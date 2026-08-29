@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "rmux/client",
   "rmux/cli",
   "rmux/core",
   "rmux/daemon",
@@ -18,6 +19,7 @@ crossterm = "0.29.0"
 avt = "0.18.0"
 portable-pty = "0.9.0"
 rmux-core = { path = "rmux/core" }
+rmux-client = { path = "rmux/client" }
 rmux-ipc = { path = "rmux/ipc" }
 rmux-proto = { path = "rmux/proto" }
 rustix = { version = "1.1.4", features = ["process"] }

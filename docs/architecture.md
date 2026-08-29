@@ -30,11 +30,14 @@ reconstruct explicitly restartable tasks as a new process generation.
 
 - `rmux-proto`: versioned, platform-independent wire messages and framing.
 - `rmux-core`: output journal and portable session-domain behavior.
+- `rmux-client`: portable client-side protocol state, checkpoint restoration,
+  and terminal attachment behavior over an injected byte stream.
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
-- `rmux`: local command-line client and interactive terminal presentation.
+- `rmux`: local command-line adapter that starts/connects to `rmuxd` over IPC.
 
-OS-specific IPC and PTY implementation details must not enter `rmux-proto`.
+OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
+`rmux-client`.
 The initial IPC implementation targets Unix-domain sockets on macOS and Linux;
 Windows named pipes will be a separate transport implementation.
 

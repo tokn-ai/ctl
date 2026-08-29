@@ -1,12 +1,10 @@
 [package]
-name = "rmux"
+name = "rmux-client"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-clap.workspace = true
-rmux-client.workspace = true
-rmux-ipc.workspace = true
+crossterm.workspace = true
 rmux-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

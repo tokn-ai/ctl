@@ -6,7 +6,10 @@ The monorepo contains two products with independent responsibilities:
 - `ctl` provides authenticated remote device control and will expose `rmux`
   sessions without reimplementing terminal persistence.
 
-Only `rmux` is part of the current milestone.
+The current milestone makes `rmux` usable through `ctl` from a paired remote
+client. It intentionally exposes only the `rmux` service; generic remote
+administration, files, jobs, port forwarding, and desktop control remain out
+of scope.
 
 ## Process ownership
 
@@ -14,7 +17,7 @@ Only `rmux` is part of the current milestone.
 `rmux` client connects over per-user IPC and may disappear without affecting a
 session.
 
-In the future, `ctld` will act as an authenticated gateway:
+`ctld` is an authenticated gateway with an independent lifecycle:
 
 ```text
 local:  rmux -> local IPC -> rmuxd -> PTY -> shell
@@ -26,20 +29,38 @@ affect a terminal session. If `rmuxd` itself exits, an exact running PTY is not
 recoverable in the initial architecture. Later disk-backed metadata may
 reconstruct explicitly restartable tasks as a new process generation.
 
+`ctld` owns neither terminal state nor session state. After an authenticated
+client opens the `rmux` service, it relays raw bytes between its TLS connection
+and one fixed local `rmuxd` endpoint. It does not decode or reframe
+`rmux-proto`, and a remote peer cannot choose a local socket path.
+
 ## Crate boundaries
 
 - `rmux-proto`: versioned, platform-independent wire messages and framing.
 - `rmux-core`: output journal and portable session-domain behavior.
 - `rmux-client`: portable client-side protocol state, checkpoint restoration,
-  and terminal attachment behavior over an injected byte stream.
+  attachment liveness, and terminal attachment behavior over an injected byte
+  stream.
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
 - `rmux`: local command-line adapter that starts/connects to `rmuxd` over IPC.
+- `ctl-proto`: versioned outer control messages for pairing and service
+  selection. It is independent of terminal and operating-system details.
+- `ctl-core`: portable client identity, pinned TLS connection, and outer
+  control handshake. It returns an injected byte stream for `rmux-client`.
+- `ctld`: device-local identity/authorization registry, TLS endpoint, and the
+  fixed local `rmuxd` relay.
+- `ctl`: remote command-line adapter and owner-only local client state.
 
 OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
 `rmux-client`.
 The initial IPC implementation targets Unix-domain sockets on macOS and Linux;
 Windows named pipes will be a separate transport implementation.
+
+`ctld` currently uses that Unix local endpoint and is therefore a Unix-only
+host component. `ctl-proto`, `ctl-core`, and the remote TLS control transport
+remain platform-independent so a future Windows local endpoint can preserve
+the same remote protocol.
 
 ## Current invariants
 
@@ -58,8 +79,15 @@ Windows named pipes will be a separate transport implementation.
    layout are independently leased capabilities.
 10. An attachment can claim only an unheld lease; it never implicitly takes a
     lease from another attachment.
-11. Leases are connection-bound. They are released when their attachment
-    detaches or disconnects, while the shell session itself continues.
+11. Leases are connection-bound and liveness-bounded. They are released when
+    their attachment detaches, disconnects, or stops proving liveness, while
+    the shell session itself continues.
+12. `ctld` authorization is explicit device/client identity, not Tailscale
+    network location. Tailscale remains the expected private reachability
+    layer.
+13. A `ctld` shutdown closes its local attachments but never terminates an
+    `rmuxd` session; a later authenticated connection attaches by durable
+    session ID and raw output sequence.
 
 An ordinary attaching client requests input only when no other attachment owns
 it. It does not resize an existing PTY. A client must explicitly request the
@@ -78,6 +106,39 @@ different attachment owns PTY resizing. Requests to acquire a held lease leave
 the requester attached as a viewer; they never force a takeover. A future
 authenticated client identity may add reconnect grace periods and deliberate
 takeover policies without changing session or stream semantics.
+
+To prevent a sleeping or half-open client from pinning either capability,
+`rmuxd` negotiates a heartbeat cadence and liveness deadline during the
+handshake. Only inbound client activity renews that deadline after the initial
+attachment transfer. That transfer has its own finite delivery deadline, since
+a client learns the heartbeat cadence only after `attached` and `rmuxd`
+serially delivers initial replay before it can process queued heartbeats. A
+silent attachment is closed and loses its leases, but its PTY, shell, journal,
+and checkpoint state remain intact. A reconnecting client may request an
+unheld former lease again; it never revokes a live attachment's ownership.
+
+## Remote control boundary
+
+`ctld` has a per-device self-signed TLS certificate and a private
+authorization registry. A pairing invitation carries the device's pinned
+public certificate, stable synthetic TLS name, endpoint, client label, and a
+short-lived one-time bearer token. The device stores only a SHA-256 digest of
+that token. A client generates its own Ed25519 identity locally and signs a
+fresh server challenge on every connection; the private client key never
+leaves the client device.
+
+The initial implementation keeps certificate pinning and client challenge
+signatures separate rather than using a transport client certificate. This
+keeps protocol authorization explicit and lets the authorized-key registry
+drive future revocation and capabilities without relying on Tailnet location.
+The only current capability is `rmux_tunnel`.
+
+`ctld serve` requires an explicit non-wildcard address. In normal use that is
+a device's concrete Tailscale IP address; it never defaults to a public
+all-interface management listener. Device state directories and
+private keys are owner-only on Unix. See `docs/ctl-protocol.md` for the exact
+outer handshake and upgrade boundary, and `docs/remote-mvp.md` for a safe
+first-use flow.
 
 ## Checkpoints
 

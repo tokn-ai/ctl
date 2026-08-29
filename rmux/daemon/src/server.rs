@@ -11,12 +11,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep_until, timeout_at};
 use uuid::Uuid;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const MIN_ATTACHMENT_LIVENESS_TIMEOUT: Duration = Duration::from_millis(100);
+pub const MAX_ATTACHMENT_LIVENESS_TIMEOUT: Duration = Duration::from_mins(5);
+pub const DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30);
+// An attachment cannot prove liveness before initial delivery: the client
+// learns the heartbeat cadence from `attached`, while rmuxd serially sends the
+// replay before it can process queued client frames. Give that transfer a
+// separate, finite window instead of applying post-attach liveness too early.
+const INITIAL_ATTACHMENT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(5);
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -24,6 +33,9 @@ pub struct DaemonConfig {
   pub journal_capacity_bytes: usize,
   pub checkpoint_interval_bytes: usize,
   pub startup_idle_timeout: Duration,
+  /// Maximum time an attached client may remain silent before `rmuxd` releases
+  /// its connection-bound leases.
+  pub attachment_liveness_timeout: Duration,
 }
 
 impl Default for DaemonConfig {
@@ -33,6 +45,7 @@ impl Default for DaemonConfig {
       journal_capacity_bytes: 4 * 1024 * 1024,
       checkpoint_interval_bytes: 256 * 1024,
       startup_idle_timeout: Duration::from_secs(10),
+      attachment_liveness_timeout: DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT,
     }
   }
 }
@@ -47,6 +60,36 @@ pub enum DaemonError {
   Bind { path: PathBuf, source: io::Error },
   #[error("daemon I/O error: {0}")]
   Io(#[from] io::Error),
+  #[error("attachment liveness timeout {actual:?} must be between {minimum:?} and {maximum:?}")]
+  InvalidAttachmentLivenessTimeout {
+    actual: Duration,
+    minimum: Duration,
+    maximum: Duration,
+  },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AttachmentLiveness {
+  timeout: Duration,
+  timeout_ms: u64,
+  heartbeat_interval_ms: u64,
+}
+
+fn attachment_liveness(timeout: Duration) -> Result<AttachmentLiveness, DaemonError> {
+  if !(MIN_ATTACHMENT_LIVENESS_TIMEOUT..=MAX_ATTACHMENT_LIVENESS_TIMEOUT).contains(&timeout) {
+    return Err(DaemonError::InvalidAttachmentLivenessTimeout {
+      actual: timeout,
+      minimum: MIN_ATTACHMENT_LIVENESS_TIMEOUT,
+      maximum: MAX_ATTACHMENT_LIVENESS_TIMEOUT,
+    });
+  }
+
+  let timeout_ms = u64::try_from(timeout.as_millis()).expect("bounded timeout fits in u64");
+  Ok(AttachmentLiveness {
+    timeout,
+    timeout_ms,
+    heartbeat_interval_ms: (timeout_ms / 3).max(1),
+  })
 }
 
 /// Runs the daemon until its final session exits or an interrupt is received.
@@ -56,6 +99,7 @@ pub enum DaemonError {
 /// Returns an error when the runtime directory or socket cannot be prepared,
 /// the endpoint is already served, or the accept loop fails.
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
+  let attachment_liveness = attachment_liveness(config.attachment_liveness_timeout)?;
   rmux_ipc::prepare_runtime_directory(&config.socket_path)
     .map_err(DaemonError::RuntimeDirectory)?;
   let listener = bind_listener(&config.socket_path).await?;
@@ -79,7 +123,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         let sessions = sessions.clone();
         let connection_guard = connections.open();
         tokio::spawn(async move {
-          if let Err(error) = handle_connection(stream, sessions).await {
+          if let Err(error) = handle_connection(stream, sessions, attachment_liveness).await {
             eprintln!("rmuxd connection error: {error}");
           }
           drop(connection_guard);
@@ -127,6 +171,7 @@ async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
 async fn handle_connection(
   mut stream: UnixStream,
   sessions: SessionManager,
+  attachment_liveness: AttachmentLiveness,
 ) -> Result<(), ConnectionError> {
   let Some(handshake) = read_frame::<_, ClientMessage>(&mut stream).await? else {
     return Ok(());
@@ -162,16 +207,19 @@ async fn handle_connection(
     &ServerMessage::HandshakeAccepted {
       protocol_version: PROTOCOL_VERSION,
       server_version: SERVER_VERSION.into(),
+      heartbeat_interval_ms: attachment_liveness.heartbeat_interval_ms,
+      attachment_liveness_timeout_ms: attachment_liveness.timeout_ms,
     },
   )
   .await?;
 
-  handle_request(stream, sessions).await
+  handle_request(stream, sessions, attachment_liveness.timeout).await
 }
 
 async fn handle_request(
   mut stream: UnixStream,
   sessions: SessionManager,
+  attachment_liveness_timeout: Duration,
 ) -> Result<(), ConnectionError> {
   let Some(request) = read_frame::<_, ClientMessage>(&mut stream).await? else {
     return Ok(());
@@ -223,6 +271,7 @@ async fn handle_request(
           terminal_size,
           request_input_lease,
           request_layout_lease,
+          attachment_liveness_timeout,
         )
         .await;
       }
@@ -255,6 +304,7 @@ async fn handle_attach(
   client_terminal_size: rmux_proto::TerminalSize,
   request_input_lease: bool,
   request_layout_lease: bool,
+  attachment_liveness_timeout: Duration,
 ) -> Result<(), ConnectionError> {
   let attachment_id = Uuid::new_v4().to_string();
   let attachment_leases = session.attach(&attachment_id, request_input_lease, request_layout_lease);
@@ -262,88 +312,182 @@ async fn handle_attach(
     session: Arc::clone(&session),
     attachment_id: attachment_id.clone(),
   };
+  let initial_delivery_deadline = initial_attachment_delivery_deadline();
 
   if attachment_leases.layout.owned_by_client {
     let resize_session = Arc::clone(&session);
     let resize_attachment_id = attachment_id.clone();
     let resize_terminal_size = client_terminal_size.clone();
-    match tokio::task::spawn_blocking(move || {
+    let resize = tokio::task::spawn_blocking(move || {
       resize_session.resize(&resize_attachment_id, resize_terminal_size)
-    })
-    .await?
-    {
-      Ok(()) => {}
-      Err(error) => {
-        let mut stream = stream;
-        send_control_error(&mut stream, &error).await?;
-        return Ok(());
-      }
+    });
+    match timeout_at(initial_delivery_deadline, resize).await {
+      Err(_) => return Ok(()),
+      Ok(result) => match result? {
+        Ok(()) => {}
+        Err(error) => {
+          let mut stream = stream;
+          match timeout_at(
+            initial_delivery_deadline,
+            send_control_error(&mut stream, &error),
+          )
+          .await
+          {
+            Ok(result) => result?,
+            Err(_) => return Ok(()),
+          }
+          return Ok(());
+        }
+      },
     }
   }
 
-  let mut events = session.subscribe();
+  let events = session.subscribe();
   let snapshot = match session.snapshot_for_attach(resume_from) {
     Ok(snapshot) => snapshot,
     Err(error) => {
       let mut stream = stream;
-      send_journal_error(&mut stream, &error).await?;
+      match timeout_at(
+        initial_delivery_deadline,
+        send_journal_error(&mut stream, &error),
+      )
+      .await
+      {
+        Ok(result) => result?,
+        Err(_) => return Ok(()),
+      }
       return Ok(());
     }
   };
   let session_info = session.info();
-  let (mut reader, mut writer) = stream.into_split();
-  let mut sent_sequence = send_attached(
-    &mut writer,
-    session_info,
-    snapshot,
-    client_terminal_size,
-    attachment_leases,
+  let (reader, mut writer) = stream.into_split();
+  let sent_sequence = match timeout_at(
+    initial_delivery_deadline,
+    send_attached(
+      &mut writer,
+      session_info,
+      snapshot,
+      client_terminal_size,
+      attachment_leases,
+    ),
   )
-  .await?;
+  .await
+  {
+    Ok(result) => result?,
+    Err(_) => return Ok(()),
+  };
 
+  let attachment = LiveAttachment {
+    reader,
+    writer,
+    events,
+    sent_sequence,
+  };
+  drive_attachment(
+    attachment,
+    session,
+    attachment_id,
+    attachment_liveness_timeout,
+    Instant::now() + attachment_liveness_timeout,
+  )
+  .await
+}
+
+struct LiveAttachment {
+  reader: OwnedReadHalf,
+  writer: OwnedWriteHalf,
+  events: broadcast::Receiver<SessionEvent>,
+  sent_sequence: u64,
+}
+
+async fn drive_attachment(
+  attachment: LiveAttachment,
+  session: Arc<Session>,
+  attachment_id: String,
+  attachment_liveness_timeout: Duration,
+  mut deadline: Instant,
+) -> Result<(), ConnectionError> {
+  let LiveAttachment {
+    mut reader,
+    mut writer,
+    mut events,
+    mut sent_sequence,
+  } = attachment;
   loop {
     tokio::select! {
+      biased;
+      () = sleep_until(deadline) => return Ok(()),
       incoming = read_frame::<_, ClientMessage>(&mut reader) => {
         let Some(message) = incoming? else {
           return Ok(());
         };
-        if !process_attach_input(
-          &mut writer,
-          Arc::clone(&session),
-          &attachment_id,
-          message,
+        if Instant::now() >= deadline {
+          return Ok(());
+        }
+        if renews_attachment_liveness(&message) {
+          deadline = Instant::now() + attachment_liveness_timeout;
+        }
+        let keep_attached = match timeout_at(
+          deadline,
+          process_attach_input(&mut writer, Arc::clone(&session), &attachment_id, message),
         )
-        .await?
+        .await
         {
+          Ok(result) => result?,
+          Err(_) => return Ok(()),
+        };
+        if !keep_attached {
           return Ok(());
         }
       }
-      event = events.recv() => {
-        match event {
-          Ok(SessionEvent::Output(chunk)) => {
-            if let Some(chunk) = chunk_after(chunk, sent_sequence) {
-              sent_sequence = chunk.sequence_end();
-              write_frame(&mut writer, &chunk.into_server_message()).await?;
+      event = events.recv() => match event {
+        Ok(SessionEvent::Output(chunk)) => {
+          if let Some(chunk) = chunk_after(chunk, sent_sequence) {
+            sent_sequence = chunk.sequence_end();
+            if write_before_deadline(&mut writer, &chunk.into_server_message(), deadline).await?.is_none() {
+              return Ok(());
             }
           }
-          Ok(SessionEvent::Ended { exit_code }) => {
-            write_frame(
-              &mut writer,
-              &ServerMessage::SessionEnded {
-                session_id: session.info().session_id,
-                exit_code,
-              },
-            )
-            .await?;
-            return Ok(());
-          }
-          Err(broadcast::error::RecvError::Lagged(_)) => {
-            sent_sequence = recover_lag(&mut writer, &session, sent_sequence).await?;
-          }
-          Err(broadcast::error::RecvError::Closed) => return Ok(()),
         }
-      }
+        Ok(SessionEvent::Ended { exit_code }) => {
+          let message = ServerMessage::SessionEnded {
+            session_id: session.info().session_id,
+            exit_code,
+          };
+          let _sent = write_before_deadline(&mut writer, &message, deadline).await?;
+          return Ok(());
+        }
+        Err(broadcast::error::RecvError::Lagged(_)) => {
+          sent_sequence = match timeout_at(
+            deadline,
+            recover_lag(&mut writer, &session, sent_sequence),
+          )
+          .await
+          {
+            Ok(result) => result?,
+            Err(_) => return Ok(()),
+          };
+        }
+        Err(broadcast::error::RecvError::Closed) => return Ok(()),
+      },
     }
+  }
+}
+
+async fn write_before_deadline<W>(
+  writer: &mut W,
+  message: &ServerMessage,
+  deadline: Instant,
+) -> Result<Option<()>, ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  match timeout_at(deadline, write_frame(writer, message)).await {
+    Ok(result) => {
+      result?;
+      Ok(Some(()))
+    }
+    Err(_) => Ok(None),
   }
 }
 
@@ -415,6 +559,9 @@ where
       let status = session.release_lease(attachment_id, lease);
       write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
     }
+    ClientMessage::Heartbeat { nonce } => {
+      write_frame(writer, &ServerMessage::HeartbeatAck { nonce }).await?;
+    }
     ClientMessage::Detach => return Ok(false),
     _ => {
       send_error(
@@ -426,6 +573,18 @@ where
     }
   }
   Ok(true)
+}
+
+fn renews_attachment_liveness(message: &ClientMessage) -> bool {
+  matches!(
+    message,
+    ClientMessage::Input { .. }
+      | ClientMessage::Resize { .. }
+      | ClientMessage::AcquireLease { .. }
+      | ClientMessage::ReleaseLease { .. }
+      | ClientMessage::Heartbeat { .. }
+      | ClientMessage::Detach
+  )
 }
 
 async fn recover_lag<W>(
@@ -467,6 +626,10 @@ where
     write_frame(writer, &chunk.into_server_message()).await?;
   }
   Ok(sent_sequence)
+}
+
+fn initial_attachment_delivery_deadline() -> Instant {
+  Instant::now() + INITIAL_ATTACHMENT_DELIVERY_TIMEOUT
 }
 
 fn chunk_after(chunk: OutputChunk, sequence: u64) -> Option<OutputChunk> {
@@ -626,5 +789,100 @@ impl Drop for SocketGuard {
     {
       let _ignored = std::fs::remove_file(&self.path);
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use rmux_core::JournalSnapshot;
+  use rmux_proto::{LeaseStatus, SessionStatus};
+  use tokio::time::{sleep, timeout};
+
+  #[tokio::test]
+  async fn initial_delivery_window_outlasts_post_attach_liveness() {
+    let liveness_timeout = Duration::from_millis(25);
+    let replay = vec![b'x'; 4 * 1024];
+    let next_sequence = u64::try_from(replay.len()).expect("test replay fits in u64");
+    let snapshot = AttachSnapshot {
+      checkpoint: None,
+      journal: JournalSnapshot {
+        earliest_sequence: 0,
+        next_sequence,
+        replay_from: 0,
+        history_gap: false,
+        chunks: vec![OutputChunk {
+          sequence_start: 0,
+          data: replay,
+        }],
+      },
+      history_gap: false,
+    };
+    let session = rmux_proto::SessionInfo {
+      session_id: "session-id".into(),
+      name: "session".into(),
+      status: SessionStatus::Running,
+      created_at_ms: 0,
+      next_sequence,
+      terminal_size: rmux_proto::TerminalSize::default(),
+    };
+    let attachment_leases = rmux_core::AttachmentLeases {
+      input: LeaseStatus {
+        held: true,
+        owned_by_client: true,
+      },
+      layout: LeaseStatus {
+        held: false,
+        owned_by_client: false,
+      },
+    };
+    let (mut writer, mut reader) = tokio::io::duplex(128);
+    let delivery = tokio::spawn(async move {
+      timeout_at(
+        initial_attachment_delivery_deadline(),
+        send_attached(
+          &mut writer,
+          session,
+          snapshot,
+          rmux_proto::TerminalSize::default(),
+          attachment_leases,
+        ),
+      )
+      .await
+    });
+
+    // The small duplex buffer prevents the initial replay from completing.
+    // It remains in the distinct delivery phase beyond the time at which the
+    // normal attachment liveness deadline would otherwise expire.
+    sleep(liveness_timeout * 2).await;
+    assert!(!delivery.is_finished());
+
+    let attached: ServerMessage = timeout(Duration::from_secs(1), read_frame(&mut reader))
+      .await
+      .expect("initial attached reply did not arrive")
+      .expect("initial attached reply failed")
+      .expect("initial attached reply ended unexpectedly");
+    assert!(matches!(attached, ServerMessage::Attached { .. }));
+    let output: ServerMessage = timeout(Duration::from_secs(1), read_frame(&mut reader))
+      .await
+      .expect("initial replay did not arrive")
+      .expect("initial replay failed")
+      .expect("initial replay ended unexpectedly");
+    assert!(matches!(
+      output,
+      ServerMessage::Output {
+        sequence_start: 0,
+        sequence_end,
+        ..
+      } if sequence_end == next_sequence
+    ));
+
+    let sent_sequence = timeout(Duration::from_secs(1), delivery)
+      .await
+      .expect("initial delivery did not finish")
+      .expect("initial delivery task panicked")
+      .expect("initial delivery hit its deadline")
+      .expect("initial delivery failed");
+    assert_eq!(sent_sequence, next_sequence);
   }
 }

@@ -1,0 +1,20 @@
+[package]
+name = "ctl-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+ctl-proto.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+rmux-client.workspace = true
+rmux-proto.workspace = true
+rustls.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+
+[lints]
+workspace = true

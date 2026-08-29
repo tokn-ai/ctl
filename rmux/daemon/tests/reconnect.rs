@@ -4,18 +4,30 @@ use rmux_proto::{
   ClientMessage, CommandSpec, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
   SessionInfo, TerminalSize, read_frame, write_frame,
 };
-use rmuxd::{DaemonConfig, run};
+use rmuxd::{DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT, DaemonConfig, run};
 use std::error::Error;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::net::UnixStream;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
+// These tests all spawn a real PTY-backed shell. Serializing this integration
+// layer avoids scheduling-dependent terminal startup failures while keeping
+// unit tests and other crates fully parallel.
+static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+async fn pty_test_lock() -> MutexGuard<'static, ()> {
+  PTY_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestResult {
+  let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("rmux.sock");
   let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
@@ -27,15 +39,18 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
   .await?;
 
   let (mut first_attach, first_attached) =
-    attach_session(&socket_path, &session.session_id, None, true, true).await?;
-  assert!(matches!(
-    first_attached,
-    ServerMessage::Attached {
-      replay_from: 0,
-      history_gap: false,
-      ..
-    }
-  ));
+    attach_session(&socket_path, &session.session_id, None, true, false).await?;
+  assert!(
+    matches!(
+      first_attached,
+      ServerMessage::Attached {
+        replay_from: 0,
+        history_gap: false,
+        ..
+      },
+    ),
+    "expected an initial replay from zero, received {first_attached:?}"
+  );
   let (first_output, resume_sequence) = read_output_until(&mut first_attach, b"before").await?;
   assert!(contains_bytes(&first_output, b"before"));
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
@@ -46,7 +61,7 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
     &session.session_id,
     Some(resume_sequence),
     true,
-    true,
+    false,
   )
   .await?;
   assert!(matches!(
@@ -88,6 +103,7 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestResult {
+  let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("rmux.sock");
   let daemon = spawn_daemon(&socket_path, 32, 1);
@@ -155,6 +171,7 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secondary_attachment_cannot_control_owned_session_but_receives_authorized_output()
 -> TestResult {
+  let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("rmux.sock");
   let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
@@ -262,6 +279,7 @@ async fn secondary_attachment_cannot_control_owned_session_but_receives_authoriz
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicitly_released_leases_can_be_acquired_by_another_attachment() -> TestResult {
+  let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("rmux.sock");
   let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
@@ -316,6 +334,10 @@ async fn explicitly_released_leases_can_be_acquired_by_another_attachment() -> T
     },
   )
   .await?;
+  // `Resize` has no response of its own. The ordered heartbeat acknowledgement
+  // proves that rmuxd processed the preceding resize before observing session
+  // state from a separate connection.
+  heartbeat(&mut second_attach, 1).await?;
   assert_eq!(
     session_info(&socket_path, &session.session_id)
       .await?
@@ -345,6 +367,7 @@ async fn explicitly_released_leases_can_be_acquired_by_another_attachment() -> T
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disconnected_attachment_releases_its_leases_for_another_attachment() -> TestResult {
+  let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("rmux.sock");
   let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
@@ -403,10 +426,170 @@ async fn disconnected_attachment_releases_its_leases_for_another_attachment() ->
   wait_for_daemon_exit(daemon, "rmuxd did not exit after disconnect test").await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn silent_open_attachment_expires_and_cannot_renew_its_leases_late() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let liveness_timeout = Duration::from_millis(200);
+  let daemon = spawn_daemon_with_liveness(&socket_path, 64 * 1024, 4 * 1024, liveness_timeout);
+  let session = create_shell_session(
+    &socket_path,
+    "silent-owner",
+    "printf 'ready\\n'; IFS= read -r line; printf 'authorized:%s\\n' \"$line\"",
+  )
+  .await?;
+
+  let (mut stale_owner, stale_attached) =
+    attach_session(&socket_path, &session.session_id, None, true, true).await?;
+  let ServerMessage::Attached {
+    input_lease,
+    layout_lease,
+    ..
+  } = stale_attached
+  else {
+    return Err(format!("expected stale attachment, received {stale_attached:?}").into());
+  };
+  assert_lease_status(&input_lease, true, true);
+  assert_lease_status(&layout_lease, true, true);
+
+  let (mut contender, contender_attached) =
+    attach_session(&socket_path, &session.session_id, None, true, true).await?;
+  let ServerMessage::Attached {
+    input_lease,
+    layout_lease,
+    ..
+  } = contender_attached
+  else {
+    return Err(format!("expected contender attachment, received {contender_attached:?}").into());
+  };
+  assert_lease_status(&input_lease, true, false);
+  assert_lease_status(&layout_lease, true, false);
+
+  for nonce in 1..=8 {
+    heartbeat(&mut contender, nonce).await?;
+    sleep(Duration::from_millis(50)).await;
+  }
+
+  // The stale stream remains physically open from this process's point of
+  // view. These post-expiry frames must not extend its deadline or preserve
+  // its leases if the server races the timeout with a readable socket.
+  let _late_heartbeat =
+    write_frame(&mut stale_owner, &ClientMessage::Heartbeat { nonce: 1_000 }).await;
+  let _late_acquire = write_frame(
+    &mut stale_owner,
+    &ClientMessage::AcquireLease {
+      lease: LeaseKind::Input,
+    },
+  )
+  .await;
+
+  heartbeat(&mut contender, 2_000).await?;
+  let input_status = acquire_lease(&mut contender, LeaseKind::Input).await?;
+  assert_lease_status(&input_status, true, true);
+  let layout_status = acquire_lease(&mut contender, LeaseKind::Layout).await?;
+  assert_lease_status(&layout_status, true, true);
+
+  write_frame(
+    &mut contender,
+    &ClientMessage::Input {
+      data: b"after-expiry\n".to_vec(),
+    },
+  )
+  .await?;
+  let (output, _) = read_output_until(&mut contender, b"authorized:after-expiry").await?;
+  assert!(contains_bytes(&output, b"authorized:after-expiry"));
+  wait_for_session_end(&mut contender).await?;
+  drop(stale_owner);
+  drop(contender);
+
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after silent owner expiry").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthy_heartbeating_attachment_retains_its_leases() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let liveness_timeout = Duration::from_millis(200);
+  let daemon = spawn_daemon_with_liveness(&socket_path, 64 * 1024, 4 * 1024, liveness_timeout);
+  let session = create_shell_session(
+    &socket_path,
+    "healthy-owner",
+    "printf 'ready\\n'; IFS= read -r line; printf 'authorized:%s\\n' \"$line\"",
+  )
+  .await?;
+
+  let (mut owner, owner_attached) =
+    attach_session(&socket_path, &session.session_id, None, true, true).await?;
+  let ServerMessage::Attached {
+    input_lease,
+    layout_lease,
+    ..
+  } = owner_attached
+  else {
+    return Err(format!("expected owner attachment, received {owner_attached:?}").into());
+  };
+  assert_lease_status(&input_lease, true, true);
+  assert_lease_status(&layout_lease, true, true);
+
+  let (mut contender, contender_attached) =
+    attach_session(&socket_path, &session.session_id, None, true, true).await?;
+  let ServerMessage::Attached {
+    input_lease,
+    layout_lease,
+    ..
+  } = contender_attached
+  else {
+    return Err(format!("expected contender attachment, received {contender_attached:?}").into());
+  };
+  assert_lease_status(&input_lease, true, false);
+  assert_lease_status(&layout_lease, true, false);
+
+  for nonce in 1..=8 {
+    heartbeat(&mut owner, nonce).await?;
+    heartbeat(&mut contender, nonce + 100).await?;
+    sleep(Duration::from_millis(50)).await;
+  }
+
+  let input_status = acquire_lease(&mut contender, LeaseKind::Input).await?;
+  assert_lease_status(&input_status, true, false);
+  let layout_status = acquire_lease(&mut contender, LeaseKind::Layout).await?;
+  assert_lease_status(&layout_status, true, false);
+
+  write_frame(
+    &mut owner,
+    &ClientMessage::Input {
+      data: b"finish\n".to_vec(),
+    },
+  )
+  .await?;
+  wait_for_session_end(&mut owner).await?;
+  wait_for_session_end(&mut contender).await?;
+  drop(owner);
+  drop(contender);
+
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after healthy owner test").await
+}
+
 fn spawn_daemon(
   socket_path: &Path,
   journal_capacity_bytes: usize,
   checkpoint_interval_bytes: usize,
+) -> tokio::task::JoinHandle<Result<(), rmuxd::DaemonError>> {
+  spawn_daemon_with_liveness(
+    socket_path,
+    journal_capacity_bytes,
+    checkpoint_interval_bytes,
+    DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT,
+  )
+}
+
+fn spawn_daemon_with_liveness(
+  socket_path: &Path,
+  journal_capacity_bytes: usize,
+  checkpoint_interval_bytes: usize,
+  attachment_liveness_timeout: Duration,
 ) -> tokio::task::JoinHandle<Result<(), rmuxd::DaemonError>> {
   let socket_path = socket_path.to_path_buf();
   tokio::spawn(async move {
@@ -415,6 +598,7 @@ fn spawn_daemon(
       journal_capacity_bytes,
       checkpoint_interval_bytes,
       startup_idle_timeout: Duration::from_secs(5),
+      attachment_liveness_timeout,
     })
     .await
   })
@@ -512,6 +696,24 @@ async fn acquire_lease(stream: &mut UnixStream, lease: LeaseKind) -> TestResult<
 async fn release_lease(stream: &mut UnixStream, lease: LeaseKind) -> TestResult<LeaseStatus> {
   write_frame(stream, &ClientMessage::ReleaseLease { lease }).await?;
   lease_status_response(stream, lease).await
+}
+
+async fn heartbeat(stream: &mut UnixStream, nonce: u64) -> TestResult {
+  write_frame(stream, &ClientMessage::Heartbeat { nonce }).await?;
+  loop {
+    match required_message(stream).await? {
+      ServerMessage::HeartbeatAck {
+        nonce: acknowledged,
+      } => {
+        assert_eq!(acknowledged, nonce);
+        return Ok(());
+      }
+      ServerMessage::Output { .. } | ServerMessage::Checkpoint { .. } => {}
+      response => {
+        return Err(format!("expected heartbeat acknowledgement, received {response:?}").into());
+      }
+    }
+  }
 }
 
 async fn lease_status_response(

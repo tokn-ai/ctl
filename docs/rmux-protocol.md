@@ -1,7 +1,7 @@
-# rmux protocol version 3
+# rmux protocol version 4
 
 The protocol is independent of local IPC and future remote transport. Version
-1 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+4 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -17,8 +17,9 @@ connection into a bidirectional stream:
 
 - daemon to client: `attached`, an optional checkpoint, replayed `output`,
   then live `output`;
-- client to daemon: `input`, `resize`, lease acquire/release, or `detach`;
-- daemon to client: `session_ended` when the child exits.
+- client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`, or
+  `detach`;
+- daemon to client: `heartbeat_ack` and `session_ended` when the child exits.
 
 Transport disconnection is an implicit detach and never kills the session.
 Creating a session carries its initial working directory separately from the
@@ -30,6 +31,31 @@ and layout leases. Requesting an unheld layout lease is an explicit resize: the
 daemon applies that terminal size before sending `attached`. Without that
 request, an attach never resizes the PTY; the size only lets the daemon report
 when a checkpoint was made for another layout.
+
+## Attachment liveness
+
+`handshake_accepted` advertises a heartbeat interval and an attachment-liveness
+timeout. A standard interactive client sends `heartbeat { nonce }` at the
+advertised cadence; `rmuxd` replies with `heartbeat_ack { nonce }`. Any valid
+post-attach client message also demonstrates client liveness.
+
+If no client activity reaches `rmuxd` before the timeout, it closes that
+attachment and releases its connection-bound leases. It does not kill the PTY,
+shell, journal, or checkpoint state. This makes a laptop sleep, client crash,
+or half-open network path unable to pin input or layout ownership forever.
+
+The initial `attached` reply, checkpoint, and retained-output replay use a
+separate five-minute delivery deadline. The liveness deadline starts only
+after that transfer finishes, because a client cannot begin its advertised
+heartbeat loop until it has received `attached`, and `rmuxd` serially sends
+the replay before it can process queued heartbeats. The delivery deadline still
+keeps a client that stops reading during initial replay from retaining leases
+indefinitely.
+
+The deadline has priority over a late client frame: an expired attachment
+cannot revive itself with a late heartbeat, input, resize, or lease request.
+Clients also treat a peer that remains silent for the advertised timeout as a
+lost connection and reconnect by session ID and output sequence.
 
 ## Attachment leases
 
@@ -45,8 +71,9 @@ connection-bound leases:
 - `input` requires the input lease, and `resize` requires the layout lease.
   An unauthorized command receives a structured error but does not terminate
   the shell session.
-- Detach, transport EOF, write failure, and session end release any leases
-  owned by that attachment. They do not terminate the PTY or child process.
+- Detach, transport EOF, write failure, attachment-liveness expiry, and session
+  end release any leases owned by that attachment. They do not terminate the
+  PTY or child process.
 
 The two requested leases are intentionally independent. A desktop client can
 retain input while a separate client owns layout, and a viewer can attach

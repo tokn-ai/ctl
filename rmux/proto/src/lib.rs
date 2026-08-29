@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
@@ -130,6 +130,11 @@ pub enum ClientMessage {
   ReleaseLease {
     lease: LeaseKind,
   },
+  /// Confirms that an attached client is still reachable without affecting
+  /// terminal input or layout ownership.
+  Heartbeat {
+    nonce: u64,
+  },
   Detach,
 }
 
@@ -153,6 +158,10 @@ pub enum ServerMessage {
   HandshakeAccepted {
     protocol_version: u16,
     server_version: String,
+    /// Suggested cadence for attached-client heartbeats.
+    heartbeat_interval_ms: u64,
+    /// Maximum interval without client activity before an attachment expires.
+    attachment_liveness_timeout_ms: u64,
   },
   SessionCreated {
     session: SessionInfo,
@@ -174,6 +183,10 @@ pub enum ServerMessage {
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
+  },
+  /// Echoes an attached client's heartbeat nonce.
+  HeartbeatAck {
+    nonce: u64,
   },
   Checkpoint {
     checkpoint: TerminalCheckpoint,
@@ -323,6 +336,18 @@ mod tests {
         },
       }
     );
+  }
+
+  #[tokio::test]
+  async fn heartbeat_frames_round_trip() {
+    let expected = ClientMessage::Heartbeat { nonce: 42 };
+    let (mut client, mut server) = tokio::io::duplex(1024);
+
+    let write = tokio::spawn(async move { write_frame(&mut client, &expected).await });
+    let actual: ClientMessage = read_frame(&mut server).await.unwrap().unwrap();
+
+    write.await.unwrap().unwrap();
+    assert_eq!(actual, ClientMessage::Heartbeat { nonce: 42 });
   }
 
   #[tokio::test]

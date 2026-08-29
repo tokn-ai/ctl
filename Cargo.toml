@@ -1,5 +1,9 @@
 [workspace]
 members = [
+  "ctl/cli",
+  "ctl/core",
+  "ctl/daemon",
+  "ctl/proto",
   "rmux/client",
   "rmux/cli",
   "rmux/core",
@@ -17,14 +21,22 @@ version = "0.1.0"
 clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 avt = "0.18.0"
+base64 = "0.22.1"
+ctl-core = { path = "ctl/core" }
+ctl-proto = { path = "ctl/proto" }
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+getrandom = "0.3.4"
 portable-pty = "0.9.0"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 rmux-core = { path = "rmux/core" }
 rmux-client = { path = "rmux/client" }
 rmux-ipc = { path = "rmux/ipc" }
 rmux-proto = { path = "rmux/proto" }
-rustix = { version = "1.1.4", features = ["process"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10.9"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = [
   "io-std",
@@ -37,6 +49,7 @@ tokio = { version = "1.53.1", features = [
   "sync",
   "time",
 ] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 uuid = { version = "1.26.0", features = ["v4"] }
 
 [workspace.lints.rust]

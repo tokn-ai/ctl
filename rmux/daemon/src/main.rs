@@ -22,6 +22,10 @@ struct Arguments {
   #[arg(long, default_value_t = 10)]
   startup_idle_seconds: u64,
 
+  /// Release an attached client's leases after this many silent seconds.
+  #[arg(long, default_value_t = 30)]
+  attachment_liveness_seconds: u64,
+
   /// Detach from the invoking terminal. Used by rmux auto-start.
   #[arg(long, hide = true)]
   detach_from_terminal: bool,
@@ -41,6 +45,7 @@ fn main() {
     journal_capacity_bytes: arguments.journal_bytes,
     checkpoint_interval_bytes: arguments.checkpoint_bytes,
     startup_idle_timeout: Duration::from_secs(arguments.startup_idle_seconds),
+    attachment_liveness_timeout: Duration::from_secs(arguments.attachment_liveness_seconds),
   };
 
   let runtime = match tokio::runtime::Builder::new_multi_thread()

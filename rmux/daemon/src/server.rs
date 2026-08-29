@@ -14,6 +14,7 @@ use thiserror::Error;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast};
 use tokio::time::{Instant, sleep_until};
+use uuid::Uuid;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -165,6 +166,13 @@ async fn handle_connection(
   )
   .await?;
 
+  handle_request(stream, sessions).await
+}
+
+async fn handle_request(
+  mut stream: UnixStream,
+  sessions: SessionManager,
+) -> Result<(), ConnectionError> {
   let Some(request) = read_frame::<_, ClientMessage>(&mut stream).await? else {
     return Ok(());
   };
@@ -204,8 +212,20 @@ async fn handle_connection(
       session,
       resume_from,
       terminal_size,
+      request_input_lease,
+      request_layout_lease,
     } => match sessions.resolve(&session) {
-      Ok(session) => return handle_attach(stream, session, resume_from, terminal_size).await,
+      Ok(session) => {
+        return handle_attach(
+          stream,
+          session,
+          resume_from,
+          terminal_size,
+          request_input_lease,
+          request_layout_lease,
+        )
+        .await;
+      }
       Err(error) => send_session_manager_error(&mut stream, &error).await?,
     },
     ClientMessage::KillSession { session } => match sessions.resolve(&session) {
@@ -233,7 +253,34 @@ async fn handle_attach(
   session: Arc<Session>,
   resume_from: Option<u64>,
   client_terminal_size: rmux_proto::TerminalSize,
+  request_input_lease: bool,
+  request_layout_lease: bool,
 ) -> Result<(), ConnectionError> {
+  let attachment_id = Uuid::new_v4().to_string();
+  let attachment_leases = session.attach(&attachment_id, request_input_lease, request_layout_lease);
+  let _attachment_guard = AttachmentGuard {
+    session: Arc::clone(&session),
+    attachment_id: attachment_id.clone(),
+  };
+
+  if attachment_leases.layout.owned_by_client {
+    let resize_session = Arc::clone(&session);
+    let resize_attachment_id = attachment_id.clone();
+    let resize_terminal_size = client_terminal_size.clone();
+    match tokio::task::spawn_blocking(move || {
+      resize_session.resize(&resize_attachment_id, resize_terminal_size)
+    })
+    .await?
+    {
+      Ok(()) => {}
+      Err(error) => {
+        let mut stream = stream;
+        send_control_error(&mut stream, &error).await?;
+        return Ok(());
+      }
+    }
+  }
+
   let mut events = session.subscribe();
   let snapshot = match session.snapshot_for_attach(resume_from) {
     Ok(snapshot) => snapshot,
@@ -245,8 +292,14 @@ async fn handle_attach(
   };
   let session_info = session.info();
   let (mut reader, mut writer) = stream.into_split();
-  let mut sent_sequence =
-    send_attached(&mut writer, session_info, snapshot, client_terminal_size).await?;
+  let mut sent_sequence = send_attached(
+    &mut writer,
+    session_info,
+    snapshot,
+    client_terminal_size,
+    attachment_leases,
+  )
+  .await?;
 
   loop {
     tokio::select! {
@@ -254,7 +307,14 @@ async fn handle_attach(
         let Some(message) = incoming? else {
           return Ok(());
         };
-        if !process_attach_input(&mut writer, Arc::clone(&session), message).await? {
+        if !process_attach_input(
+          &mut writer,
+          Arc::clone(&session),
+          &attachment_id,
+          message,
+        )
+        .await?
+        {
           return Ok(());
         }
       }
@@ -292,6 +352,7 @@ async fn send_attached<W>(
   session: rmux_proto::SessionInfo,
   snapshot: AttachSnapshot,
   client_terminal_size: rmux_proto::TerminalSize,
+  attachment_leases: rmux_core::AttachmentLeases,
 ) -> Result<u64, ConnectionError>
 where
   W: tokio::io::AsyncWrite + Unpin,
@@ -307,6 +368,8 @@ where
       history_gap: snapshot.history_gap,
       checkpoint: snapshot.checkpoint,
       terminal_size_mismatch,
+      input_lease: attachment_leases.input,
+      layout_lease: attachment_leases.layout,
     },
   )
   .await?;
@@ -321,6 +384,7 @@ where
 async fn process_attach_input<W>(
   writer: &mut W,
   session: Arc<Session>,
+  attachment_id: &str,
   message: ClientMessage,
 ) -> Result<bool, ConnectionError>
 where
@@ -328,17 +392,35 @@ where
 {
   match message {
     ClientMessage::Input { data } => {
-      tokio::task::spawn_blocking(move || session.write_input(&data)).await??;
+      let attachment_id = attachment_id.to_owned();
+      let result =
+        tokio::task::spawn_blocking(move || session.write_input(&attachment_id, &data)).await?;
+      if let Err(error) = result {
+        send_control_error(writer, &error).await?;
+      }
     }
     ClientMessage::Resize { terminal_size } => {
-      tokio::task::spawn_blocking(move || session.resize(terminal_size)).await??;
+      let attachment_id = attachment_id.to_owned();
+      let result =
+        tokio::task::spawn_blocking(move || session.resize(&attachment_id, terminal_size)).await?;
+      if let Err(error) = result {
+        send_control_error(writer, &error).await?;
+      }
+    }
+    ClientMessage::AcquireLease { lease } => {
+      let status = session.acquire_lease(attachment_id, lease);
+      write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
+    }
+    ClientMessage::ReleaseLease { lease } => {
+      let status = session.release_lease(attachment_id, lease);
+      write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
     }
     ClientMessage::Detach => return Ok(false),
     _ => {
       send_error(
         writer,
         ErrorCode::InvalidRequest,
-        "only input, resize, and detach are valid while attached",
+        "only input, resize, lease control, and detach are valid while attached",
       )
       .await?;
     }
@@ -428,11 +510,19 @@ async fn send_journal_error(
   send_error(stream, code, &error.to_string()).await
 }
 
-async fn send_control_error(
-  stream: &mut UnixStream,
+async fn send_control_error<W>(
+  writer: &mut W,
   error: &SessionControlError,
-) -> Result<(), CodecError> {
-  send_error(stream, ErrorCode::Internal, &error.to_string()).await
+) -> Result<(), CodecError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  let code = match error {
+    SessionControlError::InputLeaseRequired => ErrorCode::InputLeaseRequired,
+    SessionControlError::LayoutLeaseRequired => ErrorCode::LayoutLeaseRequired,
+    SessionControlError::Io(_) | SessionControlError::Pty(_) => ErrorCode::Internal,
+  };
+  send_error(writer, code, &error.to_string()).await
 }
 
 async fn send_error<W>(writer: &mut W, code: ErrorCode, message: &str) -> Result<(), CodecError>
@@ -487,6 +577,17 @@ impl ConnectionTracker {
 
 struct ConnectionGuard {
   tracker: Arc<ConnectionTracker>,
+}
+
+struct AttachmentGuard {
+  session: Arc<Session>,
+  attachment_id: String,
+}
+
+impl Drop for AttachmentGuard {
+  fn drop(&mut self) {
+    self.session.release_attachment(&self.attachment_id);
+  }
 }
 
 impl Drop for ConnectionGuard {

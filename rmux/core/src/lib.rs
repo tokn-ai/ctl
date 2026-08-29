@@ -1,6 +1,110 @@
-use rmux_proto::ServerMessage;
+use rmux_proto::{LeaseKind, LeaseStatus, ServerMessage};
 use std::collections::VecDeque;
 use thiserror::Error;
+
+/// The input and layout leases held by one attachment after an operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentLeases {
+  pub input: LeaseStatus,
+  pub layout: LeaseStatus,
+}
+
+/// Portable, attachment-scoped ownership policy for a terminal session.
+///
+/// The daemon owns synchronization around this state. The registry itself is
+/// intentionally independent of PTYs and transports, so Unix sockets, named
+/// pipes, and a future remote gateway share the same ownership rules.
+#[derive(Debug, Default)]
+pub struct AttachmentLeaseRegistry {
+  input_owner: Option<String>,
+  layout_owner: Option<String>,
+}
+
+impl AttachmentLeaseRegistry {
+  /// Claims each requested unheld lease without taking one from another
+  /// attachment.
+  #[must_use]
+  pub fn request_initial(
+    &mut self,
+    attachment_id: &str,
+    request_input_lease: bool,
+    request_layout_lease: bool,
+  ) -> AttachmentLeases {
+    if request_input_lease && self.input_owner.is_none() {
+      self.input_owner = Some(attachment_id.into());
+    }
+    if request_layout_lease && self.layout_owner.is_none() {
+      self.layout_owner = Some(attachment_id.into());
+    }
+    self.attachment_leases(attachment_id)
+  }
+
+  /// Claims an unheld lease, or returns its existing state without stealing it.
+  #[must_use]
+  pub fn acquire(&mut self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+    {
+      let owner = self.lease_owner_mut(lease);
+      if owner.is_none() || owner.as_deref() == Some(attachment_id) {
+        *owner = Some(attachment_id.into());
+      }
+    }
+    self.status(attachment_id, lease)
+  }
+
+  /// Releases `lease` only when it belongs to `attachment_id`.
+  #[must_use]
+  pub fn release(&mut self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+    {
+      let owner = self.lease_owner_mut(lease);
+      release_owned_lease(owner, attachment_id);
+    }
+    self.status(attachment_id, lease)
+  }
+
+  /// Releases every lease held by a detached attachment.
+  pub fn release_attachment(&mut self, attachment_id: &str) {
+    release_owned_lease(&mut self.input_owner, attachment_id);
+    release_owned_lease(&mut self.layout_owner, attachment_id);
+  }
+
+  /// Returns lease state from the perspective of `attachment_id`.
+  #[must_use]
+  pub fn status(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+    let owner = self.lease_owner(lease);
+    LeaseStatus {
+      held: owner.is_some(),
+      owned_by_client: owner == Some(attachment_id),
+    }
+  }
+
+  #[must_use]
+  pub fn attachment_leases(&self, attachment_id: &str) -> AttachmentLeases {
+    AttachmentLeases {
+      input: self.status(attachment_id, LeaseKind::Input),
+      layout: self.status(attachment_id, LeaseKind::Layout),
+    }
+  }
+
+  fn lease_owner(&self, lease: LeaseKind) -> Option<&str> {
+    match lease {
+      LeaseKind::Input => self.input_owner.as_deref(),
+      LeaseKind::Layout => self.layout_owner.as_deref(),
+    }
+  }
+
+  fn lease_owner_mut(&mut self, lease: LeaseKind) -> &mut Option<String> {
+    match lease {
+      LeaseKind::Input => &mut self.input_owner,
+      LeaseKind::Layout => &mut self.layout_owner,
+    }
+  }
+}
+
+fn release_owned_lease(owner: &mut Option<String>, attachment_id: &str) {
+  if owner.as_deref() == Some(attachment_id) {
+    *owner = None;
+  }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputChunk {
@@ -253,5 +357,85 @@ mod tests {
     assert!(validate_session_name("").is_err());
     assert!(validate_session_name("contains spaces").is_err());
     assert!(validate_session_name("../socket").is_err());
+  }
+
+  #[test]
+  fn attachment_leases_do_not_transfer_implicitly() {
+    let mut leases = AttachmentLeaseRegistry::default();
+
+    let first = leases.request_initial("first", true, true);
+    assert_eq!(
+      first,
+      AttachmentLeases {
+        input: LeaseStatus {
+          held: true,
+          owned_by_client: true,
+        },
+        layout: LeaseStatus {
+          held: true,
+          owned_by_client: true,
+        },
+      }
+    );
+
+    let second = leases.request_initial("second", true, true);
+    assert_eq!(
+      second,
+      AttachmentLeases {
+        input: LeaseStatus {
+          held: true,
+          owned_by_client: false,
+        },
+        layout: LeaseStatus {
+          held: true,
+          owned_by_client: false,
+        },
+      }
+    );
+    assert_eq!(
+      leases.acquire("second", LeaseKind::Input),
+      LeaseStatus {
+        held: true,
+        owned_by_client: false,
+      }
+    );
+  }
+
+  #[test]
+  fn attachment_release_makes_only_its_leases_available() {
+    let mut leases = AttachmentLeaseRegistry::default();
+    let _ = leases.request_initial("input", true, false);
+    let _ = leases.request_initial("layout", false, true);
+
+    leases.release_attachment("input");
+    assert_eq!(
+      leases.acquire("viewer", LeaseKind::Input),
+      LeaseStatus {
+        held: true,
+        owned_by_client: true,
+      }
+    );
+    assert_eq!(
+      leases.status("viewer", LeaseKind::Layout),
+      LeaseStatus {
+        held: true,
+        owned_by_client: false,
+      }
+    );
+
+    assert_eq!(
+      leases.release("layout", LeaseKind::Layout),
+      LeaseStatus {
+        held: false,
+        owned_by_client: false,
+      }
+    );
+    assert_eq!(
+      leases.acquire("viewer", LeaseKind::Layout),
+      LeaseStatus {
+        held: true,
+        owned_by_client: true,
+      }
+    );
   }
 }

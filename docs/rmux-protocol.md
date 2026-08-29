@@ -1,4 +1,4 @@
-# rmux protocol version 2
+# rmux protocol version 3
 
 The protocol is independent of local IPC and future remote transport. Version
 1 uses length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -17,7 +17,7 @@ connection into a bidirectional stream:
 
 - daemon to client: `attached`, an optional checkpoint, replayed `output`,
   then live `output`;
-- client to daemon: `input`, `resize`, or `detach`;
+- client to daemon: `input`, `resize`, lease acquire/release, or `detach`;
 - daemon to client: `session_ended` when the child exits.
 
 Transport disconnection is an implicit detach and never kills the session.
@@ -25,9 +25,32 @@ Creating a session carries its initial working directory separately from the
 optional command, so the daemon's own process directory is never observable as
 session state.
 
-`attach_session` includes the attaching terminal size. This does not resize
-the PTY; it lets the daemon report when a checkpoint was made for a different
-layout.
+`attach_session` includes the attaching terminal size and requests for input
+and layout leases. Requesting an unheld layout lease is an explicit resize: the
+daemon applies that terminal size before sending `attached`. Without that
+request, an attach never resizes the PTY; the size only lets the daemon report
+when a checkpoint was made for another layout.
+
+## Attachment leases
+
+Every `attach_session` stream is one attachment. Input and layout are separate
+connection-bound leases:
+
+- `request_input_lease` and `request_layout_lease` claim each unheld lease as
+  part of the attach operation. They never displace another attachment.
+- `acquire_lease` and `release_lease` adjust one capability after attaching.
+  The daemon replies with `lease_status`, whose `owned_by_client` field is
+  relative to that attachment; other attachment identities are not exposed.
+- `attached` contains the initial input and layout lease statuses.
+- `input` requires the input lease, and `resize` requires the layout lease.
+  An unauthorized command receives a structured error but does not terminate
+  the shell session.
+- Detach, transport EOF, write failure, and session end release any leases
+  owned by that attachment. They do not terminate the PTY or child process.
+
+The two requested leases are intentionally independent. A desktop client can
+retain input while a separate client owns layout, and a viewer can attach
+without requesting either capability.
 
 ## Stream sequences
 
@@ -40,7 +63,8 @@ or reset during a session.
 
 An attaching client may provide `resume_from`:
 
-- omitted: replay all retained history;
+- omitted: restore the latest compatible checkpoint and replay raw output
+  after it;
 - within the retained range: replay from that byte;
 - older than retained history: replay from the earliest retained byte and set
   `history_gap`;
@@ -79,5 +103,4 @@ does not support.
 - disk-backed journals;
 - cwd shell integration;
 - process restart policies and generations;
-- multiple-client input and layout leases;
 - Windows named-pipe transport.

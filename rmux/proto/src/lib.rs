@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
@@ -25,6 +25,27 @@ impl Default for TerminalSize {
       pixel_height: 0,
     }
   }
+}
+
+/// An independently controlled capability of an attached terminal client.
+///
+/// Input and PTY layout intentionally have separate owners. For example, a
+/// phone may view and type into a desktop-sized session without changing its
+/// layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseKind {
+  Input,
+  Layout,
+}
+
+/// Lease state as observed by one attached client.
+///
+/// The daemon deliberately does not expose another attachment's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseStatus {
+  pub held: bool,
+  pub owned_by_client: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +108,12 @@ pub enum ClientMessage {
     session: String,
     resume_from: Option<u64>,
     terminal_size: TerminalSize,
+    /// Claim input if no other attached client currently owns it. This never
+    /// takes the lease from another client.
+    request_input_lease: bool,
+    /// Claim PTY layout ownership if unheld. A successful request applies the
+    /// terminal size in this attach request as an explicit resize.
+    request_layout_lease: bool,
   },
   KillSession {
     session: String,
@@ -96,6 +123,12 @@ pub enum ClientMessage {
   },
   Resize {
     terminal_size: TerminalSize,
+  },
+  AcquireLease {
+    lease: LeaseKind,
+  },
+  ReleaseLease {
+    lease: LeaseKind,
   },
   Detach,
 }
@@ -109,6 +142,8 @@ pub enum ErrorCode {
   SequenceAhead,
   SessionAlreadyExists,
   SessionNotFound,
+  InputLeaseRequired,
+  LayoutLeaseRequired,
   Internal,
 }
 
@@ -133,6 +168,12 @@ pub enum ServerMessage {
     history_gap: bool,
     checkpoint: Option<TerminalCheckpoint>,
     terminal_size_mismatch: bool,
+    input_lease: LeaseStatus,
+    layout_lease: LeaseStatus,
+  },
+  LeaseStatus {
+    lease: LeaseKind,
+    status: LeaseStatus,
   },
   Checkpoint {
     checkpoint: TerminalCheckpoint,
@@ -236,6 +277,8 @@ mod tests {
       session: "work".into(),
       resume_from: Some(42),
       terminal_size: TerminalSize::default(),
+      request_input_lease: true,
+      request_layout_lease: false,
     };
     let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -249,6 +292,35 @@ mod tests {
         session: "work".into(),
         resume_from: Some(42),
         terminal_size: TerminalSize::default(),
+        request_input_lease: true,
+        request_layout_lease: false,
+      }
+    );
+  }
+
+  #[tokio::test]
+  async fn lease_status_frame_round_trips() {
+    let expected = ServerMessage::LeaseStatus {
+      lease: LeaseKind::Layout,
+      status: LeaseStatus {
+        held: true,
+        owned_by_client: false,
+      },
+    };
+    let (mut server, mut client) = tokio::io::duplex(1024);
+
+    let write = tokio::spawn(async move { write_frame(&mut server, &expected).await });
+    let actual: ServerMessage = read_frame(&mut client).await.unwrap().unwrap();
+
+    write.await.unwrap().unwrap();
+    assert_eq!(
+      actual,
+      ServerMessage::LeaseStatus {
+        lease: LeaseKind::Layout,
+        status: LeaseStatus {
+          held: true,
+          owned_by_client: false,
+        },
       }
     );
   }

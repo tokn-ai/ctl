@@ -1,7 +1,10 @@
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use rmux_core::{JournalError, JournalSnapshot, OutputChunk, OutputJournal, validate_session_name};
+use rmux_core::{
+  AttachmentLeaseRegistry, AttachmentLeases, JournalError, JournalSnapshot, OutputChunk,
+  OutputJournal, validate_session_name,
+};
 use rmux_proto::{
-  CommandSpec, SessionInfo, SessionStatus, TERMINAL_CHECKPOINT_FORMAT,
+  CommandSpec, LeaseKind, LeaseStatus, SessionInfo, SessionStatus, TERMINAL_CHECKPOINT_FORMAT,
   TERMINAL_CHECKPOINT_FORMAT_VERSION, TerminalCheckpoint, TerminalSize,
 };
 use std::collections::{HashMap, HashSet};
@@ -25,6 +28,7 @@ pub struct Session {
   created_at_ms: u64,
   terminal: Mutex<TerminalState>,
   checkpoint_interval_bytes: u64,
+  leases: Mutex<AttachmentLeaseRegistry>,
   master: Mutex<Box<dyn MasterPty + Send>>,
   writer: Mutex<Box<dyn Write + Send>>,
   killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -63,6 +67,31 @@ impl Session {
     self.events.subscribe()
   }
 
+  /// Registers an attached connection and grants any unheld requested leases.
+  ///
+  /// Leases never transfer implicitly. They are released when the connection
+  /// that owns them detaches or disconnects.
+  pub fn attach(
+    &self,
+    attachment_id: &str,
+    request_input_lease: bool,
+    request_layout_lease: bool,
+  ) -> AttachmentLeases {
+    lock(&self.leases).request_initial(attachment_id, request_input_lease, request_layout_lease)
+  }
+
+  pub fn release_attachment(&self, attachment_id: &str) {
+    lock(&self.leases).release_attachment(attachment_id);
+  }
+
+  pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+    lock(&self.leases).acquire(attachment_id, lease)
+  }
+
+  pub fn release_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+    lock(&self.leases).release(attachment_id, lease)
+  }
+
   pub fn snapshot_for_attach(
     &self,
     requested: Option<u64>,
@@ -93,14 +122,34 @@ impl Session {
     })
   }
 
-  pub fn write_input(&self, data: &[u8]) -> Result<(), SessionControlError> {
+  pub fn write_input(&self, attachment_id: &str, data: &[u8]) -> Result<(), SessionControlError> {
+    let leases = lock(&self.leases);
+    if !leases
+      .status(attachment_id, LeaseKind::Input)
+      .owned_by_client
+    {
+      return Err(SessionControlError::InputLeaseRequired);
+    }
     let mut writer = lock(&self.writer);
     writer.write_all(data)?;
     writer.flush()?;
+    drop(writer);
+    drop(leases);
     Ok(())
   }
 
-  pub fn resize(&self, terminal_size: TerminalSize) -> Result<(), SessionControlError> {
+  pub fn resize(
+    &self,
+    attachment_id: &str,
+    terminal_size: TerminalSize,
+  ) -> Result<(), SessionControlError> {
+    let leases = lock(&self.leases);
+    if !leases
+      .status(attachment_id, LeaseKind::Layout)
+      .owned_by_client
+    {
+      return Err(SessionControlError::LayoutLeaseRequired);
+    }
     lock(&self.master)
       .resize(to_pty_size(&terminal_size))
       .map_err(|error| SessionControlError::Pty(error.to_string()))?;
@@ -111,6 +160,8 @@ impl Session {
     );
     terminal.terminal_size = terminal_size;
     refresh_checkpoint(&mut terminal);
+    drop(terminal);
+    drop(leases);
     Ok(())
   }
 
@@ -237,6 +288,7 @@ impl SessionManager {
       created_at_ms: unix_time_ms(),
       terminal: Mutex::new(terminal),
       checkpoint_interval_bytes: self.inner.checkpoint_interval_bytes as u64,
+      leases: Mutex::new(AttachmentLeaseRegistry::default()),
       master: Mutex::new(pair.master),
       writer: Mutex::new(writer),
       killer: Mutex::new(killer),
@@ -381,6 +433,10 @@ pub enum SessionManagerError {
 
 #[derive(Debug, Error)]
 pub enum SessionControlError {
+  #[error("this attachment does not own the session input lease")]
+  InputLeaseRequired,
+  #[error("this attachment does not own the session layout lease")]
+  LayoutLeaseRequired,
   #[error("I/O error: {0}")]
   Io(#[from] std::io::Error),
   #[error("PTY error: {0}")]

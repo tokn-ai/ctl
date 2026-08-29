@@ -47,13 +47,28 @@ explicitly with:
 rmux kill work
 ```
 
+The first normal attachment claims an unheld input lease, so another normal
+attachment becomes view-only instead of stealing keystrokes. Request a viewer
+explicitly with:
+
+```sh
+rmux attach work --read-only
+```
+
+Attaching never changes the existing PTY size. To deliberately claim layout
+ownership and resize it once to the current terminal, use:
+
+```sh
+rmux attach work --resize
+```
+
 The client starts a per-user `rmuxd` on demand. The daemon owns the PTY and
 continues running after clients disconnect. It exits after its final session
 ends. Raw output history is currently bounded and memory-backed. `rmuxd`
 creates versioned terminal-state checkpoints so a new or reconnecting client
 can restore the current screen without replaying an arbitrarily large journal.
-Disk history, restart policies, cwd shell integration, and explicit input/layout
-leases are later milestones.
+Disk history, restart policies, and cwd shell integration are later
+milestones.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md).

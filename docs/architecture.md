@@ -51,10 +51,30 @@ Windows named pipes will be a separate transport implementation.
    canonical session record.
 8. A reconnect after journal compaction restores a checkpoint and replays only
    later raw output.
+9. Each live attachment may view a session independently, but input and PTY
+   layout are independently leased capabilities.
+10. An attachment can claim only an unheld lease; it never implicitly takes a
+    lease from another attachment.
+11. Leases are connection-bound. They are released when their attachment
+    detaches or disconnects, while the shell session itself continues.
 
-An attaching client does not resize an existing PTY. Explicit layout ownership
-will be introduced before automatic resize behavior, so a small secondary
-client cannot disturb the session's established layout.
+An ordinary attaching client requests input only when no other attachment owns
+it. It does not resize an existing PTY. A client must explicitly request the
+layout lease before its terminal size is applied, so a small secondary client
+cannot disturb an established desktop layout.
+
+## Attachment ownership
+
+`rmuxd` treats each `attach_session` connection as an attachment. Attachments
+are deliberately ephemeral: their identifiers are daemon-private and are not
+client identities. This keeps the MVP safe after a laptop sleeps or a network
+proxy disappears—there is no abandoned keyboard owner to clear manually.
+
+Input and layout leases are independent. One attachment can type while a
+different attachment owns PTY resizing. Requests to acquire a held lease leave
+the requester attached as a viewer; they never force a takeover. A future
+authenticated client identity may add reconnect grace periods and deliberate
+takeover policies without changing session or stream semantics.
 
 ## Checkpoints
 

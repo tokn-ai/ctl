@@ -1,7 +1,7 @@
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use rmux_proto::{
-  ClientMessage, CodecError, CommandSpec, PROTOCOL_VERSION, ServerMessage, SessionInfo,
-  TerminalCheckpoint, TerminalSize, read_frame, write_frame,
+  ClientMessage, CodecError, CommandSpec, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION,
+  ServerMessage, SessionInfo, TerminalCheckpoint, TerminalSize, read_frame, write_frame,
 };
 use std::env;
 use std::io::{self, IsTerminal};
@@ -84,8 +84,17 @@ pub async fn attach_session(
   socket_path: &Path,
   session: &str,
   resume_from: Option<u64>,
+  request_input_lease: bool,
+  request_layout_lease: bool,
 ) -> Result<(), ClientError> {
-  let (stream, attached) = begin_attach(socket_path, session, resume_from).await?;
+  let (stream, attached) = begin_attach(
+    socket_path,
+    session,
+    resume_from,
+    request_input_lease,
+    request_layout_lease,
+  )
+  .await?;
   report_attachment(&attached);
 
   let interactive = io::stdin().is_terminal();
@@ -97,7 +106,7 @@ pub async fn attach_session(
   let (socket_reader, socket_writer) = stream.into_split();
 
   tokio::select! {
-    result = forward_input(socket_writer) => result,
+    result = forward_input(socket_writer, attached.input_lease.owned_by_client) => result,
     result = forward_output(socket_reader) => result,
   }
 }
@@ -108,12 +117,16 @@ struct AttachedSession {
   history_gap: bool,
   checkpoint: Option<TerminalCheckpoint>,
   terminal_size_mismatch: bool,
+  input_lease: LeaseStatus,
+  layout_lease: LeaseStatus,
 }
 
 async fn begin_attach(
   socket_path: &Path,
   session: &str,
   resume_from: Option<u64>,
+  request_input_lease: bool,
+  request_layout_lease: bool,
 ) -> Result<(UnixStream, AttachedSession), ClientError> {
   let mut stream = connect_and_handshake(socket_path).await?;
   write_frame(
@@ -122,6 +135,8 @@ async fn begin_attach(
       session: session.into(),
       resume_from,
       terminal_size: current_terminal_size(),
+      request_input_lease,
+      request_layout_lease,
     },
   )
   .await?;
@@ -133,6 +148,8 @@ async fn begin_attach(
     history_gap,
     checkpoint,
     terminal_size_mismatch,
+    input_lease,
+    layout_lease,
     ..
   } = response
   else {
@@ -147,6 +164,8 @@ async fn begin_attach(
       history_gap,
       checkpoint,
       terminal_size_mismatch,
+      input_lease,
+      layout_lease,
     },
   ))
 }
@@ -167,6 +186,17 @@ fn report_attachment(attached: &AttachedSession) {
       attached.session.terminal_size.rows,
     );
   }
+  if !attached.input_lease.owned_by_client {
+    let reason = if attached.input_lease.held {
+      "another attachment owns input"
+    } else {
+      "input was not requested"
+    };
+    eprintln!("rmux: view-only attachment ({reason})");
+  }
+  if !attached.layout_lease.owned_by_client && attached.layout_lease.held {
+    eprintln!("rmux: another attachment owns PTY layout");
+  }
   eprintln!(
     "[attached to {}; press Ctrl-] to detach]",
     attached.session.name
@@ -175,9 +205,11 @@ fn report_attachment(attached: &AttachedSession) {
 
 async fn forward_input(
   mut socket_writer: tokio::net::unix::OwnedWriteHalf,
+  input_enabled: bool,
 ) -> Result<(), ClientError> {
   let mut stdin = tokio::io::stdin();
   let mut buffer = vec![0_u8; 4096];
+  let mut reported_view_only = false;
   loop {
     let bytes_read = stdin.read(&mut buffer).await?;
     if bytes_read == 0 {
@@ -187,7 +219,7 @@ async fn forward_input(
 
     let input = &buffer[..bytes_read];
     if let Some(detach_at) = input.iter().position(|byte| *byte == DETACH_BYTE) {
-      if detach_at > 0 {
+      if input_enabled && detach_at > 0 {
         write_frame(
           &mut socket_writer,
           &ClientMessage::Input {
@@ -198,6 +230,14 @@ async fn forward_input(
       }
       write_frame(&mut socket_writer, &ClientMessage::Detach).await?;
       return Ok(());
+    }
+
+    if !input_enabled {
+      if !reported_view_only {
+        eprintln!("\r\n[view-only attachment; press Ctrl-] to detach]");
+        reported_view_only = true;
+      }
+      continue;
     }
 
     write_frame(
@@ -232,12 +272,29 @@ async fn forward_output(
         }
         restore_checkpoint(&mut stdout, &checkpoint).await?;
       }
+      ServerMessage::LeaseStatus { lease, status } => {
+        let owner = if status.owned_by_client {
+          "owned by this attachment"
+        } else if status.held {
+          "owned by another attachment"
+        } else {
+          "available"
+        };
+        eprintln!("\r\n[{} lease is {owner}]", lease_name(lease));
+      }
       ServerMessage::SessionEnded { exit_code, .. } => {
         stdout.flush().await?;
         eprintln!("\r\n[session ended with exit code {exit_code:?}]");
         return Ok(());
       }
       ServerMessage::Error { code, message } => {
+        if matches!(
+          code,
+          ErrorCode::InputLeaseRequired | ErrorCode::LayoutLeaseRequired
+        ) {
+          eprintln!("\r\n[rmux: {message}]");
+          continue;
+        }
         return Err(ClientError::Server { code, message });
       }
       response => {
@@ -247,6 +304,13 @@ async fn forward_output(
         ));
       }
     }
+  }
+}
+
+fn lease_name(lease: LeaseKind) -> &'static str {
+  match lease {
+    LeaseKind::Input => "input",
+    LeaseKind::Layout => "layout",
   }
 }
 

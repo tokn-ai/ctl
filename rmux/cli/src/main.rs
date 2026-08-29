@@ -43,6 +43,14 @@ enum Command {
     /// Resume at this raw output byte sequence.
     #[arg(long = "from")]
     resume_from: Option<u64>,
+
+    /// Attach without requesting the input lease.
+    #[arg(long)]
+    read_only: bool,
+
+    /// Request layout ownership and explicitly resize the PTY to this terminal.
+    #[arg(long)]
+    resize: bool,
   },
 
   /// Terminate a session by name or ID.
@@ -63,7 +71,9 @@ async fn main() {
     Command::Attach {
       session,
       resume_from,
-    } => unix::attach_session(&socket_path, &session, resume_from).await,
+      read_only,
+      resize,
+    } => unix::attach_session(&socket_path, &session, resume_from, !read_only, resize).await,
     Command::Kill { session } => unix::kill_session(&socket_path, &session).await,
   };
 

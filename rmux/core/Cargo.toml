@@ -1,0 +1,11 @@
+[package]
+name = "rmux-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmux-proto.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

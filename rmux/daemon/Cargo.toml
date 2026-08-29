@@ -1,0 +1,18 @@
+[package]
+name = "rmuxd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap.workspace = true
+portable-pty.workspace = true
+rmux-core.workspace = true
+rmux-ipc.workspace = true
+rmux-proto.workspace = true
+rustix.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

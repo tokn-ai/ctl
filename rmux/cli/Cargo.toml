@@ -1,0 +1,15 @@
+[package]
+name = "rmux"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap.workspace = true
+crossterm.workspace = true
+rmux-ipc.workspace = true
+rmux-proto.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

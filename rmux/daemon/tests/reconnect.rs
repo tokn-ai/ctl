@@ -18,52 +18,18 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestResult {
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("rmux.sock");
-  let daemon_socket = socket_path.clone();
-  let daemon = tokio::spawn(async move {
-    run(DaemonConfig {
-      socket_path: daemon_socket,
-      journal_capacity_bytes: 64 * 1024,
-      startup_idle_timeout: Duration::from_secs(5),
-    })
-    .await
-  });
-
-  let mut create = connect_when_ready(&socket_path).await?;
-  handshake(&mut create).await?;
-  write_frame(
-    &mut create,
-    &ClientMessage::CreateSession {
-      name: Some("persistent".into()),
-      command: Some(CommandSpec {
-        program: "/bin/sh".into(),
-        arguments: vec![
-          "-c".into(),
-          "printf 'before\\n'; IFS= read -r line; printf 'after:%s\\n' \"$line\"".into(),
-        ],
-      }),
-      working_directory: None,
-      terminal_size: TerminalSize::default(),
-    },
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "persistent",
+    "printf 'before\\n'; IFS= read -r line; printf 'after:%s\\n' \"$line\"",
   )
   .await?;
-  let created = required_message(&mut create).await?;
-  let ServerMessage::SessionCreated { session } = created else {
-    return Err(format!("expected session_created, received {created:?}").into());
-  };
-  drop(create);
 
-  let mut first_attach = connect_when_ready(&socket_path).await?;
-  handshake(&mut first_attach).await?;
-  write_frame(
-    &mut first_attach,
-    &ClientMessage::AttachSession {
-      session: session.session_id.clone(),
-      resume_from: None,
-    },
-  )
-  .await?;
+  let (mut first_attach, first_attached) =
+    attach_session(&socket_path, &session.session_id, None).await?;
   assert!(matches!(
-    required_message(&mut first_attach).await?,
+    first_attached,
     ServerMessage::Attached {
       replay_from: 0,
       history_gap: false,
@@ -75,18 +41,10 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
   drop(first_attach);
 
-  let mut second_attach = connect_when_ready(&socket_path).await?;
-  handshake(&mut second_attach).await?;
-  write_frame(
-    &mut second_attach,
-    &ClientMessage::AttachSession {
-      session: session.session_id,
-      resume_from: Some(resume_sequence),
-    },
-  )
-  .await?;
+  let (mut second_attach, second_attached) =
+    attach_session(&socket_path, &session.session_id, Some(resume_sequence)).await?;
   assert!(matches!(
-    required_message(&mut second_attach).await?,
+    second_attached,
     ServerMessage::Attached {
       replay_from,
       history_gap: false,
@@ -120,6 +78,136 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
     .map_err(|_| "rmuxd did not exit after its final session ended")?;
   daemon_result??;
   Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestResult {
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 32, 1);
+  let session = create_shell_session(
+    &socket_path,
+    "checkpoint",
+    "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; printf '\\033[2J\\033[Hcheckpoint-ready'; IFS= read -r line",
+  )
+  .await?;
+
+  let (mut first_attach, first_attached) =
+    attach_session(&socket_path, &session.session_id, Some(0)).await?;
+  assert!(matches!(first_attached, ServerMessage::Attached { .. }));
+  let (initial_output, _) = read_output_until(&mut first_attach, b"checkpoint-ready").await?;
+  assert!(contains_bytes(&initial_output, b"checkpoint-ready"));
+  write_frame(&mut first_attach, &ClientMessage::Detach).await?;
+  drop(first_attach);
+
+  let (mut restored_attach, attached) =
+    attach_session(&socket_path, &session.session_id, Some(0)).await?;
+  let ServerMessage::Attached {
+    checkpoint: Some(checkpoint),
+    history_gap: true,
+    terminal_size_mismatch: false,
+    ..
+  } = attached
+  else {
+    return Err(format!("expected checkpoint-backed attach, received {attached:?}").into());
+  };
+  assert!(checkpoint.is_supported());
+
+  let mut restored_terminal = avt::Vt::new(80, 24);
+  restored_terminal.feed_str(&String::from_utf8(checkpoint.payload)?);
+  assert!(
+    restored_terminal
+      .text()
+      .join("\n")
+      .contains("checkpoint-ready")
+  );
+
+  write_frame(
+    &mut restored_attach,
+    &ClientMessage::Input {
+      data: b"go\n".to_vec(),
+    },
+  )
+  .await?;
+  loop {
+    if matches!(
+      required_message(&mut restored_attach).await?,
+      ServerMessage::SessionEnded { .. }
+    ) {
+      break;
+    }
+  }
+  drop(restored_attach);
+
+  let daemon_result = timeout(Duration::from_secs(3), daemon)
+    .await
+    .map_err(|_| "rmuxd did not exit after checkpoint test")?;
+  daemon_result??;
+  Ok(())
+}
+
+fn spawn_daemon(
+  socket_path: &Path,
+  journal_capacity_bytes: usize,
+  checkpoint_interval_bytes: usize,
+) -> tokio::task::JoinHandle<Result<(), rmuxd::DaemonError>> {
+  let socket_path = socket_path.to_path_buf();
+  tokio::spawn(async move {
+    run(DaemonConfig {
+      socket_path,
+      journal_capacity_bytes,
+      checkpoint_interval_bytes,
+      startup_idle_timeout: Duration::from_secs(5),
+    })
+    .await
+  })
+}
+
+async fn create_shell_session(
+  socket_path: &Path,
+  name: &str,
+  script: &str,
+) -> TestResult<rmux_proto::SessionInfo> {
+  let mut create = connect_when_ready(socket_path).await?;
+  handshake(&mut create).await?;
+  write_frame(
+    &mut create,
+    &ClientMessage::CreateSession {
+      name: Some(name.into()),
+      command: Some(CommandSpec {
+        program: "/bin/sh".into(),
+        arguments: vec!["-c".into(), script.into()],
+      }),
+      working_directory: None,
+      terminal_size: TerminalSize::default(),
+    },
+  )
+  .await?;
+  let created = required_message(&mut create).await?;
+  let ServerMessage::SessionCreated { session } = created else {
+    return Err(format!("expected session_created, received {created:?}").into());
+  };
+  Ok(session)
+}
+
+async fn attach_session(
+  socket_path: &Path,
+  session: &str,
+  resume_from: Option<u64>,
+) -> TestResult<(UnixStream, ServerMessage)> {
+  let mut stream = connect_when_ready(socket_path).await?;
+  handshake(&mut stream).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::AttachSession {
+      session: session.into(),
+      resume_from,
+      terminal_size: TerminalSize::default(),
+    },
+  )
+  .await?;
+  let attached = required_message(&mut stream).await?;
+  Ok((stream, attached))
 }
 
 async fn connect_when_ready(socket_path: &Path) -> TestResult<UnixStream> {

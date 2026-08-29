@@ -1,7 +1,7 @@
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use rmux_proto::{
   ClientMessage, CodecError, CommandSpec, PROTOCOL_VERSION, ServerMessage, SessionInfo,
-  TerminalSize, read_frame, write_frame,
+  TerminalCheckpoint, TerminalSize, read_frame, write_frame,
 };
 use std::env;
 use std::io::{self, IsTerminal};
@@ -85,12 +85,43 @@ pub async fn attach_session(
   session: &str,
   resume_from: Option<u64>,
 ) -> Result<(), ClientError> {
+  let (stream, attached) = begin_attach(socket_path, session, resume_from).await?;
+  report_attachment(&attached);
+
+  let interactive = io::stdin().is_terminal();
+  let _raw_mode = RawModeGuard::enable_if(interactive)?;
+  if let Some(checkpoint) = attached.checkpoint.as_ref() {
+    let mut stdout = tokio::io::stdout();
+    restore_checkpoint(&mut stdout, checkpoint).await?;
+  }
+  let (socket_reader, socket_writer) = stream.into_split();
+
+  tokio::select! {
+    result = forward_input(socket_writer) => result,
+    result = forward_output(socket_reader) => result,
+  }
+}
+
+struct AttachedSession {
+  session: SessionInfo,
+  replay_from: u64,
+  history_gap: bool,
+  checkpoint: Option<TerminalCheckpoint>,
+  terminal_size_mismatch: bool,
+}
+
+async fn begin_attach(
+  socket_path: &Path,
+  session: &str,
+  resume_from: Option<u64>,
+) -> Result<(UnixStream, AttachedSession), ClientError> {
   let mut stream = connect_and_handshake(socket_path).await?;
   write_frame(
     &mut stream,
     &ClientMessage::AttachSession {
       session: session.into(),
       resume_from,
+      terminal_size: current_terminal_size(),
     },
   )
   .await?;
@@ -100,85 +131,122 @@ pub async fn attach_session(
     session,
     replay_from,
     history_gap,
+    checkpoint,
+    terminal_size_mismatch,
     ..
   } = response
   else {
     return Err(unexpected("attached", &response));
   };
 
-  if history_gap {
+  Ok((
+    stream,
+    AttachedSession {
+      session,
+      replay_from,
+      history_gap,
+      checkpoint,
+      terminal_size_mismatch,
+    },
+  ))
+}
+
+fn report_attachment(attached: &AttachedSession) {
+  if attached.history_gap {
     eprintln!(
-      "rmux: requested history is no longer retained; replaying from sequence {replay_from}"
+      "rmux: older scrollback is no longer retained; restoring sequence {}",
+      attached.replay_from
     );
   }
-  eprintln!("[attached to {}; press Ctrl-] to detach]", session.name);
+  if attached.terminal_size_mismatch {
+    eprintln!(
+      "rmux: terminal is {}x{}, but this session is {}x{}; the PTY will not be resized",
+      current_terminal_size().columns,
+      current_terminal_size().rows,
+      attached.session.terminal_size.columns,
+      attached.session.terminal_size.rows,
+    );
+  }
+  eprintln!(
+    "[attached to {}; press Ctrl-] to detach]",
+    attached.session.name
+  );
+}
 
-  let interactive = io::stdin().is_terminal();
-  let _raw_mode = RawModeGuard::enable_if(interactive)?;
-  let (mut socket_reader, mut socket_writer) = stream.into_split();
+async fn forward_input(
+  mut socket_writer: tokio::net::unix::OwnedWriteHalf,
+) -> Result<(), ClientError> {
+  let mut stdin = tokio::io::stdin();
+  let mut buffer = vec![0_u8; 4096];
+  loop {
+    let bytes_read = stdin.read(&mut buffer).await?;
+    if bytes_read == 0 {
+      write_frame(&mut socket_writer, &ClientMessage::Detach).await?;
+      return Ok(());
+    }
 
-  let input = async {
-    let mut stdin = tokio::io::stdin();
-    let mut buffer = vec![0_u8; 4096];
-    loop {
-      let bytes_read = stdin.read(&mut buffer).await?;
-      if bytes_read == 0 {
-        write_frame(&mut socket_writer, &ClientMessage::Detach).await?;
-        return Ok::<(), ClientError>(());
+    let input = &buffer[..bytes_read];
+    if let Some(detach_at) = input.iter().position(|byte| *byte == DETACH_BYTE) {
+      if detach_at > 0 {
+        write_frame(
+          &mut socket_writer,
+          &ClientMessage::Input {
+            data: input[..detach_at].to_vec(),
+          },
+        )
+        .await?;
       }
+      write_frame(&mut socket_writer, &ClientMessage::Detach).await?;
+      return Ok(());
+    }
 
-      let input = &buffer[..bytes_read];
-      if let Some(detach_at) = input.iter().position(|byte| *byte == DETACH_BYTE) {
-        if detach_at > 0 {
-          write_frame(
-            &mut socket_writer,
-            &ClientMessage::Input {
-              data: input[..detach_at].to_vec(),
-            },
-          )
-          .await?;
+    write_frame(
+      &mut socket_writer,
+      &ClientMessage::Input {
+        data: input.to_vec(),
+      },
+    )
+    .await?;
+  }
+}
+
+async fn forward_output(
+  mut socket_reader: tokio::net::unix::OwnedReadHalf,
+) -> Result<(), ClientError> {
+  let mut stdout = tokio::io::stdout();
+  loop {
+    let Some(message) = read_frame::<_, ServerMessage>(&mut socket_reader).await? else {
+      return Ok(());
+    };
+    match message {
+      ServerMessage::Output { data, .. } => {
+        stdout.write_all(&data).await?;
+        stdout.flush().await?;
+      }
+      ServerMessage::Checkpoint {
+        checkpoint,
+        history_gap,
+      } => {
+        if history_gap {
+          eprintln!("\r\n[older scrollback is no longer retained; terminal state restored]");
         }
-        write_frame(&mut socket_writer, &ClientMessage::Detach).await?;
+        restore_checkpoint(&mut stdout, &checkpoint).await?;
+      }
+      ServerMessage::SessionEnded { exit_code, .. } => {
+        stdout.flush().await?;
+        eprintln!("\r\n[session ended with exit code {exit_code:?}]");
         return Ok(());
       }
-
-      write_frame(
-        &mut socket_writer,
-        &ClientMessage::Input {
-          data: input.to_vec(),
-        },
-      )
-      .await?;
-    }
-  };
-
-  let output = async {
-    let mut stdout = tokio::io::stdout();
-    loop {
-      let Some(message) = read_frame::<_, ServerMessage>(&mut socket_reader).await? else {
-        return Ok::<(), ClientError>(());
-      };
-      match message {
-        ServerMessage::Output { data, .. } => {
-          stdout.write_all(&data).await?;
-          stdout.flush().await?;
-        }
-        ServerMessage::SessionEnded { exit_code, .. } => {
-          stdout.flush().await?;
-          eprintln!("\r\n[session ended with exit code {exit_code:?}]");
-          return Ok(());
-        }
-        ServerMessage::Error { code, message } => {
-          return Err(ClientError::Server { code, message });
-        }
-        response => return Err(unexpected("output or session_ended", &response)),
+      ServerMessage::Error { code, message } => {
+        return Err(ClientError::Server { code, message });
+      }
+      response => {
+        return Err(unexpected(
+          "output, checkpoint, or session_ended",
+          &response,
+        ));
       }
     }
-  };
-
-  tokio::select! {
-    result = input => result,
-    result = output => result,
   }
 }
 
@@ -284,6 +352,22 @@ fn current_terminal_size() -> TerminalSize {
   }
 }
 
+async fn restore_checkpoint(
+  stdout: &mut tokio::io::Stdout,
+  checkpoint: &TerminalCheckpoint,
+) -> Result<(), ClientError> {
+  if !checkpoint.is_supported() {
+    return Err(ClientError::UnsupportedCheckpoint {
+      format: checkpoint.format.clone(),
+      format_version: checkpoint.format_version,
+    });
+  }
+  stdout.write_all(&checkpoint.payload).await?;
+  stdout.write_all(&checkpoint.input_prefix).await?;
+  stdout.flush().await?;
+  Ok(())
+}
+
 fn current_working_directory() -> Result<String, ClientError> {
   let directory = env::current_dir().map_err(ClientError::CurrentDirectory)?;
   directory
@@ -358,6 +442,8 @@ pub enum ClientError {
     code: rmux_proto::ErrorCode,
     message: String,
   },
+  #[error("unsupported terminal checkpoint format {format} version {format_version}")]
+  UnsupportedCheckpoint { format: String, format_version: u16 },
   #[error("expected {expected}, received {actual}")]
   UnexpectedResponse {
     expected: &'static str,

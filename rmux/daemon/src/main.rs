@@ -14,6 +14,10 @@ struct Arguments {
   #[arg(long, default_value_t = 4 * 1024 * 1024)]
   journal_bytes: usize,
 
+  /// Maximum output bytes between terminal-state checkpoints.
+  #[arg(long, default_value_t = 256 * 1024)]
+  checkpoint_bytes: usize,
+
   /// Exit after this many idle seconds if no session was created.
   #[arg(long, default_value_t = 10)]
   startup_idle_seconds: u64,
@@ -35,6 +39,7 @@ fn main() {
   let config = DaemonConfig {
     socket_path: arguments.socket.unwrap_or_else(rmux_ipc::socket_path),
     journal_capacity_bytes: arguments.journal_bytes,
+    checkpoint_interval_bytes: arguments.checkpoint_bytes,
     startup_idle_timeout: Duration::from_secs(arguments.startup_idle_seconds),
   };
 

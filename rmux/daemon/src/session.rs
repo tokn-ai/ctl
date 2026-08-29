@@ -1,6 +1,9 @@
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rmux_core::{JournalError, JournalSnapshot, OutputChunk, OutputJournal, validate_session_name};
-use rmux_proto::{CommandSpec, SessionInfo, SessionStatus, TerminalSize};
+use rmux_proto::{
+  CommandSpec, SessionInfo, SessionStatus, TERMINAL_CHECKPOINT_FORMAT,
+  TERMINAL_CHECKPOINT_FORMAT_VERSION, TerminalCheckpoint, TerminalSize,
+};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,23 +23,39 @@ pub struct Session {
   id: String,
   name: String,
   created_at_ms: u64,
-  terminal_size: Mutex<TerminalSize>,
-  journal: Mutex<OutputJournal>,
+  terminal: Mutex<TerminalState>,
+  checkpoint_interval_bytes: u64,
   master: Mutex<Box<dyn MasterPty + Send>>,
   writer: Mutex<Box<dyn Write + Send>>,
   killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
   events: broadcast::Sender<SessionEvent>,
 }
 
+struct TerminalState {
+  terminal: avt::Vt,
+  pending_input: Vec<u8>,
+  journal: OutputJournal,
+  checkpoint: TerminalCheckpoint,
+  terminal_size: TerminalSize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachSnapshot {
+  pub checkpoint: Option<TerminalCheckpoint>,
+  pub journal: JournalSnapshot,
+  pub history_gap: bool,
+}
+
 impl Session {
   pub fn info(&self) -> SessionInfo {
+    let terminal = lock(&self.terminal);
     SessionInfo {
       session_id: self.id.clone(),
       name: self.name.clone(),
       status: SessionStatus::Running,
       created_at_ms: self.created_at_ms,
-      next_sequence: lock(&self.journal).next_sequence(),
-      terminal_size: lock(&self.terminal_size).clone(),
+      next_sequence: terminal.journal.next_sequence(),
+      terminal_size: terminal.terminal_size.clone(),
     }
   }
 
@@ -44,8 +63,34 @@ impl Session {
     self.events.subscribe()
   }
 
-  pub fn snapshot_from(&self, requested: Option<u64>) -> Result<JournalSnapshot, JournalError> {
-    lock(&self.journal).snapshot_from(requested)
+  pub fn snapshot_for_attach(
+    &self,
+    requested: Option<u64>,
+  ) -> Result<AttachSnapshot, JournalError> {
+    let terminal = lock(&self.terminal);
+    let earliest_sequence = terminal.journal.earliest_sequence();
+    if let Some(sequence) = requested
+      && sequence > terminal.journal.next_sequence()
+    {
+      return Err(JournalError::SequenceAhead {
+        requested: sequence,
+        next: terminal.journal.next_sequence(),
+      });
+    }
+
+    let needs_checkpoint = requested.is_none_or(|sequence| sequence < earliest_sequence);
+    let replay_from = if needs_checkpoint {
+      terminal.checkpoint.sequence
+    } else {
+      requested.unwrap_or(earliest_sequence)
+    };
+    let journal = terminal.journal.snapshot_from(Some(replay_from))?;
+
+    Ok(AttachSnapshot {
+      checkpoint: needs_checkpoint.then(|| terminal.checkpoint.clone()),
+      journal,
+      history_gap: requested.is_some_and(|sequence| sequence < earliest_sequence),
+    })
   }
 
   pub fn write_input(&self, data: &[u8]) -> Result<(), SessionControlError> {
@@ -59,7 +104,13 @@ impl Session {
     lock(&self.master)
       .resize(to_pty_size(&terminal_size))
       .map_err(|error| SessionControlError::Pty(error.to_string()))?;
-    *lock(&self.terminal_size) = terminal_size;
+    let mut terminal = lock(&self.terminal);
+    terminal.terminal.resize(
+      usize::from(terminal_size.columns),
+      usize::from(terminal_size.rows),
+    );
+    terminal.terminal_size = terminal_size;
+    refresh_checkpoint(&mut terminal);
     Ok(())
   }
 
@@ -69,7 +120,19 @@ impl Session {
   }
 
   fn append_output(&self, data: &[u8]) {
-    let chunk = lock(&self.journal).append(data);
+    let mut terminal = lock(&self.terminal);
+    feed_terminal_bytes(&mut terminal, data);
+    let chunk = terminal.journal.append(data);
+    let checkpoint_is_stale = terminal.journal.earliest_sequence() > terminal.checkpoint.sequence;
+    let checkpoint_is_due = terminal
+      .journal
+      .next_sequence()
+      .saturating_sub(terminal.checkpoint.sequence)
+      >= self.checkpoint_interval_bytes;
+    if checkpoint_is_stale || checkpoint_is_due {
+      refresh_checkpoint(&mut terminal);
+    }
+    drop(terminal);
     if let Some(chunk) = chunk {
       let _ignored = self.events.send(SessionEvent::Output(chunk));
     }
@@ -88,6 +151,7 @@ pub struct SessionManager {
 struct SessionManagerInner {
   registry: Mutex<SessionRegistry>,
   journal_capacity_bytes: usize,
+  checkpoint_interval_bytes: usize,
   ever_had_session: AtomicBool,
   changed: Notify,
 }
@@ -99,11 +163,12 @@ struct SessionRegistry {
 }
 
 impl SessionManager {
-  pub fn new(journal_capacity_bytes: usize) -> Self {
+  pub fn new(journal_capacity_bytes: usize, checkpoint_interval_bytes: usize) -> Self {
     Self {
       inner: Arc::new(SessionManagerInner {
         registry: Mutex::new(SessionRegistry::default()),
         journal_capacity_bytes,
+        checkpoint_interval_bytes: checkpoint_interval_bytes.max(1),
         ever_had_session: AtomicBool::new(false),
         changed: Notify::new(),
       }),
@@ -147,12 +212,31 @@ impl SessionManager {
     drop(pair.slave);
 
     let (events, _) = broadcast::channel(256);
+    let terminal_parser = avt::Vt::new(
+      usize::from(terminal_size.columns),
+      usize::from(terminal_size.rows),
+    );
+    let mut terminal = TerminalState {
+      terminal: terminal_parser,
+      pending_input: Vec::new(),
+      journal: OutputJournal::new(self.inner.journal_capacity_bytes),
+      checkpoint: TerminalCheckpoint {
+        format: TERMINAL_CHECKPOINT_FORMAT.into(),
+        format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
+        sequence: 0,
+        terminal_size: terminal_size.clone(),
+        payload: Vec::new(),
+        input_prefix: Vec::new(),
+      },
+      terminal_size,
+    };
+    refresh_checkpoint(&mut terminal);
     let session = Arc::new(Session {
       id: session_id.clone(),
       name,
       created_at_ms: unix_time_ms(),
-      terminal_size: Mutex::new(terminal_size),
-      journal: Mutex::new(OutputJournal::new(self.inner.journal_capacity_bytes)),
+      terminal: Mutex::new(terminal),
+      checkpoint_interval_bytes: self.inner.checkpoint_interval_bytes as u64,
       master: Mutex::new(pair.master),
       writer: Mutex::new(writer),
       killer: Mutex::new(killer),
@@ -331,6 +415,47 @@ fn read_pty(mut reader: Box<dyn Read + Send>, session: &Session) {
   }
 }
 
+fn refresh_checkpoint(terminal: &mut TerminalState) {
+  terminal.checkpoint = TerminalCheckpoint {
+    format: TERMINAL_CHECKPOINT_FORMAT.into(),
+    format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
+    sequence: terminal.journal.next_sequence(),
+    terminal_size: terminal.terminal_size.clone(),
+    payload: terminal.terminal.dump().into_bytes(),
+    input_prefix: terminal.pending_input.clone(),
+  };
+}
+
+fn feed_terminal_bytes(terminal: &mut TerminalState, data: &[u8]) {
+  terminal.pending_input.extend_from_slice(data);
+
+  loop {
+    match std::str::from_utf8(&terminal.pending_input) {
+      Ok(valid) => {
+        terminal.terminal.feed_str(valid);
+        terminal.pending_input.clear();
+        return;
+      }
+      Err(error) => {
+        let valid_up_to = error.valid_up_to();
+        if valid_up_to > 0 {
+          let valid = String::from_utf8(terminal.pending_input[..valid_up_to].to_vec())
+            .expect("valid UTF-8 prefix reported by std::str::from_utf8");
+          terminal.terminal.feed_str(&valid);
+          terminal.pending_input.drain(..valid_up_to);
+          continue;
+        }
+
+        let Some(invalid_length) = error.error_len() else {
+          return;
+        };
+        terminal.terminal.feed('\u{fffd}');
+        terminal.pending_input.drain(..invalid_length);
+      }
+    }
+  }
+}
+
 fn to_pty_size(size: &TerminalSize) -> PtySize {
   PtySize {
     rows: size.rows,
@@ -352,4 +477,76 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn checkpoint_preserves_a_partial_escape_sequence() {
+    let mut source = terminal_state();
+    feed_terminal_bytes(&mut source, b"\x1b[");
+    refresh_checkpoint(&mut source);
+    let checkpoint = source.checkpoint.clone();
+
+    feed_terminal_bytes(&mut source, b"2J\x1b[Hcheckpoint");
+    let mut restored = terminal_state_from_checkpoint(checkpoint);
+    feed_terminal_bytes(&mut restored, b"2J\x1b[Hcheckpoint");
+
+    assert_eq!(source.terminal.text(), restored.terminal.text());
+    assert!(restored.terminal.text().join("\n").contains("checkpoint"));
+  }
+
+  #[test]
+  fn checkpoint_preserves_an_incomplete_utf8_character() {
+    let mut source = terminal_state();
+    feed_terminal_bytes(&mut source, &[0xe6]);
+    refresh_checkpoint(&mut source);
+    let checkpoint = source.checkpoint.clone();
+
+    feed_terminal_bytes(&mut source, &[0x97, 0xa5]);
+    let mut restored = terminal_state_from_checkpoint(checkpoint);
+    feed_terminal_bytes(&mut restored, &[0x97, 0xa5]);
+
+    assert_eq!(source.terminal.text(), restored.terminal.text());
+    assert!(restored.terminal.text().join("\n").contains('日'));
+  }
+
+  fn terminal_state() -> TerminalState {
+    let terminal_size = TerminalSize::default();
+    let mut state = TerminalState {
+      terminal: avt::Vt::new(80, 24),
+      pending_input: Vec::new(),
+      journal: OutputJournal::new(1024),
+      checkpoint: TerminalCheckpoint {
+        format: TERMINAL_CHECKPOINT_FORMAT.into(),
+        format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
+        sequence: 0,
+        terminal_size: terminal_size.clone(),
+        payload: Vec::new(),
+        input_prefix: Vec::new(),
+      },
+      terminal_size,
+    };
+    refresh_checkpoint(&mut state);
+    state
+  }
+
+  fn terminal_state_from_checkpoint(checkpoint: TerminalCheckpoint) -> TerminalState {
+    let mut terminal = avt::Vt::new(
+      usize::from(checkpoint.terminal_size.columns),
+      usize::from(checkpoint.terminal_size.rows),
+    );
+    let payload = String::from_utf8(checkpoint.payload.clone())
+      .expect("checkpoint payload is generated from a UTF-8 VT dump");
+    terminal.feed_str(&payload);
+    TerminalState {
+      terminal,
+      pending_input: checkpoint.input_prefix.clone(),
+      journal: OutputJournal::new(1024),
+      terminal_size: checkpoint.terminal_size.clone(),
+      checkpoint,
+    }
+  }
 }

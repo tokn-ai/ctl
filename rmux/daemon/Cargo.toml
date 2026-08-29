@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 clap.workspace = true
+avt.workspace = true
 portable-pty.workspace = true
 rmux-core.workspace = true
 rmux-ipc.workspace = true

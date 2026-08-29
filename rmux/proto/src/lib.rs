@@ -3,8 +3,10 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
+pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
+pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
@@ -22,6 +24,24 @@ impl Default for TerminalSize {
       pixel_width: 0,
       pixel_height: 0,
     }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCheckpoint {
+  pub format: String,
+  pub format_version: u16,
+  pub sequence: u64,
+  pub terminal_size: TerminalSize,
+  pub payload: Vec<u8>,
+  pub input_prefix: Vec<u8>,
+}
+
+impl TerminalCheckpoint {
+  #[must_use]
+  pub fn is_supported(&self) -> bool {
+    self.format == TERMINAL_CHECKPOINT_FORMAT
+      && self.format_version == TERMINAL_CHECKPOINT_FORMAT_VERSION
   }
 }
 
@@ -66,6 +86,7 @@ pub enum ClientMessage {
   AttachSession {
     session: String,
     resume_from: Option<u64>,
+    terminal_size: TerminalSize,
   },
   KillSession {
     session: String,
@@ -109,6 +130,12 @@ pub enum ServerMessage {
     earliest_sequence: u64,
     next_sequence: u64,
     replay_from: u64,
+    history_gap: bool,
+    checkpoint: Option<TerminalCheckpoint>,
+    terminal_size_mismatch: bool,
+  },
+  Checkpoint {
+    checkpoint: TerminalCheckpoint,
     history_gap: bool,
   },
   Output {
@@ -208,6 +235,7 @@ mod tests {
     let expected = ClientMessage::AttachSession {
       session: "work".into(),
       resume_from: Some(42),
+      terminal_size: TerminalSize::default(),
     };
     let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -220,6 +248,7 @@ mod tests {
       ClientMessage::AttachSession {
         session: "work".into(),
         resume_from: Some(42),
+        terminal_size: TerminalSize::default(),
       }
     );
   }

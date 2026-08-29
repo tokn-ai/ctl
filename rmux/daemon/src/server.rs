@@ -1,5 +1,5 @@
 use crate::session::{
-  Session, SessionControlError, SessionEvent, SessionManager, SessionManagerError,
+  AttachSnapshot, Session, SessionControlError, SessionEvent, SessionManager, SessionManagerError,
 };
 use rmux_core::{JournalError, OutputChunk};
 use rmux_proto::{
@@ -21,6 +21,7 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct DaemonConfig {
   pub socket_path: PathBuf,
   pub journal_capacity_bytes: usize,
+  pub checkpoint_interval_bytes: usize,
   pub startup_idle_timeout: Duration,
 }
 
@@ -29,6 +30,7 @@ impl Default for DaemonConfig {
     Self {
       socket_path: rmux_ipc::socket_path(),
       journal_capacity_bytes: 4 * 1024 * 1024,
+      checkpoint_interval_bytes: 256 * 1024,
       startup_idle_timeout: Duration::from_secs(10),
     }
   }
@@ -57,7 +59,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     .map_err(DaemonError::RuntimeDirectory)?;
   let listener = bind_listener(&config.socket_path).await?;
   let _socket_guard = SocketGuard::new(config.socket_path.clone())?;
-  let sessions = SessionManager::new(config.journal_capacity_bytes);
+  let sessions = SessionManager::new(
+    config.journal_capacity_bytes,
+    config.checkpoint_interval_bytes,
+  );
   let connections = Arc::new(ConnectionTracker::default());
   let startup_deadline = sleep_until(Instant::now() + config.startup_idle_timeout);
   tokio::pin!(startup_deadline);
@@ -198,8 +203,9 @@ async fn handle_connection(
     ClientMessage::AttachSession {
       session,
       resume_from,
+      terminal_size,
     } => match sessions.resolve(&session) {
-      Ok(session) => return handle_attach(stream, session, resume_from).await,
+      Ok(session) => return handle_attach(stream, session, resume_from, terminal_size).await,
       Err(error) => send_session_manager_error(&mut stream, &error).await?,
     },
     ClientMessage::KillSession { session } => match sessions.resolve(&session) {
@@ -226,9 +232,10 @@ async fn handle_attach(
   stream: UnixStream,
   session: Arc<Session>,
   resume_from: Option<u64>,
+  client_terminal_size: rmux_proto::TerminalSize,
 ) -> Result<(), ConnectionError> {
   let mut events = session.subscribe();
-  let snapshot = match session.snapshot_from(resume_from) {
+  let snapshot = match session.snapshot_for_attach(resume_from) {
     Ok(snapshot) => snapshot,
     Err(error) => {
       let mut stream = stream;
@@ -238,24 +245,8 @@ async fn handle_attach(
   };
   let session_info = session.info();
   let (mut reader, mut writer) = stream.into_split();
-
-  write_frame(
-    &mut writer,
-    &ServerMessage::Attached {
-      session: session_info,
-      earliest_sequence: snapshot.earliest_sequence,
-      next_sequence: snapshot.next_sequence,
-      replay_from: snapshot.replay_from,
-      history_gap: snapshot.history_gap,
-    },
-  )
-  .await?;
-
-  let mut sent_sequence = snapshot.replay_from;
-  for chunk in snapshot.chunks {
-    sent_sequence = chunk.sequence_end();
-    write_frame(&mut writer, &chunk.into_server_message()).await?;
-  }
+  let mut sent_sequence =
+    send_attached(&mut writer, session_info, snapshot, client_terminal_size).await?;
 
   loop {
     tokio::select! {
@@ -263,24 +254,8 @@ async fn handle_attach(
         let Some(message) = incoming? else {
           return Ok(());
         };
-        match message {
-          ClientMessage::Input { data } => {
-            let session = Arc::clone(&session);
-            tokio::task::spawn_blocking(move || session.write_input(&data)).await??;
-          }
-          ClientMessage::Resize { terminal_size } => {
-            let session = Arc::clone(&session);
-            tokio::task::spawn_blocking(move || session.resize(terminal_size)).await??;
-          }
-          ClientMessage::Detach => return Ok(()),
-          _ => {
-            send_error(
-              &mut writer,
-              ErrorCode::InvalidRequest,
-              "only input, resize, and detach are valid while attached",
-            )
-            .await?;
-          }
+        if !process_attach_input(&mut writer, Arc::clone(&session), message).await? {
+          return Ok(());
         }
       }
       event = events.recv() => {
@@ -303,17 +278,113 @@ async fn handle_attach(
             return Ok(());
           }
           Err(broadcast::error::RecvError::Lagged(_)) => {
-            let recovery = session.snapshot_from(Some(sent_sequence))?;
-            for chunk in recovery.chunks {
-              sent_sequence = chunk.sequence_end();
-              write_frame(&mut writer, &chunk.into_server_message()).await?;
-            }
+            sent_sequence = recover_lag(&mut writer, &session, sent_sequence).await?;
           }
           Err(broadcast::error::RecvError::Closed) => return Ok(()),
         }
       }
     }
   }
+}
+
+async fn send_attached<W>(
+  writer: &mut W,
+  session: rmux_proto::SessionInfo,
+  snapshot: AttachSnapshot,
+  client_terminal_size: rmux_proto::TerminalSize,
+) -> Result<u64, ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  let terminal_size_mismatch = session.terminal_size != client_terminal_size;
+  write_frame(
+    writer,
+    &ServerMessage::Attached {
+      session,
+      earliest_sequence: snapshot.journal.earliest_sequence,
+      next_sequence: snapshot.journal.next_sequence,
+      replay_from: snapshot.journal.replay_from,
+      history_gap: snapshot.history_gap,
+      checkpoint: snapshot.checkpoint,
+      terminal_size_mismatch,
+    },
+  )
+  .await?;
+  forward_chunks(
+    writer,
+    snapshot.journal.replay_from,
+    snapshot.journal.chunks,
+  )
+  .await
+}
+
+async fn process_attach_input<W>(
+  writer: &mut W,
+  session: Arc<Session>,
+  message: ClientMessage,
+) -> Result<bool, ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  match message {
+    ClientMessage::Input { data } => {
+      tokio::task::spawn_blocking(move || session.write_input(&data)).await??;
+    }
+    ClientMessage::Resize { terminal_size } => {
+      tokio::task::spawn_blocking(move || session.resize(terminal_size)).await??;
+    }
+    ClientMessage::Detach => return Ok(false),
+    _ => {
+      send_error(
+        writer,
+        ErrorCode::InvalidRequest,
+        "only input, resize, and detach are valid while attached",
+      )
+      .await?;
+    }
+  }
+  Ok(true)
+}
+
+async fn recover_lag<W>(
+  writer: &mut W,
+  session: &Session,
+  sent_sequence: u64,
+) -> Result<u64, ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  let recovery = session.snapshot_for_attach(Some(sent_sequence))?;
+  let sent_sequence = if let Some(checkpoint) = recovery.checkpoint {
+    let sequence = checkpoint.sequence;
+    write_frame(
+      writer,
+      &ServerMessage::Checkpoint {
+        checkpoint,
+        history_gap: recovery.history_gap,
+      },
+    )
+    .await?;
+    sequence
+  } else {
+    sent_sequence
+  };
+  forward_chunks(writer, sent_sequence, recovery.journal.chunks).await
+}
+
+async fn forward_chunks<W>(
+  writer: &mut W,
+  mut sent_sequence: u64,
+  chunks: Vec<OutputChunk>,
+) -> Result<u64, ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  for chunk in chunks {
+    sent_sequence = chunk.sequence_end();
+    write_frame(writer, &chunk.into_server_message()).await?;
+  }
+  Ok(sent_sequence)
 }
 
 fn chunk_after(chunk: OutputChunk, sequence: u64) -> Option<OutputChunk> {

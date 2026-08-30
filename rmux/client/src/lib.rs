@@ -1,11 +1,11 @@
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use rmux_proto::{
   ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
-  SessionInfo, TerminalCheckpoint, TerminalSize, read_frame, write_frame,
+  SessionInfo, ShellState, TerminalCheckpoint, TerminalSize, read_frame, write_frame,
 };
 use std::io::{self, IsTerminal};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,6 +29,8 @@ pub struct AttachRequest {
   pub terminal_size: TerminalSize,
   pub request_input_lease: bool,
   pub request_layout_lease: bool,
+  /// Request the current editable command line when daemon policy allows it.
+  pub request_command_line: bool,
 }
 
 /// Session metadata and attachment-relative state returned by `rmuxd`.
@@ -41,8 +43,82 @@ pub struct AttachedSession {
   pub terminal_size_mismatch: bool,
   pub input_lease: LeaseStatus,
   pub layout_lease: LeaseStatus,
+  /// Complete shell-awareness state as it existed when the attachment opened.
+  ///
+  /// Use [`Self::shell_state_cache`] to observe newer state snapshots while
+  /// the attachment remains active.
+  pub shell_state: ShellState,
   /// Server-negotiated attachment liveness settings.
   pub liveness: AttachmentLiveness,
+  shell_state_cache: ShellStateCache,
+}
+
+impl AttachedSession {
+  /// Returns a clone of this attachment's silent, thread-safe shell-state
+  /// cache.
+  ///
+  /// The standard interactive attachment updates this cache from
+  /// `shell_state_changed` messages without writing metadata to the terminal.
+  #[must_use]
+  pub fn shell_state_cache(&self) -> ShellStateCache {
+    self.shell_state_cache.clone()
+  }
+}
+
+/// A latest-value cache of complete shell-awareness state snapshots.
+///
+/// A cache is initialized from the `attached` snapshot and accepts only
+/// strictly newer daemon revisions. It is deliberately independent of raw
+/// output sequence tracking: `observed_sequence` helps a renderer correlate
+/// state with output, but never changes reconnect/resume behavior.
+#[derive(Debug, Clone)]
+pub struct ShellStateCache {
+  state: Arc<RwLock<ShellState>>,
+}
+
+impl ShellStateCache {
+  /// Creates a cache initialized with an attachment or one-shot state
+  /// snapshot.
+  #[must_use]
+  pub fn new(initial_state: ShellState) -> Self {
+    Self {
+      state: Arc::new(RwLock::new(initial_state)),
+    }
+  }
+
+  /// Returns the latest accepted complete shell-awareness snapshot.
+  #[must_use]
+  pub fn snapshot(&self) -> ShellState {
+    match self.state.read() {
+      Ok(state) => state.clone(),
+      Err(poisoned) => poisoned.into_inner().clone(),
+    }
+  }
+
+  /// Replaces the cached snapshot only when it has a newer daemon revision.
+  ///
+  /// Returns whether the cache changed. Equal revisions are deliberately
+  /// ignored so a delayed event cannot regress per-attachment state.
+  #[must_use]
+  pub fn apply_if_newer(&self, state: ShellState) -> bool {
+    let mut cached_state = match self.state.write() {
+      Ok(state) => state,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    if state.revision <= cached_state.revision {
+      return false;
+    }
+
+    *cached_state = state;
+    true
+  }
+}
+
+/// A current shell-awareness snapshot retrieved without an attachment.
+#[derive(Debug, Clone)]
+pub struct SessionShellState {
+  pub session: SessionInfo,
+  pub shell_state: ShellState,
 }
 
 /// Portable attachment liveness settings negotiated during the handshake.
@@ -154,6 +230,43 @@ where
   read_response(&mut stream).await
 }
 
+/// Retrieves the current shell-awareness state without attaching to a session.
+///
+/// The daemon applies its command-line visibility policy to the returned
+/// snapshot.
+///
+/// # Errors
+///
+/// Returns an error when the handshake, request, or response fails, or when
+/// the daemon returns an unexpected response.
+pub async fn get_shell_state<S>(
+  stream: S,
+  identity: &ClientIdentity,
+  session: impl Into<String>,
+) -> Result<SessionShellState, ClientError>
+where
+  S: AsyncRead + AsyncWrite + Unpin,
+{
+  match request(
+    stream,
+    identity,
+    ClientMessage::GetShellState {
+      session: session.into(),
+    },
+  )
+  .await?
+  {
+    ServerMessage::ShellStateResponse {
+      session,
+      shell_state,
+    } => Ok(SessionShellState {
+      session,
+      shell_state,
+    }),
+    response => Err(unexpected("shell_state_response", &response)),
+  }
+}
+
 /// Opens an attachment over any supported transport.
 ///
 /// The caller retains the stream and passes it to [`attach_interactive`] or a
@@ -180,6 +293,7 @@ where
       terminal_size: request.terminal_size,
       request_input_lease: request.request_input_lease,
       request_layout_lease: request.request_layout_lease,
+      request_command_line: request.request_command_line,
     },
   )
   .await?;
@@ -193,6 +307,7 @@ where
     terminal_size_mismatch,
     input_lease,
     layout_lease,
+    shell_state,
     ..
   } = response
   else {
@@ -209,6 +324,8 @@ where
       terminal_size_mismatch,
       input_lease,
       layout_lease,
+      shell_state_cache: ShellStateCache::new(shell_state.clone()),
+      shell_state,
       liveness: handshake.attachment_liveness,
     },
   ))
@@ -265,6 +382,7 @@ where
     attached.input_lease.owned_by_client,
     attached.layout_lease.owned_by_client,
   ));
+  let shell_state_cache = attached.shell_state_cache();
   let (peer_activity_sender, peer_activity_receiver) = watch::channel(0_u64);
   let (socket_reader, socket_writer) = tokio::io::split(stream);
   let reason = tokio::select! {
@@ -278,6 +396,7 @@ where
       socket_reader,
       Arc::clone(&last_sequence),
       leases,
+      shell_state_cache,
       peer_activity_sender,
     ) => result?,
     reason = detect_peer_silence(peer_activity_receiver, attached.liveness.peer_timeout) => reason,
@@ -588,6 +707,7 @@ async fn forward_output<R>(
   mut socket_reader: R,
   last_sequence: Arc<AtomicU64>,
   leases: Arc<AttachmentLeaseState>,
+  shell_state_cache: ShellStateCache,
   peer_activity: watch::Sender<u64>,
 ) -> Result<AttachExitReason, ClientError>
 where
@@ -630,6 +750,9 @@ where
         };
         eprintln!("\r\n[{} lease is {owner}]", lease_name(lease));
       }
+      ServerMessage::ShellStateChanged { state } => {
+        let _updated = shell_state_cache.apply_if_newer(state);
+      }
       ServerMessage::HeartbeatAck { .. } => {}
       ServerMessage::SessionEnded { exit_code, .. } => {
         stdout.flush().await?;
@@ -653,7 +776,7 @@ where
       }
       response => {
         return Err(unexpected(
-          "output, checkpoint, lease_status, heartbeat_ack, or session_ended",
+          "output, checkpoint, shell_state_changed, lease_status, heartbeat_ack, or session_ended",
           &response,
         ));
       }
@@ -772,6 +895,8 @@ mod tests {
   #[tokio::test]
   async fn begin_attach_works_over_a_generic_duplex_stream() {
     let (client, mut daemon) = tokio::io::duplex(4096);
+    let expected_shell_state = shell_state(4, "/workspace");
+    let server_shell_state = expected_shell_state.clone();
     let server = tokio::spawn(async move {
       let handshake: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
       assert!(matches!(
@@ -799,6 +924,7 @@ mod tests {
         ClientMessage::AttachSession {
           request_input_lease: true,
           request_layout_lease: false,
+          request_command_line: true,
           ..
         }
       ));
@@ -820,6 +946,7 @@ mod tests {
             held: false,
             owned_by_client: false,
           },
+          shell_state: server_shell_state,
         },
       )
       .await
@@ -838,6 +965,7 @@ mod tests {
         terminal_size: TerminalSize::default(),
         request_input_lease: true,
         request_layout_lease: false,
+        request_command_line: true,
       },
     )
     .await
@@ -845,9 +973,130 @@ mod tests {
 
     assert_eq!(attached.session.name, "work");
     assert!(attached.input_lease.owned_by_client);
+    assert_eq!(attached.shell_state, expected_shell_state);
+    assert_eq!(
+      attached.shell_state_cache().snapshot(),
+      expected_shell_state
+    );
     assert_eq!(attached.liveness.heartbeat_interval, Duration::from_secs(1));
     assert_eq!(attached.liveness.peer_timeout, Duration::from_secs(3));
     drop(stream);
+    server.await.unwrap();
+  }
+
+  #[test]
+  fn shell_state_cache_applies_only_newer_revisions() {
+    let cache = ShellStateCache::new(shell_state(4, "/before"));
+
+    assert!(!cache.apply_if_newer(shell_state(3, "/older")));
+    assert!(!cache.apply_if_newer(shell_state(4, "/same")));
+    assert_eq!(cache.snapshot(), shell_state(4, "/before"));
+
+    assert!(cache.apply_if_newer(shell_state(5, "/after")));
+    assert_eq!(cache.snapshot(), shell_state(5, "/after"));
+  }
+
+  #[test]
+  fn shell_state_cache_is_shared_across_threads() {
+    let cache = ShellStateCache::new(shell_state(4, "/before"));
+    let worker_cache = cache.clone();
+
+    let did_update =
+      std::thread::spawn(move || worker_cache.apply_if_newer(shell_state(5, "/after")))
+        .join()
+        .unwrap();
+
+    assert!(did_update);
+    assert_eq!(cache.snapshot(), shell_state(5, "/after"));
+  }
+
+  #[tokio::test]
+  async fn shell_state_updates_do_not_advance_raw_output_sequence() {
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let cache = ShellStateCache::new(shell_state(4, "/before"));
+    let updated_state = shell_state(5, "/after");
+    write_frame(
+      &mut daemon,
+      &ServerMessage::ShellStateChanged {
+        state: updated_state.clone(),
+      },
+    )
+    .await
+    .unwrap();
+    drop(daemon);
+
+    let last_sequence = Arc::new(AtomicU64::new(73));
+    let (peer_activity, _peer_activity_receiver) = watch::channel(0_u64);
+    let exit_reason = forward_output(
+      client,
+      Arc::clone(&last_sequence),
+      Arc::new(AttachmentLeaseState::new(false, false)),
+      cache.clone(),
+      peer_activity,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exit_reason, AttachExitReason::ConnectionClosed);
+    assert_eq!(last_sequence.load(Ordering::Acquire), 73);
+    assert_eq!(cache.snapshot(), updated_state);
+  }
+
+  #[tokio::test]
+  async fn get_shell_state_uses_a_one_shot_request() {
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let expected_shell_state = shell_state(7, "/project");
+    let server_shell_state = expected_shell_state.clone();
+    let server = tokio::spawn(async move {
+      let handshake: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
+      assert!(matches!(
+        handshake,
+        ClientMessage::Handshake {
+          protocol_version: PROTOCOL_VERSION,
+          ..
+        }
+      ));
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HandshakeAccepted {
+          protocol_version: PROTOCOL_VERSION,
+          server_version: "test".into(),
+          heartbeat_interval_ms: 1_000,
+          attachment_liveness_timeout_ms: 3_000,
+        },
+      )
+      .await
+      .unwrap();
+
+      let request: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
+      assert!(matches!(
+        request,
+        ClientMessage::GetShellState { ref session } if session == "work"
+      ));
+      write_frame(
+        &mut daemon,
+        &ServerMessage::ShellStateResponse {
+          session: session_info(),
+          shell_state: server_shell_state,
+        },
+      )
+      .await
+      .unwrap();
+    });
+
+    let snapshot = get_shell_state(
+      client,
+      &ClientIdentity {
+        name: "test-client".into(),
+        version: "test".into(),
+      },
+      "work",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(snapshot.session.name, "work");
+    assert_eq!(snapshot.shell_state, expected_shell_state);
     server.await.unwrap();
   }
 
@@ -859,6 +1108,14 @@ mod tests {
       created_at_ms: 0,
       next_sequence: 0,
       terminal_size: TerminalSize::default(),
+    }
+  }
+
+  fn shell_state(revision: u64, cwd: &str) -> ShellState {
+    ShellState {
+      revision,
+      cwd: Some(cwd.into()),
+      ..ShellState::default()
     }
   }
 }

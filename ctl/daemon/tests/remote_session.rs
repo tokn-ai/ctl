@@ -162,6 +162,7 @@ async fn remote_shell_survives_ctld_restart_and_resumes_from_its_sequence() -> T
       terminal_size: TerminalSize::default(),
       request_input_lease: true,
       request_layout_lease: false,
+      request_command_line: false,
     },
   )
   .await?;
@@ -219,7 +220,6 @@ async fn remote_reconnect_recovers_after_silent_gateway_relay_expiry() -> TestRe
     rmux_identity,
     session,
   } = start_remote_shell_test(Duration::from_secs(1)).await?;
-
   let CapturedAttachment {
     stream: mut stale_stream,
     resume_sequence,
@@ -241,6 +241,7 @@ async fn remote_reconnect_recovers_after_silent_gateway_relay_expiry() -> TestRe
       terminal_size: TerminalSize::default(),
       request_input_lease: true,
       request_layout_lease: true,
+      request_command_line: false,
     },
   )
   .await?;
@@ -318,8 +319,7 @@ async fn remote_reconnect_recovers_after_silent_gateway_relay_expiry() -> TestRe
   let (final_output, _) = read_output_until(&mut recovery_stream, final_marker.as_bytes()).await?;
   assert_eq!(pid_after(&final_output, "final:")?, shell_pid);
   wait_for_session_end(&mut recovery_stream).await?;
-  drop(recovery_stream);
-  drop(stale_stream);
+  drop((recovery_stream, stale_stream));
 
   stop_ctld(shutdown, ctld).await?;
   wait_for_rmuxd_exit(rmuxd).await
@@ -473,6 +473,7 @@ async fn attach_and_capture_started(
       terminal_size: TerminalSize::default(),
       request_input_lease: true,
       request_layout_lease: false,
+      request_command_line: false,
     },
   )
   .await?;

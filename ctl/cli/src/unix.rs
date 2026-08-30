@@ -202,6 +202,9 @@ async fn shell(
       terminal_size: current_terminal_size(),
       request_input_lease,
       request_layout_lease,
+      // `ctl shell` is a raw PTY presentation and deliberately does not
+      // request sensitive editable command buffers it cannot render.
+      request_command_line: false,
     };
     let (stream, attached) = match begin_attach(stream, &rmux_identity, request).await {
       Ok(attachment) => attachment,

@@ -2,7 +2,7 @@
 
 use rmux_proto::{
   ClientMessage, CommandSpec, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
-  SessionInfo, TerminalSize, read_frame, write_frame,
+  SessionInfo, ShellState, TerminalSize, read_frame, write_frame,
 };
 use rmuxd::{DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT, DaemonConfig, run};
 use std::error::Error;
@@ -166,6 +166,126 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
     .map_err(|_| "rmuxd did not exit after checkpoint test")?;
   daemon_result??;
   Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_awareness_uses_private_reports_and_redacts_viewer_command_text() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "shell-state",
+    "printf 'rmux-shell-v1\\000zsh\\0001\\000cwd,command_line,cursor,prompt_phase\\000/workspace/rmux\\000editing\\0001\\000echo 日\\0006\\000' > \"$RMUX_SHELL_STATE_PIPE\"; IFS= read -r line",
+  )
+  .await?;
+
+  let inspection = wait_for_shell_state(&socket_path, &session.session_id).await?;
+  assert_eq!(inspection.shell.shell_type, rmux_proto::ShellType::Zsh);
+  assert_eq!(inspection.cwd.as_deref(), Some("/workspace/rmux"));
+  assert_eq!(inspection.prompt_phase, rmux_proto::PromptPhase::Editing);
+  assert!(inspection.command_line_redacted);
+  assert_eq!(inspection.current_command_line, None);
+
+  let (mut owner, owner_attached) =
+    attach_session_with_command_line_request(&socket_path, &session.session_id, true, true).await?;
+  let ServerMessage::Attached {
+    shell_state: owner_state,
+    input_lease,
+    ..
+  } = owner_attached
+  else {
+    return Err(format!("expected owner attachment, received {owner_attached:?}").into());
+  };
+  assert!(input_lease.owned_by_client);
+  assert!(!owner_state.command_line_redacted);
+  assert_eq!(
+    owner_state
+      .current_command_line
+      .as_ref()
+      .map(|line| line.text.as_str()),
+    Some("echo 日")
+  );
+  assert_eq!(
+    owner_state
+      .current_command_line
+      .as_ref()
+      .and_then(|line| line.cursor_scalar_offset),
+    Some(6)
+  );
+
+  let (mut viewer, viewer_attached) =
+    attach_session_with_command_line_request(&socket_path, &session.session_id, false, true)
+      .await?;
+  let ServerMessage::Attached {
+    shell_state: viewer_state,
+    input_lease,
+    ..
+  } = viewer_attached
+  else {
+    return Err(format!("expected viewer attachment, received {viewer_attached:?}").into());
+  };
+  assert!(!input_lease.owned_by_client);
+  assert!(viewer_state.command_line_redacted);
+  assert_eq!(viewer_state.current_command_line, None);
+
+  let released_input = release_lease(&mut owner, LeaseKind::Input).await?;
+  assert_lease_status(&released_input, false, false);
+  let acquired_input = acquire_lease(&mut viewer, LeaseKind::Input).await?;
+  assert_lease_status(&acquired_input, true, true);
+  let upgraded_viewer_state =
+    wait_for_unredacted_command_line(&mut viewer, viewer_state.revision).await?;
+  assert!(upgraded_viewer_state.revision > viewer_state.revision);
+  assert!(!upgraded_viewer_state.command_line_redacted);
+  assert_eq!(
+    upgraded_viewer_state
+      .current_command_line
+      .as_ref()
+      .map(|line| line.text.as_str()),
+    Some("echo 日")
+  );
+
+  write_frame(
+    &mut viewer,
+    &ClientMessage::Input {
+      data: b"finish\n".to_vec(),
+    },
+  )
+  .await?;
+
+  wait_for_session_end(&mut owner).await?;
+  wait_for_session_end(&mut viewer).await?;
+  drop(owner);
+  drop(viewer);
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after shell-awareness test").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alternate_screen_transitions_publish_a_tui_hint() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "alternate-screen",
+    "sleep 1; printf '\\033[?1049h'; sleep 1; printf '\\033[?1049l'; sleep 1",
+  )
+  .await?;
+
+  let (mut attachment, attached) =
+    attach_session(&socket_path, &session.session_id, None, false, false).await?;
+  let ServerMessage::Attached { shell_state, .. } = attached else {
+    return Err(format!("expected attachment, received {attached:?}").into());
+  };
+  assert_eq!(shell_state.tui_hint, rmux_proto::TuiHint::Unknown);
+
+  wait_for_tui_hint(&mut attachment, rmux_proto::TuiHint::AlternateScreen).await?;
+  wait_for_tui_hint(&mut attachment, rmux_proto::TuiHint::Inline).await?;
+  wait_for_session_end(&mut attachment).await?;
+  drop(attachment);
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after alternate-screen test").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -657,6 +777,45 @@ async fn attach_session_with_options(
   request_input_lease: bool,
   request_layout_lease: bool,
 ) -> TestResult<(UnixStream, ServerMessage)> {
+  attach_session_with_command_line_option(
+    socket_path,
+    session,
+    resume_from,
+    terminal_size,
+    request_input_lease,
+    request_layout_lease,
+    false,
+  )
+  .await
+}
+
+async fn attach_session_with_command_line_request(
+  socket_path: &Path,
+  session: &str,
+  request_input_lease: bool,
+  request_command_line: bool,
+) -> TestResult<(UnixStream, ServerMessage)> {
+  attach_session_with_command_line_option(
+    socket_path,
+    session,
+    None,
+    TerminalSize::default(),
+    request_input_lease,
+    false,
+    request_command_line,
+  )
+  .await
+}
+
+async fn attach_session_with_command_line_option(
+  socket_path: &Path,
+  session: &str,
+  resume_from: Option<u64>,
+  terminal_size: TerminalSize,
+  request_input_lease: bool,
+  request_layout_lease: bool,
+  request_command_line: bool,
+) -> TestResult<(UnixStream, ServerMessage)> {
   let mut stream = connect_when_ready(socket_path).await?;
   handshake(&mut stream).await?;
   write_frame(
@@ -667,11 +826,75 @@ async fn attach_session_with_options(
       terminal_size,
       request_input_lease,
       request_layout_lease,
+      request_command_line,
     },
   )
   .await?;
   let attached = required_message(&mut stream).await?;
   Ok((stream, attached))
+}
+
+async fn wait_for_shell_state(socket_path: &Path, session: &str) -> TestResult<ShellState> {
+  let deadline = Instant::now() + Duration::from_secs(3);
+  loop {
+    let mut stream = connect_when_ready(socket_path).await?;
+    handshake(&mut stream).await?;
+    write_frame(
+      &mut stream,
+      &ClientMessage::GetShellState {
+        session: session.into(),
+      },
+    )
+    .await?;
+    let response = required_message(&mut stream).await?;
+    let ServerMessage::ShellStateResponse { shell_state, .. } = response else {
+      return Err(format!("expected shell state response, received {response:?}").into());
+    };
+    if shell_state.revision > 0 {
+      return Ok(shell_state);
+    }
+    if Instant::now() >= deadline {
+      return Err("shell reporter did not publish state".into());
+    }
+    sleep(Duration::from_millis(10)).await;
+  }
+}
+
+async fn wait_for_tui_hint(stream: &mut UnixStream, expected: rmux_proto::TuiHint) -> TestResult {
+  loop {
+    match required_message(stream).await? {
+      ServerMessage::ShellStateChanged { state } if state.tui_hint == expected => return Ok(()),
+      ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. } => {}
+      response => {
+        return Err(format!("expected tui hint {expected:?}, received {response:?}").into());
+      }
+    }
+  }
+}
+
+async fn wait_for_unredacted_command_line(
+  stream: &mut UnixStream,
+  after_revision: u64,
+) -> TestResult<ShellState> {
+  loop {
+    match required_message(stream).await? {
+      ServerMessage::ShellStateChanged { state }
+        if state.revision > after_revision
+          && !state.command_line_redacted
+          && state.current_command_line.is_some() =>
+      {
+        return Ok(state);
+      }
+      ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. } => {}
+      message => {
+        return Err(format!("expected unredacted shell state, received {message:?}").into());
+      }
+    }
+  }
 }
 
 async fn session_info(socket_path: &Path, session_id: &str) -> TestResult<SessionInfo> {
@@ -708,7 +931,9 @@ async fn heartbeat(stream: &mut UnixStream, nonce: u64) -> TestResult {
         assert_eq!(acknowledged, nonce);
         return Ok(());
       }
-      ServerMessage::Output { .. } | ServerMessage::Checkpoint { .. } => {}
+      ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ShellStateChanged { .. } => {}
       response => {
         return Err(format!("expected heartbeat acknowledgement, received {response:?}").into());
       }
@@ -726,7 +951,9 @@ async fn lease_status_response(
         assert_eq!(lease, expected_lease);
         return Ok(status);
       }
-      ServerMessage::Output { .. } | ServerMessage::Checkpoint { .. } => {}
+      ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ShellStateChanged { .. } => {}
       response => return Err(format!("expected lease status, received {response:?}").into()),
     }
   }
@@ -756,7 +983,9 @@ async fn expect_error(stream: &mut UnixStream, expected_code: ErrorCode) -> Test
         assert_eq!(code, expected_code);
         return Ok(());
       }
-      ServerMessage::Output { .. } | ServerMessage::Checkpoint { .. } => {}
+      ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ShellStateChanged { .. } => {}
       response => return Err(format!("expected error response, received {response:?}").into()),
     }
   }
@@ -766,7 +995,7 @@ async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult {
   loop {
     match required_message(stream).await? {
       ServerMessage::SessionEnded { .. } => return Ok(()),
-      ServerMessage::Output { .. } => {}
+      ServerMessage::Output { .. } | ServerMessage::ShellStateChanged { .. } => {}
       response => {
         return Err(format!("expected output or session end, received {response:?}").into());
       }
@@ -851,6 +1080,7 @@ async fn read_output_until(stream: &mut UnixStream, expected: &[u8]) -> TestResu
           return Ok((output, sequence_end));
         }
       }
+      ServerMessage::ShellStateChanged { .. } | ServerMessage::Checkpoint { .. } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
     }
   }

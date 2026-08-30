@@ -2,6 +2,8 @@
 mod server;
 #[cfg(unix)]
 mod session;
+#[cfg(unix)]
+mod shell_reporter;
 
 #[cfg(unix)]
 pub use server::{

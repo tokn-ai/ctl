@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
@@ -66,6 +66,155 @@ impl TerminalCheckpoint {
   }
 }
 
+/// The shell program that most recently reported session awareness metadata.
+///
+/// `Unknown` means no supported shell integration has reported its identity;
+/// it does not attempt to infer a shell from rendered terminal output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellType {
+  Bash,
+  Fish,
+  Pwsh,
+  Zsh,
+  Cmd,
+  Sh,
+  #[default]
+  Unknown,
+}
+
+/// Shell-awareness features advertised by a shell integration.
+///
+/// A capability only says that the integration can report a value. The value
+/// may still be absent when it is not meaningful, unavailable, or withheld by
+/// a daemon visibility policy.
+#[allow(
+  clippy::struct_excessive_bools,
+  reason = "the wire format deliberately exposes independent named capabilities"
+)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellCapabilities {
+  pub reports_cwd: bool,
+  pub reports_command_line: bool,
+  pub reports_cursor: bool,
+  pub reports_prompt_phase: bool,
+}
+
+/// Describes the shell integration currently associated with a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellDescriptor {
+  pub shell_type: ShellType,
+  /// Version of the shell-integration report format, if one reported it.
+  pub integration_version: Option<u16>,
+  pub capabilities: ShellCapabilities,
+}
+
+impl Default for ShellDescriptor {
+  fn default() -> Self {
+    Self {
+      shell_type: ShellType::Unknown,
+      integration_version: None,
+      capabilities: ShellCapabilities::default(),
+    }
+  }
+}
+
+/// The shell's high-level interaction phase.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptPhase {
+  /// No supported integration has reported a prompt phase.
+  #[default]
+  Unknown,
+  /// The shell is ready at an empty prompt.
+  AtPrompt,
+  /// The shell is accepting an editable command line.
+  Editing,
+  /// The shell has accepted a command and is waiting for it to complete.
+  Running,
+}
+
+/// The current editable shell command line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandLine {
+  pub text: String,
+  /// Optional Unicode scalar-value offset into [`Self::text`].
+  pub cursor_scalar_offset: Option<u32>,
+}
+
+impl CommandLine {
+  /// Returns whether `cursor_scalar_offset`, when present, is within
+  /// [`Self::text`].
+  #[must_use]
+  pub fn has_valid_cursor(&self) -> bool {
+    let Some(cursor_scalar_offset) = self.cursor_scalar_offset else {
+      return true;
+    };
+    let Ok(cursor_scalar_offset) = usize::try_from(cursor_scalar_offset) else {
+      return false;
+    };
+
+    cursor_scalar_offset <= self.text.chars().count()
+  }
+}
+
+/// A presentation hint derived from terminal alternate-screen state.
+///
+/// This is not an authoritative classification of an application. Some TUIs
+/// do not use the alternate screen, and some non-TUI programs do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiHint {
+  /// The terminal parser has not established an alternate-screen state yet.
+  #[default]
+  Unknown,
+  /// The terminal is using its normal inline screen buffer.
+  Inline,
+  /// The terminal parser observed the alternate screen buffer as active.
+  AlternateScreen,
+}
+
+/// Current shell-awareness metadata for one session.
+///
+/// `observed_sequence` is the raw-output next offset when this state was
+/// observed: every raw byte below it has reached the daemon. It is metadata
+/// for correlating display state with output, never a resume cursor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellState {
+  /// Monotonically increasing, session-scoped state revision.
+  pub revision: u64,
+  pub observed_sequence: u64,
+  pub shell: ShellDescriptor,
+  /// A shell-reported directory display string, not a portable file path.
+  pub cwd: Option<String>,
+  pub prompt_phase: PromptPhase,
+  /// True when a visibility policy deliberately omitted the current command.
+  /// When true, `current_command_line` must be `None`.
+  pub command_line_redacted: bool,
+  /// Omitted when no current editable line is available or visible.
+  pub current_command_line: Option<CommandLine>,
+  pub tui_hint: TuiHint,
+}
+
+impl ShellState {
+  /// Returns whether the command-line fields obey their privacy and cursor
+  /// invariants.
+  #[must_use]
+  pub fn has_valid_command_line(&self) -> bool {
+    match &self.current_command_line {
+      Some(command_line) => {
+        !self.command_line_redacted
+          && matches!(
+            self.prompt_phase,
+            PromptPhase::AtPrompt | PromptPhase::Editing
+          )
+          && command_line.has_valid_cursor()
+      }
+      None => true,
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
   pub program: String,
@@ -104,6 +253,11 @@ pub enum ClientMessage {
     terminal_size: TerminalSize,
   },
   ListSessions,
+  /// Retrieves the latest shell-awareness state without creating an
+  /// attachment. Command-line visibility is subject to daemon policy.
+  GetShellState {
+    session: String,
+  },
   AttachSession {
     session: String,
     resume_from: Option<u64>,
@@ -114,6 +268,9 @@ pub enum ClientMessage {
     /// Claim PTY layout ownership if unheld. A successful request applies the
     /// terminal size in this attach request as an explicit resize.
     request_layout_lease: bool,
+    /// Request the current editable command line in shell-awareness state.
+    /// The daemon may redact it according to its visibility policy.
+    request_command_line: bool,
   },
   KillSession {
     session: String,
@@ -169,6 +326,10 @@ pub enum ServerMessage {
   SessionList {
     sessions: Vec<SessionInfo>,
   },
+  ShellStateResponse {
+    session: SessionInfo,
+    shell_state: ShellState,
+  },
   Attached {
     session: SessionInfo,
     earliest_sequence: u64,
@@ -179,6 +340,9 @@ pub enum ServerMessage {
     terminal_size_mismatch: bool,
     input_lease: LeaseStatus,
     layout_lease: LeaseStatus,
+    /// Complete shell-awareness state at attach time. An unsupported shell
+    /// produces the default unknown state rather than omitting this snapshot.
+    shell_state: ShellState,
   },
   LeaseStatus {
     lease: LeaseKind,
@@ -187,6 +351,11 @@ pub enum ServerMessage {
   /// Echoes an attached client's heartbeat nonce.
   HeartbeatAck {
     nonce: u64,
+  },
+  /// Replaces the attached client's shell-awareness state with a newer,
+  /// complete session snapshot.
+  ShellStateChanged {
+    state: ShellState,
   },
   Checkpoint {
     checkpoint: TerminalCheckpoint,
@@ -284,6 +453,31 @@ where
 mod tests {
   use super::*;
 
+  fn shell_state() -> ShellState {
+    ShellState {
+      revision: 7,
+      observed_sequence: 123,
+      shell: ShellDescriptor {
+        shell_type: ShellType::Zsh,
+        integration_version: Some(1),
+        capabilities: ShellCapabilities {
+          reports_cwd: true,
+          reports_command_line: true,
+          reports_cursor: true,
+          reports_prompt_phase: true,
+        },
+      },
+      cwd: Some("/work/rmux".into()),
+      prompt_phase: PromptPhase::Editing,
+      command_line_redacted: false,
+      current_command_line: Some(CommandLine {
+        text: "cargo test".into(),
+        cursor_scalar_offset: Some(10),
+      }),
+      tui_hint: TuiHint::Inline,
+    }
+  }
+
   #[tokio::test]
   async fn frames_round_trip() {
     let expected = ClientMessage::AttachSession {
@@ -292,6 +486,7 @@ mod tests {
       terminal_size: TerminalSize::default(),
       request_input_lease: true,
       request_layout_lease: false,
+      request_command_line: false,
     };
     let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -307,6 +502,7 @@ mod tests {
         terminal_size: TerminalSize::default(),
         request_input_lease: true,
         request_layout_lease: false,
+        request_command_line: false,
       }
     );
   }
@@ -348,6 +544,98 @@ mod tests {
 
     write.await.unwrap().unwrap();
     assert_eq!(actual, ClientMessage::Heartbeat { nonce: 42 });
+  }
+
+  #[tokio::test]
+  async fn shell_state_changed_frame_round_trips() {
+    let expected = ServerMessage::ShellStateChanged {
+      state: shell_state(),
+    };
+    let (mut server, mut client) = tokio::io::duplex(4096);
+
+    let write = tokio::spawn(async move { write_frame(&mut server, &expected).await });
+    let actual: ServerMessage = read_frame(&mut client).await.unwrap().unwrap();
+
+    write.await.unwrap().unwrap();
+    assert_eq!(
+      actual,
+      ServerMessage::ShellStateChanged {
+        state: shell_state(),
+      }
+    );
+  }
+
+  #[test]
+  fn shell_state_json_uses_stable_snake_case_names() {
+    let encoded = serde_json::to_value(ServerMessage::ShellStateChanged {
+      state: shell_state(),
+    })
+    .unwrap();
+
+    assert_eq!(encoded["type"], "shell_state_changed");
+    assert_eq!(encoded["state"]["shell"]["shell_type"], "zsh");
+    assert_eq!(
+      encoded["state"]["current_command_line"]["cursor_scalar_offset"],
+      10
+    );
+    assert_eq!(encoded["state"]["tui_hint"], "inline");
+  }
+
+  #[test]
+  fn command_line_cursor_uses_unicode_scalar_offsets() {
+    let valid_before_accent = CommandLine {
+      text: "café".into(),
+      cursor_scalar_offset: Some(3),
+    };
+    let valid_end = CommandLine {
+      text: "café".into(),
+      cursor_scalar_offset: Some(4),
+    };
+    let invalid_after_end = CommandLine {
+      text: "café".into(),
+      cursor_scalar_offset: Some(5),
+    };
+
+    assert!(valid_before_accent.has_valid_cursor());
+    assert!(valid_end.has_valid_cursor());
+    assert!(!invalid_after_end.has_valid_cursor());
+  }
+
+  #[test]
+  fn shell_state_rejects_a_command_line_marked_as_redacted() {
+    let mut state = shell_state();
+    assert!(state.has_valid_command_line());
+
+    state.command_line_redacted = true;
+    assert!(!state.has_valid_command_line());
+
+    state.current_command_line = None;
+    assert!(state.has_valid_command_line());
+  }
+
+  #[test]
+  fn shell_state_rejects_a_command_line_while_running() {
+    let mut state = shell_state();
+    state.prompt_phase = PromptPhase::Running;
+
+    assert!(!state.has_valid_command_line());
+  }
+
+  #[test]
+  fn default_shell_state_is_an_explicit_unknown_snapshot() {
+    assert_eq!(
+      ShellState::default(),
+      ShellState {
+        revision: 0,
+        observed_sequence: 0,
+        shell: ShellDescriptor::default(),
+        cwd: None,
+        prompt_phase: PromptPhase::Unknown,
+        command_line_redacted: false,
+        current_command_line: None,
+        tui_hint: TuiHint::Unknown,
+      }
+    );
   }
 
   #[tokio::test]

@@ -69,8 +69,10 @@ PTY. Press Ctrl-] to detach without terminating the shell.
 
 ## Limits of this milestone
 
-The session journal and checkpoints are memory-backed. Shell cwd tracking,
-disk-backed history, restartable task generations, Windows local transport,
-and other remote-administration services are deliberately deferred. See
-`docs/architecture.md` and `docs/ctl-protocol.md` for the ownership and
-security boundaries.
+The session journal and checkpoints are memory-backed. Optional shell awareness
+is also memory-only: the remote rmux tunnel preserves its versioned snapshots,
+but the current raw `ctl shell` presenter does not render metadata or request
+editable command text. Disk-backed history, restartable task generations,
+Windows local transport, and other remote-administration services are
+deliberately deferred. See `docs/architecture.md` and `docs/ctl-protocol.md`
+for the ownership and security boundaries.

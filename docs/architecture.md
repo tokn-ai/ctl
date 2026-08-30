@@ -88,6 +88,10 @@ the same remote protocol.
 13. A `ctld` shutdown closes its local attachments but never terminates an
     `rmuxd` session; a later authenticated connection attaches by durable
     session ID and raw output sequence.
+14. Optional shell-awareness metadata is advisory, memory-only session state.
+    It is delivered as complete snapshots beside raw output, never inferred
+    from rendered text or used for authorization, filesystem operations, or
+    lease ownership.
 
 An ordinary attaching client requests input only when no other attachment owns
 it. It does not resize an existing PTY. A client must explicitly request the
@@ -140,14 +144,45 @@ private keys are owner-only on Unix. See `docs/ctl-protocol.md` for the exact
 outer handshake and upgrade boundary, and `docs/remote-mvp.md` for a safe
 first-use flow.
 
+## Shell awareness
+
+`rmuxd` can track a shell descriptor, cwd display string, prompt phase,
+optional editable command buffer/cursor, and an alternate-screen presentation
+hint. This is not terminal emulation and does not introduce viewport commands:
+clients still own scrolling, selection, search, and rendering.
+
+On the current Unix implementation, an opt-in shell integration writes bounded
+full snapshots to a unique owner-only FIFO supplied as
+`RMUX_SHELL_STATE_PIPE`. The integration removes that environment variable and
+opens the FIFO only for each report, so commands it executes do not inherit a
+reporter capability. The FIFO is not an `rmux-proto` client endpoint. That
+keeps the reporter's separate typed-buffer records out of raw journal,
+checkpoints, replay, and future journal persistence; normal terminal echo is
+still canonical raw output. Reports are advisory because a child process can
+lie; `rmuxd` assigns the revision and output-sequence correlation itself, and
+coalesces/rate-limits reports before they can contend with PTY ingestion.
+
+The live edit buffer may contain secrets. It is never in `SessionInfo` or the
+session list, and `get_shell_state` always redacts it. An attachment must opt
+in and currently own the input lease before `rmuxd` sends it. The shipped
+`zsh` integration clears it before command execution; `bash` v1 does not
+advertise live edit-buffer capability. `rmux attach` and `ctl shell` are raw
+terminal presenters and intentionally do not request or print the buffer.
+
+`tui_hint` means only that DEC alternate-screen modes were observed. It is not
+a classification of the child process: some TUIs do not use alternate screen,
+and normal applications can use it. It may inform a client overlay but never
+changes input or layout ownership.
+
 ## Checkpoints
 
 `rmuxd` continuously interprets raw output into terminal state. At bounded
 output intervals, or before a prior checkpoint would no longer bridge retained
 journal data, it creates a versioned checkpoint. A checkpoint captures the
 visible terminal state and the parser state required to consume subsequent
-output. It does not capture process memory, shell state, cwd, or scrollback
-that the client has not retained locally.
+output. It does not capture process memory, shell-awareness state, cwd, or
+scrollback that the client has not retained locally. A current shell-awareness
+snapshot travels separately with `attached` and later state-change messages.
 
 The current `rmux` CLI restores a compatible checkpoint by writing its VT
 restore stream to the local terminal. It reports a size mismatch but does not

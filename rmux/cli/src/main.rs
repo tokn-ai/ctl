@@ -1,7 +1,8 @@
+mod shell;
 #[cfg(unix)]
 mod unix;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rmux_proto::CommandSpec;
 use std::path::PathBuf;
 
@@ -36,6 +37,9 @@ enum Command {
   /// List running sessions.
   List,
 
+  /// Show non-sensitive shell-awareness metadata for a running session.
+  State { session: String },
+
   /// Attach to a session by name or ID.
   Attach {
     session: String,
@@ -55,6 +59,27 @@ enum Command {
 
   /// Terminate a session by name or ID.
   Kill { session: String },
+
+  /// Print an opt-in shell integration snippet.
+  Shell {
+    #[command(subcommand)]
+    command: ShellCommand,
+  },
+}
+
+#[derive(Debug, Subcommand)]
+enum ShellCommand {
+  /// Print a shell startup snippet for rmux session awareness.
+  Init {
+    #[arg(value_enum)]
+    shell: ShellKind,
+  },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ShellKind {
+  Bash,
+  Zsh,
 }
 
 #[cfg(unix)]
@@ -68,6 +93,7 @@ async fn main() {
       unix::create_session(&socket_path, name, command, cwd).await
     }
     Command::List => unix::list_sessions(&socket_path).await,
+    Command::State { session } => unix::show_shell_state(&socket_path, &session).await,
     Command::Attach {
       session,
       resume_from,
@@ -75,6 +101,12 @@ async fn main() {
       resize,
     } => unix::attach_session(&socket_path, &session, resume_from, !read_only, resize).await,
     Command::Kill { session } => unix::kill_session(&socket_path, &session).await,
+    Command::Shell {
+      command: ShellCommand::Init { shell: shell_kind },
+    } => {
+      print!("{}", shell::init_script(shell_kind.into()));
+      Ok(())
+    }
   };
 
   if let Err(error) = result {
@@ -96,4 +128,13 @@ fn command_spec(command: Vec<String>) -> Option<CommandSpec> {
     program,
     arguments: command.collect(),
   })
+}
+
+impl From<ShellKind> for shell::Shell {
+  fn from(value: ShellKind) -> Self {
+    match value {
+      ShellKind::Bash => Self::Bash,
+      ShellKind::Zsh => Self::Zsh,
+    }
+  }
 }

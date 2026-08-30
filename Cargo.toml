@@ -26,6 +26,7 @@ ctl-core = { path = "ctl/core" }
 ctl-proto = { path = "ctl/proto" }
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 getrandom = "0.3.4"
+nix = { version = "0.29.0", default-features = false, features = ["fs"] }
 portable-pty = "0.9.0"
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 rmux-core = { path = "rmux/core" }

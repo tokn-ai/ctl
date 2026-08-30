@@ -6,8 +6,9 @@ This repository will contain two independently useful products:
 - `ctl`: authenticated remote device control and access to remote `rmux`
   sessions.
 
-The current milestone implements the first local `rmux` vertical slice on
-macOS and other Unix platforms. Windows named-pipe IPC is not implemented yet.
+The current MVP supports local `rmux` sessions and authenticated `ctl` access
+to them on macOS and other Unix platforms. Windows local IPC is not implemented
+yet.
 
 ## Build
 
@@ -40,6 +41,28 @@ rmux list
 rmux attach work
 ```
 
+Optionally enable shell awareness in an interactive shell startup file. The
+snippet is inert outside an rmux-managed session:
+
+```sh
+# ~/.zshrc
+eval "$(rmux shell init zsh)"
+```
+
+`zsh` reports its cwd, prompt phase, and live editable command buffer. `bash`
+reports its shell identity, cwd, and prompt phase; it deliberately does not
+claim a reliable live edit buffer on Bash 3.2. Inspect the non-sensitive state
+of a session with:
+
+```sh
+rmux state work
+```
+
+`rmux state` never prints an editable command buffer. Future GUI clients can
+explicitly request it while they own the input lease.
+That redaction applies to shell metadata; normal terminal echo remains part of
+the raw terminal stream seen by attached viewers.
+
 Press `Ctrl-]` to detach without terminating the shell. End the session
 explicitly with:
 
@@ -67,8 +90,9 @@ continues running after clients disconnect. It exits after its final session
 ends. Raw output history is currently bounded and memory-backed. `rmuxd`
 creates versioned terminal-state checkpoints so a new or reconnecting client
 can restore the current screen without replaying an arbitrarily large journal.
-Disk history, restart policies, and cwd shell integration are later
-milestones.
+Optional shell-awareness state is memory-only and separate from the raw output
+journal. Disk-backed history and restart policies are later milestones.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
-and [`docs/rmux-protocol.md`](docs/rmux-protocol.md).
+and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in
+[`docs/remote-mvp.md`](docs/remote-mvp.md).

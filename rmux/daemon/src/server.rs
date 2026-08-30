@@ -3,7 +3,8 @@ use crate::session::{
 };
 use rmux_core::{JournalError, OutputChunk};
 use rmux_proto::{
-  ClientMessage, CodecError, ErrorCode, PROTOCOL_VERSION, ServerMessage, read_frame, write_frame,
+  ClientMessage, CodecError, ErrorCode, LeaseKind, PROTOCOL_VERSION, ServerMessage, ShellState,
+  read_frame, write_frame,
 };
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, watch};
 use tokio::time::{Instant, sleep_until, timeout_at};
 use uuid::Uuid;
 
@@ -102,9 +103,19 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   let attachment_liveness = attachment_liveness(config.attachment_liveness_timeout)?;
   rmux_ipc::prepare_runtime_directory(&config.socket_path)
     .map_err(DaemonError::RuntimeDirectory)?;
+  let runtime_directory = config.socket_path.parent().ok_or_else(|| {
+    DaemonError::RuntimeDirectory(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      format!(
+        "socket path {} has no runtime directory",
+        config.socket_path.display()
+      ),
+    ))
+  })?;
   let listener = bind_listener(&config.socket_path).await?;
   let _socket_guard = SocketGuard::new(config.socket_path.clone())?;
   let sessions = SessionManager::new(
+    runtime_directory.to_path_buf(),
     config.journal_capacity_bytes,
     config.checkpoint_interval_bytes,
   );
@@ -256,24 +267,37 @@ async fn handle_request(
       )
       .await?;
     }
+    ClientMessage::GetShellState { session } => match sessions.resolve(&session) {
+      Ok(session) => {
+        write_frame(
+          &mut stream,
+          &ServerMessage::ShellStateResponse {
+            session: session.info(),
+            shell_state: session.shell_state_for_inspection(),
+          },
+        )
+        .await?;
+      }
+      Err(error) => send_session_manager_error(&mut stream, &error).await?,
+    },
     ClientMessage::AttachSession {
       session,
       resume_from,
       terminal_size,
       request_input_lease,
       request_layout_lease,
+      request_command_line,
     } => match sessions.resolve(&session) {
       Ok(session) => {
-        return handle_attach(
-          stream,
-          session,
+        let request = AttachParameters {
           resume_from,
-          terminal_size,
+          client_terminal_size: terminal_size,
           request_input_lease,
           request_layout_lease,
+          request_command_line,
           attachment_liveness_timeout,
-        )
-        .await;
+        };
+        return handle_attach(stream, session, request).await;
       }
       Err(error) => send_session_manager_error(&mut stream, &error).await?,
     },
@@ -297,69 +321,62 @@ async fn handle_request(
   Ok(())
 }
 
-async fn handle_attach(
-  stream: UnixStream,
-  session: Arc<Session>,
+struct AttachParameters {
   resume_from: Option<u64>,
   client_terminal_size: rmux_proto::TerminalSize,
   request_input_lease: bool,
   request_layout_lease: bool,
+  request_command_line: bool,
   attachment_liveness_timeout: Duration,
+}
+
+async fn handle_attach(
+  mut stream: UnixStream,
+  session: Arc<Session>,
+  request: AttachParameters,
 ) -> Result<(), ConnectionError> {
   let attachment_id = Uuid::new_v4().to_string();
-  let attachment_leases = session.attach(&attachment_id, request_input_lease, request_layout_lease);
+  let attachment_leases = session.attach(
+    &attachment_id,
+    request.request_input_lease,
+    request.request_layout_lease,
+  );
   let _attachment_guard = AttachmentGuard {
     session: Arc::clone(&session),
     attachment_id: attachment_id.clone(),
   };
   let initial_delivery_deadline = initial_attachment_delivery_deadline();
 
-  if attachment_leases.layout.owned_by_client {
-    let resize_session = Arc::clone(&session);
-    let resize_attachment_id = attachment_id.clone();
-    let resize_terminal_size = client_terminal_size.clone();
-    let resize = tokio::task::spawn_blocking(move || {
-      resize_session.resize(&resize_attachment_id, resize_terminal_size)
-    });
-    match timeout_at(initial_delivery_deadline, resize).await {
-      Err(_) => return Ok(()),
-      Ok(result) => match result? {
-        Ok(()) => {}
-        Err(error) => {
-          let mut stream = stream;
-          match timeout_at(
-            initial_delivery_deadline,
-            send_control_error(&mut stream, &error),
-          )
-          .await
-          {
-            Ok(result) => result?,
-            Err(_) => return Ok(()),
-          }
-          return Ok(());
-        }
-      },
-    }
+  if attachment_leases.layout.owned_by_client
+    && !apply_initial_resize(
+      &mut stream,
+      Arc::clone(&session),
+      attachment_id.clone(),
+      request.client_terminal_size.clone(),
+      initial_delivery_deadline,
+    )
+    .await?
+  {
+    return Ok(());
   }
 
   let events = session.subscribe();
-  let snapshot = match session.snapshot_for_attach(resume_from) {
-    Ok(snapshot) => snapshot,
-    Err(error) => {
-      let mut stream = stream;
-      match timeout_at(
-        initial_delivery_deadline,
-        send_journal_error(&mut stream, &error),
-      )
-      .await
-      {
-        Ok(result) => result?,
-        Err(_) => return Ok(()),
-      }
-      return Ok(());
-    }
+  let shell_state_updates = session.subscribe_shell_state();
+  let Some(snapshot) = take_initial_snapshot(
+    &mut stream,
+    Arc::clone(&session),
+    request.resume_from,
+    initial_delivery_deadline,
+  )
+  .await?
+  else {
+    return Ok(());
   };
   let session_info = session.info();
+  let initial_shell_state = shell_state_for_attachment(
+    snapshot.shell_state.clone(),
+    request.request_command_line && attachment_leases.input.owned_by_client,
+  );
   let (reader, mut writer) = stream.into_split();
   let sent_sequence = match timeout_at(
     initial_delivery_deadline,
@@ -367,8 +384,9 @@ async fn handle_attach(
       &mut writer,
       session_info,
       snapshot,
-      client_terminal_size,
+      request.client_terminal_size,
       attachment_leases,
+      initial_shell_state.clone(),
     ),
   )
   .await
@@ -381,23 +399,74 @@ async fn handle_attach(
     reader,
     writer,
     events,
+    shell_state_updates,
     sent_sequence,
+    shell_state_revision: initial_shell_state.revision,
+    request_command_line: request.request_command_line,
   };
   drive_attachment(
     attachment,
     session,
     attachment_id,
-    attachment_liveness_timeout,
-    Instant::now() + attachment_liveness_timeout,
+    request.attachment_liveness_timeout,
+    Instant::now() + request.attachment_liveness_timeout,
   )
   .await
+}
+
+async fn apply_initial_resize(
+  stream: &mut UnixStream,
+  session: Arc<Session>,
+  attachment_id: String,
+  terminal_size: rmux_proto::TerminalSize,
+  deadline: Instant,
+) -> Result<bool, ConnectionError> {
+  let resize = tokio::task::spawn_blocking(move || session.resize(&attachment_id, terminal_size));
+  match timeout_at(deadline, resize).await {
+    Err(_) => Ok(false),
+    Ok(result) => match result? {
+      Ok(()) => Ok(true),
+      Err(error) => match timeout_at(deadline, send_control_error(stream, &error)).await {
+        Ok(result) => {
+          result?;
+          Ok(false)
+        }
+        Err(_) => Ok(false),
+      },
+    },
+  }
+}
+
+async fn take_initial_snapshot(
+  stream: &mut UnixStream,
+  session: Arc<Session>,
+  resume_from: Option<u64>,
+  deadline: Instant,
+) -> Result<Option<AttachSnapshot>, ConnectionError> {
+  let snapshot = tokio::task::spawn_blocking(move || session.snapshot_for_attach(resume_from));
+  match timeout_at(deadline, snapshot).await {
+    Err(_) => Ok(None),
+    Ok(result) => match result? {
+      Ok(snapshot) => Ok(Some(snapshot)),
+      Err(error) => match timeout_at(deadline, send_journal_error(stream, &error)).await {
+        Ok(result) => {
+          result?;
+          Ok(None)
+        }
+        Err(_) => Ok(None),
+      },
+    },
+  }
 }
 
 struct LiveAttachment {
   reader: OwnedReadHalf,
   writer: OwnedWriteHalf,
   events: broadcast::Receiver<SessionEvent>,
+  shell_state_updates: watch::Receiver<ShellState>,
   sent_sequence: u64,
+  shell_state_revision: u64,
+  request_command_line: bool,
 }
 
 async fn drive_attachment(
@@ -405,73 +474,208 @@ async fn drive_attachment(
   session: Arc<Session>,
   attachment_id: String,
   attachment_liveness_timeout: Duration,
-  mut deadline: Instant,
+  deadline: Instant,
 ) -> Result<(), ConnectionError> {
-  let LiveAttachment {
-    mut reader,
-    mut writer,
-    mut events,
-    mut sent_sequence,
-  } = attachment;
+  let mut driver = AttachmentDriver {
+    attachment,
+    session,
+    attachment_id,
+    attachment_liveness_timeout,
+    deadline,
+  };
   loop {
     tokio::select! {
       biased;
-      () = sleep_until(deadline) => return Ok(()),
-      incoming = read_frame::<_, ClientMessage>(&mut reader) => {
+      () = sleep_until(driver.deadline) => return Ok(()),
+      incoming = read_frame::<_, ClientMessage>(&mut driver.attachment.reader) => {
         let Some(message) = incoming? else {
           return Ok(());
         };
-        if Instant::now() >= deadline {
+        if !driver.process_client_message(message).await? {
           return Ok(());
         }
-        if renews_attachment_liveness(&message) {
-          deadline = Instant::now() + attachment_liveness_timeout;
+      }
+      event = driver.attachment.events.recv() => {
+        if !driver.process_session_event(event).await? {
+          return Ok(());
         }
-        let keep_attached = match timeout_at(
-          deadline,
-          process_attach_input(&mut writer, Arc::clone(&session), &attachment_id, message),
+      }
+      // Raw PTY output is canonical and must take precedence over advisory
+      // metadata. A watch receiver coalesces state updates, so delaying one
+      // here never loses the latest snapshot.
+      changed = driver.attachment.shell_state_updates.changed() => {
+        if !driver.process_shell_state_update(changed).await? {
+          return Ok(());
+        }
+      }
+    }
+  }
+}
+
+struct AttachmentDriver {
+  attachment: LiveAttachment,
+  session: Arc<Session>,
+  attachment_id: String,
+  attachment_liveness_timeout: Duration,
+  deadline: Instant,
+}
+
+impl AttachmentDriver {
+  async fn process_client_message(
+    &mut self,
+    message: ClientMessage,
+  ) -> Result<bool, ConnectionError> {
+    if Instant::now() >= self.deadline {
+      return Ok(false);
+    }
+    if renews_attachment_liveness(&message) {
+      self.deadline = Instant::now() + self.attachment_liveness_timeout;
+    }
+    match timeout_at(
+      self.deadline,
+      process_attach_input(
+        &mut self.attachment.writer,
+        Arc::clone(&self.session),
+        &self.attachment_id,
+        self.attachment.request_command_line,
+        message,
+      ),
+    )
+    .await
+    {
+      Ok(result) => result,
+      Err(_) => Ok(false),
+    }
+  }
+
+  async fn process_session_event(
+    &mut self,
+    event: Result<SessionEvent, broadcast::error::RecvError>,
+  ) -> Result<bool, ConnectionError> {
+    match event {
+      Ok(SessionEvent::Output(chunk)) => {
+        if let Some(chunk) = chunk_after(chunk, self.attachment.sent_sequence) {
+          self.attachment.sent_sequence = chunk.sequence_end();
+          return write_before_deadline(
+            &mut self.attachment.writer,
+            &chunk.into_server_message(),
+            self.deadline,
+          )
+          .await
+          .map(|written| written.is_some());
+        }
+        Ok(true)
+      }
+      Ok(SessionEvent::Ended { exit_code }) => {
+        let shell_state = self
+          .session
+          .shell_state_for_attachment(&self.attachment_id, self.attachment.request_command_line);
+        if write_shell_state_snapshot(
+          &mut self.attachment.writer,
+          shell_state,
+          &mut self.attachment.shell_state_revision,
+          false,
+          self.deadline,
+        )
+        .await?
+        .is_none()
+        {
+          return Ok(false);
+        }
+        let message = ServerMessage::SessionEnded {
+          session_id: self.session.info().session_id,
+          exit_code,
+        };
+        return write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
+          .await
+          .map(|_| false);
+      }
+      Err(broadcast::error::RecvError::Lagged(_)) => {
+        self.attachment.sent_sequence = match timeout_at(
+          self.deadline,
+          recover_lag(
+            &mut self.attachment.writer,
+            &self.session,
+            self.attachment.sent_sequence,
+          ),
         )
         .await
         {
           Ok(result) => result?,
-          Err(_) => return Ok(()),
+          Err(_) => return Ok(false),
         };
-        if !keep_attached {
-          return Ok(());
+        let shell_state = self
+          .session
+          .shell_state_for_attachment(&self.attachment_id, self.attachment.request_command_line);
+        if write_shell_state_snapshot(
+          &mut self.attachment.writer,
+          shell_state,
+          &mut self.attachment.shell_state_revision,
+          true,
+          self.deadline,
+        )
+        .await?
+        .is_none()
+        {
+          return Ok(false);
         }
+        Ok(true)
       }
-      event = events.recv() => match event {
-        Ok(SessionEvent::Output(chunk)) => {
-          if let Some(chunk) = chunk_after(chunk, sent_sequence) {
-            sent_sequence = chunk.sequence_end();
-            if write_before_deadline(&mut writer, &chunk.into_server_message(), deadline).await?.is_none() {
-              return Ok(());
-            }
-          }
-        }
-        Ok(SessionEvent::Ended { exit_code }) => {
-          let message = ServerMessage::SessionEnded {
-            session_id: session.info().session_id,
-            exit_code,
-          };
-          let _sent = write_before_deadline(&mut writer, &message, deadline).await?;
-          return Ok(());
-        }
-        Err(broadcast::error::RecvError::Lagged(_)) => {
-          sent_sequence = match timeout_at(
-            deadline,
-            recover_lag(&mut writer, &session, sent_sequence),
-          )
-          .await
-          {
-            Ok(result) => result?,
-            Err(_) => return Ok(()),
-          };
-        }
-        Err(broadcast::error::RecvError::Closed) => return Ok(()),
-      },
+      Err(broadcast::error::RecvError::Closed) => Ok(false),
     }
   }
+
+  async fn process_shell_state_update(
+    &mut self,
+    changed: Result<(), watch::error::RecvError>,
+  ) -> Result<bool, ConnectionError> {
+    if changed.is_err() {
+      return Ok(false);
+    }
+    let shell_state = self
+      .attachment
+      .shell_state_updates
+      .borrow_and_update()
+      .clone();
+    if shell_state.revision <= self.attachment.shell_state_revision {
+      return Ok(true);
+    }
+    let shell_state = shell_state_for_attachment(
+      shell_state,
+      self.attachment.request_command_line && self.session.owns_input_lease(&self.attachment_id),
+    );
+    write_shell_state_snapshot(
+      &mut self.attachment.writer,
+      shell_state,
+      &mut self.attachment.shell_state_revision,
+      false,
+      self.deadline,
+    )
+    .await
+    .map(|written| written.is_some())
+  }
+}
+
+async fn write_shell_state_snapshot<W>(
+  writer: &mut W,
+  shell_state: ShellState,
+  last_revision: &mut u64,
+  force: bool,
+  deadline: Instant,
+) -> Result<Option<()>, ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  if !force && shell_state.revision <= *last_revision {
+    return Ok(Some(()));
+  }
+  *last_revision = (*last_revision).max(shell_state.revision);
+  write_before_deadline(
+    writer,
+    &ServerMessage::ShellStateChanged { state: shell_state },
+    deadline,
+  )
+  .await
 }
 
 async fn write_before_deadline<W>(
@@ -497,6 +701,7 @@ async fn send_attached<W>(
   snapshot: AttachSnapshot,
   client_terminal_size: rmux_proto::TerminalSize,
   attachment_leases: rmux_core::AttachmentLeases,
+  shell_state: ShellState,
 ) -> Result<u64, ConnectionError>
 where
   W: tokio::io::AsyncWrite + Unpin,
@@ -514,6 +719,7 @@ where
       terminal_size_mismatch,
       input_lease: attachment_leases.input,
       layout_lease: attachment_leases.layout,
+      shell_state,
     },
   )
   .await?;
@@ -525,10 +731,23 @@ where
   .await
 }
 
+fn shell_state_for_attachment(
+  mut shell_state: ShellState,
+  may_view_command_line: bool,
+) -> ShellState {
+  shell_state.command_line_redacted = false;
+  if !may_view_command_line && shell_state.current_command_line.is_some() {
+    shell_state.current_command_line = None;
+    shell_state.command_line_redacted = true;
+  }
+  shell_state
+}
+
 async fn process_attach_input<W>(
   writer: &mut W,
   session: Arc<Session>,
   attachment_id: &str,
+  request_command_line: bool,
   message: ClientMessage,
 ) -> Result<bool, ConnectionError>
 where
@@ -552,8 +771,15 @@ where
       }
     }
     ClientMessage::AcquireLease { lease } => {
+      let already_owned_input =
+        lease == LeaseKind::Input && session.owns_input_lease(attachment_id);
       let status = session.acquire_lease(attachment_id, lease);
+      let acquired_input = status.owned_by_client;
       write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
+      if lease == LeaseKind::Input && request_command_line && !already_owned_input && acquired_input
+      {
+        session.refresh_shell_state_for_visibility();
+      }
     }
     ClientMessage::ReleaseLease { lease } => {
       let status = session.release_lease(attachment_id, lease);
@@ -657,6 +883,7 @@ async fn send_session_manager_error(
     SessionManagerError::NotFound { .. } => ErrorCode::SessionNotFound,
     SessionManagerError::Pty(_)
     | SessionManagerError::Spawn(_)
+    | SessionManagerError::ShellReporter(_)
     | SessionManagerError::ReaderThread(_)
     | SessionManagerError::WaiterThread(_) => ErrorCode::Internal,
   };
@@ -817,6 +1044,7 @@ mod tests {
         }],
       },
       history_gap: false,
+      shell_state: ShellState::default(),
     };
     let session = rmux_proto::SessionInfo {
       session_id: "session-id".into(),
@@ -846,6 +1074,7 @@ mod tests {
           snapshot,
           rmux_proto::TerminalSize::default(),
           attachment_leases,
+          ShellState::default(),
         ),
       )
       .await

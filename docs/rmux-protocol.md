@@ -1,7 +1,7 @@
-# rmux protocol version 4
+# rmux protocol version 5
 
 The protocol is independent of local IPC and future remote transport. Version
-4 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+5 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -15,8 +15,9 @@ handshake.
 Most commands receive one response and close. `attach_session` changes the
 connection into a bidirectional stream:
 
-- daemon to client: `attached`, an optional checkpoint, replayed `output`,
-  then live `output`;
+- daemon to client: `attached` (including a complete `shell_state` snapshot),
+  an optional checkpoint, replayed `output`, then live `output` and
+  `shell_state_changed`;
 - client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`, or
   `detach`;
 - daemon to client: `heartbeat_ack` and `session_ended` when the child exits.
@@ -27,10 +28,17 @@ optional command, so the daemon's own process directory is never observable as
 session state.
 
 `attach_session` includes the attaching terminal size and requests for input
-and layout leases. Requesting an unheld layout lease is an explicit resize: the
-daemon applies that terminal size before sending `attached`. Without that
-request, an attach never resizes the PTY; the size only lets the daemon report
-when a checkpoint was made for another layout.
+and layout leases, plus an explicit `request_command_line` privacy request.
+Requesting an unheld layout lease is an explicit resize: the daemon applies
+that terminal size before sending `attached`. Without that request, an attach
+never resizes the PTY; the size only lets the daemon report when a checkpoint
+was made for another layout. Requesting command-line state never grants access
+by itself; daemon policy may redact it.
+
+`get_shell_state` is a one-response command for a noninteractive current-state
+lookup. It returns `shell_state_response` with the resolved `session` and the
+same complete `shell_state` model used by an attachment. Command-line
+visibility remains subject to daemon policy.
 
 ## Attachment liveness
 
@@ -78,6 +86,76 @@ connection-bound leases:
 The two requested leases are intentionally independent. A desktop client can
 retain input while a separate client owns layout, and a viewer can attach
 without requesting either capability.
+
+## Shell awareness
+
+Shell-awareness metadata is optional, advisory session state beside the raw VT
+journal. It never replaces raw output, terminal checkpoints, or the client's
+own viewport and selection state. The daemon must not infer a directory,
+command line, shell, or prompt from rendered terminal text.
+
+An attached client always receives a complete `shell_state` in `attached`. An
+unintegrated session uses the explicit revision-zero unknown snapshot rather
+than omitting the field. Each later `shell_state_changed` is a complete
+replacement snapshot, not a patch. Its session-scoped `revision` increases
+strictly; clients ignore an update that is not newer than their current
+revision. When an attachment that requested command-line metadata newly gains
+the input lease while an editable buffer exists, `rmuxd` emits an otherwise
+unchanged newer snapshot. This lets a previously redacted client converge
+without weakening the monotonic revision rule.
+
+`observed_sequence` is the raw-output **next offset** when the daemon observed
+the state: all raw bytes below the offset have reached the daemon. It is useful
+only for correlation and display ordering; it is never a resume cursor. A
+client may defer presenting a state change until it has rendered raw output
+through that offset.
+
+The state contains:
+
+- `shell`: a descriptor with `shell_type` (`bash`, `zsh`, `fish`, `pwsh`,
+  `cmd`, `sh`, or `unknown`), an optional integration-format version, and
+  advertised reporting capabilities. A trusted shell integration can report a
+  new descriptor; the shipped integrations intentionally do not pass their
+  private reporter capability to arbitrary command descendants.
+- `cwd`: a shell-reported display string. It is not a portable filesystem path,
+  must not be normalized by a client, and grants no filesystem authority.
+- `prompt_phase`: `unknown`, `at_prompt`, `editing`, or `running`.
+- `current_command_line`: an optional editable buffer with an optional cursor
+  measured in Unicode scalar values, not terminal columns or UTF-8 bytes.
+- `tui_hint`: `unknown`, `inline`, or `alternate_screen`. The final value is a
+  terminal-parser observation, not a claim that an application is or is not a
+  TUI. Some TUIs do not use the alternate screen, and some ordinary programs
+  do.
+
+Shell integration reports use a daemon-private, per-session reporter sink and
+cannot be submitted through a normal client protocol command. The current Unix
+implementation uses a unique mode-`0600` FIFO supplied to a session child as
+`RMUX_SHELL_STATE_PIPE`; future platforms can provide an equivalent private
+sink. Shipped shell integrations copy the pathname into a non-exported shell
+variable, remove `RMUX_SHELL_STATE_PIPE`, and open/write/close the FIFO for
+each report. Commands executed by that shell therefore inherit neither the
+environment variable nor a reporter file descriptor. Reporter records never
+pass through the raw PTY journal, so their separate command-buffer copy cannot
+enter terminal replay or future journal persistence. Reports remain untrusted
+advisory input: shell-awareness state must never authorize operations or
+control lease ownership. The daemon assigns both `revision` and
+`observed_sequence`.
+
+The live command buffer can contain secrets. It is deliberately absent from
+`session_info` and `list_sessions`. An attachment must explicitly request it,
+and the daemon may return `command_line_redacted: true` with
+`current_command_line: null` under its visibility policy. `get_shell_state`
+does not expose it because a one-shot query has no input-lease identity. The
+shipped integrations clear it when a command starts, and rmuxd clears it when a
+session ends. This is metadata-channel redaction, not a guarantee that typed
+characters are secret from ordinary terminal viewers: shell line editing often
+echoes them into the canonical raw PTY output journal. The metadata is
+memory-only unless a future explicit persistence policy says otherwise.
+
+An attachment recovering from bounded output-broadcast lag may miss state
+updates. After sending a recovery checkpoint, the daemon sends its latest
+complete shell-state snapshot again. This lets clients converge without a
+separate shell-state replay cursor.
 
 ## Stream sequences
 
@@ -128,6 +206,7 @@ does not support.
 ## Deliberately deferred
 
 - disk-backed journals;
-- cwd shell integration;
+- disk-backed shell-awareness metadata;
+- durable command-line visibility and authorization policy;
 - process restart policies and generations;
 - Windows named-pipe transport.

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
 
 const DETACH_BYTE: u8 = 0x1d;
@@ -459,6 +459,11 @@ enum PresentationAck {
   GeometryIncompatible { observed_sequence: u64 },
 }
 
+struct PresentationAcknowledgement {
+  acknowledgement: PresentationAck,
+  completion: oneshot::Sender<Result<(), AttachmentAcknowledgementError>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingPresentation {
   Output { sequence_end: u64 },
@@ -477,22 +482,26 @@ pub enum AttachmentCommandError {
   Closed,
 }
 
-/// Failure to queue a renderer acknowledgement locally.
+/// Failure to apply a renderer acknowledgement in the attachment controller.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AttachmentAcknowledgementError {
   #[error("attachment controller is no longer running")]
   Closed,
+  #[error("unexpected presentation acknowledgement {actual}; expected {expected}")]
+  Rejected { expected: String, actual: String },
 }
 
 /// Cloneable command endpoint for an [`AttachmentController`].
 ///
-/// A successful method call only means the request entered the local ordered
-/// queue. The daemon remains authoritative; a race with lease loss is reported
-/// later as [`AttachmentEvent::ServerError`].
+/// A successful command method only means the request entered the local
+/// ordered queue. The daemon remains authoritative; a race with lease loss is
+/// reported later as [`AttachmentEvent::ServerError`]. Renderer
+/// acknowledgement methods return only after the controller accepts the next
+/// ordered presentation event and updates its renderer-applied resume state.
 #[derive(Debug, Clone)]
 pub struct AttachmentControl {
   commands: mpsc::Sender<AttachmentCommand>,
-  acknowledgements: mpsc::Sender<PresentationAck>,
+  acknowledgements: mpsc::Sender<PresentationAcknowledgement>,
   state: AttachmentState,
 }
 
@@ -561,32 +570,30 @@ impl AttachmentControl {
   ///
   /// # Errors
   ///
-  /// Returns an error when the controller has already stopped.
+  /// Returns an error when the controller has stopped or this does not match
+  /// the next ordered presentation event.
   pub async fn acknowledge_output(
     &self,
     sequence_end: u64,
   ) -> Result<(), AttachmentAcknowledgementError> {
     self
-      .acknowledgements
-      .send(PresentationAck::Output { sequence_end })
+      .acknowledge(PresentationAck::Output { sequence_end })
       .await
-      .map_err(|_error| AttachmentAcknowledgementError::Closed)
   }
 
   /// Acknowledges that the renderer reset/applied a `checkpoint` event.
   ///
   /// # Errors
   ///
-  /// Returns an error when the controller has already stopped.
+  /// Returns an error when the controller has stopped or this does not match
+  /// the next ordered presentation event.
   pub async fn acknowledge_checkpoint(
     &self,
     sequence: u64,
   ) -> Result<(), AttachmentAcknowledgementError> {
     self
-      .acknowledgements
-      .send(PresentationAck::Checkpoint { sequence })
+      .acknowledge(PresentationAck::Checkpoint { sequence })
       .await
-      .map_err(|_error| AttachmentAcknowledgementError::Closed)
   }
 
   /// Records a checkpoint that was displayed but not applied to a compatible
@@ -597,16 +604,15 @@ impl AttachmentControl {
   ///
   /// # Errors
   ///
-  /// Returns an error when the controller has already stopped.
+  /// Returns an error when the controller has stopped or this does not match
+  /// the next ordered presentation event.
   pub async fn acknowledge_checkpoint_incompatible(
     &self,
     sequence: u64,
   ) -> Result<(), AttachmentAcknowledgementError> {
     self
-      .acknowledgements
-      .send(PresentationAck::CheckpointIncompatible { sequence })
+      .acknowledge(PresentationAck::CheckpointIncompatible { sequence })
       .await
-      .map_err(|_error| AttachmentAcknowledgementError::Closed)
   }
 
   /// Acknowledges that the renderer applied an ordered PTY geometry change.
@@ -616,16 +622,15 @@ impl AttachmentControl {
   ///
   /// # Errors
   ///
-  /// Returns an error when the controller has already stopped.
+  /// Returns an error when the controller has stopped or this does not match
+  /// the next ordered presentation event.
   pub async fn acknowledge_geometry(
     &self,
     observed_sequence: u64,
   ) -> Result<(), AttachmentAcknowledgementError> {
     self
-      .acknowledgements
-      .send(PresentationAck::Geometry { observed_sequence })
+      .acknowledge(PresentationAck::Geometry { observed_sequence })
       .await
-      .map_err(|_error| AttachmentAcknowledgementError::Closed)
   }
 
   /// Records an observed geometry transition that this renderer cannot apply.
@@ -637,16 +642,33 @@ impl AttachmentControl {
   ///
   /// # Errors
   ///
-  /// Returns an error when the controller has already stopped.
+  /// Returns an error when the controller has stopped or this does not match
+  /// the next ordered presentation event.
   pub async fn acknowledge_geometry_incompatible(
     &self,
     observed_sequence: u64,
   ) -> Result<(), AttachmentAcknowledgementError> {
     self
-      .acknowledgements
-      .send(PresentationAck::GeometryIncompatible { observed_sequence })
+      .acknowledge(PresentationAck::GeometryIncompatible { observed_sequence })
       .await
-      .map_err(|_error| AttachmentAcknowledgementError::Closed)
+  }
+
+  async fn acknowledge(
+    &self,
+    acknowledgement: PresentationAck,
+  ) -> Result<(), AttachmentAcknowledgementError> {
+    let (completion, completed) = oneshot::channel();
+    self
+      .acknowledgements
+      .send(PresentationAcknowledgement {
+        acknowledgement,
+        completion,
+      })
+      .await
+      .map_err(|_error| AttachmentAcknowledgementError::Closed)?;
+    completed
+      .await
+      .unwrap_or(Err(AttachmentAcknowledgementError::Closed))
   }
 
   async fn send(&self, command: AttachmentCommand) -> Result<(), AttachmentCommandError> {
@@ -692,7 +714,7 @@ pub struct AttachmentController<S> {
   liveness: AttachmentLiveness,
   options: AttachmentControllerOptions,
   commands: Option<mpsc::Receiver<AttachmentCommand>>,
-  acknowledgements: Option<mpsc::Receiver<PresentationAck>>,
+  acknowledgements: Option<mpsc::Receiver<PresentationAcknowledgement>>,
   events: mpsc::Sender<AttachmentEvent>,
   initial_checkpoint: Option<(TerminalCheckpoint, bool)>,
   /// A renderer may continue to present raw bytes after declaring a geometry
@@ -1012,7 +1034,7 @@ impl<S> AttachmentController<S> {
   async fn drive(
     &mut self,
     mut incoming: mpsc::Receiver<IncomingServerMessage>,
-    mut acknowledgements: mpsc::Receiver<PresentationAck>,
+    mut acknowledgements: mpsc::Receiver<PresentationAcknowledgement>,
     mut writer_statuses: mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<AttachExit, ClientError> {
     if let Some((checkpoint, history_gap)) = self.initial_checkpoint.take() {
@@ -1053,7 +1075,9 @@ impl<S> AttachmentController<S> {
         }
         acknowledgement = acknowledgements.recv(), if acknowledgements_open => {
           match acknowledgement {
-            Some(acknowledgement) => self.accept_presentation_acknowledgement(acknowledgement)?,
+            Some(acknowledgement) => {
+              self.accept_presentation_acknowledgement_request(acknowledgement)?;
+            }
             None => acknowledgements_open = false,
           }
         }
@@ -1462,6 +1486,25 @@ impl<S> AttachmentController<S> {
         .flatten(),
     );
     Ok(())
+  }
+
+  fn accept_presentation_acknowledgement_request(
+    &mut self,
+    request: PresentationAcknowledgement,
+  ) -> Result<(), ClientError> {
+    let result = self.accept_presentation_acknowledgement(request.acknowledgement);
+    let completion = match &result {
+      Ok(()) => Ok(()),
+      Err(ClientError::UnexpectedPresentationAcknowledgement { expected, actual }) => {
+        Err(AttachmentAcknowledgementError::Rejected {
+          expected: expected.clone(),
+          actual: actual.clone(),
+        })
+      }
+      Err(_) => Err(AttachmentAcknowledgementError::Closed),
+    };
+    let _ignored = request.completion.send(completion);
+    result
   }
 
   fn finish(&mut self, reason: AttachExitReason) -> AttachExit {
@@ -2317,12 +2360,70 @@ mod tests {
     assert_eq!(state.resume_sequence(), Some(0));
 
     control.acknowledge_output(3).await.unwrap();
-    wait_for_resume_sequence(&state, Some(3)).await;
+    assert_eq!(state.resume_sequence(), Some(3));
 
     drop(daemon);
     let exit = runner.await.unwrap().unwrap();
     assert_eq!(exit.next_sequence, Some(3));
     assert_eq!(exit.received_sequence, 3);
+  }
+
+  #[tokio::test]
+  async fn renderer_acknowledgement_waits_until_controller_applies_it() {
+    let (client, daemon) = tokio::io::duplex(4096);
+    let checkpoint = checkpoint(7);
+    let attached = attached_session(7, Some(checkpoint.clone()), ShellState::default());
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let state = controller.state();
+    let acknowledgement =
+      tokio::spawn(async move { control.acknowledge_checkpoint(checkpoint.sequence).await });
+
+    tokio::task::yield_now().await;
+    assert!(
+      !acknowledgement.is_finished(),
+      "acknowledgement completed before the controller was running"
+    );
+
+    let runner = tokio::spawn(controller.run());
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Checkpoint { .. })
+    ));
+    acknowledgement.await.unwrap().unwrap();
+    assert_eq!(state.resume_sequence(), Some(7));
+
+    drop(daemon);
+    let exit = runner.await.unwrap().unwrap();
+    assert_eq!(exit.next_sequence, Some(7));
+  }
+
+  #[tokio::test]
+  async fn rejected_renderer_acknowledgement_is_returned_to_its_caller() {
+    let (client, daemon) = tokio::io::duplex(4096);
+    let checkpoint = checkpoint(7);
+    let attached = attached_session(7, Some(checkpoint), ShellState::default());
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(controller.run());
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Checkpoint { .. })
+    ));
+
+    let error = control.acknowledge_output(7).await.unwrap_err();
+    assert_eq!(
+      error,
+      AttachmentAcknowledgementError::Rejected {
+        expected: "checkpoint".into(),
+        actual: "output acknowledgement".into(),
+      }
+    );
+    assert!(matches!(
+      runner.await.unwrap(),
+      Err(ClientError::UnexpectedPresentationAcknowledgement { .. })
+    ));
+    drop(daemon);
   }
 
   #[tokio::test]
@@ -2348,7 +2449,7 @@ mod tests {
       panic!("expected output event");
     };
     control.acknowledge_output(sequence_end).await.unwrap();
-    wait_for_resume_sequence(&state, Some(3)).await;
+    assert_eq!(state.resume_sequence(), Some(3));
 
     let checkpoint = checkpoint(10);
     write_frame(
@@ -2374,7 +2475,7 @@ mod tests {
       .acknowledge_checkpoint(checkpoint.sequence)
       .await
       .unwrap();
-    wait_for_resume_sequence(&state, Some(10)).await;
+    assert_eq!(state.resume_sequence(), Some(10));
 
     drop(daemon);
     let exit = runner.await.unwrap().unwrap();
@@ -2417,7 +2518,7 @@ mod tests {
       .acknowledge_checkpoint(checkpoint.sequence)
       .await
       .unwrap();
-    wait_for_resume_sequence(&state, Some(checkpoint.sequence)).await;
+    assert_eq!(state.resume_sequence(), Some(checkpoint.sequence));
 
     write_frame(
       &mut daemon,
@@ -2440,7 +2541,7 @@ mod tests {
       .acknowledge_geometry(checkpoint.sequence)
       .await
       .unwrap();
-    wait_for_resume_sequence(&state, Some(checkpoint.sequence)).await;
+    assert_eq!(state.resume_sequence(), Some(checkpoint.sequence));
 
     drop(daemon);
     let exit = runner.await.unwrap().unwrap();
@@ -2491,13 +2592,13 @@ mod tests {
     );
     assert_eq!(state.terminal_size(), terminal_size);
     control.acknowledge_geometry(0).await.unwrap();
-    wait_for_resume_sequence(&state, Some(0)).await;
+    assert_eq!(state.resume_sequence(), Some(0));
 
     let Some(AttachmentEvent::Output { sequence_end, .. }) = events.recv().await else {
       panic!("expected output after geometry event");
     };
     control.acknowledge_output(sequence_end).await.unwrap();
-    wait_for_resume_sequence(&state, Some(3)).await;
+    assert_eq!(state.resume_sequence(), Some(3));
 
     drop(daemon);
     let exit = runner.await.unwrap().unwrap();
@@ -2548,13 +2649,13 @@ mod tests {
       .acknowledge_geometry_incompatible(observed_sequence)
       .await
       .unwrap();
-    wait_for_resume_sequence(&state, None).await;
+    assert_eq!(state.resume_sequence(), None);
 
     let Some(AttachmentEvent::Output { sequence_end, .. }) = events.recv().await else {
       panic!("expected output after incompatible geometry");
     };
     control.acknowledge_output(sequence_end).await.unwrap();
-    wait_for_resume_sequence(&state, None).await;
+    assert_eq!(state.resume_sequence(), None);
 
     drop(daemon);
     let exit = runner.await.unwrap().unwrap();
@@ -2590,7 +2691,7 @@ mod tests {
       panic!("expected output");
     };
     control.acknowledge_output(sequence_end).await.unwrap();
-    wait_for_resume_sequence(&state, None).await;
+    assert_eq!(state.resume_sequence(), None);
 
     let checkpoint = checkpoint(3);
     write_frame(
@@ -2610,7 +2711,7 @@ mod tests {
       .acknowledge_checkpoint_incompatible(checkpoint.sequence)
       .await
       .unwrap();
-    wait_for_resume_sequence(&state, None).await;
+    assert_eq!(state.resume_sequence(), None);
 
     write_frame(
       &mut daemon,
@@ -2629,7 +2730,7 @@ mod tests {
       .acknowledge_checkpoint(checkpoint.sequence)
       .await
       .unwrap();
-    wait_for_resume_sequence(&state, Some(checkpoint.sequence)).await;
+    assert_eq!(state.resume_sequence(), Some(checkpoint.sequence));
 
     drop(daemon);
     let exit = runner.await.unwrap().unwrap();
@@ -2868,19 +2969,6 @@ mod tests {
       payload: Vec::new(),
       input_prefix: Vec::new(),
     }
-  }
-
-  async fn wait_for_resume_sequence(state: &AttachmentState, expected: Option<u64>) {
-    tokio::time::timeout(Duration::from_secs(1), async {
-      loop {
-        if state.resume_sequence() == expected {
-          return;
-        }
-        tokio::task::yield_now().await;
-      }
-    })
-    .await
-    .expect("controller did not process renderer acknowledgement");
   }
 
   fn session_info() -> SessionInfo {

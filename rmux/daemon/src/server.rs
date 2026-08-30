@@ -67,6 +67,8 @@ pub enum DaemonError {
     minimum: Duration,
     maximum: Duration,
   },
+  #[error("could not lock local endpoint startup at {path}: {source}")]
+  EndpointStartupLock { path: PathBuf, source: io::Error },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,8 +114,16 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
       ),
     ))
   })?;
+  let endpoint_startup_lock =
+    EndpointStartupLock::acquire(&config.socket_path).map_err(|source| {
+      DaemonError::EndpointStartupLock {
+        path: endpoint_startup_lock_path(&config.socket_path),
+        source,
+      }
+    })?;
   let listener = bind_listener(&config.socket_path).await?;
   let _socket_guard = SocketGuard::new(config.socket_path.clone())?;
+  drop(endpoint_startup_lock);
   let sessions = SessionManager::new(
     runtime_directory.to_path_buf(),
     config.journal_capacity_bytes,
@@ -1077,6 +1087,33 @@ struct SocketGuard {
   inode: u64,
 }
 
+struct EndpointStartupLock {
+  _file: std::fs::File,
+}
+
+impl EndpointStartupLock {
+  fn acquire(socket_path: &Path) -> io::Result<Self> {
+    use rustix::fs::{CWD, FlockOperation, Mode, OFlags, fchmod, flock, openat};
+
+    let path = endpoint_startup_lock_path(socket_path);
+    let file = std::fs::File::from(openat(
+      CWD,
+      &path,
+      OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::RDWR,
+      Mode::RUSR | Mode::WUSR,
+    )?);
+    flock(&file, FlockOperation::LockExclusive)?;
+    fchmod(&file, Mode::RUSR | Mode::WUSR)?;
+    Ok(Self { _file: file })
+  }
+}
+
+fn endpoint_startup_lock_path(socket_path: &Path) -> PathBuf {
+  let mut path = socket_path.as_os_str().to_os_string();
+  path.push(".lock");
+  path.into()
+}
+
 impl SocketGuard {
   fn new(path: PathBuf) -> io::Result<Self> {
     use std::os::unix::fs::MetadataExt;
@@ -1109,6 +1146,44 @@ mod tests {
   use rmux_core::JournalSnapshot;
   use rmux_proto::{LeaseStatus, SessionStatus};
   use tokio::time::{sleep, timeout};
+
+  #[test]
+  fn endpoint_startup_lock_is_exclusive_and_owner_only() {
+    use rustix::fs::{FlockOperation, flock};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = std::env::temp_dir().join(format!("rmux-start-lock-{}", Uuid::new_v4()));
+    let cleanup = TestDirectory(directory.clone());
+    let socket_path = directory.join("rmux.sock");
+    rmux_ipc::prepare_runtime_directory(&socket_path).unwrap();
+
+    let first = EndpointStartupLock::acquire(&socket_path).unwrap();
+    let lock_path = endpoint_startup_lock_path(&socket_path);
+    let second = std::fs::OpenOptions::new()
+      .read(true)
+      .write(true)
+      .open(&lock_path)
+      .unwrap();
+    let error = flock(&second, FlockOperation::NonBlockingLockExclusive).unwrap_err();
+    assert!(error == rustix::io::Errno::AGAIN || error == rustix::io::Errno::WOULDBLOCK);
+    assert_eq!(
+      std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+      0o600
+    );
+
+    drop(first);
+    flock(&second, FlockOperation::LockExclusive).unwrap();
+    drop(second);
+    drop(cleanup);
+  }
+
+  struct TestDirectory(PathBuf);
+
+  impl Drop for TestDirectory {
+    fn drop(&mut self) {
+      let _ignored = std::fs::remove_dir_all(&self.0);
+    }
+  }
 
   #[tokio::test]
   async fn initial_delivery_window_outlasts_post_attach_liveness() {

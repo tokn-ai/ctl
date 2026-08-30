@@ -1,0 +1,29 @@
+[package]
+name = "rmux-gui"
+version.workspace = true
+edition.workspace = true
+description = "Local graphical client for persistent rmux terminal sessions"
+publish = false
+
+[lib]
+name = "rmux_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64.workspace = true
+rmux-client.workspace = true
+rmux-ipc.workspace = true
+rmux-proto.workspace = true
+serde.workspace = true
+tauri = { version = "2", features = [] }
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

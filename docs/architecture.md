@@ -6,10 +6,10 @@ The monorepo contains two products with independent responsibilities:
 - `ctl` provides authenticated remote device control and will expose `rmux`
   sessions without reimplementing terminal persistence.
 
-The current milestone makes `rmux` usable through `ctl` from a paired remote
-client. It intentionally exposes only the `rmux` service; generic remote
-administration, files, jobs, port forwarding, and desktop control remain out
-of scope.
+The current milestones make `rmux` usable through a local desktop client and
+through `ctl` from a paired remote client. The remote boundary intentionally
+exposes only the `rmux` service; generic remote administration, files, jobs,
+port forwarding, and desktop control remain out of scope.
 
 ## Process ownership
 
@@ -20,7 +20,7 @@ session.
 `ctld` is an authenticated gateway with an independent lifecycle:
 
 ```text
-local:  rmux -> local IPC -> rmuxd -> PTY -> shell
+local:  rmux / rmux-gui -> local IPC -> rmuxd -> PTY -> shell
 remote: ctl  -> network   -> ctld  -> local IPC -> rmuxd -> PTY -> shell
 ```
 
@@ -44,6 +44,9 @@ and one fixed local `rmuxd` endpoint. It does not decode or reframe
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
 - `rmux`: local command-line adapter that starts/connects to `rmuxd` over IPC.
+- `rmux-gui`: local Tauri/React terminal client. Its Rust adapter runs
+  `rmux-client`; its webview owns xterm rendering, viewport, and local
+  scrollback.
 - `ctl-proto`: versioned outer control messages for pairing and service
   selection. It is independent of terminal and operating-system details.
 - `ctl-core`: portable client identity, pinned TLS connection, and outer
@@ -97,6 +100,41 @@ An ordinary attaching client requests input only when no other attachment owns
 it. It does not resize an existing PTY. A client must explicitly request the
 layout lease before its terminal size is applied, so a small secondary client
 cannot disturb an established desktop layout.
+
+## Desktop client boundary
+
+`rmux-gui` is a client, not an embedded daemon. Its Tauri backend connects to
+the same per-user endpoint as the CLI and may start a sibling `rmuxd`, but it
+does not link PTY, journal, checkpoint-production, or session-lifetime logic
+into the app process. Closing the window drops its attachment and leases while
+the daemon-owned session continues.
+
+Concurrent CLI and GUI auto-start attempts may launch more than one daemon
+candidate. Candidates serialize stale-socket inspection and replacement with
+an owner-only endpoint lock, so a losing candidate cannot unlink a socket that
+another candidate has just bound.
+
+The backend exposes one window-scoped attachment actor through a Tauri channel.
+Each presentation event has an opaque event ID, and only one checkpoint,
+output, or geometry event crosses the webview bridge without an acknowledgement.
+The frontend acknowledges output only after xterm's asynchronous write callback
+and acknowledges checkpoints only after recreating a clean renderer and feeding
+both checkpoint byte fields. This keeps the bridge bounded without tying
+attachment heartbeats to webview rendering speed.
+
+Raw byte fields cross the Tauri boundary as base64. Every `u64` sequence and
+revision crosses as a decimal string so JavaScript number precision cannot
+corrupt a resume or acknowledgement boundary. Attachment and event IDs fence
+late callbacks from a replaced renderer generation.
+
+The initial desktop bridge shows shell type, cwd, prompt phase, and the TUI
+hint, but does not request or serialize the sensitive editable command buffer.
+
+The renderer adopts daemon-authoritative PTY geometry. It uses the fit add-on
+only to measure a proposed size after the user explicitly chooses **Use window
+for layout**; normal window resizing never sends a PTY resize and never acquires
+layout ownership. Scrollback, scrolling, selection, and copy remain local xterm
+behavior and generate no protocol viewport commands.
 
 ## Attachment ownership
 

@@ -7,12 +7,8 @@ use rmux_proto::{
 };
 use std::env;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
+use std::path::Path;
 use thiserror::Error;
-use tokio::net::UnixStream;
-use tokio::time::{Instant, sleep};
 
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -67,7 +63,7 @@ pub async fn list_sessions(socket_path: &Path) -> Result<(), ClientError> {
 }
 
 pub async fn show_shell_state(socket_path: &Path, session: &str) -> Result<(), ClientError> {
-  let stream = connect_or_start_daemon(socket_path).await?;
+  let stream = rmux_ipc::connect_or_start_daemon(socket_path).await?;
   let state = get_shell_state(stream, &client_identity(), session).await?;
   let command_line = if state.shell_state.command_line_redacted {
     "redacted"
@@ -125,7 +121,7 @@ pub async fn attach_session(
   request_input_lease: bool,
   request_layout_lease: bool,
 ) -> Result<(), ClientError> {
-  let stream = connect_or_start_daemon(socket_path).await?;
+  let stream = rmux_ipc::connect_or_start_daemon(socket_path).await?;
   let identity = client_identity();
   let (stream, attached) = begin_attach(
     stream,
@@ -153,7 +149,7 @@ async fn local_request(
   socket_path: &Path,
   message: ClientMessage,
 ) -> Result<ServerMessage, ClientError> {
-  let stream = connect_or_start_daemon(socket_path).await?;
+  let stream = rmux_ipc::connect_or_start_daemon(socket_path).await?;
   let identity = client_identity();
   Ok(request(stream, &identity, message).await?)
 }
@@ -163,64 +159,6 @@ fn client_identity() -> ClientIdentity {
     name: "rmux".into(),
     version: CLIENT_VERSION.into(),
   }
-}
-
-async fn connect_or_start_daemon(socket_path: &Path) -> Result<UnixStream, ClientError> {
-  match UnixStream::connect(socket_path).await {
-    Ok(stream) => return Ok(stream),
-    Err(error)
-      if matches!(
-        error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-      ) => {}
-    Err(error) => return Err(ClientError::Connect(error)),
-  }
-
-  start_daemon(socket_path)?;
-  let deadline = Instant::now() + Duration::from_secs(3);
-  loop {
-    match UnixStream::connect(socket_path).await {
-      Ok(stream) => return Ok(stream),
-      Err(error)
-        if Instant::now() < deadline
-          && matches!(
-            error.kind(),
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-          ) =>
-      {
-        sleep(Duration::from_millis(25)).await;
-      }
-      Err(error) => return Err(ClientError::Connect(error)),
-    }
-  }
-}
-
-fn start_daemon(socket_path: &Path) -> Result<(), ClientError> {
-  let executable = daemon_executable()?;
-  std::process::Command::new(&executable)
-    .arg("--socket")
-    .arg(socket_path)
-    .arg("--detach-from-terminal")
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|source| ClientError::StartDaemon { executable, source })?;
-  Ok(())
-}
-
-fn daemon_executable() -> Result<PathBuf, ClientError> {
-  if let Some(executable) = env::var_os("RMUXD_BIN") {
-    return Ok(PathBuf::from(executable));
-  }
-
-  let current_executable = env::current_exe().map_err(ClientError::CurrentExecutable)?;
-  let sibling = current_executable.with_file_name("rmuxd");
-  if sibling.is_file() {
-    return Ok(sibling);
-  }
-
-  Ok(PathBuf::from("rmuxd"))
 }
 
 fn current_working_directory() -> Result<String, ClientError> {
@@ -285,19 +223,12 @@ fn unexpected(expected: &'static str, response: &ServerMessage) -> ClientError {
 
 #[derive(Debug, Error)]
 pub enum ClientError {
-  #[error("could not connect to rmuxd: {0}")]
-  Connect(io::Error),
-  #[error("could not determine the current executable: {0}")]
-  CurrentExecutable(io::Error),
   #[error("could not determine the current working directory: {0}")]
   CurrentDirectory(io::Error),
   #[error("the current working directory is not valid UTF-8: {0:?}")]
   NonUtf8CurrentDirectory(std::ffi::OsString),
-  #[error("could not start daemon using {}: {source}", executable.display())]
-  StartDaemon {
-    executable: PathBuf,
-    source: io::Error,
-  },
+  #[error(transparent)]
+  LocalIpc(#[from] rmux_ipc::ConnectError),
   #[error(transparent)]
   Protocol(#[from] rmux_client::ClientError),
   #[error("expected {expected}, received {actual}")]

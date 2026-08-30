@@ -398,6 +398,78 @@ async fn secondary_attachment_cannot_control_owned_session_but_receives_authoriz
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn geometry_changes_are_ordered_for_viewers_and_checkpointed_on_resume() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "geometry",
+    "printf 'before-resize\\n'; IFS= read -r first; printf 'after-resize:%s\\n' \"$first\"; IFS= read -r second",
+  )
+  .await?;
+
+  let (mut owner, owner_attached) =
+    attach_session(&socket_path, &session.session_id, None, true, true).await?;
+  assert!(matches!(owner_attached, ServerMessage::Attached { .. }));
+  let (_, before_resize_sequence) = read_output_until(&mut owner, b"before-resize").await?;
+  assert!(before_resize_sequence > 0);
+
+  let (mut viewer, viewer_attached) = attach_session(
+    &socket_path,
+    &session.session_id,
+    Some(before_resize_sequence),
+    false,
+    false,
+  )
+  .await?;
+  assert!(matches!(viewer_attached, ServerMessage::Attached { .. }));
+
+  let resized = terminal_size(120, 36);
+  write_frame(
+    &mut owner,
+    &ClientMessage::Resize {
+      terminal_size: resized.clone(),
+    },
+  )
+  .await?;
+  let owner_boundary = wait_for_geometry_change(&mut owner, &resized).await?;
+  let viewer_boundary = wait_for_geometry_change(&mut viewer, &resized).await?;
+  assert_eq!(owner_boundary, before_resize_sequence);
+  assert_eq!(viewer_boundary, before_resize_sequence);
+
+  assert_geometry_checkpoint_resume(&socket_path, &session.session_id, viewer_boundary, &resized)
+    .await?;
+
+  write_frame(
+    &mut owner,
+    &ClientMessage::Input {
+      data: b"go\n".to_vec(),
+    },
+  )
+  .await?;
+  let (viewer_output, first_viewer_sequence) =
+    read_output_until_with_first_sequence(&mut viewer, b"after-resize:go").await?;
+  assert!(contains_bytes(&viewer_output, b"after-resize:go"));
+  assert_eq!(first_viewer_sequence, viewer_boundary);
+
+  write_frame(
+    &mut owner,
+    &ClientMessage::Input {
+      data: b"finish\n".to_vec(),
+    },
+  )
+  .await?;
+  wait_for_session_end(&mut owner).await?;
+  wait_for_session_end(&mut viewer).await?;
+  drop(owner);
+  drop(viewer);
+
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after geometry test").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicitly_released_leases_can_be_acquired_by_another_attachment() -> TestResult {
   let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
@@ -834,6 +906,41 @@ async fn attach_session_with_command_line_option(
   Ok((stream, attached))
 }
 
+async fn assert_geometry_checkpoint_resume(
+  socket_path: &Path,
+  session: &str,
+  geometry_boundary: u64,
+  terminal_size: &TerminalSize,
+) -> TestResult {
+  for (resume_from, expected_history_gap) in [(geometry_boundary, false), (0, true)] {
+    let (mut attachment, attached) = attach_session_with_options(
+      socket_path,
+      session,
+      Some(resume_from),
+      terminal_size.clone(),
+      false,
+      false,
+    )
+    .await?;
+    let ServerMessage::Attached {
+      checkpoint: Some(checkpoint),
+      replay_from,
+      history_gap,
+      ..
+    } = attached
+    else {
+      return Err(format!("expected geometry-safe checkpoint, received {attached:?}").into());
+    };
+    assert_eq!(&checkpoint.terminal_size, terminal_size);
+    assert_eq!(checkpoint.sequence, geometry_boundary);
+    assert_eq!(replay_from, geometry_boundary);
+    assert_eq!(history_gap, expected_history_gap);
+
+    write_frame(&mut attachment, &ClientMessage::Detach).await?;
+  }
+  Ok(())
+}
+
 async fn wait_for_shell_state(socket_path: &Path, session: &str) -> TestResult<ShellState> {
   let deadline = Instant::now() + Duration::from_secs(3);
   loop {
@@ -866,7 +973,8 @@ async fn wait_for_tui_hint(stream: &mut UnixStream, expected: rmux_proto::TuiHin
       ServerMessage::ShellStateChanged { state } if state.tui_hint == expected => return Ok(()),
       ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
-      | ServerMessage::Checkpoint { .. } => {}
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
         return Err(format!("expected tui hint {expected:?}, received {response:?}").into());
       }
@@ -889,7 +997,8 @@ async fn wait_for_unredacted_command_line(
       }
       ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
-      | ServerMessage::Checkpoint { .. } => {}
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       message => {
         return Err(format!("expected unredacted shell state, received {message:?}").into());
       }
@@ -933,7 +1042,8 @@ async fn heartbeat(stream: &mut UnixStream, nonce: u64) -> TestResult {
       }
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::ShellStateChanged { .. } => {}
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
         return Err(format!("expected heartbeat acknowledgement, received {response:?}").into());
       }
@@ -953,7 +1063,8 @@ async fn lease_status_response(
       }
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::ShellStateChanged { .. } => {}
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       response => return Err(format!("expected lease status, received {response:?}").into()),
     }
   }
@@ -985,7 +1096,8 @@ async fn expect_error(stream: &mut UnixStream, expected_code: ErrorCode) -> Test
       }
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::ShellStateChanged { .. } => {}
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       response => return Err(format!("expected error response, received {response:?}").into()),
     }
   }
@@ -995,7 +1107,9 @@ async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult {
   loop {
     match required_message(stream).await? {
       ServerMessage::SessionEnded { .. } => return Ok(()),
-      ServerMessage::Output { .. } | ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::Output { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
         return Err(format!("expected output or session end, received {response:?}").into());
       }
@@ -1080,8 +1194,61 @@ async fn read_output_until(stream: &mut UnixStream, expected: &[u8]) -> TestResu
           return Ok((output, sequence_end));
         }
       }
-      ServerMessage::ShellStateChanged { .. } | ServerMessage::Checkpoint { .. } => {}
+      ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
+    }
+  }
+}
+
+async fn read_output_until_with_first_sequence(
+  stream: &mut UnixStream,
+  expected: &[u8],
+) -> TestResult<(Vec<u8>, u64)> {
+  let mut output = Vec::new();
+  let mut first_sequence = None;
+  loop {
+    match required_message(stream).await? {
+      ServerMessage::Output {
+        sequence_start,
+        data,
+        ..
+      } => {
+        first_sequence.get_or_insert(sequence_start);
+        output.extend(data);
+        if contains_bytes(&output, expected) {
+          return Ok((
+            output,
+            first_sequence.expect("an output frame establishes its first sequence"),
+          ));
+        }
+      }
+      ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
+      message => return Err(format!("expected output, received {message:?}").into()),
+    }
+  }
+}
+
+async fn wait_for_geometry_change(
+  stream: &mut UnixStream,
+  expected_size: &TerminalSize,
+) -> TestResult<u64> {
+  loop {
+    match required_message(stream).await? {
+      ServerMessage::PtyGeometryChanged {
+        terminal_size,
+        observed_sequence,
+      } => {
+        assert_eq!(&terminal_size, expected_size);
+        return Ok(observed_sequence);
+      }
+      ServerMessage::Output { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Checkpoint { .. } => {}
+      message => return Err(format!("expected geometry change, received {message:?}").into()),
     }
   }
 }

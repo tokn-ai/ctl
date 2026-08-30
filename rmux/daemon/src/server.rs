@@ -372,17 +372,16 @@ async fn handle_attach(
   else {
     return Ok(());
   };
-  let session_info = session.info();
   let initial_shell_state = shell_state_for_attachment(
     snapshot.shell_state.clone(),
     request.request_command_line && attachment_leases.input.owned_by_client,
   );
+  let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
   let (reader, mut writer) = stream.into_split();
   let sent_sequence = match timeout_at(
     initial_delivery_deadline,
     send_attached(
       &mut writer,
-      session_info,
       snapshot,
       request.client_terminal_size,
       attachment_leases,
@@ -401,6 +400,7 @@ async fn handle_attach(
     events,
     shell_state_updates,
     sent_sequence,
+    checkpoint_geometry_revision,
     shell_state_revision: initial_shell_state.revision,
     request_command_line: request.request_command_line,
   };
@@ -465,6 +465,8 @@ struct LiveAttachment {
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
   sent_sequence: u64,
+  /// Internal ordering for geometry changes represented by the last checkpoint.
+  checkpoint_geometry_revision: Option<u64>,
   shell_state_revision: u64,
   request_command_line: bool,
 }
@@ -566,6 +568,15 @@ impl AttachmentDriver {
         }
         Ok(true)
       }
+      Ok(SessionEvent::PtyGeometryChanged {
+        terminal_size,
+        observed_sequence,
+        geometry_revision,
+      }) => {
+        self
+          .process_geometry_change(terminal_size, observed_sequence, geometry_revision)
+          .await
+      }
       Ok(SessionEvent::Ended { exit_code }) => {
         let shell_state = self
           .session
@@ -591,7 +602,7 @@ impl AttachmentDriver {
           .map(|_| false);
       }
       Err(broadcast::error::RecvError::Lagged(_)) => {
-        self.attachment.sent_sequence = match timeout_at(
+        let recovery = match timeout_at(
           self.deadline,
           recover_lag(
             &mut self.attachment.writer,
@@ -604,6 +615,10 @@ impl AttachmentDriver {
           Ok(result) => result?,
           Err(_) => return Ok(false),
         };
+        self.attachment.sent_sequence = recovery.sent_sequence;
+        if let Some(checkpoint_geometry_revision) = recovery.checkpoint_geometry_revision {
+          self.attachment.checkpoint_geometry_revision = Some(checkpoint_geometry_revision);
+        }
         let shell_state = self
           .session
           .shell_state_for_attachment(&self.attachment_id, self.attachment.request_command_line);
@@ -623,6 +638,55 @@ impl AttachmentDriver {
       }
       Err(broadcast::error::RecvError::Closed) => Ok(false),
     }
+  }
+
+  async fn process_geometry_change(
+    &mut self,
+    terminal_size: rmux_proto::TerminalSize,
+    observed_sequence: u64,
+    geometry_revision: u64,
+  ) -> Result<bool, ConnectionError> {
+    if geometry_event_is_stale(
+      self.attachment.checkpoint_geometry_revision,
+      self.attachment.sent_sequence,
+      observed_sequence,
+      geometry_revision,
+    ) {
+      return Ok(true);
+    }
+
+    // `Session::resize` serializes this event with output publication, so a
+    // live attachment can only see it at its next raw-output offset. Treat an
+    // impossible gap as a recovery boundary instead of allowing a renderer to
+    // resize ahead of unrendered raw output.
+    if observed_sequence > self.attachment.sent_sequence {
+      let recovery = match timeout_at(
+        self.deadline,
+        recover_lag(
+          &mut self.attachment.writer,
+          &self.session,
+          self.attachment.sent_sequence,
+        ),
+      )
+      .await
+      {
+        Ok(result) => result?,
+        Err(_) => return Ok(false),
+      };
+      self.attachment.sent_sequence = recovery.sent_sequence;
+      if let Some(checkpoint_geometry_revision) = recovery.checkpoint_geometry_revision {
+        self.attachment.checkpoint_geometry_revision = Some(checkpoint_geometry_revision);
+      }
+      return Ok(true);
+    }
+
+    let message = ServerMessage::PtyGeometryChanged {
+      terminal_size,
+      observed_sequence,
+    };
+    write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
+      .await
+      .map(|written| written.is_some())
   }
 
   async fn process_shell_state_update(
@@ -697,7 +761,6 @@ where
 
 async fn send_attached<W>(
   writer: &mut W,
-  session: rmux_proto::SessionInfo,
   snapshot: AttachSnapshot,
   client_terminal_size: rmux_proto::TerminalSize,
   attachment_leases: rmux_core::AttachmentLeases,
@@ -706,11 +769,11 @@ async fn send_attached<W>(
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
-  let terminal_size_mismatch = session.terminal_size != client_terminal_size;
+  let terminal_size_mismatch = snapshot.session.terminal_size != client_terminal_size;
   write_frame(
     writer,
     &ServerMessage::Attached {
-      session,
+      session: snapshot.session,
       earliest_sequence: snapshot.journal.earliest_sequence,
       next_sequence: snapshot.journal.next_sequence,
       replay_from: snapshot.journal.replay_from,
@@ -813,15 +876,21 @@ fn renews_attachment_liveness(message: &ClientMessage) -> bool {
   )
 }
 
+struct RecoveryResult {
+  sent_sequence: u64,
+  checkpoint_geometry_revision: Option<u64>,
+}
+
 async fn recover_lag<W>(
   writer: &mut W,
   session: &Session,
   sent_sequence: u64,
-) -> Result<u64, ConnectionError>
+) -> Result<RecoveryResult, ConnectionError>
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
   let recovery = session.snapshot_for_attach(Some(sent_sequence))?;
+  let checkpoint_geometry_revision = recovery.checkpoint_geometry_revision;
   let sent_sequence = if let Some(checkpoint) = recovery.checkpoint {
     let sequence = checkpoint.sequence;
     write_frame(
@@ -836,7 +905,11 @@ where
   } else {
     sent_sequence
   };
-  forward_chunks(writer, sent_sequence, recovery.journal.chunks).await
+  let sent_sequence = forward_chunks(writer, sent_sequence, recovery.journal.chunks).await?;
+  Ok(RecoveryResult {
+    sent_sequence,
+    checkpoint_geometry_revision,
+  })
 }
 
 async fn forward_chunks<W>(
@@ -871,6 +944,17 @@ fn chunk_after(chunk: OutputChunk, sequence: u64) -> Option<OutputChunk> {
     sequence_start: sequence,
     data: chunk.data[offset..].to_vec(),
   })
+}
+
+fn geometry_event_is_stale(
+  checkpoint_geometry_revision: Option<u64>,
+  sent_sequence: u64,
+  observed_sequence: u64,
+  geometry_revision: u64,
+) -> bool {
+  checkpoint_geometry_revision
+    .is_some_and(|checkpoint_revision| geometry_revision <= checkpoint_revision)
+    || observed_sequence < sent_sequence
 }
 
 async fn send_session_manager_error(
@@ -1032,7 +1116,16 @@ mod tests {
     let replay = vec![b'x'; 4 * 1024];
     let next_sequence = u64::try_from(replay.len()).expect("test replay fits in u64");
     let snapshot = AttachSnapshot {
+      session: rmux_proto::SessionInfo {
+        session_id: "session-id".into(),
+        name: "session".into(),
+        status: SessionStatus::Running,
+        created_at_ms: 0,
+        next_sequence,
+        terminal_size: rmux_proto::TerminalSize::default(),
+      },
       checkpoint: None,
+      checkpoint_geometry_revision: None,
       journal: JournalSnapshot {
         earliest_sequence: 0,
         next_sequence,
@@ -1045,14 +1138,6 @@ mod tests {
       },
       history_gap: false,
       shell_state: ShellState::default(),
-    };
-    let session = rmux_proto::SessionInfo {
-      session_id: "session-id".into(),
-      name: "session".into(),
-      status: SessionStatus::Running,
-      created_at_ms: 0,
-      next_sequence,
-      terminal_size: rmux_proto::TerminalSize::default(),
     };
     let attachment_leases = rmux_core::AttachmentLeases {
       input: LeaseStatus {
@@ -1070,7 +1155,6 @@ mod tests {
         initial_attachment_delivery_deadline(),
         send_attached(
           &mut writer,
-          session,
           snapshot,
           rmux_proto::TerminalSize::default(),
           attachment_leases,
@@ -1091,7 +1175,16 @@ mod tests {
       .expect("initial attached reply did not arrive")
       .expect("initial attached reply failed")
       .expect("initial attached reply ended unexpectedly");
-    assert!(matches!(attached, ServerMessage::Attached { .. }));
+    let ServerMessage::Attached {
+      session,
+      next_sequence: attached_next_sequence,
+      ..
+    } = attached
+    else {
+      panic!("expected attached response");
+    };
+    assert_eq!(session.next_sequence, next_sequence);
+    assert_eq!(attached_next_sequence, next_sequence);
     let output: ServerMessage = timeout(Duration::from_secs(1), read_frame(&mut reader))
       .await
       .expect("initial replay did not arrive")
@@ -1113,5 +1206,18 @@ mod tests {
       .expect("initial delivery hit its deadline")
       .expect("initial delivery failed");
     assert_eq!(sent_sequence, next_sequence);
+  }
+
+  #[test]
+  fn checkpoint_suppresses_queued_geometry_but_not_a_later_same_boundary_resize() {
+    // A subscription starts before its initial snapshot. The first event was
+    // already represented in that snapshot, even though it has the same raw
+    // boundary as the later live transition.
+    assert!(geometry_event_is_stale(Some(7), 42, 42, 7));
+    assert!(!geometry_event_is_stale(Some(7), 42, 42, 8));
+
+    // Once raw output has advanced beyond a transition, a queued older event
+    // is also stale for an attachment that resumed without a checkpoint.
+    assert!(geometry_event_is_stale(None, 43, 42, 8));
   }
 }

@@ -186,5 +186,119 @@ snapshot travels separately with `attached` and later state-change messages.
 
 The current `rmux` CLI restores a compatible checkpoint by writing its VT
 restore stream to the local terminal. It reports a size mismatch but does not
-resize the remote PTY. A richer future client may render the structured state
-itself.
+resize the remote PTY. A richer future client may apply a compatible checkpoint
+through its own terminal renderer.
+
+### Renderer-safe checkpoint application
+
+A checkpoint is an initialization program for a clean terminal renderer, not
+an idempotent screen delta. In particular, the current `rmux_vt_state` version
+1 payload is an `avt` VT dump. It recreates the represented buffers and modes,
+but does not promise to erase unrelated content or parser state already held by
+the receiving renderer.
+
+A graphical presenter that supports this format must therefore:
+
+1. Verify the format and format version before changing its live presentation.
+2. Stop applying later output while the restore is in progress, with a bounded
+   local queue.
+3. Discard or recreate its terminal emulator at the checkpoint's
+   `terminal_size`; this resets both screen buffers and its input decoder.
+4. Feed `payload`, then `input_prefix`, byte-for-byte through the same terminal
+   input path that will consume later raw output. `input_prefix` may be an
+   incomplete UTF-8 prefix, so it must not be converted to text or decoded
+   separately. Incomplete terminal-control parser state is represented by the
+   checkpoint payload itself.
+5. Treat `checkpoint.sequence` as the next raw-stream offset after the
+   restored state. It is not derived from the length of either checkpoint
+   field. Apply only output beginning at that offset after the restore.
+
+The current raw stdio presenter establishes that clean state with a terminal
+reset and full-screen clear before writing the version-1 stream. A graphical
+client should instead recreate its terminal model; it must not depend on a
+particular physical terminal's reset behavior.
+
+The renderer must not send `resize` merely to match the checkpoint dimensions.
+PTY geometry remains layout-owner controlled; a viewing client renders at the
+daemon's geometry and may use its own viewport scaling or scrolling around
+that grid. An unsupported checkpoint is an explicit compatibility failure: the
+client must not advance its resume position or claim that the visible terminal
+state was restored.
+
+### GUI render progress and reconnect
+
+The protocol has no per-output render acknowledgement. A GUI nevertheless
+needs a local acknowledgement boundary between its Rust transport/controller
+and an asynchronous webview terminal emulator. It tracks two different
+positions for each attachment:
+
+- `received_next_sequence`: the end of validated output accepted from the
+  transport;
+- `applied_next_sequence`: the end of output whose effects the renderer has
+  completed, after the renderer's write callback or equivalent completion
+  signal.
+
+Only `applied_next_sequence` is eligible for the next `attach_session`
+`resume_from` value. Receiving an event in the webview, placing it in a queue,
+or starting an asynchronous terminal write is not enough. A checkpoint becomes
+applied only after the fresh renderer has accepted its `payload` and
+`input_prefix`; its applied position is then exactly `checkpoint.sequence`.
+The controller keeps heartbeats independent of renderer progress, and bounds
+any bridge queue; a renderer that cannot catch up is detached and resumed from
+its last applied position rather than silently dropping raw bytes.
+
+This acknowledgement is local client state, not a new daemon-owned cursor and
+not a protocol message. `rmuxd` continues to own only its bounded raw journal
+and checkpoints. On a reconnect, a GUI may use its locally applied sequence
+when it retained a valid renderer; otherwise it omits `resume_from` and begins
+from a compatible checkpoint.
+
+If a presenter observes a geometry transition but cannot adopt its PTY grid,
+it must acknowledge that incompatibility locally rather than treating the
+transition as applied. It may continue displaying bytes, but its reconnect
+cursor remains absent until it has applied a later checkpoint. The raw stdio
+adapter follows this policy because printing an updated size warning does not
+resize the user's terminal.
+
+### Client-local scrollback
+
+The daemon's raw output journal is the resumable source of truth. Rendered
+lines, selection ranges, search indexes, and scroll position are client-local
+presentation data. A GUI may keep an in-memory or explicitly configured local
+history cache, but it must record the raw sequence coverage that produced it
+and must never turn scrolling into a daemon viewport command.
+
+Applying a checkpoint resets the terminal emulator's own scrollback along with
+its visible buffers. A separate local archive may keep older rendered output,
+but it must remain visibly separate from the newly restored live terminal and
+must avoid replay duplicates. If `history_gap` is true, the UI must mark a
+discontinuity rather than presenting its prior local lines and the restored
+screen as uninterrupted remote history. A checkpoint restores the current
+terminal state; it does not reconstruct discarded remote scrollback.
+
+The daemon's terminal parser is only a checkpoint producer, not a second
+scrollback service. Its rendered scrollback must remain bounded independently
+of the raw journal; the GUI owns the user-facing retention policy.
+
+### GUI foundation acceptance tests
+
+Before adding tab, split, or remote-host UX, the GUI attachment layer must
+prove the following behavior with a test renderer and, where possible, the
+chosen terminal emulator in headless mode:
+
+- Restoring a version-1 checkpoint into a deliberately dirty renderer removes
+  stale state, applies the checkpoint at its own dimensions, and matches the
+  expected screen/cursor/mode state.
+- A checkpoint followed by split UTF-8 input preserves a single byte decoder
+  across `payload`, `input_prefix`, and later output; a checkpoint whose
+  payload contains partial terminal-control parser state accepts its later
+  continuation correctly.
+- A delayed renderer acknowledgement never advances `resume_from`; reconnect
+  from the last applied sequence loses or duplicates no raw output.
+- Recovery with `history_gap` restores the live screen while clearly preserving
+  the local-history discontinuity.
+- An ordered daemon geometry update changes every attached renderer's grid at
+  its stream boundary without causing a viewing client to send `resize` or
+  acquire layout ownership.
+- A stalled webview cannot create an unbounded Rust-to-webview queue, and
+  heartbeats continue while bounded recovery is in progress.

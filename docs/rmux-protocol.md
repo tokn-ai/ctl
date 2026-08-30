@@ -1,7 +1,7 @@
-# rmux protocol version 5
+# rmux protocol version 6
 
 The protocol is independent of local IPC and future remote transport. Version
-5 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+6 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -16,8 +16,8 @@ Most commands receive one response and close. `attach_session` changes the
 connection into a bidirectional stream:
 
 - daemon to client: `attached` (including a complete `shell_state` snapshot),
-  an optional checkpoint, replayed `output`, then live `output` and
-  `shell_state_changed`;
+  an optional checkpoint, replayed `output`, then live `output`,
+  `pty_geometry_changed`, and `shell_state_changed`;
 - client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`, or
   `detach`;
 - daemon to client: `heartbeat_ack` and `session_ended` when the child exits.
@@ -34,6 +34,11 @@ that terminal size before sending `attached`. Without that request, an attach
 never resizes the PTY; the size only lets the daemon report when a checkpoint
 was made for another layout. Requesting command-line state never grants access
 by itself; daemon policy may redact it.
+
+The terminal size in `attached` is an authoritative PTY-layout fact, not an
+instruction to resize a client viewport. Later layout changes arrive as
+`pty_geometry_changed` stream messages so every attached renderer can update
+its grid without gaining layout ownership.
 
 `get_shell_state` is a one-response command for a noninteractive current-state
 lookup. It returns `shell_state_response` with the resolved `session` and the
@@ -79,6 +84,9 @@ connection-bound leases:
 - `input` requires the input lease, and `resize` requires the layout lease.
   An unauthorized command receives a structured error but does not terminate
   the shell session.
+- A successful resize that changes the PTY's geometry sends
+  `pty_geometry_changed` to every live attachment. It changes neither input
+  ownership nor a client's viewport, scroll position, or selection.
 - Detach, transport EOF, write failure, attachment-liveness expiry, and session
   end release any leases owned by that attachment. They do not terminate the
   PTY or child process.
@@ -175,13 +183,54 @@ An attaching client may provide `resume_from`:
   `history_gap`;
 - greater than the next sequence: reject the attach request.
 
+## PTY geometry transitions
+
+`pty_geometry_changed` is an authoritative, absolute PTY-layout update:
+
+```text
+terminal_size:     columns, rows, and optional pixel dimensions
+observed_sequence: raw-output next offset at the transition
+```
+
+For a transition at `observed_sequence = S`, the daemon sends every raw output
+byte below `S`, then the geometry message, then any raw output byte at or above
+`S`. If several resize operations occur before another output byte, their
+messages share `S` and remain in daemon stream order. A renderer applies the
+absolute size in each message; repeating a same-size message is harmless.
+
+The message reports a PTY fact only. It never grants the layout lease, requests
+that another attachment resize, or controls a client's viewport. In particular,
+a narrow phone viewer receives the desktop session's geometry but does not
+change it.
+
+A presenter that cannot render at the announced grid must not advance its
+local reconnect cursor past the transition. It can continue to show best-effort
+output, but its next attach must omit `resume_from` so `rmuxd` supplies a
+geometry-safe checkpoint.
+
+Geometry transitions are not raw VT bytes and version 6 deliberately does not
+add a second resume cursor for them. A caller may use `resume_from` only for a
+renderer that has processed the complete prior attachment stream, including
+geometry messages. If the requested raw position is at or before the most
+recent geometry boundary, `rmuxd` sends a checkpoint instead of replaying raw
+output across that change. When the resize-boundary checkpoint remains usable,
+a request exactly at the boundary replays from that same offset without a
+history gap. If a checkpoint must advance past the requested raw position,
+`history_gap` is true even when those raw bytes are still retained; this makes
+the client mark its own local history as discontinuous rather than reconstruct
+a renderer with the wrong grid.
+
 ## Checkpoints
 
-When a client has no previous sequence, or its requested sequence is older
-than retained raw output, `attached` includes a terminal checkpoint. The client
-restores it and then processes output from `replay_from` forward. `history_gap`
-indicates that older scrollback is unavailable; it does not mean the visible
-terminal state is incomplete when a compatible checkpoint was supplied.
+When a client has no previous sequence, its requested sequence is older than
+retained raw output, or the request crosses a PTY geometry boundary, `attached`
+includes a terminal checkpoint. The client restores it and then processes
+output from `replay_from` forward. `history_gap` means that replay did not
+deliver a contiguous raw-output range from the requested position: this can be
+caused by bounded journal eviction or by a geometry-safe checkpoint fallback.
+It does not mean the visible terminal state is incomplete when a compatible
+checkpoint was supplied, but clients must mark their own scrollback/history
+gap rather than invent missing lines.
 
 The version-1 checkpoint format is:
 
@@ -198,10 +247,19 @@ input_prefix:   raw bytes that must follow payload before later output
 is completed by later raw output without changing the checkpoint's parser
 state. It is part of the checkpoint format, not an additional output record.
 
+`terminal_size` in a checkpoint is authoritative for its restored parser
+state. A graphical client must reset or recreate its terminal model at those
+dimensions before applying `payload` and `input_prefix`; it must not apply a
+checkpoint restore stream into an unrelated live grid. The checkpoint
+supersedes every geometry transition represented when that checkpoint was
+captured; a later live resize can legitimately share its raw sequence boundary
+when no output was produced between the two operations.
+
 If a live attachment falls behind its output broadcast buffer, `checkpoint`
 is sent as a stream message and clients restore it before accepting later
-output. A client must reject a checkpoint whose `format` or `format_version` it
-does not support.
+output. A recovery checkpoint also provides the current PTY geometry, so it
+supersedes any queued geometry transition it already covers. A client must
+reject a checkpoint whose `format` or `format_version` it does not support.
 
 ## Deliberately deferred
 

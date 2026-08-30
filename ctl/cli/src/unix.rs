@@ -243,10 +243,11 @@ async fn shell(
           return Ok(());
         }
         AttachExitReason::ConnectionClosed => {
-          // The raw output sequence advances only after bytes have reached the
-          // local terminal. Reattaching from this point avoids both replaying
-          // output and replaying user input.
-          resume_from = Some(exit.next_sequence);
+          // The applied cursor advances only after the presenter writes raw
+          // bytes or restores a checkpoint. If a checkpoint was not applied,
+          // leave it absent so reconnect requests a fresh renderer-safe
+          // checkpoint instead of claiming stale terminal state.
+          resume_from = exit.next_sequence;
           recover_leases_after_connection_loss = true;
           wait_to_reconnect(&mut reconnect_delay, "connection closed").await;
         }

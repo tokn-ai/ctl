@@ -48,8 +48,8 @@ ctl shell <device-alias>
 
 `ctl shell` creates `shell` only if it does not exist. Specify a different
 name with `ctl shell <device-alias> <session>`. It reconnects after a transient
-network or gateway interruption using the last received raw output sequence;
-it never replays keyboard input. If a former attachment is still silent but
+network or gateway interruption using the last renderer-applied raw output
+sequence; it never replays keyboard input. If a former attachment is still silent but
 not yet expired, the reconnect temporarily remains view-only, then retries
 only its originally requested unheld input/layout leases. It never forces a
 takeover from an active attachment.

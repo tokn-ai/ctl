@@ -21,7 +21,17 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
   Output(OutputChunk),
-  Ended { exit_code: Option<u32> },
+  /// An authoritative PTY-layout transition placed between raw output ranges.
+  PtyGeometryChanged {
+    terminal_size: TerminalSize,
+    /// The raw-output next offset at the transition.
+    observed_sequence: u64,
+    /// Internal monotonic ordering for transitions at the same raw boundary.
+    geometry_revision: u64,
+  },
+  Ended {
+    exit_code: Option<u32>,
+  },
 }
 
 pub struct Session {
@@ -44,14 +54,40 @@ struct TerminalState {
   pending_input: Vec<u8>,
   journal: OutputJournal,
   checkpoint: TerminalCheckpoint,
+  /// The newest geometry event represented by `checkpoint`.
+  checkpoint_geometry_revision: u64,
   terminal_size: TerminalSize,
+  /// Monotonically increases for every successful geometry transition. This
+  /// is internal ordering state: the raw stream sequence remains the public
+  /// protocol boundary.
+  geometry_revision: u64,
+  /// The most recent emitted geometry boundary, if this session has ever
+  /// changed PTY geometry after creation.
+  last_geometry_change_sequence: Option<u64>,
+  /// A checkpoint captured immediately after `last_geometry_change_sequence`.
+  ///
+  /// It lets a reconnect at the exact geometry boundary restore the correct
+  /// grid without discarding raw output that follows the boundary.
+  last_geometry_checkpoint: Option<GeometryCheckpoint>,
   shell_state: ShellState,
   alternate_screen: AlternateScreenTracker,
 }
 
 #[derive(Debug, Clone)]
+struct GeometryCheckpoint {
+  checkpoint: TerminalCheckpoint,
+  geometry_revision: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct AttachSnapshot {
+  /// Session metadata captured under the same terminal-state lock as the
+  /// journal, checkpoint, and shell snapshot. Later PTY changes are delivered
+  /// only as ordered stream events.
+  pub session: SessionInfo,
   pub checkpoint: Option<TerminalCheckpoint>,
+  /// Internal event ordering state for the checkpoint sent with this snapshot.
+  pub checkpoint_geometry_revision: Option<u64>,
   pub journal: JournalSnapshot,
   pub history_gap: bool,
   /// The internal, unredacted state observed atomically with the journal.
@@ -60,13 +96,13 @@ pub struct AttachSnapshot {
   pub shell_state: ShellState,
 }
 
-/// Couples shell-state revision assignment with watch publication.
+/// Couples shell-state revision assignment with terminal-event publication.
 ///
 /// Every caller holds a [`ShellStatePublication`] from before it mutates the
-/// terminal state until after it has published the resulting snapshot. This
-/// prevents a delayed older send from overwriting a newer revision in the
-/// coalescing watch channel, and lets raw output be broadcast before the state
-/// that observes it.
+/// terminal state until after it has published the resulting stream event or
+/// snapshot. This prevents a delayed older send from overwriting a newer
+/// revision in the coalescing watch channel, and serializes raw-output and PTY
+/// geometry broadcasts at their shared sequence boundary.
 struct ShellStatePublisher {
   gate: Mutex<()>,
   sender: watch::Sender<ShellState>,
@@ -198,18 +234,60 @@ impl Session {
       });
     }
 
-    let needs_checkpoint = requested.is_none_or(|sequence| sequence < earliest_sequence);
-    let replay_from = if needs_checkpoint {
-      terminal.checkpoint.sequence
+    let geometry_checkpoint_required = requested.is_some_and(|sequence| {
+      terminal
+        .last_geometry_change_sequence
+        .is_some_and(|boundary| sequence <= boundary)
+    });
+    let journal_checkpoint_required = requested.is_none_or(|sequence| sequence < earliest_sequence);
+    let (checkpoint, checkpoint_geometry_revision) = if journal_checkpoint_required {
+      (
+        Some(terminal.checkpoint.clone()),
+        Some(terminal.checkpoint_geometry_revision),
+      )
+    } else if geometry_checkpoint_required {
+      // Prefer the checkpoint made at the resize boundary. It is valid only
+      // while the journal can still replay immediately after it; otherwise
+      // use the newer checkpoint that covers the compacted output as well.
+      let geometry_checkpoint = terminal
+        .last_geometry_checkpoint
+        .as_ref()
+        .filter(|checkpoint| checkpoint.checkpoint.sequence >= earliest_sequence)
+        .cloned()
+        .unwrap_or_else(|| GeometryCheckpoint {
+          checkpoint: terminal.checkpoint.clone(),
+          geometry_revision: terminal.checkpoint_geometry_revision,
+        });
+      (
+        Some(geometry_checkpoint.checkpoint),
+        Some(geometry_checkpoint.geometry_revision),
+      )
     } else {
-      requested.unwrap_or(earliest_sequence)
+      (None, None)
     };
+    let replay_from = checkpoint.as_ref().map_or_else(
+      || requested.unwrap_or(earliest_sequence),
+      |checkpoint| checkpoint.sequence,
+    );
     let journal = terminal.journal.snapshot_from(Some(replay_from))?;
+    let history_gap = requested.is_some_and(|sequence| sequence < journal.replay_from);
 
     Ok(AttachSnapshot {
-      checkpoint: needs_checkpoint.then(|| terminal.checkpoint.clone()),
+      session: SessionInfo {
+        session_id: self.id.clone(),
+        name: self.name.clone(),
+        status: SessionStatus::Running,
+        created_at_ms: self.created_at_ms,
+        next_sequence: terminal.journal.next_sequence(),
+        terminal_size: terminal.terminal_size.clone(),
+      },
+      checkpoint,
+      checkpoint_geometry_revision,
       journal,
-      history_gap: requested.is_some_and(|sequence| sequence < earliest_sequence),
+      // A geometry checkpoint may intentionally advance replay past retained
+      // raw bytes. Report that gap just as we report journal compaction so a
+      // client never mistakes its local scrollback for a contiguous replay.
+      history_gap,
       shell_state: terminal.shell_state.clone(),
     })
   }
@@ -242,18 +320,41 @@ impl Session {
     {
       return Err(SessionControlError::LayoutLeaseRequired);
     }
+    // This gate also covers raw output publication. Holding it while the PTY
+    // and terminal parser change makes the geometry event an exact boundary:
+    // every earlier raw byte is already broadcast, and later bytes cannot be
+    // appended or broadcast until this event has been sent.
+    let _publication = self.shell_state_publisher.begin();
+    let mut terminal = lock(&self.terminal);
     lock(&self.master)
       .resize(to_pty_size(&terminal_size))
       .map_err(|error| SessionControlError::Pty(error.to_string()))?;
-    let mut terminal = lock(&self.terminal);
-    terminal.terminal.resize(
-      usize::from(terminal_size.columns),
-      usize::from(terminal_size.rows),
-    );
-    terminal.terminal_size = terminal_size;
-    refresh_checkpoint(&mut terminal);
-    drop(terminal);
-    drop(leases);
+
+    if terminal.terminal_size != terminal_size {
+      terminal.terminal.resize(
+        usize::from(terminal_size.columns),
+        usize::from(terminal_size.rows),
+      );
+      terminal.terminal_size = terminal_size.clone();
+      terminal.geometry_revision = terminal
+        .geometry_revision
+        .checked_add(1)
+        .expect("PTY geometry revision exhausted");
+      refresh_checkpoint(&mut terminal);
+
+      let observed_sequence = terminal.journal.next_sequence();
+      terminal.last_geometry_change_sequence = Some(observed_sequence);
+      terminal.last_geometry_checkpoint = Some(GeometryCheckpoint {
+        checkpoint: terminal.checkpoint.clone(),
+        geometry_revision: terminal.geometry_revision,
+      });
+      let _ignored = self.events.send(SessionEvent::PtyGeometryChanged {
+        terminal_size,
+        observed_sequence,
+        geometry_revision: terminal.geometry_revision,
+      });
+    }
+
     Ok(())
   }
 
@@ -477,10 +578,7 @@ impl SessionManager {
     drop(pair.slave);
 
     let (events, _) = broadcast::channel(256);
-    let terminal_parser = avt::Vt::new(
-      usize::from(terminal_size.columns),
-      usize::from(terminal_size.rows),
-    );
+    let terminal_parser = terminal_emulator(&terminal_size);
     let shell_state = ShellState::default();
     let mut terminal = TerminalState {
       terminal: terminal_parser,
@@ -494,7 +592,11 @@ impl SessionManager {
         payload: Vec::new(),
         input_prefix: Vec::new(),
       },
+      checkpoint_geometry_revision: 0,
       terminal_size,
+      geometry_revision: 0,
+      last_geometry_change_sequence: None,
+      last_geometry_checkpoint: None,
       shell_state: shell_state.clone(),
       alternate_screen: AlternateScreenTracker::default(),
     };
@@ -871,6 +973,20 @@ fn refresh_checkpoint(terminal: &mut TerminalState) {
     payload: terminal.terminal.dump().into_bytes(),
     input_prefix: terminal.pending_input.clone(),
   };
+  terminal.checkpoint_geometry_revision = terminal.geometry_revision;
+}
+
+fn terminal_emulator(terminal_size: &TerminalSize) -> avt::Vt {
+  // Raw output is the daemon's bounded resumable history. The derived parser
+  // exists only to make checkpoints, so retaining a second unbounded rendered
+  // scrollback here would duplicate client-owned presentation state.
+  avt::Vt::builder()
+    .size(
+      usize::from(terminal_size.columns),
+      usize::from(terminal_size.rows),
+    )
+    .scrollback_limit(0)
+    .build()
 }
 
 fn feed_terminal_bytes(terminal: &mut TerminalState, data: &[u8]) {
@@ -961,6 +1077,18 @@ mod tests {
 
     assert_eq!(source.terminal.text(), restored.terminal.text());
     assert!(restored.terminal.text().join("\n").contains('日'));
+  }
+
+  #[test]
+  fn checkpoint_parser_retains_only_visible_rows() {
+    let mut terminal = terminal_state();
+    let rows = usize::from(terminal.terminal_size.rows);
+
+    for _ in 0..(rows + 10) {
+      feed_terminal_bytes(&mut terminal, b"line\n");
+    }
+
+    assert_eq!(terminal.terminal.lines().count(), rows);
   }
 
   #[test]
@@ -1072,7 +1200,7 @@ mod tests {
   fn terminal_state() -> TerminalState {
     let terminal_size = TerminalSize::default();
     let mut state = TerminalState {
-      terminal: avt::Vt::new(80, 24),
+      terminal: terminal_emulator(&terminal_size),
       pending_input: Vec::new(),
       journal: OutputJournal::new(1024),
       checkpoint: TerminalCheckpoint {
@@ -1083,7 +1211,11 @@ mod tests {
         payload: Vec::new(),
         input_prefix: Vec::new(),
       },
+      checkpoint_geometry_revision: 0,
       terminal_size,
+      geometry_revision: 0,
+      last_geometry_change_sequence: None,
+      last_geometry_checkpoint: None,
       shell_state: ShellState::default(),
       alternate_screen: AlternateScreenTracker::default(),
     };
@@ -1092,10 +1224,7 @@ mod tests {
   }
 
   fn terminal_state_from_checkpoint(checkpoint: TerminalCheckpoint) -> TerminalState {
-    let mut terminal = avt::Vt::new(
-      usize::from(checkpoint.terminal_size.columns),
-      usize::from(checkpoint.terminal_size.rows),
-    );
+    let mut terminal = terminal_emulator(&checkpoint.terminal_size);
     let payload = String::from_utf8(checkpoint.payload.clone())
       .expect("checkpoint payload is generated from a UTF-8 VT dump");
     terminal.feed_str(&payload);
@@ -1105,6 +1234,10 @@ mod tests {
       journal: OutputJournal::new(1024),
       terminal_size: checkpoint.terminal_size.clone(),
       checkpoint,
+      checkpoint_geometry_revision: 0,
+      geometry_revision: 0,
+      last_geometry_change_sequence: None,
+      last_geometry_checkpoint: None,
       shell_state: ShellState::default(),
       alternate_screen: AlternateScreenTracker::default(),
     }

@@ -21,10 +21,11 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, MutexGuard, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
@@ -33,8 +34,17 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RMUX_CLIENT_NAME: &str = "ctld-remote-session-test";
 const RMUX_CLIENT_VERSION: &str = "0.1.0";
 
+// Both tests run a real PTY-backed shell through a local daemon and gateway.
+// Serializing this integration layer avoids scheduling-dependent terminal
+// startup failures without making unrelated workspace tests serial.
+static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 type RemoteTunnel = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+
+async fn pty_test_lock() -> MutexGuard<'static, ()> {
+  PTY_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
 
 struct TestPaths {
   root: PathBuf,
@@ -54,6 +64,8 @@ struct RemoteShellTest {
   rmuxd: JoinHandle<Result<(), rmuxd::DaemonError>>,
   shutdown: watch::Sender<bool>,
   ctld: JoinHandle<Result<(), ctld::DaemonError>>,
+  endpoint: SocketAddr,
+  config: ctld::DaemonConfig,
   control_identity: ControlIdentity,
   host: ctl_core::HostConfig,
   rmux_identity: RmuxIdentity,
@@ -87,43 +99,19 @@ impl Drop for TestPaths {
 /// sequence, then regains the released input lease.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_shell_survives_ctld_restart_and_resumes_from_its_sequence() -> TestResult {
-  let paths = TestPaths::new();
-  let rmuxd = spawn_rmuxd(&paths.rmux_socket);
-  wait_for_unix_socket(&paths.rmux_socket).await?;
-
-  let device = ctld::initialize(&paths.state_dir)?;
-  let first_listener = TcpListener::bind("127.0.0.1:0").await?;
-  let endpoint = first_listener.local_addr()?;
-  let invitation = ctld::create_pairing_invitation(
-    &paths.state_dir,
-    endpoint.to_string(),
-    "integration-client".into(),
-    expiration_after(Duration::from_mins(1))?,
-  )?;
-  assert_eq!(invitation.device_id, device.device_id);
-
-  let config =
-    ctld::DaemonConfig::with_defaults(paths.state_dir.clone(), paths.rmux_socket.clone());
-  let (first_shutdown, first_ctld) = spawn_ctld(first_listener, config.clone());
-
-  let control_identity = ControlIdentity::generate()?;
-  let host = pair(
-    &invitation,
-    "test-host".into(),
-    &control_identity,
-    RMUX_CLIENT_NAME,
-    RMUX_CLIENT_VERSION,
-  )
-  .await?;
-  let rmux_identity = rmux_identity();
-
-  let session = create_remote_shell(
-    &host,
-    &control_identity,
-    &rmux_identity,
-    &paths.release_marker,
-  )
-  .await?;
+  let _test_guard = pty_test_lock().await;
+  let RemoteShellTest {
+    paths,
+    rmuxd,
+    shutdown: first_shutdown,
+    ctld: first_ctld,
+    endpoint,
+    config,
+    control_identity,
+    host,
+    rmux_identity,
+    session,
+  } = start_remote_shell_test(Duration::from_secs(30)).await?;
 
   let first_attachment =
     attach_and_capture_started(&host, &control_identity, &rmux_identity, &session).await?;
@@ -210,6 +198,7 @@ async fn remote_shell_survives_ctld_restart_and_resumes_from_its_sequence() -> T
 /// shell, and let the new attachment acquire the released leases in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_reconnect_recovers_after_silent_gateway_relay_expiry() -> TestResult {
+  let _test_guard = pty_test_lock().await;
   let RemoteShellTest {
     paths,
     rmuxd,
@@ -219,6 +208,7 @@ async fn remote_reconnect_recovers_after_silent_gateway_relay_expiry() -> TestRe
     host,
     rmux_identity,
     session,
+    ..
   } = start_remote_shell_test(Duration::from_secs(1)).await?;
   let CapturedAttachment {
     stream: mut stale_stream,
@@ -231,24 +221,14 @@ async fn remote_reconnect_recovers_after_silent_gateway_relay_expiry() -> TestRe
   let stale_layout = acquire_lease(&mut stale_stream, LeaseKind::Layout).await?;
   assert!(stale_layout.owned_by_client);
 
-  let recovery_tunnel = open_remote_tunnel(&host, &control_identity).await?;
-  let (mut recovery_stream, recovery_attachment) = begin_attach(
-    recovery_tunnel,
+  let (mut recovery_stream, recovery_attachment) = attach_for_stale_relay_recovery(
+    &host,
+    &control_identity,
     &rmux_identity,
-    AttachRequest {
-      session: session.session_id.clone(),
-      resume_from: Some(resume_sequence),
-      terminal_size: TerminalSize::default(),
-      request_input_lease: true,
-      request_layout_lease: true,
-      request_command_line: false,
-    },
+    &session,
+    resume_sequence,
   )
   .await?;
-  assert!(recovery_attachment.input_lease.held);
-  assert!(!recovery_attachment.input_lease.owned_by_client);
-  assert!(recovery_attachment.layout_lease.held);
-  assert!(!recovery_attachment.layout_lease.owned_by_client);
 
   let mut heartbeat_nonce =
     recover_requested_leases(&mut recovery_stream, &recovery_attachment, true, true).await?;
@@ -332,7 +312,7 @@ async fn start_remote_shell_test(
   let rmuxd = spawn_rmuxd_with_liveness(&paths.rmux_socket, attachment_liveness_timeout);
   wait_for_unix_socket(&paths.rmux_socket).await?;
 
-  ctld::initialize(&paths.state_dir)?;
+  let device = ctld::initialize(&paths.state_dir)?;
   let listener = TcpListener::bind("127.0.0.1:0").await?;
   let endpoint = listener.local_addr()?;
   let invitation = ctld::create_pairing_invitation(
@@ -341,9 +321,10 @@ async fn start_remote_shell_test(
     "integration-client".into(),
     expiration_after(Duration::from_mins(1))?,
   )?;
+  assert_eq!(invitation.device_id, device.device_id);
   let config =
     ctld::DaemonConfig::with_defaults(paths.state_dir.clone(), paths.rmux_socket.clone());
-  let (shutdown, ctld) = spawn_ctld(listener, config);
+  let (shutdown, ctld) = spawn_ctld(listener, config.clone());
 
   let control_identity = ControlIdentity::generate()?;
   let host = pair(
@@ -368,15 +349,13 @@ async fn start_remote_shell_test(
     rmuxd,
     shutdown,
     ctld,
+    endpoint,
+    config,
     control_identity,
     host,
     rmux_identity,
     session,
   })
-}
-
-fn spawn_rmuxd(socket_path: &Path) -> JoinHandle<Result<(), rmuxd::DaemonError>> {
-  spawn_rmuxd_with_liveness(socket_path, Duration::from_secs(30))
 }
 
 fn spawn_rmuxd_with_liveness(
@@ -493,6 +472,34 @@ async fn attach_and_capture_started(
   })
 }
 
+async fn attach_for_stale_relay_recovery(
+  host: &ctl_core::HostConfig,
+  control_identity: &ControlIdentity,
+  rmux_identity: &RmuxIdentity,
+  session: &SessionInfo,
+  resume_sequence: u64,
+) -> TestResult<(RemoteTunnel, AttachedSession)> {
+  let recovery_tunnel = open_remote_tunnel(host, control_identity).await?;
+  let (recovery_stream, recovery_attachment) = begin_attach(
+    recovery_tunnel,
+    rmux_identity,
+    AttachRequest {
+      session: session.session_id.clone(),
+      resume_from: Some(resume_sequence),
+      terminal_size: TerminalSize::default(),
+      request_input_lease: true,
+      request_layout_lease: true,
+      request_command_line: false,
+    },
+  )
+  .await?;
+  assert!(recovery_attachment.input_lease.held);
+  assert!(!recovery_attachment.input_lease.owned_by_client);
+  assert!(recovery_attachment.layout_lease.held);
+  assert!(!recovery_attachment.layout_lease.owned_by_client);
+  Ok((recovery_stream, recovery_attachment))
+}
+
 async fn acquire_lease<S>(stream: &mut S, lease: LeaseKind) -> TestResult<LeaseStatus>
 where
   S: AsyncRead + AsyncWrite + Unpin,
@@ -506,7 +513,9 @@ where
       } if actual == lease => return Ok(status),
       ServerMessage::HeartbeatAck { .. }
       | ServerMessage::Output { .. }
-      | ServerMessage::Checkpoint { .. } => {}
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::ShellStateChanged { .. } => {}
       message => return Err(format!("expected lease status, received {message:?}").into()),
     }
   }
@@ -573,7 +582,10 @@ async fn recover_requested_leases(
           layout = status;
           layout_status_received = true;
         }
-        ServerMessage::Output { .. } | ServerMessage::Checkpoint { .. } => {}
+        ServerMessage::Output { .. }
+        | ServerMessage::Checkpoint { .. }
+        | ServerMessage::PtyGeometryChanged { .. }
+        | ServerMessage::ShellStateChanged { .. } => {}
         message => {
           return Err(
             format!("expected heartbeat or requested lease status, received {message:?}").into(),
@@ -600,7 +612,10 @@ async fn send_heartbeat(stream: &mut RemoteTunnel, nonce: &mut u64) -> TestResul
   loop {
     match required_rmux_message(stream).await? {
       ServerMessage::HeartbeatAck { nonce: actual } if actual == *nonce => return Ok(()),
-      ServerMessage::Output { .. } | ServerMessage::Checkpoint { .. } => {}
+      ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::ShellStateChanged { .. } => {}
       message => {
         return Err(format!("expected heartbeat acknowledgement, received {message:?}").into());
       }
@@ -762,7 +777,9 @@ where
       }
       ServerMessage::Checkpoint { .. }
       | ServerMessage::HeartbeatAck { .. }
-      | ServerMessage::LeaseStatus { .. } => {}
+      | ServerMessage::LeaseStatus { .. }
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::ShellStateChanged { .. } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
     }
   }
@@ -777,7 +794,9 @@ where
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::HeartbeatAck { .. }
-      | ServerMessage::LeaseStatus { .. } => {}
+      | ServerMessage::LeaseStatus { .. }
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::ShellStateChanged { .. } => {}
       ServerMessage::SessionEnded { .. } => return Ok(()),
       message => {
         return Err(format!("expected output or session end, received {message:?}").into());

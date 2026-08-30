@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
@@ -357,6 +357,16 @@ pub enum ServerMessage {
   ShellStateChanged {
     state: ShellState,
   },
+  /// Reports an authoritative PTY geometry transition to every attachment.
+  ///
+  /// `observed_sequence` is the raw-output next offset at the transition.
+  /// The daemon sends this after every output byte below the offset and before
+  /// any output byte at or above it. This changes a terminal renderer's grid;
+  /// it neither grants layout ownership nor changes a client's viewport.
+  PtyGeometryChanged {
+    terminal_size: TerminalSize,
+    observed_sequence: u64,
+  },
   Checkpoint {
     checkpoint: TerminalCheckpoint,
     history_gap: bool,
@@ -565,6 +575,37 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn pty_geometry_changed_frame_round_trips() {
+    let expected = ServerMessage::PtyGeometryChanged {
+      terminal_size: TerminalSize {
+        columns: 132,
+        rows: 43,
+        pixel_width: 1056,
+        pixel_height: 860,
+      },
+      observed_sequence: 456,
+    };
+    let (mut server, mut client) = tokio::io::duplex(1024);
+
+    let write = tokio::spawn(async move { write_frame(&mut server, &expected).await });
+    let actual: ServerMessage = read_frame(&mut client).await.unwrap().unwrap();
+
+    write.await.unwrap().unwrap();
+    assert_eq!(
+      actual,
+      ServerMessage::PtyGeometryChanged {
+        terminal_size: TerminalSize {
+          columns: 132,
+          rows: 43,
+          pixel_width: 1056,
+          pixel_height: 860,
+        },
+        observed_sequence: 456,
+      }
+    );
+  }
+
   #[test]
   fn shell_state_json_uses_stable_snake_case_names() {
     let encoded = serde_json::to_value(ServerMessage::ShellStateChanged {
@@ -579,6 +620,24 @@ mod tests {
       10
     );
     assert_eq!(encoded["state"]["tui_hint"], "inline");
+  }
+
+  #[test]
+  fn pty_geometry_changed_json_uses_stable_snake_case_names() {
+    let encoded = serde_json::to_value(ServerMessage::PtyGeometryChanged {
+      terminal_size: TerminalSize {
+        columns: 132,
+        rows: 43,
+        pixel_width: 1056,
+        pixel_height: 860,
+      },
+      observed_sequence: 456,
+    })
+    .unwrap();
+
+    assert_eq!(encoded["type"], "pty_geometry_changed");
+    assert_eq!(encoded["terminal_size"]["columns"], 132);
+    assert_eq!(encoded["observed_sequence"], 456);
   }
 
   #[test]

@@ -3,6 +3,8 @@ export interface DeferredConnectionIntent<T> {
   settle(): void;
 }
 
+type ConnectionIntentRunner<T> = (request: T) => Promise<void>;
+
 /**
  * Tracks the newest attachment intent and holds it until the terminal
  * renderer is ready.
@@ -48,6 +50,22 @@ export class ConnectionIntentQueue<T> {
 
   isCurrent(request: T): boolean {
     return this.current === request;
+  }
+
+  drain(run: ConnectionIntentRunner<T>): boolean {
+    const deferred = this.take();
+    if (!deferred) {
+      return false;
+    }
+    if (!this.isCurrent(deferred.request)) {
+      deferred.settle();
+      return false;
+    }
+    void run(deferred.request).finally(() => {
+      this.complete(deferred.request);
+      deferred.settle();
+    });
+    return true;
   }
 
   cancelIf(matches: (request: T) => boolean): boolean {

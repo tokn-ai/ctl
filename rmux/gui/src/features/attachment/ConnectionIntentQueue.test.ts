@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ConnectionIntentQueue } from "./ConnectionIntentQueue";
 
 describe("ConnectionIntentQueue", () => {
@@ -48,5 +48,18 @@ describe("ConnectionIntentQueue", () => {
     deferred?.settle();
 
     await expect(thirdPending).resolves.toBeUndefined();
+  });
+
+  it("runs an intent that is queued after the renderer is ready", async () => {
+    const queue = new ConnectionIntentQueue<string>();
+    const run = vi.fn(async () => {});
+    queue.begin("session");
+    const pending = queue.defer("session");
+
+    expect(queue.drain(run)).toBe(true);
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledWith("session");
+    expect(queue.isCurrent("session")).toBe(false);
   });
 });

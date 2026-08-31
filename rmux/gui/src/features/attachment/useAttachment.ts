@@ -82,6 +82,7 @@ export interface AttachmentActions {
 export function useAttachment(renderer: XtermRenderer | null): AttachmentActions {
   const [state, setState] = useState(INITIAL_STATE);
   const stateRef = useRef(state);
+  const rendererRef = useRef<XtermRenderer | null>(renderer);
   const activeAttachmentRef = useRef<string | null>(null);
   const channelRef = useRef<Channel<AttachmentEvent> | null>(null);
   const generationRef = useRef(0);
@@ -91,6 +92,8 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   const inputLeaseOwnedRef = useRef(false);
   const layoutLeaseOwnedRef = useRef(false);
   const resizeWithWindowRef = useRef(false);
+  const lifecycleResetRef = useRef(false);
+  const drainDeferredConnectionRef = useRef<() => void>(() => {});
   const deferredConnectionRef = useRef<
     ConnectionIntentQueue<ConnectionRequest> | null
   >(null);
@@ -104,6 +107,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   if (!deferredConnectionRef.current) {
     deferredConnectionRef.current = new ConnectionIntentQueue<ConnectionRequest>();
   }
+  rendererRef.current = renderer;
 
   useEffect(() => {
     stateRef.current = state;
@@ -286,7 +290,13 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   }
 
   useEffect(() => {
+    if (lifecycleResetRef.current) {
+      lifecycleResetRef.current = false;
+      stateRef.current = INITIAL_STATE;
+      setState(INITIAL_STATE);
+    }
     return () => {
+      lifecycleResetRef.current = true;
       generationRef.current += 1;
       inputLeaseOwnedRef.current = false;
       layoutLeaseOwnedRef.current = false;
@@ -296,6 +306,8 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       resizeCoordinatorRef.current?.reset();
       deferredConnectionRef.current?.cancel();
       connectionQueueRef.current?.cancelPending();
+      appliedSequenceRef.current = null;
+      pendingShellStateRef.current = null;
       const attachmentId = activeAttachmentRef.current;
       activeAttachmentRef.current = null;
       channelRef.current = null;
@@ -673,26 +685,17 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     [performConnection, setFailure],
   );
 
+  const drainDeferredConnection = useCallback(() => {
+    if (!rendererRef.current) {
+      return;
+    }
+    deferredConnectionRef.current!.drain(submitConnection);
+  }, [submitConnection]);
+  drainDeferredConnectionRef.current = drainDeferredConnection;
+
   useEffect(() => {
-    if (!renderer) {
-      return;
-    }
-    const deferred = deferredConnectionRef.current!.take();
-    if (!deferred) {
-      return;
-    }
-    if (
-      deferred.request.generation !== generationRef.current ||
-      !deferredConnectionRef.current!.isCurrent(deferred.request)
-    ) {
-      deferred.settle();
-      return;
-    }
-    void submitConnection(deferred.request).finally(() => {
-      deferredConnectionRef.current!.complete(deferred.request);
-      deferred.settle();
-    });
-  }, [renderer, submitConnection]);
+    drainDeferredConnection();
+  }, [drainDeferredConnection, renderer]);
 
   const connectAt = useCallback(
     (
@@ -725,14 +728,11 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         resizeWithWindow,
       };
       deferredConnectionRef.current!.begin(request);
-      if (!renderer) {
-        return deferredConnectionRef.current!.defer(request);
-      }
-      return submitConnection(request).finally(() => {
-        deferredConnectionRef.current!.complete(request);
-      });
+      const completion = deferredConnectionRef.current!.defer(request);
+      drainDeferredConnectionRef.current();
+      return completion;
     },
-    [renderer, submitConnection],
+    [],
   );
 
   const connect = useCallback(

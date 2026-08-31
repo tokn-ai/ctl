@@ -52,7 +52,8 @@ path or service.
   `ctld connect` command and returns its piped stdin/stdout to `rmux-client`.
 - `ctld`: stateless SSH remote-command adapter for the fixed local `rmuxd`
   relay.
-- `ctl`: remote command-line adapter using OpenSSH destinations directly.
+- `ctl`: unified command-line client using local `rmuxd` by default and an
+  explicit OpenSSH destination for remote access.
 
 OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
 `rmux-client`.
@@ -237,12 +238,13 @@ and checkpoint state remain intact.
 
 ## Remote control boundary
 
-`ctl` invokes the system OpenSSH client with PTY allocation and all forwarding
-disabled, an OpenSSH destination supplied by the user, and the fixed remote
-command `exec ctld connect`. OpenSSH configuration owns host verification,
-user authentication, proxying, and healthy-connection multiplexing. `ctl`
-never disables host-key checking, enables agent forwarding, or accepts an
-arbitrary remote command.
+`ctl` connects directly to the current user's owner-only `rmuxd` data endpoint
+by default. Global `--host`/`-H` instead invokes the system OpenSSH client with
+PTY allocation and all forwarding disabled, an OpenSSH destination supplied
+by the user, and the fixed remote command `exec ctld connect`. OpenSSH
+configuration owns host verification, user authentication, proxying, and
+healthy-connection multiplexing. `ctl` never disables host-key checking,
+enables agent forwarding, or accepts an arbitrary remote command.
 
 `ctld connect` has no network listener, persistent state, identity registry,
 or service selector. It writes one fixed readiness marker, after which SSH

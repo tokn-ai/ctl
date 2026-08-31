@@ -147,15 +147,25 @@ for terminating its daemon-owned session. The Windows/Linux equivalents are
 untouched. On macOS these are native application-menu accelerators; `Cmd-Q`
 retains its standard meaning and quits the app without terminating sessions.
 
-## Remote use
+## Local and remote use
 
-`ctl` uses the system OpenSSH client and accepts an ordinary SSH destination
-or `~/.ssh/config` host alias. The remote account must be able to run
-`ctld connect` non-interactively:
+`ctl` defaults to the current user's local `rmuxd` endpoint. No SSH process or
+`ctld` helper is involved for local commands:
 
 ```sh
-ctl session list workstation
-ctl shell workstation
+ctl session list
+ctl shell
+ctl shell development
+```
+
+Pass global `--host`/`-H` to select SSH. The value is an ordinary OpenSSH
+destination or `~/.ssh/config` host alias, and the remote account must be able
+to run `ctld connect` non-interactively:
+
+```sh
+ctl --host workstation session list
+ctl --host workstation shell
+ctl -H workstation shell development
 ```
 
 `ctld` has no network listener or application-level pairing state. It relays

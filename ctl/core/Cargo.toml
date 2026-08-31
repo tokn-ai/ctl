@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+rmux-ipc.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
 
 [lints]
 workspace = true

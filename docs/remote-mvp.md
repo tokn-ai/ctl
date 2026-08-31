@@ -23,27 +23,28 @@ confirming it starts without diagnostics.
 
 ## On the client device
 
-Use an ordinary OpenSSH destination or `~/.ssh/config` alias directly:
+`ctl` defaults to the local daemon. Select an ordinary OpenSSH destination or
+`~/.ssh/config` alias with global `--host`/`-H`:
 
 ```text
-ctl session list <host>
-ctl shell <host>
+ctl --host <host> session list
+ctl --host <host> shell
 ```
 
 `ctl shell` creates the named `shell` session only when absent. Specify a
-different name with `ctl shell <host> <session>`.
+different remote name with `ctl --host <host> shell <session>`.
 
 Useful session commands:
 
 ```text
-ctl session new <host> --name <session>
-ctl session kill <host> <session>
+ctl --host <host> session new --name <session>
+ctl --host <host> session kill <session>
 ```
 
 An ordinary attachment requests input but does not resize the remote PTY. Use
-`ctl shell <host> <session> --read-only` for a viewer, or add `--resize` only
-when deliberately claiming layout ownership. Press `Ctrl-]` to detach and
-release the attachment immediately without terminating the shell.
+`ctl --host <host> shell <session> --read-only` for a viewer, or add `--resize`
+only when deliberately claiming layout ownership. Press `Ctrl-]` to detach
+and release the attachment immediately without terminating the shell.
 
 After an unexpected SSH interruption, `ctl` reconnects with exponential
 backoff. OpenSSH may reuse a configured control master; otherwise it creates a

@@ -617,8 +617,10 @@ dependencies = [
 name = "ctl-core"
 version = "0.1.0"
 dependencies = [
+ "rmux-ipc",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

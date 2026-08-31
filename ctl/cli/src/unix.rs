@@ -1,5 +1,5 @@
 use super::{Arguments, Command, SessionCommand};
-use ctl_core::{CoreError, is_retryable_connection_error, open_ssh_tunnel};
+use ctl_core::{ConnectionTarget, CoreError, is_retryable_connection_error, open_transport};
 use rmux_client::{
   AttachExitReason, AttachRequest, ClientError as RmuxClientError,
   ClientIdentity as RmuxClientIdentity, InteractiveAttachOptions, attach_interactive_with_options,
@@ -8,8 +8,8 @@ use rmux_client::{
 use rmux_proto::{
   ClientMessage, CodecError as RmuxCodecError, CommandSpec, ErrorCode, ServerMessage, SessionInfo,
 };
-use std::io;
 use std::time::Duration;
+use std::{env, io};
 use thiserror::Error;
 use tokio::time::sleep;
 
@@ -18,29 +18,28 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 pub async fn run(arguments: Arguments) -> Result<(), CliError> {
+  let target = arguments
+    .host
+    .map_or_else(ConnectionTarget::local, ConnectionTarget::ssh);
   match arguments.command {
     Command::Session { command } => match command {
-      SessionCommand::List { host } => list_sessions(&host).await,
-      SessionCommand::New {
-        host,
-        name,
-        cwd,
-        command,
-      } => create_session(&host, name, command_spec(command), cwd).await,
-      SessionCommand::Kill { host, session } => kill_session(&host, &session).await,
+      SessionCommand::List => list_sessions(&target).await,
+      SessionCommand::New { name, cwd, command } => {
+        create_session(&target, name, command_spec(command), cwd).await
+      }
+      SessionCommand::Kill { session } => kill_session(&target, &session).await,
     },
     Command::Shell {
-      host,
       session,
       resume_from,
       read_only,
       resize,
-    } => shell(&host, &session, resume_from, !read_only, resize).await,
+    } => shell(&target, &session, resume_from, !read_only, resize).await,
   }
 }
 
-async fn list_sessions(host: &str) -> Result<(), CliError> {
-  let sessions = remote_sessions(host).await?;
+async fn list_sessions(target: &ConnectionTarget) -> Result<(), CliError> {
+  let sessions = target_sessions(target).await?;
   if sessions.is_empty() {
     println!("no sessions");
     return Ok(());
@@ -54,19 +53,19 @@ async fn list_sessions(host: &str) -> Result<(), CliError> {
 }
 
 async fn create_session(
-  host: &str,
+  target: &ConnectionTarget,
   name: Option<String>,
   command: Option<CommandSpec>,
   working_directory: Option<String>,
 ) -> Result<(), CliError> {
-  let session = create_remote_session(host, name, command, working_directory).await?;
+  let session = create_target_session(target, name, command, working_directory).await?;
   println!("{}\t{}", session.session_id, session.name);
   Ok(())
 }
 
-async fn kill_session(host: &str, session: &str) -> Result<(), CliError> {
-  let response = remote_request(
-    host,
+async fn kill_session(target: &ConnectionTarget, session: &str) -> Result<(), CliError> {
+  let response = target_request(
+    target,
     ClientMessage::KillSession {
       session: session.into(),
     },
@@ -82,13 +81,13 @@ async fn kill_session(host: &str, session: &str) -> Result<(), CliError> {
 }
 
 async fn shell(
-  host: &str,
+  target: &ConnectionTarget,
   session: &str,
   initial_resume_from: Option<u64>,
   request_input_lease: bool,
   request_layout_lease: bool,
 ) -> Result<(), CliError> {
-  ensure_session(host, session).await?;
+  ensure_session(target, session).await?;
 
   let rmux_identity = rmux_identity();
   let mut resume_from = initial_resume_from;
@@ -97,7 +96,7 @@ async fn shell(
   let mut attachment_token = None;
 
   loop {
-    let stream = match open_ssh_tunnel(host).await {
+    let stream = match open_transport(target).await {
       Ok(stream) => stream,
       Err(error) if is_retryable_connection_error(&error) => {
         wait_to_reconnect(&mut reconnect_delay, &error).await;
@@ -154,17 +153,25 @@ async fn shell(
     match attach_interactive_with_options(stream, &attached, interactive_options).await {
       Ok(exit) => match exit.reason {
         AttachExitReason::Detached => {
-          eprintln!("ctl: detached locally from {host}:{session}");
+          eprintln!("ctl: detached from {}:{session}", target.label());
           return Ok(());
         }
         AttachExitReason::SessionEnded { exit_code } => {
-          eprintln!("ctl: {host}:{session} ended with exit code {exit_code:?}; not reconnecting");
+          eprintln!(
+            "ctl: {}:{session} ended with exit code {exit_code:?}; not reconnecting",
+            target.label()
+          );
           return Ok(());
         }
         AttachExitReason::ConnectionClosed => {
           resume_from = exit.next_sequence;
           recover_leases_after_connection_loss = true;
-          wait_to_reconnect(&mut reconnect_delay, "SSH connection closed").await;
+          let reason = if target.is_local() {
+            "local connection closed"
+          } else {
+            "SSH connection closed"
+          };
+          wait_to_reconnect(&mut reconnect_delay, reason).await;
         }
       },
       Err(error) if is_retryable_rmux_error(&error) => {
@@ -176,8 +183,8 @@ async fn shell(
   }
 }
 
-async fn ensure_session(host: &str, session: &str) -> Result<(), CliError> {
-  if remote_sessions(host)
+async fn ensure_session(target: &ConnectionTarget, session: &str) -> Result<(), CliError> {
+  if target_sessions(target)
     .await?
     .iter()
     .any(|candidate| candidate.name == session || candidate.session_id == session)
@@ -185,9 +192,9 @@ async fn ensure_session(host: &str, session: &str) -> Result<(), CliError> {
     return Ok(());
   }
 
-  match create_remote_session(host, Some(session.into()), None, None).await {
+  match create_target_session(target, Some(session.into()), None, None).await {
     Ok(created) => {
-      eprintln!("ctl: created remote session {}", created.name);
+      eprintln!("ctl: created session {}", created.name);
       Ok(())
     }
     Err(CliError::Rmux(RmuxClientError::Server {
@@ -198,21 +205,22 @@ async fn ensure_session(host: &str, session: &str) -> Result<(), CliError> {
   }
 }
 
-async fn remote_sessions(host: &str) -> Result<Vec<SessionInfo>, CliError> {
-  match remote_request(host, ClientMessage::ListSessions).await? {
+async fn target_sessions(target: &ConnectionTarget) -> Result<Vec<SessionInfo>, CliError> {
+  match target_request(target, ClientMessage::ListSessions).await? {
     ServerMessage::SessionList { sessions } => Ok(sessions),
     response => Err(unexpected("session_list", &response)),
   }
 }
 
-async fn create_remote_session(
-  host: &str,
+async fn create_target_session(
+  target: &ConnectionTarget,
   name: Option<String>,
   command: Option<CommandSpec>,
   working_directory: Option<String>,
 ) -> Result<SessionInfo, CliError> {
-  let response = remote_request(
-    host,
+  let working_directory = target_working_directory(target, working_directory)?;
+  let response = target_request(
+    target,
     ClientMessage::CreateSession {
       name,
       command,
@@ -227,9 +235,27 @@ async fn create_remote_session(
   }
 }
 
-async fn remote_request(host: &str, message: ClientMessage) -> Result<ServerMessage, CliError> {
-  let stream = open_ssh_tunnel(host).await?;
+async fn target_request(
+  target: &ConnectionTarget,
+  message: ClientMessage,
+) -> Result<ServerMessage, CliError> {
+  let stream = open_transport(target).await?;
   Ok(request(stream, &rmux_identity(), message).await?)
+}
+
+fn target_working_directory(
+  target: &ConnectionTarget,
+  requested: Option<String>,
+) -> Result<Option<String>, CliError> {
+  if requested.is_some() || !target.is_local() {
+    return Ok(requested);
+  }
+  let directory = env::current_dir().map_err(CliError::CurrentDirectory)?;
+  directory
+    .into_os_string()
+    .into_string()
+    .map(Some)
+    .map_err(CliError::NonUtf8CurrentDirectory)
 }
 
 fn rmux_identity() -> RmuxClientIdentity {
@@ -277,7 +303,7 @@ fn is_retryable_io_error(error: &io::Error) -> bool {
 
 async fn wait_to_reconnect(delay: &mut Duration, reason: impl std::fmt::Display) {
   eprintln!(
-    "ctl: remote connection interrupted ({reason}); reconnecting in {} ms",
+    "ctl: connection interrupted ({reason}); reconnecting in {} ms",
     delay.as_millis()
   );
   sleep(*delay).await;
@@ -293,6 +319,10 @@ fn unexpected(expected: &'static str, response: &ServerMessage) -> CliError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error("could not determine the current working directory: {0}")]
+  CurrentDirectory(io::Error),
+  #[error("the current working directory is not valid UTF-8: {0:?}")]
+  NonUtf8CurrentDirectory(std::ffi::OsString),
   #[error(transparent)]
   Control(#[from] CoreError),
   #[error(transparent)]

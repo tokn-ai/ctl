@@ -4,26 +4,27 @@ mod unix;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Remote rmux sessions over OpenSSH")]
+#[command(version, about = "Persistent local or remote rmux sessions")]
 struct Arguments {
+  /// Use an OpenSSH destination or Host alias instead of the local rmux daemon.
+  #[arg(long, short = 'H', global = true, value_name = "DESTINATION")]
+  host: Option<String>,
+
   #[command(subcommand)]
   command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-  /// Manage persistent shell sessions on an SSH host.
+  /// Manage persistent shell sessions.
   Session {
     #[command(subcommand)]
     command: SessionCommand,
   },
 
-  /// Attach to a remote shell, creating a named shell when it is absent.
+  /// Attach to a shell, creating the named session when it is absent.
   Shell {
-    /// OpenSSH destination or Host alias.
-    host: String,
-
-    /// Remote session name or ID. Defaults to the named `shell` session.
+    /// Session name or ID. Defaults to the named `shell` session.
     #[arg(default_value = "shell")]
     session: String,
 
@@ -35,7 +36,7 @@ enum Command {
     #[arg(long)]
     read_only: bool,
 
-    /// Request layout ownership and explicitly resize the remote PTY.
+    /// Request layout ownership and explicitly resize the PTY.
     #[arg(long)]
     resize: bool,
   },
@@ -43,36 +44,27 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommand {
-  /// List sessions on an SSH host.
-  List {
-    /// OpenSSH destination or Host alias.
-    host: String,
-  },
+  /// List sessions.
+  List,
 
-  /// Create a persistent remote shell session.
+  /// Create a persistent shell session.
   New {
-    /// OpenSSH destination or Host alias.
-    host: String,
-
     /// Stable, human-readable session name.
     #[arg(long, short)]
     name: Option<String>,
 
-    /// Initial remote working directory for an explicit command.
+    /// Initial working directory. Local sessions default to the current directory.
     #[arg(long)]
     cwd: Option<String>,
 
-    /// Program and arguments. Omit to use the remote default shell.
+    /// Program and arguments. Omit to use the target's default shell.
     #[arg(last = true)]
     command: Vec<String>,
   },
 
-  /// Terminate a remote session by name or ID.
+  /// Terminate a session by name or ID.
   Kill {
-    /// OpenSSH destination or Host alias.
-    host: String,
-
-    /// Remote session name or ID.
+    /// Session name or ID.
     session: String,
   },
 }
@@ -91,4 +83,30 @@ async fn main() {
 fn main() {
   eprintln!("ctl: interactive terminal support is not yet implemented on this platform");
   std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn local_shell_is_the_zero_configuration_default() {
+    let arguments = Arguments::try_parse_from(["ctl", "shell"]).unwrap();
+    assert_eq!(arguments.host, None);
+    assert!(matches!(
+      arguments.command,
+      Command::Shell { session, .. } if session == "shell"
+    ));
+  }
+
+  #[test]
+  fn host_flag_selects_ssh_without_consuming_the_session_name() {
+    let arguments =
+      Arguments::try_parse_from(["ctl", "--host", "workstation", "shell", "development"]).unwrap();
+    assert_eq!(arguments.host.as_deref(), Some("workstation"));
+    assert!(matches!(
+      arguments.command,
+      Command::Shell { session, .. } if session == "development"
+    ));
+  }
 }

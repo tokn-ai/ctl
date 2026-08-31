@@ -27,5 +27,8 @@ pnpm build
 cargo test -p rmux-gui
 ```
 
-The GUI never resizes an existing PTY on attach. Use the explicit layout action
-when this window should acquire layout ownership and resize the PTY once.
+The GUI never resizes an existing PTY merely because it was selected. **Resize
+with window** explicitly acquires layout ownership and then keeps the PTY grid
+matched to this window; turning it off releases layout ownership. Sessions
+created by this GUI start in resize-with-window mode because this window
+establishes their initial layout.

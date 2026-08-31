@@ -107,8 +107,10 @@ journal. Disk-backed history and restart policies are later milestones.
 
 The `rmux` desktop app lists and creates local sessions, renders one terminal
 pane, and exposes input and layout ownership separately. Selecting a session
-does not resize its PTY. **Use window for layout** is the explicit action that
-acquires layout ownership and applies the window's measured terminal size.
+does not resize its PTY. **Resize with window** explicitly acquires layout
+ownership and continuously matches the PTY to the window; turning it off
+releases layout ownership. A session created in the GUI starts with this mode
+enabled because that window establishes its initial layout.
 Closing or detaching the app leaves the daemon-owned shell running.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)

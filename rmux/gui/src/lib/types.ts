@@ -55,6 +55,7 @@ export interface OpenAttachmentRequest {
   resume_from: Sequence | null;
   terminal_size: TerminalSize;
   request_input_lease: boolean;
+  request_layout_lease: boolean;
 }
 
 export interface OpenAttachmentResponse {
@@ -197,5 +198,6 @@ export interface AttachmentViewState {
   reconnect_sequence: Sequence | null;
   history_gap: boolean;
   terminal_size_mismatch: boolean;
+  resize_with_window: boolean;
   message: string | null;
 }

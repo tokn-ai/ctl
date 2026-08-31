@@ -10,6 +10,21 @@ import {
 } from "./TerminalPresenter";
 
 const DEFAULT_SCROLLBACK_LINES = 10_000;
+const MAX_TERMINAL_DIMENSION = 65_535;
+
+function validDimensions(
+  dimensions: ProposedDimensions | null,
+): dimensions is ProposedDimensions {
+  return (
+    dimensions !== null &&
+    Number.isInteger(dimensions.columns) &&
+    Number.isInteger(dimensions.rows) &&
+    dimensions.columns >= 2 &&
+    dimensions.rows >= 1 &&
+    dimensions.columns <= MAX_TERMINAL_DIMENSION &&
+    dimensions.rows <= MAX_TERMINAL_DIMENSION
+  );
+}
 
 export class XtermRenderer {
   private readonly presenter: TerminalPresenter;
@@ -46,7 +61,37 @@ export class XtermRenderer {
   }
 
   proposeDimensions(): ProposedDimensions | null {
-    return this.presenter.proposeDimensions();
+    const dimensions = this.presenter.proposeDimensions();
+    return validDimensions(dimensions) ? dimensions : null;
+  }
+
+  observeDimensions(
+    onDimensions: (dimensions: ProposedDimensions) => void,
+  ): () => void {
+    let animationFrame: number | null = null;
+    const publish = () => {
+      animationFrame = null;
+      const dimensions = this.proposeDimensions();
+      if (dimensions) {
+        onDimensions(dimensions);
+      }
+    };
+    const schedule = () => {
+      if (animationFrame !== null) {
+        cancelAnimationFrame(animationFrame);
+      }
+      animationFrame = requestAnimationFrame(publish);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(this.container);
+    schedule();
+
+    return () => {
+      observer.disconnect();
+      if (animationFrame !== null) {
+        cancelAnimationFrame(animationFrame);
+      }
+    };
   }
 
   focus(): void {

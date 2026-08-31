@@ -56,7 +56,7 @@ export function TerminalPage() {
           session,
           ...current.filter((item) => item.session_id !== session.session_id),
         ]);
-        await attachment.connect(session);
+        await attachment.connect(session, { resize_with_window: true });
       } catch (error) {
         setListError(errorMessage(error));
       } finally {
@@ -82,8 +82,9 @@ export function TerminalPage() {
         <TerminalToolbar
           state={attachment.state}
           onToggleInput={() => void attachment.toggleInputLease()}
-          onUseWindowForLayout={() => void attachment.useWindowForLayout()}
-          onReleaseLayout={() => void attachment.releaseLayout()}
+          onToggleResizeWithWindow={() =>
+            void attachment.toggleResizeWithWindow()
+          }
           onReconnect={() => void attachment.reconnect()}
           onDetach={() => void attachment.detach()}
         />

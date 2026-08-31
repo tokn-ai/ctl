@@ -3,8 +3,7 @@ import type { AttachmentViewState } from "../../lib/types";
 interface TerminalToolbarProps {
   state: AttachmentViewState;
   onToggleInput(): void;
-  onUseWindowForLayout(): void;
-  onReleaseLayout(): void;
+  onToggleResizeWithWindow(): void;
   onReconnect(): void;
   onDetach(): void;
 }
@@ -12,8 +11,7 @@ interface TerminalToolbarProps {
 export function TerminalToolbar({
   state,
   onToggleInput,
-  onUseWindowForLayout,
-  onReleaseLayout,
+  onToggleResizeWithWindow,
   onReconnect,
   onDetach,
 }: TerminalToolbarProps) {
@@ -21,6 +19,9 @@ export function TerminalToolbar({
   const canReconnect =
     state.session !== null &&
     (state.phase === "disconnected" || state.phase === "error");
+  const resizeActive =
+    state.resize_with_window && state.layout_lease.owned_by_client;
+  const resizePending = state.resize_with_window && !resizeActive;
 
   return (
     <header className="terminal-toolbar">
@@ -40,22 +41,25 @@ export function TerminalToolbar({
           onClick={onToggleInput}
           disabled={!attached}
           className={state.input_lease.owned_by_client ? "active-control" : ""}
+          aria-pressed={state.input_lease.owned_by_client}
           title="Input ownership is independent from terminal layout."
         >
           {state.input_lease.owned_by_client ? "Release input" : "Request input"}
         </button>
         <button
           type="button"
-          onClick={onUseWindowForLayout}
+          onClick={onToggleResizeWithWindow}
           disabled={!attached}
-          className={state.layout_lease.owned_by_client ? "active-control" : ""}
-          title="Explicitly acquire layout and resize the PTY to this window once."
+          className={resizeActive ? "active-control" : ""}
+          aria-pressed={resizeActive}
+          title="Acquire layout ownership and keep the PTY matched to this window."
         >
-          Use window for layout
+          {resizePending
+            ? "Starting resize…"
+            : resizeActive
+              ? "Stop resizing"
+              : "Resize with window"}
         </button>
-        {state.layout_lease.owned_by_client ? (
-          <button type="button" onClick={onReleaseLayout}>Release layout</button>
-        ) : null}
         <button type="button" onClick={onDetach} disabled={!state.attachment_id}>
           Detach
         </button>

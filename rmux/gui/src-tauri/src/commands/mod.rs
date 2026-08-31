@@ -104,7 +104,7 @@ async fn open_reserved_attachment(
       resume_from,
       terminal_size,
       request_input_lease: request.request_input_lease,
-      request_layout_lease: false,
+      request_layout_lease: request.request_layout_lease,
       request_command_line: false,
     },
   )

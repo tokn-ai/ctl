@@ -226,6 +226,7 @@ pub struct OpenAttachmentRequestDto {
   pub terminal_size: TerminalSizeDto,
   pub resume_from: Option<String>,
   pub request_input_lease: bool,
+  pub request_layout_lease: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

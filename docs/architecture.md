@@ -130,11 +130,14 @@ late callbacks from a replaced renderer generation.
 The initial desktop bridge shows shell type, cwd, prompt phase, and the TUI
 hint, but does not request or serialize the sensitive editable command buffer.
 
-The renderer adopts daemon-authoritative PTY geometry. It uses the fit add-on
-only to measure a proposed size after the user explicitly chooses **Use window
-for layout**; normal window resizing never sends a PTY resize and never acquires
-layout ownership. Scrollback, scrolling, selection, and copy remain local xterm
-behavior and generate no protocol viewport commands.
+The renderer adopts daemon-authoritative PTY geometry. Selecting an existing
+session never acquires layout ownership or changes its PTY grid. **Resize with
+window** explicitly acquires the layout lease, measures the terminal container,
+and sends debounced PTY resizes while that lease remains held; turning the mode
+off releases the lease. A GUI-created session may request the lease with its
+initial attachment because that GUI establishes the new session's layout.
+Scrollback, scrolling, selection, and copy remain local xterm behavior and
+generate no protocol viewport commands.
 
 ## Attachment ownership
 

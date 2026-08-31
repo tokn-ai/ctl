@@ -17,6 +17,7 @@ import {
 } from "../features/commands/terminalCommands";
 import type { AppCommand } from "../features/commands/types";
 import { useCommandShortcuts } from "../features/commands/useCommandShortcuts";
+import { useNativeCommandEvents } from "../features/commands/useNativeCommandEvents";
 import {
   SessionListRefreshGuard,
   prependSession,
@@ -381,6 +382,7 @@ export function TerminalPage() {
   );
 
   useCommandShortcuts(commands, shortcutPlatform, executeCommand);
+  useNativeCommandEvents(commands, executeCommand);
 
   function executeCommandById(commandId: string) {
     const command = commands.find((candidate) => candidate.id === commandId);

@@ -101,6 +101,30 @@ describe("terminal commands", () => {
     expect(actions.requestCloseSession).toHaveBeenCalledWith(sessions[1]);
   });
 
+  it("uses native macOS and terminal-safe cross-platform close shortcuts", () => {
+    const macos = setup("first", "macos");
+    const other = setup("first", "other");
+
+    expect(findCommand(macos.commands, COMMAND_IDS.disconnect)).toMatchObject({
+      keybinding: { code: "KeyW", primary: true, shift: false },
+      macosNativeKeybinding: true,
+    });
+    expect(findCommand(macos.commands, COMMAND_IDS.close)).toMatchObject({
+      keybinding: { code: "KeyE", primary: true, shift: false },
+      macosNativeKeybinding: true,
+    });
+    expect(findCommand(other.commands, COMMAND_IDS.disconnect).keybinding).toEqual({
+      code: "KeyW",
+      primary: true,
+      shift: true,
+    });
+    expect(findCommand(other.commands, COMMAND_IDS.close).keybinding).toEqual({
+      code: "KeyE",
+      primary: true,
+      shift: true,
+    });
+  });
+
   it("opens a shell tab with the platform-specific shortcut", () => {
     const macos = setup("first", "macos");
     const other = setup("first", "other");

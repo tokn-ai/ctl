@@ -177,16 +177,22 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.disconnect,
       category: "Session",
-      title: "Disconnect Active Tab",
+      title: "Detach Active Tab",
       detail: activeSession?.name,
-      keywords: ["detach"],
+      keywords: ["detach", "disconnect"],
+      keybinding: {
+        code: "KeyW",
+        primary: true,
+        shift: context.shortcutPlatform === "other",
+      },
+      macosNativeKeybinding: true,
       enabled:
         activeSession !== null &&
         context.phase !== "ended" &&
         !disconnectingActive &&
         !closingActive,
       disabledReason: activeSession
-        ? "The active session cannot be disconnected right now."
+        ? "The active tab cannot be detached right now."
         : "No session is active.",
       run: () => {
         if (activeSession) {
@@ -199,7 +205,13 @@ export function buildTerminalCommands(
       category: "Session",
       title: "Close Active Session",
       detail: activeSession?.name,
-      keywords: ["kill", "terminate"],
+      keywords: ["exit", "kill", "terminate"],
+      keybinding: {
+        code: "KeyE",
+        primary: true,
+        shift: context.shortcutPlatform === "other",
+      },
+      macosNativeKeybinding: true,
       enabled: activeSession !== null && !closingActive && !disconnectingActive,
       disabledReason: activeSession
         ? "The active session is already changing state."

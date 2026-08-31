@@ -33,11 +33,16 @@ terminal shortcuts are:
 - new shell: `Cmd/Ctrl-Shift-N`
 - new tab in the current shell-reported directory: `Cmd-T` on macOS or
   `Ctrl-Shift-T` on Windows/Linux
+- detach active tab: `Cmd-W` on macOS or `Ctrl-Shift-W` on Windows/Linux
+- close active session after confirmation: `Cmd-E` on macOS or `Ctrl-Shift-E`
+  on Windows/Linux
 - next tab: `Cmd/Ctrl-Shift-]`
 - previous tab: `Cmd/Ctrl-Shift-[`
 
 These shortcuts are local to the focused app. Other key combinations continue
-to xterm and the PTY unchanged.
+to xterm and the PTY unchanged. The macOS application menu owns `Cmd-W` and
+`Cmd-E` so native window-close handling cannot race the WebView; `Cmd-Q` keeps
+its standard application-quit behavior.
 
 ## Verify
 

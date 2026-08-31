@@ -14,6 +14,8 @@ export interface AppCommand {
   detail?: string;
   keywords?: readonly string[];
   keybinding?: Keybinding;
+  /** The native menu dispatches this shortcut on macOS to avoid duplicate handling. */
+  macosNativeKeybinding?: boolean;
   enabled: boolean;
   disabledReason?: string;
   visibleInPalette?: boolean;

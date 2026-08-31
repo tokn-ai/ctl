@@ -178,6 +178,14 @@ The new-tab command uses `Cmd-T` on macOS and `Ctrl-Shift-T` on
 Windows/Linux. It remains disabled with an explanatory palette reason until a
 current shell-reported cwd is available.
 
+On macOS, the native application menu routes `Cmd-W` to the shared detach-tab
+command and `Cmd-E` to the shared close-session confirmation command. The
+WebView does not also process those accelerators, preventing one keystroke from
+dispatching twice. `Cmd-Q` remains the standard application quit and therefore
+detaches without killing daemon-owned sessions. Windows and Linux use
+`Ctrl-Shift-W` and `Ctrl-Shift-E` in the WebView so terminal `Ctrl-W` and
+`Ctrl-E` remain PTY input.
+
 ## Attachment ownership
 
 `rmuxd` treats each `attach_session` connection as an attachment. Attachments

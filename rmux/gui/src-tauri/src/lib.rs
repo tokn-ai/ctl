@@ -2,6 +2,8 @@ mod commands;
 mod dto;
 mod error;
 mod local_transport;
+#[cfg(target_os = "macos")]
+mod native_menu;
 mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -11,8 +13,13 @@ mod state;
 ///
 /// Panics when Tauri cannot initialize or run the configured application.
 pub fn run() {
-  tauri::Builder::default()
-    .manage(state::AppState::default())
+  let builder = tauri::Builder::default().manage(state::AppState::default());
+  #[cfg(target_os = "macos")]
+  let builder = builder
+    .menu(native_menu::build)
+    .on_menu_event(|app_handle, event| native_menu::handle(app_handle, &event));
+
+  builder
     .setup(|app| {
       state::register_main_window_cleanup(app);
       Ok(())

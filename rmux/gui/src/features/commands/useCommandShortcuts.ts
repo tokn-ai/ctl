@@ -1,6 +1,16 @@
 import { useEffect, useRef } from "react";
 import { matchesKeybinding } from "./keybindings";
-import type { AppCommand, ShortcutPlatform } from "./types";
+import type { AppCommand, Keybinding, ShortcutPlatform } from "./types";
+
+export function isWebviewKeybinding(
+  command: AppCommand,
+  platform: ShortcutPlatform,
+): command is AppCommand & { keybinding: Keybinding } {
+  return Boolean(
+    command.keybinding &&
+      !(platform === "macos" && command.macosNativeKeybinding),
+  );
+}
 
 export function useCommandShortcuts(
   commands: readonly AppCommand[],
@@ -19,7 +29,7 @@ export function useCommandShortcuts(
       }
       const command = commandsRef.current.find(
         (candidate) =>
-          candidate.keybinding &&
+          isWebviewKeybinding(candidate, platform) &&
           matchesKeybinding(event, candidate.keybinding, platform),
       );
       if (!command) {

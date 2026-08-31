@@ -133,6 +133,12 @@ Only the active tab is attached through the window's attachment actor. Closing
 a tab detaches its view without terminating the daemon-owned session. The
 command is available only when shell awareness has reported a cwd.
 
+`Cmd-W` detaches the active tab, while `Cmd-E` opens the existing confirmation
+for terminating its daemon-owned session. The Windows/Linux equivalents are
+`Ctrl-Shift-W` and `Ctrl-Shift-E`, leaving ordinary terminal control keys
+untouched. On macOS these are native application-menu accelerators; `Cmd-Q`
+retains its standard meaning and quits the app without terminating sessions.
+
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).

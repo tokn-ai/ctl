@@ -34,7 +34,15 @@ palette.
 
 Open the command palette with `Cmd-Shift-P` on macOS or `Ctrl-Shift-P` on
 Windows/Linux. It exposes session creation, refresh, switching, disconnect and
-close, plus terminal input, layout, reconnect, and focus actions. Default
+close, plus terminal input, layout, reconnect, focus, and a destructive
+`Restart rmuxd` maintenance action. Restart has no shortcut or permanent
+button: selecting it in the palette changes it into a second confirmation
+command. It first verifies the running daemon's separate local-control
+endpoint; an older daemon that lacks it leaves the active tab attached and
+reports that restart is unavailable. Once accepted, it terminates every local
+rmux session before both daemon endpoints drain and a fresh daemon starts. It
+cannot preserve daemon-owned PTYs, has no remote `ctl` equivalent, and is not a
+version-mismatch escape hatch: protocol upgrades must remain compatible. Default
 terminal shortcuts are:
 
 - new shell: `Cmd/Ctrl-Shift-N`

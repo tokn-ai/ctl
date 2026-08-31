@@ -54,6 +54,10 @@ export interface KillSessionRequest {
   session_id: string;
 }
 
+export interface RestartLocalDaemonResponse {
+  terminated_sessions: number;
+}
+
 export interface OpenAttachmentRequest {
   session: string;
   resume_from: Sequence | null;

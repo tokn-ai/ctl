@@ -28,6 +28,7 @@ pub fn run() {
       commands::list_sessions,
       commands::create_session,
       commands::kill_session,
+      commands::restart_local_daemon,
       commands::open_attachment,
       commands::send_input,
       commands::resize_attachment,

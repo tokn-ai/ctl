@@ -19,6 +19,8 @@ export interface AppCommand {
   enabled: boolean;
   disabledReason?: string;
   visibleInPalette?: boolean;
+  /** Keep the palette open when this starts a staged command flow. */
+  keepPaletteOpen?: boolean;
   focusTerminalAfterRun?: boolean;
   run(): void;
 }

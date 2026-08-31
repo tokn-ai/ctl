@@ -1,10 +1,22 @@
-# rmux protocol version 7
+# rmux protocol version 6
 
 The protocol is independent of local IPC and future remote transport. Version
-7 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+6 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
+
+### Additive v6 fields
+
+The running-command title fields are an additive extension of version 6, not a
+handshake-version change. A compatible implementation must accept an
+`attach_session` request without `request_running_command` and treat it as
+`false`; it must accept a `shell.capabilities` value without
+`reports_running_command` and treat it as `false`; and it must accept a
+`shell_state` without `running_command_redacted` or `running_command` and
+treat them as `false` and `null`, respectively. Version-6 implementations
+also ignore unrecognized object fields. This lets a newer client fall back to
+the shell/path title when attached to an already-running older v6 daemon.
 
 ## Connection lifecycle
 
@@ -27,7 +39,7 @@ Creating a session carries its initial working directory separately from the
 optional command, so the daemon's own process directory is never observable as
 session state. Its name is also optional; an omitted name receives a
 daemon-assigned unique name. The exact automatic naming policy is an
-implementation detail rather than a version-7 wire guarantee.
+implementation detail rather than a version-6 wire guarantee.
 
 `kill_session` is a one-response command that explicitly terminates the
 selected session and therefore ends every attachment. It is distinct from
@@ -235,7 +247,7 @@ local reconnect cursor past the transition. It can continue to show best-effort
 output, but its next attach must omit `resume_from` so `rmuxd` supplies a
 geometry-safe checkpoint.
 
-Geometry transitions are not raw VT bytes and version 7 deliberately does not
+Geometry transitions are not raw VT bytes and version 6 deliberately does not
 add a second resume cursor for them. A caller may use `resume_from` only for a
 renderer that has processed the complete prior attachment stream, including
 geometry messages. If the requested raw position is at or before the most

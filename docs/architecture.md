@@ -116,6 +116,27 @@ matching row. **Disconnect** removes the active tab, detaches its attachment,
 and preserves the PTY; **Close** is the explicit one-shot kill operation and
 terminates the session for all attachments.
 
+`Restart rmuxd` is a command-palette-only, destructive maintenance action. It
+first preflights a separate owner-only local-control endpoint beside the normal
+data endpoint. If an already-running older daemon does not support that
+endpoint, the action returns `daemon_restart_unsupported` before detaching the
+active view. After it accepts restart, `rmuxd` atomically stops admitting new
+sessions and attachments, snapshots all live sessions, and requests their
+termination. Existing data connections are then closed so a stalled client
+cannot pin daemon drain; a connected attachment may observe its normal
+session-ended event before that close. The GUI waits for both local endpoints
+to drain, then starts a fresh daemon. It never unlinks a live endpoint or
+guesses and signals a process ID.
+
+The local-control endpoint is deliberately distinct from `rmux-proto` and is
+never relayed by `ctld`; a remote `rmux_tunnel` client cannot restart a daemon.
+Because `rmuxd` owns the PTYs, this is not a reconnect or session-preserving
+recovery mechanism. If a restart has been accepted but the old daemon does not
+drain in time, the action fails without force-stopping it. Raw-protocol version
+compatibility remains the solution for an incompatible daemon, rather than
+turning restart into a protocol-mismatch escape hatch. See
+`docs/rmux-local-control.md` for the local-control protocol and lifecycle.
+
 Concurrent CLI and GUI auto-start attempts may launch more than one daemon
 candidate. Candidates serialize stale-socket inspection and replacement with
 an owner-only endpoint lock, so a losing candidate cannot unlink a socket that

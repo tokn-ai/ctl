@@ -11,6 +11,7 @@ import type {
   KillSessionRequest,
   OpenAttachmentRequest,
   OpenAttachmentResponse,
+  RestartLocalDaemonResponse,
   SessionSummary,
 } from "./types";
 
@@ -31,6 +32,10 @@ export async function createSession(
 
 export async function killSession(request: KillSessionRequest): Promise<void> {
   await invoke("kill_session", { request });
+}
+
+export async function restartLocalDaemon(): Promise<RestartLocalDaemonResponse> {
+  return invoke<RestartLocalDaemonResponse>("restart_local_daemon");
 }
 
 export async function openAttachment(

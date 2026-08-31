@@ -21,6 +21,7 @@ export const COMMAND_IDS = {
   toggleResize: "terminal.toggle_resize_with_window",
   reconnect: "terminal.reconnect",
   focus: "terminal.focus",
+  restartDaemon: "daemon.restart",
 } as const;
 
 export const SHOW_PALETTE_KEYBINDING: Keybinding = {
@@ -45,6 +46,8 @@ interface TerminalCommandContext {
   disconnectingSessionId: string | null;
   terminalReady: boolean;
   currentWorkingDirectory: string | null;
+  daemonRestartConfirmationPending: boolean;
+  restartingDaemon: boolean;
   shortcutPlatform: ShortcutPlatform;
 }
 
@@ -61,6 +64,8 @@ interface TerminalCommandActions {
   toggleResizeWithWindow(): void;
   reconnect(): void;
   focusTerminal(): void;
+  requestDaemonRestart(): void;
+  confirmDaemonRestart(): void;
 }
 
 export function buildTerminalCommands(
@@ -98,6 +103,18 @@ export function buildTerminalCommands(
     context.sessions.find(
       (session) => session.session_id === context.pendingCloseSessionId,
     ) ?? null;
+  const daemonRestartInteractionBlocked =
+    context.daemonRestartConfirmationPending || context.restartingDaemon;
+  const daemonRestartInteractionDisabledReason = context.restartingDaemon
+    ? "rmuxd is restarting."
+    : "Confirm or cancel the pending rmuxd restart first.";
+  const daemonRestartBlocked =
+    context.creating || context.createFormOpen || context.restartingDaemon;
+  const daemonRestartDisabledReason = context.restartingDaemon
+    ? "rmuxd is already restarting."
+    : context.creating
+      ? "Wait for the shell being created to finish."
+      : "Close the new-shell form before restarting rmuxd.";
 
   const commands: AppCommand[] = [
     {
@@ -116,10 +133,18 @@ export function buildTerminalCommands(
       title: "New Shell",
       keywords: ["create", "start"],
       keybinding: { code: "KeyN", primary: true, shift: true },
-      enabled: !context.creating && !context.createFormOpen,
-      disabledReason: context.creating
-        ? "A shell is being created."
-        : "The new-shell form is already open.",
+      enabled:
+        !context.creating &&
+        !context.createFormOpen &&
+        !context.daemonRestartConfirmationPending &&
+        !context.restartingDaemon,
+      disabledReason: context.restartingDaemon
+        ? "rmuxd is restarting."
+        : context.daemonRestartConfirmationPending
+          ? "Confirm or cancel the pending rmuxd restart first."
+          : context.creating
+            ? "A shell is being created."
+            : "The new-shell form is already open.",
       focusTerminalAfterRun: false,
       run: actions.showNewShellForm,
     },
@@ -134,10 +159,18 @@ export function buildTerminalCommands(
         primary: true,
         shift: context.shortcutPlatform === "other",
       },
-      enabled: context.currentWorkingDirectory !== null && !context.creating,
-      disabledReason: context.creating
-        ? "A terminal tab is already being created."
-        : "The current shell has not reported its working directory.",
+      enabled:
+        context.currentWorkingDirectory !== null &&
+        !context.creating &&
+        !context.daemonRestartConfirmationPending &&
+        !context.restartingDaemon,
+      disabledReason: context.restartingDaemon
+        ? "rmuxd is restarting."
+        : context.daemonRestartConfirmationPending
+          ? "Confirm or cancel the pending rmuxd restart first."
+          : context.creating
+            ? "A terminal tab is already being created."
+            : "The current shell has not reported its working directory.",
       focusTerminalAfterRun: false,
       run: actions.openShellTab,
     },
@@ -146,8 +179,10 @@ export function buildTerminalCommands(
       category: "Session",
       title: "Refresh Session List",
       keywords: ["reload"],
-      enabled: !context.listLoading,
-      disabledReason: "The session list is already refreshing.",
+      enabled: !context.listLoading && !daemonRestartInteractionBlocked,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : "The session list is already refreshing.",
       run: actions.refreshSessions,
     },
     {
@@ -159,8 +194,10 @@ export function buildTerminalCommands(
         primary: true,
         shift: true,
       },
-      enabled: nextTab !== null,
-      disabledReason: "There is no other tab to select.",
+      enabled: nextTab !== null && !daemonRestartInteractionBlocked,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : "There is no other tab to select.",
       run: () => {
         if (nextTab) {
           actions.selectSession(nextTab);
@@ -176,8 +213,10 @@ export function buildTerminalCommands(
         primary: true,
         shift: true,
       },
-      enabled: previousTab !== null,
-      disabledReason: "There is no other tab to select.",
+      enabled: previousTab !== null && !daemonRestartInteractionBlocked,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : "There is no other tab to select.",
       run: () => {
         if (previousTab) {
           actions.selectSession(previousTab);
@@ -200,10 +239,13 @@ export function buildTerminalCommands(
         activeSession !== null &&
         context.phase !== "ended" &&
         !disconnectingActive &&
-        !closingActive,
-      disabledReason: activeSession
-        ? "The active tab cannot be detached right now."
-        : "No session is active.",
+        !closingActive &&
+        !daemonRestartInteractionBlocked,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : activeSession
+          ? "The active tab cannot be detached right now."
+          : "No session is active.",
       run: () => {
         if (activeSession) {
           actions.disconnectSession(activeSession);
@@ -224,14 +266,18 @@ export function buildTerminalCommands(
         shift: context.shortcutPlatform === "other",
       },
       macosNativeKeybinding: true,
-      enabled: pendingCloseSession !== null
-        ? !context.closingSessionIds.has(pendingCloseSession.session_id)
-        : activeSession !== null && !closingActive && !disconnectingActive,
-      disabledReason: pendingCloseSession
-        ? "The session is already closing."
-        : activeSession
-          ? "The active session is already changing state."
-          : "No session is active.",
+      enabled:
+        !daemonRestartInteractionBlocked &&
+        (pendingCloseSession !== null
+          ? !context.closingSessionIds.has(pendingCloseSession.session_id)
+          : activeSession !== null && !closingActive && !disconnectingActive),
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : pendingCloseSession
+          ? "The session is already closing."
+          : activeSession
+            ? "The active session is already changing state."
+            : "No session is active.",
       focusTerminalAfterRun: false,
       run: () => {
         if (pendingCloseSession) {
@@ -246,8 +292,10 @@ export function buildTerminalCommands(
       category: "Terminal",
       title: context.inputOwned ? "Release Input" : "Request Input",
       keywords: ["lease", "ownership"],
-      enabled: activeTabAttached,
-      disabledReason: "Attach to a running session first.",
+      enabled: activeTabAttached && !daemonRestartInteractionBlocked,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : "Attach to a running session first.",
       run: actions.toggleInput,
     },
     {
@@ -257,8 +305,10 @@ export function buildTerminalCommands(
         ? "Stop Resizing with Window"
         : "Resize with Window",
       keywords: ["layout", "lease", "ownership"],
-      enabled: activeTabAttached,
-      disabledReason: "Attach to a running session first.",
+      enabled: activeTabAttached && !daemonRestartInteractionBlocked,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : "Attach to a running session first.",
       run: actions.toggleResizeWithWindow,
     },
     {
@@ -266,10 +316,12 @@ export function buildTerminalCommands(
       category: "Terminal",
       title: "Reconnect to Active Session",
       detail: activeSession?.name,
-      enabled: canReconnect,
-      disabledReason: activeSession
-        ? "The active session is not disconnected."
-        : "No session is active.",
+      enabled: canReconnect && !daemonRestartInteractionBlocked,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : activeSession
+          ? "The active session is not disconnected."
+          : "No session is active.",
       run: actions.reconnect,
     },
     {
@@ -279,6 +331,24 @@ export function buildTerminalCommands(
       enabled: context.terminalReady,
       disabledReason: "The terminal renderer is not ready.",
       run: actions.focusTerminal,
+    },
+    {
+      id: COMMAND_IDS.restartDaemon,
+      category: "Daemon",
+      title: context.daemonRestartConfirmationPending
+        ? "Confirm Restart rmuxd"
+        : "Restart rmuxd",
+      detail: context.daemonRestartConfirmationPending
+        ? "This terminates every local rmux session before starting a new daemon. Press Esc to cancel."
+        : "Terminate every local rmux session and start a new daemon.",
+      keywords: ["daemon", "restart", "protocol", "version", "recover"],
+      enabled: !daemonRestartBlocked,
+      disabledReason: daemonRestartDisabledReason,
+      keepPaletteOpen: !context.daemonRestartConfirmationPending,
+      focusTerminalAfterRun: false,
+      run: context.daemonRestartConfirmationPending
+        ? actions.confirmDaemonRestart
+        : actions.requestDaemonRestart,
     },
   ];
 
@@ -313,15 +383,18 @@ export function buildTerminalCommands(
       detail,
       keywords: ["attach", session.name],
       enabled:
+        !daemonRestartInteractionBlocked &&
         !context.closingSessionIds.has(session.session_id) &&
         (!selected || retryable),
-      disabledReason: context.closingSessionIds.has(session.session_id)
-        ? "This session is closing."
-        : attaching
-          ? "This session is already attaching."
-          : sessionAttached
-            ? "This session is already active."
-            : "This session has ended.",
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : context.closingSessionIds.has(session.session_id)
+          ? "This session is closing."
+          : attaching
+            ? "This session is already attaching."
+            : sessionAttached
+              ? "This session is already active."
+              : "This session has ended.",
       run: () => actions.selectSession(session),
     });
   }

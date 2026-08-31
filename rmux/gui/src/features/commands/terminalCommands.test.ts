@@ -28,6 +28,8 @@ function setup(
   phase: ConnectionPhase = "attached",
   attachmentSessionId: string | null = activeSessionId,
   pendingCloseSessionId: string | null = null,
+  daemonRestartConfirmationPending = false,
+  restartingDaemon = false,
 ) {
   const sessions = [session("first"), session("second"), session("third")];
   const tabs = sessions.filter((candidate) =>
@@ -46,6 +48,8 @@ function setup(
     toggleResizeWithWindow: vi.fn(),
     reconnect: vi.fn(),
     focusTerminal: vi.fn(),
+    requestDaemonRestart: vi.fn(),
+    confirmDaemonRestart: vi.fn(),
   };
   const commands = buildTerminalCommands(
     {
@@ -64,6 +68,8 @@ function setup(
       disconnectingSessionId: null,
       terminalReady: true,
       currentWorkingDirectory,
+      daemonRestartConfirmationPending,
+      restartingDaemon,
       shortcutPlatform,
     },
     actions,
@@ -268,5 +274,45 @@ describe("terminal commands", () => {
 
     expect(findCommand(commands, COMMAND_IDS.disconnect).enabled).toBe(false);
     expect(findCommand(commands, COMMAND_IDS.close).enabled).toBe(false);
+  });
+
+  it("stages a destructive daemon restart without a shortcut", () => {
+    const initial = setup();
+    const restart = findCommand(initial.commands, COMMAND_IDS.restartDaemon);
+
+    expect(restart).toMatchObject({
+      category: "Daemon",
+      title: "Restart rmuxd",
+      keepPaletteOpen: true,
+      focusTerminalAfterRun: false,
+    });
+    expect(restart.keybinding).toBeUndefined();
+    restart.run();
+    expect(initial.actions.requestDaemonRestart).toHaveBeenCalledOnce();
+
+    const confirmation = setup(
+      "first",
+      "macos",
+      "/work/rmux",
+      ["first", "second", "third"],
+      "attached",
+      "first",
+      null,
+      true,
+    );
+    const confirm = findCommand(
+      confirmation.commands,
+      COMMAND_IDS.restartDaemon,
+    );
+
+    expect(confirm).toMatchObject({
+      title: "Confirm Restart rmuxd",
+      keepPaletteOpen: false,
+    });
+    expect(findCommand(confirmation.commands, COMMAND_IDS.newShell).enabled).toBe(
+      false,
+    );
+    confirm.run();
+    expect(confirmation.actions.confirmDaemonRestart).toHaveBeenCalledOnce();
   });
 });

@@ -82,6 +82,15 @@ impl From<SessionInfo> for SessionDto {
   }
 }
 
+/// Result of a destructive local `rmuxd` restart.
+///
+/// The count includes sessions for which the daemon accepted a termination
+/// request before the replacement daemon passed its health check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RestartLocalDaemonResponseDto {
+  pub terminated_sessions: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseKindDto {
@@ -575,6 +584,16 @@ mod tests {
       }))
       .is_err()
     );
+  }
+
+  #[test]
+  fn daemon_restart_result_uses_a_stable_session_count_field() {
+    let json = serde_json::to_value(RestartLocalDaemonResponseDto {
+      terminated_sessions: 2,
+    })
+    .unwrap();
+
+    assert_eq!(json["terminated_sessions"], 2);
   }
 
   #[test]

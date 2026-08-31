@@ -1,11 +1,13 @@
 #![cfg(unix)]
 
+use rmux_ipc::{control_socket_path, request_local_daemon_restart};
 use rmux_proto::{
   ClientMessage, CommandSpec, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
   SessionInfo, ShellState, TerminalSize, read_frame, write_frame,
 };
 use rmuxd::{DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT, DaemonConfig, run};
 use std::error::Error;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -861,6 +863,79 @@ async fn healthy_heartbeating_attachment_retains_its_leases() -> TestResult {
   wait_for_daemon_exit(daemon, "rmuxd did not exit after healthy owner test").await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_control_restart_ends_sessions_and_closes_existing_attachments() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let control_path = control_socket_path(&socket_path)?;
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(&socket_path, "restart-target", "IFS= read -r line").await?;
+
+  let (mut attached, attached_response) =
+    attach_session(&socket_path, &session.session_id, None, true, false).await?;
+  assert!(matches!(attached_response, ServerMessage::Attached { .. }));
+
+  assert_eq!(
+    std::fs::metadata(&control_path)?.permissions().mode() & 0o777,
+    0o600
+  );
+  let control_stream = connect_when_ready(&control_path).await?;
+  let terminated_sessions = request_local_daemon_restart(control_stream).await?;
+  assert_eq!(terminated_sessions, 1);
+
+  // Once the control endpoint has accepted restart, SessionEnded delivery is
+  // best effort: a backpressured client may instead see the guaranteed data
+  // connection closure that bounds daemon draining.
+  wait_for_session_end_or_connection_close(&mut attached).await?;
+  drop(attached);
+
+  wait_for_daemon_exit(
+    daemon,
+    "rmuxd did not exit after cooperative restart drained every connection",
+  )
+  .await?;
+  assert!(!socket_path.exists());
+  assert!(!control_path.exists());
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_control_restart_cancels_a_stalled_data_connection() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let control_path = control_socket_path(&socket_path)?;
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let _session = create_shell_session(&socket_path, "restart-target", "IFS= read -r line").await?;
+
+  // Complete the raw handshake, then leave the data handler blocked waiting
+  // for its first request. This used to keep ConnectionTracker alive until a
+  // client disconnected, which could exceed the GUI's 15-second drain bound.
+  let mut stalled = connect_when_ready(&socket_path).await?;
+  handshake(&mut stalled).await?;
+
+  let control_stream = connect_when_ready(&control_path).await?;
+  assert_eq!(request_local_daemon_restart(control_stream).await?, 1);
+
+  // Keep the peer socket open throughout shutdown. The daemon can only exit
+  // within this test's three-second bound if it actively canceled the stalled
+  // data handler rather than waiting for attachment liveness.
+  wait_for_daemon_exit(
+    daemon,
+    "rmuxd did not cancel a stalled data connection during cooperative restart",
+  )
+  .await?;
+  let response: Option<ServerMessage> = timeout(Duration::from_secs(1), read_frame(&mut stalled))
+    .await
+    .map_err(|_| "stalled data connection was not closed")??;
+  assert!(response.is_none(), "stalled data connection remained open");
+  drop(stalled);
+  assert!(!socket_path.exists());
+  assert!(!control_path.exists());
+  Ok(())
+}
+
 fn spawn_daemon(
   socket_path: &Path,
   journal_capacity_bytes: usize,
@@ -1334,6 +1409,28 @@ async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult {
       | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
         return Err(format!("expected output or session end, received {response:?}").into());
+      }
+    }
+  }
+}
+
+async fn wait_for_session_end_or_connection_close(stream: &mut UnixStream) -> TestResult {
+  loop {
+    let message: Option<ServerMessage> = timeout(Duration::from_secs(3), read_frame(stream))
+      .await
+      .map_err(|_| "timed out waiting for rmuxd to end or close the attachment")??;
+    let Some(message) = message else {
+      return Ok(());
+    };
+    match message {
+      ServerMessage::SessionEnded { .. } => return Ok(()),
+      ServerMessage::Output { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
+      response => {
+        return Err(
+          format!("expected output, session end, or close, received {response:?}").into(),
+        );
       }
     }
   }

@@ -19,6 +19,7 @@ const ATTACHMENT_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 #[derive(Clone, Default)]
 pub struct AppState {
   registry: Arc<Mutex<AttachmentRegistry>>,
+  daemon_restart_transition: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -69,6 +70,13 @@ impl PendingPresentation {
 }
 
 impl AppState {
+  /// Returns the process-wide lock which serializes destructive daemon
+  /// restart attempts across every GUI window.
+  #[must_use]
+  pub fn daemon_restart_transition(&self) -> Arc<Mutex<()>> {
+    Arc::clone(&self.daemon_restart_transition)
+  }
+
   pub async fn window_transition(&self, window_label: &str) -> Arc<Mutex<()>> {
     let mut registry = self.registry.lock().await;
     Arc::clone(
@@ -496,6 +504,18 @@ mod tests {
     let _first_guard = first.lock().await;
     assert!(same_window.try_lock().is_err());
     assert!(other_window.try_lock().is_ok());
+  }
+
+  #[tokio::test]
+  async fn daemon_restart_transition_is_shared_by_state_clones() {
+    let state = AppState::default();
+    let state_clone = state.clone();
+    let first = state.daemon_restart_transition();
+    let second = state_clone.daemon_restart_transition();
+
+    assert!(Arc::ptr_eq(&first, &second));
+    let _first_guard = first.lock().await;
+    assert!(second.try_lock().is_err());
   }
 
   #[test]

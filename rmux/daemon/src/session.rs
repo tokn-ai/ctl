@@ -45,8 +45,15 @@ pub struct Session {
   writer: Mutex<Box<dyn Write + Send>>,
   killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
   events: broadcast::Sender<SessionEvent>,
+  lifecycle: Mutex<SessionLifecycle>,
   shell_state_publisher: ShellStatePublisher,
   shell_reporter: Mutex<Option<ShellReporter>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionLifecycle {
+  Running,
+  Ended { exit_code: Option<u32> },
 }
 
 struct TerminalState {
@@ -153,8 +160,19 @@ impl Session {
     }
   }
 
-  pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
-    self.events.subscribe()
+  /// Subscribes to terminal events unless the session has already ended.
+  ///
+  /// The lifecycle check and broadcast subscription share one lock with
+  /// [`Self::publish_ended`]. An attachment therefore either subscribes before
+  /// the terminal event is broadcast or observes the completed lifecycle; it
+  /// can never wait forever after missing `SessionEvent::Ended`.
+  pub(crate) fn subscribe_events(&self) -> Result<broadcast::Receiver<SessionEvent>, Option<u32>> {
+    let lifecycle = lock(&self.lifecycle);
+    let events = self.events.subscribe();
+    match *lifecycle {
+      SessionLifecycle::Running => Ok(events),
+      SessionLifecycle::Ended { exit_code } => Err(exit_code),
+    }
   }
 
   /// Subscribes to the latest complete shell-awareness snapshot.
@@ -422,6 +440,11 @@ impl Session {
     if let Some(shell_state) = shell_state {
       publication.publish(shell_state);
     }
+    let mut lifecycle = lock(&self.lifecycle);
+    if matches!(*lifecycle, SessionLifecycle::Ended { .. }) {
+      return;
+    }
+    *lifecycle = SessionLifecycle::Ended { exit_code };
     let _ignored = self.events.send(SessionEvent::Ended { exit_code });
   }
 
@@ -644,6 +667,7 @@ impl SessionManager {
       writer: Mutex::new(writer),
       killer: Mutex::new(killer),
       events,
+      lifecycle: Mutex::new(SessionLifecycle::Running),
       shell_state_publisher: ShellStatePublisher::new(shell_state),
       shell_reporter: Mutex::new(Some(shell_reporter)),
     });
@@ -691,6 +715,20 @@ impl SessionManager {
         .then_with(|| left.name.cmp(&right.name))
     });
     sessions
+  }
+
+  /// Returns a stable snapshot of live sessions for a daemon-wide lifecycle
+  /// transition.
+  ///
+  /// Callers must hold the transition gate that serializes this snapshot with
+  /// [`Self::create`]. The returned `Arc`s keep selected sessions alive while
+  /// their termination is requested outside the registry lock.
+  pub(crate) fn snapshot_for_cooperative_restart(&self) -> Vec<Arc<Session>> {
+    lock(&self.inner.registry)
+      .sessions
+      .values()
+      .cloned()
+      .collect()
   }
 
   pub fn resolve(&self, selector: &str) -> Result<Arc<Session>, SessionManagerError> {

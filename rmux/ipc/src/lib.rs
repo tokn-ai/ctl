@@ -5,9 +5,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(unix)]
 use std::process::Stdio;
 #[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 #[cfg(unix)]
@@ -20,10 +24,46 @@ const DAEMON_EXECUTABLE_ENV: &str = "RMUXD_BIN";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(unix)]
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+#[cfg(unix)]
+const MAX_LOCAL_CONTROL_FRAME_SIZE: usize = 64 * 1024;
+
+/// Version of the owner-only local `rmuxd` control endpoint.
+///
+/// This protocol is intentionally separate from `rmux-proto`: `ctld` relays
+/// only the ordinary data endpoint and must never expose daemon-global local
+/// maintenance operations to remote `rmux_tunnel` clients.
+#[cfg(unix)]
+pub const LOCAL_CONTROL_PROTOCOL_VERSION: u16 = 1;
 
 #[must_use]
 pub fn socket_path() -> PathBuf {
   runtime_directory().join("rmux.sock")
+}
+
+/// Returns the owner-only local-control endpoint associated with a data
+/// endpoint.
+///
+/// Deriving the path from the selected data endpoint keeps custom `--socket`
+/// invocations isolated from one another while ensuring the control endpoint
+/// shares the same validated runtime directory.
+///
+/// # Errors
+///
+/// Returns an error if `socket_path` has no final path component.
+#[cfg(unix)]
+pub fn control_socket_path(socket_path: &Path) -> io::Result<PathBuf> {
+  let file_name = socket_path.file_name().ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::InvalidInput,
+      format!(
+        "rmux data endpoint {} has no final path component",
+        socket_path.display()
+      ),
+    )
+  })?;
+  let mut control_file_name = file_name.to_os_string();
+  control_file_name.push(".control");
+  Ok(socket_path.with_file_name(control_file_name))
 }
 
 #[must_use]
@@ -37,6 +77,270 @@ pub fn runtime_directory() -> PathBuf {
   }
 
   fallback_runtime_directory()
+}
+
+/// Request messages accepted only by `rmuxd`'s owner-only local-control
+/// endpoint.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LocalControlClientMessage {
+  Handshake { protocol_version: u16 },
+  RestartDaemon,
+}
+
+/// Response messages emitted by `rmuxd`'s owner-only local-control endpoint.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LocalControlServerMessage {
+  HandshakeAccepted {
+    protocol_version: u16,
+    restart_supported: bool,
+  },
+  RestartAccepted {
+    terminated_sessions: u32,
+  },
+  Error {
+    code: LocalControlErrorCode,
+    message: String,
+  },
+}
+
+/// Stable errors for the owner-only local-control protocol.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalControlErrorCode {
+  InvalidRequest,
+  ProtocolVersionMismatch,
+  RestartUnsupported,
+  RestartInProgress,
+  Internal,
+}
+
+/// Capabilities negotiated with the owner-only local-control endpoint.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalControlCapabilities {
+  pub restart_supported: bool,
+}
+
+/// Errors while framing the owner-only local-control protocol.
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+pub enum LocalControlCodecError {
+  #[error("I/O error: {0}")]
+  Io(#[from] io::Error),
+  #[error("local-control frame length {actual} exceeds the maximum of {maximum} bytes")]
+  FrameTooLarge { actual: usize, maximum: usize },
+  #[error("invalid local-control JSON frame: {0}")]
+  Json(#[from] serde_json::Error),
+}
+
+/// Client-side errors for owner-only local-control operations.
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+pub enum LocalControlClientError {
+  #[error(transparent)]
+  Codec(#[from] LocalControlCodecError),
+  #[error("the running rmuxd does not support cooperative restart")]
+  RestartUnsupported,
+  #[error("local-control server error {code:?}: {message}")]
+  Server {
+    code: LocalControlErrorCode,
+    message: String,
+  },
+  #[error("expected local-control {expected}, received {actual}")]
+  UnexpectedResponse {
+    expected: &'static str,
+    actual: &'static str,
+  },
+}
+
+/// Writes one length-prefixed local-control frame.
+///
+/// # Errors
+///
+/// Returns an error when serialization fails, the frame is oversized, or the
+/// transport cannot be written or flushed.
+#[cfg(unix)]
+pub async fn write_local_control_frame<W, T>(
+  writer: &mut W,
+  message: &T,
+) -> Result<(), LocalControlCodecError>
+where
+  W: AsyncWrite + Unpin,
+  T: Serialize,
+{
+  let payload = serde_json::to_vec(message)?;
+  if payload.len() > MAX_LOCAL_CONTROL_FRAME_SIZE {
+    return Err(LocalControlCodecError::FrameTooLarge {
+      actual: payload.len(),
+      maximum: MAX_LOCAL_CONTROL_FRAME_SIZE,
+    });
+  }
+
+  #[allow(clippy::cast_possible_truncation)]
+  let length = payload.len() as u32;
+  writer.write_all(&length.to_be_bytes()).await?;
+  writer.write_all(&payload).await?;
+  writer.flush().await?;
+  Ok(())
+}
+
+/// Reads one length-prefixed local-control frame.
+///
+/// A clean end of stream before a new frame returns `Ok(None)`.
+///
+/// # Errors
+///
+/// Returns an error when the transport fails mid-frame, the declared frame is
+/// too large, or its payload is not valid JSON for `T`.
+#[cfg(unix)]
+pub async fn read_local_control_frame<R, T>(
+  reader: &mut R,
+) -> Result<Option<T>, LocalControlCodecError>
+where
+  R: AsyncRead + Unpin,
+  T: DeserializeOwned,
+{
+  let mut length_bytes = [0_u8; 4];
+  match reader.read(&mut length_bytes[..1]).await {
+    Ok(0) => return Ok(None),
+    Ok(_) => {
+      reader.read_exact(&mut length_bytes[1..]).await?;
+    }
+    Err(error) => return Err(error.into()),
+  }
+
+  let length = u32::from_be_bytes(length_bytes) as usize;
+  if length > MAX_LOCAL_CONTROL_FRAME_SIZE {
+    return Err(LocalControlCodecError::FrameTooLarge {
+      actual: length,
+      maximum: MAX_LOCAL_CONTROL_FRAME_SIZE,
+    });
+  }
+
+  let mut payload = vec![0_u8; length];
+  reader.read_exact(&mut payload).await?;
+  Ok(Some(serde_json::from_slice(&payload)?))
+}
+
+/// Negotiates local-control capabilities with a connected daemon.
+///
+/// The caller retains the stream so it can decide whether to issue a later
+/// maintenance operation. A missing control endpoint is intentionally not
+/// translated here: callers need to distinguish a legacy running daemon from
+/// an endpoint that is simply absent.
+///
+/// # Errors
+///
+/// Returns an error when the handshake fails, the daemon rejects it, or its
+/// response is malformed.
+#[cfg(unix)]
+pub async fn local_control_handshake<S>(
+  stream: &mut S,
+) -> Result<LocalControlCapabilities, LocalControlClientError>
+where
+  S: AsyncRead + AsyncWrite + Unpin,
+{
+  write_local_control_frame(
+    stream,
+    &LocalControlClientMessage::Handshake {
+      protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+    },
+  )
+  .await?;
+
+  match read_local_control_frame(stream).await? {
+    Some(LocalControlServerMessage::HandshakeAccepted {
+      protocol_version,
+      restart_supported,
+    }) if protocol_version == LOCAL_CONTROL_PROTOCOL_VERSION => {
+      Ok(LocalControlCapabilities { restart_supported })
+    }
+    Some(LocalControlServerMessage::Error { code, message }) => {
+      Err(LocalControlClientError::Server { code, message })
+    }
+    Some(response) => Err(LocalControlClientError::UnexpectedResponse {
+      expected: "handshake_accepted",
+      actual: local_control_response_name(&response),
+    }),
+    None => Err(LocalControlClientError::UnexpectedResponse {
+      expected: "handshake_accepted",
+      actual: "end_of_stream",
+    }),
+  }
+}
+
+/// Requests a daemon-coordinated restart over an owner-only control stream.
+///
+/// This function handshakes before sending `restart_daemon`; an endpoint that
+/// does not advertise support is rejected locally and never receives an
+/// unknown maintenance request.
+///
+/// # Errors
+///
+/// Returns an error when the handshake fails, restart is unsupported, or the
+/// daemon rejects or cannot complete the request.
+#[cfg(unix)]
+pub async fn request_local_daemon_restart<S>(mut stream: S) -> Result<u32, LocalControlClientError>
+where
+  S: AsyncRead + AsyncWrite + Unpin,
+{
+  let capabilities = local_control_handshake(&mut stream).await?;
+  if !capabilities.restart_supported {
+    return Err(LocalControlClientError::RestartUnsupported);
+  }
+
+  request_local_daemon_restart_after_handshake(&mut stream).await
+}
+
+/// Sends `restart_daemon` over a stream whose successful local-control
+/// handshake already advertised restart support.
+///
+/// GUI callers retain this stream across their preflight-to-detach transition
+/// so they cannot detach a live view and then discover a different endpoint
+/// has no restart capability.
+///
+/// # Errors
+///
+/// Returns an error when the daemon rejects the request or does not return a
+/// valid restart result.
+#[cfg(unix)]
+pub async fn request_local_daemon_restart_after_handshake<S>(
+  stream: &mut S,
+) -> Result<u32, LocalControlClientError>
+where
+  S: AsyncRead + AsyncWrite + Unpin,
+{
+  write_local_control_frame(stream, &LocalControlClientMessage::RestartDaemon).await?;
+  match read_local_control_frame(stream).await? {
+    Some(LocalControlServerMessage::RestartAccepted {
+      terminated_sessions,
+    }) => Ok(terminated_sessions),
+    Some(LocalControlServerMessage::Error { code, message }) => {
+      Err(LocalControlClientError::Server { code, message })
+    }
+    Some(response) => Err(LocalControlClientError::UnexpectedResponse {
+      expected: "restart_accepted",
+      actual: local_control_response_name(&response),
+    }),
+    None => Err(LocalControlClientError::UnexpectedResponse {
+      expected: "restart_accepted",
+      actual: "end_of_stream",
+    }),
+  }
+}
+
+#[cfg(unix)]
+fn local_control_response_name(response: &LocalControlServerMessage) -> &'static str {
+  match response {
+    LocalControlServerMessage::HandshakeAccepted { .. } => "handshake_accepted",
+    LocalControlServerMessage::RestartAccepted { .. } => "restart_accepted",
+    LocalControlServerMessage::Error { .. } => "error",
+  }
 }
 
 /// Connects to the local daemon, starting it when the endpoint is absent.
@@ -58,6 +362,79 @@ pub async fn connect_or_start_daemon(socket_path: &Path) -> Result<UnixStream, C
     CONNECT_RETRY_INTERVAL,
   )
   .await
+}
+
+/// Connects to the local daemon without starting a replacement.
+///
+/// This is intended for lifecycle operations which must first communicate with
+/// the daemon already serving the endpoint. In particular, callers must not
+/// use [`connect_or_start_daemon`] until an existing daemon has released its
+/// endpoint or has been confirmed absent.
+///
+/// # Errors
+///
+/// Returns an error when no daemon is currently reachable at the endpoint.
+#[cfg(unix)]
+pub async fn connect_existing_daemon(socket_path: &Path) -> Result<UnixStream, ConnectError> {
+  UnixStream::connect(socket_path)
+    .await
+    .map_err(ConnectError::Connect)
+}
+
+/// Waits until no daemon is reachable at a local endpoint.
+///
+/// This function only probes the endpoint. It never removes a socket file,
+/// signals a process, or otherwise forces a daemon to stop.
+///
+/// # Errors
+///
+/// Returns an error when the endpoint stays reachable until `wait_timeout`,
+/// or when probing it fails for a reason other than an absent endpoint.
+#[cfg(unix)]
+pub async fn wait_for_daemon_drain(
+  socket_path: &Path,
+  wait_timeout: Duration,
+) -> Result<(), EndpointDrainError> {
+  wait_for_endpoint_drain_with(
+    || UnixStream::connect(socket_path),
+    wait_timeout,
+    CONNECT_RETRY_INTERVAL,
+  )
+  .await
+}
+
+/// Waits until both endpoints owned by one `rmuxd` instance are unavailable.
+///
+/// A replacement must not be started after only the data endpoint disappears:
+/// the exiting daemon may still own its paired local-control endpoint. This
+/// function only probes the endpoints; it never unlinks sockets or signals a
+/// process.
+///
+/// # Errors
+///
+/// Returns an error when either endpoint stays reachable until `wait_timeout`
+/// or when a probe fails for a reason other than endpoint absence.
+#[cfg(unix)]
+pub async fn wait_for_daemon_shutdown(
+  data_socket_path: &Path,
+  control_socket_path: &Path,
+  wait_timeout: Duration,
+) -> Result<(), EndpointDrainError> {
+  let deadline = Instant::now() + wait_timeout;
+  loop {
+    let data_is_gone = endpoint_is_unavailable(data_socket_path).await?;
+    let control_is_gone = endpoint_is_unavailable(control_socket_path).await?;
+    if data_is_gone && control_is_gone {
+      return Ok(());
+    }
+
+    if Instant::now() >= deadline {
+      return Err(EndpointDrainError::TimedOut {
+        timeout: wait_timeout,
+      });
+    }
+    sleep(CONNECT_RETRY_INTERVAL).await;
+  }
 }
 
 #[cfg(unix)]
@@ -88,6 +465,45 @@ where
       }
       Err(error) => return Err(ConnectError::Connect(error)),
     }
+  }
+}
+
+#[cfg(unix)]
+async fn wait_for_endpoint_drain_with<T, Connect, ConnectFuture>(
+  mut connect: Connect,
+  wait_timeout: Duration,
+  retry_interval: Duration,
+) -> Result<(), EndpointDrainError>
+where
+  Connect: FnMut() -> ConnectFuture,
+  ConnectFuture: Future<Output = io::Result<T>>,
+{
+  let deadline = Instant::now() + wait_timeout;
+  loop {
+    match connect().await {
+      Ok(connection) => drop(connection),
+      Err(error) if retryable_connect_error(&error) => return Ok(()),
+      Err(error) => return Err(EndpointDrainError::Connect(error)),
+    }
+
+    if Instant::now() >= deadline {
+      return Err(EndpointDrainError::TimedOut {
+        timeout: wait_timeout,
+      });
+    }
+    sleep(retry_interval).await;
+  }
+}
+
+#[cfg(unix)]
+async fn endpoint_is_unavailable(socket_path: &Path) -> Result<bool, EndpointDrainError> {
+  match UnixStream::connect(socket_path).await {
+    Ok(connection) => {
+      drop(connection);
+      Ok(false)
+    }
+    Err(error) if retryable_connect_error(&error) => Ok(true),
+    Err(error) => Err(EndpointDrainError::Connect(error)),
   }
 }
 
@@ -143,6 +559,26 @@ pub enum ConnectError {
     executable: PathBuf,
     source: io::Error,
   },
+}
+
+#[cfg(unix)]
+impl ConnectError {
+  /// Returns whether the endpoint was absent or no process was serving it.
+  #[must_use]
+  pub fn is_endpoint_unavailable(&self) -> bool {
+    matches!(self, Self::Connect(error) if retryable_connect_error(error))
+  }
+}
+
+/// Failure while waiting for an existing `rmuxd` endpoint to drain.
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum EndpointDrainError {
+  #[error("rmuxd did not release the local endpoint within {timeout:?}")]
+  TimedOut { timeout: Duration },
+  #[error("could not probe the rmuxd endpoint: {0}")]
+  Connect(#[source] io::Error),
 }
 
 /// Creates and validates the private directory containing a local endpoint.
@@ -248,6 +684,56 @@ mod tests {
   }
 
   #[cfg(unix)]
+  #[test]
+  fn control_socket_is_derived_from_the_selected_data_socket() {
+    let data_socket = PathBuf::from("/private/runtime/custom-rmux.sock");
+    assert_eq!(
+      control_socket_path(&data_socket).unwrap(),
+      PathBuf::from("/private/runtime/custom-rmux.sock.control")
+    );
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn restart_request_refuses_a_control_endpoint_without_capability() {
+    let (client, mut daemon) = tokio::io::duplex(1024);
+    let server = tokio::spawn(async move {
+      let handshake: LocalControlClientMessage = read_local_control_frame(&mut daemon)
+        .await
+        .unwrap()
+        .expect("client sends local-control handshake");
+      assert_eq!(
+        handshake,
+        LocalControlClientMessage::Handshake {
+          protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+        }
+      );
+      write_local_control_frame(
+        &mut daemon,
+        &LocalControlServerMessage::HandshakeAccepted {
+          protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+          restart_supported: false,
+        },
+      )
+      .await
+      .unwrap();
+
+      let next: Option<LocalControlClientMessage> =
+        read_local_control_frame(&mut daemon).await.unwrap();
+      assert!(
+        next.is_none(),
+        "unsupported endpoint must not receive restart"
+      );
+    });
+
+    let error = request_local_daemon_restart(client)
+      .await
+      .expect_err("unsupported control capability must refuse restart");
+    assert!(matches!(error, LocalControlClientError::RestartUnsupported));
+    server.await.unwrap();
+  }
+
+  #[cfg(unix)]
   #[tokio::test]
   async fn healthy_endpoint_does_not_start_daemon() {
     let connect_count = Arc::new(AtomicUsize::new(0));
@@ -341,6 +827,88 @@ mod tests {
       ConnectError::Connect(error) if error.kind() == io::ErrorKind::PermissionDenied
     ));
     assert_eq!(start_count.load(Ordering::Relaxed), 0);
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn endpoint_drain_waits_until_the_endpoint_becomes_unavailable() {
+    let connect_count = Arc::new(AtomicUsize::new(0));
+
+    wait_for_endpoint_drain_with(
+      {
+        let connect_count = Arc::clone(&connect_count);
+        move || {
+          let attempt = connect_count.fetch_add(1, Ordering::Relaxed);
+          std::future::ready(if attempt == 0 {
+            Ok::<_, io::Error>(())
+          } else {
+            Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+          })
+        }
+      },
+      Duration::from_secs(1),
+      Duration::ZERO,
+    )
+    .await
+    .expect("endpoint becomes unavailable");
+
+    assert_eq!(connect_count.load(Ordering::Relaxed), 2);
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn endpoint_drain_times_out_without_forcing_a_live_endpoint() {
+    let error = wait_for_endpoint_drain_with(
+      || std::future::ready(Ok::<_, io::Error>(())),
+      Duration::ZERO,
+      Duration::ZERO,
+    )
+    .await
+    .expect_err("live endpoint must not be forced closed");
+
+    assert!(matches!(
+      error,
+      EndpointDrainError::TimedOut {
+        timeout: Duration::ZERO
+      }
+    ));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn endpoint_drain_stops_on_an_unexpected_probe_error() {
+    let error = wait_for_endpoint_drain_with(
+      || {
+        std::future::ready(Err::<(), _>(io::Error::from(
+          io::ErrorKind::PermissionDenied,
+        )))
+      },
+      Duration::from_secs(1),
+      Duration::ZERO,
+    )
+    .await
+    .expect_err("permission errors require user-visible failure");
+
+    assert!(matches!(
+      error,
+      EndpointDrainError::Connect(error) if error.kind() == io::ErrorKind::PermissionDenied
+    ));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn only_absent_endpoints_are_safe_to_replace() {
+    assert!(
+      ConnectError::Connect(io::Error::from(io::ErrorKind::NotFound)).is_endpoint_unavailable()
+    );
+    assert!(
+      ConnectError::Connect(io::Error::from(io::ErrorKind::ConnectionRefused))
+        .is_endpoint_unavailable()
+    );
+    assert!(
+      !ConnectError::Connect(io::Error::from(io::ErrorKind::PermissionDenied))
+        .is_endpoint_unavailable()
+    );
   }
 
   #[cfg(unix)]

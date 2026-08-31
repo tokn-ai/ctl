@@ -2,14 +2,18 @@ use crate::session::{
   AttachSnapshot, Session, SessionControlError, SessionEvent, SessionManager, SessionManagerError,
 };
 use rmux_core::{JournalError, OutputChunk};
+use rmux_ipc::{
+  LOCAL_CONTROL_PROTOCOL_VERSION, LocalControlClientMessage, LocalControlErrorCode,
+  LocalControlServerMessage, read_local_control_frame, write_local_control_frame,
+};
 use rmux_proto::{
   ClientMessage, CodecError, ErrorCode, LeaseKind, PROTOCOL_VERSION, ServerMessage, ShellState,
   read_frame, write_frame,
 };
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -27,6 +31,14 @@ pub const DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30
 // replay before it can process queued client frames. Give that transfer a
 // separate, finite window instead of applying post-attach liveness too early.
 const INITIAL_ATTACHMENT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(5);
+const LOCAL_CONTROL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+// A GUI retains an already-handshaken control stream while it waits for its
+// active attachment to detach (currently up to five seconds). Keep that
+// armed operation alive long enough for a serialized window transition, but
+// still bound it. Once any restart is accepted, all other control handlers
+// are canceled so this longer pre-restart window cannot delay draining.
+const LOCAL_CONTROL_ARMED_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_DRAINING_MESSAGE: &str = "rmuxd is draining for a cooperative restart";
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -59,6 +71,8 @@ pub enum DaemonError {
   AlreadyRunning(PathBuf),
   #[error("could not bind local socket {path}: {source}")]
   Bind { path: PathBuf, source: io::Error },
+  #[error("could not derive local-control socket from {path}: {source}")]
+  ControlSocketPath { path: PathBuf, source: io::Error },
   #[error("daemon I/O error: {0}")]
   Io(#[from] io::Error),
   #[error("attachment liveness timeout {actual:?} must be between {minimum:?} and {maximum:?}")]
@@ -105,6 +119,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   let attachment_liveness = attachment_liveness(config.attachment_liveness_timeout)?;
   rmux_ipc::prepare_runtime_directory(&config.socket_path)
     .map_err(DaemonError::RuntimeDirectory)?;
+  let control_socket_path =
+    rmux_ipc::control_socket_path(&config.socket_path).map_err(|source| {
+      DaemonError::ControlSocketPath {
+        path: config.socket_path.clone(),
+        source,
+      }
+    })?;
   let runtime_directory = config.socket_path.parent().ok_or_else(|| {
     DaemonError::RuntimeDirectory(io::Error::new(
       io::ErrorKind::InvalidInput,
@@ -114,27 +135,26 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
       ),
     ))
   })?;
-  let endpoint_startup_lock =
-    EndpointStartupLock::acquire(&config.socket_path).map_err(|source| {
-      DaemonError::EndpointStartupLock {
-        path: endpoint_startup_lock_path(&config.socket_path),
-        source,
-      }
-    })?;
-  let listener = bind_listener(&config.socket_path).await?;
-  let _socket_guard = SocketGuard::new(config.socket_path.clone())?;
-  drop(endpoint_startup_lock);
+  let DaemonEndpoints {
+    listener,
+    control_listener,
+    _data_socket_guard,
+    _control_socket_guard,
+  } = bind_daemon_endpoints(&config.socket_path, &control_socket_path).await?;
   let sessions = SessionManager::new(
     runtime_directory.to_path_buf(),
     config.journal_capacity_bytes,
     config.checkpoint_interval_bytes,
   );
-  let connections = Arc::new(ConnectionTracker::default());
+  let (connections, restart) = daemon_runtime();
   let startup_deadline = sleep_until(Instant::now() + config.startup_idle_timeout);
   tokio::pin!(startup_deadline);
 
   loop {
-    if sessions.ever_had_session() && sessions.session_count() == 0 && connections.count() == 0 {
+    if (sessions.ever_had_session() || restart.is_draining())
+      && sessions.session_count() == 0
+      && connections.count() == 0
+    {
       return Ok(());
     }
 
@@ -142,17 +162,48 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
       accepted = listener.accept() => {
         let (stream, _) = accepted?;
         let sessions = sessions.clone();
+        let restart = Arc::clone(&restart);
+        let data_connection_shutdown = restart.data_connection_shutdown_receiver();
         let connection_guard = connections.open();
         tokio::spawn(async move {
-          if let Err(error) = handle_connection(stream, sessions, attachment_liveness).await {
+          if let Err(error) = handle_connection(
+            stream,
+            sessions,
+            restart,
+            data_connection_shutdown,
+            attachment_liveness,
+          )
+          .await
+          {
             eprintln!("rmuxd connection error: {error}");
+          }
+          drop(connection_guard);
+        });
+      }
+      accepted = control_listener.accept() => {
+        let (stream, _) = accepted?;
+        let sessions = sessions.clone();
+        let restart = Arc::clone(&restart);
+        let control_connection_shutdown = restart.control_connection_shutdown_receiver();
+        let connection_guard = connections.open();
+        tokio::spawn(async move {
+          if let Err(error) = handle_local_control_connection(
+            stream,
+            sessions,
+            restart,
+            control_connection_shutdown,
+          )
+          .await
+          {
+            eprintln!("rmuxd local-control connection error: {error}");
           }
           drop(connection_guard);
         });
       }
       () = sessions.changed() => {}
       () = connections.changed() => {}
-      () = &mut startup_deadline, if !sessions.ever_had_session() => {
+      () = restart.changed() => {}
+      () = &mut startup_deadline, if !sessions.ever_had_session() && !restart.is_draining() => {
         if sessions.session_count() == 0 && connections.count() == 0 {
           return Ok(());
         }
@@ -166,9 +217,55 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   }
 }
 
+fn daemon_runtime() -> (Arc<ConnectionTracker>, Arc<RestartCoordinator>) {
+  (
+    Arc::new(ConnectionTracker::default()),
+    Arc::new(RestartCoordinator::new()),
+  )
+}
+
+struct DaemonEndpoints {
+  listener: UnixListener,
+  control_listener: UnixListener,
+  _data_socket_guard: SocketGuard,
+  _control_socket_guard: SocketGuard,
+}
+
+/// Binds both paired daemon endpoints under one startup lock.
+///
+/// Keeping the lock until both listeners are live prevents a concurrent
+/// launcher from observing only the data endpoint and treating the daemon as
+/// a legacy instance without local-control support.
+async fn bind_daemon_endpoints(
+  data_socket_path: &Path,
+  control_socket_path: &Path,
+) -> Result<DaemonEndpoints, DaemonError> {
+  let endpoint_startup_lock = EndpointStartupLock::acquire(data_socket_path).map_err(|source| {
+    DaemonError::EndpointStartupLock {
+      path: endpoint_startup_lock_path(data_socket_path),
+      source,
+    }
+  })?;
+  let control_listener = bind_listener(control_socket_path).await?;
+  let control_socket_guard = SocketGuard::new(control_socket_path.to_path_buf())?;
+  // Publish the primary data endpoint last. `connect_or_start_daemon` waits
+  // for this listener, so a successful data connection also proves that the
+  // paired local-control endpoint is already bound.
+  let listener = bind_listener(data_socket_path).await?;
+  let data_socket_guard = SocketGuard::new(data_socket_path.to_path_buf())?;
+  drop(endpoint_startup_lock);
+
+  Ok(DaemonEndpoints {
+    listener,
+    control_listener,
+    _data_socket_guard: data_socket_guard,
+    _control_socket_guard: control_socket_guard,
+  })
+}
+
 async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
-  match UnixListener::bind(path) {
-    Ok(listener) => Ok(listener),
+  let listener = match UnixListener::bind(path) {
+    Ok(listener) => listener,
     Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
       if UnixStream::connect(path).await.is_ok() {
         return Err(DaemonError::AlreadyRunning(path.to_path_buf()));
@@ -180,18 +277,348 @@ async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
       UnixListener::bind(path).map_err(|source| DaemonError::Bind {
         path: path.to_path_buf(),
         source,
-      })
+      })?
     }
     Err(source) => Err(DaemonError::Bind {
       path: path.to_path_buf(),
       source,
-    }),
+    })?,
+  };
+  secure_socket_endpoint(path).map_err(|source| DaemonError::Bind {
+    path: path.to_path_buf(),
+    source,
+  })?;
+  Ok(listener)
+}
+
+fn secure_socket_endpoint(path: &Path) -> io::Result<()> {
+  use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
+  let metadata = std::fs::symlink_metadata(path)?;
+  if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+    return Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      format!("local endpoint {} is not a Unix socket", path.display()),
+    ));
+  }
+  let expected_uid = rustix::process::getuid().as_raw();
+  if metadata.uid() != expected_uid {
+    return Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      format!("local endpoint {} is owned by another user", path.display()),
+    ));
+  }
+
+  std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+  let permissions = std::fs::metadata(path)?.permissions().mode();
+  if permissions & 0o077 != 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      format!(
+        "local endpoint {} is accessible by other users",
+        path.display()
+      ),
+    ));
+  }
+  Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartState {
+  Accepting,
+  Draining,
+}
+
+struct RestartCoordinator {
+  state: Mutex<RestartState>,
+  changed: Notify,
+  /// Broadcast after a restart has been accepted and its acknowledgement has
+  /// been attempted. Data connections are deliberately disposable: closing
+  /// them bounds shutdown even when a client is asleep or is not reading.
+  data_connection_shutdown: watch::Sender<bool>,
+  /// Mirrors data cancellation for pre-existing local-control handlers. The
+  /// accepting control handler sends its acknowledgement before this is set.
+  control_connection_shutdown: watch::Sender<bool>,
+}
+
+impl RestartCoordinator {
+  fn new() -> Self {
+    // `send_replace` retains the value even before a handler subscribes, so a
+    // data/control connection accepted after restart observes cancellation at
+    // its initial preflight check.
+    let (data_connection_shutdown, _data_connection_shutdown_receiver) = watch::channel(false);
+    let (control_connection_shutdown, _control_connection_shutdown_receiver) =
+      watch::channel(false);
+    Self {
+      state: Mutex::new(RestartState::Accepting),
+      changed: Notify::new(),
+      data_connection_shutdown,
+      control_connection_shutdown,
+    }
+  }
+
+  fn data_connection_shutdown_receiver(&self) -> watch::Receiver<bool> {
+    self.data_connection_shutdown.subscribe()
+  }
+
+  fn control_connection_shutdown_receiver(&self) -> watch::Receiver<bool> {
+    self.control_connection_shutdown.subscribe()
+  }
+
+  /// Runs a session-creation operation while the daemon is still accepting
+  /// new sessions.
+  ///
+  /// The closure executes under the same gate used by
+  /// [`Self::begin_cooperative_restart`]. This makes a create either complete
+  /// before restart snapshots its session, or be rejected after quiescing
+  /// begins; it cannot be created in between.
+  fn run_while_accepting<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
+    let state = lock_restart_state(&self.state);
+    if *state == RestartState::Draining {
+      return None;
+    }
+    Some(operation())
+  }
+
+  /// Atomically quiesces creates, snapshots all existing sessions, and asks
+  /// each session to terminate.
+  fn begin_cooperative_restart(
+    &self,
+    sessions: &SessionManager,
+  ) -> Result<u32, RestartCoordinatorError> {
+    let mut state = lock_restart_state(&self.state);
+    if *state == RestartState::Draining {
+      return Err(RestartCoordinatorError::AlreadyDraining);
+    }
+
+    let targets = sessions.snapshot_for_cooperative_restart();
+    let target_count =
+      u32::try_from(targets.len()).map_err(|_| RestartCoordinatorError::SessionCountOverflow)?;
+    *state = RestartState::Draining;
+
+    let termination_result = targets
+      .iter()
+      .try_for_each(|session| session.kill().map_err(RestartCoordinatorError::Termination));
+    if let Err(error) = termination_result {
+      // A failed PTY kill cannot be rolled back, but leaving the daemon
+      // permanently quiesced would strand healthy remaining sessions. Return
+      // to normal admission and report the partial destructive failure.
+      *state = RestartState::Accepting;
+      drop(state);
+      self.changed.notify_waiters();
+      return Err(error);
+    }
+
+    drop(state);
+    self.changed.notify_waiters();
+    Ok(target_count)
+  }
+
+  fn is_draining(&self) -> bool {
+    *lock_restart_state(&self.state) == RestartState::Draining
+  }
+
+  /// Closes every current and subsequently accepted connection other than the
+  /// control handler that just acknowledged this restart.
+  ///
+  /// This is intentionally separate from entering `Draining`: the accepting
+  /// control connection must first be able to receive `RestartAccepted`.
+  /// Existing attachment notifications are therefore best effort; socket
+  /// closure is the guaranteed restart outcome.
+  fn cancel_other_connections(&self) {
+    let _previous_data = self.data_connection_shutdown.send_replace(true);
+    let _previous_control = self.control_connection_shutdown.send_replace(true);
+  }
+
+  async fn changed(&self) {
+    self.changed.notified().await;
   }
 }
 
-async fn handle_connection(
+#[derive(Debug, thiserror::Error)]
+enum RestartCoordinatorError {
+  #[error("a cooperative restart is already in progress")]
+  AlreadyDraining,
+  #[error("too many sessions to report a cooperative restart result")]
+  SessionCountOverflow,
+  #[error("could not terminate a session during cooperative restart: {0}")]
+  Termination(SessionControlError),
+}
+
+fn lock_restart_state(state: &Mutex<RestartState>) -> std::sync::MutexGuard<'_, RestartState> {
+  match state.lock() {
+    Ok(state) => state,
+    Err(poisoned) => poisoned.into_inner(),
+  }
+}
+
+async fn handle_local_control_connection(
+  stream: UnixStream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+  mut control_connection_shutdown: watch::Receiver<bool>,
+) -> Result<(), ConnectionError> {
+  if *control_connection_shutdown.borrow() {
+    return Ok(());
+  }
+
+  tokio::select! {
+    biased;
+    _changed = control_connection_shutdown.changed() => Ok(()),
+    result = handle_active_local_control_connection(stream, sessions, restart) => result,
+  }
+}
+
+async fn handle_active_local_control_connection(
   mut stream: UnixStream,
   sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+) -> Result<(), ConnectionError> {
+  let Some(handshake) =
+    read_local_control_request(&mut stream, LOCAL_CONTROL_HANDSHAKE_TIMEOUT).await?
+  else {
+    return Ok(());
+  };
+  let LocalControlClientMessage::Handshake { protocol_version } = handshake else {
+    send_local_control_error(
+      &mut stream,
+      LocalControlErrorCode::InvalidRequest,
+      "the first local-control message must be a handshake",
+    )
+    .await?;
+    return Ok(());
+  };
+  if protocol_version != LOCAL_CONTROL_PROTOCOL_VERSION {
+    send_local_control_error(
+      &mut stream,
+      LocalControlErrorCode::ProtocolVersionMismatch,
+      &format!(
+        "local-control client requested version {protocol_version}; this daemon supports {LOCAL_CONTROL_PROTOCOL_VERSION}"
+      ),
+    )
+    .await?;
+    return Ok(());
+  }
+
+  write_local_control_frame(
+    &mut stream,
+    &LocalControlServerMessage::HandshakeAccepted {
+      protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+      restart_supported: true,
+    },
+  )
+  .await?;
+
+  let Some(request) =
+    read_local_control_request(&mut stream, LOCAL_CONTROL_ARMED_REQUEST_TIMEOUT).await?
+  else {
+    return Ok(());
+  };
+  match request {
+    LocalControlClientMessage::RestartDaemon => {
+      match restart.begin_cooperative_restart(&sessions) {
+        Ok(terminated_sessions) => {
+          let acknowledgement = write_local_control_frame(
+            &mut stream,
+            &LocalControlServerMessage::RestartAccepted {
+              terminated_sessions,
+            },
+          )
+          .await;
+
+          // `begin_cooperative_restart` has already made the destructive
+          // transition. Even if the requester disconnects before observing
+          // the acknowledgement, data handlers still need to be canceled so
+          // an unread client cannot pin daemon shutdown. On the normal path
+          // this happens strictly after `RestartAccepted` was sent.
+          restart.cancel_other_connections();
+          acknowledgement?;
+        }
+        Err(RestartCoordinatorError::AlreadyDraining) => {
+          send_local_control_error(
+            &mut stream,
+            LocalControlErrorCode::RestartInProgress,
+            "rmuxd is already draining for a cooperative restart",
+          )
+          .await?;
+        }
+        Err(error) => {
+          send_local_control_error(
+            &mut stream,
+            LocalControlErrorCode::Internal,
+            &error.to_string(),
+          )
+          .await?;
+        }
+      }
+    }
+    LocalControlClientMessage::Handshake { .. } => {
+      send_local_control_error(
+        &mut stream,
+        LocalControlErrorCode::InvalidRequest,
+        "only restart_daemon is valid after the local-control handshake",
+      )
+      .await?;
+    }
+  }
+  Ok(())
+}
+
+async fn read_local_control_request(
+  stream: &mut UnixStream,
+  request_timeout: Duration,
+) -> Result<Option<LocalControlClientMessage>, ConnectionError> {
+  timeout_at(
+    Instant::now() + request_timeout,
+    read_local_control_frame(stream),
+  )
+  .await
+  .map_err(|_| ConnectionError::LocalControlTimeout)?
+  .map_err(ConnectionError::LocalControl)
+}
+
+async fn send_local_control_error(
+  stream: &mut UnixStream,
+  code: LocalControlErrorCode,
+  message: &str,
+) -> Result<(), ConnectionError> {
+  write_local_control_frame(
+    stream,
+    &LocalControlServerMessage::Error {
+      code,
+      message: message.into(),
+    },
+  )
+  .await
+  .map_err(ConnectionError::LocalControl)
+}
+
+async fn handle_connection(
+  stream: UnixStream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+  mut data_connection_shutdown: watch::Receiver<bool>,
+  attachment_liveness: AttachmentLiveness,
+) -> Result<(), ConnectionError> {
+  if *data_connection_shutdown.borrow() {
+    return Ok(());
+  }
+
+  // A cooperative restart treats transport connections as disposable. Keep
+  // the cancellation at the outermost level so it can interrupt not only
+  // attachment liveness reads, but also a stalled raw handshake or a
+  // backpressured response write.
+  tokio::select! {
+    biased;
+    _changed = data_connection_shutdown.changed() => Ok(()),
+    result = handle_active_connection(stream, sessions, restart, attachment_liveness) => result,
+  }
+}
+
+async fn handle_active_connection(
+  mut stream: UnixStream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
   attachment_liveness: AttachmentLiveness,
 ) -> Result<(), ConnectionError> {
   let Some(handshake) = read_frame::<_, ClientMessage>(&mut stream).await? else {
@@ -234,12 +661,13 @@ async fn handle_connection(
   )
   .await?;
 
-  handle_request(stream, sessions, attachment_liveness.timeout).await
+  handle_request(stream, sessions, restart, attachment_liveness.timeout).await
 }
 
 async fn handle_request(
   mut stream: UnixStream,
   sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
   attachment_liveness_timeout: Duration,
 ) -> Result<(), ConnectionError> {
   let Some(request) = read_frame::<_, ClientMessage>(&mut stream).await? else {
@@ -252,22 +680,20 @@ async fn handle_request(
       command,
       working_directory,
       terminal_size,
-    } => match tokio::task::spawn_blocking(move || {
-      sessions.create(name, command, working_directory, terminal_size)
-    })
-    .await?
-    {
-      Ok(session) => {
-        write_frame(
-          &mut stream,
-          &ServerMessage::SessionCreated {
-            session: session.info(),
-          },
-        )
-        .await?;
-      }
-      Err(error) => send_session_manager_error(&mut stream, &error).await?,
-    },
+    } => {
+      handle_create_session_request(
+        &mut stream,
+        sessions,
+        restart,
+        CreateSessionParameters {
+          name,
+          command,
+          working_directory,
+          terminal_size,
+        },
+      )
+      .await?;
+    }
     ClientMessage::ListSessions => {
       write_frame(
         &mut stream,
@@ -277,19 +703,9 @@ async fn handle_request(
       )
       .await?;
     }
-    ClientMessage::GetShellState { session } => match sessions.resolve(&session) {
-      Ok(session) => {
-        write_frame(
-          &mut stream,
-          &ServerMessage::ShellStateResponse {
-            session: session.info(),
-            shell_state: session.shell_state_for_inspection(),
-          },
-        )
-        .await?;
-      }
-      Err(error) => send_session_manager_error(&mut stream, &error).await?,
-    },
+    ClientMessage::GetShellState { session } => {
+      handle_shell_state_request(&mut stream, &sessions, session).await?;
+    }
     ClientMessage::AttachSession {
       session,
       resume_from,
@@ -298,21 +714,41 @@ async fn handle_request(
       request_layout_lease,
       request_command_line,
       request_running_command,
-    } => match sessions.resolve(&session) {
-      Ok(session) => {
-        let request = AttachParameters {
-          resume_from,
-          client_terminal_size: terminal_size,
-          request_input_lease,
-          request_layout_lease,
-          request_command_line,
-          request_running_command,
-          attachment_liveness_timeout,
-        };
-        return handle_attach(stream, session, request).await;
+    } => {
+      let request = AttachParameters {
+        resume_from,
+        client_terminal_size: terminal_size,
+        request_input_lease,
+        request_layout_lease,
+        request_command_line,
+        request_running_command,
+        attachment_liveness_timeout,
+      };
+      match restart.run_while_accepting(|| {
+        sessions
+          .resolve(&session)
+          .map(|session| prepare_attachment(session, &request))
+      }) {
+        Some(Ok(Ok(attachment))) => return handle_attach(stream, attachment, request).await,
+        Some(Ok(Err(exit_code))) => {
+          send_error(
+            &mut stream,
+            ErrorCode::SessionNotFound,
+            &format!("session '{session}' has already ended (exit code {exit_code:?})"),
+          )
+          .await?;
+        }
+        Some(Err(error)) => send_session_manager_error(&mut stream, &error).await?,
+        None => {
+          send_error(
+            &mut stream,
+            ErrorCode::InvalidRequest,
+            DAEMON_DRAINING_MESSAGE,
+          )
+          .await?;
+        }
       }
-      Err(error) => send_session_manager_error(&mut stream, &error).await?,
-    },
+    }
     ClientMessage::KillSession { session } => match sessions.resolve(&session) {
       Ok(session) => match session.kill() {
         Ok(()) => write_frame(&mut stream, &ServerMessage::Success).await?,
@@ -333,6 +769,68 @@ async fn handle_request(
   Ok(())
 }
 
+struct CreateSessionParameters {
+  name: Option<String>,
+  command: Option<rmux_proto::CommandSpec>,
+  working_directory: Option<String>,
+  terminal_size: rmux_proto::TerminalSize,
+}
+
+async fn handle_create_session_request(
+  stream: &mut UnixStream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+  request: CreateSessionParameters,
+) -> Result<(), ConnectionError> {
+  let CreateSessionParameters {
+    name,
+    command,
+    working_directory,
+    terminal_size,
+  } = request;
+  match tokio::task::spawn_blocking(move || {
+    restart.run_while_accepting(|| sessions.create(name, command, working_directory, terminal_size))
+  })
+  .await?
+  {
+    Some(Ok(session)) => {
+      write_frame(
+        stream,
+        &ServerMessage::SessionCreated {
+          session: session.info(),
+        },
+      )
+      .await?;
+    }
+    Some(Err(error)) => send_session_manager_error(stream, &error).await?,
+    None => {
+      send_error(stream, ErrorCode::InvalidRequest, DAEMON_DRAINING_MESSAGE).await?;
+    }
+  }
+  Ok(())
+}
+
+async fn handle_shell_state_request(
+  stream: &mut UnixStream,
+  sessions: &SessionManager,
+  session: String,
+) -> Result<(), ConnectionError> {
+  match sessions.resolve(&session) {
+    Ok(session) => {
+      write_frame(
+        stream,
+        &ServerMessage::ShellStateResponse {
+          session: session.info(),
+          shell_state: session.shell_state_for_inspection(),
+        },
+      )
+      .await?;
+    }
+    Err(error) => send_session_manager_error(stream, &error).await?,
+  }
+  Ok(())
+}
+
 #[allow(
   clippy::struct_excessive_bools,
   reason = "each field is an independent attachment behavior negotiated by the protocol"
@@ -347,17 +845,56 @@ struct AttachParameters {
   attachment_liveness_timeout: Duration,
 }
 
-async fn handle_attach(
-  mut stream: UnixStream,
+/// Synchronous attachment admission established under the daemon restart gate.
+///
+/// `events` is subscribed before the gate is released, so a subsequent
+/// cooperative restart cannot publish `SessionEnded` before this attachment is
+/// ready to receive it.
+struct PreparedAttachment {
   session: Arc<Session>,
-  request: AttachParameters,
-) -> Result<(), ConnectionError> {
+  attachment_id: String,
+  attachment_leases: rmux_core::AttachmentLeases,
+  events: broadcast::Receiver<SessionEvent>,
+  shell_state_updates: watch::Receiver<ShellState>,
+}
+
+fn prepare_attachment(
+  session: Arc<Session>,
+  request: &AttachParameters,
+) -> Result<PreparedAttachment, Option<u32>> {
+  // Subscribe before acquiring leases. If the child exits at any later point,
+  // the receiver already holds its terminal event; if it exited beforehand,
+  // `subscribe_events` reports that fact instead of returning a permanently
+  // silent receiver.
+  let events = session.subscribe_events()?;
   let attachment_id = Uuid::new_v4().to_string();
   let attachment_leases = session.attach(
     &attachment_id,
     request.request_input_lease,
     request.request_layout_lease,
   );
+  let shell_state_updates = session.subscribe_shell_state();
+  Ok(PreparedAttachment {
+    session,
+    attachment_id,
+    attachment_leases,
+    events,
+    shell_state_updates,
+  })
+}
+
+async fn handle_attach(
+  mut stream: UnixStream,
+  attachment: PreparedAttachment,
+  request: AttachParameters,
+) -> Result<(), ConnectionError> {
+  let PreparedAttachment {
+    session,
+    attachment_id,
+    attachment_leases,
+    events,
+    shell_state_updates,
+  } = attachment;
   let _attachment_guard = AttachmentGuard {
     session: Arc::clone(&session),
     attachment_id: attachment_id.clone(),
@@ -377,8 +914,6 @@ async fn handle_attach(
     return Ok(());
   }
 
-  let events = session.subscribe();
-  let shell_state_updates = session.subscribe_shell_state();
   let Some(snapshot) = take_initial_snapshot(
     &mut stream,
     Arc::clone(&session),
@@ -1053,6 +1588,10 @@ enum ConnectionError {
   #[error(transparent)]
   Codec(#[from] CodecError),
   #[error(transparent)]
+  LocalControl(#[from] rmux_ipc::LocalControlCodecError),
+  #[error("local-control request timed out")]
+  LocalControlTimeout,
+  #[error(transparent)]
   Journal(#[from] JournalError),
   #[error(transparent)]
   Control(#[from] SessionControlError),
@@ -1200,6 +1739,14 @@ mod tests {
     flock(&second, FlockOperation::LockExclusive).unwrap();
     drop(second);
     drop(cleanup);
+  }
+
+  #[test]
+  fn armed_local_control_request_outlasts_gui_detach_window() {
+    // The GUI waits up to five seconds for detach before using its armed
+    // control stream. Keep this assertion beside the endpoint timeout so a
+    // future change cannot silently reintroduce the preflight/detach race.
+    assert!(LOCAL_CONTROL_ARMED_REQUEST_TIMEOUT > Duration::from_secs(5));
   }
 
   struct TestDirectory(PathBuf);

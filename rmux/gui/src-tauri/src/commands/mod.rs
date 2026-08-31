@@ -11,8 +11,8 @@ use tauri::{State, WebviewWindow};
 use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
   AttachmentRequestDto, CreateSessionRequestDto, KillSessionRequestDto, OpenAttachmentRequestDto,
-  OpenAttachmentResponseDto, ResizeAttachmentRequestDto, SendInputRequestDto, SessionDto,
-  decode_input, parse_sequence,
+  OpenAttachmentResponseDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
+  SendInputRequestDto, SessionDto, decode_input, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -77,6 +77,37 @@ pub async fn kill_session(request: KillSessionRequestDto) -> CommandResult<()> {
     ServerMessage::Success => Ok(()),
     response => Err(unexpected_response("success", &response)),
   }
+}
+
+/// Gracefully replaces the local `rmuxd` process after terminating all of its
+/// sessions through its owner-only local-control endpoint.
+///
+/// It first probes the endpoint without touching the active attachment. A
+/// legacy daemon therefore returns a typed unsupported error without being
+/// detached. Only a daemon that advertises cooperative restart is detached
+/// before the destructive request, which clears any pending presentation ACK
+/// and lets the daemon drain naturally without PID signals or live-socket
+/// removal.
+#[tauri::command]
+pub async fn restart_local_daemon(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+) -> CommandResult<RestartLocalDaemonResponseDto> {
+  let daemon_restart_transition = state.daemon_restart_transition();
+  let _daemon_restart_guard = daemon_restart_transition.lock().await;
+
+  let preflight = local_transport::preflight_restart_daemon().await?;
+  if preflight.requires_attachment_detach() {
+    let window_label = window.label().to_owned();
+    let window_transition = state.window_transition(&window_label).await;
+    let _window_transition_guard = window_transition.lock().await;
+    state.detach_active_window(&window_label).await?;
+  }
+
+  let outcome = local_transport::restart_daemon(preflight).await?;
+  Ok(RestartLocalDaemonResponseDto {
+    terminated_sessions: outcome.terminated_sessions,
+  })
 }
 
 #[tauri::command]

@@ -3,7 +3,7 @@
 `ctl-proto` is the small outer protocol between a remote client and `ctld`.
 It is distinct from `rmux-proto`: it authenticates a device/client pair and
 selects a service. Once the `rmux` service is selected, the outer protocol is
-finished permanently and the connection carries raw `rmux-proto` version 7
+finished permanently and the connection carries raw `rmux-proto` version 6
 frames.
 
 ## Transport
@@ -78,11 +78,11 @@ or
 authenticate { public_key, signature }  ->
        authenticated { client_id, capabilities: [rmux_tunnel] }
                                          <-
-open_service { rmux, rmux_protocol_version: 7 }
+open_service { rmux, rmux_protocol_version: 6 }
                                          ->
        service_opened { rmux }
                                          <-
-<raw rmux-proto version 7 bytes in both directions>
+<raw rmux-proto version 6 bytes in both directions>
 ```
 
 Protocol versions must match exactly. A failed authentication, expired or
@@ -98,11 +98,16 @@ deserialize, buffer through an application reader, inspect, or inject
 `rmux-proto` frames. In particular, the first raw `rmux` handshake may arrive
 immediately after the service response.
 
+Only the ordinary `rmuxd` data endpoint participates in this relay. The
+daemon's sibling owner-only local-control endpoint is not a `ctl` service and
+must never be connected or forwarded by `ctld`; it includes destructive local
+maintenance operations such as coordinated daemon restart.
+
 Closing the TLS connection closes only the corresponding `rmuxd` attachment;
 this releases its input/layout leases. The shell, PTY, raw output journal, and
 checkpoints remain owned by `rmuxd`. A reconnect repeats the outer
 authentication then attaches with the durable `rmux` session ID and last raw
-sequence that its renderer applied. `rmux-proto` version 7 also expires a silent attachment using
+sequence that its renderer applied. `rmux-proto` version 6 also expires a silent attachment using
 heartbeat acknowledgements, so a half-open gateway path cannot pin a lease
 indefinitely. See `docs/rmux-protocol.md` for the checkpoint and stream
 semantics.

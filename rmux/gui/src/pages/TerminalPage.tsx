@@ -6,6 +6,7 @@ import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { TerminalSurface } from "../components/terminal/TerminalSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
 import { useAttachment } from "../features/attachment/useAttachment";
+import { restartFailurePreservesLocalState } from "../features/daemon/restartFailurePolicy";
 import {
   detectShortcutPlatform,
   formatKeybinding,
@@ -44,6 +45,7 @@ import {
   createSession,
   killSession,
   listSessions,
+  restartLocalDaemon,
 } from "../lib/tauri";
 import type {
   SessionSummary,
@@ -77,6 +79,9 @@ export function TerminalPage() {
   const [creating, setCreating] = useState(false);
   const [createFormOpen, setCreateFormOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [daemonRestartConfirmationPending, setDaemonRestartConfirmationPending] =
+    useState(false);
+  const [restartingDaemon, setRestartingDaemon] = useState(false);
   const [pendingCloseSessionId, setPendingCloseSessionId] = useState<
     string | null
   >(null);
@@ -92,14 +97,30 @@ export function TerminalPage() {
   const tabsRef = useRef<SessionSummary[]>([]);
   const activeTabIdRef = useRef<string | null>(null);
   const creatingRef = useRef(false);
+  const daemonRestartConfirmationRef = useRef(false);
+  const restartingDaemonRef = useRef(false);
+  const daemonEpochRef = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const daemonRestartBlocksInteractions = useCallback(
+    () =>
+      daemonRestartConfirmationRef.current || restartingDaemonRef.current,
+    [],
+  );
+
+  const refresh = useCallback(async (allowDuringDaemonRestart = false) => {
+    if (!allowDuringDaemonRestart && daemonRestartBlocksInteractions()) {
+      return;
+    }
+    const daemonEpoch = daemonEpochRef.current;
     const token = refreshGuardRef.current.begin();
     setLoading(true);
     setListError(null);
     try {
       const listed = await listSessions();
-      if (!refreshGuardRef.current.canApply(token)) {
+      if (
+        daemonEpoch !== daemonEpochRef.current ||
+        !refreshGuardRef.current.canApply(token)
+      ) {
         return;
       }
       const listedIds = new Set(listed.map((session) => session.session_id));
@@ -127,15 +148,21 @@ export function TerminalPage() {
         }
       }
     } catch (error) {
-      if (refreshGuardRef.current.canApply(token)) {
+      if (
+        daemonEpoch === daemonEpochRef.current &&
+        refreshGuardRef.current.canApply(token)
+      ) {
         setListError(errorMessage(error));
       }
     } finally {
-      if (refreshGuardRef.current.isLatest(token)) {
+      if (
+        daemonEpoch === daemonEpochRef.current &&
+        refreshGuardRef.current.isLatest(token)
+      ) {
         setLoading(false);
       }
     }
-  }, []);
+  }, [daemonRestartBlocksInteractions]);
 
   useEffect(() => {
     void refresh();
@@ -143,6 +170,10 @@ export function TerminalPage() {
 
   const activateTab = useCallback(
     async (session: SessionSummary, resizeWithWindow = false) => {
+      const daemonEpoch = daemonEpochRef.current;
+      if (daemonRestartBlocksInteractions()) {
+        return;
+      }
       const nextTabs = openTerminalTab(tabsRef.current, session);
       tabsRef.current = nextTabs;
       activeTabIdRef.current = session.session_id;
@@ -162,19 +193,35 @@ export function TerminalPage() {
           attachment.state.phase === "disconnected" ||
           attachment.state.phase === "error"
         ) {
+          if (
+            daemonEpoch !== daemonEpochRef.current ||
+            daemonRestartBlocksInteractions()
+          ) {
+            return;
+          }
           await attachment.reconnect();
           return;
         }
+      }
+      if (
+        daemonEpoch !== daemonEpochRef.current ||
+        daemonRestartBlocksInteractions()
+      ) {
+        return;
       }
       await attachment.connect(session, {
         resize_with_window: resizeWithWindow,
       });
     },
-    [attachment, renderer],
+    [attachment, daemonRestartBlocksInteractions, renderer],
   );
 
   const closeTab = useCallback(
     async (session: SessionSummary) => {
+      const daemonEpoch = daemonEpochRef.current;
+      if (daemonRestartBlocksInteractions()) {
+        return;
+      }
       const currentTabs = tabsRef.current;
       if (!currentTabs.some((tab) => tab.session_id === session.session_id)) {
         return;
@@ -194,20 +241,31 @@ export function TerminalPage() {
       const nextTab = closed.nextTab;
       activeTabIdRef.current = nextTab?.session_id ?? null;
       setActiveTabId(nextTab?.session_id ?? null);
+      if (
+        daemonEpoch !== daemonEpochRef.current ||
+        daemonRestartBlocksInteractions()
+      ) {
+        return;
+      }
       if (nextTab) {
         await attachment.connect(nextTab);
       } else {
         await attachment.detach();
       }
     },
-    [attachment],
+    [attachment, daemonRestartBlocksInteractions],
   );
 
   const create = useCallback(
     async (workingDirectory: string | null): Promise<boolean> => {
-      if (creatingRef.current) {
+      if (
+        creatingRef.current ||
+        daemonRestartConfirmationRef.current ||
+        restartingDaemonRef.current
+      ) {
         return false;
       }
+      const daemonEpoch = daemonEpochRef.current;
       creatingRef.current = true;
       setCreating(true);
       setListError(null);
@@ -216,16 +274,23 @@ export function TerminalPage() {
           working_directory: workingDirectory,
           terminal_size: measuredSize(renderer),
         });
+        if (daemonEpoch !== daemonEpochRef.current) {
+          return false;
+        }
         refreshGuardRef.current.recordMutation();
         setSessions((current) => prependSession(current, session));
         await activateTab(session, true);
-        return true;
+        return daemonEpoch === daemonEpochRef.current;
       } catch (error) {
-        setListError(errorMessage(error));
+        if (daemonEpoch === daemonEpochRef.current) {
+          setListError(errorMessage(error));
+        }
         return false;
       } finally {
-        creatingRef.current = false;
-        setCreating(false);
+        if (daemonEpoch === daemonEpochRef.current) {
+          creatingRef.current = false;
+          setCreating(false);
+        }
       }
     },
     [activateTab, renderer],
@@ -233,7 +298,11 @@ export function TerminalPage() {
 
   const disconnect = useCallback(
     async (session: SessionSummary) => {
-      if (activeTabIdRef.current !== session.session_id) {
+      const daemonEpoch = daemonEpochRef.current;
+      if (
+        daemonRestartBlocksInteractions() ||
+        activeTabIdRef.current !== session.session_id
+      ) {
         return;
       }
       setDisconnectingSessionId(session.session_id);
@@ -241,17 +310,23 @@ export function TerminalPage() {
       try {
         await closeTab(session);
       } finally {
-        setDisconnectingSessionId((current) =>
-          current === session.session_id ? null : current,
-        );
+        if (daemonEpoch === daemonEpochRef.current) {
+          setDisconnectingSessionId((current) =>
+            current === session.session_id ? null : current,
+          );
+        }
       }
     },
-    [closeTab],
+    [closeTab, daemonRestartBlocksInteractions],
   );
 
   const close = useCallback(
     async (session: SessionSummary) => {
-      if (closingSessionIdsRef.current.has(session.session_id)) {
+      const daemonEpoch = daemonEpochRef.current;
+      if (
+        daemonRestartBlocksInteractions() ||
+        closingSessionIdsRef.current.has(session.session_id)
+      ) {
         return;
       }
       closingSessionIdsRef.current.add(session.session_id);
@@ -266,10 +341,16 @@ export function TerminalPage() {
         try {
           await killSession({ session_id: session.session_id });
         } catch (error) {
+          if (daemonEpoch !== daemonEpochRef.current) {
+            return;
+          }
           if (errorCode(error) !== "session_not_found") {
             setListError(errorMessage(error));
             return;
           }
+        }
+        if (daemonEpoch !== daemonEpochRef.current) {
+          return;
         }
         refreshGuardRef.current.recordMutation();
         closedSessionIdsRef.current.add(session.session_id);
@@ -282,19 +363,24 @@ export function TerminalPage() {
         // response, which means another actor already achieved the same result.
       } finally {
         closingSessionIdsRef.current.delete(session.session_id);
-        setClosingSessionIds((current) => {
-          const next = new Set(current);
-          next.delete(session.session_id);
-          return next;
-        });
+        if (daemonEpoch === daemonEpochRef.current) {
+          setClosingSessionIds((current) => {
+            const next = new Set(current);
+            next.delete(session.session_id);
+            return next;
+          });
+        }
       }
     },
-    [attachment, closeTab],
+    [attachment, closeTab, daemonRestartBlocksInteractions],
   );
 
   const requestClose = useCallback((session: SessionSummary) => {
+    if (daemonRestartBlocksInteractions()) {
+      return;
+    }
     setPendingCloseSessionId(session.session_id);
-  }, []);
+  }, [daemonRestartBlocksInteractions]);
 
   const cancelClose = useCallback(() => {
     setPendingCloseSessionId(null);
@@ -302,11 +388,89 @@ export function TerminalPage() {
 
   const confirmClose = useCallback(
     (session: SessionSummary) => {
+      if (daemonRestartBlocksInteractions()) {
+        return;
+      }
       setPendingCloseSessionId(null);
       void close(session);
     },
-    [close],
+    [close, daemonRestartBlocksInteractions],
   );
+
+  const setDaemonRestartConfirmation = useCallback((pending: boolean) => {
+    daemonRestartConfirmationRef.current = pending;
+    setDaemonRestartConfirmationPending(pending);
+  }, []);
+
+  const clearLocalDaemonState = useCallback(() => {
+    daemonEpochRef.current += 1;
+    refreshGuardRef.current.recordMutation();
+    closedSessionIdsRef.current.clear();
+    closingSessionIdsRef.current.clear();
+    creatingRef.current = false;
+    tabsRef.current = [];
+    activeTabIdRef.current = null;
+    attachment.resetAfterDaemonRestart();
+    setSessions([]);
+    setTabs([]);
+    setTabShellStates(new Map<string, ShellStateSummary>());
+    setActiveTabId(null);
+    setCreating(false);
+    setCreateFormOpen(false);
+    setPendingCloseSessionId(null);
+    setClosingSessionIds(new Set());
+    setDisconnectingSessionId(null);
+    setLoading(true);
+    setListError(null);
+  }, [attachment]);
+
+  const restartDaemon = useCallback(async () => {
+    if (restartingDaemonRef.current) {
+      return;
+    }
+    restartingDaemonRef.current = true;
+    setDaemonRestartConfirmation(false);
+    setRestartingDaemon(true);
+    try {
+      await restartLocalDaemon();
+      clearLocalDaemonState();
+      await refresh(true);
+    } catch (error) {
+      if (!restartFailurePreservesLocalState(errorCode(error))) {
+        clearLocalDaemonState();
+        await refresh(true);
+      }
+      setListError(`Could not restart rmuxd: ${errorMessage(error)}`);
+    } finally {
+      restartingDaemonRef.current = false;
+      setRestartingDaemon(false);
+      setLoading(false);
+    }
+  }, [clearLocalDaemonState, refresh, setDaemonRestartConfirmation]);
+
+  const requestDaemonRestart = useCallback(() => {
+    if (restartingDaemonRef.current) {
+      return;
+    }
+    setDaemonRestartConfirmation(true);
+  }, [setDaemonRestartConfirmation]);
+
+  const cancelDaemonRestart = useCallback(() => {
+    if (!daemonRestartConfirmationRef.current) {
+      return;
+    }
+    setDaemonRestartConfirmation(false);
+  }, [setDaemonRestartConfirmation]);
+
+  const confirmDaemonRestart = useCallback(() => {
+    if (
+      !daemonRestartConfirmationRef.current ||
+      restartingDaemonRef.current
+    ) {
+      return;
+    }
+    void restartDaemon();
+  }, [restartDaemon]);
 
   const attachedSession = attachment.state.session;
   const attachedTerminalSize = attachedSession?.terminal_size;
@@ -415,11 +579,17 @@ export function TerminalPage() {
       disconnectingSessionId,
       terminalReady: renderer !== null,
       currentWorkingDirectory,
+      daemonRestartConfirmationPending,
+      restartingDaemon,
       shortcutPlatform,
     },
     {
       showPalette: () => setPaletteOpen(true),
-      showNewShellForm: () => setCreateFormOpen(true),
+      showNewShellForm: () => {
+        if (!daemonRestartBlocksInteractions()) {
+          setCreateFormOpen(true);
+        }
+      },
       openShellTab: () => {
         if (currentWorkingDirectory) {
           void create(currentWorkingDirectory);
@@ -430,11 +600,24 @@ export function TerminalPage() {
       disconnectSession: (session) => void disconnect(session),
       requestCloseSession: requestClose,
       confirmCloseSession: confirmClose,
-      toggleInput: () => void attachment.toggleInputLease(),
-      toggleResizeWithWindow: () =>
-        void attachment.toggleResizeWithWindow(),
-      reconnect: () => void attachment.reconnect(),
+      toggleInput: () => {
+        if (!daemonRestartBlocksInteractions()) {
+          void attachment.toggleInputLease();
+        }
+      },
+      toggleResizeWithWindow: () => {
+        if (!daemonRestartBlocksInteractions()) {
+          void attachment.toggleResizeWithWindow();
+        }
+      },
+      reconnect: () => {
+        if (!daemonRestartBlocksInteractions()) {
+          void attachment.reconnect();
+        }
+      },
       focusTerminal: () => renderer?.focus(),
+      requestDaemonRestart,
+      confirmDaemonRestart,
     },
   );
   const paletteShortcutLabel = formatKeybinding(
@@ -444,13 +627,18 @@ export function TerminalPage() {
 
   const executeCommand = useCallback(
     (command: AppCommand) => {
-      setPaletteOpen(false);
+      if (!command.keepPaletteOpen) {
+        setPaletteOpen(false);
+      }
+      if (command.id !== COMMAND_IDS.restartDaemon) {
+        cancelDaemonRestart();
+      }
       command.run();
       if (command.focusTerminalAfterRun !== false) {
         requestAnimationFrame(() => renderer?.focus());
       }
     },
-    [renderer],
+    [cancelDaemonRestart, renderer],
   );
 
   useCommandShortcuts(commands, shortcutPlatform, executeCommand);
@@ -463,8 +651,18 @@ export function TerminalPage() {
     }
   }
 
+  const handleTerminalInput = useCallback(
+    (data: Uint8Array) => {
+      if (!daemonRestartBlocksInteractions()) {
+        attachment.handleInput(data);
+      }
+    },
+    [attachment, daemonRestartBlocksInteractions],
+  );
+
   function dismissPalette() {
     setPaletteOpen(false);
+    cancelDaemonRestart();
     requestAnimationFrame(() => renderer?.focus());
   }
 
@@ -489,7 +687,9 @@ export function TerminalPage() {
           onCreate={create}
           onCreateFormOpenChange={(open) => {
             if (open) {
-              executeCommandById(COMMAND_IDS.newShell);
+              if (!daemonRestartBlocksInteractions()) {
+                executeCommandById(COMMAND_IDS.newShell);
+              }
             } else {
               setCreateFormOpen(false);
             }
@@ -504,7 +704,12 @@ export function TerminalPage() {
             tabs={tabs}
             shellStates={displayedTabShellStates}
             activeSessionId={activeTabId}
-            canCreate={currentWorkingDirectory !== null && !creating}
+            canCreate={
+              currentWorkingDirectory !== null &&
+              !creating &&
+              !daemonRestartConfirmationPending &&
+              !restartingDaemon
+            }
             onSelect={(session) => void activateTab(session)}
             onClose={(session) => void closeTab(session)}
             onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
@@ -537,7 +742,7 @@ export function TerminalPage() {
           <TerminalSurface
             phase={attachment.state.phase}
             hasSession={attachment.state.session !== null}
-            onInput={attachment.handleInput}
+            onInput={handleTerminalInput}
             onReady={setRenderer}
           />
           <StatusBar state={attachment.state} />

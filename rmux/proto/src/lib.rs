@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
@@ -105,6 +105,7 @@ pub struct ShellCapabilities {
   pub reports_prompt_phase: bool,
   /// The integration can report a bounded, non-editable command summary
   /// while the shell is waiting for that command to finish.
+  #[serde(default)]
   pub reports_running_command: bool,
 }
 
@@ -203,9 +204,11 @@ pub struct ShellState {
   pub current_command_line: Option<CommandLine>,
   /// True when a visibility policy deliberately omitted the running-command
   /// summary. When true, `running_command` must be `None`.
+  #[serde(default)]
   pub running_command_redacted: bool,
   /// A bounded shell-reported command summary while `prompt_phase` is
   /// `running`. This is never an editable buffer.
+  #[serde(default)]
   pub running_command: Option<String>,
   pub tui_hint: TuiHint,
 }
@@ -344,6 +347,7 @@ pub enum ClientMessage {
     request_command_line: bool,
     /// Request the current running-command summary in shell-awareness state.
     /// The daemon may redact it according to its visibility policy.
+    #[serde(default)]
     request_running_command: bool,
   },
   KillSession {
@@ -700,6 +704,80 @@ mod tests {
     );
     assert_eq!(encoded["state"]["tui_hint"], "inline");
     assert_eq!(encoded["state"]["running_command"], serde_json::Value::Null);
+  }
+
+  #[test]
+  fn version_six_shell_state_fixture_defaults_running_command_fields() {
+    let fixture = r#"
+      {
+        "type": "shell_state_changed",
+        "state": {
+          "revision": 7,
+          "observed_sequence": 123,
+          "shell": {
+            "shell_type": "zsh",
+            "integration_version": 1,
+            "capabilities": {
+              "reports_cwd": true,
+              "reports_command_line": true,
+              "reports_cursor": true,
+              "reports_prompt_phase": true
+            }
+          },
+          "cwd": "/work/rmux",
+          "prompt_phase": "editing",
+          "command_line_redacted": false,
+          "current_command_line": {
+            "text": "cargo test",
+            "cursor_scalar_offset": 10
+          },
+          "tui_hint": "inline"
+        }
+      }
+    "#;
+
+    let ServerMessage::ShellStateChanged { state } = serde_json::from_str(fixture).unwrap() else {
+      panic!("fixture must decode as shell_state_changed");
+    };
+
+    assert!(!state.shell.capabilities.reports_running_command);
+    assert!(!state.running_command_redacted);
+    assert_eq!(state.running_command, None);
+  }
+
+  #[test]
+  fn version_six_attach_fixture_defaults_running_command_request() {
+    let fixture = r#"
+      {
+        "type": "attach_session",
+        "session": "work",
+        "resume_from": 42,
+        "terminal_size": {
+          "columns": 80,
+          "rows": 24,
+          "pixel_width": 0,
+          "pixel_height": 0
+        },
+        "request_input_lease": true,
+        "request_layout_lease": false,
+        "request_command_line": true
+      }
+    "#;
+
+    let ClientMessage::AttachSession {
+      request_running_command,
+      ..
+    } = serde_json::from_str(fixture).unwrap()
+    else {
+      panic!("fixture must decode as attach_session");
+    };
+
+    assert!(!request_running_command);
+  }
+
+  #[test]
+  fn protocol_version_remains_six_for_additive_shell_title_fields() {
+    assert_eq!(PROTOCOL_VERSION, 6);
   }
 
   #[test]

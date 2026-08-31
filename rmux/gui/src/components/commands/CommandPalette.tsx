@@ -58,6 +58,7 @@ export function CommandPalette({
 
   function execute(command: AppCommand | null) {
     if (command?.enabled) {
+      setSelectedCommandId(command.id);
       onExecute(command);
     }
   }

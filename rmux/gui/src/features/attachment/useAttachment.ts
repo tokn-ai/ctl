@@ -74,6 +74,11 @@ export interface AttachmentActions {
   reconnect(): Promise<void>;
   cancelPendingConnection(sessionId: string): void;
   detach(): Promise<void>;
+  /**
+   * Forget local attachment state for a daemon restart. The restart command
+   * owns backend detachment, so this deliberately does not send DetachAttachment.
+   */
+  resetAfterDaemonRestart(): void;
   handleInput(data: Uint8Array): void;
   toggleInputLease(): Promise<void>;
   toggleResizeWithWindow(): Promise<void>;
@@ -799,6 +804,24 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     setState(INITIAL_STATE);
   }, [setFailure]);
 
+  const resetAfterDaemonRestart = useCallback(() => {
+    generationRef.current += 1;
+    inputLeaseOwnedRef.current = false;
+    layoutLeaseOwnedRef.current = false;
+    resizeWithWindowRef.current = false;
+    inputPumpRef.current?.clear();
+    layoutLeasePumpRef.current?.reset();
+    resizeCoordinatorRef.current?.reset();
+    deferredConnectionRef.current?.cancel();
+    connectionQueueRef.current?.cancelPending();
+    appliedSequenceRef.current = null;
+    pendingShellStateRef.current = null;
+    activeAttachmentRef.current = null;
+    channelRef.current = null;
+    stateRef.current = INITIAL_STATE;
+    setState(INITIAL_STATE);
+  }, []);
+
   const handleInput = useCallback((data: Uint8Array) => {
     if (!inputLeaseOwnedRef.current || !activeAttachmentRef.current) {
       return;
@@ -896,6 +919,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     reconnect,
     cancelPendingConnection,
     detach,
+    resetAfterDaemonRestart,
     handleInput,
     toggleInputLease,
     toggleResizeWithWindow,

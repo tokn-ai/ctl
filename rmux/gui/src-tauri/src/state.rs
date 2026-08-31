@@ -2,7 +2,6 @@ use rmux_client::{
   AttachmentAcknowledgementError, AttachmentControl, AttachmentEvent, AttachmentEvents,
 };
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager as _;
@@ -10,7 +9,7 @@ use tauri::ipc::Channel;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, timeout};
 
-use crate::dto::{AttachmentEventDto, PresentationAcknowledgement, WindowBootstrapDto};
+use crate::dto::{AttachmentEventDto, PresentationAcknowledgement};
 use crate::error::{CommandErrorDto, CommandResult};
 
 const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
@@ -25,7 +24,6 @@ pub struct AppState {
 #[derive(Default)]
 struct AttachmentRegistry {
   by_window: HashMap<String, AttachmentSlot>,
-  window_bootstraps: HashMap<String, WindowBootstrapDto>,
   window_transitions: HashMap<String, Arc<Mutex<()>>>,
 }
 
@@ -71,42 +69,6 @@ impl PendingPresentation {
 }
 
 impl AppState {
-  pub async fn store_window_bootstrap(
-    &self,
-    window_label: &str,
-    bootstrap: WindowBootstrapDto,
-  ) -> CommandResult<()> {
-    let mut registry = self.registry.lock().await;
-    match registry.window_bootstraps.entry(window_label.into()) {
-      Entry::Vacant(entry) => {
-        entry.insert(bootstrap);
-        Ok(())
-      }
-      Entry::Occupied(_) => Err(CommandErrorDto::new(
-        "window_bootstrap_already_exists",
-        "a startup request already exists for this window",
-      )),
-    }
-  }
-
-  pub async fn take_window_bootstrap(&self, window_label: &str) -> Option<WindowBootstrapDto> {
-    self
-      .registry
-      .lock()
-      .await
-      .window_bootstraps
-      .remove(window_label)
-  }
-
-  pub async fn remove_window_bootstrap(&self, window_label: &str) {
-    self
-      .registry
-      .lock()
-      .await
-      .window_bootstraps
-      .remove(window_label);
-  }
-
   pub async fn window_transition(&self, window_label: &str) -> Arc<Mutex<()>> {
     let mut registry = self.registry.lock().await;
     Arc::clone(
@@ -213,10 +175,9 @@ impl AppState {
     Ok(Arc::clone(actor))
   }
 
-  async fn cleanup_window(&self, window_label: &str) {
+  async fn detach_window(&self, window_label: &str) {
     let actor = {
       let mut registry = self.registry.lock().await;
-      registry.window_bootstraps.remove(window_label);
       match registry.by_window.get(window_label) {
         Some(AttachmentSlot::Opening { .. }) => {
           registry.by_window.remove(window_label);
@@ -237,17 +198,13 @@ pub fn register_main_window_cleanup(app: &tauri::App) {
     return;
   };
   let state = app.state::<AppState>().inner().clone();
-  register_window_cleanup(&window, state);
-}
-
-pub fn register_window_cleanup(window: &tauri::WebviewWindow, state: AppState) {
   let window_label = window.label().to_owned();
   window.on_window_event(move |event| {
     if matches!(event, tauri::WindowEvent::Destroyed) {
       let state = state.clone();
       let window_label = window_label.clone();
       tauri::async_runtime::spawn(async move {
-        state.cleanup_window(&window_label).await;
+        state.detach_window(&window_label).await;
       });
     }
   });
@@ -539,42 +496,6 @@ mod tests {
     let _first_guard = first.lock().await;
     assert!(same_window.try_lock().is_err());
     assert!(other_window.try_lock().is_ok());
-  }
-
-  #[tokio::test]
-  async fn window_bootstrap_is_consumed_once() {
-    let state = AppState::default();
-    let bootstrap = WindowBootstrapDto {
-      working_directory: "/work/rmux".into(),
-      terminal_size: crate::dto::TerminalSizeDto {
-        columns: 100,
-        rows: 30,
-        pixel_width: None,
-        pixel_height: None,
-      },
-    };
-
-    state
-      .store_window_bootstrap("terminal-1", bootstrap.clone())
-      .await
-      .unwrap();
-    let duplicate = state
-      .store_window_bootstrap(
-        "terminal-1",
-        WindowBootstrapDto {
-          working_directory: "/wrong".into(),
-          ..bootstrap.clone()
-        },
-      )
-      .await
-      .unwrap_err();
-
-    assert_eq!(duplicate.code, "window_bootstrap_already_exists");
-    assert_eq!(
-      state.take_window_bootstrap("terminal-1").await,
-      Some(bootstrap)
-    );
-    assert_eq!(state.take_window_bootstrap("terminal-1").await, None);
   }
 
   #[test]

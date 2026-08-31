@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
+import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { TerminalSurface } from "../components/terminal/TerminalSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
 import { useAttachment } from "../features/attachment/useAttachment";
@@ -24,13 +25,17 @@ import {
   syncSessionTerminalSize,
 } from "../features/sessions/sessionListState";
 import type { XtermRenderer } from "../features/terminal/XtermRenderer";
+import {
+  closeTerminalTab,
+  openTerminalTab,
+  reconcileTerminalTabs,
+  syncTabTerminalSize,
+} from "../features/tabs/tabState";
 import { errorCode, errorMessage } from "../lib/errors";
 import {
   createSession,
   killSession,
   listSessions,
-  openShellWindow,
-  takeWindowBootstrap,
 } from "../lib/tauri";
 import type { SessionSummary, TerminalSize } from "../lib/types";
 
@@ -50,10 +55,11 @@ export function TerminalPage() {
   const attachment = useAttachment(renderer);
   const currentWorkingDirectory = attachment.state.shell_state?.cwd || null;
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [tabs, setTabs] = useState<SessionSummary[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [openingWindow, setOpeningWindow] = useState(false);
   const [createFormOpen, setCreateFormOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingCloseSessionId, setPendingCloseSessionId] = useState<
@@ -68,8 +74,9 @@ export function TerminalPage() {
   const closingSessionIdsRef = useRef(new Set<string>());
   const closedSessionIdsRef = useRef(new Set<string>());
   const refreshGuardRef = useRef(new SessionListRefreshGuard());
-  const bootstrapRequestedRef = useRef(false);
-  const openingWindowRef = useRef(false);
+  const tabsRef = useRef<SessionSummary[]>([]);
+  const activeTabIdRef = useRef<string | null>(null);
+  const creatingRef = useRef(false);
 
   const refresh = useCallback(async () => {
     const token = refreshGuardRef.current.begin();
@@ -82,11 +89,19 @@ export function TerminalPage() {
       }
       const listedIds = new Set(listed.map((session) => session.session_id));
       const hidden = closedSessionIdsRef.current;
-      setSessions(
-        replaceSessionList(
-          listed.filter((session) => !hidden.has(session.session_id)),
-        ),
+      const visible = replaceSessionList(
+        listed.filter((session) => !hidden.has(session.session_id)),
       );
+      setSessions(visible);
+      setTabs((current) => {
+        const next = reconcileTerminalTabs(
+          current,
+          visible,
+          activeTabIdRef.current,
+        );
+        tabsRef.current = next;
+        return next;
+      });
       for (const sessionId of hidden) {
         if (!listedIds.has(sessionId)) {
           hidden.delete(sessionId);
@@ -107,125 +122,149 @@ export function TerminalPage() {
     void refresh();
   }, [refresh]);
 
+  const activateTab = useCallback(
+    async (session: SessionSummary, resizeWithWindow = false) => {
+      const nextTabs = openTerminalTab(tabsRef.current, session);
+      tabsRef.current = nextTabs;
+      activeTabIdRef.current = session.session_id;
+      setTabs(nextTabs);
+      setActiveTabId(session.session_id);
+
+      if (attachment.state.session?.session_id === session.session_id) {
+        if (
+          attachment.state.phase === "attached" ||
+          attachment.state.phase === "connecting" ||
+          attachment.state.phase === "reconnecting"
+        ) {
+          renderer?.focus();
+          return;
+        }
+        if (
+          attachment.state.phase === "disconnected" ||
+          attachment.state.phase === "error"
+        ) {
+          await attachment.reconnect();
+          return;
+        }
+      }
+      await attachment.connect(session, {
+        resize_with_window: resizeWithWindow,
+      });
+    },
+    [attachment, renderer],
+  );
+
+  const closeTab = useCallback(
+    async (session: SessionSummary) => {
+      const currentTabs = tabsRef.current;
+      if (!currentTabs.some((tab) => tab.session_id === session.session_id)) {
+        return;
+      }
+
+      const wasActive = activeTabIdRef.current === session.session_id;
+      const closed = closeTerminalTab(currentTabs, session.session_id);
+      tabsRef.current = closed.tabs;
+      setTabs(closed.tabs);
+      if (!wasActive) {
+        return;
+      }
+
+      const nextTab = closed.nextTab;
+      activeTabIdRef.current = nextTab?.session_id ?? null;
+      setActiveTabId(nextTab?.session_id ?? null);
+      if (nextTab) {
+        await attachment.connect(nextTab);
+      } else {
+        await attachment.detach();
+      }
+    },
+    [attachment],
+  );
+
   const create = useCallback(
-    async (
-      workingDirectory: string | null,
-      initialTerminalSize?: TerminalSize,
-    ): Promise<boolean> => {
+    async (workingDirectory: string | null): Promise<boolean> => {
+      if (creatingRef.current) {
+        return false;
+      }
+      creatingRef.current = true;
       setCreating(true);
       setListError(null);
       try {
         const session = await createSession({
           working_directory: workingDirectory,
-          terminal_size: initialTerminalSize ?? measuredSize(renderer),
+          terminal_size: measuredSize(renderer),
         });
         refreshGuardRef.current.recordMutation();
         setSessions((current) => prependSession(current, session));
-        await attachment.connect(session, { resize_with_window: true });
+        await activateTab(session, true);
         return true;
       } catch (error) {
         setListError(errorMessage(error));
         return false;
       } finally {
+        creatingRef.current = false;
         setCreating(false);
       }
     },
-    [attachment, renderer],
+    [activateTab, renderer],
   );
-
-  useEffect(() => {
-    if (!renderer || bootstrapRequestedRef.current) {
-      return;
-    }
-    bootstrapRequestedRef.current = true;
-    void (async () => {
-      try {
-        const bootstrap = await takeWindowBootstrap();
-        if (bootstrap) {
-          await create(
-            bootstrap.working_directory,
-            bootstrap.terminal_size,
-          );
-        }
-      } catch (error) {
-        setListError(errorMessage(error));
-      }
-    })();
-  }, [create, renderer]);
-
-  const openNewWindow = useCallback(async () => {
-    if (!currentWorkingDirectory || openingWindowRef.current) {
-      return;
-    }
-
-    openingWindowRef.current = true;
-    setOpeningWindow(true);
-    setListError(null);
-    try {
-      await openShellWindow({
-        working_directory: currentWorkingDirectory,
-        terminal_size: measuredSize(renderer),
-      });
-    } catch (error) {
-      setListError(errorMessage(error));
-    } finally {
-      openingWindowRef.current = false;
-      setOpeningWindow(false);
-    }
-  }, [currentWorkingDirectory, renderer]);
 
   const disconnect = useCallback(
     async (session: SessionSummary) => {
-      if (attachment.state.session?.session_id !== session.session_id) {
+      if (activeTabIdRef.current !== session.session_id) {
         return;
       }
       setDisconnectingSessionId(session.session_id);
       setListError(null);
       try {
-        await attachment.detach();
+        await closeTab(session);
       } finally {
         setDisconnectingSessionId((current) =>
           current === session.session_id ? null : current,
         );
       }
     },
-    [attachment],
+    [closeTab],
   );
 
-  const close = useCallback(async (session: SessionSummary) => {
-    if (closingSessionIdsRef.current.has(session.session_id)) {
-      return;
-    }
-    closingSessionIdsRef.current.add(session.session_id);
-    setClosingSessionIds((current) => {
-      const next = new Set(current);
-      next.add(session.session_id);
-      return next;
-    });
-    setListError(null);
-    try {
-      try {
-        await killSession({ session_id: session.session_id });
-      } catch (error) {
-        if (errorCode(error) !== "session_not_found") {
-          setListError(errorMessage(error));
-          return;
-        }
+  const close = useCallback(
+    async (session: SessionSummary) => {
+      if (closingSessionIdsRef.current.has(session.session_id)) {
+        return;
       }
-      refreshGuardRef.current.recordMutation();
-      closedSessionIdsRef.current.add(session.session_id);
-      setSessions((current) => removeSession(current, session.session_id));
-      // The session is hidden after either an accepted kill or a not-found
-      // response, which means another actor already achieved the same result.
-    } finally {
-      closingSessionIdsRef.current.delete(session.session_id);
+      closingSessionIdsRef.current.add(session.session_id);
       setClosingSessionIds((current) => {
         const next = new Set(current);
-        next.delete(session.session_id);
+        next.add(session.session_id);
         return next;
       });
-    }
-  }, []);
+      setListError(null);
+      try {
+        try {
+          await killSession({ session_id: session.session_id });
+        } catch (error) {
+          if (errorCode(error) !== "session_not_found") {
+            setListError(errorMessage(error));
+            return;
+          }
+        }
+        refreshGuardRef.current.recordMutation();
+        closedSessionIdsRef.current.add(session.session_id);
+        setSessions((current) => removeSession(current, session.session_id));
+        await closeTab(session);
+        // The session is hidden after either an accepted kill or a not-found
+        // response, which means another actor already achieved the same result.
+      } finally {
+        closingSessionIdsRef.current.delete(session.session_id);
+        setClosingSessionIds((current) => {
+          const next = new Set(current);
+          next.delete(session.session_id);
+          return next;
+        });
+      }
+    },
+    [closeTab],
+  );
 
   const requestClose = useCallback((session: SessionSummary) => {
     setPendingCloseSessionId(session.session_id);
@@ -257,6 +296,15 @@ export function TerminalPage() {
         attachedTerminalSize,
       ),
     );
+    setTabs((current) => {
+      const next = syncTabTerminalSize(
+        current,
+        attachedSession.session_id,
+        attachedTerminalSize,
+      );
+      tabsRef.current = next;
+      return next;
+    });
   }, [
     attachedSession?.session_id,
     attachedTerminalSize?.columns,
@@ -272,7 +320,8 @@ export function TerminalPage() {
     refreshGuardRef.current.recordMutation();
     closedSessionIdsRef.current.add(attachedSession.session_id);
     setSessions((current) => removeSession(current, attachedSession.session_id));
-  }, [attachment.state.phase, attachedSession]);
+    void closeTab(attachedSession);
+  }, [attachment.state.phase, attachedSession, closeTab]);
 
   const disconnectableSessionId =
     attachedSession && attachment.state.phase !== "ended"
@@ -282,7 +331,8 @@ export function TerminalPage() {
   const commands = buildTerminalCommands(
     {
       sessions,
-      activeSessionId: attachedSession?.session_id ?? null,
+      tabs,
+      activeSessionId: activeTabId,
       phase: attachment.state.phase,
       inputOwned: attachment.state.input_lease.owned_by_client,
       resizeWithWindow: attachment.state.resize_with_window,
@@ -293,15 +343,18 @@ export function TerminalPage() {
       disconnectingSessionId,
       terminalReady: renderer !== null,
       currentWorkingDirectory,
-      openingWindow,
       shortcutPlatform,
     },
     {
       showPalette: () => setPaletteOpen(true),
       showNewShellForm: () => setCreateFormOpen(true),
-      openShellWindow: () => void openNewWindow(),
+      openShellTab: () => {
+        if (currentWorkingDirectory) {
+          void create(currentWorkingDirectory);
+        }
+      },
       refreshSessions: () => void refresh(),
-      selectSession: (session) => void attachment.connect(session),
+      selectSession: (session) => void activateTab(session),
       disconnectSession: (session) => void disconnect(session),
       requestCloseSession: requestClose,
       toggleInput: () => void attachment.toggleInputLease(),
@@ -346,7 +399,7 @@ export function TerminalPage() {
       <main className="app-shell">
         <SessionSidebar
           sessions={sessions}
-          selectedSessionId={attachedSession?.session_id ?? null}
+          selectedSessionId={activeTabId}
           disconnectableSessionId={disconnectableSessionId}
           loading={loading}
           error={listError}
@@ -373,6 +426,14 @@ export function TerminalPage() {
           onConfirmClose={confirmClose}
         />
         <section className="terminal-workspace">
+          <TerminalTabs
+            tabs={tabs}
+            activeSessionId={activeTabId}
+            canCreate={currentWorkingDirectory !== null && !creating}
+            onSelect={(session) => void activateTab(session)}
+            onClose={(session) => void closeTab(session)}
+            onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
+          />
           <TerminalToolbar
             state={attachment.state}
             onToggleInput={() =>

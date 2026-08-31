@@ -219,12 +219,6 @@ pub struct CreateSessionRequestDto {
   pub terminal_size: TerminalSizeDto,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WindowBootstrapDto {
-  pub working_directory: String,
-  pub terminal_size: TerminalSizeDto,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct KillSessionRequestDto {
@@ -574,34 +568,6 @@ mod tests {
     assert!(
       serde_json::from_value::<KillSessionRequestDto>(serde_json::json!({
         "sessionId": "unstable-name"
-      }))
-      .is_err()
-    );
-  }
-
-  #[test]
-  fn window_bootstrap_uses_stable_snake_case_fields() {
-    let bootstrap: WindowBootstrapDto = serde_json::from_value(serde_json::json!({
-      "working_directory": "/work/rmux",
-      "terminal_size": {
-        "columns": 100,
-        "rows": 30,
-        "pixel_width": null,
-        "pixel_height": null
-      }
-    }))
-    .unwrap();
-
-    assert_eq!(bootstrap.working_directory, "/work/rmux");
-    assert!(
-      serde_json::from_value::<WindowBootstrapDto>(serde_json::json!({
-        "workingDirectory": "/work/rmux",
-        "terminalSize": {
-          "columns": 100,
-          "rows": 30,
-          "pixelWidth": null,
-          "pixelHeight": null
-        }
       }))
       .is_err()
     );

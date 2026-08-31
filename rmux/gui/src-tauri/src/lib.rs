@@ -20,8 +20,6 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       commands::list_sessions,
       commands::create_session,
-      commands::windows::open_shell_window,
-      commands::windows::take_window_bootstrap,
       commands::kill_session,
       commands::open_attachment,
       commands::send_input,

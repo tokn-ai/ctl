@@ -1,5 +1,3 @@
-pub mod windows;
-
 use std::sync::Arc;
 
 use rmux_client::{

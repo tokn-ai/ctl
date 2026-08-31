@@ -24,12 +24,16 @@ function setup(
   activeSessionId: string | null = "first",
   shortcutPlatform: "macos" | "other" = "macos",
   currentWorkingDirectory: string | null = "/work/rmux",
+  tabIds: readonly string[] = ["first", "second", "third"],
 ) {
   const sessions = [session("first"), session("second"), session("third")];
+  const tabs = sessions.filter((candidate) =>
+    tabIds.includes(candidate.session_id),
+  );
   const actions = {
     showPalette: vi.fn(),
     showNewShellForm: vi.fn(),
-    openShellWindow: vi.fn(),
+    openShellTab: vi.fn(),
     refreshSessions: vi.fn(),
     selectSession: vi.fn(),
     disconnectSession: vi.fn(),
@@ -42,6 +46,7 @@ function setup(
   const commands = buildTerminalCommands(
     {
       sessions,
+      tabs,
       activeSessionId,
       phase: "attached",
       inputOwned: true,
@@ -53,12 +58,11 @@ function setup(
       disconnectingSessionId: null,
       terminalReady: true,
       currentWorkingDirectory,
-      openingWindow: false,
       shortcutPlatform,
     },
     actions,
   );
-  return { sessions, actions, commands };
+  return { sessions, tabs, actions, commands };
 }
 
 function findCommand(
@@ -71,14 +75,19 @@ function findCommand(
 }
 
 describe("terminal commands", () => {
-  it("cycles through sessions and wraps around", () => {
-    const { sessions, actions, commands } = setup("first");
+  it("cycles through open tabs and wraps around", () => {
+    const { tabs, actions, commands } = setup(
+      "first",
+      "macos",
+      "/work/rmux",
+      ["first", "third"],
+    );
 
-    findCommand(commands, COMMAND_IDS.nextSession).run();
-    findCommand(commands, COMMAND_IDS.previousSession).run();
+    findCommand(commands, COMMAND_IDS.nextTab).run();
+    findCommand(commands, COMMAND_IDS.previousTab).run();
 
-    expect(actions.selectSession).toHaveBeenNthCalledWith(1, sessions[1]);
-    expect(actions.selectSession).toHaveBeenNthCalledWith(2, sessions[2]);
+    expect(actions.selectSession).toHaveBeenNthCalledWith(1, tabs[1]);
+    expect(actions.selectSession).toHaveBeenNthCalledWith(2, tabs[1]);
   });
 
   it("uses the existing confirmation flow for close", () => {
@@ -92,12 +101,12 @@ describe("terminal commands", () => {
     expect(actions.requestCloseSession).toHaveBeenCalledWith(sessions[1]);
   });
 
-  it("opens a shell window with the platform-specific shortcut", () => {
+  it("opens a shell tab with the platform-specific shortcut", () => {
     const macos = setup("first", "macos");
     const other = setup("first", "other");
 
-    const macosCommand = findCommand(macos.commands, COMMAND_IDS.newWindow);
-    const otherCommand = findCommand(other.commands, COMMAND_IDS.newWindow);
+    const macosCommand = findCommand(macos.commands, COMMAND_IDS.newTab);
+    const otherCommand = findCommand(other.commands, COMMAND_IDS.newTab);
     expect(macosCommand.keybinding).toEqual({
       code: "KeyT",
       primary: true,
@@ -110,12 +119,12 @@ describe("terminal commands", () => {
     });
 
     macosCommand.run();
-    expect(macos.actions.openShellWindow).toHaveBeenCalledOnce();
+    expect(macos.actions.openShellTab).toHaveBeenCalledOnce();
   });
 
-  it("requires a shell-reported cwd before opening a window", () => {
+  it("requires a shell-reported cwd before opening a tab", () => {
     const { commands } = setup("first", "macos", null);
-    const command = findCommand(commands, COMMAND_IDS.newWindow);
+    const command = findCommand(commands, COMMAND_IDS.newTab);
 
     expect(command.enabled).toBe(false);
     expect(command.disabledReason).toContain("working directory");

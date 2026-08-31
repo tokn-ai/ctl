@@ -11,10 +11,10 @@ import type {
 export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
   newShell: "session.new_shell",
-  newWindow: "window.new_shell_here",
+  newTab: "tab.new_shell_here",
   refreshSessions: "session.refresh",
-  nextSession: "session.next",
-  previousSession: "session.previous",
+  nextTab: "tab.next",
+  previousTab: "tab.previous",
   disconnect: "session.disconnect",
   close: "session.close",
   toggleInput: "terminal.toggle_input",
@@ -31,6 +31,7 @@ export const SHOW_PALETTE_KEYBINDING: Keybinding = {
 
 interface TerminalCommandContext {
   sessions: readonly SessionSummary[];
+  tabs: readonly SessionSummary[];
   activeSessionId: string | null;
   phase: ConnectionPhase;
   inputOwned: boolean;
@@ -42,14 +43,13 @@ interface TerminalCommandContext {
   disconnectingSessionId: string | null;
   terminalReady: boolean;
   currentWorkingDirectory: string | null;
-  openingWindow: boolean;
   shortcutPlatform: ShortcutPlatform;
 }
 
 interface TerminalCommandActions {
   showPalette(): void;
   showNewShellForm(): void;
-  openShellWindow(): void;
+  openShellTab(): void;
   refreshSessions(): void;
   selectSession(session: SessionSummary): void;
   disconnectSession(session: SessionSummary): void;
@@ -68,13 +68,13 @@ export function buildTerminalCommands(
     context.sessions.find(
       (session) => session.session_id === context.activeSessionId,
     ) ?? null;
-  const nextSession = adjacentSession(
-    context.sessions,
+  const nextTab = adjacentSession(
+    context.tabs,
     context.activeSessionId,
     1,
   );
-  const previousSession = adjacentSession(
-    context.sessions,
+  const previousTab = adjacentSession(
+    context.tabs,
     context.activeSessionId,
     -1,
   );
@@ -114,9 +114,9 @@ export function buildTerminalCommands(
       run: actions.showNewShellForm,
     },
     {
-      id: COMMAND_IDS.newWindow,
-      category: "Window",
-      title: "New Window in Current Folder",
+      id: COMMAND_IDS.newTab,
+      category: "Terminal",
+      title: "New Tab in Current Folder",
       detail: context.currentWorkingDirectory ?? undefined,
       keywords: ["shell", "terminal", "cwd", "folder"],
       keybinding: {
@@ -124,13 +124,12 @@ export function buildTerminalCommands(
         primary: true,
         shift: context.shortcutPlatform === "other",
       },
-      enabled:
-        context.currentWorkingDirectory !== null && !context.openingWindow,
-      disabledReason: context.openingWindow
-        ? "A terminal window is already opening."
+      enabled: context.currentWorkingDirectory !== null && !context.creating,
+      disabledReason: context.creating
+        ? "A terminal tab is already being created."
         : "The current shell has not reported its working directory.",
       focusTerminalAfterRun: false,
-      run: actions.openShellWindow,
+      run: actions.openShellTab,
     },
     {
       id: COMMAND_IDS.refreshSessions,
@@ -142,43 +141,43 @@ export function buildTerminalCommands(
       run: actions.refreshSessions,
     },
     {
-      id: COMMAND_IDS.nextSession,
-      category: "Session",
-      title: "Switch to Next Session",
+      id: COMMAND_IDS.nextTab,
+      category: "Terminal",
+      title: "Switch to Next Tab",
       keybinding: {
         code: "BracketRight",
         primary: true,
         shift: true,
       },
-      enabled: nextSession !== null,
-      disabledReason: "There is no other session to select.",
+      enabled: nextTab !== null,
+      disabledReason: "There is no other tab to select.",
       run: () => {
-        if (nextSession) {
-          actions.selectSession(nextSession);
+        if (nextTab) {
+          actions.selectSession(nextTab);
         }
       },
     },
     {
-      id: COMMAND_IDS.previousSession,
-      category: "Session",
-      title: "Switch to Previous Session",
+      id: COMMAND_IDS.previousTab,
+      category: "Terminal",
+      title: "Switch to Previous Tab",
       keybinding: {
         code: "BracketLeft",
         primary: true,
         shift: true,
       },
-      enabled: previousSession !== null,
-      disabledReason: "There is no other session to select.",
+      enabled: previousTab !== null,
+      disabledReason: "There is no other tab to select.",
       run: () => {
-        if (previousSession) {
-          actions.selectSession(previousSession);
+        if (previousTab) {
+          actions.selectSession(previousTab);
         }
       },
     },
     {
       id: COMMAND_IDS.disconnect,
       category: "Session",
-      title: "Disconnect Active Session",
+      title: "Disconnect Active Tab",
       detail: activeSession?.name,
       keywords: ["detach"],
       enabled:

@@ -157,7 +157,7 @@ export function SessionSidebar({
                       onClick={() => onDisconnect(session)}
                       disabled={disconnecting || closing}
                       aria-label={`Disconnect from ${session.name}`}
-                      title="Disconnect this window; keep the session running"
+                      title="Disconnect this tab; keep the session running"
                     >
                       <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
                     </button>

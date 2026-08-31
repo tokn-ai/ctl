@@ -16,18 +16,25 @@ pnpm tauri dev
 ```
 
 The app may also use the path in `RMUXD_BIN`. GUI-created shells receive an
-automatic `session-N` name. **Disconnect** detaches this window and leaves the
-shell running. **Close** is deliberately destructive: after confirmation it
-terminates the session for all clients. Closing the app itself only disconnects.
+automatic `session-N` name. **Disconnect** closes the active tab and detaches
+its view while leaving the shell running. **Close** is deliberately destructive:
+after confirmation it terminates the session for all clients. Closing the app
+itself only detaches its active view.
+
+The desktop normally has one native window and one WebView. Selecting a daemon
+session opens it as a local tab, but only the active tab holds an attachment.
+Switching or closing tabs does not terminate their daemon-owned sessions.
 
 Open the command palette with `Cmd-Shift-P` on macOS or `Ctrl-Shift-P` on
 Windows/Linux. It exposes session creation, refresh, switching, disconnect and
 close, plus terminal input, layout, reconnect, and focus actions. Default
-session shortcuts are:
+terminal shortcuts are:
 
 - new shell: `Cmd/Ctrl-Shift-N`
-- next session: `Cmd/Ctrl-Shift-]`
-- previous session: `Cmd/Ctrl-Shift-[`
+- new tab in the current shell-reported directory: `Cmd-T` on macOS or
+  `Ctrl-Shift-T` on Windows/Linux
+- next tab: `Cmd/Ctrl-Shift-]`
+- previous tab: `Cmd/Ctrl-Shift-[`
 
 These shortcuts are local to the focused app. Other key combinations continue
 to xterm and the PTY unchanged.

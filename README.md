@@ -116,10 +116,10 @@ does not resize its PTY. **Resize with window** explicitly acquires layout
 ownership and continuously matches the PTY to the window; turning it off
 releases layout ownership. A session created in the GUI starts with this mode
 enabled because that window establishes its initial layout.
-GUI-created shells receive a daemon-assigned name. **Disconnect** detaches only
-that window and leaves the daemon-owned shell running; **Close** explicitly
-terminates the session for every attached client. Closing the app itself is a
-disconnect and does not terminate its sessions.
+GUI-created shells receive a daemon-assigned name. **Disconnect** closes the
+active tab and detaches its view while leaving the daemon-owned shell running;
+**Close** explicitly terminates the session for every attached client. Closing
+the app itself detaches its active view and does not terminate any sessions.
 
 The desktop command palette opens with `Cmd-Shift-P` on macOS and
 `Ctrl-Shift-P` on Windows/Linux. The same command registry supplies app-local
@@ -127,10 +127,11 @@ shortcuts for creating and switching sessions; only exact registered
 combinations are intercepted, so ordinary terminal keystrokes continue to the
 PTY.
 
-`Cmd-T` on macOS or `Ctrl-Shift-T` on Windows/Linux opens a separate native
-window with a new persistent shell in the current shell-reported directory.
-The command is available only when shell awareness has reported a cwd. Closing
-the new window detaches it without terminating the session.
+`Cmd-T` on macOS or `Ctrl-Shift-T` on Windows/Linux opens a tab in the existing
+WebView with a new persistent shell in the current shell-reported directory.
+Only the active tab is attached through the window's attachment actor. Closing
+a tab detaches its view without terminating the daemon-owned session. The
+command is available only when shell awareness has reported a cwd.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in

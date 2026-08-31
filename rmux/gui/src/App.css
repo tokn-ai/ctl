@@ -368,14 +368,120 @@ button:disabled {
 .terminal-workspace {
   display: grid;
   grid-template-areas:
+    "tabs"
     "toolbar"
     "notices"
     "terminal"
     "status";
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   background: var(--surface-0);
+}
+
+.terminal-tabs {
+  display: flex;
+  grid-area: tabs;
+  min-width: 0;
+  height: 31px;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  background: #13161b;
+}
+
+.terminal-tab-list {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.terminal-tab {
+  display: flex;
+  min-width: 104px;
+  max-width: 190px;
+  flex: 0 1 190px;
+  align-items: stretch;
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+  background: #171a20;
+}
+
+.terminal-tab.active {
+  color: var(--text);
+  background: var(--surface-0);
+  box-shadow: inset 0 2px var(--accent);
+}
+
+.terminal-tab-select {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 4px 0 10px;
+  overflow: hidden;
+  color: inherit;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.app-shell .terminal-tab-select:hover:not(:disabled) {
+  border-color: transparent;
+  background: #ffffff08;
+}
+
+.terminal-tab-select span:last-child {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-tab-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #626a76;
+}
+
+.terminal-tab.active .terminal-tab-dot {
+  background: var(--accent);
+}
+
+.terminal-tab-close,
+.terminal-tab-new {
+  color: var(--muted);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.terminal-tab-close {
+  width: 27px;
+  flex: 0 0 27px;
+  padding: 0;
+  font-size: 15px;
+}
+
+.app-shell .terminal-tab-close:hover:not(:disabled),
+.app-shell .terminal-tab-new:hover:not(:disabled) {
+  color: var(--text);
+  border-color: transparent;
+  background: #ffffff0d;
+}
+
+.terminal-tab-new {
+  width: 34px;
+  flex: 0 0 34px;
+  padding: 0;
+  font-size: 17px;
+  border-left: 1px solid var(--border);
 }
 
 .terminal-notices {

@@ -699,7 +699,6 @@ button:disabled {
   cursor: pointer;
 }
 
-.command-palette-option:hover:not([aria-disabled="true"]),
 .command-palette-option.selected {
   border-color: #3c5f45;
   background: #243329;

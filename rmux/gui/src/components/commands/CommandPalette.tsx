@@ -147,7 +147,7 @@ export function CommandPalette({
                 aria-disabled={!command.enabled}
                 tabIndex={-1}
                 key={command.id}
-                onMouseEnter={() => {
+                onPointerMove={() => {
                   if (command.enabled) {
                     setSelectedCommandId(command.id);
                   }

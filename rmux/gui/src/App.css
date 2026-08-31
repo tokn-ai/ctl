@@ -589,29 +589,68 @@ button:disabled {
   overflow: hidden;
   border-top: 1px solid var(--border);
   background: #171a20;
+  container: terminal-status / inline-size;
 }
 
-.status-bar span {
+.status-group {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+}
+
+.status-context {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.status-indicators {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.status-item {
+  display: flex;
   flex: 0 0 auto;
+  height: 100%;
+  align-items: center;
+  box-sizing: border-box;
   padding: 0 6px;
   white-space: nowrap;
   border-right: 1px solid var(--border);
 }
 
-.status-bar span:last-child {
+.status-indicators .status-item:last-child {
   border-right: 0;
 }
 
-.status-bar .status-warning {
+.status-tone-warning {
   color: var(--warning);
 }
 
-.status-bar .status-cwd {
+.status-tone-danger {
+  color: var(--danger);
+}
+
+.status-flexible {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@container terminal-status (max-width: 640px) {
+  .status-priority-low {
+    display: none;
+  }
+}
+
+@container terminal-status (max-width: 480px) {
+  .status-priority-medium {
+    display: none;
+  }
 }
 
 .command-palette-backdrop {

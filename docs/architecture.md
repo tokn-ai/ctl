@@ -134,8 +134,12 @@ revision crosses as a decimal string so JavaScript number precision cannot
 corrupt a resume or acknowledgement boundary. Attachment and event IDs fence
 late callbacks from a replaced renderer generation.
 
-The initial desktop bridge shows shell type, cwd, prompt phase, and the TUI
-hint, but does not request or serialize the sensitive editable command buffer.
+The desktop status line groups shell type and cwd separately from prompt
+activity, the TUI hint, input ownership, layout behavior, and daemon-authoritative
+PTY geometry. Lower-priority indicators collapse as the terminal pane narrows.
+Connection and history-recovery warnings take priority, while raw sequence and
+revision values remain diagnostics. The GUI does not request or serialize the
+sensitive editable command buffer.
 
 The renderer adopts daemon-authoritative PTY geometry. Selecting an existing
 session never acquires layout ownership or changes its PTY grid. **Resize with

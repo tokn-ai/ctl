@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AttachmentViewState } from "../../lib/types";
-import { createStatusItems } from "./statusItems";
+import { createStatusGroups } from "./statusItems";
 
 function state(overrides: Partial<AttachmentViewState> = {}): AttachmentViewState {
   return {
@@ -38,16 +38,25 @@ function state(overrides: Partial<AttachmentViewState> = {}): AttachmentViewStat
   };
 }
 
-describe("createStatusItems", () => {
-  it("hides ownership noise, unknown shell state, and raw sequence numbers", () => {
-    expect(createStatusItems(state()).map((item) => item.label)).toEqual([
-      "107×24",
-    ]);
+function labels(items: ReturnType<typeof createStatusGroups>) {
+  return {
+    context: items.context.map((entry) => entry.label),
+    indicators: items.indicators.map((entry) => entry.label),
+  };
+}
+
+describe("createStatusGroups", () => {
+  it("shows control and geometry state without raw sequence numbers", () => {
+    expect(labels(createStatusGroups(state()))).toEqual({
+      context: [],
+      indicators: ["INPUT", "FIXED", "107×24"],
+    });
   });
 
-  it("shows concise useful terminal state", () => {
+  it("orders shell context separately from live terminal indicators", () => {
     const current = state({
       input_lease: { held: true, owned_by_client: false },
+      layout_lease: { held: true, owned_by_client: false },
       shell_state: {
         shell_type: "zsh",
         cwd: "/Users/me/project",
@@ -58,24 +67,54 @@ describe("createStatusItems", () => {
       },
     });
 
-    expect(createStatusItems(current).map((item) => item.label)).toEqual([
-      "view only",
-      "107×24",
-      "zsh",
-      "editing",
-      "TUI",
-      "/Users/me/project",
-    ]);
+    expect(labels(createStatusGroups(current))).toEqual({
+      context: ["zsh", "/Users/me/project"],
+      indicators: ["EDITING", "TUI", "VIEW", "OTHER SIZE", "107×24"],
+    });
   });
 
-  it("shows view-only mode after this client releases input", () => {
+  it("distinguishes active and pending window sizing", () => {
+    const active = state({
+      layout_lease: { held: true, owned_by_client: true },
+      resize_with_window: true,
+    });
+    const pending = state({ resize_with_window: true });
+
+    expect(labels(createStatusGroups(active)).indicators).toContain("WINDOW");
+    expect(labels(createStatusGroups(pending)).indicators).toContain("STARTING SIZE");
+  });
+
+  it("prioritizes recovery and connection warnings while detached", () => {
     const current = state({
-      input_lease: { held: false, owned_by_client: false },
+      phase: "reconnecting",
+      history_gap: true,
+      shell_state: {
+        shell_type: "bash",
+        cwd: "/work/rmux",
+        prompt_phase: "running",
+        tui_hint: "inline",
+        revision: "3",
+        observed_sequence: "58006",
+      },
     });
 
-    expect(createStatusItems(current).map((item) => item.label)).toEqual([
-      "view only",
-      "107×24",
-    ]);
+    expect(labels(createStatusGroups(current))).toEqual({
+      context: ["bash", "/work/rmux"],
+      indicators: ["RUNNING", "107×24", "RECONNECTING", "HISTORY GAP"],
+    });
+  });
+
+  it("explains why a view-only attachment cannot send input", () => {
+    const unclaimed = createStatusGroups(state({
+      input_lease: { held: false, owned_by_client: false },
+    }));
+    const ownedElsewhere = createStatusGroups(state({
+      input_lease: { held: true, owned_by_client: false },
+    }));
+
+    expect(unclaimed.indicators.find((entry) => entry.key === "input")?.title)
+      .toContain("does not own");
+    expect(ownedElsewhere.indicators.find((entry) => entry.key === "input")?.title)
+      .toContain("another attachment");
   });
 });

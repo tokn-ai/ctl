@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   firstEnabledIndex,
   nextEnabledIndex,
   searchCommands,
 } from "../../features/commands/commandSearch";
 import { formatKeybinding } from "../../features/commands/keybindings";
+import { PointerSelectionIntent } from "../../features/commands/PointerSelectionIntent";
 import type {
   AppCommand,
   ShortcutPlatform,
@@ -27,6 +28,7 @@ export function CommandPalette({
   const [selectedCommandId, setSelectedCommandId] = useState<string | null>(
     null,
   );
+  const pointerSelectionRef = useRef(new PointerSelectionIntent());
   const filteredCommands = useMemo(
     () => searchCommands(commands, query),
     [commands, query],
@@ -129,6 +131,34 @@ export function CommandPalette({
           id="command-palette-results"
           className="command-palette-results"
           role="listbox"
+          onPointerMove={(event) => {
+            if (event.pointerType === "touch") {
+              return;
+            }
+            const commandId = commandIdFromElement(event.target);
+            const selectedId = pointerSelectionRef.current.move(
+              { clientX: event.clientX, clientY: event.clientY },
+              commandId,
+            );
+            if (
+              selectedId &&
+              filteredCommands.some(
+                (command) => command.id === selectedId && command.enabled,
+              )
+            ) {
+              setSelectedCommandId(selectedId);
+            }
+          }}
+          onPointerLeave={() => pointerSelectionRef.current.leave()}
+          onScroll={() => {
+            const position = pointerSelectionRef.current.currentPosition();
+            if (!position) {
+              return;
+            }
+            pointerSelectionRef.current.scrolled(
+              commandIdAtPoint(position.clientX, position.clientY),
+            );
+          }}
         >
           {filteredCommands.length === 0 ? (
             <div className="command-palette-empty">No matching commands.</div>
@@ -147,11 +177,7 @@ export function CommandPalette({
                 aria-disabled={!command.enabled}
                 tabIndex={-1}
                 key={command.id}
-                onPointerMove={() => {
-                  if (command.enabled) {
-                    setSelectedCommandId(command.id);
-                  }
-                }}
+                data-command-id={command.id}
                 onClick={() => execute(command)}
               >
                 <span className="command-palette-option-copy">
@@ -179,4 +205,15 @@ export function CommandPalette({
 
 function optionId(commandId: string): string {
   return `command-option-${commandId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+function commandIdAtPoint(clientX: number, clientY: number): string | null {
+  return commandIdFromElement(document.elementFromPoint(clientX, clientY));
+}
+
+function commandIdFromElement(target: EventTarget | null): string | null {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+  return target.closest<HTMLElement>("[data-command-id]")?.dataset.commandId ?? null;
 }

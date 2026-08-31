@@ -86,7 +86,7 @@ button {
   font-size: 16px;
 }
 
-button:hover:not(:disabled) {
+.app-shell button:hover:not(:disabled) {
   border-color: #49525f;
   background: var(--surface-3);
 }

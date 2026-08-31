@@ -38,6 +38,7 @@ export type TuiHint = "unknown" | "inline" | "alternate_screen";
 export interface ShellStateSummary {
   shell_type: ShellType;
   cwd: string | null;
+  running_command: string | null;
   prompt_phase: PromptPhase;
   tui_hint: TuiHint;
   revision: Sequence;

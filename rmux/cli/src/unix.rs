@@ -75,6 +75,16 @@ pub async fn show_shell_state(socket_path: &Path, session: &str) -> Result<(), C
   } else {
     "none"
   };
+  let running_command = if state.shell_state.running_command_redacted {
+    "redacted"
+  } else if state.shell_state.running_command.is_some() {
+    // A one-shot state lookup always requests the daemon's redacted view, but
+    // keep this defensive branch so future visibility policy changes cannot
+    // turn `rmux state` into an accidental command disclosure.
+    "available (not displayed)"
+  } else {
+    "none"
+  };
 
   println!("SESSION\t{}", state.session.name);
   println!(
@@ -95,6 +105,7 @@ pub async fn show_shell_state(socket_path: &Path, session: &str) -> Result<(), C
   );
   println!("TUI_HINT\t{}", tui_hint_name(state.shell_state.tui_hint));
   println!("COMMAND_LINE\t{command_line}");
+  println!("RUNNING_COMMAND\t{running_command}");
   println!("REVISION\t{}", state.shell_state.revision);
   println!("OBSERVED_SEQUENCE\t{}", state.shell_state.observed_sequence);
   Ok(())
@@ -133,8 +144,10 @@ pub async fn attach_session(
       request_input_lease,
       request_layout_lease,
       // The raw terminal CLI has no metadata UI. Keep sensitive edit buffers
-      // local to clients that explicitly need to render them.
+      // and running-command summaries local to clients that explicitly need
+      // to render them.
       request_command_line: false,
+      request_running_command: false,
     },
   )
   .await?;

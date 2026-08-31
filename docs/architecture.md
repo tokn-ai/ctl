@@ -238,9 +238,10 @@ first-use flow.
 ## Shell awareness
 
 `rmuxd` can track a shell descriptor, cwd display string, prompt phase,
-optional editable command buffer/cursor, and an alternate-screen presentation
-hint. This is not terminal emulation and does not introduce viewport commands:
-clients still own scrolling, selection, search, and rendering.
+optional editable command buffer/cursor, optional bounded running-command
+summary, and an alternate-screen presentation hint. This is not terminal
+emulation and does not introduce viewport commands: clients still own
+scrolling, selection, search, and rendering.
 
 On the current Unix implementation, an opt-in shell integration writes bounded
 full snapshots to a unique owner-only FIFO supplied as
@@ -253,12 +254,20 @@ still canonical raw output. Reports are advisory because a child process can
 lie; `rmuxd` assigns the revision and output-sequence correlation itself, and
 coalesces/rate-limits reports before they can contend with PTY ingestion.
 
-The live edit buffer may contain secrets. It is never in `SessionInfo` or the
-session list, and `get_shell_state` always redacts it. An attachment must opt
-in and currently own the input lease before `rmuxd` sends it. The shipped
-`zsh` integration clears it before command execution; `bash` v1 does not
-advertise live edit-buffer capability. `rmux attach` and `ctl shell` are raw
-terminal presenters and intentionally do not request or print the buffer.
+The live edit buffer and running-command summary may contain secrets. They are
+never in `SessionInfo` or the session list, and `get_shell_state` always
+redacts both. An attachment must opt in to each separately and currently own
+the input lease before `rmuxd` sends it. The shipped `zsh` v2 integration
+replaces editable text with a bounded running-command summary before command
+execution; `bash` does not advertise either live-editing or running-command
+capability. `rmux attach` and `ctl shell` are raw terminal presenters and
+intentionally do not request or print either value.
+
+Version-2 FIFO reports preserve the version-1 nine-field NUL-delimited wire
+shape. Their active-text fields are phase-exclusive: prompt phases carry an
+editable buffer/cursor while `running` carries only the non-editable summary.
+The daemon still accepts version-1 reports, which retain their old
+editable-buffer-only semantics.
 
 `tui_hint` means only that DEC alternate-screen modes were observed. It is not
 a classification of the child process: some TUIs do not use alternate screen,

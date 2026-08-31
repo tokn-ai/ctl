@@ -434,11 +434,41 @@ button:disabled {
   background: #ffffff08;
 }
 
-.terminal-tab-select span:last-child {
+.terminal-tab-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
   overflow: hidden;
   font-size: 11px;
+  white-space: nowrap;
+}
+
+.terminal-tab-path,
+.terminal-tab-command {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.terminal-tab-path {
+  flex: 1 1 auto;
+}
+
+.terminal-tab-separator {
+  flex: 0 0 auto;
+  color: #616a76;
+}
+
+.terminal-tab-command {
+  flex: 0 1 auto;
+  color: #aeb7c2;
+}
+
+.terminal-tab.active .terminal-tab-command {
+  color: #cbe8d1;
 }
 
 .terminal-tab-dot {

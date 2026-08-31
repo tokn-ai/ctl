@@ -24,6 +24,9 @@ itself only detaches its active view.
 The desktop normally has one native window and one WebView. Selecting a daemon
 session opens it as a local tab, but only the active tab holds an attachment.
 Switching or closing tabs does not terminate their daemon-owned sessions.
+The active tab and native window title show the last observed `path — command`
+(or shell name while idle). Inactive tabs retain their last title snapshot in
+this window until they are selected again, when they receive a fresh attachment.
 If xterm is still starting, the latest selected tab remains in an attaching
 state and is connected as soon as the renderer is ready. A failed attachment
 leaves its tab selected and can be retried from the session list or command

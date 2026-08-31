@@ -151,6 +151,7 @@ async fn remote_shell_survives_ctld_restart_and_resumes_from_its_sequence() -> T
       request_input_lease: true,
       request_layout_lease: false,
       request_command_line: false,
+      request_running_command: false,
     },
   )
   .await?;
@@ -453,6 +454,7 @@ async fn attach_and_capture_started(
       request_input_lease: true,
       request_layout_lease: false,
       request_command_line: false,
+      request_running_command: false,
     },
   )
   .await?;
@@ -490,6 +492,7 @@ async fn attach_for_stale_relay_recovery(
       request_input_lease: true,
       request_layout_lease: true,
       request_command_line: false,
+      request_running_command: false,
     },
   )
   .await?;

@@ -26,6 +26,10 @@ pub struct ClientIdentity {
 }
 
 /// Parameters for opening an attachment over an already-selected transport.
+#[allow(
+  clippy::struct_excessive_bools,
+  reason = "each flag mirrors an independently negotiated attachment capability"
+)]
 #[derive(Debug, Clone)]
 pub struct AttachRequest {
   pub session: String,
@@ -35,6 +39,9 @@ pub struct AttachRequest {
   pub request_layout_lease: bool,
   /// Request the current editable command line when daemon policy allows it.
   pub request_command_line: bool,
+  /// Request the current non-editable running-command summary when daemon
+  /// policy allows it.
+  pub request_running_command: bool,
 }
 
 /// Session metadata and attachment-relative state returned by `rmuxd`.
@@ -849,6 +856,7 @@ where
       request_input_lease: request.request_input_lease,
       request_layout_lease: request.request_layout_lease,
       request_command_line: request.request_command_line,
+      request_running_command: request.request_running_command,
     },
   )
   .await?;
@@ -2208,6 +2216,7 @@ mod tests {
           request_input_lease: true,
           request_layout_lease: false,
           request_command_line: true,
+          request_running_command: true,
           ..
         }
       ));
@@ -2249,6 +2258,7 @@ mod tests {
         request_input_lease: true,
         request_layout_lease: false,
         request_command_line: true,
+        request_running_command: true,
       },
     )
     .await

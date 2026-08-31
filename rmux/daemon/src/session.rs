@@ -165,27 +165,32 @@ impl Session {
     self.shell_state_publisher.subscribe()
   }
 
-  /// Returns the latest state without a live command buffer.
+  /// Returns the latest state without live command metadata.
   ///
   /// This is used for non-attachment inspection. A one-shot query has no
-  /// input-lease identity to prove that it may observe sensitive edit text.
+  /// input-lease identity to prove that it may observe sensitive command text.
   pub fn shell_state_for_inspection(&self) -> ShellState {
-    self.shell_state_for_visibility(false)
+    self.shell_state_for_visibility(false, false)
   }
 
   /// Returns the latest state filtered for one attachment.
   ///
-  /// Command text is visible only when the attachment both opted in and owns
-  /// the input lease at the time this snapshot is produced. A client that has
-  /// already received text cannot be made to forget it when it later releases
-  /// the lease; this policy governs future snapshots only.
+  /// Editable and running command text are independently opt-in, but each is
+  /// visible only when the attachment owns the input lease at the time this
+  /// snapshot is produced. A client that has already received text cannot be
+  /// made to forget it when it later releases the lease; this policy governs
+  /// future snapshots only.
   pub fn shell_state_for_attachment(
     &self,
     attachment_id: &str,
     request_command_line: bool,
+    request_running_command: bool,
   ) -> ShellState {
-    let may_view_command_line = request_command_line && self.owns_input_lease(attachment_id);
-    self.shell_state_for_visibility(may_view_command_line)
+    let owns_input_lease = self.owns_input_lease(attachment_id);
+    self.shell_state_for_visibility(
+      request_command_line && owns_input_lease,
+      request_running_command && owns_input_lease,
+    )
   }
 
   pub fn owns_input_lease(&self, attachment_id: &str) -> bool {
@@ -401,12 +406,15 @@ impl Session {
     let shell_state = {
       let mut terminal = lock(&self.terminal);
       if terminal.shell_state.current_command_line.is_none()
+        && terminal.shell_state.running_command.is_none()
         && terminal.shell_state.prompt_phase == PromptPhase::Unknown
       {
         None
       } else {
         terminal.shell_state.current_command_line = None;
         terminal.shell_state.command_line_redacted = false;
+        terminal.shell_state.running_command = None;
+        terminal.shell_state.running_command_redacted = false;
         terminal.shell_state.prompt_phase = PromptPhase::Unknown;
         Some(revise_shell_state(&mut terminal))
       }
@@ -429,13 +437,15 @@ impl Session {
   }
 
   /// Emits a newer complete state snapshot after a connection transitions into
-  /// command-line visibility. The underlying shell report is unchanged, but
-  /// the revision keeps every attachment's state stream strictly monotonic.
+  /// command visibility. The underlying shell report is unchanged, but the
+  /// revision keeps every attachment's state stream strictly monotonic.
   pub fn refresh_shell_state_for_visibility(&self) {
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
       let mut terminal = lock(&self.terminal);
-      if terminal.shell_state.current_command_line.is_none() {
+      if terminal.shell_state.current_command_line.is_none()
+        && terminal.shell_state.running_command.is_none()
+      {
         None
       } else {
         Some(revise_shell_state(&mut terminal))
@@ -453,14 +463,15 @@ impl Session {
     }
   }
 
-  fn shell_state_for_visibility(&self, may_view_command_line: bool) -> ShellState {
-    let mut shell_state = lock(&self.terminal).shell_state.clone();
-    shell_state.command_line_redacted = false;
-    if !may_view_command_line && shell_state.current_command_line.is_some() {
-      shell_state.current_command_line = None;
-      shell_state.command_line_redacted = true;
-    }
-    shell_state
+  fn shell_state_for_visibility(
+    &self,
+    may_view_command_line: bool,
+    may_view_running_command: bool,
+  ) -> ShellState {
+    lock(&self.terminal)
+      .shell_state
+      .clone()
+      .filtered_for_visibility(may_view_command_line, may_view_running_command)
   }
 }
 
@@ -987,12 +998,15 @@ fn apply_shell_report_to_terminal(
     cwd,
     prompt_phase,
     current_command_line,
+    running_command,
   } = report;
-  // A reporter may be buggy or malicious. Never retain an editable buffer
-  // once the shell has left a prompt, even if the private record claims one.
-  let current_command_line = match prompt_phase {
-    PromptPhase::AtPrompt | PromptPhase::Editing => current_command_line,
-    PromptPhase::Unknown | PromptPhase::Running => None,
+  // A reporter may be buggy or malicious. The two active text forms are
+  // phase-exclusive: never retain an editable buffer outside a prompt or a
+  // running summary outside the running phase.
+  let (current_command_line, running_command) = match prompt_phase {
+    PromptPhase::AtPrompt | PromptPhase::Editing => (current_command_line, None),
+    PromptPhase::Running => (None, running_command),
+    PromptPhase::Unknown => (None, None),
   };
 
   let mut candidate = terminal.shell_state.clone();
@@ -1001,7 +1015,9 @@ fn apply_shell_report_to_terminal(
   candidate.prompt_phase = prompt_phase;
   candidate.command_line_redacted = false;
   candidate.current_command_line = current_command_line;
-  if !candidate.has_valid_command_line() || candidate == terminal.shell_state {
+  candidate.running_command_redacted = false;
+  candidate.running_command = running_command;
+  if !candidate.has_valid_metadata() || candidate == terminal.shell_state {
     return None;
   }
 
@@ -1230,18 +1246,19 @@ mod tests {
   }
 
   #[test]
-  fn shell_report_tracks_cwd_and_clears_edit_text_when_running() {
+  fn shell_report_tracks_cwd_and_replaces_edit_text_with_running_summary() {
     let mut terminal = terminal_state();
     let _output = terminal.journal.append(b"ready");
     let editing = ShellReport {
       shell: rmux_proto::ShellDescriptor {
         shell_type: rmux_proto::ShellType::Zsh,
-        integration_version: Some(1),
+        integration_version: Some(2),
         capabilities: rmux_proto::ShellCapabilities {
           reports_cwd: true,
           reports_command_line: true,
           reports_cursor: true,
           reports_prompt_phase: true,
+          reports_running_command: true,
         },
       },
       cwd: Some("/workspace".into()),
@@ -1250,6 +1267,7 @@ mod tests {
         text: "cargo test".into(),
         cursor_scalar_offset: Some(10),
       }),
+      running_command: None,
     };
 
     let editing_state = apply_shell_report_to_terminal(&mut terminal, editing)
@@ -1268,15 +1286,17 @@ mod tests {
       shell: editing_state.shell,
       cwd: editing_state.cwd,
       prompt_phase: PromptPhase::Running,
-      current_command_line: Some(rmux_proto::CommandLine {
-        text: "must not persist".into(),
-        cursor_scalar_offset: None,
-      }),
+      current_command_line: None,
+      running_command: Some("cargo test --workspace".into()),
     };
     let running_state = apply_shell_report_to_terminal(&mut terminal, running)
       .expect("running state should clear prior editable text");
     assert_eq!(running_state.revision, 2);
     assert_eq!(running_state.current_command_line, None);
+    assert_eq!(
+      running_state.running_command.as_deref(),
+      Some("cargo test --workspace")
+    );
   }
 
   #[test]

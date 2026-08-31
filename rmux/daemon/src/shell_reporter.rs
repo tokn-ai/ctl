@@ -7,7 +7,11 @@
 
 use nix::sys::stat::Mode as NixMode;
 use nix::unistd::mkfifo;
-use rmux_proto::{CommandLine, PromptPhase, ShellCapabilities, ShellDescriptor, ShellType};
+#[cfg(test)]
+use rmux_proto::MAX_RUNNING_COMMAND_BYTES;
+use rmux_proto::{
+  CommandLine, PromptPhase, ShellCapabilities, ShellDescriptor, ShellType, is_valid_running_command,
+};
 use rustix::fs::{CWD, Mode, OFlags, openat};
 use std::fmt;
 use std::fs::{self, File};
@@ -20,7 +24,8 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
-const REPORT_MAGIC: &str = "rmux-shell-v1";
+const REPORT_MAGIC_V1: &str = "rmux-shell-v1";
+const REPORT_MAGIC_V2: &str = "rmux-shell-v2";
 const REPORT_FIELD_COUNT: usize = 9;
 const MAX_FIELD_BYTES: usize = 4 * 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024;
@@ -41,6 +46,7 @@ pub(crate) struct ShellReport {
   pub(crate) cwd: Option<String>,
   pub(crate) prompt_phase: PromptPhase,
   pub(crate) current_command_line: Option<CommandLine>,
+  pub(crate) running_command: Option<String>,
 }
 
 impl fmt::Debug for ShellReport {
@@ -54,6 +60,7 @@ impl fmt::Debug for ShellReport {
         "current_command_line_reported",
         &self.current_command_line.is_some(),
       )
+      .field("running_command_reported", &self.running_command.is_some())
       .finish()
   }
 }
@@ -472,49 +479,57 @@ fn parse_report(fields: &[Vec<u8>]) -> Option<ShellReport> {
     capabilities,
     cwd,
     prompt_phase,
-    command_line_present,
-    command_line,
+    active_text_present,
+    active_text,
     cursor_scalar_offset,
   ] = fields
   else {
     return None;
   };
 
-  if std::str::from_utf8(magic).ok()? != REPORT_MAGIC {
-    return None;
-  }
+  let format = match std::str::from_utf8(magic).ok()? {
+    REPORT_MAGIC_V1 => ShellReportFormat::V1,
+    REPORT_MAGIC_V2 => ShellReportFormat::V2,
+    _ => return None,
+  };
   let shell_type = parse_shell_type(std::str::from_utf8(shell_type).ok()?)?;
   let integration_version =
     parse_optional_u16(std::str::from_utf8(integration_version).ok()?).ok()?;
   let capabilities = parse_capabilities(std::str::from_utf8(capabilities).ok()?)?;
   let cwd = parse_optional_text(std::str::from_utf8(cwd).ok()?);
   let prompt_phase = parse_prompt_phase(std::str::from_utf8(prompt_phase).ok()?)?;
-  let command_line_present = std::str::from_utf8(command_line_present).ok()?;
-  let command_line = std::str::from_utf8(command_line).ok()?;
+  let active_text_present = std::str::from_utf8(active_text_present).ok()?;
+  let active_text = std::str::from_utf8(active_text).ok()?;
   let cursor_scalar_offset = std::str::from_utf8(cursor_scalar_offset).ok()?;
 
-  let current_command_line = match command_line_present {
-    "0" => {
-      if !command_line.is_empty() || !cursor_scalar_offset.is_empty() {
-        return None;
+  // Version 2 preserves the v1 nine-field record shape. Its final three
+  // fields describe one phase-exclusive active value: an editable buffer at
+  // a prompt, or a non-editable command summary while running. Version 1 is
+  // parsed with its original command-line semantics so existing integrations
+  // remain compatible.
+  let (current_command_line, running_command) = match format {
+    ShellReportFormat::V1 => (
+      parse_command_line(active_text_present, active_text, cursor_scalar_offset)?.into_option(),
+      None,
+    ),
+    ShellReportFormat::V2 => match prompt_phase {
+      PromptPhase::AtPrompt | PromptPhase::Editing => (
+        parse_command_line(active_text_present, active_text, cursor_scalar_offset)?.into_option(),
+        None,
+      ),
+      PromptPhase::Running => (
+        None,
+        parse_running_command(active_text_present, active_text, cursor_scalar_offset)?
+          .into_option(),
+      ),
+      PromptPhase::Unknown => {
+        if parse_absent_active_text(active_text_present, active_text, cursor_scalar_offset) {
+          (None, None)
+        } else {
+          return None;
+        }
       }
-      None
-    }
-    "1" => {
-      if command_line.len() > MAX_COMMAND_LINE_BYTES {
-        return None;
-      }
-      let cursor_scalar_offset = parse_optional_u32(cursor_scalar_offset).ok()?;
-      let command_line = CommandLine {
-        text: command_line.into(),
-        cursor_scalar_offset,
-      };
-      if !command_line.has_valid_cursor() {
-        return None;
-      }
-      Some(command_line)
-    }
-    _ => return None,
+    },
   };
 
   if cwd.is_some() && !capabilities.reports_cwd
@@ -523,6 +538,10 @@ fn parse_report(fields: &[Vec<u8>]) -> Option<ShellReport> {
       .as_ref()
       .is_some_and(|line| line.cursor_scalar_offset.is_some())
       && !capabilities.reports_cursor
+    || matches!(format, ShellReportFormat::V2)
+      && prompt_phase == PromptPhase::Running
+      && active_text_present == "1"
+      && !capabilities.reports_running_command
     || prompt_phase != PromptPhase::Unknown && !capabilities.reports_prompt_phase
   {
     return None;
@@ -537,7 +556,85 @@ fn parse_report(fields: &[Vec<u8>]) -> Option<ShellReport> {
     cwd,
     prompt_phase,
     current_command_line,
+    running_command,
   })
+}
+
+#[derive(Clone, Copy)]
+enum ShellReportFormat {
+  V1,
+  V2,
+}
+
+/// A valid active-text field, preserving whether it was deliberately absent.
+enum ActiveText<T> {
+  Absent,
+  Present(T),
+}
+
+impl<T> ActiveText<T> {
+  fn into_option(self) -> Option<T> {
+    match self {
+      Self::Absent => None,
+      Self::Present(value) => Some(value),
+    }
+  }
+}
+
+fn parse_command_line(
+  active_text_present: &str,
+  active_text: &str,
+  cursor_scalar_offset: &str,
+) -> Option<ActiveText<CommandLine>> {
+  match active_text_present {
+    "0" => parse_absent_active_text(active_text_present, active_text, cursor_scalar_offset)
+      .then_some(ActiveText::Absent),
+    "1" => {
+      if active_text.len() > MAX_COMMAND_LINE_BYTES {
+        return None;
+      }
+      let cursor_scalar_offset = parse_optional_u32(cursor_scalar_offset).ok()?;
+      let command_line = CommandLine {
+        text: active_text.into(),
+        cursor_scalar_offset,
+      };
+      command_line
+        .has_valid_cursor()
+        .then_some(ActiveText::Present(command_line))
+    }
+    _ => None,
+  }
+}
+
+fn parse_running_command(
+  active_text_present: &str,
+  active_text: &str,
+  cursor_scalar_offset: &str,
+) -> Option<ActiveText<String>> {
+  match active_text_present {
+    "0" => parse_absent_active_text(active_text_present, active_text, cursor_scalar_offset)
+      .then_some(ActiveText::Absent),
+    "1" if cursor_scalar_offset.is_empty() => {
+      // An overlong or control-containing command must not leave the prior
+      // editable state visible until the next prompt. Keep the trustworthy
+      // running phase, but omit an invalid title preview instead of retaining
+      // or truncating it.
+      Some(if is_valid_running_command(active_text) {
+        ActiveText::Present(active_text.into())
+      } else {
+        ActiveText::Absent
+      })
+    }
+    _ => None,
+  }
+}
+
+fn parse_absent_active_text(
+  active_text_present: &str,
+  active_text: &str,
+  cursor_scalar_offset: &str,
+) -> bool {
+  active_text_present == "0" && active_text.is_empty() && cursor_scalar_offset.is_empty()
 }
 
 fn parse_shell_type(value: &str) -> Option<ShellType> {
@@ -565,6 +662,7 @@ fn parse_capabilities(value: &str) -> Option<ShellCapabilities> {
       "command_line" => &mut capabilities.reports_command_line,
       "cursor" => &mut capabilities.reports_cursor,
       "prompt_phase" => &mut capabilities.reports_prompt_phase,
+      "running_command" => &mut capabilities.reports_running_command,
       _ => return None,
     };
     if *reported {
@@ -623,7 +721,7 @@ mod tests {
     .expect("shell reporter should start");
 
     let record = report_record(&[
-      REPORT_MAGIC,
+      REPORT_MAGIC_V1,
       "zsh",
       "1",
       "cwd,command_line,cursor,prompt_phase",
@@ -665,7 +763,7 @@ mod tests {
   fn rejects_malformed_records_without_delivery() {
     let mut parser = RecordParser::default();
     let record = report_record(&[
-      REPORT_MAGIC,
+      REPORT_MAGIC_V1,
       "zsh",
       "1",
       "command_line,cursor",
@@ -687,7 +785,7 @@ mod tests {
     let mut parser = RecordParser::default();
     let oversized_line = "x".repeat(MAX_COMMAND_LINE_BYTES + 1);
     let oversized = report_record_owned(&[
-      REPORT_MAGIC.into(),
+      REPORT_MAGIC_V1.into(),
       "bash".into(),
       "1".into(),
       "command_line".into(),
@@ -698,7 +796,7 @@ mod tests {
       String::new(),
     ]);
     let valid = report_record(&[
-      REPORT_MAGIC,
+      REPORT_MAGIC_V1,
       "bash",
       "1",
       "cwd,prompt_phase",
@@ -721,7 +819,7 @@ mod tests {
   fn accepts_an_empty_active_command_line() {
     let mut parser = RecordParser::default();
     let record = report_record(&[
-      REPORT_MAGIC,
+      REPORT_MAGIC_V1,
       "zsh",
       "1",
       "command_line,cursor,prompt_phase",
@@ -742,6 +840,123 @@ mod tests {
       .expect("empty active line should be present");
     assert_eq!(command_line.text, "");
     assert_eq!(command_line.cursor_scalar_offset, Some(0));
+  }
+
+  #[test]
+  fn parses_a_v2_running_command_from_the_phase_exclusive_active_text() {
+    let mut parser = RecordParser::default();
+    let record = report_record(&[
+      REPORT_MAGIC_V2,
+      "zsh",
+      "2",
+      "cwd,command_line,cursor,prompt_phase,running_command",
+      "/workspace",
+      "running",
+      "1",
+      "cargo test --workspace",
+      "",
+    ]);
+    let mut reports = Vec::new();
+    let mut receive = |report| reports.push(report);
+    parser.push(&record, &mut receive);
+
+    let report = reports.pop().expect("v2 report should be accepted");
+    assert_eq!(report.shell.integration_version, Some(2));
+    assert!(report.shell.capabilities.reports_running_command);
+    assert_eq!(report.current_command_line, None);
+    assert_eq!(
+      report.running_command.as_deref(),
+      Some("cargo test --workspace")
+    );
+  }
+
+  #[test]
+  fn v2_rejects_running_command_text_outside_running_phase() {
+    let mut parser = RecordParser::default();
+    let record = report_record(&[
+      REPORT_MAGIC_V2,
+      "zsh",
+      "2",
+      "cwd,prompt_phase,running_command",
+      "/workspace",
+      "at_prompt",
+      "1",
+      "cargo test",
+      "",
+    ]);
+    let mut reports = Vec::new();
+    let mut receive = |report| reports.push(report);
+    parser.push(&record, &mut receive);
+
+    assert!(reports.is_empty());
+  }
+
+  #[test]
+  fn v2_rejects_a_running_summary_without_its_advertised_capability() {
+    let mut parser = RecordParser::default();
+    let record = report_record(&[
+      REPORT_MAGIC_V2,
+      "zsh",
+      "2",
+      "cwd,prompt_phase",
+      "/workspace",
+      "running",
+      "1",
+      "cargo test",
+      "",
+    ]);
+    let mut reports = Vec::new();
+    let mut receive = |report| reports.push(report);
+    parser.push(&record, &mut receive);
+
+    assert!(reports.is_empty());
+  }
+
+  #[test]
+  fn v2_omits_invalid_running_command_text_without_dropping_the_running_phase() {
+    let mut parser = RecordParser::default();
+    let record = report_record(&[
+      REPORT_MAGIC_V2,
+      "zsh",
+      "2",
+      "prompt_phase,running_command",
+      "",
+      "running",
+      "1",
+      "cargo\ntest",
+      "",
+    ]);
+    let mut reports = Vec::new();
+    let mut receive = |report| reports.push(report);
+    parser.push(&record, &mut receive);
+
+    let report = reports.pop().expect("running report should be retained");
+    assert_eq!(report.prompt_phase, PromptPhase::Running);
+    assert_eq!(report.running_command, None);
+  }
+
+  #[test]
+  fn v2_omits_an_overlong_running_command_without_dropping_the_running_phase() {
+    let mut parser = RecordParser::default();
+    let overlong_command = "x".repeat(MAX_RUNNING_COMMAND_BYTES + 1);
+    let record = report_record(&[
+      REPORT_MAGIC_V2,
+      "zsh",
+      "2",
+      "prompt_phase,running_command",
+      "",
+      "running",
+      "1",
+      &overlong_command,
+      "",
+    ]);
+    let mut reports = Vec::new();
+    let mut receive = |report| reports.push(report);
+    parser.push(&record, &mut receive);
+
+    let report = reports.pop().expect("running report should be retained");
+    assert_eq!(report.prompt_phase, PromptPhase::Running);
+    assert_eq!(report.running_command, None);
   }
 
   #[test]
@@ -830,11 +1045,13 @@ mod tests {
           reports_command_line: false,
           reports_cursor: false,
           reports_prompt_phase: true,
+          reports_running_command: false,
         },
       },
       cwd: Some(cwd.into()),
       prompt_phase: PromptPhase::AtPrompt,
       current_command_line: None,
+      running_command: None,
     }
   }
 

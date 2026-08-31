@@ -23,6 +23,7 @@ function state(overrides: Partial<AttachmentViewState> = {}): AttachmentViewStat
     shell_state: {
       shell_type: "unknown",
       cwd: null,
+      running_command: null,
       prompt_phase: "unknown",
       tui_hint: "unknown",
       revision: "1",
@@ -60,6 +61,7 @@ describe("createStatusGroups", () => {
       shell_state: {
         shell_type: "zsh",
         cwd: "/Users/me/project",
+        running_command: null,
         prompt_phase: "editing",
         tui_hint: "alternate_screen",
         revision: "2",
@@ -91,6 +93,7 @@ describe("createStatusGroups", () => {
       shell_state: {
         shell_type: "bash",
         cwd: "/work/rmux",
+        running_command: "cargo test",
         prompt_phase: "running",
         tui_hint: "inline",
         revision: "3",

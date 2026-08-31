@@ -32,13 +32,24 @@ import {
   reconcileTerminalTabs,
   syncTabTerminalSize,
 } from "../features/tabs/tabState";
+import {
+  forgetTabShellState,
+  rememberTabShellState,
+  retainTabShellStates,
+} from "../features/tabs/shellStateCache";
+import { formatTerminalTitle } from "../features/tabs/terminalTitle";
+import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
 import {
   createSession,
   killSession,
   listSessions,
 } from "../lib/tauri";
-import type { SessionSummary, TerminalSize } from "../lib/types";
+import type {
+  SessionSummary,
+  ShellStateSummary,
+  TerminalSize,
+} from "../lib/types";
 
 function measuredSize(renderer: XtermRenderer | null): TerminalSize {
   const proposed = renderer?.proposeDimensions();
@@ -57,6 +68,9 @@ export function TerminalPage() {
   const currentWorkingDirectory = attachment.state.shell_state?.cwd || null;
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [tabs, setTabs] = useState<SessionSummary[]>([]);
+  const [tabShellStates, setTabShellStates] = useState<
+    ReadonlyMap<string, ShellStateSummary>
+  >(() => new Map());
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
@@ -94,15 +108,19 @@ export function TerminalPage() {
         listed.filter((session) => !hidden.has(session.session_id)),
       );
       setSessions(visible);
-      setTabs((current) => {
-        const next = reconcileTerminalTabs(
+      const nextTabs = reconcileTerminalTabs(
+        tabsRef.current,
+        visible,
+        activeTabIdRef.current,
+      );
+      tabsRef.current = nextTabs;
+      setTabs(nextTabs);
+      setTabShellStates((current) =>
+        retainTabShellStates(
           current,
-          visible,
-          activeTabIdRef.current,
-        );
-        tabsRef.current = next;
-        return next;
-      });
+          new Set(nextTabs.map((session) => session.session_id)),
+        ),
+      );
       for (const sessionId of hidden) {
         if (!listedIds.has(sessionId)) {
           hidden.delete(sessionId);
@@ -166,6 +184,9 @@ export function TerminalPage() {
       const closed = closeTerminalTab(currentTabs, session.session_id);
       tabsRef.current = closed.tabs;
       setTabs(closed.tabs);
+      setTabShellStates((current) =>
+        forgetTabShellState(current, session.session_id),
+      );
       if (!wasActive) {
         return;
       }
@@ -253,6 +274,9 @@ export function TerminalPage() {
         refreshGuardRef.current.recordMutation();
         closedSessionIdsRef.current.add(session.session_id);
         setSessions((current) => removeSession(current, session.session_id));
+        setTabShellStates((current) =>
+          forgetTabShellState(current, session.session_id),
+        );
         await closeTab(session);
         // The session is hidden after either an accepted kill or a not-found
         // response, which means another actor already achieved the same result.
@@ -286,6 +310,28 @@ export function TerminalPage() {
 
   const attachedSession = attachment.state.session;
   const attachedTerminalSize = attachedSession?.terminal_size;
+  const attachedShellState = attachment.state.shell_state;
+  useEffect(() => {
+    if (!attachedSession || !attachedShellState) {
+      return;
+    }
+    if (
+      !tabsRef.current.some(
+        (tab) => tab.session_id === attachedSession.session_id,
+      )
+    ) {
+      return;
+    }
+    setTabShellStates((current) =>
+      rememberTabShellState(
+        current,
+        attachedSession.session_id,
+        attachedShellState,
+        { replaceEqualRevision: true },
+      ),
+    );
+  }, [attachedSession?.session_id, attachedShellState]);
+
   useEffect(() => {
     if (!attachedSession || !attachedTerminalSize) {
       return;
@@ -322,6 +368,9 @@ export function TerminalPage() {
     refreshGuardRef.current.recordMutation();
     closedSessionIdsRef.current.add(attachedSession.session_id);
     setSessions((current) => removeSession(current, attachedSession.session_id));
+    setTabShellStates((current) =>
+      forgetTabShellState(current, attachedSession.session_id),
+    );
     void closeTab(attachedSession);
   }, [attachment.state.phase, attachedSession, closeTab]);
 
@@ -329,6 +378,25 @@ export function TerminalPage() {
     attachedSession && attachment.state.phase !== "ended"
       ? attachedSession.session_id
       : null;
+
+  const activeTab = tabs.find((tab) => tab.session_id === activeTabId) ?? null;
+  const activeShellState =
+    attachedSession?.session_id === activeTabId && attachedShellState
+      ? attachedShellState
+      : activeTabId
+        ? tabShellStates.get(activeTabId) ?? null
+        : null;
+  const displayedTabShellStates =
+    attachedSession && attachedShellState
+      ? rememberTabShellState(
+          tabShellStates,
+          attachedSession.session_id,
+          attachedShellState,
+          { replaceEqualRevision: true },
+        )
+      : tabShellStates;
+  const activeTitle = formatTerminalTitle(activeTab, activeShellState);
+  useWindowTitle(activeTitle.text);
 
   const commands = buildTerminalCommands(
     {
@@ -434,6 +502,7 @@ export function TerminalPage() {
         <section className="terminal-workspace">
           <TerminalTabs
             tabs={tabs}
+            shellStates={displayedTabShellStates}
             activeSessionId={activeTabId}
             canCreate={currentWorkingDirectory !== null && !creating}
             onSelect={(session) => void activateTab(session)}

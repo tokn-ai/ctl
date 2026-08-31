@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   AttachmentAckRequest,
   AttachmentEvent,
@@ -75,4 +76,11 @@ export async function acknowledgeAttachmentEvent(
 
 export async function detachAttachment(request: AttachmentIdRequest): Promise<void> {
   await invoke("detach_attachment", { request });
+}
+
+export async function setNativeWindowTitle(title: string): Promise<void> {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    return;
+  }
+  await getCurrentWindow().setTitle(title);
 }

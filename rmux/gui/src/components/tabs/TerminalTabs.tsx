@@ -1,7 +1,9 @@
-import type { SessionSummary } from "../../lib/types";
+import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import { formatTerminalTitle } from "../../features/tabs/terminalTitle";
 
 interface TerminalTabsProps {
   tabs: readonly SessionSummary[];
+  shellStates: ReadonlyMap<string, ShellStateSummary>;
   activeSessionId: string | null;
   canCreate: boolean;
   onSelect(session: SessionSummary): void;
@@ -11,6 +13,7 @@ interface TerminalTabsProps {
 
 export function TerminalTabs({
   tabs,
+  shellStates,
   activeSessionId,
   canCreate,
   onSelect,
@@ -22,6 +25,10 @@ export function TerminalTabs({
       <div className="terminal-tab-list" role="tablist">
         {tabs.map((tab) => {
           const active = tab.session_id === activeSessionId;
+          const title = formatTerminalTitle(
+            tab,
+            shellStates.get(tab.session_id) ?? null,
+          );
           return (
             <div
               className={`terminal-tab ${active ? "active" : ""}`}
@@ -32,11 +39,22 @@ export function TerminalTabs({
                 type="button"
                 role="tab"
                 aria-selected={active}
-                title={tab.name}
+                aria-label={title.text}
+                title={title.text}
                 onClick={() => onSelect(tab)}
               >
                 <span className="terminal-tab-dot" aria-hidden="true" />
-                <span>{tab.name}</span>
+                <span className="terminal-tab-copy">
+                  <span className="terminal-tab-path">{title.path}</span>
+                  {title.command ? (
+                    <>
+                      <span className="terminal-tab-separator" aria-hidden="true">
+                        —
+                      </span>
+                      <span className="terminal-tab-command">{title.command}</span>
+                    </>
+                  ) : null}
+                </span>
               </button>
               <button
                 className="terminal-tab-close"

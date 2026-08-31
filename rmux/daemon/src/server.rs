@@ -297,6 +297,7 @@ async fn handle_request(
       request_input_lease,
       request_layout_lease,
       request_command_line,
+      request_running_command,
     } => match sessions.resolve(&session) {
       Ok(session) => {
         let request = AttachParameters {
@@ -305,6 +306,7 @@ async fn handle_request(
           request_input_lease,
           request_layout_lease,
           request_command_line,
+          request_running_command,
           attachment_liveness_timeout,
         };
         return handle_attach(stream, session, request).await;
@@ -331,12 +333,17 @@ async fn handle_request(
   Ok(())
 }
 
+#[allow(
+  clippy::struct_excessive_bools,
+  reason = "each field is an independent attachment behavior negotiated by the protocol"
+)]
 struct AttachParameters {
   resume_from: Option<u64>,
   client_terminal_size: rmux_proto::TerminalSize,
   request_input_lease: bool,
   request_layout_lease: bool,
   request_command_line: bool,
+  request_running_command: bool,
   attachment_liveness_timeout: Duration,
 }
 
@@ -385,6 +392,7 @@ async fn handle_attach(
   let initial_shell_state = shell_state_for_attachment(
     snapshot.shell_state.clone(),
     request.request_command_line && attachment_leases.input.owned_by_client,
+    request.request_running_command && attachment_leases.input.owned_by_client,
   );
   let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
   let (reader, mut writer) = stream.into_split();
@@ -413,6 +421,7 @@ async fn handle_attach(
     checkpoint_geometry_revision,
     shell_state_revision: initial_shell_state.revision,
     request_command_line: request.request_command_line,
+    request_running_command: request.request_running_command,
   };
   drive_attachment(
     attachment,
@@ -479,6 +488,7 @@ struct LiveAttachment {
   checkpoint_geometry_revision: Option<u64>,
   shell_state_revision: u64,
   request_command_line: bool,
+  request_running_command: bool,
 }
 
 async fn drive_attachment(
@@ -550,6 +560,7 @@ impl AttachmentDriver {
         Arc::clone(&self.session),
         &self.attachment_id,
         self.attachment.request_command_line,
+        self.attachment.request_running_command,
         message,
       ),
     )
@@ -588,9 +599,11 @@ impl AttachmentDriver {
           .await
       }
       Ok(SessionEvent::Ended { exit_code }) => {
-        let shell_state = self
-          .session
-          .shell_state_for_attachment(&self.attachment_id, self.attachment.request_command_line);
+        let shell_state = self.session.shell_state_for_attachment(
+          &self.attachment_id,
+          self.attachment.request_command_line,
+          self.attachment.request_running_command,
+        );
         if write_shell_state_snapshot(
           &mut self.attachment.writer,
           shell_state,
@@ -629,9 +642,11 @@ impl AttachmentDriver {
         if let Some(checkpoint_geometry_revision) = recovery.checkpoint_geometry_revision {
           self.attachment.checkpoint_geometry_revision = Some(checkpoint_geometry_revision);
         }
-        let shell_state = self
-          .session
-          .shell_state_for_attachment(&self.attachment_id, self.attachment.request_command_line);
+        let shell_state = self.session.shell_state_for_attachment(
+          &self.attachment_id,
+          self.attachment.request_command_line,
+          self.attachment.request_running_command,
+        );
         if write_shell_state_snapshot(
           &mut self.attachment.writer,
           shell_state,
@@ -717,6 +732,7 @@ impl AttachmentDriver {
     let shell_state = shell_state_for_attachment(
       shell_state,
       self.attachment.request_command_line && self.session.owns_input_lease(&self.attachment_id),
+      self.attachment.request_running_command && self.session.owns_input_lease(&self.attachment_id),
     );
     write_shell_state_snapshot(
       &mut self.attachment.writer,
@@ -805,15 +821,11 @@ where
 }
 
 fn shell_state_for_attachment(
-  mut shell_state: ShellState,
+  shell_state: ShellState,
   may_view_command_line: bool,
+  may_view_running_command: bool,
 ) -> ShellState {
-  shell_state.command_line_redacted = false;
-  if !may_view_command_line && shell_state.current_command_line.is_some() {
-    shell_state.current_command_line = None;
-    shell_state.command_line_redacted = true;
-  }
-  shell_state
+  shell_state.filtered_for_visibility(may_view_command_line, may_view_running_command)
 }
 
 async fn process_attach_input<W>(
@@ -821,6 +833,7 @@ async fn process_attach_input<W>(
   session: Arc<Session>,
   attachment_id: &str,
   request_command_line: bool,
+  request_running_command: bool,
   message: ClientMessage,
 ) -> Result<bool, ConnectionError>
 where
@@ -849,14 +862,25 @@ where
       let status = session.acquire_lease(attachment_id, lease);
       let acquired_input = status.owned_by_client;
       write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
-      if lease == LeaseKind::Input && request_command_line && !already_owned_input && acquired_input
+      if lease == LeaseKind::Input
+        && (request_command_line || request_running_command)
+        && !already_owned_input
+        && acquired_input
       {
         session.refresh_shell_state_for_visibility();
       }
     }
     ClientMessage::ReleaseLease { lease } => {
+      let already_owned_input =
+        lease == LeaseKind::Input && session.owns_input_lease(attachment_id);
       let status = session.release_lease(attachment_id, lease);
       write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
+      if lease == LeaseKind::Input
+        && (request_command_line || request_running_command)
+        && already_owned_input
+      {
+        session.refresh_shell_state_for_visibility();
+      }
     }
     ClientMessage::Heartbeat { nonce } => {
       write_frame(writer, &ServerMessage::HeartbeatAck { nonce }).await?;

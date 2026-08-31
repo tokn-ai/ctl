@@ -203,8 +203,10 @@ async fn shell(
       request_input_lease,
       request_layout_lease,
       // `ctl shell` is a raw PTY presentation and deliberately does not
-      // request sensitive editable command buffers it cannot render.
+      // request sensitive editable command buffers or command summaries it
+      // cannot render.
       request_command_line: false,
+      request_running_command: false,
     };
     let (stream, attached) = match begin_attach(stream, &rmux_identity, request).await {
       Ok(attachment) => attachment,

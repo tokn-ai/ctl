@@ -18,7 +18,7 @@ pub enum Shell {
   Zsh,
 }
 
-const ZSH_INIT: &str = r#"# rmux shell-awareness integration v1 for zsh.
+const ZSH_INIT: &str = r#"# rmux shell-awareness integration v2 for zsh.
 # Add this once to ~/.zshrc:
 #   eval "$(rmux shell init zsh)"
 if [[ -o interactive && -n ${RMUX_SHELL_STATE_PIPE-} && -z ${__RMUX_SHELL_AWARENESS-} ]]; then
@@ -39,6 +39,9 @@ if [[ -o interactive && -n ${RMUX_SHELL_STATE_PIPE-} && -z ${__RMUX_SHELL_AWAREN
       local command_line_present=$2
       local command_line=${3-}
       local cursor_scalar_offset=${4-}
+      # The protocol bounds text in UTF-8 bytes, while zsh normally counts
+      # characters. The C locale makes `${#value}` use byte length.
+      local LC_ALL=C
 
       # Do not truncate an editable line: omitting it is safer than presenting
       # a misleading prefix. The daemon also enforces this bound.
@@ -49,9 +52,20 @@ if [[ -o interactive && -n ${RMUX_SHELL_STATE_PIPE-} && -z ${__RMUX_SHELL_AWAREN
       fi
 
       builtin printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
-        rmux-shell-v1 zsh 1 cwd,command_line,cursor,prompt_phase \
+        rmux-shell-v2 zsh 2 cwd,command_line,cursor,prompt_phase,running_command \
         "$PWD" "$prompt_phase" "$command_line_present" "$command_line" "$cursor_scalar_offset" \
         >"$__rmux_shell_state_pipe" 2>/dev/null
+    }
+
+    function __rmux_shell_state_has_safe_running_command() {
+      local command_line=$1
+      if [[ -z $command_line || $command_line == *[[:cntrl:]]* ]]; then
+        return 1
+      fi
+      # This is deliberately after the control check: use the caller locale
+      # for the Unicode character class, then use C only for byte length.
+      local LC_ALL=C
+      (( ${#command_line} <= 256 ))
     }
 
     function __rmux_shell_state_precmd() {
@@ -59,7 +73,15 @@ if [[ -o interactive && -n ${RMUX_SHELL_STATE_PIPE-} && -z ${__RMUX_SHELL_AWAREN
     }
 
     function __rmux_shell_state_preexec() {
-      __rmux_shell_state_emit running 0
+      # The v2 active-text fields are phase-exclusive. The daemon retains this
+      # title summary only when it is a bounded, non-control-character string.
+      if __rmux_shell_state_has_safe_running_command "$1"; then
+        __rmux_shell_state_emit running 1 "$1" ''
+      else
+        # Still publish the running phase so the daemon clears any prior
+        # editable buffer. Only the optional title preview is omitted.
+        __rmux_shell_state_emit running 0 '' ''
+      fi
     }
 
     function __rmux_shell_state_line_pre_redraw() {
@@ -83,7 +105,7 @@ if [[ -o interactive && -n ${RMUX_SHELL_STATE_PIPE-} && -z ${__RMUX_SHELL_AWAREN
 fi
 "#;
 
-const BASH_INIT: &str = r#"# rmux shell-awareness integration v1 for bash.
+const BASH_INIT: &str = r#"# rmux shell-awareness integration v2 for bash.
 # Add this once to ~/.bashrc:
 #   eval "$(rmux shell init bash)"
 if [[ $- == *i* && -n ${RMUX_SHELL_STATE_PIPE:-} && -z ${__RMUX_SHELL_AWARENESS:-} ]]; then
@@ -96,7 +118,7 @@ if [[ $- == *i* && -n ${RMUX_SHELL_STATE_PIPE:-} && -z ${__RMUX_SHELL_AWARENESS:
   if [[ -n ${__rmux_shell_state_pipe:-} ]]; then
     __rmux_shell_state_bash_emit() {
       builtin printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
-        rmux-shell-v1 bash 1 cwd,prompt_phase \
+        rmux-shell-v2 bash 2 cwd,prompt_phase \
         "$PWD" at_prompt 0 '' '' >"$__rmux_shell_state_pipe" 2>/dev/null
     }
 
@@ -122,7 +144,12 @@ mod tests {
   #[test]
   fn zsh_integration_advertises_live_editing_capabilities() {
     let script = init_script(Shell::Zsh);
-    assert!(script.contains("cwd,command_line,cursor,prompt_phase"));
+    assert!(script.contains("rmux-shell-v2 zsh 2"));
+    assert!(script.contains("cwd,command_line,cursor,prompt_phase,running_command"));
+    assert!(script.contains("function __rmux_shell_state_has_safe_running_command"));
+    assert!(script.contains("local LC_ALL=C"));
+    assert!(script.contains("(( ${#command_line} <= 256 ))"));
+    assert!(script.contains("__rmux_shell_state_emit running 0 '' ''"));
     assert!(script.contains("line-pre-redraw"));
     assert!(script.contains("RMUX_SHELL_STATE_PIPE"));
     assert!(script.contains("unset RMUX_SHELL_STATE_PIPE"));
@@ -133,6 +160,7 @@ mod tests {
   #[test]
   fn bash_integration_does_not_claim_a_live_edit_buffer() {
     let script = init_script(Shell::Bash);
+    assert!(script.contains("rmux-shell-v2 bash 2"));
     assert!(script.contains("cwd,prompt_phase"));
     assert!(!script.contains("cwd,command_line,cursor,prompt_phase"));
     assert!(script.contains("unset RMUX_SHELL_STATE_PIPE"));

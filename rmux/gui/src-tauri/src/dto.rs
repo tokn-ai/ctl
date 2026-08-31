@@ -186,10 +186,11 @@ impl From<TuiHint> for TuiHintDto {
   }
 }
 
-/// Privacy-preserving shell state for the GUI status bar.
+/// Privacy-preserving shell state for GUI status and title presentation.
 ///
-/// Editable command-line data is deliberately absent from this DTO and the
-/// attachment never requests it from `rmuxd`.
+/// Editable command-line data is deliberately absent from this DTO. The
+/// running-command summary is separately requested by the GUI and remains
+/// subject to rmuxd's input-lease visibility policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ShellStateDto {
   pub revision: String,
@@ -197,6 +198,7 @@ pub struct ShellStateDto {
   pub shell_type: ShellTypeDto,
   pub cwd: Option<String>,
   pub prompt_phase: PromptPhaseDto,
+  pub running_command: Option<String>,
   pub tui_hint: TuiHintDto,
 }
 
@@ -208,6 +210,7 @@ impl From<ShellState> for ShellStateDto {
       shell_type: value.shell.shell_type.into(),
       cwd: value.cwd,
       prompt_phase: value.prompt_phase.into(),
+      running_command: value.running_command,
       tui_hint: value.tui_hint.into(),
     }
   }
@@ -543,6 +546,7 @@ pub fn parse_sequence(value: Option<String>) -> CommandResult<Option<u64>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use rmux_proto::{ShellCapabilities, ShellDescriptor};
 
   #[test]
   fn session_u64_values_are_decimal_strings() {
@@ -589,7 +593,7 @@ mod tests {
   }
 
   #[test]
-  fn shell_state_dto_never_serializes_the_command_line() {
+  fn shell_state_dto_never_serializes_the_editable_command_line() {
     let state = ShellState {
       current_command_line: Some(rmux_proto::CommandLine {
         text: "secret".into(),
@@ -600,6 +604,29 @@ mod tests {
     let json = serde_json::to_string(&ShellStateDto::from(state)).unwrap();
     assert!(!json.contains("secret"));
     assert!(!json.contains("current_command_line"));
+  }
+
+  #[test]
+  fn shell_state_dto_serializes_a_valid_running_summary() {
+    let state = ShellState {
+      shell: ShellDescriptor {
+        shell_type: ShellType::Zsh,
+        integration_version: Some(2),
+        capabilities: ShellCapabilities {
+          reports_prompt_phase: true,
+          reports_running_command: true,
+          ..ShellCapabilities::default()
+        },
+      },
+      prompt_phase: PromptPhase::Running,
+      running_command: Some("cargo test".into()),
+      ..ShellState::default()
+    };
+    assert!(state.has_valid_metadata());
+
+    let json = serde_json::to_string(&ShellStateDto::from(state)).unwrap();
+    assert!(json.contains("running_command"));
+    assert!(json.contains("cargo test"));
   }
 
   #[test]

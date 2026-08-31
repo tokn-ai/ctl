@@ -3,10 +3,15 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
+/// Maximum UTF-8 byte length of a shell-reported running-command summary.
+///
+/// This is intentionally much smaller than the editable command-line bound:
+/// it is presentation metadata for titles, not an alternate command buffer.
+pub const MAX_RUNNING_COMMAND_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
@@ -98,6 +103,9 @@ pub struct ShellCapabilities {
   pub reports_command_line: bool,
   pub reports_cursor: bool,
   pub reports_prompt_phase: bool,
+  /// The integration can report a bounded, non-editable command summary
+  /// while the shell is waiting for that command to finish.
+  pub reports_running_command: bool,
 }
 
 /// Describes the shell integration currently associated with a session.
@@ -193,6 +201,12 @@ pub struct ShellState {
   pub command_line_redacted: bool,
   /// Omitted when no current editable line is available or visible.
   pub current_command_line: Option<CommandLine>,
+  /// True when a visibility policy deliberately omitted the running-command
+  /// summary. When true, `running_command` must be `None`.
+  pub running_command_redacted: bool,
+  /// A bounded shell-reported command summary while `prompt_phase` is
+  /// `running`. This is never an editable buffer.
+  pub running_command: Option<String>,
   pub tui_hint: TuiHint,
 }
 
@@ -213,6 +227,63 @@ impl ShellState {
       None => true,
     }
   }
+
+  /// Returns whether the running-command fields obey their privacy,
+  /// capability, phase, and bounded-text invariants.
+  #[must_use]
+  pub fn has_valid_running_command(&self) -> bool {
+    match &self.running_command {
+      Some(command) => {
+        !self.running_command_redacted
+          && self.shell.capabilities.reports_running_command
+          && self.prompt_phase == PromptPhase::Running
+          && is_valid_running_command(command)
+      }
+      None => true,
+    }
+  }
+
+  /// Returns whether every shell-awareness field obeys its wire invariants.
+  #[must_use]
+  pub fn has_valid_metadata(&self) -> bool {
+    self.has_valid_command_line() && self.has_valid_running_command()
+  }
+
+  /// Returns this snapshot with command metadata filtered for one viewer.
+  ///
+  /// Visibility is evaluated by the daemon from the attachment's explicit
+  /// request and current input lease. The fields remain in every complete
+  /// snapshot so clients can distinguish unavailable data from policy
+  /// redaction.
+  #[must_use]
+  pub fn filtered_for_visibility(
+    mut self,
+    may_view_command_line: bool,
+    may_view_running_command: bool,
+  ) -> Self {
+    self.command_line_redacted = false;
+    if !may_view_command_line && self.current_command_line.is_some() {
+      self.current_command_line = None;
+      self.command_line_redacted = true;
+    }
+    self.running_command_redacted = false;
+    if !may_view_running_command && self.running_command.is_some() {
+      self.running_command = None;
+      self.running_command_redacted = true;
+    }
+    self
+  }
+}
+
+/// Returns whether a running-command title summary is safe to retain.
+///
+/// The summary is a bounded non-empty UTF-8 string without control
+/// characters. It intentionally does not attempt to parse command syntax.
+#[must_use]
+pub fn is_valid_running_command(command: &str) -> bool {
+  !command.is_empty()
+    && command.len() <= MAX_RUNNING_COMMAND_BYTES
+    && !command.chars().any(char::is_control)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +342,9 @@ pub enum ClientMessage {
     /// Request the current editable command line in shell-awareness state.
     /// The daemon may redact it according to its visibility policy.
     request_command_line: bool,
+    /// Request the current running-command summary in shell-awareness state.
+    /// The daemon may redact it according to its visibility policy.
+    request_running_command: bool,
   },
   KillSession {
     session: String,
@@ -475,6 +549,7 @@ mod tests {
           reports_command_line: true,
           reports_cursor: true,
           reports_prompt_phase: true,
+          reports_running_command: false,
         },
       },
       cwd: Some("/work/rmux".into()),
@@ -484,6 +559,8 @@ mod tests {
         text: "cargo test".into(),
         cursor_scalar_offset: Some(10),
       }),
+      running_command_redacted: false,
+      running_command: None,
       tui_hint: TuiHint::Inline,
     }
   }
@@ -497,6 +574,7 @@ mod tests {
       request_input_lease: true,
       request_layout_lease: false,
       request_command_line: false,
+      request_running_command: true,
     };
     let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -513,6 +591,7 @@ mod tests {
         request_input_lease: true,
         request_layout_lease: false,
         request_command_line: false,
+        request_running_command: true,
       }
     );
   }
@@ -620,6 +699,7 @@ mod tests {
       10
     );
     assert_eq!(encoded["state"]["tui_hint"], "inline");
+    assert_eq!(encoded["state"]["running_command"], serde_json::Value::Null);
   }
 
   #[test]
@@ -681,6 +761,75 @@ mod tests {
   }
 
   #[test]
+  fn shell_state_accepts_a_bounded_running_command_only_while_running() {
+    let mut state = shell_state();
+    state.prompt_phase = PromptPhase::Running;
+    state.current_command_line = None;
+    state.shell.capabilities.reports_running_command = true;
+    state.running_command = Some("cargo test --workspace".into());
+
+    assert!(state.has_valid_running_command());
+    assert!(state.has_valid_metadata());
+
+    state.prompt_phase = PromptPhase::AtPrompt;
+    assert!(!state.has_valid_running_command());
+  }
+
+  #[test]
+  fn shell_state_rejects_invalid_running_command_summaries() {
+    let mut state = shell_state();
+    state.prompt_phase = PromptPhase::Running;
+    state.current_command_line = None;
+    state.shell.capabilities.reports_running_command = true;
+
+    state.running_command = Some(String::new());
+    assert!(!state.has_valid_running_command());
+
+    state.running_command = Some("cargo\ntest".into());
+    assert!(!state.has_valid_running_command());
+
+    state.running_command = Some("x".repeat(MAX_RUNNING_COMMAND_BYTES + 1));
+    assert!(!state.has_valid_running_command());
+  }
+
+  #[test]
+  fn shell_state_rejects_a_running_command_marked_as_redacted() {
+    let mut state = shell_state();
+    state.prompt_phase = PromptPhase::Running;
+    state.current_command_line = None;
+    state.shell.capabilities.reports_running_command = true;
+    state.running_command = Some("cargo test".into());
+    state.running_command_redacted = true;
+
+    assert!(!state.has_valid_running_command());
+  }
+
+  #[test]
+  fn shell_state_visibility_filters_editing_and_running_text_independently() {
+    let mut editing = shell_state();
+    let hidden_editing = editing.clone().filtered_for_visibility(false, true);
+    assert!(hidden_editing.command_line_redacted);
+    assert_eq!(hidden_editing.current_command_line, None);
+    assert!(!hidden_editing.running_command_redacted);
+
+    editing.prompt_phase = PromptPhase::Running;
+    editing.current_command_line = None;
+    editing.shell.capabilities.reports_running_command = true;
+    editing.running_command = Some("cargo test".into());
+    let hidden_running = editing.clone().filtered_for_visibility(true, false);
+    assert!(hidden_running.running_command_redacted);
+    assert_eq!(hidden_running.running_command, None);
+    assert!(!hidden_running.command_line_redacted);
+
+    let visible_running = editing.filtered_for_visibility(false, true);
+    assert!(!visible_running.running_command_redacted);
+    assert_eq!(
+      visible_running.running_command.as_deref(),
+      Some("cargo test")
+    );
+  }
+
+  #[test]
   fn default_shell_state_is_an_explicit_unknown_snapshot() {
     assert_eq!(
       ShellState::default(),
@@ -692,6 +841,8 @@ mod tests {
         prompt_phase: PromptPhase::Unknown,
         command_line_redacted: false,
         current_command_line: None,
+        running_command_redacted: false,
+        running_command: None,
         tui_hint: TuiHint::Unknown,
       }
     );

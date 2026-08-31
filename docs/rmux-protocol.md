@@ -1,7 +1,7 @@
-# rmux protocol version 6
+# rmux protocol version 7
 
 The protocol is independent of local IPC and future remote transport. Version
-6 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+7 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -27,14 +27,15 @@ Creating a session carries its initial working directory separately from the
 optional command, so the daemon's own process directory is never observable as
 session state. Its name is also optional; an omitted name receives a
 daemon-assigned unique name. The exact automatic naming policy is an
-implementation detail rather than a version-6 wire guarantee.
+implementation detail rather than a version-7 wire guarantee.
 
 `kill_session` is a one-response command that explicitly terminates the
 selected session and therefore ends every attachment. It is distinct from
 `detach`, transport EOF, and client exit, all of which preserve the session.
 
 `attach_session` includes the attaching terminal size and requests for input
-and layout leases, plus an explicit `request_command_line` privacy request.
+and layout leases, plus independent `request_command_line` and
+`request_running_command` privacy requests.
 Requesting an unheld layout lease is an explicit resize: the daemon applies
 that terminal size before sending `attached`. Without that request, an attach
 never resizes the PTY; the size only lets the daemon report when a checkpoint
@@ -48,8 +49,8 @@ its grid without gaining layout ownership.
 
 `get_shell_state` is a one-response command for a noninteractive current-state
 lookup. It returns `shell_state_response` with the resolved `session` and the
-same complete `shell_state` model used by an attachment. Command-line
-visibility remains subject to daemon policy.
+same complete `shell_state` model used by an attachment. Editable command-line
+and running-command visibility remain subject to daemon policy.
 
 ## Attachment liveness
 
@@ -113,10 +114,14 @@ unintegrated session uses the explicit revision-zero unknown snapshot rather
 than omitting the field. Each later `shell_state_changed` is a complete
 replacement snapshot, not a patch. Its session-scoped `revision` increases
 strictly; clients ignore an update that is not newer than their current
-revision. When an attachment that requested command-line metadata newly gains
-the input lease while an editable buffer exists, `rmuxd` emits an otherwise
-unchanged newer snapshot. This lets a previously redacted client converge
-without weakening the monotonic revision rule.
+revision **within the same attachment**. The initial snapshot of a new
+attachment is authoritative even when its revision matches a locally cached
+snapshot, because input-lease visibility can make its command metadata more
+restricted. When an attachment that requested editable command-line or
+running-command metadata newly gains the input lease while the corresponding
+value exists, `rmuxd` emits an otherwise unchanged newer snapshot. This lets a
+previously redacted client converge without weakening the monotonic revision
+rule.
 
 `observed_sequence` is the raw-output **next offset** when the daemon observed
 the state: all raw bytes below the offset have reached the daemon. It is useful
@@ -136,6 +141,10 @@ The state contains:
 - `prompt_phase`: `unknown`, `at_prompt`, `editing`, or `running`.
 - `current_command_line`: an optional editable buffer with an optional cursor
   measured in Unicode scalar values, not terminal columns or UTF-8 bytes.
+- `running_command`: an optional non-editable title summary while
+  `prompt_phase` is `running`. It is nonempty, at most 256 UTF-8 bytes, and
+  contains no control characters. It is not parsed as a process identity or
+  command invocation.
 - `tui_hint`: `unknown`, `inline`, or `alternate_screen`. The final value is a
   terminal-parser observation, not a claim that an application is or is not a
   TUI. Some TUIs do not use the alternate screen, and some ordinary programs
@@ -155,16 +164,28 @@ advisory input: shell-awareness state must never authorize operations or
 control lease ownership. The daemon assigns both `revision` and
 `observed_sequence`.
 
-The live command buffer can contain secrets. It is deliberately absent from
-`session_info` and `list_sessions`. An attachment must explicitly request it,
-and the daemon may return `command_line_redacted: true` with
-`current_command_line: null` under its visibility policy. `get_shell_state`
-does not expose it because a one-shot query has no input-lease identity. The
-shipped integrations clear it when a command starts, and rmuxd clears it when a
-session ends. This is metadata-channel redaction, not a guarantee that typed
-characters are secret from ordinary terminal viewers: shell line editing often
-echoes them into the canonical raw PTY output journal. The metadata is
-memory-only unless a future explicit persistence policy says otherwise.
+The live command buffer and short running-command summary can contain secrets.
+They are deliberately absent from `session_info` and `list_sessions`. An
+attachment must explicitly request each value and currently own the input
+lease; the daemon may return `command_line_redacted: true` with
+`current_command_line: null` and/or `running_command_redacted: true` with
+`running_command: null` under its visibility policy. `get_shell_state`
+redacts both because a one-shot query has no input-lease identity. The shipped
+integrations clear editable text when a command starts, and rmuxd clears both
+active-text forms when a session ends. This is metadata-channel redaction, not
+a guarantee that typed characters are secret from ordinary terminal viewers:
+shell line editing often echoes them into the canonical raw PTY output journal.
+The metadata is memory-only unless a future explicit persistence policy says
+otherwise.
+
+FIFO report version 2 retains the version-1 record shape: exactly nine
+NUL-delimited fields. The first field is `rmux-shell-v2`; fields seven through
+nine are phase-exclusive active text. During `at_prompt` or `editing`, they
+mean `command_line_present`, `command_line`, and `cursor_scalar_offset` just
+as in version 1. During `running`, they mean `running_command_present`,
+`running_command`, and an empty cursor field. `unknown` reports no active
+text. `rmuxd` continues to accept `rmux-shell-v1` records with their original
+editable-command semantics, so installed v1 integrations remain compatible.
 
 An attachment recovering from bounded output-broadcast lag may miss state
 updates. After sending a recovery checkpoint, the daemon sends its latest
@@ -214,7 +235,7 @@ local reconnect cursor past the transition. It can continue to show best-effort
 output, but its next attach must omit `resume_from` so `rmuxd` supplies a
 geometry-safe checkpoint.
 
-Geometry transitions are not raw VT bytes and version 6 deliberately does not
+Geometry transitions are not raw VT bytes and version 7 deliberately does not
 add a second resume cursor for them. A caller may use `resume_from` only for a
 renderer that has processed the complete prior attachment stream, including
 geometry messages. If the requested raw position is at or before the most

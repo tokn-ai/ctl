@@ -298,6 +298,67 @@ async fn shell_awareness_uses_private_reports_and_redacts_viewer_command_text() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_command_summaries_follow_input_lease_visibility() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "running-command-state",
+    "printf 'rmux-shell-v2\\000zsh\\0002\\000cwd,prompt_phase,running_command\\000/workspace/rmux\\000running\\0001\\000cargo test --workspace\\000\\000' > \"$RMUX_SHELL_STATE_PIPE\"; IFS= read -r line",
+  )
+  .await?;
+
+  let inspection = wait_for_shell_state(&socket_path, &session.session_id).await?;
+  assert_eq!(inspection.prompt_phase, rmux_proto::PromptPhase::Running);
+  assert!(inspection.running_command_redacted);
+  assert_eq!(inspection.running_command, None);
+
+  let (mut viewer, attached) =
+    attach_session_with_running_command_request(&socket_path, &session.session_id, false).await?;
+  let ServerMessage::Attached {
+    shell_state: viewer_state,
+    input_lease,
+    ..
+  } = attached
+  else {
+    return Err(format!("expected viewer attachment, received {attached:?}").into());
+  };
+  assert!(!input_lease.held);
+  assert!(!input_lease.owned_by_client);
+  assert!(viewer_state.running_command_redacted);
+  assert_eq!(viewer_state.running_command, None);
+
+  let acquired_input = acquire_lease(&mut viewer, LeaseKind::Input).await?;
+  assert_lease_status(&acquired_input, true, true);
+  let visible_state = wait_for_visible_running_command(&mut viewer, viewer_state.revision).await?;
+  assert!(visible_state.revision > viewer_state.revision);
+  assert!(!visible_state.running_command_redacted);
+  assert_eq!(
+    visible_state.running_command.as_deref(),
+    Some("cargo test --workspace")
+  );
+
+  let released_input = release_lease(&mut viewer, LeaseKind::Input).await?;
+  assert_lease_status(&released_input, false, false);
+  let redacted_state =
+    wait_for_redacted_running_command(&mut viewer, visible_state.revision).await?;
+  assert!(redacted_state.revision > visible_state.revision);
+  assert!(redacted_state.running_command_redacted);
+  assert_eq!(redacted_state.running_command, None);
+
+  kill_shell_session(&socket_path, &session.session_id).await?;
+  wait_for_session_end(&mut viewer).await?;
+  drop(viewer);
+  wait_for_daemon_exit(
+    daemon,
+    "rmuxd did not exit after running-command visibility test",
+  )
+  .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alternate_screen_transitions_publish_a_tui_hint() -> TestResult {
   let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
@@ -928,14 +989,31 @@ async fn attach_session_with_command_line_request(
   request_input_lease: bool,
   request_command_line: bool,
 ) -> TestResult<(UnixStream, ServerMessage)> {
-  attach_session_with_command_line_option(
+  attach_session_with_shell_metadata_options(
     socket_path,
     session,
-    None,
-    TerminalSize::default(),
-    request_input_lease,
-    false,
-    request_command_line,
+    TestAttachmentOptions {
+      request_input_lease,
+      request_command_line,
+      ..TestAttachmentOptions::default()
+    },
+  )
+  .await
+}
+
+async fn attach_session_with_running_command_request(
+  socket_path: &Path,
+  session: &str,
+  request_input_lease: bool,
+) -> TestResult<(UnixStream, ServerMessage)> {
+  attach_session_with_shell_metadata_options(
+    socket_path,
+    session,
+    TestAttachmentOptions {
+      request_input_lease,
+      request_running_command: true,
+      ..TestAttachmentOptions::default()
+    },
   )
   .await
 }
@@ -949,17 +1027,52 @@ async fn attach_session_with_command_line_option(
   request_layout_lease: bool,
   request_command_line: bool,
 ) -> TestResult<(UnixStream, ServerMessage)> {
+  attach_session_with_shell_metadata_options(
+    socket_path,
+    session,
+    TestAttachmentOptions {
+      resume_from,
+      terminal_size,
+      request_input_lease,
+      request_layout_lease,
+      request_command_line,
+      ..TestAttachmentOptions::default()
+    },
+  )
+  .await
+}
+
+#[allow(
+  clippy::struct_excessive_bools,
+  reason = "test helper deliberately mirrors independent attach request flags"
+)]
+#[derive(Default)]
+struct TestAttachmentOptions {
+  resume_from: Option<u64>,
+  terminal_size: TerminalSize,
+  request_input_lease: bool,
+  request_layout_lease: bool,
+  request_command_line: bool,
+  request_running_command: bool,
+}
+
+async fn attach_session_with_shell_metadata_options(
+  socket_path: &Path,
+  session: &str,
+  options: TestAttachmentOptions,
+) -> TestResult<(UnixStream, ServerMessage)> {
   let mut stream = connect_when_ready(socket_path).await?;
   handshake(&mut stream).await?;
   write_frame(
     &mut stream,
     &ClientMessage::AttachSession {
       session: session.into(),
-      resume_from,
-      terminal_size,
-      request_input_lease,
-      request_layout_lease,
-      request_command_line,
+      resume_from: options.resume_from,
+      terminal_size: options.terminal_size,
+      request_input_lease: options.request_input_lease,
+      request_layout_lease: options.request_layout_lease,
+      request_command_line: options.request_command_line,
+      request_running_command: options.request_running_command,
     },
   )
   .await?;
@@ -1062,6 +1175,54 @@ async fn wait_for_unredacted_command_line(
       | ServerMessage::PtyGeometryChanged { .. } => {}
       message => {
         return Err(format!("expected unredacted shell state, received {message:?}").into());
+      }
+    }
+  }
+}
+
+async fn wait_for_visible_running_command(
+  stream: &mut UnixStream,
+  after_revision: u64,
+) -> TestResult<ShellState> {
+  loop {
+    match required_message(stream).await? {
+      ServerMessage::ShellStateChanged { state }
+        if state.revision > after_revision
+          && !state.running_command_redacted
+          && state.running_command.is_some() =>
+      {
+        return Ok(state);
+      }
+      ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
+      message => {
+        return Err(format!("expected visible running command, received {message:?}").into());
+      }
+    }
+  }
+}
+
+async fn wait_for_redacted_running_command(
+  stream: &mut UnixStream,
+  after_revision: u64,
+) -> TestResult<ShellState> {
+  loop {
+    match required_message(stream).await? {
+      ServerMessage::ShellStateChanged { state }
+        if state.revision > after_revision
+          && state.running_command_redacted
+          && state.running_command.is_none() =>
+      {
+        return Ok(state);
+      }
+      ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
+      message => {
+        return Err(format!("expected redacted running command, received {message:?}").into());
       }
     }
   }

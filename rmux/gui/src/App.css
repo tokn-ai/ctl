@@ -129,6 +129,11 @@ button:disabled {
   background: #243027;
 }
 
+.session-row.confirming-close {
+  border-color: #694242;
+  background: #2e2326;
+}
+
 .session-select {
   display: grid;
   grid-template-columns: 9px minmax(0, 1fr);
@@ -184,6 +189,54 @@ button:disabled {
   color: #ffd0d0;
   border-color: #694242;
   background: #3b2628;
+}
+
+.session-close-confirmation {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 7px 8px 10px;
+  color: #efc7c7;
+  font-size: 11px;
+  border-top: 1px solid #57383b;
+}
+
+.session-close-confirmation > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-confirmation-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.session-confirm-cancel,
+.session-confirm-close {
+  padding: 4px 7px;
+  font-size: 11px;
+  border-radius: 5px;
+}
+
+.session-confirm-cancel {
+  color: var(--muted);
+  background: transparent;
+}
+
+.session-confirm-close {
+  color: #ffe5e5;
+  border-color: #75474b;
+  background: #4a2c30;
+}
+
+.session-confirm-close:hover:not(:disabled) {
+  border-color: #a85e64;
+  background: #62373c;
 }
 
 .session-indicator {

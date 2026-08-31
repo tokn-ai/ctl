@@ -35,6 +35,9 @@ export function SessionSidebar({
 }: SessionSidebarProps) {
   const [showCreate, setShowCreate] = useState(false);
   const [workingDirectory, setWorkingDirectory] = useState("");
+  const [pendingCloseSessionId, setPendingCloseSessionId] = useState<
+    string | null
+  >(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -46,12 +49,12 @@ export function SessionSidebar({
   }
 
   function requestClose(session: SessionSummary) {
-    const confirmed = window.confirm(
-      `Close "${session.name}"? This terminates its shell and disconnects every attached client.`,
-    );
-    if (confirmed) {
-      onClose(session);
-    }
+    setPendingCloseSessionId(session.session_id);
+  }
+
+  function confirmClose(session: SessionSummary) {
+    setPendingCloseSessionId(null);
+    onClose(session);
   }
 
   return (
@@ -91,9 +94,12 @@ export function SessionSidebar({
           const closing = closingSessionIds.has(session.session_id);
           const disconnecting = session.session_id === disconnectingSessionId;
           const canDisconnect = session.session_id === disconnectableSessionId;
+          const confirmingClose = session.session_id === pendingCloseSessionId;
           return (
             <div
-              className={`session-row ${selected ? "active" : ""}`}
+              className={`session-row ${selected ? "active" : ""} ${
+                confirmingClose ? "confirming-close" : ""
+              }`}
               key={session.session_id}
             >
               <button
@@ -113,30 +119,64 @@ export function SessionSidebar({
                   </small>
                 </span>
               </button>
-              <div className="session-actions">
-                {canDisconnect ? (
-                  <button
-                    className="session-action"
-                    type="button"
-                    onClick={() => onDisconnect(session)}
-                    disabled={disconnecting || closing}
-                    aria-label={`Disconnect from ${session.name}`}
-                    title="Disconnect this window; keep the session running"
-                  >
-                    <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
-                  </button>
-                ) : null}
-                <button
-                  className="session-action session-close"
-                  type="button"
-                  onClick={() => requestClose(session)}
-                  disabled={closing || disconnecting}
-                  aria-label={`Close ${session.name}`}
-                  title="Close the session and terminate its shell"
+              {confirmingClose ? (
+                <div
+                  className="session-close-confirmation"
+                  role="group"
+                  aria-label={`Confirm closing ${session.name}`}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      setPendingCloseSessionId(null);
+                    }
+                  }}
                 >
-                  <span aria-hidden="true">{closing ? "…" : "×"}</span>
-                </button>
-              </div>
+                  <span>
+                    Terminate <strong>{session.name}</strong> for all clients?
+                  </span>
+                  <div className="session-confirmation-actions">
+                    <button
+                      className="session-confirm-cancel"
+                      type="button"
+                      onClick={() => setPendingCloseSessionId(null)}
+                      autoFocus
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="session-confirm-close"
+                      type="button"
+                      onClick={() => confirmClose(session)}
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="session-actions">
+                  {canDisconnect ? (
+                    <button
+                      className="session-action"
+                      type="button"
+                      onClick={() => onDisconnect(session)}
+                      disabled={disconnecting || closing}
+                      aria-label={`Disconnect from ${session.name}`}
+                      title="Disconnect this window; keep the session running"
+                    >
+                      <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
+                    </button>
+                  ) : null}
+                  <button
+                    className="session-action session-close"
+                    type="button"
+                    onClick={() => requestClose(session)}
+                    disabled={closing || disconnecting}
+                    aria-label={`Close ${session.name}`}
+                    title="Close the session and terminate its shell"
+                  >
+                    <span aria-hidden="true">{closing ? "…" : "×"}</span>
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}

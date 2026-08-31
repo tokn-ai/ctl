@@ -2,35 +2,17 @@
 mod unix;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Remote control client for persistent rmux sessions")]
+#[command(version, about = "Remote rmux sessions over OpenSSH")]
 struct Arguments {
-  /// Override the private directory containing this client's identity and hosts.
-  #[arg(long, global = true, value_name = "DIR")]
-  state_dir: Option<PathBuf>,
-
   #[command(subcommand)]
   command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-  /// Authorize this client with a one-time invitation from ctld.
-  Pair {
-    /// Encoded pairing invitation from `ctld pair create`. Omit it to read one line from standard input.
-    invitation: Option<String>,
-
-    /// Local name for the paired device.
-    #[arg(long)]
-    alias: String,
-  },
-
-  /// List paired remote devices.
-  Hosts,
-
-  /// Manage remote persistent shell sessions.
+  /// Manage persistent shell sessions on an SSH host.
   Session {
     #[command(subcommand)]
     command: SessionCommand,
@@ -38,7 +20,7 @@ enum Command {
 
   /// Attach to a remote shell, creating a named shell when it is absent.
   Shell {
-    /// Local alias of the paired remote device.
+    /// OpenSSH destination or Host alias.
     host: String,
 
     /// Remote session name or ID. Defaults to the named `shell` session.
@@ -61,15 +43,15 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommand {
-  /// List sessions on a remote device.
+  /// List sessions on an SSH host.
   List {
-    /// Local alias of the paired remote device.
+    /// OpenSSH destination or Host alias.
     host: String,
   },
 
   /// Create a persistent remote shell session.
   New {
-    /// Local alias of the paired remote device.
+    /// OpenSSH destination or Host alias.
     host: String,
 
     /// Stable, human-readable session name.
@@ -87,7 +69,7 @@ enum SessionCommand {
 
   /// Terminate a remote session by name or ID.
   Kill {
-    /// Local alias of the paired remote device.
+    /// OpenSSH destination or Host alias.
     host: String,
 
     /// Remote session name or ID.
@@ -107,6 +89,6 @@ async fn main() {
 
 #[cfg(not(unix))]
 fn main() {
-  eprintln!("ctl: local client-state storage is not yet implemented on this platform");
+  eprintln!("ctl: interactive terminal support is not yet implemented on this platform");
   std::process::exit(1);
 }

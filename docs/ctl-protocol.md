@@ -1,123 +1,91 @@
-# ctl control protocol version 1
+# ctl SSH transport
 
-`ctl-proto` is the small outer protocol between a remote client and `ctld`.
-It is distinct from `rmux-proto`: it authenticates a device/client pair and
-selects a service. Once the `rmux` service is selected, the outer protocol is
-finished permanently and the connection carries raw `rmux-proto` version 6
-frames.
+`ctl` carries the versioned `rmux-proto` stream through an OpenSSH remote
+command. There is no separate network listener, TLS identity, pairing format,
+or outer application-authentication protocol. A fixed `ctl-ssh-v1` readiness
+marker precedes the raw stream so startup output cannot be mistaken for an
+`rmux-proto` frame.
 
-## Transport
+## Connection command
 
-The normal transport is TCP reachable through Tailscale. `ctld` must bind an
-explicit non-wildcard address; Tailscale ACLs are useful defence in depth but
-are not authorization.
-
-TLS is server-authenticated with a per-device self-signed certificate. A
-pairing invitation pins that exact certificate and uses a stable synthetic DNS
-name (`<device-id>.ctl.invalid`) for TLS verification, independent of a
-changing Tailnet address.
-
-The maximum outer-control frame is 64 KiB. A frame is a four-byte unsigned
-big-endian JSON payload length followed by a UTF-8 JSON payload. The outer
-protocol applies only before the raw service upgrade.
-
-## Pairing and client identity
-
-`ctld init` creates a device ID, TLS private key/certificate, and an empty
-authorization registry in owner-only device state. `ctld pair create` creates
-a 32-byte random one-time token, persists only `SHA-256(token)`, and produces
-an explicitly versioned invitation containing:
-
-- endpoint;
-- invitation format version;
-- device ID and stable TLS name;
-- pinned server certificate;
-- client label;
-- token and expiry timestamp.
-
-The invitation is a bearer secret. Do not put it in documentation, source
-code, logs, or a shell-history example.
-
-`ctl pair` generates an Ed25519 key locally, connects using the invitation's
-pinned TLS certificate, and presents the token and public key. `ctld` consumes
-the token, binds the expected label to the key, and records the derived stable
-client ID. The private key never leaves the client.
-
-Every later connection receives a random challenge. The client signs this
-canonical byte sequence with its Ed25519 key:
+For every one-shot request or interactive attachment, `ctl` starts the system
+OpenSSH client with the equivalent fixed argument sequence:
 
 ```text
-"ctl-auth-v1\0"
-+ u32_be(challenge length) + challenge
-+ u32_be(client name length) + client name UTF-8
-+ u32_be(client version length) + client version UTF-8
+ssh -T \
+  -o ClearAllForwardings=yes \
+  -o ForwardAgent=no \
+  -o ForwardX11=no \
+  -o PermitLocalCommand=no \
+  -o RemoteCommand=none \
+  -- <destination> exec ctld connect
 ```
 
-Length-prefixing prevents ambiguity caused by concatenating variable-length
-fields. `ctld` verifies the signature against its non-revoked authorized-key
-registry. Authentication is explicit in the protocol rather than inferred
-from Tailnet location.
+`<destination>` is an OpenSSH destination or `Host` alias. Host-key checking,
+user authentication, certificates, agents, proxy jumps, ports, and connection
+multiplexing remain OpenSSH configuration. `ctl` never disables host-key
+verification, enables agent forwarding, creates a forwarding, or accepts a
+user-controlled remote command.
 
-## Control lifecycle
+OpenSSH may reuse a healthy configured control master. A broken SSH transport
+cannot resume an existing channel; `ctl` starts a replacement channel and
+uses the `rmux-proto` attachment token described below.
 
-The server accepts only this order:
+## Remote command
+
+`ctld connect` is a disposable, stateless process launched once per SSH
+channel. It connects to the fixed per-user `rmuxd` data endpoint, starting only
+an absolute-path companion `rmuxd` when configured and necessary, writes
+`ctl-ssh-v1\n` to stdout, then copies raw bytes in both directions:
 
 ```text
-client                                                   ctld
-------                                                   ----
-hello { control_protocol_version, client_name, client_version }
-                                         ->
-       hello_accepted { device_id, challenge, server_version }
-                                         <-
-
-pair { token, public_key, label }       ->  pair_accepted { client_id } <-
-  (connection closes)
-
-or
-
-authenticate { public_key, signature }  ->
-       authenticated { client_id, capabilities: [rmux_tunnel] }
-                                         <-
-open_service { rmux, rmux_protocol_version: 6 }
-                                         ->
-       service_opened { rmux }
-                                         <-
-<raw rmux-proto version 6 bytes in both directions>
+SSH stdin  -> ctld connect -> rmuxd Unix socket
+SSH stdout <- ctld connect <- rmuxd Unix socket
 ```
 
-Protocol versions must match exactly. A failed authentication, expired or
-reused token, wrong label, or invalid request receives a structured outer
-error before the connection closes. No local `rmuxd` socket is contacted before
-successful authentication and service selection.
+Completion or failure of either copy direction ends the relay and closes its
+local socket. Diagnostics use stderr exclusively. The remote command accepts
+no arbitrary local socket, forwarded address, or service name from the SSH
+client. The sibling owner-only `rmuxd` maintenance endpoint is never exposed.
 
-## rmux upgrade and reconnect
+Non-interactive remote shell startup files must not write to stdout. Such bytes
+precede the readiness marker, so `ctl` rejects the connection with a focused
+startup-output error instead of feeding them to `rmux-proto`; stderr output is
+safe.
 
-After `service_opened`, `ctld` does a raw bidirectional copy between its TLS
-stream and a fixed same-user local `rmuxd` endpoint. It must not wrap,
-deserialize, buffer through an application reader, inspect, or inject
-`rmux-proto` frames. In particular, the first raw `rmux` handshake may arrive
-immediately after the service response.
+## Authorization boundary
 
-Only the ordinary `rmuxd` data endpoint participates in this relay. The
-daemon's sibling owner-only local-control endpoint is not a `ctl` service and
-must never be connected or forwarded by `ctld`; it includes destructive local
-maintenance operations such as coordinated daemon restart.
+SSH authenticates the device and user. `ctld` adds no identity, authorization,
+or capability registry. It runs with the SSH account's existing authority and
+can reach only that account's fixed local `rmuxd` endpoint.
 
-Closing the TLS connection closes only the corresponding `rmuxd` attachment;
-this releases its input/layout leases. The shell, PTY, raw output journal, and
-checkpoints remain owned by `rmuxd`. A reconnect repeats the outer
-authentication then attaches with the durable `rmux` session ID and last raw
-sequence that its renderer applied. `rmux-proto` version 6 also expires a silent attachment using
-heartbeat acknowledgements, so a half-open gateway path cannot pin a lease
-indefinitely. See `docs/rmux-protocol.md` for the checkpoint and stream
-semantics.
+This does not grant a successfully authenticated SSH account new local
+authority: the same account can already connect to its owner-only `rmuxd`
+socket. Deployments that must grant `ctl` without ordinary SSH remote-command
+access are outside the current design.
 
-## Current scope and deferred work
+## Reconnect lifecycle
 
-Version 1 authorizes only `rmux_tunnel`. It does not expose arbitrary local
-sockets, command execution, filesystem operations, jobs, port forwarding,
-services, system information, or desktop streaming.
+`rmuxd`, not `ctld`, owns reconnect state. A successful initial attachment
+returns an opaque memory-only token. After an unexpected transport loss,
+`rmuxd` retains that logical attachment and its input/layout leases for the
+negotiated liveness interval, 30 seconds by default.
 
-The current `ctld -> rmuxd` implementation uses Unix-domain sockets on macOS
-and Linux. Windows will add a local endpoint implementation without changing
-this control protocol or `rmux-proto`.
+A replacement SSH channel sends `resume_attachment` with the token and the
+renderer-applied raw output sequence. A valid token:
+
+- reuses the same daemon-private attachment ID;
+- immediately supersedes the prior transport generation, including a
+  half-open one;
+- preserves the attachment's existing input and layout leases;
+- independently replays output from the renderer's requested sequence.
+
+An explicit `detach` releases the attachment immediately and is confirmed by
+`detached`. If the reconnect grace expires, `rmuxd` forgets the token and
+releases both leases. Tokens are random, session-scoped, never persisted or
+logged, and disappear with `rmuxd`; an invalid or expired token receives
+`attachment_resume_rejected`, after which a client may open a new attachment
+normally.
+
+The PTY, shell, journal, checkpoints, and shell-awareness state remain owned by
+`rmuxd` throughout. No keyboard input is replayed after reconnect.

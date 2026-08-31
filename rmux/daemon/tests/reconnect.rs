@@ -56,6 +56,7 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
   let (first_output, resume_sequence) = read_output_until(&mut first_attach, b"before").await?;
   assert!(contains_bytes(&first_output, b"before"));
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut first_attach).await?;
   drop(first_attach);
 
   let (mut second_attach, second_attached) = attach_session(
@@ -158,6 +159,7 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
   let (initial_output, _) = read_output_until(&mut first_attach, b"checkpoint-ready").await?;
   assert!(contains_bytes(&initial_output, b"checkpoint-ready"));
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut first_attach).await?;
   drop(first_attach);
 
   let (mut restored_attach, attached) =
@@ -661,7 +663,12 @@ async fn disconnected_attachment_releases_its_leases_for_another_attachment() ->
   let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("rmux.sock");
-  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let daemon = spawn_daemon_with_liveness(
+    &socket_path,
+    64 * 1024,
+    4 * 1024,
+    Duration::from_millis(200),
+  );
   let session = create_shell_session(
     &socket_path,
     "disconnected",
@@ -672,6 +679,7 @@ async fn disconnected_attachment_releases_its_leases_for_another_attachment() ->
   let (first_attach, first_attached) =
     attach_session(&socket_path, &session.session_id, None, true, true).await?;
   let ServerMessage::Attached {
+    attachment_token,
     input_lease,
     layout_lease,
     ..
@@ -702,6 +710,17 @@ async fn disconnected_attachment_releases_its_leases_for_another_attachment() ->
   let layout_status = acquire_lease_until_owned(&mut second_attach, LeaseKind::Layout).await?;
   assert_lease_status(&layout_status, true, true);
 
+  let (expired_resume, expired_response) =
+    resume_attachment(&socket_path, &session.session_id, &attachment_token, None).await?;
+  assert!(matches!(
+    expired_response,
+    ServerMessage::Error {
+      code: ErrorCode::AttachmentResumeRejected,
+      ..
+    }
+  ));
+  drop(expired_resume);
+
   write_frame(
     &mut second_attach,
     &ClientMessage::Input {
@@ -715,6 +734,84 @@ async fn disconnected_attachment_releases_its_leases_for_another_attachment() ->
   drop(second_attach);
 
   wait_for_daemon_exit(daemon, "rmuxd did not exit after disconnect test").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconnect_token_rebinds_the_attachment_and_preserves_both_leases() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon_with_liveness(
+    &socket_path,
+    64 * 1024,
+    4 * 1024,
+    Duration::from_millis(500),
+  );
+  let session = create_shell_session(
+    &socket_path,
+    "token-resume",
+    "printf 'ready\\n'; IFS= read -r line; printf 'authorized:%s\\n' \"$line\"",
+  )
+  .await?;
+
+  let (mut stale_attachment, attached) =
+    attach_session(&socket_path, &session.session_id, None, true, true).await?;
+  let ServerMessage::Attached {
+    attachment_token,
+    input_lease,
+    layout_lease,
+    ..
+  } = attached
+  else {
+    return Err(format!("expected initial attachment, received {attached:?}").into());
+  };
+  assert_lease_status(&input_lease, true, true);
+  assert_lease_status(&layout_lease, true, true);
+
+  // Rebind while the old transport is still physically open. Possession of
+  // the token supersedes that stale generation without waiting for liveness
+  // expiry and without exposing either lease to a contender.
+  let (mut resumed, resumed_response) =
+    resume_attachment(&socket_path, &session.session_id, &attachment_token, None).await?;
+  let ServerMessage::Attached {
+    attachment_token: resumed_token,
+    input_lease,
+    layout_lease,
+    ..
+  } = resumed_response
+  else {
+    return Err(format!("expected resumed attachment, received {resumed_response:?}").into());
+  };
+  assert_eq!(resumed_token, attachment_token);
+  assert_lease_status(&input_lease, true, true);
+  assert_lease_status(&layout_lease, true, true);
+
+  timeout(Duration::from_secs(1), async {
+    loop {
+      if read_frame::<_, ServerMessage>(&mut stale_attachment)
+        .await?
+        .is_none()
+      {
+        return Ok::<(), rmux_proto::CodecError>(());
+      }
+    }
+  })
+  .await
+  .map_err(|_| "superseded attachment did not close")??;
+
+  write_frame(
+    &mut resumed,
+    &ClientMessage::Input {
+      data: b"after-resume\n".to_vec(),
+    },
+  )
+  .await?;
+  let (output, _) = read_output_until(&mut resumed, b"authorized:after-resume").await?;
+  assert!(contains_bytes(&output, b"authorized:after-resume"));
+  wait_for_session_end(&mut resumed).await?;
+  drop(resumed);
+
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after token-resume test").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -957,14 +1054,18 @@ fn spawn_daemon_with_liveness(
 ) -> tokio::task::JoinHandle<Result<(), rmuxd::DaemonError>> {
   let socket_path = socket_path.to_path_buf();
   tokio::spawn(async move {
-    run(DaemonConfig {
+    let result = run(DaemonConfig {
       socket_path,
       journal_capacity_bytes,
       checkpoint_interval_bytes,
       startup_idle_timeout: Duration::from_secs(5),
       attachment_liveness_timeout,
     })
-    .await
+    .await;
+    if let Err(error) = &result {
+      eprintln!("test rmuxd failed to start or serve: {error}");
+    }
+    result
   })
 }
 
@@ -1155,6 +1256,30 @@ async fn attach_session_with_shell_metadata_options(
   Ok((stream, attached))
 }
 
+async fn resume_attachment(
+  socket_path: &Path,
+  session: &str,
+  attachment_token: &str,
+  resume_from: Option<u64>,
+) -> TestResult<(UnixStream, ServerMessage)> {
+  let mut stream = connect_when_ready(socket_path).await?;
+  handshake(&mut stream).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::ResumeAttachment {
+      session: session.into(),
+      attachment_token: attachment_token.into(),
+      resume_from,
+      terminal_size: TerminalSize::default(),
+      request_command_line: false,
+      request_running_command: false,
+    },
+  )
+  .await?;
+  let attached = required_message(&mut stream).await?;
+  Ok((stream, attached))
+}
+
 async fn assert_geometry_checkpoint_resume(
   socket_path: &Path,
   session: &str,
@@ -1186,8 +1311,17 @@ async fn assert_geometry_checkpoint_resume(
     assert_eq!(history_gap, expected_history_gap);
 
     write_frame(&mut attachment, &ClientMessage::Detach).await?;
+    wait_for_detached(&mut attachment).await?;
   }
   Ok(())
+}
+
+async fn wait_for_detached(stream: &mut UnixStream) -> TestResult {
+  loop {
+    if required_message(stream).await? == ServerMessage::Detached {
+      return Ok(());
+    }
+  }
 }
 
 async fn wait_for_shell_state(socket_path: &Path, session: &str) -> TestResult<ShellState> {

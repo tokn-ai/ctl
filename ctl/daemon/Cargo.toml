@@ -4,29 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-base64.workspace = true
 clap.workspace = true
-ctl-proto.workspace = true
-ed25519-dalek.workspace = true
-getrandom.workspace = true
-rcgen.workspace = true
 rmux-ipc.workspace = true
-rmux-proto.workspace = true
-rustix.workspace = true
-rustls.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-rustls.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
-ctl-core.workspace = true
 rmux-client.workspace = true
 rmux-proto.workspace = true
 rmuxd = { path = "../../rmux/daemon" }
+uuid.workspace = true
 
 [lints]
 workspace = true

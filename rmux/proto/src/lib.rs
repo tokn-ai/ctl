@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
@@ -350,6 +350,19 @@ pub enum ClientMessage {
     #[serde(default)]
     request_running_command: bool,
   },
+  /// Rebinds a new transport to a recently disconnected logical attachment.
+  ///
+  /// The opaque token is issued only in `attached`, remains memory-only, and
+  /// preserves the attachment's existing input/layout lease ownership.
+  ResumeAttachment {
+    session: String,
+    attachment_token: String,
+    resume_from: Option<u64>,
+    terminal_size: TerminalSize,
+    request_command_line: bool,
+    #[serde(default)]
+    request_running_command: bool,
+  },
   KillSession {
     session: String,
   },
@@ -382,6 +395,7 @@ pub enum ErrorCode {
   SequenceAhead,
   SessionAlreadyExists,
   SessionNotFound,
+  AttachmentResumeRejected,
   InputLeaseRequired,
   LayoutLeaseRequired,
   Internal,
@@ -409,6 +423,9 @@ pub enum ServerMessage {
     shell_state: ShellState,
   },
   Attached {
+    /// Opaque, memory-only credential for reconnecting this logical
+    /// attachment through a replacement transport.
+    attachment_token: String,
     session: SessionInfo,
     earliest_sequence: u64,
     next_sequence: u64,
@@ -422,6 +439,9 @@ pub enum ServerMessage {
     /// produces the default unknown state rather than omitting this snapshot.
     shell_state: ShellState,
   },
+  /// Confirms that the daemon processed an explicit detach and released the
+  /// logical attachment without reconnect grace.
+  Detached,
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
@@ -746,7 +766,7 @@ mod tests {
   }
 
   #[test]
-  fn version_six_attach_fixture_defaults_running_command_request() {
+  fn legacy_attach_fixture_defaults_running_command_request() {
     let fixture = r#"
       {
         "type": "attach_session",
@@ -776,8 +796,25 @@ mod tests {
   }
 
   #[test]
-  fn protocol_version_remains_six_for_additive_shell_title_fields() {
-    assert_eq!(PROTOCOL_VERSION, 6);
+  fn reconnect_support_uses_protocol_version_seven() {
+    assert_eq!(PROTOCOL_VERSION, 7);
+  }
+
+  #[test]
+  fn resume_attachment_uses_stable_snake_case_fields() {
+    let encoded = serde_json::to_value(ClientMessage::ResumeAttachment {
+      session: "work".into(),
+      attachment_token: "secret".into(),
+      resume_from: Some(42),
+      terminal_size: TerminalSize::default(),
+      request_command_line: false,
+      request_running_command: false,
+    })
+    .unwrap();
+
+    assert_eq!(encoded["type"], "resume_attachment");
+    assert_eq!(encoded["attachment_token"], "secret");
+    assert_eq!(encoded["resume_from"], 42);
   }
 
   #[test]

@@ -47,6 +47,9 @@ pub struct AttachRequest {
 /// Session metadata and attachment-relative state returned by `rmuxd`.
 #[derive(Debug, Clone)]
 pub struct AttachedSession {
+  /// Opaque credential for rebinding this logical attachment after an
+  /// unexpected transport loss.
+  pub attachment_token: String,
   pub session: SessionInfo,
   pub replay_from: u64,
   pub history_gap: bool,
@@ -151,9 +154,10 @@ pub struct HandshakeInfo {
 
 /// Optional automatic lease recovery for an interactive attachment.
 ///
-/// This is useful when a reconnect begins while a stale attachment still owns
-/// a lease. The client retries only leases it does not own; it never asks the
-/// daemon to displace another attachment.
+/// This is a fallback after a reconnect token expires and the client must open
+/// a new attachment while a stale attachment still owns a lease. The client
+/// retries only leases it does not own; it never asks the daemon to displace
+/// another logical attachment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InteractiveAttachOptions {
   pub reacquire_input_lease: bool,
@@ -839,30 +843,69 @@ where
 /// Returns an error when the handshake or attach request fails, or when the
 /// daemon's first attachment message is not `attached`.
 pub async fn begin_attach<S>(
-  mut stream: S,
+  stream: S,
   identity: &ClientIdentity,
   request: AttachRequest,
 ) -> Result<(S, AttachedSession), ClientError>
 where
   S: AsyncRead + AsyncWrite + Unpin,
 {
+  let message = ClientMessage::AttachSession {
+    session: request.session,
+    resume_from: request.resume_from,
+    terminal_size: request.terminal_size,
+    request_input_lease: request.request_input_lease,
+    request_layout_lease: request.request_layout_lease,
+    request_command_line: request.request_command_line,
+    request_running_command: request.request_running_command,
+  };
+  begin_attachment(stream, identity, message).await
+}
+
+/// Rebinds a replacement transport to a recently disconnected attachment.
+///
+/// The daemon validates the opaque token, supersedes the prior transport, and
+/// preserves the logical attachment's existing leases. `resume_from` remains
+/// renderer-owned and independently determines raw output replay.
+///
+/// # Errors
+///
+/// Returns an error when the handshake fails, the token is invalid or
+/// expired, or the daemon's first attachment message is malformed.
+pub async fn resume_attach<S>(
+  stream: S,
+  identity: &ClientIdentity,
+  attachment_token: String,
+  request: AttachRequest,
+) -> Result<(S, AttachedSession), ClientError>
+where
+  S: AsyncRead + AsyncWrite + Unpin,
+{
+  let message = ClientMessage::ResumeAttachment {
+    session: request.session,
+    attachment_token,
+    resume_from: request.resume_from,
+    terminal_size: request.terminal_size,
+    request_command_line: request.request_command_line,
+    request_running_command: request.request_running_command,
+  };
+  begin_attachment(stream, identity, message).await
+}
+
+async fn begin_attachment<S>(
+  mut stream: S,
+  identity: &ClientIdentity,
+  message: ClientMessage,
+) -> Result<(S, AttachedSession), ClientError>
+where
+  S: AsyncRead + AsyncWrite + Unpin,
+{
   let handshake = handshake(&mut stream, identity).await?;
-  write_frame(
-    &mut stream,
-    &ClientMessage::AttachSession {
-      session: request.session,
-      resume_from: request.resume_from,
-      terminal_size: request.terminal_size,
-      request_input_lease: request.request_input_lease,
-      request_layout_lease: request.request_layout_lease,
-      request_command_line: request.request_command_line,
-      request_running_command: request.request_running_command,
-    },
-  )
-  .await?;
+  write_frame(&mut stream, &message).await?;
 
   let response = read_response(&mut stream).await?;
   let ServerMessage::Attached {
+    attachment_token,
     session,
     replay_from,
     history_gap,
@@ -880,6 +923,7 @@ where
   Ok((
     stream,
     AttachedSession {
+      attachment_token,
       session,
       replay_from,
       history_gap,
@@ -1073,13 +1117,13 @@ impl<S> AttachmentController<S> {
     loop {
       tokio::select! {
         writer_status = writer_statuses.recv() => {
-          return match writer_status {
-            Some(WriterStatus::Detached) => Ok(self.finish(AttachExitReason::Detached)),
+          match writer_status {
+            Some(WriterStatus::DetachSent) => {}
             Some(WriterStatus::ConnectionClosed) | None => {
-              Ok(self.finish(AttachExitReason::ConnectionClosed))
+              return Ok(self.finish(AttachExitReason::ConnectionClosed));
             }
-            Some(WriterStatus::Fatal(error)) => Err(error),
-          };
+            Some(WriterStatus::Fatal(error)) => return Err(error),
+          }
         }
         acknowledgement = acknowledgements.recv(), if acknowledgements_open => {
           match acknowledgement {
@@ -1153,6 +1197,9 @@ impl<S> AttachmentController<S> {
           .emit_event(AttachmentEvent::HeartbeatAck { nonce }, writer_statuses)
           .await
       }
+      ServerMessage::Detached => Ok(ControllerAction::Exit {
+        reason: AttachExitReason::Detached,
+      }),
       ServerMessage::SessionEnded {
         session_id,
         exit_code,
@@ -1167,7 +1214,7 @@ impl<S> AttachmentController<S> {
           .await
       }
       response => Err(unexpected(
-        "output, checkpoint, pty_geometry_changed, shell_state_changed, lease_status, heartbeat_ack, or session_ended",
+        "output, checkpoint, pty_geometry_changed, shell_state_changed, lease_status, heartbeat_ack, detached, or session_ended",
         &response,
       )),
     }
@@ -1406,9 +1453,7 @@ impl<S> AttachmentController<S> {
       }
       writer_status = writer_statuses.recv() => {
         match writer_status {
-          Some(WriterStatus::Detached) => Ok(ControllerAction::Exit {
-            reason: AttachExitReason::Detached,
-          }),
+          Some(WriterStatus::DetachSent) => Ok(ControllerAction::Continue),
           Some(WriterStatus::ConnectionClosed) | None => Ok(ControllerAction::Exit {
             reason: AttachExitReason::ConnectionClosed,
           }),
@@ -1540,7 +1585,7 @@ enum ControllerAction {
 }
 
 enum WriterStatus {
-  Detached,
+  DetachSent,
   ConnectionClosed,
   Fatal(ClientError),
 }
@@ -1613,7 +1658,7 @@ async fn drive_attachment_writer<W>(
         match command {
           Some(AttachmentCommand::Detach) | None => {
             match send_attachment_message(&mut writer, &ClientMessage::Detach).await {
-              Ok(true) => break WriterStatus::Detached,
+              Ok(true) => break WriterStatus::DetachSent,
               Ok(false) => break WriterStatus::ConnectionClosed,
               Err(error) => break WriterStatus::Fatal(error),
             }
@@ -1629,7 +1674,14 @@ async fn drive_attachment_writer<W>(
       }
     }
   };
+  let detach_sent = matches!(status, WriterStatus::DetachSent);
   let _ignored = statuses.send(status);
+  if detach_sent {
+    // Keep the write task and status channel alive until the reader observes
+    // the daemon's detach acknowledgement. The controller aborts this task
+    // when it finishes.
+    std::future::pending::<()>().await;
+  }
 }
 
 fn peer_is_silent(peer_activity: &Arc<Mutex<Instant>>, peer_timeout: Duration) -> bool {
@@ -2223,6 +2275,7 @@ mod tests {
       write_frame(
         &mut daemon,
         &ServerMessage::Attached {
+          attachment_token: "token".into(),
           session: session_info(),
           earliest_sequence: 0,
           next_sequence: 0,
@@ -2336,6 +2389,36 @@ mod tests {
     assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
     assert_eq!(exit.next_sequence, Some(73));
     assert_eq!(exit.received_sequence, 73);
+  }
+
+  #[tokio::test]
+  async fn controller_waits_for_detach_acknowledgement() {
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let attached = attached_session(0, None, ShellState::default());
+    let (controller, control, _events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let mut runner = tokio::spawn(controller.run());
+
+    control.detach().await.unwrap();
+    assert_eq!(
+      read_frame::<_, ClientMessage>(&mut daemon)
+        .await
+        .unwrap()
+        .unwrap(),
+      ClientMessage::Detach
+    );
+    assert!(
+      tokio::time::timeout(Duration::from_millis(20), &mut runner)
+        .await
+        .is_err(),
+      "controller exited before the daemon acknowledged detach"
+    );
+
+    write_frame(&mut daemon, &ServerMessage::Detached)
+      .await
+      .unwrap();
+    let exit = runner.await.unwrap().unwrap();
+    assert_eq!(exit.reason, AttachExitReason::Detached);
   }
 
   #[tokio::test]
@@ -2948,6 +3031,7 @@ mod tests {
     shell_state: ShellState,
   ) -> AttachedSession {
     AttachedSession {
+      attachment_token: "token".into(),
       session: session_info(),
       replay_from,
       history_gap: false,

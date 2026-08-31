@@ -3,11 +3,11 @@
 The monorepo contains two products with independent responsibilities:
 
 - `rmux` provides persistent local terminal sessions.
-- `ctl` provides authenticated remote device control and will expose `rmux`
-  sessions without reimplementing terminal persistence.
+- `ctl` exposes `rmux` sessions through an SSH-authorized remote command
+  without reimplementing terminal persistence.
 
 The current milestones make `rmux` usable through a local desktop client and
-through `ctl` from a paired remote client. The remote boundary intentionally
+through `ctl` from an SSH-authorized remote client. The remote boundary intentionally
 exposes only the `rmux` service; generic remote administration, files, jobs,
 port forwarding, and desktop control remain out of scope.
 
@@ -17,22 +17,23 @@ port forwarding, and desktop control remain out of scope.
 `rmux` client connects over per-user IPC and may disappear without affecting a
 session.
 
-`ctld` is an authenticated gateway with an independent lifecycle:
+`ctld connect` is a disposable SSH remote-command gateway:
 
 ```text
 local:  rmux / rmux-gui -> local IPC -> rmuxd -> PTY -> shell
-remote: ctl  -> network   -> ctld  -> local IPC -> rmuxd -> PTY -> shell
+remote: ctl -> OpenSSH -> ctld connect -> local IPC -> rmuxd -> PTY -> shell
 ```
 
-`ctld` and `rmuxd` have independent lifecycles. Restarting `ctld` must not
-affect a terminal session. If `rmuxd` itself exits, an exact running PTY is not
-recoverable in the initial architecture. Later disk-backed metadata may
-reconstruct explicitly restartable tasks as a new process generation.
+Each SSH channel gets a new `ctld connect` process. Ending that process drops
+only its local attachment stream and must not affect a terminal session. If
+`rmuxd` itself exits, an exact running PTY is not recoverable in the initial
+architecture. Later disk-backed metadata may reconstruct explicitly
+restartable tasks as a new process generation.
 
-`ctld` owns neither terminal state nor session state. After an authenticated
-client opens the `rmux` service, it relays raw bytes between its TLS connection
-and one fixed local `rmuxd` endpoint. It does not decode or reframe
-`rmux-proto`, and a remote peer cannot choose a local socket path.
+`ctld` owns neither terminal state nor session state. It relays raw bytes
+between SSH stdin/stdout and one fixed local `rmuxd` endpoint. It does not
+decode or reframe `rmux-proto`, and a remote peer cannot choose a local socket
+path or service.
 
 ## Crate boundaries
 
@@ -47,13 +48,11 @@ and one fixed local `rmuxd` endpoint. It does not decode or reframe
 - `rmux-gui`: local Tauri/React terminal client. Its Rust adapter runs
   `rmux-client`; its webview owns xterm rendering, viewport, and local
   scrollback.
-- `ctl-proto`: versioned outer control messages for pairing and service
-  selection. It is independent of terminal and operating-system details.
-- `ctl-core`: portable client identity, pinned TLS connection, and outer
-  control handshake. It returns an injected byte stream for `rmux-client`.
-- `ctld`: device-local identity/authorization registry, TLS endpoint, and the
-  fixed local `rmuxd` relay.
-- `ctl`: remote command-line adapter and owner-only local client state.
+- `ctl-core`: owned OpenSSH child-process transport. It invokes one fixed
+  `ctld connect` command and returns its piped stdin/stdout to `rmux-client`.
+- `ctld`: stateless SSH remote-command adapter for the fixed local `rmuxd`
+  relay.
+- `ctl`: remote command-line adapter using OpenSSH destinations directly.
 
 OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
 `rmux-client`.
@@ -61,9 +60,9 @@ The initial IPC implementation targets Unix-domain sockets on macOS and Linux;
 Windows named pipes will be a separate transport implementation.
 
 `ctld` currently uses that Unix local endpoint and is therefore a Unix-only
-host component. `ctl-proto`, `ctl-core`, and the remote TLS control transport
-remain platform-independent so a future Windows local endpoint can preserve
-the same remote protocol.
+host component. The OpenSSH transport and `rmux-proto` remain independent of
+that endpoint so a future Windows implementation can preserve the same remote
+behavior.
 
 ## Current invariants
 
@@ -82,15 +81,15 @@ the same remote protocol.
    layout are independently leased capabilities.
 10. An attachment can claim only an unheld lease; it never implicitly takes a
     lease from another attachment.
-11. Leases are connection-bound and liveness-bounded. They are released when
-    their attachment detaches, disconnects, or stops proving liveness, while
-    the shell session itself continues.
-12. `ctld` authorization is explicit device/client identity, not Tailscale
-    network location. Tailscale remains the expected private reachability
-    layer.
-13. A `ctld` shutdown closes its local attachments but never terminates an
-    `rmuxd` session; a later authenticated connection attaches by durable
-    session ID and raw output sequence.
+11. Leases belong to a logical attachment rather than one transport stream.
+    Explicit detach releases them immediately; unexpected transport loss
+    preserves them for a bounded reconnect grace, after which they are
+    released while the shell continues.
+12. OpenSSH owns host verification, encryption, and user authorization. `ctl`
+    adds no network listener, forwarding, application key, or pairing state.
+13. A `ctld connect` exit closes only its local stream and never terminates an
+    `rmuxd` session. A replacement SSH channel may rebind the logical
+    attachment using its memory-only token and renderer-applied raw sequence.
 14. Optional shell-awareness metadata is advisory, memory-only session state.
     It is delivered as complete snapshots beside raw output, never inferred
     from rendered text or used for authorization, filesystem operations, or
@@ -130,7 +129,7 @@ to drain, then starts a fresh daemon. It never unlinks a live endpoint or
 guesses and signals a process ID.
 
 The local-control endpoint is deliberately distinct from `rmux-proto` and is
-never relayed by `ctld`; a remote `rmux_tunnel` client cannot restart a daemon.
+never relayed by `ctld`; a remote `ctl` client cannot restart a daemon.
 Because `rmuxd` owns the PTYs, this is not a reconnect or session-preserving
 recovery mechanism. If a restart has been accepted but the old daemon does not
 drain in time, the action fails without force-stopping it. Raw-protocol version
@@ -213,16 +212,16 @@ detaches without killing daemon-owned sessions. Windows and Linux use
 
 ## Attachment ownership
 
-`rmuxd` treats each `attach_session` connection as an attachment. Attachments
-are deliberately ephemeral: their identifiers are daemon-private and are not
-client identities. This keeps the MVP safe after a laptop sleeps or a network
-proxy disappears—there is no abandoned keyboard owner to clear manually.
+`rmuxd` treats each `attach_session` request as a logical attachment. Its
+identifier remains daemon-private and is not a client identity. The client
+receives only a random, memory-only token that may rebind a replacement
+transport during a bounded grace period.
 
 Input and layout leases are independent. One attachment can type while a
 different attachment owns PTY resizing. Requests to acquire a held lease leave
-the requester attached as a viewer; they never force a takeover. A future
-authenticated client identity may add reconnect grace periods and deliberate
-takeover policies without changing session or stream semantics.
+the requester attached as a viewer; they never force a takeover. Only
+possession of an attachment's token may supersede that attachment's stale
+transport generation; it does not displace another logical attachment.
 
 To prevent a sleeping or half-open client from pinning either capability,
 `rmuxd` negotiates a heartbeat cadence and liveness deadline during the
@@ -230,32 +229,33 @@ handshake. Only inbound client activity renews that deadline after the initial
 attachment transfer. That transfer has its own finite delivery deadline, since
 a client learns the heartbeat cadence only after `attached` and `rmuxd`
 serially delivers initial replay before it can process queued heartbeats. A
-silent attachment is closed and loses its leases, but its PTY, shell, journal,
-and checkpoint state remain intact. A reconnecting client may request an
-unheld former lease again; it never revokes a live attachment's ownership.
+silent transport is closed, but its logical attachment remains resumable for
+one bounded reconnect interval. Possession of the attachment token immediately
+supersedes the stale transport generation while preserving its leases. An
+explicit detach or expired grace releases the leases; the PTY, shell, journal,
+and checkpoint state remain intact.
 
 ## Remote control boundary
 
-`ctld` has a per-device self-signed TLS certificate and a private
-authorization registry. A pairing invitation carries the device's pinned
-public certificate, stable synthetic TLS name, endpoint, client label, and a
-short-lived one-time bearer token. The device stores only a SHA-256 digest of
-that token. A client generates its own Ed25519 identity locally and signs a
-fresh server challenge on every connection; the private client key never
-leaves the client device.
+`ctl` invokes the system OpenSSH client with PTY allocation and all forwarding
+disabled, an OpenSSH destination supplied by the user, and the fixed remote
+command `exec ctld connect`. OpenSSH configuration owns host verification,
+user authentication, proxying, and healthy-connection multiplexing. `ctl`
+never disables host-key checking, enables agent forwarding, or accepts an
+arbitrary remote command.
 
-The initial implementation keeps certificate pinning and client challenge
-signatures separate rather than using a transport client certificate. This
-keeps protocol authorization explicit and lets the authorized-key registry
-drive future revocation and capabilities without relying on Tailnet location.
-The only current capability is `rmux_tunnel`.
+`ctld connect` has no network listener, persistent state, identity registry,
+or service selector. It writes one fixed readiness marker, after which SSH
+stdin/stdout carries raw `rmux-proto`; diagnostics use stderr. The helper
+connects only to the current user's fixed `rmuxd` data endpoint and cannot
+reach its owner-only maintenance endpoint. Its authority is exactly that of
+the already SSH-authenticated operating-system account.
 
-`ctld serve` requires an explicit non-wildcard address. In normal use that is
-a device's concrete Tailscale IP address; it never defaults to a public
-all-interface management listener. Device state directories and
-private keys are owner-only on Unix. See `docs/ctl-protocol.md` for the exact
-outer handshake and upgrade boundary, and `docs/remote-mvp.md` for a safe
-first-use flow.
+Reconnect state stays inside `rmuxd`. Its opaque attachment tokens are random,
+memory-only, session-scoped credentials for rebinding a replacement stream;
+they are not device identities or substitutes for SSH authorization. See
+`docs/ctl-protocol.md` for the transport contract and `docs/remote-mvp.md` for
+setup.
 
 ## Shell awareness
 

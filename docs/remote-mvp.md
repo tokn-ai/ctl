@@ -1,78 +1,63 @@
-# Remote rmux MVP
+# Remote rmux over SSH
 
-This milestone lets a paired client attach to a named persistent shell on a
-Unix device. Tailscale supplies reachability; `ctl` still verifies the device
-certificate and a client Ed25519 signature itself.
+This milestone lets an SSH-authorized user access persistent `rmux` sessions
+without exposing a separate network service. OpenSSH provides reachability,
+host verification, encryption, and user authentication.
 
 ## On the controlled device
 
-Build or install `rmuxd`, `ctld`, and `rmux` for the same OS user. Initialize
-the device identity once:
+Build or install `rmuxd` and `ctld` for the same OS user. They should be
+available in the non-interactive SSH command environment. `ctld` starts a
+sibling `rmuxd` on demand when both binaries are installed together; `rmuxd`
+may instead be started independently.
+
+Verify that the fixed remote command works and that non-interactive startup
+files produce no stdout:
 
 ```text
-ctld init
+ssh -T <host> exec ctld connect
 ```
 
-Start the gateway on the device's concrete Tailscale IP and a chosen port:
-
-```text
-ctld serve --listen <tailscale-ip>:9944
-```
-
-The gateway uses the per-user local `rmuxd` endpoint. If `rmuxd` is not yet
-running, `ctld` starts only an absolute-path sibling `rmuxd` binary; otherwise
-start `rmuxd` yourself or pass `ctld serve --rmuxd-bin <absolute-path>`.
-
-Create a short-lived invitation for the client device:
-
-```text
-ctld pair create --endpoint <device-name-or-tailscale-ip>:9944 --label <client-name>
-```
-
-That command prints a one-time bearer secret. Transfer it through a channel
-you trust. Do not place it in source code, logs, screenshots, or a shell
-command line.
+The command waits for `rmux-proto` input, so terminate this manual probe after
+confirming it starts without diagnostics.
 
 ## On the client device
 
-Run `ctl pair --alias <device-alias>` and paste the invitation when prompted.
-It reads one line from standard input, so the token does not need to enter
-shell history. A piped single invitation line also works.
-
-Confirm pairing and create/attach to the default named shell:
+Use an ordinary OpenSSH destination or `~/.ssh/config` alias directly:
 
 ```text
-ctl hosts
-ctl shell <device-alias>
+ctl session list <host>
+ctl shell <host>
 ```
 
-`ctl shell` creates `shell` only if it does not exist. Specify a different
-name with `ctl shell <device-alias> <session>`. It reconnects after a transient
-network or gateway interruption using the last renderer-applied raw output
-sequence; it never replays keyboard input. If a former attachment is still silent but
-not yet expired, the reconnect temporarily remains view-only, then retries
-only its originally requested unheld input/layout leases. It never forces a
-takeover from an active attachment.
+`ctl shell` creates the named `shell` session only when absent. Specify a
+different name with `ctl shell <host> <session>`.
 
 Useful session commands:
 
 ```text
-ctl session list <device-alias>
-ctl session new <device-alias> --name <session>
-ctl session kill <device-alias> <session>
+ctl session new <host> --name <session>
+ctl session kill <host> <session>
 ```
 
-An ordinary attach requests input but does not resize the remote PTY. Use
-`ctl shell <device-alias> <session> --read-only` for a viewer, or add `--resize`
-only when you deliberately want to acquire layout ownership and resize the
-PTY. Press Ctrl-] to detach without terminating the shell.
+An ordinary attachment requests input but does not resize the remote PTY. Use
+`ctl shell <host> <session> --read-only` for a viewer, or add `--resize` only
+when deliberately claiming layout ownership. Press `Ctrl-]` to detach and
+release the attachment immediately without terminating the shell.
 
-## Limits of this milestone
+After an unexpected SSH interruption, `ctl` reconnects with exponential
+backoff. OpenSSH may reuse a configured control master; otherwise it creates a
+new SSH connection. `rmuxd` preserves the logical attachment and both leases
+for 30 seconds by default, while output resumes from the last renderer-applied
+raw sequence.
 
-The session journal and checkpoints are memory-backed. Optional shell awareness
-is also memory-only: the remote rmux tunnel preserves its versioned snapshots,
-but the current raw `ctl shell` presenter does not render metadata or request
-editable command text. Disk-backed history, restartable task generations,
-Windows local transport, and other remote-administration services are
-deliberately deferred. See `docs/architecture.md` and `docs/ctl-protocol.md`
-for the ownership and security boundaries.
+## Operational limits
+
+- SSH authentication must work for a non-interactive remote command. Password
+  and host-key prompts remain OpenSSH behavior, but key, agent, or certificate
+  authentication is preferable for unattended reconnects.
+- `ctld` is currently Unix-only because its fixed local endpoint is a Unix
+  socket. A future Windows endpoint can retain the same SSH transport.
+- Journals, checkpoints, shell awareness, and reconnect tokens are memory-only.
+- Generic commands, files, jobs, port forwarding, desktop streaming, and
+  `rmuxd` maintenance control are not exposed by `ctld`.

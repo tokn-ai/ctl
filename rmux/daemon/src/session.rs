@@ -41,6 +41,7 @@ pub struct Session {
   terminal: Mutex<TerminalState>,
   checkpoint_interval_bytes: u64,
   leases: Mutex<AttachmentLeaseRegistry>,
+  attachments: Mutex<HashMap<String, AttachmentRecord>>,
   master: Mutex<Box<dyn MasterPty + Send>>,
   writer: Mutex<Box<dyn Write + Send>>,
   killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -48,6 +49,21 @@ pub struct Session {
   lifecycle: Mutex<SessionLifecycle>,
   shell_state_publisher: ShellStatePublisher,
   shell_reporter: Mutex<Option<ShellReporter>>,
+}
+
+struct AttachmentRecord {
+  attachment_id: String,
+  generation: u64,
+  connected: bool,
+  superseded: watch::Sender<u64>,
+}
+
+pub struct AttachmentRegistration {
+  pub attachment_id: String,
+  pub attachment_token: String,
+  pub generation: u64,
+  pub leases: AttachmentLeases,
+  pub superseded: watch::Receiver<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,21 +233,120 @@ impl Session {
       .owned_by_client
   }
 
-  /// Registers an attached connection and grants any unheld requested leases.
+  /// Registers a logical attachment and grants any unheld requested leases.
   ///
-  /// Leases never transfer implicitly. They are released when the connection
-  /// that owns them detaches or disconnects.
-  pub fn attach(
+  /// The returned opaque token can rebind a replacement transport to this
+  /// attachment during its bounded reconnect grace period.
+  pub fn create_attachment(
     &self,
-    attachment_id: &str,
     request_input_lease: bool,
     request_layout_lease: bool,
-  ) -> AttachmentLeases {
-    lock(&self.leases).request_initial(attachment_id, request_input_lease, request_layout_lease)
+  ) -> AttachmentRegistration {
+    let attachment_id = Uuid::new_v4().to_string();
+    let (superseded, receiver) = watch::channel(0_u64);
+    let attachment_token = {
+      let mut attachments = lock(&self.attachments);
+      let mut candidate = Uuid::new_v4().simple().to_string();
+      while attachments.contains_key(&candidate) {
+        candidate = Uuid::new_v4().simple().to_string();
+      }
+      attachments.insert(
+        candidate.clone(),
+        AttachmentRecord {
+          attachment_id: attachment_id.clone(),
+          generation: 0,
+          connected: true,
+          superseded,
+        },
+      );
+      candidate
+    };
+    let leases =
+      lock(&self.leases).request_initial(&attachment_id, request_input_lease, request_layout_lease);
+    AttachmentRegistration {
+      attachment_id,
+      attachment_token,
+      generation: 0,
+      leases,
+      superseded: receiver,
+    }
   }
 
-  pub fn release_attachment(&self, attachment_id: &str) {
-    lock(&self.leases).release_attachment(attachment_id);
+  /// Rebinds a replacement transport and invalidates the previous generation.
+  pub fn resume_attachment(&self, attachment_token: &str) -> Option<AttachmentRegistration> {
+    let (attachment_id, generation, superseded) = {
+      let mut attachments = lock(&self.attachments);
+      let record = attachments.get_mut(attachment_token)?;
+      record.generation = record.generation.checked_add(1)?;
+      record.connected = true;
+      let _ignored = record.superseded.send(record.generation);
+      (
+        record.attachment_id.clone(),
+        record.generation,
+        record.superseded.subscribe(),
+      )
+    };
+    let leases = lock(&self.leases).attachment_leases(&attachment_id);
+    Some(AttachmentRegistration {
+      attachment_id,
+      attachment_token: attachment_token.into(),
+      generation,
+      leases,
+      superseded,
+    })
+  }
+
+  /// Marks the current transport generation as temporarily disconnected.
+  ///
+  /// Returns `true` only when a grace timer should be scheduled.
+  pub fn suspend_attachment(&self, attachment_token: &str, generation: u64) -> bool {
+    let mut attachments = lock(&self.attachments);
+    let Some(record) = attachments.get_mut(attachment_token) else {
+      return false;
+    };
+    if record.generation != generation || !record.connected {
+      return false;
+    }
+    record.connected = false;
+    true
+  }
+
+  /// Releases a disconnected attachment when its reconnect grace expires.
+  pub fn expire_attachment(&self, attachment_token: &str, generation: u64) {
+    let attachment_id = {
+      let mut attachments = lock(&self.attachments);
+      let Some(record) = attachments.get(attachment_token) else {
+        return;
+      };
+      if record.generation != generation || record.connected {
+        return;
+      }
+      attachments
+        .remove(attachment_token)
+        .map(|record| record.attachment_id)
+    };
+    if let Some(attachment_id) = attachment_id {
+      lock(&self.leases).release_attachment(&attachment_id);
+    }
+  }
+
+  /// Explicitly detaches the current generation without reconnect grace.
+  pub fn close_attachment(&self, attachment_token: &str, generation: u64) {
+    let attachment_id = {
+      let mut attachments = lock(&self.attachments);
+      let Some(record) = attachments.get(attachment_token) else {
+        return;
+      };
+      if record.generation != generation {
+        return;
+      }
+      attachments
+        .remove(attachment_token)
+        .map(|record| record.attachment_id)
+    };
+    if let Some(attachment_id) = attachment_id {
+      lock(&self.leases).release_attachment(&attachment_id);
+    }
   }
 
   pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
@@ -663,6 +778,7 @@ impl SessionManager {
       terminal: Mutex::new(terminal),
       checkpoint_interval_bytes: self.inner.checkpoint_interval_bytes as u64,
       leases: Mutex::new(AttachmentLeaseRegistry::default()),
+      attachments: Mutex::new(HashMap::new()),
       master: Mutex::new(pair.master),
       writer: Mutex::new(writer),
       killer: Mutex::new(killer),

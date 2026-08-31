@@ -1,5 +1,6 @@
 use crate::session::{
-  AttachSnapshot, Session, SessionControlError, SessionEvent, SessionManager, SessionManagerError,
+  AttachSnapshot, AttachmentRegistration, Session, SessionControlError, SessionEvent,
+  SessionManager, SessionManagerError,
 };
 use rmux_core::{JournalError, OutputChunk};
 use rmux_ipc::{
@@ -20,6 +21,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast, watch};
 use tokio::time::{Instant, sleep_until, timeout_at};
+#[cfg(test)]
 use uuid::Uuid;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -46,8 +48,8 @@ pub struct DaemonConfig {
   pub journal_capacity_bytes: usize,
   pub checkpoint_interval_bytes: usize,
   pub startup_idle_timeout: Duration,
-  /// Maximum time an attached client may remain silent before `rmuxd` releases
-  /// its connection-bound leases.
+  /// Maximum silence before a transport expires, and the reconnect grace used
+  /// after an unexpected transport loss.
   pub attachment_liveness_timeout: Duration,
 }
 
@@ -724,38 +726,38 @@ async fn handle_request(
         request_running_command,
         attachment_liveness_timeout,
       };
-      match restart.run_while_accepting(|| {
-        sessions
-          .resolve(&session)
-          .map(|session| prepare_attachment(session, &request))
-      }) {
-        Some(Ok(Ok(attachment))) => return handle_attach(stream, attachment, request).await,
-        Some(Ok(Err(exit_code))) => {
-          send_error(
-            &mut stream,
-            ErrorCode::SessionNotFound,
-            &format!("session '{session}' has already ended (exit code {exit_code:?})"),
-          )
-          .await?;
-        }
-        Some(Err(error)) => send_session_manager_error(&mut stream, &error).await?,
-        None => {
-          send_error(
-            &mut stream,
-            ErrorCode::InvalidRequest,
-            DAEMON_DRAINING_MESSAGE,
-          )
-          .await?;
-        }
-      }
+      return handle_new_attachment_request(stream, sessions, restart, session, request).await;
     }
-    ClientMessage::KillSession { session } => match sessions.resolve(&session) {
-      Ok(session) => match session.kill() {
-        Ok(()) => write_frame(&mut stream, &ServerMessage::Success).await?,
-        Err(error) => send_control_error(&mut stream, &error).await?,
-      },
-      Err(error) => send_session_manager_error(&mut stream, &error).await?,
-    },
+    ClientMessage::ResumeAttachment {
+      session,
+      attachment_token,
+      resume_from,
+      terminal_size,
+      request_command_line,
+      request_running_command,
+    } => {
+      let request = AttachParameters {
+        resume_from,
+        client_terminal_size: terminal_size,
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line,
+        request_running_command,
+        attachment_liveness_timeout,
+      };
+      return handle_resume_attachment_request(
+        stream,
+        sessions,
+        restart,
+        session,
+        attachment_token,
+        request,
+      )
+      .await;
+    }
+    ClientMessage::KillSession { session } => {
+      handle_kill_session_request(&mut stream, &sessions, &session).await?;
+    }
     _ => {
       send_error(
         &mut stream,
@@ -767,6 +769,107 @@ async fn handle_request(
   }
 
   Ok(())
+}
+
+async fn handle_kill_session_request(
+  stream: &mut UnixStream,
+  sessions: &SessionManager,
+  session: &str,
+) -> Result<(), ConnectionError> {
+  match sessions.resolve(session) {
+    Ok(session) => match session.kill() {
+      Ok(()) => write_frame(stream, &ServerMessage::Success).await?,
+      Err(error) => send_control_error(stream, &error).await?,
+    },
+    Err(error) => send_session_manager_error(stream, &error).await?,
+  }
+  Ok(())
+}
+
+async fn handle_new_attachment_request(
+  mut stream: UnixStream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+  session: String,
+  request: AttachParameters,
+) -> Result<(), ConnectionError> {
+  match restart.run_while_accepting(|| {
+    sessions
+      .resolve(&session)
+      .map(|session| prepare_attachment(session, &request))
+  }) {
+    Some(Ok(Ok(attachment))) => handle_attach(stream, attachment, request).await,
+    Some(Ok(Err(exit_code))) => {
+      send_error(
+        &mut stream,
+        ErrorCode::SessionNotFound,
+        &format!("session '{session}' has already ended (exit code {exit_code:?})"),
+      )
+      .await?;
+      Ok(())
+    }
+    Some(Err(error)) => {
+      send_session_manager_error(&mut stream, &error).await?;
+      Ok(())
+    }
+    None => {
+      send_error(
+        &mut stream,
+        ErrorCode::InvalidRequest,
+        DAEMON_DRAINING_MESSAGE,
+      )
+      .await?;
+      Ok(())
+    }
+  }
+}
+
+async fn handle_resume_attachment_request(
+  mut stream: UnixStream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+  session: String,
+  attachment_token: String,
+  request: AttachParameters,
+) -> Result<(), ConnectionError> {
+  match restart.run_while_accepting(|| {
+    sessions
+      .resolve(&session)
+      .map(|session| prepare_resumed_attachment(session, &attachment_token))
+  }) {
+    Some(Ok(Ok(attachment))) => handle_attach(stream, attachment, request).await,
+    Some(Ok(Err(ResumePreparationError::SessionEnded(exit_code)))) => {
+      send_error(
+        &mut stream,
+        ErrorCode::SessionNotFound,
+        &format!("session '{session}' has already ended (exit code {exit_code:?})"),
+      )
+      .await?;
+      Ok(())
+    }
+    Some(Ok(Err(ResumePreparationError::Rejected))) => {
+      send_error(
+        &mut stream,
+        ErrorCode::AttachmentResumeRejected,
+        "the attachment reconnect token is invalid or expired",
+      )
+      .await?;
+      Ok(())
+    }
+    Some(Err(error)) => {
+      send_session_manager_error(&mut stream, &error).await?;
+      Ok(())
+    }
+    None => {
+      send_error(
+        &mut stream,
+        ErrorCode::InvalidRequest,
+        DAEMON_DRAINING_MESSAGE,
+      )
+      .await?;
+      Ok(())
+    }
+  }
 }
 
 struct CreateSessionParameters {
@@ -853,7 +956,11 @@ struct AttachParameters {
 struct PreparedAttachment {
   session: Arc<Session>,
   attachment_id: String,
+  attachment_token: String,
+  attachment_generation: u64,
   attachment_leases: rmux_core::AttachmentLeases,
+  superseded: watch::Receiver<u64>,
+  resumed: bool,
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
 }
@@ -867,20 +974,61 @@ fn prepare_attachment(
   // `subscribe_events` reports that fact instead of returning a permanently
   // silent receiver.
   let events = session.subscribe_events()?;
-  let attachment_id = Uuid::new_v4().to_string();
-  let attachment_leases = session.attach(
-    &attachment_id,
-    request.request_input_lease,
-    request.request_layout_lease,
-  );
+  let registration =
+    session.create_attachment(request.request_input_lease, request.request_layout_lease);
   let shell_state_updates = session.subscribe_shell_state();
-  Ok(PreparedAttachment {
+  Ok(prepared_attachment(
     session,
-    attachment_id,
-    attachment_leases,
+    registration,
+    false,
     events,
     shell_state_updates,
-  })
+  ))
+}
+
+enum ResumePreparationError {
+  SessionEnded(Option<u32>),
+  Rejected,
+}
+
+fn prepare_resumed_attachment(
+  session: Arc<Session>,
+  attachment_token: &str,
+) -> Result<PreparedAttachment, ResumePreparationError> {
+  let events = session
+    .subscribe_events()
+    .map_err(ResumePreparationError::SessionEnded)?;
+  let registration = session
+    .resume_attachment(attachment_token)
+    .ok_or(ResumePreparationError::Rejected)?;
+  let shell_state_updates = session.subscribe_shell_state();
+  Ok(prepared_attachment(
+    session,
+    registration,
+    true,
+    events,
+    shell_state_updates,
+  ))
+}
+
+fn prepared_attachment(
+  session: Arc<Session>,
+  registration: AttachmentRegistration,
+  resumed: bool,
+  events: broadcast::Receiver<SessionEvent>,
+  shell_state_updates: watch::Receiver<ShellState>,
+) -> PreparedAttachment {
+  PreparedAttachment {
+    session,
+    attachment_id: registration.attachment_id,
+    attachment_token: registration.attachment_token,
+    attachment_generation: registration.generation,
+    attachment_leases: registration.leases,
+    superseded: registration.superseded,
+    resumed,
+    events,
+    shell_state_updates,
+  }
 }
 
 async fn handle_attach(
@@ -891,13 +1039,21 @@ async fn handle_attach(
   let PreparedAttachment {
     session,
     attachment_id,
+    attachment_token,
+    attachment_generation,
     attachment_leases,
+    superseded,
+    resumed,
     events,
     shell_state_updates,
   } = attachment;
-  let _attachment_guard = AttachmentGuard {
+  let mut attachment_guard = AttachmentGuard {
     session: Arc::clone(&session),
-    attachment_id: attachment_id.clone(),
+    attachment_token: attachment_token.clone(),
+    generation: attachment_generation,
+    reconnect_grace: request.attachment_liveness_timeout,
+    preserve_on_drop: resumed,
+    active: true,
   };
   let initial_delivery_deadline = initial_attachment_delivery_deadline();
 
@@ -938,6 +1094,7 @@ async fn handle_attach(
       snapshot,
       request.client_terminal_size,
       attachment_leases,
+      attachment_token,
       initial_shell_state.clone(),
     ),
   )
@@ -946,6 +1103,7 @@ async fn handle_attach(
     Ok(result) => result?,
     Err(_) => return Ok(()),
   };
+  attachment_guard.preserve_on_drop = true;
 
   let attachment = LiveAttachment {
     reader,
@@ -957,15 +1115,20 @@ async fn handle_attach(
     shell_state_revision: initial_shell_state.revision,
     request_command_line: request.request_command_line,
     request_running_command: request.request_running_command,
+    superseded,
   };
-  drive_attachment(
+  let exit = drive_attachment(
     attachment,
     session,
     attachment_id,
     request.attachment_liveness_timeout,
     Instant::now() + request.attachment_liveness_timeout,
   )
-  .await
+  .await?;
+  if exit == AttachmentExit::Detached {
+    attachment_guard.close_now();
+  }
+  Ok(())
 }
 
 async fn apply_initial_resize(
@@ -1024,6 +1187,14 @@ struct LiveAttachment {
   shell_state_revision: u64,
   request_command_line: bool,
   request_running_command: bool,
+  superseded: watch::Receiver<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentExit {
+  Detached,
+  Disconnected,
+  Superseded,
 }
 
 async fn drive_attachment(
@@ -1032,7 +1203,7 @@ async fn drive_attachment(
   attachment_id: String,
   attachment_liveness_timeout: Duration,
   deadline: Instant,
-) -> Result<(), ConnectionError> {
+) -> Result<AttachmentExit, ConnectionError> {
   let mut driver = AttachmentDriver {
     attachment,
     session,
@@ -1043,18 +1214,33 @@ async fn drive_attachment(
   loop {
     tokio::select! {
       biased;
-      () = sleep_until(driver.deadline) => return Ok(()),
+      () = sleep_until(driver.deadline) => return Ok(AttachmentExit::Disconnected),
+      changed = driver.attachment.superseded.changed() => {
+        let _ = changed;
+        return Ok(AttachmentExit::Superseded);
+      }
       incoming = read_frame::<_, ClientMessage>(&mut driver.attachment.reader) => {
         let Some(message) = incoming? else {
-          return Ok(());
+          return Ok(AttachmentExit::Disconnected);
         };
+        if message == ClientMessage::Detach {
+          // Receipt of `detach` is authoritative even when its acknowledgement
+          // cannot cross a concurrently failing transport. The guard still
+          // closes the logical attachment immediately in either case.
+          let _acknowledgement = write_frame(
+            &mut driver.attachment.writer,
+            &ServerMessage::Detached,
+          )
+          .await;
+          return Ok(AttachmentExit::Detached);
+        }
         if !driver.process_client_message(message).await? {
-          return Ok(());
+          return Ok(AttachmentExit::Disconnected);
         }
       }
       event = driver.attachment.events.recv() => {
         if !driver.process_session_event(event).await? {
-          return Ok(());
+          return Ok(AttachmentExit::Disconnected);
         }
       }
       // Raw PTY output is canonical and must take precedence over advisory
@@ -1062,7 +1248,7 @@ async fn drive_attachment(
       // here never loses the latest snapshot.
       changed = driver.attachment.shell_state_updates.changed() => {
         if !driver.process_shell_state_update(changed).await? {
-          return Ok(());
+          return Ok(AttachmentExit::Disconnected);
         }
       }
     }
@@ -1325,6 +1511,7 @@ async fn send_attached<W>(
   snapshot: AttachSnapshot,
   client_terminal_size: rmux_proto::TerminalSize,
   attachment_leases: rmux_core::AttachmentLeases,
+  attachment_token: String,
   shell_state: ShellState,
 ) -> Result<u64, ConnectionError>
 where
@@ -1334,6 +1521,7 @@ where
   write_frame(
     writer,
     &ServerMessage::Attached {
+      attachment_token,
       session: snapshot.session,
       earliest_sequence: snapshot.journal.earliest_sequence,
       next_sequence: snapshot.journal.next_sequence,
@@ -1629,12 +1817,50 @@ struct ConnectionGuard {
 
 struct AttachmentGuard {
   session: Arc<Session>,
-  attachment_id: String,
+  attachment_token: String,
+  generation: u64,
+  reconnect_grace: Duration,
+  preserve_on_drop: bool,
+  active: bool,
+}
+
+impl AttachmentGuard {
+  fn close_now(&mut self) {
+    if self.active {
+      self
+        .session
+        .close_attachment(&self.attachment_token, self.generation);
+      self.active = false;
+    }
+  }
 }
 
 impl Drop for AttachmentGuard {
   fn drop(&mut self) {
-    self.session.release_attachment(&self.attachment_id);
+    if !self.active {
+      return;
+    }
+    if !self.preserve_on_drop {
+      self
+        .session
+        .close_attachment(&self.attachment_token, self.generation);
+      return;
+    }
+    if !self
+      .session
+      .suspend_attachment(&self.attachment_token, self.generation)
+    {
+      return;
+    }
+
+    let session = Arc::clone(&self.session);
+    let attachment_token = self.attachment_token.clone();
+    let generation = self.generation;
+    let reconnect_grace = self.reconnect_grace;
+    tokio::spawn(async move {
+      tokio::time::sleep(reconnect_grace).await;
+      session.expire_attachment(&attachment_token, generation);
+    });
   }
 }
 
@@ -1805,6 +2031,7 @@ mod tests {
           snapshot,
           rmux_proto::TerminalSize::default(),
           attachment_leases,
+          "test-token".into(),
           ShellState::default(),
         ),
       )

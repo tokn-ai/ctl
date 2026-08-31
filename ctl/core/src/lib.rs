@@ -1,454 +1,235 @@
-//! Reusable authenticated client primitives for `ctl`.
+//! OpenSSH transport primitives for `ctl`.
 //!
-//! This crate owns the portable client identity, host configuration, TLS
-//! connection, and outer-control handshake. It deliberately does not know how
-//! configuration is stored on a particular operating system or how a terminal
-//! is rendered.
+//! Authentication, host verification, proxying, and connection multiplexing
+//! belong to the user's OpenSSH installation and configuration. This crate
+//! owns only one remote-command channel and exposes its stdin/stdout as the
+//! bidirectional byte stream consumed by `rmux-client`.
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use ctl_proto::{
-  CONTROL_PROTOCOL_VERSION, Capability, ClientMessage, CodecError, ErrorCode, PairingInvitation,
-  ServerMessage, Service, authentication_payload, client_id_from_public_key, read_frame,
-  validate_pairing_invitation, write_frame,
-};
-use ed25519_dalek::{Signer, SigningKey};
-use rustls::{
-  ClientConfig, RootCertStore,
-  pki_types::{CertificateDer, ServerName},
-};
-use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::io;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::process::Stdio;
+use std::task::{Context, Poll};
 use thiserror::Error;
-use tokio::net::TcpStream;
-use tokio_rustls::{TlsConnector, client::TlsStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::sync::watch;
 
-pub const CLIENT_STATE_VERSION: u16 = 1;
+const SSH_PROGRAM: &str = "ssh";
+const REMOTE_COMMAND: [&str; 3] = ["exec", "ctld", "connect"];
+const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 
-/// A locally generated Ed25519 identity used for protocol authorization.
-pub struct ClientIdentity {
-  signing_key: SigningKey,
+/// One OpenSSH remote-command channel carrying raw `rmux-proto` bytes.
+///
+/// Dropping the stream closes its pipes and asks the supervisor to terminate
+/// and reap the SSH child. A fresh reconnect always creates a fresh SSH
+/// channel; OpenSSH may transparently reuse a configured control master.
+pub struct SshTransport {
+  stdin: ChildStdin,
+  stdout: ChildStdout,
+  shutdown: watch::Sender<bool>,
 }
 
-impl ClientIdentity {
-  /// Generates a new independent client identity from the operating system's
-  /// cryptographic random source.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error when secure randomness is unavailable.
-  pub fn generate() -> Result<Self, CoreError> {
-    let mut private_key = [0_u8; 32];
-    getrandom::fill(&mut private_key).map_err(|error| CoreError::Random(error.to_string()))?;
-    Ok(Self {
-      signing_key: SigningKey::from_bytes(&private_key),
-    })
-  }
-
-  /// Restores an identity from exactly one Ed25519 private-key seed.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error unless `private_key` contains exactly 32 bytes.
-  pub fn from_private_key(private_key: &[u8]) -> Result<Self, CoreError> {
-    let private_key: [u8; 32] = private_key
-      .try_into()
-      .map_err(|_| CoreError::InvalidPrivateKey)?;
-    Ok(Self {
-      signing_key: SigningKey::from_bytes(&private_key),
-    })
-  }
-
-  /// Returns the private seed for owner-only local persistence.
-  #[must_use]
-  pub fn private_key_bytes(&self) -> [u8; 32] {
-    self.signing_key.to_bytes()
-  }
-
-  /// Returns the public key supplied to `ctld` during pairing and login.
-  #[must_use]
-  pub fn public_key_bytes(&self) -> [u8; 32] {
-    self.signing_key.verifying_key().to_bytes()
-  }
-
-  /// Returns the printable stable identity derived from this public key.
-  #[must_use]
-  pub fn client_id(&self) -> String {
-    client_id_from_public_key(&self.public_key_bytes())
-  }
-
-  /// Signs the canonical control-authentication payload for a server challenge.
-  #[must_use]
-  pub fn sign_authentication(
-    &self,
-    challenge: &[u8],
-    client_name: &str,
-    client_version: &str,
-  ) -> [u8; 64] {
-    self
-      .signing_key
-      .sign(&authentication_payload(
-        challenge,
-        client_name,
-        client_version,
-      ))
-      .to_bytes()
+impl AsyncRead for SshTransport {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+    buffer: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.stdout).poll_read(context, buffer)
   }
 }
 
-/// A configured, certificate-pinned remote device.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostConfig {
-  pub alias: String,
-  pub endpoint: String,
-  pub server_name: String,
-  pub device_id: String,
-  pub device_certificate_base64: String,
-}
-
-/// Portable serialized client state. The caller is responsible for persisting
-/// it in platform-appropriate private storage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientState {
-  pub version: u16,
-  pub identity_private_key_base64: String,
-  pub hosts: Vec<HostConfig>,
-}
-
-impl ClientState {
-  #[must_use]
-  pub fn new(identity: &ClientIdentity) -> Self {
-    Self {
-      version: CLIENT_STATE_VERSION,
-      identity_private_key_base64: STANDARD.encode(identity.private_key_bytes()),
-      hosts: Vec::new(),
-    }
+impl AsyncWrite for SshTransport {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+    buffer: &[u8],
+  ) -> Poll<Result<usize, io::Error>> {
+    Pin::new(&mut self.stdin).poll_write(context, buffer)
   }
 
-  /// Restores the client identity embedded in this state document.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error when the state version or key encoding is unsupported.
-  pub fn identity(&self) -> Result<ClientIdentity, CoreError> {
-    if self.version != CLIENT_STATE_VERSION {
-      return Err(CoreError::UnsupportedStateVersion {
-        actual: self.version,
-        supported: CLIENT_STATE_VERSION,
-      });
-    }
-    let private_key = STANDARD.decode(&self.identity_private_key_base64)?;
-    ClientIdentity::from_private_key(&private_key)
+  fn poll_flush(
+    mut self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+  ) -> Poll<Result<(), io::Error>> {
+    Pin::new(&mut self.stdin).poll_flush(context)
   }
 
-  /// Inserts or replaces one host by its local alias.
-  pub fn upsert_host(&mut self, host: HostConfig) {
-    if let Some(existing) = self
-      .hosts
-      .iter_mut()
-      .find(|existing| existing.alias == host.alias)
-    {
-      *existing = host;
-      return;
-    }
-    self.hosts.push(host);
-    self
-      .hosts
-      .sort_by(|left, right| left.alias.cmp(&right.alias));
-  }
-
-  #[must_use]
-  pub fn host(&self, alias: &str) -> Option<&HostConfig> {
-    self.hosts.iter().find(|host| host.alias == alias)
+  fn poll_shutdown(
+    mut self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+  ) -> Poll<Result<(), io::Error>> {
+    Pin::new(&mut self.stdin).poll_shutdown(context)
   }
 }
 
-/// Establishes a server-authenticated TLS connection to a certificate-pinned
-/// remote device.
+impl Drop for SshTransport {
+  fn drop(&mut self) {
+    let _ignored = self.shutdown.send(true);
+  }
+}
+
+/// Starts `ctld connect` through the system OpenSSH client.
+///
+/// The destination is interpreted exactly as an OpenSSH destination or
+/// `~/.ssh/config` host alias. No shell fragment or user-controlled remote
+/// command is accepted. SSH diagnostics and remote `ctld` diagnostics remain
+/// on stderr and can never corrupt the protocol stream.
 ///
 /// # Errors
 ///
-/// Returns an error when the endpoint cannot be reached, the pinned
-/// certificate is invalid, or TLS identity verification fails.
-pub async fn connect_tls(host: &HostConfig) -> Result<TlsStream<TcpStream>, CoreError> {
-  let certificate = STANDARD.decode(&host.device_certificate_base64)?;
-  let mut roots = RootCertStore::empty();
-  roots
-    .add(CertificateDer::from(certificate))
-    .map_err(|error| CoreError::TlsConfiguration(error.to_string()))?;
-  let config = ClientConfig::builder()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-  let connector = TlsConnector::from(Arc::new(config));
-  let server_name = ServerName::try_from(host.server_name.clone())
-    .map_err(|_| CoreError::InvalidServerName(host.server_name.clone()))?;
-  let stream = TcpStream::connect(&host.endpoint).await?;
-  Ok(connector.connect(server_name, stream).await?)
-}
+/// Returns an error when the destination is unsafe or OpenSSH cannot be
+/// started with piped stdin/stdout.
+pub async fn open_ssh_tunnel(destination: &str) -> Result<SshTransport, CoreError> {
+  validate_destination(destination)?;
+  let mut command = Command::new(SSH_PROGRAM);
+  command
+    .args(ssh_arguments(destination))
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true);
 
-/// Consumes a pairing invitation, authorizes this client identity, and returns
-/// a reusable pinned host configuration.
-///
-/// # Errors
-///
-/// Returns an error when TLS, the control handshake, or pairing authorization
-/// fails.
-pub async fn pair(
-  invitation: &PairingInvitation,
-  alias: String,
-  identity: &ClientIdentity,
-  client_name: &str,
-  client_version: &str,
-) -> Result<HostConfig, CoreError> {
-  validate_pairing_invitation(invitation)?;
-  let host = host_from_invitation(invitation, alias);
-  let mut stream = connect_tls(&host).await?;
-  let hello = begin_control(&mut stream, client_name, client_version).await?;
-  ensure_device_id(&host, &hello.device_id)?;
+  let mut child = command.spawn().map_err(CoreError::StartSsh)?;
+  let stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
+  let stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
+  let (shutdown, mut shutdown_requested) = watch::channel(false);
 
-  let token = STANDARD.decode(&invitation.token_base64)?;
-  write_frame(
-    &mut stream,
-    &ClientMessage::Pair {
-      token,
-      public_key: identity.public_key_bytes().to_vec(),
-      label: invitation.client_label.clone(),
-    },
-  )
-  .await?;
-  match read_control_response(&mut stream).await? {
-    ServerMessage::PairAccepted { client_id } if client_id == identity.client_id() => Ok(host),
-    ServerMessage::PairAccepted { client_id } => Err(CoreError::UnexpectedClientId {
-      expected: identity.client_id(),
-      actual: client_id,
-    }),
-    response => Err(unexpected("pair_accepted", &response)),
-  }
-}
-
-/// Opens the authenticated raw `rmux` tunnel for a configured host.
-///
-/// Once this function returns, the TLS stream is no longer carrying
-/// `ctl-proto` frames. It carries only end-to-end `rmux-proto` frames.
-///
-/// # Errors
-///
-/// Returns an error when TLS, authentication, capability negotiation, or the
-/// tunnel upgrade fails.
-pub async fn open_rmux_tunnel(
-  host: &HostConfig,
-  identity: &ClientIdentity,
-  client_name: &str,
-  client_version: &str,
-) -> Result<TlsStream<TcpStream>, CoreError> {
-  let mut stream = connect_tls(host).await?;
-  let hello = begin_control(&mut stream, client_name, client_version).await?;
-  ensure_device_id(host, &hello.device_id)?;
-
-  write_frame(
-    &mut stream,
-    &ClientMessage::Authenticate {
-      public_key: identity.public_key_bytes().to_vec(),
-      signature: identity
-        .sign_authentication(&hello.challenge, client_name, client_version)
-        .to_vec(),
-    },
-  )
-  .await?;
-  match read_control_response(&mut stream).await? {
-    ServerMessage::Authenticated {
-      client_id,
-      capabilities,
-    } if client_id == identity.client_id() && capabilities.contains(&Capability::RmuxTunnel) => {}
-    ServerMessage::Authenticated { client_id, .. } if client_id != identity.client_id() => {
-      return Err(CoreError::UnexpectedClientId {
-        expected: identity.client_id(),
-        actual: client_id,
-      });
+  tokio::spawn(async move {
+    tokio::select! {
+      result = child.wait() => {
+        if let Err(error) = result {
+          eprintln!("ctl: could not wait for ssh: {error}");
+        }
+      }
+      changed = shutdown_requested.changed() => {
+        if changed.is_ok() && *shutdown_requested.borrow() {
+          let _ignored = child.start_kill();
+        }
+        if let Err(error) = child.wait().await {
+          eprintln!("ctl: could not reap ssh: {error}");
+        }
+      }
     }
-    ServerMessage::Authenticated { .. } => return Err(CoreError::RmuxCapabilityUnavailable),
-    response => return Err(unexpected("authenticated", &response)),
-  }
+  });
 
-  write_frame(
-    &mut stream,
-    &ClientMessage::OpenService {
-      service: Service::Rmux,
-      rmux_protocol_version: rmux_proto::PROTOCOL_VERSION,
-    },
-  )
-  .await?;
-  match read_control_response(&mut stream).await? {
-    ServerMessage::ServiceOpened {
-      service: Service::Rmux,
-    } => Ok(stream),
-    response => Err(unexpected("service_opened", &response)),
+  let mut transport = SshTransport {
+    stdin,
+    stdout,
+    shutdown,
+  };
+  let mut preface = vec![0_u8; SSH_TRANSPORT_PREFACE.len()];
+  transport
+    .read_exact(&mut preface)
+    .await
+    .map_err(CoreError::ReadSshPreface)?;
+  if preface != SSH_TRANSPORT_PREFACE {
+    return Err(CoreError::InvalidSshPreface);
+  }
+  Ok(transport)
+}
+
+/// Returns whether opening a replacement SSH channel may succeed without a
+/// configuration change.
+#[must_use]
+pub fn is_retryable_connection_error(error: &CoreError) -> bool {
+  match error {
+    CoreError::ReadSshPreface(source) => !matches!(
+      source.kind(),
+      io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
+    ),
+    CoreError::InvalidSshDestination(_)
+    | CoreError::StartSsh(_)
+    | CoreError::MissingSshStdin
+    | CoreError::MissingSshStdout
+    | CoreError::InvalidSshPreface => false,
   }
 }
 
-#[derive(Debug)]
-struct ControlHello {
-  device_id: String,
-  challenge: Vec<u8>,
+fn validate_destination(destination: &str) -> Result<(), CoreError> {
+  if destination.trim().is_empty() || destination.chars().any(char::is_control) {
+    return Err(CoreError::InvalidSshDestination(destination.into()));
+  }
+  Ok(())
 }
 
-async fn begin_control<S>(
-  stream: &mut S,
-  client_name: &str,
-  client_version: &str,
-) -> Result<ControlHello, CoreError>
-where
-  S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-  write_frame(
-    stream,
-    &ClientMessage::Hello {
-      protocol_version: CONTROL_PROTOCOL_VERSION,
-      client_name: client_name.into(),
-      client_version: client_version.into(),
-    },
-  )
-  .await?;
-  match read_control_response(stream).await? {
-    ServerMessage::HelloAccepted {
-      protocol_version,
-      device_id,
-      challenge,
-      ..
-    } if protocol_version == CONTROL_PROTOCOL_VERSION => Ok(ControlHello {
-      device_id,
-      challenge,
-    }),
-    ServerMessage::HelloAccepted {
-      protocol_version, ..
-    } => Err(CoreError::ProtocolVersionMismatch {
-      requested: CONTROL_PROTOCOL_VERSION,
-      actual: protocol_version,
-    }),
-    response => Err(unexpected("hello_accepted", &response)),
-  }
-}
-
-async fn read_control_response<S>(stream: &mut S) -> Result<ServerMessage, CoreError>
-where
-  S: tokio::io::AsyncRead + Unpin,
-{
-  match read_frame(stream).await? {
-    Some(ServerMessage::Error { code, message }) => Err(CoreError::Server { code, message }),
-    Some(message) => Ok(message),
-    None => Err(CoreError::UnexpectedEof),
-  }
-}
-
-fn host_from_invitation(invitation: &PairingInvitation, alias: String) -> HostConfig {
-  HostConfig {
-    alias,
-    endpoint: invitation.endpoint.clone(),
-    server_name: invitation.server_name.clone(),
-    device_id: invitation.device_id.clone(),
-    device_certificate_base64: invitation.device_certificate_base64.clone(),
-  }
-}
-
-fn ensure_device_id(host: &HostConfig, actual: &str) -> Result<(), CoreError> {
-  if host.device_id == actual {
-    Ok(())
-  } else {
-    Err(CoreError::UnexpectedDeviceId {
-      expected: host.device_id.clone(),
-      actual: actual.into(),
-    })
-  }
-}
-
-fn unexpected(expected: &'static str, actual: &ServerMessage) -> CoreError {
-  CoreError::UnexpectedResponse {
-    expected,
-    actual: format!("{actual:?}"),
-  }
+fn ssh_arguments(destination: &str) -> Vec<OsString> {
+  [
+    "-T",
+    "-o",
+    "ClearAllForwardings=yes",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "ForwardX11=no",
+    "-o",
+    "PermitLocalCommand=no",
+    "-o",
+    "RemoteCommand=none",
+    "--",
+    destination,
+    REMOTE_COMMAND[0],
+    REMOTE_COMMAND[1],
+    REMOTE_COMMAND[2],
+  ]
+  .into_iter()
+  .map(OsString::from)
+  .collect()
 }
 
 #[derive(Debug, Error)]
 pub enum CoreError {
-  #[error("secure randomness is unavailable: {0}")]
-  Random(String),
-  #[error("the saved client private key is not a 32-byte Ed25519 seed")]
-  InvalidPrivateKey,
-  #[error("state version {actual} is unsupported; this client supports {supported}")]
-  UnsupportedStateVersion { actual: u16, supported: u16 },
-  #[error(transparent)]
-  Base64(#[from] base64::DecodeError),
-  #[error(transparent)]
-  Invitation(#[from] ctl_proto::InvitationError),
-  #[error(transparent)]
-  Codec(#[from] CodecError),
-  #[error("network or TLS I/O error: {0}")]
-  Io(#[from] io::Error),
-  #[error("invalid TLS configuration: {0}")]
-  TlsConfiguration(String),
-  #[error("invalid TLS server name '{0}'")]
-  InvalidServerName(String),
-  #[error("expected device ID '{expected}', received '{actual}'")]
-  UnexpectedDeviceId { expected: String, actual: String },
-  #[error("expected client ID '{expected}', received '{actual}'")]
-  UnexpectedClientId { expected: String, actual: String },
-  #[error("control protocol mismatch: requested {requested}, server selected {actual}")]
-  ProtocolVersionMismatch { requested: u16, actual: u16 },
-  #[error("the device did not grant the rmux tunnel capability")]
-  RmuxCapabilityUnavailable,
-  #[error("device closed the control connection before responding")]
-  UnexpectedEof,
-  #[error("device error {code:?}: {message}")]
-  Server { code: ErrorCode, message: String },
-  #[error("expected {expected}, received {actual}")]
-  UnexpectedResponse {
-    expected: &'static str,
-    actual: String,
-  },
+  #[error("invalid SSH destination '{0}'")]
+  InvalidSshDestination(String),
+  #[error("could not start the system ssh client: {0}")]
+  StartSsh(#[source] io::Error),
+  #[error("the ssh client did not expose a writable stdin pipe")]
+  MissingSshStdin,
+  #[error("the ssh client did not expose a readable stdout pipe")]
+  MissingSshStdout,
+  #[error("could not read the ctld transport marker from SSH: {0}")]
+  ReadSshPreface(#[source] io::Error),
+  #[error(
+    "remote stdout did not begin with the ctld transport marker; check non-interactive shell startup output"
+  )]
+  InvalidSshPreface,
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
   #[test]
-  fn identity_round_trips_and_signs_a_challenge() {
-    let identity = ClientIdentity::generate().unwrap();
-    let restored = ClientIdentity::from_private_key(&identity.private_key_bytes()).unwrap();
-    assert_eq!(identity.public_key_bytes(), restored.public_key_bytes());
-    assert_eq!(identity.client_id(), restored.client_id());
-
-    let challenge = b"test challenge";
-    let signature = identity.sign_authentication(challenge, "ctl", "0.1.0");
-    let verifying_key = VerifyingKey::from_bytes(&identity.public_key_bytes()).unwrap();
-    verifying_key
-      .verify(
-        &authentication_payload(challenge, "ctl", "0.1.0"),
-        &Signature::from_bytes(&signature),
-      )
-      .unwrap();
+  fn ssh_command_uses_a_fixed_remote_command_and_disables_forwarding() {
+    assert_eq!(
+      ssh_arguments("workstation"),
+      [
+        "-T",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "RemoteCommand=none",
+        "--",
+        "workstation",
+        "exec",
+        "ctld",
+        "connect",
+      ]
+      .map(OsString::from)
+    );
   }
 
   #[test]
-  fn client_state_replaces_hosts_by_alias() {
-    let identity = ClientIdentity::generate().unwrap();
-    let mut state = ClientState::new(&identity);
-    let first = HostConfig {
-      alias: "mac".into(),
-      endpoint: "mac.example:4433".into(),
-      server_name: "device.ctl.invalid".into(),
-      device_id: "device".into(),
-      device_certificate_base64: "AA==".into(),
-    };
-    state.upsert_host(first);
-    state.upsert_host(HostConfig {
-      endpoint: "new-mac.example:4433".into(),
-      ..state.host("mac").unwrap().clone()
-    });
-
-    assert_eq!(state.hosts.len(), 1);
-    assert_eq!(state.host("mac").unwrap().endpoint, "new-mac.example:4433");
-    assert_eq!(state.identity().unwrap().client_id(), identity.client_id());
+  fn unsafe_destinations_are_rejected_before_starting_ssh() {
+    assert!(validate_destination("").is_err());
+    assert!(validate_destination("host\ncommand").is_err());
+    assert!(validate_destination("user@host").is_ok());
   }
 }

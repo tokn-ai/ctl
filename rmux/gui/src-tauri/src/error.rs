@@ -38,6 +38,7 @@ pub fn protocol_error_code(code: &ErrorCode) -> &'static str {
     ErrorCode::SequenceAhead => "sequence_ahead",
     ErrorCode::SessionAlreadyExists => "session_already_exists",
     ErrorCode::SessionNotFound => "session_not_found",
+    ErrorCode::AttachmentResumeRejected => "attachment_resume_rejected",
     ErrorCode::InputLeaseRequired => "input_lease_required",
     ErrorCode::LayoutLeaseRequired => "layout_lease_required",
     ErrorCode::Internal => "internal",

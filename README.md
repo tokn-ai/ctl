@@ -3,11 +3,10 @@
 This repository will contain two independently useful products:
 
 - `rmux`: persistent local terminal sessions;
-- `ctl`: authenticated remote device control and access to remote `rmux`
-  sessions.
+- `ctl`: SSH-authorized access to remote `rmux` sessions.
 
 The current MVP supports local `rmux` sessions, a local desktop terminal,
-and authenticated `ctl` access to sessions on macOS and other Unix platforms.
+and SSH-backed `ctl` access to sessions on macOS and other Unix platforms.
 Windows local IPC is not implemented yet.
 
 ## Build
@@ -24,6 +23,15 @@ For local use, install both packages into your Cargo binary directory:
 ```sh
 cargo install --path rmux/daemon
 cargo install --path rmux/cli
+```
+
+For remote access, install `rmuxd` and `ctld` on the controlled device and
+`ctl` on the client:
+
+```sh
+cargo install --path rmux/daemon
+cargo install --path ctl/daemon
+cargo install --path ctl/cli
 ```
 
 The desktop app uses pnpm and Tauri 2. Build `rmuxd` into the shared Cargo
@@ -138,6 +146,23 @@ for terminating its daemon-owned session. The Windows/Linux equivalents are
 `Ctrl-Shift-W` and `Ctrl-Shift-E`, leaving ordinary terminal control keys
 untouched. On macOS these are native application-menu accelerators; `Cmd-Q`
 retains its standard meaning and quits the app without terminating sessions.
+
+## Remote use
+
+`ctl` uses the system OpenSSH client and accepts an ordinary SSH destination
+or `~/.ssh/config` host alias. The remote account must be able to run
+`ctld connect` non-interactively:
+
+```sh
+ctl session list workstation
+ctl shell workstation
+```
+
+`ctld` has no network listener or application-level pairing state. It relays
+the SSH channel to the same user's fixed local `rmuxd` endpoint. After an
+unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
+the logical attachment and its leases for 30 seconds by default. An explicit
+`Ctrl-]` detach releases them immediately.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in

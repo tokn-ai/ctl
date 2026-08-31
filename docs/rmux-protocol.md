@@ -1,22 +1,17 @@
-# rmux protocol version 6
+# rmux protocol version 7
 
 The protocol is independent of local IPC and future remote transport. Version
-6 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+7 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
 
-### Additive v6 fields
+### Version 7 attachment reconnect
 
-The running-command title fields are an additive extension of version 6, not a
-handshake-version change. A compatible implementation must accept an
-`attach_session` request without `request_running_command` and treat it as
-`false`; it must accept a `shell.capabilities` value without
-`reports_running_command` and treat it as `false`; and it must accept a
-`shell_state` without `running_command_redacted` or `running_command` and
-treat them as `false` and `null`, respectively. Version-6 implementations
-also ignore unrecognized object fields. This lets a newer client fall back to
-the shell/path title when attached to an already-running older v6 daemon.
+Version 7 adds an opaque `attachment_token` to `attached` and a corresponding
+`resume_attachment` request. The token rebinds a replacement transport to the
+same logical attachment during a bounded reconnect grace, preserving its input
+and layout leases. Protocol versions still match exactly during handshake.
 
 ## Connection lifecycle
 
@@ -24,26 +19,33 @@ Every connection starts with `handshake`. The daemon replies with
 `handshake_accepted` or a structured error. One command follows a successful
 handshake.
 
-Most commands receive one response and close. `attach_session` changes the
-connection into a bidirectional stream:
+Most commands receive one response and close. `attach_session` creates a
+logical attachment and changes the connection into a bidirectional stream.
+`resume_attachment` rebinds a replacement stream to an existing logical
+attachment:
 
 - daemon to client: `attached` (including a complete `shell_state` snapshot),
   an optional checkpoint, replayed `output`, then live `output`,
   `pty_geometry_changed`, and `shell_state_changed`;
 - client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`, or
   `detach`;
-- daemon to client: `heartbeat_ack` and `session_ended` when the child exits.
+- daemon to client: `heartbeat_ack`, `detached` after an explicit detach is
+  processed, and `session_ended` when the child exits.
 
-Transport disconnection is an implicit detach and never kills the session.
+Explicit `detach` is complete after the client receives `detached`; the daemon
+then closes the logical attachment immediately. Transport loss instead
+suspends it for the negotiated reconnect grace and never kills the session.
 Creating a session carries its initial working directory separately from the
 optional command, so the daemon's own process directory is never observable as
 session state. Its name is also optional; an omitted name receives a
 daemon-assigned unique name. The exact automatic naming policy is an
-implementation detail rather than a version-6 wire guarantee.
+implementation detail rather than a version-7 wire guarantee.
 
 `kill_session` is a one-response command that explicitly terminates the
 selected session and therefore ends every attachment. It is distinct from
 `detach`, transport EOF, and client exit, all of which preserve the session.
+Only explicit `detach` releases leases immediately; unexpected EOF retains
+them until resume or grace expiry.
 
 `attach_session` includes the attaching terminal size and requests for input
 and layout leases, plus independent `request_command_line` and
@@ -72,9 +74,10 @@ advertised cadence; `rmuxd` replies with `heartbeat_ack { nonce }`. Any valid
 post-attach client message also demonstrates client liveness.
 
 If no client activity reaches `rmuxd` before the timeout, it closes that
-attachment and releases its connection-bound leases. It does not kill the PTY,
-shell, journal, or checkpoint state. This makes a laptop sleep, client crash,
-or half-open network path unable to pin input or layout ownership forever.
+transport generation. The logical attachment remains resumable only for its
+bounded grace; expiry releases its leases. It does not kill the PTY, shell,
+journal, or checkpoint state. This makes a laptop sleep, client crash, or
+half-open network path unable to pin input or layout ownership forever.
 
 The initial `attached` reply, checkpoint, and retained-output replay use a
 separate five-minute delivery deadline. The liveness deadline starts only
@@ -87,12 +90,13 @@ indefinitely.
 The deadline has priority over a late client frame: an expired attachment
 cannot revive itself with a late heartbeat, input, resize, or lease request.
 Clients also treat a peer that remains silent for the advertised timeout as a
-lost connection and reconnect by session ID and output sequence.
+lost connection and reconnect by session ID, attachment token, and renderer-
+applied output sequence.
 
 ## Attachment leases
 
-Every `attach_session` stream is one attachment. Input and layout are separate
-connection-bound leases:
+Every `attach_session` creates one logical attachment. Input and layout are
+separate attachment-bound leases:
 
 - `request_input_lease` and `request_layout_lease` claim each unheld lease as
   part of the attach operation. They never displace another attachment.
@@ -106,9 +110,18 @@ connection-bound leases:
 - A successful resize that changes the PTY's geometry sends
   `pty_geometry_changed` to every live attachment. It changes neither input
   ownership nor a client's viewport, scroll position, or selection.
-- Detach, transport EOF, write failure, attachment-liveness expiry, and session
-  end release any leases owned by that attachment. They do not terminate the
-  PTY or child process.
+- Explicit detach and reconnect-grace expiry release any leases owned by that
+  attachment. Transport EOF, write failure, and attachment-liveness expiry
+  first preserve them for bounded reconnect. None terminate the PTY or child
+  process.
+
+`attached.attachment_token` is random, session-scoped, memory-only, and never
+exposes the daemon-private attachment ID. `resume_attachment` with a valid
+token immediately supersedes the previous transport generation, including a
+half-open one, and returns the same token and current lease status. An invalid
+or expired token receives `attachment_resume_rejected`. Output recovery remains
+independent: the client must still supply only its renderer-applied
+`resume_from`, and input is never replayed.
 
 The two requested leases are intentionally independent. A desktop client can
 retain input while a separate client owns layout, and a viewer can attach
@@ -247,7 +260,7 @@ local reconnect cursor past the transition. It can continue to show best-effort
 output, but its next attach must omit `resume_from` so `rmuxd` supplies a
 geometry-safe checkpoint.
 
-Geometry transitions are not raw VT bytes and version 6 deliberately does not
+Geometry transitions are not raw VT bytes and version 7 deliberately does not
 add a second resume cursor for them. A caller may use `resume_from` only for a
 renderer that has processed the complete prior attachment stream, including
 geometry messages. If the requested raw position is at or before the most

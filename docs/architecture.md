@@ -129,6 +129,12 @@ and acknowledges checkpoints only after recreating a clean renderer and feeding
 both checkpoint byte fields. This keeps the bridge bounded without tying
 attachment heartbeats to webview rendering speed.
 
+Attachment transitions are serialized per window by the backend. Opening a
+different session detaches and awaits the previous actor before reserving its
+replacement, which releases the previous attachment's leases without ending
+its persistent shell session. The frontend therefore never asks a user to
+manually detach before switching sessions.
+
 Raw byte fields cross the Tauri boundary as base64. Every `u64` sequence and
 revision crosses as a decimal string so JavaScript number precision cannot
 corrupt a resume or acknowledgement boundary. Attachment and event IDs fence

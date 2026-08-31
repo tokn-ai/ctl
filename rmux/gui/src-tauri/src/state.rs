@@ -7,13 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager as _;
 use tauri::ipc::Channel;
 use tokio::sync::{Mutex, Notify};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::dto::{AttachmentEventDto, PresentationAcknowledgement};
 use crate::error::{CommandErrorDto, CommandResult};
 
 const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(30);
+const ATTACHMENT_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -23,6 +24,7 @@ pub struct AppState {
 #[derive(Default)]
 struct AttachmentRegistry {
   by_window: HashMap<String, AttachmentSlot>,
+  window_transitions: HashMap<String, Arc<Mutex<()>>>,
 }
 
 enum AttachmentSlot {
@@ -67,12 +69,43 @@ impl PendingPresentation {
 }
 
 impl AppState {
+  pub async fn window_transition(&self, window_label: &str) -> Arc<Mutex<()>> {
+    let mut registry = self.registry.lock().await;
+    Arc::clone(
+      registry
+        .window_transitions
+        .entry(window_label.into())
+        .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+  }
+
+  pub async fn detach_active_window(&self, window_label: &str) -> CommandResult<()> {
+    let actor = {
+      let registry = self.registry.lock().await;
+      match registry.by_window.get(window_label) {
+        Some(AttachmentSlot::Opening { .. }) => {
+          return Err(CommandErrorDto::new(
+            "window_attachment_transition_in_progress",
+            "another attachment transition is already in progress for this window",
+          ));
+        }
+        Some(AttachmentSlot::Active(actor)) => Some(Arc::clone(actor)),
+        None => None,
+      }
+    };
+
+    match actor {
+      Some(actor) => actor.detach_and_wait().await,
+      None => Ok(()),
+    }
+  }
+
   pub async fn reserve_window(&self, window_label: &str, attachment_id: &str) -> CommandResult<()> {
     let mut registry = self.registry.lock().await;
     if registry.by_window.contains_key(window_label) {
       return Err(CommandErrorDto::new(
         "window_already_attached",
-        "detach the current terminal before opening another session",
+        "another attachment transition is already in progress for this window",
       ));
     }
     registry.by_window.insert(
@@ -268,6 +301,32 @@ impl AttachmentActor {
     }
   }
 
+  pub async fn detach_and_wait(&self) -> CommandResult<()> {
+    if self.closed.load(Ordering::Acquire) {
+      return Ok(());
+    }
+
+    let detach_error = self
+      .control
+      .detach()
+      .await
+      .err()
+      .map(CommandErrorDto::backend);
+    if timeout(ATTACHMENT_CLOSE_TIMEOUT, self.wait_until_closed())
+      .await
+      .is_ok()
+    {
+      return Ok(());
+    }
+    if let Some(error) = detach_error {
+      return Err(error);
+    }
+    Err(CommandErrorDto::new(
+      "attachment_detach_timeout",
+      "the attachment did not close within five seconds",
+    ))
+  }
+
   fn mark_closed(&self) {
     self.closed.store(true, Ordering::Release);
     self.closed_changed.notify_waiters();
@@ -423,6 +482,21 @@ async fn forward_event(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn window_transitions_are_stable_and_window_scoped() {
+    let state = AppState::default();
+    let first = state.window_transition("main").await;
+    let same_window = state.window_transition("main").await;
+    let other_window = state.window_transition("secondary").await;
+
+    assert!(Arc::ptr_eq(&first, &same_window));
+    assert!(!Arc::ptr_eq(&first, &other_window));
+
+    let _first_guard = first.lock().await;
+    assert!(same_window.try_lock().is_err());
+    assert!(other_window.try_lock().is_ok());
+  }
 
   #[test]
   fn attachment_slot_tracks_the_reserved_id() {

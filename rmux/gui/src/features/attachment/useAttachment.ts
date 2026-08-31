@@ -563,21 +563,8 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         return;
       }
 
-      const previousAttachment = activeAttachmentRef.current;
       activeAttachmentRef.current = null;
       channelRef.current = null;
-
-      if (previousAttachment) {
-        try {
-          await detachAttachment({ attachment_id: previousAttachment });
-        } catch {
-          // Opening a replacement attachment is still safe: the backend fences
-          // every command with its attachment id and detaches the old actor.
-        }
-      }
-      if (generation !== generationRef.current) {
-        return;
-      }
 
       const proposed = renderer.proposeDimensions();
       const requestedTerminalSize = proposed

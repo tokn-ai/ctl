@@ -88,6 +88,9 @@ pub async fn open_attachment(
 ) -> CommandResult<OpenAttachmentResponseDto> {
   let attachment_id = uuid::Uuid::new_v4().to_string();
   let window_label = window.label().to_owned();
+  let transition = state.window_transition(&window_label).await;
+  let _transition_guard = transition.lock().await;
+  state.detach_active_window(&window_label).await?;
   state.reserve_window(&window_label, &attachment_id).await?;
 
   let result = open_reserved_attachment(
@@ -238,20 +241,10 @@ pub async fn detach_attachment(
   state: State<'_, AppState>,
   request: AttachmentRequestDto,
 ) -> CommandResult<()> {
+  let transition = state.window_transition(window.label()).await;
+  let _transition_guard = transition.lock().await;
   let actor = state.actor(window.label(), &request.attachment_id).await?;
-  actor
-    .control
-    .detach()
-    .await
-    .map_err(CommandErrorDto::backend)?;
-  tokio::time::timeout(std::time::Duration::from_secs(5), actor.wait_until_closed())
-    .await
-    .map_err(|_elapsed| {
-      CommandErrorDto::new(
-        "attachment_detach_timeout",
-        "the attachment did not close within five seconds",
-      )
-    })
+  actor.detach_and_wait().await
 }
 
 fn client_identity() -> ClientIdentity {

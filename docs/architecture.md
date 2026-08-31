@@ -112,9 +112,10 @@ the daemon-owned session continues.
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same
 collision-safe `session-N` allocation used by every unnamed client. Its session
 list merges authoritative geometry changes from the active attachment into the
-matching row. **Disconnect** removes the active tab, detaches its attachment,
-and preserves the PTY; **Close** is the explicit one-shot kill operation and
-terminates the session for all attachments.
+matching row. **Disconnect** removes a selected open tab and preserves the
+PTY; for the active tab it detaches the attachment, while an inactive tab is
+already detached and is removed only from this window. **Close** is the
+explicit one-shot kill operation and terminates the session for all attachments.
 
 `Restart rmuxd` is a command-palette-only, destructive maintenance action. It
 first preflights a separate owner-only local-control endpoint beside the normal

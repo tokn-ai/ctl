@@ -13,7 +13,7 @@ interface SessionSidebarProps {
   sessions: SessionSummary[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
   selectedSessionId: string | null;
-  disconnectableSessionId: string | null;
+  openTabSessionIds: ReadonlySet<string>;
   loading: boolean;
   error: string | null;
   creating: boolean;
@@ -64,7 +64,7 @@ export function SessionSidebar({
   sessions,
   shellStates,
   selectedSessionId,
-  disconnectableSessionId,
+  openTabSessionIds,
   loading,
   error,
   creating,
@@ -132,7 +132,7 @@ export function SessionSidebar({
           const selected = session.session_id === selectedSessionId;
           const closing = closingSessionIds.has(session.session_id);
           const disconnecting = session.session_id === disconnectingSessionId;
-          const canDisconnect = session.session_id === disconnectableSessionId;
+          const canDisconnect = openTabSessionIds.has(session.session_id);
           const confirmingClose = session.session_id === pendingCloseSessionId;
           return (
             <div

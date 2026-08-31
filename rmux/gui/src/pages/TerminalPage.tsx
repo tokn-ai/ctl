@@ -309,7 +309,7 @@ export function TerminalPage() {
       const daemonEpoch = daemonEpochRef.current;
       if (
         daemonRestartBlocksInteractions() ||
-        activeTabIdRef.current !== session.session_id
+        !tabsRef.current.some((tab) => tab.session_id === session.session_id)
       ) {
         return;
       }
@@ -547,10 +547,9 @@ export function TerminalPage() {
     void closeTab(attachedSession);
   }, [attachment.state.phase, attachedSession, closeTab]);
 
-  const disconnectableSessionId =
-    attachedSession && attachment.state.phase !== "ended"
-      ? attachedSession.session_id
-      : null;
+  const openTabSessionIds = new Set(
+    tabs.map((tab) => tab.session_id),
+  );
 
   const activeTab = tabs.find((tab) => tab.session_id === activeTabId) ?? null;
   const activeShellState =
@@ -689,7 +688,7 @@ export function TerminalPage() {
           sessions={sessions}
           shellStates={displayedSessionShellStates}
           selectedSessionId={activeTabId}
-          disconnectableSessionId={disconnectableSessionId}
+          openTabSessionIds={openTabSessionIds}
           loading={loading}
           error={listError}
           creating={creating}
@@ -711,7 +710,7 @@ export function TerminalPage() {
               setCreateFormOpen(false);
             }
           }}
-          onDisconnect={() => executeCommandById(COMMAND_IDS.disconnect)}
+          onDisconnect={(session) => void disconnect(session)}
           onRequestClose={requestClose}
           onCancelClose={cancelClose}
           onConfirmClose={confirmClose}

@@ -16,6 +16,18 @@ const session: SessionSummary = {
   next_sequence: "0",
 };
 
+const secondSession: SessionSummary = {
+  ...session,
+  session_id: "second",
+  name: "second",
+};
+
+const listedOnlySession: SessionSummary = {
+  ...session,
+  session_id: "listed-only",
+  name: "listed-only",
+};
+
 const shellState: ShellStateSummary = {
   shell_type: "zsh",
   cwd: "/Users/clouds/Projects/Tools/ctl/rmux/gui",
@@ -33,7 +45,7 @@ describe("SessionSidebar", () => {
         sessions={[session]}
         shellStates={new Map()}
         selectedSessionId="first"
-        disconnectableSessionId="first"
+        openTabSessionIds={new Set(["first"])}
         loading={false}
         error={null}
         creating={false}
@@ -62,7 +74,7 @@ describe("SessionSidebar", () => {
         sessions={[session]}
         shellStates={new Map([[session.session_id, shellState]])}
         selectedSessionId={null}
-        disconnectableSessionId={null}
+        openTabSessionIds={new Set()}
         loading={false}
         error={null}
         creating={false}
@@ -96,7 +108,7 @@ describe("SessionSidebar", () => {
         sessions={[session]}
         shellStates={new Map()}
         selectedSessionId={null}
-        disconnectableSessionId={null}
+        openTabSessionIds={new Set()}
         loading={false}
         error={null}
         creating={false}
@@ -117,5 +129,38 @@ describe("SessionSidebar", () => {
 
     expect(markup).toContain("<strong>Shell</strong>");
     expect(markup).toContain(session.name);
+  });
+
+  it("shows Disconnect for every open tab, not merely the active attachment", () => {
+    const markup = renderToStaticMarkup(
+      <SessionSidebar
+        sessions={[session, secondSession, listedOnlySession]}
+        shellStates={new Map()}
+        selectedSessionId={session.session_id}
+        openTabSessionIds={new Set([
+          session.session_id,
+          secondSession.session_id,
+        ])}
+        loading={false}
+        error={null}
+        creating={false}
+        createFormOpen={false}
+        pendingCloseSessionId={null}
+        closingSessionIds={new Set()}
+        disconnectingSessionId={null}
+        onRefresh={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn(async () => true)}
+        onCreateFormOpenChange={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRequestClose={vi.fn()}
+        onCancelClose={vi.fn()}
+        onConfirmClose={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Disconnect from first"');
+    expect(markup).toContain('aria-label="Disconnect from second"');
+    expect(markup).not.toContain('aria-label="Disconnect from listed-only"');
   });
 });

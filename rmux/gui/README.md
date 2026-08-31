@@ -16,10 +16,11 @@ pnpm tauri dev
 ```
 
 The app may also use the path in `RMUXD_BIN`. GUI-created shells receive an
-automatic `session-N` name. **Disconnect** closes the active tab and detaches
-its view while leaving the shell running. **Close** is deliberately destructive:
-after confirmation it terminates the session for all clients. Closing the app
-itself only detaches its active view.
+automatic `session-N` name. **Disconnect** removes an open local tab while
+leaving its shell running. For the active tab it also detaches the live view;
+inactive tabs have no live attachment to detach. **Close** is deliberately
+destructive: after confirmation it terminates the session for all clients.
+Closing the app itself only detaches its active view.
 
 The desktop normally has one native window and one WebView. Selecting a daemon
 session opens it as a local tab, but only the active tab holds an attachment.

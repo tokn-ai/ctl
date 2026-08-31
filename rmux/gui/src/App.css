@@ -263,8 +263,12 @@ button:disabled {
 }
 
 .session-copy small {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar-state {
@@ -455,6 +459,9 @@ button:disabled {
 
 .terminal-tab-path {
   flex: 1 1 auto;
+  /* Paths normally share their beginning; keep the final component visible. */
+  direction: rtl;
+  text-align: left;
 }
 
 .terminal-tab-separator {

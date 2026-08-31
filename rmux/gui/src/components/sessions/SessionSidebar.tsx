@@ -1,9 +1,17 @@
 import type { FormEvent } from "react";
 import { useState } from "react";
-import type { SessionSummary } from "../../lib/types";
+import {
+  compactTerminalTitle,
+  compactTerminalTitleParts,
+  formatTerminalTitle,
+} from "../../features/tabs/terminalTitle";
+import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+
+const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 
 interface SessionSidebarProps {
   sessions: SessionSummary[];
+  shellStates: ReadonlyMap<string, ShellStateSummary>;
   selectedSessionId: string | null;
   disconnectableSessionId: string | null;
   loading: boolean;
@@ -23,8 +31,38 @@ interface SessionSidebarProps {
   onConfirmClose(session: SessionSummary): void;
 }
 
+function sidebarTitle(
+  session: SessionSummary,
+  shellState: ShellStateSummary | null,
+): { fullTitle: string; compactTitle: string } {
+  const title = formatTerminalTitle(session, shellState);
+
+  // `formatTerminalTitle` deliberately uses the session name as a general
+  // fallback. In the sidebar, keep that stable identifier in the detail line
+  // instead, so an unobserved shell remains visually neutral rather than
+  // repeating the same `session-1` label twice.
+  if (!shellState?.cwd) {
+    const fullTitle = title.command ?? "Shell";
+    return {
+      fullTitle,
+      compactTitle: compactTerminalTitle(
+        fullTitle,
+        SIDEBAR_TERMINAL_TITLE_MAX_LENGTH,
+      ),
+    };
+  }
+  return {
+    fullTitle: title.text,
+    compactTitle: compactTerminalTitleParts(
+      title,
+      SIDEBAR_TERMINAL_TITLE_MAX_LENGTH,
+    ),
+  };
+}
+
 export function SessionSidebar({
   sessions,
+  shellStates,
   selectedSessionId,
   disconnectableSessionId,
   loading,
@@ -87,6 +125,10 @@ export function SessionSidebar({
           </div>
         ) : null}
         {sessions.map((session) => {
+          const { fullTitle, compactTitle } = sidebarTitle(
+            session,
+            shellStates.get(session.session_id) ?? null,
+          );
           const selected = session.session_id === selectedSessionId;
           const closing = closingSessionIds.has(session.session_id);
           const disconnecting = session.session_id === disconnectingSessionId;
@@ -105,11 +147,15 @@ export function SessionSidebar({
                 onClick={() => onSelect(session)}
                 disabled={closing}
                 aria-current={selected ? "true" : undefined}
+                aria-label={`${fullTitle} — ${session.name}`}
+                title={fullTitle}
               >
                 <span className="session-indicator" aria-hidden="true" />
                 <span className="session-copy">
-                  <strong>{session.name}</strong>
+                  <strong>{compactTitle}</strong>
                   <small>
+                    {session.name}
+                    <span aria-hidden="true"> · </span>
                     {session.terminal_size.columns}×{session.terminal_size.rows}
                     <span aria-hidden="true"> · </span>
                     {session.status}

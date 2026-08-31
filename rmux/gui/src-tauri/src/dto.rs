@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use rmux_client::{AttachExit, AttachExitReason, AttachedSession, AttachmentControl};
@@ -80,6 +82,17 @@ impl From<SessionInfo> for SessionDto {
       terminal_size: value.terminal_size.into(),
     }
   }
+}
+
+/// Session list data enriched with non-attaching shell snapshots.
+///
+/// Each snapshot is keyed by the durable session ID rather than its mutable
+/// display name. A missing entry is expected when a session exits between the
+/// list request and its best-effort shell-state inspection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionListDto {
+  pub sessions: Vec<SessionDto>,
+  pub shell_states: BTreeMap<String, ShellStateDto>,
 }
 
 /// Result of a destructive local `rmuxd` restart.
@@ -570,6 +583,22 @@ mod tests {
     .into();
     let json = serde_json::to_value(dto).unwrap();
     assert_eq!(json["next_sequence"], u64::MAX.to_string());
+  }
+
+  #[test]
+  fn session_list_keeps_shell_states_keyed_by_session_id() {
+    let states = BTreeMap::from([(
+      "session-1".to_owned(),
+      ShellStateDto::from(ShellState::default()),
+    )]);
+    let json = serde_json::to_value(SessionListDto {
+      sessions: Vec::new(),
+      shell_states: states,
+    })
+    .unwrap();
+
+    assert!(json["sessions"].as_array().is_some_and(Vec::is_empty));
+    assert!(json["shell_states"]["session-1"].is_object());
   }
 
   #[test]

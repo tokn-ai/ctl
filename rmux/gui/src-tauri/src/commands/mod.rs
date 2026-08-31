@@ -1,18 +1,22 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmux_client::{
   AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity, begin_attach,
-  request as rmux_request,
+  get_shell_state, request as rmux_request,
 };
 use rmux_proto::{ClientMessage, ServerMessage};
 use tauri::ipc::Channel;
 use tauri::{State, WebviewWindow};
+use tokio::task::JoinSet;
+use tokio::time::timeout;
 
 use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
   AttachmentRequestDto, CreateSessionRequestDto, KillSessionRequestDto, OpenAttachmentRequestDto,
   OpenAttachmentResponseDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
-  SendInputRequestDto, SessionDto, decode_input, parse_sequence,
+  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, decode_input, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -20,19 +24,70 @@ use crate::state::{AppState, AttachmentActor, forward_attachment_events};
 
 const CLIENT_NAME: &str = "rmux-gui";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS: usize = 4;
 
 #[tauri::command]
-pub async fn list_sessions() -> CommandResult<Vec<SessionDto>> {
+pub async fn list_sessions() -> CommandResult<SessionListDto> {
   let stream = local_transport::connect().await?;
   let response = rmux_request(stream, &client_identity(), ClientMessage::ListSessions)
     .await
     .map_err(CommandErrorDto::client)?;
   match response {
-    ServerMessage::SessionList { sessions } => {
-      Ok(sessions.into_iter().map(SessionDto::from).collect())
-    }
+    ServerMessage::SessionList { sessions } => Ok(SessionListDto {
+      shell_states: inspect_session_shell_states(&sessions).await,
+      sessions: sessions.into_iter().map(SessionDto::from).collect(),
+    }),
     response => Err(unexpected_response("session_list", &response)),
   }
+}
+
+/// Retrieves presentation metadata without making the session list fragile.
+///
+/// Listing is authoritative. Individual sessions can naturally exit after it
+/// returns, so an unavailable endpoint, a failed handshake, or a missing
+/// session merely omits that shell snapshot. The frontend then falls back to a
+/// neutral title while keeping the list usable.
+async fn inspect_session_shell_states(
+  sessions: &[rmux_proto::SessionInfo],
+) -> BTreeMap<String, ShellStateDto> {
+  let mut shell_states = BTreeMap::new();
+  let mut session_ids = sessions.iter().map(|session| session.session_id.clone());
+  let mut inspections = JoinSet::new();
+
+  // A stale lookup must not turn a refresh into one timeout per listed row.
+  for _ in 0..MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS {
+    let Some(session_id) = session_ids.next() else {
+      break;
+    };
+    inspections.spawn(inspect_session_shell_state(session_id));
+  }
+
+  while let Some(result) = inspections.join_next().await {
+    if let Ok(Some((session_id, shell_state))) = result {
+      shell_states.insert(session_id, shell_state);
+    }
+
+    if let Some(session_id) = session_ids.next() {
+      inspections.spawn(inspect_session_shell_state(session_id));
+    }
+  }
+
+  shell_states
+}
+
+async fn inspect_session_shell_state(session_id: String) -> Option<(String, ShellStateDto)> {
+  let stream = local_transport::connect_existing().await.ok()?;
+  let identity = client_identity();
+  let snapshot = timeout(
+    SESSION_SHELL_STATE_INSPECTION_TIMEOUT,
+    get_shell_state(stream, &identity, &session_id),
+  )
+  .await
+  .ok()?
+  .ok()?;
+
+  (snapshot.session.session_id == session_id).then(|| (session_id, snapshot.shell_state.into()))
 }
 
 #[tauri::command]

@@ -38,7 +38,10 @@ import {
   rememberTabShellState,
   retainTabShellStates,
 } from "../features/tabs/shellStateCache";
-import { formatTerminalTitle } from "../features/tabs/terminalTitle";
+import {
+  compactTerminalTitleParts,
+  formatTerminalTitle,
+} from "../features/tabs/terminalTitle";
 import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
 import {
@@ -71,6 +74,9 @@ export function TerminalPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [tabs, setTabs] = useState<SessionSummary[]>([]);
   const [tabShellStates, setTabShellStates] = useState<
+    ReadonlyMap<string, ShellStateSummary>
+  >(() => new Map());
+  const [sessionShellStates, setSessionShellStates] = useState<
     ReadonlyMap<string, ShellStateSummary>
   >(() => new Map());
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -116,19 +122,21 @@ export function TerminalPage() {
     setLoading(true);
     setListError(null);
     try {
-      const listed = await listSessions();
+      const listedResponse = await listSessions();
       if (
         daemonEpoch !== daemonEpochRef.current ||
         !refreshGuardRef.current.canApply(token)
       ) {
         return;
       }
+      const listed = listedResponse.sessions;
       const listedIds = new Set(listed.map((session) => session.session_id));
       const hidden = closedSessionIdsRef.current;
       const visible = replaceSessionList(
         listed.filter((session) => !hidden.has(session.session_id)),
       );
       setSessions(visible);
+      setSessionShellStates(new Map(Object.entries(listedResponse.shell_states)));
       const nextTabs = reconcileTerminalTabs(
         tabsRef.current,
         visible,
@@ -414,6 +422,7 @@ export function TerminalPage() {
     setSessions([]);
     setTabs([]);
     setTabShellStates(new Map<string, ShellStateSummary>());
+    setSessionShellStates(new Map<string, ShellStateSummary>());
     setActiveTabId(null);
     setCreating(false);
     setCreateFormOpen(false);
@@ -557,10 +566,17 @@ export function TerminalPage() {
           attachedSession.session_id,
           attachedShellState,
           { replaceEqualRevision: true },
-        )
+      )
       : tabShellStates;
+  const displayedSessionShellStates = new Map(sessionShellStates);
+  if (attachedSession && attachedShellState) {
+    displayedSessionShellStates.set(
+      attachedSession.session_id,
+      attachedShellState,
+    );
+  }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
-  useWindowTitle(activeTitle.text);
+  useWindowTitle(compactTerminalTitleParts(activeTitle));
 
   const commands = buildTerminalCommands(
     {
@@ -671,6 +687,7 @@ export function TerminalPage() {
       <main className="app-shell">
         <SessionSidebar
           sessions={sessions}
+          shellStates={displayedSessionShellStates}
           selectedSessionId={activeTabId}
           disconnectableSessionId={disconnectableSessionId}
           loading={loading}

@@ -12,6 +12,7 @@ import type {
   OpenAttachmentRequest,
   OpenAttachmentResponse,
   RestartLocalDaemonResponse,
+  SessionListResponse,
   SessionSummary,
 } from "./types";
 
@@ -20,8 +21,8 @@ export interface OpenAttachmentResult {
   channel: Channel<AttachmentEvent>;
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
-  return invoke<SessionSummary[]>("list_sessions");
+export async function listSessions(): Promise<SessionListResponse> {
+  return invoke<SessionListResponse>("list_sessions");
 }
 
 export async function createSession(

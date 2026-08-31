@@ -45,6 +45,15 @@ export interface ShellStateSummary {
   observed_sequence: Sequence;
 }
 
+/**
+ * A session list plus best-effort non-attaching shell snapshots. Entries can
+ * be absent when a session exits during refresh or cannot be inspected.
+ */
+export interface SessionListResponse {
+  sessions: SessionSummary[];
+  shell_states: Record<string, ShellStateSummary>;
+}
+
 export interface CreateSessionRequest {
   working_directory: string | null;
   terminal_size: TerminalSize;

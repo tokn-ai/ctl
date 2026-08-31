@@ -65,6 +65,18 @@ pub async fn connect() -> Result<LocalStream, CommandErrorDto> {
     .map_err(CommandErrorDto::backend)
 }
 
+/// Connects to the currently running local daemon without starting a new one.
+///
+/// Supplemental metadata lookups use this after a successful primary request:
+/// if the daemon has gone away in the meantime, they should be ignored rather
+/// than silently starting a replacement with unrelated sessions.
+#[cfg(unix)]
+pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
+  rmux_ipc::connect_existing_daemon(&rmux_ipc::socket_path())
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
 /// Verifies whether the daemon currently serving the data endpoint exposes
 /// the separate owner-only local-control endpoint.
 ///
@@ -325,6 +337,14 @@ pub fn default_working_directory() -> Result<String, CommandErrorDto> {
 
 #[cfg(not(unix))]
 pub async fn connect() -> Result<LocalStream, CommandErrorDto> {
+  Err(CommandErrorDto::new(
+    "unsupported_platform",
+    "local rmux transport is not implemented on this platform",
+  ))
+}
+
+#[cfg(not(unix))]
+pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
   Err(CommandErrorDto::new(
     "unsupported_platform",
     "local rmux transport is not implemented on this platform",

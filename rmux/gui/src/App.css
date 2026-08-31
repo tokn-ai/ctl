@@ -62,22 +62,9 @@ button {
 .sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 22px 18px 15px;
-}
-
-.eyebrow {
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: 0.16em;
-}
-
-.sidebar-header h1 {
-  margin: 2px 0 0;
-  font-size: 20px;
-  font-weight: 670;
-  letter-spacing: -0.025em;
+  justify-content: flex-end;
+  min-height: 44px;
+  padding: 10px 12px 6px;
 }
 
 .icon-button,
@@ -92,11 +79,11 @@ button {
 }
 
 .icon-button {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   color: var(--muted);
-  font-size: 18px;
+  font-size: 16px;
 }
 
 button:hover:not(:disabled) {
@@ -123,18 +110,14 @@ button:disabled {
 
 .session-row {
   display: grid;
-  grid-template-columns: 9px minmax(0, 1fr);
-  gap: 9px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   width: 100%;
   margin-bottom: 3px;
-  padding: 10px 10px;
   color: var(--text);
-  text-align: left;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
-  cursor: pointer;
 }
 
 .session-row:hover {
@@ -144,6 +127,63 @@ button:disabled {
 .session-row.active {
   border-color: #3a5a42;
   background: #243027;
+}
+
+.session-select {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+  padding: 10px 4px 10px 10px;
+  color: var(--text);
+  text-align: left;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.session-select:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+}
+
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 5px;
+}
+
+.session-action {
+  display: inline-flex;
+  width: 25px;
+  height: 25px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+  transition: 120ms ease;
+}
+
+.session-action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--surface-3);
+}
+
+.session-close:hover:not(:disabled) {
+  color: #ffd0d0;
+  border-color: #694242;
+  background: #3b2628;
 }
 
 .session-indicator {

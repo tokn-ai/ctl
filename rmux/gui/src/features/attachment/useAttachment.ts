@@ -5,12 +5,12 @@ import {
   acknowledgeAttachmentEvent,
   acquireAttachmentLease,
   detachAttachment,
-  errorMessage,
   openAttachment,
   releaseAttachmentLease,
   resizeAttachment,
   sendInput,
 } from "../../lib/tauri";
+import { errorMessage } from "../../lib/errors";
 import type {
   AttachmentEvent,
   AttachmentViewState,

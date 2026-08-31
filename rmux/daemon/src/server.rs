@@ -979,7 +979,8 @@ async fn send_session_manager_error(
     | SessionManagerError::Spawn(_)
     | SessionManagerError::ShellReporter(_)
     | SessionManagerError::ReaderThread(_)
-    | SessionManagerError::WaiterThread(_) => ErrorCode::Internal,
+    | SessionManagerError::WaiterThread(_)
+    | SessionManagerError::AutomaticNameExhausted => ErrorCode::Internal,
   };
   send_error(stream, code, &error.to_string()).await
 }

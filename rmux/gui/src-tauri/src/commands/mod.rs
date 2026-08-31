@@ -10,7 +10,7 @@ use tauri::{State, WebviewWindow};
 
 use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
-  AttachmentRequestDto, CreateSessionRequestDto, OpenAttachmentRequestDto,
+  AttachmentRequestDto, CreateSessionRequestDto, KillSessionRequestDto, OpenAttachmentRequestDto,
   OpenAttachmentResponseDto, ResizeAttachmentRequestDto, SendInputRequestDto, SessionDto,
   decode_input, parse_sequence,
 };
@@ -26,7 +26,7 @@ pub async fn list_sessions() -> CommandResult<Vec<SessionDto>> {
   let stream = local_transport::connect().await?;
   let response = rmux_request(stream, &client_identity(), ClientMessage::ListSessions)
     .await
-    .map_err(CommandErrorDto::backend)?;
+    .map_err(CommandErrorDto::client)?;
   match response {
     ServerMessage::SessionList { sessions } => {
       Ok(sessions.into_iter().map(SessionDto::from).collect())
@@ -47,17 +47,35 @@ pub async fn create_session(request: CreateSessionRequestDto) -> CommandResult<S
     stream,
     &client_identity(),
     ClientMessage::CreateSession {
-      name: request.name,
+      name: None,
       command: None,
       working_directory: Some(working_directory),
       terminal_size,
     },
   )
   .await
-  .map_err(CommandErrorDto::backend)?;
+  .map_err(CommandErrorDto::client)?;
   match response {
     ServerMessage::SessionCreated { session } => Ok(session.into()),
     response => Err(unexpected_response("session_created", &response)),
+  }
+}
+
+#[tauri::command]
+pub async fn kill_session(request: KillSessionRequestDto) -> CommandResult<()> {
+  let stream = local_transport::connect().await?;
+  let response = rmux_request(
+    stream,
+    &client_identity(),
+    ClientMessage::KillSession {
+      session: request.session_id,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::client)?;
+  match response {
+    ServerMessage::Success => Ok(()),
+    response => Err(unexpected_response("success", &response)),
   }
 }
 
@@ -109,7 +127,7 @@ async fn open_reserved_attachment(
     },
   )
   .await
-  .map_err(CommandErrorDto::backend)?;
+  .map_err(CommandErrorDto::client)?;
 
   let options = AttachmentControllerOptions {
     // This bridge is paired with the GUI's xterm presenter, which always
@@ -125,7 +143,7 @@ async fn open_reserved_attachment(
     ..AttachmentControllerOptions::default()
   };
   let (controller, control, events) =
-    AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::backend)?;
+    AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
   let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached);
   let actor = Arc::new(AttachmentActor::new(
     attachment_id.clone(),

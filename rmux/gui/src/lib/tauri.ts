@@ -7,6 +7,7 @@ import type {
   AttachmentLeaseRequest,
   AttachmentResizeRequest,
   CreateSessionRequest,
+  KillSessionRequest,
   OpenAttachmentRequest,
   OpenAttachmentResponse,
   SessionSummary,
@@ -25,6 +26,10 @@ export async function createSession(
   request: CreateSessionRequest,
 ): Promise<SessionSummary> {
   return invoke<SessionSummary>("create_session", { request });
+}
+
+export async function killSession(request: KillSessionRequest): Promise<void> {
+  await invoke("kill_session", { request });
 }
 
 export async function openAttachment(
@@ -70,22 +75,4 @@ export async function acknowledgeAttachmentEvent(
 
 export async function detachAttachment(request: AttachmentIdRequest): Promise<void> {
   await invoke("detach_attachment", { request });
-}
-
-export function errorMessage(error: unknown): string {
-  if (typeof error === "string") {
-    return error;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return error.message;
-  }
-  return "An unexpected rmux error occurred.";
 }

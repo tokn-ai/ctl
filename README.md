@@ -42,8 +42,13 @@ pnpm tauri dev
 Create a detached persistent shell in the current directory:
 
 ```sh
+rmux new
 rmux new --name work
 ```
+
+Without `--name`, `rmuxd` assigns a short name such as `session-1`, increasing
+monotonically for that daemon lifetime. Explicit names remain available for
+scripts and stable workflows.
 
 List and attach to sessions:
 
@@ -111,7 +116,10 @@ does not resize its PTY. **Resize with window** explicitly acquires layout
 ownership and continuously matches the PTY to the window; turning it off
 releases layout ownership. A session created in the GUI starts with this mode
 enabled because that window establishes its initial layout.
-Closing or detaching the app leaves the daemon-owned shell running.
+GUI-created shells receive a daemon-assigned name. **Disconnect** detaches only
+that window and leaves the daemon-owned shell running; **Close** explicitly
+terminates the session for every attached client. Closing the app itself is a
+disconnect and does not terminate its sessions.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in

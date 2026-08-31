@@ -101,6 +101,42 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
   Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unnamed_sessions_get_monotonic_names_without_colliding_with_explicit_names() -> TestResult
+{
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let explicit_one = create_shell_session(&socket_path, "session-1", "IFS= read -r line").await?;
+  let explicit_three = create_shell_session(&socket_path, "session-3", "IFS= read -r line").await?;
+
+  let (automatic_a, automatic_b) = tokio::join!(
+    create_shell_session_with_name(&socket_path, None, "IFS= read -r line"),
+    create_shell_session_with_name(&socket_path, None, "IFS= read -r line"),
+  );
+  let automatic_a = automatic_a?;
+  let automatic_b = automatic_b?;
+  let mut concurrent_names = [automatic_a.name.as_str(), automatic_b.name.as_str()];
+  concurrent_names.sort_unstable();
+  assert_eq!(concurrent_names, ["session-2", "session-4"]);
+
+  let automatic_c = create_shell_session_with_name(&socket_path, None, "IFS= read -r line").await?;
+  assert_eq!(automatic_c.name, "session-5");
+
+  for session in [
+    &explicit_one,
+    &explicit_three,
+    &automatic_a,
+    &automatic_b,
+    &automatic_c,
+  ] {
+    kill_shell_session(&socket_path, &session.session_id).await?;
+  }
+
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after automatic naming test").await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestResult {
   let _test_guard = pty_test_lock().await;
@@ -801,12 +837,20 @@ async fn create_shell_session(
   name: &str,
   script: &str,
 ) -> TestResult<rmux_proto::SessionInfo> {
+  create_shell_session_with_name(socket_path, Some(name), script).await
+}
+
+async fn create_shell_session_with_name(
+  socket_path: &Path,
+  name: Option<&str>,
+  script: &str,
+) -> TestResult<rmux_proto::SessionInfo> {
   let mut create = connect_when_ready(socket_path).await?;
   handshake(&mut create).await?;
   write_frame(
     &mut create,
     &ClientMessage::CreateSession {
-      name: Some(name.into()),
+      name: name.map(str::to_owned),
       command: Some(CommandSpec {
         program: "/bin/sh".into(),
         arguments: vec!["-c".into(), script.into()],
@@ -821,6 +865,23 @@ async fn create_shell_session(
     return Err(format!("expected session_created, received {created:?}").into());
   };
   Ok(session)
+}
+
+async fn kill_shell_session(socket_path: &Path, session: &str) -> TestResult {
+  let mut stream = connect_when_ready(socket_path).await?;
+  handshake(&mut stream).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::KillSession {
+      session: session.into(),
+    },
+  )
+  .await?;
+  let response = required_message(&mut stream).await?;
+  if response != ServerMessage::Success {
+    return Err(format!("expected success after killing session, received {response:?}").into());
+  }
+  Ok(())
 }
 
 async fn attach_session(

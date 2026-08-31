@@ -509,10 +509,20 @@ fn attach_shell_report_target(target: &Arc<Mutex<ShellReportTarget>>, session: &
   }
 }
 
-#[derive(Default)]
 struct SessionRegistry {
   sessions: HashMap<String, Arc<Session>>,
   pending_names: HashSet<String>,
+  next_automatic_name: Option<u64>,
+}
+
+impl Default for SessionRegistry {
+  fn default() -> Self {
+    Self {
+      sessions: HashMap::new(),
+      pending_names: HashSet::new(),
+      next_automatic_name: Some(1),
+    }
+  }
 }
 
 impl SessionManager {
@@ -533,6 +543,21 @@ impl SessionManager {
     }
   }
 
+  fn reserve_name(
+    &self,
+    requested_name: Option<String>,
+  ) -> Result<NameReservation, SessionManagerError> {
+    match requested_name {
+      Some(name) => {
+        validate_session_name(&name).map_err(|message| SessionManagerError::InvalidName {
+          message: message.into(),
+        })?;
+        NameReservation::acquire(Arc::clone(&self.inner), name)
+      }
+      None => NameReservation::acquire_automatic(Arc::clone(&self.inner)),
+    }
+  }
+
   pub fn create(
     &self,
     requested_name: Option<String>,
@@ -541,12 +566,8 @@ impl SessionManager {
     terminal_size: TerminalSize,
   ) -> Result<Arc<Session>, SessionManagerError> {
     let session_id = Uuid::new_v4().to_string();
-    let name = requested_name.unwrap_or_else(|| format!("session-{}", &session_id[..8]));
-    validate_session_name(&name).map_err(|message| SessionManagerError::InvalidName {
-      message: message.into(),
-    })?;
-
-    let reservation = NameReservation::acquire(Arc::clone(&self.inner), name.clone())?;
+    let reservation = self.reserve_name(requested_name)?;
+    let name = reservation.name().to_owned();
     let shell_report_target = Arc::new(Mutex::new(ShellReportTarget::default()));
     let reporter_target = Arc::clone(&shell_report_target);
     let shell_reporter = ShellReporter::new(&self.inner.runtime_directory, move |report| {
@@ -718,6 +739,38 @@ impl NameReservation {
     })
   }
 
+  fn acquire_automatic(manager: Arc<SessionManagerInner>) -> Result<Self, SessionManagerError> {
+    let name = {
+      let mut registry = lock(&manager.registry);
+      loop {
+        let sequence = registry
+          .next_automatic_name
+          .ok_or(SessionManagerError::AutomaticNameExhausted)?;
+        registry.next_automatic_name = sequence.checked_add(1);
+        let candidate = format!("session-{sequence}");
+        let exists = registry.pending_names.contains(&candidate)
+          || registry
+            .sessions
+            .values()
+            .any(|session| session.name == candidate);
+        if !exists {
+          registry.pending_names.insert(candidate.clone());
+          break candidate;
+        }
+      }
+    };
+
+    Ok(Self {
+      manager,
+      name,
+      active: true,
+    })
+  }
+
+  fn name(&self) -> &str {
+    &self.name
+  }
+
   fn commit(mut self, session_id: String, session: Arc<Session>) {
     let mut registry = lock(&self.manager.registry);
     registry.pending_names.remove(&self.name);
@@ -742,6 +795,8 @@ pub enum SessionManagerError {
   InvalidName { message: String },
   #[error("a session named '{name}' already exists")]
   AlreadyExists { name: String },
+  #[error("automatic session name sequence is exhausted")]
+  AutomaticNameExhausted,
   #[error("session '{selector}' was not found")]
   NotFound { selector: String },
   #[error("could not create PTY: {0}")]
@@ -1045,9 +1100,70 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::sync::Arc;
   use std::sync::mpsc;
+  use std::sync::{Arc, Barrier};
   use std::thread;
+
+  #[test]
+  fn automatic_names_are_monotonic_and_safe_under_concurrent_reservations() {
+    const AUTOMATIC_RESERVATIONS: u64 = 16;
+
+    let manager = SessionManager::new(std::path::PathBuf::new(), 1, 1);
+    let explicit = NameReservation::acquire(Arc::clone(&manager.inner), "session-7".into())
+      .expect("the explicit name should be reserved");
+    let barrier = Arc::new(Barrier::new(
+      usize::try_from(AUTOMATIC_RESERVATIONS).expect("test count fits in usize") + 1,
+    ));
+    let mut handles = Vec::new();
+
+    for _ in 0..AUTOMATIC_RESERVATIONS {
+      let inner = Arc::clone(&manager.inner);
+      let barrier = Arc::clone(&barrier);
+      handles.push(thread::spawn(move || {
+        let reservation = NameReservation::acquire_automatic(inner)
+          .expect("automatic names should remain available");
+        barrier.wait();
+        reservation
+      }));
+    }
+
+    barrier.wait();
+    let names: HashSet<_> = handles
+      .into_iter()
+      .map(|handle| {
+        let reservation = handle
+          .join()
+          .expect("name reservation thread should complete");
+        reservation.name().to_owned()
+      })
+      .collect();
+    let expected: HashSet<_> = (1..=AUTOMATIC_RESERVATIONS + 1)
+      .filter(|sequence| *sequence != 7)
+      .map(|sequence| format!("session-{sequence}"))
+      .collect();
+    assert_eq!(names, expected);
+
+    drop(explicit);
+    let next = NameReservation::acquire_automatic(Arc::clone(&manager.inner))
+      .expect("released names must not rewind the automatic sequence");
+    assert_eq!(next.name(), "session-18");
+  }
+
+  #[test]
+  fn automatic_names_use_the_final_sequence_before_exhaustion() {
+    let manager = SessionManager::new(std::path::PathBuf::new(), 1, 1);
+    lock(&manager.inner.registry).next_automatic_name = Some(u64::MAX);
+
+    let final_name = NameReservation::acquire_automatic(Arc::clone(&manager.inner))
+      .expect("the final automatic name should remain usable");
+    assert_eq!(final_name.name(), format!("session-{}", u64::MAX));
+    drop(final_name);
+
+    assert!(matches!(
+      NameReservation::acquire_automatic(Arc::clone(&manager.inner)),
+      Err(SessionManagerError::AutomaticNameExhausted)
+    ));
+  }
 
   #[test]
   fn checkpoint_preserves_a_partial_escape_sequence() {

@@ -4,41 +4,59 @@ import type { SessionSummary } from "../../lib/types";
 
 interface SessionSidebarProps {
   sessions: SessionSummary[];
-  activeSessionId: string | null;
+  selectedSessionId: string | null;
+  disconnectableSessionId: string | null;
   loading: boolean;
   error: string | null;
   creating: boolean;
+  closingSessionIds: ReadonlySet<string>;
+  disconnectingSessionId: string | null;
   onRefresh(): void;
   onSelect(session: SessionSummary): void;
-  onCreate(name: string | null, workingDirectory: string | null): void;
+  onCreate(workingDirectory: string | null): Promise<boolean>;
+  onDisconnect(session: SessionSummary): void;
+  onClose(session: SessionSummary): void;
 }
 
 export function SessionSidebar({
   sessions,
-  activeSessionId,
+  selectedSessionId,
+  disconnectableSessionId,
   loading,
   error,
   creating,
+  closingSessionIds,
+  disconnectingSessionId,
   onRefresh,
   onSelect,
   onCreate,
+  onDisconnect,
+  onClose,
 }: SessionSidebarProps) {
   const [showCreate, setShowCreate] = useState(false);
-  const [name, setName] = useState("");
   const [workingDirectory, setWorkingDirectory] = useState("");
 
-  function submit(event: FormEvent) {
+  async function submit(event: FormEvent) {
     event.preventDefault();
-    onCreate(name.trim() || null, workingDirectory.trim() || null);
+    const created = await onCreate(workingDirectory.trim() || null);
+    if (created) {
+      setWorkingDirectory("");
+      setShowCreate(false);
+    }
+  }
+
+  function requestClose(session: SessionSummary) {
+    const confirmed = window.confirm(
+      `Close "${session.name}"? This terminates its shell and disconnects every attached client.`,
+    );
+    if (confirmed) {
+      onClose(session);
+    }
   }
 
   return (
     <aside className="session-sidebar" aria-label="rmux sessions">
       <header className="sidebar-header">
-        <div>
-          <span className="eyebrow">LOCAL RMUX</span>
-          <h1>Sessions</h1>
-        </div>
         <button
           className="icon-button"
           type="button"
@@ -68,46 +86,72 @@ export function SessionSidebar({
             <small>Create one here or with the rmux CLI.</small>
           </div>
         ) : null}
-        {sessions.map((session) => (
-          <button
-            className={`session-row ${
-              session.session_id === activeSessionId ? "active" : ""
-            }`}
-            type="button"
-            key={session.session_id}
-            onClick={() => onSelect(session)}
-          >
-            <span className="session-indicator" aria-hidden="true" />
-            <span className="session-copy">
-              <strong>{session.name}</strong>
-              <small>
-                {session.terminal_size.columns}×{session.terminal_size.rows}
-                <span aria-hidden="true"> · </span>
-                {session.status}
-              </small>
-            </span>
-          </button>
-        ))}
+        {sessions.map((session) => {
+          const selected = session.session_id === selectedSessionId;
+          const closing = closingSessionIds.has(session.session_id);
+          const disconnecting = session.session_id === disconnectingSessionId;
+          const canDisconnect = session.session_id === disconnectableSessionId;
+          return (
+            <div
+              className={`session-row ${selected ? "active" : ""}`}
+              key={session.session_id}
+            >
+              <button
+                className="session-select"
+                type="button"
+                onClick={() => onSelect(session)}
+                disabled={closing}
+                aria-current={selected ? "true" : undefined}
+              >
+                <span className="session-indicator" aria-hidden="true" />
+                <span className="session-copy">
+                  <strong>{session.name}</strong>
+                  <small>
+                    {session.terminal_size.columns}×{session.terminal_size.rows}
+                    <span aria-hidden="true"> · </span>
+                    {session.status}
+                  </small>
+                </span>
+              </button>
+              <div className="session-actions">
+                {canDisconnect ? (
+                  <button
+                    className="session-action"
+                    type="button"
+                    onClick={() => onDisconnect(session)}
+                    disabled={disconnecting || closing}
+                    aria-label={`Disconnect from ${session.name}`}
+                    title="Disconnect this window; keep the session running"
+                  >
+                    <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
+                  </button>
+                ) : null}
+                <button
+                  className="session-action session-close"
+                  type="button"
+                  onClick={() => requestClose(session)}
+                  disabled={closing || disconnecting}
+                  aria-label={`Close ${session.name}`}
+                  title="Close the session and terminate its shell"
+                >
+                  <span aria-hidden="true">{closing ? "…" : "×"}</span>
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <footer className="sidebar-footer">
         {showCreate ? (
           <form className="new-session-form" onSubmit={submit}>
             <label>
-              Session name
-              <input
-                value={name}
-                onChange={(event) => setName(event.currentTarget.value)}
-                placeholder="optional"
-                autoFocus
-              />
-            </label>
-            <label>
               Working directory
               <input
                 value={workingDirectory}
                 onChange={(event) => setWorkingDirectory(event.currentTarget.value)}
                 placeholder="home directory"
+                autoFocus
               />
             </label>
             <div className="form-actions">
@@ -119,7 +163,7 @@ export function SessionSidebar({
                 Cancel
               </button>
               <button className="button-primary" type="submit" disabled={creating}>
-                {creating ? "Creating…" : "Create"}
+                {creating ? "Creating…" : "Create shell"}
               </button>
             </div>
           </form>

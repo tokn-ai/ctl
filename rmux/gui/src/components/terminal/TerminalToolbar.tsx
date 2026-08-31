@@ -5,7 +5,6 @@ interface TerminalToolbarProps {
   onToggleInput(): void;
   onToggleResizeWithWindow(): void;
   onReconnect(): void;
-  onDetach(): void;
 }
 
 export function TerminalToolbar({
@@ -13,7 +12,6 @@ export function TerminalToolbar({
   onToggleInput,
   onToggleResizeWithWindow,
   onReconnect,
-  onDetach,
 }: TerminalToolbarProps) {
   const attached = state.phase === "attached";
   const canReconnect =
@@ -59,9 +57,6 @@ export function TerminalToolbar({
             : resizeActive
               ? "Stop resizing"
               : "Resize with window"}
-        </button>
-        <button type="button" onClick={onDetach} disabled={!state.attachment_id}>
-          Detach
         </button>
       </div>
     </header>

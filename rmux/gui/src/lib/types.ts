@@ -45,9 +45,12 @@ export interface ShellStateSummary {
 }
 
 export interface CreateSessionRequest {
-  name: string | null;
   working_directory: string | null;
   terminal_size: TerminalSize;
+}
+
+export interface KillSessionRequest {
+  session_id: string;
 }
 
 export interface OpenAttachmentRequest {

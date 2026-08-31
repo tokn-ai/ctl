@@ -109,6 +109,13 @@ does not link PTY, journal, checkpoint-production, or session-lifetime logic
 into the app process. Closing the window drops its attachment and leases while
 the daemon-owned session continues.
 
+The GUI omits a name when it creates a shell, so `rmuxd` applies the same
+collision-safe `session-N` allocation used by every unnamed client. Its session
+list merges authoritative geometry changes from the active attachment into the
+matching row. **Disconnect** is attachment detach and preserves the PTY;
+**Close** is the explicit one-shot kill operation and terminates the session
+for all attachments.
+
 Concurrent CLI and GUI auto-start attempts may launch more than one daemon
 candidate. Candidates serialize stale-socket inspection and replacement with
 an owner-only endpoint lock, so a losing candidate cannot unlink a socket that

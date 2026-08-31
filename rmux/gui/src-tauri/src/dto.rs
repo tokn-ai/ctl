@@ -7,7 +7,7 @@ use rmux_proto::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CommandErrorDto, CommandResult};
+use crate::error::{CommandErrorDto, CommandResult, protocol_error_code};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSizeDto {
@@ -215,9 +215,14 @@ impl From<ShellState> for ShellStateDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CreateSessionRequestDto {
-  pub name: Option<String>,
   pub working_directory: Option<String>,
   pub terminal_size: TerminalSizeDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct KillSessionRequestDto {
+  pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -454,7 +459,7 @@ impl AttachmentEventDto {
   pub fn server_error(attachment_id: &str, code: &ErrorCode, message: String) -> Self {
     Self::ServerError {
       attachment_id: attachment_id.into(),
-      code: error_code_name(code).into(),
+      code: protocol_error_code(code).into(),
       message,
     }
   }
@@ -535,20 +540,6 @@ pub fn parse_sequence(value: Option<String>) -> CommandResult<Option<u64>> {
     .transpose()
 }
 
-fn error_code_name(code: &ErrorCode) -> &'static str {
-  match code {
-    ErrorCode::InvalidRequest => "invalid_request",
-    ErrorCode::InvalidSessionName => "invalid_session_name",
-    ErrorCode::ProtocolVersionMismatch => "protocol_version_mismatch",
-    ErrorCode::SequenceAhead => "sequence_ahead",
-    ErrorCode::SessionAlreadyExists => "session_already_exists",
-    ErrorCode::SessionNotFound => "session_not_found",
-    ErrorCode::InputLeaseRequired => "input_lease_required",
-    ErrorCode::LayoutLeaseRequired => "layout_lease_required",
-    ErrorCode::Internal => "internal",
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -566,6 +557,20 @@ mod tests {
     .into();
     let json = serde_json::to_value(dto).unwrap();
     assert_eq!(json["next_sequence"], u64::MAX.to_string());
+  }
+
+  #[test]
+  fn kill_session_request_uses_stable_snake_case_session_id() {
+    let request: KillSessionRequestDto =
+      serde_json::from_value(serde_json::json!({ "session_id": "stable-id" })).unwrap();
+
+    assert_eq!(request.session_id, "stable-id");
+    assert!(
+      serde_json::from_value::<KillSessionRequestDto>(serde_json::json!({
+        "sessionId": "unstable-name"
+      }))
+      .is_err()
+    );
   }
 
   #[test]

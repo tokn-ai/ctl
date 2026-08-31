@@ -25,7 +25,13 @@ connection into a bidirectional stream:
 Transport disconnection is an implicit detach and never kills the session.
 Creating a session carries its initial working directory separately from the
 optional command, so the daemon's own process directory is never observable as
-session state.
+session state. Its name is also optional; an omitted name receives a
+daemon-assigned unique name. The exact automatic naming policy is an
+implementation detail rather than a version-6 wire guarantee.
+
+`kill_session` is a one-response command that explicitly terminates the
+selected session and therefore ends every attachment. It is distinct from
+`detach`, transport EOF, and client exit, all of which preserve the session.
 
 `attach_session` includes the attaching terminal size and requests for input
 and layout leases, plus an explicit `request_command_line` privacy request.

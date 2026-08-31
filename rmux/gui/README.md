@@ -15,8 +15,10 @@ pnpm install
 pnpm tauri dev
 ```
 
-The app may also use the path in `RMUXD_BIN`. Detaching or closing the app does
-not kill a session.
+The app may also use the path in `RMUXD_BIN`. GUI-created shells receive an
+automatic `session-N` name. **Disconnect** detaches this window and leaves the
+shell running. **Close** is deliberately destructive: after confirmation it
+terminates the session for all clients. Closing the app itself only disconnects.
 
 ## Verify
 
@@ -31,4 +33,6 @@ The GUI never resizes an existing PTY merely because it was selected. **Resize
 with window** explicitly acquires layout ownership and then keeps the PTY grid
 matched to this window; turning it off releases layout ownership. Sessions
 created by this GUI start in resize-with-window mode because this window
-establishes their initial layout.
+establishes their initial layout. Authoritative geometry changes update the
+active session's size in the sidebar immediately; inactive rows refresh from
+the daemon when the session list is refreshed.

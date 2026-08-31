@@ -27,6 +27,7 @@ function setup(
   tabIds: readonly string[] = ["first", "second", "third"],
   phase: ConnectionPhase = "attached",
   attachmentSessionId: string | null = activeSessionId,
+  pendingCloseSessionId: string | null = null,
 ) {
   const sessions = [session("first"), session("second"), session("third")];
   const tabs = sessions.filter((candidate) =>
@@ -40,6 +41,7 @@ function setup(
     selectSession: vi.fn(),
     disconnectSession: vi.fn(),
     requestCloseSession: vi.fn(),
+    confirmCloseSession: vi.fn(),
     toggleInput: vi.fn(),
     toggleResizeWithWindow: vi.fn(),
     reconnect: vi.fn(),
@@ -57,6 +59,7 @@ function setup(
       listLoading: false,
       creating: false,
       createFormOpen: false,
+      pendingCloseSessionId,
       closingSessionIds: new Set(),
       disconnectingSessionId: null,
       terminalReady: true,
@@ -102,6 +105,30 @@ describe("terminal commands", () => {
     close.run();
 
     expect(actions.requestCloseSession).toHaveBeenCalledWith(sessions[1]);
+  });
+
+  it("confirms the pending close with the same close command", () => {
+    const { sessions, actions, commands } = setup(
+      "second",
+      "macos",
+      "/work/rmux",
+      ["first", "second", "third"],
+      "attached",
+      "second",
+      "second",
+    );
+
+    const close = findCommand(commands, COMMAND_IDS.close);
+    expect(close).toMatchObject({
+      title: "Confirm Close second",
+      detail: "second",
+      enabled: true,
+    });
+
+    close.run();
+
+    expect(actions.confirmCloseSession).toHaveBeenCalledWith(sessions[1]);
+    expect(actions.requestCloseSession).not.toHaveBeenCalled();
   });
 
   it("uses native macOS and terminal-safe cross-platform close shortcuts", () => {

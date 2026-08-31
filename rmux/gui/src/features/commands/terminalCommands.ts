@@ -40,6 +40,7 @@ interface TerminalCommandContext {
   listLoading: boolean;
   creating: boolean;
   createFormOpen: boolean;
+  pendingCloseSessionId: string | null;
   closingSessionIds: ReadonlySet<string>;
   disconnectingSessionId: string | null;
   terminalReady: boolean;
@@ -55,6 +56,7 @@ interface TerminalCommandActions {
   selectSession(session: SessionSummary): void;
   disconnectSession(session: SessionSummary): void;
   requestCloseSession(session: SessionSummary): void;
+  confirmCloseSession(session: SessionSummary): void;
   toggleInput(): void;
   toggleResizeWithWindow(): void;
   reconnect(): void;
@@ -92,6 +94,10 @@ export function buildTerminalCommands(
   const disconnectingActive =
     activeSession !== null &&
     context.disconnectingSessionId === activeSession.session_id;
+  const pendingCloseSession =
+    context.sessions.find(
+      (session) => session.session_id === context.pendingCloseSessionId,
+    ) ?? null;
 
   const commands: AppCommand[] = [
     {
@@ -207,8 +213,10 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.close,
       category: "Session",
-      title: "Close Active Session",
-      detail: activeSession?.name,
+      title: pendingCloseSession
+        ? `Confirm Close ${pendingCloseSession.name}`
+        : "Close Active Session",
+      detail: pendingCloseSession?.name ?? activeSession?.name,
       keywords: ["exit", "kill", "terminate"],
       keybinding: {
         code: "KeyE",
@@ -216,13 +224,19 @@ export function buildTerminalCommands(
         shift: context.shortcutPlatform === "other",
       },
       macosNativeKeybinding: true,
-      enabled: activeSession !== null && !closingActive && !disconnectingActive,
-      disabledReason: activeSession
-        ? "The active session is already changing state."
-        : "No session is active.",
+      enabled: pendingCloseSession !== null
+        ? !context.closingSessionIds.has(pendingCloseSession.session_id)
+        : activeSession !== null && !closingActive && !disconnectingActive,
+      disabledReason: pendingCloseSession
+        ? "The session is already closing."
+        : activeSession
+          ? "The active session is already changing state."
+          : "No session is active.",
       focusTerminalAfterRun: false,
       run: () => {
-        if (activeSession) {
+        if (pendingCloseSession) {
+          actions.confirmCloseSession(pendingCloseSession);
+        } else if (activeSession) {
           actions.requestCloseSession(activeSession);
         }
       },

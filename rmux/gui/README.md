@@ -43,6 +43,9 @@ terminal shortcuts are:
 - next tab: `Cmd/Ctrl-Shift-]`
 - previous tab: `Cmd/Ctrl-Shift-[`
 
+The close shortcut first opens its confirmation with **Close** focused. Press
+the same shortcut again to terminate the pending session, or `Esc` to cancel.
+
 These shortcuts are local to the focused app. Other key combinations continue
 to xterm and the PTY unchanged. The macOS application menu owns `Cmd-W` and
 `Cmd-E` so native window-close handling cannot race the WebView; `Cmd-Q` keeps

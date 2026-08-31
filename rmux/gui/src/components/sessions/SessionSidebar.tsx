@@ -122,9 +122,12 @@ export function SessionSidebar({
                   role="group"
                   aria-label={`Confirm closing ${session.name}`}
                   onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      onCancelClose();
+                    if (event.nativeEvent.isComposing || event.key !== "Escape") {
+                      return;
                     }
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onCancelClose();
                   }}
                 >
                   <span>
@@ -135,7 +138,6 @@ export function SessionSidebar({
                       className="session-confirm-cancel"
                       type="button"
                       onClick={onCancelClose}
-                      autoFocus
                     >
                       Cancel
                     </button>
@@ -143,6 +145,7 @@ export function SessionSidebar({
                       className="session-confirm-close"
                       type="button"
                       onClick={() => onConfirmClose(session)}
+                      autoFocus
                     >
                       Close
                     </button>

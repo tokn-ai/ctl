@@ -342,6 +342,7 @@ export function TerminalPage() {
       listLoading: loading,
       creating,
       createFormOpen,
+      pendingCloseSessionId,
       closingSessionIds,
       disconnectingSessionId,
       terminalReady: renderer !== null,
@@ -360,6 +361,7 @@ export function TerminalPage() {
       selectSession: (session) => void activateTab(session),
       disconnectSession: (session) => void disconnect(session),
       requestCloseSession: requestClose,
+      confirmCloseSession: confirmClose,
       toggleInput: () => void attachment.toggleInputLease(),
       toggleResizeWithWindow: () =>
         void attachment.toggleResizeWithWindow(),

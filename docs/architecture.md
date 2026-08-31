@@ -135,6 +135,14 @@ replacement, which releases the previous attachment's leases without ending
 its persistent shell session. The frontend therefore never asks a user to
 manually detach before switching sessions.
 
+Each native terminal window has independent frontend state and an independent
+window-scoped attachment actor. **New Window in Current Folder** stores a
+one-shot startup request in backend memory, creates a native window, and lets
+that window create and attach its own auto-named persistent session. The cwd is
+used only after an explicit user command and only when shell awareness reports
+it; clients never infer a directory from rendered terminal output. Closing any
+window detaches its actor without ending its shell session.
+
 Raw byte fields cross the Tauri boundary as base64. Every `u64` sequence and
 revision crosses as a decimal string so JavaScript number precision cannot
 corrupt a resume or acknowledgement boundary. Attachment and event IDs fence
@@ -163,6 +171,10 @@ webview intercepts only an exact enabled or disabled registered key combination
 before xterm; unregistered keystrokes remain PTY input. Command search,
 selection, and focus are client presentation concerns and do not add protocol
 messages or daemon state.
+
+The new-window command uses `Cmd-T` on macOS and `Ctrl-Shift-T` on
+Windows/Linux. It remains disabled with an explanatory palette reason until a
+current shell-reported cwd is available.
 
 ## Attachment ownership
 

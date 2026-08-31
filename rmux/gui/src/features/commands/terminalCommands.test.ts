@@ -20,11 +20,16 @@ function session(id: string): SessionSummary {
   };
 }
 
-function setup(activeSessionId: string | null = "first") {
+function setup(
+  activeSessionId: string | null = "first",
+  shortcutPlatform: "macos" | "other" = "macos",
+  currentWorkingDirectory: string | null = "/work/rmux",
+) {
   const sessions = [session("first"), session("second"), session("third")];
   const actions = {
     showPalette: vi.fn(),
     showNewShellForm: vi.fn(),
+    openShellWindow: vi.fn(),
     refreshSessions: vi.fn(),
     selectSession: vi.fn(),
     disconnectSession: vi.fn(),
@@ -47,6 +52,9 @@ function setup(activeSessionId: string | null = "first") {
       closingSessionIds: new Set(),
       disconnectingSessionId: null,
       terminalReady: true,
+      currentWorkingDirectory,
+      openingWindow: false,
+      shortcutPlatform,
     },
     actions,
   );
@@ -82,6 +90,35 @@ describe("terminal commands", () => {
     close.run();
 
     expect(actions.requestCloseSession).toHaveBeenCalledWith(sessions[1]);
+  });
+
+  it("opens a shell window with the platform-specific shortcut", () => {
+    const macos = setup("first", "macos");
+    const other = setup("first", "other");
+
+    const macosCommand = findCommand(macos.commands, COMMAND_IDS.newWindow);
+    const otherCommand = findCommand(other.commands, COMMAND_IDS.newWindow);
+    expect(macosCommand.keybinding).toEqual({
+      code: "KeyT",
+      primary: true,
+      shift: false,
+    });
+    expect(otherCommand.keybinding).toEqual({
+      code: "KeyT",
+      primary: true,
+      shift: true,
+    });
+
+    macosCommand.run();
+    expect(macos.actions.openShellWindow).toHaveBeenCalledOnce();
+  });
+
+  it("requires a shell-reported cwd before opening a window", () => {
+    const { commands } = setup("first", "macos", null);
+    const command = findCommand(commands, COMMAND_IDS.newWindow);
+
+    expect(command.enabled).toBe(false);
+    expect(command.disabledReason).toContain("working directory");
   });
 
   it("publishes one dynamic switch command per session", () => {

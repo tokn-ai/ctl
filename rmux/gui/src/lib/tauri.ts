@@ -11,6 +11,7 @@ import type {
   OpenAttachmentRequest,
   OpenAttachmentResponse,
   SessionSummary,
+  WindowBootstrap,
 } from "./types";
 
 export interface OpenAttachmentResult {
@@ -26,6 +27,14 @@ export async function createSession(
   request: CreateSessionRequest,
 ): Promise<SessionSummary> {
   return invoke<SessionSummary>("create_session", { request });
+}
+
+export async function openShellWindow(request: WindowBootstrap): Promise<void> {
+  await invoke("open_shell_window", { request });
+}
+
+export async function takeWindowBootstrap(): Promise<WindowBootstrap | null> {
+  return invoke<WindowBootstrap | null>("take_window_bootstrap");
 }
 
 export async function killSession(request: KillSessionRequest): Promise<void> {

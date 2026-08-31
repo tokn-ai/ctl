@@ -29,6 +29,8 @@ import {
   createSession,
   killSession,
   listSessions,
+  openShellWindow,
+  takeWindowBootstrap,
 } from "../lib/tauri";
 import type { SessionSummary, TerminalSize } from "../lib/types";
 
@@ -46,10 +48,12 @@ export function TerminalPage() {
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const [shortcutPlatform] = useState(detectShortcutPlatform);
   const attachment = useAttachment(renderer);
+  const currentWorkingDirectory = attachment.state.shell_state?.cwd || null;
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [openingWindow, setOpeningWindow] = useState(false);
   const [createFormOpen, setCreateFormOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingCloseSessionId, setPendingCloseSessionId] = useState<
@@ -64,6 +68,8 @@ export function TerminalPage() {
   const closingSessionIdsRef = useRef(new Set<string>());
   const closedSessionIdsRef = useRef(new Set<string>());
   const refreshGuardRef = useRef(new SessionListRefreshGuard());
+  const bootstrapRequestedRef = useRef(false);
+  const openingWindowRef = useRef(false);
 
   const refresh = useCallback(async () => {
     const token = refreshGuardRef.current.begin();
@@ -102,13 +108,16 @@ export function TerminalPage() {
   }, [refresh]);
 
   const create = useCallback(
-    async (workingDirectory: string | null): Promise<boolean> => {
+    async (
+      workingDirectory: string | null,
+      initialTerminalSize?: TerminalSize,
+    ): Promise<boolean> => {
       setCreating(true);
       setListError(null);
       try {
         const session = await createSession({
           working_directory: workingDirectory,
-          terminal_size: measuredSize(renderer),
+          terminal_size: initialTerminalSize ?? measuredSize(renderer),
         });
         refreshGuardRef.current.recordMutation();
         setSessions((current) => prependSession(current, session));
@@ -123,6 +132,47 @@ export function TerminalPage() {
     },
     [attachment, renderer],
   );
+
+  useEffect(() => {
+    if (!renderer || bootstrapRequestedRef.current) {
+      return;
+    }
+    bootstrapRequestedRef.current = true;
+    void (async () => {
+      try {
+        const bootstrap = await takeWindowBootstrap();
+        if (bootstrap) {
+          await create(
+            bootstrap.working_directory,
+            bootstrap.terminal_size,
+          );
+        }
+      } catch (error) {
+        setListError(errorMessage(error));
+      }
+    })();
+  }, [create, renderer]);
+
+  const openNewWindow = useCallback(async () => {
+    if (!currentWorkingDirectory || openingWindowRef.current) {
+      return;
+    }
+
+    openingWindowRef.current = true;
+    setOpeningWindow(true);
+    setListError(null);
+    try {
+      await openShellWindow({
+        working_directory: currentWorkingDirectory,
+        terminal_size: measuredSize(renderer),
+      });
+    } catch (error) {
+      setListError(errorMessage(error));
+    } finally {
+      openingWindowRef.current = false;
+      setOpeningWindow(false);
+    }
+  }, [currentWorkingDirectory, renderer]);
 
   const disconnect = useCallback(
     async (session: SessionSummary) => {
@@ -242,10 +292,14 @@ export function TerminalPage() {
       closingSessionIds,
       disconnectingSessionId,
       terminalReady: renderer !== null,
+      currentWorkingDirectory,
+      openingWindow,
+      shortcutPlatform,
     },
     {
       showPalette: () => setPaletteOpen(true),
       showNewShellForm: () => setCreateFormOpen(true),
+      openShellWindow: () => void openNewWindow(),
       refreshSessions: () => void refresh(),
       selectSession: (session) => void attachment.connect(session),
       disconnectSession: (session) => void disconnect(session),

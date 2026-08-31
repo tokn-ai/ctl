@@ -2,11 +2,16 @@ import type {
   ConnectionPhase,
   SessionSummary,
 } from "../../lib/types";
-import type { AppCommand, Keybinding } from "./types";
+import type {
+  AppCommand,
+  Keybinding,
+  ShortcutPlatform,
+} from "./types";
 
 export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
   newShell: "session.new_shell",
+  newWindow: "window.new_shell_here",
   refreshSessions: "session.refresh",
   nextSession: "session.next",
   previousSession: "session.previous",
@@ -36,11 +41,15 @@ interface TerminalCommandContext {
   closingSessionIds: ReadonlySet<string>;
   disconnectingSessionId: string | null;
   terminalReady: boolean;
+  currentWorkingDirectory: string | null;
+  openingWindow: boolean;
+  shortcutPlatform: ShortcutPlatform;
 }
 
 interface TerminalCommandActions {
   showPalette(): void;
   showNewShellForm(): void;
+  openShellWindow(): void;
   refreshSessions(): void;
   selectSession(session: SessionSummary): void;
   disconnectSession(session: SessionSummary): void;
@@ -103,6 +112,25 @@ export function buildTerminalCommands(
         : "The new-shell form is already open.",
       focusTerminalAfterRun: false,
       run: actions.showNewShellForm,
+    },
+    {
+      id: COMMAND_IDS.newWindow,
+      category: "Window",
+      title: "New Window in Current Folder",
+      detail: context.currentWorkingDirectory ?? undefined,
+      keywords: ["shell", "terminal", "cwd", "folder"],
+      keybinding: {
+        code: "KeyT",
+        primary: true,
+        shift: context.shortcutPlatform === "other",
+      },
+      enabled:
+        context.currentWorkingDirectory !== null && !context.openingWindow,
+      disabledReason: context.openingWindow
+        ? "A terminal window is already opening."
+        : "The current shell has not reported its working directory.",
+      focusTerminalAfterRun: false,
+      run: actions.openShellWindow,
     },
     {
       id: COMMAND_IDS.refreshSessions,

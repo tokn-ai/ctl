@@ -49,6 +49,11 @@ export interface CreateSessionRequest {
   terminal_size: TerminalSize;
 }
 
+export interface WindowBootstrap {
+  working_directory: string;
+  terminal_size: TerminalSize;
+}
+
 export interface KillSessionRequest {
   session_id: string;
 }

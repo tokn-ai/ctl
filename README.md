@@ -127,6 +127,11 @@ shortcuts for creating and switching sessions; only exact registered
 combinations are intercepted, so ordinary terminal keystrokes continue to the
 PTY.
 
+`Cmd-T` on macOS or `Ctrl-Shift-T` on Windows/Linux opens a separate native
+window with a new persistent shell in the current shell-reported directory.
+The command is available only when shell awareness has reported a cwd. Closing
+the new window detaches it without terminating the session.
+
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).

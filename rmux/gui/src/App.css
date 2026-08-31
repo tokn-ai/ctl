@@ -274,10 +274,19 @@ button:disabled {
 
 .terminal-workspace {
   display: grid;
+  grid-template-areas:
+    "toolbar"
+    "notices"
+    "terminal"
+    "status";
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   background: var(--surface-0);
+}
+
+.terminal-notices {
+  grid-area: notices;
 }
 
 .terminal-notices:empty {
@@ -286,6 +295,7 @@ button:disabled {
 
 .terminal-toolbar {
   display: flex;
+  grid-area: toolbar;
   min-width: 0;
   align-items: center;
   justify-content: space-between;
@@ -389,6 +399,7 @@ button:disabled {
 
 .terminal-shell {
   position: relative;
+  grid-area: terminal;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -473,6 +484,7 @@ button:disabled {
 
 .status-bar {
   display: flex;
+  grid-area: status;
   min-width: 0;
   align-items: center;
   gap: 0;

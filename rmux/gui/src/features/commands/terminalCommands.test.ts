@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionSummary } from "../../lib/types";
+import type { ConnectionPhase, SessionSummary } from "../../lib/types";
 import {
   buildTerminalCommands,
   COMMAND_IDS,
@@ -25,6 +25,8 @@ function setup(
   shortcutPlatform: "macos" | "other" = "macos",
   currentWorkingDirectory: string | null = "/work/rmux",
   tabIds: readonly string[] = ["first", "second", "third"],
+  phase: ConnectionPhase = "attached",
+  attachmentSessionId: string | null = activeSessionId,
 ) {
   const sessions = [session("first"), session("second"), session("third")];
   const tabs = sessions.filter((candidate) =>
@@ -48,7 +50,8 @@ function setup(
       sessions,
       tabs,
       activeSessionId,
-      phase: "attached",
+      attachmentSessionId,
+      phase,
       inputOwned: true,
       resizeWithWindow: false,
       listLoading: false,
@@ -164,6 +167,73 @@ describe("terminal commands", () => {
     expect(switchCommands.find(({ id }) => id.endsWith("second"))?.enabled).toBe(
       false,
     );
+  });
+
+  it("keeps a selected session retryable after its attachment fails", () => {
+    const { commands } = setup(
+      "second",
+      "macos",
+      "/work/rmux",
+      ["first", "second"],
+      "error",
+      "second",
+    );
+
+    const retry = findCommand(commands, "session.switch.second");
+    expect(retry).toMatchObject({
+      title: "Reconnect to second",
+      detail: "Retry attachment",
+      enabled: true,
+    });
+  });
+
+  it("keeps a selected tab attachable when no attachment exists", () => {
+    const { commands } = setup(
+      "second",
+      "macos",
+      "/work/rmux",
+      ["first", "second"],
+      "idle",
+      null,
+    );
+
+    expect(findCommand(commands, "session.switch.second")).toMatchObject({
+      title: "Attach to second",
+      detail: "Retry attachment",
+      enabled: true,
+    });
+  });
+
+  it("does not start another attachment for a selected connecting tab", () => {
+    const { commands } = setup(
+      "second",
+      "macos",
+      "/work/rmux",
+      ["first", "second"],
+      "connecting",
+      "second",
+    );
+
+    const connecting = findCommand(commands, "session.switch.second");
+    expect(connecting).toMatchObject({
+      detail: "Attaching…",
+      enabled: false,
+    });
+  });
+
+  it("does not expose controls for an attachment behind another selected tab", () => {
+    const { commands } = setup(
+      "second",
+      "macos",
+      "/work/rmux",
+      ["first", "second"],
+      "attached",
+      "first",
+    );
+
+    expect(findCommand(commands, COMMAND_IDS.toggleInput).enabled).toBe(false);
+    expect(findCommand(commands, COMMAND_IDS.toggleResize).enabled).toBe(false);
+    expect(findCommand(commands, COMMAND_IDS.reconnect).enabled).toBe(false);
   });
 
   it("does not expose disabled session actions without an active session", () => {

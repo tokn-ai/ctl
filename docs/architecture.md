@@ -143,7 +143,10 @@ Current Folder** creates and attaches an auto-named persistent session without
 reloading the WebView. The cwd is used only after an explicit user command and
 only when shell awareness reports it; clients never infer a directory from
 rendered terminal output. Closing a tab detaches its view without ending its
-shell session.
+shell session. If the renderer is still starting, the GUI retains only the
+latest selected attachment intent and connects it once the renderer is ready.
+A failed attachment leaves the selected tab retryable rather than treating
+local tab selection as proof that a daemon attachment exists.
 
 Raw byte fields cross the Tauri boundary as base64. Every `u64` sequence and
 revision crosses as a decimal string so JavaScript number precision cannot

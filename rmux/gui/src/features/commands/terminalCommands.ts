@@ -33,6 +33,7 @@ interface TerminalCommandContext {
   sessions: readonly SessionSummary[];
   tabs: readonly SessionSummary[];
   activeSessionId: string | null;
+  attachmentSessionId: string | null;
   phase: ConnectionPhase;
   inputOwned: boolean;
   resizeWithWindow: boolean;
@@ -78,9 +79,12 @@ export function buildTerminalCommands(
     context.activeSessionId,
     -1,
   );
-  const attached = context.phase === "attached";
+  const activeAttachmentMatchesTab =
+    activeSession?.session_id === context.attachmentSessionId;
+  const activeTabAttached =
+    activeAttachmentMatchesTab && context.phase === "attached";
   const canReconnect =
-    activeSession !== null &&
+    activeAttachmentMatchesTab &&
     (context.phase === "disconnected" || context.phase === "error");
   const closingActive =
     activeSession !== null &&
@@ -228,7 +232,7 @@ export function buildTerminalCommands(
       category: "Terminal",
       title: context.inputOwned ? "Release Input" : "Request Input",
       keywords: ["lease", "ownership"],
-      enabled: attached,
+      enabled: activeTabAttached,
       disabledReason: "Attach to a running session first.",
       run: actions.toggleInput,
     },
@@ -239,7 +243,7 @@ export function buildTerminalCommands(
         ? "Stop Resizing with Window"
         : "Resize with Window",
       keywords: ["layout", "lease", "ownership"],
-      enabled: attached,
+      enabled: activeTabAttached,
       disabledReason: "Attach to a running session first.",
       run: actions.toggleResizeWithWindow,
     },
@@ -266,18 +270,44 @@ export function buildTerminalCommands(
 
   for (const session of context.sessions) {
     const selected = session.session_id === context.activeSessionId;
+    const matchesAttachment =
+      session.session_id === context.attachmentSessionId;
+    const attaching =
+      matchesAttachment &&
+      (context.phase === "connecting" || context.phase === "reconnecting");
+    const sessionAttached = matchesAttachment && context.phase === "attached";
+    const ended = matchesAttachment && context.phase === "ended";
+    const retryable = selected && !attaching && !sessionAttached && !ended;
+    const title = retryable
+      ? matchesAttachment
+        ? `Reconnect to ${session.name}`
+        : `Attach to ${session.name}`
+      : `Switch to ${session.name}`;
+    const detail = selected
+      ? attaching
+        ? "Attaching…"
+        : sessionAttached
+          ? "Current session"
+          : ended
+            ? "Session ended"
+            : "Retry attachment"
+      : `${session.terminal_size.columns}×${session.terminal_size.rows} · ${session.status}`;
     commands.push({
       id: `session.switch.${session.session_id}`,
       category: "Session",
-      title: `Switch to ${session.name}`,
-      detail: selected
-        ? "Current session"
-        : `${session.terminal_size.columns}×${session.terminal_size.rows} · ${session.status}`,
+      title,
+      detail,
       keywords: ["attach", session.name],
-      enabled: !selected && !context.closingSessionIds.has(session.session_id),
-      disabledReason: selected
-        ? "This session is already active."
-        : "This session is closing.",
+      enabled:
+        !context.closingSessionIds.has(session.session_id) &&
+        (!selected || retryable),
+      disabledReason: context.closingSessionIds.has(session.session_id)
+        ? "This session is closing."
+        : attaching
+          ? "This session is already attaching."
+          : sessionAttached
+            ? "This session is already active."
+            : "This session has ended.",
       run: () => actions.selectSession(session),
     });
   }

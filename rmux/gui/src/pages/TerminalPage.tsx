@@ -241,6 +241,7 @@ export function TerminalPage() {
       });
       setListError(null);
       try {
+        attachment.cancelPendingConnection(session.session_id);
         try {
           await killSession({ session_id: session.session_id });
         } catch (error) {
@@ -264,7 +265,7 @@ export function TerminalPage() {
         });
       }
     },
-    [closeTab],
+    [attachment, closeTab],
   );
 
   const requestClose = useCallback((session: SessionSummary) => {
@@ -334,6 +335,7 @@ export function TerminalPage() {
       sessions,
       tabs,
       activeSessionId: activeTabId,
+      attachmentSessionId: attachment.state.session?.session_id ?? null,
       phase: attachment.state.phase,
       inputOwned: attachment.state.input_lease.owned_by_client,
       resizeWithWindow: attachment.state.resize_with_window,

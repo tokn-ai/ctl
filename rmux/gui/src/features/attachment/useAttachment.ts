@@ -21,6 +21,7 @@ import type {
 } from "../../lib/types";
 import type { ProposedDimensions } from "../terminal/TerminalPresenter";
 import type { XtermRenderer } from "../terminal/XtermRenderer";
+import { ConnectionIntentQueue } from "./ConnectionIntentQueue";
 import { InputPump } from "./InputPump";
 import {
   LayoutLeasePump,
@@ -71,6 +72,7 @@ export interface AttachmentActions {
   state: AttachmentViewState;
   connect(session: SessionSummary, options?: ConnectOptions): Promise<void>;
   reconnect(): Promise<void>;
+  cancelPendingConnection(sessionId: string): void;
   detach(): Promise<void>;
   handleInput(data: Uint8Array): void;
   toggleInputLease(): Promise<void>;
@@ -89,12 +91,18 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   const inputLeaseOwnedRef = useRef(false);
   const layoutLeaseOwnedRef = useRef(false);
   const resizeWithWindowRef = useRef(false);
+  const deferredConnectionRef = useRef<
+    ConnectionIntentQueue<ConnectionRequest> | null
+  >(null);
   const connectionQueueRef = useRef<LatestTaskQueue | null>(null);
   const layoutLeasePumpRef = useRef<LayoutLeasePump | null>(null);
   const resizePumpRef = useRef<ResizePump | null>(null);
   const resizeCoordinatorRef = useRef<ResizeCoordinator | null>(null);
   if (!connectionQueueRef.current) {
     connectionQueueRef.current = new LatestTaskQueue();
+  }
+  if (!deferredConnectionRef.current) {
+    deferredConnectionRef.current = new ConnectionIntentQueue<ConnectionRequest>();
   }
 
   useEffect(() => {
@@ -286,6 +294,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       inputPumpRef.current?.clear();
       layoutLeasePumpRef.current?.reset();
       resizeCoordinatorRef.current?.reset();
+      deferredConnectionRef.current?.cancel();
       connectionQueueRef.current?.cancelPending();
       const attachmentId = activeAttachmentRef.current;
       activeAttachmentRef.current = null;
@@ -651,17 +660,46 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     [publishShellState, queueEvent, renderer, setFailure],
   );
 
+  const submitConnection = useCallback(
+    (request: ConnectionRequest): Promise<void> =>
+      connectionQueueRef.current!.submit(
+        () => performConnection(request),
+        (error) => {
+          if (request.generation === generationRef.current) {
+            setFailure(error);
+          }
+        },
+      ),
+    [performConnection, setFailure],
+  );
+
+  useEffect(() => {
+    if (!renderer) {
+      return;
+    }
+    const deferred = deferredConnectionRef.current!.take();
+    if (!deferred) {
+      return;
+    }
+    if (
+      deferred.request.generation !== generationRef.current ||
+      !deferredConnectionRef.current!.isCurrent(deferred.request)
+    ) {
+      deferred.settle();
+      return;
+    }
+    void submitConnection(deferred.request).finally(() => {
+      deferredConnectionRef.current!.complete(deferred.request);
+      deferred.settle();
+    });
+  }, [renderer, submitConnection]);
+
   const connectAt = useCallback(
     (
       session: SessionSummary,
       resumeFrom: string | null,
       resizeWithWindow: boolean,
     ): Promise<void> => {
-      if (!renderer) {
-        setFailure("The terminal renderer is not ready.");
-        return Promise.resolve();
-      }
-
       const generation = generationRef.current + 1;
       generationRef.current = generation;
       inputLeaseOwnedRef.current = false;
@@ -680,22 +718,21 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         resize_with_window: resizeWithWindow,
       });
 
-      return connectionQueueRef.current!.submit(
-        () =>
-          performConnection({
-            generation,
-            session,
-            resumeFrom,
-            resizeWithWindow,
-          }),
-        (error) => {
-          if (generation === generationRef.current) {
-            setFailure(error);
-          }
-        },
-      );
+      const request = {
+        generation,
+        session,
+        resumeFrom,
+        resizeWithWindow,
+      };
+      deferredConnectionRef.current!.begin(request);
+      if (!renderer) {
+        return deferredConnectionRef.current!.defer(request);
+      }
+      return submitConnection(request).finally(() => {
+        deferredConnectionRef.current!.complete(request);
+      });
     },
-    [performConnection, renderer, setFailure],
+    [renderer, submitConnection],
   );
 
   const connect = useCallback(
@@ -715,6 +752,21 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     }
   }, [connectAt]);
 
+  const cancelPendingConnection = useCallback((sessionId: string) => {
+    const cancelled = deferredConnectionRef.current?.cancelIf(
+      (request) => request.session.session_id === sessionId,
+    );
+    if (!cancelled) {
+      return;
+    }
+
+    generationRef.current += 1;
+    connectionQueueRef.current?.cancelPending();
+    appliedSequenceRef.current = null;
+    pendingShellStateRef.current = null;
+    setState(INITIAL_STATE);
+  }, []);
+
   const detach = useCallback(async () => {
     const generation = generationRef.current + 1;
     generationRef.current = generation;
@@ -724,6 +776,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     inputPumpRef.current?.clear();
     layoutLeasePumpRef.current?.reset();
     resizeCoordinatorRef.current?.reset();
+    deferredConnectionRef.current?.cancel();
     connectionQueueRef.current?.cancelPending();
     const attachmentId = activeAttachmentRef.current;
     activeAttachmentRef.current = null;
@@ -841,6 +894,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     state,
     connect,
     reconnect,
+    cancelPendingConnection,
     detach,
     handleInput,
     toggleInputLease,

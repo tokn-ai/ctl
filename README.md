@@ -121,6 +121,12 @@ that window and leaves the daemon-owned shell running; **Close** explicitly
 terminates the session for every attached client. Closing the app itself is a
 disconnect and does not terminate its sessions.
 
+The desktop command palette opens with `Cmd-Shift-P` on macOS and
+`Ctrl-Shift-P` on Windows/Linux. The same command registry supplies app-local
+shortcuts for creating and switching sessions; only exact registered
+combinations are intercepted, so ordinary terminal keystrokes continue to the
+PTY.
+
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).

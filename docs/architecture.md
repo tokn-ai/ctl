@@ -146,6 +146,14 @@ initial attachment because that GUI establishes the new session's layout.
 Scrollback, scrolling, selection, and copy remain local xterm behavior and
 generate no protocol viewport commands.
 
+App actions are registered as stable frontend command IDs. The command palette,
+toolbar, session list, and app-local shortcuts dispatch through that shared
+registry, including dynamic commands for switching to a known session. The
+webview intercepts only an exact enabled or disabled registered key combination
+before xterm; unregistered keystrokes remain PTY input. Command search,
+selection, and focus are client presentation concerns and do not add protocol
+messages or daemon state.
+
 ## Attachment ownership
 
 `rmuxd` treats each `attach_session` connection as an attachment. Attachments

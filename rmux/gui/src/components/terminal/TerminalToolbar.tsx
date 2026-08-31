@@ -5,6 +5,8 @@ interface TerminalToolbarProps {
   onToggleInput(): void;
   onToggleResizeWithWindow(): void;
   onReconnect(): void;
+  onShowCommands(): void;
+  commandShortcutLabel: string;
 }
 
 export function TerminalToolbar({
@@ -12,6 +14,8 @@ export function TerminalToolbar({
   onToggleInput,
   onToggleResizeWithWindow,
   onReconnect,
+  onShowCommands,
+  commandShortcutLabel,
 }: TerminalToolbarProps) {
   const attached = state.phase === "attached";
   const canReconnect =
@@ -57,6 +61,15 @@ export function TerminalToolbar({
             : resizeActive
               ? "Stop resizing"
               : "Resize with window"}
+        </button>
+        <button
+          className="command-palette-trigger"
+          type="button"
+          onClick={onShowCommands}
+          title={`Show command palette (${commandShortcutLabel})`}
+        >
+          Commands
+          <kbd aria-hidden="true">{commandShortcutLabel}</kbd>
         </button>
       </div>
     </header>

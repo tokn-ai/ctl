@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
 import { TerminalSurface } from "../components/terminal/TerminalSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
 import { useAttachment } from "../features/attachment/useAttachment";
+import {
+  detectShortcutPlatform,
+  formatKeybinding,
+} from "../features/commands/keybindings";
+import {
+  buildTerminalCommands,
+  COMMAND_IDS,
+  SHOW_PALETTE_KEYBINDING,
+} from "../features/commands/terminalCommands";
+import type { AppCommand } from "../features/commands/types";
+import { useCommandShortcuts } from "../features/commands/useCommandShortcuts";
 import {
   SessionListRefreshGuard,
   prependSession,
@@ -32,11 +44,17 @@ function measuredSize(renderer: XtermRenderer | null): TerminalSize {
 
 export function TerminalPage() {
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
+  const [shortcutPlatform] = useState(detectShortcutPlatform);
   const attachment = useAttachment(renderer);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [createFormOpen, setCreateFormOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [pendingCloseSessionId, setPendingCloseSessionId] = useState<
+    string | null
+  >(null);
   const [closingSessionIds, setClosingSessionIds] = useState<ReadonlySet<string>>(
     new Set(),
   );
@@ -159,6 +177,22 @@ export function TerminalPage() {
     }
   }, []);
 
+  const requestClose = useCallback((session: SessionSummary) => {
+    setPendingCloseSessionId(session.session_id);
+  }, []);
+
+  const cancelClose = useCallback(() => {
+    setPendingCloseSessionId(null);
+  }, []);
+
+  const confirmClose = useCallback(
+    (session: SessionSummary) => {
+      setPendingCloseSessionId(null);
+      void close(session);
+    },
+    [close],
+  );
+
   const attachedSession = attachment.state.session;
   const attachedTerminalSize = attachedSession?.terminal_size;
   useEffect(() => {
@@ -195,51 +229,138 @@ export function TerminalPage() {
       ? attachedSession.session_id
       : null;
 
+  const commands = buildTerminalCommands(
+    {
+      sessions,
+      activeSessionId: attachedSession?.session_id ?? null,
+      phase: attachment.state.phase,
+      inputOwned: attachment.state.input_lease.owned_by_client,
+      resizeWithWindow: attachment.state.resize_with_window,
+      listLoading: loading,
+      creating,
+      createFormOpen,
+      closingSessionIds,
+      disconnectingSessionId,
+      terminalReady: renderer !== null,
+    },
+    {
+      showPalette: () => setPaletteOpen(true),
+      showNewShellForm: () => setCreateFormOpen(true),
+      refreshSessions: () => void refresh(),
+      selectSession: (session) => void attachment.connect(session),
+      disconnectSession: (session) => void disconnect(session),
+      requestCloseSession: requestClose,
+      toggleInput: () => void attachment.toggleInputLease(),
+      toggleResizeWithWindow: () =>
+        void attachment.toggleResizeWithWindow(),
+      reconnect: () => void attachment.reconnect(),
+      focusTerminal: () => renderer?.focus(),
+    },
+  );
+  const paletteShortcutLabel = formatKeybinding(
+    SHOW_PALETTE_KEYBINDING,
+    shortcutPlatform,
+  );
+
+  const executeCommand = useCallback(
+    (command: AppCommand) => {
+      setPaletteOpen(false);
+      command.run();
+      if (command.focusTerminalAfterRun !== false) {
+        requestAnimationFrame(() => renderer?.focus());
+      }
+    },
+    [renderer],
+  );
+
+  useCommandShortcuts(commands, shortcutPlatform, executeCommand);
+
+  function executeCommandById(commandId: string) {
+    const command = commands.find((candidate) => candidate.id === commandId);
+    if (command?.enabled) {
+      executeCommand(command);
+    }
+  }
+
+  function dismissPalette() {
+    setPaletteOpen(false);
+    requestAnimationFrame(() => renderer?.focus());
+  }
+
   return (
-    <main className="app-shell">
-      <SessionSidebar
-        sessions={sessions}
-        selectedSessionId={attachedSession?.session_id ?? null}
-        disconnectableSessionId={disconnectableSessionId}
-        loading={loading}
-        error={listError}
-        creating={creating}
-        closingSessionIds={closingSessionIds}
-        disconnectingSessionId={disconnectingSessionId}
-        onRefresh={() => void refresh()}
-        onSelect={(session) => void attachment.connect(session)}
-        onCreate={create}
-        onDisconnect={(session) => void disconnect(session)}
-        onClose={(session) => void close(session)}
-      />
-      <section className="terminal-workspace">
-        <TerminalToolbar
-          state={attachment.state}
-          onToggleInput={() => void attachment.toggleInputLease()}
-          onToggleResizeWithWindow={() =>
-            void attachment.toggleResizeWithWindow()
+    <>
+      <main className="app-shell">
+        <SessionSidebar
+          sessions={sessions}
+          selectedSessionId={attachedSession?.session_id ?? null}
+          disconnectableSessionId={disconnectableSessionId}
+          loading={loading}
+          error={listError}
+          creating={creating}
+          createFormOpen={createFormOpen}
+          pendingCloseSessionId={pendingCloseSessionId}
+          closingSessionIds={closingSessionIds}
+          disconnectingSessionId={disconnectingSessionId}
+          onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
+          onSelect={(session) =>
+            executeCommandById(`session.switch.${session.session_id}`)
           }
-          onReconnect={() => void attachment.reconnect()}
+          onCreate={create}
+          onCreateFormOpenChange={(open) => {
+            if (open) {
+              executeCommandById(COMMAND_IDS.newShell);
+            } else {
+              setCreateFormOpen(false);
+            }
+          }}
+          onDisconnect={() => executeCommandById(COMMAND_IDS.disconnect)}
+          onRequestClose={requestClose}
+          onCancelClose={cancelClose}
+          onConfirmClose={confirmClose}
         />
-        <div className="terminal-notices">
-          {attachment.state.history_gap ? (
-            <div className="history-gap-banner" role="status">
-              Earlier remote output is no longer contiguous. The live screen was restored from a
-              checkpoint.
-            </div>
-          ) : null}
-          {attachment.state.message ? (
-            <div className="message-banner" role="status">{attachment.state.message}</div>
-          ) : null}
-        </div>
-        <TerminalSurface
-          phase={attachment.state.phase}
-          hasSession={attachment.state.session !== null}
-          onInput={attachment.handleInput}
-          onReady={setRenderer}
+        <section className="terminal-workspace">
+          <TerminalToolbar
+            state={attachment.state}
+            onToggleInput={() =>
+              executeCommandById(COMMAND_IDS.toggleInput)
+            }
+            onToggleResizeWithWindow={() =>
+              executeCommandById(COMMAND_IDS.toggleResize)
+            }
+            onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
+            onShowCommands={() =>
+              executeCommandById(COMMAND_IDS.showPalette)
+            }
+            commandShortcutLabel={paletteShortcutLabel}
+          />
+          <div className="terminal-notices">
+            {attachment.state.history_gap ? (
+              <div className="history-gap-banner" role="status">
+                Earlier remote output is no longer contiguous. The live screen was restored from a
+                checkpoint.
+              </div>
+            ) : null}
+            {attachment.state.message ? (
+              <div className="message-banner" role="status">{attachment.state.message}</div>
+            ) : null}
+          </div>
+          <TerminalSurface
+            phase={attachment.state.phase}
+            hasSession={attachment.state.session !== null}
+            onInput={attachment.handleInput}
+            onReady={setRenderer}
+          />
+          <StatusBar state={attachment.state} />
+        </section>
+      </main>
+      {paletteOpen ? (
+        <CommandPalette
+          commands={commands}
+          platform={shortcutPlatform}
+          onDismiss={dismissPalette}
+          onExecute={executeCommand}
         />
-        <StatusBar state={attachment.state} />
-      </section>
-    </main>
+      ) : null}
+    </>
   );
 }

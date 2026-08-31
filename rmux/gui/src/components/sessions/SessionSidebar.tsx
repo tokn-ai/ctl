@@ -9,13 +9,18 @@ interface SessionSidebarProps {
   loading: boolean;
   error: string | null;
   creating: boolean;
+  createFormOpen: boolean;
+  pendingCloseSessionId: string | null;
   closingSessionIds: ReadonlySet<string>;
   disconnectingSessionId: string | null;
   onRefresh(): void;
   onSelect(session: SessionSummary): void;
   onCreate(workingDirectory: string | null): Promise<boolean>;
+  onCreateFormOpenChange(open: boolean): void;
   onDisconnect(session: SessionSummary): void;
-  onClose(session: SessionSummary): void;
+  onRequestClose(session: SessionSummary): void;
+  onCancelClose(): void;
+  onConfirmClose(session: SessionSummary): void;
 }
 
 export function SessionSidebar({
@@ -25,36 +30,28 @@ export function SessionSidebar({
   loading,
   error,
   creating,
+  createFormOpen,
+  pendingCloseSessionId,
   closingSessionIds,
   disconnectingSessionId,
   onRefresh,
   onSelect,
   onCreate,
+  onCreateFormOpenChange,
   onDisconnect,
-  onClose,
+  onRequestClose,
+  onCancelClose,
+  onConfirmClose,
 }: SessionSidebarProps) {
-  const [showCreate, setShowCreate] = useState(false);
   const [workingDirectory, setWorkingDirectory] = useState("");
-  const [pendingCloseSessionId, setPendingCloseSessionId] = useState<
-    string | null
-  >(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const created = await onCreate(workingDirectory.trim() || null);
     if (created) {
       setWorkingDirectory("");
-      setShowCreate(false);
+      onCreateFormOpenChange(false);
     }
-  }
-
-  function requestClose(session: SessionSummary) {
-    setPendingCloseSessionId(session.session_id);
-  }
-
-  function confirmClose(session: SessionSummary) {
-    setPendingCloseSessionId(null);
-    onClose(session);
   }
 
   return (
@@ -126,7 +123,7 @@ export function SessionSidebar({
                   aria-label={`Confirm closing ${session.name}`}
                   onKeyDown={(event) => {
                     if (event.key === "Escape") {
-                      setPendingCloseSessionId(null);
+                      onCancelClose();
                     }
                   }}
                 >
@@ -137,7 +134,7 @@ export function SessionSidebar({
                     <button
                       className="session-confirm-cancel"
                       type="button"
-                      onClick={() => setPendingCloseSessionId(null)}
+                      onClick={onCancelClose}
                       autoFocus
                     >
                       Cancel
@@ -145,7 +142,7 @@ export function SessionSidebar({
                     <button
                       className="session-confirm-close"
                       type="button"
-                      onClick={() => confirmClose(session)}
+                      onClick={() => onConfirmClose(session)}
                     >
                       Close
                     </button>
@@ -168,7 +165,7 @@ export function SessionSidebar({
                   <button
                     className="session-action session-close"
                     type="button"
-                    onClick={() => requestClose(session)}
+                    onClick={() => onRequestClose(session)}
                     disabled={closing || disconnecting}
                     aria-label={`Close ${session.name}`}
                     title="Close the session and terminate its shell"
@@ -183,7 +180,7 @@ export function SessionSidebar({
       </div>
 
       <footer className="sidebar-footer">
-        {showCreate ? (
+        {createFormOpen ? (
           <form className="new-session-form" onSubmit={submit}>
             <label>
               Working directory
@@ -198,7 +195,7 @@ export function SessionSidebar({
               <button
                 className="button-secondary"
                 type="button"
-                onClick={() => setShowCreate(false)}
+                onClick={() => onCreateFormOpenChange(false)}
               >
                 Cancel
               </button>
@@ -211,7 +208,7 @@ export function SessionSidebar({
           <button
             className="new-session-button"
             type="button"
-            onClick={() => setShowCreate(true)}
+            onClick={() => onCreateFormOpenChange(true)}
           >
             <span aria-hidden="true">＋</span> New shell
           </button>

@@ -20,6 +20,18 @@ automatic `session-N` name. **Disconnect** detaches this window and leaves the
 shell running. **Close** is deliberately destructive: after confirmation it
 terminates the session for all clients. Closing the app itself only disconnects.
 
+Open the command palette with `Cmd-Shift-P` on macOS or `Ctrl-Shift-P` on
+Windows/Linux. It exposes session creation, refresh, switching, disconnect and
+close, plus terminal input, layout, reconnect, and focus actions. Default
+session shortcuts are:
+
+- new shell: `Cmd/Ctrl-Shift-N`
+- next session: `Cmd/Ctrl-Shift-]`
+- previous session: `Cmd/Ctrl-Shift-[`
+
+These shortcuts are local to the focused app. Other key combinations continue
+to xterm and the PTY unchanged.
+
 ## Verify
 
 ```sh

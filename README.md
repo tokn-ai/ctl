@@ -5,9 +5,9 @@ This repository will contain two independently useful products:
 - `rmux`: persistent local terminal sessions;
 - `ctl`: SSH-authorized access to remote `rmux` sessions.
 
-The current MVP supports local `rmux` sessions, a local desktop terminal,
-and SSH-backed `ctl` access to sessions on macOS and other Unix platforms.
-Windows local IPC is not implemented yet.
+The current MVP supports local `rmux` sessions plus mixed local/SSH sessions
+in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
+local IPC is not implemented yet.
 
 ## Build
 
@@ -119,12 +119,14 @@ without replaying an arbitrarily large journal.
 Optional shell-awareness state is memory-only and separate from the raw output
 journal. Disk-backed history and restart policies are later milestones.
 
-The `rmux` desktop app lists and creates local sessions, renders one terminal
-pane, and exposes input and layout ownership separately. Selecting a session
-does not resize its PTY. **Resize with window** explicitly acquires layout
-ownership and continuously matches the PTY to the window; turning it off
-releases layout ownership. A session created in the GUI starts with this mode
-enabled because that window establishes its initial layout.
+The `rmux` desktop app lists local sessions alongside sessions from persisted
+OpenSSH destinations. Each row and tab carries its host; create, attach,
+reconnect, and kill operations always use that session's original target.
+It renders one terminal pane and exposes input and layout ownership separately.
+Selecting a session does not resize its PTY. **Resize with window** explicitly
+acquires layout ownership and continuously matches the PTY to the window;
+turning it off releases layout ownership. A session created in the GUI starts
+with this mode enabled because that window establishes its initial layout.
 GUI-created shells receive a daemon-assigned name. **Disconnect** closes the
 active tab and detaches its view while leaving the daemon-owned shell running;
 **Close** explicitly terminates the session for every attached client. Closing

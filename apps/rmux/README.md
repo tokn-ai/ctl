@@ -1,7 +1,7 @@
 # rmux app
 
-The local desktop client for daemon-owned `rmux` terminal sessions. It uses
-Tauri 2, React/TypeScript, and xterm.js.
+The desktop client for local and SSH-connected daemon-owned `rmux` terminal
+sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
 ## Develop
 
@@ -15,15 +15,29 @@ pnpm install
 pnpm tauri dev
 ```
 
-The app may also use the path in `RMUXD_BIN`. GUI-created shells receive an
-automatic `session-N` name. **Disconnect** removes an open local tab while
-leaving its shell running. For the active tab it also detaches the live view;
-inactive tabs have no live attachment to detach. **Close** is deliberately
-destructive: after confirmation it terminates the session for all clients.
-Closing the app itself only detaches its active view.
+The app may also use the path in `RMUXD_BIN`. Add an ordinary OpenSSH
+destination or `~/.ssh/config` alias with **+ Host**. The alias list persists
+in the app's WebView storage; credentials, keys, ports, and remote commands do
+not. Local is always present and remains the default for a new shell. The
+sidebar mixes sessions from every configured target and labels each row with
+its host. A failed host reports its own error while last-known sessions from
+other targets remain usable.
 
-The desktop normally has one native window and one WebView. Selecting a daemon
-session opens it as a local tab, but only the active tab holds an attachment.
+SSH uses `ctl-core` and the system `ssh` executable with the fixed remote
+command `exec ctld connect`; forwarding, agent access, X11, local commands,
+and PTY allocation remain disabled. Configure authentication and host trust
+before adding a host—the app does not implement password or host-key prompt
+UI. Connection attempts are bounded to ten seconds.
+
+GUI-created shells receive an automatic `session-N` name. **Disconnect**
+removes an open tab while leaving its shell running. For the active tab it also
+detaches the live view; inactive tabs have no live attachment to detach.
+**Close** is deliberately destructive: after confirmation it terminates the
+session for all clients. Closing the app itself only detaches its active view.
+
+The desktop normally has one native window and one WebView. A session and tab
+are identified by both host and daemon session ID, so equal IDs from different
+daemons remain distinct. Only the active tab holds an attachment.
 Switching or closing tabs does not terminate their daemon-owned sessions.
 The active tab and native window title show the last observed `path — command`
 (or shell name while idle). Inactive tabs retain their last title snapshot in
@@ -41,7 +55,8 @@ button: selecting it in the palette changes it into a second confirmation
 command. It first verifies the running daemon's separate local-control
 endpoint; an older daemon that lacks it leaves the active tab attached and
 reports that restart is unavailable. Once accepted, it terminates every local
-rmux session before both daemon endpoints drain and a fresh daemon starts. It
+rmux session before both daemon endpoints drain and a fresh daemon starts.
+Remote tabs and their SSH attachments are unrelated and remain intact. It
 cannot preserve daemon-owned PTYs, has no remote `ctl` equivalent, and is not a
 version-mismatch escape hatch: protocol upgrades must remain compatible. Default
 terminal shortcuts are:
@@ -70,6 +85,15 @@ pnpm check
 pnpm test
 pnpm build
 cargo test -p rmux-app
+```
+
+An opt-in backend integration test covers remote create, list, attach, and
+kill through the same command functions invoked by Tauri:
+
+```sh
+RMUX_TEST_SSH_TARGET=rmux-docker cargo test -p rmux-app \
+  commands::tests::creates_lists_attaches_and_kills_a_session_over_ssh \
+  -- --ignored --exact
 ```
 
 The GUI never resizes an existing PTY merely because it was selected. **Resize

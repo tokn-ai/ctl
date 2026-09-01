@@ -6,10 +6,11 @@ The monorepo contains two products with independent responsibilities:
 - `ctl` exposes `rmux` sessions through an SSH-authorized remote command
   without reimplementing terminal persistence.
 
-The current milestones make `rmux` usable through a local desktop client and
-through `ctl` from an SSH-authorized remote client. The remote boundary intentionally
-exposes only the `rmux` service; generic remote administration, files, jobs,
-port forwarding, and desktop control remain out of scope.
+The current milestones make `rmux` usable through a desktop client that mixes
+local and SSH targets, and through `ctl` from an SSH-authorized remote client.
+The remote boundary intentionally exposes only the `rmux` service; generic
+remote administration, files, jobs, port forwarding, and desktop control
+remain out of scope.
 
 ## Process ownership
 
@@ -21,7 +22,8 @@ session.
 
 ```text
 local:  rmux / rmux-app -> local IPC -> rmuxd -> PTY -> shell
-remote: ctl -> OpenSSH -> ctld connect -> local IPC -> rmuxd -> PTY -> shell
+remote: ctl / rmux-app -> OpenSSH -> ctld connect -> local IPC
+                                                    -> rmuxd -> PTY -> shell
 ```
 
 Each SSH channel gets a new `ctld connect` process. Ending that process drops
@@ -45,9 +47,9 @@ path or service.
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
 - `rmux`: canonical local CLI and reusable rmux command implementation.
-- `rmux-app`: local Tauri/React terminal client in `apps/rmux`. Its Rust
-  adapter runs `rmux-client`; its webview owns xterm rendering, viewport, and
-  local scrollback.
+- `rmux-app`: local/SSH Tauri/React terminal client in `apps/rmux`. Its Rust
+  adapter composes `ctl-core` transport with `rmux-client`; its webview owns
+  xterm rendering, viewport, and local scrollback.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctld connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
@@ -104,11 +106,21 @@ cannot disturb an established desktop layout.
 
 ## Desktop client boundary
 
-`rmux-app` is a client, not an embedded daemon. Its Tauri backend connects to
-the same per-user endpoint as the CLI and may start a sibling `rmuxd`, but it
-does not link PTY, journal, checkpoint-production, or session-lifetime logic
-into the app process. Closing the window drops its attachment and leases while
-the daemon-owned session continues.
+`rmux-app` is a client, not an embedded daemon. Every Tauri request carries an
+explicit local or OpenSSH target. The backend composes `ctl-core` with
+`rmux-client`, connects to the same per-user local endpoint as the CLI, and may
+start a sibling `rmuxd`, but it does not link PTY, journal,
+checkpoint-production, or session-lifetime logic into the app process.
+Closing the window drops its attachment and leases while the daemon-owned
+session continues.
+
+The frontend persists only OpenSSH destination strings and always includes the
+local target. It queries configured targets concurrently and keys rows, tabs,
+shell-state caches, mutations, and reconnect intent by `(target, session ID)`.
+A failed target retains its last-known rows and reports a target-local error
+without hiding successful targets. OpenSSH configuration remains responsible
+for user, port, credentials, proxies, host verification, and connection
+multiplexing. The app adds no SSH prompt or credential surface.
 
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same
 collision-safe `session-N` allocation used by every unnamed client. Its session
@@ -132,6 +144,10 @@ guesses and signals a process ID.
 
 The local-control endpoint is deliberately distinct from `rmux-proto` and is
 never relayed by `ctld`; a remote `ctl` client cannot restart a daemon.
+The backend records the target owned by its active attachment actor, so a
+local restart detaches only a local attachment; a remote attachment in the
+same window remains live. The frontend removes only local rows and tabs after
+a successful or potentially destructive local restart.
 Because `rmuxd` owns the PTYs, this is not a reconnect or session-preserving
 recovery mechanism. If a restart has been accepted but the old daemon does not
 drain in time, the action fails without force-stopping it. Raw-protocol version

@@ -183,6 +183,7 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
       .map_err(|error| format!("restored checkpoint attachment did not open: {error}"))?;
   let ServerMessage::Attached {
     checkpoint: Some(checkpoint),
+    history: Some(history),
     history_gap: true,
     terminal_size_mismatch: false,
     ..
@@ -191,6 +192,8 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
     return Err(format!("expected checkpoint-backed attach, received {attached:?}").into());
   };
   assert!(checkpoint.is_supported());
+  assert!(history.is_supported());
+  assert_eq!(history.sequence, checkpoint.sequence);
 
   let mut restored_terminal = avt::Vt::new(80, 24);
   restored_terminal.feed_str(&String::from_utf8(checkpoint.payload)?);

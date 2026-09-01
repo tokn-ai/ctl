@@ -43,6 +43,7 @@ describe("TerminalPresenter", () => {
 
     await presenter.restoreCheckpoint(
       terminalSize(8, 2),
+      [],
       new TextEncoder().encode("restored"),
       new Uint8Array(),
     );
@@ -59,12 +60,31 @@ describe("TerminalPresenter", () => {
 
     await presenter.restoreCheckpoint(
       terminalSize(10, 2),
+      [],
       new TextEncoder().encode("amount: "),
       new Uint8Array([0xe2, 0x82]),
     );
     await presenter.write(new Uint8Array([0xac]));
 
     expect(visibleLine(instances[1], 0)).toBe("amount: €");
+  });
+
+  it("restores normalized history above the live checkpoint", async () => {
+    const instances: Terminal[] = [];
+    const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(8, 2));
+
+    await presenter.restoreCheckpoint(
+      terminalSize(8, 2),
+      ["old-one", "old-two"],
+      new TextEncoder().encode("\u001b[2J\u001b[Hlive"),
+      new Uint8Array(),
+    );
+
+    const buffer = instances[1].buffer.normal;
+    expect(buffer.baseY).toBe(2);
+    expect(buffer.getLine(0)?.translateToString(true)).toBe("old-one");
+    expect(buffer.getLine(1)?.translateToString(true)).toBe("old-two");
+    expect(buffer.getLine(buffer.baseY)?.translateToString(true)).toBe("live");
   });
 
   it("serializes output and authoritative geometry changes", async () => {

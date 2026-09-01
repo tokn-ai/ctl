@@ -112,9 +112,10 @@ rmux attach work --resize
 
 The client starts a per-user `rmuxd` on demand. The daemon owns the PTY and
 continues running after clients disconnect. It exits after its final session
-ends. Raw output history is currently bounded and memory-backed. `rmuxd`
-creates versioned terminal-state checkpoints so a new or reconnecting client
-can restore the current screen without replaying an arbitrarily large journal.
+ends. Raw output replay and normalized logical history are bounded and
+memory-backed. `rmuxd` creates paired versioned history/live checkpoints so a
+new or reconnecting GUI can reconstruct scrollback and the current screen
+without replaying an arbitrarily large journal.
 Optional shell-awareness state is memory-only and separate from the raw output
 journal. Disk-backed history and restart policies are later milestones.
 

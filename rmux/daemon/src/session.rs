@@ -6,10 +6,11 @@ use rmux_core::{
 };
 use rmux_proto::{
   CommandSpec, LeaseKind, LeaseStatus, PromptPhase, SessionInfo, SessionStatus, ShellState,
-  TERMINAL_CHECKPOINT_FORMAT, TERMINAL_CHECKPOINT_FORMAT_VERSION, TerminalCheckpoint, TerminalSize,
+  TERMINAL_CHECKPOINT_FORMAT, TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT,
+  TERMINAL_HISTORY_FORMAT_VERSION, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize,
   TuiHint,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -19,6 +20,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
+
+const TERMINAL_SCROLLBACK_MAX_ROWS: usize = 10_000;
+const TERMINAL_SCROLLBACK_MAX_CELLS: usize = 1_000_000;
+// Leave headroom in the 8 MiB protocol frame for line-length prefixes, the
+// live checkpoint, and attachment metadata.
+const TERMINAL_HISTORY_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -76,6 +83,11 @@ enum SessionLifecycle {
 
 struct TerminalState {
   terminal: avt::Vt,
+  history_control_parser: avt::parser::Parser,
+  history_clear_pending: bool,
+  history: TerminalHistory,
+  /// History captured at exactly the same raw-output boundary as `checkpoint`.
+  checkpoint_history: TerminalHistorySnapshot,
   pending_input: Vec<u8>,
   journal: OutputJournal,
   checkpoint: TerminalCheckpoint,
@@ -98,9 +110,85 @@ struct TerminalState {
   alternate_screen: AlternateScreenTracker,
 }
 
+struct TerminalHistory {
+  generation: u64,
+  revision: u64,
+  capacity_bytes: usize,
+  retained_bytes: usize,
+  truncated: bool,
+  lines: VecDeque<String>,
+}
+
+impl TerminalHistory {
+  fn new(capacity_bytes: usize) -> Self {
+    Self {
+      generation: 0,
+      revision: 0,
+      capacity_bytes: capacity_bytes.max(1),
+      retained_bytes: 0,
+      truncated: false,
+      lines: VecDeque::new(),
+    }
+  }
+
+  fn replace(&mut self, lines: Vec<String>, source_truncated: bool) {
+    let mut retained_bytes = lines.iter().map(|line| line.len() + 1).sum::<usize>();
+    let mut lines = VecDeque::from(lines);
+    let mut truncated = self.truncated || source_truncated;
+    while retained_bytes > self.capacity_bytes {
+      let Some(line) = lines.pop_front() else {
+        retained_bytes = 0;
+        break;
+      };
+      retained_bytes = retained_bytes.saturating_sub(line.len() + 1);
+      truncated = true;
+    }
+
+    if self.lines == lines && self.truncated == truncated {
+      return;
+    }
+    self.lines = lines;
+    self.retained_bytes = retained_bytes;
+    self.truncated = truncated;
+    self.revision = self
+      .revision
+      .checked_add(1)
+      .expect("terminal-history revision exhausted");
+  }
+
+  fn clear(&mut self) {
+    self.generation = self
+      .generation
+      .checked_add(1)
+      .expect("terminal-history generation exhausted");
+    self.revision = self
+      .revision
+      .checked_add(1)
+      .expect("terminal-history revision exhausted");
+    self.retained_bytes = 0;
+    self.truncated = false;
+    self.lines.clear();
+  }
+
+  fn snapshot(&self, sequence: u64) -> TerminalHistorySnapshot {
+    TerminalHistorySnapshot {
+      format: TERMINAL_HISTORY_FORMAT.into(),
+      format_version: TERMINAL_HISTORY_FORMAT_VERSION,
+      sequence,
+      generation: self.generation,
+      revision: self.revision,
+      retained_bytes: u64::try_from(self.retained_bytes)
+        .expect("bounded terminal history byte count fits in u64"),
+      truncated: self.truncated,
+      lines: self.lines.iter().cloned().collect(),
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 struct GeometryCheckpoint {
   checkpoint: TerminalCheckpoint,
+  history: TerminalHistorySnapshot,
   geometry_revision: u64,
 }
 
@@ -115,6 +203,9 @@ pub struct AttachSnapshot {
   pub checkpoint_geometry_revision: Option<u64>,
   pub journal: JournalSnapshot,
   pub history_gap: bool,
+  /// Normalized logical lines that are completely outside the live grid.
+  /// Present whenever the attachment also receives a replacing checkpoint.
+  pub history: Option<TerminalHistorySnapshot>,
   /// The internal, unredacted state observed atomically with the journal.
   /// Callers must apply their own attachment visibility policy before sending
   /// it to a client.
@@ -390,38 +481,44 @@ impl Session {
           .is_some_and(|boundary| sequence <= boundary)
       });
     let journal_checkpoint_required = requested.is_none_or(|sequence| sequence < earliest_sequence);
-    let (checkpoint, checkpoint_geometry_revision) = if journal_checkpoint_required {
-      (
-        Some(terminal.checkpoint.clone()),
-        Some(terminal.checkpoint_geometry_revision),
-      )
-    } else if geometry_checkpoint_required {
-      // Prefer the checkpoint made at the resize boundary. It is valid only
-      // while the journal can still replay immediately after it; otherwise
-      // use the newer checkpoint that covers the compacted output as well.
-      let geometry_checkpoint = terminal
-        .last_geometry_checkpoint
-        .as_ref()
-        .filter(|checkpoint| checkpoint.checkpoint.sequence >= earliest_sequence)
-        .cloned()
-        .unwrap_or_else(|| GeometryCheckpoint {
-          checkpoint: terminal.checkpoint.clone(),
-          geometry_revision: terminal.checkpoint_geometry_revision,
-        });
-      (
-        Some(geometry_checkpoint.checkpoint),
-        Some(geometry_checkpoint.geometry_revision),
-      )
-    } else {
-      (None, None)
-    };
+    let (checkpoint, checkpoint_history, checkpoint_geometry_revision) =
+      if journal_checkpoint_required {
+        (
+          Some(terminal.checkpoint.clone()),
+          Some(terminal.checkpoint_history.clone()),
+          Some(terminal.checkpoint_geometry_revision),
+        )
+      } else if geometry_checkpoint_required {
+        // Prefer the checkpoint made at the resize boundary. It is valid only
+        // while the journal can still replay immediately after it; otherwise
+        // use the newer checkpoint that covers the compacted output as well.
+        let geometry_checkpoint = terminal
+          .last_geometry_checkpoint
+          .as_ref()
+          .filter(|checkpoint| checkpoint.checkpoint.sequence >= earliest_sequence)
+          .cloned()
+          .unwrap_or_else(|| GeometryCheckpoint {
+            checkpoint: terminal.checkpoint.clone(),
+            history: terminal.checkpoint_history.clone(),
+            geometry_revision: terminal.checkpoint_geometry_revision,
+          });
+        (
+          Some(geometry_checkpoint.checkpoint),
+          Some(geometry_checkpoint.history),
+          Some(geometry_checkpoint.geometry_revision),
+        )
+      } else {
+        (None, None, None)
+      };
     let replay_from = checkpoint.as_ref().map_or_else(
       || requested.unwrap_or(earliest_sequence),
       |checkpoint| checkpoint.sequence,
     );
     let journal = terminal.journal.snapshot_from(Some(replay_from))?;
-    let history_gap = requested.is_some_and(|sequence| sequence < journal.replay_from);
-
+    let history_gap = requested.is_some_and(|sequence| sequence < journal.replay_from)
+      || checkpoint_history
+        .as_ref()
+        .is_some_and(|history| history.truncated);
     Ok(AttachSnapshot {
       session: SessionInfo {
         session_id: self.id.clone(),
@@ -435,9 +532,11 @@ impl Session {
       checkpoint_geometry_revision,
       journal,
       // A geometry checkpoint may intentionally advance replay past retained
-      // raw bytes. Report that gap just as we report journal compaction so a
-      // client never mistakes its local scrollback for a contiguous replay.
+      // raw bytes, and bounded logical history may have dropped its oldest
+      // lines. Report either gap so the client never presents partial history
+      // as complete.
       history_gap,
+      history: checkpoint_history,
       shell_state: terminal.shell_state.clone(),
     })
   }
@@ -496,6 +595,7 @@ impl Session {
       terminal.last_geometry_change_sequence = Some(observed_sequence);
       terminal.last_geometry_checkpoint = Some(GeometryCheckpoint {
         checkpoint: terminal.checkpoint.clone(),
+        history: terminal.checkpoint_history.clone(),
         geometry_revision: terminal.geometry_revision,
       });
       let _ignored = self.events.send(SessionEvent::PtyGeometryChanged {
@@ -517,8 +617,7 @@ impl Session {
     let publication = self.shell_state_publisher.begin();
     let (chunk, shell_state) = {
       let mut terminal = lock(&self.terminal);
-      let alternate_screen = terminal.alternate_screen.observe(data);
-      feed_terminal_bytes(&mut terminal, data);
+      let alternate_screen = feed_terminal_output(&mut terminal, data);
       let chunk = terminal.journal.append(data);
       let shell_state = alternate_screen.and_then(|tui_hint| {
         (terminal.shell_state.tui_hint != tui_hint).then(|| {
@@ -762,8 +861,13 @@ impl SessionManager {
     let (events, _) = broadcast::channel(256);
     let terminal_parser = terminal_emulator(&terminal_size);
     let shell_state = ShellState::default();
+    let history = TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES);
     let mut terminal = TerminalState {
       terminal: terminal_parser,
+      history_control_parser: avt::parser::Parser::new(),
+      history_clear_pending: false,
+      checkpoint_history: history.snapshot(0),
+      history,
       pending_input: Vec::new(),
       journal: OutputJournal::new(self.inner.journal_capacity_bytes),
       checkpoint: TerminalCheckpoint {
@@ -1039,6 +1143,19 @@ struct AlternateScreenTracker {
 }
 
 impl AlternateScreenTracker {
+  fn active(&self) -> bool {
+    self.active_modes != 0
+  }
+
+  fn reset(&mut self) -> Option<TuiHint> {
+    let changed = self.tui_hint != TuiHint::Inline;
+    *self = Self {
+      tui_hint: TuiHint::Inline,
+      ..Self::default()
+    };
+    changed.then_some(TuiHint::Inline)
+  }
+
   fn observe(&mut self, data: &[u8]) -> Option<TuiHint> {
     if data.is_empty() {
       return None;
@@ -1240,6 +1357,7 @@ fn revise_shell_state(terminal: &mut TerminalState) -> ShellState {
 }
 
 fn refresh_checkpoint(terminal: &mut TerminalState) {
+  refresh_history(terminal);
   terminal.checkpoint = TerminalCheckpoint {
     format: TERMINAL_CHECKPOINT_FORMAT.into(),
     format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
@@ -1248,50 +1366,168 @@ fn refresh_checkpoint(terminal: &mut TerminalState) {
     payload: terminal.terminal.dump().into_bytes(),
     input_prefix: terminal.pending_input.clone(),
   };
+  terminal.checkpoint_history = terminal.history.snapshot(terminal.checkpoint.sequence);
   terminal.checkpoint_geometry_revision = terminal.geometry_revision;
 }
 
+fn refresh_history(terminal: &mut TerminalState) {
+  if terminal.alternate_screen.active() {
+    return;
+  }
+  let source_truncated = terminal
+    .terminal
+    .lines()
+    .count()
+    .saturating_sub(usize::from(terminal.terminal_size.rows))
+    >= terminal_scrollback_rows(&terminal.terminal_size);
+  let lines = logical_history_lines(&terminal.terminal, &terminal.terminal_size);
+  terminal.history.replace(lines, source_truncated);
+}
+
+fn logical_history_lines(terminal: &avt::Vt, terminal_size: &TerminalSize) -> Vec<String> {
+  let mut all_lines = terminal.text();
+  let mut live_terminal = terminal_emulator(terminal_size);
+  live_terminal.feed_str(&terminal.dump());
+  let live_lines = live_terminal.text();
+
+  let mut matching_suffix = 0;
+  while matching_suffix < all_lines.len()
+    && matching_suffix < live_lines.len()
+    && all_lines[all_lines.len() - 1 - matching_suffix]
+      == live_lines[live_lines.len() - 1 - matching_suffix]
+  {
+    matching_suffix += 1;
+  }
+
+  let mut history_end = all_lines.len().saturating_sub(matching_suffix);
+  if matching_suffix < live_lines.len() && history_end > 0 {
+    let active_prefix = &all_lines[history_end - 1];
+    let visible_suffix = &live_lines[live_lines.len() - 1 - matching_suffix];
+    if active_prefix.ends_with(visible_suffix) {
+      history_end -= 1;
+    } else {
+      // A checkpoint dump must describe a suffix of the authoritative primary
+      // buffer. If a future emulator format violates that invariant, omit
+      // history rather than duplicating mutable screen content as scrollback.
+      history_end = 0;
+    }
+  }
+  all_lines.truncate(history_end);
+  all_lines
+}
+
 fn terminal_emulator(terminal_size: &TerminalSize) -> avt::Vt {
-  // Raw output is the daemon's bounded resumable history. The derived parser
-  // exists only to make checkpoints, so retaining a second unbounded rendered
-  // scrollback here would duplicate client-owned presentation state.
+  // rmuxd owns a bounded authoritative scrollback in addition to its live
+  // checkpoint. Raw output remains a short delta journal, not history state.
   avt::Vt::builder()
     .size(
       usize::from(terminal_size.columns),
       usize::from(terminal_size.rows),
     )
-    .scrollback_limit(0)
+    .scrollback_limit(terminal_scrollback_rows(terminal_size))
     .build()
 }
 
+fn terminal_scrollback_rows(terminal_size: &TerminalSize) -> usize {
+  let columns = usize::from(terminal_size.columns).max(1);
+  TERMINAL_SCROLLBACK_MAX_ROWS.min(TERMINAL_SCROLLBACK_MAX_CELLS / columns)
+}
+
+fn feed_terminal_output(terminal: &mut TerminalState, data: &[u8]) -> Option<TuiHint> {
+  feed_terminal_bytes_inner(terminal, data)
+}
+
+#[cfg(test)]
 fn feed_terminal_bytes(terminal: &mut TerminalState, data: &[u8]) {
+  let _ignored = feed_terminal_bytes_inner(terminal, data);
+}
+
+fn feed_terminal_bytes_inner(terminal: &mut TerminalState, data: &[u8]) -> Option<TuiHint> {
+  let mut tui_hint = None;
   terminal.pending_input.extend_from_slice(data);
 
   loop {
     match std::str::from_utf8(&terminal.pending_input) {
       Ok(valid) => {
-        terminal.terminal.feed_str(valid);
+        let valid = valid.to_owned();
+        tui_hint = feed_terminal_text(terminal, &valid).or(tui_hint);
         terminal.pending_input.clear();
-        return;
+        break;
       }
       Err(error) => {
         let valid_up_to = error.valid_up_to();
         if valid_up_to > 0 {
           let valid = String::from_utf8(terminal.pending_input[..valid_up_to].to_vec())
             .expect("valid UTF-8 prefix reported by std::str::from_utf8");
-          terminal.terminal.feed_str(&valid);
+          tui_hint = feed_terminal_text(terminal, &valid).or(tui_hint);
           terminal.pending_input.drain(..valid_up_to);
           continue;
         }
 
         let Some(invalid_length) = error.error_len() else {
-          return;
+          break;
         };
-        terminal.terminal.feed('\u{fffd}');
+        tui_hint = feed_terminal_character(terminal, '\u{fffd}').or(tui_hint);
         terminal.pending_input.drain(..invalid_length);
       }
     }
   }
+
+  tui_hint
+}
+
+fn feed_terminal_text(terminal: &mut TerminalState, text: &str) -> Option<TuiHint> {
+  let mut tui_hint = None;
+  for ch in text.chars() {
+    tui_hint = feed_terminal_character(terminal, ch).or(tui_hint);
+  }
+  // `Vt::feed` deliberately defers dirty-line collection and scrollback GC;
+  // an empty batch performs that bounded maintenance once per PTY read.
+  terminal.terminal.feed_str("");
+  tui_hint
+}
+
+fn feed_terminal_character(terminal: &mut TerminalState, ch: char) -> Option<TuiHint> {
+  use avt::parser::{EdScope, Function};
+
+  let mut encoded = [0; 4];
+  let tui_hint = terminal
+    .alternate_screen
+    .observe(ch.encode_utf8(&mut encoded).as_bytes());
+  let history_action = match terminal.history_control_parser.feed(ch) {
+    Some(Function::Ed(EdScope::SavedLines)) => Some(false),
+    Some(Function::Ris) => Some(true),
+    _ => None,
+  };
+  terminal.terminal.feed(ch);
+
+  let Some(terminal_already_reset) = history_action else {
+    apply_pending_history_clear(terminal);
+    return tui_hint;
+  };
+  terminal.history.clear();
+  if terminal_already_reset {
+    terminal.history_clear_pending = false;
+    return terminal.alternate_screen.reset().or(tui_hint);
+  }
+  terminal.history_clear_pending = true;
+  apply_pending_history_clear(terminal);
+  tui_hint
+}
+
+fn apply_pending_history_clear(terminal: &mut TerminalState) {
+  if !terminal.history_clear_pending || terminal.alternate_screen.active() {
+    return;
+  }
+
+  // AVT currently parses ED 3 but intentionally leaves saved lines intact.
+  // Replaying its primary-screen dump into a fresh bounded emulator preserves
+  // the live view and parser prefix while dropping only the old scrollback.
+  let payload = terminal.terminal.dump();
+  let mut replacement = terminal_emulator(&terminal.terminal_size);
+  replacement.feed_str(&payload);
+  terminal.terminal = replacement;
+  terminal.history_clear_pending = false;
 }
 
 fn to_pty_size(size: &TerminalSize) -> PtySize {
@@ -1416,15 +1652,110 @@ mod tests {
   }
 
   #[test]
-  fn checkpoint_parser_retains_only_visible_rows() {
+  fn checkpoint_parser_retains_bounded_scrollback_behind_the_live_view() {
     let mut terminal = terminal_state();
     let rows = usize::from(terminal.terminal_size.rows);
 
     for _ in 0..(rows + 10) {
-      feed_terminal_bytes(&mut terminal, b"line\n");
+      feed_terminal_bytes(&mut terminal, b"line\r\n");
     }
 
-    assert_eq!(terminal.terminal.lines().count(), rows);
+    assert_eq!(terminal.terminal.view().count(), rows);
+    assert!(terminal.terminal.lines().count() > rows);
+  }
+
+  #[test]
+  fn history_contains_only_complete_logical_lines_above_the_live_view() {
+    let mut terminal = terminal_state_with_size(5, 2, 1024);
+
+    feed_terminal_bytes(&mut terminal, b"first\r\nsecond\r\nlive");
+    refresh_history(&mut terminal);
+
+    assert_eq!(terminal.history.snapshot(0).lines, vec!["first"]);
+  }
+
+  #[test]
+  fn soft_wrapped_history_is_one_logical_line_across_resize() {
+    let mut terminal = terminal_state_with_size(5, 2, 1024);
+
+    feed_terminal_bytes(&mut terminal, b"abcdefghij\r\none\r\ntwo");
+    refresh_history(&mut terminal);
+    assert_eq!(terminal.history.snapshot(0).lines, vec!["abcdefghij"]);
+
+    terminal.terminal.resize(10, 2);
+    terminal.terminal_size.columns = 10;
+    refresh_history(&mut terminal);
+    assert_eq!(terminal.history.snapshot(0).lines, vec!["abcdefghij"]);
+  }
+
+  #[test]
+  fn alternate_screen_output_does_not_replace_primary_history() {
+    let mut terminal = terminal_state_with_size(8, 2, 1024);
+    feed_terminal_bytes(&mut terminal, b"history\r\nprimary\r\nlive");
+    refresh_history(&mut terminal);
+    let primary_history = terminal.history.snapshot(0);
+
+    feed_terminal_output(&mut terminal, b"\x1b[?1049halternate\r\ncontent\r\nmore");
+    refresh_history(&mut terminal);
+    assert_eq!(terminal.history.snapshot(0), primary_history);
+
+    feed_terminal_output(&mut terminal, b"\x1b[?1049l");
+    refresh_history(&mut terminal);
+    assert_eq!(terminal.history.snapshot(0), primary_history);
+  }
+
+  #[test]
+  fn erase_saved_lines_starts_a_new_history_generation() {
+    let mut terminal = terminal_state_with_size(8, 2, 1024);
+    feed_terminal_bytes(&mut terminal, b"history\r\nprimary\r\nlive");
+    refresh_checkpoint(&mut terminal);
+    let old_checkpoint_history = terminal.checkpoint_history.clone();
+    assert_eq!(old_checkpoint_history.lines, vec!["history"]);
+
+    feed_terminal_bytes(&mut terminal, b"\x1b[3J");
+    refresh_history(&mut terminal);
+
+    let history = terminal.history.snapshot(0);
+    assert_eq!(history.generation, old_checkpoint_history.generation + 1);
+    assert!(history.lines.is_empty());
+    assert_eq!(terminal.checkpoint_history, old_checkpoint_history);
+    assert_eq!(terminal.terminal.lines().count(), 2);
+  }
+
+  #[test]
+  fn output_after_erasing_saved_lines_in_the_same_chunk_is_retained() {
+    let mut terminal = terminal_state_with_size(12, 2, 1024);
+    feed_terminal_bytes(&mut terminal, b"old-history\r\nprimary\r\nlive");
+    refresh_history(&mut terminal);
+    assert_eq!(terminal.history.snapshot(0).lines, vec!["old-history"]);
+
+    feed_terminal_bytes(
+      &mut terminal,
+      b"\x1b[3J\x1b[2J\x1b[Hnew-history\r\nnew-screen\r\nlive",
+    );
+    refresh_history(&mut terminal);
+
+    assert_eq!(terminal.history.snapshot(0).lines, vec!["new-history"]);
+  }
+
+  #[test]
+  fn bounded_history_discards_whole_oldest_lines() {
+    let mut history = TerminalHistory::new(8);
+
+    history.replace(vec!["one".into(), "two".into(), "three".into()], false);
+    let first = history.snapshot(0);
+    assert_eq!(first.lines, vec!["three"]);
+    assert_eq!(first.retained_bytes, 6);
+    assert!(first.truncated);
+
+    history.replace(vec!["three".into()], false);
+    assert_eq!(history.snapshot(0), first);
+
+    history.clear();
+    let cleared = history.snapshot(0);
+    assert_eq!(cleared.generation, first.generation + 1);
+    assert!(!cleared.truncated);
+    assert!(cleared.lines.is_empty());
   }
 
   #[test]
@@ -1559,8 +1890,30 @@ mod tests {
 
   fn terminal_state() -> TerminalState {
     let terminal_size = TerminalSize::default();
+    terminal_state_with_size(
+      terminal_size.columns,
+      terminal_size.rows,
+      TERMINAL_HISTORY_CAPACITY_BYTES,
+    )
+  }
+
+  fn terminal_state_with_size(
+    columns: u16,
+    rows: u16,
+    history_capacity_bytes: usize,
+  ) -> TerminalState {
+    let terminal_size = TerminalSize {
+      columns,
+      rows,
+      ..TerminalSize::default()
+    };
+    let history = TerminalHistory::new(history_capacity_bytes);
     let mut state = TerminalState {
       terminal: terminal_emulator(&terminal_size),
+      history_control_parser: avt::parser::Parser::new(),
+      history_clear_pending: false,
+      checkpoint_history: history.snapshot(0),
+      history,
       pending_input: Vec::new(),
       journal: OutputJournal::new(1024),
       checkpoint: TerminalCheckpoint {
@@ -1590,6 +1943,10 @@ mod tests {
     terminal.feed_str(&payload);
     TerminalState {
       terminal,
+      history_control_parser: avt::parser::Parser::new(),
+      history_clear_pending: false,
+      history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES),
+      checkpoint_history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES).snapshot(0),
       pending_input: checkpoint.input_prefix.clone(),
       journal: OutputJournal::new(1024),
       terminal_size: checkpoint.terminal_size.clone(),

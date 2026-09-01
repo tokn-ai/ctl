@@ -430,13 +430,20 @@ async fn forward_event(
   let event = match event {
     AttachmentEvent::Checkpoint {
       checkpoint,
+      history,
       history_gap,
     } => {
       let acknowledgement = PresentationAcknowledgement::Checkpoint {
         sequence: checkpoint.sequence,
       };
       let event_id = actor.set_pending(acknowledgement).await?;
-      AttachmentEventDto::checkpoint(&actor.attachment_id, event_id, checkpoint, history_gap)
+      AttachmentEventDto::checkpoint(
+        &actor.attachment_id,
+        event_id,
+        checkpoint,
+        history,
+        history_gap,
+      )
     }
     AttachmentEvent::Output {
       sequence_start,

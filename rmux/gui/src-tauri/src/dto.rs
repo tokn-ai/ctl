@@ -5,7 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use rmux_client::{AttachExit, AttachExitReason, AttachedSession, AttachmentControl};
 use rmux_proto::{
   ErrorCode, LeaseKind, LeaseStatus, PromptPhase, SessionInfo, SessionStatus, ShellState,
-  ShellType, TerminalCheckpoint, TerminalSize, TuiHint,
+  ShellType, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, TuiHint,
 };
 use serde::{Deserialize, Serialize};
 
@@ -340,6 +340,33 @@ impl From<TerminalCheckpoint> for TerminalCheckpointDto {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalHistorySnapshotDto {
+  pub format: String,
+  pub format_version: u16,
+  pub sequence: String,
+  pub generation: String,
+  pub revision: String,
+  pub retained_bytes: String,
+  pub truncated: bool,
+  pub lines: Vec<String>,
+}
+
+impl From<TerminalHistorySnapshot> for TerminalHistorySnapshotDto {
+  fn from(value: TerminalHistorySnapshot) -> Self {
+    Self {
+      format: value.format,
+      format_version: value.format_version,
+      sequence: value.sequence.to_string(),
+      generation: value.generation.to_string(),
+      revision: value.revision.to_string(),
+      retained_bytes: value.retained_bytes.to_string(),
+      truncated: value.truncated,
+      lines: value.lines,
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationAcknowledgement {
   Checkpoint { sequence: u64 },
@@ -375,6 +402,7 @@ pub enum AttachmentEventDto {
     attachment_id: String,
     event_id: String,
     checkpoint: TerminalCheckpointDto,
+    history: TerminalHistorySnapshotDto,
     history_gap: bool,
   },
   Output {
@@ -428,12 +456,14 @@ impl AttachmentEventDto {
     attachment_id: &str,
     event_id: String,
     checkpoint: TerminalCheckpoint,
+    history: TerminalHistorySnapshot,
     history_gap: bool,
   ) -> Self {
     Self::Checkpoint {
       attachment_id: attachment_id.into(),
       event_id,
       checkpoint: checkpoint.into(),
+      history: history.into(),
       history_gap,
     }
   }
@@ -640,6 +670,26 @@ mod tests {
     assert_eq!(json["event_type"], "output");
     assert_eq!(json["sequence_end"], u64::MAX.to_string());
     assert_eq!(json["data_base64"], "AP8=");
+  }
+
+  #[test]
+  fn terminal_history_preserves_u64_precision_as_decimal_strings() {
+    let dto = TerminalHistorySnapshotDto::from(TerminalHistorySnapshot {
+      format: rmux_proto::TERMINAL_HISTORY_FORMAT.into(),
+      format_version: rmux_proto::TERMINAL_HISTORY_FORMAT_VERSION,
+      sequence: u64::MAX,
+      generation: u64::MAX - 1,
+      revision: u64::MAX - 2,
+      retained_bytes: u64::MAX - 3,
+      truncated: true,
+      lines: vec!["history".into()],
+    });
+
+    let json = serde_json::to_value(dto).unwrap();
+    assert_eq!(json["sequence"], u64::MAX.to_string());
+    assert_eq!(json["generation"], (u64::MAX - 1).to_string());
+    assert_eq!(json["revision"], (u64::MAX - 2).to_string());
+    assert_eq!(json["retained_bytes"], (u64::MAX - 3).to_string());
   }
 
   #[test]

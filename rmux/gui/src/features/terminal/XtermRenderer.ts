@@ -46,10 +46,16 @@ export class XtermRenderer {
 
   restoreCheckpoint(
     terminalSize: TerminalSize,
+    historyLines: string[],
     payload: Uint8Array,
     inputPrefix: Uint8Array,
   ): Promise<void> {
-    return this.presenter.restoreCheckpoint(terminalSize, payload, inputPrefix);
+    return this.presenter.restoreCheckpoint(
+      terminalSize,
+      historyLines,
+      payload,
+      inputPrefix,
+    );
   }
 
   recreate(terminalSize: TerminalSize): Promise<void> {

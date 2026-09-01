@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
 ///
@@ -12,6 +12,8 @@ pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 pub const DEFAULT_PRESENTATION_WINDOW_BYTES: u64 = 256 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
+pub const TERMINAL_HISTORY_FORMAT: &str = "rmux_logical_lines";
+pub const TERMINAL_HISTORY_FORMAT_VERSION: u16 = 1;
 /// Maximum UTF-8 byte length of a shell-reported running-command summary.
 ///
 /// This is intentionally much smaller than the editable command-line bound:
@@ -73,6 +75,31 @@ impl TerminalCheckpoint {
   pub fn is_supported(&self) -> bool {
     self.format == TERMINAL_CHECKPOINT_FORMAT
       && self.format_version == TERMINAL_CHECKPOINT_FORMAT_VERSION
+  }
+}
+
+/// Bounded, normalized logical lines above an authoritative live checkpoint.
+///
+/// Unlike raw PTY output, these lines no longer contain terminal controls and
+/// do not change within a history generation. A new generation replaces all
+/// older lines, such as after the application erases saved lines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalHistorySnapshot {
+  pub format: String,
+  pub format_version: u16,
+  /// Raw-output boundary shared with the accompanying terminal checkpoint.
+  pub sequence: u64,
+  pub generation: u64,
+  pub revision: u64,
+  pub retained_bytes: u64,
+  pub truncated: bool,
+  pub lines: Vec<String>,
+}
+
+impl TerminalHistorySnapshot {
+  #[must_use]
+  pub fn is_supported(&self) -> bool {
+    self.format == TERMINAL_HISTORY_FORMAT && self.format_version == TERMINAL_HISTORY_FORMAT_VERSION
   }
 }
 
@@ -470,6 +497,7 @@ pub enum ServerMessage {
     replay_from: u64,
     history_gap: bool,
     checkpoint: Option<TerminalCheckpoint>,
+    history: Option<Box<TerminalHistorySnapshot>>,
     terminal_size_mismatch: bool,
     input_lease: LeaseStatus,
     layout_lease: LeaseStatus,
@@ -505,6 +533,7 @@ pub enum ServerMessage {
   },
   Checkpoint {
     checkpoint: TerminalCheckpoint,
+    history: Box<TerminalHistorySnapshot>,
     history_gap: bool,
   },
   Output {
@@ -842,8 +871,8 @@ mod tests {
   }
 
   #[test]
-  fn presentation_flow_control_uses_protocol_version_eight() {
-    assert_eq!(PROTOCOL_VERSION, 8);
+  fn terminal_history_snapshots_use_protocol_version_nine() {
+    assert_eq!(PROTOCOL_VERSION, 9);
   }
 
   #[test]

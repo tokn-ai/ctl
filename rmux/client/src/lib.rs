@@ -2,7 +2,8 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 pub use rmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use rmux_proto::{
   ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
-  SessionInfo, ShellState, TerminalCheckpoint, TerminalSize, read_frame, write_frame,
+  SessionInfo, ShellState, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, read_frame,
+  write_frame,
 };
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal};
@@ -57,6 +58,7 @@ pub struct AttachedSession {
   pub replay_from: u64,
   pub history_gap: bool,
   pub checkpoint: Option<TerminalCheckpoint>,
+  pub history: Option<TerminalHistorySnapshot>,
   pub terminal_size_mismatch: bool,
   pub input_lease: LeaseStatus,
   pub layout_lease: LeaseStatus,
@@ -255,6 +257,7 @@ impl Default for AttachmentControllerOptions {
 pub enum AttachmentEvent {
   Checkpoint {
     checkpoint: TerminalCheckpoint,
+    history: TerminalHistorySnapshot,
     history_gap: bool,
   },
   Output {
@@ -724,7 +727,7 @@ pub struct AttachmentController<S> {
   commands: Option<mpsc::Receiver<AttachmentCommand>>,
   acknowledgements: Option<mpsc::Receiver<PresentationAcknowledgement>>,
   events: mpsc::Sender<AttachmentEvent>,
-  initial_checkpoint: Option<(TerminalCheckpoint, bool)>,
+  initial_checkpoint: Option<(TerminalCheckpoint, TerminalHistorySnapshot, bool)>,
   /// A renderer may continue to present raw bytes after declaring a geometry
   /// incompatible, but it cannot resume safely until a checkpoint is applied.
   renderer_requires_checkpoint: bool,
@@ -909,6 +912,7 @@ where
     replay_from,
     history_gap,
     checkpoint,
+    history,
     terminal_size_mismatch,
     input_lease,
     layout_lease,
@@ -927,6 +931,7 @@ where
       replay_from,
       history_gap,
       checkpoint,
+      history: history.map(|history| *history),
       terminal_size_mismatch,
       input_lease,
       layout_lease,
@@ -959,14 +964,18 @@ impl<S> AttachmentController<S> {
         event_queue_capacity: options.event_queue_capacity,
       });
     }
-    if let Some(checkpoint) = attached.checkpoint.as_ref() {
-      validate_checkpoint(checkpoint)?;
-      if checkpoint.sequence != attached.replay_from {
-        return Err(ClientError::InvalidInitialCheckpointSequence {
-          checkpoint_sequence: checkpoint.sequence,
-          replay_from: attached.replay_from,
-        });
+    match (attached.checkpoint.as_ref(), attached.history.as_ref()) {
+      (Some(checkpoint), Some(history)) => {
+        validate_checkpoint_bundle(checkpoint, history)?;
+        if checkpoint.sequence != attached.replay_from {
+          return Err(ClientError::InvalidInitialCheckpointSequence {
+            checkpoint_sequence: checkpoint.sequence,
+            replay_from: attached.replay_from,
+          });
+        }
       }
+      (None, None) => {}
+      _ => return Err(ClientError::CheckpointHistoryPresenceMismatch),
     }
 
     let state = AttachmentState::from_attached(attached);
@@ -976,7 +985,8 @@ impl<S> AttachmentController<S> {
     let initial_checkpoint = attached
       .checkpoint
       .as_ref()
-      .map(|checkpoint| (checkpoint.clone(), attached.history_gap));
+      .zip(attached.history.as_ref())
+      .map(|(checkpoint, history)| (checkpoint.clone(), history.clone(), attached.history_gap));
     let renderer_requires_checkpoint =
       !options.renderer_starts_compatible || attached.checkpoint.is_some();
     if renderer_requires_checkpoint {
@@ -1086,7 +1096,7 @@ impl<S> AttachmentController<S> {
     presentation_progress: watch::Sender<Option<u64>>,
     mut writer_statuses: mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<AttachExit, ClientError> {
-    if let Some((checkpoint, history_gap)) = self.initial_checkpoint.take() {
+    if let Some((checkpoint, history, history_gap)) = self.initial_checkpoint.take() {
       let queued = self.enqueue_presentation(PendingPresentation::Checkpoint {
         sequence: checkpoint.sequence,
       });
@@ -1098,6 +1108,7 @@ impl<S> AttachmentController<S> {
         .emit_event(
           AttachmentEvent::Checkpoint {
             checkpoint,
+            history,
             history_gap,
           },
           &mut writer_statuses,
@@ -1173,10 +1184,11 @@ impl<S> AttachmentController<S> {
       }
       ServerMessage::Checkpoint {
         checkpoint,
+        history,
         history_gap,
       } => {
         self
-          .process_checkpoint(checkpoint, history_gap, writer_statuses)
+          .process_checkpoint(checkpoint, *history, history_gap, writer_statuses)
           .await
       }
       ServerMessage::PtyGeometryChanged {
@@ -1251,10 +1263,11 @@ impl<S> AttachmentController<S> {
   async fn process_checkpoint(
     &mut self,
     checkpoint: TerminalCheckpoint,
+    history: TerminalHistorySnapshot,
     history_gap: bool,
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
-    self.accept_checkpoint(&checkpoint)?;
+    self.accept_checkpoint(&checkpoint, &history)?;
     let queued = self.enqueue_presentation(PendingPresentation::Checkpoint {
       sequence: checkpoint.sequence,
     });
@@ -1266,6 +1279,7 @@ impl<S> AttachmentController<S> {
       .emit_event(
         AttachmentEvent::Checkpoint {
           checkpoint,
+          history,
           history_gap,
         },
         writer_statuses,
@@ -1370,8 +1384,12 @@ impl<S> AttachmentController<S> {
     Ok(())
   }
 
-  fn accept_checkpoint(&mut self, checkpoint: &TerminalCheckpoint) -> Result<(), ClientError> {
-    validate_checkpoint(checkpoint)?;
+  fn accept_checkpoint(
+    &mut self,
+    checkpoint: &TerminalCheckpoint,
+    history: &TerminalHistorySnapshot,
+  ) -> Result<(), ClientError> {
+    validate_checkpoint_bundle(checkpoint, history)?;
     let previous_sequence = self.state.received_sequence();
     if checkpoint.sequence < previous_sequence {
       return Err(ClientError::StaleCheckpoint {
@@ -1824,6 +1842,26 @@ fn validate_checkpoint(checkpoint: &TerminalCheckpoint) -> Result<(), ClientErro
   }
 }
 
+fn validate_checkpoint_bundle(
+  checkpoint: &TerminalCheckpoint,
+  history: &TerminalHistorySnapshot,
+) -> Result<(), ClientError> {
+  validate_checkpoint(checkpoint)?;
+  if !history.is_supported() {
+    return Err(ClientError::UnsupportedTerminalHistory {
+      format: history.format.clone(),
+      format_version: history.format_version,
+    });
+  }
+  if history.sequence != checkpoint.sequence {
+    return Err(ClientError::InvalidTerminalHistorySequence {
+      checkpoint_sequence: checkpoint.sequence,
+      history_sequence: history.sequence,
+    });
+  }
+  Ok(())
+}
+
 /// Runs the standard terminal presentation for an attached session.
 ///
 /// The function never resizes the remote PTY. That action requires an
@@ -2074,6 +2112,7 @@ async fn present_interactive_events(
     match event {
       AttachmentEvent::Checkpoint {
         checkpoint,
+        history: _,
         history_gap,
       } => {
         if history_gap {
@@ -2213,6 +2252,17 @@ pub enum ClientError {
   AttachmentCommand(#[from] AttachmentCommandError),
   #[error("unsupported terminal checkpoint format {format} version {format_version}")]
   UnsupportedCheckpoint { format: String, format_version: u16 },
+  #[error("a terminal checkpoint and its history snapshot must be delivered together")]
+  CheckpointHistoryPresenceMismatch,
+  #[error("unsupported terminal history format {format} version {format_version}")]
+  UnsupportedTerminalHistory { format: String, format_version: u16 },
+  #[error(
+    "terminal history sequence {history_sequence} does not match checkpoint sequence {checkpoint_sequence}"
+  )]
+  InvalidTerminalHistorySequence {
+    checkpoint_sequence: u64,
+    history_sequence: u64,
+  },
   #[error(
     "initial checkpoint sequence {checkpoint_sequence} does not match replay start {replay_from}"
   )]
@@ -2303,6 +2353,7 @@ mod tests {
           replay_from: 0,
           history_gap: false,
           checkpoint: None,
+          history: None,
           terminal_size_mismatch: false,
           input_lease: LeaseStatus {
             held: true,
@@ -2362,6 +2413,37 @@ mod tests {
 
     assert!(cache.apply_if_newer(shell_state(5, "/after")));
     assert_eq!(cache.snapshot(), shell_state(5, "/after"));
+  }
+
+  #[test]
+  fn controller_rejects_a_checkpoint_without_its_history_snapshot() {
+    let (client, _daemon) = tokio::io::duplex(64);
+    let mut attached = attached_session(7, Some(checkpoint(7)), ShellState::default());
+    attached.history = None;
+
+    assert!(matches!(
+      AttachmentController::new(client, &attached, controller_options()),
+      Err(ClientError::CheckpointHistoryPresenceMismatch)
+    ));
+  }
+
+  #[test]
+  fn controller_rejects_history_from_a_different_checkpoint_boundary() {
+    let (client, _daemon) = tokio::io::duplex(64);
+    let mut attached = attached_session(7, Some(checkpoint(7)), ShellState::default());
+    attached
+      .history
+      .as_mut()
+      .expect("checkpoint fixture includes history")
+      .sequence = 6;
+
+    assert!(matches!(
+      AttachmentController::new(client, &attached, controller_options()),
+      Err(ClientError::InvalidTerminalHistorySequence {
+        checkpoint_sequence: 7,
+        history_sequence: 6,
+      })
+    ));
   }
 
   #[test]
@@ -2571,6 +2653,7 @@ mod tests {
       &mut daemon,
       &ServerMessage::Checkpoint {
         checkpoint: checkpoint.clone(),
+        history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: true,
       },
     )
@@ -2580,6 +2663,7 @@ mod tests {
       events.recv().await,
       Some(AttachmentEvent::Checkpoint {
         checkpoint: checkpoint.clone(),
+        history: terminal_history(checkpoint.sequence),
         history_gap: true,
       })
     );
@@ -2617,6 +2701,7 @@ mod tests {
       &mut daemon,
       &ServerMessage::Checkpoint {
         checkpoint: checkpoint.clone(),
+        history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: true,
       },
     )
@@ -2626,6 +2711,7 @@ mod tests {
       events.recv().await,
       Some(AttachmentEvent::Checkpoint {
         checkpoint: checkpoint.clone(),
+        history: terminal_history(checkpoint.sequence),
         history_gap: true,
       })
     );
@@ -2819,6 +2905,7 @@ mod tests {
       &mut daemon,
       &ServerMessage::Checkpoint {
         checkpoint: checkpoint.clone(),
+        history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: false,
       },
     )
@@ -2851,6 +2938,7 @@ mod tests {
       &mut daemon,
       &ServerMessage::Checkpoint {
         checkpoint: checkpoint.clone(),
+        history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: false,
       },
     )
@@ -3156,12 +3244,16 @@ mod tests {
     checkpoint: Option<TerminalCheckpoint>,
     shell_state: ShellState,
   ) -> AttachedSession {
+    let history = checkpoint
+      .as_ref()
+      .map(|checkpoint| terminal_history(checkpoint.sequence));
     AttachedSession {
       attachment_token: "token".into(),
       session: session_info(),
       replay_from,
       history_gap: false,
       checkpoint,
+      history,
       terminal_size_mismatch: false,
       input_lease: LeaseStatus {
         held: false,
@@ -3188,6 +3280,19 @@ mod tests {
       terminal_size: TerminalSize::default(),
       payload: Vec::new(),
       input_prefix: Vec::new(),
+    }
+  }
+
+  fn terminal_history(sequence: u64) -> TerminalHistorySnapshot {
+    TerminalHistorySnapshot {
+      format: rmux_proto::TERMINAL_HISTORY_FORMAT.into(),
+      format_version: rmux_proto::TERMINAL_HISTORY_FORMAT_VERSION,
+      sequence,
+      generation: 0,
+      revision: 0,
+      retained_bytes: 0,
+      truncated: false,
+      lines: Vec::new(),
     }
   }
 

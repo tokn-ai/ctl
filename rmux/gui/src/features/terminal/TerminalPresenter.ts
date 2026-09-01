@@ -32,12 +32,14 @@ export class TerminalPresenter {
 
   restoreCheckpoint(
     terminalSize: TerminalSize,
+    historyLines: string[],
     payload: Uint8Array,
     inputPrefix: Uint8Array,
   ): Promise<void> {
     return this.enqueue(async () => {
       this.adapter.dispose();
       this.adapter = this.factory(terminalSize);
+      await this.writeHistory(historyLines, terminalSize.rows);
       await this.writeBytes(payload);
       await this.writeBytes(inputPrefix);
     });
@@ -81,5 +83,14 @@ export class TerminalPresenter {
     return new Promise((resolve) => {
       this.adapter.write(data, resolve);
     });
+  }
+
+  private writeHistory(lines: string[], rows: number): Promise<void> {
+    if (lines.length === 0) {
+      return Promise.resolve();
+    }
+    const scrollIntoHistory = "\r\n".repeat(Math.max(0, rows - 1));
+    const text = `${lines.join("\r\n")}\r\n${scrollIntoHistory}`;
+    return this.writeBytes(new TextEncoder().encode(text));
   }
 }

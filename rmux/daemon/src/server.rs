@@ -1423,8 +1423,12 @@ impl AttachmentDriver {
           return Ok(true);
         }
         let sequence = checkpoint.sequence;
+        let history = snapshot
+          .history
+          .expect("checkpoint delivery always carries paired terminal history");
         let message = ServerMessage::Checkpoint {
           checkpoint,
+          history: Box::new(history),
           history_gap: snapshot.history_gap,
         };
         if write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
@@ -1670,6 +1674,7 @@ where
       replay_from: snapshot.journal.replay_from,
       history_gap: snapshot.history_gap,
       checkpoint: snapshot.checkpoint,
+      history: snapshot.history.map(Box::new),
       terminal_size_mismatch,
       input_lease: attachment_leases.input,
       layout_lease: attachment_leases.layout,
@@ -2135,6 +2140,7 @@ mod tests {
         }],
       },
       history_gap: false,
+      history: None,
       shell_state: ShellState::default(),
     };
     let attachment_leases = rmux_core::AttachmentLeases {

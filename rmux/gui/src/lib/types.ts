@@ -116,6 +116,17 @@ export interface TerminalCheckpoint {
   input_prefix_base64: string;
 }
 
+export interface TerminalHistorySnapshot {
+  format: string;
+  format_version: number;
+  sequence: Sequence;
+  generation: string;
+  revision: string;
+  retained_bytes: string;
+  truncated: boolean;
+  lines: string[];
+}
+
 interface AttachmentEventBase {
   attachment_id: string;
 }
@@ -127,6 +138,7 @@ interface PresentationEventBase extends AttachmentEventBase {
 export interface CheckpointEvent extends PresentationEventBase {
   event_type: "checkpoint";
   checkpoint: TerminalCheckpoint;
+  history: TerminalHistorySnapshot;
   history_gap: boolean;
 }
 

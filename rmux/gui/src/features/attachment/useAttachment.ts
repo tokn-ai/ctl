@@ -403,6 +403,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         case "checkpoint":
           await renderer.restoreCheckpoint(
             event.checkpoint.terminal_size,
+            event.history.lines,
             decodeBase64(event.checkpoint.payload_base64),
             decodeBase64(event.checkpoint.input_prefix_base64),
           );

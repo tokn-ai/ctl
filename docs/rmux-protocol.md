@@ -1,7 +1,7 @@
-# rmux protocol version 7
+# rmux protocol version 9
 
 The protocol is independent of local IPC and future remote transport. Version
-7 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+9 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -12,6 +12,10 @@ Version 7 adds an opaque `attachment_token` to `attached` and a corresponding
 `resume_attachment` request. The token rebinds a replacement transport to the
 same logical attachment during a bounded reconnect grace, preserving its input
 and layout leases. Protocol versions still match exactly during handshake.
+
+Version 8 adds renderer-applied presentation flow control. Version 9 pairs
+every terminal checkpoint with a bounded normalized-history snapshot captured
+at the same raw sequence.
 
 ## Connection lifecycle
 
@@ -25,10 +29,10 @@ logical attachment and changes the connection into a bidirectional stream.
 attachment:
 
 - daemon to client: `attached` (including a complete `shell_state` snapshot),
-  an optional checkpoint, replayed `output`, then live `output`,
+  an optional checkpoint/history pair, replayed `output`, then live `output`,
   `pty_geometry_changed`, and `shell_state_changed`;
-- client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`, or
-  `detach`;
+- client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`,
+  `presentation_applied`, or `detach`;
 - daemon to client: `heartbeat_ack`, `detached` after an explicit detach is
   processed, and `session_ended` when the child exits.
 
@@ -79,19 +83,33 @@ bounded grace; expiry releases its leases. It does not kill the PTY, shell,
 journal, or checkpoint state. This makes a laptop sleep, client crash, or
 half-open network path unable to pin input or layout ownership forever.
 
-The initial `attached` reply, checkpoint, and retained-output replay use a
-separate five-minute delivery deadline. The liveness deadline starts only
-after that transfer finishes, because a client cannot begin its advertised
-heartbeat loop until it has received `attached`, and `rmuxd` serially sends
-the replay before it can process queued heartbeats. The delivery deadline still
-keeps a client that stops reading during initial replay from retaining leases
-indefinitely.
+The initial `attached` reply and later presentation use a separate five-minute
+delivery deadline. `rmuxd` sends only a bounded presentation window beyond the
+last `presentation_applied` sequence, so a slow renderer applies backpressure
+without turning queue capacity into a transport failure. Heartbeats and control
+messages continue while presentation is paused. The delivery deadline still
+keeps a client that stops reading entirely from retaining leases indefinitely.
 
 The deadline has priority over a late client frame: an expired attachment
 cannot revive itself with a late heartbeat, input, resize, or lease request.
 Clients also treat a peer that remains silent for the advertised timeout as a
 lost connection and reconnect by session ID, attachment token, and renderer-
 applied output sequence.
+
+## Presentation flow control
+
+`attach_session` and `resume_attachment` advertise a non-zero
+`presentation_window_bytes`. The daemon charges raw output against that window,
+with a minimum charge per frame so fragmented PTY reads cannot create an
+unbounded event count. A checkpoint blocks later output until the renderer has
+applied it.
+
+After a renderer completes a checkpoint or output event, the client sends
+`presentation_applied { sequence }`. This is delivery credit, not a state hash:
+it proves only that the presentation event finished. A client that could not
+adopt a checkpoint or geometry may replenish delivery credit while keeping its
+own reconnect cursor unset. Heartbeats, detach, input, and lease control remain
+independent of presentation credit.
 
 ## Attachment leases
 
@@ -266,7 +284,7 @@ local reconnect cursor past the transition. It can continue to show best-effort
 output, but its next attach must omit `resume_from` so `rmuxd` supplies a
 geometry-safe checkpoint.
 
-Geometry transitions are not raw VT bytes and version 7 deliberately does not
+Geometry transitions are not raw VT bytes and the protocol deliberately does not
 add a second resume cursor for them. A caller may use `resume_from` only for a
 renderer that has processed the complete prior attachment stream, including
 geometry messages. If the requested raw position is at or before the most
@@ -282,13 +300,17 @@ a renderer with the wrong grid.
 
 When a client has no previous sequence, its requested sequence is older than
 retained raw output, or the request crosses a PTY geometry boundary, `attached`
-includes a terminal checkpoint. The client restores it and then processes
-output from `replay_from` forward. `history_gap` means that replay did not
-deliver a contiguous raw-output range from the requested position: this can be
-caused by bounded journal eviction or by a geometry-safe checkpoint fallback.
-It does not mean the visible terminal state is incomplete when a compatible
-checkpoint was supplied, but clients must mark their own scrollback/history
-gap rather than invent missing lines.
+includes a terminal checkpoint and a terminal-history snapshot with the same
+`sequence`. The client restores the history and live checkpoint, then processes
+output from `replay_from` forward. A checkpoint and history snapshot are invalid
+unless both are present and their sequences match.
+
+`history_gap` means the restored presentation is not complete back to the
+client's requested position. It can be caused by bounded journal eviction, a
+geometry-safe checkpoint fallback, or eviction of the oldest normalized
+history lines. The live terminal state remains complete when a compatible
+checkpoint was supplied, but clients must expose the history discontinuity
+rather than invent missing lines.
 
 The version-1 checkpoint format is:
 
@@ -305,6 +327,25 @@ input_prefix:   raw bytes that must follow payload before later output
 is completed by later raw output without changing the checkpoint's parser
 state. It is part of the checkpoint format, not an additional output record.
 
+The version-1 terminal-history format is:
+
+```text
+format:          rmux_logical_lines
+format_version:  1
+sequence:        raw boundary shared with the checkpoint
+generation:      identity reset by RIS or erase-saved-lines
+revision:        monotonic snapshot revision within daemon memory
+retained_bytes:  normalized UTF-8 bytes retained, including line separators
+truncated:       whether older lines in this generation were evicted
+lines:           complete logical lines above the live grid
+```
+
+History lines are the daemon emulator's normalized text after terminal controls
+have been interpreted. Soft-wrapped physical rows are merged into logical
+lines. Alternate-screen output is excluded. The snapshot is bounded by bytes,
+physical rows, and emulator cells; it is a full replacement, not an incremental
+patch. Version 1 does not preserve style runs in historical lines.
+
 `terminal_size` in a checkpoint is authoritative for its restored parser
 state. A graphical client must reset or recreate its terminal model at those
 dimensions before applying `payload` and `input_prefix`; it must not apply a
@@ -314,10 +355,10 @@ captured; a later live resize can legitimately share its raw sequence boundary
 when no output was produced between the two operations.
 
 If a live attachment falls behind its output broadcast buffer, `checkpoint`
-is sent as a stream message and clients restore it before accepting later
-output. A recovery checkpoint also provides the current PTY geometry, so it
+is sent with its paired history as a stream message and clients restore both
+before accepting later output. A recovery checkpoint also provides the current PTY geometry, so it
 supersedes any queued geometry transition it already covers. A client must
-reject a checkpoint whose `format` or `format_version` it does not support.
+reject a checkpoint or history format/version it does not support.
 
 ## Deliberately deferred
 

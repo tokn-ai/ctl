@@ -20,6 +20,12 @@ import type { AppCommand } from "../features/commands/types";
 import { useCommandShortcuts } from "../features/commands/useCommandShortcuts";
 import { useNativeCommandEvents } from "../features/commands/useNativeCommandEvents";
 import {
+  forgetShellState,
+  mergeShellStateInspections,
+  rememberShellState,
+  retainShellStates,
+} from "../features/shell/shellStateCache";
+import {
   SessionListRefreshGuard,
   prependSession,
   removeSession,
@@ -33,11 +39,6 @@ import {
   reconcileTerminalTabs,
   syncTabTerminalSize,
 } from "../features/tabs/tabState";
-import {
-  forgetTabShellState,
-  rememberTabShellState,
-  retainTabShellStates,
-} from "../features/tabs/shellStateCache";
 import {
   compactTerminalTitleParts,
   formatTerminalTitle,
@@ -140,8 +141,15 @@ export function TerminalPage() {
       const visible = replaceSessionList(
         listed.filter((session) => !hidden.has(session.session_id)),
       );
+      const visibleIds = new Set(visible.map((session) => session.session_id));
       setSessions(visible);
-      setSessionShellStates(new Map(Object.entries(listedResponse.shell_states)));
+      setSessionShellStates((current) =>
+        mergeShellStateInspections(
+          current,
+          new Map(Object.entries(listedResponse.shell_states)),
+          visibleIds,
+        ),
+      );
       const nextTabs = reconcileTerminalTabs(
         tabsRef.current,
         visible,
@@ -150,7 +158,7 @@ export function TerminalPage() {
       tabsRef.current = nextTabs;
       setTabs(nextTabs);
       setTabShellStates((current) =>
-        retainTabShellStates(
+        retainShellStates(
           current,
           new Set(nextTabs.map((session) => session.session_id)),
         ),
@@ -245,7 +253,7 @@ export function TerminalPage() {
       tabsRef.current = closed.tabs;
       setTabs(closed.tabs);
       setTabShellStates((current) =>
-        forgetTabShellState(current, session.session_id),
+        forgetShellState(current, session.session_id),
       );
       if (!wasActive) {
         return;
@@ -369,7 +377,10 @@ export function TerminalPage() {
         closedSessionIdsRef.current.add(session.session_id);
         setSessions((current) => removeSession(current, session.session_id));
         setTabShellStates((current) =>
-          forgetTabShellState(current, session.session_id),
+          forgetShellState(current, session.session_id),
+        );
+        setSessionShellStates((current) =>
+          forgetShellState(current, session.session_id),
         );
         await closeTab(session);
         // The session is hidden after either an accepted kill or a not-found
@@ -501,7 +512,15 @@ export function TerminalPage() {
       return;
     }
     setTabShellStates((current) =>
-      rememberTabShellState(
+      rememberShellState(
+        current,
+        attachedSession.session_id,
+        attachedShellState,
+        { replaceEqualRevision: true },
+      ),
+    );
+    setSessionShellStates((current) =>
+      rememberShellState(
         current,
         attachedSession.session_id,
         attachedShellState,
@@ -547,7 +566,10 @@ export function TerminalPage() {
     closedSessionIdsRef.current.add(attachedSession.session_id);
     setSessions((current) => removeSession(current, attachedSession.session_id));
     setTabShellStates((current) =>
-      forgetTabShellState(current, attachedSession.session_id),
+      forgetShellState(current, attachedSession.session_id),
+    );
+    setSessionShellStates((current) =>
+      forgetShellState(current, attachedSession.session_id),
     );
     void closeTab(attachedSession);
   }, [attachment.state.phase, attachedSession, closeTab]);
@@ -565,7 +587,7 @@ export function TerminalPage() {
         : null;
   const displayedTabShellStates =
     attachedSession && attachedShellState
-      ? rememberTabShellState(
+      ? rememberShellState(
           tabShellStates,
           attachedSession.session_id,
           attachedShellState,

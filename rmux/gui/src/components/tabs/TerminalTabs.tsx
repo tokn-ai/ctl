@@ -45,7 +45,9 @@ export function TerminalTabs({
               >
                 <span className="terminal-tab-dot" aria-hidden="true" />
                 <span className="terminal-tab-copy">
-                  <span className="terminal-tab-path">{title.path}</span>
+                  <span className="terminal-tab-path">
+                    <bdi dir="ltr">{title.path}</bdi>
+                  </span>
                   {title.command ? (
                     <>
                       <span className="terminal-tab-separator" aria-hidden="true">

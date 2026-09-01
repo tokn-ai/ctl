@@ -459,7 +459,11 @@ button:disabled {
 
 .terminal-tab-path {
   flex: 1 1 auto;
-  /* Paths normally share their beginning; keep the final component visible. */
+  /*
+   * RTL overflow keeps the distinguishing path tail visible. The nested LTR
+   * bidi isolate preserves filesystem character order, especially for the
+   * neutral `~` and `/` characters in home-relative paths.
+   */
   direction: rtl;
   text-align: left;
 }

@@ -23,6 +23,7 @@ import type {
 import type { ProposedDimensions } from "../terminal/TerminalPresenter";
 import type { XtermRenderer } from "../terminal/XtermRenderer";
 import {
+  ATTACHMENT_RECOVERY_STABILITY_MS,
   AttachmentRecoveryBackoff,
   canAutomaticallyRecoverAttachment,
   interruptedAttachmentState,
@@ -132,13 +133,17 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     stateRef.current = state;
   }, [state]);
 
-  const resetRecovery = useCallback(() => {
+  const clearRecoveryTimer = useCallback(() => {
     if (recoveryTimerRef.current !== null) {
       clearTimeout(recoveryTimerRef.current);
       recoveryTimerRef.current = null;
     }
-    recoveryBackoffRef.current.reset();
   }, []);
+
+  const resetRecovery = useCallback(() => {
+    clearRecoveryTimer();
+    recoveryBackoffRef.current.reset();
+  }, [clearRecoveryTimer]);
 
   const setFailure = useCallback((error: unknown) => {
     const code = errorCode(error);
@@ -332,7 +337,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     return () => {
       lifecycleRecoveryStateRef.current =
         interruptedAttachmentState(stateRef.current) ?? INITIAL_STATE;
-      resetRecovery();
+      clearRecoveryTimer();
       generationRef.current += 1;
       inputLeaseOwnedRef.current = false;
       layoutLeaseOwnedRef.current = false;
@@ -351,7 +356,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         void detachAttachment({ attachment_id: attachmentId });
       }
     };
-  }, [resetRecovery]);
+  }, [clearRecoveryTimer]);
 
   const publishAppliedSequence = useCallback((sequence: string) => {
     appliedSequenceRef.current = sequence;
@@ -693,7 +698,6 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
           resizeCoordinatorRef.current?.setDesired(requestedTerminalSize);
           resizeCoordinatorRef.current?.setEnabled(true);
         }
-        resetRecovery();
         publishShellState(result.attached.shell_state);
         setState((current) => ({
           ...current,
@@ -723,7 +727,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         }
       }
     },
-    [publishShellState, queueEvent, renderer, resetRecovery, setFailure],
+    [publishShellState, queueEvent, renderer, setFailure],
   );
 
   const submitConnection = useCallback(
@@ -843,6 +847,20 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   );
 
   useEffect(() => {
+    if (state.phase === "attached" && recoveryBackoffRef.current.isActive()) {
+      recoveryTimerRef.current = setTimeout(() => {
+        recoveryTimerRef.current = null;
+        recoveryBackoffRef.current.reset();
+      }, ATTACHMENT_RECOVERY_STABILITY_MS);
+
+      return () => {
+        if (recoveryTimerRef.current !== null) {
+          clearTimeout(recoveryTimerRef.current);
+          recoveryTimerRef.current = null;
+        }
+      };
+    }
+
     if (
       !state.session ||
       !matchesRecoveryPhase(state.phase) ||
@@ -887,6 +905,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     };
   }, [
     reconnectCurrent,
+    state.attachment_id,
     state.error_code,
     state.phase,
     state.session?.session_id,

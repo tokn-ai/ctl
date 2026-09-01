@@ -3,6 +3,8 @@ import type { AttachmentViewState } from "../../lib/types";
 export const INITIAL_ATTACHMENT_RECOVERY_DELAY_MS = 250;
 export const MAX_ATTACHMENT_RECOVERY_DELAY_MS = 5_000;
 export const ATTACHMENT_RECOVERY_WINDOW_MS = 30_000;
+export const ATTACHMENT_RECOVERY_STABILITY_MS =
+  ATTACHMENT_RECOVERY_WINDOW_MS;
 
 const EMPTY_LEASE = { held: false, owned_by_client: false };
 
@@ -80,6 +82,10 @@ export class AttachmentRecoveryBackoff {
     );
     this.attempt += 1;
     return delay;
+  }
+
+  isActive(): boolean {
+    return this.startedAt !== null;
   }
 
   reset(): void {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AttachmentViewState } from "../../lib/types";
 import {
   ATTACHMENT_RECOVERY_WINDOW_MS,
+  ATTACHMENT_RECOVERY_STABILITY_MS,
   AttachmentRecoveryBackoff,
   canAutomaticallyRecoverAttachment,
   interruptedAttachmentState,
@@ -54,14 +55,23 @@ describe("attachment recovery", () => {
     expect(backoff.nextDelay(1_000 + ATTACHMENT_RECOVERY_WINDOW_MS)).toBeNull();
   });
 
-  it("can be reset after a successful attachment", () => {
+  it("can be reset after a stable attachment", () => {
     const backoff = new AttachmentRecoveryBackoff();
+    expect(backoff.isActive()).toBe(false);
     expect(backoff.nextDelay(1_000)).toBe(250);
+    expect(backoff.isActive()).toBe(true);
     expect(backoff.nextDelay(1_250)).toBe(500);
 
     backoff.reset();
 
+    expect(backoff.isActive()).toBe(false);
     expect(backoff.nextDelay(20_000)).toBe(250);
+  });
+
+  it("requires a full recovery window before treating a connection as stable", () => {
+    expect(ATTACHMENT_RECOVERY_STABILITY_MS).toBe(
+      ATTACHMENT_RECOVERY_WINDOW_MS,
+    );
   });
 
   it("does not retry deterministic terminal failures", () => {

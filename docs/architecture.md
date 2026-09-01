@@ -44,16 +44,17 @@ path or service.
   stream.
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
-- `rmux`: local command-line adapter that starts/connects to `rmuxd` over IPC.
+- `rmux`: canonical local CLI and reusable rmux command implementation.
 - `rmux-gui`: local Tauri/React terminal client. Its Rust adapter runs
   `rmux-client`; its webview owns xterm rendering, viewport, and local
   scrollback.
-- `ctl-core`: owned OpenSSH child-process transport. It invokes one fixed
-  `ctld connect` command and returns its piped stdin/stdout to `rmux-client`.
+- `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
+  child, invokes one fixed `ctld connect` command, and exposes the resulting
+  byte stream to the selected control-domain client.
 - `ctld`: stateless SSH remote-command adapter for the fixed local `rmuxd`
   relay.
-- `ctl`: unified command-line client using local `rmuxd` by default and an
-  explicit OpenSSH destination for remote access.
+- `ctl`: control router. `ctl rmux` redirects the canonical rmux command
+  surface locally by default or through an explicit OpenSSH destination.
 
 OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
 `rmux-client`.
@@ -284,7 +285,7 @@ redacts both. An attachment must opt in to each separately and currently own
 the input lease before `rmuxd` sends it. The shipped `zsh` v2 integration
 replaces editable text with a bounded running-command summary before command
 execution; `bash` does not advertise either live-editing or running-command
-capability. `rmux attach` and `ctl shell` are raw terminal presenters and
+capability. `rmux attach` and `ctl rmux attach` are raw terminal presenters and
 intentionally do not request or print either value.
 
 Version-2 FIFO reports preserve the version-1 nine-field NUL-delimited wire

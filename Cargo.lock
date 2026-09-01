@@ -607,8 +607,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ctl-core",
- "rmux-client",
- "rmux-proto",
+ "rmux",
  "thiserror 2.0.20",
  "tokio",
 ]

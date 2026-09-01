@@ -8,9 +8,10 @@ marker precedes the raw stream so startup output cannot be mistaken for an
 
 ## Connection command
 
-When global `--host`/`-H` selects a remote target, every one-shot request or
-interactive attachment starts the system OpenSSH client with the equivalent
-fixed argument sequence:
+`ctl rmux` uses the canonical rmux command implementation with a ctl-selected
+transport. When global `--host`/`-H` selects a remote target, every one-shot
+request or interactive attachment starts the system OpenSSH client with the
+equivalent fixed argument sequence:
 
 ```text
 ssh -T \
@@ -28,10 +29,10 @@ multiplexing remain OpenSSH configuration. `ctl` never disables host-key
 verification, enables agent forwarding, creates a forwarding, or accepts a
 user-controlled remote command.
 
-Without `--host`, `ctl` connects directly to the current user's owner-only
-local `rmuxd` endpoint and does not start SSH or `ctld`. The `rmux-proto`
-request, attachment, detach, and reconnect behavior above that transport is
-shared by both targets.
+Without `--host`, transport-requiring `ctl rmux` commands connect directly to
+the current user's owner-only local `rmuxd` endpoint and do not start SSH or
+`ctld`. The `rmux-proto` request, attachment, detach, and reconnect behavior
+above that transport is shared by both targets.
 
 OpenSSH may reuse a healthy configured control master. A broken SSH transport
 cannot resume an existing channel; `ctl` starts a replacement channel and

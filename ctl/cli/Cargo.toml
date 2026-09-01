@@ -6,8 +6,7 @@ edition.workspace = true
 [dependencies]
 clap.workspace = true
 ctl-core.workspace = true
-rmux-client.workspace = true
-rmux-proto.workspace = true
+rmux-cli.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

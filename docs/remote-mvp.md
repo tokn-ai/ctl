@@ -23,28 +23,28 @@ confirming it starts without diagnostics.
 
 ## On the client device
 
-`ctl` defaults to the local daemon. Select an ordinary OpenSSH destination or
-`~/.ssh/config` alias with global `--host`/`-H`:
+`rmux` defines the canonical command surface. `ctl rmux` redirects those same
+commands through ctl's selected target. Select an ordinary OpenSSH destination
+or `~/.ssh/config` alias with global `--host`/`-H`:
 
 ```text
-ctl --host <host> session list
-ctl --host <host> shell
+ctl --host <host> rmux list
+ctl --host <host> rmux attach <session>
 ```
-
-`ctl shell` creates the named `shell` session only when absent. Specify a
-different remote name with `ctl --host <host> shell <session>`.
 
 Useful session commands:
 
 ```text
-ctl --host <host> session new --name <session>
-ctl --host <host> session kill <session>
+ctl --host <host> rmux new --name <session>
+ctl --host <host> rmux state <session>
+ctl --host <host> rmux kill <session>
 ```
 
 An ordinary attachment requests input but does not resize the remote PTY. Use
-`ctl --host <host> shell <session> --read-only` for a viewer, or add `--resize`
-only when deliberately claiming layout ownership. Press `Ctrl-]` to detach
-and release the attachment immediately without terminating the shell.
+`ctl --host <host> rmux attach <session> --read-only` for a viewer, or add
+`--resize` only when deliberately claiming layout ownership. Press `Ctrl-]`
+to detach and release the attachment immediately without terminating the
+shell.
 
 After an unexpected SSH interruption, `ctl` reconnects with exponential
 backoff. OpenSSH may reuse a configured control master; otherwise it creates a

@@ -3,6 +3,10 @@ name = "rmux"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "rmux_cli"
+path = "src/lib.rs"
+
 [dependencies]
 clap.workspace = true
 rmux-client.workspace = true

@@ -27,6 +27,17 @@ pub struct TargetRequestDto {
   pub target: ConnectionTargetDto,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SshConfigHostDto {
+  pub destination: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SshConfigHostCatalogDto {
+  pub hosts: Vec<SshConfigHostDto>,
+  pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSizeDto {
   pub columns: u16,
@@ -664,6 +675,20 @@ mod tests {
       serde_json::to_value(target).unwrap(),
       serde_json::json!({ "kind": "ssh", "destination": "rmux-docker" })
     );
+  }
+
+  #[test]
+  fn ssh_config_catalog_uses_destination_strings_and_warnings() {
+    let json = serde_json::to_value(SshConfigHostCatalogDto {
+      hosts: vec![SshConfigHostDto {
+        destination: "rmux-docker".into(),
+      }],
+      warnings: vec!["partial discovery".into()],
+    })
+    .unwrap();
+
+    assert_eq!(json["hosts"][0]["destination"], "rmux-docker");
+    assert_eq!(json["warnings"][0], "partial discovery");
   }
 
   #[test]

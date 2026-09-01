@@ -152,6 +152,37 @@ button {
   font-size: 10px;
 }
 
+.host-suggestions {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.host-suggestions > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.host-suggestions > div {
+  display: flex;
+  max-height: 92px;
+  flex-wrap: wrap;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.host-suggestions button {
+  max-width: 100%;
+  padding: 4px 6px;
+  overflow: hidden;
+  color: #aeb6c1;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .host-form input {
   min-width: 0;
   padding: 6px 7px;
@@ -164,6 +195,10 @@ button {
 .host-form > small {
   color: #ffb0b0;
   font-size: 10px;
+}
+
+.host-form > small.host-suggestion-warning {
+  color: #d8bd7b;
 }
 
 .icon-button,

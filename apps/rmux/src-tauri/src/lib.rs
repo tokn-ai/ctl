@@ -4,6 +4,7 @@ mod error;
 mod local_transport;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod ssh_config;
 mod state;
 mod transport;
 
@@ -27,6 +28,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       commands::list_sessions,
+      commands::list_ssh_config_hosts,
       commands::create_session,
       commands::kill_session,
       commands::restart_local_daemon,

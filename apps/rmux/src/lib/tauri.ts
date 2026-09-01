@@ -15,6 +15,7 @@ import type {
   RestartLocalDaemonResponse,
   SessionListResponse,
   SessionSummary,
+  SshConfigHostCatalog,
 } from "./types";
 
 export interface OpenAttachmentResult {
@@ -28,6 +29,10 @@ export async function listSessions(
   return invoke<SessionListResponse>("list_sessions", {
     request: { target },
   });
+}
+
+export async function listSshConfigHosts(): Promise<SshConfigHostCatalog> {
+  return invoke<SshConfigHostCatalog>("list_ssh_config_hosts");
 }
 
 export async function createSession(

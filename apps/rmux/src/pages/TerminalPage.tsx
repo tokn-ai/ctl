@@ -47,6 +47,7 @@ import {
 import {
   LOCAL_TARGET,
   browserStorage,
+  inactiveSshConfigDestinations,
   loadRemoteTargets,
   normalizeSshDestination,
   sameSession,
@@ -63,12 +64,14 @@ import {
   createSession,
   killSession,
   listSessions,
+  listSshConfigHosts,
   restartLocalDaemon,
 } from "../lib/tauri";
 import type {
   ConnectionTarget,
   SessionSummary,
   ShellStateSummary,
+  SshConfigHost,
   TerminalSize,
 } from "../lib/types";
 
@@ -95,6 +98,8 @@ export function TerminalPage() {
     LOCAL_TARGET,
     ...loadRemoteTargets(browserStorage()),
   ]);
+  const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHost[]>([]);
+  const [sshConfigWarning, setSshConfigWarning] = useState<string | null>(null);
   const [targetErrors, setTargetErrors] = useState<ReadonlyMap<string, string>>(
     () => new Map(),
   );
@@ -140,6 +145,26 @@ export function TerminalPage() {
       daemonRestartConfirmationRef.current || restartingDaemonRef.current,
     [],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    void listSshConfigHosts()
+      .then((catalog) => {
+        if (cancelled) {
+          return;
+        }
+        setSshConfigHosts(catalog.hosts);
+        setSshConfigWarning(catalog.warnings[0] ?? null);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setSshConfigWarning(errorMessage(error));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refresh = useCallback(async (allowDuringDaemonRestart = false) => {
     if (!allowDuringDaemonRestart && daemonRestartBlocksInteractions()) {
@@ -257,6 +282,11 @@ export function TerminalPage() {
       return true;
     },
     [targets],
+  );
+
+  const hostSuggestions = inactiveSshConfigDestinations(
+    sshConfigHosts,
+    targets,
   );
 
   const activateTab = useCallback(
@@ -929,6 +959,8 @@ export function TerminalPage() {
           onRequestClose={requestClose}
           onCancelClose={cancelClose}
           onConfirmClose={confirmClose}
+          hostSuggestions={hostSuggestions}
+          hostSuggestionWarning={sshConfigWarning}
           onAddHost={addHost}
           onRemoveHost={(target) => void removeHost(target)}
         />

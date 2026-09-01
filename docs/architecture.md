@@ -114,13 +114,17 @@ checkpoint-production, or session-lifetime logic into the app process.
 Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
-The frontend persists only OpenSSH destination strings and always includes the
-local target. It queries configured targets concurrently and keys rows, tabs,
-shell-state caches, mutations, and reconnect intent by `(target, session ID)`.
-A failed target retains its last-known rows and reports a target-local error
-without hiding successful targets. OpenSSH configuration remains responsible
-for user, port, credentials, proxies, host verification, and connection
-multiplexing. The app adds no SSH prompt or credential surface.
+The frontend persists only selected OpenSSH destination strings and always
+includes the local target. A read-only backend command discovers concrete
+aliases from the user's OpenSSH config and recursive `Include` files for the
+**+ Host** picker; wildcard and negated patterns are omitted, and discovery
+never opens a connection. Selecting a suggestion promotes it to a configured
+target. The frontend queries configured targets concurrently and keys rows,
+tabs, shell-state caches, mutations, and reconnect intent by `(target, session
+ID)`. A failed target retains its last-known rows and reports a target-local
+error without hiding successful targets. OpenSSH configuration remains
+responsible for user, port, credentials, proxies, host verification, and
+connection multiplexing. The app adds no SSH prompt or credential surface.
 
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same
 collision-safe `session-N` allocation used by every unnamed client. Its session

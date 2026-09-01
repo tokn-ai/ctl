@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionTarget, SessionSummary } from "../../lib/types";
 import {
   LOCAL_TARGET,
+  inactiveSshConfigDestinations,
   loadRemoteTargets,
   normalizeSshDestination,
   sameSession,
@@ -70,6 +71,20 @@ describe("connection targets", () => {
       JSON.stringify({ schema_version: 2, ssh_destinations: ["host"] }),
     );
     expect(loadRemoteTargets(storage)).toEqual([]);
+  });
+
+  it("offers normalized SSH config hosts that are not already active", () => {
+    expect(
+      inactiveSshConfigDestinations(
+        [
+          { destination: " workstation " },
+          { destination: "rmux-docker" },
+          { destination: "workstation" },
+          { destination: "host\ncommand" },
+        ],
+        [LOCAL_TARGET, { kind: "ssh", destination: "workstation" }],
+      ),
+    ).toEqual(["rmux-docker"]);
   });
 });
 

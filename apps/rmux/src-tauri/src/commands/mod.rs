@@ -16,11 +16,12 @@ use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
   AttachmentRequestDto, CreateSessionRequestDto, KillSessionRequestDto, OpenAttachmentRequestDto,
   OpenAttachmentResponseDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
-  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, TargetRequestDto, decode_input,
-  parse_sequence,
+  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, SshConfigHostCatalogDto,
+  SshConfigHostDto, TargetRequestDto, decode_input, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
+use crate::ssh_config;
 use crate::state::{AppState, AttachmentActor, forward_attachment_events};
 use crate::transport;
 
@@ -29,6 +30,23 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOCAL_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(250);
 const REMOTE_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS: usize = 4;
+
+#[tauri::command]
+pub async fn list_ssh_config_hosts() -> CommandResult<SshConfigHostCatalogDto> {
+  let discovery = tauri::async_runtime::spawn_blocking(ssh_config::discover_hosts)
+    .await
+    .map_err(CommandErrorDto::backend)?
+    .map_err(|error| CommandErrorDto::new("ssh_config_discovery_failed", error.to_string()))?;
+
+  Ok(SshConfigHostCatalogDto {
+    hosts: discovery
+      .hosts
+      .into_iter()
+      .map(|destination| SshConfigHostDto { destination })
+      .collect(),
+    warnings: discovery.warnings,
+  })
+}
 
 #[tauri::command]
 pub async fn list_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {

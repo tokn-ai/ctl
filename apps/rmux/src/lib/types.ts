@@ -4,6 +4,15 @@ export type ConnectionTarget =
   | { kind: "local" }
   | { kind: "ssh"; destination: string };
 
+export interface SshConfigHost {
+  destination: string;
+}
+
+export interface SshConfigHostCatalog {
+  hosts: SshConfigHost[];
+  warnings: string[];
+}
+
 export interface TerminalSize {
   columns: number;
   rows: number;

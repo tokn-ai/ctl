@@ -11,6 +11,7 @@ import type {
   ShellStateSummary,
 } from "../../lib/types";
 import { sessionKey, targetKey, targetLabel } from "../../features/targets/targets";
+import { SshHostPicker } from "./SshHostPicker";
 
 const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 
@@ -28,6 +29,8 @@ interface SessionSidebarProps {
   pendingCloseSessionKey: string | null;
   closingSessionKeys: ReadonlySet<string>;
   disconnectingSessionKey: string | null;
+  hostSuggestions: readonly string[];
+  hostSuggestionWarning: string | null;
   onRefresh(): void;
   onSelect(session: SessionSummary): void;
   onCreate(target: ConnectionTarget, workingDirectory: string | null): Promise<boolean>;
@@ -83,6 +86,8 @@ export function SessionSidebar({
   pendingCloseSessionKey,
   closingSessionKeys,
   disconnectingSessionKey,
+  hostSuggestions,
+  hostSuggestionWarning,
   onRefresh,
   onSelect,
   onCreate,
@@ -97,8 +102,6 @@ export function SessionSidebar({
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [creationTargetKey, setCreationTargetKey] = useState("local");
   const [hostFormOpen, setHostFormOpen] = useState(false);
-  const [hostDestination, setHostDestination] = useState("");
-  const [hostValidationError, setHostValidationError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!targets.some((target) => targetKey(target) === creationTargetKey)) {
@@ -119,17 +122,6 @@ export function SessionSidebar({
       setWorkingDirectory("");
       onCreateFormOpenChange(false);
     }
-  }
-
-  function submitHost(event: FormEvent) {
-    event.preventDefault();
-    if (!onAddHost(hostDestination)) {
-      setHostValidationError("Enter a unique OpenSSH host or alias.");
-      return;
-    }
-    setHostDestination("");
-    setHostValidationError(null);
-    setHostFormOpen(false);
   }
 
   return (
@@ -179,27 +171,12 @@ export function SessionSidebar({
         </div>
 
         {hostFormOpen ? (
-          <form className="host-form" onSubmit={submitHost}>
-            <label>
-              OpenSSH host or alias
-              <input
-                value={hostDestination}
-                onChange={(event) => {
-                  setHostDestination(event.currentTarget.value);
-                  setHostValidationError(null);
-                }}
-                placeholder="rmux-docker"
-                autoFocus
-              />
-            </label>
-            {hostValidationError ? <small>{hostValidationError}</small> : null}
-            <div className="form-actions">
-              <button type="button" onClick={() => setHostFormOpen(false)}>
-                Cancel
-              </button>
-              <button className="button-primary" type="submit">Add</button>
-            </div>
-          </form>
+          <SshHostPicker
+            suggestions={hostSuggestions}
+            warning={hostSuggestionWarning}
+            onAddHost={onAddHost}
+            onClose={() => setHostFormOpen(false)}
+          />
         ) : null}
       </div>
 

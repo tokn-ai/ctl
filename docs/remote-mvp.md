@@ -67,12 +67,14 @@ ctl --host rmux-docker rmux attach docker-test
 ```
 
 The desktop app uses the same OpenSSH transport. Start `rmux-app`, choose
-**+ Host**, and enter `rmux-docker`. Local and container sessions appear in one
-sidebar with host labels. The app stores only this destination string and uses
-the SSH configuration above for the port, user, identity, host verification,
-and any control-master reuse. New shells default to local; the creation form
-can explicitly select `rmux-docker`, while **New Tab in Current Folder** always
-inherits the active session's host.
+**+ Host**, and select the discovered `rmux-docker` alias. Concrete aliases
+from `~/.ssh/config` and its `Include` files are suggestions only; opening the
+picker does not contact them. Local and container sessions appear in one
+sidebar with host labels. The app stores only the selected destination string
+and uses the SSH configuration above for the port, user, identity, host
+verification, and any control-master reuse. New shells default to local; the
+creation form can explicitly select `rmux-docker`, while **New Tab in Current
+Folder** always inherits the active session's host.
 
 The `rmux_ssh_host_keys` volume preserves the SSH host identity across
 container replacement. Terminal sessions remain memory-backed and disappear

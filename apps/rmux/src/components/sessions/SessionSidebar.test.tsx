@@ -57,6 +57,8 @@ describe("SessionSidebar", () => {
         pendingCloseSessionKey={sessionKey(session)}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
+        hostSuggestions={[]}
+        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
@@ -90,6 +92,8 @@ describe("SessionSidebar", () => {
         pendingCloseSessionKey={null}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
+        hostSuggestions={[]}
+        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
@@ -128,6 +132,8 @@ describe("SessionSidebar", () => {
         pendingCloseSessionKey={null}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
+        hostSuggestions={[]}
+        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
@@ -164,6 +170,8 @@ describe("SessionSidebar", () => {
         pendingCloseSessionKey={null}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
+        hostSuggestions={[]}
+        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}

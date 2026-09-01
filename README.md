@@ -119,9 +119,11 @@ without replaying an arbitrarily large journal.
 Optional shell-awareness state is memory-only and separate from the raw output
 journal. Disk-backed history and restart policies are later milestones.
 
-The `rmux` desktop app lists local sessions alongside sessions from persisted
-OpenSSH destinations. Each row and tab carries its host; create, attach,
-reconnect, and kill operations always use that session's original target.
+The `rmux` desktop app lists local sessions alongside sessions from selected,
+persisted OpenSSH destinations. Its **+ Host** picker discovers concrete
+aliases from the user's OpenSSH config without connecting to them; selecting
+one makes it an active target. Each row and tab carries its host; create,
+attach, reconnect, and kill operations always use that session's original target.
 It renders one terminal pane and exposes input and layout ownership separately.
 Selecting a session does not resize its PTY. **Resize with window** explicitly
 acquires layout ownership and continuously matches the PTY to the window;

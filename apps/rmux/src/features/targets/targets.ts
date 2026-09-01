@@ -1,4 +1,8 @@
-import type { ConnectionTarget, SessionSummary } from "../../lib/types";
+import type {
+  ConnectionTarget,
+  SessionSummary,
+  SshConfigHost,
+} from "../../lib/types";
 
 export const LOCAL_TARGET: ConnectionTarget = Object.freeze({ kind: "local" });
 
@@ -105,6 +109,20 @@ export function saveRemoteTargets(
     // A privacy-restricted WebView may deny persistence. Host use remains
     // valid for the current app lifetime, so storage failure is non-fatal.
   }
+}
+
+export function inactiveSshConfigDestinations(
+  hosts: readonly SshConfigHost[],
+  targets: readonly ConnectionTarget[],
+): string[] {
+  const activeDestinations = new Set(
+    targets.flatMap((target) =>
+      target.kind === "ssh" ? [target.destination] : [],
+    ),
+  );
+  return uniqueDestinations(hosts.map((host) => host.destination)).filter(
+    (destination) => !activeDestinations.has(destination),
+  );
 }
 
 function uniqueDestinations(destinations: readonly string[]): string[] {

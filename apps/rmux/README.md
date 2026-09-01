@@ -15,13 +15,16 @@ pnpm install
 pnpm tauri dev
 ```
 
-The app may also use the path in `RMUXD_BIN`. Add an ordinary OpenSSH
-destination or `~/.ssh/config` alias with **+ Host**. The alias list persists
-in the app's WebView storage; credentials, keys, ports, and remote commands do
-not. Local is always present and remains the default for a new shell. The
-sidebar mixes sessions from every configured target and labels each row with
-its host. A failed host reports its own error while last-known sessions from
-other targets remain usable.
+The app may also use the path in `RMUXD_BIN`. Open **+ Host** to choose a
+concrete alias discovered from `~/.ssh/config` (including its `Include` files)
+or add another ordinary OpenSSH destination. Wildcard and negated `Host`
+patterns are not destinations and are omitted. Discovery only fills the
+picker: the app does not contact an SSH host until it is explicitly selected.
+Selected destinations persist in the app's WebView storage; credentials, keys,
+ports, and remote commands do not. Local is always present and remains the
+default for a new shell. The sidebar mixes sessions from every selected target
+and labels each row with its host. A failed host reports its own error while
+last-known sessions from other targets remain usable.
 
 SSH uses `ctl-core` and the system `ssh` executable with the fixed remote
 command `exec ctld connect`; forwarding, agent access, X11, local commands,

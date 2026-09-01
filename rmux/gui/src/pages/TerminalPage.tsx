@@ -44,6 +44,7 @@ import {
 } from "../features/tabs/terminalTitle";
 import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
+import { displayWorkingDirectory } from "../lib/shellState";
 import {
   createSession,
   killSession,
@@ -70,7 +71,11 @@ export function TerminalPage() {
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const [shortcutPlatform] = useState(detectShortcutPlatform);
   const attachment = useAttachment(renderer);
-  const currentWorkingDirectory = attachment.state.shell_state?.cwd || null;
+  const currentShellState = attachment.state.shell_state;
+  const currentWorkingDirectory = currentShellState?.cwd || null;
+  const currentWorkingDirectoryDisplay = currentShellState
+    ? displayWorkingDirectory(currentShellState)
+    : null;
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [tabs, setTabs] = useState<SessionSummary[]>([]);
   const [tabShellStates, setTabShellStates] = useState<
@@ -594,6 +599,7 @@ export function TerminalPage() {
       disconnectingSessionId,
       terminalReady: renderer !== null,
       currentWorkingDirectory,
+      currentWorkingDirectoryDisplay,
       daemonRestartConfirmationPending,
       restartingDaemon,
       shortcutPlatform,

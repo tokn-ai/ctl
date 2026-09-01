@@ -1,4 +1,5 @@
 import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import { displayWorkingDirectory } from "../../lib/shellState";
 
 /**
  * Native title bars have a finite visual width. Keep this comfortably below a
@@ -113,7 +114,9 @@ export function formatTerminalTitle(
   session: Pick<SessionSummary, "name"> | null,
   shellState: ShellStateSummary | null,
 ): TerminalTitle {
-  const path = shellState?.cwd || session?.name || "rmux";
+  const path = shellState
+    ? displayWorkingDirectory(shellState) || session?.name || "rmux"
+    : session?.name || "rmux";
   const command = shellState ? displayShell(shellState) : null;
 
   return {

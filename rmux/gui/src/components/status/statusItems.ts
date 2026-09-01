@@ -3,6 +3,7 @@ import type {
   ConnectionPhase,
   PromptPhase,
 } from "../../lib/types";
+import { displayWorkingDirectory } from "../../lib/shellState";
 
 export type StatusItemPriority = "high" | "medium" | "low";
 export type StatusItemTone = "normal" | "warning" | "danger";
@@ -145,8 +146,9 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
       priority: "low",
     }));
   }
-  if (shell?.cwd) {
-    context.push(item("cwd", shell.cwd, shell.cwd, { flexible: true }));
+  const cwdDisplay = shell ? displayWorkingDirectory(shell) : null;
+  if (cwdDisplay) {
+    context.push(item("cwd", cwdDisplay, cwdDisplay, { flexible: true }));
   }
 
   const connection = connectionStatus(state.phase);

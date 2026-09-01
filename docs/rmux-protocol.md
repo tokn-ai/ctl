@@ -161,8 +161,14 @@ The state contains:
   advertised reporting capabilities. A trusted shell integration can report a
   new descriptor; the shipped integrations intentionally do not pass their
   private reporter capability to arbitrary command descendants.
-- `cwd`: a shell-reported display string. It is not a portable filesystem path,
-  must not be normalized by a client, and grants no filesystem authority.
+- `cwd`: the unmodified, shell-reported working directory. A client may send it
+  back to the same daemon for an operation such as creating a new session in
+  the current directory, but it is not portable across hosts and grants no
+  filesystem authority.
+- `cwd_display`: an optional daemon-derived presentation of `cwd`. The daemon
+  replaces its own user-home prefix with `~`; clients fall back to `cwd` when
+  reading a snapshot from an older daemon. Clients must not use this display
+  value as an operational filesystem path.
 - `prompt_phase`: `unknown`, `at_prompt`, `editing`, or `running`.
 - `current_command_line`: an optional editable buffer with an optional cursor
   measured in Unicode scalar values, not terminal columns or UTF-8 bytes.

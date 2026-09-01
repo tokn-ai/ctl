@@ -10,7 +10,9 @@ use rmux_proto::{
   TuiHint,
 };
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1165,6 +1167,7 @@ fn apply_shell_report_to_terminal(
 
   let mut candidate = terminal.shell_state.clone();
   candidate.shell = shell;
+  candidate.cwd_display = cwd.as_deref().map(display_working_directory);
   candidate.cwd = cwd;
   candidate.prompt_phase = prompt_phase;
   candidate.command_line_redacted = false;
@@ -1177,6 +1180,43 @@ fn apply_shell_report_to_terminal(
 
   terminal.shell_state = candidate;
   Some(revise_shell_state(terminal))
+}
+
+fn display_working_directory(cwd: &str) -> String {
+  target_home_directory()
+    .as_deref()
+    .and_then(|home| abbreviate_home_directory(cwd, home))
+    .unwrap_or_else(|| cwd.into())
+}
+
+fn target_home_directory() -> Option<std::ffi::OsString> {
+  #[cfg(unix)]
+  const HOME_ENVIRONMENT: &str = "HOME";
+  #[cfg(windows)]
+  const HOME_ENVIRONMENT: &str = "USERPROFILE";
+  #[cfg(not(any(unix, windows)))]
+  const HOME_ENVIRONMENT: &str = "HOME";
+
+  std::env::var_os(HOME_ENVIRONMENT)
+}
+
+fn abbreviate_home_directory(path: &str, home: &OsStr) -> Option<String> {
+  let path = Path::new(path);
+  let home = Path::new(home);
+  if home.as_os_str().is_empty() || path.is_absolute() != home.is_absolute() {
+    return None;
+  }
+
+  let relative = path.strip_prefix(home).ok()?;
+  if relative.as_os_str().is_empty() {
+    return Some("~".into());
+  }
+
+  Path::new("~")
+    .join(relative)
+    .into_os_string()
+    .into_string()
+    .ok()
 }
 
 fn revise_shell_state(terminal: &mut TerminalState) -> ShellState {
@@ -1450,6 +1490,26 @@ mod tests {
     assert_eq!(
       running_state.running_command.as_deref(),
       Some("cargo test --workspace")
+    );
+  }
+
+  #[test]
+  fn working_directory_display_abbreviates_only_the_home_path_boundary() {
+    assert_eq!(
+      abbreviate_home_directory("/Users/me", OsStr::new("/Users/me")),
+      Some("~".into())
+    );
+    assert_eq!(
+      abbreviate_home_directory("/Users/me/project", OsStr::new("/Users/me")),
+      Some("~/project".into())
+    );
+    assert_eq!(
+      abbreviate_home_directory("/Users/meanwhile", OsStr::new("/Users/me")),
+      None
+    );
+    assert_eq!(
+      abbreviate_home_directory("/work/project", OsStr::new("/Users/me")),
+      None
     );
   }
 

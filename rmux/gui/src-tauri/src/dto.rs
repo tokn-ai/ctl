@@ -219,6 +219,7 @@ pub struct ShellStateDto {
   pub observed_sequence: String,
   pub shell_type: ShellTypeDto,
   pub cwd: Option<String>,
+  pub cwd_display: Option<String>,
   pub prompt_phase: PromptPhaseDto,
   pub running_command: Option<String>,
   pub tui_hint: TuiHintDto,
@@ -231,6 +232,7 @@ impl From<ShellState> for ShellStateDto {
       observed_sequence: value.observed_sequence.to_string(),
       shell_type: value.shell.shell_type.into(),
       cwd: value.cwd,
+      cwd_display: value.cwd_display,
       prompt_phase: value.prompt_phase.into(),
       running_command: value.running_command,
       tui_hint: value.tui_hint.into(),
@@ -675,6 +677,19 @@ mod tests {
     let json = serde_json::to_string(&ShellStateDto::from(state)).unwrap();
     assert!(json.contains("running_command"));
     assert!(json.contains("cargo test"));
+  }
+
+  #[test]
+  fn shell_state_dto_keeps_raw_and_display_working_directories_separate() {
+    let state = ShellState {
+      cwd: Some("/Users/me/project".into()),
+      cwd_display: Some("~/project".into()),
+      ..ShellState::default()
+    };
+
+    let json = serde_json::to_value(ShellStateDto::from(state)).unwrap();
+    assert_eq!(json["cwd"], "/Users/me/project");
+    assert_eq!(json["cwd_display"], "~/project");
   }
 
   #[test]

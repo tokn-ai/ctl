@@ -30,6 +30,7 @@ function setup(
   pendingCloseSessionId: string | null = null,
   daemonRestartConfirmationPending = false,
   restartingDaemon = false,
+  currentWorkingDirectoryDisplay = currentWorkingDirectory,
 ) {
   const sessions = [session("first"), session("second"), session("third")];
   const tabs = sessions.filter((candidate) =>
@@ -68,6 +69,7 @@ function setup(
       disconnectingSessionId: null,
       terminalReady: true,
       currentWorkingDirectory,
+      currentWorkingDirectoryDisplay,
       daemonRestartConfirmationPending,
       restartingDaemon,
       shortcutPlatform,

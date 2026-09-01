@@ -193,8 +193,7 @@ async fn show_shell_state<C: Connector>(connector: &C, session: &str) -> Result<
     "CWD\t{}",
     state
       .shell_state
-      .cwd
-      .as_deref()
+      .displayed_cwd()
       .map_or_else(|| "-".into(), escaped_for_terminal)
   );
   println!(

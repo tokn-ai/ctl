@@ -38,6 +38,19 @@ describe("formatTerminalTitle", () => {
     });
   });
 
+  it("uses the target-derived home-relative display path", () => {
+    expect(
+      formatTerminalTitle(
+        { name: "session-1" },
+        shellState({ cwd_display: "~/Projects/Tools/ctl" }),
+      ),
+    ).toEqual({
+      path: "~/Projects/Tools/ctl",
+      command: "zsh",
+      text: "~/Projects/Tools/ctl — zsh",
+    });
+  });
+
   it("uses the shell when the session is idle", () => {
     expect(
       formatTerminalTitle({ name: "session-1" }, shellState()),

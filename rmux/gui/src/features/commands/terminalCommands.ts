@@ -46,6 +46,7 @@ interface TerminalCommandContext {
   disconnectingSessionId: string | null;
   terminalReady: boolean;
   currentWorkingDirectory: string | null;
+  currentWorkingDirectoryDisplay: string | null;
   daemonRestartConfirmationPending: boolean;
   restartingDaemon: boolean;
   shortcutPlatform: ShortcutPlatform;
@@ -152,7 +153,7 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.newTab,
       category: "Terminal",
       title: "New Tab in Current Folder",
-      detail: context.currentWorkingDirectory ?? undefined,
+      detail: context.currentWorkingDirectoryDisplay ?? undefined,
       keywords: ["shell", "terminal", "cwd", "folder"],
       keybinding: {
         code: "KeyT",

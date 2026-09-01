@@ -61,6 +61,7 @@ describe("createStatusGroups", () => {
       shell_state: {
         shell_type: "zsh",
         cwd: "/Users/me/project",
+        cwd_display: "~/project",
         running_command: null,
         prompt_phase: "editing",
         tui_hint: "alternate_screen",
@@ -70,7 +71,7 @@ describe("createStatusGroups", () => {
     });
 
     expect(labels(createStatusGroups(current))).toEqual({
-      context: ["zsh", "/Users/me/project"],
+      context: ["zsh", "~/project"],
       indicators: ["EDITING", "TUI", "VIEW", "OTHER SIZE", "107×24"],
     });
   });

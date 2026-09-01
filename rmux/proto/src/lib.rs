@@ -194,8 +194,19 @@ pub struct ShellState {
   pub revision: u64,
   pub observed_sequence: u64,
   pub shell: ShellDescriptor,
-  /// A shell-reported directory display string, not a portable file path.
+  /// The shell-reported target-local working directory.
+  ///
+  /// Clients may send this value back only to the same daemon for operations
+  /// such as creating another session in the current directory. It is not a
+  /// portable path across hosts.
   pub cwd: Option<String>,
+  /// A daemon-derived presentation of `cwd`, with the target user's home
+  /// directory abbreviated to `~` when possible.
+  ///
+  /// This additive field defaults to absent when reading snapshots from a
+  /// daemon that predates home-relative display paths.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cwd_display: Option<String>,
   pub prompt_phase: PromptPhase,
   /// True when a visibility policy deliberately omitted the current command.
   /// When true, `current_command_line` must be `None`.
@@ -214,6 +225,13 @@ pub struct ShellState {
 }
 
 impl ShellState {
+  /// Returns the target-derived display path, falling back to the raw working
+  /// directory for snapshots produced by an older daemon.
+  #[must_use]
+  pub fn displayed_cwd(&self) -> Option<&str> {
+    self.cwd_display.as_deref().or(self.cwd.as_deref())
+  }
+
   /// Returns whether the command-line fields obey their privacy and cursor
   /// invariants.
   #[must_use]
@@ -577,6 +595,7 @@ mod tests {
         },
       },
       cwd: Some("/work/rmux".into()),
+      cwd_display: Some("~/work/rmux".into()),
       prompt_phase: PromptPhase::Editing,
       command_line_redacted: false,
       current_command_line: Some(CommandLine {
@@ -724,6 +743,7 @@ mod tests {
     );
     assert_eq!(encoded["state"]["tui_hint"], "inline");
     assert_eq!(encoded["state"]["running_command"], serde_json::Value::Null);
+    assert_eq!(encoded["state"]["cwd_display"], "~/work/rmux");
   }
 
   #[test]
@@ -763,6 +783,8 @@ mod tests {
     assert!(!state.shell.capabilities.reports_running_command);
     assert!(!state.running_command_redacted);
     assert_eq!(state.running_command, None);
+    assert_eq!(state.cwd_display, None);
+    assert_eq!(state.displayed_cwd(), Some("/work/rmux"));
   }
 
   #[test]
@@ -953,6 +975,7 @@ mod tests {
         observed_sequence: 0,
         shell: ShellDescriptor::default(),
         cwd: None,
+        cwd_display: None,
         prompt_phase: PromptPhase::Unknown,
         command_line_redacted: false,
         current_command_line: None,

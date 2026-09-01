@@ -30,7 +30,7 @@ impl CommandErrorDto {
     }
   }
 
-  pub fn transport(error: CoreError) -> Self {
+  pub fn transport(error: &CoreError) -> Self {
     match error {
       CoreError::InvalidSshDestination(_) => {
         Self::new("invalid_ssh_destination", error.to_string())

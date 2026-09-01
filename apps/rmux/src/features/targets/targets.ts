@@ -99,7 +99,12 @@ export function saveRemoteTargets(
       ),
     ),
   };
-  storage.setItem(STORAGE_KEY, JSON.stringify(stored));
+  try {
+    storage.setItem(STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // A privacy-restricted WebView may deny persistence. Host use remains
+    // valid for the current app lifetime, so storage failure is non-fatal.
+  }
 }
 
 function uniqueDestinations(destinations: readonly string[]): string[] {

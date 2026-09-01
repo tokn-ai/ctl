@@ -367,3 +367,73 @@ fn unexpected_response(expected: &str, _actual: &ServerMessage) -> CommandErrorD
     format!("expected {expected}, received another response type"),
   )
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::dto::{ConnectionTargetDto, TerminalSizeDto};
+
+  /// Exercises the public command functions invoked by Tauri without a
+  /// `WebView`. The caller supplies an OpenSSH destination so authentication and
+  /// host verification remain owned by the user's SSH configuration.
+  #[tokio::test]
+  #[ignore = "requires RMUX_TEST_SSH_TARGET and a live ctld SSH endpoint"]
+  async fn creates_lists_attaches_and_kills_a_session_over_ssh() {
+    let destination = std::env::var("RMUX_TEST_SSH_TARGET")
+      .expect("set RMUX_TEST_SSH_TARGET to an OpenSSH destination");
+    let target = ConnectionTargetDto::Ssh { destination };
+    let created = create_session(CreateSessionRequestDto {
+      target: target.clone(),
+      working_directory: None,
+      terminal_size: TerminalSizeDto {
+        columns: 80,
+        rows: 24,
+        pixel_width: None,
+        pixel_height: None,
+      },
+    })
+    .await
+    .expect("create remote session");
+
+    assert_eq!(created.target, target);
+    let listed = list_sessions(TargetRequestDto {
+      target: target.clone(),
+    })
+    .await
+    .expect("list remote sessions");
+    assert!(
+      listed
+        .sessions
+        .iter()
+        .any(|session| session.session_id == created.session_id)
+    );
+
+    let stream = transport::connect(&target)
+      .await
+      .expect("open remote attachment transport");
+    let (_stream, attached) = begin_attach(
+      stream,
+      &client_identity(),
+      AttachRequest {
+        session: created.session_id.clone(),
+        resume_from: None,
+        terminal_size: rmux_proto::TerminalSize::default(),
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line: false,
+        request_running_command: true,
+        presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+      },
+    )
+    .await
+    .expect("attach to remote session");
+    assert_eq!(attached.session.session_id, created.session_id);
+
+    kill_session(KillSessionRequestDto {
+      target,
+      session_id: created.session_id,
+    })
+    .await
+    .expect("kill remote session");
+  }
+}

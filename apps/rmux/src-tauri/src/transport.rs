@@ -20,7 +20,7 @@ pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
         ),
       )
     })?
-    .map_err(CommandErrorDto::transport)
+    .map_err(|error| CommandErrorDto::transport(&error))
 }
 
 /// Opens a supplemental connection without replacing a vanished local daemon.

@@ -3,8 +3,13 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
+/// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
+///
+/// The daemon additionally charges a minimum cost per output frame, so this
+/// byte window bounds both memory and event count for fragmented PTY reads.
+pub const DEFAULT_PRESENTATION_WINDOW_BYTES: u64 = 256 * 1024;
 pub const TERMINAL_CHECKPOINT_FORMAT: &str = "rmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
 /// Maximum UTF-8 byte length of a shell-reported running-command summary.
@@ -367,6 +372,9 @@ pub enum ClientMessage {
     /// The daemon may redact it according to its visibility policy.
     #[serde(default)]
     request_running_command: bool,
+    /// Maximum raw output the daemon may send beyond renderer-applied state.
+    #[serde(default = "default_presentation_window_bytes")]
+    presentation_window_bytes: u64,
   },
   /// Rebinds a new transport to a recently disconnected logical attachment.
   ///
@@ -380,6 +388,9 @@ pub enum ClientMessage {
     request_command_line: bool,
     #[serde(default)]
     request_running_command: bool,
+    /// Maximum raw output the daemon may send beyond renderer-applied state.
+    #[serde(default = "default_presentation_window_bytes")]
+    presentation_window_bytes: u64,
   },
   KillSession {
     session: String,
@@ -401,7 +412,16 @@ pub enum ClientMessage {
   Heartbeat {
     nonce: u64,
   },
+  /// Advances the daemon's per-attachment presentation window after the
+  /// renderer has applied a checkpoint or contiguous raw output.
+  PresentationApplied {
+    sequence: u64,
+  },
   Detach,
+}
+
+const fn default_presentation_window_bytes() -> u64 {
+  DEFAULT_PRESENTATION_WINDOW_BYTES
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,6 +638,7 @@ mod tests {
       request_layout_lease: false,
       request_command_line: false,
       request_running_command: true,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     };
     let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -635,6 +656,7 @@ mod tests {
         request_layout_lease: false,
         request_command_line: false,
         request_running_command: true,
+        presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
       }
     );
   }
@@ -808,6 +830,7 @@ mod tests {
 
     let ClientMessage::AttachSession {
       request_running_command,
+      presentation_window_bytes,
       ..
     } = serde_json::from_str(fixture).unwrap()
     else {
@@ -815,11 +838,12 @@ mod tests {
     };
 
     assert!(!request_running_command);
+    assert_eq!(presentation_window_bytes, DEFAULT_PRESENTATION_WINDOW_BYTES);
   }
 
   #[test]
-  fn reconnect_support_uses_protocol_version_seven() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+  fn presentation_flow_control_uses_protocol_version_eight() {
+    assert_eq!(PROTOCOL_VERSION, 8);
   }
 
   #[test]
@@ -831,12 +855,17 @@ mod tests {
       terminal_size: TerminalSize::default(),
       request_command_line: false,
       request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     })
     .unwrap();
 
     assert_eq!(encoded["type"], "resume_attachment");
     assert_eq!(encoded["attachment_token"], "secret");
     assert_eq!(encoded["resume_from"], 42);
+    assert_eq!(
+      encoded["presentation_window_bytes"],
+      DEFAULT_PRESENTATION_WINDOW_BYTES
+    );
   }
 
   #[test]

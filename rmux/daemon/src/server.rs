@@ -11,6 +11,7 @@ use rmux_proto::{
   ClientMessage, CodecError, ErrorCode, LeaseKind, PROTOCOL_VERSION, ServerMessage, ShellState,
   read_frame, write_frame,
 };
+use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,11 +29,13 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MIN_ATTACHMENT_LIVENESS_TIMEOUT: Duration = Duration::from_millis(100);
 pub const MAX_ATTACHMENT_LIVENESS_TIMEOUT: Duration = Duration::from_mins(5);
 pub const DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30);
-// An attachment cannot prove liveness before initial delivery: the client
-// learns the heartbeat cadence from `attached`, while rmuxd serially sends the
-// replay before it can process queued client frames. Give that transfer a
-// separate, finite window instead of applying post-attach liveness too early.
+// An attachment cannot prove liveness before receiving `attached`, because
+// that response carries its token, checkpoint, leases, and heartbeat cadence.
+// Bound this admission write separately from post-attach liveness.
 const INITIAL_ATTACHMENT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(5);
+const MAX_PRESENTATION_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+const MIN_OUTPUT_FRAME_CHARGE_BYTES: u64 = 4 * 1024;
+const MAX_OUTPUT_FRAME_BYTES: usize = 64 * 1024;
 const LOCAL_CONTROL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 // A GUI retains an already-handshaken control stream while it waits for its
 // active attachment to detach (currently up to five seconds). Keep that
@@ -697,13 +700,10 @@ async fn handle_request(
       .await?;
     }
     ClientMessage::ListSessions => {
-      write_frame(
-        &mut stream,
-        &ServerMessage::SessionList {
-          sessions: sessions.list(),
-        },
-      )
-      .await?;
+      let response = ServerMessage::SessionList {
+        sessions: sessions.list(),
+      };
+      write_frame(&mut stream, &response).await?;
     }
     ClientMessage::GetShellState { session } => {
       handle_shell_state_request(&mut stream, &sessions, session).await?;
@@ -716,6 +716,7 @@ async fn handle_request(
       request_layout_lease,
       request_command_line,
       request_running_command,
+      presentation_window_bytes,
     } => {
       let request = AttachParameters {
         resume_from,
@@ -724,6 +725,7 @@ async fn handle_request(
         request_layout_lease,
         request_command_line,
         request_running_command,
+        presentation_window_bytes,
         attachment_liveness_timeout,
       };
       return handle_new_attachment_request(stream, sessions, restart, session, request).await;
@@ -735,6 +737,7 @@ async fn handle_request(
       terminal_size,
       request_command_line,
       request_running_command,
+      presentation_window_bytes,
     } => {
       let request = AttachParameters {
         resume_from,
@@ -743,6 +746,7 @@ async fn handle_request(
         request_layout_lease: false,
         request_command_line,
         request_running_command,
+        presentation_window_bytes,
         attachment_liveness_timeout,
       };
       return handle_resume_attachment_request(
@@ -793,6 +797,9 @@ async fn handle_new_attachment_request(
   session: String,
   request: AttachParameters,
 ) -> Result<(), ConnectionError> {
+  if reject_invalid_presentation_window(&mut stream, &request).await? {
+    return Ok(());
+  }
   match restart.run_while_accepting(|| {
     sessions
       .resolve(&session)
@@ -832,6 +839,9 @@ async fn handle_resume_attachment_request(
   attachment_token: String,
   request: AttachParameters,
 ) -> Result<(), ConnectionError> {
+  if reject_invalid_presentation_window(&mut stream, &request).await? {
+    return Ok(());
+  }
   match restart.run_while_accepting(|| {
     sessions
       .resolve(&session)
@@ -945,7 +955,28 @@ struct AttachParameters {
   request_layout_lease: bool,
   request_command_line: bool,
   request_running_command: bool,
+  presentation_window_bytes: u64,
   attachment_liveness_timeout: Duration,
+}
+
+fn valid_presentation_window(window_bytes: u64) -> bool {
+  (1..=MAX_PRESENTATION_WINDOW_BYTES).contains(&window_bytes)
+}
+
+async fn reject_invalid_presentation_window(
+  stream: &mut UnixStream,
+  request: &AttachParameters,
+) -> Result<bool, ConnectionError> {
+  if valid_presentation_window(request.presentation_window_bytes) {
+    return Ok(false);
+  }
+  send_error(
+    stream,
+    ErrorCode::InvalidRequest,
+    "presentation_window_bytes must be between 1 and 8388608",
+  )
+  .await?;
+  Ok(true)
 }
 
 /// Synchronous attachment admission established under the daemon restart gate.
@@ -1086,8 +1117,10 @@ async fn handle_attach(
     request.request_running_command && attachment_leases.input.owned_by_client,
   );
   let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
+  let sent_sequence = snapshot.journal.replay_from;
+  let applied_sequence = snapshot.checkpoint.is_none().then_some(sent_sequence);
   let (reader, mut writer) = stream.into_split();
-  let sent_sequence = match timeout_at(
+  match timeout_at(
     initial_delivery_deadline,
     send_attached(
       &mut writer,
@@ -1102,7 +1135,7 @@ async fn handle_attach(
   {
     Ok(result) => result?,
     Err(_) => return Ok(()),
-  };
+  }
   attachment_guard.preserve_on_drop = true;
 
   let attachment = LiveAttachment {
@@ -1113,6 +1146,10 @@ async fn handle_attach(
     sent_sequence,
     checkpoint_geometry_revision,
     shell_state_revision: initial_shell_state.revision,
+    presentation_window_bytes: request.presentation_window_bytes,
+    applied_sequence,
+    in_flight_output: VecDeque::new(),
+    in_flight_charge_bytes: 0,
     request_command_line: request.request_command_line,
     request_running_command: request.request_running_command,
     superseded,
@@ -1185,9 +1222,19 @@ struct LiveAttachment {
   /// Internal ordering for geometry changes represented by the last checkpoint.
   checkpoint_geometry_revision: Option<u64>,
   shell_state_revision: u64,
+  presentation_window_bytes: u64,
+  applied_sequence: Option<u64>,
+  in_flight_output: VecDeque<OutputDelivery>,
+  in_flight_charge_bytes: u64,
   request_command_line: bool,
   request_running_command: bool,
   superseded: watch::Receiver<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OutputDelivery {
+  sequence_end: u64,
+  charge_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1211,6 +1258,9 @@ async fn drive_attachment(
     attachment_liveness_timeout,
     deadline,
   };
+  if !driver.send_available_output().await? {
+    return Ok(AttachmentExit::Disconnected);
+  }
   loop {
     tokio::select! {
       biased;
@@ -1271,6 +1321,19 @@ impl AttachmentDriver {
     if Instant::now() >= self.deadline {
       return Ok(false);
     }
+    if let ClientMessage::PresentationApplied { sequence } = message {
+      if let Err(message) = self.accept_presentation_progress(sequence) {
+        send_error(
+          &mut self.attachment.writer,
+          ErrorCode::InvalidRequest,
+          message,
+        )
+        .await?;
+        return Ok(true);
+      }
+      self.deadline = Instant::now() + self.attachment_liveness_timeout;
+      return self.send_available_output().await;
+    }
     if renews_attachment_liveness(&message) {
       self.deadline = Instant::now() + self.attachment_liveness_timeout;
     }
@@ -1292,24 +1355,131 @@ impl AttachmentDriver {
     }
   }
 
+  fn accept_presentation_progress(&mut self, sequence: u64) -> Result<(), &'static str> {
+    if sequence > self.attachment.sent_sequence {
+      return Err("presentation acknowledgement is ahead of sent output");
+    }
+    if let Some(applied_sequence) = self.attachment.applied_sequence {
+      if sequence < applied_sequence {
+        return Err("presentation acknowledgement regressed");
+      }
+      if sequence == applied_sequence {
+        return Ok(());
+      }
+      if !self
+        .attachment
+        .in_flight_output
+        .iter()
+        .any(|delivery| delivery.sequence_end == sequence)
+      {
+        return Err("presentation acknowledgement is not an output frame boundary");
+      }
+    } else if sequence != self.attachment.sent_sequence
+      || !self.attachment.in_flight_output.is_empty()
+    {
+      return Err("presentation acknowledgement does not match the pending checkpoint");
+    }
+
+    self.attachment.applied_sequence = Some(sequence);
+    while self
+      .attachment
+      .in_flight_output
+      .front()
+      .is_some_and(|delivery| delivery.sequence_end <= sequence)
+    {
+      let delivery = self
+        .attachment
+        .in_flight_output
+        .pop_front()
+        .expect("front delivery exists");
+      self.attachment.in_flight_charge_bytes = self
+        .attachment
+        .in_flight_charge_bytes
+        .saturating_sub(delivery.charge_bytes);
+    }
+    Ok(())
+  }
+
+  async fn send_available_output(&mut self) -> Result<bool, ConnectionError> {
+    if self.attachment.applied_sequence.is_none() {
+      return Ok(true);
+    }
+
+    loop {
+      let available_bytes = self
+        .attachment
+        .presentation_window_bytes
+        .saturating_sub(self.attachment.in_flight_charge_bytes);
+      if available_bytes == 0 {
+        return Ok(true);
+      }
+
+      let snapshot = self.session.snapshot_for_delivery(
+        Some(self.attachment.sent_sequence),
+        self.attachment.checkpoint_geometry_revision,
+      )?;
+      if let Some(checkpoint) = snapshot.checkpoint {
+        if !self.attachment.in_flight_output.is_empty() {
+          return Ok(true);
+        }
+        let sequence = checkpoint.sequence;
+        let message = ServerMessage::Checkpoint {
+          checkpoint,
+          history_gap: snapshot.history_gap,
+        };
+        if write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
+          .await?
+          .is_none()
+        {
+          return Ok(false);
+        }
+        self.attachment.sent_sequence = sequence;
+        self.attachment.applied_sequence = None;
+        self.attachment.checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
+        return Ok(true);
+      }
+
+      let frame_limit = usize::try_from(available_bytes)
+        .unwrap_or(usize::MAX)
+        .min(MAX_OUTPUT_FRAME_BYTES);
+      let Some(chunk) = coalesce_output_chunks(
+        snapshot.journal.chunks,
+        self.attachment.sent_sequence,
+        frame_limit,
+      ) else {
+        return Ok(true);
+      };
+      let sequence_end = chunk.sequence_end();
+      let charge_bytes =
+        output_frame_charge(chunk.data.len(), self.attachment.presentation_window_bytes);
+      if charge_bytes > available_bytes {
+        return Ok(true);
+      }
+      if write_before_deadline(
+        &mut self.attachment.writer,
+        &chunk.into_server_message(),
+        self.deadline,
+      )
+      .await?
+      .is_none()
+      {
+        return Ok(false);
+      }
+      self.attachment.sent_sequence = sequence_end;
+      self.attachment.in_flight_charge_bytes += charge_bytes;
+      self.attachment.in_flight_output.push_back(OutputDelivery {
+        sequence_end,
+        charge_bytes,
+      });
+    }
+  }
+
   async fn process_session_event(
     &mut self,
     event: Result<SessionEvent, broadcast::error::RecvError>,
   ) -> Result<bool, ConnectionError> {
     match event {
-      Ok(SessionEvent::Output(chunk)) => {
-        if let Some(chunk) = chunk_after(chunk, self.attachment.sent_sequence) {
-          self.attachment.sent_sequence = chunk.sequence_end();
-          return write_before_deadline(
-            &mut self.attachment.writer,
-            &chunk.into_server_message(),
-            self.deadline,
-          )
-          .await
-          .map(|written| written.is_some());
-        }
-        Ok(true)
-      }
+      Ok(SessionEvent::Output) => self.send_available_output().await,
       Ok(SessionEvent::PtyGeometryChanged {
         terminal_size,
         observed_sequence,
@@ -1346,22 +1516,8 @@ impl AttachmentDriver {
           .map(|_| false);
       }
       Err(broadcast::error::RecvError::Lagged(_)) => {
-        let recovery = match timeout_at(
-          self.deadline,
-          recover_lag(
-            &mut self.attachment.writer,
-            &self.session,
-            self.attachment.sent_sequence,
-          ),
-        )
-        .await
-        {
-          Ok(result) => result?,
-          Err(_) => return Ok(false),
-        };
-        self.attachment.sent_sequence = recovery.sent_sequence;
-        if let Some(checkpoint_geometry_revision) = recovery.checkpoint_geometry_revision {
-          self.attachment.checkpoint_geometry_revision = Some(checkpoint_geometry_revision);
+        if !self.send_available_output().await? {
+          return Ok(false);
         }
         let shell_state = self.session.shell_state_for_attachment(
           &self.attachment_id,
@@ -1406,33 +1562,19 @@ impl AttachmentDriver {
     // impossible gap as a recovery boundary instead of allowing a renderer to
     // resize ahead of unrendered raw output.
     if observed_sequence > self.attachment.sent_sequence {
-      let recovery = match timeout_at(
-        self.deadline,
-        recover_lag(
-          &mut self.attachment.writer,
-          &self.session,
-          self.attachment.sent_sequence,
-        ),
-      )
-      .await
-      {
-        Ok(result) => result?,
-        Err(_) => return Ok(false),
-      };
-      self.attachment.sent_sequence = recovery.sent_sequence;
-      if let Some(checkpoint_geometry_revision) = recovery.checkpoint_geometry_revision {
-        self.attachment.checkpoint_geometry_revision = Some(checkpoint_geometry_revision);
-      }
-      return Ok(true);
+      return self.send_available_output().await;
     }
 
     let message = ServerMessage::PtyGeometryChanged {
       terminal_size,
       observed_sequence,
     };
-    write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
-      .await
-      .map(|written| written.is_some())
+    let written =
+      write_before_deadline(&mut self.attachment.writer, &message, self.deadline).await?;
+    if written.is_some() {
+      self.attachment.checkpoint_geometry_revision = Some(geometry_revision);
+    }
+    Ok(written.is_some())
   }
 
   async fn process_shell_state_update(
@@ -1513,7 +1655,7 @@ async fn send_attached<W>(
   attachment_leases: rmux_core::AttachmentLeases,
   attachment_token: String,
   shell_state: ShellState,
-) -> Result<u64, ConnectionError>
+) -> Result<(), ConnectionError>
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
@@ -1535,12 +1677,7 @@ where
     },
   )
   .await?;
-  forward_chunks(
-    writer,
-    snapshot.journal.replay_from,
-    snapshot.journal.chunks,
-  )
-  .await
+  Ok(())
 }
 
 fn shell_state_for_attachment(
@@ -1633,59 +1770,48 @@ fn renews_attachment_liveness(message: &ClientMessage) -> bool {
   )
 }
 
-struct RecoveryResult {
-  sent_sequence: u64,
-  checkpoint_geometry_revision: Option<u64>,
-}
-
-async fn recover_lag<W>(
-  writer: &mut W,
-  session: &Session,
-  sent_sequence: u64,
-) -> Result<RecoveryResult, ConnectionError>
-where
-  W: tokio::io::AsyncWrite + Unpin,
-{
-  let recovery = session.snapshot_for_attach(Some(sent_sequence))?;
-  let checkpoint_geometry_revision = recovery.checkpoint_geometry_revision;
-  let sent_sequence = if let Some(checkpoint) = recovery.checkpoint {
-    let sequence = checkpoint.sequence;
-    write_frame(
-      writer,
-      &ServerMessage::Checkpoint {
-        checkpoint,
-        history_gap: recovery.history_gap,
-      },
-    )
-    .await?;
-    sequence
-  } else {
-    sent_sequence
-  };
-  let sent_sequence = forward_chunks(writer, sent_sequence, recovery.journal.chunks).await?;
-  Ok(RecoveryResult {
-    sent_sequence,
-    checkpoint_geometry_revision,
-  })
-}
-
-async fn forward_chunks<W>(
-  writer: &mut W,
-  mut sent_sequence: u64,
-  chunks: Vec<OutputChunk>,
-) -> Result<u64, ConnectionError>
-where
-  W: tokio::io::AsyncWrite + Unpin,
-{
-  for chunk in chunks {
-    sent_sequence = chunk.sequence_end();
-    write_frame(writer, &chunk.into_server_message()).await?;
-  }
-  Ok(sent_sequence)
-}
-
 fn initial_attachment_delivery_deadline() -> Instant {
   Instant::now() + INITIAL_ATTACHMENT_DELIVERY_TIMEOUT
+}
+
+fn output_frame_charge(data_len: usize, presentation_window_bytes: u64) -> u64 {
+  let minimum_charge = presentation_window_bytes.min(MIN_OUTPUT_FRAME_CHARGE_BYTES);
+  u64::try_from(data_len)
+    .unwrap_or(u64::MAX)
+    .max(minimum_charge)
+}
+
+fn coalesce_output_chunks(
+  chunks: Vec<OutputChunk>,
+  sequence: u64,
+  max_bytes: usize,
+) -> Option<OutputChunk> {
+  if max_bytes == 0 {
+    return None;
+  }
+
+  let mut data = Vec::with_capacity(max_bytes.min(MAX_OUTPUT_FRAME_BYTES));
+  let mut next_sequence = sequence;
+  for chunk in chunks {
+    let Some(chunk) = chunk_after(chunk, next_sequence) else {
+      continue;
+    };
+    if chunk.sequence_start != next_sequence {
+      break;
+    }
+    let remaining = max_bytes - data.len();
+    let take = remaining.min(chunk.data.len());
+    data.extend_from_slice(&chunk.data[..take]);
+    next_sequence += take as u64;
+    if data.len() == max_bytes {
+      break;
+    }
+  }
+
+  (!data.is_empty()).then_some(OutputChunk {
+    sequence_start: sequence,
+    data,
+  })
 }
 
 fn chunk_after(chunk: OutputChunk, sequence: u64) -> Option<OutputChunk> {
@@ -1935,7 +2061,7 @@ mod tests {
   use super::*;
   use rmux_core::JournalSnapshot;
   use rmux_proto::{LeaseStatus, SessionStatus};
-  use tokio::time::{sleep, timeout};
+  use tokio::time::timeout;
 
   #[test]
   fn endpoint_startup_lock_is_exclusive_and_owner_only() {
@@ -1984,8 +2110,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn initial_delivery_window_outlasts_post_attach_liveness() {
-    let liveness_timeout = Duration::from_millis(25);
+  async fn initial_delivery_defers_replay_until_presentation_credit() {
     let replay = vec![b'x'; 4 * 1024];
     let next_sequence = u64::try_from(replay.len()).expect("test replay fits in u64");
     let snapshot = AttachSnapshot {
@@ -2038,12 +2163,6 @@ mod tests {
       .await
     });
 
-    // The small duplex buffer prevents the initial replay from completing.
-    // It remains in the distinct delivery phase beyond the time at which the
-    // normal attachment liveness deadline would otherwise expire.
-    sleep(liveness_timeout * 2).await;
-    assert!(!delivery.is_finished());
-
     let attached: ServerMessage = timeout(Duration::from_secs(1), read_frame(&mut reader))
       .await
       .expect("initial attached reply did not arrive")
@@ -2059,27 +2178,19 @@ mod tests {
     };
     assert_eq!(session.next_sequence, next_sequence);
     assert_eq!(attached_next_sequence, next_sequence);
-    let output: ServerMessage = timeout(Duration::from_secs(1), read_frame(&mut reader))
-      .await
-      .expect("initial replay did not arrive")
-      .expect("initial replay failed")
-      .expect("initial replay ended unexpectedly");
-    assert!(matches!(
-      output,
-      ServerMessage::Output {
-        sequence_start: 0,
-        sequence_end,
-        ..
-      } if sequence_end == next_sequence
-    ));
-
-    let sent_sequence = timeout(Duration::from_secs(1), delivery)
+    timeout(Duration::from_secs(1), delivery)
       .await
       .expect("initial delivery did not finish")
       .expect("initial delivery task panicked")
       .expect("initial delivery hit its deadline")
       .expect("initial delivery failed");
-    assert_eq!(sent_sequence, next_sequence);
+
+    assert!(
+      read_frame::<_, ServerMessage>(&mut reader)
+        .await
+        .expect("initial delivery stream remained valid")
+        .is_none()
+    );
   }
 
   #[test]
@@ -2093,5 +2204,26 @@ mod tests {
     // Once raw output has advanced beyond a transition, a queued older event
     // is also stale for an attachment that resumed without a checkpoint.
     assert!(geometry_event_is_stale(None, 43, 42, 8));
+  }
+
+  #[test]
+  fn fragmented_output_is_coalesced_into_a_bounded_frame() {
+    let chunks = (0..512)
+      .map(|sequence_start| OutputChunk {
+        sequence_start,
+        data: b"x".to_vec(),
+      })
+      .collect();
+
+    let frame = coalesce_output_chunks(chunks, 0, MAX_OUTPUT_FRAME_BYTES)
+      .expect("fragmented output produced a frame");
+
+    assert_eq!(frame.sequence_start, 0);
+    assert_eq!(frame.sequence_end(), 512);
+    assert_eq!(frame.data, vec![b'x'; 512]);
+    assert_eq!(
+      output_frame_charge(frame.data.len(), 256 * 1024),
+      MIN_OUTPUT_FRAME_CHARGE_BYTES
+    );
   }
 }

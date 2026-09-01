@@ -2,8 +2,8 @@
 
 use rmux_ipc::{control_socket_path, request_local_daemon_restart};
 use rmux_proto::{
-  ClientMessage, CommandSpec, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
-  SessionInfo, ShellState, TerminalSize, read_frame, write_frame,
+  ClientMessage, CommandSpec, DEFAULT_PRESENTATION_WINDOW_BYTES, ErrorCode, LeaseKind, LeaseStatus,
+  PROTOCOL_VERSION, ServerMessage, SessionInfo, ShellState, TerminalSize, read_frame, write_frame,
 };
 use rmuxd::{DEFAULT_ATTACHMENT_LIVENESS_TIMEOUT, DaemonConfig, run};
 use std::error::Error;
@@ -56,7 +56,9 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
   let (first_output, resume_sequence) = read_output_until(&mut first_attach, b"before").await?;
   assert!(contains_bytes(&first_output, b"before"));
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
-  wait_for_detached(&mut first_attach).await?;
+  wait_for_detached(&mut first_attach)
+    .await
+    .map_err(|error| format!("first attachment did not detach: {error}"))?;
   drop(first_attach);
 
   let (mut second_attach, second_attached) = attach_session(
@@ -151,19 +153,34 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
     "checkpoint",
     "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; printf '\\033[2J\\033[Hcheckpoint-ready'; IFS= read -r line",
   )
-  .await?;
+  .await
+  .map_err(|error| format!("checkpoint session was not created: {error}"))?;
 
   let (mut first_attach, first_attached) =
-    attach_session(&socket_path, &session.session_id, Some(0), false, false).await?;
+    attach_session(&socket_path, &session.session_id, Some(0), false, false)
+      .await
+      .map_err(|error| format!("first checkpoint attachment did not open: {error}"))?;
   assert!(matches!(first_attached, ServerMessage::Attached { .. }));
-  let (initial_output, _) = read_output_until(&mut first_attach, b"checkpoint-ready").await?;
+  let initial_output = match &first_attached {
+    ServerMessage::Attached {
+      checkpoint: Some(checkpoint),
+      ..
+    } => checkpoint.payload.clone(),
+    _ => {
+      read_output_until(&mut first_attach, b"checkpoint-ready")
+        .await?
+        .0
+    }
+  };
   assert!(contains_bytes(&initial_output, b"checkpoint-ready"));
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
   wait_for_detached(&mut first_attach).await?;
   drop(first_attach);
 
   let (mut restored_attach, attached) =
-    attach_session(&socket_path, &session.session_id, Some(0), true, false).await?;
+    attach_session(&socket_path, &session.session_id, Some(0), true, false)
+      .await
+      .map_err(|error| format!("restored checkpoint attachment did not open: {error}"))?;
   let ServerMessage::Attached {
     checkpoint: Some(checkpoint),
     history_gap: true,
@@ -192,10 +209,10 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
   )
   .await?;
   loop {
-    if matches!(
-      required_message(&mut restored_attach).await?,
-      ServerMessage::SessionEnded { .. }
-    ) {
+    let message = required_message(&mut restored_attach)
+      .await
+      .map_err(|error| format!("restored attachment did not finish: {error}"))?;
+    if matches!(message, ServerMessage::SessionEnded { .. }) {
       break;
     }
   }
@@ -206,6 +223,105 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
     .map_err(|_| "rmuxd did not exit after checkpoint test")?;
   daemon_result??;
   Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn presentation_window_pauses_output_without_blocking_heartbeats() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 64 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "presentation-window",
+    "yes x | head -c 16384; IFS= read -r line",
+  )
+  .await?;
+
+  let mut attachment = connect_when_ready(&socket_path).await?;
+  handshake(&mut attachment).await?;
+  write_frame(
+    &mut attachment,
+    &ClientMessage::AttachSession {
+      session: session.session_id.clone(),
+      resume_from: None,
+      terminal_size: TerminalSize::default(),
+      request_input_lease: false,
+      request_layout_lease: false,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes: 4 * 1024,
+    },
+  )
+  .await?;
+  let attached = required_message(&mut attachment).await?;
+  let ServerMessage::Attached {
+    checkpoint: Some(checkpoint),
+    ..
+  } = attached
+  else {
+    return Err(format!("expected checkpoint-backed attachment, received {attached:?}").into());
+  };
+  write_frame(
+    &mut attachment,
+    &ClientMessage::PresentationApplied {
+      sequence: checkpoint.sequence,
+    },
+  )
+  .await?;
+
+  let first_sequence_end = loop {
+    if let ServerMessage::Output {
+      sequence_start,
+      sequence_end,
+      data,
+    } = required_message(&mut attachment).await?
+    {
+      assert_eq!(sequence_start, checkpoint.sequence);
+      assert!(!data.is_empty());
+      assert!(data.len() <= 4 * 1024);
+      break sequence_end;
+    }
+  };
+
+  write_frame(&mut attachment, &ClientMessage::Heartbeat { nonce: 99 }).await?;
+  loop {
+    match required_message(&mut attachment).await? {
+      ServerMessage::HeartbeatAck { nonce: 99 } => break,
+      ServerMessage::Output { .. } => {
+        return Err("daemon exceeded presentation credit before renderer progress".into());
+      }
+      ServerMessage::ShellStateChanged { .. } => {}
+      message => {
+        return Err(format!("unexpected message before heartbeat ACK: {message:?}").into());
+      }
+    }
+  }
+
+  write_frame(
+    &mut attachment,
+    &ClientMessage::PresentationApplied {
+      sequence: first_sequence_end,
+    },
+  )
+  .await?;
+  loop {
+    if let ServerMessage::Output {
+      sequence_start,
+      data,
+      ..
+    } = required_message(&mut attachment).await?
+    {
+      assert_eq!(sequence_start, first_sequence_end);
+      assert!(!data.is_empty());
+      break;
+    }
+  }
+
+  kill_shell_session(&socket_path, &session.session_id).await?;
+  wait_for_session_end(&mut attachment).await?;
+  drop(attachment);
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after presentation-window test").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1249,10 +1365,24 @@ async fn attach_session_with_shell_metadata_options(
       request_layout_lease: options.request_layout_lease,
       request_command_line: options.request_command_line,
       request_running_command: options.request_running_command,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     },
   )
   .await?;
   let attached = required_message(&mut stream).await?;
+  if let ServerMessage::Attached {
+    checkpoint: Some(checkpoint),
+    ..
+  } = &attached
+  {
+    write_frame(
+      &mut stream,
+      &ClientMessage::PresentationApplied {
+        sequence: checkpoint.sequence,
+      },
+    )
+    .await?;
+  }
   Ok((stream, attached))
 }
 
@@ -1273,10 +1403,24 @@ async fn resume_attachment(
       terminal_size: TerminalSize::default(),
       request_command_line: false,
       request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     },
   )
   .await?;
   let attached = required_message(&mut stream).await?;
+  if let ServerMessage::Attached {
+    checkpoint: Some(checkpoint),
+    ..
+  } = &attached
+  {
+    write_frame(
+      &mut stream,
+      &ClientMessage::PresentationApplied {
+        sequence: checkpoint.sequence,
+      },
+    )
+    .await?;
+  }
   Ok((stream, attached))
 }
 
@@ -1539,6 +1683,7 @@ async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult {
     match required_message(stream).await? {
       ServerMessage::SessionEnded { .. } => return Ok(()),
       ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
@@ -1559,6 +1704,7 @@ async fn wait_for_session_end_or_connection_close(stream: &mut UnixStream) -> Te
     match message {
       ServerMessage::SessionEnded { .. } => return Ok(()),
       ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
@@ -1643,13 +1789,31 @@ async fn read_output_until(stream: &mut UnixStream, expected: &[u8]) -> TestResu
         sequence_end, data, ..
       } => {
         output.extend(data);
+        write_frame(
+          stream,
+          &ClientMessage::PresentationApplied {
+            sequence: sequence_end,
+          },
+        )
+        .await?;
         if contains_bytes(&output, expected) {
           return Ok((output, sequence_end));
         }
       }
-      ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::Checkpoint { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      ServerMessage::Checkpoint { checkpoint, .. } => {
+        output = checkpoint.payload.clone();
+        write_frame(
+          stream,
+          &ClientMessage::PresentationApplied {
+            sequence: checkpoint.sequence,
+          },
+        )
+        .await?;
+        if contains_bytes(&output, expected) {
+          return Ok((output, checkpoint.sequence));
+        }
+      }
+      ServerMessage::ShellStateChanged { .. } | ServerMessage::PtyGeometryChanged { .. } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
     }
   }

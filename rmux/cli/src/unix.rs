@@ -1,8 +1,8 @@
 use super::{Command, ShellCommand, command_spec, shell};
 use rmux_client::{
   AttachExitReason, AttachRequest, ClientError as ProtocolError, ClientIdentity,
-  InteractiveAttachOptions, attach_interactive_with_options, begin_attach, current_terminal_size,
-  get_shell_state, request, resume_attach,
+  DEFAULT_PRESENTATION_WINDOW_BYTES, InteractiveAttachOptions, attach_interactive_with_options,
+  begin_attach, current_terminal_size, get_shell_state, request, resume_attach,
 };
 use rmux_proto::{
   ClientMessage, CodecError, CommandSpec, ErrorCode, PromptPhase, ServerMessage, SessionInfo,
@@ -252,6 +252,7 @@ async fn attach_session<C: Connector>(
       request_layout_lease,
       request_command_line: false,
       request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     };
     let attachment = if let Some(token) = attachment_token.clone() {
       resume_attach(stream, &identity, token, request).await

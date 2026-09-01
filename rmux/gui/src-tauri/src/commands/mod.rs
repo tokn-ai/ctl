@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmux_client::{
-  AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity, begin_attach,
-  get_shell_state, request as rmux_request,
+  AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity,
+  DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach, get_shell_state, request as rmux_request,
 };
 use rmux_proto::{ClientMessage, ServerMessage};
 use tauri::ipc::Channel;
@@ -214,6 +214,7 @@ async fn open_reserved_attachment(
       request_layout_lease: request.request_layout_lease,
       request_command_line: false,
       request_running_command: true,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     },
   )
   .await

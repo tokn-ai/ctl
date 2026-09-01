@@ -1,6 +1,9 @@
 #![cfg(unix)]
 
-use rmux_client::{AttachRequest, ClientIdentity, begin_attach, request, resume_attach};
+use rmux_client::{
+  AttachRequest, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach, request,
+  resume_attach,
+};
 use rmux_proto::{
   ClientMessage, CommandSpec, ServerMessage, SessionStatus, TerminalSize, read_frame, write_frame,
 };
@@ -78,6 +81,7 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
     request_layout_lease: false,
     request_command_line: false,
     request_running_command: false,
+    presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
   };
   let (mut attachment, attached) = begin_attach(
     open_gateway(&socket).await?,
@@ -85,6 +89,15 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
     attach_request.clone(),
   )
   .await?;
+  if let Some(checkpoint) = &attached.checkpoint {
+    write_frame(
+      &mut attachment,
+      &ClientMessage::PresentationApplied {
+        sequence: checkpoint.sequence,
+      },
+    )
+    .await?;
+  }
   read_output_until(&mut attachment, b"ready").await?;
 
   // This is the lifecycle of a broken SSH channel: its disposable `ctld`
@@ -113,6 +126,15 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
   )
   .await?;
   assert!(resumed_attachment.input_lease.owned_by_client);
+  if let Some(checkpoint) = &resumed_attachment.checkpoint {
+    write_frame(
+      &mut resumed,
+      &ClientMessage::PresentationApplied {
+        sequence: checkpoint.sequence,
+      },
+    )
+    .await?;
+  }
   write_frame(
     &mut resumed,
     &ClientMessage::Input {

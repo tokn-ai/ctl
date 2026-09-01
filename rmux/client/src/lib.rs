@@ -1,4 +1,5 @@
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+pub use rmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use rmux_proto::{
   ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
   SessionInfo, ShellState, TerminalCheckpoint, TerminalSize, read_frame, write_frame,
@@ -10,8 +11,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 const DETACH_BYTE: u8 = 0x1d;
 // `rmux_vt_state` is an initialization stream, not an idempotent patch. The
@@ -42,6 +43,8 @@ pub struct AttachRequest {
   /// Request the current non-editable running-command summary when daemon
   /// policy allows it.
   pub request_running_command: bool,
+  /// Maximum raw output rmuxd may send beyond renderer-applied state.
+  pub presentation_window_bytes: u64,
 }
 
 /// Session metadata and attachment-relative state returned by `rmuxd`.
@@ -227,12 +230,6 @@ pub struct AttachmentControllerOptions {
   /// drains events but never acknowledges them cannot grow memory without
   /// limit.
   pub event_queue_capacity: usize,
-  /// Maximum time a full presentation queue may stall an attachment before the
-  /// controller closes it. A later reconnect resumes from the renderer-applied
-  /// cursor rather than silently discarding queued output. The controller caps
-  /// it below the daemon's negotiated peer timeout so this deliberate shutdown
-  /// happens before a blocked reader can masquerade as peer silence.
-  pub presentation_backpressure_timeout: Duration,
 }
 
 impl Default for AttachmentControllerOptions {
@@ -244,7 +241,6 @@ impl Default for AttachmentControllerOptions {
       resize_after_layout_reacquire: None,
       command_queue_capacity: 64,
       event_queue_capacity: 128,
-      presentation_backpressure_timeout: Duration::from_secs(30),
     }
   }
 }
@@ -459,8 +455,9 @@ enum AttachmentCommand {
 
 /// Confirms that a renderer has applied one ordered presentation event.
 ///
-/// Acknowledgements are local controller messages, never daemon protocol
-/// frames. They determine the safe raw-output resume cursor after a reconnect.
+/// The controller uses these local messages both to determine the safe
+/// reconnect cursor and to publish coalesced delivery progress to rmuxd. A
+/// renderer never writes protocol frames itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PresentationAck {
   Output { sequence_end: u64 },
@@ -858,6 +855,7 @@ where
     request_layout_lease: request.request_layout_lease,
     request_command_line: request.request_command_line,
     request_running_command: request.request_running_command,
+    presentation_window_bytes: request.presentation_window_bytes,
   };
   begin_attachment(stream, identity, message).await
 }
@@ -888,6 +886,7 @@ where
     terminal_size: request.terminal_size,
     request_command_line: request.request_command_line,
     request_running_command: request.request_running_command,
+    presentation_window_bytes: request.presentation_window_bytes,
   };
   begin_attachment(stream, identity, message).await
 }
@@ -952,7 +951,7 @@ impl<S> AttachmentController<S> {
   pub fn new(
     stream: S,
     attached: &AttachedSession,
-    mut options: AttachmentControllerOptions,
+    options: AttachmentControllerOptions,
   ) -> Result<(Self, AttachmentControl, AttachmentEvents), ClientError> {
     if options.command_queue_capacity == 0 || options.event_queue_capacity == 0 {
       return Err(ClientError::InvalidAttachmentQueueCapacity {
@@ -960,18 +959,6 @@ impl<S> AttachmentController<S> {
         event_queue_capacity: options.event_queue_capacity,
       });
     }
-    if options.presentation_backpressure_timeout.is_zero() {
-      return Err(ClientError::InvalidPresentationBackpressureTimeout);
-    }
-    let latest_safe_backpressure_timeout = attached
-      .liveness
-      .peer_timeout
-      .checked_div(2)
-      .unwrap_or(attached.liveness.peer_timeout);
-    options.presentation_backpressure_timeout = options
-      .presentation_backpressure_timeout
-      .min(latest_safe_backpressure_timeout);
-
     if let Some(checkpoint) = attached.checkpoint.as_ref() {
       validate_checkpoint(checkpoint)?;
       if checkpoint.sequence != attached.replay_from {
@@ -1060,18 +1047,27 @@ impl<S> AttachmentController<S> {
     let (reader, writer) = tokio::io::split(stream);
     let (incoming_sender, incoming_receiver) = mpsc::channel(self.options.event_queue_capacity);
     let (writer_status_sender, writer_status_receiver) = mpsc::unbounded_channel();
+    let (presentation_progress_sender, presentation_progress_receiver) = watch::channel(None);
     let peer_activity = Arc::new(Mutex::new(Instant::now()));
     let reader = read_server_messages(reader, incoming_sender, Arc::clone(&peer_activity));
     let writer = drive_attachment_writer(
       writer,
-      commands,
       self.state.clone(),
       self.liveness,
       self.options.clone(),
       peer_activity,
-      writer_status_sender,
+      AttachmentWriterChannels {
+        commands,
+        presentation_progress: presentation_progress_receiver,
+        statuses: writer_status_sender,
+      },
     );
-    let driver = self.drive(incoming_receiver, acknowledgements, writer_status_receiver);
+    let driver = self.drive(
+      incoming_receiver,
+      acknowledgements,
+      presentation_progress_sender,
+      writer_status_receiver,
+    );
     tokio::pin!(reader);
     tokio::pin!(writer);
     tokio::pin!(driver);
@@ -1087,6 +1083,7 @@ impl<S> AttachmentController<S> {
     &mut self,
     mut incoming: mpsc::Receiver<IncomingServerMessage>,
     mut acknowledgements: mpsc::Receiver<PresentationAcknowledgement>,
+    presentation_progress: watch::Sender<Option<u64>>,
     mut writer_statuses: mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<AttachExit, ClientError> {
     if let Some((checkpoint, history_gap)) = self.initial_checkpoint.take() {
@@ -1115,6 +1112,8 @@ impl<S> AttachmentController<S> {
     let mut acknowledgements_open = true;
 
     loop {
+      let presentation_capacity_available =
+        self.pending_presentations.len() < self.options.event_queue_capacity;
       tokio::select! {
         writer_status = writer_statuses.recv() => {
           match writer_status {
@@ -1128,12 +1127,16 @@ impl<S> AttachmentController<S> {
         acknowledgement = acknowledgements.recv(), if acknowledgements_open => {
           match acknowledgement {
             Some(acknowledgement) => {
-              self.accept_presentation_acknowledgement_request(acknowledgement)?;
+              if let Some(applied_sequence) =
+                self.accept_presentation_acknowledgement_request(acknowledgement)?
+              {
+                presentation_progress.send_replace(Some(applied_sequence));
+              }
             }
             None => acknowledgements_open = false,
           }
         }
-        incoming_message = incoming.recv() => {
+        incoming_message = incoming.recv(), if presentation_capacity_available => {
           match incoming_message {
             Some(IncomingServerMessage::Message(message)) => {
               match self.process_server_message(*message, &mut writer_statuses).await? {
@@ -1228,11 +1231,11 @@ impl<S> AttachmentController<S> {
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     self.accept_output(sequence_start, sequence_end, &data)?;
-    if !self.enqueue_presentation(PendingPresentation::Output { sequence_end }) {
-      return Ok(ControllerAction::Exit {
-        reason: AttachExitReason::ConnectionClosed,
-      });
-    }
+    let queued = self.enqueue_presentation(PendingPresentation::Output { sequence_end });
+    debug_assert!(
+      queued,
+      "presentation capacity is checked before receiving output"
+    );
     self
       .emit_event(
         AttachmentEvent::Output {
@@ -1252,13 +1255,13 @@ impl<S> AttachmentController<S> {
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     self.accept_checkpoint(&checkpoint)?;
-    if !self.enqueue_presentation(PendingPresentation::Checkpoint {
+    let queued = self.enqueue_presentation(PendingPresentation::Checkpoint {
       sequence: checkpoint.sequence,
-    }) {
-      return Ok(ControllerAction::Exit {
-        reason: AttachExitReason::ConnectionClosed,
-      });
-    }
+    });
+    debug_assert!(
+      queued,
+      "presentation capacity is checked before receiving checkpoints"
+    );
     self
       .emit_event(
         AttachmentEvent::Checkpoint {
@@ -1403,11 +1406,11 @@ impl<S> AttachmentController<S> {
     }
 
     self.state.set_terminal_size(terminal_size.clone());
-    if !self.enqueue_presentation(PendingPresentation::Geometry { observed_sequence }) {
-      return Ok(ControllerAction::Exit {
-        reason: AttachExitReason::ConnectionClosed,
-      });
-    }
+    let queued = self.enqueue_presentation(PendingPresentation::Geometry { observed_sequence });
+    debug_assert!(
+      queued,
+      "presentation capacity is checked before receiving geometry"
+    );
     self
       .emit_event(
         AttachmentEvent::PtyGeometryChanged {
@@ -1420,12 +1423,7 @@ impl<S> AttachmentController<S> {
   }
 
   fn enqueue_presentation(&mut self, pending: PendingPresentation) -> bool {
-    // The extra slot permits one current event to wait in the bounded bridge
-    // while the previous event is still awaiting an acknowledgement. Once a
-    // presenter drains events without acknowledging them, this ledger remains
-    // bounded and the controller closes for a checkpoint-safe reconnect.
-    let capacity = self.options.event_queue_capacity.saturating_add(1);
-    if self.pending_presentations.len() >= capacity {
+    if self.pending_presentations.len() >= self.options.event_queue_capacity {
       return false;
     }
     self.pending_presentations.push_back(pending);
@@ -1438,9 +1436,7 @@ impl<S> AttachmentController<S> {
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     let send = self.events.send(event);
-    let backpressure = sleep(self.options.presentation_backpressure_timeout);
     tokio::pin!(send);
-    tokio::pin!(backpressure);
     tokio::select! {
       result = &mut send => {
         if result.is_ok() {
@@ -1460,65 +1456,67 @@ impl<S> AttachmentController<S> {
           Some(WriterStatus::Fatal(error)) => Err(error),
         }
       }
-      () = &mut backpressure => {
-        Ok(ControllerAction::Exit {
-          reason: AttachExitReason::ConnectionClosed,
-        })
-      }
     }
   }
 
   fn accept_presentation_acknowledgement(
     &mut self,
     acknowledgement: PresentationAck,
-  ) -> Result<(), ClientError> {
+  ) -> Result<Option<u64>, ClientError> {
     let pending = self.pending_presentations.front().copied().ok_or_else(|| {
       ClientError::UnexpectedPresentationAcknowledgement {
         expected: "no pending presentation event".into(),
         actual: presentation_acknowledgement_name(acknowledgement).into(),
       }
     })?;
-    let (acknowledged_sequence, applied_checkpoint, incompatible_checkpoint, incompatible_geometry) =
-      match (pending, acknowledgement) {
-        (
-          PendingPresentation::Output {
-            sequence_end: expected_sequence_end,
-          },
-          PresentationAck::Output { sequence_end },
-        ) if sequence_end == expected_sequence_end => (Some(sequence_end), false, false, false),
-        (
-          PendingPresentation::Checkpoint {
-            sequence: expected_sequence,
-          },
-          PresentationAck::Checkpoint { sequence },
-        ) if sequence == expected_sequence => (Some(sequence), true, false, false),
-        (
-          PendingPresentation::Checkpoint {
-            sequence: expected_sequence,
-          },
-          PresentationAck::CheckpointIncompatible { sequence },
-        ) if sequence == expected_sequence => (None, false, true, false),
-        (
-          PendingPresentation::Geometry {
-            observed_sequence: expected_sequence,
-          },
-          PresentationAck::Geometry { observed_sequence },
-        ) if observed_sequence == expected_sequence => {
-          (self.state.resume_sequence(), false, false, false)
-        }
-        (
-          PendingPresentation::Geometry {
-            observed_sequence: expected_sequence,
-          },
-          PresentationAck::GeometryIncompatible { observed_sequence },
-        ) if observed_sequence == expected_sequence => (None, false, false, true),
-        _ => {
-          return Err(ClientError::UnexpectedPresentationAcknowledgement {
-            expected: pending_presentation_name(pending).into(),
-            actual: presentation_acknowledgement_name(acknowledgement).into(),
-          });
-        }
-      };
+    let (
+      acknowledged_sequence,
+      applied_checkpoint,
+      incompatible_checkpoint,
+      incompatible_geometry,
+      delivery_progress,
+    ) = match (pending, acknowledgement) {
+      (
+        PendingPresentation::Output {
+          sequence_end: expected_sequence_end,
+        },
+        PresentationAck::Output { sequence_end },
+      ) if sequence_end == expected_sequence_end => {
+        (Some(sequence_end), false, false, false, Some(sequence_end))
+      }
+      (
+        PendingPresentation::Checkpoint {
+          sequence: expected_sequence,
+        },
+        PresentationAck::Checkpoint { sequence },
+      ) if sequence == expected_sequence => (Some(sequence), true, false, false, Some(sequence)),
+      (
+        PendingPresentation::Checkpoint {
+          sequence: expected_sequence,
+        },
+        PresentationAck::CheckpointIncompatible { sequence },
+      ) if sequence == expected_sequence => (None, false, true, false, Some(sequence)),
+      (
+        PendingPresentation::Geometry {
+          observed_sequence: expected_sequence,
+        },
+        PresentationAck::Geometry { observed_sequence },
+      ) if observed_sequence == expected_sequence => {
+        (self.state.resume_sequence(), false, false, false, None)
+      }
+      (
+        PendingPresentation::Geometry {
+          observed_sequence: expected_sequence,
+        },
+        PresentationAck::GeometryIncompatible { observed_sequence },
+      ) if observed_sequence == expected_sequence => (None, false, false, true, None),
+      _ => {
+        return Err(ClientError::UnexpectedPresentationAcknowledgement {
+          expected: pending_presentation_name(pending).into(),
+          actual: presentation_acknowledgement_name(acknowledgement).into(),
+        });
+      }
+    };
     let _popped = self.pending_presentations.pop_front();
     if applied_checkpoint {
       self.renderer_requires_checkpoint = false;
@@ -1538,16 +1536,16 @@ impl<S> AttachmentController<S> {
         .then_some(acknowledged_sequence)
         .flatten(),
     );
-    Ok(())
+    Ok(delivery_progress)
   }
 
   fn accept_presentation_acknowledgement_request(
     &mut self,
     request: PresentationAcknowledgement,
-  ) -> Result<(), ClientError> {
+  ) -> Result<Option<u64>, ClientError> {
     let result = self.accept_presentation_acknowledgement(request.acknowledgement);
     let completion = match &result {
-      Ok(()) => Ok(()),
+      Ok(_) => Ok(()),
       Err(ClientError::UnexpectedPresentationAcknowledgement { expected, actual }) => {
         Err(AttachmentAcknowledgementError::Rejected {
           expected: expected.clone(),
@@ -1608,14 +1606,19 @@ fn presentation_acknowledgement_name(acknowledgement: PresentationAck) -> &'stat
   }
 }
 
+struct AttachmentWriterChannels {
+  commands: mpsc::Receiver<AttachmentCommand>,
+  presentation_progress: watch::Receiver<Option<u64>>,
+  statuses: mpsc::UnboundedSender<WriterStatus>,
+}
+
 async fn drive_attachment_writer<W>(
   mut writer: W,
-  mut commands: mpsc::Receiver<AttachmentCommand>,
   state: AttachmentState,
   liveness: AttachmentLiveness,
   options: AttachmentControllerOptions,
   peer_activity: Arc<Mutex<Instant>>,
-  statuses: mpsc::UnboundedSender<WriterStatus>,
+  mut channels: AttachmentWriterChannels,
 ) where
   W: AsyncWrite + Unpin,
 {
@@ -1626,6 +1629,7 @@ async fn drive_attachment_writer<W>(
   );
   heartbeats.set_missed_tick_behavior(MissedTickBehavior::Delay);
   let mut heartbeat_nonce = 0_u64;
+  let mut presentation_progress_open = true;
   let mut resize_after_layout_reacquire = options.reacquire_layout_lease
     && options.resize_after_layout_reacquire.is_some()
     && !state.lease_status(LeaseKind::Layout).owned_by_client;
@@ -1654,7 +1658,26 @@ async fn drive_attachment_writer<W>(
           Err(error) => break WriterStatus::Fatal(error),
         }
       }
-      command = commands.recv() => {
+      changed = channels.presentation_progress.changed(), if presentation_progress_open => {
+        if changed.is_err() {
+          presentation_progress_open = false;
+          continue;
+        }
+        let Some(sequence) = *channels.presentation_progress.borrow_and_update() else {
+          continue;
+        };
+        match send_attachment_message(
+          &mut writer,
+          &ClientMessage::PresentationApplied { sequence },
+        )
+        .await
+        {
+          Ok(true) => {}
+          Ok(false) => break WriterStatus::ConnectionClosed,
+          Err(error) => break WriterStatus::Fatal(error),
+        }
+      }
+      command = channels.commands.recv() => {
         match command {
           Some(AttachmentCommand::Detach) | None => {
             match send_attachment_message(&mut writer, &ClientMessage::Detach).await {
@@ -1675,7 +1698,7 @@ async fn drive_attachment_writer<W>(
     }
   };
   let detach_sent = matches!(status, WriterStatus::DetachSent);
-  let _ignored = statuses.send(status);
+  let _ignored = channels.statuses.send(status);
   if detach_sent {
     // Keep the write task and status channel alive until the reader observes
     // the daemon's detach acknowledgement. The controller aborts this task
@@ -2182,8 +2205,6 @@ pub enum ClientError {
     command_queue_capacity: usize,
     event_queue_capacity: usize,
   },
-  #[error("attachment controller presentation backpressure timeout must be non-zero")]
-  InvalidPresentationBackpressureTimeout,
   #[error("attachment controller has already been started")]
   AttachmentControllerAlreadyRun,
   #[error("daemon error {code:?}: {message}")]
@@ -2312,6 +2333,7 @@ mod tests {
         request_layout_lease: false,
         request_command_line: true,
         request_running_command: true,
+        presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
       },
     )
     .await
@@ -2785,6 +2807,12 @@ mod tests {
     };
     control.acknowledge_output(sequence_end).await.unwrap();
     assert_eq!(state.resume_sequence(), None);
+    loop {
+      let message: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
+      if matches!(message, ClientMessage::PresentationApplied { sequence: 3 }) {
+        break;
+      }
+    }
 
     let checkpoint = checkpoint(3);
     write_frame(
@@ -2805,6 +2833,19 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(state.resume_sequence(), None);
+    let repeated_progress = tokio::time::timeout(Duration::from_secs(1), async {
+      loop {
+        let message: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
+        if matches!(message, ClientMessage::PresentationApplied { sequence: 3 }) {
+          return;
+        }
+      }
+    })
+    .await;
+    assert!(
+      repeated_progress.is_ok(),
+      "an incompatible checkpoint still replenishes delivery credit"
+    );
 
     write_frame(
       &mut daemon,
@@ -2831,14 +2872,14 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn acknowledgement_ledger_is_bounded_when_events_are_not_acknowledged() {
+  async fn acknowledgement_ledger_backpressures_until_the_renderer_advances() {
     let (client, mut daemon) = tokio::io::duplex(4096);
     let attached = attached_session(0, None, ShellState::default());
     let options = AttachmentControllerOptions {
       event_queue_capacity: 1,
       ..controller_options()
     };
-    let (controller, _control, mut events) =
+    let (controller, control, mut events) =
       AttachmentController::new(client, &attached, options).unwrap();
     let runner = tokio::spawn(controller.run());
 
@@ -2853,30 +2894,45 @@ mod tests {
       )
       .await
       .unwrap();
-      assert!(matches!(
-        events.recv().await,
-        Some(AttachmentEvent::Output { .. })
-      ));
     }
 
-    write_frame(
-      &mut daemon,
-      &ServerMessage::Output {
-        sequence_start: 2,
-        sequence_end: 3,
-        data: b"c".to_vec(),
-      },
-    )
-    .await
-    .unwrap();
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Output {
+        sequence_end: 1,
+        ..
+      })
+    ));
+    assert!(events.try_recv().is_err());
+    assert!(!runner.is_finished());
 
-    let exit = tokio::time::timeout(Duration::from_secs(1), runner)
-      .await
-      .expect("unacknowledged presentation ledger did not close")
-      .unwrap()
-      .unwrap();
+    control.acknowledge_output(1).await.unwrap();
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Output {
+        sequence_end: 2,
+        ..
+      })
+    ));
+    control.acknowledge_output(2).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+      loop {
+        let message: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
+        if let ClientMessage::PresentationApplied { sequence } = message
+          && sequence == 2
+        {
+          return;
+        }
+      }
+    })
+    .await
+    .expect("renderer progress was not sent to the daemon");
+
+    drop(daemon);
+    let exit = runner.await.unwrap().unwrap();
     assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
-    assert_eq!(exit.next_sequence, Some(0));
+    assert_eq!(exit.next_sequence, Some(2));
   }
 
   #[tokio::test]
@@ -2898,7 +2954,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn full_presentation_queue_keeps_heartbeats_live_then_reconnects_from_applied_cursor() {
+  async fn full_presentation_queue_keeps_heartbeats_live_and_drains_after_progress() {
     let (client, mut daemon) = tokio::io::duplex(4096);
     let mut attached = attached_session(0, None, ShellState::default());
     attached.liveness = AttachmentLiveness {
@@ -2907,10 +2963,9 @@ mod tests {
     };
     let options = AttachmentControllerOptions {
       event_queue_capacity: 1,
-      presentation_backpressure_timeout: Duration::from_millis(30),
       ..controller_options()
     };
-    let (controller, _control, _events) =
+    let (controller, control, mut events) =
       AttachmentController::new(client, &attached, options).unwrap();
     let runner = tokio::spawn(controller.run());
 
@@ -2924,6 +2979,14 @@ mod tests {
     )
     .await
     .unwrap();
+
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Output {
+        sequence_end: 3,
+        ..
+      })
+    ));
     write_frame(
       &mut daemon,
       &ServerMessage::Output {
@@ -2950,14 +3013,80 @@ mod tests {
     .expect("controller stopped heartbeating while presentation queue was full");
     assert!(matches!(heartbeat, ClientMessage::Heartbeat { .. }));
 
-    let exit = tokio::time::timeout(Duration::from_millis(200), runner)
-      .await
-      .expect("full presentation queue did not trigger bounded shutdown")
-      .unwrap()
-      .unwrap();
+    assert!(!runner.is_finished());
+    control.acknowledge_output(3).await.unwrap();
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::Output {
+        sequence_end: 6,
+        ..
+      })
+    ));
+    control.acknowledge_output(6).await.unwrap();
+
+    drop(daemon);
+    let exit = runner.await.unwrap().unwrap();
     assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
-    assert_eq!(exit.next_sequence, Some(0));
+    assert_eq!(exit.next_sequence, Some(6));
     assert_eq!(exit.received_sequence, 6);
+  }
+
+  #[tokio::test]
+  async fn fragmented_replay_larger_than_the_event_queue_drains_without_reconnect() {
+    const OUTPUT_COUNT: u64 = 256;
+
+    let (client, mut daemon) = tokio::io::duplex(64 * 1024);
+    let attached = attached_session(0, None, ShellState::default());
+    let options = AttachmentControllerOptions {
+      event_queue_capacity: 4,
+      ..controller_options()
+    };
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, options).unwrap();
+    let runner = tokio::spawn(controller.run());
+    let daemon_task = tokio::spawn(async move {
+      for sequence_start in 0..OUTPUT_COUNT {
+        write_frame(
+          &mut daemon,
+          &ServerMessage::Output {
+            sequence_start,
+            sequence_end: sequence_start + 1,
+            data: b"x".to_vec(),
+          },
+        )
+        .await
+        .unwrap();
+      }
+
+      loop {
+        let message: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
+        if matches!(
+          message,
+          ClientMessage::PresentationApplied {
+            sequence: OUTPUT_COUNT
+          }
+        ) {
+          return;
+        }
+      }
+    });
+
+    for expected_sequence in 1..=OUTPUT_COUNT {
+      let Some(AttachmentEvent::Output { sequence_end, .. }) = events.recv().await else {
+        panic!("fragmented replay ended before sequence {expected_sequence}");
+      };
+      assert_eq!(sequence_end, expected_sequence);
+      control.acknowledge_output(sequence_end).await.unwrap();
+      if expected_sequence % 16 == 0 {
+        tokio::task::yield_now().await;
+      }
+    }
+
+    daemon_task.await.unwrap();
+    let exit = runner.await.unwrap().unwrap();
+    assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
+    assert_eq!(exit.next_sequence, Some(OUTPUT_COUNT));
+    assert_eq!(exit.received_sequence, OUTPUT_COUNT);
   }
 
   #[tokio::test]
@@ -3019,10 +3148,7 @@ mod tests {
   }
 
   fn controller_options() -> AttachmentControllerOptions {
-    AttachmentControllerOptions {
-      presentation_backpressure_timeout: Duration::from_secs(1),
-      ..AttachmentControllerOptions::default()
-    }
+    AttachmentControllerOptions::default()
   }
 
   fn attached_session(

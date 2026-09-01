@@ -1,8 +1,8 @@
 use crate::shell_reporter::{ShellReport, ShellReporter, ShellReporterError};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rmux_core::{
-  AttachmentLeaseRegistry, AttachmentLeases, JournalError, JournalSnapshot, OutputChunk,
-  OutputJournal, validate_session_name,
+  AttachmentLeaseRegistry, AttachmentLeases, JournalError, JournalSnapshot, OutputJournal,
+  validate_session_name,
 };
 use rmux_proto::{
   CommandSpec, LeaseKind, LeaseStatus, PromptPhase, SessionInfo, SessionStatus, ShellState,
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-  Output(OutputChunk),
+  Output,
   /// An authoritative PTY-layout transition placed between raw output ranges.
   PtyGeometryChanged {
     terminal_size: TerminalSize,
@@ -363,6 +363,14 @@ impl Session {
     &self,
     requested: Option<u64>,
   ) -> Result<AttachSnapshot, JournalError> {
+    self.snapshot_for_delivery(requested, None)
+  }
+
+  pub fn snapshot_for_delivery(
+    &self,
+    requested: Option<u64>,
+    checkpoint_geometry_revision: Option<u64>,
+  ) -> Result<AttachSnapshot, JournalError> {
     let terminal = lock(&self.terminal);
     let earliest_sequence = terminal.journal.earliest_sequence();
     if let Some(sequence) = requested
@@ -374,11 +382,13 @@ impl Session {
       });
     }
 
-    let geometry_checkpoint_required = requested.is_some_and(|sequence| {
-      terminal
-        .last_geometry_change_sequence
-        .is_some_and(|boundary| sequence <= boundary)
-    });
+    let geometry_checkpoint_required = checkpoint_geometry_revision
+      .is_none_or(|revision| revision < terminal.geometry_revision)
+      && requested.is_some_and(|sequence| {
+        terminal
+          .last_geometry_change_sequence
+          .is_some_and(|boundary| sequence <= boundary)
+      });
     let journal_checkpoint_required = requested.is_none_or(|sequence| sequence < earliest_sequence);
     let (checkpoint, checkpoint_geometry_revision) = if journal_checkpoint_required {
       (
@@ -527,8 +537,8 @@ impl Session {
       }
       (chunk, shell_state)
     };
-    if let Some(chunk) = chunk {
-      let _ignored = self.events.send(SessionEvent::Output(chunk));
+    if chunk.is_some() {
+      let _ignored = self.events.send(SessionEvent::Output);
     }
     if let Some(shell_state) = shell_state {
       publication.publish(shell_state);

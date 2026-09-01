@@ -8,6 +8,7 @@ function state(overrides: Partial<AttachmentViewState> = {}): AttachmentViewStat
     error_code: null,
     attachment_id: "attachment",
     session: {
+      target: { kind: "local" },
       session_id: "session",
       name: "shell",
       status: "running",

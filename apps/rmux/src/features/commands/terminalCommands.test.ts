@@ -3,10 +3,13 @@ import type { ConnectionPhase, SessionSummary } from "../../lib/types";
 import {
   buildTerminalCommands,
   COMMAND_IDS,
+  sessionSwitchCommandId,
 } from "./terminalCommands";
+import { sessionKey } from "../targets/targets";
 
 function session(id: string): SessionSummary {
   return {
+    target: { kind: "local" },
     session_id: id,
     name: id,
     status: "running",
@@ -36,6 +39,8 @@ function setup(
   const tabs = sessions.filter((candidate) =>
     tabIds.includes(candidate.session_id),
   );
+  const identityFor = (sessionId: string | null) =>
+    sessionId === null ? null : sessionKey(session(sessionId));
   const actions = {
     showPalette: vi.fn(),
     showNewShellForm: vi.fn(),
@@ -56,17 +61,17 @@ function setup(
     {
       sessions,
       tabs,
-      activeSessionId,
-      attachmentSessionId,
+      activeSessionKey: identityFor(activeSessionId),
+      attachmentSessionKey: identityFor(attachmentSessionId),
       phase,
       inputOwned: true,
       resizeWithWindow: false,
       listLoading: false,
       creating: false,
       createFormOpen: false,
-      pendingCloseSessionId,
-      closingSessionIds: new Set(),
-      disconnectingSessionId: null,
+      pendingCloseSessionKey: identityFor(pendingCloseSessionId),
+      closingSessionKeys: new Set(),
+      disconnectingSessionKey: null,
       terminalReady: true,
       currentWorkingDirectory,
       currentWorkingDirectoryDisplay,
@@ -193,19 +198,20 @@ describe("terminal commands", () => {
   });
 
   it("publishes one dynamic switch command per session", () => {
-    const { commands } = setup("second");
+    const { sessions, commands } = setup("second");
     const switchCommands = commands.filter((command) =>
       command.id.startsWith("session.switch."),
     );
 
     expect(switchCommands).toHaveLength(3);
-    expect(switchCommands.find(({ id }) => id.endsWith("second"))?.enabled).toBe(
-      false,
-    );
+    expect(
+      switchCommands.find(({ id }) => id === sessionSwitchCommandId(sessions[1]))
+        ?.enabled,
+    ).toBe(false);
   });
 
   it("keeps a selected session retryable after its attachment fails", () => {
-    const { commands } = setup(
+    const { sessions, commands } = setup(
       "second",
       "macos",
       "/work/rmux",
@@ -214,7 +220,7 @@ describe("terminal commands", () => {
       "second",
     );
 
-    const retry = findCommand(commands, "session.switch.second");
+    const retry = findCommand(commands, sessionSwitchCommandId(sessions[1]));
     expect(retry).toMatchObject({
       title: "Reconnect to second",
       detail: "Retry attachment",
@@ -223,7 +229,7 @@ describe("terminal commands", () => {
   });
 
   it("keeps a selected tab attachable when no attachment exists", () => {
-    const { commands } = setup(
+    const { sessions, commands } = setup(
       "second",
       "macos",
       "/work/rmux",
@@ -232,7 +238,7 @@ describe("terminal commands", () => {
       null,
     );
 
-    expect(findCommand(commands, "session.switch.second")).toMatchObject({
+    expect(findCommand(commands, sessionSwitchCommandId(sessions[1]))).toMatchObject({
       title: "Attach to second",
       detail: "Retry attachment",
       enabled: true,
@@ -240,7 +246,7 @@ describe("terminal commands", () => {
   });
 
   it("does not start another attachment for a selected connecting tab", () => {
-    const { commands } = setup(
+    const { sessions, commands } = setup(
       "second",
       "macos",
       "/work/rmux",
@@ -249,7 +255,10 @@ describe("terminal commands", () => {
       "second",
     );
 
-    const connecting = findCommand(commands, "session.switch.second");
+    const connecting = findCommand(
+      commands,
+      sessionSwitchCommandId(sessions[1]),
+    );
     expect(connecting).toMatchObject({
       detail: "Attaching…",
       enabled: false,

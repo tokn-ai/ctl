@@ -26,7 +26,8 @@ use crate::transport;
 
 const CLIENT_NAME: &str = "rmux-app";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(250);
+const LOCAL_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(250);
+const REMOTE_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS: usize = 4;
 
 #[tauri::command]
@@ -86,12 +87,18 @@ async fn inspect_session_shell_state(
   target: crate::dto::ConnectionTargetDto,
   session_id: String,
 ) -> Option<(String, ShellStateDto)> {
-  let stream = transport::connect_existing(&target).await.ok()?;
   let identity = client_identity();
-  let snapshot = timeout(
-    SESSION_SHELL_STATE_INSPECTION_TIMEOUT,
-    get_shell_state(stream, &identity, &session_id),
-  )
+  let inspection_timeout = if target.is_local() {
+    LOCAL_SESSION_SHELL_STATE_INSPECTION_TIMEOUT
+  } else {
+    REMOTE_SESSION_SHELL_STATE_INSPECTION_TIMEOUT
+  };
+  let snapshot = timeout(inspection_timeout, async {
+    let stream = transport::connect_existing(&target).await?;
+    get_shell_state(stream, &identity, &session_id)
+      .await
+      .map_err(CommandErrorDto::client)
+  })
   .await
   .ok()?
   .ok()?;
@@ -166,7 +173,7 @@ pub async fn restart_local_daemon(
     let window_label = window.label().to_owned();
     let window_transition = state.window_transition(&window_label).await;
     let _window_transition_guard = window_transition.lock().await;
-    state.detach_active_window(&window_label).await?;
+    state.detach_active_local_window(&window_label).await?;
   }
 
   let outcome = local_transport::restart_daemon(preflight).await?;
@@ -246,10 +253,11 @@ async fn open_reserved_attachment(
   };
   let (controller, control, events) =
     AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
-  let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target);
+  let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
   let actor = Arc::new(AttachmentActor::new(
     attachment_id.clone(),
     window_label.clone(),
+    target,
     control,
   ));
   state

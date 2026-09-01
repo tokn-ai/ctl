@@ -1,4 +1,9 @@
-import type { SessionSummary, TerminalSize } from "../../lib/types";
+import type {
+  ConnectionTarget,
+  SessionSummary,
+  TerminalSize,
+} from "../../lib/types";
+import { sessionKey, targetKey } from "../targets/targets";
 
 export interface SessionListRefreshToken {
   requestId: number;
@@ -45,16 +50,39 @@ export function prependSession(
 ): SessionSummary[] {
   return [
     session,
-    ...sessions.filter((item) => item.session_id !== session.session_id),
+    ...sessions.filter((item) => sessionKey(item) !== sessionKey(session)),
   ];
+}
+
+/**
+ * Applies successful per-target refreshes while retaining the last known rows
+ * for failed targets. Removed targets are always dropped.
+ */
+export function mergeTargetSessionLists(
+  current: readonly SessionSummary[],
+  targets: readonly ConnectionTarget[],
+  refreshed: ReadonlyMap<string, readonly SessionSummary[]>,
+): SessionSummary[] {
+  const currentByTarget = new Map<string, SessionSummary[]>();
+  for (const session of current) {
+    const key = targetKey(session.target);
+    const existing = currentByTarget.get(key) ?? [];
+    existing.push(session);
+    currentByTarget.set(key, existing);
+  }
+
+  return targets.flatMap((target) => {
+    const key = targetKey(target);
+    return [...(refreshed.get(key) ?? currentByTarget.get(key) ?? [])];
+  });
 }
 
 export function syncSessionTerminalSize(
   sessions: SessionSummary[],
-  sessionId: string,
+  identity: string,
   terminalSize: TerminalSize,
 ): SessionSummary[] {
-  const index = sessions.findIndex((session) => session.session_id === sessionId);
+  const index = sessions.findIndex((session) => sessionKey(session) === identity);
   if (index === -1) {
     return sessions;
   }
@@ -74,9 +102,9 @@ export function syncSessionTerminalSize(
 
 export function removeSession(
   sessions: readonly SessionSummary[],
-  sessionId: string,
+  identity: string,
 ): SessionSummary[] {
-  return sessions.filter((session) => session.session_id !== sessionId);
+  return sessions.filter((session) => sessionKey(session) !== identity);
 }
 
 function sameTerminalSize(left: TerminalSize, right: TerminalSize): boolean {

@@ -1,9 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import { sessionKey } from "../../features/targets/targets";
 import { SessionSidebar } from "./SessionSidebar";
 
 const session: SessionSummary = {
+  target: { kind: "local" },
   session_id: "first",
   name: "first",
   status: "running",
@@ -42,17 +44,19 @@ describe("SessionSidebar", () => {
   it("focuses Close when a destructive confirmation opens", () => {
     const markup = renderToStaticMarkup(
       <SessionSidebar
+        targets={[session.target]}
+        targetErrors={new Map()}
         sessions={[session]}
         shellStates={new Map()}
-        selectedSessionId="first"
-        openTabSessionIds={new Set(["first"])}
+        selectedSessionKey={sessionKey(session)}
+        openTabSessionKeys={new Set([sessionKey(session)])}
         loading={false}
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionId="first"
-        closingSessionIds={new Set()}
-        disconnectingSessionId={null}
+        pendingCloseSessionKey={sessionKey(session)}
+        closingSessionKeys={new Set()}
+        disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
@@ -61,6 +65,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
+        onAddHost={vi.fn(() => true)}
+        onRemoveHost={vi.fn()}
       />,
     );
 
@@ -71,17 +77,19 @@ describe("SessionSidebar", () => {
   it("uses the observed terminal title as the primary label", () => {
     const markup = renderToStaticMarkup(
       <SessionSidebar
+        targets={[session.target]}
+        targetErrors={new Map()}
         sessions={[session]}
-        shellStates={new Map([[session.session_id, shellState]])}
-        selectedSessionId={null}
-        openTabSessionIds={new Set()}
+        shellStates={new Map([[sessionKey(session), shellState]])}
+        selectedSessionKey={null}
+        openTabSessionKeys={new Set()}
         loading={false}
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionId={null}
-        closingSessionIds={new Set()}
-        disconnectingSessionId={null}
+        pendingCloseSessionKey={null}
+        closingSessionKeys={new Set()}
+        disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
@@ -90,6 +98,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
+        onAddHost={vi.fn(() => true)}
+        onRemoveHost={vi.fn()}
       />,
     );
 
@@ -97,7 +107,7 @@ describe("SessionSidebar", () => {
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…pps/rmux — …mux-app</strong>");
     expect(markup).toContain(
-      `<small>${session.name}<span aria-hidden="true"> · </span>`,
+      `<small>local<span aria-hidden="true"> · </span>${session.name}<span aria-hidden="true"> · </span>`,
     );
     expect(markup).not.toContain(`<strong>${session.name}</strong>`);
   });
@@ -105,17 +115,19 @@ describe("SessionSidebar", () => {
   it("uses a neutral primary label until shell state is observed", () => {
     const markup = renderToStaticMarkup(
       <SessionSidebar
+        targets={[session.target]}
+        targetErrors={new Map()}
         sessions={[session]}
         shellStates={new Map()}
-        selectedSessionId={null}
-        openTabSessionIds={new Set()}
+        selectedSessionKey={null}
+        openTabSessionKeys={new Set()}
         loading={false}
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionId={null}
-        closingSessionIds={new Set()}
-        disconnectingSessionId={null}
+        pendingCloseSessionKey={null}
+        closingSessionKeys={new Set()}
+        disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
@@ -124,6 +136,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
+        onAddHost={vi.fn(() => true)}
+        onRemoveHost={vi.fn()}
       />,
     );
 
@@ -134,20 +148,22 @@ describe("SessionSidebar", () => {
   it("shows Disconnect for every open tab, not merely the active attachment", () => {
     const markup = renderToStaticMarkup(
       <SessionSidebar
+        targets={[session.target]}
+        targetErrors={new Map()}
         sessions={[session, secondSession, listedOnlySession]}
         shellStates={new Map()}
-        selectedSessionId={session.session_id}
-        openTabSessionIds={new Set([
-          session.session_id,
-          secondSession.session_id,
+        selectedSessionKey={sessionKey(session)}
+        openTabSessionKeys={new Set([
+          sessionKey(session),
+          sessionKey(secondSession),
         ])}
         loading={false}
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionId={null}
-        closingSessionIds={new Set()}
-        disconnectingSessionId={null}
+        pendingCloseSessionKey={null}
+        closingSessionKeys={new Set()}
+        disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
@@ -156,6 +172,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
+        onAddHost={vi.fn(() => true)}
+        onRemoveHost={vi.fn()}
       />,
     );
 

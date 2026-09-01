@@ -1,5 +1,9 @@
 export type Sequence = string;
 
+export type ConnectionTarget =
+  | { kind: "local" }
+  | { kind: "ssh"; destination: string };
+
 export interface TerminalSize {
   columns: number;
   rows: number;
@@ -16,6 +20,7 @@ export type LeaseKind = "input" | "layout";
 export type SessionStatus = "running" | "exited";
 
 export interface SessionSummary {
+  target: ConnectionTarget;
   session_id: string;
   name: string;
   status: SessionStatus;
@@ -56,11 +61,13 @@ export interface SessionListResponse {
 }
 
 export interface CreateSessionRequest {
+  target: ConnectionTarget;
   working_directory: string | null;
   terminal_size: TerminalSize;
 }
 
 export interface KillSessionRequest {
+  target: ConnectionTarget;
   session_id: string;
 }
 
@@ -69,6 +76,7 @@ export interface RestartLocalDaemonResponse {
 }
 
 export interface OpenAttachmentRequest {
+  target: ConnectionTarget;
   session: string;
   resume_from: Sequence | null;
   terminal_size: TerminalSize;

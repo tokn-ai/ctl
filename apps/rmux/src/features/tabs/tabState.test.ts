@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SessionSummary } from "../../lib/types";
+import { sessionKey } from "../targets/targets";
 import {
   closeTerminalTab,
   openTerminalTab,
@@ -9,6 +10,7 @@ import {
 
 function session(id: string): SessionSummary {
   return {
+    target: { kind: "local" },
     session_id: id,
     name: id,
     status: "running",
@@ -34,18 +36,35 @@ describe("terminal tab state", () => {
     ]);
   });
 
+  it("opens equal daemon session ids from different targets as separate tabs", () => {
+    const local = session("same");
+    const remote = {
+      ...session("same"),
+      target: { kind: "ssh", destination: "rmux-docker" } as const,
+    };
+
+    expect(openTerminalTab(openTerminalTab([], local), remote)).toEqual([
+      local,
+      remote,
+    ]);
+  });
+
   it("selects the right neighbor, then the left neighbor, after close", () => {
     const tabs = [session("first"), session("second"), session("third")];
 
-    expect(closeTerminalTab(tabs, "second").nextTab?.session_id).toBe("third");
-    expect(closeTerminalTab(tabs, "third").nextTab?.session_id).toBe("second");
+    expect(closeTerminalTab(tabs, sessionKey(tabs[1])).nextTab?.session_id).toBe(
+      "third",
+    );
+    expect(closeTerminalTab(tabs, sessionKey(tabs[2])).nextTab?.session_id).toBe(
+      "second",
+    );
   });
 
   it("keeps only listed tabs except the active transition", () => {
     const tabs = [session("first"), session("second")];
     const listed = [{ ...session("second"), name: "updated" }];
 
-    expect(reconcileTerminalTabs(tabs, listed, "first")).toEqual([
+    expect(reconcileTerminalTabs(tabs, listed, sessionKey(tabs[0]))).toEqual([
       tabs[0],
       listed[0],
     ]);
@@ -61,7 +80,7 @@ describe("terminal tab state", () => {
       pixel_height: null,
     };
 
-    expect(syncTabTerminalSize(tabs, "second", terminalSize)).toEqual([
+    expect(syncTabTerminalSize(tabs, sessionKey(tabs[1]), terminalSize)).toEqual([
       tabs[0],
       { ...tabs[1], terminal_size: terminalSize },
     ]);

@@ -1,4 +1,5 @@
 import type { AttachmentViewState } from "../../lib/types";
+import { targetLabel } from "../../features/targets/targets";
 
 interface TerminalToolbarProps {
   state: AttachmentViewState;
@@ -31,7 +32,10 @@ export function TerminalToolbar({
         <span className={`connection-dot ${state.phase}`} aria-hidden="true" />
         <div>
           <strong>{state.session?.name ?? "No session"}</strong>
-          <small>{state.phase.replace("_", " ")}</small>
+          <small>
+            {state.session ? `${targetLabel(state.session.target)} · ` : ""}
+            {state.phase.replace("_", " ")}
+          </small>
         </div>
       </div>
       <div className="toolbar-actions">

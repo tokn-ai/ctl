@@ -8,6 +8,7 @@ import type {
   AttachmentLeaseRequest,
   AttachmentResizeRequest,
   CreateSessionRequest,
+  ConnectionTarget,
   KillSessionRequest,
   OpenAttachmentRequest,
   OpenAttachmentResponse,
@@ -21,8 +22,12 @@ export interface OpenAttachmentResult {
   channel: Channel<AttachmentEvent>;
 }
 
-export async function listSessions(): Promise<SessionListResponse> {
-  return invoke<SessionListResponse>("list_sessions");
+export async function listSessions(
+  target: ConnectionTarget,
+): Promise<SessionListResponse> {
+  return invoke<SessionListResponse>("list_sessions", {
+    request: { target },
+  });
 }
 
 export async function createSession(

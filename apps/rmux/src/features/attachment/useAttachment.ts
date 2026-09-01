@@ -22,6 +22,7 @@ import type {
 } from "../../lib/types";
 import type { ProposedDimensions } from "../terminal/TerminalPresenter";
 import type { XtermRenderer } from "../terminal/XtermRenderer";
+import { sameSession, sessionKey } from "../targets/targets";
 import {
   ATTACHMENT_RECOVERY_STABILITY_MS,
   AttachmentRecoveryBackoff,
@@ -85,7 +86,7 @@ export interface AttachmentActions {
   state: AttachmentViewState;
   connect(session: SessionSummary, options?: ConnectOptions): Promise<void>;
   reconnect(): Promise<void>;
-  cancelPendingConnection(sessionId: string): void;
+  cancelPendingConnection(session: SessionSummary): void;
   detach(): Promise<void>;
   /**
    * Forget local attachment state for a daemon restart. The restart command
@@ -654,6 +655,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       try {
         const result = await openAttachment(
           {
+            target: session.target,
             session: session.session_id,
             resume_from: resumeFrom,
             terminal_size: requestedTerminalSize,
@@ -829,7 +831,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       }
       if (
         transitionGeneration !== generationRef.current ||
-        stateRef.current.session?.session_id !== current.session.session_id
+        !sameSession(stateRef.current.session, current.session)
       ) {
         return;
       }
@@ -886,12 +888,13 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       return;
     }
 
-    const sessionId = state.session.session_id;
+    const identity = sessionKey(state.session);
     recoveryTimerRef.current = setTimeout(() => {
       recoveryTimerRef.current = null;
       const current = stateRef.current;
       if (
-        current.session?.session_id === sessionId &&
+        current.session !== null &&
+        sessionKey(current.session) === identity &&
         matchesRecoveryPhase(current.phase)
       ) {
         void reconnectCurrent(false);
@@ -909,12 +912,13 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     state.attachment_id,
     state.error_code,
     state.phase,
-    state.session?.session_id,
+    state.session ? sessionKey(state.session) : null,
   ]);
 
-  const cancelPendingConnection = useCallback((sessionId: string) => {
+  const cancelPendingConnection = useCallback((session: SessionSummary) => {
+    const identity = sessionKey(session);
     const cancelled = deferredConnectionRef.current?.cancelIf(
-      (request) => request.session.session_id === sessionId,
+      (request) => sessionKey(request.session) === identity,
     );
     if (!cancelled) {
       return;

@@ -1,34 +1,43 @@
 import type { FormEvent } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   compactTerminalTitle,
   compactTerminalTitleParts,
   formatTerminalTitle,
 } from "../../features/tabs/terminalTitle";
-import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import type {
+  ConnectionTarget,
+  SessionSummary,
+  ShellStateSummary,
+} from "../../lib/types";
+import { sessionKey, targetKey, targetLabel } from "../../features/targets/targets";
 
 const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 
 interface SessionSidebarProps {
+  targets: readonly ConnectionTarget[];
+  targetErrors: ReadonlyMap<string, string>;
   sessions: SessionSummary[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
-  selectedSessionId: string | null;
-  openTabSessionIds: ReadonlySet<string>;
+  selectedSessionKey: string | null;
+  openTabSessionKeys: ReadonlySet<string>;
   loading: boolean;
   error: string | null;
   creating: boolean;
   createFormOpen: boolean;
-  pendingCloseSessionId: string | null;
-  closingSessionIds: ReadonlySet<string>;
-  disconnectingSessionId: string | null;
+  pendingCloseSessionKey: string | null;
+  closingSessionKeys: ReadonlySet<string>;
+  disconnectingSessionKey: string | null;
   onRefresh(): void;
   onSelect(session: SessionSummary): void;
-  onCreate(workingDirectory: string | null): Promise<boolean>;
+  onCreate(target: ConnectionTarget, workingDirectory: string | null): Promise<boolean>;
   onCreateFormOpenChange(open: boolean): void;
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onCancelClose(): void;
   onConfirmClose(session: SessionSummary): void;
+  onAddHost(destination: string): boolean;
+  onRemoveHost(target: ConnectionTarget): void;
 }
 
 function sidebarTitle(
@@ -61,17 +70,19 @@ function sidebarTitle(
 }
 
 export function SessionSidebar({
+  targets,
+  targetErrors,
   sessions,
   shellStates,
-  selectedSessionId,
-  openTabSessionIds,
+  selectedSessionKey,
+  openTabSessionKeys,
   loading,
   error,
   creating,
   createFormOpen,
-  pendingCloseSessionId,
-  closingSessionIds,
-  disconnectingSessionId,
+  pendingCloseSessionKey,
+  closingSessionKeys,
+  disconnectingSessionKey,
   onRefresh,
   onSelect,
   onCreate,
@@ -80,44 +91,132 @@ export function SessionSidebar({
   onRequestClose,
   onCancelClose,
   onConfirmClose,
+  onAddHost,
+  onRemoveHost,
 }: SessionSidebarProps) {
   const [workingDirectory, setWorkingDirectory] = useState("");
+  const [creationTargetKey, setCreationTargetKey] = useState("local");
+  const [hostFormOpen, setHostFormOpen] = useState(false);
+  const [hostDestination, setHostDestination] = useState("");
+  const [hostValidationError, setHostValidationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!targets.some((target) => targetKey(target) === creationTargetKey)) {
+      setCreationTargetKey("local");
+    }
+  }, [creationTargetKey, targets]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const created = await onCreate(workingDirectory.trim() || null);
+    const target =
+      targets.find((candidate) => targetKey(candidate) === creationTargetKey) ??
+      targets[0];
+    if (!target) {
+      return;
+    }
+    const created = await onCreate(target, workingDirectory.trim() || null);
     if (created) {
       setWorkingDirectory("");
       onCreateFormOpenChange(false);
     }
   }
 
+  function submitHost(event: FormEvent) {
+    event.preventDefault();
+    if (!onAddHost(hostDestination)) {
+      setHostValidationError("Enter a unique OpenSSH host or alias.");
+      return;
+    }
+    setHostDestination("");
+    setHostValidationError(null);
+    setHostFormOpen(false);
+  }
+
   return (
     <aside className="session-sidebar" aria-label="rmux sessions">
-      <header className="sidebar-header">
-        <button
-          className="icon-button"
-          type="button"
-          onClick={onRefresh}
-          disabled={loading}
-          aria-label="Refresh sessions"
-          title="Refresh sessions"
-        >
-          ↻
-        </button>
-      </header>
+      <div className="sidebar-connections">
+        <header className="sidebar-header">
+          <strong>Sessions</strong>
+          <button
+            className="host-add-button"
+            type="button"
+            onClick={() => setHostFormOpen((open) => !open)}
+            aria-expanded={hostFormOpen}
+          >
+            + Host
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            aria-label="Refresh sessions"
+            title="Refresh sessions"
+          >
+            ↻
+          </button>
+        </header>
+
+        <div className="sidebar-hosts" aria-label="Configured hosts">
+          {targets.map((target) => {
+            const key = targetKey(target);
+            return (
+              <span className="host-chip" key={key} title={targetLabel(target)}>
+                <span>{targetLabel(target)}</span>
+                {target.kind === "ssh" ? (
+                  <button
+                    type="button"
+                    onClick={() => onRemoveHost(target)}
+                    aria-label={`Remove ${targetLabel(target)}`}
+                    title={`Remove ${targetLabel(target)}`}
+                  >
+                    ×
+                  </button>
+                ) : null}
+              </span>
+            );
+          })}
+        </div>
+
+        {hostFormOpen ? (
+          <form className="host-form" onSubmit={submitHost}>
+            <label>
+              OpenSSH host or alias
+              <input
+                value={hostDestination}
+                onChange={(event) => {
+                  setHostDestination(event.currentTarget.value);
+                  setHostValidationError(null);
+                }}
+                placeholder="rmux-docker"
+                autoFocus
+              />
+            </label>
+            {hostValidationError ? <small>{hostValidationError}</small> : null}
+            <div className="form-actions">
+              <button type="button" onClick={() => setHostFormOpen(false)}>
+                Cancel
+              </button>
+              <button className="button-primary" type="submit">Add</button>
+            </div>
+          </form>
+        ) : null}
+      </div>
 
       <div className="session-list">
         {loading && sessions.length === 0 ? (
-          <p className="sidebar-state">Finding local sessions…</p>
+          <p className="sidebar-state">Finding sessions across hosts…</p>
         ) : null}
         {error ? (
-          <div className="sidebar-state error-state">
-            <p>{error}</p>
-            <button type="button" onClick={onRefresh}>Retry</button>
-          </div>
+          <div className="sidebar-state error-state"><p>{error}</p></div>
         ) : null}
-        {!loading && !error && sessions.length === 0 ? (
+        {[...targetErrors.entries()].map(([key, message]) => (
+          <div className="host-error" key={key} role="status">
+            <strong>{key === "local" ? "local" : key.slice(4)}</strong>
+            <span>{message}</span>
+          </div>
+        ))}
+        {!loading && !error && targetErrors.size === 0 && sessions.length === 0 ? (
           <div className="sidebar-state">
             <span className="empty-glyph">›_</span>
             <p>No running sessions.</p>
@@ -125,21 +224,22 @@ export function SessionSidebar({
           </div>
         ) : null}
         {sessions.map((session) => {
+          const identity = sessionKey(session);
           const { fullTitle, compactTitle } = sidebarTitle(
             session,
-            shellStates.get(session.session_id) ?? null,
+            shellStates.get(identity) ?? null,
           );
-          const selected = session.session_id === selectedSessionId;
-          const closing = closingSessionIds.has(session.session_id);
-          const disconnecting = session.session_id === disconnectingSessionId;
-          const canDisconnect = openTabSessionIds.has(session.session_id);
-          const confirmingClose = session.session_id === pendingCloseSessionId;
+          const selected = identity === selectedSessionKey;
+          const closing = closingSessionKeys.has(identity);
+          const disconnecting = identity === disconnectingSessionKey;
+          const canDisconnect = openTabSessionKeys.has(identity);
+          const confirmingClose = identity === pendingCloseSessionKey;
           return (
             <div
               className={`session-row ${selected ? "active" : ""} ${
                 confirmingClose ? "confirming-close" : ""
               }`}
-              key={session.session_id}
+              key={identity}
             >
               <button
                 className="session-select"
@@ -154,6 +254,8 @@ export function SessionSidebar({
                 <span className="session-copy">
                   <strong>{compactTitle}</strong>
                   <small>
+                    {targetLabel(session.target)}
+                    <span aria-hidden="true"> · </span>
                     {session.name}
                     <span aria-hidden="true"> · </span>
                     {session.terminal_size.columns}×{session.terminal_size.rows}
@@ -231,6 +333,19 @@ export function SessionSidebar({
       <footer className="sidebar-footer">
         {createFormOpen ? (
           <form className="new-session-form" onSubmit={submit}>
+            <label>
+              Host
+              <select
+                value={creationTargetKey}
+                onChange={(event) => setCreationTargetKey(event.currentTarget.value)}
+              >
+                {targets.map((target) => (
+                  <option key={targetKey(target)} value={targetKey(target)}>
+                    {targetLabel(target)}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               Working directory
               <input

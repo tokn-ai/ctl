@@ -7,6 +7,7 @@ import type {
   Keybinding,
   ShortcutPlatform,
 } from "./types";
+import { sessionKey, targetLabel } from "../targets/targets";
 
 export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
@@ -33,17 +34,17 @@ export const SHOW_PALETTE_KEYBINDING: Keybinding = {
 interface TerminalCommandContext {
   sessions: readonly SessionSummary[];
   tabs: readonly SessionSummary[];
-  activeSessionId: string | null;
-  attachmentSessionId: string | null;
+  activeSessionKey: string | null;
+  attachmentSessionKey: string | null;
   phase: ConnectionPhase;
   inputOwned: boolean;
   resizeWithWindow: boolean;
   listLoading: boolean;
   creating: boolean;
   createFormOpen: boolean;
-  pendingCloseSessionId: string | null;
-  closingSessionIds: ReadonlySet<string>;
-  disconnectingSessionId: string | null;
+  pendingCloseSessionKey: string | null;
+  closingSessionKeys: ReadonlySet<string>;
+  disconnectingSessionKey: string | null;
   terminalReady: boolean;
   currentWorkingDirectory: string | null;
   currentWorkingDirectoryDisplay: string | null;
@@ -75,20 +76,21 @@ export function buildTerminalCommands(
 ): AppCommand[] {
   const activeSession =
     context.sessions.find(
-      (session) => session.session_id === context.activeSessionId,
+      (session) => sessionKey(session) === context.activeSessionKey,
     ) ?? null;
   const nextTab = adjacentSession(
     context.tabs,
-    context.activeSessionId,
+    context.activeSessionKey,
     1,
   );
   const previousTab = adjacentSession(
     context.tabs,
-    context.activeSessionId,
+    context.activeSessionKey,
     -1,
   );
   const activeAttachmentMatchesTab =
-    activeSession?.session_id === context.attachmentSessionId;
+    activeSession !== null &&
+    sessionKey(activeSession) === context.attachmentSessionKey;
   const activeTabAttached =
     activeAttachmentMatchesTab && context.phase === "attached";
   const canReconnect =
@@ -96,13 +98,13 @@ export function buildTerminalCommands(
     (context.phase === "disconnected" || context.phase === "error");
   const closingActive =
     activeSession !== null &&
-    context.closingSessionIds.has(activeSession.session_id);
+    context.closingSessionKeys.has(sessionKey(activeSession));
   const disconnectingActive =
     activeSession !== null &&
-    context.disconnectingSessionId === activeSession.session_id;
+    context.disconnectingSessionKey === sessionKey(activeSession);
   const pendingCloseSession =
     context.sessions.find(
-      (session) => session.session_id === context.pendingCloseSessionId,
+      (session) => sessionKey(session) === context.pendingCloseSessionKey,
     ) ?? null;
   const daemonRestartInteractionBlocked =
     context.daemonRestartConfirmationPending || context.restartingDaemon;
@@ -270,7 +272,7 @@ export function buildTerminalCommands(
       enabled:
         !daemonRestartInteractionBlocked &&
         (pendingCloseSession !== null
-          ? !context.closingSessionIds.has(pendingCloseSession.session_id)
+          ? !context.closingSessionKeys.has(sessionKey(pendingCloseSession))
           : activeSession !== null && !closingActive && !disconnectingActive),
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
@@ -354,9 +356,10 @@ export function buildTerminalCommands(
   ];
 
   for (const session of context.sessions) {
-    const selected = session.session_id === context.activeSessionId;
+    const identity = sessionKey(session);
+    const selected = identity === context.activeSessionKey;
     const matchesAttachment =
-      session.session_id === context.attachmentSessionId;
+      identity === context.attachmentSessionKey;
     const attaching =
       matchesAttachment &&
       (context.phase === "connecting" || context.phase === "reconnecting");
@@ -376,20 +379,20 @@ export function buildTerminalCommands(
           : ended
             ? "Session ended"
             : "Retry attachment"
-      : `${session.terminal_size.columns}×${session.terminal_size.rows} · ${session.status}`;
+      : `${targetLabel(session.target)} · ${session.terminal_size.columns}×${session.terminal_size.rows} · ${session.status}`;
     commands.push({
-      id: `session.switch.${session.session_id}`,
+      id: sessionSwitchCommandId(session),
       category: "Session",
       title,
       detail,
       keywords: ["attach", session.name],
       enabled:
         !daemonRestartInteractionBlocked &&
-        !context.closingSessionIds.has(session.session_id) &&
+        !context.closingSessionKeys.has(identity) &&
         (!selected || retryable),
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : context.closingSessionIds.has(session.session_id)
+        : context.closingSessionKeys.has(identity)
           ? "This session is closing."
           : attaching
             ? "This session is already attaching."
@@ -405,14 +408,14 @@ export function buildTerminalCommands(
 
 function adjacentSession(
   sessions: readonly SessionSummary[],
-  activeSessionId: string | null,
+  activeSessionKey: string | null,
   direction: 1 | -1,
 ): SessionSummary | null {
   if (sessions.length === 0) {
     return null;
   }
   const activeIndex = sessions.findIndex(
-    (session) => session.session_id === activeSessionId,
+    (session) => sessionKey(session) === activeSessionKey,
   );
   if (activeIndex === -1) {
     return direction === 1 ? sessions[0] : sessions[sessions.length - 1];
@@ -421,4 +424,8 @@ function adjacentSession(
     return null;
   }
   return sessions[(activeIndex + direction + sessions.length) % sessions.length];
+}
+
+export function sessionSwitchCommandId(session: SessionSummary): string {
+  return `session.switch.${encodeURIComponent(sessionKey(session))}`;
 }

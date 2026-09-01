@@ -14,6 +14,7 @@ import {
 import {
   buildTerminalCommands,
   COMMAND_IDS,
+  sessionSwitchCommandId,
   SHOW_PALETTE_KEYBINDING,
 } from "../features/commands/terminalCommands";
 import type { AppCommand } from "../features/commands/types";
@@ -27,9 +28,9 @@ import {
 } from "../features/shell/shellStateCache";
 import {
   SessionListRefreshGuard,
+  mergeTargetSessionLists,
   prependSession,
   removeSession,
-  replaceSessionList,
   syncSessionTerminalSize,
 } from "../features/sessions/sessionListState";
 import type { XtermRenderer } from "../features/terminal/XtermRenderer";
@@ -43,6 +44,18 @@ import {
   compactTerminalTitleParts,
   formatTerminalTitle,
 } from "../features/tabs/terminalTitle";
+import {
+  LOCAL_TARGET,
+  browserStorage,
+  loadRemoteTargets,
+  normalizeSshDestination,
+  sameSession,
+  sameTarget,
+  saveRemoteTargets,
+  sessionKey,
+  targetKey,
+  targetKeyFromSessionKey,
+} from "../features/targets/targets";
 import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
 import { displayWorkingDirectory } from "../lib/shellState";
@@ -53,6 +66,7 @@ import {
   restartLocalDaemon,
 } from "../lib/tauri";
 import type {
+  ConnectionTarget,
   SessionSummary,
   ShellStateSummary,
   TerminalSize,
@@ -77,6 +91,13 @@ export function TerminalPage() {
   const currentWorkingDirectoryDisplay = currentShellState
     ? displayWorkingDirectory(currentShellState)
     : null;
+  const [targets, setTargets] = useState<ConnectionTarget[]>(() => [
+    LOCAL_TARGET,
+    ...loadRemoteTargets(browserStorage()),
+  ]);
+  const [targetErrors, setTargetErrors] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [tabs, setTabs] = useState<SessionSummary[]>([]);
   const [tabShellStates, setTabShellStates] = useState<
@@ -85,7 +106,7 @@ export function TerminalPage() {
   const [sessionShellStates, setSessionShellStates] = useState<
     ReadonlyMap<string, ShellStateSummary>
   >(() => new Map());
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -94,20 +115,21 @@ export function TerminalPage() {
   const [daemonRestartConfirmationPending, setDaemonRestartConfirmationPending] =
     useState(false);
   const [restartingDaemon, setRestartingDaemon] = useState(false);
-  const [pendingCloseSessionId, setPendingCloseSessionId] = useState<
+  const [pendingCloseSessionKey, setPendingCloseSessionKey] = useState<
     string | null
   >(null);
-  const [closingSessionIds, setClosingSessionIds] = useState<ReadonlySet<string>>(
+  const [closingSessionKeys, setClosingSessionKeys] = useState<ReadonlySet<string>>(
     new Set(),
   );
-  const [disconnectingSessionId, setDisconnectingSessionId] = useState<
+  const [disconnectingSessionKey, setDisconnectingSessionKey] = useState<
     string | null
   >(null);
-  const closingSessionIdsRef = useRef(new Set<string>());
-  const closedSessionIdsRef = useRef(new Set<string>());
+  const closingSessionKeysRef = useRef(new Set<string>());
+  const closedSessionKeysRef = useRef(new Set<string>());
   const refreshGuardRef = useRef(new SessionListRefreshGuard());
+  const sessionsRef = useRef<SessionSummary[]>([]);
   const tabsRef = useRef<SessionSummary[]>([]);
-  const activeTabIdRef = useRef<string | null>(null);
+  const activeTabKeyRef = useRef<string | null>(null);
   const creatingRef = useRef(false);
   const daemonRestartConfirmationRef = useRef(false);
   const restartingDaemonRef = useRef(false);
@@ -128,52 +150,77 @@ export function TerminalPage() {
     setLoading(true);
     setListError(null);
     try {
-      const listedResponse = await listSessions();
+      const results = await Promise.all(
+        targets.map(async (target) => {
+          try {
+            return { target, response: await listSessions(target) } as const;
+          } catch (error) {
+            return { target, error } as const;
+          }
+        }),
+      );
       if (
         daemonEpoch !== daemonEpochRef.current ||
         !refreshGuardRef.current.canApply(token)
       ) {
         return;
       }
-      const listed = listedResponse.sessions;
-      const listedIds = new Set(listed.map((session) => session.session_id));
-      const hidden = closedSessionIdsRef.current;
-      const visible = replaceSessionList(
-        listed.filter((session) => !hidden.has(session.session_id)),
-      );
-      const visibleIds = new Set(visible.map((session) => session.session_id));
+      const refreshed = new Map<string, SessionSummary[]>();
+      const inspections = new Map<string, ShellStateSummary>();
+      const errors = new Map<string, string>();
+      const successfulTargets = new Set<string>();
+      const listedSessionKeys = new Set<string>();
+      for (const result of results) {
+        const key = targetKey(result.target);
+        if ("error" in result) {
+          errors.set(key, errorMessage(result.error));
+          continue;
+        }
+        successfulTargets.add(key);
+        refreshed.set(key, result.response.sessions);
+        for (const session of result.response.sessions) {
+          listedSessionKeys.add(sessionKey(session));
+          const shellState = result.response.shell_states[session.session_id];
+          if (shellState) {
+            inspections.set(sessionKey(session), shellState);
+          }
+        }
+      }
+      const hidden = closedSessionKeysRef.current;
+      const visible = mergeTargetSessionLists(
+        sessionsRef.current,
+        targets,
+        refreshed,
+      ).filter((session) => !hidden.has(sessionKey(session)));
+      const visibleIds = new Set(visible.map(sessionKey));
+      sessionsRef.current = visible;
       setSessions(visible);
+      setTargetErrors(errors);
       setSessionShellStates((current) =>
-        mergeShellStateInspections(
-          current,
-          new Map(Object.entries(listedResponse.shell_states)),
-          visibleIds,
-        ),
+        mergeShellStateInspections(current, inspections, visibleIds),
       );
       const nextTabs = reconcileTerminalTabs(
         tabsRef.current,
         visible,
-        activeTabIdRef.current,
+        activeTabKeyRef.current,
       );
       tabsRef.current = nextTabs;
       setTabs(nextTabs);
       setTabShellStates((current) =>
         retainShellStates(
           current,
-          new Set(nextTabs.map((session) => session.session_id)),
+          new Set(nextTabs.map(sessionKey)),
         ),
       );
-      for (const sessionId of hidden) {
-        if (!listedIds.has(sessionId)) {
-          hidden.delete(sessionId);
+      for (const identity of hidden) {
+        const hiddenTarget = targetKeyFromSessionKey(identity);
+        if (
+          hiddenTarget &&
+          successfulTargets.has(hiddenTarget) &&
+          !listedSessionKeys.has(identity)
+        ) {
+          hidden.delete(identity);
         }
-      }
-    } catch (error) {
-      if (
-        daemonEpoch === daemonEpochRef.current &&
-        refreshGuardRef.current.canApply(token)
-      ) {
-        setListError(errorMessage(error));
       }
     } finally {
       if (
@@ -183,11 +230,34 @@ export function TerminalPage() {
         setLoading(false);
       }
     }
-  }, [daemonRestartBlocksInteractions]);
+  }, [daemonRestartBlocksInteractions, targets]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const addHost = useCallback(
+    (destination: string): boolean => {
+      const normalized = normalizeSshDestination(destination);
+      if (
+        !normalized ||
+        targets.some(
+          (target) =>
+            target.kind === "ssh" && target.destination === normalized,
+        )
+      ) {
+        return false;
+      }
+      const next: ConnectionTarget[] = [
+        ...targets,
+        { kind: "ssh", destination: normalized },
+      ];
+      saveRemoteTargets(browserStorage(), next);
+      setTargets(next);
+      return true;
+    },
+    [targets],
+  );
 
   const activateTab = useCallback(
     async (session: SessionSummary, resizeWithWindow = false) => {
@@ -195,13 +265,14 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) {
         return;
       }
+      const identity = sessionKey(session);
       const nextTabs = openTerminalTab(tabsRef.current, session);
       tabsRef.current = nextTabs;
-      activeTabIdRef.current = session.session_id;
+      activeTabKeyRef.current = identity;
       setTabs(nextTabs);
-      setActiveTabId(session.session_id);
+      setActiveTabKey(identity);
 
-      if (attachment.state.session?.session_id === session.session_id) {
+      if (sameSession(attachment.state.session, session)) {
         if (
           attachment.state.phase === "attached" ||
           attachment.state.phase === "connecting" ||
@@ -243,25 +314,26 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) {
         return;
       }
+      const identity = sessionKey(session);
       const currentTabs = tabsRef.current;
-      if (!currentTabs.some((tab) => tab.session_id === session.session_id)) {
+      if (!currentTabs.some((tab) => sessionKey(tab) === identity)) {
         return;
       }
 
-      const wasActive = activeTabIdRef.current === session.session_id;
-      const closed = closeTerminalTab(currentTabs, session.session_id);
+      const wasActive = activeTabKeyRef.current === identity;
+      const closed = closeTerminalTab(currentTabs, identity);
       tabsRef.current = closed.tabs;
       setTabs(closed.tabs);
       setTabShellStates((current) =>
-        forgetShellState(current, session.session_id),
+        forgetShellState(current, identity),
       );
       if (!wasActive) {
         return;
       }
 
       const nextTab = closed.nextTab;
-      activeTabIdRef.current = nextTab?.session_id ?? null;
-      setActiveTabId(nextTab?.session_id ?? null);
+      activeTabKeyRef.current = nextTab ? sessionKey(nextTab) : null;
+      setActiveTabKey(nextTab ? sessionKey(nextTab) : null);
       if (
         daemonEpoch !== daemonEpochRef.current ||
         daemonRestartBlocksInteractions()
@@ -277,8 +349,66 @@ export function TerminalPage() {
     [attachment, daemonRestartBlocksInteractions],
   );
 
+  const removeHost = useCallback(
+    async (target: ConnectionTarget) => {
+      if (target.kind === "local" || daemonRestartBlocksInteractions()) {
+        return;
+      }
+      const removedTargetKey = targetKey(target);
+      const activeTab = tabsRef.current.find(
+        (tab) => sessionKey(tab) === activeTabKeyRef.current,
+      );
+      const removingActive = activeTab
+        ? sameTarget(activeTab.target, target)
+        : false;
+      if (removingActive) {
+        await attachment.detach();
+      }
+
+      const nextTargets = targets.filter(
+        (candidate) => !sameTarget(candidate, target),
+      );
+      const nextSessions = sessionsRef.current.filter(
+        (session) => !sameTarget(session.target, target),
+      );
+      const nextTabs = tabsRef.current.filter(
+        (tab) => !sameTarget(tab.target, target),
+      );
+      const nextActive = removingActive ? nextTabs[0] ?? null : activeTab ?? null;
+      const nextActiveKey = nextActive ? sessionKey(nextActive) : null;
+
+      refreshGuardRef.current.recordMutation();
+      sessionsRef.current = nextSessions;
+      tabsRef.current = nextTabs;
+      activeTabKeyRef.current = nextActiveKey;
+      setTargets(nextTargets);
+      saveRemoteTargets(browserStorage(), nextTargets);
+      setSessions(nextSessions);
+      setTabs(nextTabs);
+      setActiveTabKey(nextActiveKey);
+      setSessionShellStates((current) =>
+        retainShellStates(current, new Set(nextSessions.map(sessionKey))),
+      );
+      setTabShellStates((current) =>
+        retainShellStates(current, new Set(nextTabs.map(sessionKey))),
+      );
+      setTargetErrors((current) => {
+        const next = new Map(current);
+        next.delete(removedTargetKey);
+        return next;
+      });
+      if (removingActive && nextActive) {
+        await attachment.connect(nextActive);
+      }
+    },
+    [attachment, daemonRestartBlocksInteractions, targets],
+  );
+
   const create = useCallback(
-    async (workingDirectory: string | null): Promise<boolean> => {
+    async (
+      target: ConnectionTarget,
+      workingDirectory: string | null,
+    ): Promise<boolean> => {
       if (
         creatingRef.current ||
         daemonRestartConfirmationRef.current ||
@@ -292,6 +422,7 @@ export function TerminalPage() {
       setListError(null);
       try {
         const session = await createSession({
+          target,
           working_directory: workingDirectory,
           terminal_size: measuredSize(renderer),
         });
@@ -299,7 +430,11 @@ export function TerminalPage() {
           return false;
         }
         refreshGuardRef.current.recordMutation();
-        setSessions((current) => prependSession(current, session));
+        setSessions((current) => {
+          const next = prependSession(current, session);
+          sessionsRef.current = next;
+          return next;
+        });
         await activateTab(session, true);
         return daemonEpoch === daemonEpochRef.current;
       } catch (error) {
@@ -320,20 +455,21 @@ export function TerminalPage() {
   const disconnect = useCallback(
     async (session: SessionSummary) => {
       const daemonEpoch = daemonEpochRef.current;
+      const identity = sessionKey(session);
       if (
         daemonRestartBlocksInteractions() ||
-        !tabsRef.current.some((tab) => tab.session_id === session.session_id)
+        !tabsRef.current.some((tab) => sessionKey(tab) === identity)
       ) {
         return;
       }
-      setDisconnectingSessionId(session.session_id);
+      setDisconnectingSessionKey(identity);
       setListError(null);
       try {
         await closeTab(session);
       } finally {
         if (daemonEpoch === daemonEpochRef.current) {
-          setDisconnectingSessionId((current) =>
-            current === session.session_id ? null : current,
+          setDisconnectingSessionKey((current) =>
+            current === identity ? null : current,
           );
         }
       }
@@ -344,23 +480,27 @@ export function TerminalPage() {
   const close = useCallback(
     async (session: SessionSummary) => {
       const daemonEpoch = daemonEpochRef.current;
+      const identity = sessionKey(session);
       if (
         daemonRestartBlocksInteractions() ||
-        closingSessionIdsRef.current.has(session.session_id)
+        closingSessionKeysRef.current.has(identity)
       ) {
         return;
       }
-      closingSessionIdsRef.current.add(session.session_id);
-      setClosingSessionIds((current) => {
+      closingSessionKeysRef.current.add(identity);
+      setClosingSessionKeys((current) => {
         const next = new Set(current);
-        next.add(session.session_id);
+        next.add(identity);
         return next;
       });
       setListError(null);
       try {
-        attachment.cancelPendingConnection(session.session_id);
+        attachment.cancelPendingConnection(session);
         try {
-          await killSession({ session_id: session.session_id });
+          await killSession({
+            target: session.target,
+            session_id: session.session_id,
+          });
         } catch (error) {
           if (daemonEpoch !== daemonEpochRef.current) {
             return;
@@ -374,23 +514,27 @@ export function TerminalPage() {
           return;
         }
         refreshGuardRef.current.recordMutation();
-        closedSessionIdsRef.current.add(session.session_id);
-        setSessions((current) => removeSession(current, session.session_id));
+        closedSessionKeysRef.current.add(identity);
+        setSessions((current) => {
+          const next = removeSession(current, identity);
+          sessionsRef.current = next;
+          return next;
+        });
         setTabShellStates((current) =>
-          forgetShellState(current, session.session_id),
+          forgetShellState(current, identity),
         );
         setSessionShellStates((current) =>
-          forgetShellState(current, session.session_id),
+          forgetShellState(current, identity),
         );
         await closeTab(session);
         // The session is hidden after either an accepted kill or a not-found
         // response, which means another actor already achieved the same result.
       } finally {
-        closingSessionIdsRef.current.delete(session.session_id);
+        closingSessionKeysRef.current.delete(identity);
         if (daemonEpoch === daemonEpochRef.current) {
-          setClosingSessionIds((current) => {
+          setClosingSessionKeys((current) => {
             const next = new Set(current);
-            next.delete(session.session_id);
+            next.delete(identity);
             return next;
           });
         }
@@ -403,11 +547,11 @@ export function TerminalPage() {
     if (daemonRestartBlocksInteractions()) {
       return;
     }
-    setPendingCloseSessionId(session.session_id);
+    setPendingCloseSessionKey(sessionKey(session));
   }, [daemonRestartBlocksInteractions]);
 
   const cancelClose = useCallback(() => {
-    setPendingCloseSessionId(null);
+    setPendingCloseSessionKey(null);
   }, []);
 
   const confirmClose = useCallback(
@@ -415,7 +559,7 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) {
         return;
       }
-      setPendingCloseSessionId(null);
+      setPendingCloseSessionKey(null);
       void close(session);
     },
     [close, daemonRestartBlocksInteractions],
@@ -426,27 +570,57 @@ export function TerminalPage() {
     setDaemonRestartConfirmationPending(pending);
   }, []);
 
-  const clearLocalDaemonState = useCallback(() => {
+  const clearLocalDaemonState = useCallback((): SessionSummary | null => {
     daemonEpochRef.current += 1;
     refreshGuardRef.current.recordMutation();
-    closedSessionIdsRef.current.clear();
-    closingSessionIdsRef.current.clear();
+    closedSessionKeysRef.current.clear();
+    closingSessionKeysRef.current.clear();
     creatingRef.current = false;
-    tabsRef.current = [];
-    activeTabIdRef.current = null;
-    attachment.resetAfterDaemonRestart();
-    setSessions([]);
-    setTabs([]);
-    setTabShellStates(new Map<string, ShellStateSummary>());
-    setSessionShellStates(new Map<string, ShellStateSummary>());
-    setActiveTabId(null);
+    const retainedSessions = sessionsRef.current.filter(
+      (session) => session.target.kind !== "local",
+    );
+    const activeTab = tabsRef.current.find(
+      (tab) => sessionKey(tab) === activeTabKeyRef.current,
+    );
+    const activeWasLocal = activeTab?.target.kind === "local";
+    const retainedTabs = tabsRef.current.filter(
+      (tab) => tab.target.kind !== "local",
+    );
+    const nextActiveTab = activeWasLocal ? retainedTabs[0] ?? null : null;
+    const nextActiveKey = activeWasLocal
+      ? nextActiveTab
+        ? sessionKey(nextActiveTab)
+        : null
+      : activeTabKeyRef.current;
+
+    sessionsRef.current = retainedSessions;
+    tabsRef.current = retainedTabs;
+    activeTabKeyRef.current = nextActiveKey;
+    if (attachment.state.session?.target.kind === "local") {
+      attachment.resetAfterDaemonRestart();
+    }
+    setSessions(retainedSessions);
+    setTabs(retainedTabs);
+    setTabShellStates((current) =>
+      retainShellStates(current, new Set(retainedTabs.map(sessionKey))),
+    );
+    setSessionShellStates((current) =>
+      retainShellStates(current, new Set(retainedSessions.map(sessionKey))),
+    );
+    setActiveTabKey(nextActiveKey);
     setCreating(false);
     setCreateFormOpen(false);
-    setPendingCloseSessionId(null);
-    setClosingSessionIds(new Set());
-    setDisconnectingSessionId(null);
+    setPendingCloseSessionKey(null);
+    setClosingSessionKeys(new Set());
+    setDisconnectingSessionKey(null);
     setLoading(true);
     setListError(null);
+    setTargetErrors((current) => {
+      const next = new Map(current);
+      next.delete("local");
+      return next;
+    });
+    return nextActiveTab;
   }, [attachment]);
 
   const restartDaemon = useCallback(async () => {
@@ -456,13 +630,14 @@ export function TerminalPage() {
     restartingDaemonRef.current = true;
     setDaemonRestartConfirmation(false);
     setRestartingDaemon(true);
+    let nextActiveTab: SessionSummary | null = null;
     try {
       await restartLocalDaemon();
-      clearLocalDaemonState();
+      nextActiveTab = clearLocalDaemonState();
       await refresh(true);
     } catch (error) {
       if (!restartFailurePreservesLocalState(errorCode(error))) {
-        clearLocalDaemonState();
+        nextActiveTab = clearLocalDaemonState();
         await refresh(true);
       }
       setListError(`Could not restart rmuxd: ${errorMessage(error)}`);
@@ -471,7 +646,10 @@ export function TerminalPage() {
       setRestartingDaemon(false);
       setLoading(false);
     }
-  }, [clearLocalDaemonState, refresh, setDaemonRestartConfirmation]);
+    if (nextActiveTab) {
+      await activateTab(nextActiveTab);
+    }
+  }, [activateTab, clearLocalDaemonState, refresh, setDaemonRestartConfirmation]);
 
   const requestDaemonRestart = useCallback(() => {
     if (restartingDaemonRef.current) {
@@ -498,6 +676,7 @@ export function TerminalPage() {
   }, [restartDaemon]);
 
   const attachedSession = attachment.state.session;
+  const attachedSessionKey = attachedSession ? sessionKey(attachedSession) : null;
   const attachedTerminalSize = attachedSession?.terminal_size;
   const attachedShellState = attachment.state.shell_state;
   useEffect(() => {
@@ -506,7 +685,7 @@ export function TerminalPage() {
     }
     if (
       !tabsRef.current.some(
-        (tab) => tab.session_id === attachedSession.session_id,
+        (tab) => sameSession(tab, attachedSession),
       )
     ) {
       return;
@@ -514,7 +693,7 @@ export function TerminalPage() {
     setTabShellStates((current) =>
       rememberShellState(
         current,
-        attachedSession.session_id,
+        sessionKey(attachedSession),
         attachedShellState,
         { replaceEqualRevision: true },
       ),
@@ -522,36 +701,38 @@ export function TerminalPage() {
     setSessionShellStates((current) =>
       rememberShellState(
         current,
-        attachedSession.session_id,
+        sessionKey(attachedSession),
         attachedShellState,
         { replaceEqualRevision: true },
       ),
     );
-  }, [attachedSession?.session_id, attachedShellState]);
+  }, [attachedSessionKey, attachedShellState]);
 
   useEffect(() => {
     if (!attachedSession || !attachedTerminalSize) {
       return;
     }
     refreshGuardRef.current.recordMutation();
-    setSessions((current) =>
-      syncSessionTerminalSize(
+    setSessions((current) => {
+      const next = syncSessionTerminalSize(
         current,
-        attachedSession.session_id,
+        sessionKey(attachedSession),
         attachedTerminalSize,
-      ),
-    );
+      );
+      sessionsRef.current = next;
+      return next;
+    });
     setTabs((current) => {
       const next = syncTabTerminalSize(
         current,
-        attachedSession.session_id,
+        sessionKey(attachedSession),
         attachedTerminalSize,
       );
       tabsRef.current = next;
       return next;
     });
   }, [
-    attachedSession?.session_id,
+    attachedSessionKey,
     attachedTerminalSize?.columns,
     attachedTerminalSize?.rows,
     attachedTerminalSize?.pixel_width,
@@ -562,34 +743,38 @@ export function TerminalPage() {
     if (attachment.state.phase !== "ended" || !attachedSession) {
       return;
     }
+    const identity = sessionKey(attachedSession);
     refreshGuardRef.current.recordMutation();
-    closedSessionIdsRef.current.add(attachedSession.session_id);
-    setSessions((current) => removeSession(current, attachedSession.session_id));
+    closedSessionKeysRef.current.add(identity);
+    setSessions((current) => {
+      const next = removeSession(current, identity);
+      sessionsRef.current = next;
+      return next;
+    });
     setTabShellStates((current) =>
-      forgetShellState(current, attachedSession.session_id),
+      forgetShellState(current, identity),
     );
     setSessionShellStates((current) =>
-      forgetShellState(current, attachedSession.session_id),
+      forgetShellState(current, identity),
     );
     void closeTab(attachedSession);
   }, [attachment.state.phase, attachedSession, closeTab]);
 
-  const openTabSessionIds = new Set(
-    tabs.map((tab) => tab.session_id),
-  );
+  const openTabSessionKeys = new Set(tabs.map(sessionKey));
 
-  const activeTab = tabs.find((tab) => tab.session_id === activeTabId) ?? null;
+  const activeTab =
+    tabs.find((tab) => sessionKey(tab) === activeTabKey) ?? null;
   const activeShellState =
-    attachedSession?.session_id === activeTabId && attachedShellState
+    attachedSessionKey === activeTabKey && attachedShellState
       ? attachedShellState
-      : activeTabId
-        ? tabShellStates.get(activeTabId) ?? null
+      : activeTabKey
+        ? tabShellStates.get(activeTabKey) ?? null
         : null;
   const displayedTabShellStates =
     attachedSession && attachedShellState
       ? rememberShellState(
           tabShellStates,
-          attachedSession.session_id,
+          sessionKey(attachedSession),
           attachedShellState,
           { replaceEqualRevision: true },
       )
@@ -597,7 +782,7 @@ export function TerminalPage() {
   const displayedSessionShellStates = new Map(sessionShellStates);
   if (attachedSession && attachedShellState) {
     displayedSessionShellStates.set(
-      attachedSession.session_id,
+      sessionKey(attachedSession),
       attachedShellState,
     );
   }
@@ -608,17 +793,17 @@ export function TerminalPage() {
     {
       sessions,
       tabs,
-      activeSessionId: activeTabId,
-      attachmentSessionId: attachment.state.session?.session_id ?? null,
+      activeSessionKey: activeTabKey,
+      attachmentSessionKey: attachedSessionKey,
       phase: attachment.state.phase,
       inputOwned: attachment.state.input_lease.owned_by_client,
       resizeWithWindow: attachment.state.resize_with_window,
       listLoading: loading,
       creating,
       createFormOpen,
-      pendingCloseSessionId,
-      closingSessionIds,
-      disconnectingSessionId,
+      pendingCloseSessionKey,
+      closingSessionKeys,
+      disconnectingSessionKey,
       terminalReady: renderer !== null,
       currentWorkingDirectory,
       currentWorkingDirectoryDisplay,
@@ -634,8 +819,8 @@ export function TerminalPage() {
         }
       },
       openShellTab: () => {
-        if (currentWorkingDirectory) {
-          void create(currentWorkingDirectory);
+        if (currentWorkingDirectory && activeTab) {
+          void create(activeTab.target, currentWorkingDirectory);
         }
       },
       refreshSessions: () => void refresh(),
@@ -713,20 +898,22 @@ export function TerminalPage() {
     <>
       <main className="app-shell">
         <SessionSidebar
+          targets={targets}
+          targetErrors={targetErrors}
           sessions={sessions}
           shellStates={displayedSessionShellStates}
-          selectedSessionId={activeTabId}
-          openTabSessionIds={openTabSessionIds}
+          selectedSessionKey={activeTabKey}
+          openTabSessionKeys={openTabSessionKeys}
           loading={loading}
           error={listError}
           creating={creating}
           createFormOpen={createFormOpen}
-          pendingCloseSessionId={pendingCloseSessionId}
-          closingSessionIds={closingSessionIds}
-          disconnectingSessionId={disconnectingSessionId}
+          pendingCloseSessionKey={pendingCloseSessionKey}
+          closingSessionKeys={closingSessionKeys}
+          disconnectingSessionKey={disconnectingSessionKey}
           onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
           onSelect={(session) =>
-            executeCommandById(`session.switch.${session.session_id}`)
+            executeCommandById(sessionSwitchCommandId(session))
           }
           onCreate={create}
           onCreateFormOpenChange={(open) => {
@@ -742,12 +929,14 @@ export function TerminalPage() {
           onRequestClose={requestClose}
           onCancelClose={cancelClose}
           onConfirmClose={confirmClose}
+          onAddHost={addHost}
+          onRemoveHost={(target) => void removeHost(target)}
         />
         <section className="terminal-workspace">
           <TerminalTabs
             tabs={tabs}
             shellStates={displayedTabShellStates}
-            activeSessionId={activeTabId}
+            activeSessionKey={activeTabKey}
             canCreate={
               currentWorkingDirectory !== null &&
               !creating &&

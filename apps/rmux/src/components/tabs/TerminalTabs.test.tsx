@@ -1,10 +1,12 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import { sessionKey } from "../../features/targets/targets";
 import { TerminalTabs } from "./TerminalTabs";
 
 function session(id: string): SessionSummary {
   return {
+    target: { kind: "local" },
     session_id: id,
     name: id,
     status: "running",
@@ -32,11 +34,13 @@ function shellState(): ShellStateSummary {
 
 describe("TerminalTabs", () => {
   it("marks the active tab and explains that tab close preserves the session", () => {
+    const first = session("first");
+    const second = session("second");
     const markup = renderToStaticMarkup(
       <TerminalTabs
-        tabs={[session("first"), session("second")]}
-        shellStates={new Map([["second", shellState()]])}
-        activeSessionId="second"
+        tabs={[first, second]}
+        shellStates={new Map([[sessionKey(second), shellState()]])}
+        activeSessionKey={sessionKey(second)}
         canCreate
         onSelect={vi.fn()}
         onClose={vi.fn()}
@@ -46,7 +50,7 @@ describe("TerminalTabs", () => {
 
     expect(markup).toContain('aria-label="Terminal tabs"');
     expect(markup).toContain('aria-selected="true"');
-    expect(markup).toContain('aria-label="/workspace — cargo test"');
+    expect(markup).toContain('aria-label="/workspace — cargo test on local"');
     expect(markup).toContain(
       'class="terminal-tab-path"><bdi dir="ltr">/workspace</bdi>',
     );
@@ -56,6 +60,7 @@ describe("TerminalTabs", () => {
   });
 
   it("keeps a home-relative path in logical filesystem order", () => {
+    const first = session("first");
     const homeRelativeState: ShellStateSummary = {
       ...shellState(),
       cwd: "/Users/clouds/Projects/Agents",
@@ -63,9 +68,9 @@ describe("TerminalTabs", () => {
     };
     const markup = renderToStaticMarkup(
       <TerminalTabs
-        tabs={[session("first")]}
-        shellStates={new Map([["first", homeRelativeState]])}
-        activeSessionId="first"
+        tabs={[first]}
+        shellStates={new Map([[sessionKey(first), homeRelativeState]])}
+        activeSessionKey={sessionKey(first)}
         canCreate
         onSelect={vi.fn()}
         onClose={vi.fn()}

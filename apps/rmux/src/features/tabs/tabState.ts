@@ -1,4 +1,5 @@
 import type { SessionSummary, TerminalSize } from "../../lib/types";
+import { sessionKey } from "../targets/targets";
 
 export interface ClosedTabState {
   tabs: SessionSummary[];
@@ -10,7 +11,7 @@ export function openTerminalTab(
   session: SessionSummary,
 ): SessionSummary[] {
   const existingIndex = tabs.findIndex(
-    (tab) => tab.session_id === session.session_id,
+    (tab) => sessionKey(tab) === sessionKey(session),
   );
   if (existingIndex === -1) {
     return [...tabs, session];
@@ -26,14 +27,14 @@ export function openTerminalTab(
 
 export function closeTerminalTab(
   tabs: readonly SessionSummary[],
-  sessionId: string,
+  identity: string,
 ): ClosedTabState {
-  const closedIndex = tabs.findIndex((tab) => tab.session_id === sessionId);
+  const closedIndex = tabs.findIndex((tab) => sessionKey(tab) === identity);
   if (closedIndex === -1) {
     return { tabs: [...tabs], nextTab: null };
   }
 
-  const remaining = tabs.filter((tab) => tab.session_id !== sessionId);
+  const remaining = tabs.filter((tab) => sessionKey(tab) !== identity);
   const nextIndex = Math.min(closedIndex, remaining.length - 1);
   return {
     tabs: remaining,
@@ -43,11 +44,11 @@ export function closeTerminalTab(
 
 export function syncTabTerminalSize(
   tabs: readonly SessionSummary[],
-  sessionId: string,
+  identity: string,
   terminalSize: TerminalSize,
 ): SessionSummary[] {
   return tabs.map((tab) =>
-    tab.session_id === sessionId
+    sessionKey(tab) === identity
       ? { ...tab, terminal_size: terminalSize }
       : tab,
   );
@@ -56,16 +57,17 @@ export function syncTabTerminalSize(
 export function reconcileTerminalTabs(
   tabs: readonly SessionSummary[],
   listedSessions: readonly SessionSummary[],
-  preservedSessionId: string | null,
+  preservedSessionKey: string | null,
 ): SessionSummary[] {
   const listedById = new Map(
-    listedSessions.map((session) => [session.session_id, session]),
+    listedSessions.map((session) => [sessionKey(session), session]),
   );
   return tabs.flatMap((tab) => {
-    const listed = listedById.get(tab.session_id);
+    const identity = sessionKey(tab);
+    const listed = listedById.get(identity);
     if (listed) {
       return [listed];
     }
-    return tab.session_id === preservedSessionId ? [tab] : [];
+    return identity === preservedSessionKey ? [tab] : [];
   });
 }

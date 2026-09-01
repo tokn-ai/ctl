@@ -9,7 +9,7 @@ use tauri::ipc::Channel;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, timeout};
 
-use crate::dto::{AttachmentEventDto, PresentationAcknowledgement};
+use crate::dto::{AttachmentEventDto, ConnectionTargetDto, PresentationAcknowledgement};
 use crate::error::{CommandErrorDto, CommandResult};
 
 const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
@@ -36,6 +36,7 @@ enum AttachmentSlot {
 pub struct AttachmentActor {
   pub attachment_id: String,
   pub window_label: String,
+  pub target: ConnectionTargetDto,
   pub control: AttachmentControl,
   pending: Mutex<Option<PendingPresentation>>,
   pending_changed: Notify,
@@ -99,6 +100,30 @@ impl AppState {
         }
         Some(AttachmentSlot::Active(actor)) => Some(Arc::clone(actor)),
         None => None,
+      }
+    };
+
+    match actor {
+      Some(actor) => actor.detach_and_wait().await,
+      None => Ok(()),
+    }
+  }
+
+  /// Detaches the active actor only when it belongs to the local daemon being
+  /// restarted. A remote SSH attachment in the same window is unrelated and
+  /// must remain live through local maintenance.
+  pub async fn detach_active_local_window(&self, window_label: &str) -> CommandResult<()> {
+    let actor = {
+      let registry = self.registry.lock().await;
+      match registry.by_window.get(window_label) {
+        Some(AttachmentSlot::Opening { .. }) => {
+          return Err(CommandErrorDto::new(
+            "window_attachment_transition_in_progress",
+            "another attachment transition is already in progress for this window",
+          ));
+        }
+        Some(AttachmentSlot::Active(actor)) if actor.target.is_local() => Some(Arc::clone(actor)),
+        Some(AttachmentSlot::Active(_)) | None => None,
       }
     };
 
@@ -219,10 +244,16 @@ pub fn register_main_window_cleanup(app: &tauri::App) {
 }
 
 impl AttachmentActor {
-  pub fn new(attachment_id: String, window_label: String, control: AttachmentControl) -> Self {
+  pub fn new(
+    attachment_id: String,
+    window_label: String,
+    target: ConnectionTargetDto,
+    control: AttachmentControl,
+  ) -> Self {
     Self {
       attachment_id,
       window_label,
+      target,
       control,
       pending: Mutex::new(None),
       pending_changed: Notify::new(),

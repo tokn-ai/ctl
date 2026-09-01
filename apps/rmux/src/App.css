@@ -33,7 +33,8 @@ body,
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -43,7 +44,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   background: var(--surface-0);
@@ -62,12 +63,111 @@ button {
 .sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  gap: 7px;
   min-height: 44px;
   padding: 10px 12px 6px;
 }
 
+.sidebar-header strong {
+  min-width: 0;
+  margin-right: auto;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.host-add-button {
+  padding: 5px 7px;
+  color: var(--muted);
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.sidebar-connections {
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-hosts {
+  display: flex;
+  gap: 5px;
+  padding: 1px 12px 10px;
+  overflow-x: auto;
+}
+
+.host-chip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 150px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  color: #aeb6c1;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #12151a;
+}
+
+.host-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-chip button {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  padding: 0;
+  color: #7f8793;
+  font-size: 11px;
+  line-height: 11px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.host-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0 10px 10px;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #12151a;
+}
+
+.host-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.host-form input {
+  min-width: 0;
+  padding: 6px 7px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-0);
+}
+
+.host-form > small {
+  color: #ffb0b0;
+  font-size: 10px;
+}
+
 .icon-button,
+.host-form button,
 .toolbar-actions button,
 .sidebar-state button,
 .form-actions button {
@@ -92,7 +192,8 @@ button {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid #6cc77e;
   outline-offset: 2px;
 }
@@ -300,6 +401,32 @@ button:disabled {
   border-color: #6b3c3c;
 }
 
+.host-error {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 7px;
+  padding: 7px 9px;
+  color: #e6a9a9;
+  font-size: 10px;
+  border-left: 2px solid #744144;
+  background: #2a2022;
+}
+
+.host-error strong,
+.host-error span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-error strong {
+  color: #ffc4c4;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-weight: 600;
+}
+
 .empty-glyph,
 .terminal-mark {
   color: var(--accent);
@@ -342,7 +469,8 @@ button:disabled {
   font-size: 11px;
 }
 
-.new-session-form input {
+.new-session-form input,
+.new-session-form select {
   width: 100%;
   min-width: 0;
   padding: 7px 8px;
@@ -447,6 +575,21 @@ button:disabled {
   overflow: hidden;
   font-size: 11px;
   white-space: nowrap;
+}
+
+.terminal-tab-host {
+  max-width: 58px;
+  flex: 0 1 auto;
+  padding: 2px 4px;
+  overflow: hidden;
+  color: #84909d;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid #343a45;
+  border-radius: 4px;
 }
 
 .terminal-tab-path,

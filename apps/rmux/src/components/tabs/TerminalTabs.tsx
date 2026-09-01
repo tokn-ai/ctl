@@ -1,10 +1,11 @@
 import type { SessionSummary, ShellStateSummary } from "../../lib/types";
 import { formatTerminalTitle } from "../../features/tabs/terminalTitle";
+import { sessionKey, targetLabel } from "../../features/targets/targets";
 
 interface TerminalTabsProps {
   tabs: readonly SessionSummary[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
-  activeSessionId: string | null;
+  activeSessionKey: string | null;
   canCreate: boolean;
   onSelect(session: SessionSummary): void;
   onClose(session: SessionSummary): void;
@@ -14,7 +15,7 @@ interface TerminalTabsProps {
 export function TerminalTabs({
   tabs,
   shellStates,
-  activeSessionId,
+  activeSessionKey,
   canCreate,
   onSelect,
   onClose,
@@ -24,26 +25,28 @@ export function TerminalTabs({
     <nav className="terminal-tabs" aria-label="Terminal tabs">
       <div className="terminal-tab-list" role="tablist">
         {tabs.map((tab) => {
-          const active = tab.session_id === activeSessionId;
+          const identity = sessionKey(tab);
+          const active = identity === activeSessionKey;
           const title = formatTerminalTitle(
             tab,
-            shellStates.get(tab.session_id) ?? null,
+            shellStates.get(identity) ?? null,
           );
           return (
             <div
               className={`terminal-tab ${active ? "active" : ""}`}
-              key={tab.session_id}
+              key={identity}
             >
               <button
                 className="terminal-tab-select"
                 type="button"
                 role="tab"
                 aria-selected={active}
-                aria-label={title.text}
-                title={title.text}
+                aria-label={`${title.text} on ${targetLabel(tab.target)}`}
+                title={`${title.text} · ${targetLabel(tab.target)}`}
                 onClick={() => onSelect(tab)}
               >
                 <span className="terminal-tab-dot" aria-hidden="true" />
+                <span className="terminal-tab-host">{targetLabel(tab.target)}</span>
                 <span className="terminal-tab-copy">
                   <span className="terminal-tab-path">
                     <bdi dir="ltr">{title.path}</bdi>

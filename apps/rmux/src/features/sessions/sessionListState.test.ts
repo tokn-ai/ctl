@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { SessionSummary, TerminalSize } from "../../lib/types";
+import { sessionKey } from "../targets/targets";
 import {
   SessionListRefreshGuard,
+  mergeTargetSessionLists,
   prependSession,
   removeSession,
   replaceSessionList,
@@ -22,6 +24,7 @@ function session(
   overrides: Partial<SessionSummary> = {},
 ): SessionSummary {
   return {
+    target: { kind: "local" },
     session_id: sessionId,
     name: sessionId,
     status: "running",
@@ -75,6 +78,32 @@ describe("session list state", () => {
     expect(result.filter((item) => item.session_id === "created")).toHaveLength(1);
   });
 
+  it("keeps equal daemon session ids distinct across targets", () => {
+    const local = session("same");
+    const remote = session("same", {
+      target: { kind: "ssh", destination: "rmux-docker" },
+    });
+
+    expect(prependSession([local], remote)).toEqual([remote, local]);
+  });
+
+  it("replaces successful hosts while retaining failed-host rows", () => {
+    const localOld = session("local-old");
+    const localNew = session("local-new");
+    const remote = session("remote", {
+      target: { kind: "ssh", destination: "rmux-docker" },
+    });
+    const targets = [localOld.target, remote.target];
+
+    expect(
+      mergeTargetSessionLists(
+        [localOld, remote],
+        targets,
+        new Map([["local", [localNew]]]),
+      ),
+    ).toEqual([localNew, remote]);
+  });
+
   it("synchronizes only terminal_size on an existing session", () => {
     const original = session("active", {
       name: "shell",
@@ -84,7 +113,11 @@ describe("session list state", () => {
     const other = session("other");
     const resized = terminalSize(107, 24);
 
-    const result = syncSessionTerminalSize([original, other], "active", resized);
+    const result = syncSessionTerminalSize(
+      [original, other],
+      sessionKey(original),
+      resized,
+    );
 
     expect(result).toEqual([
       {
@@ -106,7 +139,7 @@ describe("session list state", () => {
 
     const result = syncSessionTerminalSize(
       current,
-      "removed",
+      sessionKey(session("removed")),
       terminalSize(107, 24),
     );
 
@@ -119,7 +152,7 @@ describe("session list state", () => {
     const removed = session("removed");
     const second = session("second");
 
-    expect(removeSession([first, removed, second], "removed")).toEqual([
+    expect(removeSession([first, removed, second], sessionKey(removed))).toEqual([
       first,
       second,
     ]);

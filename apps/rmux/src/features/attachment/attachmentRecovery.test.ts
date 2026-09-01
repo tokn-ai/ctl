@@ -17,6 +17,7 @@ function attachedState(
     error_code: null,
     attachment_id: "attachment-1",
     session: {
+      target: { kind: "local" },
       session_id: "session-1",
       name: "work",
       status: "running",

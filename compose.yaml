@@ -1,0 +1,17 @@
+services:
+  rmux-remote:
+    build:
+      context: .
+      dockerfile: docker/rmux/Dockerfile
+    ports:
+      - "127.0.0.1:${RMUX_SSH_PORT:-2222}:22"
+    volumes:
+      - type: bind
+        source: ${RMUX_AUTHORIZED_KEYS_FILE:?set RMUX_AUTHORIZED_KEYS_FILE to an authorized public-key file}
+        target: /run/secrets/rmux_authorized_keys
+        read_only: true
+      - rmux_ssh_host_keys:/etc/ssh/host_keys
+    restart: unless-stopped
+
+volumes:
+  rmux_ssh_host_keys:

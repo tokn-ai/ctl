@@ -21,6 +21,55 @@ ssh -T <host> exec ctld connect
 The command waits for `rmux-proto` input, so terminate this manual probe after
 confirming it starts without diagnostics.
 
+### Docker development target
+
+The repository includes a development image that builds `ctld` and `rmuxd`
+and exposes them through OpenSSH. It deliberately accepts only public-key
+authentication and the fixed `exec ctld connect` remote command. Shells,
+PTY allocation, forwarding, agent access, X11, tunnels, and SSH subsystems are
+disabled.
+
+Set an absolute path to the public-key file that may access the container, then
+start the target:
+
+```sh
+export RMUX_AUTHORIZED_KEYS_FILE=/absolute/path/to/id_ed25519.pub
+docker compose up --build --detach rmux-remote
+```
+
+The default host port is `2222`. Set `RMUX_SSH_PORT` before starting the
+container to choose another port. Add a local OpenSSH alias so `ctl` can use
+the port and matching private key through normal SSH configuration:
+
+```sshconfig
+Host rmux-docker
+  HostName 127.0.0.1
+  Port 2222
+  User rmux
+  IdentityFile /absolute/path/to/id_ed25519
+  IdentitiesOnly yes
+```
+
+Inspect and trust the container host-key fingerprint before the first
+connection:
+
+```sh
+docker compose exec rmux-remote \
+  ssh-keygen -lf /etc/ssh/host_keys/ssh_host_ed25519_key.pub
+```
+
+Then exercise the real remote path:
+
+```sh
+ctl --host rmux-docker rmux list
+ctl --host rmux-docker rmux new --name docker-test
+ctl --host rmux-docker rmux attach docker-test
+```
+
+The `rmux_ssh_host_keys` volume preserves the SSH host identity across
+container replacement. Terminal sessions remain memory-backed and disappear
+when the container stops, matching the current `rmuxd` persistence model.
+
 ## On the client device
 
 `rmux` defines the canonical command surface. `ctl rmux` redirects those same

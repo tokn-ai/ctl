@@ -1,0 +1,40 @@
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+HostKey /etc/ssh/host_keys/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+
+UsePAM no
+StrictModes yes
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+AllowUsers rmux
+
+ForceCommand /usr/local/libexec/rmux-forced-command
+DisableForwarding yes
+PermitTTY no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+GatewayPorts no
+PermitTunnel no
+PermitUserEnvironment no
+PermitUserRC no
+
+UseDNS no
+PrintMotd no
+PrintLastLog no
+TCPKeepAlive yes
+ClientAliveInterval 15
+ClientAliveCountMax 3
+LogLevel VERBOSE
+MaxAuthTries 3
+MaxSessions 10

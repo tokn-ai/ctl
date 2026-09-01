@@ -5,6 +5,7 @@ import { createStatusGroups } from "./statusItems";
 function state(overrides: Partial<AttachmentViewState> = {}): AttachmentViewState {
   return {
     phase: "attached",
+    error_code: null,
     attachment_id: "attachment",
     session: {
       session_id: "session",

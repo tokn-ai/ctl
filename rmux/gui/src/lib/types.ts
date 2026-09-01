@@ -207,6 +207,7 @@ export type ConnectionPhase =
 
 export interface AttachmentViewState {
   phase: ConnectionPhase;
+  error_code: string | null;
   attachment_id: string | null;
   session: SessionSummary | null;
   input_lease: LeaseStatus;

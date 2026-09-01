@@ -1,4 +1,4 @@
-# rmux desktop
+# rmux app
 
 The local desktop client for daemon-owned `rmux` terminal sessions. It uses
 Tauri 2, React/TypeScript, and xterm.js.
@@ -10,7 +10,7 @@ beside its own Cargo binary, then start Tauri:
 
 ```sh
 cargo build -p rmuxd
-cd rmux/gui
+cd apps/rmux
 pnpm install
 pnpm tauri dev
 ```
@@ -69,7 +69,7 @@ its standard application-quit behavior.
 pnpm check
 pnpm test
 pnpm build
-cargo test -p rmux-gui
+cargo test -p rmux-app
 ```
 
 The GUI never resizes an existing PTY merely because it was selected. **Resize

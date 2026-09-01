@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  rmux_gui_lib::run();
+  rmux_app_lib::run();
 }

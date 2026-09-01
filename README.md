@@ -40,7 +40,7 @@ daemon:
 
 ```sh
 cargo build -p rmuxd
-cd rmux/gui
+cd apps/rmux
 pnpm install
 pnpm tauri dev
 ```

@@ -27,14 +27,14 @@ describe("formatTerminalTitle", () => {
       formatTerminalTitle(
         { name: "session-1" },
         shellState({
-          running_command: "cargo test -p rmux-gui",
+          running_command: "cargo test -p rmux-app",
           prompt_phase: "running",
         }),
       ),
     ).toEqual({
       path: "/Users/clouds/Projects/Tools/ctl",
-      command: "cargo test -p rmux-gui",
-      text: "/Users/clouds/Projects/Tools/ctl — cargo test -p rmux-gui",
+      command: "cargo test -p rmux-app",
+      text: "/Users/clouds/Projects/Tools/ctl — cargo test -p rmux-app",
     });
   });
 
@@ -99,7 +99,7 @@ describe("compactTerminalTitle", () => {
   it("omits the shared prefix and preserves the distinguishing tail", () => {
     expect(
       compactTerminalTitle(
-        "/Users/clouds/Projects/Tools/ctl/rmux/gui/src/features/tabs — cargo test",
+        "/Users/clouds/Projects/Tools/ctl/apps/rmux/src/features/tabs — cargo test",
         31,
       ),
     ).toBe("…src/features/tabs — cargo test");
@@ -117,7 +117,7 @@ describe("compactTerminalTitleParts", () => {
     const title = formatTerminalTitle(
       { name: "session-1" },
       shellState({
-        cwd: "/Users/clouds/Projects/Tools/ctl/rmux/gui/src/features/tabs",
+        cwd: "/Users/clouds/Projects/Tools/ctl/apps/rmux/src/features/tabs",
         running_command:
           "pnpm exec vitest run terminalTitle --watch=false --reporter=verbose",
         prompt_phase: "running",

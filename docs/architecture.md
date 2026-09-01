@@ -20,7 +20,7 @@ session.
 `ctld connect` is a disposable SSH remote-command gateway:
 
 ```text
-local:  rmux / rmux-gui -> local IPC -> rmuxd -> PTY -> shell
+local:  rmux / rmux-app -> local IPC -> rmuxd -> PTY -> shell
 remote: ctl -> OpenSSH -> ctld connect -> local IPC -> rmuxd -> PTY -> shell
 ```
 
@@ -45,9 +45,9 @@ path or service.
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
 - `rmux`: canonical local CLI and reusable rmux command implementation.
-- `rmux-gui`: local Tauri/React terminal client. Its Rust adapter runs
-  `rmux-client`; its webview owns xterm rendering, viewport, and local
-  scrollback.
+- `rmux-app`: local Tauri/React terminal client in `apps/rmux`. Its Rust
+  adapter runs `rmux-client`; its webview owns xterm rendering, viewport, and
+  local scrollback.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctld connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
@@ -104,7 +104,7 @@ cannot disturb an established desktop layout.
 
 ## Desktop client boundary
 
-`rmux-gui` is a client, not an embedded daemon. Its Tauri backend connects to
+`rmux-app` is a client, not an embedded daemon. Its Tauri backend connects to
 the same per-user endpoint as the CLI and may start a sibling `rmuxd`, but it
 does not link PTY, journal, checkpoint-production, or session-lifetime logic
 into the app process. Closing the window drops its attachment and leases while

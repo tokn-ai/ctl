@@ -2831,6 +2831,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmux-app"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "rmux-client",
+ "rmux-ipc",
+ "rmux-proto",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "rmux-client"
 version = "0.1.0"
 dependencies = [
@@ -2846,22 +2862,6 @@ version = "0.1.0"
 dependencies = [
  "rmux-proto",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "rmux-gui"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "rmux-client",
- "rmux-ipc",
- "rmux-proto",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
- "uuid",
 ]
 
 [[package]]

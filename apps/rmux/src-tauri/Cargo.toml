@@ -1,12 +1,12 @@
 [package]
-name = "rmux-gui"
+name = "rmux-app"
 version.workspace = true
 edition.workspace = true
 description = "Local graphical client for persistent rmux terminal sessions"
 publish = false
 
 [lib]
-name = "rmux_gui_lib"
+name = "rmux_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -22,7 +22,7 @@ use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
 use crate::state::{AppState, AttachmentActor, forward_attachment_events};
 
-const CLIENT_NAME: &str = "rmux-gui";
+const CLIENT_NAME: &str = "rmux-app";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS: usize = 4;

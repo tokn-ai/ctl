@@ -11,6 +11,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CommandErrorDto, CommandResult, protocol_error_code};
 
+/// Explicit endpoint identity carried by every operation that opens a stream.
+///
+/// The SSH value is only an OpenSSH destination or configured host alias. It
+/// never contains a remote command, credential, or forwarding configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConnectionTargetDto {
+  Local,
+  Ssh { destination: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TargetRequestDto {
+  pub target: ConnectionTargetDto,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSizeDto {
   pub columns: u16,
@@ -65,6 +81,7 @@ impl From<SessionStatus> for SessionStatusDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionDto {
+  pub target: ConnectionTargetDto,
   pub session_id: String,
   pub name: String,
   pub status: SessionStatusDto,
@@ -72,9 +89,11 @@ pub struct SessionDto {
   pub terminal_size: TerminalSizeDto,
 }
 
-impl From<SessionInfo> for SessionDto {
-  fn from(value: SessionInfo) -> Self {
+impl SessionDto {
+  #[must_use]
+  pub fn new(value: SessionInfo, target: ConnectionTargetDto) -> Self {
     Self {
+      target,
       session_id: value.session_id,
       name: value.name,
       status: value.status.into(),
@@ -242,6 +261,7 @@ impl From<ShellState> for ShellStateDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CreateSessionRequestDto {
+  pub target: ConnectionTargetDto,
   pub working_directory: Option<String>,
   pub terminal_size: TerminalSizeDto,
 }
@@ -249,11 +269,13 @@ pub struct CreateSessionRequestDto {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct KillSessionRequestDto {
+  pub target: ConnectionTargetDto,
   pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OpenAttachmentRequestDto {
+  pub target: ConnectionTargetDto,
   pub session: String,
   pub terminal_size: TerminalSizeDto,
   pub resume_from: Option<String>,
@@ -274,10 +296,14 @@ pub struct OpenAttachmentResponseDto {
 }
 
 impl OpenAttachmentResponseDto {
-  pub fn new(attachment_id: String, attached: &AttachedSession) -> Self {
+  pub fn new(
+    attachment_id: String,
+    attached: &AttachedSession,
+    target: ConnectionTargetDto,
+  ) -> Self {
     Self {
       attachment_id,
-      session: attached.session.clone().into(),
+      session: SessionDto::new(attached.session.clone(), target),
       replay_from: attached.replay_from.to_string(),
       history_gap: attached.history_gap,
       terminal_size_mismatch: attached.terminal_size_mismatch,
@@ -604,17 +630,40 @@ mod tests {
 
   #[test]
   fn session_u64_values_are_decimal_strings() {
-    let dto: SessionDto = SessionInfo {
-      session_id: "session".into(),
-      name: "large".into(),
-      status: SessionStatus::Running,
-      created_at_ms: u64::MAX,
-      next_sequence: u64::MAX,
-      terminal_size: TerminalSize::default(),
-    }
-    .into();
+    let dto = SessionDto::new(
+      SessionInfo {
+        session_id: "session".into(),
+        name: "large".into(),
+        status: SessionStatus::Running,
+        created_at_ms: u64::MAX,
+        next_sequence: u64::MAX,
+        terminal_size: TerminalSize::default(),
+      },
+      ConnectionTargetDto::Local,
+    );
     let json = serde_json::to_value(dto).unwrap();
+    assert_eq!(json["target"]["kind"], "local");
     assert_eq!(json["next_sequence"], u64::MAX.to_string());
+  }
+
+  #[test]
+  fn ssh_target_uses_a_tagged_snake_case_shape() {
+    let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": "rmux-docker"
+    }))
+    .unwrap();
+
+    assert_eq!(
+      target,
+      ConnectionTargetDto::Ssh {
+        destination: "rmux-docker".into()
+      }
+    );
+    assert_eq!(
+      serde_json::to_value(target).unwrap(),
+      serde_json::json!({ "kind": "ssh", "destination": "rmux-docker" })
+    );
   }
 
   #[test]
@@ -635,8 +684,11 @@ mod tests {
 
   #[test]
   fn kill_session_request_uses_stable_snake_case_session_id() {
-    let request: KillSessionRequestDto =
-      serde_json::from_value(serde_json::json!({ "session_id": "stable-id" })).unwrap();
+    let request: KillSessionRequestDto = serde_json::from_value(serde_json::json!({
+      "target": { "kind": "local" },
+      "session_id": "stable-id"
+    }))
+    .unwrap();
 
     assert_eq!(request.session_id, "stable-id");
     assert!(

@@ -2,7 +2,7 @@
 name = "rmux-app"
 version.workspace = true
 edition.workspace = true
-description = "Local graphical client for persistent rmux terminal sessions"
+description = "Graphical client for local and SSH-connected rmux terminal sessions"
 publish = false
 
 [lib]
@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 base64.workspace = true
+ctl-core.workspace = true
 rmux-client.workspace = true
 rmux-ipc.workspace = true
 rmux-proto.workspace = true

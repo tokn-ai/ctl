@@ -16,11 +16,13 @@ use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
   AttachmentRequestDto, CreateSessionRequestDto, KillSessionRequestDto, OpenAttachmentRequestDto,
   OpenAttachmentResponseDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
-  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, decode_input, parse_sequence,
+  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, TargetRequestDto, decode_input,
+  parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
 use crate::state::{AppState, AttachmentActor, forward_attachment_events};
+use crate::transport;
 
 const CLIENT_NAME: &str = "rmux-app";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -28,15 +30,18 @@ const SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(2
 const MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS: usize = 4;
 
 #[tauri::command]
-pub async fn list_sessions() -> CommandResult<SessionListDto> {
-  let stream = local_transport::connect().await?;
+pub async fn list_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {
+  let stream = transport::connect(&request.target).await?;
   let response = rmux_request(stream, &client_identity(), ClientMessage::ListSessions)
     .await
     .map_err(CommandErrorDto::client)?;
   match response {
     ServerMessage::SessionList { sessions } => Ok(SessionListDto {
-      shell_states: inspect_session_shell_states(&sessions).await,
-      sessions: sessions.into_iter().map(SessionDto::from).collect(),
+      shell_states: inspect_session_shell_states(&request.target, &sessions).await,
+      sessions: sessions
+        .into_iter()
+        .map(|session| SessionDto::new(session, request.target.clone()))
+        .collect(),
     }),
     response => Err(unexpected_response("session_list", &response)),
   }
@@ -49,6 +54,7 @@ pub async fn list_sessions() -> CommandResult<SessionListDto> {
 /// session merely omits that shell snapshot. The frontend then falls back to a
 /// neutral title while keeping the list usable.
 async fn inspect_session_shell_states(
+  target: &crate::dto::ConnectionTargetDto,
   sessions: &[rmux_proto::SessionInfo],
 ) -> BTreeMap<String, ShellStateDto> {
   let mut shell_states = BTreeMap::new();
@@ -60,7 +66,7 @@ async fn inspect_session_shell_states(
     let Some(session_id) = session_ids.next() else {
       break;
     };
-    inspections.spawn(inspect_session_shell_state(session_id));
+    inspections.spawn(inspect_session_shell_state(target.clone(), session_id));
   }
 
   while let Some(result) = inspections.join_next().await {
@@ -69,15 +75,18 @@ async fn inspect_session_shell_states(
     }
 
     if let Some(session_id) = session_ids.next() {
-      inspections.spawn(inspect_session_shell_state(session_id));
+      inspections.spawn(inspect_session_shell_state(target.clone(), session_id));
     }
   }
 
   shell_states
 }
 
-async fn inspect_session_shell_state(session_id: String) -> Option<(String, ShellStateDto)> {
-  let stream = local_transport::connect_existing().await.ok()?;
+async fn inspect_session_shell_state(
+  target: crate::dto::ConnectionTargetDto,
+  session_id: String,
+) -> Option<(String, ShellStateDto)> {
+  let stream = transport::connect_existing(&target).await.ok()?;
   let identity = client_identity();
   let snapshot = timeout(
     SESSION_SHELL_STATE_INSPECTION_TIMEOUT,
@@ -93,32 +102,33 @@ async fn inspect_session_shell_state(session_id: String) -> Option<(String, Shel
 #[tauri::command]
 pub async fn create_session(request: CreateSessionRequestDto) -> CommandResult<SessionDto> {
   let terminal_size = request.terminal_size.into_proto()?;
-  let working_directory = match request.working_directory {
-    Some(directory) => directory,
-    None => local_transport::default_working_directory()?,
+  let working_directory = match (request.working_directory, request.target.is_local()) {
+    (Some(directory), _) => Some(directory),
+    (None, true) => Some(local_transport::default_working_directory()?),
+    (None, false) => None,
   };
-  let stream = local_transport::connect().await?;
+  let stream = transport::connect(&request.target).await?;
   let response = rmux_request(
     stream,
     &client_identity(),
     ClientMessage::CreateSession {
       name: None,
       command: None,
-      working_directory: Some(working_directory),
+      working_directory,
       terminal_size,
     },
   )
   .await
   .map_err(CommandErrorDto::client)?;
   match response {
-    ServerMessage::SessionCreated { session } => Ok(session.into()),
+    ServerMessage::SessionCreated { session } => Ok(SessionDto::new(session, request.target)),
     response => Err(unexpected_response("session_created", &response)),
   }
 }
 
 #[tauri::command]
 pub async fn kill_session(request: KillSessionRequestDto) -> CommandResult<()> {
-  let stream = local_transport::connect().await?;
+  let stream = transport::connect(&request.target).await?;
   let response = rmux_request(
     stream,
     &client_identity(),
@@ -200,9 +210,10 @@ async fn open_reserved_attachment(
   request: OpenAttachmentRequestDto,
   on_event: Channel<AttachmentEventDto>,
 ) -> CommandResult<OpenAttachmentResponseDto> {
+  let target = request.target.clone();
   let terminal_size = request.terminal_size.into_proto()?;
   let resume_from = parse_sequence(request.resume_from)?;
-  let stream = local_transport::connect().await?;
+  let stream = transport::connect(&target).await?;
   let (stream, attached) = begin_attach(
     stream,
     &client_identity(),
@@ -235,7 +246,7 @@ async fn open_reserved_attachment(
   };
   let (controller, control, events) =
     AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
-  let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached);
+  let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target);
   let actor = Arc::new(AttachmentActor::new(
     attachment_id.clone(),
     window_label.clone(),

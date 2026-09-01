@@ -58,13 +58,6 @@ pub type LocalStream = tokio::net::UnixStream;
 #[cfg(not(unix))]
 pub type LocalStream = tokio::io::DuplexStream;
 
-#[cfg(unix)]
-pub async fn connect() -> Result<LocalStream, CommandErrorDto> {
-  rmux_ipc::connect_or_start_daemon(&rmux_ipc::socket_path())
-    .await
-    .map_err(CommandErrorDto::backend)
-}
-
 /// Connects to the currently running local daemon without starting a new one.
 ///
 /// Supplemental metadata lookups use this after a successful primary request:
@@ -333,14 +326,6 @@ pub fn default_working_directory() -> Result<String, CommandErrorDto> {
       "enter a working directory because the user home directory is not valid UTF-8",
     )
   })
-}
-
-#[cfg(not(unix))]
-pub async fn connect() -> Result<LocalStream, CommandErrorDto> {
-  Err(CommandErrorDto::new(
-    "unsupported_platform",
-    "local rmux transport is not implemented on this platform",
-  ))
 }
 
 #[cfg(not(unix))]

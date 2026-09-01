@@ -1,3 +1,4 @@
+use ctl_core::CoreError;
 use rmux_client::ClientError;
 use rmux_proto::ErrorCode;
 use serde::Serialize;
@@ -26,6 +27,23 @@ impl CommandErrorDto {
     match error {
       ClientError::Server { code, message } => Self::new(protocol_error_code(&code), message),
       error => Self::backend(error),
+    }
+  }
+
+  pub fn transport(error: CoreError) -> Self {
+    match error {
+      CoreError::InvalidSshDestination(_) => {
+        Self::new("invalid_ssh_destination", error.to_string())
+      }
+      CoreError::StartSsh(_) | CoreError::MissingSshStdin | CoreError::MissingSshStdout => {
+        Self::new("ssh_start_failed", error.to_string())
+      }
+      CoreError::ReadSshPreface(_) => Self::new("ssh_connection_failed", error.to_string()),
+      CoreError::InvalidSshPreface => Self::new("invalid_ssh_preface", error.to_string()),
+      #[cfg(unix)]
+      CoreError::LocalIpc(_) => Self::new("local_connection_failed", error.to_string()),
+      #[cfg(not(unix))]
+      CoreError::LocalTransportUnsupported => Self::new("unsupported_platform", error.to_string()),
     }
   }
 }

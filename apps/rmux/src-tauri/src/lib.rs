@@ -5,6 +5,7 @@ mod local_transport;
 #[cfg(target_os = "macos")]
 mod native_menu;
 mod state;
+mod transport;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the native rmux application runtime.

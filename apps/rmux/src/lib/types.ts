@@ -2,6 +2,8 @@ export type Sequence = string;
 
 export interface SshConnectionTarget {
   kind: "ssh";
+  /** App-owned identity; stripped at the native transport boundary. */
+  host_id?: string;
   destination: string;
   hostname?: string;
   user?: string;
@@ -10,6 +12,37 @@ export interface SshConnectionTarget {
 }
 
 export type ConnectionTarget = { kind: "local" } | SshConnectionTarget;
+
+export interface WorkspaceHost {
+  host_id: string;
+  target: ConnectionTarget;
+}
+
+export interface SessionReference {
+  host_id: string;
+  session_id: string;
+}
+
+/** Remembered presentation metadata, never authoritative runtime state. */
+export interface WorkspaceSession extends SessionReference {
+  name: string;
+  last_known_cwd: string | null;
+  last_known_cwd_display: string | null;
+}
+
+export interface WorkspaceDocument {
+  schema_version: 1;
+  workspace_id: string;
+  hosts: WorkspaceHost[];
+  sessions: WorkspaceSession[];
+  tabs: SessionReference[];
+  active_tab: SessionReference | null;
+}
+
+export interface WorkspaceSnapshot {
+  revision: string | null;
+  document: WorkspaceDocument;
+}
 
 export interface SshConfigHost {
   destination: string;
@@ -63,7 +96,7 @@ export interface LeaseStatus {
 }
 
 export type LeaseKind = "input" | "layout";
-export type SessionStatus = "running" | "exited";
+export type SessionStatus = "running" | "exited" | "unknown" | "unreachable" | "missing";
 
 export interface SessionSummary {
   target: ConnectionTarget;
@@ -104,6 +137,13 @@ export interface ShellStateSummary {
 export interface SessionListResponse {
   sessions: SessionSummary[];
   shell_states: Record<string, ShellStateSummary>;
+}
+
+export interface SessionInspection {
+  session_id: string;
+  session: SessionSummary | null;
+  shell_state: ShellStateSummary | null;
+  error: { code: string; message: string } | null;
 }
 
 export interface CreateSessionRequest {

@@ -13,6 +13,7 @@ mod ssh_config;
 mod ssh_identity;
 mod state;
 mod transport;
+mod workspace;
 
 pub use ssh_auth::helper_exit_code as ssh_askpass_exit_code;
 
@@ -35,6 +36,9 @@ pub fn run() {
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
+      workspace::load_workspace,
+      workspace::update_workspace,
+      commands::inspection::inspect_known_sessions,
       commands::list_sessions,
       commands::list_ssh_config_hosts,
       commands::list_ssh_identity_files,

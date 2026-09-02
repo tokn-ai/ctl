@@ -507,3 +507,4 @@ mod tests {
     .expect("kill remote session");
   }
 }
+pub mod inspection;

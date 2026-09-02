@@ -3,6 +3,7 @@ import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
 import { useWorkspace } from "../features/workspace/useWorkspace";
+import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
 import { withHostId } from "../features/workspace/workspaceModel";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
@@ -381,12 +382,16 @@ export function TerminalPage() {
   );
 
   const activateTab = useCallback(
-    async (session: SessionSummary, resizeWithWindow = false) => {
+    async (requestedSession: SessionSummary, resizeWithWindow = false) => {
       const daemonEpoch = daemonEpochRef.current;
       if (daemonRestartBlocksInteractions()) {
         return;
       }
-      const identity = sessionKey(session);
+      const identity = sessionKey(requestedSession);
+      // Inspection may have just completed, before React publishes new props.
+      const session =
+        sessionsRef.current.find((known) => sessionKey(known) === identity) ??
+        requestedSession;
       const nextTabs = openTerminalTab(tabsRef.current, session);
       tabsRef.current = nextTabs;
       activeTabKeyRef.current = identity;
@@ -428,6 +433,15 @@ export function TerminalPage() {
     },
     [attachment, daemonRestartBlocksInteractions, renderer],
   );
+
+  const resumeHost = useWorkspaceConnections({
+    ready: workspace.ready,
+    closing: workspace.closing,
+    tabs,
+    active_tab_key: activeTabKey,
+    activateTab,
+    refreshHost: refresh,
+  });
 
   const closeTab = useCallback(
     async (session: SessionSummary) => {
@@ -1180,12 +1194,22 @@ export function TerminalPage() {
             ) : null}
             {activeTab && attachment.state.session === null ? (
               <div className="message-banner" role="status">
-                Restored tab — disconnected. Cached paths are last-known.
+                {activeTab.target.kind === "ssh"
+                  ? "Connect this host to resume its saved tab. Cached paths are last-known."
+                  : "Local session is not connected. Cached paths are last-known."}
                 <button
                   type="button"
-                  onClick={() => void activateTab(activeTab)}
+                  onClick={() => {
+                    if (activeTab.target.kind === "ssh") {
+                      setHostFlow(activeTab.target);
+                    } else {
+                      void activateTab(activeTab);
+                    }
+                  }}
                 >
-                  Connect session
+                  {activeTab.target.kind === "ssh"
+                    ? "Connect host"
+                    : "Connect session"}
                 </button>
               </div>
             ) : null}
@@ -1239,7 +1263,10 @@ export function TerminalPage() {
           onActivateHost={activateConfiguredHost}
           onSaveHost={saveHost}
           onConnected={() => {
-            if (hostFlow) void refresh(hostFlow);
+            if (hostFlow)
+              void resumeHost(hostFlow).catch((failure) =>
+                setListError(errorMessage(failure)),
+              );
           }}
           onClose={() => {
             setHostFlow(undefined);

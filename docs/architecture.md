@@ -129,9 +129,12 @@ identity-file-path fields. Config replacement uses a same-directory temporary
 file, preserves existing file permissions, and refuses to write when alias
 discovery is incomplete or the original changes during the operation.
 
-Startup restores entries and tabs disconnected, with unverified runtime
-status. It does not contact hosts, start a local daemon, enumerate sessions, or
-attach the selected tab. The sidebar is workspace membership, not a mirror of
+Startup restores entries and tabs with unverified runtime status, then
+automatically attaches the selected tab if it is local. It does not open SSH
+connections or enumerate sessions. **Connect host** authenticates that host,
+inspects its known sessions, and resumes its selected tab (or first open tab
+if another host was selected). Hosts without open tabs are only inspected.
+The sidebar is workspace membership, not a mirror of
 daemon inventory. New shells are remembered before attachment. **Add existing
 session** explicitly enumerates one selected host and adds only chosen sessions,
 without attaching. Explicit refresh inspects only remembered IDs; connection

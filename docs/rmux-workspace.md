@@ -39,7 +39,8 @@ never assumes every session on a remembered host belongs in this workspace.
 
 | Action | Workspace effect | Remote effect |
 | --- | --- | --- |
-| Launch/restart app | Restore entries, tabs, selection as unverified | None, including for the selected tab |
+| Launch/restart app | Restore entries, tabs, selection as unverified | Attach the selected tab automatically if local; no SSH connections |
+| Connect host | Inspect its known entries; resume the selected tab on that host, otherwise its first open tab | Authenticate through SSH, inspect known IDs, then attach |
 | Open session | Select/open its tab | Connect to its host and attach |
 | Create shell | Persist new membership before attaching | Create one session |
 | Add existing session | Remember selected entries | Enumerate only the selected host; no attachment |
@@ -53,6 +54,14 @@ An unreachable host is not evidence of a missing session. Successful inspection
 or attachment is authoritative for live state; `session_not_found` marks an
 entry missing. A session that exits while attached remains remembered as exited.
 On the next app restart, saved entries are again unverified until contacted.
+
+Only one terminal tab is attached per window. Local startup attachment is a
+one-shot intent and uses the normal connection/error handling once the renderer
+is ready. Background local tabs do not replace a selected remote tab. Remote
+tabs remain disconnected until opened explicitly or their host is connected.
+Connecting a host with no open tabs only refreshes its known entries; it does
+not reopen detached tabs or import sessions. A late host inspection cannot
+override a newer tab selection, reopen a closed tab, or attach after window close.
 
 If remote creation succeeds but local persistence fails, the shell is not
 killed or created again automatically. Its entry stays in memory, attachment

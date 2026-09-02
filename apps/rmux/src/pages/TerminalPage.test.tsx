@@ -8,7 +8,9 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
 import type { WorkspaceDocument, WorkspaceSnapshot } from "../lib/types";
+import { restoreWorkspace } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
 
 const api = vi.hoisted(() => ({
@@ -22,6 +24,8 @@ const api = vi.hoisted(() => ({
   killSession: vi.fn(),
   restartLocalDaemon: vi.fn(),
   forgetSshCredentials: vi.fn(),
+  probeSshHost: vi.fn(),
+  cancelSshProbe: vi.fn(),
 }));
 const attachment = vi.hoisted(() => ({
   state: {
@@ -107,6 +111,8 @@ beforeEach(() => {
   });
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
+  api.probeSshHost.mockResolvedValue(undefined);
+  api.cancelSshProbe.mockResolvedValue(undefined);
   api.inspectKnownSessions.mockResolvedValue([]);
   attachment.connect.mockResolvedValue(undefined);
   attachment.detach.mockResolvedValue(undefined);
@@ -114,19 +120,110 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("workspace-backed terminal page", () => {
-  it("restores its selected tab without listing or connecting any host", async () => {
+  it("keeps a restored remote tab cold, then resumes it after connecting its host", async () => {
+    const known = restoreWorkspace(snapshot().document).sessions[0];
+    api.inspectKnownSessions.mockResolvedValueOnce([
+      {
+        session_id: known.session_id,
+        session: { ...known, status: "running", next_sequence: "42" },
+        shell_state: null,
+        error: null,
+      },
+    ]);
+    let authenticated!: () => void;
+    api.probeSshHost.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          authenticated = resolve;
+        }),
+    );
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await screen.findByRole("button", { name: "Connect host" });
     expect(screen.getByText("unverified", { exact: false })).toBeTruthy();
     expect(api.listSessions).not.toHaveBeenCalled();
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
     expect(attachment.connect).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Connect session" }));
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Connect host" }));
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    await act(async () => authenticated());
     await waitFor(() => expect(attachment.connect).toHaveBeenCalledTimes(1));
     expect(attachment.connect.mock.calls[0][0]).toMatchObject({
       session_id: "known-id",
       target: { host_id: "test-id", destination: "test" },
+      status: "running",
+      next_sequence: "42",
     });
+    expect(api.inspectKnownSessions).toHaveBeenCalledExactlyOnceWith(
+      { kind: "ssh", destination: "test", host_id: "test-id" },
+      ["known-id"],
+    );
+    expect(api.listSessions).not.toHaveBeenCalled();
+  });
+
+  it("automatically attaches only the selected local tab once across rerenders", async () => {
+    const saved = snapshot();
+    saved.document.sessions.push({
+      host_id: "local",
+      session_id: "local-id",
+      name: "local-shell",
+      last_known_cwd: "/local",
+      last_known_cwd_display: "~/local",
+    });
+    saved.document.active_tab = { host_id: "local", session_id: "local-id" };
+    saved.document.tabs.push(saved.document.active_tab);
+    api.loadWorkspace.mockResolvedValue(saved);
+    const page = render(
+      <StrictMode>
+        <TerminalPage />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
+    expect(attachment.connect.mock.calls[0]).toEqual([
+      expect.objectContaining({
+        session_id: "local-id",
+        target: { kind: "local" },
+      }),
+      { resize_with_window: false },
+    ]);
+    page.rerender(
+      <StrictMode>
+        <TerminalPage />
+      </StrictMode>,
+    );
+    expect(attachment.connect).toHaveBeenCalledOnce();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+  });
+
+  it("does not attach after failed or cancelled host authentication", async () => {
+    api.probeSshHost.mockRejectedValueOnce(new Error("Authentication failed"));
+    render(<TerminalPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Connect host" }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await screen.findByText("Authentication failed");
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+
+    let authenticated!: () => void;
+    api.probeSshHost.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          authenticated = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel quick input" }));
+    await act(async () => authenticated());
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(api.cancelSshProbe).toHaveBeenCalledOnce();
   });
 
   it("refreshes only remembered IDs and keeps missing sessions in the workspace", async () => {
@@ -139,7 +236,7 @@ describe("workspace-backed terminal page", () => {
       },
     ]);
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
     await waitFor(() =>
       expect(api.inspectKnownSessions).toHaveBeenCalledTimes(1),
@@ -162,7 +259,7 @@ describe("workspace-backed terminal page", () => {
       message: "Authenticate first",
     });
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
     await screen.findByText("unreachable", { exact: false });
     expect(screen.getByText("Authenticate first")).toBeTruthy();
@@ -172,7 +269,7 @@ describe("workspace-backed terminal page", () => {
 
   it("removes workspace membership without terminating the daemon session", async () => {
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(
       screen.getByRole("button", { name: "Remove remembered from workspace" }),
     );
@@ -199,14 +296,12 @@ describe("workspace-backed terminal page", () => {
 
   it("keeps a detached tab's session known and only explicit termination calls kill", async () => {
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(
       screen.getByRole("button", { name: "Disconnect from remembered" }),
     );
     await waitFor(() =>
-      expect(
-        screen.queryByRole("button", { name: "Connect session" }),
-      ).toBeNull(),
+      expect(screen.queryByRole("button", { name: "Connect host" })).toBeNull(),
     );
     expect(
       screen.getByRole("button", { name: "~/work — remembered" }),
@@ -222,7 +317,7 @@ describe("workspace-backed terminal page", () => {
     );
   });
 
-  it("saves a newly created session before attachment, then restores it disconnected on relaunch", async () => {
+  it("saves a newly created local session before attachment, then reconnects it on relaunch", async () => {
     const created = {
       target: { kind: "local" as const },
       session_id: "new-local",
@@ -255,7 +350,7 @@ describe("workspace-backed terminal page", () => {
         }),
     );
     const first = render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
@@ -277,11 +372,14 @@ describe("workspace-backed terminal page", () => {
     attachment.connect.mockClear();
     api.loadWorkspace.mockResolvedValue(disk);
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
     expect(
       screen.getByRole("button", { name: "Shell — new-shell" }),
     ).toBeTruthy();
-    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(attachment.connect.mock.calls[0][0]).toMatchObject({
+      session_id: "new-local",
+      target: { kind: "local" },
+    });
     expect(api.listSessions).not.toHaveBeenCalled();
   });
 
@@ -304,7 +402,7 @@ describe("workspace-backed terminal page", () => {
       message: "disk full",
     });
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Connect session" });
+    await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await screen.findByText(

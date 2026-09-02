@@ -120,7 +120,9 @@ Optional shell-awareness state is memory-only and separate from the raw output
 journal. Disk-backed history and restart policies are later milestones.
 
 The `rmux` desktop app restores a disk-backed workspace of known local and
-remote sessions, with all tabs disconnected on startup. **Add existing session**
+remote sessions, automatically reconnecting the selected local tab on startup.
+Remote hosts stay disconnected until explicitly opened; **Connect host** resumes
+that host's selected tab, or its first open tab. **Add existing session**
 explicitly discovers one host's inventory and remembers only chosen entries;
 opening a session connects on demand. Its **+ Host** picker discovers concrete
 aliases from the user's OpenSSH config without connecting to them; selecting

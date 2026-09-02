@@ -35,8 +35,10 @@ Existing WebView host settings migrate automatically after a successful disk wri
 
 The workspace file lives in Tauri's app-data directory as `workspace.json`.
 It remembers known sessions, cached paths, tab order, and selection. Startup
-restores those entries disconnected and unverified: no SSH connections or local
-daemon discovery run automatically. Select a session to connect. Use **Add
+restores those entries as unverified and automatically connects the selected
+local tab. Remote hosts stay disconnected until explicitly opened; **Connect
+host** resumes that host's selected tab, or its first open tab if another host
+was selected. No daemon inventory is discovered automatically. Use **Add
 existing session** in the sidebar or command palette to discover one host's
 inventory and explicitly remember sessions without attaching. **Refresh Known
 Sessions** inspects only remembered IDs; it does not adopt other apps' sessions.

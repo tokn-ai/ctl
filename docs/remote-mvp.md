@@ -83,8 +83,10 @@ Password/passphrase and host-verification prompts use the same overlay on
 macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
 chip to authenticate again if SSH config/agent alone is insufficient.
 
-The app restores known local and remote sessions from disk without connecting
-on startup, including the last selected tab. Use **Add existing session** to
+The app restores known sessions from disk and automatically attaches the last
+selected tab if it is local. Remote hosts stay disconnected on startup.
+**Connect host** authenticates and resumes that host's selected saved tab, or
+its first open tab if another host was selected. Use **Add existing session** to
 discover and remember sessions already running in the container; simply adding
 a host does not import its daemon's inventory. Opening a session connects to
 its host on demand. See `docs/rmux-workspace.md` for persistence and migration.

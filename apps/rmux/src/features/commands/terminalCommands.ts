@@ -5,6 +5,8 @@ import { sessionKey, targetLabel } from "../targets/targets";
 export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
   addHost: "host.add",
+  addExistingSession: "session.add_existing",
+  forgetSession: "session.forget",
   newShell: "session.new_shell",
   newTab: "tab.new_shell_here",
   refreshSessions: "session.refresh",
@@ -50,6 +52,8 @@ interface TerminalCommandContext {
 interface TerminalCommandActions {
   showPalette(): void;
   showAddHost(): void;
+  showAddExistingSession(): void;
+  forgetSession(session: SessionSummary): void;
   showNewShellForm(): void;
   openShellTab(): void;
   refreshSessions(): void;
@@ -109,6 +113,31 @@ export function buildTerminalCommands(
         : "Close the new-shell form before restarting rmuxd.";
 
   const commands: AppCommand[] = [
+    {
+      id: COMMAND_IDS.addExistingSession,
+      category: "Session",
+      title: "Add existing session",
+      keywords: ["import", "discover", "known", "workspace"],
+      enabled: !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: actions.showAddExistingSession,
+    },
+    {
+      id: COMMAND_IDS.forgetSession,
+      category: "Workspace",
+      title: "Remove Active Session from Workspace",
+      detail: "Forget this entry without terminating its shell.",
+      keywords: ["forget", "remove"],
+      enabled:
+        activeSession !== null &&
+        !daemonRestartInteractionBlocked &&
+        !closingActive &&
+        !disconnectingActive,
+      focusTerminalAfterRun: false,
+      run: () => {
+        if (activeSession) actions.forgetSession(activeSession);
+      },
+    },
     {
       id: COMMAND_IDS.addHost,
       category: "Host",
@@ -178,7 +207,7 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.refreshSessions,
       category: "Session",
-      title: "Refresh Session List",
+      title: "Refresh Known Sessions",
       keywords: ["reload"],
       enabled: !context.listLoading && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
@@ -334,7 +363,8 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.restartDaemon,
       category: "Daemon",
       title: "Restart rmuxd",
-      detail: "Terminate every local rmux session and start a new daemon.",
+      detail:
+        "Terminate every local rmux session, including other apps’ sessions, and start a new daemon.",
       keywords: ["daemon", "restart", "protocol", "version", "recover"],
       enabled: !daemonRestartBlocked,
       disabledReason: daemonRestartDisabledReason,

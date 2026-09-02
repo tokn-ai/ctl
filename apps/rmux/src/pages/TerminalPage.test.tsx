@@ -168,4 +168,56 @@ describe("workspace-backed terminal page", () => {
     expect(screen.queryByText("missing", { exact: false })).toBeNull();
     expect(api.killSession).not.toHaveBeenCalled();
   });
+
+  it("removes workspace membership without terminating the daemon session", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect session" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove remembered from workspace" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove from workspace" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "~/work — remembered" }),
+      ).toBeNull(),
+    );
+    expect(api.killSession).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    await waitFor(() => {
+      const latest =
+        api.updateWorkspace.mock.calls[
+          api.updateWorkspace.mock.calls.length - 1
+        ][1];
+      expect(latest.sessions).toEqual([]);
+      expect(latest.tabs).toEqual([]);
+    });
+  });
+
+  it("keeps a detached tab's session known and only explicit termination calls kill", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect session" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Disconnect from remembered" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Connect session" }),
+      ).toBeNull(),
+    );
+    expect(
+      screen.getByRole("button", { name: "~/work — remembered" }),
+    ).toBeTruthy();
+    expect(api.killSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Close remembered" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close session" }));
+    await waitFor(() =>
+      expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
+        target: { kind: "ssh", destination: "test", host_id: "test-id" },
+        session_id: "known-id",
+      }),
+    );
+  });
 });

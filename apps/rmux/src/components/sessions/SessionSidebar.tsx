@@ -43,6 +43,8 @@ interface SessionSidebarProps {
   onAddHost(): void;
   onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
+  onAddExisting(): void;
+  onForget(session: SessionSummary): void;
 }
 
 function sidebarTitle(
@@ -96,6 +98,8 @@ export function SessionSidebar({
   onAddHost,
   onConnectHost,
   onRemoveHost,
+  onAddExisting,
+  onForget,
 }: SessionSidebarProps) {
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [creationTargetKey, setCreationTargetKey] = useState("local");
@@ -251,6 +255,16 @@ export function SessionSidebar({
                 </span>
               </button>
               <div className="session-actions">
+                <button
+                  className="session-action"
+                  type="button"
+                  onClick={() => onForget(session)}
+                  disabled={closing || disconnecting}
+                  aria-label={`Remove ${session.name} from workspace`}
+                  title="Remove from workspace; keep the shell running"
+                >
+                  −
+                </button>
                 {canDisconnect ? (
                   <button
                     className="session-action"
@@ -280,6 +294,13 @@ export function SessionSidebar({
       </div>
 
       <footer className="sidebar-footer">
+        <button
+          className="new-session-button"
+          type="button"
+          onClick={onAddExisting}
+        >
+          Add existing session
+        </button>
         {createFormOpen ? (
           <form className="new-session-form" onSubmit={submit}>
             <label>

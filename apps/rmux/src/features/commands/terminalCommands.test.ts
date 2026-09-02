@@ -44,6 +44,8 @@ function setup(
   const actions = {
     showPalette: vi.fn(),
     showAddHost: vi.fn(),
+    showAddExistingSession: vi.fn(),
+    forgetSession: vi.fn(),
     showNewShellForm: vi.fn(),
     openShellTab: vi.fn(),
     refreshSessions: vi.fn(),

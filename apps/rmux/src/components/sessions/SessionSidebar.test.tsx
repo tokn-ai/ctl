@@ -65,6 +65,8 @@ describe("SessionSidebar", () => {
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
+        onAddExisting={vi.fn()}
+        onForget={vi.fn()}
       />,
     );
 
@@ -98,6 +100,8 @@ describe("SessionSidebar", () => {
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
+        onAddExisting={vi.fn()}
+        onForget={vi.fn()}
       />,
     );
 
@@ -135,6 +139,8 @@ describe("SessionSidebar", () => {
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
+        onAddExisting={vi.fn()}
+        onForget={vi.fn()}
       />,
     );
 
@@ -168,6 +174,8 @@ describe("SessionSidebar", () => {
         onAddHost={vi.fn()}
         onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
+        onAddExisting={vi.fn()}
+        onForget={vi.fn()}
       />,
     );
 

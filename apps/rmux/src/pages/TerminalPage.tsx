@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
+import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
 import { useWorkspace } from "../features/workspace/useWorkspace";
 import { withHostId } from "../features/workspace/workspaceModel";
 import { CommandPalette } from "../components/commands/CommandPalette";
@@ -125,6 +126,10 @@ export function TerminalPage() {
   const [creating, setCreating] = useState(false);
   const [createFormOpen, setCreateFormOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [pendingForget, setPendingForget] = useState<SessionSummary | null>(
+    null,
+  );
   const [hostFlow, setHostFlow] = useState<ConnectionTarget | null | undefined>(
     undefined,
   );
@@ -611,6 +616,49 @@ export function TerminalPage() {
     [closeTab, daemonRestartBlocksInteractions],
   );
 
+  const importSession = useCallback(
+    async (session: SessionSummary, shell_state: ShellStateSummary | null) => {
+      if (!workspace.ready || daemonRestartBlocksInteractions()) return;
+      refreshGuardRef.current.recordMutation();
+      setSessions((current) => prependSession(current, session));
+      if (shell_state) {
+        setSessionShellStates((current) =>
+          rememberShellState(current, sessionKey(session), shell_state),
+        );
+      }
+      await persistWorkspace();
+    },
+    [
+      workspace.ready,
+      daemonRestartBlocksInteractions,
+      setSessions,
+      setSessionShellStates,
+      persistWorkspace,
+    ],
+  );
+
+  const forgetSession = useCallback(
+    async (session: SessionSummary) => {
+      if (daemonRestartBlocksInteractions()) return;
+      attachment.cancelPendingConnection(session);
+      refreshGuardRef.current.recordMutation();
+      await closeTab(session);
+      setSessions((current) => removeSession(current, sessionKey(session)));
+      setSessionShellStates((current) =>
+        forgetShellState(current, sessionKey(session)),
+      );
+      await persistWorkspace();
+    },
+    [
+      attachment,
+      closeTab,
+      daemonRestartBlocksInteractions,
+      setSessions,
+      setSessionShellStates,
+      persistWorkspace,
+    ],
+  );
+
   const close = useCallback(
     async (session: SessionSummary) => {
       const daemonEpoch = daemonEpochRef.current;
@@ -936,6 +984,8 @@ export function TerminalPage() {
     {
       showPalette: () => setPaletteOpen(true),
       showAddHost: () => setHostFlow(null),
+      showAddExistingSession: () => setImportOpen(true),
+      forgetSession: (session) => setPendingForget(session),
       showNewShellForm: () => {
         if (!daemonRestartBlocksInteractions()) {
           setCreateFormOpen(true);
@@ -978,6 +1028,8 @@ export function TerminalPage() {
     (command: AppCommand) => {
       if (
         !workspace.ready ||
+        importOpen ||
+        pendingForget ||
         hostFlow !== undefined ||
         pendingCloseSessionKey ||
         daemonRestartConfirmationPending
@@ -1001,6 +1053,8 @@ export function TerminalPage() {
       pendingCloseSessionKey,
       daemonRestartConfirmationPending,
       workspace.ready,
+      importOpen,
+      pendingForget,
     ],
   );
 
@@ -1061,6 +1115,10 @@ export function TerminalPage() {
           }}
           onDisconnect={(session) => void disconnect(session)}
           onRequestClose={requestClose}
+          onForget={setPendingForget}
+          onAddExisting={() =>
+            executeCommandById(COMMAND_IDS.addExistingSession)
+          }
           onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
           onConnectHost={(target) => {
             if (target.kind === "ssh") {
@@ -1147,7 +1205,28 @@ export function TerminalPage() {
           <StatusBar state={attachment.state} />
         </section>
       </main>
-      {hostFlow !== undefined ? (
+      {importOpen ? (
+        <AddExistingSessionFlow
+          targets={targets}
+          known={sessions}
+          onAdd={importSession}
+          onClose={() => setImportOpen(false)}
+        />
+      ) : pendingForget ? (
+        <QuickInput
+          title="Remove from workspace"
+          description={`Forget ${pendingForget.name} and close its tab? Its shell will keep running. You can add it again through discovery.`}
+          mode={{ kind: "confirm", confirm_label: "Remove from workspace" }}
+          onCancel={() => setPendingForget(null)}
+          onSubmit={() => {
+            const session = pendingForget;
+            setPendingForget(null);
+            void forgetSession(session).catch((failure) =>
+              setListError(errorMessage(failure)),
+            );
+          }}
+        />
+      ) : hostFlow !== undefined ? (
         <SshHostFlow
           suggestions={hostSuggestions}
           warning={sshConfigWarning}

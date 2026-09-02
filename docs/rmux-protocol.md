@@ -152,10 +152,10 @@ journal. It never replaces raw output, terminal checkpoints, or the client's
 own viewport and selection state. The daemon must not infer a directory,
 command line, shell, or prompt from rendered terminal text.
 
-An attached client always receives a complete `shell_state` in `attached`. An
-unintegrated session uses the explicit revision-zero unknown snapshot rather
-than omitting the field. Each later `shell_state_changed` is a complete
-replacement snapshot, not a patch. Its session-scoped `revision` increases
+An attached client always receives a complete `shell_state` in `attached`. It
+starts as an explicit revision-zero unknown snapshot; OS observations can fill
+cwd and process details even without shell integration. Each later
+`shell_state_changed` is a complete replacement snapshot, not a patch. Its session-scoped `revision` increases
 strictly; clients ignore an update that is not newer than their current
 revision **within the same attachment**. The initial snapshot of a new
 attachment is authoritative even when its revision matches a locally cached
@@ -179,14 +179,25 @@ The state contains:
   advertised reporting capabilities. A trusted shell integration can report a
   new descriptor; the shipped integrations intentionally do not pass their
   private reporter capability to arbitrary command descendants.
-- `cwd`: the unmodified, shell-reported working directory. A client may send it
-  back to the same daemon for an operation such as creating a new session in
+- `cwd`: the unmodified, shell-reported working directory, falling back to the
+  root shell's OS-observed physical cwd when no report supplies it. A client may
+  send it back to the same daemon for an operation such as creating a new session in
   the current directory, but it is not portable across hosts and grants no
   filesystem authority.
 - `cwd_display`: an optional daemon-derived presentation of `cwd`. The daemon
   replaces its own user-home prefix with `~`; clients fall back to `cwd` when
   reading a snapshot from an older daemon. Clients must not use this display
   value as an operational filesystem path.
+- `cwd_source`: optional `shell_integration` or `process`, absent when cwd is
+  unavailable or a snapshot comes from an older daemon.
+- `process`: optional native observation containing the root `pid`, optional
+  bounded `name`, and `foreground`. The latter is tagged with `state`:
+  `unknown`, `shell` (the root shell's group owns the tty), or `child` with a
+  verified descendant's `pid` and optional `name`. Names are nonempty, at most
+  256 UTF-8 bytes, with no control characters; no arguments or environment are
+  collected. This is independent of integration capabilities and command-text
+  visibility. Shell-group ownership does not establish prompt state; builtins
+  and jobs running without job control cannot reliably be distinguished.
 - `prompt_phase`: `unknown`, `at_prompt`, `editing`, or `running`.
 - `current_command_line`: an optional editable buffer with an optional cursor
   measured in Unicode scalar values, not terminal columns or UTF-8 bytes.
@@ -198,6 +209,13 @@ The state contains:
   terminal-parser observation, not a claim that an application is or is not a
   TUI. Some TUIs do not use the alternate screen, and some ordinary programs
   do.
+
+`cwd_source` and `process` are additive, default-absent protocol-9 fields.
+Older clients ignore them, and newer clients accept older snapshots. Native
+observations continue without attachments. OS failures produce absent/unknown
+details rather than failing the session; process exit clears live identity.
+Physical cwd can differ from logical `$PWD`, and names can be truncated by the
+OS. Snapshots are best-effort observations, not guarantees of liveness.
 
 Shell integration reports use a daemon-private, per-session reporter sink and
 cannot be submitted through a normal client protocol command. The current Unix

@@ -1,4 +1,6 @@
 #[cfg(unix)]
+mod process_monitor;
+#[cfg(unix)]
 mod server;
 #[cfg(unix)]
 mod session;

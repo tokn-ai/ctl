@@ -1,3 +1,4 @@
+use crate::process_monitor::ProcessMonitor;
 use crate::shell_reporter::{ShellReport, ShellReporter, ShellReporterError};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rmux_core::{
@@ -5,10 +6,10 @@ use rmux_core::{
   validate_session_name,
 };
 use rmux_proto::{
-  CommandSpec, LeaseKind, LeaseStatus, PromptPhase, SessionInfo, SessionStatus, ShellState,
-  TERMINAL_CHECKPOINT_FORMAT, TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT,
-  TERMINAL_HISTORY_FORMAT_VERSION, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize,
-  TuiHint,
+  CommandSpec, CwdSource, ForegroundProcess, LeaseKind, LeaseStatus, PromptPhase, SessionInfo,
+  SessionStatus, ShellProcessState, ShellState, TERMINAL_CHECKPOINT_FORMAT,
+  TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT, TERMINAL_HISTORY_FORMAT_VERSION,
+  TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, TuiHint,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
@@ -58,6 +59,7 @@ pub struct Session {
   lifecycle: Mutex<SessionLifecycle>,
   shell_state_publisher: ShellStatePublisher,
   shell_reporter: Mutex<Option<ShellReporter>>,
+  process_observation_enabled: AtomicBool,
 }
 
 struct AttachmentRecord {
@@ -107,6 +109,8 @@ struct TerminalState {
   /// grid without discarding raw output that follows the boundary.
   last_geometry_checkpoint: Option<GeometryCheckpoint>,
   shell_state: ShellState,
+  native_cwd: Option<String>,
+  reported_cwd: Option<String>,
   alternate_screen: AlternateScreenTracker,
 }
 
@@ -117,6 +121,44 @@ struct TerminalHistory {
   retained_bytes: usize,
   truncated: bool,
   lines: VecDeque<String>,
+}
+
+impl TerminalState {
+  fn new(
+    terminal_size: TerminalSize,
+    journal_capacity_bytes: usize,
+    history_capacity_bytes: usize,
+  ) -> Self {
+    let history = TerminalHistory::new(history_capacity_bytes);
+    let mut state = Self {
+      terminal: terminal_emulator(&terminal_size),
+      history_control_parser: avt::parser::Parser::new(),
+      history_clear_pending: false,
+      checkpoint_history: history.snapshot(0),
+      history,
+      pending_input: Vec::new(),
+      journal: OutputJournal::new(journal_capacity_bytes),
+      checkpoint: TerminalCheckpoint {
+        format: TERMINAL_CHECKPOINT_FORMAT.into(),
+        format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
+        sequence: 0,
+        terminal_size: terminal_size.clone(),
+        payload: Vec::new(),
+        input_prefix: Vec::new(),
+      },
+      checkpoint_geometry_revision: 0,
+      terminal_size,
+      geometry_revision: 0,
+      last_geometry_change_sequence: None,
+      last_geometry_checkpoint: None,
+      shell_state: ShellState::default(),
+      native_cwd: None,
+      reported_cwd: None,
+      alternate_screen: AlternateScreenTracker::default(),
+    };
+    refresh_checkpoint(&mut state);
+    state
+  }
 }
 
 impl TerminalHistory {
@@ -645,12 +687,16 @@ impl Session {
   }
 
   fn publish_ended(&self, exit_code: Option<u32>) {
+    self
+      .process_observation_enabled
+      .store(false, Ordering::Release);
     self.shutdown_shell_reporter();
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
       let mut terminal = lock(&self.terminal);
       if terminal.shell_state.current_command_line.is_none()
         && terminal.shell_state.running_command.is_none()
+        && terminal.shell_state.process.is_none()
         && terminal.shell_state.prompt_phase == PromptPhase::Unknown
       {
         None
@@ -660,6 +706,7 @@ impl Session {
         terminal.shell_state.running_command = None;
         terminal.shell_state.running_command_redacted = false;
         terminal.shell_state.prompt_phase = PromptPhase::Unknown;
+        terminal.shell_state.process = None;
         Some(revise_shell_state(&mut terminal))
       }
     };
@@ -682,6 +729,27 @@ impl Session {
     };
     if let Some(shell_state) = shell_state {
       publication.publish(shell_state);
+    }
+  }
+
+  pub(crate) fn process_observation_enabled(&self) -> bool {
+    self.process_observation_enabled.load(Ordering::Acquire)
+  }
+
+  pub(crate) fn foreground_process_group(&self) -> Option<u32> {
+    lock(&self.master)
+      .process_group_leader()
+      .and_then(|pid| u32::try_from(pid).ok())
+  }
+
+  pub(crate) fn apply_process_observation(&self, observation: Option<process_info::Snapshot>) {
+    let publication = self.shell_state_publisher.begin();
+    if !self.process_observation_enabled() {
+      return;
+    }
+    let shell_state = apply_process_observation_to_terminal(&mut lock(&self.terminal), observation);
+    if let Some(state) = shell_state {
+      publication.publish(state);
     }
   }
 
@@ -736,6 +804,7 @@ struct SessionManagerInner {
   checkpoint_interval_bytes: usize,
   ever_had_session: AtomicBool,
   changed: Notify,
+  process_monitor: Option<ProcessMonitor>,
 }
 
 /// A reporter starts before its child process, while the [`Session`] is only
@@ -799,6 +868,7 @@ impl SessionManager {
         checkpoint_interval_bytes: checkpoint_interval_bytes.max(1),
         ever_had_session: AtomicBool::new(false),
         changed: Notify::new(),
+        process_monitor: ProcessMonitor::new(),
       }),
     }
   }
@@ -847,6 +917,11 @@ impl SessionManager {
       .slave
       .spawn_command(command_builder)
       .map_err(|error| SessionManagerError::Spawn(error.to_string()))?;
+    // Capture the birth token while we still own the unreaped child handle.
+    // This is a small process-info query; slow cwd/tree work is background-only.
+    let process_inspector = child
+      .process_id()
+      .and_then(|pid| process_info::Inspector::new(pid).ok());
     let reader = pair
       .master
       .try_clone_reader()
@@ -859,34 +934,12 @@ impl SessionManager {
     drop(pair.slave);
 
     let (events, _) = broadcast::channel(256);
-    let terminal_parser = terminal_emulator(&terminal_size);
-    let shell_state = ShellState::default();
-    let history = TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES);
-    let mut terminal = TerminalState {
-      terminal: terminal_parser,
-      history_control_parser: avt::parser::Parser::new(),
-      history_clear_pending: false,
-      checkpoint_history: history.snapshot(0),
-      history,
-      pending_input: Vec::new(),
-      journal: OutputJournal::new(self.inner.journal_capacity_bytes),
-      checkpoint: TerminalCheckpoint {
-        format: TERMINAL_CHECKPOINT_FORMAT.into(),
-        format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
-        sequence: 0,
-        terminal_size: terminal_size.clone(),
-        payload: Vec::new(),
-        input_prefix: Vec::new(),
-      },
-      checkpoint_geometry_revision: 0,
+    let terminal = TerminalState::new(
       terminal_size,
-      geometry_revision: 0,
-      last_geometry_change_sequence: None,
-      last_geometry_checkpoint: None,
-      shell_state: shell_state.clone(),
-      alternate_screen: AlternateScreenTracker::default(),
-    };
-    refresh_checkpoint(&mut terminal);
+      self.inner.journal_capacity_bytes,
+      TERMINAL_HISTORY_CAPACITY_BYTES,
+    );
+    let shell_state = terminal.shell_state.clone();
     let session = Arc::new(Session {
       id: session_id.clone(),
       name,
@@ -902,9 +955,13 @@ impl SessionManager {
       lifecycle: Mutex::new(SessionLifecycle::Running),
       shell_state_publisher: ShellStatePublisher::new(shell_state),
       shell_reporter: Mutex::new(Some(shell_reporter)),
+      process_observation_enabled: AtomicBool::new(process_inspector.is_some()),
     });
 
     attach_shell_report_target(&shell_report_target, &session);
+    if let (Some(monitor), Some(inspector)) = (&self.inner.process_monitor, process_inspector) {
+      monitor.register(inspector, &session);
+    }
 
     reservation.commit(session_id.clone(), Arc::clone(&session));
     self.inner.ever_had_session.store(true, Ordering::Release);
@@ -1294,17 +1351,76 @@ fn apply_shell_report_to_terminal(
 
   let mut candidate = terminal.shell_state.clone();
   candidate.shell = shell;
-  candidate.cwd_display = cwd.as_deref().map(display_working_directory);
-  candidate.cwd = cwd;
+  set_observed_cwd(&mut candidate, cwd.as_ref(), terminal.native_cwd.as_ref());
   candidate.prompt_phase = prompt_phase;
   candidate.command_line_redacted = false;
   candidate.current_command_line = current_command_line;
   candidate.running_command_redacted = false;
   candidate.running_command = running_command;
-  if !candidate.has_valid_metadata() || candidate == terminal.shell_state {
+  if !candidate.has_valid_metadata() {
+    return None;
+  }
+  terminal.reported_cwd = cwd;
+  if candidate == terminal.shell_state {
     return None;
   }
 
+  terminal.shell_state = candidate;
+  Some(revise_shell_state(terminal))
+}
+
+fn set_observed_cwd(state: &mut ShellState, reported: Option<&String>, native: Option<&String>) {
+  let (cwd, source) = if let Some(cwd) = reported {
+    (Some(cwd.clone()), Some(CwdSource::ShellIntegration))
+  } else if let Some(cwd) = native {
+    (Some(cwd.clone()), Some(CwdSource::Process))
+  } else {
+    (None, None)
+  };
+  state.cwd_display = cwd.as_deref().map(display_working_directory);
+  state.cwd = cwd;
+  state.cwd_source = source;
+}
+
+fn apply_process_observation_to_terminal(
+  terminal: &mut TerminalState,
+  observation: Option<process_info::Snapshot>,
+) -> Option<ShellState> {
+  let mut candidate = terminal.shell_state.clone();
+  let (native_cwd, process) = observation.map_or((None, None), |observation| {
+    let cwd = observation
+      .cwd
+      .and_then(|path| path.into_os_string().into_string().ok());
+    let foreground = match observation.foreground {
+      process_info::Foreground::Unknown => ForegroundProcess::Unknown,
+      process_info::Foreground::Shell => ForegroundProcess::Shell,
+      process_info::Foreground::Child(process) => ForegroundProcess::Child {
+        pid: process.identity.pid,
+        name: process.name,
+      },
+    };
+    (
+      cwd,
+      Some(ShellProcessState {
+        pid: observation.shell.identity.pid,
+        name: observation.shell.name,
+        foreground,
+      }),
+    )
+  });
+  candidate.process = process;
+  set_observed_cwd(
+    &mut candidate,
+    terminal.reported_cwd.as_ref(),
+    native_cwd.as_ref(),
+  );
+  if !candidate.has_valid_metadata() {
+    return None;
+  }
+  terminal.native_cwd = native_cwd;
+  if candidate == terminal.shell_state {
+    return None;
+  }
   terminal.shell_state = candidate;
   Some(revise_shell_state(terminal))
 }
@@ -1835,6 +1951,118 @@ mod tests {
   }
 
   #[test]
+  fn native_observations_provide_cwd_and_job_without_inventing_shell_reports() {
+    let mut terminal = terminal_state();
+    let _output = terminal.journal.append(b"ready");
+    let sample = native_sample("/native");
+    let state = apply_process_observation_to_terminal(&mut terminal, Some(sample.clone())).unwrap();
+    assert_eq!(state.revision, 1);
+    assert_eq!(state.observed_sequence, 5);
+    assert_eq!(state.cwd.as_deref(), Some("/native"));
+    assert_eq!(state.cwd_source, Some(CwdSource::Process));
+    assert_eq!(state.shell, rmux_proto::ShellDescriptor::default());
+    assert_eq!(state.prompt_phase, PromptPhase::Unknown);
+    assert_eq!(state.current_command_line, None);
+    assert_eq!(state.running_command, None);
+    assert_eq!(
+      state.process.unwrap().foreground,
+      ForegroundProcess::Child {
+        pid: 20,
+        name: Some("sleep".into())
+      }
+    );
+    assert_eq!(
+      apply_process_observation_to_terminal(&mut terminal, Some(sample)),
+      None
+    );
+    assert_eq!(terminal.shell_state.revision, 1);
+
+    let unavailable = apply_process_observation_to_terminal(&mut terminal, None).unwrap();
+    assert_eq!(unavailable.cwd, None);
+    assert_eq!(unavailable.cwd_source, None);
+    assert_eq!(unavailable.process, None);
+    assert_eq!(unavailable.revision, 2);
+  }
+
+  #[test]
+  fn shell_reports_win_over_native_cwd_and_native_failures_preserve_reports() {
+    let mut terminal = terminal_state();
+    apply_process_observation_to_terminal(&mut terminal, Some(native_sample("/physical")));
+    let state =
+      apply_shell_report_to_terminal(&mut terminal, cwd_report(Some("/logical"))).unwrap();
+    assert_eq!(state.cwd.as_deref(), Some("/logical"));
+    assert_eq!(state.cwd_source, Some(CwdSource::ShellIntegration));
+    assert!(state.process.is_some());
+    let revision = state.revision;
+    assert_eq!(
+      apply_process_observation_to_terminal(&mut terminal, Some(native_sample("/new-physical"))),
+      None
+    );
+    assert_eq!(terminal.native_cwd.as_deref(), Some("/new-physical"));
+    assert_eq!(terminal.shell_state.revision, revision);
+
+    let missing = apply_process_observation_to_terminal(&mut terminal, None).unwrap();
+    assert_eq!(missing.cwd.as_deref(), Some("/logical"));
+    assert_eq!(missing.cwd_source, Some(CwdSource::ShellIntegration));
+    assert_eq!(missing.prompt_phase, PromptPhase::AtPrompt);
+    assert_eq!(missing.process, None);
+  }
+
+  #[test]
+  fn reports_without_cwd_use_the_latest_native_fallback() {
+    let mut terminal = terminal_state();
+    apply_shell_report_to_terminal(&mut terminal, cwd_report(Some("/logical")));
+    apply_process_observation_to_terminal(&mut terminal, Some(native_sample("/physical")));
+    let state = apply_shell_report_to_terminal(&mut terminal, cwd_report(None)).unwrap();
+    assert_eq!(state.cwd.as_deref(), Some("/physical"));
+    assert_eq!(state.cwd_source, Some(CwdSource::Process));
+    assert_eq!(state.prompt_phase, PromptPhase::AtPrompt);
+  }
+
+  fn native_sample(cwd: &str) -> process_info::Snapshot {
+    let shell = process_info::ProcessInfo {
+      identity: process_info::ProcessIdentity {
+        pid: 10,
+        start_time: 1,
+      },
+      parent_pid: 1,
+      process_group: 10,
+      name: Some("sh".into()),
+    };
+    process_info::Snapshot {
+      shell,
+      cwd: Some(cwd.into()),
+      foreground: process_info::Foreground::Child(process_info::ProcessInfo {
+        identity: process_info::ProcessIdentity {
+          pid: 20,
+          start_time: 2,
+        },
+        parent_pid: 10,
+        process_group: 20,
+        name: Some("sleep".into()),
+      }),
+    }
+  }
+
+  fn cwd_report(cwd: Option<&str>) -> ShellReport {
+    ShellReport {
+      shell: rmux_proto::ShellDescriptor {
+        shell_type: rmux_proto::ShellType::Sh,
+        integration_version: Some(1),
+        capabilities: rmux_proto::ShellCapabilities {
+          reports_cwd: true,
+          reports_prompt_phase: true,
+          ..rmux_proto::ShellCapabilities::default()
+        },
+      },
+      cwd: cwd.map(str::to_owned),
+      prompt_phase: PromptPhase::AtPrompt,
+      current_command_line: None,
+      running_command: None,
+    }
+  }
+
+  #[test]
   fn working_directory_display_abbreviates_only_the_home_path_boundary() {
     assert_eq!(
       abbreviate_home_directory("/Users/me", OsStr::new("/Users/me")),
@@ -1907,33 +2135,7 @@ mod tests {
       rows,
       ..TerminalSize::default()
     };
-    let history = TerminalHistory::new(history_capacity_bytes);
-    let mut state = TerminalState {
-      terminal: terminal_emulator(&terminal_size),
-      history_control_parser: avt::parser::Parser::new(),
-      history_clear_pending: false,
-      checkpoint_history: history.snapshot(0),
-      history,
-      pending_input: Vec::new(),
-      journal: OutputJournal::new(1024),
-      checkpoint: TerminalCheckpoint {
-        format: TERMINAL_CHECKPOINT_FORMAT.into(),
-        format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
-        sequence: 0,
-        terminal_size: terminal_size.clone(),
-        payload: Vec::new(),
-        input_prefix: Vec::new(),
-      },
-      checkpoint_geometry_revision: 0,
-      terminal_size,
-      geometry_revision: 0,
-      last_geometry_change_sequence: None,
-      last_geometry_checkpoint: None,
-      shell_state: ShellState::default(),
-      alternate_screen: AlternateScreenTracker::default(),
-    };
-    refresh_checkpoint(&mut state);
-    state
+    TerminalState::new(terminal_size, 1024, history_capacity_bytes)
   }
 
   fn terminal_state_from_checkpoint(checkpoint: TerminalCheckpoint) -> TerminalState {
@@ -1956,6 +2158,8 @@ mod tests {
       last_geometry_change_sequence: None,
       last_geometry_checkpoint: None,
       shell_state: ShellState::default(),
+      native_cwd: None,
+      reported_cwd: None,
       alternate_screen: AlternateScreenTracker::default(),
     }
   }

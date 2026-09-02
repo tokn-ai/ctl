@@ -226,12 +226,19 @@ pub struct ShellState {
   pub revision: u64,
   pub observed_sequence: u64,
   pub shell: ShellDescriptor,
-  /// The shell-reported target-local working directory.
+  /// The target-local shell working directory, reported by shell integration
+  /// or observed from its OS process as a best-effort fallback.
   ///
   /// Clients may send this value back only to the same daemon for operations
   /// such as creating another session in the current directory. It is not a
   /// portable path across hosts.
   pub cwd: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cwd_source: Option<CwdSource>,
+  /// Native process observations, independent of shell-integration capability
+  /// and command-text visibility. Contains no arguments or environment.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub process: Option<ShellProcessState>,
   /// A daemon-derived presentation of `cwd`, with the target user's home
   /// directory abbreviated to `~` when possible.
   ///
@@ -254,6 +261,29 @@ pub struct ShellState {
   #[serde(default)]
   pub running_command: Option<String>,
   pub tui_hint: TuiHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CwdSource {
+  ShellIntegration,
+  Process,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellProcessState {
+  pub pid: u32,
+  pub name: Option<String>,
+  pub foreground: ForegroundProcess,
+}
+
+/// OS job control does not establish shell prompt state or a command line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ForegroundProcess {
+  Unknown,
+  Shell,
+  Child { pid: u32, name: Option<String> },
 }
 
 impl ShellState {
@@ -299,7 +329,20 @@ impl ShellState {
   /// Returns whether every shell-awareness field obeys its wire invariants.
   #[must_use]
   pub fn has_valid_metadata(&self) -> bool {
-    self.has_valid_command_line() && self.has_valid_running_command()
+    let valid_process = self.process.as_ref().is_none_or(|process| {
+      process.pid > 0
+        && process.name.as_deref().is_none_or(is_valid_running_command)
+        && match &process.foreground {
+          ForegroundProcess::Unknown | ForegroundProcess::Shell => true,
+          ForegroundProcess::Child { pid, name } => {
+            *pid > 0 && *pid != process.pid && name.as_deref().is_none_or(is_valid_running_command)
+          }
+        }
+    });
+    self.has_valid_command_line()
+      && self.has_valid_running_command()
+      && valid_process
+      && (self.cwd.is_some() || self.cwd_source.is_none())
   }
 
   /// Returns this snapshot with command metadata filtered for one viewer.
@@ -645,6 +688,8 @@ mod tests {
       },
       cwd: Some("/work/rmux".into()),
       cwd_display: Some("~/work/rmux".into()),
+      cwd_source: Some(CwdSource::ShellIntegration),
+      process: None,
       prompt_phase: PromptPhase::Editing,
       command_line_redacted: false,
       current_command_line: Some(CommandLine {
@@ -1025,6 +1070,79 @@ mod tests {
   }
 
   #[test]
+  fn process_metadata_round_trips_without_exposing_command_text() {
+    let mut state = shell_state();
+    state.process = Some(ShellProcessState {
+      pid: 10,
+      name: Some("zsh".into()),
+      foreground: ForegroundProcess::Child {
+        pid: 20,
+        name: Some("cargo".into()),
+      },
+    });
+    let visible = state.filtered_for_visibility(false, false);
+    assert!(visible.has_valid_metadata());
+    assert!(visible.command_line_redacted);
+    assert_eq!(visible.current_command_line, None);
+    assert!(visible.process.is_some());
+    let json = serde_json::to_value(&visible).unwrap();
+    assert_eq!(json["process"]["foreground"]["state"], "child");
+    assert_eq!(json["cwd_source"], "shell_integration");
+    assert_eq!(serde_json::from_value::<ShellState>(json).unwrap(), visible);
+  }
+
+  #[test]
+  fn older_shell_snapshots_need_no_process_metadata_or_cwd_source() {
+    let mut json = serde_json::to_value(shell_state()).unwrap();
+    json.as_object_mut().unwrap().remove("cwd_source");
+    json.as_object_mut().unwrap().remove("process");
+    let decoded: ShellState = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.cwd_source, None);
+    assert_eq!(decoded.process, None);
+    assert!(decoded.has_valid_metadata());
+    let empty = serde_json::to_value(ShellState::default()).unwrap();
+    assert!(empty.get("cwd_source").is_none());
+    assert!(empty.get("process").is_none());
+  }
+
+  #[test]
+  fn process_metadata_rejects_invalid_ids_names_and_orphan_cwd_source() {
+    let mut state = ShellState {
+      process: Some(ShellProcessState {
+        pid: 10,
+        name: Some("sh".into()),
+        foreground: ForegroundProcess::Shell,
+      }),
+      ..ShellState::default()
+    };
+    assert!(state.has_valid_metadata());
+    for foreground in [
+      ForegroundProcess::Child { pid: 0, name: None },
+      ForegroundProcess::Child {
+        pid: 10,
+        name: None,
+      },
+      ForegroundProcess::Child {
+        pid: 20,
+        name: Some("bad\nname".into()),
+      },
+      ForegroundProcess::Child {
+        pid: 20,
+        name: Some("x".repeat(MAX_RUNNING_COMMAND_BYTES + 1)),
+      },
+    ] {
+      state.process.as_mut().unwrap().foreground = foreground;
+      assert!(!state.has_valid_metadata());
+    }
+    state.process.as_mut().unwrap().foreground = ForegroundProcess::Unknown;
+    state.process.as_mut().unwrap().pid = 0;
+    assert!(!state.has_valid_metadata());
+    state.process = None;
+    state.cwd_source = Some(CwdSource::Process);
+    assert!(!state.has_valid_metadata());
+  }
+
+  #[test]
   fn default_shell_state_is_an_explicit_unknown_snapshot() {
     assert_eq!(
       ShellState::default(),
@@ -1034,6 +1152,8 @@ mod tests {
         shell: ShellDescriptor::default(),
         cwd: None,
         cwd_display: None,
+        cwd_source: None,
+        process: None,
         prompt_phase: PromptPhase::Unknown,
         command_line_redacted: false,
         current_command_line: None,

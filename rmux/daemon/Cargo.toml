@@ -7,6 +7,7 @@ edition.workspace = true
 clap.workspace = true
 avt.workspace = true
 portable-pty.workspace = true
+process-info.workspace = true
 rmux-core.workspace = true
 rmux-ipc.workspace = true
 rmux-proto.workspace = true

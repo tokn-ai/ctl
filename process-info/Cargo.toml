@@ -1,0 +1,15 @@
+[package]
+name = "process-info"
+version.workspace = true
+edition.workspace = true
+description = "Best-effort, read-only inspection of a known shell and its foreground job"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
+libproc = "0.14.11"
+
+[dev-dependencies]
+portable-pty.workspace = true
+
+[lints]
+workspace = true

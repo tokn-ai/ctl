@@ -39,6 +39,8 @@ path or service.
 
 ## Crate boundaries
 
+- `process-info`: read-only, best-effort shell cwd and foreground-job inspection
+  on macOS/Linux, independent of rmux protocols, PTY ownership, and shell hooks.
 - `rmux-proto`: versioned, platform-independent wire messages and framing.
 - `rmux-core`: output journal and portable session-domain behavior.
 - `rmux-client`: portable client-side protocol state, checkpoint restoration,
@@ -228,8 +230,8 @@ actor, so only the active tab is attached. Switching tabs atomically replaces
 that attachment; inactive daemon-owned sessions continue running. **New Tab in
 Current Folder** creates and attaches an auto-named persistent session without
 reloading the WebView. The cwd is used only after an explicit user command and
-only when shell awareness reports it; clients never infer a directory from
-rendered terminal output. Closing a tab detaches its view without ending its
+only when shell awareness has a reported or OS-observed cwd; clients never infer
+a directory from rendered terminal output. Closing a tab detaches its view without ending its
 shell session. If the renderer is still starting, the GUI retains only the
 latest selected attachment intent and connects it once the renderer is ready.
 A failed attachment leaves the selected tab retryable rather than treating
@@ -328,9 +330,33 @@ setup.
 
 `rmuxd` can track a shell descriptor, cwd display string, prompt phase,
 optional editable command buffer/cursor, optional bounded running-command
-summary, and an alternate-screen presentation hint. This is not terminal
-emulation and does not introduce viewport commands: clients still own
+summary, native process identity/foreground job, and an alternate-screen
+presentation hint. This is not terminal emulation and does not introduce
+viewport commands: clients still own
 scrolling, selection, search, and rendering.
+
+`process-info` anchors observations to the spawned child's PID and birth token.
+On macOS it uses libproc; on Linux it reads `/proc`. The daemon supplies the
+PTY's foreground process group, and the crate verifies candidate ancestry back
+to the managed shell. Only process names are collected, never argv or environment.
+The cwd is the root shell's physical cwd, not a foreground child's or nested
+shell's cwd. Shell reports take precedence and preserve logical `$PWD` spelling.
+OS observations never set shell-integration capabilities or infer prompt state.
+
+One worker per session manager samples live sessions roughly every 500 ms,
+including detached sessions. Only changed snapshots advance metadata revisions;
+updates use the existing latest-state channel, not the raw journal. The worker
+holds no session or PTY lock across process queries. It holds weak references and
+is not joined on shutdown: a stuck network-filesystem cwd lookup can delay
+metadata for this manager but cannot stall terminal traffic or shutdown. Lookup
+failures clear native observations without discarding shell-reported fields;
+session end disables sampling and clears live process identity. These are
+advisory, non-atomic samples, never authorization or proof of liveness.
+
+This layer needs no dotfile edits. Automatic, dotfile-free shell integration is
+a later layer. The app already receives cwd through its existing adapter; the
+new process fields are currently available in the Rust/wire model, not yet
+mapped into the app's title UI.
 
 On the current Unix implementation, an opt-in shell integration writes bounded
 full snapshots to a unique owner-only FIFO supplied as

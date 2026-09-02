@@ -65,8 +65,15 @@ rmux list
 rmux attach work
 ```
 
-Optionally enable shell awareness in an interactive shell startup file. The
-snippet is inert outside an rmux-managed session:
+On macOS and Linux, `rmuxd` observes the managed shell's physical cwd and
+foreground job on a background worker, including while detached. The reusable
+[`process-info`](process-info/README.md) crate reads OS process metadata without
+shell hooks, arguments, environment, or dotfile changes. Unavailable information
+stays unknown; a process name is not a command line or prompt-state report.
+
+Optionally enable richer shell awareness in an interactive shell startup file.
+The snippet is inert outside an rmux-managed session; automatic integration
+without startup-file edits is a later step:
 
 ```sh
 # ~/.zshrc
@@ -75,8 +82,9 @@ eval "$(rmux shell init zsh)"
 
 `zsh` reports its cwd, prompt phase, and live editable command buffer. `bash`
 reports its shell identity, cwd, and prompt phase; it deliberately does not
-claim a reliable live edit buffer on Bash 3.2. Inspect the non-sensitive state
-of a session with:
+claim a reliable live edit buffer on Bash 3.2. Shell-reported cwd takes precedence
+over OS observations, preserving logical paths through symlinks. Inspect the
+non-sensitive state of a session with:
 
 ```sh
 rmux state work
@@ -153,10 +161,10 @@ combinations are intercepted, so ordinary terminal keystrokes continue to the
 PTY.
 
 `Cmd-T` on macOS or `Ctrl-Shift-T` on Windows/Linux opens a tab in the existing
-WebView with a new persistent shell in the current shell-reported directory.
+WebView with a new persistent shell in the current observed shell directory.
 Only the active tab is attached through the window's attachment actor. Closing
 a tab detaches its view without terminating the daemon-owned session. The
-command is available only when shell awareness has reported a cwd.
+command is available only when shell awareness has a reported or OS-observed cwd.
 
 `Cmd-W` detaches the active tab, while `Cmd-E` opens the existing confirmation
 for terminating its daemon-owned session. The Windows/Linux equivalents are

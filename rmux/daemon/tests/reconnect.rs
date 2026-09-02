@@ -328,6 +328,89 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_metadata_tracks_unintegrated_shells_even_while_detached() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket_path, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "native-state",
+    "export ENV=/dev/null; exec /bin/sh -i",
+  )
+  .await?;
+  let (mut attachment, _) =
+    attach_session(&socket_path, &session.session_id, None, true, false).await?;
+  write_frame(
+    &mut attachment,
+    &ClientMessage::Input {
+      data: b"cd /; printf '\\137\\137ready\\137\\137\\n'\n".to_vec(),
+    },
+  )
+  .await?;
+  read_output_until(&mut attachment, b"__ready__").await?;
+  let idle = wait_for_shell_state_matching(&socket_path, &session.session_id, |state| {
+    state.cwd.as_deref() == Some("/")
+      && state
+        .process
+        .as_ref()
+        .is_some_and(|process| process.foreground == rmux_proto::ForegroundProcess::Shell)
+  })
+  .await?;
+  assert_eq!(idle.cwd_source, Some(rmux_proto::CwdSource::Process));
+  assert_eq!(idle.shell, rmux_proto::ShellDescriptor::default());
+  assert_eq!(idle.prompt_phase, rmux_proto::PromptPhase::Unknown);
+
+  write_frame(
+    &mut attachment,
+    &ClientMessage::Input {
+      data: b"sleep 60\n".to_vec(),
+    },
+  )
+  .await?;
+  write_frame(&mut attachment, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut attachment).await?;
+  drop(attachment);
+  let running = wait_for_shell_state_matching(&socket_path, &session.session_id, |state| {
+    state.process.as_ref().is_some_and(|process| {
+      matches!(&process.foreground, rmux_proto::ForegroundProcess::Child { name, .. }
+        if name.as_deref() == Some("sleep"))
+    })
+  })
+  .await?;
+  assert!(running.revision > idle.revision);
+  assert_eq!(running.running_command, None);
+  assert_eq!(running.current_command_line, None);
+  assert_eq!(running.prompt_phase, rmux_proto::PromptPhase::Unknown);
+  assert_eq!(running.cwd.as_deref(), Some("/"));
+
+  let (mut attachment, attached) =
+    attach_session(&socket_path, &session.session_id, None, true, false).await?;
+  let ServerMessage::Attached { shell_state, .. } = attached else {
+    return Err("expected native state on reattach".into());
+  };
+  assert_eq!(shell_state.process, running.process);
+  write_frame(&mut attachment, &ClientMessage::Input { data: vec![3] }).await?;
+  wait_for_shell_state_matching(&socket_path, &session.session_id, |state| {
+    state
+      .process
+      .as_ref()
+      .is_some_and(|process| process.foreground == rmux_proto::ForegroundProcess::Shell)
+  })
+  .await?;
+  write_frame(
+    &mut attachment,
+    &ClientMessage::Input {
+      data: b"exit\n".to_vec(),
+    },
+  )
+  .await?;
+  wait_for_session_end(&mut attachment).await?;
+  drop(attachment);
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after native metadata test").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_awareness_uses_private_reports_and_redacts_viewer_command_text() -> TestResult {
   let _test_guard = pty_test_lock().await;
   let test_directory = TestDirectory::new();
@@ -1472,6 +1555,17 @@ async fn wait_for_detached(stream: &mut UnixStream) -> TestResult {
 }
 
 async fn wait_for_shell_state(socket_path: &Path, session: &str) -> TestResult<ShellState> {
+  wait_for_shell_state_matching(socket_path, session, |state| {
+    state.shell.integration_version.is_some()
+  })
+  .await
+}
+
+async fn wait_for_shell_state_matching(
+  socket_path: &Path,
+  session: &str,
+  matches: impl Fn(&ShellState) -> bool,
+) -> TestResult<ShellState> {
   let deadline = Instant::now() + Duration::from_secs(3);
   loop {
     let mut stream = connect_when_ready(socket_path).await?;
@@ -1487,7 +1581,7 @@ async fn wait_for_shell_state(socket_path: &Path, session: &str) -> TestResult<S
     let ServerMessage::ShellStateResponse { shell_state, .. } = response else {
       return Err(format!("expected shell state response, received {response:?}").into());
     };
-    if shell_state.revision > 0 {
+    if matches(&shell_state) {
       return Ok(shell_state);
     }
     if Instant::now() >= deadline {

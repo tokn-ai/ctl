@@ -33,6 +33,14 @@ The app remembers the active alias in either case so it can restore the mixed
 host list on launch; config-backed targets keep only that alias locally.
 Existing destination-only app storage migrates automatically.
 
+The identity-file input suggests candidate files from the top level of
+`~/.ssh`. Type to filter, use the arrow keys and Enter, or click a file. Manual
+paths remain available, including when discovery fails. Rust lists names and
+metadata only: it does not open key contents. Public keys, common SSH support
+files, backups, and directories are omitted; symlinks to regular files are
+supported. Suggestions are not proof that a file is a valid private key—OpenSSH
+validates the selected identity when connecting.
+
 Wildcard and negated `Host` patterns are not destinations and are omitted from
 suggestions. Discovery only fills the picker: the app does not contact an SSH
 host until it is explicitly selected. Local is always present and remains the

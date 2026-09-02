@@ -18,6 +18,7 @@ import type {
   SessionSummary,
   SshConfigHostCatalog,
   SshHostDefinition,
+  SshIdentityFileCatalog,
   SshPrompt,
 } from "./types";
 
@@ -69,6 +70,10 @@ export async function listSessions(
 
 export async function listSshConfigHosts(): Promise<SshConfigHostCatalog> {
   return invoke<SshConfigHostCatalog>("list_ssh_config_hosts");
+}
+
+export async function listSshIdentityFiles(): Promise<SshIdentityFileCatalog> {
+  return invoke<SshIdentityFileCatalog>("list_ssh_identity_files");
 }
 
 export async function saveSshConfigHost(

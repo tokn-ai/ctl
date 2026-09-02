@@ -20,6 +20,16 @@ export interface SshConfigHostCatalog {
   warnings: string[];
 }
 
+export interface SshIdentityFile {
+  path: string;
+  display_path: string;
+}
+
+export interface SshIdentityFileCatalog {
+  identity_files: SshIdentityFile[];
+  warnings: string[];
+}
+
 export interface SshHostDefinition {
   alias: string;
   hostname: string;

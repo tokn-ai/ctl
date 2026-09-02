@@ -63,6 +63,18 @@ pub struct SshConfigHostCatalogDto {
   pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SshIdentityFileDto {
+  pub path: String,
+  pub display_path: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct SshIdentityFileCatalogDto {
+  pub identity_files: Vec<SshIdentityFileDto>,
+  pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SaveSshConfigHostRequestDto {
   pub alias: String,

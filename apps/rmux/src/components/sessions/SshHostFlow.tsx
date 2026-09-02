@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
 import { parseHostAddress } from "../../features/targets/hostAddress";
+import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
   appLocalSshTarget,
   configuredSshTarget,
@@ -52,6 +53,7 @@ export function SshHostFlow({
   onClose,
 }: SshHostFlowProps) {
   const [step, setStep] = useState<Step>(target ? "reconnect" : "host");
+  const identityFiles = useSshIdentityFiles(step === "identity");
   const [address, setAddress] = useState("");
   const [definition, setDefinition] = useState<SshHostDefinition>({
     alias: "",
@@ -208,10 +210,18 @@ export function SshHostFlow({
         label: "SSH host",
         placeholder: "rmux@127.0.0.1:2222",
         initial_value: address,
-        suggestions: suggestions.map((host) => ({
-          id: `ssh-config:${host}`,
-          label: host,
-        })),
+        suggestions: suggestions.length
+          ? {
+              label: "SSH config hosts",
+              items: suggestions.map((host) => ({
+                id: `ssh-config:${host}`,
+                label: host,
+              })),
+              empty_message: "Enter a hostname to add a new host.",
+              no_match_message:
+                "No matching SSH config hosts. Enter a hostname to add a new host.",
+            }
+          : undefined,
       };
       break;
     case "name":
@@ -251,11 +261,27 @@ export function SshHostFlow({
       break;
     case "identity":
       title = "Identity file";
+      description =
+        "Choose a file from ~/.ssh using ↑/↓ and Enter, or type any private-key path. Key contents are not read for suggestions.";
       mode = {
         kind: "input",
         label: "Identity file",
         initial_value: definition.identity_file ?? "",
         placeholder: "~/.ssh/id_ed25519",
+        suggestions: {
+          label: "Identity files in ~/.ssh",
+          items: identityFiles.identity_files.map((file) => ({
+            id: file.path,
+            label: file.display_path,
+          })),
+          loading: identityFiles.loading,
+          loading_message: "Loading identity files…",
+          empty_message:
+            "No identity-file candidates in ~/.ssh. Enter a path manually.",
+          no_match_message:
+            "No matching identity files. Enter a path manually.",
+          warning: identityFiles.warnings.join("\n") || undefined,
+        },
       };
       onBack = back("auth");
       break;

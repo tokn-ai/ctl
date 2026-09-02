@@ -7,6 +7,7 @@ import { SshHostFlow } from "./SshHostFlow";
 import {
   cancelSshProbe,
   forgetSshCredentials,
+  listSshIdentityFiles,
   probeSshHost,
   respondSshPrompt,
 } from "../../lib/tauri";
@@ -17,9 +18,16 @@ vi.mock("../../lib/tauri", () => ({
   cancelSshProbe: vi.fn(async () => undefined),
   respondSshPrompt: vi.fn(async () => undefined),
   forgetSshCredentials: vi.fn(async () => undefined),
+  listSshIdentityFiles: vi.fn(),
 }));
 afterEach(cleanup);
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(listSshIdentityFiles).mockResolvedValue({
+    identity_files: [],
+    warnings: [],
+  });
+});
 
 function setup() {
   const save = vi.fn(async () => undefined);
@@ -52,6 +60,78 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("SSH host quick-input flow", () => {
+  it("discovers identities only on the identity step and connects with a selected path", async () => {
+    vi.mocked(listSshIdentityFiles).mockResolvedValue({
+      identity_files: [
+        {
+          path: "/test-home/.ssh/local.id_rsa",
+          display_path: "~/.ssh/local.id_rsa",
+        },
+      ],
+      warnings: [],
+    });
+    vi.mocked(probeSshHost).mockResolvedValue(undefined);
+    const { user } = setup();
+    await details(user);
+    expect(listSshIdentityFiles).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: /Identity file/ }));
+    await screen.findByRole("option", { name: "~/.ssh/local.id_rsa" });
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(probeSshHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identity_file: "/test-home/.ssh/local.id_rsa",
+      }),
+      expect.any(String),
+      expect.any(Function),
+    );
+  });
+
+  it("allows a manual identity when discovery fails", async () => {
+    vi.mocked(listSshIdentityFiles).mockRejectedValue(
+      new Error("Permission denied"),
+    );
+    vi.mocked(probeSshHost).mockResolvedValue(undefined);
+    const { user } = setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /Identity file/ }));
+    await screen.findByText(/Could not list ~\/.ssh: Permission denied/);
+    await user.type(
+      screen.getByRole("combobox", { name: "Identity file" }),
+      "/custom/key{Enter}",
+    );
+    expect(probeSshHost).toHaveBeenCalledWith(
+      expect.objectContaining({ identity_file: "/custom/key" }),
+      expect.any(String),
+      expect.any(Function),
+    );
+  });
+
+  it("ignores a stale discovery after leaving and reopening the identity step", async () => {
+    let resolveFirst:
+      | ((catalog: { identity_files: []; warnings: string[] }) => void)
+      | undefined;
+    vi.mocked(listSshIdentityFiles).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    const { user } = setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /Identity file/ }));
+    await screen.findByText("Loading identity files…");
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    await user.click(screen.getByRole("option", { name: /Identity file/ }));
+    await screen.findByText(
+      "No identity-file candidates in ~/.ssh. Enter a path manually.",
+    );
+    await act(async () =>
+      resolveFirst?.({ identity_files: [], warnings: ["stale error"] }),
+    );
+    expect(screen.queryByText("stale error")).toBeNull();
+    expect(listSshIdentityFiles).toHaveBeenCalledTimes(2);
+  });
+
   it("forgets unsaved credentials when the storage step is cancelled", async () => {
     vi.mocked(probeSshHost).mockResolvedValue(undefined);
     const { user, save, close } = setup();
@@ -134,7 +214,7 @@ describe("SSH host quick-input flow", () => {
     await details(user);
     await user.click(screen.getByRole("option", { name: /Identity file/ }));
     await user.type(
-      screen.getByRole("textbox", { name: "Identity file" }),
+      screen.getByRole("combobox", { name: "Identity file" }),
       "~/.ssh/local.id_rsa{Enter}",
     );
     await screen.findByText(

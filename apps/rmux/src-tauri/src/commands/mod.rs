@@ -33,6 +33,13 @@ const REMOTE_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_s
 const MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS: usize = 4;
 
 #[tauri::command]
+pub async fn list_ssh_identity_files() -> CommandResult<crate::dto::SshIdentityFileCatalogDto> {
+  tauri::async_runtime::spawn_blocking(crate::ssh_identity::discover_identity_files)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
 pub async fn list_ssh_config_hosts() -> CommandResult<SshConfigHostCatalogDto> {
   let discovery = tauri::async_runtime::spawn_blocking(ssh_config::discover_hosts)
     .await

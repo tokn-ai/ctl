@@ -1,15 +1,9 @@
 import { useState } from "react";
 import { QuickInputFrame } from "./QuickInputFrame";
+import { QuickInputField, type QuickInputFieldMode } from "./QuickInputField";
 
 export type QuickInputMode =
-  | {
-      kind: "input";
-      label: string;
-      initial_value?: string;
-      placeholder?: string;
-      secret?: boolean;
-      suggestions?: readonly { id: string; label: string }[];
-    }
+  | QuickInputFieldMode
   | {
       kind: "pick";
       choices: readonly { id: string; label: string; detail?: string }[];
@@ -37,9 +31,6 @@ export function QuickInput({
   onCancel,
   onBack,
 }: QuickInputProps) {
-  const [value, setValue] = useState(
-    mode.kind === "input" ? (mode.initial_value ?? "") : "",
-  );
   const [selected, setSelected] = useState(0);
   return (
     <QuickInputFrame
@@ -85,41 +76,7 @@ export function QuickInput({
         <p className="quick-input-description">{description}</p>
       ) : null}
       {mode.kind === "input" ? (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            onSubmit(value);
-          }}
-        >
-          <div className="command-palette-input-row">
-            <span aria-hidden="true">›</span>
-            <input
-              aria-label={mode.label}
-              type={mode.secret ? "password" : "text"}
-              value={value}
-              onChange={(event) => setValue(event.currentTarget.value)}
-              placeholder={mode.placeholder}
-              autoFocus
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <button type="submit">Continue</button>
-          </div>
-        </form>
-      ) : null}
-      {mode.kind === "input" && mode.suggestions?.length ? (
-        <div className="command-palette-results" aria-label="SSH config hosts">
-          {mode.suggestions.map((suggestion) => (
-            <button
-              type="button"
-              className="command-palette-option"
-              key={suggestion.id}
-              onClick={() => onSubmit(suggestion.id)}
-            >
-              {suggestion.label}
-            </button>
-          ))}
-        </div>
+        <QuickInputField mode={mode} onSubmit={onSubmit} />
       ) : null}
       {mode.kind === "pick" ? (
         <div

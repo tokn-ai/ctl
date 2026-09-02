@@ -10,6 +10,7 @@ mod ssh_auth;
 #[path = "ssh_auth/unsupported.rs"]
 mod ssh_auth;
 mod ssh_config;
+mod ssh_identity;
 mod state;
 mod transport;
 
@@ -36,6 +37,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       commands::list_sessions,
       commands::list_ssh_config_hosts,
+      commands::list_ssh_identity_files,
       commands::save_ssh_config_host,
       ssh_auth::commands::probe_ssh_host,
       ssh_auth::commands::respond_ssh_prompt,

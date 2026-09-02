@@ -46,7 +46,9 @@ import {
 } from "../features/tabs/terminalTitle";
 import {
   LOCAL_TARGET,
+  appLocalSshTarget,
   browserStorage,
+  configuredSshTarget,
   inactiveSshConfigDestinations,
   loadRemoteTargets,
   normalizeSshDestination,
@@ -66,12 +68,15 @@ import {
   listSessions,
   listSshConfigHosts,
   restartLocalDaemon,
+  saveSshConfigHost,
 } from "../lib/tauri";
 import type {
   ConnectionTarget,
   SessionSummary,
   ShellStateSummary,
   SshConfigHost,
+  SshHostDefinition,
+  SshHostStorage,
   TerminalSize,
 } from "../lib/types";
 
@@ -261,27 +266,60 @@ export function TerminalPage() {
     void refresh();
   }, [refresh]);
 
-  const addHost = useCallback(
-    (destination: string): boolean => {
-      const normalized = normalizeSshDestination(destination);
+  const addTarget = useCallback(
+    (target: ConnectionTarget): boolean => {
       if (
-        !normalized ||
-        targets.some(
-          (target) =>
-            target.kind === "ssh" && target.destination === normalized,
-        )
+        target.kind === "local" ||
+        !normalizeSshDestination(target.destination) ||
+        targets.some((candidate) => sameTarget(candidate, target))
       ) {
         return false;
       }
-      const next: ConnectionTarget[] = [
-        ...targets,
-        { kind: "ssh", destination: normalized },
-      ];
+      const next = [...targets, target];
       saveRemoteTargets(browserStorage(), next);
       setTargets(next);
       return true;
     },
     [targets],
+  );
+
+  const activateConfiguredHost = useCallback(
+    (destination: string): boolean => {
+      const target = configuredSshTarget(destination);
+      return target ? addTarget(target) : false;
+    },
+    [addTarget],
+  );
+
+  const saveHost = useCallback(
+    async (
+      definition: SshHostDefinition,
+      storage: SshHostStorage,
+    ): Promise<void> => {
+      if (
+        targets.some(
+          (target) =>
+            target.kind === "ssh" && target.destination === definition.alias,
+        )
+      ) {
+        throw new Error(`Host ${definition.alias} is already active.`);
+      }
+      const target =
+        storage === "ssh_config"
+          ? configuredSshTarget((await saveSshConfigHost(definition)).destination)
+          : appLocalSshTarget(definition);
+      if (!target || !addTarget(target)) {
+        throw new Error("The host settings could not be saved.");
+      }
+      if (storage === "ssh_config") {
+        setSshConfigHosts((current) =>
+          current.some((host) => host.destination === target.destination)
+            ? current
+            : [...current, { destination: target.destination }],
+        );
+      }
+    },
+    [addTarget, targets],
   );
 
   const hostSuggestions = inactiveSshConfigDestinations(
@@ -961,7 +999,8 @@ export function TerminalPage() {
           onConfirmClose={confirmClose}
           hostSuggestions={hostSuggestions}
           hostSuggestionWarning={sshConfigWarning}
-          onAddHost={addHost}
+          onActivateHost={activateConfiguredHost}
+          onSaveHost={saveHost}
           onRemoveHost={(target) => void removeHost(target)}
         />
         <section className="terminal-workspace">

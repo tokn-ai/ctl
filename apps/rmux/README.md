@@ -15,13 +15,22 @@ pnpm install
 pnpm tauri dev
 ```
 
-The app may also use the path in `RMUXD_BIN`. Open **+ Host** to choose a
+The app may also use the path in `RMUXD_BIN`. Open **+ Host** to activate a
 concrete alias discovered from `~/.ssh/config` (including its `Include` files)
-or add another ordinary OpenSSH destination. Wildcard and negated `Host`
-patterns are not destinations and are omitted. Discovery only fills the
-picker: the app does not contact an SSH host until it is explicitly selected.
-Selected destinations persist in the app's WebView storage; credentials, keys,
-ports, and remote commands do not. Local is always present and remains the
+or enter a hostname/IP and optional alias, user, port, and identity-file path.
+The next step chooses where the new definition is saved. **OpenSSH config**
+writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
+reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.
+**This app only** stores the same non-secret settings in WebView local storage
+and supplies them to OpenSSH as fixed arguments. Passwords, private-key
+contents, arbitrary options, forwarding, and remote commands are never stored.
+The app remembers the active alias in either case so it can restore the mixed
+host list on launch; config-backed targets keep only that alias locally.
+Existing destination-only app storage migrates automatically.
+
+Wildcard and negated `Host` patterns are not destinations and are omitted from
+suggestions. Discovery only fills the picker: the app does not contact an SSH
+host until it is explicitly selected. Local is always present and remains the
 default for a new shell. The sidebar mixes sessions from every selected target
 and labels each row with its host. A failed host reports its own error while
 last-known sessions from other targets remain usable.
@@ -29,8 +38,8 @@ last-known sessions from other targets remain usable.
 SSH uses `ctl-core` and the system `ssh` executable with the fixed remote
 command `exec ctld connect`; forwarding, agent access, X11, local commands,
 and PTY allocation remain disabled. Configure authentication and host trust
-before adding a host—the app does not implement password or host-key prompt
-UI. Connection attempts are bounded to ten seconds.
+before connecting—the app does not implement password or host-key prompt UI.
+Connection attempts are bounded to ten seconds.
 
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also

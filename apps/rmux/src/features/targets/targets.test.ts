@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionTarget, SessionSummary } from "../../lib/types";
 import {
   LOCAL_TARGET,
+  appLocalSshTarget,
   inactiveSshConfigDestinations,
   loadRemoteTargets,
   normalizeSshDestination,
@@ -58,6 +59,58 @@ describe("connection targets", () => {
     expect(loadRemoteTargets(storage)).toEqual([
       { kind: "ssh", destination: "rmux-docker" },
       { kind: "ssh", destination: "lab" },
+    ]);
+  });
+
+  it("persists app-local SSH settings in schema two", () => {
+    const storage = memoryStorage();
+    const target = appLocalSshTarget({
+      alias: "rmux-remote-test",
+      hostname: "127.0.0.1",
+      user: "rmux",
+      port: 2222,
+      identity_file: "~/.ssh/local.id_rsa",
+    });
+    expect(target).not.toBeNull();
+
+    saveRemoteTargets(storage, [LOCAL_TARGET, target!]);
+
+    expect(JSON.parse(storage.getItem("rmux.remote_hosts")!)).toEqual({
+      schema_version: 2,
+      ssh_hosts: [
+        {
+          destination: "rmux-remote-test",
+          hostname: "127.0.0.1",
+          user: "rmux",
+          port: 2222,
+          identity_file: "~/.ssh/local.id_rsa",
+        },
+      ],
+    });
+    expect(loadRemoteTargets(storage)).toEqual([target]);
+  });
+
+  it("rejects invalid app-local ports instead of falling back to SSH defaults", () => {
+    expect(
+      appLocalSshTarget({
+        alias: "invalid",
+        hostname: "127.0.0.1",
+        user: null,
+        port: 0,
+        identity_file: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("migrates schema-one destination lists on read", () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      "rmux.remote_hosts",
+      JSON.stringify({ schema_version: 1, ssh_destinations: ["legacy"] }),
+    );
+
+    expect(loadRemoteTargets(storage)).toEqual([
+      { kind: "ssh", destination: "legacy" },
     ]);
   });
 

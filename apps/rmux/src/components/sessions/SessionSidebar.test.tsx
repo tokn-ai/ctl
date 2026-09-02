@@ -67,7 +67,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
-        onAddHost={vi.fn(() => true)}
+        onActivateHost={vi.fn(() => true)}
+        onSaveHost={vi.fn(async () => undefined)}
         onRemoveHost={vi.fn()}
       />,
     );
@@ -102,7 +103,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
-        onAddHost={vi.fn(() => true)}
+        onActivateHost={vi.fn(() => true)}
+        onSaveHost={vi.fn(async () => undefined)}
         onRemoveHost={vi.fn()}
       />,
     );
@@ -142,7 +144,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
-        onAddHost={vi.fn(() => true)}
+        onActivateHost={vi.fn(() => true)}
+        onSaveHost={vi.fn(async () => undefined)}
         onRemoveHost={vi.fn()}
       />,
     );
@@ -180,7 +183,8 @@ describe("SessionSidebar", () => {
         onRequestClose={vi.fn()}
         onCancelClose={vi.fn()}
         onConfirmClose={vi.fn()}
-        onAddHost={vi.fn(() => true)}
+        onActivateHost={vi.fn(() => true)}
+        onSaveHost={vi.fn(async () => undefined)}
         onRemoveHost={vi.fn()}
       />,
     );

@@ -26,8 +26,22 @@ const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 pub enum ConnectionTarget {
   /// The current user's owner-only local `rmuxd` endpoint.
   Local { socket_path: PathBuf },
-  /// An OpenSSH destination or `Host` alias.
-  Ssh { destination: String },
+  /// An OpenSSH destination or `Host` alias, optionally with app-local
+  /// connection settings expressed as fixed command arguments.
+  Ssh {
+    destination: String,
+    options: SshConnectionOptions,
+  },
+}
+
+/// Non-secret OpenSSH connection settings supplied without parsing arbitrary
+/// command-line options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SshConnectionOptions {
+  pub hostname: Option<String>,
+  pub user: Option<String>,
+  pub port: Option<u16>,
+  pub identity_file: Option<PathBuf>,
 }
 
 impl ConnectionTarget {
@@ -44,6 +58,17 @@ impl ConnectionTarget {
   pub fn ssh(destination: impl Into<String>) -> Self {
     Self::Ssh {
       destination: destination.into(),
+      options: SshConnectionOptions::default(),
+    }
+  }
+
+  /// Selects an SSH destination with validated, structured connection
+  /// settings. These settings never include forwarding or a remote command.
+  #[must_use]
+  pub fn ssh_with_options(destination: impl Into<String>, options: SshConnectionOptions) -> Self {
+    Self::Ssh {
+      destination: destination.into(),
+      options,
     }
   }
 
@@ -52,7 +77,7 @@ impl ConnectionTarget {
   pub fn label(&self) -> &str {
     match self {
       Self::Local { .. } => "local",
-      Self::Ssh { destination } => destination,
+      Self::Ssh { destination, .. } => destination,
     }
   }
 
@@ -135,9 +160,12 @@ pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, Core
         Err(CoreError::LocalTransportUnsupported)
       }
     }
-    ConnectionTarget::Ssh { destination } => {
-      Ok(Transport::Ssh(open_ssh_tunnel(destination).await?))
-    }
+    ConnectionTarget::Ssh {
+      destination,
+      options,
+    } => Ok(Transport::Ssh(
+      open_ssh_tunnel_with_options(destination, options).await?,
+    )),
   }
 }
 
@@ -204,10 +232,17 @@ impl Drop for SshTransport {
 /// Returns an error when the destination is unsafe or OpenSSH cannot be
 /// started with piped stdin/stdout.
 pub async fn open_ssh_tunnel(destination: &str) -> Result<SshTransport, CoreError> {
-  validate_destination(destination)?;
+  open_ssh_tunnel_with_options(destination, &SshConnectionOptions::default()).await
+}
+
+async fn open_ssh_tunnel_with_options(
+  destination: &str,
+  options: &SshConnectionOptions,
+) -> Result<SshTransport, CoreError> {
+  validate_ssh_target(destination, options)?;
   let mut command = Command::new(SSH_PROGRAM);
   command
-    .args(ssh_arguments(destination))
+    .args(ssh_arguments(destination, options))
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::inherit())
@@ -264,6 +299,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
       io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
     ),
     CoreError::InvalidSshDestination(_)
+    | CoreError::InvalidSshOption(_)
     | CoreError::StartSsh(_)
     | CoreError::MissingSshStdin
     | CoreError::MissingSshStdout
@@ -280,8 +316,39 @@ fn validate_destination(destination: &str) -> Result<(), CoreError> {
   Ok(())
 }
 
-fn ssh_arguments(destination: &str) -> Vec<OsString> {
-  [
+fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Result<(), CoreError> {
+  validate_destination(destination)?;
+  if let Some(hostname) = &options.hostname
+    && (hostname.trim().is_empty()
+      || hostname
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace()))
+  {
+    return Err(CoreError::InvalidSshOption("hostname".into()));
+  }
+  if let Some(user) = &options.user
+    && (user.trim().is_empty()
+      || user
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace()))
+  {
+    return Err(CoreError::InvalidSshOption("user".into()));
+  }
+  if options.port == Some(0) {
+    return Err(CoreError::InvalidSshOption("port".into()));
+  }
+  if options
+    .identity_file
+    .as_ref()
+    .is_some_and(|path| path.as_os_str().is_empty())
+  {
+    return Err(CoreError::InvalidSshOption("identity_file".into()));
+  }
+  Ok(())
+}
+
+fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsString> {
+  let mut arguments = [
     "-T",
     "-o",
     "ClearAllForwardings=yes",
@@ -293,15 +360,27 @@ fn ssh_arguments(destination: &str) -> Vec<OsString> {
     "PermitLocalCommand=no",
     "-o",
     "RemoteCommand=none",
-    "--",
-    destination,
-    REMOTE_COMMAND[0],
-    REMOTE_COMMAND[1],
-    REMOTE_COMMAND[2],
   ]
   .into_iter()
   .map(OsString::from)
-  .collect()
+  .collect::<Vec<_>>();
+  if let Some(port) = options.port {
+    arguments.extend([OsString::from("-p"), OsString::from(port.to_string())]);
+  }
+  if let Some(user) = &options.user {
+    arguments.extend([OsString::from("-l"), OsString::from(user)]);
+  }
+  if let Some(identity_file) = &options.identity_file {
+    arguments.extend([OsString::from("-i"), identity_file.as_os_str().to_owned()]);
+  }
+  arguments.extend([
+    OsString::from("--"),
+    OsString::from(options.hostname.as_deref().unwrap_or(destination)),
+    OsString::from(REMOTE_COMMAND[0]),
+    OsString::from(REMOTE_COMMAND[1]),
+    OsString::from(REMOTE_COMMAND[2]),
+  ]);
+  arguments
 }
 
 #[derive(Debug, Error)]
@@ -314,6 +393,8 @@ pub enum CoreError {
   LocalTransportUnsupported,
   #[error("invalid SSH destination '{0}'")]
   InvalidSshDestination(String),
+  #[error("invalid structured SSH setting '{0}'")]
+  InvalidSshOption(String),
   #[error("could not start the system ssh client: {0}")]
   StartSsh(#[source] io::Error),
   #[error("the ssh client did not expose a writable stdin pipe")]
@@ -337,7 +418,7 @@ mod tests {
   #[test]
   fn ssh_command_uses_a_fixed_remote_command_and_disables_forwarding() {
     assert_eq!(
-      ssh_arguments("workstation"),
+      ssh_arguments("workstation", &SshConnectionOptions::default()),
       [
         "-T",
         "-o",
@@ -365,6 +446,48 @@ mod tests {
     assert!(validate_destination("").is_err());
     assert!(validate_destination("host\ncommand").is_err());
     assert!(validate_destination("user@host").is_ok());
+  }
+
+  #[test]
+  fn structured_ssh_settings_are_separate_arguments_before_the_destination() {
+    let options = SshConnectionOptions {
+      hostname: Some("127.0.0.1".into()),
+      user: Some("rmux".into()),
+      port: Some(2222),
+      identity_file: Some(PathBuf::from("/tmp/key with spaces")),
+    };
+    let arguments = ssh_arguments("rmux-remote-test", &options);
+
+    assert!(validate_ssh_target("rmux-remote-test", &options).is_ok());
+    assert_eq!(
+      &arguments[arguments.len() - 11..],
+      [
+        "-p",
+        "2222",
+        "-l",
+        "rmux",
+        "-i",
+        "/tmp/key with spaces",
+        "--",
+        "127.0.0.1",
+        "exec",
+        "ctld",
+        "connect",
+      ]
+      .map(OsString::from)
+    );
+  }
+
+  #[test]
+  fn invalid_structured_ssh_settings_are_rejected() {
+    let options = SshConnectionOptions {
+      hostname: Some("host with spaces".into()),
+      user: None,
+      port: Some(0),
+      identity_file: None,
+    };
+
+    assert!(validate_ssh_target("label", &options).is_err());
   }
 
   #[cfg(unix)]

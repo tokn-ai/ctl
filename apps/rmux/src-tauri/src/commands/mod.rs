@@ -16,8 +16,9 @@ use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
   AttachmentRequestDto, CreateSessionRequestDto, KillSessionRequestDto, OpenAttachmentRequestDto,
   OpenAttachmentResponseDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
-  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, SshConfigHostCatalogDto,
-  SshConfigHostDto, TargetRequestDto, decode_input, parse_sequence,
+  SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto, SendInputRequestDto, SessionDto,
+  SessionListDto, ShellStateDto, SshConfigHostCatalogDto, SshConfigHostDto, TargetRequestDto,
+  decode_input, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -46,6 +47,38 @@ pub async fn list_ssh_config_hosts() -> CommandResult<SshConfigHostCatalogDto> {
       .collect(),
     warnings: discovery.warnings,
   })
+}
+
+#[tauri::command]
+pub async fn save_ssh_config_host(
+  request: SaveSshConfigHostRequestDto,
+) -> CommandResult<SaveSshConfigHostResponseDto> {
+  let definition = ssh_config::SshHostDefinition {
+    alias: request.alias,
+    hostname: request.hostname,
+    user: request.user,
+    port: request.port,
+    identity_file: request.identity_file,
+  };
+  let destination =
+    tauri::async_runtime::spawn_blocking(move || ssh_config::save_host(&definition))
+      .await
+      .map_err(CommandErrorDto::backend)?
+      .map_err(|error| ssh_config_write_error(&error))?;
+  Ok(SaveSshConfigHostResponseDto { destination })
+}
+
+fn ssh_config_write_error(error: &ssh_config::SaveSshConfigError) -> CommandErrorDto {
+  let code = match error {
+    ssh_config::SaveSshConfigError::InvalidField(_) => "invalid_ssh_host",
+    ssh_config::SaveSshConfigError::AliasConflict(_) => "ssh_alias_conflict",
+    ssh_config::SaveSshConfigError::IncompleteDiscovery(_) => "ssh_config_discovery_incomplete",
+    ssh_config::SaveSshConfigError::ConcurrentModification => "ssh_config_changed",
+    ssh_config::SaveSshConfigError::MalformedManagedBlock(_)
+    | ssh_config::SaveSshConfigError::Io { .. }
+    | ssh_config::SaveSshConfigError::HomeDirectoryUnavailable(_) => "ssh_config_write_failed",
+  };
+  CommandErrorDto::new(code, error.to_string())
 }
 
 #[tauri::command]
@@ -392,14 +425,23 @@ mod tests {
   use crate::dto::{ConnectionTargetDto, TerminalSizeDto};
 
   /// Exercises the public command functions invoked by Tauri without a
-  /// `WebView`. The caller supplies an OpenSSH destination so authentication and
-  /// host verification remain owned by the user's SSH configuration.
+  /// `WebView`. The caller supplies an OpenSSH destination and may supply the
+  /// structured settings used by app-local hosts. Authentication and host
+  /// verification remain owned by OpenSSH.
   #[tokio::test]
   #[ignore = "requires RMUX_TEST_SSH_TARGET and a live ctld SSH endpoint"]
   async fn creates_lists_attaches_and_kills_a_session_over_ssh() {
     let destination = std::env::var("RMUX_TEST_SSH_TARGET")
       .expect("set RMUX_TEST_SSH_TARGET to an OpenSSH destination");
-    let target = ConnectionTargetDto::Ssh { destination };
+    let target = ConnectionTargetDto::Ssh {
+      destination,
+      hostname: std::env::var("RMUX_TEST_SSH_HOSTNAME").ok(),
+      user: std::env::var("RMUX_TEST_SSH_USER").ok(),
+      port: std::env::var("RMUX_TEST_SSH_PORT")
+        .ok()
+        .map(|port| port.parse().expect("RMUX_TEST_SSH_PORT must be a u16")),
+      identity_file: std::env::var("RMUX_TEST_SSH_IDENTITY_FILE").ok(),
+    };
     let created = create_session(CreateSessionRequestDto {
       target: target.clone(),
       working_directory: None,

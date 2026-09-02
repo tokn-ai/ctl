@@ -1,8 +1,15 @@
 export type Sequence = string;
 
-export type ConnectionTarget =
-  | { kind: "local" }
-  | { kind: "ssh"; destination: string };
+export interface SshConnectionTarget {
+  kind: "ssh";
+  destination: string;
+  hostname?: string;
+  user?: string;
+  port?: number;
+  identity_file?: string;
+}
+
+export type ConnectionTarget = { kind: "local" } | SshConnectionTarget;
 
 export interface SshConfigHost {
   destination: string;
@@ -12,6 +19,20 @@ export interface SshConfigHostCatalog {
   hosts: SshConfigHost[];
   warnings: string[];
 }
+
+export interface SshHostDefinition {
+  alias: string;
+  hostname: string;
+  user: string | null;
+  port: number | null;
+  identity_file: string | null;
+}
+
+export interface SaveSshConfigHostResponse {
+  destination: string;
+}
+
+export type SshHostStorage = "ssh_config" | "local_storage";
 
 export interface TerminalSize {
   columns: number;

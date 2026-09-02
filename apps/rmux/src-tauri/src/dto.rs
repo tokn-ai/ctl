@@ -13,13 +13,38 @@ use crate::error::{CommandErrorDto, CommandResult, protocol_error_code};
 
 /// Explicit endpoint identity carried by every operation that opens a stream.
 ///
-/// The SSH value is only an OpenSSH destination or configured host alias. It
-/// never contains a remote command, credential, or forwarding configuration.
+/// The SSH value is an OpenSSH destination or configured host alias. Optional
+/// app-local settings are passed as fixed SSH arguments; arbitrary options,
+/// remote commands, credentials, and forwarding configuration remain absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConnectionTargetDto {
   Local,
-  Ssh { destination: String },
+  Ssh {
+    destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_file: Option<String>,
+  },
+}
+
+impl ConnectionTargetDto {
+  #[cfg(test)]
+  #[must_use]
+  pub fn ssh(destination: impl Into<String>) -> Self {
+    Self::Ssh {
+      destination: destination.into(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -36,6 +61,20 @@ pub struct SshConfigHostDto {
 pub struct SshConfigHostCatalogDto {
   pub hosts: Vec<SshConfigHostDto>,
   pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SaveSshConfigHostRequestDto {
+  pub alias: String,
+  pub hostname: String,
+  pub user: Option<String>,
+  pub port: Option<u16>,
+  pub identity_file: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SaveSshConfigHostResponseDto {
+  pub destination: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -665,15 +704,35 @@ mod tests {
     }))
     .unwrap();
 
-    assert_eq!(
-      target,
-      ConnectionTargetDto::Ssh {
-        destination: "rmux-docker".into()
-      }
-    );
+    assert_eq!(target, ConnectionTargetDto::ssh("rmux-docker"));
     assert_eq!(
       serde_json::to_value(target).unwrap(),
       serde_json::json!({ "kind": "ssh", "destination": "rmux-docker" })
+    );
+  }
+
+  #[test]
+  fn app_local_ssh_target_serializes_only_structured_settings() {
+    let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": "rmux-remote-test",
+      "hostname": "127.0.0.1",
+      "user": "rmux",
+      "port": 2222,
+      "identity_file": "~/.ssh/local.id_rsa"
+    }))
+    .unwrap();
+
+    assert_eq!(
+      serde_json::to_value(target).unwrap(),
+      serde_json::json!({
+        "kind": "ssh",
+        "destination": "rmux-remote-test",
+        "hostname": "127.0.0.1",
+        "user": "rmux",
+        "port": 2222,
+        "identity_file": "~/.ssh/local.id_rsa"
+      })
     );
   }
 

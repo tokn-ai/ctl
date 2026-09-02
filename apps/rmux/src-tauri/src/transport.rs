@@ -1,4 +1,5 @@
-use ctl_core::{ConnectionTarget, Transport, open_transport};
+use ctl_core::{ConnectionTarget, SshConnectionOptions, Transport, open_transport};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -50,7 +51,21 @@ impl ConnectionTargetDto {
   pub fn to_core(&self) -> ConnectionTarget {
     match self {
       Self::Local => ConnectionTarget::local(),
-      Self::Ssh { destination } => ConnectionTarget::ssh(destination.clone()),
+      Self::Ssh {
+        destination,
+        hostname,
+        user,
+        port,
+        identity_file,
+      } => ConnectionTarget::ssh_with_options(
+        destination.clone(),
+        SshConnectionOptions {
+          hostname: hostname.clone(),
+          user: user.clone(),
+          port: *port,
+          identity_file: identity_file.as_ref().map(PathBuf::from),
+        },
+      ),
     }
   }
 
@@ -63,7 +78,36 @@ impl ConnectionTargetDto {
   pub fn label(&self) -> &str {
     match self {
       Self::Local => "local",
-      Self::Ssh { destination } => destination,
+      Self::Ssh { destination, .. } => destination,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn app_local_settings_map_to_structured_core_options() {
+    let target = ConnectionTargetDto::Ssh {
+      destination: "rmux-remote-test".into(),
+      hostname: Some("127.0.0.1".into()),
+      user: Some("rmux".into()),
+      port: Some(2222),
+      identity_file: Some("~/.ssh/local.id_rsa".into()),
+    };
+
+    assert_eq!(
+      target.to_core(),
+      ConnectionTarget::Ssh {
+        destination: "rmux-remote-test".into(),
+        options: SshConnectionOptions {
+          hostname: Some("127.0.0.1".into()),
+          user: Some("rmux".into()),
+          port: Some(2222),
+          identity_file: Some(PathBuf::from("~/.ssh/local.id_rsa")),
+        },
+      }
+    );
   }
 }

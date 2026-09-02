@@ -1,7 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+mod write;
+
+pub use write::{SaveSshConfigError, SshHostDefinition, save_host};
 
 const MAX_INCLUDE_DEPTH: usize = 32;
 
@@ -9,6 +13,7 @@ const MAX_INCLUDE_DEPTH: usize = 32;
 pub struct SshHostDiscovery {
   pub hosts: Vec<String>,
   pub warnings: Vec<String>,
+  occurrences: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +105,7 @@ impl<'a> HostCollector<'a> {
       };
       if keyword.eq_ignore_ascii_case("host") {
         for host in arguments.into_iter().filter(|host| is_concrete_host(host)) {
+          *self.discovery.occurrences.entry(host.clone()).or_default() += 1;
           if self.seen_hosts.insert(host.clone()) {
             self.discovery.hosts.push(host);
           }

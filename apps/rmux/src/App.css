@@ -183,6 +183,61 @@ button {
   white-space: nowrap;
 }
 
+.host-connection-details {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.host-connection-details summary {
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.host-connection-details[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.host-storage-step {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.host-storage-step > div:first-child,
+.host-storage-choice {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.host-storage-step > div:first-child small,
+.host-storage-choice small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.host-storage-choice {
+  padding: 7px;
+  color: var(--text);
+  text-align: left;
+}
+
+.host-storage-step > small.host-save-error {
+  color: #ffb0b0;
+  font-size: 10px;
+}
+
+.host-storage-step .form-actions span {
+  min-width: 48px;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+}
+
 .host-form input {
   min-width: 0;
   padding: 6px 7px;

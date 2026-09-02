@@ -29,6 +29,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       commands::list_sessions,
       commands::list_ssh_config_hosts,
+      commands::save_ssh_config_host,
       commands::create_session,
       commands::kill_session,
       commands::restart_local_daemon,

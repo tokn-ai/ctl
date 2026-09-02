@@ -9,6 +9,8 @@ import type {
   ConnectionTarget,
   SessionSummary,
   ShellStateSummary,
+  SshHostDefinition,
+  SshHostStorage,
 } from "../../lib/types";
 import { sessionKey, targetKey, targetLabel } from "../../features/targets/targets";
 import { SshHostPicker } from "./SshHostPicker";
@@ -39,7 +41,11 @@ interface SessionSidebarProps {
   onRequestClose(session: SessionSummary): void;
   onCancelClose(): void;
   onConfirmClose(session: SessionSummary): void;
-  onAddHost(destination: string): boolean;
+  onActivateHost(destination: string): boolean;
+  onSaveHost(
+    definition: SshHostDefinition,
+    storage: SshHostStorage,
+  ): Promise<void>;
   onRemoveHost(target: ConnectionTarget): void;
 }
 
@@ -96,7 +102,8 @@ export function SessionSidebar({
   onRequestClose,
   onCancelClose,
   onConfirmClose,
-  onAddHost,
+  onActivateHost,
+  onSaveHost,
   onRemoveHost,
 }: SessionSidebarProps) {
   const [workingDirectory, setWorkingDirectory] = useState("");
@@ -174,7 +181,8 @@ export function SessionSidebar({
           <SshHostPicker
             suggestions={hostSuggestions}
             warning={hostSuggestionWarning}
-            onAddHost={onAddHost}
+            onActivateHost={onActivateHost}
+            onSaveHost={onSaveHost}
             onClose={() => setHostFormOpen(false)}
           />
         ) : null}

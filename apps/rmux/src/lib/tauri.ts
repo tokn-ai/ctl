@@ -13,9 +13,11 @@ import type {
   OpenAttachmentRequest,
   OpenAttachmentResponse,
   RestartLocalDaemonResponse,
+  SaveSshConfigHostResponse,
   SessionListResponse,
   SessionSummary,
   SshConfigHostCatalog,
+  SshHostDefinition,
 } from "./types";
 
 export interface OpenAttachmentResult {
@@ -33,6 +35,12 @@ export async function listSessions(
 
 export async function listSshConfigHosts(): Promise<SshConfigHostCatalog> {
   return invoke<SshConfigHostCatalog>("list_ssh_config_hosts");
+}
+
+export async function saveSshConfigHost(
+  request: SshHostDefinition,
+): Promise<SaveSshConfigHostResponse> {
+  return invoke<SaveSshConfigHostResponse>("save_ssh_config_host", { request });
 }
 
 export async function createSession(

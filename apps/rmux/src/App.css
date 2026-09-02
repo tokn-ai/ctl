@@ -42,6 +42,67 @@ button {
   color: inherit;
 }
 
+.app-crash {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 12px;
+  padding: clamp(28px, 8vw, 96px);
+  background:
+    radial-gradient(circle at 0 0, #352326 0, transparent 42%),
+    var(--surface-0);
+}
+
+.app-crash-product {
+  color: var(--danger);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.app-crash h1,
+.app-crash p {
+  max-width: 560px;
+  margin: 0;
+}
+
+.app-crash h1 {
+  font-size: clamp(24px, 4vw, 42px);
+}
+
+.app-crash p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.app-crash code {
+  max-width: min(100%, 720px);
+  padding: 9px 11px;
+  overflow-wrap: anywhere;
+  color: #ffb0b0;
+  border: 1px solid #5e353a;
+  border-radius: 7px;
+  background: #1d1417;
+}
+
+.app-crash button {
+  padding: 8px 12px;
+  color: var(--text);
+  border: 1px solid #5e353a;
+  border-radius: 7px;
+  background: #332024;
+  cursor: pointer;
+}
+
+.app-crash button:hover {
+  border-color: var(--danger);
+  background: #43272c;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);

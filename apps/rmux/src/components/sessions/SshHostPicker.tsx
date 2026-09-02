@@ -137,6 +137,11 @@ export function SshHostPicker({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  function updateField(field: keyof HostFields, value: string) {
+    setFields((current) => ({ ...current, [field]: value }));
+    setValidationError(null);
+  }
+
   function activateConfiguredHost(destination: string) {
     if (!onActivateHost(destination)) {
       setValidationError("That OpenSSH host is already active.");
@@ -213,11 +218,11 @@ export function SshHostPicker({
           value={fields.hostname}
           onChange={(event) => {
             const hostname = event.currentTarget.value;
-            setFields((current) => ({
-              ...current,
-              hostname,
-              alias: aliasEdited ? current.alias : hostname,
-            }));
+            setFields((current) =>
+              aliasEdited
+                ? { ...current, hostname }
+                : { ...current, hostname, alias: hostname },
+            );
             setValidationError(null);
           }}
           placeholder="127.0.0.1"
@@ -229,12 +234,9 @@ export function SshHostPicker({
         <input
           value={fields.alias}
           onChange={(event) => {
+            const alias = event.currentTarget.value;
             setAliasEdited(true);
-            setFields((current) => ({
-              ...current,
-              alias: event.currentTarget.value,
-            }));
-            setValidationError(null);
+            updateField("alias", alias);
           }}
           placeholder="rmux-remote-test"
         />
@@ -245,13 +247,7 @@ export function SshHostPicker({
           User
           <input
             value={fields.user}
-            onChange={(event) => {
-              setFields((current) => ({
-                ...current,
-                user: event.currentTarget.value,
-              }));
-              setValidationError(null);
-            }}
+            onChange={(event) => updateField("user", event.currentTarget.value)}
             placeholder="current user"
           />
         </label>
@@ -260,13 +256,7 @@ export function SshHostPicker({
           <input
             value={fields.port}
             inputMode="numeric"
-            onChange={(event) => {
-              setFields((current) => ({
-                ...current,
-                port: event.currentTarget.value,
-              }));
-              setValidationError(null);
-            }}
+            onChange={(event) => updateField("port", event.currentTarget.value)}
             placeholder="22"
           />
         </label>
@@ -274,13 +264,9 @@ export function SshHostPicker({
           Identity file
           <input
             value={fields.identity_file}
-            onChange={(event) => {
-              setFields((current) => ({
-                ...current,
-                identity_file: event.currentTarget.value,
-              }));
-              setValidationError(null);
-            }}
+            onChange={(event) =>
+              updateField("identity_file", event.currentTarget.value)
+            }
             placeholder="~/.ssh/id_ed25519"
           />
         </label>

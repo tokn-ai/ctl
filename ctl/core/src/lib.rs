@@ -17,6 +17,8 @@ use tokio::net::UnixStream;
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+mod ssh_startup;
+
 const SSH_PROGRAM: &str = "ssh";
 const REMOTE_COMMAND: [&str; 3] = ["exec", "ctld", "connect"];
 const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
@@ -42,6 +44,17 @@ pub struct SshConnectionOptions {
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
+}
+
+/// Local prompt handling only; this cannot alter the remote command.
+pub enum SshInteraction {
+  Inherit,
+  Batch,
+  Askpass {
+    program: PathBuf,
+    socket: PathBuf,
+    token: String,
+  },
 }
 
 impl ConnectionTarget {
@@ -239,18 +252,67 @@ async fn open_ssh_tunnel_with_options(
   destination: &str,
   options: &SshConnectionOptions,
 ) -> Result<SshTransport, CoreError> {
+  open_ssh_tunnel_interactive(destination, options, &SshInteraction::Inherit).await
+}
+
+/// Opens the fixed ctld command with explicit local SSH prompt handling.
+///
+/// # Errors
+/// Returns validation, SSH startup, or transport-marker failures.
+pub async fn open_ssh_tunnel_interactive(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+) -> Result<SshTransport, CoreError> {
   validate_ssh_target(destination, options)?;
   let mut command = Command::new(SSH_PROGRAM);
+
+  // Insert local-only options before `--`; never append them to the remote command.
+  let arguments = ssh_arguments(destination, options);
+  let extra: Vec<OsString> = match interaction {
+    SshInteraction::Inherit => Vec::new(),
+    SshInteraction::Batch => vec!["-o".into(), "BatchMode=yes".into()],
+    SshInteraction::Askpass {
+      program,
+      socket,
+      token,
+    } => {
+      command
+        .env("SSH_ASKPASS", program)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DISPLAY", "rmux-askpass")
+        .env("CTL_SSH_ASKPASS", "1")
+        .env("CTL_SSH_ASKPASS_SOCKET", socket)
+        .env("CTL_SSH_ASKPASS_TOKEN", token);
+      vec![
+        "-o".into(),
+        "BatchMode=no".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=ask".into(),
+      ]
+    }
+  };
   command
-    .args(ssh_arguments(destination, options))
+    .args(extra)
+    .args(arguments)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::inherit())
+    .stderr(Stdio::piped())
     .kill_on_drop(true);
 
   let mut child = command.spawn().map_err(CoreError::StartSsh)?;
   let stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
-  let stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
+  let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
+  let diagnostics = ssh_startup::Diagnostics::start(child.stderr.take());
+  let mut preface = vec![0_u8; SSH_TRANSPORT_PREFACE.len()];
+  if let Err(error) = stdout.read_exact(&mut preface).await {
+    return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+  }
+  if preface != SSH_TRANSPORT_PREFACE {
+    let _ = child.kill().await;
+    drop(diagnostics);
+    return Err(CoreError::InvalidSshPreface);
+  }
   let (shutdown, mut shutdown_requested) = watch::channel(false);
 
   tokio::spawn(async move {
@@ -269,22 +331,14 @@ async fn open_ssh_tunnel_with_options(
         }
       }
     }
+    drop(diagnostics);
   });
 
-  let mut transport = SshTransport {
+  Ok(SshTransport {
     stdin,
     stdout,
     shutdown,
-  };
-  let mut preface = vec![0_u8; SSH_TRANSPORT_PREFACE.len()];
-  transport
-    .read_exact(&mut preface)
-    .await
-    .map_err(CoreError::ReadSshPreface)?;
-  if preface != SSH_TRANSPORT_PREFACE {
-    return Err(CoreError::InvalidSshPreface);
-  }
-  Ok(transport)
+  })
 }
 
 /// Returns whether opening a replacement transport may succeed without a
@@ -298,6 +352,9 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
       source.kind(),
       io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
     ),
+    // This is a preface-read failure enriched with stderr; retain its previous
+    // reconnect behavior (for example after a transient connection refusal).
+    CoreError::SshStartup(_) => true,
     CoreError::InvalidSshDestination(_)
     | CoreError::InvalidSshOption(_)
     | CoreError::StartSsh(_)
@@ -403,6 +460,8 @@ pub enum CoreError {
   MissingSshStdout,
   #[error("could not read the ctld transport marker from SSH: {0}")]
   ReadSshPreface(#[source] io::Error),
+  #[error("SSH connection failed before ctld was ready: {0}")]
+  SshStartup(String),
   #[error(
     "remote stdout did not begin with the ctld transport marker; check non-interactive shell startup output"
   )]

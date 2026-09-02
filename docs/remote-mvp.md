@@ -77,13 +77,19 @@ choose **Identity file** and enter the matching private-key path. These steps
 open at the command palette location. Verify any SSH host-key prompt against
 the fingerprint above. Once `ctld connect` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
-WebView local storage. The latter still invokes the system SSH client and does
+the app's native workspace file. The latter still invokes the system SSH client and does
 not store the key contents. `ctld` is assumed to be on the remote `PATH`.
 Password/passphrase and host-verification prompts use the same overlay on
 macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
 chip to authenticate again if SSH config/agent alone is insufficient.
 
-Local and container sessions then appear in one sidebar with host labels. New
+The app restores known local and remote sessions from disk without connecting
+on startup, including the last selected tab. Use **Add existing session** to
+discover and remember sessions already running in the container; simply adding
+a host does not import its daemon's inventory. Opening a session connects to
+its host on demand. See `docs/rmux-workspace.md` for persistence and migration.
+
+Known local and container sessions appear in one sidebar with host labels. New
 shells default to local; the creation form can explicitly select the remote
 host, while **New Tab in Current Folder** always inherits the active session's
 host.

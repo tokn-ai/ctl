@@ -29,6 +29,21 @@ pub struct SessionInspectionDto {
 pub async fn inspect_known_sessions(
   request: InspectKnownSessionsRequest,
 ) -> CommandResult<Vec<SessionInspectionDto>> {
+  // Bound the entire batch as well as individual operations. A host that
+  // disappears midway through a large workspace cannot pin refresh forever.
+  timeout(Duration::from_secs(30), inspect_requested(request))
+    .await
+    .map_err(|_| {
+      CommandErrorDto::new(
+        "session_inspection_timeout",
+        "Known-session refresh timed out.",
+      )
+    })?
+}
+
+async fn inspect_requested(
+  request: InspectKnownSessionsRequest,
+) -> CommandResult<Vec<SessionInspectionDto>> {
   if request.session_ids.len() > 10_000 {
     return Err(CommandErrorDto::new(
       "invalid_request",

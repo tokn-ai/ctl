@@ -10,7 +10,14 @@ const api = vi.hoisted(() => ({
   loadWorkspace: vi.fn(),
   updateWorkspace: vi.fn(),
 }));
+const nativeWindow = vi.hoisted(() => ({
+  onCloseRequested: vi.fn(),
+  destroy: vi.fn(),
+}));
 vi.mock("../../lib/tauri", () => api);
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => nativeWindow,
+}));
 
 const initial: WorkspaceSnapshot = {
   revision: "one",
@@ -38,6 +45,9 @@ const initial: WorkspaceSnapshot = {
 beforeEach(() => {
   vi.resetAllMocks();
   window.localStorage.clear();
+  delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  nativeWindow.onCloseRequested.mockResolvedValue(() => {});
+  nativeWindow.destroy.mockResolvedValue(undefined);
   api.loadWorkspace.mockResolvedValue(initial);
   api.updateWorkspace.mockImplementation(
     async (_revision: string | null, document: WorkspaceDocument) => ({
@@ -46,7 +56,10 @@ beforeEach(() => {
     }),
   );
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+});
 
 describe("workspace lifecycle", () => {
   it("loads remembered sessions and tabs without any transport operations or writes", async () => {
@@ -140,5 +153,88 @@ describe("workspace lifecycle", () => {
     });
     await waitFor(() => expect(result.current.error).toBe("disk full"));
     expect(result.current.sessions).toEqual([]);
+  });
+
+  it("waits for pending writes before destroying the window and freezes later changes", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() =>
+      expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce(),
+    );
+    let complete!: (snapshot: WorkspaceSnapshot) => void;
+    api.updateWorkspace.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    act(() => result.current.setTabs([]));
+    await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
+    const preventDefault = vi.fn();
+    let closing!: Promise<void>;
+    act(() => {
+      closing = nativeWindow.onCloseRequested.mock.calls[0][0]({
+        preventDefault,
+      });
+    });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(result.current.closing).toBe(true);
+    expect(nativeWindow.destroy).not.toHaveBeenCalled();
+    act(() => result.current.setSessions([]));
+    expect(result.current.sessions).toHaveLength(1);
+    await act(async () => {
+      complete({
+        revision: "saved",
+        document: api.updateWorkspace.mock.calls[0][1],
+      });
+      await closing;
+    });
+    expect(nativeWindow.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("pauses window close for an in-flight session creation or a save failure", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() =>
+      expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce(),
+    );
+    result.current.closeBlockedRef.current = () => true;
+    await act(async () =>
+      nativeWindow.onCloseRequested.mock.calls[0][0]({
+        preventDefault: vi.fn(),
+      }),
+    );
+    expect(nativeWindow.destroy).not.toHaveBeenCalled();
+    expect(result.current.error).toContain("ongoing session operation");
+    result.current.closeBlockedRef.current = () => false;
+    api.updateWorkspace.mockRejectedValue({
+      code: "workspace_io_failed",
+      message: "disk full",
+    });
+    act(() => result.current.setTabs([]));
+    await act(async () =>
+      nativeWindow.onCloseRequested.mock.calls[0][0]({
+        preventDefault: vi.fn(),
+      }),
+    );
+    expect(result.current.closing).toBe(false);
+    expect(result.current.error).toContain("disk full");
+    expect(nativeWindow.destroy).not.toHaveBeenCalled();
+  });
+
+  it("does not discard malformed legacy settings", async () => {
+    api.loadWorkspace.mockResolvedValue({
+      revision: null,
+      document: workspaceDocument(emptyWorkspaceView()),
+    });
+    const legacy = JSON.stringify({
+      schema_version: 2,
+      ssh_hosts: [{ destination: "invalid", port: 0 }],
+    });
+    window.localStorage.setItem("rmux.remote_hosts", legacy);
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.error).toContain("preserved"));
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("rmux.remote_hosts")).toBe(legacy);
   });
 });

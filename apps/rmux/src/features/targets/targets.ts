@@ -139,34 +139,19 @@ export function readLegacyRemoteTargets(
       "The previous host settings could not be migrated. Their local-storage copy has been preserved.",
     );
   }
+  const valid = isStoredRemoteHostsV1(value)
+    ? value.ssh_destinations.every(
+        (destination) => normalizeSshDestination(destination) !== null,
+      )
+    : value.ssh_hosts.every(
+        (host) => normalizeSshTarget({ kind: "ssh", ...host }) !== null,
+      );
+  if (!valid) {
+    throw new Error(
+      "Previous host settings contain invalid entries. Their local-storage copy has been preserved.",
+    );
+  }
   return loadRemoteTargets(storage);
-}
-
-export function saveRemoteTargets(
-  storage: Storage | null,
-  targets: readonly ConnectionTarget[],
-): void {
-  if (!storage) {
-    return;
-  }
-  const stored: StoredRemoteHostsV2 = {
-    schema_version: STORAGE_SCHEMA_VERSION,
-    ssh_hosts: uniqueSshTargets(
-      targets.flatMap((target) => {
-        if (target.kind !== "ssh") {
-          return [];
-        }
-        const normalized = normalizeSshTarget(target);
-        return normalized ? [normalized] : [];
-      }),
-    ).map(({ kind: _kind, ...host }) => host),
-  };
-  try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(stored));
-  } catch {
-    // A privacy-restricted WebView may deny persistence. Host use remains
-    // valid for the current app lifetime, so storage failure is non-fatal.
-  }
 }
 
 export function appLocalSshTarget(

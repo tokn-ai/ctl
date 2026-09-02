@@ -26,12 +26,22 @@ not supported. After a successful connection, choose where to save the host.
 **OpenSSH config**
 writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
 reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.
-**This app only** stores the same non-secret settings in WebView local storage
+**This app only** stores the same non-secret settings in the native workspace file
 and supplies them to OpenSSH as fixed arguments. Passwords, private-key
 contents, arbitrary options, forwarding, and remote commands are never stored.
 The app remembers the active alias in either case so it can restore the mixed
 host list on launch; config-backed targets keep only that alias locally.
-Existing destination-only app storage migrates automatically.
+Existing WebView host settings migrate automatically after a successful disk write.
+
+The workspace file lives in Tauri's app-data directory as `workspace.json`.
+It remembers known sessions, cached paths, tab order, and selection. Startup
+restores those entries disconnected and unverified: no SSH connections or local
+daemon discovery run automatically. Select a session to connect. Use **Add
+existing session** in the sidebar or command palette to discover one host's
+inventory and explicitly remember sessions without attaching. **Refresh Known
+Sessions** inspects only remembered IDs; it does not adopt other apps' sessions.
+Old sessions were never saved, so the first migration requires explicit import.
+See [workspace persistence](../../docs/rmux-workspace.md) for recovery and tests.
 
 The identity-file input suggests candidate files from the top level of
 `~/.ssh`. Type to filter, use the arrow keys and Enter, or click a file. Manual
@@ -44,7 +54,7 @@ validates the selected identity when connecting.
 Wildcard and negated `Host` patterns are not destinations and are omitted from
 suggestions. Discovery only fills the picker: the app does not contact an SSH
 host until it is explicitly selected. Local is always present and remains the
-default for a new shell. The sidebar mixes sessions from every selected target
+default for a new shell. The sidebar mixes remembered sessions from selected targets
 and labels each row with its host. A failed host reports its own error while
 last-known sessions from other targets remain usable.
 
@@ -65,7 +75,10 @@ GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also
 detaches the live view; inactive tabs have no live attachment to detach.
 **Close** is deliberately destructive: after confirmation it terminates the
-session for all clients. Closing the app itself only detaches its active view.
+session for all clients. **Remove from workspace** forgets an entry and closes
+its tab without terminating its shell. Closing the app itself only detaches its
+active view. Normal window close waits for pending workspace saves; save failures
+remain visible with a retry action.
 
 The desktop normally has one native window and one WebView. A session and tab
 are identified by both host and daemon session ID, so equal IDs from different
@@ -87,7 +100,9 @@ button: selecting it opens a quick-input confirmation, with Cancel focused.
 It first verifies the running daemon's separate local-control
 endpoint; an older daemon that lacks it leaves the active tab attached and
 reports that restart is unavailable. Once accepted, it terminates every local
-rmux session before both daemon endpoints drain and a fresh daemon starts.
+rmux session (including sessions opened by other apps) before both daemon
+endpoints drain and a fresh daemon starts. Local workspace entries become
+missing rather than being silently removed.
 Remote tabs and their SSH attachments are unrelated and remain intact. It
 cannot preserve daemon-owned PTYs, has no remote `ctl` equivalent, and is not a
 version-mismatch escape hatch: protocol upgrades must remain compatible. Default

@@ -114,8 +114,12 @@ checkpoint-production, or session-lifetime logic into the app process.
 Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
-The frontend persists selected remote target definitions and always includes
-the local target. A read-only backend command discovers concrete
+The app persists workspace metadata through its native backend and always
+includes the local target. The versioned app-data `workspace.json` contains
+host definitions and stable IDs, known session references, cached cwd labels,
+tab order, and the selected tab. Runtime status, output, credentials, and
+attachment tokens are never written to the workspace. `ctld` remains stateless.
+A read-only backend command discovers concrete
 aliases from the user's OpenSSH config and recursive `Include` files for the
 **+ Host** picker; wildcard and negated patterns are omitted, and discovery
 never opens a connection. Selecting a suggestion promotes it to a configured
@@ -125,12 +129,21 @@ identity-file-path fields. Config replacement uses a same-directory temporary
 file, preserves existing file permissions, and refuses to write when alias
 discovery is incomplete or the original changes during the operation.
 
+Startup restores entries and tabs disconnected, with unverified runtime
+status. It does not contact hosts, start a local daemon, enumerate sessions, or
+attach the selected tab. The sidebar is workspace membership, not a mirror of
+daemon inventory. New shells are remembered before attachment. **Add existing
+session** explicitly enumerates one selected host and adds only chosen sessions,
+without attaching. Explicit refresh inspects only remembered IDs; connection
+failures retain entries as unreachable, while not-found responses mark them
+missing rather than removing them. Opening a session connects on demand.
+
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed `exec ctld connect` command.
-The frontend queries configured targets concurrently and keys rows, tabs,
-shell-state caches, mutations, and reconnect intent by `(target, session ID)`.
-A failed target retains its last-known rows and reports a target-local error
-without hiding successful targets. OpenSSH remains responsible for passwords,
+Rows, tabs, shell-state caches, mutations, and reconnect intent use
+`(stable host ID, session ID)`, independent of an SSH alias's display spelling.
+A failed target reports its own error without hiding successful targets.
+OpenSSH remains responsible for passwords,
 key contents, proxies, host verification, and connection multiplexing. The app
 brokers OpenSSH askpass prompts through its shared quick-input overlay on
 macOS/Linux. A random capability and ephemeral owner-only Unix socket connect
@@ -144,12 +157,20 @@ Background connections use cached credentials or batch mode, never unsolicited
 dialogs. SSH startup diagnostics are bounded and returned to the frontend
 instead of being lost behind a generic missing-transport-marker error.
 
+Native workspace writes are serialized, revision-checked across app processes,
+and atomically replaced with owner-only files. Invalid/future files are
+preserved and block writes. Legacy WebView host settings migrate only when no
+native workspace exists; the legacy copy is removed only after a successful
+disk write. Previous sessions were never persisted and require explicit import.
+See `docs/rmux-workspace.md` for the lifecycle and migration contract.
+
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same
 collision-safe `session-N` allocation used by every unnamed client. Its session
 list merges authoritative geometry changes from the active attachment into the
 matching row. **Disconnect** removes a selected open tab and preserves the
 PTY; for the active tab it detaches the attachment, while an inactive tab is
-already detached and is removed only from this window. **Close** is the
+already detached and is removed only from this window. **Remove from workspace**
+also forgets membership without terminating the shell. **Close** is the
 explicit one-shot kill operation and terminates the session for all attachments.
 
 `Restart rmuxd` is a command-palette-only, destructive maintenance action. It
@@ -168,8 +189,10 @@ The local-control endpoint is deliberately distinct from `rmux-proto` and is
 never relayed by `ctld`; a remote `ctl` client cannot restart a daemon.
 The backend records the target owned by its active attachment actor, so a
 local restart detaches only a local attachment; a remote attachment in the
-same window remains live. The frontend removes only local rows and tabs after
-a successful or potentially destructive local restart.
+same window remains live. The frontend marks local entries missing after a
+successful or potentially destructive local restart, retaining their references
+and tabs. It does not refresh or reconnect remote hosts as a side effect. The
+confirmation warns that local sessions opened by other apps are affected too.
 Because `rmuxd` owns the PTYs, this is not a reconnect or session-preserving
 recovery mechanism. If a restart has been accepted but the old daemon does not
 drain in time, the action fails without force-stopping it. Raw-protocol version

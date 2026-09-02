@@ -1,5 +1,7 @@
 //! App-owned workspace metadata. Never connects to a daemon or stores runtime state.
 
+#[cfg(all(test, unix))]
+mod remote_test;
 mod repository;
 #[cfg(test)]
 mod tests;

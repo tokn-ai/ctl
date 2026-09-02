@@ -159,6 +159,8 @@ export function TerminalPage() {
   const daemonRestartConfirmationRef = useRef(false);
   const restartingDaemonRef = useRef(false);
   const daemonEpochRef = useRef(0);
+  workspace.closeBlockedRef.current = () =>
+    creatingRef.current || restartingDaemonRef.current;
 
   const daemonRestartBlocksInteractions = useCallback(
     () => daemonRestartConfirmationRef.current || restartingDaemonRef.current,
@@ -457,7 +459,8 @@ export function TerminalPage() {
       ) {
         return;
       }
-      if (nextTab) {
+      // Closing a restored, disconnected tab must not open a new SSH channel.
+      if (nextTab && attachment.state.session !== null) {
         await attachment.connect(nextTab);
       } else {
         await attachment.detach();
@@ -517,7 +520,7 @@ export function TerminalPage() {
         next.delete(removedTargetKey);
         return next;
       });
-      if (removingActive && nextActive) {
+      if (removingActive && nextActive && attachment.state.session !== null) {
         await attachment.connect(nextActive);
       }
     },
@@ -1028,6 +1031,7 @@ export function TerminalPage() {
     (command: AppCommand) => {
       if (
         !workspace.ready ||
+        workspace.closing ||
         importOpen ||
         pendingForget ||
         hostFlow !== undefined ||
@@ -1053,6 +1057,7 @@ export function TerminalPage() {
       pendingCloseSessionKey,
       daemonRestartConfirmationPending,
       workspace.ready,
+      workspace.closing,
       importOpen,
       pendingForget,
     ],
@@ -1085,7 +1090,7 @@ export function TerminalPage() {
 
   return (
     <>
-      <main className="app-shell" inert={!workspace.ready}>
+      <main className="app-shell" inert={!workspace.ready || workspace.closing}>
         <SessionSidebar
           targets={targets}
           targetErrors={targetErrors}
@@ -1160,7 +1165,7 @@ export function TerminalPage() {
           <div className="terminal-notices">
             {workspace.error ? (
               <div className="message-banner" role="alert">
-                Workspace could not be saved or loaded: {workspace.error}
+                Workspace: {workspace.error}
                 {workspace.ready ? (
                   <button
                     type="button"

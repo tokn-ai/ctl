@@ -28,6 +28,9 @@ export function useWorkspace() {
   const writerRef = useRef<WorkspaceWriter | null>(null);
   const workspaceIdRef = useRef("default");
   const [ready, setReady] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+  const closeBlockedRef = useRef<() => boolean>(() => false);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(false);
 
@@ -89,7 +92,7 @@ export function useWorkspace() {
       key: K,
       action: SetStateAction<WorkspaceView[K]>,
     ) => {
-      if (!writerRef.current) return;
+      if (!writerRef.current || closingRef.current) return;
       const previous = viewRef.current;
       const value =
         typeof action === "function"
@@ -109,24 +112,40 @@ export function useWorkspace() {
   useEffect(() => {
     if (!ready || !("__TAURI_INTERNALS__" in window)) return;
     let disposed = false;
-    let closing = false;
     const registration = getCurrentWindow().onCloseRequested(async (event) => {
       event.preventDefault();
-      if (closing) return;
-      closing = true;
+      if (closingRef.current) return;
+      if (closeBlockedRef.current()) {
+        setError(
+          "Wait for the ongoing session operation to finish before closing the window.",
+        );
+        return;
+      }
+      closingRef.current = true;
+      setClosing(true);
       try {
         await persist(true);
         await getCurrentWindow().destroy();
-      } catch {
-        closing = false;
+      } catch (failure) {
+        closingRef.current = false;
+        setClosing(false);
+        setError(`Window close paused: ${errorMessage(failure)}`);
       }
     });
-    void registration.then((unlisten) => {
-      if (disposed) unlisten();
-    });
+    void registration.then(
+      (unlisten) => {
+        if (disposed) unlisten();
+      },
+      (failure: unknown) => {
+        if (!disposed) setError(errorMessage(failure));
+      },
+    );
     return () => {
       disposed = true;
-      void registration.then((unlisten) => unlisten());
+      void registration.then(
+        (unlisten) => unlisten(),
+        () => undefined,
+      );
     };
   }, [ready, persist]);
 
@@ -159,6 +178,8 @@ export function useWorkspace() {
     ...view,
     viewRef,
     ready,
+    closing,
+    closeBlockedRef,
     error,
     persist,
     setTargets,

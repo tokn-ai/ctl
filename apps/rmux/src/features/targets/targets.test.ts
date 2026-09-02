@@ -7,7 +7,6 @@ import {
   loadRemoteTargets,
   normalizeSshDestination,
   sameSession,
-  saveRemoteTargets,
   sessionKey,
   targetKey,
 } from "./targets";
@@ -47,14 +46,19 @@ describe("connection targets", () => {
     expect(normalizeSshDestination("host\ncommand")).toBeNull();
   });
 
-  it("persists only unique normalized SSH destinations", () => {
+  it("reads unique normalized SSH destinations from legacy storage", () => {
     const storage = memoryStorage();
-    saveRemoteTargets(storage, [
-      LOCAL_TARGET,
-      { kind: "ssh", destination: "rmux-docker" },
-      { kind: "ssh", destination: " rmux-docker " },
-      { kind: "ssh", destination: "lab" },
-    ]);
+    storage.setItem(
+      "rmux.remote_hosts",
+      JSON.stringify({
+        schema_version: 2,
+        ssh_hosts: [
+          { destination: "rmux-docker" },
+          { destination: " rmux-docker " },
+          { destination: "lab" },
+        ],
+      }),
+    );
 
     expect(loadRemoteTargets(storage)).toEqual([
       { kind: "ssh", destination: "rmux-docker" },
@@ -62,7 +66,7 @@ describe("connection targets", () => {
     ]);
   });
 
-  it("persists app-local SSH settings in schema two", () => {
+  it("reads app-local SSH settings from legacy schema two", () => {
     const storage = memoryStorage();
     const target = appLocalSshTarget({
       alias: "rmux-remote-test",
@@ -73,20 +77,21 @@ describe("connection targets", () => {
     });
     expect(target).not.toBeNull();
 
-    saveRemoteTargets(storage, [LOCAL_TARGET, target!]);
-
-    expect(JSON.parse(storage.getItem("rmux.remote_hosts")!)).toEqual({
-      schema_version: 2,
-      ssh_hosts: [
-        {
-          destination: "rmux-remote-test",
-          hostname: "127.0.0.1",
-          user: "rmux",
-          port: 2222,
-          identity_file: "~/.ssh/local.id_rsa",
-        },
-      ],
-    });
+    storage.setItem(
+      "rmux.remote_hosts",
+      JSON.stringify({
+        schema_version: 2,
+        ssh_hosts: [
+          {
+            destination: "rmux-remote-test",
+            hostname: "127.0.0.1",
+            user: "rmux",
+            port: 2222,
+            identity_file: "~/.ssh/local.id_rsa",
+          },
+        ],
+      }),
+    );
     expect(loadRemoteTargets(storage)).toEqual([target]);
   });
 

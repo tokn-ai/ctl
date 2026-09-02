@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -219,5 +220,99 @@ describe("workspace-backed terminal page", () => {
         session_id: "known-id",
       }),
     );
+  });
+
+  it("saves a newly created session before attachment, then restores it disconnected on relaunch", async () => {
+    const created = {
+      target: { kind: "local" as const },
+      session_id: "new-local",
+      name: "new-shell",
+      status: "running" as const,
+      next_sequence: "0",
+      terminal_size: {
+        columns: 80,
+        rows: 24,
+        pixel_width: null,
+        pixel_height: null,
+      },
+    };
+    api.createSession.mockResolvedValue(created);
+    let disk = snapshot();
+    api.updateWorkspace.mockImplementation(
+      async (_revision: string | null, document: WorkspaceDocument) => {
+        disk = { revision: crypto.randomUUID(), document };
+        return disk;
+      },
+    );
+    let release!: () => void;
+    api.updateWorkspace.mockImplementationOnce(
+      (_revision: string | null, document: WorkspaceDocument) =>
+        new Promise((resolve) => {
+          release = () => {
+            disk = { revision: "created", document };
+            resolve(disk);
+          };
+        }),
+    );
+    const first = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect session" });
+    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(api.updateWorkspace.mock.calls[0][1].sessions).toHaveLength(2);
+    await act(async () => release());
+    await waitFor(() =>
+      expect(attachment.connect).toHaveBeenCalledExactlyOnceWith(created, {
+        resize_with_window: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(disk.document.active_tab).toEqual({
+        host_id: "local",
+        session_id: "new-local",
+      }),
+    );
+    first.unmount();
+    attachment.connect.mockClear();
+    api.loadWorkspace.mockResolvedValue(disk);
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect session" });
+    expect(
+      screen.getByRole("button", { name: "Shell — new-shell" }),
+    ).toBeTruthy();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+  });
+
+  it("does not attach, kill, or duplicate a shell when saving after creation fails", async () => {
+    api.createSession.mockResolvedValue({
+      target: { kind: "local" },
+      session_id: "unsaved",
+      name: "created-once",
+      status: "running",
+      next_sequence: "0",
+      terminal_size: {
+        columns: 80,
+        rows: 24,
+        pixel_width: null,
+        pixel_height: null,
+      },
+    });
+    api.updateWorkspace.mockRejectedValue({
+      code: "workspace_io_failed",
+      message: "disk full",
+    });
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect session" });
+    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await screen.findByText(
+      /was created, but saving its workspace entry failed/,
+    );
+    expect(api.createSession).toHaveBeenCalledOnce();
+    expect(api.killSession).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Retry saving" })).toBeTruthy();
   });
 });

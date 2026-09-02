@@ -1,3 +1,5 @@
+pub mod inspection;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,13 +95,27 @@ fn ssh_config_write_error(error: &ssh_config::SaveSshConfigError) -> CommandErro
 
 #[tauri::command]
 pub async fn list_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {
+  timeout(Duration::from_secs(30), discover_sessions(request))
+    .await
+    .map_err(|_| {
+      CommandErrorDto::new("session_discovery_timeout", "Session discovery timed out.")
+    })?
+}
+
+async fn discover_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {
   let stream = transport::connect(&request.target).await?;
   let response = rmux_request(stream, &client_identity(), ClientMessage::ListSessions)
     .await
     .map_err(CommandErrorDto::client)?;
   match response {
     ServerMessage::SessionList { sessions } => Ok(SessionListDto {
-      shell_states: inspect_session_shell_states(&request.target, &sessions).await,
+      // A large inventory or stalled metadata lookup must not prevent import.
+      shell_states: timeout(
+        Duration::from_secs(5),
+        inspect_session_shell_states(&request.target, &sessions),
+      )
+      .await
+      .unwrap_or_default(),
       sessions: sessions
         .into_iter()
         .map(|session| SessionDto::new(session, request.target.clone()))
@@ -507,4 +523,3 @@ mod tests {
     .expect("kill remote session");
   }
 }
-pub mod inspection;

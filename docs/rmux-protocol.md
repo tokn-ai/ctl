@@ -224,8 +224,9 @@ integrations clear editable text when a command starts, and rmuxd clears both
 active-text forms when a session ends. This is metadata-channel redaction, not
 a guarantee that typed characters are secret from ordinary terminal viewers:
 shell line editing often echoes them into the canonical raw PTY output journal.
-The metadata is memory-only unless a future explicit persistence policy says
-otherwise.
+Daemon shell-awareness state is memory-only. The desktop workspace explicitly
+retains only last-known cwd/display-cwd for presentation; it does not persist
+editable text, running commands, or live prompt state. See `rmux-workspace.md`.
 
 FIFO report version 2 retains the version-1 record shape: exactly nine
 NUL-delimited fields. The first field is `rmux-shell-v2`; fields seven through

@@ -119,8 +119,10 @@ without replaying an arbitrarily large journal.
 Optional shell-awareness state is memory-only and separate from the raw output
 journal. Disk-backed history and restart policies are later milestones.
 
-The `rmux` desktop app lists local sessions alongside sessions from selected,
-persisted OpenSSH destinations. Its **+ Host** picker discovers concrete
+The `rmux` desktop app restores a disk-backed workspace of known local and
+remote sessions, with all tabs disconnected on startup. **Add existing session**
+explicitly discovers one host's inventory and remembers only chosen entries;
+opening a session connects on demand. Its **+ Host** picker discovers concrete
 aliases from the user's OpenSSH config without connecting to them; selecting
 one makes it an active target. A new hostname can be saved as a reusable,
 managed OpenSSH `Host` block or as structured app-local connection settings.
@@ -139,6 +141,8 @@ GUI-created shells receive a daemon-assigned name. **Disconnect** closes the
 active tab and detaches its view while leaving the daemon-owned shell running;
 **Close** explicitly terminates the session for every attached client. Closing
 the app itself detaches its active view and does not terminate any sessions.
+**Remove from workspace** forgets an entry without killing its shell. See
+[workspace persistence](docs/rmux-workspace.md) for disk storage and migration.
 
 The desktop command palette opens with `Cmd-Shift-P` on macOS and
 `Ctrl-Shift-P` on Windows/Linux. The same command registry supplies app-local

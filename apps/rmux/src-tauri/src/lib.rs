@@ -4,9 +4,16 @@ mod error;
 mod local_transport;
 #[cfg(target_os = "macos")]
 mod native_menu;
+#[cfg(unix)]
+mod ssh_auth;
+#[cfg(not(unix))]
+#[path = "ssh_auth/unsupported.rs"]
+mod ssh_auth;
 mod ssh_config;
 mod state;
 mod transport;
+
+pub use ssh_auth::helper_exit_code as ssh_askpass_exit_code;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the native rmux application runtime.
@@ -30,6 +37,10 @@ pub fn run() {
       commands::list_sessions,
       commands::list_ssh_config_hosts,
       commands::save_ssh_config_host,
+      ssh_auth::commands::probe_ssh_host,
+      ssh_auth::commands::respond_ssh_prompt,
+      ssh_auth::commands::cancel_ssh_probe,
+      ssh_auth::commands::forget_ssh_credentials,
       commands::create_session,
       commands::kill_session,
       commands::restart_local_daemon,

@@ -60,11 +60,14 @@ pub async fn save_ssh_config_host(
     port: request.port,
     identity_file: request.identity_file,
   };
-  let destination =
-    tauri::async_runtime::spawn_blocking(move || ssh_config::save_host(&definition))
-      .await
-      .map_err(CommandErrorDto::backend)?
-      .map_err(|error| ssh_config_write_error(&error))?;
+  let destination = tauri::async_runtime::spawn_blocking(move || {
+    let destination = ssh_config::save_host(&definition)?;
+    crate::ssh_auth::remember_configured_alias(&definition);
+    Ok::<_, ssh_config::SaveSshConfigError>(destination)
+  })
+  .await
+  .map_err(CommandErrorDto::backend)?
+  .map_err(|error| ssh_config_write_error(&error))?;
   Ok(SaveSshConfigHostResponseDto { destination })
 }
 

@@ -9,11 +9,12 @@ import type {
   ConnectionTarget,
   SessionSummary,
   ShellStateSummary,
-  SshHostDefinition,
-  SshHostStorage,
 } from "../../lib/types";
-import { sessionKey, targetKey, targetLabel } from "../../features/targets/targets";
-import { SshHostPicker } from "./SshHostPicker";
+import {
+  sessionKey,
+  targetKey,
+  targetLabel,
+} from "../../features/targets/targets";
 
 const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 
@@ -28,24 +29,19 @@ interface SessionSidebarProps {
   error: string | null;
   creating: boolean;
   createFormOpen: boolean;
-  pendingCloseSessionKey: string | null;
   closingSessionKeys: ReadonlySet<string>;
   disconnectingSessionKey: string | null;
-  hostSuggestions: readonly string[];
-  hostSuggestionWarning: string | null;
   onRefresh(): void;
   onSelect(session: SessionSummary): void;
-  onCreate(target: ConnectionTarget, workingDirectory: string | null): Promise<boolean>;
+  onCreate(
+    target: ConnectionTarget,
+    workingDirectory: string | null,
+  ): Promise<boolean>;
   onCreateFormOpenChange(open: boolean): void;
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
-  onCancelClose(): void;
-  onConfirmClose(session: SessionSummary): void;
-  onActivateHost(destination: string): boolean;
-  onSaveHost(
-    definition: SshHostDefinition,
-    storage: SshHostStorage,
-  ): Promise<void>;
+  onAddHost(): void;
+  onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
 }
 
@@ -89,26 +85,20 @@ export function SessionSidebar({
   error,
   creating,
   createFormOpen,
-  pendingCloseSessionKey,
   closingSessionKeys,
   disconnectingSessionKey,
-  hostSuggestions,
-  hostSuggestionWarning,
   onRefresh,
   onSelect,
   onCreate,
   onCreateFormOpenChange,
   onDisconnect,
   onRequestClose,
-  onCancelClose,
-  onConfirmClose,
-  onActivateHost,
-  onSaveHost,
+  onAddHost,
+  onConnectHost,
   onRemoveHost,
 }: SessionSidebarProps) {
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [creationTargetKey, setCreationTargetKey] = useState("local");
-  const [hostFormOpen, setHostFormOpen] = useState(false);
 
   useEffect(() => {
     if (!targets.some((target) => targetKey(target) === creationTargetKey)) {
@@ -136,12 +126,7 @@ export function SessionSidebar({
       <div className="sidebar-connections">
         <header className="sidebar-header">
           <strong>Sessions</strong>
-          <button
-            className="host-add-button"
-            type="button"
-            onClick={() => setHostFormOpen((open) => !open)}
-            aria-expanded={hostFormOpen}
-          >
+          <button className="host-add-button" type="button" onClick={onAddHost}>
             + Host
           </button>
           <button
@@ -161,7 +146,15 @@ export function SessionSidebar({
             const key = targetKey(target);
             return (
               <span className="host-chip" key={key} title={targetLabel(target)}>
-                <span>{targetLabel(target)}</span>
+                <button
+                  className="host-connect"
+                  type="button"
+                  onClick={() => onConnectHost(target)}
+                  disabled={target.kind === "local"}
+                  title={`Connect to ${targetLabel(target)}`}
+                >
+                  {targetLabel(target)}
+                </button>
                 {target.kind === "ssh" ? (
                   <button
                     type="button"
@@ -176,16 +169,6 @@ export function SessionSidebar({
             );
           })}
         </div>
-
-        {hostFormOpen ? (
-          <SshHostPicker
-            suggestions={hostSuggestions}
-            warning={hostSuggestionWarning}
-            onActivateHost={onActivateHost}
-            onSaveHost={onSaveHost}
-            onClose={() => setHostFormOpen(false)}
-          />
-        ) : null}
       </div>
 
       <div className="session-list">
@@ -193,7 +176,9 @@ export function SessionSidebar({
           <p className="sidebar-state">Finding sessions across hosts…</p>
         ) : null}
         {error ? (
-          <div className="sidebar-state error-state"><p>{error}</p></div>
+          <div className="sidebar-state error-state">
+            <p>{error}</p>
+          </div>
         ) : null}
         {[...targetErrors.entries()].map(([key, message]) => (
           <div className="host-error" key={key} role="status">
@@ -201,7 +186,10 @@ export function SessionSidebar({
             <span>{message}</span>
           </div>
         ))}
-        {!loading && !error && targetErrors.size === 0 && sessions.length === 0 ? (
+        {!loading &&
+        !error &&
+        targetErrors.size === 0 &&
+        sessions.length === 0 ? (
           <div className="sidebar-state">
             <span className="empty-glyph">›_</span>
             <p>No running sessions.</p>
@@ -218,12 +206,9 @@ export function SessionSidebar({
           const closing = closingSessionKeys.has(identity);
           const disconnecting = identity === disconnectingSessionKey;
           const canDisconnect = openTabSessionKeys.has(identity);
-          const confirmingClose = identity === pendingCloseSessionKey;
           return (
             <div
-              className={`session-row ${selected ? "active" : ""} ${
-                confirmingClose ? "confirming-close" : ""
-              }`}
+              className={`session-row ${selected ? "active" : ""}`}
               key={identity}
             >
               <button
@@ -249,67 +234,30 @@ export function SessionSidebar({
                   </small>
                 </span>
               </button>
-              {confirmingClose ? (
-                <div
-                  className="session-close-confirmation"
-                  role="group"
-                  aria-label={`Confirm closing ${session.name}`}
-                  onKeyDown={(event) => {
-                    if (event.nativeEvent.isComposing || event.key !== "Escape") {
-                      return;
-                    }
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onCancelClose();
-                  }}
-                >
-                  <span>
-                    Terminate <strong>{session.name}</strong> for all clients?
-                  </span>
-                  <div className="session-confirmation-actions">
-                    <button
-                      className="session-confirm-cancel"
-                      type="button"
-                      onClick={onCancelClose}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="session-confirm-close"
-                      type="button"
-                      onClick={() => onConfirmClose(session)}
-                      autoFocus
-                    >
-                      Close
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="session-actions">
-                  {canDisconnect ? (
-                    <button
-                      className="session-action"
-                      type="button"
-                      onClick={() => onDisconnect(session)}
-                      disabled={disconnecting || closing}
-                      aria-label={`Disconnect from ${session.name}`}
-                      title="Disconnect this tab; keep the session running"
-                    >
-                      <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
-                    </button>
-                  ) : null}
+              <div className="session-actions">
+                {canDisconnect ? (
                   <button
-                    className="session-action session-close"
+                    className="session-action"
                     type="button"
-                    onClick={() => onRequestClose(session)}
-                    disabled={closing || disconnecting}
-                    aria-label={`Close ${session.name}`}
-                    title="Close the session and terminate its shell"
+                    onClick={() => onDisconnect(session)}
+                    disabled={disconnecting || closing}
+                    aria-label={`Disconnect from ${session.name}`}
+                    title="Disconnect this tab; keep the session running"
                   >
-                    <span aria-hidden="true">{closing ? "…" : "×"}</span>
+                    <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
                   </button>
-                </div>
-              )}
+                ) : null}
+                <button
+                  className="session-action session-close"
+                  type="button"
+                  onClick={() => onRequestClose(session)}
+                  disabled={closing || disconnecting}
+                  aria-label={`Close ${session.name}`}
+                  title="Close the session and terminate its shell"
+                >
+                  <span aria-hidden="true">{closing ? "…" : "×"}</span>
+                </button>
+              </div>
             </div>
           );
         })}
@@ -322,7 +270,9 @@ export function SessionSidebar({
               Host
               <select
                 value={creationTargetKey}
-                onChange={(event) => setCreationTargetKey(event.currentTarget.value)}
+                onChange={(event) =>
+                  setCreationTargetKey(event.currentTarget.value)
+                }
               >
                 {targets.map((target) => (
                   <option key={targetKey(target)} value={targetKey(target)}>
@@ -335,7 +285,9 @@ export function SessionSidebar({
               Working directory
               <input
                 value={workingDirectory}
-                onChange={(event) => setWorkingDirectory(event.currentTarget.value)}
+                onChange={(event) =>
+                  setWorkingDirectory(event.currentTarget.value)
+                }
                 placeholder="home directory"
                 autoFocus
               />
@@ -348,7 +300,11 @@ export function SessionSidebar({
               >
                 Cancel
               </button>
-              <button className="button-primary" type="submit" disabled={creating}>
+              <button
+                className="button-primary"
+                type="submit"
+                disabled={creating}
+              >
                 {creating ? "Creating…" : "Create shell"}
               </button>
             </div>

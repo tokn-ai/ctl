@@ -2,7 +2,12 @@
   color: #e4e7ec;
   background: #111318;
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    Inter,
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -52,8 +57,7 @@ button {
   gap: 12px;
   padding: clamp(28px, 8vw, 96px);
   background:
-    radial-gradient(circle at 0 0, #352326 0, transparent 42%),
-    var(--surface-0);
+    radial-gradient(circle at 0 0, #352326 0, transparent 42%), var(--surface-0);
 }
 
 .app-crash-product {
@@ -116,8 +120,7 @@ button {
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-width: 0;
   background:
-    radial-gradient(circle at 0 0, #263029 0, transparent 34%),
-    var(--surface-1);
+    radial-gradient(circle at 0 0, #263029 0, transparent 34%), var(--surface-1);
   border-right: 1px solid var(--border);
 }
 
@@ -194,131 +197,18 @@ button {
   cursor: pointer;
 }
 
-.host-form {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  margin: 0 10px 10px;
-  padding: 9px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: #12151a;
-}
-
-.host-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.host-suggestions {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.host-suggestions > span {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.host-suggestions > div {
-  display: flex;
-  max-height: 92px;
-  flex-wrap: wrap;
-  gap: 4px;
-  overflow-y: auto;
-}
-
-.host-suggestions button {
-  max-width: 100%;
-  padding: 4px 6px;
+.host-chip .host-connect {
+  width: auto;
+  flex: 0 1 auto;
   overflow: hidden;
-  color: #aeb6c1;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.host-connection-details {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.host-connection-details summary {
-  padding: 2px 0;
-  cursor: pointer;
-}
-
-.host-connection-details[open] {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.host-storage-step {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.host-storage-step > div:first-child,
-.host-storage-choice {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-}
-
-.host-storage-step > div:first-child small,
-.host-storage-choice small {
-  color: var(--muted);
-  font-size: 9px;
-}
-
-.host-storage-choice {
-  padding: 7px;
-  color: var(--text);
-  text-align: left;
-}
-
-.host-storage-step > small.host-save-error {
-  color: #ffb0b0;
-  font-size: 10px;
-}
-
-.host-storage-step .form-actions span {
-  min-width: 48px;
-  color: var(--muted);
-  font-size: 10px;
-  text-align: right;
-}
-
-.host-form input {
-  min-width: 0;
-  padding: 6px 7px;
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--surface-0);
-}
-
-.host-form > small {
-  color: #ffb0b0;
-  font-size: 10px;
-}
-
-.host-form > small.host-suggestion-warning {
-  color: #d8bd7b;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .icon-button,
-.host-form button,
 .toolbar-actions button,
 .sidebar-state button,
 .form-actions button {
@@ -381,11 +271,6 @@ button:disabled {
   background: #243027;
 }
 
-.session-row.confirming-close {
-  border-color: #694242;
-  background: #2e2326;
-}
-
 .session-select {
   display: grid;
   grid-template-columns: 9px minmax(0, 1fr);
@@ -441,54 +326,6 @@ button:disabled {
   color: #ffd0d0;
   border-color: #694242;
   background: #3b2628;
-}
-
-.session-close-confirmation {
-  display: flex;
-  grid-column: 1 / -1;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 7px 8px 10px;
-  color: #efc7c7;
-  font-size: 11px;
-  border-top: 1px solid #57383b;
-}
-
-.session-close-confirmation > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.session-confirmation-actions {
-  display: flex;
-  flex: none;
-  gap: 4px;
-}
-
-.session-confirm-cancel,
-.session-confirm-close {
-  padding: 4px 7px;
-  font-size: 11px;
-  border-radius: 5px;
-}
-
-.session-confirm-cancel {
-  color: var(--muted);
-  background: transparent;
-}
-
-.session-confirm-close {
-  color: #ffe5e5;
-  border-color: #75474b;
-  background: #4a2c30;
-}
-
-.session-confirm-close:hover:not(:disabled) {
-  border-color: #a85e64;
-  background: #62373c;
 }
 
 .session-indicator {
@@ -1113,6 +950,60 @@ button:disabled {
   border-radius: 10px;
   background: #1b1f26;
   box-shadow: 0 24px 70px #00000099;
+}
+
+.quick-input-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+}
+
+.quick-input-heading strong {
+  flex: 1;
+  font-size: 13px;
+}
+.quick-input-description {
+  margin: 0;
+  padding: 0 12px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.quick-input-detail {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.quick-input-error {
+  margin: 0;
+  padding: 12px;
+  color: var(--danger);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.quick-input-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px;
+}
+.quick-input-heading button,
+.quick-input-actions button,
+.command-palette-input-row button {
+  padding: 5px 9px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.quick-input-actions .quick-input-danger {
+  color: var(--danger);
+  border-color: #8b4545;
 }
 
 .command-palette-input-row {

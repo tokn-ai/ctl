@@ -39,6 +39,23 @@ impl CommandErrorDto {
         Self::new("ssh_start_failed", error.to_string())
       }
       CoreError::ReadSshPreface(_) => Self::new("ssh_connection_failed", error.to_string()),
+      CoreError::SshStartup(message) => {
+        let lower = message.to_lowercase();
+        let code = if lower.contains("host key verification")
+          || lower.contains("host identification has changed")
+        {
+          "ssh_host_key_failed"
+        } else if lower.contains("permission denied") {
+          "ssh_authentication_failed"
+        } else if lower.contains("ctld")
+          && (lower.contains("not found") || lower.contains("no such file"))
+        {
+          "ctld_not_found"
+        } else {
+          "ssh_connection_failed"
+        };
+        Self::new(code, error.to_string())
+      }
       CoreError::InvalidSshPreface => Self::new("invalid_ssh_preface", error.to_string()),
       #[cfg(unix)]
       CoreError::LocalIpc(_) => Self::new("local_connection_failed", error.to_string()),

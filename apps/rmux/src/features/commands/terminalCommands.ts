@@ -1,16 +1,10 @@
-import type {
-  ConnectionPhase,
-  SessionSummary,
-} from "../../lib/types";
-import type {
-  AppCommand,
-  Keybinding,
-  ShortcutPlatform,
-} from "./types";
+import type { ConnectionPhase, SessionSummary } from "../../lib/types";
+import type { AppCommand, Keybinding, ShortcutPlatform } from "./types";
 import { sessionKey, targetLabel } from "../targets/targets";
 
 export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
+  addHost: "host.add",
   newShell: "session.new_shell",
   newTab: "tab.new_shell_here",
   refreshSessions: "session.refresh",
@@ -55,19 +49,18 @@ interface TerminalCommandContext {
 
 interface TerminalCommandActions {
   showPalette(): void;
+  showAddHost(): void;
   showNewShellForm(): void;
   openShellTab(): void;
   refreshSessions(): void;
   selectSession(session: SessionSummary): void;
   disconnectSession(session: SessionSummary): void;
   requestCloseSession(session: SessionSummary): void;
-  confirmCloseSession(session: SessionSummary): void;
   toggleInput(): void;
   toggleResizeWithWindow(): void;
   reconnect(): void;
   focusTerminal(): void;
   requestDaemonRestart(): void;
-  confirmDaemonRestart(): void;
 }
 
 export function buildTerminalCommands(
@@ -78,11 +71,7 @@ export function buildTerminalCommands(
     context.sessions.find(
       (session) => sessionKey(session) === context.activeSessionKey,
     ) ?? null;
-  const nextTab = adjacentSession(
-    context.tabs,
-    context.activeSessionKey,
-    1,
-  );
+  const nextTab = adjacentSession(context.tabs, context.activeSessionKey, 1);
   const previousTab = adjacentSession(
     context.tabs,
     context.activeSessionKey,
@@ -102,24 +91,33 @@ export function buildTerminalCommands(
   const disconnectingActive =
     activeSession !== null &&
     context.disconnectingSessionKey === sessionKey(activeSession);
-  const pendingCloseSession =
-    context.sessions.find(
-      (session) => sessionKey(session) === context.pendingCloseSessionKey,
-    ) ?? null;
   const daemonRestartInteractionBlocked =
     context.daemonRestartConfirmationPending || context.restartingDaemon;
   const daemonRestartInteractionDisabledReason = context.restartingDaemon
     ? "rmuxd is restarting."
     : "Confirm or cancel the pending rmuxd restart first.";
   const daemonRestartBlocked =
-    context.creating || context.createFormOpen || context.restartingDaemon;
+    context.creating ||
+    context.createFormOpen ||
+    daemonRestartInteractionBlocked;
   const daemonRestartDisabledReason = context.restartingDaemon
     ? "rmuxd is already restarting."
-    : context.creating
-      ? "Wait for the shell being created to finish."
-      : "Close the new-shell form before restarting rmuxd.";
+    : context.daemonRestartConfirmationPending
+      ? daemonRestartInteractionDisabledReason
+      : context.creating
+        ? "Wait for the shell being created to finish."
+        : "Close the new-shell form before restarting rmuxd.";
 
   const commands: AppCommand[] = [
+    {
+      id: COMMAND_IDS.addHost,
+      category: "Host",
+      title: "Add SSH Host",
+      keywords: ["remote", "ssh", "connect"],
+      enabled: !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: actions.showAddHost,
+    },
     {
       id: COMMAND_IDS.showPalette,
       category: "View",
@@ -258,10 +256,8 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.close,
       category: "Session",
-      title: pendingCloseSession
-        ? `Confirm Close ${pendingCloseSession.name}`
-        : "Close Active Session",
-      detail: pendingCloseSession?.name ?? activeSession?.name,
+      title: "Close Active Session",
+      detail: activeSession?.name,
       keywords: ["exit", "kill", "terminate"],
       keybinding: {
         code: "KeyE",
@@ -271,21 +267,20 @@ export function buildTerminalCommands(
       macosNativeKeybinding: true,
       enabled:
         !daemonRestartInteractionBlocked &&
-        (pendingCloseSession !== null
-          ? !context.closingSessionKeys.has(sessionKey(pendingCloseSession))
-          : activeSession !== null && !closingActive && !disconnectingActive),
+        context.pendingCloseSessionKey === null &&
+        activeSession !== null &&
+        !closingActive &&
+        !disconnectingActive,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : pendingCloseSession
-          ? "The session is already closing."
+        : context.pendingCloseSessionKey
+          ? "Confirm or cancel the pending close first."
           : activeSession
             ? "The active session is already changing state."
             : "No session is active.",
       focusTerminalAfterRun: false,
       run: () => {
-        if (pendingCloseSession) {
-          actions.confirmCloseSession(pendingCloseSession);
-        } else if (activeSession) {
+        if (activeSession) {
           actions.requestCloseSession(activeSession);
         }
       },
@@ -338,28 +333,21 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.restartDaemon,
       category: "Daemon",
-      title: context.daemonRestartConfirmationPending
-        ? "Confirm Restart rmuxd"
-        : "Restart rmuxd",
-      detail: context.daemonRestartConfirmationPending
-        ? "This terminates every local rmux session before starting a new daemon. Press Esc to cancel."
-        : "Terminate every local rmux session and start a new daemon.",
+      title: "Restart rmuxd",
+      detail: "Terminate every local rmux session and start a new daemon.",
       keywords: ["daemon", "restart", "protocol", "version", "recover"],
       enabled: !daemonRestartBlocked,
       disabledReason: daemonRestartDisabledReason,
-      keepPaletteOpen: !context.daemonRestartConfirmationPending,
+      keepPaletteOpen: false,
       focusTerminalAfterRun: false,
-      run: context.daemonRestartConfirmationPending
-        ? actions.confirmDaemonRestart
-        : actions.requestDaemonRestart,
+      run: actions.requestDaemonRestart,
     },
   ];
 
   for (const session of context.sessions) {
     const identity = sessionKey(session);
     const selected = identity === context.activeSessionKey;
-    const matchesAttachment =
-      identity === context.attachmentSessionKey;
+    const matchesAttachment = identity === context.attachmentSessionKey;
     const attaching =
       matchesAttachment &&
       (context.phase === "connecting" || context.phase === "reconnecting");
@@ -423,7 +411,9 @@ function adjacentSession(
   if (sessions.length === 1) {
     return null;
   }
-  return sessions[(activeIndex + direction + sessions.length) % sessions.length];
+  return sessions[
+    (activeIndex + direction + sessions.length) % sessions.length
+  ];
 }
 
 export function sessionSwitchCommandId(session: SessionSummary): string {

@@ -34,6 +34,12 @@ export interface SaveSshConfigHostResponse {
 
 export type SshHostStorage = "ssh_config" | "local_storage";
 
+export interface SshPrompt {
+  prompt_id: string;
+  kind: "confirm" | "secret";
+  message: string;
+}
+
 export interface TerminalSize {
   columns: number;
   rows: number;

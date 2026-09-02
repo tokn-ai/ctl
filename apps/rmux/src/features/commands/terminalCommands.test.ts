@@ -43,19 +43,18 @@ function setup(
     sessionId === null ? null : sessionKey(session(sessionId));
   const actions = {
     showPalette: vi.fn(),
+    showAddHost: vi.fn(),
     showNewShellForm: vi.fn(),
     openShellTab: vi.fn(),
     refreshSessions: vi.fn(),
     selectSession: vi.fn(),
     disconnectSession: vi.fn(),
     requestCloseSession: vi.fn(),
-    confirmCloseSession: vi.fn(),
     toggleInput: vi.fn(),
     toggleResizeWithWindow: vi.fn(),
     reconnect: vi.fn(),
     focusTerminal: vi.fn(),
     requestDaemonRestart: vi.fn(),
-    confirmDaemonRestart: vi.fn(),
   };
   const commands = buildTerminalCommands(
     {
@@ -95,12 +94,10 @@ function findCommand(
 
 describe("terminal commands", () => {
   it("cycles through open tabs and wraps around", () => {
-    const { tabs, actions, commands } = setup(
+    const { tabs, actions, commands } = setup("first", "macos", "/work/rmux", [
       "first",
-      "macos",
-      "/work/rmux",
-      ["first", "third"],
-    );
+      "third",
+    ]);
 
     findCommand(commands, COMMAND_IDS.nextTab).run();
     findCommand(commands, COMMAND_IDS.previousTab).run();
@@ -120,8 +117,8 @@ describe("terminal commands", () => {
     expect(actions.requestCloseSession).toHaveBeenCalledWith(sessions[1]);
   });
 
-  it("confirms the pending close with the same close command", () => {
-    const { sessions, actions, commands } = setup(
+  it("cannot confirm a pending close through the command registry", () => {
+    const { actions, commands } = setup(
       "second",
       "macos",
       "/work/rmux",
@@ -133,14 +130,11 @@ describe("terminal commands", () => {
 
     const close = findCommand(commands, COMMAND_IDS.close);
     expect(close).toMatchObject({
-      title: "Confirm Close second",
+      title: "Close Active Session",
       detail: "second",
-      enabled: true,
+      enabled: false,
     });
 
-    close.run();
-
-    expect(actions.confirmCloseSession).toHaveBeenCalledWith(sessions[1]);
     expect(actions.requestCloseSession).not.toHaveBeenCalled();
   });
 
@@ -156,7 +150,9 @@ describe("terminal commands", () => {
       keybinding: { code: "KeyE", primary: true, shift: false },
       macosNativeKeybinding: true,
     });
-    expect(findCommand(other.commands, COMMAND_IDS.disconnect).keybinding).toEqual({
+    expect(
+      findCommand(other.commands, COMMAND_IDS.disconnect).keybinding,
+    ).toEqual({
       code: "KeyW",
       primary: true,
       shift: true,
@@ -205,8 +201,9 @@ describe("terminal commands", () => {
 
     expect(switchCommands).toHaveLength(3);
     expect(
-      switchCommands.find(({ id }) => id === sessionSwitchCommandId(sessions[1]))
-        ?.enabled,
+      switchCommands.find(
+        ({ id }) => id === sessionSwitchCommandId(sessions[1]),
+      )?.enabled,
     ).toBe(false);
   });
 
@@ -238,7 +235,9 @@ describe("terminal commands", () => {
       null,
     );
 
-    expect(findCommand(commands, sessionSwitchCommandId(sessions[1]))).toMatchObject({
+    expect(
+      findCommand(commands, sessionSwitchCommandId(sessions[1])),
+    ).toMatchObject({
       title: "Attach to second",
       detail: "Retry attachment",
       enabled: true,
@@ -294,7 +293,7 @@ describe("terminal commands", () => {
     expect(restart).toMatchObject({
       category: "Daemon",
       title: "Restart rmuxd",
-      keepPaletteOpen: true,
+      keepPaletteOpen: false,
       focusTerminalAfterRun: false,
     });
     expect(restart.keybinding).toBeUndefined();
@@ -317,13 +316,13 @@ describe("terminal commands", () => {
     );
 
     expect(confirm).toMatchObject({
-      title: "Confirm Restart rmuxd",
+      title: "Restart rmuxd",
+      enabled: false,
       keepPaletteOpen: false,
     });
-    expect(findCommand(confirmation.commands, COMMAND_IDS.newShell).enabled).toBe(
-      false,
-    );
-    confirm.run();
-    expect(confirmation.actions.confirmDaemonRestart).toHaveBeenCalledOnce();
+    expect(
+      findCommand(confirmation.commands, COMMAND_IDS.newShell).enabled,
+    ).toBe(false);
+    expect(confirmation.actions.requestDaemonRestart).not.toHaveBeenCalled();
   });
 });

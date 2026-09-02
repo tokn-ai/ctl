@@ -132,7 +132,17 @@ shell-state caches, mutations, and reconnect intent by `(target, session ID)`.
 A failed target retains its last-known rows and reports a target-local error
 without hiding successful targets. OpenSSH remains responsible for passwords,
 key contents, proxies, host verification, and connection multiplexing. The app
-adds no SSH prompt or credential surface.
+brokers OpenSSH askpass prompts through its shared quick-input overlay on
+macOS/Linux. A random capability and ephemeral owner-only Unix socket connect
+the same app binary (in helper mode, before Tauri starts) to one connection
+attempt. Prompt replies are window/attempt-scoped and single-use; cancellation
+or window destruction terminates the SSH attempt and removes the socket.
+Host trust is confirmed explicitly and remains in OpenSSH's known-hosts files.
+Passwords/passphrases are retained only in native process memory for later
+connections to the same target; other interactive responses are not cached.
+Background connections use cached credentials or batch mode, never unsolicited
+dialogs. SSH startup diagnostics are bounded and returned to the frontend
+instead of being lost behind a generic missing-transport-marker error.
 
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same
 collision-safe `session-N` allocation used by every unnamed client. Its session

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { QuickInput } from "../components/commands/QuickInput";
+import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
@@ -69,6 +71,7 @@ import {
   listSshConfigHosts,
   restartLocalDaemon,
   saveSshConfigHost,
+  forgetSshCredentials,
 } from "../lib/tauri";
 import type {
   ConnectionTarget,
@@ -122,15 +125,20 @@ export function TerminalPage() {
   const [creating, setCreating] = useState(false);
   const [createFormOpen, setCreateFormOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [daemonRestartConfirmationPending, setDaemonRestartConfirmationPending] =
-    useState(false);
+  const [hostFlow, setHostFlow] = useState<ConnectionTarget | null | undefined>(
+    undefined,
+  );
+  const [
+    daemonRestartConfirmationPending,
+    setDaemonRestartConfirmationPending,
+  ] = useState(false);
   const [restartingDaemon, setRestartingDaemon] = useState(false);
   const [pendingCloseSessionKey, setPendingCloseSessionKey] = useState<
     string | null
   >(null);
-  const [closingSessionKeys, setClosingSessionKeys] = useState<ReadonlySet<string>>(
-    new Set(),
-  );
+  const [closingSessionKeys, setClosingSessionKeys] = useState<
+    ReadonlySet<string>
+  >(new Set());
   const [disconnectingSessionKey, setDisconnectingSessionKey] = useState<
     string | null
   >(null);
@@ -146,8 +154,7 @@ export function TerminalPage() {
   const daemonEpochRef = useRef(0);
 
   const daemonRestartBlocksInteractions = useCallback(
-    () =>
-      daemonRestartConfirmationRef.current || restartingDaemonRef.current,
+    () => daemonRestartConfirmationRef.current || restartingDaemonRef.current,
     [],
   );
 
@@ -171,96 +178,96 @@ export function TerminalPage() {
     };
   }, []);
 
-  const refresh = useCallback(async (allowDuringDaemonRestart = false) => {
-    if (!allowDuringDaemonRestart && daemonRestartBlocksInteractions()) {
-      return;
-    }
-    const daemonEpoch = daemonEpochRef.current;
-    const token = refreshGuardRef.current.begin();
-    setLoading(true);
-    setListError(null);
-    try {
-      const results = await Promise.all(
-        targets.map(async (target) => {
-          try {
-            return { target, response: await listSessions(target) } as const;
-          } catch (error) {
-            return { target, error } as const;
-          }
-        }),
-      );
-      if (
-        daemonEpoch !== daemonEpochRef.current ||
-        !refreshGuardRef.current.canApply(token)
-      ) {
+  const refresh = useCallback(
+    async (allowDuringDaemonRestart = false) => {
+      if (!allowDuringDaemonRestart && daemonRestartBlocksInteractions()) {
         return;
       }
-      const refreshed = new Map<string, SessionSummary[]>();
-      const inspections = new Map<string, ShellStateSummary>();
-      const errors = new Map<string, string>();
-      const successfulTargets = new Set<string>();
-      const listedSessionKeys = new Set<string>();
-      for (const result of results) {
-        const key = targetKey(result.target);
-        if ("error" in result) {
-          errors.set(key, errorMessage(result.error));
-          continue;
+      const daemonEpoch = daemonEpochRef.current;
+      const token = refreshGuardRef.current.begin();
+      setLoading(true);
+      setListError(null);
+      try {
+        const results = await Promise.all(
+          targets.map(async (target) => {
+            try {
+              return { target, response: await listSessions(target) } as const;
+            } catch (error) {
+              return { target, error } as const;
+            }
+          }),
+        );
+        if (
+          daemonEpoch !== daemonEpochRef.current ||
+          !refreshGuardRef.current.canApply(token)
+        ) {
+          return;
         }
-        successfulTargets.add(key);
-        refreshed.set(key, result.response.sessions);
-        for (const session of result.response.sessions) {
-          listedSessionKeys.add(sessionKey(session));
-          const shellState = result.response.shell_states[session.session_id];
-          if (shellState) {
-            inspections.set(sessionKey(session), shellState);
+        const refreshed = new Map<string, SessionSummary[]>();
+        const inspections = new Map<string, ShellStateSummary>();
+        const errors = new Map<string, string>();
+        const successfulTargets = new Set<string>();
+        const listedSessionKeys = new Set<string>();
+        for (const result of results) {
+          const key = targetKey(result.target);
+          if ("error" in result) {
+            errors.set(key, errorMessage(result.error));
+            continue;
+          }
+          successfulTargets.add(key);
+          refreshed.set(key, result.response.sessions);
+          for (const session of result.response.sessions) {
+            listedSessionKeys.add(sessionKey(session));
+            const shellState = result.response.shell_states[session.session_id];
+            if (shellState) {
+              inspections.set(sessionKey(session), shellState);
+            }
           }
         }
-      }
-      const hidden = closedSessionKeysRef.current;
-      const visible = mergeTargetSessionLists(
-        sessionsRef.current,
-        targets,
-        refreshed,
-      ).filter((session) => !hidden.has(sessionKey(session)));
-      const visibleIds = new Set(visible.map(sessionKey));
-      sessionsRef.current = visible;
-      setSessions(visible);
-      setTargetErrors(errors);
-      setSessionShellStates((current) =>
-        mergeShellStateInspections(current, inspections, visibleIds),
-      );
-      const nextTabs = reconcileTerminalTabs(
-        tabsRef.current,
-        visible,
-        activeTabKeyRef.current,
-      );
-      tabsRef.current = nextTabs;
-      setTabs(nextTabs);
-      setTabShellStates((current) =>
-        retainShellStates(
-          current,
-          new Set(nextTabs.map(sessionKey)),
-        ),
-      );
-      for (const identity of hidden) {
-        const hiddenTarget = targetKeyFromSessionKey(identity);
+        const hidden = closedSessionKeysRef.current;
+        const visible = mergeTargetSessionLists(
+          sessionsRef.current,
+          targets,
+          refreshed,
+        ).filter((session) => !hidden.has(sessionKey(session)));
+        const visibleIds = new Set(visible.map(sessionKey));
+        sessionsRef.current = visible;
+        setSessions(visible);
+        setTargetErrors(errors);
+        setSessionShellStates((current) =>
+          mergeShellStateInspections(current, inspections, visibleIds),
+        );
+        const nextTabs = reconcileTerminalTabs(
+          tabsRef.current,
+          visible,
+          activeTabKeyRef.current,
+        );
+        tabsRef.current = nextTabs;
+        setTabs(nextTabs);
+        setTabShellStates((current) =>
+          retainShellStates(current, new Set(nextTabs.map(sessionKey))),
+        );
+        for (const identity of hidden) {
+          const hiddenTarget = targetKeyFromSessionKey(identity);
+          if (
+            hiddenTarget &&
+            successfulTargets.has(hiddenTarget) &&
+            !listedSessionKeys.has(identity)
+          ) {
+            hidden.delete(identity);
+          }
+        }
+      } finally {
         if (
-          hiddenTarget &&
-          successfulTargets.has(hiddenTarget) &&
-          !listedSessionKeys.has(identity)
+          daemonEpoch === daemonEpochRef.current &&
+          refreshGuardRef.current.isLatest(token)
         ) {
-          hidden.delete(identity);
+          setLoading(false);
         }
       }
-    } finally {
-      if (
-        daemonEpoch === daemonEpochRef.current &&
-        refreshGuardRef.current.isLatest(token)
-      ) {
-        setLoading(false);
-      }
-    }
-  }, [daemonRestartBlocksInteractions, targets]);
+    },
+    [daemonRestartBlocksInteractions, targets],
+  );
 
   useEffect(() => {
     void refresh();
@@ -306,7 +313,9 @@ export function TerminalPage() {
       }
       const target =
         storage === "ssh_config"
-          ? configuredSshTarget((await saveSshConfigHost(definition)).destination)
+          ? configuredSshTarget(
+              (await saveSshConfigHost(definition)).destination,
+            )
           : appLocalSshTarget(definition);
       if (!target || !addTarget(target)) {
         throw new Error("The host settings could not be saved.");
@@ -392,9 +401,7 @@ export function TerminalPage() {
       const closed = closeTerminalTab(currentTabs, identity);
       tabsRef.current = closed.tabs;
       setTabs(closed.tabs);
-      setTabShellStates((current) =>
-        forgetShellState(current, identity),
-      );
+      setTabShellStates((current) => forgetShellState(current, identity));
       if (!wasActive) {
         return;
       }
@@ -422,6 +429,7 @@ export function TerminalPage() {
       if (target.kind === "local" || daemonRestartBlocksInteractions()) {
         return;
       }
+      void forgetSshCredentials(target).catch(() => undefined);
       const removedTargetKey = targetKey(target);
       const activeTab = tabsRef.current.find(
         (tab) => sessionKey(tab) === activeTabKeyRef.current,
@@ -442,7 +450,9 @@ export function TerminalPage() {
       const nextTabs = tabsRef.current.filter(
         (tab) => !sameTarget(tab.target, target),
       );
-      const nextActive = removingActive ? nextTabs[0] ?? null : activeTab ?? null;
+      const nextActive = removingActive
+        ? (nextTabs[0] ?? null)
+        : (activeTab ?? null);
       const nextActiveKey = nextActive ? sessionKey(nextActive) : null;
 
       refreshGuardRef.current.recordMutation();
@@ -588,12 +598,8 @@ export function TerminalPage() {
           sessionsRef.current = next;
           return next;
         });
-        setTabShellStates((current) =>
-          forgetShellState(current, identity),
-        );
-        setSessionShellStates((current) =>
-          forgetShellState(current, identity),
-        );
+        setTabShellStates((current) => forgetShellState(current, identity));
+        setSessionShellStates((current) => forgetShellState(current, identity));
         await closeTab(session);
         // The session is hidden after either an accepted kill or a not-found
         // response, which means another actor already achieved the same result.
@@ -611,16 +617,21 @@ export function TerminalPage() {
     [attachment, closeTab, daemonRestartBlocksInteractions],
   );
 
-  const requestClose = useCallback((session: SessionSummary) => {
-    if (daemonRestartBlocksInteractions()) {
-      return;
-    }
-    setPendingCloseSessionKey(sessionKey(session));
-  }, [daemonRestartBlocksInteractions]);
+  const requestClose = useCallback(
+    (session: SessionSummary) => {
+      if (daemonRestartBlocksInteractions()) {
+        return;
+      }
+      setPaletteOpen(false);
+      setPendingCloseSessionKey(sessionKey(session));
+    },
+    [daemonRestartBlocksInteractions],
+  );
 
   const cancelClose = useCallback(() => {
     setPendingCloseSessionKey(null);
-  }, []);
+    requestAnimationFrame(() => renderer?.focus());
+  }, [renderer]);
 
   const confirmClose = useCallback(
     (session: SessionSummary) => {
@@ -654,7 +665,7 @@ export function TerminalPage() {
     const retainedTabs = tabsRef.current.filter(
       (tab) => tab.target.kind !== "local",
     );
-    const nextActiveTab = activeWasLocal ? retainedTabs[0] ?? null : null;
+    const nextActiveTab = activeWasLocal ? (retainedTabs[0] ?? null) : null;
     const nextActiveKey = activeWasLocal
       ? nextActiveTab
         ? sessionKey(nextActiveTab)
@@ -717,12 +728,18 @@ export function TerminalPage() {
     if (nextActiveTab) {
       await activateTab(nextActiveTab);
     }
-  }, [activateTab, clearLocalDaemonState, refresh, setDaemonRestartConfirmation]);
+  }, [
+    activateTab,
+    clearLocalDaemonState,
+    refresh,
+    setDaemonRestartConfirmation,
+  ]);
 
   const requestDaemonRestart = useCallback(() => {
     if (restartingDaemonRef.current) {
       return;
     }
+    setPaletteOpen(false);
     setDaemonRestartConfirmation(true);
   }, [setDaemonRestartConfirmation]);
 
@@ -731,31 +748,27 @@ export function TerminalPage() {
       return;
     }
     setDaemonRestartConfirmation(false);
-  }, [setDaemonRestartConfirmation]);
+    requestAnimationFrame(() => renderer?.focus());
+  }, [renderer, setDaemonRestartConfirmation]);
 
   const confirmDaemonRestart = useCallback(() => {
-    if (
-      !daemonRestartConfirmationRef.current ||
-      restartingDaemonRef.current
-    ) {
+    if (!daemonRestartConfirmationRef.current || restartingDaemonRef.current) {
       return;
     }
     void restartDaemon();
   }, [restartDaemon]);
 
   const attachedSession = attachment.state.session;
-  const attachedSessionKey = attachedSession ? sessionKey(attachedSession) : null;
+  const attachedSessionKey = attachedSession
+    ? sessionKey(attachedSession)
+    : null;
   const attachedTerminalSize = attachedSession?.terminal_size;
   const attachedShellState = attachment.state.shell_state;
   useEffect(() => {
     if (!attachedSession || !attachedShellState) {
       return;
     }
-    if (
-      !tabsRef.current.some(
-        (tab) => sameSession(tab, attachedSession),
-      )
-    ) {
+    if (!tabsRef.current.some((tab) => sameSession(tab, attachedSession))) {
       return;
     }
     setTabShellStates((current) =>
@@ -819,12 +832,8 @@ export function TerminalPage() {
       sessionsRef.current = next;
       return next;
     });
-    setTabShellStates((current) =>
-      forgetShellState(current, identity),
-    );
-    setSessionShellStates((current) =>
-      forgetShellState(current, identity),
-    );
+    setTabShellStates((current) => forgetShellState(current, identity));
+    setSessionShellStates((current) => forgetShellState(current, identity));
     void closeTab(attachedSession);
   }, [attachment.state.phase, attachedSession, closeTab]);
 
@@ -836,7 +845,7 @@ export function TerminalPage() {
     attachedSessionKey === activeTabKey && attachedShellState
       ? attachedShellState
       : activeTabKey
-        ? tabShellStates.get(activeTabKey) ?? null
+        ? (tabShellStates.get(activeTabKey) ?? null)
         : null;
   const displayedTabShellStates =
     attachedSession && attachedShellState
@@ -845,7 +854,7 @@ export function TerminalPage() {
           sessionKey(attachedSession),
           attachedShellState,
           { replaceEqualRevision: true },
-      )
+        )
       : tabShellStates;
   const displayedSessionShellStates = new Map(sessionShellStates);
   if (attachedSession && attachedShellState) {
@@ -881,6 +890,7 @@ export function TerminalPage() {
     },
     {
       showPalette: () => setPaletteOpen(true),
+      showAddHost: () => setHostFlow(null),
       showNewShellForm: () => {
         if (!daemonRestartBlocksInteractions()) {
           setCreateFormOpen(true);
@@ -895,7 +905,6 @@ export function TerminalPage() {
       selectSession: (session) => void activateTab(session),
       disconnectSession: (session) => void disconnect(session),
       requestCloseSession: requestClose,
-      confirmCloseSession: confirmClose,
       toggleInput: () => {
         if (!daemonRestartBlocksInteractions()) {
           void attachment.toggleInputLease();
@@ -913,7 +922,6 @@ export function TerminalPage() {
       },
       focusTerminal: () => renderer?.focus(),
       requestDaemonRestart,
-      confirmDaemonRestart,
     },
   );
   const paletteShortcutLabel = formatKeybinding(
@@ -923,6 +931,12 @@ export function TerminalPage() {
 
   const executeCommand = useCallback(
     (command: AppCommand) => {
+      if (
+        hostFlow !== undefined ||
+        pendingCloseSessionKey ||
+        daemonRestartConfirmationPending
+      )
+        return;
       if (!command.keepPaletteOpen) {
         setPaletteOpen(false);
       }
@@ -934,7 +948,13 @@ export function TerminalPage() {
         requestAnimationFrame(() => renderer?.focus());
       }
     },
-    [cancelDaemonRestart, renderer],
+    [
+      cancelDaemonRestart,
+      renderer,
+      hostFlow,
+      pendingCloseSessionKey,
+      daemonRestartConfirmationPending,
+    ],
   );
 
   useCommandShortcuts(commands, shortcutPlatform, executeCommand);
@@ -976,7 +996,6 @@ export function TerminalPage() {
           error={listError}
           creating={creating}
           createFormOpen={createFormOpen}
-          pendingCloseSessionKey={pendingCloseSessionKey}
           closingSessionKeys={closingSessionKeys}
           disconnectingSessionKey={disconnectingSessionKey}
           onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
@@ -995,12 +1014,13 @@ export function TerminalPage() {
           }}
           onDisconnect={(session) => void disconnect(session)}
           onRequestClose={requestClose}
-          onCancelClose={cancelClose}
-          onConfirmClose={confirmClose}
-          hostSuggestions={hostSuggestions}
-          hostSuggestionWarning={sshConfigWarning}
-          onActivateHost={activateConfiguredHost}
-          onSaveHost={saveHost}
+          onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
+          onConnectHost={(target) => {
+            if (target.kind === "ssh") {
+              setPaletteOpen(false);
+              setHostFlow(target);
+            }
+          }}
           onRemoveHost={(target) => void removeHost(target)}
         />
         <section className="terminal-workspace">
@@ -1020,27 +1040,25 @@ export function TerminalPage() {
           />
           <TerminalToolbar
             state={attachment.state}
-            onToggleInput={() =>
-              executeCommandById(COMMAND_IDS.toggleInput)
-            }
+            onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
             onToggleResizeWithWindow={() =>
               executeCommandById(COMMAND_IDS.toggleResize)
             }
             onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
-            onShowCommands={() =>
-              executeCommandById(COMMAND_IDS.showPalette)
-            }
+            onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
             commandShortcutLabel={paletteShortcutLabel}
           />
           <div className="terminal-notices">
             {attachment.state.history_gap ? (
               <div className="history-gap-banner" role="status">
-                Earlier remote output is no longer contiguous. The live screen was restored from a
-                checkpoint.
+                Earlier remote output is no longer contiguous. The live screen
+                was restored from a checkpoint.
               </div>
             ) : null}
             {attachment.state.message ? (
-              <div className="message-banner" role="status">{attachment.state.message}</div>
+              <div className="message-banner" role="status">
+                {attachment.state.message}
+              </div>
             ) : null}
           </div>
           <TerminalSurface
@@ -1052,7 +1070,50 @@ export function TerminalPage() {
           <StatusBar state={attachment.state} />
         </section>
       </main>
-      {paletteOpen ? (
+      {hostFlow !== undefined ? (
+        <SshHostFlow
+          suggestions={hostSuggestions}
+          warning={sshConfigWarning}
+          target={hostFlow ?? undefined}
+          onActivateHost={activateConfiguredHost}
+          onSaveHost={saveHost}
+          onConnected={() => void refresh()}
+          onClose={() => {
+            setHostFlow(undefined);
+            requestAnimationFrame(() => renderer?.focus());
+          }}
+        />
+      ) : pendingCloseSessionKey ? (
+        <QuickInput
+          title="Close session"
+          description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.`}
+          mode={{
+            kind: "confirm",
+            confirm_label: "Close session",
+            destructive: true,
+          }}
+          onCancel={cancelClose}
+          onSubmit={() => {
+            const session = sessions.find(
+              (session) => sessionKey(session) === pendingCloseSessionKey,
+            );
+            if (session) confirmClose(session);
+            else cancelClose();
+          }}
+        />
+      ) : daemonRestartConfirmationPending ? (
+        <QuickInput
+          title="Restart rmuxd"
+          description="Terminate every local rmux session and start a new daemon? This cannot be undone."
+          mode={{
+            kind: "confirm",
+            confirm_label: "Restart rmuxd",
+            destructive: true,
+          }}
+          onCancel={cancelDaemonRestart}
+          onSubmit={confirmDaemonRestart}
+        />
+      ) : paletteOpen ? (
         <CommandPalette
           commands={commands}
           platform={shortcutPlatform}

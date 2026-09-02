@@ -72,12 +72,16 @@ exists, start `rmux-app`, choose **+ Host**, and activate the discovered
 files are suggestions only; opening the picker does not contact them.
 
 The app can also define the container without a pre-existing alias. In **+
-Host**, enter `127.0.0.1`, use a name such as `rmux-remote-test`, then expand
-the connection settings and enter user `rmux`, port `2222`, and the matching
-private-key path. Continue and choose either **OpenSSH config** to create a
+Host**, enter `rmux@127.0.0.1:2222`, use a name such as `rmux-remote-test`, then
+choose **Identity file** and enter the matching private-key path. These steps
+open at the command palette location. Verify any SSH host-key prompt against
+the fingerprint above. Once `ctld connect` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
 WebView local storage. The latter still invokes the system SSH client and does
-not store the key contents.
+not store the key contents. `ctld` is assumed to be on the remote `PATH`.
+Password/passphrase and host-verification prompts use the same overlay on
+macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
+chip to authenticate again if SSH config/agent alone is insufficient.
 
 Local and container sessions then appear in one sidebar with host labels. New
 shells default to local; the creation form can explicitly select the remote

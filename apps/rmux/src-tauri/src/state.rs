@@ -234,6 +234,7 @@ pub fn register_main_window_cleanup(app: &tauri::App) {
   let window_label = window.label().to_owned();
   window.on_window_event(move |event| {
     if matches!(event, tauri::WindowEvent::Destroyed) {
+      crate::ssh_auth::cancel_window(&window_label);
       let state = state.clone();
       let window_label = window_label.clone();
       tauri::async_runtime::spawn(async move {

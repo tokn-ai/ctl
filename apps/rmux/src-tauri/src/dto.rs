@@ -16,7 +16,7 @@ use crate::error::{CommandErrorDto, CommandResult, protocol_error_code};
 /// The SSH value is an OpenSSH destination or configured host alias. Optional
 /// app-local settings are passed as fixed SSH arguments; arbitrary options,
 /// remote commands, credentials, and forwarding configuration remain absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConnectionTargetDto {
   Local,

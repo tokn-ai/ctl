@@ -17,8 +17,13 @@ pnpm tauri dev
 
 The app may also use the path in `RMUXD_BIN`. Open **+ Host** to activate a
 concrete alias discovered from `~/.ssh/config` (including its `Include` files)
-or enter a hostname/IP and optional alias, user, port, and identity-file path.
-The next step chooses where the new definition is saved. **OpenSSH config**
+or enter `[user@]hostname[:port]`, then a name, then choose SSH config/agent,
+an identity-file path, or password/interactive authentication. These steps use
+the same quick-input overlay as the command palette. OpenSSH requests any
+required host-key confirmation, password, passphrase, or interactive response
+there. `ctld` must already be on the remote `PATH`; custom command paths are
+not supported. After a successful connection, choose where to save the host.
+**OpenSSH config**
 writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
 reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.
 **This app only** stores the same non-secret settings in WebView local storage
@@ -37,9 +42,16 @@ last-known sessions from other targets remain usable.
 
 SSH uses `ctl-core` and the system `ssh` executable with the fixed remote
 command `exec ctld connect`; forwarding, agent access, X11, local commands,
-and PTY allocation remain disabled. Configure authentication and host trust
-before connecting—the app does not implement password or host-key prompt UI.
-Connection attempts are bounded to ten seconds.
+and PTY allocation remain disabled. On macOS/Linux, a short-lived owner-only
+Unix socket connects OpenSSH's askpass helper to the quick-input UI. Host-key
+trust requires explicit confirmation and is managed by OpenSSH. Passwords and
+key passphrases are cached only in native process memory, never saved to disk,
+command arguments, environment variables, or logs; one-time responses are not
+cached. Removing a host forgets its cached credentials. Click a host chip to
+authenticate again after relaunch or failed credentials. Background connections
+never open unsolicited prompts and time out after ten seconds; an explicit
+interactive attempt allows up to three minutes and Escape cancels it. On other
+platforms, preconfigured noninteractive SSH remains available.
 
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also
@@ -63,8 +75,8 @@ Open the command palette with `Cmd-Shift-P` on macOS or `Ctrl-Shift-P` on
 Windows/Linux. It exposes session creation, refresh, switching, disconnect and
 close, plus terminal input, layout, reconnect, focus, and a destructive
 `Restart rmuxd` maintenance action. Restart has no shortcut or permanent
-button: selecting it in the palette changes it into a second confirmation
-command. It first verifies the running daemon's separate local-control
+button: selecting it opens a quick-input confirmation, with Cancel focused.
+It first verifies the running daemon's separate local-control
 endpoint; an older daemon that lacks it leaves the active tab attached and
 reports that restart is unavailable. Once accepted, it terminates every local
 rmux session before both daemon endpoints drain and a fresh daemon starts.
@@ -82,8 +94,10 @@ terminal shortcuts are:
 - next tab: `Cmd/Ctrl-Shift-]`
 - previous tab: `Cmd/Ctrl-Shift-[`
 
-The close shortcut first opens its confirmation with **Close** focused. Press
-the same shortcut again to terminate the pending session, or `Esc` to cancel.
+The close shortcut opens a quick-input confirmation with **Cancel** focused.
+Choose **Close session** to terminate it, or `Esc` to cancel. Repeating a
+shortcut while a prompt is open cannot bypass confirmation. New-shell input
+remains in the sidebar for now.
 
 These shortcuts are local to the focused app. Other key combinations continue
 to xterm and the PTY unchanged. The macOS application menu owns `Cmd-W` and
@@ -106,6 +120,19 @@ kill through the same command functions invoked by Tauri:
 RMUX_TEST_SSH_TARGET=rmux-docker cargo test -p rmux-app \
   commands::tests::creates_lists_attaches_and_kills_a_session_over_ssh \
   -- --ignored --exact
+```
+
+The SSH prompt bridge also has opt-in tests for the built helper binary and
+the local test container at `127.0.0.1:2222`. The host-key test uses a temporary
+known-hosts file; provide the fingerprint independently inspected in the
+container, never one learned from an unverified connection:
+
+```sh
+cargo build -p rmux-app
+RMUX_TEST_ASKPASS_PROGRAM=/absolute/path/to/target/debug/rmux-app \
+RMUX_TEST_SSH_IDENTITY=/absolute/path/to/private-key \
+RMUX_TEST_SSH_FINGERPRINT=SHA256:verified-container-fingerprint \
+cargo test -p rmux-app ssh_auth::tests -- --ignored
 ```
 
 The GUI never resizes an existing PTY merely because it was selected. **Resize

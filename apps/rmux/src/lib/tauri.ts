@@ -18,7 +18,41 @@ import type {
   SessionSummary,
   SshConfigHostCatalog,
   SshHostDefinition,
+  SshPrompt,
 } from "./types";
+
+export async function probeSshHost(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+): Promise<void> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  await invoke("probe_ssh_host", {
+    request: { target, attempt_id },
+    on_prompt: channel,
+  });
+}
+
+export async function respondSshPrompt(
+  attempt_id: string,
+  prompt_id: string,
+  response: string | null,
+): Promise<void> {
+  await invoke("respond_ssh_prompt", {
+    request: { attempt_id, prompt_id, response },
+  });
+}
+
+export async function cancelSshProbe(attempt_id: string): Promise<void> {
+  await invoke("cancel_ssh_probe", { request: { attempt_id } });
+}
+
+export async function forgetSshCredentials(
+  target: ConnectionTarget,
+): Promise<void> {
+  await invoke("forget_ssh_credentials", { request: { target } });
+}
 
 export interface OpenAttachmentResult {
   attached: OpenAttachmentResponse;
@@ -70,7 +104,9 @@ export async function openAttachment(
   return { attached, channel };
 }
 
-export async function sendInput(request: AttachmentInputRequest): Promise<void> {
+export async function sendInput(
+  request: AttachmentInputRequest,
+): Promise<void> {
   await invoke("send_input", { request });
 }
 
@@ -98,7 +134,9 @@ export async function acknowledgeAttachmentEvent(
   await invoke("acknowledge_attachment_event", { request });
 }
 
-export async function detachAttachment(request: AttachmentIdRequest): Promise<void> {
+export async function detachAttachment(
+  request: AttachmentIdRequest,
+): Promise<void> {
   await invoke("detach_attachment", { request });
 }
 

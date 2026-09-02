@@ -41,7 +41,7 @@ const shellState: ShellStateSummary = {
 };
 
 describe("SessionSidebar", () => {
-  it("focuses Close when a destructive confirmation opens", () => {
+  it("delegates close and add-host interactions without inline forms", () => {
     const markup = renderToStaticMarkup(
       <SessionSidebar
         targets={[session.target]}
@@ -54,27 +54,24 @@ describe("SessionSidebar", () => {
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionKey={sessionKey(session)}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
-        hostSuggestions={[]}
-        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
         onCreateFormOpenChange={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
-        onCancelClose={vi.fn()}
-        onConfirmClose={vi.fn()}
-        onActivateHost={vi.fn(() => true)}
-        onSaveHost={vi.fn(async () => undefined)}
+        onAddHost={vi.fn()}
+        onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
       />,
     );
 
-    expect(markup).toMatch(/class="session-confirm-close"[^>]*autofocus/);
-    expect(markup).not.toMatch(/class="session-confirm-cancel"[^>]*autofocus/);
+    expect(markup).toContain('aria-label="Close first"');
+    expect(markup).toContain("+ Host");
+    expect(markup).not.toContain("session-close-confirmation");
+    expect(markup).not.toContain("host-form");
   });
 
   it("uses the observed terminal title as the primary label", () => {
@@ -90,26 +87,22 @@ describe("SessionSidebar", () => {
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionKey={null}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
-        hostSuggestions={[]}
-        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
         onCreateFormOpenChange={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
-        onCancelClose={vi.fn()}
-        onConfirmClose={vi.fn()}
-        onActivateHost={vi.fn(() => true)}
-        onSaveHost={vi.fn(async () => undefined)}
+        onAddHost={vi.fn()}
+        onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
       />,
     );
 
-    const fullTitle = "/Users/clouds/Projects/Tools/ctl/apps/rmux — cargo test -p rmux-app";
+    const fullTitle =
+      "/Users/clouds/Projects/Tools/ctl/apps/rmux — cargo test -p rmux-app";
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…pps/rmux — …mux-app</strong>");
     expect(markup).toContain(
@@ -131,21 +124,16 @@ describe("SessionSidebar", () => {
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionKey={null}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
-        hostSuggestions={[]}
-        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
         onCreateFormOpenChange={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
-        onCancelClose={vi.fn()}
-        onConfirmClose={vi.fn()}
-        onActivateHost={vi.fn(() => true)}
-        onSaveHost={vi.fn(async () => undefined)}
+        onAddHost={vi.fn()}
+        onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
       />,
     );
@@ -162,29 +150,23 @@ describe("SessionSidebar", () => {
         sessions={[session, secondSession, listedOnlySession]}
         shellStates={new Map()}
         selectedSessionKey={sessionKey(session)}
-        openTabSessionKeys={new Set([
-          sessionKey(session),
-          sessionKey(secondSession),
-        ])}
+        openTabSessionKeys={
+          new Set([sessionKey(session), sessionKey(secondSession)])
+        }
         loading={false}
         error={null}
         creating={false}
         createFormOpen={false}
-        pendingCloseSessionKey={null}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
-        hostSuggestions={[]}
-        hostSuggestionWarning={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn(async () => true)}
         onCreateFormOpenChange={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
-        onCancelClose={vi.fn()}
-        onConfirmClose={vi.fn()}
-        onActivateHost={vi.fn(() => true)}
-        onSaveHost={vi.fn(async () => undefined)}
+        onAddHost={vi.fn()}
+        onConnectHost={vi.fn()}
         onRemoveHost={vi.fn()}
       />,
     );

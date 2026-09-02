@@ -173,7 +173,7 @@ export function SessionSidebar({
 
       <div className="session-list">
         {loading && sessions.length === 0 ? (
-          <p className="sidebar-state">Finding sessions across hosts…</p>
+          <p className="sidebar-state">Loading workspace…</p>
         ) : null}
         {error ? (
           <div className="sidebar-state error-state">
@@ -182,7 +182,13 @@ export function SessionSidebar({
         ) : null}
         {[...targetErrors.entries()].map(([key, message]) => (
           <div className="host-error" key={key} role="status">
-            <strong>{key === "local" ? "local" : key.slice(4)}</strong>
+            <strong>
+              {targets.find((target) => targetKey(target) === key)
+                ? targetLabel(
+                    targets.find((target) => targetKey(target) === key)!,
+                  )
+                : "Host"}
+            </strong>
             <span>{message}</span>
           </div>
         ))}
@@ -192,8 +198,11 @@ export function SessionSidebar({
         sessions.length === 0 ? (
           <div className="sidebar-state">
             <span className="empty-glyph">›_</span>
-            <p>No running sessions.</p>
-            <small>Create one here or with the rmux CLI.</small>
+            <p>No known sessions.</p>
+            <small>
+              Create a shell or use “Add existing session” to remember one
+              already running.
+            </small>
           </div>
         ) : null}
         {sessions.map((session) => {
@@ -228,9 +237,16 @@ export function SessionSidebar({
                     <span aria-hidden="true"> · </span>
                     {session.name}
                     <span aria-hidden="true"> · </span>
-                    {session.terminal_size.columns}×{session.terminal_size.rows}
-                    <span aria-hidden="true"> · </span>
-                    {session.status}
+                    {session.status === "running" ? (
+                      <>
+                        {session.terminal_size.columns}×
+                        {session.terminal_size.rows}
+                        <span aria-hidden="true"> · </span>
+                      </>
+                    ) : null}
+                    {session.status === "unknown"
+                      ? "unverified"
+                      : session.status}
                   </small>
                 </span>
               </button>

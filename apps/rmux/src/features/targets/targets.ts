@@ -30,7 +30,11 @@ interface StoredRemoteHostsV2 {
 }
 
 export function targetKey(target: ConnectionTarget): string {
-  return target.kind === "local" ? "local" : `ssh:${target.destination}`;
+  return target.kind === "local"
+    ? "local"
+    : target.host_id
+      ? `host:${target.host_id}`
+      : `ssh:${target.destination}`;
 }
 
 export function targetLabel(target: ConnectionTarget): string {
@@ -70,7 +74,10 @@ export function sameSession(
 
 export function normalizeSshDestination(destination: string): string | null {
   const normalized = destination.trim();
-  if (!normalized || [...normalized].some((character) => isControl(character))) {
+  if (
+    !normalized ||
+    [...normalized].some((character) => isControl(character))
+  ) {
     return null;
   }
   return normalized;
@@ -109,6 +116,30 @@ export function loadRemoteTargets(storage: Storage | null): ConnectionTarget[] {
   } catch {
     return [];
   }
+}
+
+/** Only called after successful migration to the native workspace file. */
+export function clearLegacyRemoteTargets(storage: Storage | null): void {
+  try {
+    storage?.removeItem(STORAGE_KEY);
+  } catch {
+    /* The durable native copy is already saved. */
+  }
+}
+
+/** Migration must not silently discard malformed or future legacy data. */
+export function readLegacyRemoteTargets(
+  storage: Storage | null,
+): ConnectionTarget[] {
+  const encoded = storage?.getItem(STORAGE_KEY);
+  if (!encoded) return [];
+  const value: unknown = JSON.parse(encoded);
+  if (!isStoredRemoteHostsV1(value) && !isStoredRemoteHostsV2(value)) {
+    throw new Error(
+      "The previous host settings could not be migrated. Their local-storage copy has been preserved.",
+    );
+  }
+  return loadRemoteTargets(storage);
 }
 
 export function saveRemoteTargets(
@@ -173,7 +204,8 @@ function normalizeSshTarget(
     (target.hostname !== undefined && !hostname) ||
     (target.user !== undefined && !user) ||
     (target.identity_file !== undefined && !identityFile) ||
-    (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65_535))
+    (port !== undefined &&
+      (!Number.isInteger(port) || port < 1 || port > 65_535))
   ) {
     return null;
   }
@@ -189,7 +221,10 @@ function normalizeSshTarget(
 
 function normalizeOptionalToken(value: string | undefined): string | null {
   const normalized = normalizeOptionalValue(value);
-  if (!normalized || [...normalized].some((character) => /\s/u.test(character))) {
+  if (
+    !normalized ||
+    [...normalized].some((character) => /\s/u.test(character))
+  ) {
     return null;
   }
   return normalized;
@@ -200,7 +235,8 @@ function normalizeOptionalValue(value: string | undefined): string | null {
     return null;
   }
   const normalized = value.trim();
-  return normalized && ![...normalized].some((character) => isControl(character))
+  return normalized &&
+    ![...normalized].some((character) => isControl(character))
     ? normalized
     : null;
 }

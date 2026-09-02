@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
+import { useWorkspace } from "../features/workspace/useWorkspace";
+import { withHostId } from "../features/workspace/workspaceModel";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
@@ -30,7 +32,6 @@ import {
 } from "../features/shell/shellStateCache";
 import {
   SessionListRefreshGuard,
-  mergeTargetSessionLists,
   prependSession,
   removeSession,
   syncSessionTerminalSize,
@@ -47,19 +48,14 @@ import {
   formatTerminalTitle,
 } from "../features/tabs/terminalTitle";
 import {
-  LOCAL_TARGET,
   appLocalSshTarget,
-  browserStorage,
   configuredSshTarget,
   inactiveSshConfigDestinations,
-  loadRemoteTargets,
   normalizeSshDestination,
   sameSession,
   sameTarget,
-  saveRemoteTargets,
   sessionKey,
   targetKey,
-  targetKeyFromSessionKey,
 } from "../features/targets/targets";
 import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
@@ -67,7 +63,7 @@ import { displayWorkingDirectory } from "../lib/shellState";
 import {
   createSession,
   killSession,
-  listSessions,
+  inspectKnownSessions,
   listSshConfigHosts,
   restartLocalDaemon,
   saveSshConfigHost,
@@ -94,6 +90,20 @@ function measuredSize(renderer: XtermRenderer | null): TerminalSize {
 }
 
 export function TerminalPage() {
+  const workspace = useWorkspace();
+  const {
+    targets,
+    setTargets,
+    sessions,
+    setSessions,
+    tabs,
+    setTabs,
+    active_tab_key: activeTabKey,
+    setActiveTabKey,
+    shell_states: sessionShellStates,
+    setShellStates: setSessionShellStates,
+    persist: persistWorkspace,
+  } = workspace;
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const [shortcutPlatform] = useState(detectShortcutPlatform);
   const attachment = useAttachment(renderer);
@@ -102,25 +112,15 @@ export function TerminalPage() {
   const currentWorkingDirectoryDisplay = currentShellState
     ? displayWorkingDirectory(currentShellState)
     : null;
-  const [targets, setTargets] = useState<ConnectionTarget[]>(() => [
-    LOCAL_TARGET,
-    ...loadRemoteTargets(browserStorage()),
-  ]);
   const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHost[]>([]);
   const [sshConfigWarning, setSshConfigWarning] = useState<string | null>(null);
   const [targetErrors, setTargetErrors] = useState<ReadonlyMap<string, string>>(
     () => new Map(),
   );
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [tabs, setTabs] = useState<SessionSummary[]>([]);
   const [tabShellStates, setTabShellStates] = useState<
     ReadonlyMap<string, ShellStateSummary>
   >(() => new Map());
-  const [sessionShellStates, setSessionShellStates] = useState<
-    ReadonlyMap<string, ShellStateSummary>
-  >(() => new Map());
-  const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createFormOpen, setCreateFormOpen] = useState(false);
@@ -143,11 +143,13 @@ export function TerminalPage() {
     string | null
   >(null);
   const closingSessionKeysRef = useRef(new Set<string>());
-  const closedSessionKeysRef = useRef(new Set<string>());
   const refreshGuardRef = useRef(new SessionListRefreshGuard());
   const sessionsRef = useRef<SessionSummary[]>([]);
   const tabsRef = useRef<SessionSummary[]>([]);
   const activeTabKeyRef = useRef<string | null>(null);
+  sessionsRef.current = sessions;
+  tabsRef.current = tabs;
+  activeTabKeyRef.current = activeTabKey;
   const creatingRef = useRef(false);
   const daemonRestartConfirmationRef = useRef(false);
   const restartingDaemonRef = useRef(false);
@@ -179,8 +181,8 @@ export function TerminalPage() {
   }, []);
 
   const refresh = useCallback(
-    async (allowDuringDaemonRestart = false) => {
-      if (!allowDuringDaemonRestart && daemonRestartBlocksInteractions()) {
+    async (selectedTarget?: ConnectionTarget) => {
+      if (!workspace.ready || daemonRestartBlocksInteractions()) {
         return;
       }
       const daemonEpoch = daemonEpochRef.current;
@@ -189,13 +191,27 @@ export function TerminalPage() {
       setListError(null);
       try {
         const results = await Promise.all(
-          targets.map(async (target) => {
-            try {
-              return { target, response: await listSessions(target) } as const;
-            } catch (error) {
-              return { target, error } as const;
-            }
-          }),
+          targets
+            .filter(
+              (target) =>
+                (!selectedTarget || sameTarget(target, selectedTarget)) &&
+                sessionsRef.current.some((session) =>
+                  sameTarget(session.target, target),
+                ),
+            )
+            .map(async (target) => {
+              try {
+                const ids = sessionsRef.current
+                  .filter((session) => sameTarget(session.target, target))
+                  .map((session) => session.session_id);
+                return {
+                  target,
+                  response: await inspectKnownSessions(target, ids),
+                } as const;
+              } catch (error) {
+                return { target, error } as const;
+              }
+            }),
         );
         if (
           daemonEpoch !== daemonEpochRef.current ||
@@ -203,33 +219,55 @@ export function TerminalPage() {
         ) {
           return;
         }
-        const refreshed = new Map<string, SessionSummary[]>();
+        const refreshed = new Map<string, SessionSummary>();
         const inspections = new Map<string, ShellStateSummary>();
-        const errors = new Map<string, string>();
-        const successfulTargets = new Set<string>();
-        const listedSessionKeys = new Set<string>();
+        const errors = new Map(targetErrors);
         for (const result of results) {
           const key = targetKey(result.target);
+          errors.delete(key);
           if ("error" in result) {
             errors.set(key, errorMessage(result.error));
+            for (const session of sessionsRef.current.filter((session) =>
+              sameTarget(session.target, result.target),
+            )) {
+              refreshed.set(sessionKey(session), {
+                ...session,
+                status: "unreachable",
+              });
+            }
             continue;
           }
-          successfulTargets.add(key);
-          refreshed.set(key, result.response.sessions);
-          for (const session of result.response.sessions) {
-            listedSessionKeys.add(sessionKey(session));
-            const shellState = result.response.shell_states[session.session_id];
-            if (shellState) {
-              inspections.set(sessionKey(session), shellState);
+          for (const inspection of result.response) {
+            const known = sessionsRef.current.find(
+              (session) =>
+                sameTarget(session.target, result.target) &&
+                session.session_id === inspection.session_id,
+            );
+            if (!known) continue;
+            const identity = sessionKey(known);
+            refreshed.set(
+              identity,
+              inspection.session ?? {
+                ...known,
+                status:
+                  inspection.error?.code === "session_not_found"
+                    ? "missing"
+                    : "unreachable",
+              },
+            );
+            if (inspection.shell_state) {
+              inspections.set(identity, inspection.shell_state);
+            } else if (inspection.error?.code !== "session_not_found") {
+              errors.set(
+                key,
+                inspection.error?.message ?? "Could not inspect session.",
+              );
             }
           }
         }
-        const hidden = closedSessionKeysRef.current;
-        const visible = mergeTargetSessionLists(
-          sessionsRef.current,
-          targets,
-          refreshed,
-        ).filter((session) => !hidden.has(sessionKey(session)));
+        const visible = sessionsRef.current.map(
+          (session) => refreshed.get(sessionKey(session)) ?? session,
+        );
         const visibleIds = new Set(visible.map(sessionKey));
         sessionsRef.current = visible;
         setSessions(visible);
@@ -247,16 +285,6 @@ export function TerminalPage() {
         setTabShellStates((current) =>
           retainShellStates(current, new Set(nextTabs.map(sessionKey))),
         );
-        for (const identity of hidden) {
-          const hiddenTarget = targetKeyFromSessionKey(identity);
-          if (
-            hiddenTarget &&
-            successfulTargets.has(hiddenTarget) &&
-            !listedSessionKeys.has(identity)
-          ) {
-            hidden.delete(identity);
-          }
-        }
       } finally {
         if (
           daemonEpoch === daemonEpochRef.current &&
@@ -266,32 +294,41 @@ export function TerminalPage() {
         }
       }
     },
-    [daemonRestartBlocksInteractions, targets],
+    [
+      daemonRestartBlocksInteractions,
+      targets,
+      targetErrors,
+      workspace.ready,
+      setSessions,
+      setTabs,
+      setSessionShellStates,
+    ],
   );
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
   const addTarget = useCallback(
-    (target: ConnectionTarget): boolean => {
+    async (target: ConnectionTarget): Promise<boolean> => {
       if (
+        !workspace.ready ||
         target.kind === "local" ||
         !normalizeSshDestination(target.destination) ||
-        targets.some((candidate) => sameTarget(candidate, target))
+        targets.some(
+          (candidate) =>
+            candidate.kind === "ssh" &&
+            candidate.destination === target.destination,
+        )
       ) {
         return false;
       }
-      const next = [...targets, target];
-      saveRemoteTargets(browserStorage(), next);
+      const next = [...targets, withHostId(target)];
       setTargets(next);
+      await persistWorkspace();
       return true;
     },
-    [targets],
+    [targets, workspace.ready, setTargets, persistWorkspace],
   );
 
   const activateConfiguredHost = useCallback(
-    (destination: string): boolean => {
+    async (destination: string): Promise<boolean> => {
       const target = configuredSshTarget(destination);
       return target ? addTarget(target) : false;
     },
@@ -317,7 +354,7 @@ export function TerminalPage() {
               (await saveSshConfigHost(definition)).destination,
             )
           : appLocalSshTarget(definition);
-      if (!target || !addTarget(target)) {
+      if (!target || !(await addTarget(target))) {
         throw new Error("The host settings could not be saved.");
       }
       if (storage === "ssh_config") {
@@ -460,10 +497,10 @@ export function TerminalPage() {
       tabsRef.current = nextTabs;
       activeTabKeyRef.current = nextActiveKey;
       setTargets(nextTargets);
-      saveRemoteTargets(browserStorage(), nextTargets);
       setSessions(nextSessions);
       setTabs(nextTabs);
       setActiveTabKey(nextActiveKey);
+      await persistWorkspace();
       setSessionShellStates((current) =>
         retainShellStates(current, new Set(nextSessions.map(sessionKey))),
       );
@@ -479,7 +516,17 @@ export function TerminalPage() {
         await attachment.connect(nextActive);
       }
     },
-    [attachment, daemonRestartBlocksInteractions, targets],
+    [
+      attachment,
+      daemonRestartBlocksInteractions,
+      targets,
+      setTargets,
+      setSessions,
+      setTabs,
+      setActiveTabKey,
+      setSessionShellStates,
+      persistWorkspace,
+    ],
   );
 
   const create = useCallback(
@@ -488,6 +535,7 @@ export function TerminalPage() {
       workingDirectory: string | null,
     ): Promise<boolean> => {
       if (
+        !workspace.ready ||
         creatingRef.current ||
         daemonRestartConfirmationRef.current ||
         restartingDaemonRef.current
@@ -513,6 +561,14 @@ export function TerminalPage() {
           sessionsRef.current = next;
           return next;
         });
+        try {
+          await persistWorkspace();
+        } catch (failure) {
+          setListError(
+            `Shell ${session.name} was created, but saving its workspace entry failed. Retry saving before closing the app. ${errorMessage(failure)}`,
+          );
+          return true;
+        }
         await activateTab(session, true);
         return daemonEpoch === daemonEpochRef.current;
       } catch (error) {
@@ -527,7 +583,7 @@ export function TerminalPage() {
         }
       }
     },
-    [activateTab, renderer],
+    [activateTab, renderer, workspace.ready, setSessions, persistWorkspace],
   );
 
   const disconnect = useCallback(
@@ -592,7 +648,6 @@ export function TerminalPage() {
           return;
         }
         refreshGuardRef.current.recordMutation();
-        closedSessionKeysRef.current.add(identity);
         setSessions((current) => {
           const next = removeSession(current, identity);
           sessionsRef.current = next;
@@ -649,58 +704,35 @@ export function TerminalPage() {
     setDaemonRestartConfirmationPending(pending);
   }, []);
 
-  const clearLocalDaemonState = useCallback((): SessionSummary | null => {
+  const clearLocalDaemonState = useCallback(() => {
     daemonEpochRef.current += 1;
     refreshGuardRef.current.recordMutation();
-    closedSessionKeysRef.current.clear();
     closingSessionKeysRef.current.clear();
     creatingRef.current = false;
-    const retainedSessions = sessionsRef.current.filter(
-      (session) => session.target.kind !== "local",
-    );
-    const activeTab = tabsRef.current.find(
-      (tab) => sessionKey(tab) === activeTabKeyRef.current,
-    );
-    const activeWasLocal = activeTab?.target.kind === "local";
-    const retainedTabs = tabsRef.current.filter(
-      (tab) => tab.target.kind !== "local",
-    );
-    const nextActiveTab = activeWasLocal ? (retainedTabs[0] ?? null) : null;
-    const nextActiveKey = activeWasLocal
-      ? nextActiveTab
-        ? sessionKey(nextActiveTab)
-        : null
-      : activeTabKeyRef.current;
-
-    sessionsRef.current = retainedSessions;
-    tabsRef.current = retainedTabs;
-    activeTabKeyRef.current = nextActiveKey;
     if (attachment.state.session?.target.kind === "local") {
       attachment.resetAfterDaemonRestart();
     }
-    setSessions(retainedSessions);
-    setTabs(retainedTabs);
-    setTabShellStates((current) =>
-      retainShellStates(current, new Set(retainedTabs.map(sessionKey))),
-    );
-    setSessionShellStates((current) =>
-      retainShellStates(current, new Set(retainedSessions.map(sessionKey))),
-    );
-    setActiveTabKey(nextActiveKey);
+    const markLocalMissing = (current: SessionSummary[]): SessionSummary[] =>
+      current.map((session) =>
+        session.target.kind === "local"
+          ? { ...session, status: "missing" }
+          : session,
+      );
+    setSessions(markLocalMissing);
+    setTabs(markLocalMissing);
     setCreating(false);
     setCreateFormOpen(false);
     setPendingCloseSessionKey(null);
     setClosingSessionKeys(new Set());
     setDisconnectingSessionKey(null);
-    setLoading(true);
+    setLoading(false);
     setListError(null);
     setTargetErrors((current) => {
       const next = new Map(current);
       next.delete("local");
       return next;
     });
-    return nextActiveTab;
-  }, [attachment]);
+  }, [attachment, setSessions, setTabs]);
 
   const restartDaemon = useCallback(async () => {
     if (restartingDaemonRef.current) {
@@ -709,15 +741,12 @@ export function TerminalPage() {
     restartingDaemonRef.current = true;
     setDaemonRestartConfirmation(false);
     setRestartingDaemon(true);
-    let nextActiveTab: SessionSummary | null = null;
     try {
       await restartLocalDaemon();
-      nextActiveTab = clearLocalDaemonState();
-      await refresh(true);
+      clearLocalDaemonState();
     } catch (error) {
       if (!restartFailurePreservesLocalState(errorCode(error))) {
-        nextActiveTab = clearLocalDaemonState();
-        await refresh(true);
+        clearLocalDaemonState();
       }
       setListError(`Could not restart rmuxd: ${errorMessage(error)}`);
     } finally {
@@ -725,15 +754,7 @@ export function TerminalPage() {
       setRestartingDaemon(false);
       setLoading(false);
     }
-    if (nextActiveTab) {
-      await activateTab(nextActiveTab);
-    }
-  }, [
-    activateTab,
-    clearLocalDaemonState,
-    refresh,
-    setDaemonRestartConfirmation,
-  ]);
+  }, [clearLocalDaemonState, setDaemonRestartConfirmation]);
 
   const requestDaemonRestart = useCallback(() => {
     if (restartingDaemonRef.current) {
@@ -821,21 +842,43 @@ export function TerminalPage() {
   ]);
 
   useEffect(() => {
-    if (attachment.state.phase !== "ended" || !attachedSession) {
-      return;
-    }
-    const identity = sessionKey(attachedSession);
-    refreshGuardRef.current.recordMutation();
-    closedSessionKeysRef.current.add(identity);
-    setSessions((current) => {
-      const next = removeSession(current, identity);
-      sessionsRef.current = next;
-      return next;
-    });
-    setTabShellStates((current) => forgetShellState(current, identity));
-    setSessionShellStates((current) => forgetShellState(current, identity));
-    void closeTab(attachedSession);
-  }, [attachment.state.phase, attachedSession, closeTab]);
+    if (!attachedSession) return;
+    const phase = attachment.state.phase;
+    const status =
+      phase === "ended"
+        ? "exited"
+        : phase === "error"
+          ? attachment.state.error_code === "session_not_found"
+            ? "missing"
+            : "unreachable"
+          : phase === "attached"
+            ? "running"
+            : null;
+    if (!status) return;
+    const updateStatus = (current: SessionSummary[]): SessionSummary[] => {
+      if (
+        !current.some(
+          (session) =>
+            sameSession(session, attachedSession) && session.status !== status,
+        )
+      )
+        return current;
+      refreshGuardRef.current.recordMutation();
+      return current.map((session) =>
+        sameSession(session, attachedSession)
+          ? { ...session, status }
+          : session,
+      );
+    };
+    setSessions(updateStatus);
+    setTabs(updateStatus);
+  }, [
+    attachment.state.phase,
+    attachment.state.error_code,
+    attachedSessionKey,
+    setSessions,
+    setTabs,
+  ]);
 
   const openTabSessionKeys = new Set(tabs.map(sessionKey));
 
@@ -845,17 +888,19 @@ export function TerminalPage() {
     attachedSessionKey === activeTabKey && attachedShellState
       ? attachedShellState
       : activeTabKey
-        ? (tabShellStates.get(activeTabKey) ?? null)
+        ? (tabShellStates.get(activeTabKey) ??
+          sessionShellStates.get(activeTabKey) ??
+          null)
         : null;
   const displayedTabShellStates =
     attachedSession && attachedShellState
       ? rememberShellState(
-          tabShellStates,
+          new Map([...sessionShellStates, ...tabShellStates]),
           sessionKey(attachedSession),
           attachedShellState,
           { replaceEqualRevision: true },
         )
-      : tabShellStates;
+      : new Map([...sessionShellStates, ...tabShellStates]);
   const displayedSessionShellStates = new Map(sessionShellStates);
   if (attachedSession && attachedShellState) {
     displayedSessionShellStates.set(
@@ -932,6 +977,7 @@ export function TerminalPage() {
   const executeCommand = useCallback(
     (command: AppCommand) => {
       if (
+        !workspace.ready ||
         hostFlow !== undefined ||
         pendingCloseSessionKey ||
         daemonRestartConfirmationPending
@@ -954,6 +1000,7 @@ export function TerminalPage() {
       hostFlow,
       pendingCloseSessionKey,
       daemonRestartConfirmationPending,
+      workspace.ready,
     ],
   );
 
@@ -984,7 +1031,7 @@ export function TerminalPage() {
 
   return (
     <>
-      <main className="app-shell">
+      <main className="app-shell" inert={!workspace.ready}>
         <SessionSidebar
           targets={targets}
           targetErrors={targetErrors}
@@ -992,8 +1039,8 @@ export function TerminalPage() {
           shellStates={displayedSessionShellStates}
           selectedSessionKey={activeTabKey}
           openTabSessionKeys={openTabSessionKeys}
-          loading={loading}
-          error={listError}
+          loading={loading || !workspace.ready}
+          error={listError ?? workspace.error}
           creating={creating}
           createFormOpen={createFormOpen}
           closingSessionKeys={closingSessionKeys}
@@ -1021,7 +1068,11 @@ export function TerminalPage() {
               setHostFlow(target);
             }
           }}
-          onRemoveHost={(target) => void removeHost(target)}
+          onRemoveHost={(target) =>
+            void removeHost(target).catch((failure) =>
+              setListError(errorMessage(failure)),
+            )
+          }
         />
         <section className="terminal-workspace">
           <TerminalTabs
@@ -1049,6 +1100,32 @@ export function TerminalPage() {
             commandShortcutLabel={paletteShortcutLabel}
           />
           <div className="terminal-notices">
+            {workspace.error ? (
+              <div className="message-banner" role="alert">
+                Workspace could not be saved or loaded: {workspace.error}
+                {workspace.ready ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void persistWorkspace(true).catch(() => undefined)
+                    }
+                  >
+                    Retry saving
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {activeTab && attachment.state.session === null ? (
+              <div className="message-banner" role="status">
+                Restored tab — disconnected. Cached paths are last-known.
+                <button
+                  type="button"
+                  onClick={() => void activateTab(activeTab)}
+                >
+                  Connect session
+                </button>
+              </div>
+            ) : null}
             {attachment.state.history_gap ? (
               <div className="history-gap-banner" role="status">
                 Earlier remote output is no longer contiguous. The live screen
@@ -1077,7 +1154,9 @@ export function TerminalPage() {
           target={hostFlow ?? undefined}
           onActivateHost={activateConfiguredHost}
           onSaveHost={saveHost}
-          onConnected={() => void refresh()}
+          onConnected={() => {
+            if (hostFlow) void refresh(hostFlow);
+          }}
           onClose={() => {
             setHostFlow(undefined);
             requestAnimationFrame(() => renderer?.focus());
@@ -1104,7 +1183,7 @@ export function TerminalPage() {
       ) : daemonRestartConfirmationPending ? (
         <QuickInput
           title="Restart rmuxd"
-          description="Terminate every local rmux session and start a new daemon? This cannot be undone."
+          description="Terminate every local rmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
           mode={{
             kind: "confirm",
             confirm_label: "Restart rmuxd",

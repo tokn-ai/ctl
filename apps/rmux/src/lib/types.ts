@@ -96,7 +96,12 @@ export interface LeaseStatus {
 }
 
 export type LeaseKind = "input" | "layout";
-export type SessionStatus = "running" | "exited" | "unknown" | "unreachable" | "missing";
+export type SessionStatus =
+  | "running"
+  | "exited"
+  | "unknown"
+  | "unreachable"
+  | "missing";
 
 export interface SessionSummary {
   target: ConnectionTarget;

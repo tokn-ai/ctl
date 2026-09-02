@@ -54,7 +54,7 @@ export function TerminalSurface({
         <div className="terminal-placeholder">
           <span className="terminal-mark">›_</span>
           <h2>A terminal that outlives its window.</h2>
-          <p>Select a running session or create a new shell.</p>
+          <p>Select a remembered session to connect, or create a new shell.</p>
         </div>
       ) : null}
       {phase === "connecting" || phase === "reconnecting" ? (

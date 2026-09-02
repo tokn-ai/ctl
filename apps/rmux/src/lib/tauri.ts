@@ -82,12 +82,23 @@ export async function listSessions(
   const response = await invoke<SessionListResponse>("list_sessions", {
     request: { target },
   });
-  return { ...response, sessions: response.sessions.map((session) => ({ ...session, target })) };
+  return {
+    ...response,
+    sessions: response.sessions.map((session) => ({ ...session, target })),
+  };
 }
 
-export async function inspectKnownSessions(target: ConnectionTarget, session_ids: string[]): Promise<SessionInspection[]> {
-  const results = await invoke<SessionInspection[]>("inspect_known_sessions", { request: { target, session_ids } });
-  return results.map((result) => ({ ...result, session: result.session ? { ...result.session, target } : null }));
+export async function inspectKnownSessions(
+  target: ConnectionTarget,
+  session_ids: string[],
+): Promise<SessionInspection[]> {
+  const results = await invoke<SessionInspection[]>("inspect_known_sessions", {
+    request: { target, session_ids },
+  });
+  return results.map((result) => ({
+    ...result,
+    session: result.session ? { ...result.session, target } : null,
+  }));
 }
 
 export async function listSshConfigHosts(): Promise<SshConfigHostCatalog> {
@@ -129,7 +140,13 @@ export async function openAttachment(
     request,
     onEvent: channel,
   });
-  return { attached: { ...attached, session: { ...attached.session, target: request.target } }, channel };
+  return {
+    attached: {
+      ...attached,
+      session: { ...attached.session, target: request.target },
+    },
+    channel,
+  };
 }
 
 export async function sendInput(

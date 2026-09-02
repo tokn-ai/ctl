@@ -24,7 +24,7 @@ interface SshHostFlowProps {
   suggestions: readonly string[];
   warning: string | null;
   target?: ConnectionTarget;
-  onActivateHost(destination: string): boolean;
+  onActivateHost(destination: string): boolean | Promise<boolean>;
   onSaveHost(
     definition: SshHostDefinition,
     storage: SshHostStorage,
@@ -120,8 +120,9 @@ export function SshHostFlow({
         onConnected();
         onClose();
       } else if (configuredRef.current && candidate.kind === "ssh") {
-        if (!onActivateHost(candidate.destination))
+        if (!(await onActivateHost(candidate.destination)))
           throw new Error("That SSH host is already active.");
+        if (closedRef.current) return;
         onClose();
       } else {
         uncommittedTargetRef.current = candidate;

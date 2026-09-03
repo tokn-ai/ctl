@@ -1,13 +1,12 @@
 [package]
-name = "ctl"
+name = "task-cli"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 clap.workspace = true
-ctl-core.workspace = true
-rmux-cli.workspace = true
-task-cli.workspace = true
+rustix.workspace = true
+task-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

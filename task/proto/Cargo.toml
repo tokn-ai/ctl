@@ -1,13 +1,11 @@
 [package]
-name = "ctl"
+name = "task-proto"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-clap.workspace = true
-ctl-core.workspace = true
-rmux-cli.workspace = true
-task-cli.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

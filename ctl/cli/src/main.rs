@@ -3,6 +3,7 @@ mod unix;
 
 use clap::{Parser, Subcommand};
 use rmux_cli::Command as RmuxCommand;
+use task_cli::Command as TaskCommand;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Route control commands locally or over OpenSSH")]
@@ -21,6 +22,11 @@ enum Command {
   Rmux {
     #[command(subcommand)]
     command: RmuxCommand,
+  },
+  /// Manage reusable background and interactive tasks.
+  Task {
+    #[command(subcommand)]
+    command: TaskCommand,
   },
 }
 
@@ -73,6 +79,18 @@ mod tests {
       Command::Rmux {
         command: RmuxCommand::Attach { session, .. }
       } if session == "development"
+    ));
+  }
+
+  #[test]
+  fn task_commands_use_the_ctl_command_surface() {
+    let arguments = Arguments::try_parse_from(["ctl", "task", "list"]).unwrap();
+    assert_eq!(arguments.host, None);
+    assert!(matches!(
+      arguments.command,
+      Command::Task {
+        command: TaskCommand::List
+      }
     ));
   }
 }

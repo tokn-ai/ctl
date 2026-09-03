@@ -6,12 +6,19 @@ use rmux_cli::{CommandError, ConnectFuture, Connector};
 use thiserror::Error;
 
 pub async fn run(arguments: Arguments) -> Result<(), CliError> {
-  let target = arguments
-    .host
-    .map_or_else(ConnectionTarget::local, ConnectionTarget::ssh);
-  let connector = CtlConnector { target };
   match arguments.command {
-    Command::Rmux { command } => rmux_cli::run(command, &connector).await?,
+    Command::Rmux { command } => {
+      let target = arguments
+        .host
+        .map_or_else(ConnectionTarget::local, ConnectionTarget::ssh);
+      rmux_cli::run(command, &CtlConnector { target }).await?;
+    }
+    Command::Task { command } => {
+      if let Some(host) = arguments.host {
+        return Err(CliError::RemoteTaskUnsupported(host));
+      }
+      task_cli::run(command).await?;
+    }
   }
   Ok(())
 }
@@ -61,4 +68,8 @@ impl Connector for CtlConnector {
 pub enum CliError {
   #[error(transparent)]
   Rmux(#[from] CommandError),
+  #[error(transparent)]
+  Task(#[from] task_cli::CommandError),
+  #[error("remote task routing is not implemented yet for host {0:?}")]
+  RemoteTaskUnsupported(String),
 }

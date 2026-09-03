@@ -34,6 +34,14 @@ cargo install --path ctl/daemon
 cargo install --path ctl/cli
 ```
 
+The local task runner also requires `taskd` beside `ctl`, or `TASKD_BIN` set to
+the daemon executable:
+
+```sh
+cargo install --path task/daemon
+cargo install --path ctl/cli
+```
+
 The desktop app uses pnpm and Tauri 2. Build `rmuxd` into the shared Cargo
 target directory before starting it so the app can auto-start its sibling
 daemon:
@@ -207,6 +215,29 @@ the SSH channel to the same user's fixed local `rmuxd` endpoint. After an
 unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
 the logical attachment and its leases for 30 seconds by default. An explicit
 `Ctrl-]` detach releases them immediately.
+
+## Managed tasks
+
+The initial task implementation manages local noninteractive commands. Task
+definitions and completed run metadata persist in taskd; stdout and stderr are
+kept in a bounded in-memory log for the current daemon lifetime.
+
+```sh
+ctl task create api --cwd ./service --start -- cargo run
+ctl task list
+ctl task show api
+ctl task logs api
+ctl task logs api --follow
+ctl task stop api
+ctl task restart api
+ctl task remove api
+```
+
+Background tasks run in their own process group. Stop first sends a graceful
+termination signal to the group and escalates if it does not exit. Interactive
+rmux-backed tasks can be registered with `--mode interactive`, but starting
+them is reserved for the next implementation stage. Remote task routing and
+desktop workspace integration are also not implemented yet.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). Numbered

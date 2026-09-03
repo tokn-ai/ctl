@@ -209,5 +209,7 @@ the logical attachment and its leases for 30 seconds by default. An explicit
 `Ctrl-]` detach releases them immediately.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
-and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). The remote setup is in
+and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). Numbered
+[`design proposals`](docs/proposals/README.md) record feature intent and major
+ownership boundaries. The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).

@@ -18,6 +18,20 @@ import type {
 import { restoreWorkspace } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
 import { detectShortcutPlatform } from "../features/commands/keybindings";
+import { COMMAND_IDS } from "../features/commands/terminalCommands";
+import { NATIVE_COMMAND_EVENT } from "../features/commands/useNativeCommandEvents";
+
+const nativeEvents = vi.hoisted(() => ({
+  listeners: new Map<string, (event: { payload: string }) => void>(),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(
+    async (name: string, callback: (event: { payload: string }) => void) => {
+      nativeEvents.listeners.set(name, callback);
+      return () => nativeEvents.listeners.delete(name);
+    },
+  ),
+}));
 
 const api = vi.hoisted(() => ({
   loadWorkspace: vi.fn(),
@@ -68,9 +82,6 @@ vi.mock("../features/attachment/useAttachment", () => ({
 vi.mock("../components/terminal/TerminalSurface", () => ({
   TerminalSurface: () => <div>Terminal renderer</div>,
 }));
-vi.mock("../features/commands/useNativeCommandEvents", () => ({
-  useNativeCommandEvents: () => {},
-}));
 
 function snapshot(): WorkspaceSnapshot {
   return {
@@ -103,6 +114,7 @@ function snapshot(): WorkspaceSnapshot {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  nativeEvents.listeners.clear();
   window.localStorage.clear();
   api.loadWorkspace.mockResolvedValue(snapshot());
   api.updateWorkspace.mockImplementation(
@@ -120,10 +132,14 @@ beforeEach(() => {
   api.probeSshHost.mockResolvedValue(undefined);
   api.cancelSshProbe.mockResolvedValue(undefined);
   api.inspectKnownSessions.mockResolvedValue([]);
+  api.killSession.mockResolvedValue(undefined);
   attachment.connect.mockResolvedValue(undefined);
   attachment.detach.mockResolvedValue(undefined);
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function newSession(
   target: ConnectionTarget = { kind: "local" },
@@ -153,7 +169,134 @@ function shortcut(code: string, shiftKey = true) {
   });
 }
 
+function nativeCommand(commandId: string, count = 1) {
+  const listener = nativeEvents.listeners.get(NATIVE_COMMAND_EVENT);
+  expect(listener).toBeDefined();
+  act(() => {
+    for (let index = 0; index < count; index += 1) {
+      listener!({ payload: commandId });
+    }
+  });
+}
+
 describe("workspace-backed terminal page", () => {
+  it("opens close confirmation with native Cmd+E, then confirms once with Cmd+E", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    let finishKill!: () => void;
+    api.killSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishKill = resolve;
+        }),
+    );
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    // Queued events before the dialog renders must only open confirmation.
+    nativeCommand(COMMAND_IDS.close, 2);
+    const dialog = screen.getByRole("dialog", { name: "Close session" });
+    expect(dialog.textContent).toContain("Press ⌘E to confirm");
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Cancel" }),
+    );
+    expect(api.killSession).not.toHaveBeenCalled();
+    nativeCommand(COMMAND_IDS.disconnect);
+    shortcut("KeyN");
+    shortcut("KeyP");
+    expect(screen.getAllByRole("dialog")).toEqual([dialog]);
+    expect(attachment.detach).not.toHaveBeenCalled();
+    // Confirmation is consumed synchronously, even before React rerenders.
+    nativeCommand(COMMAND_IDS.close, 2);
+    nativeCommand(COMMAND_IDS.close);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
+      target: { kind: "ssh", destination: "test", host_id: "test-id" },
+      session_id: "known-id",
+    });
+    await act(async () => finishKill());
+  });
+
+  it("confirms only the non-active session named by the sidebar close dialog", async () => {
+    const saved = snapshot();
+    saved.document.sessions.push({
+      host_id: "test-id",
+      session_id: "other-id",
+      name: "other",
+      last_known_cwd: null,
+      last_known_cwd_display: null,
+    });
+    api.loadWorkspace.mockResolvedValue(saved);
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("button", { name: "Close other" }));
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "Terminate other for all clients?",
+    );
+    nativeCommand(COMMAND_IDS.close);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Close other" })).toBeNull(),
+    );
+    expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
+      target: { kind: "ssh", destination: "test", host_id: "test-id" },
+      session_id: "other-id",
+    });
+    expect(
+      screen.getByRole("button", { name: "Close remembered" }),
+    ).toBeTruthy();
+  });
+
+  it("cancels native close confirmation with Escape and requires a new confirmation", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    nativeCommand(COMMAND_IDS.close);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    nativeCommand(COMMAND_IDS.close);
+    expect(screen.getByRole("dialog", { name: "Close session" })).toBeTruthy();
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
+  it("requires a fresh Ctrl+Shift+E key press, ignoring held repeats and composition", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux");
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyE");
+    const dialog = screen.getByRole("dialog", { name: "Close session" });
+    expect(dialog.textContent).toContain("Press Ctrl+Shift+E to confirm");
+    fireEvent.keyDown(dialog, {
+      code: "KeyE",
+      ctrlKey: true,
+      shiftKey: true,
+      repeat: true,
+    });
+    fireEvent.keyDown(dialog, {
+      code: "KeyE",
+      ctrlKey: true,
+      shiftKey: true,
+      isComposing: true,
+    });
+    expect(api.killSession).not.toHaveBeenCalled();
+    shortcut("KeyE");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Close remembered" }),
+      ).toBeNull(),
+    );
+    expect(api.killSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not route native close into a different confirmation dialog", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove remembered from workspace" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    nativeCommand(COMMAND_IDS.close);
+    nativeCommand(COMMAND_IDS.close);
+    expect(screen.getAllByRole("dialog")).toEqual([dialog]);
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
   it("opens new-shell quick input from its shortcut and blocks other commands until cancelled", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
@@ -165,6 +308,7 @@ describe("workspace-backed terminal page", () => {
     shortcut("KeyP");
     shortcut("KeyN");
     shortcut("KeyE", detectShortcutPlatform() !== "macos");
+    nativeCommand(COMMAND_IDS.close);
     expect(screen.getAllByRole("dialog")).toEqual([dialog]);
     expect(api.createSession).not.toHaveBeenCalled();
     expect(api.killSession).not.toHaveBeenCalled();

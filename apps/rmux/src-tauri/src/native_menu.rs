@@ -1,3 +1,5 @@
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSEventType};
 use tauri::menu::{
   AboutMetadata, HELP_SUBMENU_ID, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu,
   WINDOW_SUBMENU_ID,
@@ -108,6 +110,11 @@ pub fn handle(app_handle: &AppHandle, event: &tauri::menu::MenuEvent) {
   let Some(command_id) = frontend_command(event.id()) else {
     return;
   };
+  // Native menu accelerators bypass the webview's KeyboardEvent.repeat guard.
+  // Check AppKit on the event-loop thread before emitting the command to JS.
+  if current_event_is_key_repeat() {
+    return;
+  }
   let target = app_handle
     .webview_windows()
     .into_values()
@@ -116,6 +123,21 @@ pub fn handle(app_handle: &AppHandle, event: &tauri::menu::MenuEvent) {
   if let Some(window) = target {
     let _ignored = window.emit(NATIVE_COMMAND_EVENT, command_id);
   }
+}
+
+fn current_event_is_key_repeat() -> bool {
+  let Some(main_thread) = MainThreadMarker::new() else {
+    return false;
+  };
+  let Some(event) = NSApplication::sharedApplication(main_thread).currentEvent() else {
+    return false;
+  };
+  is_key_repeat(event.r#type(), || event.isARepeat())
+}
+
+fn is_key_repeat(event_type: NSEventType, is_repeat: impl FnOnce() -> bool) -> bool {
+  // isARepeat raises an AppKit exception for mouse and modifier-change events.
+  event_type == NSEventType::KeyDown && is_repeat()
 }
 
 fn frontend_command(menu_id: &MenuId) -> Option<&'static str> {
@@ -131,6 +153,23 @@ fn frontend_command(menu_id: &MenuId) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn ignores_held_shortcuts_but_accepts_distinct_key_presses() {
+    assert!(is_key_repeat(NSEventType::KeyDown, || true));
+    assert!(!is_key_repeat(NSEventType::KeyDown, || false));
+  }
+
+  #[test]
+  fn does_not_query_repeat_state_for_mouse_menu_actions_or_modifier_events() {
+    for event_type in [
+      NSEventType::LeftMouseUp,
+      NSEventType::FlagsChanged,
+      NSEventType::ApplicationDefined,
+    ] {
+      assert!(!is_key_repeat(event_type, || panic!("not a key event")));
+    }
+  }
 
   #[test]
   fn maps_only_rmux_session_menu_items_to_frontend_commands() {

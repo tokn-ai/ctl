@@ -120,8 +120,9 @@ terminal shortcuts are:
 - previous tab: `Cmd/Ctrl-Shift-[`
 
 The close shortcut opens a quick-input confirmation with **Cancel** focused.
-Choose **Close session** to terminate it, or `Esc` to cancel. Repeating a
-shortcut while a prompt is open cannot bypass confirmation.
+Press the close shortcut again (`Cmd-E` on macOS, `Ctrl-Shift-E` on Windows/Linux)
+or choose **Close session** to terminate the session named in the prompt.
+Press `Esc` to cancel. Other commands remain blocked while confirmation is open.
 
 **New Shell**, from the sidebar, command palette, or `Cmd/Ctrl-Shift-N`, uses
 the same overlay: choose a host (Local is first/default), then enter an optional

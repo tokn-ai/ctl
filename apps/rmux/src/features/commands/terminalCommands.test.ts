@@ -34,6 +34,8 @@ function setup(
   daemonRestartConfirmationPending = false,
   restartingDaemon = false,
   currentWorkingDirectoryDisplay = currentWorkingDirectory,
+  closingSessionIds: readonly string[] = [],
+  disconnectingSessionId: string | null = null,
 ) {
   const sessions = [session("first"), session("second"), session("third")];
   const tabs = sessions.filter((candidate) =>
@@ -52,6 +54,7 @@ function setup(
     selectSession: vi.fn(),
     disconnectSession: vi.fn(),
     requestCloseSession: vi.fn(),
+    confirmCloseSession: vi.fn(),
     toggleInput: vi.fn(),
     toggleResizeWithWindow: vi.fn(),
     reconnect: vi.fn(),
@@ -71,8 +74,10 @@ function setup(
       creating: false,
       newShellOpen: false,
       pendingCloseSessionKey: identityFor(pendingCloseSessionId),
-      closingSessionKeys: new Set(),
-      disconnectingSessionKey: null,
+      closingSessionKeys: new Set(
+        closingSessionIds.map((id) => sessionKey(session(id))),
+      ),
+      disconnectingSessionKey: identityFor(disconnectingSessionId),
       terminalReady: true,
       currentWorkingDirectory,
       currentWorkingDirectoryDisplay,
@@ -130,27 +135,90 @@ describe("terminal commands", () => {
     close.run();
 
     expect(actions.requestCloseSession).toHaveBeenCalledWith(sessions[1]);
+    expect(actions.confirmCloseSession).not.toHaveBeenCalled();
   });
 
-  it("cannot confirm a pending close through the command registry", () => {
+  it.each(["first", "second", null])(
+    "confirms the pending session while %s is active",
+    (activeSessionId) => {
+      const { sessions, actions, commands } = setup(
+        activeSessionId,
+        "macos",
+        "/work/rmux",
+        ["first", "second", "third"],
+        "attached",
+        "second",
+        "second",
+      );
+
+      const close = findCommand(commands, COMMAND_IDS.close);
+      expect(close).toMatchObject({
+        title: "Confirm Close Session",
+        detail: "second",
+        enabled: true,
+      });
+
+      close.run();
+      expect(actions.confirmCloseSession).toHaveBeenCalledExactlyOnceWith(
+        sessions[1],
+      );
+      expect(actions.requestCloseSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not fall back to the active session when the pending session disappears", () => {
     const { actions, commands } = setup(
-      "second",
+      "first",
       "macos",
       "/work/rmux",
-      ["first", "second", "third"],
+      undefined,
       "attached",
-      "second",
-      "second",
+      "first",
+      "missing",
     );
-
     const close = findCommand(commands, COMMAND_IDS.close);
-    expect(close).toMatchObject({
-      title: "Close Active Session",
-      detail: "second",
-      enabled: false,
-    });
-
+    expect(close.enabled).toBe(false);
+    close.run();
+    expect(actions.confirmCloseSession).not.toHaveBeenCalled();
     expect(actions.requestCloseSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["closing", "disconnecting", "restart-confirmation", "restarting"])(
+    "disables confirmation while its target is %s",
+    (state) => {
+      const { commands } = setup(
+        "first",
+        "macos",
+        "/work/rmux",
+        undefined,
+        "attached",
+        "first",
+        "second",
+        state === "restart-confirmation",
+        state === "restarting",
+        "/work/rmux",
+        state === "closing" ? ["second"] : [],
+        state === "disconnecting" ? "second" : null,
+      );
+      expect(findCommand(commands, COMMAND_IDS.close).enabled).toBe(false);
+    },
+  );
+
+  it("does not let the active tab's in-flight operation disable a different pending close", () => {
+    const { commands } = setup(
+      "first",
+      "macos",
+      "/work/rmux",
+      undefined,
+      "attached",
+      "first",
+      "second",
+      false,
+      false,
+      "/work/rmux",
+      ["first"],
+    );
+    expect(findCommand(commands, COMMAND_IDS.close).enabled).toBe(true);
   });
 
   it("uses native macOS and terminal-safe cross-platform close shortcuts", () => {

@@ -27,6 +27,10 @@ export const SHOW_PALETTE_KEYBINDING: Keybinding = {
   shift: true,
 };
 
+export function closeSessionKeybinding(platform: ShortcutPlatform): Keybinding {
+  return { code: "KeyE", primary: true, shift: platform === "other" };
+}
+
 interface TerminalCommandContext {
   sessions: readonly SessionSummary[];
   tabs: readonly SessionSummary[];
@@ -60,6 +64,7 @@ interface TerminalCommandActions {
   selectSession(session: SessionSummary): void;
   disconnectSession(session: SessionSummary): void;
   requestCloseSession(session: SessionSummary): void;
+  confirmCloseSession(session: SessionSummary): void;
   toggleInput(): void;
   toggleResizeWithWindow(): void;
   reconnect(): void;
@@ -75,6 +80,16 @@ export function buildTerminalCommands(
     context.sessions.find(
       (session) => sessionKey(session) === context.activeSessionKey,
     ) ?? null;
+  const closeConfirmationPending = context.pendingCloseSessionKey !== null;
+  const closeSession = closeConfirmationPending
+    ? (context.sessions.find(
+        (session) => sessionKey(session) === context.pendingCloseSessionKey,
+      ) ?? null)
+    : activeSession;
+  const closeSessionBusy =
+    closeSession !== null &&
+    (context.closingSessionKeys.has(sessionKey(closeSession)) ||
+      context.disconnectingSessionKey === sessionKey(closeSession));
   const nextTab = adjacentSession(context.tabs, context.activeSessionKey, 1);
   const previousTab = adjacentSession(
     context.tabs,
@@ -283,32 +298,30 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.close,
       category: "Session",
-      title: "Close Active Session",
-      detail: activeSession?.name,
+      title: closeConfirmationPending
+        ? "Confirm Close Session"
+        : "Close Active Session",
+      detail: closeSession?.name,
       keywords: ["exit", "kill", "terminate"],
-      keybinding: {
-        code: "KeyE",
-        primary: true,
-        shift: context.shortcutPlatform === "other",
-      },
+      keybinding: closeSessionKeybinding(context.shortcutPlatform),
       macosNativeKeybinding: true,
       enabled:
         !daemonRestartInteractionBlocked &&
-        context.pendingCloseSessionKey === null &&
-        activeSession !== null &&
-        !closingActive &&
-        !disconnectingActive,
+        closeSession !== null &&
+        !closeSessionBusy,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
-        : context.pendingCloseSessionKey
-          ? "Confirm or cancel the pending close first."
-          : activeSession
-            ? "The active session is already changing state."
+        : closeSession
+          ? "The session is already changing state."
+          : closeConfirmationPending
+            ? "The session awaiting confirmation is no longer available."
             : "No session is active.",
       focusTerminalAfterRun: false,
       run: () => {
-        if (activeSession) {
-          actions.requestCloseSession(activeSession);
+        if (closeSession) {
+          if (closeConfirmationPending)
+            actions.confirmCloseSession(closeSession);
+          else actions.requestCloseSession(closeSession);
         }
       },
     },

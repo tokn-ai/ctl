@@ -2937,6 +2937,8 @@ dependencies = [
  "ctl-core",
  "dirs",
  "glob",
+ "objc2",
+ "objc2-app-kit",
  "rmux-client",
  "rmux-ipc",
  "rmux-proto",

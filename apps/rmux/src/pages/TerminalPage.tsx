@@ -20,6 +20,7 @@ import {
 } from "../features/commands/keybindings";
 import {
   buildTerminalCommands,
+  closeSessionKeybinding,
   COMMAND_IDS,
   sessionSwitchCommandId,
   SHOW_PALETTE_KEYBINDING,
@@ -150,6 +151,7 @@ export function TerminalPage() {
     string | null
   >(null);
   const closingSessionKeysRef = useRef(new Set<string>());
+  const pendingCloseSessionKeyRef = useRef<string | null>(null);
   const refreshGuardRef = useRef(new SessionListRefreshGuard());
   const sessionsRef = useRef<SessionSummary[]>([]);
   const tabsRef = useRef<SessionSummary[]>([]);
@@ -746,25 +748,37 @@ export function TerminalPage() {
 
   const requestClose = useCallback(
     (session: SessionSummary) => {
-      if (daemonRestartBlocksInteractions()) {
+      const identity = sessionKey(session);
+      if (
+        daemonRestartBlocksInteractions() ||
+        pendingCloseSessionKeyRef.current !== null ||
+        closingSessionKeysRef.current.has(identity)
+      ) {
         return;
       }
       setPaletteOpen(false);
-      setPendingCloseSessionKey(sessionKey(session));
+      pendingCloseSessionKeyRef.current = identity;
+      setPendingCloseSessionKey(identity);
     },
     [daemonRestartBlocksInteractions],
   );
 
   const cancelClose = useCallback(() => {
+    pendingCloseSessionKeyRef.current = null;
     setPendingCloseSessionKey(null);
     requestAnimationFrame(() => renderer?.focus());
   }, [renderer]);
 
   const confirmClose = useCallback(
     (session: SessionSummary) => {
-      if (daemonRestartBlocksInteractions()) {
+      if (
+        daemonRestartBlocksInteractions() ||
+        pendingCloseSessionKeyRef.current !== sessionKey(session)
+      ) {
         return;
       }
+      // Consume the confirmation before starting async work or rerendering.
+      pendingCloseSessionKeyRef.current = null;
       setPendingCloseSessionKey(null);
       void close(session);
     },
@@ -794,6 +808,7 @@ export function TerminalPage() {
     setTabs(markLocalMissing);
     setCreating(false);
     setNewShellOpen(false);
+    pendingCloseSessionKeyRef.current = null;
     setPendingCloseSessionKey(null);
     setClosingSessionKeys(new Set());
     setDisconnectingSessionKey(null);
@@ -1026,6 +1041,7 @@ export function TerminalPage() {
       selectSession: (session) => void activateTab(session),
       disconnectSession: (session) => void disconnect(session),
       requestCloseSession: requestClose,
+      confirmCloseSession: confirmClose,
       toggleInput: () => {
         if (!daemonRestartBlocksInteractions()) {
           void attachment.toggleInputLease();
@@ -1049,6 +1065,10 @@ export function TerminalPage() {
     SHOW_PALETTE_KEYBINDING,
     shortcutPlatform,
   );
+  const closeShortcutLabel = formatKeybinding(
+    closeSessionKeybinding(shortcutPlatform),
+    shortcutPlatform,
+  );
 
   const executeCommand = useCallback(
     (command: AppCommand) => {
@@ -1059,7 +1079,7 @@ export function TerminalPage() {
         importOpen ||
         pendingForget ||
         hostFlow !== undefined ||
-        pendingCloseSessionKey ||
+        (pendingCloseSessionKey !== null && command.id !== COMMAND_IDS.close) ||
         daemonRestartConfirmationPending
       )
         return;
@@ -1289,7 +1309,7 @@ export function TerminalPage() {
       ) : pendingCloseSessionKey ? (
         <QuickInput
           title="Close session"
-          description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.`}
+          description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone. Press ${closeShortcutLabel} to confirm, or Esc to cancel.`}
           mode={{
             kind: "confirm",
             confirm_label: "Close session",

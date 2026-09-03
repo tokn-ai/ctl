@@ -1,5 +1,7 @@
 # ctl monorepo
 
+[![CI](https://github.com/tokn-ai/ctl/actions/workflows/ci.yml/badge.svg)](https://github.com/tokn-ai/ctl/actions/workflows/ci.yml)
+
 This repository will contain two independently useful products:
 
 - `rmux`: persistent local terminal sessions;

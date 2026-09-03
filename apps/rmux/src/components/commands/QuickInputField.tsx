@@ -16,16 +16,22 @@ export interface QuickInputFieldMode {
   initial_value?: string;
   placeholder?: string;
   secret?: boolean;
+  submit_label?: string;
   suggestions?: QuickInputSuggestions;
 }
 
 interface QuickInputFieldProps {
   mode: QuickInputFieldMode;
   onSubmit(value: string): void;
+  onChange?(value: string): void;
 }
 
 /** Editable input with optional suggestions; selection never overwrites a draft. */
-export function QuickInputField({ mode, onSubmit }: QuickInputFieldProps) {
+export function QuickInputField({
+  mode,
+  onSubmit,
+  onChange,
+}: QuickInputFieldProps) {
   const [value, setValue] = useState(mode.initial_value ?? "");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const listId = useId();
@@ -71,6 +77,7 @@ export function QuickInputField({ mode, onSubmit }: QuickInputFieldProps) {
             onChange={(event) => {
               setValue(event.currentTarget.value);
               setSelectedId(null);
+              onChange?.(event.currentTarget.value);
             }}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing) return;
@@ -103,7 +110,7 @@ export function QuickInputField({ mode, onSubmit }: QuickInputFieldProps) {
             autoComplete="off"
             spellCheck={false}
           />
-          <button type="submit">Continue</button>
+          <button type="submit">{mode.submit_label ?? "Continue"}</button>
         </div>
       </form>
       {suggestions ? (

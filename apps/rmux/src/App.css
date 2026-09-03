@@ -210,8 +210,7 @@ button {
 
 .icon-button,
 .toolbar-actions button,
-.sidebar-state button,
-.form-actions button {
+.sidebar-state button {
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface-2);
@@ -444,42 +443,6 @@ button:disabled {
 .new-session-button span {
   margin-right: 5px;
   color: var(--accent);
-}
-
-.new-session-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.new-session-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.new-session-form input,
-.new-session-form select {
-  width: 100%;
-  min-width: 0;
-  padding: 7px 8px;
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface-0);
-}
-
-.form-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.form-actions button {
-  padding: 6px 10px;
-  font-size: 12px;
 }
 
 .button-primary {

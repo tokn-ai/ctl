@@ -37,7 +37,7 @@ interface TerminalCommandContext {
   resizeWithWindow: boolean;
   listLoading: boolean;
   creating: boolean;
-  createFormOpen: boolean;
+  newShellOpen: boolean;
   pendingCloseSessionKey: string | null;
   closingSessionKeys: ReadonlySet<string>;
   disconnectingSessionKey: string | null;
@@ -54,7 +54,7 @@ interface TerminalCommandActions {
   showAddHost(): void;
   showAddExistingSession(): void;
   forgetSession(session: SessionSummary): void;
-  showNewShellForm(): void;
+  showNewShell(): void;
   openShellTab(): void;
   refreshSessions(): void;
   selectSession(session: SessionSummary): void;
@@ -101,16 +101,14 @@ export function buildTerminalCommands(
     ? "rmuxd is restarting."
     : "Confirm or cancel the pending rmuxd restart first.";
   const daemonRestartBlocked =
-    context.creating ||
-    context.createFormOpen ||
-    daemonRestartInteractionBlocked;
+    context.creating || context.newShellOpen || daemonRestartInteractionBlocked;
   const daemonRestartDisabledReason = context.restartingDaemon
     ? "rmuxd is already restarting."
     : context.daemonRestartConfirmationPending
       ? daemonRestartInteractionDisabledReason
       : context.creating
         ? "Wait for the shell being created to finish."
-        : "Close the new-shell form before restarting rmuxd.";
+        : "Close the new-shell dialog before restarting rmuxd.";
 
   const commands: AppCommand[] = [
     {
@@ -165,7 +163,7 @@ export function buildTerminalCommands(
       keybinding: { code: "KeyN", primary: true, shift: true },
       enabled:
         !context.creating &&
-        !context.createFormOpen &&
+        !context.newShellOpen &&
         !context.daemonRestartConfirmationPending &&
         !context.restartingDaemon,
       disabledReason: context.restartingDaemon
@@ -174,9 +172,9 @@ export function buildTerminalCommands(
           ? "Confirm or cancel the pending rmuxd restart first."
           : context.creating
             ? "A shell is being created."
-            : "The new-shell form is already open.",
+            : "The new-shell dialog is already open.",
       focusTerminalAfterRun: false,
-      run: actions.showNewShellForm,
+      run: actions.showNewShell,
     },
     {
       id: COMMAND_IDS.newTab,

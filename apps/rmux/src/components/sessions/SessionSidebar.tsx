@@ -1,5 +1,3 @@
-import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
 import {
   compactTerminalTitle,
   compactTerminalTitleParts,
@@ -28,16 +26,11 @@ interface SessionSidebarProps {
   loading: boolean;
   error: string | null;
   creating: boolean;
-  createFormOpen: boolean;
   closingSessionKeys: ReadonlySet<string>;
   disconnectingSessionKey: string | null;
   onRefresh(): void;
   onSelect(session: SessionSummary): void;
-  onCreate(
-    target: ConnectionTarget,
-    workingDirectory: string | null,
-  ): Promise<boolean>;
-  onCreateFormOpenChange(open: boolean): void;
+  onNewShell(): void;
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
@@ -86,13 +79,11 @@ export function SessionSidebar({
   loading,
   error,
   creating,
-  createFormOpen,
   closingSessionKeys,
   disconnectingSessionKey,
   onRefresh,
   onSelect,
-  onCreate,
-  onCreateFormOpenChange,
+  onNewShell,
   onDisconnect,
   onRequestClose,
   onAddHost,
@@ -101,30 +92,6 @@ export function SessionSidebar({
   onAddExisting,
   onForget,
 }: SessionSidebarProps) {
-  const [workingDirectory, setWorkingDirectory] = useState("");
-  const [creationTargetKey, setCreationTargetKey] = useState("local");
-
-  useEffect(() => {
-    if (!targets.some((target) => targetKey(target) === creationTargetKey)) {
-      setCreationTargetKey("local");
-    }
-  }, [creationTargetKey, targets]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const target =
-      targets.find((candidate) => targetKey(candidate) === creationTargetKey) ??
-      targets[0];
-    if (!target) {
-      return;
-    }
-    const created = await onCreate(target, workingDirectory.trim() || null);
-    if (created) {
-      setWorkingDirectory("");
-      onCreateFormOpenChange(false);
-    }
-  }
-
   return (
     <aside className="session-sidebar" aria-label="rmux sessions">
       <div className="sidebar-connections">
@@ -301,60 +268,14 @@ export function SessionSidebar({
         >
           Add existing session
         </button>
-        {createFormOpen ? (
-          <form className="new-session-form" onSubmit={submit}>
-            <label>
-              Host
-              <select
-                value={creationTargetKey}
-                onChange={(event) =>
-                  setCreationTargetKey(event.currentTarget.value)
-                }
-              >
-                {targets.map((target) => (
-                  <option key={targetKey(target)} value={targetKey(target)}>
-                    {targetLabel(target)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Working directory
-              <input
-                value={workingDirectory}
-                onChange={(event) =>
-                  setWorkingDirectory(event.currentTarget.value)
-                }
-                placeholder="home directory"
-                autoFocus
-              />
-            </label>
-            <div className="form-actions">
-              <button
-                className="button-secondary"
-                type="button"
-                onClick={() => onCreateFormOpenChange(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="button-primary"
-                type="submit"
-                disabled={creating}
-              >
-                {creating ? "Creating…" : "Create shell"}
-              </button>
-            </div>
-          </form>
-        ) : (
-          <button
-            className="new-session-button"
-            type="button"
-            onClick={() => onCreateFormOpenChange(true)}
-          >
-            <span aria-hidden="true">＋</span> New shell
-          </button>
-        )}
+        <button
+          className="new-session-button"
+          type="button"
+          onClick={onNewShell}
+          disabled={creating}
+        >
+          <span aria-hidden="true">＋</span> New shell
+        </button>
       </footer>
     </aside>
   );

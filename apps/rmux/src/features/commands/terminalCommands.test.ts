@@ -46,7 +46,7 @@ function setup(
     showAddHost: vi.fn(),
     showAddExistingSession: vi.fn(),
     forgetSession: vi.fn(),
-    showNewShellForm: vi.fn(),
+    showNewShell: vi.fn(),
     openShellTab: vi.fn(),
     refreshSessions: vi.fn(),
     selectSession: vi.fn(),
@@ -69,7 +69,7 @@ function setup(
       resizeWithWindow: false,
       listLoading: false,
       creating: false,
-      createFormOpen: false,
+      newShellOpen: false,
       pendingCloseSessionKey: identityFor(pendingCloseSessionId),
       closingSessionKeys: new Set(),
       disconnectingSessionKey: null,
@@ -95,6 +95,19 @@ function findCommand(
 }
 
 describe("terminal commands", () => {
+  it("opens new-shell quick input without refocusing the terminal", () => {
+    const { actions, commands } = setup();
+    const command = findCommand(commands, COMMAND_IDS.newShell);
+    expect(command.focusTerminalAfterRun).toBe(false);
+    expect(command.keybinding).toEqual({
+      code: "KeyN",
+      primary: true,
+      shift: true,
+    });
+    command.run();
+    expect(actions.showNewShell).toHaveBeenCalledOnce();
+  });
+
   it("cycles through open tabs and wraps around", () => {
     const { tabs, actions, commands } = setup("first", "macos", "/work/rmux", [
       "first",

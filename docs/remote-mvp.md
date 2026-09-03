@@ -92,9 +92,10 @@ a host does not import its daemon's inventory. Opening a session connects to
 its host on demand. See `docs/rmux-workspace.md` for persistence and migration.
 
 Known local and container sessions appear in one sidebar with host labels. New
-shells default to local; the creation form can explicitly select the remote
-host, while **New Tab in Current Folder** always inherits the active session's
-host.
+shells default to local; **New Shell** uses the command-palette overlay to
+choose a host and working directory. Only submission contacts that host;
+authentication can be established with **Connect host** first. **New Tab in
+Current Folder** always inherits the active session's host.
 
 The `rmux_ssh_host_keys` volume preserves the SSH host identity across
 container replacement. Terminal sessions remain memory-backed and disappear

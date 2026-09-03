@@ -46,7 +46,11 @@ export function QuickInputFrame({
                 'input:not(:disabled), button:not(:disabled):not([tabindex="-1"])',
               ),
             ];
-            if (!elements.length) return;
+            if (!elements.length) {
+              event.preventDefault();
+              event.currentTarget.focus();
+              return;
+            }
             const index = elements.indexOf(
               document.activeElement as HTMLElement,
             );

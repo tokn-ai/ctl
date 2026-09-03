@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
+import { NewShellFlow } from "../components/sessions/NewShellFlow";
 import { useWorkspace } from "../features/workspace/useWorkspace";
 import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
 import { withHostId } from "../features/workspace/workspaceModel";
@@ -125,7 +126,7 @@ export function TerminalPage() {
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [createFormOpen, setCreateFormOpen] = useState(false);
+  const [newShellOpen, setNewShellOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [pendingForget, setPendingForget] = useState<SessionSummary | null>(
@@ -555,14 +556,16 @@ export function TerminalPage() {
     async (
       target: ConnectionTarget,
       workingDirectory: string | null,
-    ): Promise<boolean> => {
+    ): Promise<void> => {
       if (
         !workspace.ready ||
         creatingRef.current ||
         daemonRestartConfirmationRef.current ||
         restartingDaemonRef.current
       ) {
-        return false;
+        throw new Error(
+          "Shell creation is currently unavailable. Try again when the workspace is ready.",
+        );
       }
       const daemonEpoch = daemonEpochRef.current;
       creatingRef.current = true;
@@ -575,7 +578,7 @@ export function TerminalPage() {
           terminal_size: measuredSize(renderer),
         });
         if (daemonEpoch !== daemonEpochRef.current) {
-          return false;
+          return;
         }
         refreshGuardRef.current.recordMutation();
         setSessions((current) => {
@@ -589,15 +592,19 @@ export function TerminalPage() {
           setListError(
             `Shell ${session.name} was created, but saving its workspace entry failed. Retry saving before closing the app. ${errorMessage(failure)}`,
           );
-          return true;
+          return;
         }
-        await activateTab(session, true);
-        return daemonEpoch === daemonEpochRef.current;
-      } catch (error) {
-        if (daemonEpoch === daemonEpochRef.current) {
-          setListError(errorMessage(error));
+        try {
+          await activateTab(session, true);
+        } catch (failure) {
+          // Creation already succeeded: close the input flow rather than offer
+          // a retry that would create a second persistent shell.
+          if (daemonEpoch === daemonEpochRef.current) {
+            setListError(
+              `Shell ${session.name} was created, but opening its tab failed. Select the existing session to retry. ${errorMessage(failure)}`,
+            );
+          }
         }
-        return false;
       } finally {
         if (daemonEpoch === daemonEpochRef.current) {
           creatingRef.current = false;
@@ -786,7 +793,7 @@ export function TerminalPage() {
     setSessions(markLocalMissing);
     setTabs(markLocalMissing);
     setCreating(false);
-    setCreateFormOpen(false);
+    setNewShellOpen(false);
     setPendingCloseSessionKey(null);
     setClosingSessionKeys(new Set());
     setDisconnectingSessionKey(null);
@@ -987,7 +994,7 @@ export function TerminalPage() {
       resizeWithWindow: attachment.state.resize_with_window,
       listLoading: loading,
       creating,
-      createFormOpen,
+      newShellOpen,
       pendingCloseSessionKey,
       closingSessionKeys,
       disconnectingSessionKey,
@@ -1003,14 +1010,16 @@ export function TerminalPage() {
       showAddHost: () => setHostFlow(null),
       showAddExistingSession: () => setImportOpen(true),
       forgetSession: (session) => setPendingForget(session),
-      showNewShellForm: () => {
+      showNewShell: () => {
         if (!daemonRestartBlocksInteractions()) {
-          setCreateFormOpen(true);
+          setNewShellOpen(true);
         }
       },
       openShellTab: () => {
         if (currentWorkingDirectory && activeTab) {
-          void create(activeTab.target, currentWorkingDirectory);
+          void create(activeTab.target, currentWorkingDirectory).catch(
+            (failure) => setListError(errorMessage(failure)),
+          );
         }
       },
       refreshSessions: () => void refresh(),
@@ -1046,6 +1055,7 @@ export function TerminalPage() {
       if (
         !workspace.ready ||
         workspace.closing ||
+        newShellOpen ||
         importOpen ||
         pendingForget ||
         hostFlow !== undefined ||
@@ -1072,6 +1082,7 @@ export function TerminalPage() {
       daemonRestartConfirmationPending,
       workspace.ready,
       workspace.closing,
+      newShellOpen,
       importOpen,
       pendingForget,
     ],
@@ -1089,11 +1100,11 @@ export function TerminalPage() {
 
   const handleTerminalInput = useCallback(
     (data: Uint8Array) => {
-      if (!daemonRestartBlocksInteractions()) {
+      if (!newShellOpen && !daemonRestartBlocksInteractions()) {
         attachment.handleInput(data);
       }
     },
-    [attachment, daemonRestartBlocksInteractions],
+    [attachment, daemonRestartBlocksInteractions, newShellOpen],
   );
 
   function dismissPalette() {
@@ -1104,7 +1115,10 @@ export function TerminalPage() {
 
   return (
     <>
-      <main className="app-shell" inert={!workspace.ready || workspace.closing}>
+      <main
+        className="app-shell"
+        inert={!workspace.ready || workspace.closing || newShellOpen}
+      >
         <SessionSidebar
           targets={targets}
           targetErrors={targetErrors}
@@ -1115,23 +1129,13 @@ export function TerminalPage() {
           loading={loading || !workspace.ready}
           error={listError ?? workspace.error}
           creating={creating}
-          createFormOpen={createFormOpen}
           closingSessionKeys={closingSessionKeys}
           disconnectingSessionKey={disconnectingSessionKey}
           onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
           onSelect={(session) =>
             executeCommandById(sessionSwitchCommandId(session))
           }
-          onCreate={create}
-          onCreateFormOpenChange={(open) => {
-            if (open) {
-              if (!daemonRestartBlocksInteractions()) {
-                executeCommandById(COMMAND_IDS.newShell);
-              }
-            } else {
-              setCreateFormOpen(false);
-            }
-          }}
+          onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
           onDisconnect={(session) => void disconnect(session)}
           onRequestClose={requestClose}
           onForget={setPendingForget}
@@ -1234,7 +1238,16 @@ export function TerminalPage() {
           <StatusBar state={attachment.state} />
         </section>
       </main>
-      {importOpen ? (
+      {newShellOpen ? (
+        <NewShellFlow
+          targets={targets}
+          onCreate={create}
+          onClose={() => {
+            setNewShellOpen(false);
+            requestAnimationFrame(() => renderer?.focus());
+          }}
+        />
+      ) : importOpen ? (
         <AddExistingSessionFlow
           targets={targets}
           known={sessions}

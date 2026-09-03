@@ -9,9 +9,15 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
-import type { WorkspaceDocument, WorkspaceSnapshot } from "../lib/types";
+import type {
+  ConnectionTarget,
+  SessionSummary,
+  WorkspaceDocument,
+  WorkspaceSnapshot,
+} from "../lib/types";
 import { restoreWorkspace } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
+import { detectShortcutPlatform } from "../features/commands/keybindings";
 
 const api = vi.hoisted(() => ({
   loadWorkspace: vi.fn(),
@@ -119,7 +125,150 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+function newSession(
+  target: ConnectionTarget = { kind: "local" },
+): SessionSummary {
+  return {
+    target,
+    session_id: "created-id",
+    name: "created-shell",
+    status: "running",
+    next_sequence: "0",
+    terminal_size: {
+      columns: 80,
+      rows: 24,
+      pixel_width: null,
+      pixel_height: null,
+    },
+  };
+}
+
+function shortcut(code: string, shiftKey = true) {
+  const macos = detectShortcutPlatform() === "macos";
+  fireEvent.keyDown(window, {
+    code,
+    ctrlKey: !macos,
+    metaKey: macos,
+    shiftKey,
+  });
+}
+
 describe("workspace-backed terminal page", () => {
+  it("opens new-shell quick input from its shortcut and blocks other commands until cancelled", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyN");
+    const dialog = screen.getByRole("dialog", {
+      name: "New shell — host · 1/2",
+    });
+    expect(document.querySelector("main")?.hasAttribute("inert")).toBe(true);
+    shortcut("KeyP");
+    shortcut("KeyN");
+    shortcut("KeyE", detectShortcutPlatform() !== "macos");
+    expect(screen.getAllByRole("dialog")).toEqual([dialog]);
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(api.killSession).not.toHaveBeenCalled();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.querySelector("main")?.hasAttribute("inert")).toBe(false);
+    shortcut("KeyN");
+    expect(document.activeElement).toBe(
+      screen.getByRole("option", { name: "Local" }),
+    );
+  });
+
+  it("routes palette New Shell to a chosen remote without contacting other hosts", async () => {
+    const target = {
+      kind: "ssh" as const,
+      destination: "test",
+      host_id: "test-id",
+    };
+    const created = newSession(target);
+    api.createSession.mockResolvedValue(created);
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyP");
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Search commands" }),
+      {
+        target: { value: "New Shell" },
+      },
+    );
+    fireEvent.click(screen.getByRole("option", { name: /New Shell/ }));
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: "test" }));
+    fireEvent.change(screen.getByLabelText("Working directory"), {
+      target: { value: "/remote/work" },
+    });
+    expect(api.createSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.createSession).toHaveBeenCalledExactlyOnceWith({
+      target,
+      working_directory: "/remote/work",
+      terminal_size: {
+        columns: 80,
+        rows: 24,
+        pixel_width: null,
+        pixel_height: null,
+      },
+    });
+    expect(attachment.connect).toHaveBeenCalledExactlyOnceWith(created, {
+      resize_with_window: true,
+    });
+    expect(api.listSessions).not.toHaveBeenCalled();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+  });
+
+  it("keeps backend failures in the dialog for correction and retry", async () => {
+    api.createSession
+      .mockRejectedValueOnce({ message: "Cannot open directory" })
+      .mockResolvedValue(newSession());
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Local" }));
+    fireEvent.change(screen.getByLabelText("Working directory"), {
+      target: { value: "/missing" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Cannot open directory",
+    );
+    expect(attachment.connect).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Working directory"), {
+      target: { value: "/work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.createSession).toHaveBeenCalledTimes(2);
+    expect(attachment.connect).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer another creation when opening the already-created shell fails", async () => {
+    const created = newSession();
+    api.createSession.mockResolvedValue(created);
+    attachment.connect.mockRejectedValueOnce(
+      new Error("Connection interrupted"),
+    );
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Local" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await screen.findByText(/was created, but opening its tab failed/);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(api.createSession).toHaveBeenCalledOnce();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Shell — created-shell" }),
+    );
+    await waitFor(() => expect(attachment.connect).toHaveBeenCalledTimes(2));
+    expect(api.createSession).toHaveBeenCalledOnce();
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
   it("keeps a restored remote tab cold, then resumes it after connecting its host", async () => {
     const known = restoreWorkspace(snapshot().document).sessions[0];
     api.inspectKnownSessions.mockResolvedValueOnce([
@@ -352,6 +501,7 @@ describe("workspace-backed terminal page", () => {
     const first = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
     expect(attachment.connect).not.toHaveBeenCalled();
@@ -404,6 +554,7 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Local" }));
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await screen.findByText(
       /was created, but saving its workspace entry failed/,

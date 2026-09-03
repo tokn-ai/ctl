@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
@@ -8,6 +8,32 @@ import { QuickInput } from "./QuickInput";
 afterEach(cleanup);
 
 describe("QuickInput interactions", () => {
+  it("explicitly disables all dismissal paths for a non-cancellable operation", async () => {
+    const cancel = vi.fn();
+    render(
+      <QuickInput
+        title="Creating"
+        mode={{ kind: "progress", message: "Creating shell…" }}
+        cancel_disabled
+        onSubmit={vi.fn()}
+        onCancel={cancel}
+      />,
+    );
+    const button = screen.getByLabelText(
+      "Cancel quick input",
+    ) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    const user = userEvent.setup();
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    await user.keyboard("{Escape}");
+    fireEvent.click(button);
+    fireEvent.mouseDown(screen.getByRole("dialog").parentElement!);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it("captures typed values under StrictMode and submits with Enter", async () => {
     const submit = vi.fn();
     render(

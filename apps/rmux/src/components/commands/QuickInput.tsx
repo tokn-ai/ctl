@@ -19,6 +19,8 @@ interface QuickInputProps {
   onSubmit(value: string): void;
   onCancel(): void;
   onBack?(): void;
+  onChange?(value: string): void;
+  cancel_disabled?: boolean;
 }
 
 /** Remount with a step key so secrets and drafts never leak between prompts. */
@@ -30,12 +32,17 @@ export function QuickInput({
   onSubmit,
   onCancel,
   onBack,
+  onChange,
+  cancel_disabled = false,
 }: QuickInputProps) {
   const [selected, setSelected] = useState(0);
+  const cancel = () => {
+    if (!cancel_disabled) onCancel();
+  };
   return (
     <QuickInputFrame
       title={title}
-      onDismiss={onCancel}
+      onDismiss={cancel}
       onKeyDown={(event) => {
         if (mode.kind !== "pick" || !mode.choices.length) return;
         if (
@@ -66,7 +73,8 @@ export function QuickInput({
         <strong>{title}</strong>
         <button
           type="button"
-          onClick={onCancel}
+          onClick={cancel}
+          disabled={cancel_disabled}
           aria-label="Cancel quick input"
         >
           Esc
@@ -76,7 +84,7 @@ export function QuickInput({
         <p className="quick-input-description">{description}</p>
       ) : null}
       {mode.kind === "input" ? (
-        <QuickInputField mode={mode} onSubmit={onSubmit} />
+        <QuickInputField mode={mode} onSubmit={onSubmit} onChange={onChange} />
       ) : null}
       {mode.kind === "pick" ? (
         <div
@@ -107,7 +115,12 @@ export function QuickInput({
       ) : null}
       {mode.kind === "confirm" ? (
         <div className="quick-input-actions">
-          <button type="button" onClick={onCancel} autoFocus>
+          <button
+            type="button"
+            onClick={cancel}
+            disabled={cancel_disabled}
+            autoFocus
+          >
             Cancel
           </button>
           <button

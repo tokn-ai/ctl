@@ -138,8 +138,10 @@ one makes it an active target. A new hostname can be saved as a reusable,
 managed OpenSSH `Host` block or as structured app-local connection settings.
 Add Host uses the command-palette overlay for host, name, authentication, and
 storage prompts, with connection verification before saving. The same overlay
-handles destructive close/restart confirmations. `ctld` is assumed on the
-remote `PATH`; new-shell input remains in the sidebar.
+handles destructive close/restart confirmations and **New Shell** input.
+**New Shell** asks for a host (Local first) and an optional working directory;
+blank uses that host's home directory. Escape cancels before creation starts,
+and progress/errors stay in the overlay. `ctld` is assumed on the remote `PATH`.
 Each row and tab carries its host; create, attach, reconnect, and kill
 operations always use that session's original target.
 It renders one terminal pane and exposes input and layout ownership separately.

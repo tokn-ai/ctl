@@ -41,7 +41,7 @@ const shellState: ShellStateSummary = {
 };
 
 describe("SessionSidebar", () => {
-  it("delegates close and add-host interactions without inline forms", () => {
+  it("delegates close, add-host, and new-shell interactions without inline forms", () => {
     const markup = renderToStaticMarkup(
       <SessionSidebar
         targets={[session.target]}
@@ -53,13 +53,11 @@ describe("SessionSidebar", () => {
         loading={false}
         error={null}
         creating={false}
-        createFormOpen={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
-        onCreate={vi.fn(async () => true)}
-        onCreateFormOpenChange={vi.fn()}
+        onNewShell={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
@@ -74,6 +72,8 @@ describe("SessionSidebar", () => {
     expect(markup).toContain("+ Host");
     expect(markup).not.toContain("session-close-confirmation");
     expect(markup).not.toContain("host-form");
+    expect(markup).toContain("New shell");
+    expect(markup).not.toContain("<form");
   });
 
   it("uses the observed terminal title as the primary label", () => {
@@ -88,13 +88,11 @@ describe("SessionSidebar", () => {
         loading={false}
         error={null}
         creating={false}
-        createFormOpen={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
-        onCreate={vi.fn(async () => true)}
-        onCreateFormOpenChange={vi.fn()}
+        onNewShell={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
@@ -127,13 +125,11 @@ describe("SessionSidebar", () => {
         loading={false}
         error={null}
         creating={false}
-        createFormOpen={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
-        onCreate={vi.fn(async () => true)}
-        onCreateFormOpenChange={vi.fn()}
+        onNewShell={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}
@@ -162,13 +158,11 @@ describe("SessionSidebar", () => {
         loading={false}
         error={null}
         creating={false}
-        createFormOpen={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
-        onCreate={vi.fn(async () => true)}
-        onCreateFormOpenChange={vi.fn()}
+        onNewShell={vi.fn()}
         onDisconnect={vi.fn()}
         onRequestClose={vi.fn()}
         onAddHost={vi.fn()}

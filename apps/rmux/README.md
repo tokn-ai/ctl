@@ -121,8 +121,17 @@ terminal shortcuts are:
 
 The close shortcut opens a quick-input confirmation with **Cancel** focused.
 Choose **Close session** to terminate it, or `Esc` to cancel. Repeating a
-shortcut while a prompt is open cannot bypass confirmation. New-shell input
-remains in the sidebar for now.
+shortcut while a prompt is open cannot bypass confirmation.
+
+**New Shell**, from the sidebar, command palette, or `Cmd/Ctrl-Shift-N`, uses
+the same overlay: choose a host (Local is first/default), then enter an optional
+working directory. Blank means that host's home directory. Back preserves the
+directory draft, and Escape cancels before submission without contacting a
+host. Once creation starts, dismissal is disabled until it finishes because
+the backend may already have created a persistent shell. Errors remain inline
+for correction/retry; a successful creation is saved and opened as before.
+Post-creation save or attachment failures preserve the existing shell and use
+workspace/session recovery rather than inviting duplicate creation.
 
 These shortcuts are local to the focused app. Other key combinations continue
 to xterm and the PTY unchanged. The macOS application menu owns `Cmd-W` and

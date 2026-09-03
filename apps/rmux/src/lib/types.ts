@@ -1,5 +1,37 @@
 export type Sequence = string;
 
+export interface CommandKeybinding {
+  code: string;
+  primary: boolean;
+  shift?: boolean;
+  alt?: boolean;
+}
+
+export interface KeybindingOverride {
+  command_id: string;
+  /** null explicitly removes a default binding. */
+  keybinding: CommandKeybinding | null;
+}
+
+export interface KeybindingsDocument {
+  schema_version: 1;
+  overrides: KeybindingOverride[];
+}
+
+export interface KeybindingsSnapshot {
+  path: string;
+  /** Exact source text for compare-and-swap with external editor changes. */
+  revision: string | null;
+  document: KeybindingsDocument;
+}
+
+export interface NativeCommandBinding {
+  command_id: string;
+  title: string;
+  keybinding: CommandKeybinding | null;
+  enabled: boolean;
+}
+
 export interface SshConnectionTarget {
   kind: "ssh";
   /** App-owned identity; stripped at the native transport boundary. */

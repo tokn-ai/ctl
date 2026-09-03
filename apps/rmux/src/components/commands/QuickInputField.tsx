@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type RefObject } from "react";
 
 export interface QuickInputSuggestions {
   label: string;
@@ -24,6 +24,7 @@ interface QuickInputFieldProps {
   mode: QuickInputFieldMode;
   onSubmit(value: string): void;
   onChange?(value: string): void;
+  submissionValue?: RefObject<() => string>;
 }
 
 /** Editable input with optional suggestions; selection never overwrites a draft. */
@@ -31,6 +32,7 @@ export function QuickInputField({
   mode,
   onSubmit,
   onChange,
+  submissionValue,
 }: QuickInputFieldProps) {
   const [value, setValue] = useState(mode.initial_value ?? "");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -44,6 +46,7 @@ export function QuickInputField({
     ) ?? [];
   const selectedIndex = items.findIndex((item) => item.id === selectedId);
   const selected = items[selectedIndex];
+  if (submissionValue) submissionValue.current = () => selected?.id ?? value;
   const status = suggestions?.loading
     ? (suggestions.loading_message ?? "Loading suggestions…")
     : items.length === 0 && suggestions

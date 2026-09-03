@@ -1,4 +1,14 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import {
+  useCommandEnvironment,
+  useCommandScope,
+} from "../../features/commands/CommandContext";
+import { QUICK_INPUT_IDS } from "../../features/commands/commandIds";
+import { defaultKeybindings } from "../../features/commands/keymap";
+import {
+  detectShortcutPlatform,
+  formatKeybinding,
+} from "../../features/commands/keybindings";
 import { QuickInputFrame } from "./QuickInputFrame";
 import { QuickInputField, type QuickInputFieldMode } from "./QuickInputField";
 
@@ -16,11 +26,13 @@ interface QuickInputProps {
   description?: string;
   error?: string | null;
   mode: QuickInputMode;
-  onSubmit(value: string): void;
+  onSubmit(value: string): void | Promise<void>;
   onCancel(): void;
   onBack?(): void;
   onChange?(value: string): void;
   cancel_disabled?: boolean;
+  /** Reuse the initiating command's configured shortcut in this confirmation. */
+  confirm_command_id?: string;
 }
 
 /** Remount with a step key so secrets and drafts never leak between prompts. */
@@ -34,11 +46,60 @@ export function QuickInput({
   onBack,
   onChange,
   cancel_disabled = false,
+  confirm_command_id,
 }: QuickInputProps) {
   const [selected, setSelected] = useState(0);
+  const inputValue = useRef<() => string>(() => "");
+  const environment = useCommandEnvironment();
+  const dispatcher = useCommandScope({
+    commands: [
+      {
+        id: QUICK_INPUT_IDS.cancel,
+        category: "Dialog",
+        title: "Cancel Quick Input",
+        enabled: !cancel_disabled,
+        run: onCancel,
+      },
+      {
+        id: QUICK_INPUT_IDS.back,
+        category: "Dialog",
+        title: "Previous Step",
+        enabled: Boolean(onBack) && !cancel_disabled,
+        run: onBack ?? (() => {}),
+      },
+      {
+        id: QUICK_INPUT_IDS.accept,
+        category: "Dialog",
+        title: "Accept Quick Input",
+        enabled:
+          mode.kind !== "progress" &&
+          (mode.kind !== "pick" || mode.choices.length > 0),
+        run: (args) => {
+          const value =
+            args?.value ??
+            (mode.kind === "input"
+              ? inputValue.current()
+              : mode.kind === "pick"
+                ? mode.choices[selected]?.id
+                : "confirm");
+          if (value !== undefined) return onSubmit(value);
+        },
+      },
+    ],
+    redirects: confirm_command_id
+      ? { [confirm_command_id]: QUICK_INPUT_IDS.accept }
+      : undefined,
+  });
   const cancel = () => {
-    if (!cancel_disabled) onCancel();
+    dispatcher.execute(QUICK_INPUT_IDS.cancel);
   };
+  const submit = (value: string) => {
+    dispatcher.execute(QUICK_INPUT_IDS.accept, { value });
+  };
+  const platform = detectShortcutPlatform();
+  const cancelKey = environment
+    ? environment.keybinding(QUICK_INPUT_IDS.cancel)
+    : defaultKeybindings(platform).get(QUICK_INPUT_IDS.cancel);
   return (
     <QuickInputFrame
       title={title}
@@ -60,13 +121,17 @@ export function QuickInput({
             [next]?.focus();
         } else if (event.key === "Enter") {
           event.preventDefault();
-          onSubmit(mode.choices[selected].id);
+          submit(mode.choices[selected].id);
         }
       }}
     >
       <header className="quick-input-heading">
         {onBack ? (
-          <button type="button" aria-label="Previous step" onClick={onBack}>
+          <button
+            type="button"
+            aria-label="Previous step"
+            onClick={() => dispatcher.execute(QUICK_INPUT_IDS.back)}
+          >
             ←
           </button>
         ) : null}
@@ -77,14 +142,19 @@ export function QuickInput({
           disabled={cancel_disabled}
           aria-label="Cancel quick input"
         >
-          Esc
+          {cancelKey ? formatKeybinding(cancelKey, platform) : "Cancel"}
         </button>
       </header>
       {description ? (
         <p className="quick-input-description">{description}</p>
       ) : null}
       {mode.kind === "input" ? (
-        <QuickInputField mode={mode} onSubmit={onSubmit} onChange={onChange} />
+        <QuickInputField
+          mode={mode}
+          onSubmit={submit}
+          onChange={onChange}
+          submissionValue={inputValue}
+        />
       ) : null}
       {mode.kind === "pick" ? (
         <div
@@ -101,7 +171,7 @@ export function QuickInput({
               className={`command-palette-option ${index === selected ? "selected" : ""}`}
               autoFocus={index === 0}
               onFocus={() => setSelected(index)}
-              onClick={() => onSubmit(choice.id)}
+              onClick={() => submit(choice.id)}
             >
               <span>
                 <strong>{choice.label}</strong>
@@ -128,7 +198,7 @@ export function QuickInput({
             className={
               mode.destructive ? "quick-input-danger" : "button-primary"
             }
-            onClick={() => onSubmit("confirm")}
+            onClick={() => submit("confirm")}
           >
             {mode.confirm_label}
           </button>
@@ -136,7 +206,7 @@ export function QuickInput({
       ) : null}
       {mode.kind === "progress" ? (
         <p className="quick-input-description" role="status">
-          {mode.message ?? "Connecting… Press Escape to cancel."}
+          {mode.message ?? "Connecting…"}
         </p>
       ) : null}
       {error ? (

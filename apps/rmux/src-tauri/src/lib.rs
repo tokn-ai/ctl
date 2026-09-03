@@ -1,6 +1,8 @@
+mod command_menu;
 mod commands;
 mod dto;
 mod error;
+mod keybindings;
 mod local_transport;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -38,6 +40,9 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       workspace::load_workspace,
       workspace::update_workspace,
+      keybindings::load_keybindings,
+      keybindings::save_keybindings,
+      command_menu::sync_command_menu,
       commands::inspection::inspect_known_sessions,
       commands::list_sessions,
       commands::list_ssh_config_hosts,

@@ -14,6 +14,7 @@ import type {
   SessionSummary,
   WorkspaceDocument,
   WorkspaceSnapshot,
+  KeybindingsDocument,
 } from "../lib/types";
 import { restoreWorkspace } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
@@ -46,6 +47,9 @@ const api = vi.hoisted(() => ({
   forgetSshCredentials: vi.fn(),
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(),
+  loadKeybindings: vi.fn(),
+  saveKeybindings: vi.fn(),
+  syncCommandMenu: vi.fn(),
 }));
 const attachment = vi.hoisted(() => ({
   state: {
@@ -117,6 +121,19 @@ beforeEach(() => {
   nativeEvents.listeners.clear();
   window.localStorage.clear();
   api.loadWorkspace.mockResolvedValue(snapshot());
+  api.loadKeybindings.mockResolvedValue({
+    path: "/test/keybindings.json",
+    revision: null,
+    document: { schema_version: 1, overrides: [] },
+  });
+  api.syncCommandMenu.mockResolvedValue(undefined);
+  api.saveKeybindings.mockImplementation(
+    async (_revision: string | null, document: KeybindingsDocument) => ({
+      path: "/test/keybindings.json",
+      revision: JSON.stringify(document),
+      document,
+    }),
+  );
   api.updateWorkspace.mockImplementation(
     async (_revision: string | null, document: WorkspaceDocument) => ({
       revision: crypto.randomUUID(),
@@ -180,6 +197,176 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("saves a remapped shortcut through quick input, updates labels, and restores it on restart", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux");
+    const first = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyP");
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Search commands" }),
+      { target: { value: "Configure Keyboard Shortcuts" } },
+    );
+    fireEvent.click(
+      screen.getByRole("option", { name: /Configure Keyboard Shortcuts/ }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: /^New Shell/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Shortcut" }), {
+      target: { value: "Primary+Shift+Y" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save shortcut" }));
+    const picker = await screen.findByRole("dialog", {
+      name: "Keyboard shortcuts",
+    });
+    expect(
+      screen.getByRole("option", { name: /New Shell/ }).textContent,
+    ).toContain("Ctrl+Shift+Y");
+    expect(api.saveKeybindings).toHaveBeenCalledExactlyOnceWith(null, {
+      schema_version: 1,
+      overrides: [
+        {
+          command_id: COMMAND_IDS.newShell,
+          keybinding: { code: "KeyY", primary: true, shift: true, alt: false },
+        },
+      ],
+    });
+    fireEvent.keyDown(picker, { key: "Escape" });
+    shortcut("KeyN");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    shortcut("KeyY");
+    expect(
+      screen.getByRole("dialog", { name: "New shell — host · 1/2" }),
+    ).toBeTruthy();
+    first.unmount();
+    const document = api.saveKeybindings.mock.calls[0][1];
+    api.loadKeybindings.mockResolvedValue({
+      path: "/test/keybindings.json",
+      revision: JSON.stringify(document),
+      document,
+    });
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyN");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    shortcut("KeyY");
+    expect(
+      screen.getByRole("dialog", { name: "New shell — host · 1/2" }),
+    ).toBeTruthy();
+  });
+
+  it("uses the remapped close shortcut for both requesting and confirming, and supports unbinding", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux");
+    api.loadKeybindings.mockResolvedValue({
+      path: "/test/keybindings.json",
+      revision: "one",
+      document: {
+        schema_version: 1,
+        overrides: [
+          {
+            command_id: COMMAND_IDS.close,
+            keybinding: { code: "KeyY", primary: true, shift: true },
+          },
+          { command_id: COMMAND_IDS.newShell, keybinding: null },
+        ],
+      },
+    });
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyN");
+    shortcut("KeyE");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    shortcut("KeyY");
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "Press Ctrl+Shift+Y to confirm",
+    );
+    expect(api.killSession).not.toHaveBeenCalled();
+    shortcut("KeyY");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Close remembered" }),
+      ).toBeNull(),
+    );
+    expect(api.killSession).toHaveBeenCalledOnce();
+  });
+
+  it("dispatches configured dialog accept/cancel keys without exposing app commands", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux");
+    api.loadKeybindings.mockResolvedValue({
+      path: "/test/keybindings.json",
+      revision: "one",
+      document: {
+        schema_version: 1,
+        overrides: [
+          {
+            command_id: "quick_input.cancel",
+            keybinding: { code: "Escape", primary: false, alt: true },
+          },
+          {
+            command_id: "quick_input.accept",
+            keybinding: { code: "Enter", primary: true },
+          },
+        ],
+      },
+    });
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyN");
+    const picker = screen.getByRole("dialog");
+    fireEvent.keyDown(picker, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBe(picker);
+    fireEvent.keyDown(picker, { code: "Enter", ctrlKey: true });
+    const input = screen.getByRole("textbox", { name: "Working directory" });
+    fireEvent.change(input, { target: { value: "/chosen/path" } });
+    nativeCommand(COMMAND_IDS.close);
+    expect(api.killSession).not.toHaveBeenCalled();
+    api.createSession.mockResolvedValue(newSession());
+    fireEvent.keyDown(input, { code: "Enter", ctrlKey: true });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.createSession.mock.calls[0][0].working_directory).toBe(
+      "/chosen/path",
+    );
+    shortcut("KeyN");
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Escape",
+      altKey: true,
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("preserves bindings and the editor draft when saving fails", async () => {
+    api.saveKeybindings.mockRejectedValue(new Error("changed on disk"));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    nativeCommand(COMMAND_IDS.configureKeybindings);
+    fireEvent.click(screen.getByRole("option", { name: /^New Shell/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Shortcut" }), {
+      target: { value: "Alt+F2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save shortcut" }));
+    await screen.findByText("changed on disk");
+    expect(
+      (screen.getByRole("textbox", { name: "Shortcut" }) as HTMLInputElement)
+        .value,
+    ).toBe("Alt+F2");
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    shortcut("KeyN");
+    expect(
+      screen.getByRole("dialog", { name: "New shell — host · 1/2" }),
+    ).toBeTruthy();
+  });
+
+  it("keeps defaults usable when loading shortcut settings fails, without overwriting the file", async () => {
+    api.loadKeybindings.mockRejectedValue(
+      new Error("invalid keybindings.json"),
+    );
+    render(<TerminalPage />);
+    await screen.findByText(/Keyboard shortcuts: invalid keybindings.json/);
+    shortcut("KeyN");
+    expect(
+      screen.getByRole("dialog", { name: "New shell — host · 1/2" }),
+    ).toBeTruthy();
+    expect(api.saveKeybindings).not.toHaveBeenCalled();
+  });
+
   it("opens close confirmation with native Cmd+E, then confirms once with Cmd+E", async () => {
     vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     let finishKill!: () => void;

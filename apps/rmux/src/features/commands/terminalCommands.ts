@@ -1,37 +1,17 @@
-import type { ConnectionPhase, SessionSummary } from "../../lib/types";
-import type { AppCommand, Keybinding, ShortcutPlatform } from "./types";
-import { sessionKey, targetLabel } from "../targets/targets";
+import type {
+  ConnectionPhase,
+  ConnectionTarget,
+  SessionSummary,
+} from "../../lib/types";
+import type { AppCommand, CommandArguments, ShortcutPlatform } from "./types";
+import { sessionKey, targetKey, targetLabel } from "../targets/targets";
 
-export const COMMAND_IDS = {
-  showPalette: "view.show_command_palette",
-  addHost: "host.add",
-  addExistingSession: "session.add_existing",
-  forgetSession: "session.forget",
-  newShell: "session.new_shell",
-  newTab: "tab.new_shell_here",
-  refreshSessions: "session.refresh",
-  nextTab: "tab.next",
-  previousTab: "tab.previous",
-  disconnect: "session.disconnect",
-  close: "session.close",
-  toggleInput: "terminal.toggle_input",
-  toggleResize: "terminal.toggle_resize_with_window",
-  reconnect: "terminal.reconnect",
-  focus: "terminal.focus",
-  restartDaemon: "daemon.restart",
-} as const;
-
-export const SHOW_PALETTE_KEYBINDING: Keybinding = {
-  code: "KeyP",
-  primary: true,
-  shift: true,
-};
-
-export function closeSessionKeybinding(platform: ShortcutPlatform): Keybinding {
-  return { code: "KeyE", primary: true, shift: platform === "other" };
-}
+import { COMMAND_IDS } from "./commandIds";
+import { defaultKeybindings } from "./keymap";
+export { COMMAND_IDS } from "./commandIds";
 
 interface TerminalCommandContext {
+  targets: readonly ConnectionTarget[];
   sessions: readonly SessionSummary[];
   tabs: readonly SessionSummary[];
   activeSessionKey: string | null;
@@ -61,15 +41,20 @@ interface TerminalCommandActions {
   showNewShell(): void;
   openShellTab(): void;
   refreshSessions(): void;
-  selectSession(session: SessionSummary): void;
-  disconnectSession(session: SessionSummary): void;
+  selectSession(session: SessionSummary): void | Promise<void>;
+  disconnectSession(session: SessionSummary): void | Promise<void>;
   requestCloseSession(session: SessionSummary): void;
-  confirmCloseSession(session: SessionSummary): void;
+  confirmCloseSession(session: SessionSummary): void | Promise<void>;
   toggleInput(): void;
   toggleResizeWithWindow(): void;
   reconnect(): void;
   focusTerminal(): void;
   requestDaemonRestart(): void;
+  connectHost(target: ConnectionTarget): void;
+  removeHost(target: ConnectionTarget): void | Promise<void>;
+  saveWorkspace(): void | Promise<void>;
+  configureKeybindings(): void;
+  reloadKeybindings(): void | Promise<void>;
 }
 
 export function buildTerminalCommands(
@@ -115,6 +100,23 @@ export function buildTerminalCommands(
   const daemonRestartInteractionDisabledReason = context.restartingDaemon
     ? "rmuxd is restarting."
     : "Confirm or cancel the pending rmuxd restart first.";
+  const sessionFor = (args: CommandArguments = {}) =>
+    args.session_key === undefined
+      ? activeSession
+      : (context.sessions.find(
+          (session) => sessionKey(session) === args.session_key,
+        ) ?? null);
+  const targetFor = (args: CommandArguments = {}) =>
+    args.target_key === undefined
+      ? (activeSession?.target ?? null)
+      : (context.targets.find(
+          (target) => targetKey(target) === args.target_key,
+        ) ?? null);
+  const sessionAvailable = (session: SessionSummary | null) =>
+    session !== null &&
+    !daemonRestartInteractionBlocked &&
+    !context.closingSessionKeys.has(sessionKey(session)) &&
+    context.disconnectingSessionKey !== sessionKey(session);
   const daemonRestartBlocked =
     context.creating || context.newShellOpen || daemonRestartInteractionBlocked;
   const daemonRestartDisabledReason = context.restartingDaemon
@@ -147,8 +149,10 @@ export function buildTerminalCommands(
         !closingActive &&
         !disconnectingActive,
       focusTerminalAfterRun: false,
-      run: () => {
-        if (activeSession) actions.forgetSession(activeSession);
+      isEnabled: (args) => sessionAvailable(sessionFor(args)),
+      run: (args) => {
+        const session = sessionFor(args);
+        if (session) actions.forgetSession(session);
       },
     },
     {
@@ -164,7 +168,6 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.showPalette,
       category: "View",
       title: "Show Command Palette",
-      keybinding: SHOW_PALETTE_KEYBINDING,
       enabled: true,
       visibleInPalette: false,
       focusTerminalAfterRun: false,
@@ -175,7 +178,6 @@ export function buildTerminalCommands(
       category: "Session",
       title: "New Shell",
       keywords: ["create", "start"],
-      keybinding: { code: "KeyN", primary: true, shift: true },
       enabled:
         !context.creating &&
         !context.newShellOpen &&
@@ -197,11 +199,6 @@ export function buildTerminalCommands(
       title: "New Tab in Current Folder",
       detail: context.currentWorkingDirectoryDisplay ?? undefined,
       keywords: ["shell", "terminal", "cwd", "folder"],
-      keybinding: {
-        code: "KeyT",
-        primary: true,
-        shift: context.shortcutPlatform === "other",
-      },
       enabled:
         context.currentWorkingDirectory !== null &&
         !context.creating &&
@@ -232,11 +229,6 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.nextTab,
       category: "Terminal",
       title: "Switch to Next Tab",
-      keybinding: {
-        code: "BracketRight",
-        primary: true,
-        shift: true,
-      },
       enabled: nextTab !== null && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
@@ -251,11 +243,6 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.previousTab,
       category: "Terminal",
       title: "Switch to Previous Tab",
-      keybinding: {
-        code: "BracketLeft",
-        primary: true,
-        shift: true,
-      },
       enabled: previousTab !== null && !daemonRestartInteractionBlocked,
       disabledReason: daemonRestartInteractionBlocked
         ? daemonRestartInteractionDisabledReason
@@ -272,12 +259,6 @@ export function buildTerminalCommands(
       title: "Detach Active Tab",
       detail: activeSession?.name,
       keywords: ["detach", "disconnect"],
-      keybinding: {
-        code: "KeyW",
-        primary: true,
-        shift: context.shortcutPlatform === "other",
-      },
-      macosNativeKeybinding: true,
       enabled:
         activeSession !== null &&
         context.phase !== "ended" &&
@@ -289,9 +270,17 @@ export function buildTerminalCommands(
         : activeSession
           ? "The active tab cannot be detached right now."
           : "No session is active.",
-      run: () => {
-        if (activeSession) {
-          actions.disconnectSession(activeSession);
+      isEnabled: (args) => {
+        const session = sessionFor(args);
+        return (
+          sessionAvailable(session) &&
+          context.tabs.some((tab) => sessionKey(tab) === sessionKey(session!))
+        );
+      },
+      run: (args) => {
+        const session = sessionFor(args);
+        if (session) {
+          return actions.disconnectSession(session);
         }
       },
     },
@@ -303,8 +292,6 @@ export function buildTerminalCommands(
         : "Close Active Session",
       detail: closeSession?.name,
       keywords: ["exit", "kill", "terminate"],
-      keybinding: closeSessionKeybinding(context.shortcutPlatform),
-      macosNativeKeybinding: true,
       enabled:
         !daemonRestartInteractionBlocked &&
         closeSession !== null &&
@@ -317,11 +304,18 @@ export function buildTerminalCommands(
             ? "The session awaiting confirmation is no longer available."
             : "No session is active.",
       focusTerminalAfterRun: false,
-      run: () => {
-        if (closeSession) {
+      isEnabled: (args) =>
+        sessionAvailable(
+          closeConfirmationPending ? closeSession : sessionFor(args),
+        ),
+      run: (args) => {
+        const requestedSession = closeConfirmationPending
+          ? closeSession
+          : sessionFor(args);
+        if (requestedSession) {
           if (closeConfirmationPending)
-            actions.confirmCloseSession(closeSession);
-          else actions.requestCloseSession(closeSession);
+            return actions.confirmCloseSession(requestedSession);
+          else actions.requestCloseSession(requestedSession);
         }
       },
     },
@@ -385,6 +379,69 @@ export function buildTerminalCommands(
     },
   ];
 
+  commands.push(
+    {
+      id: COMMAND_IDS.selectSession,
+      category: "Session",
+      title: "Connect Active Session",
+      enabled: sessionAvailable(activeSession),
+      isEnabled: (args) => sessionAvailable(sessionFor(args)),
+      run: (args) => {
+        const session = sessionFor(args);
+        if (session) return actions.selectSession(session);
+      },
+    },
+    {
+      id: COMMAND_IDS.connectHost,
+      category: "Host",
+      title: "Connect Active Host",
+      enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      isEnabled: (args) =>
+        targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: (args) => {
+        const target = targetFor(args);
+        if (target) actions.connectHost(target);
+      },
+    },
+    {
+      id: COMMAND_IDS.removeHost,
+      category: "Host",
+      title: "Remove Active Host from Workspace",
+      enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      isEnabled: (args) =>
+        targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: (args) => {
+        const target = targetFor(args);
+        if (target) return actions.removeHost(target);
+      },
+    },
+    {
+      id: COMMAND_IDS.saveWorkspace,
+      category: "Workspace",
+      title: "Retry Saving Workspace",
+      enabled: !daemonRestartInteractionBlocked,
+      run: actions.saveWorkspace,
+    },
+    {
+      id: COMMAND_IDS.configureKeybindings,
+      category: "Settings",
+      title: "Configure Keyboard Shortcuts",
+      keywords: ["keybindings", "keys", "settings"],
+      enabled: true,
+      focusTerminalAfterRun: false,
+      run: actions.configureKeybindings,
+    },
+    {
+      id: COMMAND_IDS.reloadKeybindings,
+      category: "Settings",
+      title: "Reload Keyboard Shortcuts",
+      enabled: true,
+      run: actions.reloadKeybindings,
+    },
+  );
+
   for (const session of context.sessions) {
     const identity = sessionKey(session);
     const selected = identity === context.activeSessionKey;
@@ -432,7 +489,11 @@ export function buildTerminalCommands(
     });
   }
 
-  return commands;
+  const defaults = defaultKeybindings(context.shortcutPlatform);
+  return commands.map((command) => ({
+    ...command,
+    keybinding: defaults.get(command.id),
+  }));
 }
 
 function adjacentSession(

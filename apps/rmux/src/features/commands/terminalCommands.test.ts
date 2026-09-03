@@ -60,9 +60,15 @@ function setup(
     reconnect: vi.fn(),
     focusTerminal: vi.fn(),
     requestDaemonRestart: vi.fn(),
+    connectHost: vi.fn(),
+    removeHost: vi.fn(),
+    saveWorkspace: vi.fn(),
+    configureKeybindings: vi.fn(),
+    reloadKeybindings: vi.fn(),
   };
   const commands = buildTerminalCommands(
     {
+      targets: [{ kind: "local" }],
       sessions,
       tabs,
       activeSessionKey: identityFor(activeSessionId),
@@ -227,11 +233,9 @@ describe("terminal commands", () => {
 
     expect(findCommand(macos.commands, COMMAND_IDS.disconnect)).toMatchObject({
       keybinding: { code: "KeyW", primary: true, shift: false },
-      macosNativeKeybinding: true,
     });
     expect(findCommand(macos.commands, COMMAND_IDS.close)).toMatchObject({
       keybinding: { code: "KeyE", primary: true, shift: false },
-      macosNativeKeybinding: true,
     });
     expect(
       findCommand(other.commands, COMMAND_IDS.disconnect).keybinding,

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
@@ -20,14 +26,14 @@ import {
 } from "../features/commands/keybindings";
 import {
   buildTerminalCommands,
-  closeSessionKeybinding,
   COMMAND_IDS,
-  sessionSwitchCommandId,
-  SHOW_PALETTE_KEYBINDING,
 } from "../features/commands/terminalCommands";
-import type { AppCommand } from "../features/commands/types";
-import { useCommandShortcuts } from "../features/commands/useCommandShortcuts";
-import { useNativeCommandEvents } from "../features/commands/useNativeCommandEvents";
+import type { AppCommand, CommandArguments } from "../features/commands/types";
+import { CommandDispatcher } from "../features/commands/CommandDispatcher";
+import { CommandProvider } from "../features/commands/CommandContext";
+import { CommandBindings } from "../features/commands/CommandBindings";
+import { useKeybindings } from "../features/commands/useKeybindings";
+import { KeybindingsFlow } from "../components/commands/KeybindingsFlow";
 import {
   forgetShellState,
   mergeShellStateInspections,
@@ -110,6 +116,9 @@ export function TerminalPage() {
   } = workspace;
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const [shortcutPlatform] = useState(detectShortcutPlatform);
+  const keybindings = useKeybindings(shortcutPlatform);
+  const [keybindingsOpen, setKeybindingsOpen] = useState(false);
+  const [dispatcher] = useState(() => new CommandDispatcher());
   const attachment = useAttachment(renderer);
   const currentShellState = attachment.state.shell_state;
   const currentWorkingDirectory = currentShellState?.cwd || null;
@@ -780,7 +789,7 @@ export function TerminalPage() {
       // Consume the confirmation before starting async work or rerendering.
       pendingCloseSessionKeyRef.current = null;
       setPendingCloseSessionKey(null);
-      void close(session);
+      return close(session);
     },
     [close, daemonRestartBlocksInteractions],
   );
@@ -1000,6 +1009,7 @@ export function TerminalPage() {
 
   const commands = buildTerminalCommands(
     {
+      targets,
       sessions,
       tabs,
       activeSessionKey: activeTabKey,
@@ -1038,8 +1048,8 @@ export function TerminalPage() {
         }
       },
       refreshSessions: () => void refresh(),
-      selectSession: (session) => void activateTab(session),
-      disconnectSession: (session) => void disconnect(session),
+      selectSession: activateTab,
+      disconnectSession: disconnect,
       requestCloseSession: requestClose,
       confirmCloseSession: confirmClose,
       toggleInput: () => {
@@ -1059,72 +1069,65 @@ export function TerminalPage() {
       },
       focusTerminal: () => renderer?.focus(),
       requestDaemonRestart,
-    },
-  );
-  const paletteShortcutLabel = formatKeybinding(
-    SHOW_PALETTE_KEYBINDING,
-    shortcutPlatform,
-  );
-  const closeShortcutLabel = formatKeybinding(
-    closeSessionKeybinding(shortcutPlatform),
-    shortcutPlatform,
-  );
-
-  const executeCommand = useCallback(
-    (command: AppCommand) => {
-      if (
-        !workspace.ready ||
-        workspace.closing ||
-        newShellOpen ||
-        importOpen ||
-        pendingForget ||
-        hostFlow !== undefined ||
-        (pendingCloseSessionKey !== null && command.id !== COMMAND_IDS.close) ||
-        daemonRestartConfirmationPending
-      )
-        return;
-      if (!command.keepPaletteOpen) {
+      connectHost: (target) => {
         setPaletteOpen(false);
-      }
-      if (command.id !== COMMAND_IDS.restartDaemon) {
-        cancelDaemonRestart();
-      }
-      command.run();
-      if (command.focusTerminalAfterRun !== false) {
-        requestAnimationFrame(() => renderer?.focus());
-      }
+        setHostFlow(target);
+      },
+      removeHost,
+      saveWorkspace: () => persistWorkspace(true),
+      configureKeybindings: () => setKeybindingsOpen(true),
+      reloadKeybindings: keybindings.reload,
     },
-    [
-      cancelDaemonRestart,
-      renderer,
-      hostFlow,
-      pendingCloseSessionKey,
-      daemonRestartConfirmationPending,
-      workspace.ready,
-      workspace.closing,
-      newShellOpen,
-      importOpen,
-      pendingForget,
-    ],
-  );
+  ).map((command) => ({
+    ...command,
+    keybinding: keybindings.bindings.get(command.id),
+  }));
+  const shortcutLabel = (id: string) => {
+    const binding = keybindings.bindings.get(id);
+    return binding ? formatKeybinding(binding, shortcutPlatform) : "";
+  };
+  const paletteShortcutLabel = shortcutLabel(COMMAND_IDS.showPalette);
+  const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
+  const dialogOpen =
+    keybindingsOpen ||
+    newShellOpen ||
+    importOpen ||
+    pendingForget !== null ||
+    hostFlow !== undefined ||
+    pendingCloseSessionKey !== null ||
+    daemonRestartConfirmationPending;
 
-  useCommandShortcuts(commands, shortcutPlatform, executeCommand);
-  useNativeCommandEvents(commands, executeCommand);
+  useLayoutEffect(() => {
+    dispatcher.update(
+      commands.map((command) => ({
+        ...command,
+        run: (args) => {
+          if (!command.keepPaletteOpen) setPaletteOpen(false);
+          if (command.id !== COMMAND_IDS.restartDaemon) cancelDaemonRestart();
+          const result = command.run(args);
+          if (command.focusTerminalAfterRun !== false)
+            requestAnimationFrame(() => renderer?.focus());
+          return result;
+        },
+      })),
+      workspace.ready && !workspace.closing && keybindings.ready && !dialogOpen,
+      (error) => setListError(errorMessage(error)),
+    );
+  });
 
-  function executeCommandById(commandId: string) {
-    const command = commands.find((candidate) => candidate.id === commandId);
-    if (command?.enabled) {
-      executeCommand(command);
-    }
+  function executeCommandById(commandId: string, args?: CommandArguments) {
+    dispatcher.execute(commandId, args);
   }
+  const executeCommand = (command: AppCommand) =>
+    executeCommandById(command.id);
 
   const handleTerminalInput = useCallback(
     (data: Uint8Array) => {
-      if (!newShellOpen && !daemonRestartBlocksInteractions()) {
+      if (!dialogOpen && !paletteOpen && !daemonRestartBlocksInteractions()) {
         attachment.handleInput(data);
       }
     },
-    [attachment, daemonRestartBlocksInteractions, newShellOpen],
+    [attachment, daemonRestartBlocksInteractions, dialogOpen, paletteOpen],
   );
 
   function dismissPalette() {
@@ -1134,10 +1137,15 @@ export function TerminalPage() {
   }
 
   return (
-    <>
+    <CommandProvider
+      value={{ dispatcher, keybinding: (id) => keybindings.bindings.get(id) }}
+    >
+      <CommandBindings platform={shortcutPlatform} />
       <main
         className="app-shell"
-        inert={!workspace.ready || workspace.closing || newShellOpen}
+        inert={
+          !workspace.ready || workspace.closing || dialogOpen || paletteOpen
+        }
       >
         <SessionSidebar
           targets={targets}
@@ -1153,26 +1161,39 @@ export function TerminalPage() {
           disconnectingSessionKey={disconnectingSessionKey}
           onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
           onSelect={(session) =>
-            executeCommandById(sessionSwitchCommandId(session))
+            executeCommandById(COMMAND_IDS.selectSession, {
+              session_key: sessionKey(session),
+            })
           }
           onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
-          onDisconnect={(session) => void disconnect(session)}
-          onRequestClose={requestClose}
-          onForget={setPendingForget}
+          onDisconnect={(session) =>
+            executeCommandById(COMMAND_IDS.disconnect, {
+              session_key: sessionKey(session),
+            })
+          }
+          onRequestClose={(session) =>
+            executeCommandById(COMMAND_IDS.close, {
+              session_key: sessionKey(session),
+            })
+          }
+          onForget={(session) =>
+            executeCommandById(COMMAND_IDS.forgetSession, {
+              session_key: sessionKey(session),
+            })
+          }
           onAddExisting={() =>
             executeCommandById(COMMAND_IDS.addExistingSession)
           }
           onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
-          onConnectHost={(target) => {
-            if (target.kind === "ssh") {
-              setPaletteOpen(false);
-              setHostFlow(target);
-            }
-          }}
+          onConnectHost={(target) =>
+            executeCommandById(COMMAND_IDS.connectHost, {
+              target_key: targetKey(target),
+            })
+          }
           onRemoveHost={(target) =>
-            void removeHost(target).catch((failure) =>
-              setListError(errorMessage(failure)),
-            )
+            executeCommandById(COMMAND_IDS.removeHost, {
+              target_key: targetKey(target),
+            })
           }
         />
         <section className="terminal-workspace">
@@ -1186,8 +1207,16 @@ export function TerminalPage() {
               !daemonRestartConfirmationPending &&
               !restartingDaemon
             }
-            onSelect={(session) => void activateTab(session)}
-            onClose={(session) => void closeTab(session)}
+            onSelect={(session) =>
+              executeCommandById(COMMAND_IDS.selectSession, {
+                session_key: sessionKey(session),
+              })
+            }
+            onClose={(session) =>
+              executeCommandById(COMMAND_IDS.disconnect, {
+                session_key: sessionKey(session),
+              })
+            }
             onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
           />
           <TerminalToolbar
@@ -1201,6 +1230,20 @@ export function TerminalPage() {
             commandShortcutLabel={paletteShortcutLabel}
           />
           <div className="terminal-notices">
+            {keybindings.error ? (
+              <div className="message-banner" role="alert">
+                Keyboard shortcuts: {keybindings.error} Last valid bindings
+                remain active.
+                <button
+                  type="button"
+                  onClick={() =>
+                    executeCommandById(COMMAND_IDS.reloadKeybindings)
+                  }
+                >
+                  Reload shortcuts
+                </button>
+              </div>
+            ) : null}
             {workspace.error ? (
               <div className="message-banner" role="alert">
                 Workspace: {workspace.error}
@@ -1208,7 +1251,7 @@ export function TerminalPage() {
                   <button
                     type="button"
                     onClick={() =>
-                      void persistWorkspace(true).catch(() => undefined)
+                      executeCommandById(COMMAND_IDS.saveWorkspace)
                     }
                   >
                     Retry saving
@@ -1225,9 +1268,13 @@ export function TerminalPage() {
                   type="button"
                   onClick={() => {
                     if (activeTab.target.kind === "ssh") {
-                      setHostFlow(activeTab.target);
+                      executeCommandById(COMMAND_IDS.connectHost, {
+                        target_key: targetKey(activeTab.target),
+                      });
                     } else {
-                      void activateTab(activeTab);
+                      executeCommandById(COMMAND_IDS.selectSession, {
+                        session_key: sessionKey(activeTab),
+                      });
                     }
                   }}
                 >
@@ -1258,7 +1305,20 @@ export function TerminalPage() {
           <StatusBar state={attachment.state} />
         </section>
       </main>
-      {newShellOpen ? (
+      {keybindingsOpen ? (
+        <KeybindingsFlow
+          commands={commands}
+          document={keybindings.document}
+          path={keybindings.path}
+          error={keybindings.error}
+          platform={shortcutPlatform}
+          onSave={keybindings.save}
+          onClose={() => {
+            setKeybindingsOpen(false);
+            requestAnimationFrame(() => renderer?.focus());
+          }}
+        />
+      ) : newShellOpen ? (
         <NewShellFlow
           targets={targets}
           onCreate={create}
@@ -1283,7 +1343,7 @@ export function TerminalPage() {
           onSubmit={() => {
             const session = pendingForget;
             setPendingForget(null);
-            void forgetSession(session).catch((failure) =>
+            return forgetSession(session).catch((failure) =>
               setListError(errorMessage(failure)),
             );
           }}
@@ -1309,7 +1369,8 @@ export function TerminalPage() {
       ) : pendingCloseSessionKey ? (
         <QuickInput
           title="Close session"
-          description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone. Press ${closeShortcutLabel} to confirm, or Esc to cancel.`}
+          description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.${closeShortcutLabel ? ` Press ${closeShortcutLabel} to confirm.` : ""}`}
+          confirm_command_id={COMMAND_IDS.close}
           mode={{
             kind: "confirm",
             confirm_label: "Close session",
@@ -1320,7 +1381,7 @@ export function TerminalPage() {
             const session = sessions.find(
               (session) => sessionKey(session) === pendingCloseSessionKey,
             );
-            if (session) confirmClose(session);
+            if (session) return confirmClose(session);
             else cancelClose();
           }}
         />
@@ -1344,6 +1405,6 @@ export function TerminalPage() {
           onExecute={executeCommand}
         />
       ) : null}
-    </>
+    </CommandProvider>
   );
 }

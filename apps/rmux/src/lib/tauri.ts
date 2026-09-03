@@ -23,7 +23,30 @@ import type {
   WorkspaceDocument,
   WorkspaceSnapshot,
   SessionInspection,
+  KeybindingsSnapshot,
+  KeybindingsDocument,
+  NativeCommandBinding,
 } from "./types";
+
+export async function loadKeybindings(): Promise<KeybindingsSnapshot> {
+  return invoke<KeybindingsSnapshot>("load_keybindings");
+}
+
+export async function saveKeybindings(
+  expected_revision: string | null,
+  document: KeybindingsDocument,
+): Promise<KeybindingsSnapshot> {
+  return invoke<KeybindingsSnapshot>("save_keybindings", {
+    request: { expected_revision, document },
+  });
+}
+
+export async function syncCommandMenu(
+  bindings: NativeCommandBinding[],
+): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  await invoke("sync_command_menu", { bindings });
+}
 
 export async function loadWorkspace(): Promise<WorkspaceSnapshot> {
   return invoke<WorkspaceSnapshot>("load_workspace");

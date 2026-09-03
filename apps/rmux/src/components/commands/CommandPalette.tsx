@@ -7,6 +7,12 @@ import {
 import { formatKeybinding } from "../../features/commands/keybindings";
 import { PointerSelectionIntent } from "../../features/commands/PointerSelectionIntent";
 import { QuickInputFrame } from "./QuickInputFrame";
+import {
+  useCommandEnvironment,
+  useCommandScope,
+} from "../../features/commands/CommandContext";
+import { defaultKeybindings } from "../../features/commands/keymap";
+import { QUICK_INPUT_IDS } from "../../features/commands/commandIds";
 import type {
   AppCommand,
   ShortcutPlatform,
@@ -30,6 +36,10 @@ export function CommandPalette({
     null,
   );
   const pointerSelectionRef = useRef(new PointerSelectionIntent());
+  const environment = useCommandEnvironment();
+  const cancelKey = environment
+    ? environment.keybinding(QUICK_INPUT_IDS.cancel)
+    : defaultKeybindings(platform).get(QUICK_INPUT_IDS.cancel);
   const filteredCommands = useMemo(
     () => searchCommands(commands, query),
     [commands, query],
@@ -64,14 +74,42 @@ export function CommandPalette({
     }
   }
 
+  const dispatcher = useCommandScope({
+    allow_app_commands: true,
+    commands: [
+      {
+        id: QUICK_INPUT_IDS.cancel,
+        category: "Dialog",
+        title: "Close Command Palette",
+        enabled: true,
+        run: onDismiss,
+      },
+      {
+        id: QUICK_INPUT_IDS.accept,
+        category: "Dialog",
+        title: "Run Selected Command",
+        enabled: selectedCommand !== null,
+        run: () => execute(selectedCommand),
+      },
+    ],
+  });
+
   return (
     <QuickInputFrame
       title="Command palette"
-      onDismiss={onDismiss}
+      onDismiss={() => {
+        dispatcher.execute(QUICK_INPUT_IDS.cancel);
+      }}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing) {
           return;
         }
+        // Enter on the close button must activate that button, not the result.
+        if (
+          event.target instanceof HTMLButtonElement &&
+          event.target.getAttribute("role") !== "option"
+        )
+          return;
         switch (event.key) {
           case "ArrowDown":
             event.preventDefault();
@@ -83,7 +121,7 @@ export function CommandPalette({
             break;
           case "Enter":
             event.preventDefault();
-            execute(selectedCommand);
+            dispatcher.execute(QUICK_INPUT_IDS.accept);
             break;
         }
       }}
@@ -109,7 +147,13 @@ export function CommandPalette({
           spellCheck={false}
           autoFocus
         />
-        <kbd>Esc</kbd>
+        <button
+          type="button"
+          aria-label="Close command palette"
+          onClick={() => dispatcher.execute(QUICK_INPUT_IDS.cancel)}
+        >
+          {cancelKey ? formatKeybinding(cancelKey, platform) : "Close"}
+        </button>
       </div>
 
       <div

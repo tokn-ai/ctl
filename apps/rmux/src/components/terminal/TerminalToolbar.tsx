@@ -40,7 +40,9 @@ export function TerminalToolbar({
       </div>
       <div className="toolbar-actions">
         {canReconnect ? (
-          <button type="button" onClick={onReconnect}>Reconnect</button>
+          <button type="button" onClick={onReconnect}>
+            Reconnect
+          </button>
         ) : null}
         <button
           type="button"
@@ -50,7 +52,9 @@ export function TerminalToolbar({
           aria-pressed={state.input_lease.owned_by_client}
           title="Input ownership is independent from terminal layout."
         >
-          {state.input_lease.owned_by_client ? "Release input" : "Request input"}
+          {state.input_lease.owned_by_client
+            ? "Release input"
+            : "Request input"}
         </button>
         <button
           type="button"
@@ -70,10 +74,12 @@ export function TerminalToolbar({
           className="command-palette-trigger"
           type="button"
           onClick={onShowCommands}
-          title={`Show command palette (${commandShortcutLabel})`}
+          title={`Show command palette${commandShortcutLabel ? ` (${commandShortcutLabel})` : ""}`}
         >
           Commands
-          <kbd aria-hidden="true">{commandShortcutLabel}</kbd>
+          {commandShortcutLabel ? (
+            <kbd aria-hidden="true">{commandShortcutLabel}</kbd>
+          ) : null}
         </button>
       </div>
     </header>

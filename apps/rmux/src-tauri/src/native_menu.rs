@@ -6,9 +6,8 @@ use tauri::menu::{
 };
 use tauri::{AppHandle, Emitter as _, Manager as _};
 
-const DETACH_TAB_COMMAND_ID: &str = "session.disconnect";
-const CLOSE_SESSION_COMMAND_ID: &str = "session.close";
 const NATIVE_COMMAND_EVENT: &str = "rmux://command";
+const COMMAND_MENU_ID: &str = "rmux.commands";
 
 pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
   let package = app_handle.package_info();
@@ -40,27 +39,7 @@ pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
       &PredefinedMenuItem::quit(app_handle, None)?,
     ],
   )?;
-  let file_menu = Submenu::with_items(
-    app_handle,
-    "File",
-    true,
-    &[
-      &MenuItem::with_id(
-        app_handle,
-        DETACH_TAB_COMMAND_ID,
-        "Close Tab",
-        true,
-        Some("CmdOrCtrl+W"),
-      )?,
-      &MenuItem::with_id(
-        app_handle,
-        CLOSE_SESSION_COMMAND_ID,
-        "Close Session…",
-        true,
-        Some("CmdOrCtrl+E"),
-      )?,
-    ],
-  )?;
+  let file_menu = Submenu::with_id_and_items(app_handle, COMMAND_MENU_ID, "Commands", true, &[])?;
   let edit_menu = Submenu::with_items(
     app_handle,
     "Edit",
@@ -125,6 +104,48 @@ pub fn handle(app_handle: &AppHandle, event: &tauri::menu::MenuEvent) {
   }
 }
 
+pub fn sync(
+  app: &AppHandle,
+  bindings: &[crate::command_menu::NativeCommandBinding],
+) -> crate::error::CommandResult<()> {
+  use crate::error::CommandErrorDto;
+  let menu = app.menu().ok_or_else(|| {
+    CommandErrorDto::new(
+      "command_menu_missing",
+      "The application menu is unavailable.",
+    )
+  })?;
+  let next = Submenu::with_id_and_items(app, COMMAND_MENU_ID, "Commands", true, &[])
+    .map_err(CommandErrorDto::backend)?;
+  for binding in bindings {
+    let accelerator = binding
+      .keybinding
+      .as_ref()
+      .map(crate::keybindings::accelerator)
+      .transpose()?;
+    let item = MenuItem::with_id(
+      app,
+      format!("rmux.command.{}", binding.command_id),
+      &binding.title,
+      binding.enabled,
+      accelerator.as_deref(),
+    )
+    .map_err(CommandErrorDto::backend)?;
+    next.append(&item).map_err(CommandErrorDto::backend)?;
+  }
+  let previous = menu.get(COMMAND_MENU_ID);
+  if let Some(previous) = &previous {
+    menu.remove(previous).map_err(CommandErrorDto::backend)?;
+  }
+  if let Err(failure) = menu.insert(&next, 1) {
+    if let Some(previous) = previous {
+      let _ignored = menu.insert(&previous, 1);
+    }
+    return Err(CommandErrorDto::backend(failure));
+  }
+  Ok(())
+}
+
 fn current_event_is_key_repeat() -> bool {
   let Some(main_thread) = MainThreadMarker::new() else {
     return false;
@@ -135,19 +156,16 @@ fn current_event_is_key_repeat() -> bool {
   is_key_repeat(event.r#type(), || event.isARepeat())
 }
 
+fn frontend_command(menu_id: &MenuId) -> Option<&str> {
+  menu_id
+    .as_ref()
+    .strip_prefix("rmux.command.")
+    .filter(|id| crate::keybindings::valid_command_id(id))
+}
+
 fn is_key_repeat(event_type: NSEventType, is_repeat: impl FnOnce() -> bool) -> bool {
   // isARepeat raises an AppKit exception for mouse and modifier-change events.
   event_type == NSEventType::KeyDown && is_repeat()
-}
-
-fn frontend_command(menu_id: &MenuId) -> Option<&'static str> {
-  if menu_id == DETACH_TAB_COMMAND_ID {
-    Some(DETACH_TAB_COMMAND_ID)
-  } else if menu_id == CLOSE_SESSION_COMMAND_ID {
-    Some(CLOSE_SESSION_COMMAND_ID)
-  } else {
-    None
-  }
 }
 
 #[cfg(test)]
@@ -174,13 +192,10 @@ mod tests {
   #[test]
   fn maps_only_rmux_session_menu_items_to_frontend_commands() {
     assert_eq!(
-      frontend_command(&MenuId::new(DETACH_TAB_COMMAND_ID)),
-      Some(DETACH_TAB_COMMAND_ID)
+      frontend_command(&MenuId::new("rmux.command.session.close")),
+      Some("session.close")
     );
-    assert_eq!(
-      frontend_command(&MenuId::new(CLOSE_SESSION_COMMAND_ID)),
-      Some(CLOSE_SESSION_COMMAND_ID)
-    );
-    assert_eq!(frontend_command(&MenuId::new("unrelated")), None);
+    assert!(frontend_command(&MenuId::new("undo")).is_none());
+    assert!(frontend_command(&MenuId::new("rmux.command.")).is_none());
   }
 }

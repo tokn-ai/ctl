@@ -30,7 +30,17 @@ export function useCommandShortcuts(
       const command = commandsRef.current.find(
         (candidate) =>
           isWebviewKeybinding(candidate, platform) &&
-          matchesKeybinding(event, candidate.keybinding, platform),
+          matchesKeybinding(
+            {
+              code: event.code || event.key,
+              ctrlKey: event.ctrlKey,
+              metaKey: event.metaKey,
+              shiftKey: event.shiftKey,
+              altKey: event.altKey,
+            },
+            candidate.keybinding,
+            platform,
+          ),
       );
       if (!command) {
         return;

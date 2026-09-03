@@ -134,7 +134,7 @@ export function NewShellFlow({
         submit_label: "Create shell",
       }}
       onChange={setWorkingDirectory}
-      onSubmit={(value) => void create(value)}
+      onSubmit={create}
       onBack={() => {
         if (busyRef.current) return;
         setSelectedTargetKey(null);

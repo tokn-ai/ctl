@@ -36,11 +36,7 @@ export function QuickInputFrame({
         aria-label={title}
         onKeyDown={(event) => {
           if (event.nativeEvent.isComposing) return;
-          if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            onDismiss();
-          } else if (event.key === "Tab") {
+          if (event.key === "Tab") {
             const elements = [
               ...event.currentTarget.querySelectorAll<HTMLElement>(
                 'input:not(:disabled), button:not(:disabled):not([tabindex="-1"])',

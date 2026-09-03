@@ -97,7 +97,7 @@ palette.
 Open the command palette with `Cmd-Shift-P` on macOS or `Ctrl-Shift-P` on
 Windows/Linux. It exposes session creation, refresh, switching, disconnect and
 close, plus terminal input, layout, reconnect, focus, and a destructive
-`Restart rmuxd` maintenance action. Restart has no shortcut or permanent
+`Restart rmuxd` maintenance action. Restart has no default shortcut or permanent
 button: selecting it opens a quick-input confirmation, with Cancel focused.
 It first verifies the running daemon's separate local-control
 endpoint; an older daemon that lacks it leaves the active tab attached and
@@ -134,10 +134,47 @@ for correction/retry; a successful creation is saved and opened as before.
 Post-creation save or attachment failures preserve the existing shell and use
 workspace/session recovery rather than inviting duplicate creation.
 
-These shortcuts are local to the focused app. Other key combinations continue
-to xterm and the PTY unchanged. The macOS application menu owns `Cmd-W` and
-`Cmd-E` so native window-close handling cannot race the WebView; `Cmd-Q` keeps
-its standard application-quit behavior.
+These are the defaults. **Configure Keyboard Shortcuts** in the palette opens
+quick input: select a command and enter a combination such as
+`Primary+Shift+Y` (`Primary` means Cmd on macOS and Ctrl elsewhere). Blank removes
+the binding; `default` restores it. Commands without defaults can also be bound.
+The close command's configured shortcut also confirms its own close dialog.
+Dialog accept/cancel/back are scoped commands; accept and back have no default
+shortcut. Ordinary Enter still submits a form or activates the focused button,
+so Enter on a confirmation's initially focused Cancel button remains safe.
+
+Overrides persist separately from workspace/session data in `keybindings.json`
+under the native app configuration directory (the shortcut picker shows its
+exact path). Example:
+
+```json
+{
+  "schema_version": 1,
+  "overrides": [
+    {
+      "command_id": "session.close",
+      "keybinding": { "code": "KeyY", "primary": true, "shift": true }
+    },
+    { "command_id": "tab.new_shell_here", "keybinding": null }
+  ]
+}
+```
+
+Use **Reload Keyboard Shortcuts** after editing the file externally. Invalid,
+conflicting, or unknown bindings leave the last valid keymap active and show an
+error; the file is not overwritten automatically. Saves reject concurrent edits.
+This version supports one single-keystroke combination per command, not chords
+or arbitrary `when` expressions. Conflicts must be resolved by unbinding the
+other command first. Unmodified typing keys cannot be assigned app-wide.
+
+Sidebar, tab, toolbar, palette, dialog, and native-menu actions use the same
+dispatcher, with explicit session/host targets and shared availability checks.
+Native Command-modified accelerators and displayed labels derive from the
+resolved keymap; unmodified dialog and Alt/function keys use the webview adapter.
+Shortcuts are local to the focused app. Text editing, focus/list navigation,
+and raw xterm/PTY input remain widget behavior. Standard native editing/window
+commands (including Cmd-Q) and emergency reload after a renderer crash remain
+platform/recovery operations, outside the configurable app command registry.
 
 ## Verify
 

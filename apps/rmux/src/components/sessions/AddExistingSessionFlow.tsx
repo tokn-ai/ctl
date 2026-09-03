@@ -167,7 +167,7 @@ function SessionChoices({
               ],
             }
       }
-      onSubmit={(id) => void submit(id)}
+      onSubmit={submit}
       onBack={saving ? undefined : onBack}
       onCancel={() => {
         if (!saving) onClose();

@@ -144,6 +144,10 @@ Windows versions. See [Microsoft's ClosePseudoConsole documentation](https://lea
 PTY handles remain owned by rmuxd throughout. A taskd interactive-task adapter
 is still separate work.
 
+Attachment reads retain partial protocol frames across output and resize events;
+Windows named-pipe delivery exposed a cancellation bug in the original reader.
+A byte-by-byte cancellation regression test now runs on every platform.
+
 Native CI exercises real ConPTY input/output, attachment resumption after a
 connection loss, resize, final output and exit status, and owner-only daemon
 restart. A separate smoke test checks `rmuxd.exe` discovery, auto-start, and

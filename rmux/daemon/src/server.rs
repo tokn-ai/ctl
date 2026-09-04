@@ -8,8 +8,8 @@ use rmux_ipc::{
   LocalControlServerMessage, read_local_control_frame, write_local_control_frame,
 };
 use rmux_proto::{
-  ClientMessage, CodecError, ErrorCode, LeaseKind, PROTOCOL_VERSION, ServerMessage, ShellState,
-  read_frame, write_frame,
+  ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, PROTOCOL_VERSION, ServerMessage,
+  ShellState, read_frame, write_frame,
 };
 use std::collections::VecDeque;
 use std::io;
@@ -1184,7 +1184,7 @@ async fn handle_attach(
   attachment_guard.preserve_on_drop = true;
 
   let attachment = LiveAttachment {
-    reader,
+    reader: FrameReader::new(reader),
     writer,
     events,
     shell_state_updates,
@@ -1259,7 +1259,7 @@ async fn take_initial_snapshot(
 }
 
 struct LiveAttachment {
-  reader: OwnedReadHalf,
+  reader: FrameReader<OwnedReadHalf>,
   writer: OwnedWriteHalf,
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
@@ -1314,7 +1314,7 @@ async fn drive_attachment(
         let _ = changed;
         return Ok(AttachmentExit::Superseded);
       }
-      incoming = read_frame::<_, ClientMessage>(&mut driver.attachment.reader) => {
+      incoming = driver.attachment.reader.read_frame::<ClientMessage>() => {
         let Some(message) = incoming? else {
           return Ok(AttachmentExit::Disconnected);
         };

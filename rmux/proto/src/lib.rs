@@ -635,6 +635,8 @@ where
 /// Reads and deserializes one length-prefixed protocol frame.
 ///
 /// A clean end of stream before a new frame returns `Ok(None)`.
+/// Do not cancel this function and reuse the stream: use [`FrameReader`] when
+/// a read competes with other events in `select!`.
 ///
 /// # Errors
 ///
@@ -645,31 +647,115 @@ where
   R: AsyncRead + Unpin,
   T: DeserializeOwned,
 {
-  let mut length_bytes = [0_u8; 4];
-  match reader.read(&mut length_bytes[..1]).await {
-    Ok(0) => return Ok(None),
-    Ok(_) => {
-      reader.read_exact(&mut length_bytes[1..]).await?;
+  FrameReader::new(reader).read_frame().await
+}
+
+/// A framed reader that retains partial headers and bodies across cancellation.
+/// Keep this value alive when selecting reads against unrelated events.
+pub struct FrameReader<R> {
+  reader: R,
+  header: [u8; 4],
+  header_read: usize,
+  payload: Vec<u8>,
+  payload_read: usize,
+}
+
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+  /// Wraps a stream without reading ahead across frame boundaries.
+  #[must_use]
+  pub fn new(reader: R) -> Self {
+    Self {
+      reader,
+      header: [0; 4],
+      header_read: 0,
+      payload: Vec::new(),
+      payload_read: 0,
     }
-    Err(error) => return Err(error.into()),
   }
 
-  let length = u32::from_be_bytes(length_bytes) as usize;
-  if length > MAX_FRAME_SIZE {
-    return Err(CodecError::FrameTooLarge {
-      actual: length,
-      maximum: MAX_FRAME_SIZE,
-    });
+  /// Reads a frame, preserving consumed bytes if the future is cancelled.
+  ///
+  /// # Errors
+  /// Returns errors for incomplete, oversized, or invalid frames. Callers should
+  /// close the connection on an error.
+  pub async fn read_frame<T: DeserializeOwned>(&mut self) -> Result<Option<T>, CodecError> {
+    while self.header_read < self.header.len() {
+      let count = self
+        .reader
+        .read(&mut self.header[self.header_read..])
+        .await?;
+      if count == 0 {
+        return if self.header_read == 0 {
+          Ok(None)
+        } else {
+          Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())
+        };
+      }
+      self.header_read += count;
+    }
+    let length = u32::from_be_bytes(self.header) as usize;
+    if length > MAX_FRAME_SIZE {
+      return Err(CodecError::FrameTooLarge {
+        actual: length,
+        maximum: MAX_FRAME_SIZE,
+      });
+    }
+    self.payload.resize(length, 0);
+    while self.payload_read < length {
+      let count = self
+        .reader
+        .read(&mut self.payload[self.payload_read..])
+        .await?;
+      if count == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+      }
+      self.payload_read += count;
+    }
+    self.header_read = 0;
+    self.payload_read = 0;
+    let payload = std::mem::take(&mut self.payload);
+    Ok(Some(serde_json::from_slice(&payload)?))
   }
-
-  let mut payload = vec![0_u8; length];
-  reader.read_exact(&mut payload).await?;
-  Ok(Some(serde_json::from_slice(&payload)?))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn cancelled_fragmented_reads_preserve_framing_and_the_next_message() {
+    let expected = ClientMessage::Input {
+      data: b"hello".to_vec(),
+    };
+    let payload = serde_json::to_vec(&expected).unwrap();
+    let length = u32::try_from(payload.len()).unwrap().to_be_bytes();
+    let bytes = [length.as_slice(), payload.as_slice()].concat();
+    let (mut writer, reader) = tokio::io::duplex(1024);
+    let mut reader = FrameReader::new(reader);
+    for byte in &bytes[..bytes.len() - 1] {
+      writer.write_all(&[*byte]).await.unwrap();
+      // Poll the read until pending, then simulate an unrelated ready event.
+      tokio::select! {
+        biased;
+        result = reader.read_frame::<ClientMessage>() => panic!("premature frame: {result:?}"),
+        () = std::future::ready(()) => {}
+      }
+    }
+    writer.write_all(&bytes[bytes.len() - 1..]).await.unwrap();
+    assert_eq!(
+      reader.read_frame::<ClientMessage>().await.unwrap(),
+      Some(expected)
+    );
+    write_frame(&mut writer, &ClientMessage::ListSessions)
+      .await
+      .unwrap();
+    assert_eq!(
+      reader.read_frame::<ClientMessage>().await.unwrap(),
+      Some(ClientMessage::ListSessions)
+    );
+    drop(writer);
+    assert_eq!(reader.read_frame::<ClientMessage>().await.unwrap(), None);
+  }
 
   fn shell_state() -> ShellState {
     ShellState {

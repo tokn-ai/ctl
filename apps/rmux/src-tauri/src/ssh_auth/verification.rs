@@ -2,7 +2,7 @@ use crate::error::{CommandErrorDto, CommandResult};
 use rmux_client::{ClientIdentity, handshake};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// A ctld marker alone does not prove that the remote daemon speaks our protocol.
+/// A ctl-agent marker alone does not prove that the remote daemon speaks our protocol.
 pub async fn verify(mut stream: impl AsyncRead + AsyncWrite + Unpin) -> CommandResult<()> {
   handshake(
     &mut stream,

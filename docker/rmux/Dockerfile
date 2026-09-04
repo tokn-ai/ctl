@@ -6,8 +6,8 @@ WORKDIR /workspace
 COPY . .
 RUN --mount=type=cache,id=rmux-cargo-registry,target=/usr/local/cargo/registry \
   --mount=type=cache,id=rmux-cargo-target,target=/workspace/target \
-  cargo build --locked --release -p ctld -p rmuxd \
-  && install -D -m 0755 /workspace/target/release/ctld /out/ctld \
+  cargo build --locked --release -p ctl-agent -p rmuxd \
+  && install -D -m 0755 /workspace/target/release/ctl-agent /out/ctl-agent \
   && install -D -m 0755 /workspace/target/release/rmuxd /out/rmuxd
 
 FROM debian:bookworm-slim AS runtime
@@ -24,14 +24,14 @@ RUN apt-get update \
   && useradd --create-home --uid 1000 --shell /bin/sh rmux \
   && usermod --password x rmux
 
-COPY --from=builder /out/ctld /usr/local/bin/ctld
+COPY --from=builder /out/ctl-agent /usr/local/bin/ctl-agent
 COPY --from=builder /out/rmuxd /usr/local/bin/rmuxd
 COPY docker/rmux/entrypoint.sh /usr/local/libexec/rmux-entrypoint
 COPY docker/rmux/forced-command.sh /usr/local/libexec/rmux-forced-command
 COPY docker/rmux/sshd_config /etc/ssh/sshd_config
 
 RUN chmod 0755 \
-  /usr/local/bin/ctld \
+  /usr/local/bin/ctl-agent \
   /usr/local/bin/rmuxd \
   /usr/local/libexec/rmux-entrypoint \
   /usr/local/libexec/rmux-forced-command

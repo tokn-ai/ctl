@@ -205,7 +205,7 @@ async fn openssh_host_verification_uses_the_prompt_bridge() {
     ])
     .arg("-o")
     .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
-    .args(["--", "127.0.0.1", "exec", "ctld", "connect"])
+    .args(["--", "127.0.0.1", "exec", "ctl-agent", "connect"])
     .env("SSH_ASKPASS", program)
     .env("SSH_ASKPASS_REQUIRE", "force")
     .env("DISPLAY", "rmux-test")

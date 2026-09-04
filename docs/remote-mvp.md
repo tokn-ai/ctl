@@ -6,8 +6,8 @@ host verification, encryption, and user authentication.
 
 ## On the controlled device
 
-Build or install `rmuxd` and `ctld` for the same OS user. They should be
-available in the non-interactive SSH command environment. `ctld` starts a
+Build or install `rmuxd` and `ctl-agent` for the same OS user. They should be
+available in the non-interactive SSH command environment. `ctl-agent` starts a
 sibling `rmuxd` on demand when both binaries are installed together; `rmuxd`
 may instead be started independently.
 
@@ -15,11 +15,11 @@ Verify that the fixed remote command works and that non-interactive startup
 files produce no stdout:
 
 ```text
-ssh -T <host> exec ctld connect
+ssh -T <host> exec ctl-agent connect
 ```
 
 For a Windows host using the default cmd.exe SSH shell, the corresponding
-probe is `ssh -T <host> ctld.exe connect`. Use
+probe is `ssh -T <host> ctl-agent.exe connect`. Use
 `ctl --host <host> --remote-platform windows rmux ...` for normal commands.
 
 The command waits for `rmux-proto` input, so terminate this manual probe after
@@ -27,9 +27,9 @@ confirming it starts without diagnostics.
 
 ### Docker development target
 
-The repository includes a development image that builds `ctld` and `rmuxd`
+The repository includes a development image that builds `ctl-agent` and `rmuxd`
 and exposes them through OpenSSH. It deliberately accepts only public-key
-authentication and the fixed `exec ctld connect` remote command. Shells,
+authentication and the fixed `exec ctl-agent connect` remote command. Shells,
 PTY allocation, forwarding, agent access, X11, tunnels, and SSH subsystems are
 disabled.
 
@@ -79,10 +79,10 @@ The app can also define the container without a pre-existing alias. In **+
 Host**, enter `rmux@127.0.0.1:2222`, use a name such as `rmux-remote-test`, then
 choose **Identity file** and enter the matching private-key path. These steps
 open at the command palette location. Verify any SSH host-key prompt against
-the fingerprint above. Once `ctld connect` succeeds, choose **OpenSSH config** to create a
+the fingerprint above. Once `ctl-agent connect` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
-not store the key contents. `ctld` is assumed to be on the remote `PATH`.
+not store the key contents. `ctl-agent` is assumed to be on the remote `PATH`.
 Password/passphrase and host-verification prompts use the same overlay on
 macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
 chip to authenticate again if SSH config/agent alone is insufficient.
@@ -142,10 +142,10 @@ raw sequence.
   and host-key prompts remain OpenSSH behavior, but key, agent, or certificate
   authentication is preferable for unattended reconnects.
 - Windows hosts use `--remote-platform windows` with the server's default
-  cmd.exe shell. Install `ctld.exe` and `rmuxd.exe` together on the remote PATH.
+  cmd.exe shell. Install `ctl-agent.exe` and `rmuxd.exe` together on the remote PATH.
   Their data endpoint is an owner-restricted named pipe. PowerShell/custom
   server shells and desktop remote-platform selection remain unverified or
   unimplemented.
 - Journals, checkpoints, shell awareness, and reconnect tokens are memory-only.
 - Generic commands, files, jobs, port forwarding, desktop streaming, and
-  `rmuxd` maintenance control are not exposed by `ctld`.
+  `rmuxd` maintenance control are not exposed by `ctl-agent`.

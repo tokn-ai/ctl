@@ -3,7 +3,7 @@ members = [
   "process-info",
   "ctl/cli",
   "ctl/core",
-  "ctl/daemon",
+  "ctl/agent",
   "rmux/client",
   "rmux/cli",
   "rmux/core",

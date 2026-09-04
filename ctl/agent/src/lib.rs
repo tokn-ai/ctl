@@ -1,6 +1,6 @@
 //! Stateless SSH remote-command gateway for the local `rmuxd` service.
 //!
-//! `ctld connect` is a disposable process. It relays one SSH channel's
+//! `ctl-agent connect` is a disposable process. It relays one SSH channel's
 //! stdin/stdout to the fixed per-user `rmuxd` endpoint and owns no terminal,
 //! session, authorization, or reconnect state.
 
@@ -40,7 +40,7 @@ impl ConnectConfig {
 ///
 /// Returns an error when `rmuxd` cannot be reached or either relay direction
 /// fails. Completion of either direction ends the entire disposable relay.
-pub async fn connect_stdio(config: &ConnectConfig) -> Result<(), DaemonError> {
+pub async fn connect_stdio(config: &ConnectConfig) -> Result<(), AgentError> {
   connect(tokio::io::stdin(), tokio::io::stdout(), config).await
 }
 
@@ -57,7 +57,7 @@ pub async fn connect<R, W>(
   mut client_reader: R,
   mut client_writer: W,
   config: &ConnectConfig,
-) -> Result<(), DaemonError>
+) -> Result<(), AgentError>
 where
   R: AsyncRead + Unpin,
   W: AsyncWrite + Unpin,
@@ -66,8 +66,8 @@ where
   client_writer
     .write_all(SSH_TRANSPORT_PREFACE)
     .await
-    .map_err(DaemonError::Relay)?;
-  client_writer.flush().await.map_err(DaemonError::Relay)?;
+    .map_err(AgentError::Relay)?;
+  client_writer.flush().await.map_err(AgentError::Relay)?;
   let (mut rmux_reader, mut rmux_writer) = tokio::io::split(rmux);
   let client_to_rmux = tokio::io::copy(&mut client_reader, &mut rmux_writer);
   let rmux_to_client = tokio::io::copy(&mut rmux_reader, &mut client_writer);
@@ -75,26 +75,26 @@ where
 
   tokio::select! {
     result = &mut client_to_rmux => {
-      result.map_err(DaemonError::Relay)?;
+      result.map_err(AgentError::Relay)?;
     }
     result = &mut rmux_to_client => {
-      result.map_err(DaemonError::Relay)?;
+      result.map_err(AgentError::Relay)?;
     }
   }
   Ok(())
 }
 
-async fn connect_or_start_rmuxd(config: &ConnectConfig) -> Result<Stream, DaemonError> {
+async fn connect_or_start_rmuxd(config: &ConnectConfig) -> Result<Stream, AgentError> {
   match connect_existing_daemon(&config.rmux_socket).await {
     Ok(stream) => return Ok(stream),
     Err(error) if error.is_endpoint_unavailable() => {}
-    Err(error) => return Err(DaemonError::RmuxConnect(error)),
+    Err(error) => return Err(AgentError::RmuxConnect(error)),
   }
 
   let executable = config
     .rmuxd_bin
     .as_deref()
-    .ok_or_else(|| DaemonError::RmuxUnavailable(config.rmux_socket.clone()))?;
+    .ok_or_else(|| AgentError::RmuxUnavailable(config.rmux_socket.clone()))?;
   start_rmuxd(executable, &config.rmux_socket)?;
 
   let deadline = Instant::now() + RMUX_START_TIMEOUT;
@@ -104,14 +104,14 @@ async fn connect_or_start_rmuxd(config: &ConnectConfig) -> Result<Stream, Daemon
       Err(error) if Instant::now() < deadline && error.is_endpoint_unavailable() => {
         sleep(Duration::from_millis(25)).await;
       }
-      Err(error) => return Err(DaemonError::RmuxConnect(error)),
+      Err(error) => return Err(AgentError::RmuxConnect(error)),
     }
   }
 }
 
-fn start_rmuxd(executable: &Path, socket: &Path) -> Result<(), DaemonError> {
+fn start_rmuxd(executable: &Path, socket: &Path) -> Result<(), AgentError> {
   if !executable.is_absolute() {
-    return Err(DaemonError::RmuxdPathNotAbsolute(executable.into()));
+    return Err(AgentError::RmuxdPathNotAbsolute(executable.into()));
   }
   let mut command = std::process::Command::new(executable);
   #[cfg(windows)]
@@ -131,7 +131,7 @@ fn start_rmuxd(executable: &Path, socket: &Path) -> Result<(), DaemonError> {
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()
-    .map_err(|source| DaemonError::StartRmuxd {
+    .map_err(|source| AgentError::StartRmuxd {
       executable: executable.into(),
       source,
     })?;
@@ -139,7 +139,7 @@ fn start_rmuxd(executable: &Path, socket: &Path) -> Result<(), DaemonError> {
 }
 
 #[derive(Debug, Error)]
-pub enum DaemonError {
+pub enum AgentError {
   #[error("the local rmux service is unavailable at {}", .0.display())]
   RmuxUnavailable(PathBuf),
   #[error("could not connect to the local rmux service: {0}")]

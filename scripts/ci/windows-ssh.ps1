@@ -34,7 +34,7 @@ $originalAcls = @{}
 try {
   Stop-Service sshd -ErrorAction SilentlyContinue
   # The fixed remote command resolves installed executables through the server's PATH.
-  foreach ($binary in @('ctld.exe', 'rmuxd.exe')) {
+  foreach ($binary in @('ctl-agent.exe', 'rmuxd.exe')) {
     $destination = Join-Path $env:WINDIR "System32\$binary"
     if (Test-Path $destination) { throw "Refusing to replace $destination" }
     Copy-Item "target\debug\$binary" $destination
@@ -107,7 +107,7 @@ $originalConfig
   Start-Service sshd
   Invoke-Native -Program "$openssh\ssh.exe" -Arguments @('-vvv', '-E', "$root\client.log", 'ctl-windows-ci', 'echo', 'SSH_AUTHENTICATED')
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
-  Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctld', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
+  Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctl-agent', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
   Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'rmux', 'list')
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue

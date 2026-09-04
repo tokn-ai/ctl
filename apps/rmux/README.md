@@ -21,7 +21,7 @@ or enter `[user@]hostname[:port]`, then a name, then choose SSH config/agent,
 an identity-file path, or password/interactive authentication. These steps use
 the same quick-input overlay as the command palette. OpenSSH requests any
 required host-key confirmation, password, passphrase, or interactive response
-there. `ctld` must already be on the remote `PATH`; custom command paths are
+there. `ctl-agent` must already be on the remote `PATH`; custom command paths are
 not supported. After a successful connection, choose where to save the host.
 **OpenSSH config**
 writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
@@ -61,7 +61,7 @@ and labels each row with its host. A failed host reports its own error while
 last-known sessions from other targets remain usable.
 
 SSH uses `ctl-core` and the system `ssh` executable with the fixed remote
-command `exec ctld connect`; forwarding, agent access, X11, local commands,
+command `exec ctl-agent connect`; forwarding, agent access, X11, local commands,
 and PTY allocation remain disabled. On macOS/Linux, a short-lived owner-only
 Unix socket connects OpenSSH's askpass helper to the quick-input UI. Host-key
 trust requires explicit confirmation and is managed by OpenSSH. Passwords and

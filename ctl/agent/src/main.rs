@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use ctld::{ConnectConfig, connect_stdio};
+use ctl_agent::{ConnectConfig, connect_stdio};
 use std::env;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -20,7 +20,7 @@ enum Command {
 #[tokio::main]
 async fn main() {
   if let Err(error) = run(Arguments::parse()).await {
-    eprintln!("ctld: {error}");
+    eprintln!("ctl-agent: {error}");
     std::process::exit(1);
   }
 }
@@ -45,5 +45,5 @@ fn companion_rmuxd_binary() -> Option<PathBuf> {
 #[derive(Debug, Error)]
 enum MainError {
   #[error(transparent)]
-  Daemon(#[from] ctld::DaemonError),
+  Agent(#[from] ctl_agent::AgentError),
 }

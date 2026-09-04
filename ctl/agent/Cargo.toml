@@ -1,5 +1,5 @@
 [package]
-name = "ctld"
+name = "ctl-agent"
 version.workspace = true
 edition.workspace = true
 

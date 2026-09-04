@@ -18,21 +18,21 @@ remain out of scope.
 `rmux` client connects over per-user IPC and may disappear without affecting a
 session.
 
-`ctld connect` is a disposable SSH remote-command gateway:
+`ctl-agent connect` is a disposable SSH remote-command gateway:
 
 ```text
 local:  rmux / rmux-app -> local IPC -> rmuxd -> PTY -> shell
-remote: ctl / rmux-app -> OpenSSH -> ctld connect -> local IPC
+remote: ctl / rmux-app -> OpenSSH -> ctl-agent connect -> local IPC
                                                     -> rmuxd -> PTY -> shell
 ```
 
-Each SSH channel gets a new `ctld connect` process. Ending that process drops
+Each SSH channel gets a new `ctl-agent connect` process. Ending that process drops
 only its local attachment stream and must not affect a terminal session. If
 `rmuxd` itself exits, an exact running PTY is not recoverable in the initial
 architecture. Later disk-backed metadata may reconstruct explicitly
 restartable tasks as a new process generation.
 
-`ctld` owns neither terminal state nor session state. It relays raw bytes
+`ctl-agent` owns neither terminal state nor session state. It relays raw bytes
 between SSH stdin/stdout and one fixed local `rmuxd` endpoint. It does not
 decode or reframe `rmux-proto`, and a remote peer cannot choose a local socket
 path or service.
@@ -53,22 +53,20 @@ path or service.
   adapter composes `ctl-core` transport with `rmux-client`; its webview owns
   xterm rendering, viewport, and local scrollback.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
-  child, invokes one fixed `ctld connect` command, and exposes the resulting
+  child, invokes one fixed `ctl-agent connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
-- `ctld`: stateless SSH remote-command adapter for the fixed local `rmuxd`
+- `ctl-agent`: stateless SSH remote-command adapter for the fixed local `rmuxd`
   relay.
 - `ctl`: control router. `ctl rmux` redirects the canonical rmux command
   surface locally by default or through an explicit OpenSSH destination.
 
 OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
 `rmux-client`.
-The initial IPC implementation targets Unix-domain sockets on macOS and Linux;
-Windows named pipes will be a separate transport implementation.
-
-`ctld` currently uses that Unix local endpoint and is therefore a Unix-only
-host component. The OpenSSH transport and `rmux-proto` remain independent of
-that endpoint so a future Windows implementation can preserve the same remote
-behavior.
+Local IPC uses Unix-domain sockets on macOS and Linux and owner-restricted
+named pipes on Windows. `ctl-agent` relays the appropriate local data endpoint
+without changing the SSH transport or rmux protocol. Unix remote commands use
+`exec ctl-agent connect`; Windows hosts with the default cmd.exe SSH shell use
+`ctl-agent.exe connect`, selected through `--remote-platform windows`.
 
 ## Current invariants
 
@@ -93,7 +91,7 @@ behavior.
     released while the shell continues.
 12. OpenSSH owns host verification, encryption, and user authorization. `ctl`
     adds no network listener, forwarding, application key, or pairing state.
-13. A `ctld connect` exit closes only its local stream and never terminates an
+13. A `ctl-agent connect` exit closes only its local stream and never terminates an
     `rmuxd` session. A replacement SSH channel may rebind the logical
     attachment using its memory-only token and renderer-applied raw sequence.
 14. Optional shell-awareness metadata is advisory, memory-only session state.
@@ -120,7 +118,7 @@ The app persists workspace metadata through its native backend and always
 includes the local target. The versioned app-data `workspace.json` contains
 host definitions and stable IDs, known session references, cached cwd labels,
 tab order, and the selected tab. Runtime status, output, credentials, and
-attachment tokens are never written to the workspace. `ctld` remains stateless.
+attachment tokens are never written to the workspace. `ctl-agent` remains stateless.
 A read-only backend command discovers concrete
 aliases from the user's OpenSSH config and recursive `Include` files for the
 **+ Host** picker; wildcard and negated patterns are omitted, and discovery
@@ -144,7 +142,7 @@ failures retain entries as unreachable, while not-found responses mark them
 missing rather than removing them. Opening a session connects on demand.
 
 App-local settings become separate, validated OpenSSH arguments and cannot
-introduce arbitrary options or change the fixed `exec ctld connect` command.
+introduce arbitrary options or change the fixed `exec ctl-agent connect` command.
 Rows, tabs, shell-state caches, mutations, and reconnect intent use
 `(stable host ID, session ID)`, independent of an SSH alias's display spelling.
 A failed target reports its own error without hiding successful targets.
@@ -191,7 +189,7 @@ to drain, then starts a fresh daemon. It never unlinks a live endpoint or
 guesses and signals a process ID.
 
 The local-control endpoint is deliberately distinct from `rmux-proto` and is
-never relayed by `ctld`; a remote `ctl` client cannot restart a daemon.
+never relayed by `ctl-agent`; a remote `ctl` client cannot restart a daemon.
 The backend records the target owned by its active attachment actor, so a
 local restart detaches only a local attachment; a remote attachment in the
 same window remains live. The frontend marks local entries missing after a
@@ -308,12 +306,12 @@ and checkpoint state remain intact.
 `ctl` connects directly to the current user's owner-only `rmuxd` data endpoint
 by default. Global `--host`/`-H` instead invokes the system OpenSSH client with
 PTY allocation and all forwarding disabled, an OpenSSH destination supplied
-by the user, and the fixed remote command `exec ctld connect`. OpenSSH
+by the user, and the fixed remote command `exec ctl-agent connect`. OpenSSH
 configuration owns host verification, user authentication, proxying, and
 healthy-connection multiplexing. `ctl` never disables host-key checking,
 enables agent forwarding, or accepts an arbitrary remote command.
 
-`ctld connect` has no network listener, persistent state, identity registry,
+`ctl-agent connect` has no network listener, persistent state, identity registry,
 or service selector. It writes one fixed readiness marker, after which SSH
 stdin/stdout carries raw `rmux-proto`; diagnostics use stderr. The helper
 connects only to the current user's fixed `rmuxd` data endpoint and cannot

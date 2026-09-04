@@ -18,12 +18,12 @@ struct TestPaths {
 impl TestPaths {
   fn new() -> Self {
     let token = Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("ctld-gateway-{}", &token[..12]));
+    let root = std::env::temp_dir().join(format!("ctl-agent-gateway-{}", &token[..12]));
     std::fs::create_dir(&root).expect("create test directory");
     #[cfg(unix)]
     let rmux_socket = root.join("rmux.sock");
     #[cfg(windows)]
-    let rmux_socket = PathBuf::from(format!(r"\\.\pipe\ctld-gateway-{token}"));
+    let rmux_socket = PathBuf::from(format!(r"\\.\pipe\ctl-agent-gateway-{token}"));
     Self { root, rmux_socket }
   }
 }
@@ -62,18 +62,18 @@ async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
     direct.write_all(b"pong").await.expect("write probe");
   });
 
-  let config = ctld::ConnectConfig::new(paths.rmux_socket.clone());
+  let config = ctl_agent::ConnectConfig::new(paths.rmux_socket.clone());
   let (mut client, gateway) = tokio::io::duplex(1024);
   let (gateway_reader, gateway_writer) = tokio::io::split(gateway);
   let relay =
-    tokio::spawn(async move { ctld::connect(gateway_reader, gateway_writer, &config).await });
+    tokio::spawn(async move { ctl_agent::connect(gateway_reader, gateway_writer, &config).await });
 
-  let mut preface = vec![0_u8; ctld::SSH_TRANSPORT_PREFACE.len()];
+  let mut preface = vec![0_u8; ctl_agent::SSH_TRANSPORT_PREFACE.len()];
   client
     .read_exact(&mut preface)
     .await
     .expect("read transport preface");
-  assert_eq!(preface, ctld::SSH_TRANSPORT_PREFACE);
+  assert_eq!(preface, ctl_agent::SSH_TRANSPORT_PREFACE);
 
   let payload = b"\0raw rmux payload\xff\n";
   client.write_all(payload).await.expect("write raw payload");
@@ -106,13 +106,13 @@ async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
 #[tokio::test]
 async fn missing_local_endpoint_is_reported_without_starting_an_unconfigured_daemon() {
   let paths = TestPaths::new();
-  let config = ctld::ConnectConfig::new(paths.rmux_socket.clone());
+  let config = ctl_agent::ConnectConfig::new(paths.rmux_socket.clone());
   let (client, gateway) = tokio::io::duplex(64);
   let (gateway_reader, gateway_writer) = tokio::io::split(gateway);
 
-  let error = ctld::connect(gateway_reader, gateway_writer, &config)
+  let error = ctl_agent::connect(gateway_reader, gateway_writer, &config)
     .await
     .expect_err("missing endpoint must fail");
-  assert!(matches!(error, ctld::DaemonError::RmuxUnavailable(_)));
+  assert!(matches!(error, ctl_agent::AgentError::RmuxUnavailable(_)));
   drop(client);
 }

@@ -47,10 +47,10 @@ impl CommandErrorDto {
           "ssh_host_key_failed"
         } else if lower.contains("permission denied") {
           "ssh_authentication_failed"
-        } else if lower.contains("ctld")
+        } else if lower.contains("ctl-agent")
           && (lower.contains("not found") || lower.contains("no such file"))
         {
-          "ctld_not_found"
+          "ctl_agent_not_found"
         } else {
           "ssh_connection_failed"
         };

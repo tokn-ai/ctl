@@ -163,7 +163,7 @@ the desktop app can attach without a second terminal interface.
 Remote task control must continue to rely on OpenSSH authentication and fixed
 remote commands. It must not make taskd a network listener or expose an
 arbitrary local endpoint. The exact gateway shape is unresolved: extending
-ctld with an explicit service selector and creating a separate fixed task relay
+ctl-agent with an explicit service selector and creating a separate fixed task relay
 are both possible. Raw task requests must not be confused with `rmux-proto`, and
 the rmuxd maintenance endpoint remains local-only.
 

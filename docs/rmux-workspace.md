@@ -2,7 +2,7 @@
 
 The app's workspace answers “which sessions do I want to keep here?” It is
 separate from `rmuxd`'s live inventory and from SSH authorization. A session
-can be remembered by several clients. `ctld` remains a stateless SSH bridge;
+can be remembered by several clients. `ctl-agent` remains a stateless SSH bridge;
 `rmuxd` continues to own all shells, PTYs, history, checkpoints, and leases.
 
 ## Disk format and ownership
@@ -80,7 +80,7 @@ Run the frontend suite and native persistence/transport tests:
 
 ```sh
 pnpm --dir apps/rmux test
-cargo test -p rmux-app -p ctld
+cargo test -p rmux-app -p ctl-agent
 ```
 
 The opt-in live test targets the repository's Docker/Podman fixture at

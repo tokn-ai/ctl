@@ -2,7 +2,7 @@
 
 This document specifies the owner-only maintenance endpoint exposed by a local
 Unix `rmuxd`. It is intentionally separate from `rmux-proto`: the latter is a
-terminal-session protocol and may be relayed by `ctld`; this protocol controls
+terminal-session protocol and may be relayed by `ctl-agent`; this protocol controls
 the daemon process itself and is never remote.
 
 ## Endpoint and access boundary
@@ -13,7 +13,7 @@ directory, are bound while the same startup lock is held, and are mode `0600`.
 `rmuxd` removes each endpoint only if its own listener inode still occupies the
 path.
 
-`ctld` connects only to the data endpoint. It must not discover, connect to,
+`ctl-agent` connects only to the data endpoint. It must not discover, connect to,
 or relay the control endpoint. A future remote daemon lifecycle feature needs a
 separately authorized `ctl` service; it must not be added to raw `rmux-proto`.
 

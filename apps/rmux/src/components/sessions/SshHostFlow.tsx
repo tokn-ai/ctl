@@ -312,13 +312,13 @@ export function SshHostFlow({
     case "retry":
       title = step === "retry" ? "Could not connect" : "Connect host";
       description =
-        "OpenSSH will ask for host verification or authentication if needed. ctld must be on the remote PATH.";
+        "OpenSSH will ask for host verification or authentication if needed. ctl-agent must be on the remote PATH.";
       mode = { kind: "pick", choices: [{ id: "retry", label: "Connect" }] };
       if (!target) onBack = back(configuredRef.current ? "host" : "auth");
       break;
     case "progress":
       title = "Connecting to host";
-      description = "Starting the fixed remote command: exec ctld connect";
+      description = "Starting the fixed remote command: exec ctl-agent connect";
       mode = { kind: "progress" };
   }
 

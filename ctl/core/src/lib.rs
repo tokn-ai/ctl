@@ -30,8 +30,8 @@ pub enum RemotePlatform {
 impl RemotePlatform {
   fn command(self) -> &'static [&'static str] {
     match self {
-      Self::Unix => &["exec", "ctld", "connect"],
-      Self::Windows => &["ctld.exe", "connect"],
+      Self::Unix => &["exec", "ctl-agent", "connect"],
+      Self::Windows => &["ctl-agent.exe", "connect"],
     }
   }
 }
@@ -233,11 +233,11 @@ impl Drop for SshTransport {
   }
 }
 
-/// Starts `ctld connect` through the system OpenSSH client.
+/// Starts `ctl-agent connect` through the system OpenSSH client.
 ///
 /// The destination is interpreted exactly as an OpenSSH destination or
 /// `~/.ssh/config` host alias. No shell fragment or user-controlled remote
-/// command is accepted. SSH diagnostics and remote `ctld` diagnostics remain
+/// command is accepted. SSH diagnostics and remote `ctl-agent` diagnostics remain
 /// on stderr and can never corrupt the protocol stream.
 ///
 /// # Errors
@@ -255,7 +255,7 @@ async fn open_ssh_tunnel_with_options(
   open_ssh_tunnel_interactive(destination, options, &SshInteraction::Inherit).await
 }
 
-/// Opens the fixed ctld command with explicit local SSH prompt handling.
+/// Opens the fixed ctl-agent command with explicit local SSH prompt handling.
 ///
 /// # Errors
 /// Returns validation, SSH startup, or transport-marker failures.
@@ -452,12 +452,12 @@ pub enum CoreError {
   MissingSshStdin,
   #[error("the ssh client did not expose a readable stdout pipe")]
   MissingSshStdout,
-  #[error("could not read the ctld transport marker from SSH: {0}")]
+  #[error("could not read the ctl-agent transport marker from SSH: {0}")]
   ReadSshPreface(#[source] io::Error),
-  #[error("SSH connection failed before ctld was ready: {0}")]
+  #[error("SSH connection failed before ctl-agent was ready: {0}")]
   SshStartup(String),
   #[error(
-    "remote stdout did not begin with the ctld transport marker; check non-interactive shell startup output"
+    "remote stdout did not begin with the ctl-agent transport marker; check non-interactive shell startup output"
   )]
   InvalidSshPreface,
 }
@@ -486,7 +486,7 @@ mod tests {
         "--",
         "workstation",
         "exec",
-        "ctld",
+        "ctl-agent",
         "connect",
       ]
       .map(OsString::from)
@@ -502,7 +502,7 @@ mod tests {
     let arguments = ssh_arguments("windows-host", &options);
     assert_eq!(
       &arguments[arguments.len() - 4..],
-      ["--", "windows-host", "ctld.exe", "connect"].map(OsString::from)
+      ["--", "windows-host", "ctl-agent.exe", "connect"].map(OsString::from)
     );
   }
 
@@ -537,7 +537,7 @@ mod tests {
         "--",
         "127.0.0.1",
         "exec",
-        "ctld",
+        "ctl-agent",
         "connect",
       ]
       .map(OsString::from)

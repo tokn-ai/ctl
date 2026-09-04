@@ -36,7 +36,7 @@ const MAX_LOCAL_CONTROL_FRAME_SIZE: usize = 64 * 1024;
 
 /// Version of the owner-only local `rmuxd` control endpoint.
 ///
-/// This protocol is intentionally separate from `rmux-proto`: `ctld` relays
+/// This protocol is intentionally separate from `rmux-proto`: `ctl-agent` relays
 /// only the ordinary data endpoint and must never expose daemon-global local
 /// maintenance operations to remote `rmux_tunnel` clients.
 pub const LOCAL_CONTROL_PROTOCOL_VERSION: u16 = 1;

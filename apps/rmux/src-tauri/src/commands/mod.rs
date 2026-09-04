@@ -455,7 +455,7 @@ mod tests {
   /// structured settings used by app-local hosts. Authentication and host
   /// verification remain owned by OpenSSH.
   #[tokio::test]
-  #[ignore = "requires RMUX_TEST_SSH_TARGET and a live ctld SSH endpoint"]
+  #[ignore = "requires RMUX_TEST_SSH_TARGET and a live ctl-agent SSH endpoint"]
   async fn creates_lists_attaches_and_kills_a_session_over_ssh() {
     let destination = std::env::var("RMUX_TEST_SSH_TARGET")
       .expect("set RMUX_TEST_SSH_TARGET to an OpenSSH destination");

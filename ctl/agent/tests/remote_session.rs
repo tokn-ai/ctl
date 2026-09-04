@@ -27,7 +27,7 @@ struct TestDirectory {
 impl TestDirectory {
   fn new() -> Self {
     let suffix = Uuid::new_v4().simple().to_string();
-    let path = PathBuf::from("/tmp").join(format!("ctld-remote-{}", &suffix[..12]));
+    let path = PathBuf::from("/tmp").join(format!("ctl-agent-remote-{}", &suffix[..12]));
     std::fs::create_dir(&path).expect("create test directory");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
       .expect("make test directory private");
@@ -48,7 +48,7 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
   let daemon = spawn_rmuxd(&socket);
   wait_for_socket(&socket).await?;
   let identity = ClientIdentity {
-    name: "ctld-integration-test".into(),
+    name: "ctl-agent-integration-test".into(),
     version: "0.1.0".into(),
   };
 
@@ -100,7 +100,7 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
   }
   read_output_until(&mut attachment, b"ready").await?;
 
-  // This is the lifecycle of a broken SSH channel: its disposable `ctld`
+  // This is the lifecycle of a broken SSH channel: its disposable `ctl-agent`
   // relay disappears, but the daemon-owned shell must remain alive.
   drop(attachment);
   sleep(Duration::from_millis(50)).await;
@@ -165,18 +165,18 @@ async fn wait_for_session_end(stream: &mut DuplexStream) -> TestResult {
 }
 
 async fn open_gateway(socket: &Path) -> TestResult<DuplexStream> {
-  let config = ctld::ConnectConfig::new(socket.into());
+  let config = ctl_agent::ConnectConfig::new(socket.into());
   let (client, gateway) = tokio::io::duplex(1024 * 1024);
   let (reader, writer) = tokio::io::split(gateway);
   tokio::spawn(async move {
-    if let Err(error) = ctld::connect(reader, writer, &config).await {
+    if let Err(error) = ctl_agent::connect(reader, writer, &config).await {
       eprintln!("test gateway failed: {error}");
     }
   });
   let mut client = client;
-  let mut preface = vec![0_u8; ctld::SSH_TRANSPORT_PREFACE.len()];
+  let mut preface = vec![0_u8; ctl_agent::SSH_TRANSPORT_PREFACE.len()];
   client.read_exact(&mut preface).await?;
-  if preface != ctld::SSH_TRANSPORT_PREFACE {
+  if preface != ctl_agent::SSH_TRANSPORT_PREFACE {
     return Err("gateway returned an invalid transport preface".into());
   }
   Ok(client)

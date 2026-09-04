@@ -28,7 +28,7 @@ Windows runtime behavior.
 | `rmux` CLI | Separate executable check passed with dead-code warnings; non-Unix main exits with an unsupported-platform message | Compilation does not make the CLI usable on Windows |
 | `ctl` / `task-cli` | Check failed: unconditional `UnixStream` and `rustix::process` usage in task-cli | Task CLI integration currently prevents even ctl's non-Unix fallback from compiling |
 | `taskd` | Check failed: the library is Unix-only, while main imports its exports unconditionally | Missing Windows execution backend and binary platform boundary |
-| `ctld` | Check failed: explicit non-Unix compile error and Unix socket import | Gateway requires a Windows local IPC implementation |
+| `ctl-agent` | Check failed: explicit non-Unix compile error and Unix socket import | Gateway requires a Windows local IPC implementation |
 | `rmuxd` | Source explicitly rejects non-Unix builds | Requires Windows daemon plumbing, not just a CI matrix entry |
 | `rmux-app` | Source has unsupported local-transport stubs and a batch-SSH path; Windows build was not checked | Separate native build investigation required |
 
@@ -169,13 +169,13 @@ use the system `ssh` executable with binary stdin/stdout pipes. OpenSSH still
 owns authentication and host verification; no forwarding, arbitrary remote
 command, or local daemon maintenance capability is added.
 
-The default remote platform remains Unix (`exec ctld connect`). CLI clients
-can select `--remote-platform windows` to use the fixed `ctld.exe connect`
+The default remote platform remains Unix (`exec ctl-agent connect`). CLI clients
+can select `--remote-platform windows` to use the fixed `ctl-agent.exe connect`
 command with the Windows OpenSSH server's default cmd.exe shell. The platform
 is independent of the client OS; arbitrary shell commands remain disallowed.
 The desktop currently selects Unix remote commands.
 
-`ctld` uses the shared IPC stream and only the data endpoint. Its installed
+`ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `rmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`
 and `CREATE_BREAKAWAY_FROM_JOB`: Windows OpenSSH permits breakaway so the
 persistent daemon survives the disposable channel. If the enclosing job

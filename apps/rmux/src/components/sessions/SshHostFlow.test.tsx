@@ -270,7 +270,7 @@ describe("SSH host quick-input flow", () => {
 
   it("keeps preflight errors visible and lets the user backtrack", async () => {
     vi.mocked(probeSshHost).mockRejectedValue({
-      message: "ctld: command not found",
+      message: "ctl-agent: command not found",
     });
     const { user, save } = setup();
     await details(user);
@@ -278,7 +278,7 @@ describe("SSH host quick-input flow", () => {
       screen.getByRole("option", { name: /SSH config \/ agent/ }),
     );
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toContain("ctld"),
+      expect(screen.getByRole("alert").textContent).toContain("ctl-agent"),
     );
     await user.click(screen.getByRole("button", { name: "Previous step" }));
     expect(

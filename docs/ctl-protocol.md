@@ -20,11 +20,11 @@ ssh -T \
   -o ForwardX11=no \
   -o PermitLocalCommand=no \
   -o RemoteCommand=none \
-  -- <destination> exec ctld connect
+  -- <destination> exec ctl-agent connect
 ```
 
-With `--remote-platform windows`, the suffix is `ctld.exe connect` instead
-of `exec ctld connect`. This is an enumerated server-platform choice, independent
+With `--remote-platform windows`, the suffix is `ctl-agent.exe connect` instead
+of `exec ctl-agent connect`. This is an enumerated server-platform choice, independent
 of the client OS, and currently requires the Windows server's default cmd.exe
 shell. Both choices retain the same SSH options and binary protocol. Omitting
 `--remote-platform` preserves Unix behavior; the option requires `--host`.
@@ -37,7 +37,7 @@ user-controlled remote command.
 
 Without `--host`, transport-requiring `ctl rmux` commands connect directly to
 the current user's owner-only local `rmuxd` endpoint and do not start SSH or
-`ctld`. The `rmux-proto` request, attachment, detach, and reconnect behavior
+`ctl-agent`. The `rmux-proto` request, attachment, detach, and reconnect behavior
 above that transport is shared by both targets.
 
 OpenSSH may reuse a healthy configured control master. A broken SSH transport
@@ -46,14 +46,14 @@ uses the `rmux-proto` attachment token described below.
 
 ## Remote command
 
-`ctld connect` is a disposable, stateless process launched once per SSH
+`ctl-agent connect` is a disposable, stateless process launched once per SSH
 channel. It connects to the fixed per-user `rmuxd` data endpoint, starting only
 an absolute-path companion `rmuxd` when configured and necessary, writes
 `ctl-ssh-v1\n` to stdout, then copies raw bytes in both directions:
 
 ```text
-SSH stdin  -> ctld connect -> rmuxd data endpoint
-SSH stdout <- ctld connect <- rmuxd data endpoint
+SSH stdin  -> ctl-agent connect -> rmuxd data endpoint
+SSH stdout <- ctl-agent connect <- rmuxd data endpoint
 ```
 
 Completion or failure of either copy direction ends the relay and closes its
@@ -62,7 +62,7 @@ no arbitrary local socket, forwarded address, or service name from the SSH
 client. The sibling owner-only `rmuxd` maintenance endpoint is never exposed.
 
 The endpoint is a Unix socket or an owner-restricted Windows named pipe.
-Windows discovers `rmuxd.exe` beside `ctld.exe`. Auto-start detaches the daemon
+Windows discovers `rmuxd.exe` beside `ctl-agent.exe`. Auto-start detaches the daemon
 from the console and requests breakaway from the SSH job, with null standard
 streams. If job policy disallows breakaway, startup fails explicitly. The
 SSH gateway itself remains disposable and the maintenance pipe remains local.
@@ -74,7 +74,7 @@ safe.
 
 ## Authorization boundary
 
-SSH authenticates the device and user. `ctld` adds no identity, authorization,
+SSH authenticates the device and user. `ctl-agent` adds no identity, authorization,
 or capability registry. It runs with the SSH account's existing authority and
 can reach only that account's fixed local `rmuxd` endpoint.
 
@@ -85,7 +85,7 @@ access are outside the current design.
 
 ## Reconnect lifecycle
 
-`rmuxd`, not `ctld`, owns reconnect state. A successful initial attachment
+`rmuxd`, not `ctl-agent`, owns reconnect state. A successful initial attachment
 returns an opaque memory-only token. After an unexpected transport loss,
 `rmuxd` retains that logical attachment and its input/layout leases for the
 negotiated liveness interval, 30 seconds by default.

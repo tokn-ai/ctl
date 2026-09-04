@@ -24,7 +24,7 @@ cargo build --workspace
 For the Windows local CLI and daemon slice:
 
 ```sh
-cargo build -p ctl -p ctld -p taskd -p rmux -p rmuxd
+cargo build -p ctl -p ctl-agent -p taskd -p rmux -p rmuxd
 ```
 
 The `rmux` and `rmuxd` binaries must be installed beside one another, or
@@ -37,12 +37,12 @@ cargo install --path rmux/daemon
 cargo install --path rmux/cli
 ```
 
-For remote access, install `rmuxd` and `ctld` on the controlled device and
+For remote access, install `rmuxd` and `ctl-agent` on the controlled device and
 `ctl` on the client:
 
 ```sh
 cargo install --path rmux/daemon
-cargo install --path ctl/daemon
+cargo install --path ctl/agent
 cargo install --path ctl/cli
 ```
 
@@ -161,7 +161,7 @@ storage prompts, with connection verification before saving. The same overlay
 handles destructive close/restart confirmations and **New Shell** input.
 **New Shell** asks for a host (Local first) and an optional working directory;
 blank uses that host's home directory. Escape cancels before creation starts,
-and progress/errors stay in the overlay. `ctld` is assumed on the remote `PATH`.
+and progress/errors stay in the overlay. `ctl-agent` is assumed on the remote `PATH`.
 Each row and tab carries its host; create, attach, reconnect, and kill
 operations always use that session's original target.
 It renders one terminal pane and exposes input and layout ownership separately.
@@ -205,7 +205,7 @@ rmux attach development
 ```
 
 `ctl rmux` reuses that exact command surface through ctl's selected target.
-The target is local by default; no SSH process or `ctld` helper is involved:
+The target is local by default; no SSH process or `ctl-agent` helper is involved:
 
 ```sh
 ctl rmux list
@@ -214,7 +214,7 @@ ctl rmux attach development
 
 Pass global `--host`/`-H` to redirect the same rmux command through SSH. The
 value is an ordinary OpenSSH destination or `~/.ssh/config` host alias, and
-the remote account must be able to run `ctld connect` non-interactively:
+the remote account must be able to run `ctl-agent connect` non-interactively:
 
 ```sh
 ctl --host workstation rmux list
@@ -222,7 +222,7 @@ ctl --host workstation rmux new --name development
 ctl -H workstation rmux attach development
 ```
 
-`ctld` has no network listener or application-level pairing state. It relays
+`ctl-agent` has no network listener or application-level pairing state. It relays
 the SSH channel to the same user's fixed local `rmuxd` endpoint. After an
 unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
 the logical attachment and its leases for 30 seconds by default. An explicit
@@ -269,7 +269,7 @@ Windows desktop backend and native shell metadata remain separate work.
 
 ### Windows SSH hosts
 
-Install `ctld.exe` and `rmuxd.exe` beside each other in a directory on the
+Install `ctl-agent.exe` and `rmuxd.exe` beside each other in a directory on the
 remote user's PATH. Enable Windows OpenSSH Server with its default `cmd.exe`
 shell, then select the server platform explicitly from either client platform:
 
@@ -278,8 +278,13 @@ ctl --host windows-host --remote-platform windows rmux new development -- cmd.ex
 ctl --host windows-host --remote-platform windows rmux attach development
 ```
 
-The fixed Windows command is `ctld.exe connect`. The gateway relays only the
+The fixed Windows command is `ctl-agent.exe connect`. The gateway relays only the
 user's rmux data pipe, and starts the companion daemon when absent. The daemon
 breaks away from the SSH job so its sessions survive disconnects. PowerShell
 and custom SSH shells are not covered by this implementation. Remote task
 routing and desktop remote-platform selection remain pending.
+
+The SSH gateway is named `ctl-agent` (`ctl-agent.exe` on Windows), reflecting
+its per-connection lifetime. When upgrading from the former gateway name,
+update the client, remote executable, and any SSH forced-command configuration
+together. The `ctl-ssh-v1` transport marker and rmux wire protocol are unchanged.

@@ -662,7 +662,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctld"
+name = "ctl-agent"
 version = "0.1.0"
 dependencies = [
  "clap",

@@ -26,7 +26,36 @@ import type {
   KeybindingsSnapshot,
   KeybindingsDocument,
   NativeCommandBinding,
+  TaskDefinition,
+  TaskDefinitionScope,
+  TaskDefinitionCatalog,
+  SavedTaskDefinition,
 } from "./types";
+
+export async function loadTaskDefinitions(scope: TaskDefinitionScope): Promise<TaskDefinitionCatalog> {
+  return invoke("load_task_definitions", { request: { scope } });
+}
+
+export async function saveTaskDefinition(
+  scope: TaskDefinitionScope,
+  definition_id: string,
+  expected_revision: string | null,
+  definition: TaskDefinition,
+): Promise<SavedTaskDefinition> {
+  return invoke("save_task_definition", {
+    request: { scope, definition_id, expected_revision, definition },
+  });
+}
+
+export async function removeTaskDefinition(
+  scope: TaskDefinitionScope,
+  definition_id: string,
+  expected_revision: string,
+): Promise<void> {
+  return invoke("remove_task_definition", {
+    request: { scope, definition_id, expected_revision },
+  });
+}
 
 export async function loadKeybindings(): Promise<KeybindingsSnapshot> {
   return invoke<KeybindingsSnapshot>("load_keybindings");

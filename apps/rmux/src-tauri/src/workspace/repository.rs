@@ -9,24 +9,39 @@ const MAX_WORKSPACE_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) struct Repository {
   directory: PathBuf,
+  definition_path: PathBuf,
 }
 
 impl Repository {
   pub fn new(directory: PathBuf) -> Self {
-    Self { directory }
+    Self {
+      definition_path: directory.join("tasks.json"),
+      directory,
+    }
+  }
+
+  pub fn with_definition_store(mut self, path: PathBuf) -> Self {
+    self.definition_path = path;
+    self
   }
 
   pub fn load(&self) -> CommandResult<WorkspaceSnapshot> {
     let _lock = self.lock()?;
-    self.read()
+    self.migrate_definitions(self.read()?)
   }
 
   pub fn update(&self, request: UpdateWorkspaceRequest) -> CommandResult<WorkspaceSnapshot> {
+    if request.document.schema_version != 3 {
+      return Err(CommandErrorDto::new(
+        "workspace_version_unsupported",
+        "Reload the workspace before saving with this app version.",
+      ));
+    }
     request.document.validate()?;
     let _lock = self.lock()?;
     // Read and validate even when the caller expects an absent file. Never
     // replace an unreadable, corrupt, unsupported, or concurrently edited file.
-    let current = self.read()?;
+    let current = self.migrate_definitions(self.read()?)?;
     if current.revision != request.expected_revision {
       return Err(CommandErrorDto::new(
         "workspace_conflict",
@@ -37,7 +52,12 @@ impl Repository {
       revision: Some(uuid::Uuid::new_v4().to_string()),
       document: request.document,
     };
-    let bytes = serde_json::to_vec_pretty(&snapshot).map_err(CommandErrorDto::backend)?;
+    self.persist_snapshot(&snapshot)?;
+    Ok(snapshot)
+  }
+
+  fn persist_snapshot(&self, snapshot: &WorkspaceSnapshot) -> CommandResult<()> {
+    let bytes = serde_json::to_vec_pretty(snapshot).map_err(CommandErrorDto::backend)?;
     if bytes.len() as u64 > MAX_WORKSPACE_BYTES {
       return Err(CommandErrorDto::new(
         "workspace_too_large",
@@ -45,7 +65,64 @@ impl Repository {
       ));
     }
     self.write(&bytes).map_err(io_error)?;
+    Ok(())
+  }
+
+  fn migrate_definitions(
+    &self,
+    mut snapshot: WorkspaceSnapshot,
+  ) -> CommandResult<WorkspaceSnapshot> {
+    if snapshot.document.schema_version == 3 {
+      return Ok(snapshot);
+    }
+    // Preserve the original workspace before writing to either store. Import is
+    // idempotent, so retrying after a crash between the two commits is safe.
+    self.ensure_backup("workspace-v2.backup.json")?;
+    let imported = task_store::Repository::new(self.definition_path.clone())
+      .import_legacy(&snapshot.document.task_definitions)
+      .map_err(crate::task_definitions::store_error)?;
+    for reference in &mut snapshot.document.task_references {
+      let saved = snapshot
+        .document
+        .task_definitions
+        .iter()
+        .find(|definition| Some(&definition.definition_id) == reference.definition_id.as_ref());
+      if let Some(saved) = saved
+        && reference.applied_revision.as_deref() == Some(saved.revision.as_str())
+        && let Some(definition) = imported
+          .definitions
+          .iter()
+          .find(|definition| definition.definition_id == saved.definition_id)
+      {
+        reference.applied_revision = Some(definition.revision.clone());
+      }
+    }
+    snapshot.document.task_definitions.clear();
+    snapshot.document.schema_version = 3;
+    snapshot.revision = Some(uuid::Uuid::new_v4().to_string());
+    snapshot.document.validate()?;
+    self.persist_snapshot(&snapshot)?;
     Ok(snapshot)
+  }
+
+  fn ensure_backup(&self, name: &str) -> CommandResult<()> {
+    let path = self.directory.join(name);
+    regular_file_or_absent(&path).map_err(io_error)?;
+    let source = fs::read(self.directory.join("workspace.json")).map_err(io_error)?;
+    match fs::read(&path) {
+      Ok(existing) if existing == source => return Ok(()),
+      Ok(_) => {
+        return Err(CommandErrorDto::new(
+          "workspace_backup_conflict",
+          format!(
+            "{name} differs from the workspace being migrated. Preserve and review both files before retrying."
+          ),
+        ));
+      }
+      Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+      Err(error) => return Err(io_error(error)),
+    }
+    self.write_named(name, &source).map_err(io_error)
   }
 
   fn read(&self) -> CommandResult<WorkspaceSnapshot> {
@@ -76,11 +153,7 @@ impl Repository {
       )
     })?;
     if value["document"]["schema_version"] == 1 {
-      let backup = self.directory.join("workspace-v1.backup.json");
-      regular_file_or_absent(&backup).map_err(io_error)?;
-      if !backup.exists() {
-        fs::copy(&path, &backup).map_err(io_error)?;
-      }
+      self.ensure_backup("workspace-v1.backup.json")?;
       value["document"]["schema_version"] = 2.into();
       if let Some(tabs) = value["document"]["tabs"].as_array_mut() {
         for tab in tabs {
@@ -129,6 +202,10 @@ impl Repository {
   }
 
   fn write(&self, bytes: &[u8]) -> io::Result<()> {
+    self.write_named("workspace.json", bytes)
+  }
+
+  fn write_named(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
     let path = self
       .directory
       .join(format!(".workspace-{}.tmp", uuid::Uuid::new_v4()));
@@ -144,7 +221,7 @@ impl Repository {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&temporary.0, self.directory.join("workspace.json"))?;
+    fs::rename(&temporary.0, self.directory.join(name))?;
     #[cfg(unix)]
     File::open(&self.directory)?.sync_all()?;
     Ok(())

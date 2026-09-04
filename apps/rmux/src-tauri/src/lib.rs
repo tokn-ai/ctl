@@ -14,6 +14,7 @@ mod ssh_auth;
 mod ssh_config;
 mod ssh_identity;
 mod state;
+mod task_definitions;
 mod tasks;
 mod transport;
 mod workspace;
@@ -56,6 +57,9 @@ pub fn run() {
       tasks::watch_task_logs,
       tasks::cancel_task_logs,
       tasks::acknowledge_task_log,
+      task_definitions::load_task_definitions,
+      task_definitions::save_task_definition,
+      task_definitions::remove_task_definition,
       workspace::load_workspace,
       workspace::update_workspace,
       keybindings::load_keybindings,

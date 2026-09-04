@@ -16,6 +16,9 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 
+mod definitions;
+pub use definitions::{DefinitionCommand, DefinitionError, SaveArguments, ScopeArguments};
+
 #[cfg(test)]
 mod tests;
 
@@ -104,8 +107,20 @@ pub enum Command {
     mode: Mode,
     #[arg(long)]
     start: bool,
-    #[arg(last = true, required = true)]
+    /// Copy a local saved definition into a new registered task.
+    #[arg(long, conflicts_with_all = ["command", "cwd", "mode"])]
+    from_definition: Option<String>,
+    #[command(flatten)]
+    scope: ScopeArguments,
+    #[arg(last = true, required_unless_present = "from_definition")]
     command: Vec<String>,
+  },
+  /// Save a reusable local definition without registering or starting a task.
+  Save(SaveArguments),
+  /// Inspect and manage local saved definitions.
+  Definitions {
+    #[command(subcommand)]
+    command: DefinitionCommand,
   },
   Attach {
     task: String,
@@ -169,28 +184,53 @@ pub async fn run_with_connector<C: Connector>(
   mut command: Command,
   connector: &C,
 ) -> Result<(), CommandError> {
-  if connector.is_local_task_target()
-    && let Command::Create { cwd, .. } = &mut command
+  match command {
+    Command::Save(arguments) => return definitions::save(arguments, connector).await,
+    Command::Definitions { command } => return definitions::run(command, connector),
+    _ => {}
+  }
+  if let Command::Create {
+    cwd,
+    mode,
+    from_definition,
+    scope,
+    command,
+    ..
+  } = &mut command
   {
-    let current = std::env::current_dir().map_err(CommandError::WorkingDirectory)?;
-    let directory = cwd
-      .as_ref()
-      .map_or_else(|| current.clone(), |path| current.join(path));
-    *cwd = Some(
-      directory
-        .to_str()
-        .ok_or_else(|| {
-          io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "task working directory must be valid Unicode",
-          )
-        })
-        .map_err(CommandError::WorkingDirectory)?
-        .to_owned(),
-    );
+    if let Some(selector) = from_definition {
+      definitions::require_local(connector)?;
+      let saved = definitions::lookup(scope, selector)?;
+      *cwd = saved.definition.working_directory;
+      *mode = match saved.definition.execution_mode {
+        ExecutionMode::Interactive => Mode::Interactive,
+        ExecutionMode::Background => Mode::Background,
+      };
+      *command = std::iter::once(saved.definition.program)
+        .chain(saved.definition.arguments)
+        .collect();
+    } else {
+      if scope.is_explicit() {
+        return Err(DefinitionError::ScopeRequiresDefinition.into());
+      }
+      if connector.is_local_task_target() {
+        *cwd = Some(local_working_directory(cwd.as_deref())?);
+      }
+    }
   }
   let stream = connect(connector).await?;
   execute(command, stream, connector).await
+}
+
+fn local_working_directory(directory: Option<&str>) -> Result<String, CommandError> {
+  let current = std::env::current_dir().map_err(CommandError::WorkingDirectory)?;
+  let directory = directory.map_or_else(|| current.clone(), |path| current.join(path));
+  directory.into_os_string().into_string().map_err(|_| {
+    CommandError::WorkingDirectory(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "task working directory must be valid Unicode",
+    ))
+  })
 }
 
 async fn connect<C: Connector>(connector: &C) -> Result<C::Stream, CommandError> {
@@ -239,6 +279,7 @@ async fn execute<C: Connector>(
       mode,
       start,
       command,
+      ..
     } => {
       let mut command = command.into_iter();
       let program = command.next().ok_or(CommandError::MissingProgram)?;
@@ -307,6 +348,9 @@ async fn execute<C: Connector>(
       follow,
       after,
     } => print_logs(&mut stream, task, follow, after).await?,
+    Command::Save(_) | Command::Definitions { .. } => {
+      unreachable!("local definition commands are handled before daemon connection")
+    }
   }
   Ok(())
 }
@@ -454,6 +498,8 @@ fn unexpected(expected: &'static str, response: &ServerMessage) -> CommandError 
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error(transparent)]
+  Definition(#[from] DefinitionError),
   #[error(transparent)]
   Client(#[from] task_client::ClientError),
   #[error(transparent)]

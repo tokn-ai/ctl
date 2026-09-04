@@ -4,6 +4,8 @@ import type {
   SavedTaskDefinition,
   TaskTab,
   SessionSummary,
+  TaskDefinitionScope,
+  TaskReference,
 } from "../../lib/types";
 import {
   inspectKnownSessions,
@@ -17,6 +19,7 @@ import { sessionKey } from "../targets/targets";
 import { sameDefinition } from "./taskModel";
 
 import { useTaskEditor } from "./useTaskEditor";
+import { definitionScopeKey, definitionScopeLabel, GLOBAL_DEFINITION_SCOPE, useTaskDefinitions } from "./useTaskDefinitions";
 
 type Workspace = ReturnType<typeof useWorkspace>;
 export function useTaskWorkspace(
@@ -31,7 +34,12 @@ export function useTaskWorkspace(
   const [hasLoaded, setHasLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [daemonStatus, setDaemonStatus] = useState<string | null>(null);
-  const editor = useTaskEditor(workspace);
+  const catalog = useTaskDefinitions(workspace.task_definition_scope, workspace.ready);
+  const editor = useTaskEditor(workspace, catalog);
+  useEffect(() => {
+    if (definitionScopeKey(catalog.scope) !== definitionScopeKey(workspace.task_definition_scope))
+      workspace.update("task_definition_scope", catalog.scope);
+  }, [definitionScopeKey(catalog.scope), definitionScopeKey(workspace.task_definition_scope)]);
   const mutation = useRef(false);
   const epoch = useRef(0);
   const mounted = useRef(true);
@@ -54,6 +62,19 @@ export function useTaskWorkspace(
             task.task_id === active.task_id && active.host_id === "local",
         ) ?? null)
       : null;
+  const activeReference = active?.kind === "task" ? workspace.task_references.find((item) =>
+    item.host_id === active.host_id && item.task_id === active.task_id) : undefined;
+  const activeSaved = activeReference ? catalog.get(activeReference.definition_scope ?? GLOBAL_DEFINITION_SCOPE)?.definitions.find((item) =>
+    item.definition_id === activeReference.definition_id) : undefined;
+  useEffect(() => {
+    if (!activeReference?.definition_id) return;
+    const source = activeReference.definition_scope ?? GLOBAL_DEFINITION_SCOPE;
+    if (definitionScopeKey(source) === definitionScopeKey(catalog.scope)) return;
+    const refresh = () => { void catalog.load(source).catch((failure: unknown) => setError(errorMessage(failure))); };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [activeReference?.definition_id, definitionScopeKey(activeReference?.definition_scope), definitionScopeKey(catalog.scope), catalog.load]);
 
   const refresh = useCallback(async (background = false) => {
     const version = epoch.current;
@@ -158,6 +179,10 @@ export function useTaskWorkspace(
     remember(task);
     const sessionId = task.active_run?.interactive?.session_id;
     const view = workspaceRef.current;
+    const reference = view.task_references.find((item) => item.host_id === "local" && item.task_id === task.task_id);
+    const source = reference?.definition_scope ?? GLOBAL_DEFINITION_SCOPE;
+    if (reference?.definition_id && !catalog.get(source))
+      void catalog.load(source).catch((failure: unknown) => setError(errorMessage(failure)));
     const oldTab = view.tabs.find(
       (tab) => tab.target.kind === "local" && tab.session_id === sessionId,
     );
@@ -177,13 +202,29 @@ export function useTaskWorkspace(
     definition: SavedTaskDefinition,
     another = false,
     instanceName?: string,
+    source: TaskDefinitionScope = catalog.scope,
   ) => {
     const view = workspaceRef.current;
+    source = await catalog.ensureScope(source);
+    // Resolve persisted aliases before default-instance lookup, including after an app restart.
+    const candidates = view.viewRef.current.task_references.filter((item) =>
+      !another && item.is_default && item.definition_id === definition.definition_id && item.host_id === "local");
+    const canonicalReferences = await Promise.all(candidates.map(async (item) => ({
+      ...item,
+      definition_scope: await catalog.ensureScope(item.definition_scope),
+    })));
+    if (canonicalReferences.some((item, index) =>
+      definitionScopeKey(item.definition_scope) !== definitionScopeKey(candidates[index].definition_scope))) {
+      view.update("task_references", (references) => references.map((item) =>
+        canonicalReferences.find((candidate) => candidate.task_id === item.task_id && candidate.host_id === item.host_id) ?? item));
+      await view.persist();
+    }
     let reference = another
       ? undefined
       : view.viewRef.current.task_references.find(
           (item) =>
             item.definition_id === definition.definition_id &&
+            definitionScopeKey(catalog.resolveScope(item.definition_scope)) === definitionScopeKey(catalog.resolveScope(source)) &&
             item.host_id === "local" &&
             item.is_default,
         );
@@ -192,6 +233,7 @@ export function useTaskWorkspace(
         host_id: "local",
         task_id: crypto.randomUUID(),
         definition_id: definition.definition_id,
+        definition_scope: source,
         applied_revision: definition.revision,
         is_default: !another,
       };
@@ -327,16 +369,30 @@ export function useTaskWorkspace(
     busy,
     active,
     activeTask,
+    activeSaved,
     draft: editor.draft,
     saved: editor.saved,
     editorId: editor.definitionId,
+    editorKey: `${definitionScopeKey(editor.scope)}:${editor.definitionId}`,
     closeEditor: editor.close,
     openEditor: editor.open,
     drafts: workspace.task_drafts,
     savingDraft: workspace.saving,
     draftError: workspace.error,
     discardDraft: editor.discard,
-    refresh,
+    definitions: catalog.definitions,
+    definition_scope: catalog.scope,
+    definition_path: catalog.path,
+    definitions_loading: catalog.loading,
+    definitions_loaded: catalog.has_loaded,
+    definitions_error: catalog.error,
+    refreshDefinitions: catalog.refresh,
+    selectDefinitionScope: (source: TaskDefinitionScope) => workspace.update("task_definition_scope", source),
+    savedForReference: (reference: TaskReference) => catalog.get(reference.definition_scope ?? GLOBAL_DEFINITION_SCOPE)?.definitions.find((item) => item.definition_id === reference.definition_id),
+    draftConflict: editor.conflict,
+    draftReviewRequired: editor.reviewRequired,
+    reloadDraft: () => perform(editor.reload),
+    refresh: async () => { await Promise.all([refresh(), catalog.refresh()]); },
     open,
     openTask,
     newDefinition: () => editor.create(),
@@ -348,11 +404,11 @@ export function useTaskWorkspace(
     save: (run = false) =>
       perform(async () => {
         const result = await editor.save();
-        if (run) await startSaved(result);
+        if (run) await startSaved(result, false, undefined, editor.scope);
         editor.close();
       }),
-    run: (definition: SavedTaskDefinition, another = false, name?: string) =>
-      perform(() => startSaved(definition, another, name)),
+    run: (definition: SavedTaskDefinition, another = false, name?: string, source?: TaskDefinitionScope) =>
+      perform(() => startSaved(definition, another, name, source)),
     saveAsDefinition: (task: ManagedTask) => editor.create(task.definition),
     apply: (task: ManagedTask, definition: SavedTaskDefinition) =>
       perform(async () => {
@@ -372,13 +428,15 @@ export function useTaskWorkspace(
       }),
     forgetDefinition: (definition_id: string) =>
       perform(async () => {
-        editor.discard(definition_id);
-        workspace.update("task_definitions", (definitions) =>
-          definitions.filter((item) => item.definition_id !== definition_id),
-        );
+        const source = editor.definitionId === definition_id ? editor.scope : catalog.scope;
+        const saved = catalog.get(source)?.definitions.find((item) => item.definition_id === definition_id);
+        const expected_revision = editor.definitionId === definition_id ? editor.draft?.base_revision : saved?.revision;
+        if (typeof expected_revision !== "string") throw new Error("Reload the saved definition before deleting it.");
+        await catalog.remove(source, definition_id, expected_revision);
+        editor.discard(definition_id, source);
         workspace.update("task_references", (references) =>
           references.map((item) =>
-            item.definition_id === definition_id
+            item.definition_id === definition_id && definitionScopeKey(item.definition_scope) === definitionScopeKey(source)
               ? {
                   ...item,
                   definition_id: null,
@@ -395,11 +453,13 @@ export function useTaskWorkspace(
         const reference = workspace.task_references.find(
           (item) => item.task_id === task_id,
         );
-        const definition = workspace.task_definitions.find(
+        const source = reference?.definition_scope ?? GLOBAL_DEFINITION_SCOPE;
+        const latest = await catalog.load(source);
+        const definition = latest.definitions.find(
           (item) => item.definition_id === reference?.definition_id,
         );
         if (!definition)
-          throw new Error("No saved definition is available for this task.");
+          throw new Error(`No saved definition is available for this task in ${definitionScopeLabel(source)}.`);
         await taskRequest({
           type: "register_task",
           task_id,

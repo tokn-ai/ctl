@@ -10,8 +10,11 @@ clap.workspace = true
 rustix.workspace = true
 task-ipc.workspace = true
 task-proto.workspace = true
+task-store.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

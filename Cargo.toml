@@ -16,6 +16,7 @@ members = [
   "task/daemon",
   "task/cli",
   "task/client",
+  "task/store",
 ]
 resolver = "3"
 
@@ -48,6 +49,7 @@ task-ipc = { path = "task/ipc" }
 task-proto = { path = "task/proto" }
 task-cli = { path = "task/cli" }
 task-client = { path = "task/client" }
+task-store = { path = "task/store" }
 tokio = { version = "1.53.1", features = [
   "io-std",
   "io-util",

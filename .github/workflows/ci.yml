@@ -109,10 +109,10 @@ jobs:
         run: >-
           cargo check --locked --target x86_64-pc-windows-msvc --all-targets
           -p rmux-proto -p rmux-core -p rmux-client -p task-proto
-          -p ctl-core -p rmux-ipc -p task-ipc -p task-cli -p taskd -p ctl -p ctl-agent -p rmux -p rmuxd
+          -p ctl-core -p rmux-ipc -p task-ipc -p task-store -p task-cli -p taskd -p ctl -p ctl-agent -p rmux -p rmuxd
 
       - name: Test Windows tasks and protocol framing
-        run: cargo test --locked -p taskd -p task-ipc -p task-proto -p task-cli -p ctl -p ctl-core -p ctl-agent -p rmux-proto
+        run: cargo test --locked -p taskd -p task-ipc -p task-proto -p task-store -p task-cli -p ctl -p ctl-core -p ctl-agent -p rmux-proto
 
       - name: Test Windows ConPTY sessions
         run: cargo test --locked -p rmuxd --test windows_conpty

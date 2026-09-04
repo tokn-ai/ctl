@@ -3,6 +3,7 @@ import type {
   TaskTab,
   SavedTaskDefinition,
   TaskDefinitionDraft,
+  TaskDefinitionScope,
   TaskReference,
   ConnectionTarget,
   SessionReference,
@@ -16,6 +17,7 @@ export interface WorkspaceView {
   sidebar_view: "sessions" | "tasks";
   task_drafts: TaskDefinitionDraft[];
   task_definitions: SavedTaskDefinition[];
+  task_definition_scope: TaskDefinitionScope;
   task_references: TaskReference[];
   task_tabs: TaskTab[];
   tab_order: string[];
@@ -31,6 +33,7 @@ export function emptyWorkspaceView(): WorkspaceView {
     sidebar_view: "sessions",
     task_drafts: [],
     task_definitions: [],
+    task_definition_scope: { kind: "global" },
     task_references: [],
     task_tabs: [],
     tab_order: [],
@@ -115,6 +118,7 @@ export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
     sidebar_view: document.sidebar_view ?? (document.active_tab?.kind === "task_definition" ? "tasks" : "sessions"),
     task_drafts: document.task_drafts ?? [],
     task_definitions: document.task_definitions ?? [],
+    task_definition_scope: document.task_definition_scope ?? { kind: "global" },
     task_references: document.task_references ?? [],
     task_tabs: document.tabs.filter(
       (tab): tab is TaskTab => tab.kind === "task",
@@ -170,23 +174,11 @@ export function workspaceDocument(
     (tab) => workspaceTabKey(tab) === view.active_tab_key,
   );
   return {
-    schema_version: 2,
+    schema_version: 3,
     sidebar_view: view.sidebar_view,
     task_drafts: view.task_drafts,
-    task_definitions: view.task_definitions,
-    task_references: view.task_references.map((item) =>
-      item.definition_id &&
-      !view.task_definitions.some(
-        (definition) => definition.definition_id === item.definition_id,
-      )
-        ? {
-            ...item,
-            definition_id: null,
-            applied_revision: null,
-            is_default: false,
-          }
-        : item,
-    ),
+    task_definition_scope: view.task_definition_scope,
+    task_references: view.task_references,
     workspace_id,
     hosts: view.targets.map((target) => {
       if (target.kind === "local")

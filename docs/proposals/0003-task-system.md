@@ -210,6 +210,19 @@ proposals if later needed.
 
 ## Implementation status
 
+The current local CLI captures the caller's working directory when creating a
+task, and each registered task permits at most one active run.
+[Proposal 0007](0007-local-task-workflows.md) proposes extending local workflows
+with saved definitions, independent runs, caller or fixed working directories,
+and local scheduling. It remains **Proposed**; the current behavior continues
+until that design is accepted and implemented. Arbitrary shell-job adoption
+through `Ctrl+Z` followed by `task bg` is deferred by that proposal.
+
+The definition-saving portion now uses shared project/global catalogs through
+`task-store`, with CLI and desktop access and migration from embedded workspace
+definitions. See [shared task definitions](../task-definitions.md). Independent
+invocations, directory policies, and scheduling remain pending.
+
 Local background and interactive execution are implemented on Unix and Windows.
 The versioned task protocol supports task registration, start, stop, restart,
 show, list, remove, background logs, and interactive attachment. Taskd persists
@@ -238,6 +251,7 @@ references and the new states; existing background state records remain readable
 - [Proposal 0001: Persistent terminal sessions with rmux](0001-rmux.md)
 - [Proposal 0002: Local and SSH control routing with ctl](0002-ctl.md)
 - [Proposal 0006: Explicit task routing over SSH](0006-remote-tasks.md)
+- [Proposal 0007: Local task definitions, runs, and schedules](0007-local-task-workflows.md)
 - [Architecture](../architecture.md)
 - [rmux protocol](../rmux-protocol.md)
 - [ctl SSH transport](../ctl-protocol.md)

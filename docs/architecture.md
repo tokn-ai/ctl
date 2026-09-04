@@ -550,3 +550,17 @@ there. The desktop workspace task interface currently uses local taskd. See
 [proposal 0003](proposals/0003-task-system.md) and the
 [local-control protocol](rmux-local-control.md) for lifecycle and retention rules,
 and [proposal 0006](proposals/0006-remote-tasks.md) for SSH service selection.
+
+The local CLI currently captures cwd when a task is created. A registered task
+has a unique name and at most one active run, and the desktop reuses one default
+registration per saved definition and host. These remain the current behavior.
+[Proposal 0007](proposals/0007-local-task-workflows.md), still **Proposed**, describes
+extending saved definitions to independent local runs, explicit caller or fixed
+working directories, and local scheduling. It preserves the SSH gateway boundary
+and defers arbitrary shell-job adoption through `Ctrl+Z` and `task bg`.
+
+Saved local definitions now use the shared `task-store` crate. CLI and desktop
+read the same project/global catalogs; workspace schema 3 retains only definition
+references, source selection, and drafts. Saving uses content revisions and
+atomic replacement, independently of taskd's registered-task state. See
+[shared task definitions](task-definitions.md) for storage and migration.

@@ -49,6 +49,10 @@ try {
   # ssh-keygen adds an explicit creator ACE; /grant:r does not remove it.
   $creatorSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/remove:g', "*$creatorSid")
+  # Authentication reads this file under the user's token, which may not
+  # have an enabled Administrators SID. Do not inherit access onto the host key.
+  Invoke-Native -Program 'icacls.exe' -Arguments @($root, '/grant', "*${creatorSid}:(RX)")
+  Invoke-Native -Program 'icacls.exe' -Arguments @("$root\authorized_keys", '/grant', "*${creatorSid}:(R)")
   $rootSsh = $root.Replace('\', '/')
   $user = $env:USERNAME.ToLowerInvariant()
   New-Item -ItemType Directory -Force (Split-Path $serverConfig) | Out-Null

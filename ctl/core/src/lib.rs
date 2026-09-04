@@ -541,7 +541,7 @@ mod tests {
     #[cfg(windows)]
     let listener = rmux_ipc::windows::Listener::bind(&socket_path).unwrap();
     let server = tokio::spawn(async move {
-      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut stream = listener.accept().await.unwrap().0;
       let mut request = [0_u8; 4];
       stream.read_exact(&mut request).await.unwrap();
       assert_eq!(&request, b"ping");

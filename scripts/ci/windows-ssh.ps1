@@ -46,6 +46,9 @@ try {
   # SYSTEM runs sshd; only SYSTEM and Administrators may change its host key/config.
   Invoke-Native -Program 'icacls.exe' -Arguments @($root, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T')
   Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/setowner', '*S-1-5-18')
+  # ssh-keygen adds an explicit creator ACE; /grant:r does not remove it.
+  $creatorSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/remove:g', "*$creatorSid")
   $rootSsh = $root.Replace('\', '/')
   $user = $env:USERNAME.ToLowerInvariant()
   New-Item -ItemType Directory -Force (Split-Path $serverConfig) | Out-Null

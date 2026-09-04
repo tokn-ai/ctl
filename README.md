@@ -232,9 +232,25 @@ the logical attachment and its leases for 30 seconds by default. An explicit
 ## Managed tasks
 
 Tasks support local and SSH background commands and interactive terminals on
-Unix and Windows. Task definitions and the latest run metadata persist in taskd.
+Unix and Windows. Registered-task definitions and the latest run metadata persist in taskd.
 Background stdout and stderr use a bounded in-memory log; interactive input and
 output stay in rmuxd.
+
+Reusable local definitions are shared by the CLI and desktop, separately from
+registered tasks. Save to the current project or explicitly use the global catalog:
+
+```sh
+ctl task save build -- cargo build
+ctl task definitions list
+ctl task definitions show build
+ctl task create app-build --from-definition build --start
+ctl task save shell --global --mode interactive -- bash
+```
+
+The desktop Tasks sidebar selects Global or a project directory. Saving checks
+the original definition revision; concurrent edits keep your draft and report a
+conflict. See [shared task definitions](docs/task-definitions.md) for paths,
+scope selection, updating definitions, and workspace migration.
 
 ```sh
 ctl task create api --cwd ./service --start -- cargo run

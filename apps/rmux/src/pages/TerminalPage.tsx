@@ -1274,7 +1274,7 @@ export function TerminalPage() {
           tasks={
             <TaskSidebar
               model={taskWorkspace}
-              definitions={workspace.task_definitions}
+              definitions={taskWorkspace.definitions}
               references={workspace.task_references}
             />
           }
@@ -1376,16 +1376,7 @@ export function TerminalPage() {
             <TaskDetail
               key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`}
               model={taskWorkspace}
-              saved={workspace.task_definitions.find(
-                (definition) =>
-                  definition.definition_id ===
-                  workspace.task_references.find(
-                    (reference) =>
-                      reference.task_id === taskWorkspace.activeTask?.task_id ||
-                      (taskWorkspace.active?.kind === "task" &&
-                        reference.task_id === taskWorkspace.active.task_id),
-                  )?.definition_id,
-              )}
+              saved={taskWorkspace.activeSaved}
             />
           ) : null}
           <div
@@ -1487,7 +1478,7 @@ export function TerminalPage() {
       </main>
       {taskWorkspace.editorId ? (
         <TaskEditor
-          key={taskWorkspace.editorId}
+          key={taskWorkspace.editorKey}
           model={taskWorkspace}
           saved={taskWorkspace.saved}
         />

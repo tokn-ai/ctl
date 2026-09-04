@@ -17,6 +17,13 @@ the desktop remain separate UI work; the CLI gateway is defined in
 [Proposal 0006](0006-remote-tasks.md). References include host identity from the
 beginning.
 
+This document describes the current default-task desktop interaction.
+[Proposal 0007](0007-local-task-workflows.md) proposes extending saved definitions
+to independent local runs, explicit caller or fixed working directories, and
+local scheduling. That proposal remains **Proposed**. The default registration,
+**Run another instance**, and task-tab behavior below remain current until the
+new design is accepted and implemented.
+
 ## Screen plan
 
 ```text
@@ -159,11 +166,21 @@ rather than accumulate task protocol and persistence logic.
 ## References
 
 - [Proposal 0003: Managed tasks in ctl](0003-task-system.md)
+- [Proposal 0007: Local task definitions, runs, and schedules](0007-local-task-workflows.md)
 - [Workspace implementation](../../apps/rmux/src-tauri/src/workspace/mod.rs)
 - [rmux local-control protocol](../rmux-local-control.md)
 
 
 ## Sidebar and draft storage update
+
+The current schema 3 update moves saved definitions into shared project/global
+catalogs. The Tasks sidebar selects Global or an explicit project directory;
+saves and deletes use native definition-store commands with the inspected
+revision. Drafts retain their source scope and original revision, including
+across catalog refresh and app relaunch. Workspace writes retain drafts and
+references but never replace the shared catalog. See
+[shared task definitions](../task-definitions.md) for migration and conflicts.
+The schema 2 behavior below records the preceding draft-storage transition.
 
 Workspace schema v2 additionally stores `sidebar_view` (Sessions by default) and
 `task_drafts` (empty by default). Each draft has a stable `definition_id` and the

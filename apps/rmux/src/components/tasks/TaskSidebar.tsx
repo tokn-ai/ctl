@@ -1,5 +1,7 @@
 import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import type { SavedTaskDefinition, TaskReference } from "../../lib/types";
+import { definitionScopeKey, definitionScopeLabel, GLOBAL_DEFINITION_SCOPE } from "../../features/tasks/useTaskDefinitions";
+import { TaskDefinitionSource } from "./TaskDefinitionSource";
 import { taskState } from "../../features/tasks/taskModel";
 export function TaskSidebar({
   model,
@@ -33,10 +35,11 @@ export function TaskSidebar({
           +
         </button>
       </header>
+      <TaskDefinitionSource model={model} />
       {model.drafts.filter(
         (draft) =>
           !definitions.some(
-            (saved) => saved.definition_id === draft.definition_id,
+            (saved) => saved.definition_id === draft.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
           ),
       ).length ? (
         <>
@@ -45,26 +48,26 @@ export function TaskSidebar({
             .filter(
               (draft) =>
                 !definitions.some(
-                  (saved) => saved.definition_id === draft.definition_id,
+                  (saved) => saved.definition_id === draft.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
                 ),
             )
             .map((draft) => (
-              <div className="task-sidebar-row" key={draft.definition_id}>
+              <div className="task-sidebar-row" key={`${definitionScopeKey(draft.scope)}:${draft.definition_id}`}>
                 <button
                   className="task-row-main"
                   aria-label={`Resume draft ${draft.definition.name || "Untitled task"}`}
-                  onClick={() => model.openEditor(draft.definition_id)}
+                  onClick={() => model.openEditor(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
                 >
                   <span aria-hidden="true">◇</span>
                   <span>
                     {draft.definition.name || "Untitled task"}
-                    <small>Draft</small>
+                    <small>Draft · {definitionScopeLabel(draft.scope ?? GLOBAL_DEFINITION_SCOPE)}</small>
                   </span>
                 </button>
                 <button
                   className="task-row-run"
                   aria-label={`Delete draft ${draft.definition.name || "Untitled task"}`}
-                  onClick={() => model.discardDraft(draft.definition_id)}
+                  onClick={() => model.discardDraft(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
                 >
                   ×
                 </button>
@@ -75,7 +78,9 @@ export function TaskSidebar({
       <h3>
         Saved definitions <span>{definitions.length}</span>
       </h3>
-      {definitions.length === 0 ? (
+      {!model.definitions_loaded && !model.definitions_error ? (
+        <p className="task-sidebar-note">Loading definitions…</p>
+      ) : model.definitions_loaded && definitions.length === 0 ? (
         <button className="task-empty-action" onClick={model.newDefinition}>
           + Create a task definition
         </button>
@@ -87,14 +92,14 @@ export function TaskSidebar({
           >
             <button
               className="task-row-main"
-              onClick={() => model.openEditor(saved.definition_id)}
+              onClick={() => model.openEditor(saved.definition_id, model.definition_scope)}
             >
               <span aria-hidden="true">◇</span>
               <span>
                 {saved.definition.name}
                 <small>
                   {model.drafts.some(
-                    (draft) => draft.definition_id === saved.definition_id,
+                    (draft) => draft.definition_id === saved.definition_id && definitionScopeKey(draft.scope) === definitionScopeKey(model.definition_scope),
                   )
                     ? "Draft changes"
                     : saved.definition.execution_mode}
@@ -113,6 +118,12 @@ export function TaskSidebar({
           </div>
         ))
       )}
+      {model.definitions_error ? (
+        <div className="task-inline-error" role="alert">
+          Could not load definitions: {model.definitions_error}
+          <button disabled={model.definitions_loading} onClick={() => void model.refreshDefinitions()}>Retry definitions</button>
+        </div>
+      ) : null}
       <h3>
         Managed tasks <span>Local</span>
       </h3>
@@ -156,10 +167,7 @@ export function TaskSidebar({
           >
             <span className="task-state-dot unknown" />
             <span>
-              {definitions.find(
-                (definition) =>
-                  definition.definition_id === reference.definition_id,
-              )?.definition.name ?? "Saved task"}
+              {model.savedForReference(reference)?.definition.name ?? "Saved task"}
               <small>
                 {reference.host_id === "local"
                   ? model.connection_error

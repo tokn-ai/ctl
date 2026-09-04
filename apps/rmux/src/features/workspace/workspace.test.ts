@@ -56,8 +56,8 @@ describe("workspace model", () => {
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
     expect(workspaceDocument(view)).toEqual({
       ...snapshot.document,
-      schema_version: 2,
-      task_definitions: [],
+      schema_version: 3,
+      task_definition_scope: { kind: "global" },
       task_references: [],
       task_drafts: [],
       sidebar_view: "sessions",
@@ -93,7 +93,21 @@ describe("workspace model", () => {
     expect(persisted.active_tab).toEqual(persisted.tabs[0]);
     expect(persisted.task_drafts).toEqual(document.task_drafts);
     expect(persisted.sidebar_view).toBe("tasks");
-    expect(persisted.task_definitions).toEqual(document.task_definitions);
+    expect(view.task_definitions).toEqual(document.task_definitions);
+    expect(persisted.task_definitions).toBeUndefined();
+  });
+
+  it("keeps external definition references and source scopes without rewriting the catalog", () => {
+    const view = emptyWorkspaceView();
+    const scope = { kind: "project" as const, project_root: "/work/project" };
+    view.task_definition_scope = scope;
+    view.task_references = [{ host_id: "local", task_id: "task", definition_id: "external", definition_scope: scope, applied_revision: "r1", is_default: true }];
+    view.task_drafts = [{ definition_id: "external", scope, base_revision: "r1", definition: { name: "build", program: "cargo", arguments: ["build"], working_directory: null, execution_mode: "background" } }];
+    const document = workspaceDocument(view);
+    expect(document.task_definitions).toBeUndefined();
+    expect(document.task_references).toEqual(view.task_references);
+    expect(document.task_drafts).toEqual(view.task_drafts);
+    expect(restoreWorkspace(document).task_definition_scope).toEqual(scope);
   });
 
   it("never persists runtime status, output positions, commands, or credentials", () => {

@@ -63,7 +63,7 @@ export interface WorkspaceSession extends SessionReference {
 }
 
 export interface WorkspaceDocument {
-  schema_version: 1 | 2;
+  schema_version: 1 | 2 | 3;
   workspace_id: string;
   hosts: WorkspaceHost[];
   sessions: WorkspaceSession[];
@@ -71,6 +71,7 @@ export interface WorkspaceDocument {
   active_tab: WorkspaceTab | null;
   task_definitions?: SavedTaskDefinition[];
   task_drafts?: TaskDefinitionDraft[];
+  task_definition_scope?: TaskDefinitionScope;
   sidebar_view?: "sessions" | "tasks";
   task_references?: TaskReference[];
 }
@@ -396,6 +397,17 @@ export interface TaskDefinitionDraft {
   command_line?: string;
   definition_id: string;
   definition: TaskDefinition;
+  scope?: TaskDefinitionScope;
+  /** Missing means a legacy draft whose original revision must be reviewed. */
+  base_revision?: string | null;
+}
+export type TaskDefinitionScope =
+  | { kind: "global" }
+  | { kind: "project"; project_root: string };
+export interface TaskDefinitionCatalog {
+  scope: TaskDefinitionScope;
+  path: string;
+  definitions: SavedTaskDefinition[];
 }
 export interface SavedTaskDefinition {
   definition_id: string;
@@ -406,6 +418,7 @@ export interface TaskReference {
   host_id: string;
   task_id: string;
   definition_id: string | null;
+  definition_scope?: TaskDefinitionScope;
   applied_revision: string | null;
   is_default: boolean;
 }

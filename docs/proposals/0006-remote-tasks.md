@@ -44,6 +44,12 @@ remote paths; relative paths resolve against the remote home. Taskd resolves
 working directories when starting execution, while preserving submitted
 definitions and run snapshots so saved-definition comparisons remain stable.
 
+The local CLI currently captures cwd at task creation, rather than at each
+later start. [Proposal 0007](0007-local-task-workflows.md) proposes independent
+local runs with caller or fixed cwd and local scheduling; it remains
+**Proposed**. It does not change this implemented SSH gateway boundary or
+extend the new local workflows to remote hosts.
+
 The Docker image installs `ctl-agent`, `ctl`, `rmuxd`, and `taskd`. Its forced
 command allowlist accepts exactly `exec ctl-agent connect` and
 `exec ctl-agent connect --service task`, mapping each to literal arguments
@@ -81,6 +87,7 @@ command convention.
 ## Detailed specifications
 
 - [Managed tasks](0003-task-system.md)
+- [Proposed local task workflows](0007-local-task-workflows.md)
 - [ctl SSH transport](../ctl-protocol.md)
 - [Remote setup and Docker upgrades](../remote-mvp.md)
 - [rmux local lifecycle control](../rmux-local-control.md)

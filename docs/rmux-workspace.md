@@ -14,10 +14,19 @@ versioned document contains:
 - `workspace_id`, `schema_version`;
 - `hosts`: stable `host_id` plus a local or structured SSH target;
 - `sessions`: `(host_id, session_id)`, name, and last-known cwd/display cwd;
-- ordered `tabs` and optional `active_tab`, referencing known sessions.
+- ordered `tabs` and optional `active_tab`, referencing sessions or managed tasks;
+- task references, sidebar selection, and task drafts with their source scopes
+  and original saved-definition revisions.
+
+Schema 3 stores saved task definitions in separate shared project/global
+catalogs. The workspace keeps `task_definition_scope` and references, while
+definitions are loaded as view data and excluded from subsequent workspace
+writes. Schema 2 definitions are imported into the global catalog with a
+recoverable backup before migration commits. See
+[shared task definitions](task-definitions.md) for paths and migration behavior.
 
 An outer opaque `revision` fences stale writers. Runtime status, process names,
-command lines, terminal output, output sequences, passwords, and attachment
+runtime command lines, terminal output, output sequences, passwords, and attachment
 tokens are excluded. Cached cwd is presentation only: it is not treated as live
 shell awareness or used to create a shell automatically.
 

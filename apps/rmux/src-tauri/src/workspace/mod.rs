@@ -9,6 +9,8 @@ mod tests;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use task_store::DefinitionScope;
+pub use task_store::SavedTaskDefinition;
 use tauri::Manager as _;
 
 use crate::dto::ConnectionTargetDto;
@@ -64,17 +66,12 @@ impl From<SessionReference> for WorkspaceTab {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SavedTaskDefinition {
-  pub definition_id: String,
-  pub revision: String,
-  pub definition: task_proto::TaskDefinition,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TaskReference {
   pub host_id: String,
   pub task_id: String,
   pub definition_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub definition_scope: Option<DefinitionScope>,
   pub applied_revision: Option<String>,
   pub is_default: bool,
 }
@@ -84,8 +81,28 @@ pub struct TaskReference {
 pub struct TaskDefinitionDraft {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub command_line: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub scope: Option<DefinitionScope>,
+  // Missing means a legacy draft with an unknown base; null means a new definition.
+  #[serde(default, skip_serializing_if = "DraftBaseRevision::is_unknown")]
+  pub base_revision: DraftBaseRevision,
   pub definition_id: String,
   pub definition: task_proto::TaskDefinition,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DraftBaseRevision {
+  Saved(String),
+  New,
+  #[default]
+  Unknown,
+}
+
+impl DraftBaseRevision {
+  fn is_unknown(&self) -> bool {
+    matches!(self, Self::Unknown)
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +124,8 @@ pub struct WorkspaceDocument {
   pub active_tab: Option<WorkspaceTab>,
   #[serde(default)]
   pub task_definitions: Vec<SavedTaskDefinition>,
+  #[serde(default = "global_definition_scope")]
+  pub task_definition_scope: DefinitionScope,
   #[serde(default)]
   pub task_drafts: Vec<TaskDefinitionDraft>,
   #[serde(default)]
@@ -115,10 +134,14 @@ pub struct WorkspaceDocument {
   pub task_references: Vec<TaskReference>,
 }
 
+fn global_definition_scope() -> DefinitionScope {
+  DefinitionScope::Global
+}
+
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
-      schema_version: 2,
+      schema_version: 3,
       workspace_id: "default".into(),
       hosts: vec![WorkspaceHost {
         host_id: "local".into(),
@@ -126,6 +149,7 @@ impl Default for WorkspaceDocument {
       }],
       sessions: Vec::new(),
       task_definitions: Vec::new(),
+      task_definition_scope: DefinitionScope::Global,
       task_drafts: Vec::new(),
       sidebar_view: SidebarView::default(),
       task_references: Vec::new(),
@@ -137,10 +161,16 @@ impl Default for WorkspaceDocument {
 
 impl WorkspaceDocument {
   fn validate(&self) -> CommandResult<()> {
-    if self.schema_version != 2 {
+    if !matches!(self.schema_version, 2 | 3) {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "This workspace was written by another app version. Its file has not been changed.",
+      ));
+    }
+    if self.schema_version == 3 && !self.task_definitions.is_empty() {
+      return Err(CommandErrorDto::new(
+        "workspace_invalid",
+        "Saved task definitions belong in the shared definition store.",
       ));
     }
     let invalid = || {
@@ -225,7 +255,10 @@ impl WorkspaceDocument {
         draft.definition_id.is_empty()
           || draft.definition_id.len() > 4096
           || draft.definition_id.chars().any(char::is_control)
-          || !ids.insert(&draft.definition_id)
+          || !ids.insert((
+            &draft.definition_id,
+            draft.scope.clone().unwrap_or(DefinitionScope::Global),
+          ))
           || draft
             .command_line
             .as_ref()
@@ -294,15 +327,17 @@ impl WorkspaceDocument {
       if !hosts.contains(task.host_id.as_str())
         || uuid::Uuid::parse_str(&task.task_id).is_err()
         || !task_ids.insert((task.host_id.as_str(), task.task_id.as_str()))
-        || task
-          .definition_id
-          .as_ref()
-          .is_some_and(|id| !definitions.contains(id.as_str()))
+        || task.definition_id.as_ref().is_some_and(|id| {
+          !valid_text(id) || (self.schema_version == 2 && !definitions.contains(id.as_str()))
+        })
         || (task.is_default
-          && task
-            .definition_id
-            .as_ref()
-            .is_some_and(|id| !defaults.insert((task.host_id.as_str(), id.as_str()))))
+          && task.definition_id.as_ref().is_some_and(|id| {
+            let scope = task
+              .definition_scope
+              .clone()
+              .unwrap_or(DefinitionScope::Global);
+            !defaults.insert((task.host_id.as_str(), id.as_str(), scope))
+          }))
       {
         return Err(invalid());
       }
@@ -319,7 +354,8 @@ impl WorkspaceDocument {
         task_ids.contains(&(host_id.as_str(), task_id.as_str()))
       }
       WorkspaceTab::TaskDefinition { definition_id } => {
-        definitions.contains(definition_id.as_str())
+        valid_text(definition_id)
+          && (self.schema_version == 3 || definitions.contains(definition_id.as_str()))
       }
     };
 
@@ -351,9 +387,14 @@ pub async fn load_workspace(app: tauri::AppHandle) -> CommandResult<WorkspaceSna
     .path()
     .app_data_dir()
     .map_err(CommandErrorDto::backend)?;
-  tauri::async_runtime::spawn_blocking(move || repository::Repository::new(directory).load())
-    .await
-    .map_err(CommandErrorDto::backend)?
+  let definition_path = task_store::global_path().map_err(crate::task_definitions::store_error)?;
+  tauri::async_runtime::spawn_blocking(move || {
+    repository::Repository::new(directory)
+      .with_definition_store(definition_path)
+      .load()
+  })
+  .await
+  .map_err(CommandErrorDto::backend)?
 }
 
 #[tauri::command]
@@ -365,8 +406,11 @@ pub async fn update_workspace(
     .path()
     .app_data_dir()
     .map_err(CommandErrorDto::backend)?;
+  let definition_path = task_store::global_path().map_err(crate::task_definitions::store_error)?;
   tauri::async_runtime::spawn_blocking(move || {
-    repository::Repository::new(directory).update(request)
+    repository::Repository::new(directory)
+      .with_definition_store(definition_path)
+      .update(request)
   })
   .await
   .map_err(CommandErrorDto::backend)?

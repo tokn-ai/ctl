@@ -234,7 +234,7 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
   fs::write(fixture.0.join("workspace.json"), &bytes).unwrap();
   let loaded = fixture.repository().load().unwrap();
   assert_eq!(loaded.document, populated());
-  assert_eq!(loaded.revision.as_deref(), Some("old"));
+  assert_ne!(loaded.revision.as_deref(), Some("old"));
   assert_eq!(
     fs::read(fixture.0.join("workspace-v1.backup.json")).unwrap(),
     bytes
@@ -248,7 +248,7 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
     .unwrap();
   assert_eq!(
     fixture.repository().load().unwrap().document.schema_version,
-    2
+    3
   );
 }
 
@@ -259,6 +259,8 @@ fn incomplete_task_drafts_round_trip_without_becoming_runnable_definitions() {
   document.sidebar_view = SidebarView::Tasks;
   document.task_drafts.push(TaskDefinitionDraft {
     command_line: Some("cargo run \"unfinished".into()),
+    scope: None,
+    base_revision: DraftBaseRevision::Unknown,
     definition_id: uuid::Uuid::new_v4().to_string(),
     definition: task_proto::TaskDefinition {
       name: String::new(),
@@ -278,4 +280,170 @@ fn incomplete_task_drafts_round_trip_without_becoming_runnable_definitions() {
   assert_eq!(fixture.repository().load().unwrap().document, document);
   document.task_drafts.push(document.task_drafts[0].clone());
   assert!(document.validate().is_err());
+}
+
+fn legacy_definition() -> SavedTaskDefinition {
+  SavedTaskDefinition {
+    definition_id: uuid::Uuid::new_v4().to_string(),
+    revision: "legacy-revision".into(),
+    definition: task_proto::TaskDefinition {
+      name: "build".into(),
+      program: "cargo".into(),
+      arguments: vec!["build".into()],
+      working_directory: None,
+      execution_mode: task_proto::ExecutionMode::Background,
+    },
+  }
+}
+
+fn write_legacy(fixture: &Fixture, saved: &SavedTaskDefinition) -> Vec<u8> {
+  fs::create_dir_all(&fixture.0).unwrap();
+  let mut document = populated();
+  document.schema_version = 2;
+  document.task_definitions.push(saved.clone());
+  document.task_references.push(TaskReference {
+    host_id: "local".into(),
+    task_id: uuid::Uuid::new_v4().to_string(),
+    definition_id: Some(saved.definition_id.clone()),
+    definition_scope: None,
+    applied_revision: Some(saved.revision.clone()),
+    is_default: true,
+  });
+  let bytes = serde_json::to_vec(&WorkspaceSnapshot {
+    revision: Some("workspace-before-import".into()),
+    document,
+  })
+  .unwrap();
+  fs::write(fixture.0.join("workspace.json"), &bytes).unwrap();
+  bytes
+}
+
+#[test]
+fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() {
+  let fixture = Fixture::new();
+  let saved = legacy_definition();
+  let original = write_legacy(&fixture, &saved);
+  let store = task_store::Repository::new(fixture.0.join("tasks.json"));
+  // Simulate a crash after import but before the workspace migration commits.
+  store.import_legacy(std::slice::from_ref(&saved)).unwrap();
+  let snapshot = fixture.repository().load().unwrap();
+  assert_eq!(snapshot.document.schema_version, 3);
+  assert!(snapshot.document.task_definitions.is_empty());
+  let definitions = store.load().unwrap().definitions;
+  assert_eq!(definitions.len(), 1);
+  assert_eq!(definitions[0].definition, saved.definition);
+  assert_eq!(definitions[0].definition_id, saved.definition_id);
+  let original: WorkspaceSnapshot = serde_json::from_slice(&original).unwrap();
+  assert_eq!(snapshot.document.sessions, original.document.sessions);
+  assert_eq!(
+    snapshot.document.task_references[0].task_id,
+    original.document.task_references[0].task_id
+  );
+  assert_eq!(
+    snapshot.document.task_references[0]
+      .applied_revision
+      .as_deref(),
+    Some(definitions[0].revision.as_str())
+  );
+  assert!(fixture.0.join("workspace-v2.backup.json").is_file());
+  assert_eq!(fixture.repository().load().unwrap(), snapshot);
+
+  // A later CLI change cannot be overwritten by persisting an old workspace view.
+  let mut updated = saved.definition;
+  updated.arguments = vec!["test".into()];
+  store
+    .save(
+      &saved.definition_id,
+      Some(&definitions[0].revision),
+      updated.clone(),
+    )
+    .unwrap();
+  fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: snapshot.revision,
+      document: snapshot.document,
+    })
+    .unwrap();
+  assert_eq!(store.load().unwrap().definitions[0].definition, updated);
+}
+
+#[test]
+fn conflicting_import_keeps_workspace_and_shared_definition_unchanged() {
+  let fixture = Fixture::new();
+  let saved = legacy_definition();
+  let bytes = write_legacy(&fixture, &saved);
+  let store = task_store::Repository::new(fixture.0.join("tasks.json"));
+  let mut other = saved.definition.clone();
+  other.arguments = vec!["test".into()];
+  store
+    .save(&saved.definition_id, None, other.clone())
+    .unwrap();
+  assert!(fixture.repository().load().is_err());
+  assert_eq!(fs::read(fixture.0.join("workspace.json")).unwrap(), bytes);
+  assert_eq!(store.load().unwrap().definitions[0].definition, other);
+}
+
+#[test]
+fn incomplete_migration_backup_does_not_authorize_replacing_the_workspace() {
+  let fixture = Fixture::new();
+  let saved = legacy_definition();
+  let original = write_legacy(&fixture, &saved);
+  let backup = fixture.0.join("workspace-v2.backup.json");
+  fs::write(&backup, b"partial").unwrap();
+  assert_eq!(
+    fixture.repository().load().unwrap_err().code,
+    "workspace_backup_conflict"
+  );
+  assert_eq!(
+    fs::read(fixture.0.join("workspace.json")).unwrap(),
+    original
+  );
+  assert_eq!(fs::read(backup).unwrap(), b"partial");
+  assert!(!fixture.0.join("tasks.json").exists());
+}
+
+#[test]
+fn migration_that_exceeds_the_size_limit_preserves_the_readable_source() {
+  let fixture = Fixture::new();
+  let saved = legacy_definition();
+  let bytes = write_legacy(&fixture, &saved);
+  let mut original: WorkspaceSnapshot = serde_json::from_slice(&bytes).unwrap();
+  let reference = original.document.task_references[0].clone();
+  for _ in 0..14_000 {
+    original.document.task_references.push(TaskReference {
+      task_id: uuid::Uuid::new_v4().to_string(),
+      is_default: false,
+      ..reference.clone()
+    });
+  }
+  original.document.validate().unwrap();
+  let bytes = serde_json::to_vec(&original).unwrap();
+  assert!(bytes.len() < 4 * 1024 * 1024);
+  fs::write(fixture.0.join("workspace.json"), &bytes).unwrap();
+  assert_eq!(
+    fixture.repository().load().unwrap_err().code,
+    "workspace_too_large"
+  );
+  assert_eq!(fs::read(fixture.0.join("workspace.json")).unwrap(), bytes);
+}
+
+#[test]
+fn draft_revision_distinguishes_unknown_base_from_new_definition() {
+  let mut value = serde_json::json!({
+    "definition_id": "draft",
+    "definition": legacy_definition().definition,
+  });
+  let old: TaskDefinitionDraft = serde_json::from_value(value.clone()).unwrap();
+  assert_eq!(old.base_revision, DraftBaseRevision::Unknown);
+  value["base_revision"] = serde_json::Value::Null;
+  let new: TaskDefinitionDraft = serde_json::from_value(value.clone()).unwrap();
+  assert_eq!(new.base_revision, DraftBaseRevision::New);
+  assert!(serde_json::to_value(new).unwrap()["base_revision"].is_null());
+  value["base_revision"] = "saved-revision".into();
+  let edited: TaskDefinitionDraft = serde_json::from_value(value).unwrap();
+  assert_eq!(
+    edited.base_revision,
+    DraftBaseRevision::Saved("saved-revision".into())
+  );
 }

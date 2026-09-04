@@ -36,5 +36,6 @@ clarifications and links may update the existing document.
 | [0002](0002-ctl.md) | Local and SSH control routing with ctl | Implemented |
 | [0003](0003-task-system.md) | Managed tasks in ctl | Proposed |
 | [0004](0004-windows-ssh.md) | Windows SSH gateways | Implemented |
-| [0005](0005-desktop-tasks.md) | Tasks in the desktop workspace | Proposed |
+| [0005](0005-desktop-tasks.md) | Tasks in the desktop workspace | Accepted |
 | [0006](0006-remote-tasks.md) | Explicit task routing over SSH | Implemented |
+| [0007](0007-local-task-workflows.md) | Local task definitions, runs, and schedules | Proposed |

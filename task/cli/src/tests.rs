@@ -116,6 +116,8 @@ fn create_command(cwd: Option<String>, start: bool) -> Command {
     cwd,
     mode: Mode::Background,
     start,
+    from_definition: None,
+    scope: ScopeArguments::default(),
     command: vec!["cargo".into(), "build".into()],
   }
 }
@@ -333,4 +335,154 @@ async fn interactive_attachment_is_delegated_to_the_selected_target() {
     *connector.attachments.lock().unwrap(),
     vec![("session-42".into(), PathBuf::from("/remote/rmux.sock"))]
   );
+}
+
+struct DefinitionDirectory(PathBuf);
+
+impl DefinitionDirectory {
+  fn new() -> Self {
+    let path = std::env::temp_dir().join(format!("task-cli-definition-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&path).unwrap();
+    Self(path)
+  }
+
+  fn scope(&self) -> ScopeArguments {
+    ScopeArguments {
+      global: false,
+      project: Some(self.0.clone()),
+    }
+  }
+
+  fn repository(&self) -> task_store::Repository {
+    task_store::Repository::new(task_store::project_path(&self.0).unwrap())
+  }
+}
+
+impl Drop for DefinitionDirectory {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.0);
+  }
+}
+
+#[tokio::test]
+async fn create_from_definition_preserves_saved_values_and_registers_a_distinct_task() {
+  let directory = DefinitionDirectory::new();
+  let mut saved_definition = task_info(None).definition;
+  saved_definition.execution_mode = ExecutionMode::Interactive;
+  let saved = directory
+    .repository()
+    .save(
+      &uuid::Uuid::new_v4().to_string(),
+      None,
+      saved_definition.clone(),
+    )
+    .unwrap();
+  let mut registered = task_info(None);
+  registered.definition = saved_definition;
+  registered.definition.name = "new-instance".into();
+  let connector = MockConnector::new(
+    true,
+    vec![
+      create_exchange(&registered),
+      Exchange {
+        request: ClientMessage::StartTask {
+          task: registered.task_id.clone(),
+        },
+        responses: vec![ServerMessage::TaskStatus { task: registered }],
+      },
+    ],
+  );
+  run_with_connector(
+    Command::Create {
+      name: "new-instance".into(),
+      cwd: None,
+      mode: Mode::Background,
+      start: true,
+      from_definition: Some(saved.definition_id.clone()),
+      scope: directory.scope(),
+      command: Vec::new(),
+    },
+    &connector,
+  )
+  .await
+  .unwrap();
+  connector.assert_complete(2).await;
+  assert_eq!(
+    directory.repository().load().unwrap().definitions,
+    vec![saved]
+  );
+}
+
+#[tokio::test]
+async fn save_from_run_copies_the_historical_snapshot_without_resolving_its_directory() {
+  let directory = DefinitionDirectory::new();
+  let historical = task_info(Some("relative-original".into())).definition;
+  let mut task = task_info(Some("/new-current-directory".into()));
+  task.definition.program = "changed-program".into();
+  task.last_run = Some(RunInfo {
+    definition: Some(historical.clone()),
+    interactive: None,
+    run_id: "previous-run".into(),
+    state: RunState::Completed,
+    started_at_ms: 1,
+    ended_at_ms: Some(2),
+    exit_code: Some(0),
+  });
+  let connector = MockConnector::new(
+    true,
+    vec![Exchange {
+      request: ClientMessage::ListTasks,
+      responses: vec![ServerMessage::TaskList { tasks: vec![task] }],
+    }],
+  );
+  let saved = definitions::save_record(
+    SaveArguments {
+      name: "saved-copy".into(),
+      scope: directory.scope(),
+      definition_id: None,
+      expected_revision: None,
+      from_run: Some("previous-run".into()),
+      cwd: None,
+      mode: None,
+      command: Vec::new(),
+    },
+    &connector,
+  )
+  .await
+  .unwrap();
+  let mut expected = historical;
+  expected.name = "saved-copy".into();
+  assert_eq!(saved.definition, expected);
+  assert_eq!(
+    directory.repository().load().unwrap().definitions,
+    vec![saved]
+  );
+  connector.assert_complete(1).await;
+}
+
+#[tokio::test]
+async fn remote_create_from_local_definition_fails_before_connecting() {
+  let connector = MockConnector::new(false, Vec::new());
+  let error = run_with_connector(
+    Command::Create {
+      name: "new-instance".into(),
+      cwd: None,
+      mode: Mode::Background,
+      start: false,
+      from_definition: Some("local-build".into()),
+      scope: ScopeArguments {
+        global: false,
+        project: Some(PathBuf::from("missing-project")),
+      },
+      command: Vec::new(),
+    },
+    &connector,
+  )
+  .await
+  .unwrap_err();
+  assert!(matches!(
+    error,
+    CommandError::Definition(DefinitionError::LocalOnly)
+  ));
+  connector.assert_complete(0).await;
 }

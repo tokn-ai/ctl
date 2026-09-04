@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 task-client.workspace = true
 task-proto.workspace = true
+task-store.workspace = true
 base64.workspace = true
 ctl-core.workspace = true
 dirs.workspace = true

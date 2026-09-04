@@ -16,6 +16,9 @@ import type {
   WorkspaceDocument,
   WorkspaceSnapshot,
   KeybindingsDocument,
+  TaskDefinition,
+  TaskDefinitionScope,
+  SavedTaskDefinition,
 } from "../lib/types";
 import { restoreWorkspace } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
@@ -37,6 +40,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const api = vi.hoisted(() => ({
   taskRequest: vi.fn(),
+  loadTaskDefinitions: vi.fn(),
+  saveTaskDefinition: vi.fn(),
+  removeTaskDefinition: vi.fn(),
   restartTaskDaemon: vi.fn(),
   loadWorkspace: vi.fn(),
   updateWorkspace: vi.fn(),
@@ -123,6 +129,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.restartTaskDaemon.mockResolvedValue(undefined);
   api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
+  api.loadTaskDefinitions.mockImplementation(async (scope: TaskDefinitionScope) => ({ scope, path: "/test/definitions.json", definitions: [] }));
+  api.saveTaskDefinition.mockImplementation(async (_scope: TaskDefinitionScope, definition_id: string, _expected_revision: string | null, definition: TaskDefinition) => ({ definition_id, revision: "saved-revision", definition }));
+  api.removeTaskDefinition.mockResolvedValue(undefined);
   nativeEvents.listeners.clear();
   window.localStorage.clear();
   api.loadWorkspace.mockResolvedValue(snapshot());
@@ -241,7 +250,7 @@ describe("workspace-backed terminal page", () => {
     const persisted = api.updateWorkspace.mock.calls.slice(
       -1,
     )[0]![1] as WorkspaceDocument;
-    expect(persisted.task_definitions).toEqual([]);
+    expect(persisted.task_definitions).toBeUndefined();
     expect(
       api.taskRequest.mock.calls.every(
         ([request]) => request.type === "list_tasks",
@@ -291,7 +300,8 @@ describe("workspace-backed terminal page", () => {
     const document = api.updateWorkspace.mock.calls.slice(
       -1,
     )[0][1] as WorkspaceDocument;
-    expect(document.task_definitions?.[0].definition).toMatchObject({
+    expect(document.task_definitions).toBeUndefined();
+    expect(api.saveTaskDefinition.mock.calls[0][3]).toMatchObject({
       name: "Build",
       program: "cargo",
     });
@@ -315,7 +325,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create definition" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
-    expect(document.task_definitions?.[0].definition.name).toMatch(/^cargo-default-[a-z]+$/);
+    expect(api.saveTaskDefinition.mock.calls[0][3].name).toMatch(/^cargo-default-[a-z]+$/);
     expect(document.task_drafts).toEqual([]);
   });
 
@@ -358,8 +368,107 @@ describe("workspace-backed terminal page", () => {
         -1,
       )[0][1] as WorkspaceDocument;
       expect(document.task_drafts?.[0].command_line).toBe('cargo "unfinished');
-      expect(document.task_definitions).toEqual([]);
+      expect(document.task_definitions).toBeUndefined();
     });
+  });
+
+  it("keeps a dirty draft's revision across external refresh and requires explicit reload after a conflict", async () => {
+    const scope = { kind: "global" as const };
+    const original = { definition_id: "shared-build", revision: "r1", definition: { name: "Build", program: "cargo", arguments: ["build"], working_directory: null, execution_mode: "background" as const } };
+    api.loadTaskDefinitions.mockResolvedValue({ scope, path: "/shared/tasks.json", definitions: [original] });
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(await screen.findByText("Build"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "My draft" } });
+
+    const external = { ...original, revision: "r2", definition: { ...original.definition, name: "CLI edit" } };
+    api.loadTaskDefinitions.mockResolvedValue({ scope, path: "/shared/tasks.json", definitions: [external] });
+    fireEvent(window, new Event("focus"));
+    await screen.findByText("CLI edit");
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("My draft");
+    api.saveTaskDefinition.mockRejectedValueOnce({ code: "definition_conflict", message: "Definition revision conflict." });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findAllByText("Definition revision conflict.");
+    expect(api.saveTaskDefinition).toHaveBeenLastCalledWith(scope, "shared-build", "r1", expect.objectContaining({ name: "My draft" }));
+    const draftDocument = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    expect(draftDocument.task_drafts?.[0]).toMatchObject({ scope, base_revision: "r1", definition: { name: "My draft" } });
+    expect(draftDocument.task_definitions).toBeUndefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload latest definition…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Replace draft with latest" }));
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("CLI edit"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Reviewed edit" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.saveTaskDefinition).toHaveBeenLastCalledWith(scope, "shared-build", "r2", expect.objectContaining({ name: "Reviewed edit" }));
+  });
+
+  it.each(["Build", "Test"])("keeps a reopened %s editor open when an earlier save completes", async (next) => {
+    const scope = { kind: "global" as const };
+    const original: SavedTaskDefinition = { definition_id: "build", revision: "r1", definition: { name: "Build", program: "cargo", arguments: ["build"], working_directory: null, execution_mode: "background" } };
+    const other = { ...original, definition_id: "test", definition: { ...original.definition, name: "Test" } };
+    api.loadTaskDefinitions.mockResolvedValue({ scope, path: "/shared/tasks.json", definitions: [original, other] });
+    let finish!: (value: SavedTaskDefinition) => void;
+    api.saveTaskDefinition.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(await screen.findByText("Build"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Saved build" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.saveTaskDefinition).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Close task editor" }));
+    fireEvent.click(screen.getByText(next));
+    await act(async () => { finish({ ...original, revision: "r2", definition: { ...original.definition, name: "Saved build" } }); });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByRole("dialog", { name: "Edit task definition" })).toBeDefined();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(next === "Build" ? "Saved build" : "Test");
+  });
+
+  it("requires an absolute project folder and keeps a resumed draft pinned to that source", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Definition source" }), { target: { value: "project" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "relative/project" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open project definitions" }));
+    expect(screen.getByText("Enter an absolute project folder path.")).toBeDefined();
+    expect(api.loadTaskDefinitions.mock.calls.every(([scope]) => scope.kind === "global")).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/project" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open project definitions" }));
+    const project = { kind: "project", project_root: "/work/project" };
+    await waitFor(() => expect(api.loadTaskDefinitions).toHaveBeenCalledWith(project));
+    fireEvent.click(screen.getByRole("button", { name: "New task definition" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Project build" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Command line" }), { target: { value: "cargo build" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close task editor" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Definition source" }), { target: { value: "global" } });
+    fireEvent.click(screen.getByRole("button", { name: "Resume draft Project build" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create definition" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.saveTaskDefinition).toHaveBeenLastCalledWith(project, expect.any(String), null, expect.objectContaining({ name: "Project build" }));
+    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    expect(document.task_definition_scope).toEqual({ kind: "global" });
+    expect(document.task_definitions).toBeUndefined();
+  });
+
+  it("deletes through the shared store using the opened revision and retains the draft on conflict", async () => {
+    const scope = { kind: "global" as const };
+    const saved = { definition_id: "shared-build", revision: "r1", definition: { name: "Build", program: "cargo", arguments: [], working_directory: null, execution_mode: "background" as const } };
+    api.loadTaskDefinitions.mockResolvedValue({ scope, path: "/shared/tasks.json", definitions: [saved] });
+    api.removeTaskDefinition.mockRejectedValue({ code: "definition_conflict", message: "The definition changed before deletion." });
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(await screen.findByText("Build"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Unfinished edit" } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete definition…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete definition" }));
+    await screen.findAllByText("The definition changed before deletion.");
+    expect(api.removeTaskDefinition).toHaveBeenCalledWith(scope, saved.definition_id, "r1");
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Unfinished edit");
+    expect((api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument).task_drafts?.[0].base_revision).toBe("r1");
   });
 
   it("restarts taskd from the palette and prevents duplicate requests while pending", async () => {

@@ -3023,6 +3023,7 @@ dependencies = [
  "serde_json",
  "task-client",
  "task-proto",
+ "task-store",
  "tauri",
  "tauri-build",
  "thiserror 2.0.20",
@@ -3726,11 +3727,14 @@ dependencies = [
  "clap",
  "rmux",
  "rustix",
+ "serde_json",
  "task-client",
  "task-ipc",
  "task-proto",
+ "task-store",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3763,6 +3767,19 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "task-store"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "sha2",
+ "task-proto",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import type { SavedTaskDefinition } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
+import { definitionScopeLabel } from "../../features/tasks/useTaskDefinitions";
 
 export function TaskEditor({
   model,
@@ -11,6 +12,7 @@ export function TaskEditor({
   saved?: SavedTaskDefinition;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReload, setConfirmReload] = useState(false);
   const [instanceName, setInstanceName] = useState<string | null>(null);
   const previousFocus = useRef(document.activeElement);
   useEffect(
@@ -49,10 +51,10 @@ export function TaskEditor({
         <div className="task-editor">
           <header className="task-page-heading">
             <div>
-              <span className="task-eyebrow">WORKSPACE TASK · LOCAL</span>
+              <span className="task-eyebrow">TASK DEFINITION · {definitionScopeLabel(draft.scope)}</span>
               <h1>{saved ? "Edit task definition" : "Create task"}</h1>
               <p>
-                Keep a command ready to run. Your draft saves automatically.
+                Shared with ctl. Your draft saves automatically; Save updates the definition.
               </p>
             </div>
             <button
@@ -222,6 +224,26 @@ export function TaskEditor({
               {model.error ?? model.draftError}
             </div>
           ) : null}
+          {model.draftConflict || model.draftReviewRequired ? (
+            <div className="task-inline-error" role="alert">
+              {model.draftReviewRequired
+                ? "This recovered draft needs review before replacing a shared definition."
+                : "The shared definition changed outside this editor. Your draft and its original revision are kept."}
+            </div>
+          ) : null}
+          {model.draftConflict || model.draftReviewRequired || model.error ? (
+            <div className="task-secondary-actions">
+              <button disabled={model.busy} onClick={() => setConfirmReload(true)}>Reload latest definition…</button>
+              <button disabled={model.busy} onClick={() => void model.save()}>Retry save</button>
+            </div>
+          ) : null}
+          {confirmReload ? (
+            <div className="task-confirm">
+              <p>Replace this draft with the latest saved definition? Your draft edits will be discarded.</p>
+              <button disabled={model.busy} onClick={() => { void model.reloadDraft(); setConfirmReload(false); }}>Replace draft with latest</button>
+              <button onClick={() => setConfirmReload(false)}>Keep draft</button>
+            </div>
+          ) : null}
           {saved ? (
             <div className="task-secondary-actions">
               <button
@@ -252,7 +274,7 @@ export function TaskEditor({
               <button
                 disabled={!instanceName.trim() || model.busy}
                 onClick={() => {
-                  void model.run(saved, true, instanceName);
+                  void model.run(saved, true, instanceName, draft.scope);
                   setInstanceName(null);
                 }}
               >
@@ -264,7 +286,7 @@ export function TaskEditor({
           {confirmDelete && saved ? (
             <div className="task-confirm">
               <p>
-                Delete “{saved.definition.name}” from this workspace? Its
+                Delete “{saved.definition.name}” from {definitionScopeLabel(draft.scope)} definitions? Its
                 managed tasks will remain.
               </p>
               <button

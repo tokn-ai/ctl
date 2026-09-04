@@ -3,18 +3,18 @@
 The monorepo contains two products with independent responsibilities:
 
 - `rmux` provides persistent local terminal sessions.
-- `ctl` exposes `rmux` sessions through an SSH-authorized remote command
-  without reimplementing terminal persistence.
+- `ctl` routes terminal and task commands locally or through an SSH-authorized
+  remote command. Taskd owns task definitions and background execution.
 
 The current milestones make `rmux` usable through a desktop client that mixes
 local and SSH targets, and through `ctl` from an SSH-authorized remote client.
-The remote boundary intentionally exposes only the `rmux` service; generic
-remote administration, files, jobs, port forwarding, and desktop control
+The remote boundary exposes the fixed `rmux` and `task` services; generic
+remote administration, files, port forwarding, and desktop control
 remain out of scope.
 
 ## Process ownership
 
-`rmuxd` is a per-user daemon. It owns every PTY and child process. A local
+`rmuxd` is a per-user daemon. It owns every PTY and the processes using them. A local
 `rmux` client connects over per-user IPC and may disappear without affecting a
 session.
 
@@ -32,10 +32,12 @@ only its local attachment stream and must not affect a terminal session. If
 architecture. Later disk-backed metadata may reconstruct explicitly
 restartable tasks as a new process generation.
 
-`ctl-agent` owns neither terminal state nor session state. It relays raw bytes
-between SSH stdin/stdout and one fixed local `rmuxd` endpoint. It does not
-decode or reframe `rmux-proto`, and a remote peer cannot choose a local socket
-path or service.
+`ctl-agent` owns no terminal, session, or task state. It relays raw bytes
+between SSH stdin/stdout and the selected fixed local data endpoint. The default
+`rmux` service uses `rmuxd`; `connect --service task` uses `taskd`. The gateway
+does not decode or reframe either protocol, and a remote peer cannot choose a
+local socket path or service outside this enum. Taskd owns background child
+processes; its interactive tasks use rmuxd's PTYs and normal rmux attachments.
 
 ## Crate boundaries
 
@@ -55,10 +57,11 @@ path or service.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctl-agent connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
-- `ctl-agent`: stateless SSH remote-command adapter for the fixed local `rmuxd`
-  relay.
+- `ctl-agent`: stateless SSH remote-command adapter for the fixed local rmux
+  data and task endpoints.
 - `ctl`: control router. `ctl rmux` redirects the canonical rmux command
   surface locally by default or through an explicit OpenSSH destination.
+  `ctl task` routes the managed-task command surface through the same target.
 
 OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
 `rmux-client`.
@@ -67,6 +70,7 @@ named pipes on Windows. `ctl-agent` relays the appropriate local data endpoint
 without changing the SSH transport or rmux protocol. Unix remote commands use
 `exec ctl-agent connect`; Windows hosts with the default cmd.exe SSH shell use
 `ctl-agent.exe connect`, selected through `--remote-platform windows`.
+Task routing appends the fixed `--service task` arguments on either platform.
 
 ## Current invariants
 
@@ -303,20 +307,22 @@ and checkpoint state remain intact.
 
 ## Remote control boundary
 
-`ctl` connects directly to the current user's owner-only `rmuxd` data endpoint
-by default. Global `--host`/`-H` instead invokes the system OpenSSH client with
+`ctl` connects directly to the current user's owner-only endpoint for the chosen
+command domain by default. Global `--host`/`-H` invokes the system OpenSSH client with
 PTY allocation and all forwarding disabled, an OpenSSH destination supplied
-by the user, and the fixed remote command `exec ctl-agent connect`. OpenSSH
+by the user, and the fixed remote command `exec ctl-agent connect` for rmux or
+`exec ctl-agent connect --service task` for tasks. OpenSSH
 configuration owns host verification, user authentication, proxying, and
 healthy-connection multiplexing. `ctl` never disables host-key checking,
 enables agent forwarding, or accepts an arbitrary remote command.
 
-`ctl-agent connect` has no network listener, persistent state, identity registry,
-or service selector. It writes one fixed readiness marker, after which SSH
-stdin/stdout carries raw `rmux-proto`; diagnostics use stderr. The helper
-connects only to the current user's fixed `rmuxd` data endpoint and cannot
-reach its owner-only maintenance endpoint. Its authority is exactly that of
-the already SSH-authenticated operating-system account.
+`ctl-agent connect` has no network listener, persistent state, or identity
+registry. Its service enum chooses rmux or task. It writes one fixed readiness
+marker, after which SSH stdin/stdout carries that service's raw protocol;
+diagnostics use stderr. The helper connects only to the current user's fixed
+data endpoint and cannot reach rmux's owner-only maintenance endpoint. Taskd
+may use maintenance locally to manage interactive runs. Its authority is exactly
+that of the already SSH-authenticated operating-system account.
 
 Reconnect state stays inside `rmuxd`. Its opaque attachment tokens are random,
 memory-only, session-scoped credentials for rebinding a replacement stream;
@@ -524,7 +530,7 @@ emulator in headless mode:
   transport; the Rust-to-webview queue stays bounded and heartbeats continue.
 
 
-## Managed local tasks
+## Managed tasks
 
 Taskd owns task definitions, desired state, and run records. Background runs use
 pipes and process ownership in taskd; interactive runs use PTYs and process
@@ -535,7 +541,12 @@ and geometry continue through normal rmux attachments, including `ctl task attac
 Interactive run intent is persisted before creation, keyed by task/run UUID and
 pinned to the rmuxd instance UUID. Taskd can recover a live session or its retained
 exit result after restarting. It acknowledges the result only after saving it.
-An rmuxd replacement fails old runs without automatic recreation. No remote task
-service or desktop workspace task storage is implemented yet. See
+An rmuxd replacement fails old runs without automatic recreation. The CLI routes
+task registration, lifecycle, and background logs to the selected local or SSH
+target. Interactive attachment uses a separate rmux channel to that same target;
+remote socket metadata never selects a local endpoint. Remote definitions default
+to the remote user's home directory, and relative working directories resolve
+there. The desktop workspace task interface currently uses local taskd. See
 [proposal 0003](proposals/0003-task-system.md) and the
-[local-control protocol](rmux-local-control.md) for lifecycle and retention rules.
+[local-control protocol](rmux-local-control.md) for lifecycle and retention rules,
+and [proposal 0006](proposals/0006-remote-tasks.md) for SSH service selection.

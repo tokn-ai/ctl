@@ -126,4 +126,40 @@ mod tests {
       }
     ));
   }
+
+  #[test]
+  fn every_task_command_accepts_the_host_and_remote_platform_options() {
+    let commands: &[&[&str]] = &[
+      &["create", "build", "--start", "--", "cargo", "build"],
+      &["attach", "build"],
+      &["list"],
+      &["show", "build"],
+      &["start", "build"],
+      &["stop", "build"],
+      &["restart", "build"],
+      &["logs", "build", "--follow", "--after", "12"],
+      &["remove", "build"],
+    ];
+    for command in commands {
+      let arguments = Arguments::try_parse_from(
+        [
+          "ctl",
+          "--host",
+          "task-server",
+          "--remote-platform",
+          "windows",
+          "task",
+        ]
+        .into_iter()
+        .chain(command.iter().copied()),
+      )
+      .unwrap();
+      assert_eq!(arguments.host.as_deref(), Some("task-server"));
+      assert!(matches!(
+        arguments.remote_platform,
+        Some(RemotePlatform::Windows)
+      ));
+      assert!(matches!(arguments.command, Command::Task { .. }));
+    }
+  }
 }

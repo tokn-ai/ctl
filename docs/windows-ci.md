@@ -175,6 +175,12 @@ command with the Windows OpenSSH server's default cmd.exe shell. The platform
 is independent of the client OS; arbitrary shell commands remain disallowed.
 The desktop currently selects Unix remote commands.
 
+[Proposal 0006](proposals/0006-remote-tasks.md) extends this convention to tasks:
+`ctl --host HOST --remote-platform windows task ...` selects
+`ctl-agent.exe connect --service task`. The companion is `taskd.exe`, while
+interactive attachment opens the ordinary rmux channel on the same target.
+This does not broaden the original loopback rmux fixture's reported coverage.
+
 `ctl-agent` uses the shared IPC stream and only the data endpoint. Its installed
 companion is `rmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`
 and `CREATE_BREAKAWAY_FROM_JOB`: Windows OpenSSH permits breakaway so the
@@ -199,9 +205,9 @@ not covered by the loopback fixture.
 
 ## Remaining Windows work
 
-- Interactive-task integration between taskd and rmuxd. PTYs remain owned
-  exclusively by rmuxd.
-- Remote task routing and desktop remote-platform selection.
+- Additional native SSH coverage for remote task lifecycle and interactive
+  attachment. PTYs remain owned exclusively by rmuxd.
+- Desktop remote-platform selection.
 - Native process inspection and the desktop app's local transport/build.
 - Broader Windows tests for portable crates, remote clients, and terminals.
 - Cross-account ACL tests and filesystem ACL hardening for custom data paths.

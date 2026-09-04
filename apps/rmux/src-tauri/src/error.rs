@@ -57,7 +57,9 @@ impl CommandErrorDto {
         Self::new(code, error.to_string())
       }
       CoreError::InvalidSshPreface => Self::new("invalid_ssh_preface", error.to_string()),
-      CoreError::LocalIpc(_) => Self::new("local_connection_failed", error.to_string()),
+      CoreError::LocalIpc(_) | CoreError::LocalTask(_) => {
+        Self::new("local_connection_failed", error.to_string())
+      }
     }
   }
 }

@@ -203,6 +203,29 @@ async fn output_until(stream: &mut Stream, marker: &str) -> u64 {
   }
 }
 
+// Final-output fixtures must fit within one presentation window and stay below
+// the checkpoint threshold. The daemon may already have closed its receive
+// side, so drain without acknowledgements and require the final SessionEnded.
+async fn assert_final_output(stream: &mut Stream, marker: &str, expected_exit_code: u32) {
+  let deadline = Instant::now() + Duration::from_secs(15);
+  let mut output = Vec::new();
+  let mut marker_seen = false;
+  loop {
+    assert!(Instant::now() < deadline, "session did not end: {output:?}");
+    match message(stream).await {
+      ServerMessage::Output { data, .. } => output.extend(data),
+      ServerMessage::Checkpoint { checkpoint, .. } => output = checkpoint.payload,
+      ServerMessage::SessionEnded { exit_code, .. } => {
+        assert!(marker_seen, "final output marker missing: {output:?}");
+        assert_eq!(exit_code, Some(expected_exit_code));
+        return;
+      }
+      _ => {}
+    }
+    marker_seen |= String::from_utf8_lossy(&output).contains(marker);
+  }
+}
+
 #[tokio::test]
 async fn conpty_survives_disconnect_resizes_and_drains_exit_output() {
   let daemon = Daemon::start().await;
@@ -243,13 +266,7 @@ async fn conpty_survives_disconnect_resizes_and_drains_exit_output() {
   input(&mut resumed, "echo AFTER_RESUME\r").await;
   output_until(&mut resumed, "AFTER_RESUME").await;
   input(&mut resumed, "echo FINAL_TAIL& exit /b 7\r").await;
-  output_until(&mut resumed, "FINAL_TAIL").await;
-  loop {
-    if let ServerMessage::SessionEnded { exit_code, .. } = message(&mut resumed).await {
-      assert_eq!(exit_code, Some(7));
-      break;
-    }
-  }
+  assert_final_output(&mut resumed, "FINAL_TAIL", 7).await;
   drop(resumed);
   daemon.wait().await;
 }

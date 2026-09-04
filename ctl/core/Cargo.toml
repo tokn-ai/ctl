@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 rmux-ipc.workspace = true
+task-client.workspace = true
+task-ipc.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

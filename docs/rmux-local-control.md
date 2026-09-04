@@ -118,7 +118,7 @@ restart rmuxd to reset the limit. Tombstones alone do not prevent normal idle
 exit. Taskd retains the backend endpoint in each run so changing its runtime
 configuration does not silently redirect recovery to another endpoint.
 
-The task CLI uses protocol version 2. On-disk task state remains schema version
+The task CLI uses protocol version 3. On-disk task state remains schema version
 1 with optional interactive metadata; older background records are accepted.
 State replacement is atomic, with recovery designed for process crashes; no
 power-loss durability guarantee is added here. The latest completed result is

@@ -11,7 +11,9 @@ services:
         target: /run/secrets/rmux_authorized_keys
         read_only: true
       - rmux_ssh_host_keys:/etc/ssh/host_keys
+      - taskd_data:/var/lib/taskd
     restart: unless-stopped
 
 volumes:
   rmux_ssh_host_keys:
+  taskd_data:

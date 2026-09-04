@@ -1,4 +1,4 @@
-use super::{RequestError, State, now_ms};
+use super::{RequestError, State, execution_definition, now_ms};
 use rmux_ipc::{
   LocalControlClientMessage, LocalControlServerMessage, ManagedOperation, ManagedSessionInfo,
 };
@@ -117,6 +117,7 @@ impl State {
     task_id: &str,
     definition: TaskDefinition,
   ) -> Result<TaskInfo, RequestError> {
+    execution_definition(&definition)?;
     // Hold a confirmed data connection while releasing the previous outcome.
     // Otherwise an idle rmuxd can exit between release and the next creation.
     // Only an explicit start may auto-start rmuxd; reconciliation never does.
@@ -215,12 +216,13 @@ impl State {
     let operation = if task.desired_state == DesiredState::Stopped {
       Some(ManagedOperation::Stop)
     } else if session.is_none() && needs_creation {
+      let definition = execution_definition(&task.definition)?;
       Some(ManagedOperation::Start {
         command: rmux_proto::CommandSpec {
-          program: task.definition.program.clone(),
-          arguments: task.definition.arguments.clone(),
+          program: definition.program,
+          arguments: definition.arguments,
         },
-        working_directory: task.definition.working_directory.clone(),
+        working_directory: definition.working_directory,
       })
     } else {
       None

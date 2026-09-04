@@ -163,10 +163,10 @@ the desktop app can attach without a second terminal interface.
 
 Remote task control must continue to rely on OpenSSH authentication and fixed
 remote commands. It must not make taskd a network listener or expose an
-arbitrary local endpoint. The exact gateway shape is unresolved: extending
-ctl-agent with an explicit service selector and creating a separate fixed task relay
-are both possible. Raw task requests must not be confused with `rmux-proto`, and
-the rmuxd maintenance endpoint remains local-only.
+arbitrary local endpoint. [Proposal 0006](0006-remote-tasks.md) resolves the
+gateway shape with `ctl-agent connect --service task`. The fixed command selects
+the service before its own protocol handshake. Raw task requests are not mixed
+with `rmux-proto`, and the rmuxd maintenance endpoint remains local-only.
 
 ## Invariants
 
@@ -205,8 +205,7 @@ proposals if later needed.
    semantics.
 7. Background log retention, ordering, rotation, following, and redaction.
 8. Environment-variable storage, secret handling, and inheritance rules.
-9. The exact remote task gateway and protocol framing.
-10. Whether task names are unique globally within one taskd or may be grouped
+9. Whether task names are unique globally within one taskd or may be grouped
     into namespaces.
 
 ## Implementation status
@@ -226,8 +225,10 @@ replaced rmuxd instances fail the run without automatic recreation. Ambiguous
 transport failures leave the run `unknown` and block another start until
 reconciliation resolves its state. Pending creation is `starting`.
 
-SSH task routing, persistent background logs, full run history, restart policies,
-and desktop workspace integration remain pending, so this proposal stays
+SSH task routing is implemented through the explicit task service, with
+interactive attachment through rmux on the same target. The desktop workspace
+has local task integration. Persistent background logs, full run history, and
+restart policies remain pending, so this proposal stays
 **Proposed**. Definition editing is not yet exposed; the stored definition is
 unchanged throughout each run. Task protocol version 2 adds interactive backend
 references and the new states; existing background state records remain readable.
@@ -236,6 +237,7 @@ references and the new states; existing background state records remain readable
 
 - [Proposal 0001: Persistent terminal sessions with rmux](0001-rmux.md)
 - [Proposal 0002: Local and SSH control routing with ctl](0002-ctl.md)
+- [Proposal 0006: Explicit task routing over SSH](0006-remote-tasks.md)
 - [Architecture](../architecture.md)
 - [rmux protocol](../rmux-protocol.md)
 - [ctl SSH transport](../ctl-protocol.md)

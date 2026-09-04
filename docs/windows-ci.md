@@ -1,7 +1,8 @@
 # Windows CI exploration
 
-Status: exploration only, 2026-09-04. No Windows job or test execution is
-enabled by this document.
+Status: compile-only CI enabled, 2026-09-04. Windows test execution remains
+deferred. The findings below distinguish source compatibility from runtime
+support.
 
 ## Evidence
 
@@ -34,11 +35,12 @@ Windows runtime behavior.
 The failing executable checks were exploratory and expected to expose gaps.
 They do not change the passing Linux/macOS CI gates.
 
-## Proposed first job
+## Initial compile-only job
 
-Start with native Windows compilation of the six portable crates. Keep the
+CI checks native Windows compilation of the six portable crates. Keep the
 package list explicit so adding a Unix-only workspace member cannot silently
-expand this gate. This candidate is documentation only:
+expand this gate. The job in [the CI workflow](../.github/workflows/ci.yml) uses
+the following configuration:
 
 ```yaml
 windows-check:
@@ -100,8 +102,8 @@ Full workspace and process/terminal integration tests follow Windows runtime
 implementation. Do not add `continue-on-error` or empty platform stubs merely
 to make an unsupported feature appear tested.
 
-## Next decision
+## Next step
 
-Decide whether to activate the compile-only job above, or prioritize Windows
-runtime implementation first. Test execution remains deferred in either case
-until its intended coverage is agreed.
+Use the native compile-only result to assess test readiness. Windows runtime
+implementation and test execution remain separate follow-up work; a passing
+compile-only job does not establish either.

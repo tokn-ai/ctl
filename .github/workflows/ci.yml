@@ -85,6 +85,32 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+  windows-check:
+    name: Windows portable compilation
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Typecheck test sources without linking or executing Windows tests.
+      - name: Check portable crates and test sources
+        run: >-
+          cargo check --locked --target x86_64-pc-windows-msvc --all-targets
+          -p rmux-proto -p rmux-core -p rmux-client -p task-proto
+          -p ctl-core -p rmux-ipc
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

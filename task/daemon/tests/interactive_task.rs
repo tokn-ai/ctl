@@ -523,6 +523,7 @@ async fn persisted_creation_intent_is_idempotent_and_retired_runs_stay_retired()
   fixture.taskd.kill().await.unwrap();
   task.desired_state = DesiredState::Running;
   task.active_run = Some(task_proto::RunInfo {
+    definition: Some(task.definition.clone()),
     run_id: Uuid::new_v4().to_string(),
     state: RunState::Starting,
     started_at_ms: 1,

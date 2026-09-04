@@ -124,6 +124,7 @@ impl State {
     self.release_outcome(task_id).await?;
     let mut task = self.show(task_id).await?;
     task.active_run = Some(RunInfo {
+      definition: Some(definition.clone()),
       interactive: Some(InteractiveRun {
         rmux_socket: self.rmux_socket.clone(),
         instance_id: String::new(),

@@ -1,3 +1,10 @@
+import { useTaskWorkspace } from "../features/tasks/useTaskWorkspace";
+import { TaskSidebar } from "../components/tasks/TaskSidebar";
+import { TaskEditor } from "../components/tasks/TaskEditor";
+import { TaskDetail } from "../components/tasks/TaskDetail";
+import { taskState } from "../features/tasks/taskModel";
+import { workspaceTabKey } from "../features/workspace/workspaceModel";
+import "../components/tasks/tasks.css";
 import {
   useCallback,
   useEffect,
@@ -120,6 +127,8 @@ export function TerminalPage() {
   const [keybindingsOpen, setKeybindingsOpen] = useState(false);
   const [dispatcher] = useState(() => new CommandDispatcher());
   const attachment = useAttachment(renderer);
+  const taskWorkspace = useTaskWorkspace(workspace, async (session) => { await attachment.connect(session, { resize_with_window: true }); }, attachment.detach);
+  const taskWorkspaceRef = useRef(taskWorkspace); taskWorkspaceRef.current = taskWorkspace;
   const currentShellState = attachment.state.shell_state;
   const currentWorkingDirectory = currentShellState?.cwd || null;
   const currentWorkingDirectoryDisplay = currentShellState
@@ -173,7 +182,7 @@ export function TerminalPage() {
   const restartingDaemonRef = useRef(false);
   const daemonEpochRef = useRef(0);
   workspace.closeBlockedRef.current = () =>
-    creatingRef.current || restartingDaemonRef.current;
+    creatingRef.current || restartingDaemonRef.current || taskWorkspace.busy || taskWorkspace.hasDirtyDrafts;
 
   const daemonRestartBlocksInteractions = useCallback(
     () => daemonRestartConfirmationRef.current || restartingDaemonRef.current,
@@ -399,6 +408,8 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) {
         return;
       }
+      const managed = requestedSession.target.kind === "local" ? taskWorkspaceRef.current.tasks.find((task) => task.active_run?.interactive?.session_id === requestedSession.session_id) : undefined;
+      if (managed) { taskWorkspaceRef.current.openTask(managed); return; }
       const identity = sessionKey(requestedSession);
       // Inspection may have just completed, before React publishes new props.
       const session =
@@ -1005,9 +1016,9 @@ export function TerminalPage() {
     );
   }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
-  useWindowTitle(compactTerminalTitleParts(activeTitle));
+  useWindowTitle(taskWorkspace.active ? taskWorkspace.activeTask?.definition.name ?? taskWorkspace.saved?.definition.name ?? "Task definition" : compactTerminalTitleParts(activeTitle));
 
-  const commands = buildTerminalCommands(
+  const commands: AppCommand[] = buildTerminalCommands(
     {
       targets,
       sessions,
@@ -1078,10 +1089,22 @@ export function TerminalPage() {
       configureKeybindings: () => setKeybindingsOpen(true),
       reloadKeybindings: keybindings.reload,
     },
-  ).map((command) => ({
-    ...command,
-    keybinding: keybindings.bindings.get(command.id),
-  }));
+  ).map((command) => {
+    const base = { ...command, keybinding: keybindings.bindings.get(command.id) };
+    if (command.id === COMMAND_IDS.disconnect && taskWorkspace.active) return { ...base, title: "Close tab", enabled: true, isEnabled: () => true, focusTerminalAfterRun: false, run: () => taskWorkspace.close(workspaceTabKey(taskWorkspace.active!)) };
+    if (command.id === COMMAND_IDS.nextTab || command.id === COMMAND_IDS.previousTab) return { ...base, enabled: workspace.tab_order.length > 1, focusTerminalAfterRun: false, run: () => {
+      const offset = command.id === COMMAND_IDS.nextTab ? 1 : -1;
+      const order = workspace.tab_order;
+      const key = order[(order.indexOf(activeTabKey ?? "") + offset + order.length) % order.length];
+      const taskTab = workspace.task_tabs.find((tab) => workspaceTabKey(tab) === key);
+      if (taskTab) taskWorkspace.open(taskTab); else { const terminal = tabs.find((tab) => sessionKey(tab) === key); if (terminal) void activateTab(terminal); }
+    } };
+    return base;
+  });
+  commands.push({ id: "task.new", category: "Tasks", title: "New task definition", enabled: workspace.ready && !taskWorkspace.busy, focusTerminalAfterRun: false, run: taskWorkspace.newDefinition });
+  for (const action of ["start_task", "stop_task", "restart_task"] as const) {
+    commands.push({ id: `task.${action}`, category: "Tasks", title: action === "start_task" ? "Start task" : action === "stop_task" ? "Stop task" : "Restart task", enabled: !!taskWorkspace.activeTask && !taskWorkspace.busy && (action === "start_task" ? !taskWorkspace.activeTask.active_run : action === "stop_task" ? !!taskWorkspace.activeTask.active_run : true), focusTerminalAfterRun: false, run: () => { if (taskWorkspace.activeTask) void taskWorkspace.action(taskWorkspace.activeTask, action); } });
+  }
   const shortcutLabel = (id: string) => {
     const binding = keybindings.bindings.get(id);
     return binding ? formatKeybinding(binding, shortcutPlatform) : "";
@@ -1195,10 +1218,18 @@ export function TerminalPage() {
               target_key: targetKey(target),
             })
           }
-        />
+        ><TaskSidebar model={taskWorkspace} definitions={workspace.task_definitions} references={workspace.task_references} /></SessionSidebar>
         <section className="terminal-workspace">
           <TerminalTabs
             tabs={tabs}
+            extra_tabs={workspace.task_tabs.map((tab) => {
+              const saved = tab.kind === "task_definition" ? workspace.task_definitions.find((item) => item.definition_id === tab.definition_id) : undefined;
+              const task = tab.kind === "task" ? taskWorkspace.tasks.find((item) => item.task_id === tab.task_id) : undefined;
+              return { tab_key: workspaceTabKey(tab), title: tab.kind === "task_definition" ? `${saved?.definition.name ?? "New task"}${taskWorkspace.drafts[tab.definition_id]?.dirty ? " *" : ""}` : task?.definition.name ?? "Saved task", host: tab.kind === "task_definition" ? "Definition" : tab.host_id === "local" ? "Local" : tab.host_id, status: task ? taskState(task) : "unknown" };
+            })}
+            tab_order={workspace.tab_order}
+            on_select_extra={(key) => { const tab = workspace.task_tabs.find((item) => workspaceTabKey(item) === key); if (tab) taskWorkspace.open(tab); }}
+            on_close_extra={taskWorkspace.close}
             shellStates={displayedTabShellStates}
             activeSessionKey={activeTabKey}
             canCreate={
@@ -1219,6 +1250,10 @@ export function TerminalPage() {
             }
             onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
           />
+          {taskWorkspace.active?.kind === "task_definition" ? <TaskEditor key={taskWorkspace.active.definition_id} model={taskWorkspace} saved={taskWorkspace.saved} /> : null}
+          {taskWorkspace.active?.kind === "task" ? <TaskDetail key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`} model={taskWorkspace} saved={workspace.task_definitions.find((definition) => definition.definition_id === workspace.task_references.find((reference) => reference.task_id === taskWorkspace.activeTask?.task_id || (taskWorkspace.active?.kind === "task" && reference.task_id === taskWorkspace.active.task_id))?.definition_id)} /> : null}
+          {taskWorkspace.pendingClose ? <div className="task-confirm" role="dialog" aria-label="Unsaved task definition"><p>Save changes before closing this definition?</p><button onClick={() => void taskWorkspace.saveBeforeClose()}>Save and close</button><button onClick={() => taskWorkspace.closeNow(taskWorkspace.pendingClose!)}>Discard changes</button><button onClick={taskWorkspace.cancelClose}>Cancel</button></div> : null}
+          <div className="terminal-pane" hidden={!!taskWorkspace.active && !(taskWorkspace.activeTask?.definition.execution_mode === "interactive" && taskWorkspace.activeTask.active_run)}>
           <TerminalToolbar
             state={attachment.state}
             onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
@@ -1303,6 +1338,7 @@ export function TerminalPage() {
             onReady={setRenderer}
           />
           <StatusBar state={attachment.state} />
+          </div>
         </section>
       </main>
       {keybindingsOpen ? (

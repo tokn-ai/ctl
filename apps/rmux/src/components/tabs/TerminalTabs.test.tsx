@@ -48,7 +48,7 @@ describe("TerminalTabs", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Terminal tabs"');
+    expect(markup).toContain('aria-label="Workspace tabs"');
     expect(markup).toContain('aria-selected="true"');
     expect(markup).toContain('aria-label="/workspace — cargo test on local"');
     expect(markup).toContain(

@@ -175,6 +175,81 @@ impl State {
     Ok(task)
   }
 
+  async fn register(
+    &self,
+    task_id: String,
+    definition: TaskDefinition,
+  ) -> Result<TaskInfo, RequestError> {
+    let task_id = Uuid::parse_str(&task_id)
+      .map_err(RequestError::internal)?
+      .to_string();
+    let mut tasks = self.tasks.lock().await;
+    if let Some(task) = tasks.get(&task_id) {
+      return Ok(task.clone());
+    }
+    validate_definition(&definition)?;
+    if tasks
+      .values()
+      .any(|task| task.definition.name == definition.name)
+    {
+      return Err(RequestError::new(
+        ErrorCode::NameConflict,
+        "Another task has this name. Choose a different name.",
+      ));
+    }
+    let task = TaskInfo {
+      task_id: task_id.clone(),
+      definition,
+      desired_state: DesiredState::Stopped,
+      active_run: None,
+      last_run: None,
+    };
+    tasks.insert(task_id.clone(), task.clone());
+    if let Err(error) = self.persist_blocking(&tasks) {
+      tasks.remove(&task_id);
+      return Err(RequestError::internal(error));
+    }
+    Ok(task)
+  }
+
+  async fn update_definition(
+    &self,
+    selector: &str,
+    definition: TaskDefinition,
+  ) -> Result<TaskInfo, RequestError> {
+    validate_definition(&definition)?;
+    let mut tasks = self.tasks.lock().await;
+    let previous = resolve_task(&tasks, selector)?.clone();
+    if previous.active_run.is_some() {
+      return Err(RequestError::new(
+        ErrorCode::AlreadyRunning,
+        "Stop the task before applying changes.",
+      ));
+    }
+    if tasks
+      .values()
+      .any(|task| task.task_id != previous.task_id && task.definition.name == definition.name)
+    {
+      return Err(RequestError::new(
+        ErrorCode::NameConflict,
+        "Another task has this name.",
+      ));
+    }
+    let mut task = previous.clone();
+    if let Some(run) = task.last_run.as_mut() {
+      run
+        .definition
+        .get_or_insert_with(|| task.definition.clone());
+    }
+    task.definition = definition;
+    tasks.insert(task.task_id.clone(), task.clone());
+    if let Err(error) = self.persist_blocking(&tasks) {
+      tasks.insert(previous.task_id.clone(), previous);
+      return Err(RequestError::internal(error));
+    }
+    Ok(task)
+  }
+
   async fn list(&self) -> Vec<TaskInfo> {
     let mut tasks: Vec<_> = self.tasks.lock().await.values().cloned().collect();
     tasks.sort_by(|left, right| left.definition.name.cmp(&right.definition.name));
@@ -212,6 +287,7 @@ impl State {
     let stderr = child.stderr();
     let run_id = Uuid::new_v4().to_string();
     let run = RunInfo {
+      definition: Some(definition.clone()),
       interactive: None,
       run_id: run_id.clone(),
       state: RunState::Running,
@@ -596,6 +672,8 @@ async fn handle_request(
     &request,
     ClientMessage::CreateTask { .. }
       | ClientMessage::StartTask { .. }
+      | ClientMessage::RegisterTask { .. }
+      | ClientMessage::UpdateTask { .. }
       | ClientMessage::StopTask { .. }
       | ClientMessage::RestartTask { .. }
       | ClientMessage::RemoveTask { .. }
@@ -609,6 +687,17 @@ async fn handle_request(
       .create(definition)
       .await
       .map(|task| ServerMessage::TaskCreated { task }),
+    ClientMessage::RegisterTask {
+      task_id,
+      definition,
+    } => state
+      .register(task_id, definition)
+      .await
+      .map(|task| ServerMessage::TaskCreated { task }),
+    ClientMessage::UpdateTask { task, definition } => state
+      .update_definition(&task, definition)
+      .await
+      .map(|task| ServerMessage::TaskStatus { task }),
     ClientMessage::ListTasks => Ok(ServerMessage::TaskList {
       tasks: state.list().await,
     }),
@@ -743,14 +832,25 @@ fn validate_definition(definition: &TaskDefinition) -> Result<(), RequestError> 
       "task names must contain between 1 and 64 bytes",
     ));
   }
-  if !definition
-    .name
-    .bytes()
-    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+  if definition.name.trim() != definition.name || definition.name.chars().any(char::is_control) {
+    return Err(RequestError::new(
+      ErrorCode::InvalidDefinition,
+      "Task names cannot contain control characters or leading/trailing whitespace.",
+    ));
+  }
+  if definition.program.contains('\0')
+    || definition
+      .arguments
+      .iter()
+      .any(|argument| argument.contains('\0'))
+    || definition
+      .working_directory
+      .as_ref()
+      .is_some_and(|directory| directory.contains('\0'))
   {
     return Err(RequestError::new(
       ErrorCode::InvalidDefinition,
-      "task names may contain only ASCII letters, digits, '-', '_', and '.'",
+      "Commands cannot contain null characters.",
     ));
   }
   if definition.program.is_empty() {

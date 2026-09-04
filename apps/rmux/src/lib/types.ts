@@ -63,12 +63,14 @@ export interface WorkspaceSession extends SessionReference {
 }
 
 export interface WorkspaceDocument {
-  schema_version: 1;
+  schema_version: 1 | 2;
   workspace_id: string;
   hosts: WorkspaceHost[];
   sessions: WorkspaceSession[];
-  tabs: SessionReference[];
-  active_tab: SessionReference | null;
+  tabs: WorkspaceTab[];
+  active_tab: WorkspaceTab | null;
+  task_definitions?: SavedTaskDefinition[];
+  task_references?: TaskReference[];
 }
 
 export interface WorkspaceSnapshot {
@@ -363,3 +365,58 @@ export interface AttachmentViewState {
   resize_with_window: boolean;
   message: string | null;
 }
+
+
+export interface TaskDefinition {
+  name: string;
+  program: string;
+  arguments: string[];
+  working_directory: string | null;
+  execution_mode: "background" | "interactive";
+}
+export interface TaskRun {
+  run_id: string;
+  state: "starting" | "unknown" | "running" | "completed" | "failed" | "stopped";
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  exit_code: number | null;
+  definition?: TaskDefinition;
+  interactive?: { session_id: string | null; instance_id: string; rmux_socket: string; released: boolean };
+}
+export interface ManagedTask {
+  task_id: string;
+  definition: TaskDefinition;
+  desired_state: "running" | "stopped";
+  active_run: TaskRun | null;
+  last_run: TaskRun | null;
+}
+export interface SavedTaskDefinition {
+  definition_id: string;
+  revision: string;
+  definition: TaskDefinition;
+}
+export interface TaskReference {
+  host_id: string;
+  task_id: string;
+  definition_id: string | null;
+  applied_revision: string | null;
+  is_default: boolean;
+}
+export type WorkspaceTab =
+  | (SessionReference & { kind?: "session" })
+  | { kind: "task"; host_id: string; task_id: string }
+  | { kind: "task_definition"; definition_id: string };
+export type TaskTab = Exclude<WorkspaceTab, SessionReference>;
+export type TaskRequest =
+  | { type: "list_tasks" }
+  | { type: "show_task" | "start_task" | "stop_task" | "restart_task" | "remove_task"; task: string }
+  | { type: "register_task"; task_id: string; definition: TaskDefinition }
+  | { type: "update_task"; task: string; definition: TaskDefinition };
+export type TaskResponse =
+  | { type: "task_list"; tasks: ManagedTask[] }
+  | { type: "task_created" | "task_status"; task: ManagedTask }
+  | { type: "task_removed"; task_id: string };
+export type TaskLogEvent =
+  | { event_type: "log"; subscription_id: string; run_id: string; sequence: string; stream: "stdout" | "stderr"; data: number[] }
+  | { event_type: "finished" }
+  | { event_type: "error"; message: string };

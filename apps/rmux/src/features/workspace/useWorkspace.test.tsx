@@ -205,7 +205,7 @@ describe("workspace lifecycle", () => {
       }),
     );
     expect(nativeWindow.destroy).not.toHaveBeenCalled();
-    expect(result.current.error).toContain("ongoing session operation");
+    expect(result.current.error).toContain("ongoing operations");
     result.current.closeBlockedRef.current = () => false;
     api.updateWorkspace.mockRejectedValue({
       code: "workspace_io_failed",

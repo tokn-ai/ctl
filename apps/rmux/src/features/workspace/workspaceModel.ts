@@ -1,4 +1,8 @@
 import type {
+  WorkspaceTab,
+  TaskTab,
+  SavedTaskDefinition,
+  TaskReference,
   ConnectionTarget,
   SessionReference,
   SessionSummary,
@@ -8,6 +12,10 @@ import type {
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
 
 export interface WorkspaceView {
+  task_definitions: SavedTaskDefinition[];
+  task_references: TaskReference[];
+  task_tabs: TaskTab[];
+  tab_order: string[];
   targets: ConnectionTarget[];
   sessions: SessionSummary[];
   tabs: SessionSummary[];
@@ -17,6 +25,7 @@ export interface WorkspaceView {
 
 export function emptyWorkspaceView(): WorkspaceView {
   return {
+    task_definitions: [], task_references: [], task_tabs: [], tab_order: [],
     targets: [LOCAL_TARGET],
     sessions: [],
     tabs: [],
@@ -38,7 +47,9 @@ export function sessionReference(session: SessionSummary): SessionReference {
   };
 }
 
-function referenceKey(reference: SessionReference): string {
+export function workspaceTabKey(reference: WorkspaceTab): string {
+  if (reference.kind === "task") return `task:${reference.host_id}:${reference.task_id}`;
+  if (reference.kind === "task_definition") return `definition:${reference.definition_id}`;
   return JSON.stringify([
     reference.host_id === "local" ? "local" : `host:${reference.host_id}`,
     reference.session_id,
@@ -91,9 +102,13 @@ export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
     targets,
     sessions,
     shell_states,
-    tabs: document.tabs.map((reference) => byKey.get(referenceKey(reference))!),
+    task_definitions: document.task_definitions ?? [],
+    task_references: document.task_references ?? [],
+    task_tabs: document.tabs.filter((tab): tab is TaskTab => tab.kind === "task" || tab.kind === "task_definition"),
+    tab_order: document.tabs.map(workspaceTabKey),
+    tabs: document.tabs.filter((tab): tab is SessionReference => !tab.kind || tab.kind === "session").map((reference) => byKey.get(workspaceTabKey(reference))!).filter(Boolean),
     active_tab_key: document.active_tab
-      ? referenceKey(document.active_tab)
+      ? workspaceTabKey(document.active_tab)
       : null,
   };
 }
@@ -109,9 +124,17 @@ export function workspaceDocument(
   );
   const sessionKeys = new Set(sessions.map(sessionKey));
   const tabs = view.tabs.filter((tab) => sessionKeys.has(sessionKey(tab)));
-  const active = tabs.find((tab) => sessionKey(tab) === view.active_tab_key);
+  const allTabs: WorkspaceTab[] = [...tabs.map((tab) => ({ ...sessionReference(tab), kind: "session" as const })), ...view.task_tabs.filter((tab) => tab.kind === "task_definition" ? view.task_definitions.some((item) => item.definition_id === tab.definition_id) : view.task_references.some((item) => item.host_id === tab.host_id && item.task_id === tab.task_id))];
+  allTabs.sort((left, right) => {
+    const a = view.tab_order.indexOf(workspaceTabKey(left));
+    const b = view.tab_order.indexOf(workspaceTabKey(right));
+    return (a < 0 ? Infinity : a) - (b < 0 ? Infinity : b);
+  });
+  const active = allTabs.find((tab) => workspaceTabKey(tab) === view.active_tab_key);
   return {
-    schema_version: 1,
+    schema_version: 2,
+    task_definitions: view.task_definitions,
+    task_references: view.task_references.map((item) => item.definition_id && !view.task_definitions.some((definition) => definition.definition_id === item.definition_id) ? { ...item, definition_id: null, applied_revision: null, is_default: false } : item),
     workspace_id,
     hosts: view.targets.map((target) => {
       if (target.kind === "local")
@@ -128,7 +151,7 @@ export function workspaceDocument(
         last_known_cwd_display: shell?.cwd_display ?? null,
       };
     }),
-    tabs: tabs.map(sessionReference),
-    active_tab: active ? sessionReference(active) : null,
+    tabs: allTabs,
+    active_tab: active ?? null,
   };
 }

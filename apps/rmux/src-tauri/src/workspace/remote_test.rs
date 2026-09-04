@@ -139,8 +139,8 @@ async fn create_phase(directory: &Path, target: &ConnectionTargetDto) -> Result<
     last_known_cwd: None,
     last_known_cwd_display: None,
   });
-  document.tabs.push(reference.clone());
-  document.active_tab = Some(reference);
+  document.tabs.push(reference.clone().into());
+  document.active_tab = Some(reference.into());
   Repository::new(directory.to_path_buf())
     .update(UpdateWorkspaceRequest {
       expected_revision: None,

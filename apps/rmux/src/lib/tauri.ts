@@ -214,3 +214,20 @@ export async function setNativeWindowTitle(title: string): Promise<void> {
   }
   await getCurrentWindow().setTitle(title);
 }
+
+export async function taskRequest(request: import("./types").TaskRequest): Promise<import("./types").TaskResponse> {
+  return invoke("task_request", { request });
+}
+
+export async function watchTaskLogs(task_id: string, after_sequence: string | null, onEvent: (event: import("./types").TaskLogEvent) => void): Promise<string> {
+  const channel = new Channel<import("./types").TaskLogEvent>();
+  channel.onmessage = (event) => {
+    try { onEvent(event); }
+    finally { if (event.event_type === "log") void invoke("acknowledge_task_log", { subscriptionId: event.subscription_id, sequence: event.sequence }).catch(() => undefined); }
+  };
+  return invoke("watch_task_logs", { request: { task_id, after_sequence }, onEvent: channel });
+}
+
+export async function cancelTaskLogs(subscription_id: string): Promise<void> {
+  return invoke("cancel_task_logs", { subscriptionId: subscription_id });
+}

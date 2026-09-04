@@ -1,6 +1,9 @@
 use crate::process_monitor::ProcessMonitor;
+#[cfg(unix)]
 use crate::shell_reporter::{ShellReport, ShellReporter, ShellReporterError};
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(unix)]
+use portable_pty::ChildKiller;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rmux_core::{
   AttachmentLeaseRegistry, AttachmentLeases, JournalError, JournalSnapshot, OutputJournal,
   validate_session_name,
@@ -52,12 +55,14 @@ pub struct Session {
   checkpoint_interval_bytes: u64,
   leases: Mutex<AttachmentLeaseRegistry>,
   attachments: Mutex<HashMap<String, AttachmentRecord>>,
-  master: Mutex<Box<dyn MasterPty + Send>>,
+  master: Mutex<Option<Box<dyn MasterPty + Send>>>,
   writer: Mutex<Box<dyn Write + Send>>,
+  #[cfg(unix)]
   killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
   events: broadcast::Sender<SessionEvent>,
   lifecycle: Mutex<SessionLifecycle>,
   shell_state_publisher: ShellStatePublisher,
+  #[cfg(unix)]
   shell_reporter: Mutex<Option<ShellReporter>>,
   process_observation_enabled: AtomicBool,
 }
@@ -618,6 +623,8 @@ impl Session {
     let _publication = self.shell_state_publisher.begin();
     let mut terminal = lock(&self.terminal);
     lock(&self.master)
+      .as_ref()
+      .ok_or_else(|| SessionControlError::Pty("terminal has closed".into()))?
       .resize(to_pty_size(&terminal_size))
       .map_err(|error| SessionControlError::Pty(error.to_string()))?;
 
@@ -651,7 +658,16 @@ impl Session {
   }
 
   pub fn kill(&self) -> Result<(), SessionControlError> {
+    #[cfg(unix)]
     lock(&self.killer).kill()?;
+    #[cfg(windows)]
+    if let Some(master) = lock(&self.master).take() {
+      // Closing ConPTY terminates attached console processes, and can block on
+      // older Windows versions. The independent PTY reader keeps draining.
+      std::thread::Builder::new()
+        .name("rmux-conpty-close".into())
+        .spawn(move || drop(master))?;
+    }
     Ok(())
   }
 
@@ -690,6 +706,7 @@ impl Session {
     self
       .process_observation_enabled
       .store(false, Ordering::Release);
+    #[cfg(unix)]
     self.shutdown_shell_reporter();
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
@@ -721,6 +738,7 @@ impl Session {
     let _ignored = self.events.send(SessionEvent::Ended { exit_code });
   }
 
+  #[cfg(unix)]
   fn apply_shell_report(&self, report: ShellReport) {
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
@@ -736,10 +754,25 @@ impl Session {
     self.process_observation_enabled.load(Ordering::Acquire)
   }
 
+  #[cfg_attr(
+    windows,
+    allow(
+      clippy::unused_self,
+      reason = "Windows has no POSIX foreground process group"
+    )
+  )]
   pub(crate) fn foreground_process_group(&self) -> Option<u32> {
-    lock(&self.master)
-      .process_group_leader()
-      .and_then(|pid| u32::try_from(pid).ok())
+    #[cfg(unix)]
+    {
+      lock(&self.master)
+        .as_ref()
+        .and_then(|master| master.process_group_leader())
+        .and_then(|pid| u32::try_from(pid).ok())
+    }
+    #[cfg(windows)]
+    {
+      None
+    }
   }
 
   pub(crate) fn apply_process_observation(&self, observation: Option<process_info::Snapshot>) {
@@ -773,6 +806,7 @@ impl Session {
     }
   }
 
+  #[cfg(unix)]
   fn shutdown_shell_reporter(&self) {
     let reporter = lock(&self.shell_reporter).take();
     if let Some(mut reporter) = reporter {
@@ -799,6 +833,7 @@ pub struct SessionManager {
 
 struct SessionManagerInner {
   registry: Mutex<SessionRegistry>,
+  #[cfg(unix)]
   runtime_directory: std::path::PathBuf,
   journal_capacity_bytes: usize,
   checkpoint_interval_bytes: usize,
@@ -811,11 +846,13 @@ struct SessionManagerInner {
 /// complete after the PTY child and master endpoints have been created. Keep
 /// the latest early report until the newly created session can own it.
 #[derive(Default)]
+#[cfg(unix)]
 struct ShellReportTarget {
   session: Option<std::sync::Weak<Session>>,
   pending_report: Option<ShellReport>,
 }
 
+#[cfg(unix)]
 fn deliver_shell_report(target: &Arc<Mutex<ShellReportTarget>>, report: ShellReport) {
   // Keep installation of the session target and delivery of the latest early
   // report in one serialized critical section. Otherwise a newer live report
@@ -829,6 +866,7 @@ fn deliver_shell_report(target: &Arc<Mutex<ShellReportTarget>>, report: ShellRep
   }
 }
 
+#[cfg(unix)]
 fn attach_shell_report_target(target: &Arc<Mutex<ShellReportTarget>>, session: &Arc<Session>) {
   let mut target = lock(target);
   target.session = Some(Arc::downgrade(session));
@@ -860,15 +898,22 @@ impl SessionManager {
     journal_capacity_bytes: usize,
     checkpoint_interval_bytes: usize,
   ) -> Self {
+    #[cfg(windows)]
+    drop(runtime_directory);
     Self {
       inner: Arc::new(SessionManagerInner {
         registry: Mutex::new(SessionRegistry::default()),
+        #[cfg(unix)]
         runtime_directory,
         journal_capacity_bytes,
         checkpoint_interval_bytes: checkpoint_interval_bytes.max(1),
         ever_had_session: AtomicBool::new(false),
         changed: Notify::new(),
-        process_monitor: ProcessMonitor::new(),
+        process_monitor: if cfg!(unix) {
+          ProcessMonitor::new()
+        } else {
+          None
+        },
       }),
     }
   }
@@ -898,12 +943,16 @@ impl SessionManager {
     let session_id = Uuid::new_v4().to_string();
     let reservation = self.reserve_name(requested_name)?;
     let name = reservation.name().to_owned();
+    #[cfg(unix)]
     let shell_report_target = Arc::new(Mutex::new(ShellReportTarget::default()));
+    #[cfg(unix)]
     let reporter_target = Arc::clone(&shell_report_target);
+    #[cfg(unix)]
     let shell_reporter = ShellReporter::new(&self.inner.runtime_directory, move |report| {
       deliver_shell_report(&reporter_target, report);
     })
     .map_err(SessionManagerError::ShellReporter)?;
+    #[cfg(unix)]
     let shell_reporter_path = shell_reporter.path().to_path_buf();
 
     let pty_system = native_pty_system();
@@ -912,6 +961,7 @@ impl SessionManager {
       .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
     let mut command_builder = build_command(command, working_directory);
     command_builder.env("TERM", "xterm-256color");
+    #[cfg(unix)]
     command_builder.env("RMUX_SHELL_STATE_PIPE", shell_reporter_path);
     let mut child = pair
       .slave
@@ -930,6 +980,7 @@ impl SessionManager {
       .master
       .take_writer()
       .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
+    #[cfg(unix)]
     let killer = child.clone_killer();
     drop(pair.slave);
 
@@ -948,16 +999,19 @@ impl SessionManager {
       checkpoint_interval_bytes: self.inner.checkpoint_interval_bytes as u64,
       leases: Mutex::new(AttachmentLeaseRegistry::default()),
       attachments: Mutex::new(HashMap::new()),
-      master: Mutex::new(pair.master),
+      master: Mutex::new(Some(pair.master)),
       writer: Mutex::new(writer),
+      #[cfg(unix)]
       killer: Mutex::new(killer),
       events,
       lifecycle: Mutex::new(SessionLifecycle::Running),
       shell_state_publisher: ShellStatePublisher::new(shell_state),
+      #[cfg(unix)]
       shell_reporter: Mutex::new(Some(shell_reporter)),
       process_observation_enabled: AtomicBool::new(process_inspector.is_some()),
     });
 
+    #[cfg(unix)]
     attach_shell_report_target(&shell_report_target, &session);
     if let (Some(monitor), Some(inspector)) = (&self.inner.process_monitor, process_inspector) {
       monitor.register(inspector, &session);
@@ -979,6 +1033,13 @@ impl SessionManager {
       .name(format!("rmux-waiter-{}", &session_id[..8]))
       .spawn(move || {
         let exit_code = child.wait().ok().map(|status| status.exit_code());
+        // ConPTY keeps the output pipe open until the pseudoconsole closes.
+        // Drop it on this waiter thread while the reader continues to drain.
+        #[cfg(windows)]
+        {
+          let master = lock(&waiter_session.master).take();
+          drop(master);
+        }
         let _reader_result = reader_thread.join();
         waiter_session.publish_ended(exit_code);
         if let Some(manager) = manager.upgrade() {
@@ -1142,6 +1203,7 @@ pub enum SessionManagerError {
   #[error("could not spawn child process: {0}")]
   Spawn(String),
   #[error(transparent)]
+  #[cfg(unix)]
   ShellReporter(#[from] ShellReporterError),
   #[error("could not start PTY reader thread: {0}")]
   ReaderThread(std::io::Error),
@@ -1329,6 +1391,7 @@ fn alternate_screen_transition(sequence: &[u8]) -> Option<(bool, u8)> {
   (modes != 0).then_some((final_byte == b'h', modes))
 }
 
+#[cfg(unix)]
 fn apply_shell_report_to_terminal(
   terminal: &mut TerminalState,
   report: ShellReport,
@@ -1553,7 +1616,7 @@ fn feed_terminal_output(terminal: &mut TerminalState, data: &[u8]) -> Option<Tui
   feed_terminal_bytes_inner(terminal, data)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn feed_terminal_bytes(terminal: &mut TerminalState, data: &[u8]) {
   let _ignored = feed_terminal_bytes_inner(terminal, data);
 }
@@ -1669,7 +1732,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
   use super::*;
   use std::sync::mpsc;

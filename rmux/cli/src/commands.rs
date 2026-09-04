@@ -4,6 +4,7 @@ use rmux_client::{
   DEFAULT_PRESENTATION_WINDOW_BYTES, InteractiveAttachOptions, attach_interactive_with_options,
   begin_attach, current_terminal_size, get_shell_state, request, resume_attach,
 };
+use rmux_ipc::Stream;
 use rmux_proto::{
   ClientMessage, CodecError, CommandSpec, ErrorCode, PromptPhase, ServerMessage, SessionInfo,
   ShellType, TuiHint,
@@ -16,7 +17,6 @@ use std::pin::Pin;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::UnixStream;
 use tokio::time::sleep;
 
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -55,7 +55,7 @@ impl LocalConnector {
 }
 
 impl Connector for LocalConnector {
-  type Stream = UnixStream;
+  type Stream = Stream;
   type Error = rmux_ipc::ConnectError;
 
   fn connect(&self) -> ConnectFuture<'_, Self::Stream, Self::Error> {

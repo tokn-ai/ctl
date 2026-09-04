@@ -6,7 +6,7 @@ use std::time::Duration;
 #[derive(Debug, Parser)]
 #[command(version, about = "Persistent local terminal session daemon")]
 struct Arguments {
-  /// Override the local Unix socket path.
+  /// Override the local endpoint (Unix socket or Windows named pipe).
   #[arg(long)]
   socket: Option<PathBuf>,
 
@@ -33,6 +33,7 @@ struct Arguments {
 
 fn main() {
   let arguments = Arguments::parse();
+  #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()
   {

@@ -49,7 +49,15 @@ async fn main() {
       .await
       .map_err(|error| error.to_string()),
     Command::Task { .. } => Err("remote task routing is not implemented yet".into()),
-    Command::Rmux { .. } => Err("rmux transport is not yet implemented on this platform".into()),
+    Command::Rmux { command } if arguments.host.is_none() => {
+      let connector = rmux_cli::LocalConnector::new(rmux_ipc::socket_path());
+      rmux_cli::run(command, &connector)
+        .await
+        .map_err(|error| error.to_string())
+    }
+    Command::Rmux { .. } => {
+      Err("remote rmux routing is not yet implemented on this platform".into())
+    }
   };
   if let Err(error) = result {
     eprintln!("ctl: {error}");

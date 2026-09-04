@@ -3,8 +3,7 @@ name = "rmux-ipc"
 version.workspace = true
 edition.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+[dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -12,3 +11,12 @@ tokio.workspace = true
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "2.4.4", features = ["tokio"] }
+widestring = "1.2.1"
+dirs.workspace = true
+uuid = { workspace = true, features = ["v5"] }

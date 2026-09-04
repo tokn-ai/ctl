@@ -1,14 +1,12 @@
 //! Shared command surface for the local `rmux` CLI and `ctl rmux`.
 
+mod commands;
 mod shell;
-#[cfg(unix)]
-mod unix;
 
 use clap::{Subcommand, ValueEnum};
 use rmux_proto::CommandSpec;
 
-#[cfg(unix)]
-pub use unix::{CommandError, ConnectFuture, Connector, LocalConnector, run};
+pub use commands::{CommandError, ConnectFuture, Connector, LocalConnector, run};
 
 /// Canonical rmux commands, independent of how the daemon is reached.
 #[derive(Debug, Subcommand)]

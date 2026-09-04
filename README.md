@@ -9,8 +9,8 @@ This repository will contain two independently useful products:
 
 The current MVP supports local `rmux` sessions plus mixed local/SSH sessions
 in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
-supports local background tasks through `ctl task`; rmux terminal IPC is not
-implemented there yet.
+supports local ConPTY sessions through `rmux` and `ctl rmux`, plus background
+tasks through `ctl task`. Windows desktop and SSH routing remain pending.
 
 ## Build
 
@@ -18,10 +18,10 @@ implemented there yet.
 cargo build --workspace
 ```
 
-For the Windows background-task slice:
+For the Windows local CLI and daemon slice:
 
 ```sh
-cargo build -p ctl -p taskd
+cargo build -p ctl -p taskd -p rmux -p rmuxd
 ```
 
 The `rmux` and `rmuxd` binaries must be installed beside one another, or
@@ -261,5 +261,5 @@ and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). Numbered
 ownership boundaries. The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).
 The [Windows CI exploration](docs/windows-ci.md) records verified compilation
-boundaries and native background-task tests. Windows rmux terminals and the
-desktop backend remain separate work.
+boundaries and native tests for background tasks and ConPTY sessions. The
+Windows desktop backend and native shell metadata remain separate work.

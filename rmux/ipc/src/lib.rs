@@ -1,30 +1,37 @@
 use std::env;
-#[cfg(unix)]
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(windows)]
+pub use interprocess::local_socket::tokio::Stream;
+#[cfg(windows)]
+use interprocess::local_socket::{GenericFilePath, ToFsName, traits::tokio::Stream as _};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-#[cfg(unix)]
 use std::process::Stdio;
-#[cfg(unix)]
 use std::time::Duration;
-#[cfg(unix)]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
-use tokio::net::UnixStream;
-#[cfg(unix)]
+pub use tokio::net::UnixStream as Stream;
 use tokio::time::{Instant, sleep};
+#[cfg(windows)]
+pub mod windows;
+
+async fn connect(path: &Path) -> io::Result<Stream> {
+  #[cfg(unix)]
+  {
+    Stream::connect(path).await
+  }
+  #[cfg(windows)]
+  {
+    Stream::connect(path.to_fs_name::<GenericFilePath>()?).await
+  }
+}
 
 const RUNTIME_DIRECTORY_ENV: &str = "RMUX_RUNTIME_DIR";
-#[cfg(unix)]
 const DAEMON_EXECUTABLE_ENV: &str = "RMUXD_BIN";
-#[cfg(unix)]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-#[cfg(unix)]
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
-#[cfg(unix)]
 const MAX_LOCAL_CONTROL_FRAME_SIZE: usize = 64 * 1024;
 
 /// Version of the owner-only local `rmuxd` control endpoint.
@@ -32,12 +39,18 @@ const MAX_LOCAL_CONTROL_FRAME_SIZE: usize = 64 * 1024;
 /// This protocol is intentionally separate from `rmux-proto`: `ctld` relays
 /// only the ordinary data endpoint and must never expose daemon-global local
 /// maintenance operations to remote `rmux_tunnel` clients.
-#[cfg(unix)]
 pub const LOCAL_CONTROL_PROTOCOL_VERSION: u16 = 1;
 
 #[must_use]
 pub fn socket_path() -> PathBuf {
-  runtime_directory().join("rmux.sock")
+  #[cfg(unix)]
+  {
+    runtime_directory().join("rmux.sock")
+  }
+  #[cfg(windows)]
+  {
+    windows::endpoint(&runtime_directory())
+  }
 }
 
 /// Returns the owner-only local-control endpoint associated with a data
@@ -50,7 +63,6 @@ pub fn socket_path() -> PathBuf {
 /// # Errors
 ///
 /// Returns an error if `socket_path` has no final path component.
-#[cfg(unix)]
 pub fn control_socket_path(socket_path: &Path) -> io::Result<PathBuf> {
   let file_name = socket_path.file_name().ok_or_else(|| {
     io::Error::new(
@@ -81,7 +93,6 @@ pub fn runtime_directory() -> PathBuf {
 
 /// Request messages accepted only by `rmuxd`'s owner-only local-control
 /// endpoint.
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalControlClientMessage {
@@ -90,7 +101,6 @@ pub enum LocalControlClientMessage {
 }
 
 /// Response messages emitted by `rmuxd`'s owner-only local-control endpoint.
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalControlServerMessage {
@@ -108,7 +118,6 @@ pub enum LocalControlServerMessage {
 }
 
 /// Stable errors for the owner-only local-control protocol.
-#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalControlErrorCode {
@@ -120,14 +129,12 @@ pub enum LocalControlErrorCode {
 }
 
 /// Capabilities negotiated with the owner-only local-control endpoint.
-#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalControlCapabilities {
   pub restart_supported: bool,
 }
 
 /// Errors while framing the owner-only local-control protocol.
-#[cfg(unix)]
 #[derive(Debug, thiserror::Error)]
 pub enum LocalControlCodecError {
   #[error("I/O error: {0}")]
@@ -139,7 +146,6 @@ pub enum LocalControlCodecError {
 }
 
 /// Client-side errors for owner-only local-control operations.
-#[cfg(unix)]
 #[derive(Debug, thiserror::Error)]
 pub enum LocalControlClientError {
   #[error(transparent)]
@@ -164,7 +170,6 @@ pub enum LocalControlClientError {
 ///
 /// Returns an error when serialization fails, the frame is oversized, or the
 /// transport cannot be written or flushed.
-#[cfg(unix)]
 pub async fn write_local_control_frame<W, T>(
   writer: &mut W,
   message: &T,
@@ -197,7 +202,6 @@ where
 ///
 /// Returns an error when the transport fails mid-frame, the declared frame is
 /// too large, or its payload is not valid JSON for `T`.
-#[cfg(unix)]
 pub async fn read_local_control_frame<R, T>(
   reader: &mut R,
 ) -> Result<Option<T>, LocalControlCodecError>
@@ -238,7 +242,6 @@ where
 ///
 /// Returns an error when the handshake fails, the daemon rejects it, or its
 /// response is malformed.
-#[cfg(unix)]
 pub async fn local_control_handshake<S>(
   stream: &mut S,
 ) -> Result<LocalControlCapabilities, LocalControlClientError>
@@ -284,7 +287,6 @@ where
 ///
 /// Returns an error when the handshake fails, restart is unsupported, or the
 /// daemon rejects or cannot complete the request.
-#[cfg(unix)]
 pub async fn request_local_daemon_restart<S>(mut stream: S) -> Result<u32, LocalControlClientError>
 where
   S: AsyncRead + AsyncWrite + Unpin,
@@ -308,7 +310,6 @@ where
 ///
 /// Returns an error when the daemon rejects the request or does not return a
 /// valid restart result.
-#[cfg(unix)]
 pub async fn request_local_daemon_restart_after_handshake<S>(
   stream: &mut S,
 ) -> Result<u32, LocalControlClientError>
@@ -334,7 +335,6 @@ where
   }
 }
 
-#[cfg(unix)]
 fn local_control_response_name(response: &LocalControlServerMessage) -> &'static str {
   match response {
     LocalControlServerMessage::HandshakeAccepted { .. } => "handshake_accepted",
@@ -353,10 +353,9 @@ fn local_control_response_name(response: &LocalControlServerMessage) -> &'static
 ///
 /// Returns an error when the endpoint cannot be connected, the daemon
 /// executable cannot be resolved, or a daemon candidate cannot be spawned.
-#[cfg(unix)]
-pub async fn connect_or_start_daemon(socket_path: &Path) -> Result<UnixStream, ConnectError> {
+pub async fn connect_or_start_daemon(socket_path: &Path) -> Result<Stream, ConnectError> {
   connect_or_start_with(
-    || UnixStream::connect(socket_path),
+    || connect(socket_path),
     || start_daemon(socket_path),
     CONNECT_TIMEOUT,
     CONNECT_RETRY_INTERVAL,
@@ -374,11 +373,8 @@ pub async fn connect_or_start_daemon(socket_path: &Path) -> Result<UnixStream, C
 /// # Errors
 ///
 /// Returns an error when no daemon is currently reachable at the endpoint.
-#[cfg(unix)]
-pub async fn connect_existing_daemon(socket_path: &Path) -> Result<UnixStream, ConnectError> {
-  UnixStream::connect(socket_path)
-    .await
-    .map_err(ConnectError::Connect)
+pub async fn connect_existing_daemon(socket_path: &Path) -> Result<Stream, ConnectError> {
+  connect(socket_path).await.map_err(ConnectError::Connect)
 }
 
 /// Waits until no daemon is reachable at a local endpoint.
@@ -390,13 +386,12 @@ pub async fn connect_existing_daemon(socket_path: &Path) -> Result<UnixStream, C
 ///
 /// Returns an error when the endpoint stays reachable until `wait_timeout`,
 /// or when probing it fails for a reason other than an absent endpoint.
-#[cfg(unix)]
 pub async fn wait_for_daemon_drain(
   socket_path: &Path,
   wait_timeout: Duration,
 ) -> Result<(), EndpointDrainError> {
   wait_for_endpoint_drain_with(
-    || UnixStream::connect(socket_path),
+    || connect(socket_path),
     wait_timeout,
     CONNECT_RETRY_INTERVAL,
   )
@@ -414,7 +409,6 @@ pub async fn wait_for_daemon_drain(
 ///
 /// Returns an error when either endpoint stays reachable until `wait_timeout`
 /// or when a probe fails for a reason other than endpoint absence.
-#[cfg(unix)]
 pub async fn wait_for_daemon_shutdown(
   data_socket_path: &Path,
   control_socket_path: &Path,
@@ -437,7 +431,6 @@ pub async fn wait_for_daemon_shutdown(
   }
 }
 
-#[cfg(unix)]
 async fn connect_or_start_with<T, Connect, ConnectFuture, Start>(
   mut connect: Connect,
   start: Start,
@@ -468,7 +461,6 @@ where
   }
 }
 
-#[cfg(unix)]
 async fn wait_for_endpoint_drain_with<T, Connect, ConnectFuture>(
   mut connect: Connect,
   wait_timeout: Duration,
@@ -495,9 +487,8 @@ where
   }
 }
 
-#[cfg(unix)]
 async fn endpoint_is_unavailable(socket_path: &Path) -> Result<bool, EndpointDrainError> {
-  match UnixStream::connect(socket_path).await {
+  match connect(socket_path).await {
     Ok(connection) => {
       drop(connection);
       Ok(false)
@@ -507,7 +498,6 @@ async fn endpoint_is_unavailable(socket_path: &Path) -> Result<bool, EndpointDra
   }
 }
 
-#[cfg(unix)]
 fn retryable_connect_error(error: &io::Error) -> bool {
   matches!(
     error.kind(),
@@ -515,10 +505,15 @@ fn retryable_connect_error(error: &io::Error) -> bool {
   )
 }
 
-#[cfg(unix)]
 fn start_daemon(socket_path: &Path) -> Result<(), ConnectError> {
   let executable = daemon_executable()?;
-  std::process::Command::new(&executable)
+  let mut command = std::process::Command::new(&executable);
+  #[cfg(windows)]
+  {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0000_0008); // DETACHED_PROCESS
+  }
+  command
     .arg("--socket")
     .arg(socket_path)
     .arg("--detach-from-terminal")
@@ -530,23 +525,21 @@ fn start_daemon(socket_path: &Path) -> Result<(), ConnectError> {
   Ok(())
 }
 
-#[cfg(unix)]
 fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
   }
 
   let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
-  let sibling = current_executable.with_file_name("rmuxd");
+  let sibling = current_executable.with_file_name(format!("rmuxd{}", env::consts::EXE_SUFFIX));
   if sibling.is_file() {
     return Ok(sibling);
   }
 
-  Ok(PathBuf::from("rmuxd"))
+  Ok(PathBuf::from(format!("rmuxd{}", env::consts::EXE_SUFFIX)))
 }
 
 /// Failure to connect to or launch the local `rmuxd` process.
-#[cfg(unix)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConnectError {
@@ -561,7 +554,6 @@ pub enum ConnectError {
   },
 }
 
-#[cfg(unix)]
 impl ConnectError {
   /// Returns whether the endpoint was absent or no process was serving it.
   #[must_use]
@@ -571,7 +563,6 @@ impl ConnectError {
 }
 
 /// Failure while waiting for an existing `rmuxd` endpoint to drain.
-#[cfg(unix)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EndpointDrainError {
@@ -587,6 +578,7 @@ pub enum EndpointDrainError {
 ///
 /// Returns an error when the endpoint has no parent, the directory cannot be
 /// created, or the directory is not private and owned by the current user.
+#[cfg(unix)]
 pub fn prepare_runtime_directory(path: &Path) -> io::Result<()> {
   let directory = path.parent().ok_or_else(|| {
     io::Error::new(
@@ -610,7 +602,9 @@ fn fallback_runtime_directory() -> PathBuf {
 
 #[cfg(not(unix))]
 fn fallback_runtime_directory() -> PathBuf {
-  env::temp_dir().join("rmux")
+  dirs::data_local_dir()
+    .unwrap_or_else(env::temp_dir)
+    .join("ctl/rmux")
 }
 
 #[cfg(unix)]
@@ -652,11 +646,6 @@ fn secure_runtime_directory(directory: &Path) -> io::Result<()> {
   Ok(())
 }
 
-#[cfg(not(unix))]
-fn secure_runtime_directory(_directory: &Path) -> io::Result<()> {
-  Ok(())
-}
-
 #[cfg(unix)]
 fn set_owner_only_permissions(directory: &Path) -> io::Result<()> {
   use std::os::unix::fs::PermissionsExt;
@@ -664,12 +653,7 @@ fn set_owner_only_permissions(directory: &Path) -> io::Result<()> {
   std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(not(unix))]
-fn set_owner_only_permissions(_directory: &Path) -> io::Result<()> {
-  Ok(())
-}
-
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
   use super::*;
 
@@ -678,6 +662,7 @@ mod tests {
   #[cfg(unix)]
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+  #[cfg(unix)]
   #[test]
   fn socket_is_inside_runtime_directory() {
     assert_eq!(socket_path().file_name().unwrap(), "rmux.sock");

@@ -18,11 +18,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{UnixListener, UnixStream};
+type OwnedReadHalf = tokio::io::ReadHalf<Stream>;
+type OwnedWriteHalf = tokio::io::WriteHalf<Stream>;
+use rmux_ipc::Stream;
+#[cfg(windows)]
+use rmux_ipc::windows::Listener;
+#[cfg(unix)]
+use tokio::net::UnixListener as Listener;
 use tokio::sync::{Notify, broadcast, watch};
 use tokio::time::{Instant, sleep_until, timeout_at};
 #[cfg(test)]
+#[cfg(all(test, unix))]
 use uuid::Uuid;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -122,35 +128,15 @@ fn attachment_liveness(timeout: Duration) -> Result<AttachmentLiveness, DaemonEr
 /// the endpoint is already served, or the accept loop fails.
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   let attachment_liveness = attachment_liveness(config.attachment_liveness_timeout)?;
-  rmux_ipc::prepare_runtime_directory(&config.socket_path)
-    .map_err(DaemonError::RuntimeDirectory)?;
-  let control_socket_path =
-    rmux_ipc::control_socket_path(&config.socket_path).map_err(|source| {
-      DaemonError::ControlSocketPath {
-        path: config.socket_path.clone(),
-        source,
-      }
-    })?;
-  let runtime_directory = config.socket_path.parent().ok_or_else(|| {
-    DaemonError::RuntimeDirectory(io::Error::new(
-      io::ErrorKind::InvalidInput,
-      format!(
-        "socket path {} has no runtime directory",
-        config.socket_path.display()
-      ),
-    ))
-  })?;
+  let (endpoints, sessions) = prepare_daemon(&config).await?;
   let DaemonEndpoints {
     listener,
     control_listener,
+    #[cfg(unix)]
     _data_socket_guard,
+    #[cfg(unix)]
     _control_socket_guard,
-  } = bind_daemon_endpoints(&config.socket_path, &control_socket_path).await?;
-  let sessions = SessionManager::new(
-    runtime_directory.to_path_buf(),
-    config.journal_capacity_bytes,
-    config.checkpoint_interval_bytes,
-  );
+  } = endpoints;
   let (connections, restart) = daemon_runtime();
   let startup_deadline = sleep_until(Instant::now() + config.startup_idle_timeout);
   tokio::pin!(startup_deadline);
@@ -165,7 +151,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
 
     tokio::select! {
       accepted = listener.accept() => {
-        let (stream, _) = accepted?;
+        let stream = accepted?.0;
         let sessions = sessions.clone();
         let restart = Arc::clone(&restart);
         let data_connection_shutdown = restart.data_connection_shutdown_receiver();
@@ -186,7 +172,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         });
       }
       accepted = control_listener.accept() => {
-        let (stream, _) = accepted?;
+        let stream = accepted?.0;
         let sessions = sessions.clone();
         let restart = Arc::clone(&restart);
         let control_connection_shutdown = restart.control_connection_shutdown_receiver();
@@ -222,6 +208,60 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   }
 }
 
+#[cfg_attr(
+  windows,
+  allow(
+    clippy::unused_async,
+    reason = "Unix endpoint startup probes existing listeners asynchronously"
+  )
+)]
+async fn prepare_daemon(
+  config: &DaemonConfig,
+) -> Result<(DaemonEndpoints, SessionManager), DaemonError> {
+  #[cfg(unix)]
+  rmux_ipc::prepare_runtime_directory(&config.socket_path)
+    .map_err(DaemonError::RuntimeDirectory)?;
+  let control_socket_path =
+    rmux_ipc::control_socket_path(&config.socket_path).map_err(|source| {
+      DaemonError::ControlSocketPath {
+        path: config.socket_path.clone(),
+        source,
+      }
+    })?;
+  #[cfg(unix)]
+  let runtime_directory = config
+    .socket_path
+    .parent()
+    .map(Path::to_path_buf)
+    .ok_or_else(|| {
+      DaemonError::RuntimeDirectory(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+          "socket path {} has no runtime directory",
+          config.socket_path.display()
+        ),
+      ))
+    })?;
+  let endpoints = {
+    #[cfg(unix)]
+    {
+      bind_daemon_endpoints(&config.socket_path, &control_socket_path).await?
+    }
+    #[cfg(windows)]
+    {
+      bind_daemon_endpoints(&config.socket_path, &control_socket_path)?
+    }
+  };
+  #[cfg(windows)]
+  let runtime_directory = rmux_ipc::runtime_directory();
+  let sessions = SessionManager::new(
+    runtime_directory,
+    config.journal_capacity_bytes,
+    config.checkpoint_interval_bytes,
+  );
+  Ok((endpoints, sessions))
+}
+
 fn daemon_runtime() -> (Arc<ConnectionTracker>, Arc<RestartCoordinator>) {
   (
     Arc::new(ConnectionTracker::default()),
@@ -230,9 +270,11 @@ fn daemon_runtime() -> (Arc<ConnectionTracker>, Arc<RestartCoordinator>) {
 }
 
 struct DaemonEndpoints {
-  listener: UnixListener,
-  control_listener: UnixListener,
+  listener: Listener,
+  control_listener: Listener,
+  #[cfg(unix)]
   _data_socket_guard: SocketGuard,
+  #[cfg(unix)]
   _control_socket_guard: SocketGuard,
 }
 
@@ -241,6 +283,7 @@ struct DaemonEndpoints {
 /// Keeping the lock until both listeners are live prevents a concurrent
 /// launcher from observing only the data endpoint and treating the daemon as
 /// a legacy instance without local-control support.
+#[cfg(unix)]
 async fn bind_daemon_endpoints(
   data_socket_path: &Path,
   control_socket_path: &Path,
@@ -268,18 +311,19 @@ async fn bind_daemon_endpoints(
   })
 }
 
-async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
-  let listener = match UnixListener::bind(path) {
+#[cfg(unix)]
+async fn bind_listener(path: &Path) -> Result<Listener, DaemonError> {
+  let listener = match Listener::bind(path) {
     Ok(listener) => listener,
     Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-      if UnixStream::connect(path).await.is_ok() {
+      if Stream::connect(path).await.is_ok() {
         return Err(DaemonError::AlreadyRunning(path.to_path_buf()));
       }
       std::fs::remove_file(path).map_err(|source| DaemonError::Bind {
         path: path.to_path_buf(),
         source,
       })?;
-      UnixListener::bind(path).map_err(|source| DaemonError::Bind {
+      Listener::bind(path).map_err(|source| DaemonError::Bind {
         path: path.to_path_buf(),
         source,
       })?
@@ -296,6 +340,7 @@ async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
   Ok(listener)
 }
 
+#[cfg(unix)]
 fn secure_socket_endpoint(path: &Path) -> io::Result<()> {
   use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
@@ -458,7 +503,7 @@ fn lock_restart_state(state: &Mutex<RestartState>) -> std::sync::MutexGuard<'_, 
 }
 
 async fn handle_local_control_connection(
-  stream: UnixStream,
+  stream: Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   mut control_connection_shutdown: watch::Receiver<bool>,
@@ -475,7 +520,7 @@ async fn handle_local_control_connection(
 }
 
 async fn handle_active_local_control_connection(
-  mut stream: UnixStream,
+  mut stream: Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
 ) -> Result<(), ConnectionError> {
@@ -570,7 +615,7 @@ async fn handle_active_local_control_connection(
 }
 
 async fn read_local_control_request(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   request_timeout: Duration,
 ) -> Result<Option<LocalControlClientMessage>, ConnectionError> {
   timeout_at(
@@ -583,7 +628,7 @@ async fn read_local_control_request(
 }
 
 async fn send_local_control_error(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   code: LocalControlErrorCode,
   message: &str,
 ) -> Result<(), ConnectionError> {
@@ -599,7 +644,7 @@ async fn send_local_control_error(
 }
 
 async fn handle_connection(
-  stream: UnixStream,
+  stream: Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   mut data_connection_shutdown: watch::Receiver<bool>,
@@ -621,7 +666,7 @@ async fn handle_connection(
 }
 
 async fn handle_active_connection(
-  mut stream: UnixStream,
+  mut stream: Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   attachment_liveness: AttachmentLiveness,
@@ -670,7 +715,7 @@ async fn handle_active_connection(
 }
 
 async fn handle_request(
-  mut stream: UnixStream,
+  mut stream: Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   attachment_liveness_timeout: Duration,
@@ -776,7 +821,7 @@ async fn handle_request(
 }
 
 async fn handle_kill_session_request(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   sessions: &SessionManager,
   session: &str,
 ) -> Result<(), ConnectionError> {
@@ -791,7 +836,7 @@ async fn handle_kill_session_request(
 }
 
 async fn handle_new_attachment_request(
-  mut stream: UnixStream,
+  mut stream: Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   session: String,
@@ -832,7 +877,7 @@ async fn handle_new_attachment_request(
 }
 
 async fn handle_resume_attachment_request(
-  mut stream: UnixStream,
+  mut stream: Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   session: String,
@@ -890,7 +935,7 @@ struct CreateSessionParameters {
 }
 
 async fn handle_create_session_request(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   request: CreateSessionParameters,
@@ -924,7 +969,7 @@ async fn handle_create_session_request(
 }
 
 async fn handle_shell_state_request(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   sessions: &SessionManager,
   session: String,
 ) -> Result<(), ConnectionError> {
@@ -964,7 +1009,7 @@ fn valid_presentation_window(window_bytes: u64) -> bool {
 }
 
 async fn reject_invalid_presentation_window(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   request: &AttachParameters,
 ) -> Result<bool, ConnectionError> {
   if valid_presentation_window(request.presentation_window_bytes) {
@@ -1063,7 +1108,7 @@ fn prepared_attachment(
 }
 
 async fn handle_attach(
-  mut stream: UnixStream,
+  mut stream: Stream,
   attachment: PreparedAttachment,
   request: AttachParameters,
 ) -> Result<(), ConnectionError> {
@@ -1119,7 +1164,7 @@ async fn handle_attach(
   let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
   let sent_sequence = snapshot.journal.replay_from;
   let applied_sequence = snapshot.checkpoint.is_none().then_some(sent_sequence);
-  let (reader, mut writer) = stream.into_split();
+  let (reader, mut writer) = tokio::io::split(stream);
   match timeout_at(
     initial_delivery_deadline,
     send_attached(
@@ -1169,7 +1214,7 @@ async fn handle_attach(
 }
 
 async fn apply_initial_resize(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   session: Arc<Session>,
   attachment_id: String,
   terminal_size: rmux_proto::TerminalSize,
@@ -1192,7 +1237,7 @@ async fn apply_initial_resize(
 }
 
 async fn take_initial_snapshot(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   session: Arc<Session>,
   resume_from: Option<u64>,
   deadline: Instant,
@@ -1846,16 +1891,17 @@ fn geometry_event_is_stale(
 }
 
 async fn send_session_manager_error(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   error: &SessionManagerError,
 ) -> Result<(), CodecError> {
   let code = match error {
     SessionManagerError::InvalidName { .. } => ErrorCode::InvalidSessionName,
     SessionManagerError::AlreadyExists { .. } => ErrorCode::SessionAlreadyExists,
     SessionManagerError::NotFound { .. } => ErrorCode::SessionNotFound,
+    #[cfg(unix)]
+    SessionManagerError::ShellReporter(_) => ErrorCode::Internal,
     SessionManagerError::Pty(_)
     | SessionManagerError::Spawn(_)
-    | SessionManagerError::ShellReporter(_)
     | SessionManagerError::ReaderThread(_)
     | SessionManagerError::WaiterThread(_)
     | SessionManagerError::AutomaticNameExhausted => ErrorCode::Internal,
@@ -1863,10 +1909,7 @@ async fn send_session_manager_error(
   send_error(stream, code, &error.to_string()).await
 }
 
-async fn send_journal_error(
-  stream: &mut UnixStream,
-  error: &JournalError,
-) -> Result<(), CodecError> {
+async fn send_journal_error(stream: &mut Stream, error: &JournalError) -> Result<(), CodecError> {
   let code = match error {
     JournalError::SequenceAhead { .. } => ErrorCode::SequenceAhead,
   };
@@ -2002,16 +2045,19 @@ impl Drop for ConnectionGuard {
   }
 }
 
+#[cfg(unix)]
 struct SocketGuard {
   path: PathBuf,
   device: u64,
   inode: u64,
 }
 
+#[cfg(unix)]
 struct EndpointStartupLock {
   _file: std::fs::File,
 }
 
+#[cfg(unix)]
 impl EndpointStartupLock {
   fn acquire(socket_path: &Path) -> io::Result<Self> {
     use rustix::fs::{CWD, FlockOperation, Mode, OFlags, fchmod, flock, openat};
@@ -2029,12 +2075,14 @@ impl EndpointStartupLock {
   }
 }
 
+#[cfg(unix)]
 fn endpoint_startup_lock_path(socket_path: &Path) -> PathBuf {
   let mut path = socket_path.as_os_str().to_os_string();
   path.push(".lock");
   path.into()
 }
 
+#[cfg(unix)]
 impl SocketGuard {
   fn new(path: PathBuf) -> io::Result<Self> {
     use std::os::unix::fs::MetadataExt;
@@ -2048,6 +2096,7 @@ impl SocketGuard {
   }
 }
 
+#[cfg(unix)]
 impl Drop for SocketGuard {
   fn drop(&mut self) {
     use std::os::unix::fs::MetadataExt;
@@ -2061,7 +2110,7 @@ impl Drop for SocketGuard {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
   use super::*;
   use rmux_core::JournalSnapshot;
@@ -2232,4 +2281,22 @@ mod tests {
       MIN_OUTPUT_FRAME_CHARGE_BYTES
     );
   }
+}
+
+#[cfg(windows)]
+fn bind_daemon_endpoints(data: &Path, control: &Path) -> Result<DaemonEndpoints, DaemonError> {
+  // The exclusive control instance arbitrates startup. Publish data last.
+  // No filesystem lock or stale pipe removal is needed on Windows.
+  let control_listener = Listener::bind(control).map_err(|source| DaemonError::Bind {
+    path: control.into(),
+    source,
+  })?;
+  let listener = Listener::bind(data).map_err(|source| DaemonError::Bind {
+    path: data.into(),
+    source,
+  })?;
+  Ok(DaemonEndpoints {
+    listener,
+    control_listener,
+  })
 }

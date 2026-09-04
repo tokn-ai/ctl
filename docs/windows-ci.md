@@ -1,6 +1,6 @@
 # Windows CI exploration
 
-Status: Windows background-task implementation and native CI coverage added,
+Status: Windows background tasks and local ConPTY sessions implemented,
 2026-09-04. Full workspace Windows tests remain deferred. The findings below distinguish source compatibility from runtime
 support.
 
@@ -117,10 +117,44 @@ working directory when creating a definition. Background console programs use
 `CREATE_NO_WINDOW`. Commands are passed as a program plus arguments; taskd does
 not insert a shell. Invoke `cmd.exe` or PowerShell explicitly when needed.
 
+## Windows local terminal sessions
+
+`rmuxd` now uses `portable-pty`'s ConPTY backend, with the same journal,
+checkpoints, leases, flow control, and reconnect protocol as Unix. The local
+`rmux` CLI and `ctl rmux` can create, list, attach to, inspect, and terminate
+sessions. The daemon auto-start path locates `rmuxd.exe` and detaches it from
+the invoking console.
+
+The data and owner-only maintenance endpoints are separate local named pipes,
+both restricted by an owner-only DACL and rejecting remote clients. The
+maintenance name adds `.control` to the data name. Its exclusive first instance
+arbitrates concurrent startup; the data endpoint is published last, so a data
+connection also implies maintenance support is available. `RMUX_RUNTIME_DIR`
+is a namespace seed on Windows, not a filesystem socket directory.
+
+A child waiter closes the pseudoconsole before joining the independent output
+reader. Session kill also closes ConPTY on a separate thread. This keeps output
+draining while `ClosePseudoConsole` runs, avoiding the shutdown deadlock on older
+Windows versions. See [Microsoft's ClosePseudoConsole documentation](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole).
+PTY handles remain owned by rmuxd throughout. A taskd interactive-task adapter
+is still separate work.
+
+Native CI exercises real ConPTY input/output, attachment resumption after a
+connection loss, resize, final output and exit status, and owner-only daemon
+restart. A separate smoke test checks `rmuxd.exe` discovery, auto-start, and
+local `ctl rmux` routing. The existing Unix integration suite remains enabled
+on Linux/macOS; its shell/FIFO-specific fixtures are not passed off as Windows
+coverage. Manual Windows Terminal keyboard/rendering checks and cross-account
+ACL tests remain useful follow-up validation.
+
+Windows has no native process inspection or Bash/Zsh FIFO reporter in this
+slice, so unavailable shell metadata stays unknown. Terminal output and
+terminal-derived state continue to work.
+
 ## Remaining Windows work
 
-- rmuxd's ConPTY, process, journal, lease, and local IPC integration. PTYs still
-  belong exclusively to rmuxd; interactive tasks cannot yet start.
+- Interactive-task integration between taskd and rmuxd. PTYs remain owned
+  exclusively by rmuxd.
 - ctld's fixed local gateway and remote task routing.
 - Native process inspection and the desktop app's local transport/build.
 - Broader Windows tests for portable crates, remote clients, and terminals.

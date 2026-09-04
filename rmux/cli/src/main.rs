@@ -1,13 +1,12 @@
 use clap::Parser;
 use rmux_cli::Command;
-#[cfg(unix)]
 use rmux_cli::LocalConnector;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Persistent local terminal sessions")]
 struct Arguments {
-  /// Override the local Unix socket path.
+  /// Override the local endpoint (Unix socket or Windows named pipe).
   #[arg(long, global = true)]
   socket: Option<PathBuf>,
 
@@ -15,7 +14,6 @@ struct Arguments {
   command: Command,
 }
 
-#[cfg(unix)]
 #[tokio::main]
 async fn main() {
   let arguments = Arguments::parse();
@@ -24,10 +22,4 @@ async fn main() {
     eprintln!("rmux: {error}");
     std::process::exit(1);
   }
-}
-
-#[cfg(not(unix))]
-fn main() {
-  eprintln!("rmux: local IPC is not yet implemented on this platform");
-  std::process::exit(1);
 }

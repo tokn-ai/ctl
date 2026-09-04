@@ -1,6 +1,7 @@
 use std::{
   path::{Path, PathBuf},
   process::Stdio,
+  sync::OnceLock,
   time::Duration,
 };
 
@@ -10,12 +11,18 @@ use task_proto::{
 };
 use tokio::{
   process::{Child, Command},
+  sync::{Mutex, MutexGuard},
   task::JoinHandle,
   time::{Instant, sleep, timeout},
 };
 use uuid::Uuid;
 
+// Each fixture embeds rmuxd and owns real PTYs. Keep their lifetimes isolated,
+// as in rmuxd's reconnect suite, including process shutdown and pipe cleanup.
+static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 struct Fixture {
+  _pty_guard: MutexGuard<'static, ()>,
   root: PathBuf,
   task_socket: PathBuf,
   rmux_socket: PathBuf,
@@ -26,6 +33,7 @@ struct Fixture {
 
 impl Fixture {
   async fn start() -> Self {
+    let pty_guard = PTY_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await;
     let id = Uuid::new_v4().simple().to_string();
     #[cfg(unix)]
     let root = PathBuf::from("/tmp").join(format!("task-pty-{}", &id[..8]));
@@ -42,6 +50,7 @@ impl Fixture {
     let keepalive = connect_rmux(&rmux_socket).await;
     let taskd = launch_taskd(&root, &task_socket, &rmux_socket).await;
     Self {
+      _pty_guard: pty_guard,
       root,
       task_socket,
       rmux_socket,

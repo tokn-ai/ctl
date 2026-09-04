@@ -1,6 +1,6 @@
 //! Local and OpenSSH transport primitives for `ctl`.
 //!
-//! Local connections use the owner-only `rmuxd` endpoint. Remote
+//! Local connections use owner-only daemon endpoints. Remote
 //! authentication, host verification, proxying, and connection multiplexing
 //! belong to the user's OpenSSH installation and configuration.
 
@@ -36,6 +36,14 @@ impl RemotePlatform {
   }
 }
 const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
+
+/// The fixed per-user service exposed through an SSH gateway.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemoteService {
+  #[default]
+  Rmux,
+  Task,
+}
 
 /// The daemon endpoint selected for one `ctl` operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,13 +124,16 @@ impl ConnectionTarget {
   }
 }
 
-/// A raw `rmux-proto` stream over either the local socket or OpenSSH.
-pub enum Transport {
-  Local(rmux_ipc::Stream),
+/// A raw protocol stream over either a service's local endpoint or OpenSSH.
+pub enum Transport<LocalStream = rmux_ipc::Stream> {
+  Local(LocalStream),
   Ssh(SshTransport),
 }
 
-impl AsyncRead for Transport {
+/// A task protocol stream over the local task endpoint or OpenSSH.
+pub type TaskTransport = Transport<task_ipc::Stream>;
+
+impl<LocalStream: AsyncRead + Unpin> AsyncRead for Transport<LocalStream> {
   fn poll_read(
     mut self: Pin<&mut Self>,
     context: &mut Context<'_>,
@@ -135,7 +146,7 @@ impl AsyncRead for Transport {
   }
 }
 
-impl AsyncWrite for Transport {
+impl<LocalStream: AsyncWrite + Unpin> AsyncWrite for Transport<LocalStream> {
   fn poll_write(
     mut self: Pin<&mut Self>,
     context: &mut Context<'_>,
@@ -182,7 +193,34 @@ pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, Core
   }
 }
 
-/// One OpenSSH remote-command channel carrying raw `rmux-proto` bytes.
+/// Opens the selected user's task endpoint locally or through SSH.
+///
+/// A local target's socket path selects rmux for interactive attachments;
+/// task requests always use the current user's fixed task endpoint.
+///
+/// # Errors
+/// Returns task daemon startup, SSH startup, or transport-marker failures.
+pub async fn open_task_transport(target: &ConnectionTarget) -> Result<TaskTransport, CoreError> {
+  match target {
+    ConnectionTarget::Local { .. } => Ok(Transport::Local(
+      task_client::connect_or_start(&task_ipc::socket_path()).await?,
+    )),
+    ConnectionTarget::Ssh {
+      destination,
+      options,
+    } => Ok(Transport::Ssh(
+      open_ssh_service_interactive(
+        destination,
+        options,
+        &SshInteraction::Inherit,
+        RemoteService::Task,
+      )
+      .await?,
+    )),
+  }
+}
+
+/// One OpenSSH remote-command channel carrying raw service protocol bytes.
 ///
 /// Dropping the stream closes its pipes and asks the supervisor to terminate
 /// and reap the SSH child. A fresh reconnect always creates a fresh SSH
@@ -264,11 +302,27 @@ pub async fn open_ssh_tunnel_interactive(
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
 ) -> Result<SshTransport, CoreError> {
+  open_ssh_service_interactive(destination, options, interaction, RemoteService::Rmux).await
+}
+
+/// Opens an enumerated gateway service with explicit local SSH prompt handling.
+///
+/// Service selection adds only a fixed argument pair to the remote command;
+/// remote socket paths and arbitrary commands are never accepted.
+///
+/// # Errors
+/// Returns validation, SSH startup, or transport-marker failures.
+pub async fn open_ssh_service_interactive(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  service: RemoteService,
+) -> Result<SshTransport, CoreError> {
   validate_ssh_target(destination, options)?;
   let mut command = Command::new(SSH_PROGRAM);
 
   // Insert local-only options before `--`; never append them to the remote command.
-  let arguments = ssh_arguments(destination, options);
+  let arguments = ssh_service_arguments(destination, options, service);
   let extra: Vec<OsString> = match interaction {
     SshInteraction::Inherit => Vec::new(),
     SshInteraction::Batch => vec!["-o".into(), "BatchMode=yes".into()],
@@ -350,6 +404,10 @@ async fn start_ssh_transport(mut command: Command) -> Result<SshTransport, CoreE
 pub fn is_retryable_connection_error(error: &CoreError) -> bool {
   match error {
     CoreError::LocalIpc(source) => source.is_endpoint_unavailable(),
+    CoreError::LocalTask(task_client::ClientError::Connect(source)) => matches!(
+      source.kind(),
+      io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    ),
     CoreError::ReadSshPreface(source) => !matches!(
       source.kind(),
       io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
@@ -357,7 +415,8 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     // This is a preface-read failure enriched with stderr; retain its previous
     // reconnect behavior (for example after a transient connection refusal).
     CoreError::SshStartup(_) => true,
-    CoreError::InvalidSshDestination(_)
+    CoreError::LocalTask(_)
+    | CoreError::InvalidSshDestination(_)
     | CoreError::InvalidSshOption(_)
     | CoreError::StartSsh(_)
     | CoreError::MissingSshStdin
@@ -404,7 +463,16 @@ fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Res
   Ok(())
 }
 
+#[cfg(test)]
 fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsString> {
+  ssh_service_arguments(destination, options, RemoteService::Rmux)
+}
+
+fn ssh_service_arguments(
+  destination: &str,
+  options: &SshConnectionOptions,
+  service: RemoteService,
+) -> Vec<OsString> {
   let mut arguments = [
     "-T",
     "-o",
@@ -435,6 +503,9 @@ fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsStr
     OsString::from(options.hostname.as_deref().unwrap_or(destination)),
   ]);
   arguments.extend(options.remote_platform.command().iter().map(OsString::from));
+  if service == RemoteService::Task {
+    arguments.extend([OsString::from("--service"), OsString::from("task")]);
+  }
   arguments
 }
 
@@ -442,6 +513,8 @@ fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsStr
 pub enum CoreError {
   #[error(transparent)]
   LocalIpc(#[from] rmux_ipc::ConnectError),
+  #[error(transparent)]
+  LocalTask(#[from] task_client::ClientError),
   #[error("invalid SSH destination '{0}'")]
   InvalidSshDestination(String),
   #[error("invalid structured SSH setting '{0}'")]
@@ -504,6 +577,24 @@ mod tests {
       &arguments[arguments.len() - 4..],
       ["--", "windows-host", "ctl-agent.exe", "connect"].map(OsString::from)
     );
+  }
+
+  #[test]
+  fn task_service_only_appends_fixed_arguments_on_either_remote_platform() {
+    for remote_platform in [RemotePlatform::Unix, RemotePlatform::Windows] {
+      let options = SshConnectionOptions {
+        remote_platform,
+        port: Some(2222),
+        ..SshConnectionOptions::default()
+      };
+      let rmux = ssh_service_arguments("host", &options, RemoteService::Rmux);
+      let task = ssh_service_arguments("host", &options, RemoteService::Task);
+      assert_eq!(&task[..rmux.len()], rmux.as_slice());
+      assert_eq!(
+        &task[rmux.len()..],
+        ["--service", "task"].map(OsString::from)
+      );
+    }
   }
 
   #[test]

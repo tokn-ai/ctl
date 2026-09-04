@@ -277,7 +277,7 @@ impl State {
     if definition.execution_mode == ExecutionMode::Interactive {
       return self.start_interactive(&task_id, definition).await;
     }
-    let mut child = process::spawn(&definition).map_err(|error| {
+    let mut child = process::spawn(&execution_definition(&definition)?).map_err(|error| {
       RequestError::new(
         ErrorCode::InvalidDefinition,
         format!("could not start {:?}: {error}", definition.program),
@@ -823,6 +823,38 @@ fn resolve_task_mut<'a>(
 ) -> Result<&'a mut TaskInfo, RequestError> {
   let task_id = resolve_task(tasks, selector)?.task_id.clone();
   Ok(tasks.get_mut(&task_id).expect("resolved task exists"))
+}
+
+fn execution_definition(definition: &TaskDefinition) -> Result<TaskDefinition, RequestError> {
+  // Saved definitions and run snapshots must retain the client's original
+  // values. Resolve paths only for process creation on this host.
+  let mut definition = definition.clone();
+  let directory = definition.working_directory.as_deref().map(Path::new);
+  let directory = match directory {
+    Some(path) if path.is_absolute() => path.to_path_buf(),
+    relative => {
+      let home = dirs::home_dir().ok_or_else(|| {
+        RequestError::new(
+          ErrorCode::InvalidDefinition,
+          "the task host has no home directory; supply an absolute working directory",
+        )
+      })?;
+      relative.map_or(home.clone(), |path| home.join(path))
+    }
+  };
+  if !directory.is_absolute() {
+    return Err(RequestError::new(
+      ErrorCode::InvalidDefinition,
+      "task working directory must resolve to an absolute path on the task host",
+    ));
+  }
+  definition.working_directory = Some(directory.into_os_string().into_string().map_err(|_| {
+    RequestError::new(
+      ErrorCode::InvalidDefinition,
+      "task working directory must be valid Unicode",
+    )
+  })?);
+  Ok(definition)
 }
 
 fn validate_definition(definition: &TaskDefinition) -> Result<(), RequestError> {

@@ -1,7 +1,10 @@
 use clap::{Subcommand, ValueEnum};
 
+use std::future::Future;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::time::Duration;
 use task_client::connect_or_start;
 
 use task_ipc::{Stream, socket_path};
@@ -10,11 +13,91 @@ use task_proto::{
   read_frame, write_frame,
 };
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::timeout;
+
+#[cfg(test)]
+mod tests;
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub type ConnectFuture<'a, Stream, ConnectError> =
+  Pin<Box<dyn Future<Output = Result<Stream, ConnectError>> + Send + 'a>>;
+pub type AttachFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CommandError>> + Send + 'a>>;
+
+/// Routes task commands and their interactive sessions to the same target.
+pub trait Connector {
+  type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+  type Error: std::error::Error + Send + Sync + 'static;
+
+  fn connect_task(&self) -> ConnectFuture<'_, Self::Stream, Self::Error>;
+  fn is_local_task_target(&self) -> bool;
+
+  /// Attaches to the selected target's rmux session. The socket path belongs to
+  /// that target and must only be used as local IPC for a local target.
+  fn attach_interactive(&self, session: String, rmux_socket: PathBuf) -> AttachFuture<'_>;
+}
+
+/// Connector for the local per-user task daemon and its rmux sessions.
+#[derive(Debug, Clone)]
+pub struct LocalConnector {
+  socket_path: PathBuf,
+}
+
+impl LocalConnector {
+  #[must_use]
+  pub fn new(socket_path: PathBuf) -> Self {
+    Self { socket_path }
+  }
+}
+
+impl Connector for LocalConnector {
+  type Stream = Stream;
+  type Error = task_client::ClientError;
+
+  fn connect_task(&self) -> ConnectFuture<'_, Self::Stream, Self::Error> {
+    Box::pin(connect_or_start(&self.socket_path))
+  }
+
+  fn is_local_task_target(&self) -> bool {
+    true
+  }
+
+  fn attach_interactive(&self, session: String, rmux_socket: PathBuf) -> AttachFuture<'_> {
+    Box::pin(
+      async move { attach_session(session, &rmux_cli::LocalConnector::new(rmux_socket)).await },
+    )
+  }
+}
+
+/// Runs the interactive rmux attachment through the target's connector.
+///
+/// # Errors
+///
+/// Returns an error when the session cannot be reached or terminal attachment fails.
+pub async fn attach_session<C: rmux_cli::Connector>(
+  session: String,
+  connector: &C,
+) -> Result<(), CommandError> {
+  rmux_cli::run(
+    rmux_cli::Command::Attach {
+      session,
+      resume_from: None,
+      read_only: false,
+      resize: true,
+    },
+    connector,
+  )
+  .await?;
+  Ok(())
+}
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
   Create {
     name: String,
+    /// Working directory on the target; defaults to the local cwd or remote home.
     #[arg(long)]
     cwd: Option<String>,
     #[arg(long, value_enum, default_value_t = Mode::Background)]
@@ -73,8 +156,22 @@ impl From<Mode> for ExecutionMode {
 ///
 /// Returns an error when taskd cannot be reached, a protocol exchange fails,
 /// taskd rejects the operation, or log output cannot be written.
-pub async fn run(mut command: Command) -> Result<(), CommandError> {
-  if let Command::Create { cwd, .. } = &mut command {
+pub async fn run(command: Command) -> Result<(), CommandError> {
+  run_with_connector(command, &LocalConnector::new(socket_path())).await
+}
+
+/// Runs one task command against the supplied local or remote target.
+///
+/// # Errors
+///
+/// Returns connection, protocol, daemon, working directory, or output errors.
+pub async fn run_with_connector<C: Connector>(
+  mut command: Command,
+  connector: &C,
+) -> Result<(), CommandError> {
+  if connector.is_local_task_target()
+    && let Command::Create { cwd, .. } = &mut command
+  {
     let current = std::env::current_dir().map_err(CommandError::WorkingDirectory)?;
     let directory = cwd
       .as_ref()
@@ -92,22 +189,24 @@ pub async fn run(mut command: Command) -> Result<(), CommandError> {
         .to_owned(),
     );
   }
-  let socket = socket_path();
-  let mut stream = connect_or_start(&socket).await?;
-  request(
-    &mut stream,
-    &ClientMessage::Handshake {
-      protocol_version: PROTOCOL_VERSION,
-      client_name: "ctl".into(),
-    },
-  )
-  .await?;
-  expect_handshake(read_required(&mut stream).await?)?;
-
-  execute(command, stream, &socket).await
+  let stream = connect(connector).await?;
+  execute(command, stream, connector).await
 }
 
-async fn attach_task(task: &TaskInfo) -> Result<(), CommandError> {
+async fn connect<C: Connector>(connector: &C) -> Result<C::Stream, CommandError> {
+  let mut stream = connector
+    .connect_task()
+    .await
+    .map_err(|error| CommandError::Connect(Box::new(error)))?;
+  timeout(HANDSHAKE_TIMEOUT, handshake(&mut stream))
+    .await
+    .map_err(|_| CommandError::Timeout {
+      operation: "handshake",
+    })??;
+  Ok(stream)
+}
+
+async fn attach_task<C: Connector>(task: &TaskInfo, connector: &C) -> Result<(), CommandError> {
   let backend = task
     .active_run
     .as_ref()
@@ -123,37 +222,33 @@ async fn attach_task(task: &TaskInfo) -> Result<(), CommandError> {
       code: task_proto::ErrorCode::NotRunning,
       message: "interactive session is not ready".into(),
     })?;
-  let connector = rmux_cli::LocalConnector::new(backend.rmux_socket.clone());
-  rmux_cli::run(
-    rmux_cli::Command::Attach {
-      session,
-      resume_from: None,
-      read_only: false,
-      resize: true,
-    },
-    &connector,
-  )
-  .await?;
-  Ok(())
+  connector
+    .attach_interactive(session, backend.rmux_socket.clone())
+    .await
 }
 
-async fn execute(command: Command, mut stream: Stream, socket: &Path) -> Result<(), CommandError> {
+async fn execute<C: Connector>(
+  command: Command,
+  mut stream: C::Stream,
+  connector: &C,
+) -> Result<(), CommandError> {
   match command {
     Command::Create {
       name,
       cwd,
       mode,
       start,
-      mut command,
+      command,
     } => {
-      let program = command.remove(0);
+      let mut command = command.into_iter();
+      let program = command.next().ok_or(CommandError::MissingProgram)?;
       let response = one(
         &mut stream,
         ClientMessage::CreateTask {
           definition: TaskDefinition {
             name,
             program,
-            arguments: command,
+            arguments: command.collect(),
             working_directory: cwd,
             execution_mode: mode.into(),
           },
@@ -161,10 +256,10 @@ async fn execute(command: Command, mut stream: Stream, socket: &Path) -> Result<
       )
       .await?;
       let task = expect_task(response)?;
+      drop(stream);
       print_task(&task);
       if start {
-        let mut stream = connect_or_start(socket).await?;
-        handshake(&mut stream).await?;
+        let mut stream = connect(connector).await?;
         print_task(&expect_task(
           one(&mut stream, ClientMessage::StartTask { task: task.task_id }).await?,
         )?);
@@ -172,7 +267,8 @@ async fn execute(command: Command, mut stream: Stream, socket: &Path) -> Result<
     }
     Command::Attach { task } => {
       let task = expect_task(one(&mut stream, ClientMessage::ShowTask { task }).await?)?;
-      attach_task(&task).await?;
+      drop(stream);
+      attach_task(&task, connector).await?;
     }
     Command::List => match one(&mut stream, ClientMessage::ListTasks).await? {
       ServerMessage::TaskList { tasks } => {
@@ -215,21 +311,27 @@ async fn execute(command: Command, mut stream: Stream, socket: &Path) -> Result<
   Ok(())
 }
 
-async fn print_logs(
-  stream: &mut Stream,
+async fn print_logs<S: AsyncRead + AsyncWrite + Unpin>(
+  stream: &mut S,
   task: String,
   follow: bool,
   after_sequence: Option<u64>,
 ) -> Result<(), CommandError> {
-  request(
-    stream,
-    &ClientMessage::ReadLogs {
-      task,
-      after_sequence,
-      follow,
-    },
+  timeout(
+    REQUEST_TIMEOUT,
+    request(
+      stream,
+      &ClientMessage::ReadLogs {
+        task,
+        after_sequence,
+        follow,
+      },
+    ),
   )
-  .await?;
+  .await
+  .map_err(|_| CommandError::Timeout {
+    operation: "log request",
+  })??;
   loop {
     match read_required(stream).await? {
       ServerMessage::Log { event } => {
@@ -278,7 +380,7 @@ fn print_task(task: &TaskInfo) {
   }
 }
 
-async fn handshake(stream: &mut Stream) -> Result<(), CommandError> {
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Result<(), CommandError> {
   request(
     stream,
     &ClientMessage::Handshake {
@@ -290,21 +392,35 @@ async fn handshake(stream: &mut Stream) -> Result<(), CommandError> {
   expect_handshake(read_required(stream).await?)
 }
 
-async fn one(stream: &mut Stream, message: ClientMessage) -> Result<ServerMessage, CommandError> {
-  request(stream, &message).await?;
-  let response = read_required(stream).await?;
-  if let ServerMessage::Error { code, message } = response {
-    return Err(CommandError::Server { code, message });
-  }
-  Ok(response)
+async fn one<S: AsyncRead + AsyncWrite + Unpin>(
+  stream: &mut S,
+  message: ClientMessage,
+) -> Result<ServerMessage, CommandError> {
+  timeout(REQUEST_TIMEOUT, async {
+    request(stream, &message).await?;
+    let response = read_required(stream).await?;
+    if let ServerMessage::Error { code, message } = response {
+      return Err(CommandError::Server { code, message });
+    }
+    Ok(response)
+  })
+  .await
+  .map_err(|_| CommandError::Timeout {
+    operation: "request",
+  })?
 }
 
-async fn request(stream: &mut Stream, message: &ClientMessage) -> Result<(), CommandError> {
+async fn request<S: AsyncWrite + Unpin>(
+  stream: &mut S,
+  message: &ClientMessage,
+) -> Result<(), CommandError> {
   write_frame(stream, message).await?;
   Ok(())
 }
 
-async fn read_required(stream: &mut Stream) -> Result<ServerMessage, CommandError> {
+async fn read_required<S: AsyncRead + Unpin>(
+  stream: &mut S,
+) -> Result<ServerMessage, CommandError> {
   read_frame(stream)
     .await?
     .ok_or(CommandError::UnexpectedEndOfStream)
@@ -344,17 +460,14 @@ pub enum CommandError {
   Rmux(#[from] rmux_cli::CommandError),
   #[error("could not resolve task working directory: {0}")]
   WorkingDirectory(#[source] io::Error),
+  #[error("task command must include a program")]
+  MissingProgram,
+  #[error("taskd {operation} timed out")]
+  Timeout { operation: &'static str },
   #[error(transparent)]
   Codec(#[from] task_proto::CodecError),
   #[error("could not connect to taskd: {0}")]
-  Connect(#[source] io::Error),
-  #[error("could not determine the current executable: {0}")]
-  CurrentExecutable(#[source] io::Error),
-  #[error("could not start taskd using {}: {source}", executable.display())]
-  StartDaemon {
-    executable: PathBuf,
-    source: io::Error,
-  },
+  Connect(#[source] Box<dyn std::error::Error + Send + Sync>),
   #[error("taskd closed the connection before responding")]
   UnexpectedEndOfStream,
   #[error("expected {expected}, received {actual}")]

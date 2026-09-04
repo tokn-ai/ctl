@@ -12,9 +12,10 @@ not close it or change its position.
 
 The agreed interaction is one default managed task per saved definition and
 host. A separate **Run another instance** action creates an independent task.
-The first implementation supports the local host; remote task execution remains
-unavailable until ctl has a task gateway. References include host identity from
-the beginning.
+The first desktop implementation supports the local host. Remote controls in
+the desktop remain separate UI work; the CLI gateway is defined in
+[Proposal 0006](0006-remote-tasks.md). References include host identity from the
+beginning.
 
 ## Screen plan
 

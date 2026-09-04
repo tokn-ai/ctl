@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { TaskDefinition, SavedTaskDefinition } from "../../lib/types";
 import type { useWorkspace } from "../workspace/useWorkspace";
+import { generateTaskName } from "./taskName";
 import { sameDefinition, validateDefinition } from "./taskModel";
 
 import { parseCommandLine, formatCommandLine } from "./commandLine";
@@ -101,11 +102,18 @@ export function useTaskEditor(workspace: Workspace) {
 
   async function save(): Promise<SavedTaskDefinition> {
     if (!definitionId || !draft) throw new Error("No task draft is open.");
-    const invalid = draft.command_error ?? validateDefinition(draft.definition);
+    const definition = {
+      ...draft.definition,
+      name: draft.definition.name.trim()
+        ? draft.definition.name
+        : generateTaskName(draft.definition),
+    };
+    const invalid = draft.command_error ?? validateDefinition(definition);
     if (invalid) throw new Error(invalid);
+    if (definition.name !== draft.definition.name) edit(definition);
     const value = {
       definition_id: definitionId,
-      definition: draft.definition,
+      definition,
       revision: crypto.randomUUID(),
     };
     workspace.update("task_definitions", (definitions) => [

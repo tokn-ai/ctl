@@ -187,3 +187,8 @@ require an explicitly invoked shell. An optional `command_line` draft field
 preserves exact input, including unfinished quotes, across dismissal and relaunch.
 Incomplete parsing blocks definition creation and execution, without blocking
 draft saving. Published definitions still store only executable and arguments.
+
+An omitted name is generated on creation as `executable-folder-word`, using the
+executable and working-directory basenames plus a random word. An unspecified
+or root working directory uses `default`. Generated names respect the 64-byte
+limit and are stored with the definition; explicit names remain unchanged.

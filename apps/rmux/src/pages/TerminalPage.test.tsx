@@ -304,6 +304,21 @@ describe("workspace-backed terminal page", () => {
     ).toBe(true);
   });
 
+  it("generates a name when creating a definition with a blank name", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "New task definition" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Command line" }), {
+      target: { value: "cargo build" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create definition" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    expect(document.task_definitions?.[0].definition.name).toMatch(/^cargo-default-[a-z]+$/);
+    expect(document.task_drafts).toEqual([]);
+  });
+
   it("parses command input and preserves unfinished quoting on dismissal", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });

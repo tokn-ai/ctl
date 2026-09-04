@@ -95,7 +95,7 @@ export function TaskEditor({
                 Name
                 <input
                   value={definition.name}
-                  placeholder="e.g. API server"
+                  placeholder="Optional: command-folder-random word"
                   onChange={(event) =>
                     model.edit({ ...definition, name: event.target.value })
                   }

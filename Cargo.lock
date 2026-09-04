@@ -662,6 +662,9 @@ dependencies = [
  "rmux-ipc",
  "rmux-proto",
  "rmuxd",
+ "task-ipc",
+ "task-proto",
+ "taskd",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
@@ -672,6 +675,8 @@ name = "ctl-core"
 version = "0.1.0"
 dependencies = [
  "rmux-ipc",
+ "task-client",
+ "task-ipc",
  "thiserror 2.0.20",
  "tokio",
  "uuid",

@@ -505,3 +505,65 @@ async fn daemon_restart_refuses_active_tasks_and_releases_idle_state() {
   assert_eq!(restored.last_run.unwrap().state, RunState::Stopped);
   daemon.stop().await;
 }
+
+#[tokio::test]
+async fn omitted_and_relative_working_directories_resolve_on_the_daemon_host() {
+  let daemon = TestDaemon::start().await;
+  let home = dirs::home_dir().unwrap().canonicalize().unwrap();
+  for (index, working_directory) in [None, Some(".".into())].into_iter().enumerate() {
+    let response = daemon
+      .request(ClientMessage::CreateTask {
+        definition: TaskDefinition {
+          name: format!("remote-directory-{index}"),
+          program: shell_program(),
+          arguments: shell_arguments("pwd", "cd"),
+          working_directory: working_directory.clone(),
+          execution_mode: ExecutionMode::Background,
+        },
+      })
+      .await;
+    let ServerMessage::TaskCreated { task } = response else {
+      panic!("unexpected task response: {response:?}");
+    };
+    assert_eq!(task.definition.working_directory, working_directory);
+    assert!(matches!(
+      daemon
+        .request(ClientMessage::StartTask {
+          task: task.task_id.clone()
+        })
+        .await,
+      ServerMessage::TaskStatus { .. }
+    ));
+    let mut stream = daemon.connect().await;
+    write_frame(
+      &mut stream,
+      &ClientMessage::ReadLogs {
+        task: task.task_id,
+        after_sequence: None,
+        follow: true,
+      },
+    )
+    .await
+    .unwrap();
+    let mut output = Vec::new();
+    loop {
+      match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+      {
+        ServerMessage::Log { event } => output.extend(event.data),
+        ServerMessage::LogsFinished => break,
+        response => panic!("unexpected log response: {response:?}"),
+      }
+    }
+    assert_eq!(
+      PathBuf::from(String::from_utf8(output).unwrap().trim())
+        .canonicalize()
+        .unwrap(),
+      home
+    );
+  }
+  daemon.stop().await;
+}

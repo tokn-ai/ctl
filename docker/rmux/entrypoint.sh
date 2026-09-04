@@ -10,7 +10,8 @@ if [ ! -r "$authorized_keys_source" ]; then
   exit 64
 fi
 
-install -d -m 0700 -o rmux -g rmux /home/rmux/.ssh /run/rmux
+install -d -m 0700 -o rmux -g rmux \
+  /home/rmux/.ssh /run/rmux /run/taskd /var/lib/taskd
 install -d -m 0700 /etc/ssh/host_keys /run/sshd
 install -m 0600 -o rmux -g rmux "$authorized_keys_source" "$authorized_keys_target"
 

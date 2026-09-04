@@ -5,7 +5,7 @@
 This repository will contain two independently useful products:
 
 - `rmux`: persistent local terminal sessions;
-- `ctl`: SSH-authorized access to remote `rmux` sessions.
+- `ctl`: local and SSH-authorized access to terminal sessions and managed tasks.
 
 The current MVP supports local `rmux` sessions plus mixed local/SSH sessions
 in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
@@ -37,11 +37,12 @@ cargo install --path rmux/daemon
 cargo install --path rmux/cli
 ```
 
-For remote access, install `rmuxd` and `ctl-agent` on the controlled device and
-`ctl` on the client:
+For remote access, install `rmuxd`, `taskd`, and `ctl-agent` together on the
+controlled device and `ctl` on the client:
 
 ```sh
 cargo install --path rmux/daemon
+cargo install --path task/daemon
 cargo install --path ctl/agent
 cargo install --path ctl/cli
 ```
@@ -230,8 +231,8 @@ the logical attachment and its leases for 30 seconds by default. An explicit
 
 ## Managed tasks
 
-Tasks support local background commands and interactive terminals on Unix and
-Windows. Task definitions and the latest run metadata persist in taskd.
+Tasks support local and SSH background commands and interactive terminals on
+Unix and Windows. Task definitions and the latest run metadata persist in taskd.
 Background stdout and stderr use a bounded in-memory log; interactive input and
 output stay in rmuxd.
 
@@ -239,6 +240,7 @@ output stay in rmuxd.
 ctl task create api --cwd ./service --start -- cargo run
 ctl task list
 ctl task show api
+ctl task start api
 ctl task logs api
 ctl task logs api --follow
 ctl task stop api
@@ -260,16 +262,38 @@ the run; rmuxd owns its process and PTY (ConPTY on Windows). `ctl task show`
 also reports the session ID for `ctl rmux attach`. `ctl task logs` applies only
 to background tasks.
 
+Global `--host` selects the same remote target for task registration, lifecycle,
+logs, and interactive attachment:
+
+```sh
+ctl --host workstation task create api --cwd /home/me/service --start -- cargo run
+ctl --host workstation task list
+ctl --host workstation task logs api --follow
+ctl --host workstation task create shell --mode interactive --start -- bash
+ctl --host workstation task attach shell
+ctl --host workstation task stop shell
+ctl --host workstation task remove shell
+```
+
+Task requests use the fixed `exec ctl-agent connect --service task` command.
+Interactive attachment opens a separate rmux channel to that same host; remote
+socket paths in task metadata are never opened on the client. A local create
+defaults to the caller's working directory. A remote create defaults to the
+remote user's home; `--cwd` names a remote path, with relative paths resolved
+against that home.
+
 Interactive runs survive taskd restart and are reconciled with the same rmuxd
 instance. Rmuxd retains exit results until taskd records them. Replacing or
 losing rmuxd fails the affected runs; taskd does not automatically recreate
 them. Starting and restarting remain explicit operations.
 
 Build and install `ctl`, `taskd`, and `rmuxd` together. This task protocol is
-version 2; restart an older taskd before using it. Restart an older rmuxd to
+version 3; restart an older taskd before using it. Restart an older rmuxd to
 enable managed sessions (this terminates its existing terminals). Existing
-background task records remain readable. Remote task routing, automatic restart
-policies, and desktop workspace task integration remain pending.
+background task records remain readable. SSH task routing additionally requires
+the updated gateway and any SSH forced-command allowlist; rebuilding the Docker
+target updates all four binaries. Automatic restart policies remain pending.
+The desktop task interface currently manages local tasks.
 
 On Unix, background tasks run in their own process group. Stop first sends a
 termination signal to the group and escalates if it does not exit.
@@ -277,7 +301,6 @@ termination signal to the group and escalates if it does not exit.
 Windows background tasks use owner-restricted local named pipes and Job Objects.
 Stop terminates the entire process tree; taskd exit also terminates its jobs.
 Task completion follows the root process and cleans up remaining descendants.
-`ctl task create` saves the caller's working directory unless `--cwd` is supplied.
 Windows state defaults to `%LOCALAPPDATA%\ctl\taskd` and inherits filesystem ACLs;
 custom data directories should be private to the user.
 
@@ -292,20 +315,22 @@ Windows desktop backend and native shell metadata remain separate work.
 
 ### Windows SSH hosts
 
-Install `ctl-agent.exe` and `rmuxd.exe` beside each other in a directory on the
+Install `ctl-agent.exe`, `taskd.exe`, and `rmuxd.exe` together in a directory on the
 remote user's PATH. Enable Windows OpenSSH Server with its default `cmd.exe`
 shell, then select the server platform explicitly from either client platform:
 
 ```sh
 ctl --host windows-host --remote-platform windows rmux new development -- cmd.exe /D /Q
 ctl --host windows-host --remote-platform windows rmux attach development
+ctl --host windows-host --remote-platform windows task list
 ```
 
-The fixed Windows command is `ctl-agent.exe connect`. The gateway relays only the
-user's rmux data pipe, and starts the companion daemon when absent. The daemon
-breaks away from the SSH job so its sessions survive disconnects. PowerShell
-and custom SSH shells are not covered by this implementation. Remote task
-routing and desktop remote-platform selection remain pending.
+The fixed Windows commands are `ctl-agent.exe connect` for rmux and
+`ctl-agent.exe connect --service task` for tasks. The gateway relays the selected
+user-owned data pipe and starts its companion daemon when absent. The daemon
+breaks away from the SSH job so its sessions or tasks survive disconnects.
+PowerShell and custom SSH shells are not covered by this implementation.
+Desktop remote-platform selection remains pending.
 
 The SSH gateway is named `ctl-agent` (`ctl-agent.exe` on Windows), reflecting
 its per-connection lifetime. When upgrading from the former gateway name,

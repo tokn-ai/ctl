@@ -3,6 +3,10 @@
 - Status: Implemented
 - Created: 2026-09-04
 
+[Proposal 0006](0006-remote-tasks.md) extends this command convention and daemon
+lifetime boundary to the fixed task service. The original scope below records
+the rmux gateway implementation.
+
 ## Summary
 
 Extend Proposal 0002 to Windows clients and Windows SSH hosts while preserving

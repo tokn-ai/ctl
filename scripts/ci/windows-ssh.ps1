@@ -21,6 +21,7 @@ $config = Join-Path $sshDirectory 'config'
 $originalConfig = if (Test-Path $config) { [IO.File]::ReadAllText($config) } else { $null }
 $service = Get-Service sshd
 $wasRunning = $service.Status -eq 'Running'
+$originalStartType = $service.StartType
 $serverConfig = Join-Path $env:ProgramData 'ssh\sshd_config'
 $originalServerConfig = if (Test-Path $serverConfig) { [IO.File]::ReadAllText($serverConfig) } else { $null }
 $shellKey = 'HKLM:\SOFTWARE\OpenSSH'
@@ -76,11 +77,14 @@ Host ctl-windows-ci
 
 $originalConfig
 "@ | Set-Content $config -Encoding ascii
+  Set-Service sshd -StartupType Manual
   Start-Service sshd
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctld', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
   Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'rmux', 'list')
 } catch {
+  Get-Service sshd | Format-List Name, Status, StartType
+  Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddMinutes(-5) } -MaxEvents 10 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
   Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 20 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
   throw
 } finally {
@@ -96,6 +100,7 @@ $originalConfig
   if ($null -eq $originalShell) { Remove-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue }
   else { Set-ItemProperty $shellKey -Name DefaultShell -Value $originalShell }
   if ($wasRunning) { Start-Service sshd }
+  Set-Service sshd -StartupType $originalStartType
   Remove-Item Env:CTL_TEST_SSH_HOST -ErrorAction SilentlyContinue
   Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 }

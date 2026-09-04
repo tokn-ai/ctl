@@ -103,10 +103,13 @@ $originalConfig
   Set-Service sshd -StartupType Manual
   Invoke-Native -Program 'sc.exe' -Arguments @('config', 'sshd', 'binPath=', "`"$openssh\sshd.exe`" -E `"$root\service.log`"")
   Start-Service sshd
+  Invoke-Native -Program "$openssh\ssh.exe" -Arguments @('-vvv', '-E', "$root\client.log", 'ctl-windows-ci', 'echo', 'SSH_AUTHENTICATED')
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctld', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
   Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'rmux', 'list')
 } catch {
+  Stop-Service sshd -ErrorAction SilentlyContinue
+  Get-Content "$root\client.log" -Tail 100 -ErrorAction SilentlyContinue
   Get-Content "$root\service.log" -Tail 100 -ErrorAction SilentlyContinue
   if ((Get-Service sshd).Status -eq 'Stopped') {
     $diagnostic = Start-Process "$openssh\sshd.exe" -ArgumentList @('-D', '-e', '-f', $serverConfig) -RedirectStandardError "$root\startup.log" -RedirectStandardOutput "$root\startup.out" -PassThru

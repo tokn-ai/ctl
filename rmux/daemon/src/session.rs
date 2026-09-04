@@ -963,7 +963,7 @@ impl SessionManager {
     command_builder.env("TERM", "xterm-256color");
     #[cfg(unix)]
     command_builder.env("RMUX_SHELL_STATE_PIPE", shell_reporter_path);
-    let mut child = pair
+    let child = pair
       .slave
       .spawn_command(command_builder)
       .map_err(|error| SessionManagerError::Spawn(error.to_string()))?;
@@ -979,6 +979,13 @@ impl SessionManager {
     let writer = pair
       .master
       .take_writer()
+      .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
+    #[cfg(windows)]
+    let crate::conpty::PtyIo {
+      reader,
+      writer,
+      initial_output,
+    } = crate::conpty::initialize(reader, writer)
       .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
     #[cfg(unix)]
     let killer = child.clone_killer();
@@ -1011,6 +1018,10 @@ impl SessionManager {
       process_observation_enabled: AtomicBool::new(process_inspector.is_some()),
     });
 
+    #[cfg(windows)]
+    if !initial_output.is_empty() {
+      session.append_output(&initial_output);
+    }
     #[cfg(unix)]
     attach_shell_report_target(&shell_report_target, &session);
     if let (Some(monitor), Some(inspector)) = (&self.inner.process_monitor, process_inspector) {
@@ -1021,33 +1032,7 @@ impl SessionManager {
     self.inner.ever_had_session.store(true, Ordering::Release);
     self.inner.changed.notify_one();
 
-    let reader_session = Arc::clone(&session);
-    let reader_thread = std::thread::Builder::new()
-      .name(format!("rmux-reader-{}", &session_id[..8]))
-      .spawn(move || read_pty(reader, &reader_session))
-      .map_err(SessionManagerError::ReaderThread)?;
-
-    let manager = Arc::downgrade(&self.inner);
-    let waiter_session = Arc::clone(&session);
-    std::thread::Builder::new()
-      .name(format!("rmux-waiter-{}", &session_id[..8]))
-      .spawn(move || {
-        let exit_code = child.wait().ok().map(|status| status.exit_code());
-        // ConPTY keeps the output pipe open until the pseudoconsole closes.
-        // Drop it on this waiter thread while the reader continues to drain.
-        #[cfg(windows)]
-        {
-          let master = lock(&waiter_session.master).take();
-          drop(master);
-        }
-        let _reader_result = reader_thread.join();
-        waiter_session.publish_ended(exit_code);
-        if let Some(manager) = manager.upgrade() {
-          lock(&manager.registry).sessions.remove(&session_id);
-          manager.changed.notify_one();
-        }
-      })
-      .map_err(SessionManagerError::WaiterThread)?;
+    start_session_workers(child, reader, &session, &self.inner)?;
 
     Ok(session)
   }
@@ -1186,6 +1171,44 @@ impl Drop for NameReservation {
         .remove(&self.name);
     }
   }
+}
+
+fn start_session_workers(
+  mut child: Box<dyn portable_pty::Child + Send + Sync>,
+  reader: Box<dyn Read + Send>,
+  session: &Arc<Session>,
+  manager: &Arc<SessionManagerInner>,
+) -> Result<(), SessionManagerError> {
+  let session_id = session.id.clone();
+  let reader_session = Arc::clone(session);
+  let reader_thread = std::thread::Builder::new()
+    .name(format!("rmux-reader-{}", &session_id[..8]))
+    .spawn(move || read_pty(reader, &reader_session))
+    .map_err(SessionManagerError::ReaderThread)?;
+
+  let manager = Arc::downgrade(manager);
+  let waiter_session = Arc::clone(session);
+  std::thread::Builder::new()
+    .name(format!("rmux-waiter-{}", &session_id[..8]))
+    .spawn(move || {
+      let exit_code = child.wait().ok().map(|status| status.exit_code());
+      // ConPTY keeps the output pipe open until the pseudoconsole closes.
+      // Drop it on this waiter thread while the reader continues to drain.
+      #[cfg(windows)]
+      {
+        let master = lock(&waiter_session.master).take();
+        drop(master);
+      }
+      let _reader_result = reader_thread.join();
+      waiter_session.publish_ended(exit_code);
+      if let Some(manager) = manager.upgrade() {
+        lock(&manager.registry).sessions.remove(&session_id);
+        manager.changed.notify_one();
+      }
+    })
+    .map_err(SessionManagerError::WaiterThread)?;
+
+  Ok(())
 }
 
 #[derive(Debug, Error)]

@@ -132,6 +132,11 @@ arbitrates concurrent startup; the data endpoint is published last, so a data
 connection also implies maintenance support is available. `RMUX_RUNTIME_DIR`
 is a namespace seed on Windows, not a filesystem socket directory.
 
+The daemon answers ConPTY's initial cursor-position query at the canonical
+origin before publishing a new session. The bounded startup reader handles
+fragmented queries and removes that transport handshake from replayed output;
+a detached session does not need a renderer to finish starting.
+
 A child waiter closes the pseudoconsole before joining the independent output
 reader. Session kill also closes ConPTY on a separate thread. This keeps output
 draining while `ClosePseudoConsole` runs, avoiding the shutdown deadlock on older

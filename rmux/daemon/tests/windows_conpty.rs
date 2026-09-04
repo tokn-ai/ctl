@@ -173,6 +173,7 @@ async fn output_until(stream: &mut Stream, marker: &str) -> u64 {
       ServerMessage::Output {
         data, sequence_end, ..
       } => {
+        eprintln!("ConPTY output: {:?}", String::from_utf8_lossy(&data));
         output.extend(data);
         write_frame(
           stream,

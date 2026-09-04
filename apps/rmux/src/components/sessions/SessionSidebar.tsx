@@ -17,7 +17,6 @@ import {
 const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 
 interface SessionSidebarProps {
-  children?: import("react").ReactNode;
   targets: readonly ConnectionTarget[];
   targetErrors: ReadonlyMap<string, string>;
   sessions: SessionSummary[];
@@ -71,7 +70,6 @@ function sidebarTitle(
 }
 
 export function SessionSidebar({
-  children,
   targets,
   targetErrors,
   sessions,
@@ -279,7 +277,6 @@ export function SessionSidebar({
           <span aria-hidden="true">＋</span> New shell
         </button>
       </footer>
-      {children}
     </aside>
   );
 }

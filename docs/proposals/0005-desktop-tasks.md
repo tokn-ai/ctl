@@ -1,13 +1,13 @@
 # Proposal 0005: Tasks in the desktop workspace
 
-- Status: Proposed
+- Status: Accepted
 - Created: 2026-09-04
 
 ## Summary
 
-Saved task definitions and managed tasks appear in the existing desktop sidebar.
-Terminals, task output, and definition editors share one tab strip and content
-area. A task tab represents a managed task, so stopping or restarting a run does
+The desktop sidebar has a vertical activity bar with Sessions and Tasks tabs.
+Terminals and managed task output share the main tab strip. Task creation and
+definition editing use an in-app dialog over the current tab. A task tab represents a managed task, so stopping or restarting a run does
 not close it or change its position.
 
 The agreed interaction is one default managed task per saved definition and
@@ -20,7 +20,7 @@ beginning.
 ## Screen plan
 
 ```text
-Workspace                 | shell × | api × | Edit build × |
+Workspace                 | shell × | api × |              |
                           +--------------------------------+
 Terminals                 | api · Local · Running           |
   shell                   | Background        Stop Restart |
@@ -35,8 +35,9 @@ Tasks                 [+] +--------------------------------+
 ```
 
 - Selecting a managed task opens or focuses its tab without starting it.
-- Selecting a saved definition opens its editor. Its primary actions are
-  **Save** and **Save and run**. Existing definitions also offer **Run**.
+- Selecting a saved definition opens its dialog. New drafts offer **Create definition**
+  and **Create and run**; existing definitions offer **Save changes** and **Save and run**.
+  Run remains available on saved definitions in the sidebar.
 - The editor contains name, executable, arguments, working directory, and
   Background / Interactive mode. Arguments are entered as separate values;
   the app does not infer shell quoting or execute a command through a shell.
@@ -59,8 +60,11 @@ Tasks                 [+] +--------------------------------+
 - Closing a tab only closes its view. Removing a saved definition does not stop
   or unregister tasks. Removing a managed task requires it to be stopped and
   names that task explicitly. Forgetting a workspace reference is separate.
-- Unsaved editor changes survive tab switches. Closing a dirty editor offers
-  Save, Discard, or Cancel; it never silently throws away changes.
+- Draft edits autosave to the workspace, including incomplete fields. Closing the
+  dialog by Escape, its close button, or the backdrop dismisses it without a
+  confirmation and retains the draft. Drafts can be resumed from the Tasks sidebar
+  after an app restart. Creating a runnable definition and starting a task remain
+  explicit actions. Failed writes are visible; normal app close flushes pending writes.
 
 ### Loading, errors, and restoration
 
@@ -132,7 +136,8 @@ Migrate workspace schema version 1 to version 2 with:
 The migration preserves existing hosts, terminal membership, tab order, and active
 selection. Preserve a recoverable copy before replacing the old workspace file.
 Runtime status, logs, terminal bytes, and process IDs are never workspace data.
-Dirty editor drafts are held in app memory until Save and are not daemon state.
+Editor drafts autosave in the workspace, separately from runnable definitions;
+they are never daemon state.
 
 Keep task coordination, editors, log subscriptions, and generalized tab state in
 feature modules. The existing large TerminalPage should compose these modules
@@ -156,3 +161,35 @@ rather than accumulate task protocol and persistence logic.
 - [Proposal 0003: Managed tasks in ctl](0003-task-system.md)
 - [Workspace implementation](../../apps/rmux/src-tauri/src/workspace/mod.rs)
 - [rmux local-control protocol](../rmux-local-control.md)
+
+
+## Sidebar and draft storage update
+
+Workspace schema v2 additionally stores `sidebar_view` (Sessions by default) and
+`task_drafts` (empty by default). Each draft has a stable `definition_id` and the
+editable definition fields. Draft validation permits incomplete commands and
+paths while bounding stored data. Existing definitions retain their stricter
+validation and are changed only by an explicit save action.
+
+Legacy definition tabs are removed from the restored tab strip; definitions
+remain available in the sidebar and open in the dialog. Ordinary session and
+managed-task tabs keep their relative order. The dialog does not detach a
+terminal, and its focus containment and the app command barrier prevent input
+from reaching the terminal while editing.
+
+
+### Command-line entry
+
+The task dialog focuses a command-line field by default. POSIX single/double
+quotes and backslash escapes split it into the executable and argument rows.
+Those rows remain editable and regenerate an equivalent quoted command line.
+No variables, globs, or command substitutions are expanded; shell operators
+require an explicitly invoked shell. An optional `command_line` draft field
+preserves exact input, including unfinished quotes, across dismissal and relaunch.
+Incomplete parsing blocks definition creation and execution, without blocking
+draft saving. Published definitions still store only executable and arguments.
+
+An omitted name is generated on creation as `executable-folder-word`, using the
+executable and working-directory basenames plus a random word. An unspecified
+or root working directory uses `default`. Generated names respect the 64-byte
+limit and are stored with the definition; explicit names remain unchanged.

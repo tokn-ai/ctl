@@ -1,3 +1,4 @@
+mod control;
 mod interactive;
 mod process;
 
@@ -582,6 +583,12 @@ impl State {
 /// Returns an error when local storage, the Unix endpoint, or signal handling
 /// cannot be initialized or operated safely.
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
+  // EOF on the control stream means the listener and state lock are released.
+  drop(serve(config).await?);
+  Ok(())
+}
+
+async fn serve(config: DaemonConfig) -> Result<Option<Stream>, DaemonError> {
   #[cfg(unix)]
   prepare_runtime_directory(&config.socket_path)?;
   #[cfg(unix)]
@@ -591,6 +598,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   #[cfg(unix)]
   let _socket_guard = SocketGuard(config.socket_path.clone());
   let state = Arc::new(State::load(&config.data_directory, config.rmux_socket)?);
+  let (control_tx, mut control_rx) = mpsc::channel(1);
+  let mut connections = tokio::task::JoinSet::new();
   let reconciliation = state.reconcile_interactive();
   tokio::pin!(reconciliation);
   loop {
@@ -602,13 +611,25 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         #[cfg(windows)]
         let stream = accepted.map_err(DaemonError::Accept)?;
         let state = Arc::clone(&state);
-        tokio::spawn(async move {
-          let _ = handle_connection(stream, state).await;
+        let control_tx = control_tx.clone();
+        connections.spawn(async move {
+          let _ = handle_connection(stream, state, control_tx).await;
         });
       }
+      Some(request) = control_rx.recv() => {
+        let _mutation = state.mutations.lock().await;
+        if let Some(stream) = control::accept_restart(request, &state).await {
+          connections.abort_all();
+          while connections.join_next().await.is_some() {}
+          return Ok(Some(stream));
+        }
+      }
+      Some(_) = connections.join_next(), if !connections.is_empty() => {}
       signal = tokio::signal::ctrl_c() => {
         signal.map_err(DaemonError::Signal)?;
-        return Ok(());
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+        return Ok(None);
       }
     }
   }
@@ -617,8 +638,16 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
 async fn handle_connection(
   mut stream: Stream,
   state: Arc<State>,
+  control_tx: mpsc::Sender<control::Request>,
 ) -> Result<(), task_proto::CodecError> {
-  let handshake = read_frame::<_, ClientMessage>(&mut stream).await?;
+  let handshake = match read_frame::<_, control::FirstMessage>(&mut stream).await? {
+    Some(control::FirstMessage::Control(request)) => {
+      let _ = control_tx.send(control::Request { stream, request }).await;
+      return Ok(());
+    }
+    Some(control::FirstMessage::Task(request)) => Some(request),
+    None => None,
+  };
   match handshake {
     Some(ClientMessage::Handshake {
       protocol_version, ..

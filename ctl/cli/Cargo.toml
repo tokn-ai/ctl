@@ -8,6 +8,7 @@ clap.workspace = true
 ctl-core.workspace = true
 rmux-cli.workspace = true
 task-cli.workspace = true
+task-client.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

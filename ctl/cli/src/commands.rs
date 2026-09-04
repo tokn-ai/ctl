@@ -25,6 +25,15 @@ pub async fn run(arguments: Arguments) -> Result<(), CliError> {
     Command::Rmux { command } => {
       rmux_cli::run(command, &connector).await?;
     }
+    Command::Taskd {
+      command: super::TaskdCommand::Restart,
+    } => {
+      if !connector.target.is_local() {
+        return Err(CliError::RemoteTaskDaemonRestartUnsupported);
+      }
+      task_client::restart_daemon().await?;
+      println!("taskd is ready");
+    }
     Command::Task { command } => {
       task_cli::run_with_connector(command, &connector).await?;
     }
@@ -110,8 +119,12 @@ impl Connector for CtlConnector {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error("taskd restart is only supported locally; run it on the task host")]
+  RemoteTaskDaemonRestartUnsupported,
   #[error(transparent)]
   Rmux(#[from] CommandError),
+  #[error(transparent)]
+  TaskDaemon(#[from] task_client::ClientError),
   #[error(transparent)]
   Task(#[from] task_cli::CommandError),
 }
@@ -119,6 +132,17 @@ pub enum CliError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn remote_daemon_restart_is_rejected_before_connecting() {
+    use clap::Parser;
+    let arguments =
+      Arguments::try_parse_from(["ctl", "--host", "task-server", "taskd", "restart"]).unwrap();
+    assert!(matches!(
+      run(arguments).await,
+      Err(CliError::RemoteTaskDaemonRestartUnsupported)
+    ));
+  }
 
   #[test]
   fn remote_interactive_sessions_keep_the_task_host_and_connection_options() {

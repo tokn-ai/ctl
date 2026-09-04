@@ -415,6 +415,98 @@ async fn registration_retries_reuse_identity_and_updates_preserve_run_definition
 }
 
 #[tokio::test]
+async fn daemon_restart_refuses_active_tasks_and_releases_idle_state() {
+  use task_proto::control;
+  let mut daemon = TestDaemon::start().await;
+  let definition = TaskDefinition {
+    name: "restart-survivor".into(),
+    program: shell_program(),
+    arguments: shell_arguments("sleep 30 & wait", "ping -n 30 127.0.0.1 >nul"),
+    working_directory: None,
+    execution_mode: ExecutionMode::Background,
+  };
+  let ServerMessage::TaskCreated { task } = daemon
+    .request(ClientMessage::CreateTask { definition })
+    .await
+  else {
+    panic!("expected task creation");
+  };
+  daemon
+    .request(ClientMessage::StartTask {
+      task: task.task_id.clone(),
+    })
+    .await;
+  let mut control_stream = connect(&daemon.socket).await.unwrap();
+  write_frame(
+    &mut control_stream,
+    &control::ClientMessage::RestartDaemon {
+      protocol_version: control::PROTOCOL_VERSION,
+    },
+  )
+  .await
+  .unwrap();
+  let refused = read_frame::<_, control::ServerMessage>(&mut control_stream)
+    .await
+    .unwrap();
+  assert!(
+    matches!(refused, Some(control::ServerMessage::Error { message }) if message.contains("active tasks"))
+  );
+  let ServerMessage::TaskStatus { task: running } = daemon
+    .request(ClientMessage::ShowTask {
+      task: task.task_id.clone(),
+    })
+    .await
+  else {
+    panic!("expected task status")
+  };
+  assert!(running.active_run.is_some());
+  daemon
+    .request(ClientMessage::StopTask {
+      task: task.task_id.clone(),
+    })
+    .await;
+
+  // An idle data connection must not hold the state lock past control EOF.
+  let _idle_connection = connect(&daemon.socket).await.unwrap();
+  let mut control_stream = connect(&daemon.socket).await.unwrap();
+  write_frame(
+    &mut control_stream,
+    &control::ClientMessage::RestartDaemon {
+      protocol_version: control::PROTOCOL_VERSION,
+    },
+  )
+  .await
+  .unwrap();
+  let accepted = read_frame::<_, control::ServerMessage>(&mut control_stream)
+    .await
+    .unwrap();
+  assert!(
+    matches!(accepted, Some(control::ServerMessage::RestartAccepted { data_directory, .. }) if data_directory == daemon.root.join("data"))
+  );
+  assert!(
+    tokio::time::timeout(
+      Duration::from_secs(5),
+      read_frame::<_, control::ServerMessage>(&mut control_stream)
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .is_none()
+  );
+  assert!(daemon.child.wait().await.unwrap().success());
+  let daemon = TestDaemon::launch(daemon.root.clone(), daemon.socket.clone()).await;
+  let ServerMessage::TaskStatus { task: restored } = daemon
+    .request(ClientMessage::ShowTask { task: task.task_id })
+    .await
+  else {
+    panic!("expected restored task")
+  };
+  assert_eq!(restored.definition, task.definition);
+  assert_eq!(restored.last_run.unwrap().state, RunState::Stopped);
+  daemon.stop().await;
+}
+
+#[tokio::test]
 async fn omitted_and_relative_working_directories_resolve_on_the_daemon_host() {
   let daemon = TestDaemon::start().await;
   let home = dirs::home_dir().unwrap().canonicalize().unwrap();

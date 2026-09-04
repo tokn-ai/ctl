@@ -18,12 +18,15 @@ try {
   New-Item -ItemType Directory -Path $root | Out-Null
   Push-Location $root
   try {
+    Invoke-Ctl -Arguments @('taskd', 'restart')
     Invoke-Ctl -Arguments @('task', 'create', 'smoke', '--start', '--', 'cmd.exe', '/D', '/C', 'echo cli-output& cd')
     $logs = Invoke-Ctl -Arguments @('task', 'logs', 'smoke', '--follow')
     if (($logs -join "`n") -notmatch 'cli-output') { throw 'Missing task output' }
     if (($logs -join "`n") -notmatch [regex]::Escape($root)) { throw 'Wrong task working directory' }
     Invoke-Ctl -Arguments @('task', 'restart', 'smoke')
     Invoke-Ctl -Arguments @('task', 'logs', 'smoke', '--follow')
+    Invoke-Ctl -Arguments @('taskd', 'restart')
+    Invoke-Ctl -Arguments @('task', 'show', 'smoke')
     Invoke-Ctl -Arguments @('task', 'remove', 'smoke')
     Invoke-Ctl -Arguments @('task', 'create', 'long-running', '--start', '--', 'cmd.exe', '/D', '/C', 'ping -n 30 127.0.0.1 >nul')
     Invoke-Ctl -Arguments @('task', 'stop', 'long-running')

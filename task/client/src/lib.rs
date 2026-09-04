@@ -1,4 +1,6 @@
 //! Reusable local taskd transport for CLI and desktop clients.
+mod restart;
+pub use restart::restart_daemon;
 use std::{
   env, io,
   path::{Path, PathBuf},
@@ -65,12 +67,28 @@ pub async fn connect_or_start(socket: &Path) -> Result<Stream, ClientError> {
     Err(error) => return Err(ClientError::Connect(error)),
   }
   let executable = daemon_executable()?;
-  let mut daemon = std::process::Command::new(&executable);
+  spawn_daemon(socket, &executable, None)?;
+  wait_for_endpoint(socket).await
+}
+
+fn spawn_daemon(
+  socket: &Path,
+  executable: &Path,
+  configuration: Option<(&Path, &Path)>,
+) -> Result<(), ClientError> {
+  let mut daemon = std::process::Command::new(executable);
   #[cfg(windows)]
   {
     use std::os::windows::process::CommandExt;
     // DETACHED_PROCESS: taskd survives the invoking console.
     daemon.creation_flags(0x0000_0008);
+  }
+  if let Some((data_directory, rmux_socket)) = configuration {
+    daemon
+      .arg("--data-directory")
+      .arg(data_directory)
+      .arg("--rmux-socket")
+      .arg(rmux_socket);
   }
   daemon
     .arg("--socket")
@@ -80,7 +98,14 @@ pub async fn connect_or_start(socket: &Path) -> Result<Stream, ClientError> {
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()
-    .map_err(|source| ClientError::StartDaemon { executable, source })?;
+    .map_err(|source| ClientError::StartDaemon {
+      executable: executable.to_owned(),
+      source,
+    })?;
+  Ok(())
+}
+
+async fn wait_for_endpoint(socket: &Path) -> Result<Stream, ClientError> {
   let deadline = Instant::now() + CONNECT_TIMEOUT;
   loop {
     match connect(socket).await {
@@ -125,6 +150,8 @@ pub enum ClientError {
     executable: PathBuf,
     source: io::Error,
   },
+  #[error("{0}")]
+  Restart(String),
   #[error("unexpected taskd response")]
   UnexpectedResponse,
   #[error("taskd request timed out")]

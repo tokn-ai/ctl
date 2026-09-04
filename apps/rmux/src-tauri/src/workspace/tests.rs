@@ -251,3 +251,31 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
     2
   );
 }
+
+#[test]
+fn incomplete_task_drafts_round_trip_without_becoming_runnable_definitions() {
+  let fixture = Fixture::new();
+  let mut document = populated();
+  document.sidebar_view = SidebarView::Tasks;
+  document.task_drafts.push(TaskDefinitionDraft {
+    command_line: Some("cargo run \"unfinished".into()),
+    definition_id: uuid::Uuid::new_v4().to_string(),
+    definition: task_proto::TaskDefinition {
+      name: String::new(),
+      program: String::new(),
+      arguments: vec![String::new()],
+      working_directory: Some("unfinished/relative".into()),
+      execution_mode: task_proto::ExecutionMode::Background,
+    },
+  });
+  fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: None,
+      document: document.clone(),
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load().unwrap().document, document);
+  document.task_drafts.push(document.task_drafts[0].clone());
+  assert!(document.validate().is_err());
+}

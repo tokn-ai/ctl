@@ -1,3 +1,4 @@
+import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
 import { useTaskWorkspace } from "../features/tasks/useTaskWorkspace";
 import { TaskSidebar } from "../components/tasks/TaskSidebar";
 import { TaskEditor } from "../components/tasks/TaskEditor";
@@ -127,8 +128,15 @@ export function TerminalPage() {
   const [keybindingsOpen, setKeybindingsOpen] = useState(false);
   const [dispatcher] = useState(() => new CommandDispatcher());
   const attachment = useAttachment(renderer);
-  const taskWorkspace = useTaskWorkspace(workspace, async (session) => { await attachment.connect(session, { resize_with_window: true }); }, attachment.detach);
-  const taskWorkspaceRef = useRef(taskWorkspace); taskWorkspaceRef.current = taskWorkspace;
+  const taskWorkspace = useTaskWorkspace(
+    workspace,
+    async (session) => {
+      await attachment.connect(session, { resize_with_window: true });
+    },
+    attachment.detach,
+  );
+  const taskWorkspaceRef = useRef(taskWorkspace);
+  taskWorkspaceRef.current = taskWorkspace;
   const currentShellState = attachment.state.shell_state;
   const currentWorkingDirectory = currentShellState?.cwd || null;
   const currentWorkingDirectoryDisplay = currentShellState
@@ -182,7 +190,7 @@ export function TerminalPage() {
   const restartingDaemonRef = useRef(false);
   const daemonEpochRef = useRef(0);
   workspace.closeBlockedRef.current = () =>
-    creatingRef.current || restartingDaemonRef.current || taskWorkspace.busy || taskWorkspace.hasDirtyDrafts;
+    creatingRef.current || restartingDaemonRef.current || taskWorkspace.busy;
 
   const daemonRestartBlocksInteractions = useCallback(
     () => daemonRestartConfirmationRef.current || restartingDaemonRef.current,
@@ -408,8 +416,18 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) {
         return;
       }
-      const managed = requestedSession.target.kind === "local" ? taskWorkspaceRef.current.tasks.find((task) => task.active_run?.interactive?.session_id === requestedSession.session_id) : undefined;
-      if (managed) { taskWorkspaceRef.current.openTask(managed); return; }
+      const managed =
+        requestedSession.target.kind === "local"
+          ? taskWorkspaceRef.current.tasks.find(
+              (task) =>
+                task.active_run?.interactive?.session_id ===
+                requestedSession.session_id,
+            )
+          : undefined;
+      if (managed) {
+        taskWorkspaceRef.current.openTask(managed);
+        return;
+      }
       const identity = sessionKey(requestedSession);
       // Inspection may have just completed, before React publishes new props.
       const session =
@@ -1016,7 +1034,13 @@ export function TerminalPage() {
     );
   }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
-  useWindowTitle(taskWorkspace.active ? taskWorkspace.activeTask?.definition.name ?? taskWorkspace.saved?.definition.name ?? "Task definition" : compactTerminalTitleParts(activeTitle));
+  useWindowTitle(
+    taskWorkspace.active
+      ? (taskWorkspace.activeTask?.definition.name ??
+          taskWorkspace.saved?.definition.name ??
+          "Task definition")
+      : compactTerminalTitleParts(activeTitle),
+  );
 
   const commands: AppCommand[] = buildTerminalCommands(
     {
@@ -1090,20 +1114,92 @@ export function TerminalPage() {
       reloadKeybindings: keybindings.reload,
     },
   ).map((command) => {
-    const base = { ...command, keybinding: keybindings.bindings.get(command.id) };
-    if (command.id === COMMAND_IDS.disconnect && taskWorkspace.active) return { ...base, title: "Close tab", enabled: true, isEnabled: () => true, focusTerminalAfterRun: false, run: () => taskWorkspace.close(workspaceTabKey(taskWorkspace.active!)) };
-    if (command.id === COMMAND_IDS.nextTab || command.id === COMMAND_IDS.previousTab) return { ...base, enabled: workspace.tab_order.length > 1, focusTerminalAfterRun: false, run: () => {
-      const offset = command.id === COMMAND_IDS.nextTab ? 1 : -1;
-      const order = workspace.tab_order;
-      const key = order[(order.indexOf(activeTabKey ?? "") + offset + order.length) % order.length];
-      const taskTab = workspace.task_tabs.find((tab) => workspaceTabKey(tab) === key);
-      if (taskTab) taskWorkspace.open(taskTab); else { const terminal = tabs.find((tab) => sessionKey(tab) === key); if (terminal) void activateTab(terminal); }
-    } };
+    const base = {
+      ...command,
+      keybinding: keybindings.bindings.get(command.id),
+    };
+    if (command.id === COMMAND_IDS.disconnect && taskWorkspace.active)
+      return {
+        ...base,
+        title: "Close tab",
+        enabled: true,
+        isEnabled: () => true,
+        focusTerminalAfterRun: false,
+        run: () => taskWorkspace.close(workspaceTabKey(taskWorkspace.active!)),
+      };
+    if (
+      command.id === COMMAND_IDS.nextTab ||
+      command.id === COMMAND_IDS.previousTab
+    )
+      return {
+        ...base,
+        enabled: workspace.tab_order.length > 1,
+        focusTerminalAfterRun: false,
+        run: () => {
+          const offset = command.id === COMMAND_IDS.nextTab ? 1 : -1;
+          const order = workspace.tab_order;
+          const key =
+            order[
+              (order.indexOf(activeTabKey ?? "") + offset + order.length) %
+                order.length
+            ];
+          const taskTab = workspace.task_tabs.find(
+            (tab) => workspaceTabKey(tab) === key,
+          );
+          if (taskTab) taskWorkspace.open(taskTab);
+          else {
+            const terminal = tabs.find((tab) => sessionKey(tab) === key);
+            if (terminal) void activateTab(terminal);
+          }
+        },
+      };
     return base;
   });
-  commands.push({ id: "task.new", category: "Tasks", title: "New task definition", enabled: workspace.ready && !taskWorkspace.busy, focusTerminalAfterRun: false, run: taskWorkspace.newDefinition });
+  commands.push({
+    id: COMMAND_IDS.restartTaskDaemon,
+    category: "Tasks",
+    title: "Restart taskd",
+    detail: "Restart the local task daemon. Stop active tasks first.",
+    enabled: workspace.ready && !taskWorkspace.busy,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.restartTaskDaemon),
+    focusTerminalAfterRun: false,
+    run: () => {
+      workspace.update("sidebar_view", "tasks");
+      return taskWorkspace.restartDaemon();
+    },
+  });
+  commands.push({
+    id: "task.new",
+    category: "Tasks",
+    title: "New task definition",
+    enabled: workspace.ready && !taskWorkspace.busy,
+    focusTerminalAfterRun: false,
+    run: taskWorkspace.newDefinition,
+  });
   for (const action of ["start_task", "stop_task", "restart_task"] as const) {
-    commands.push({ id: `task.${action}`, category: "Tasks", title: action === "start_task" ? "Start task" : action === "stop_task" ? "Stop task" : "Restart task", enabled: !!taskWorkspace.activeTask && !taskWorkspace.busy && (action === "start_task" ? !taskWorkspace.activeTask.active_run : action === "stop_task" ? !!taskWorkspace.activeTask.active_run : true), focusTerminalAfterRun: false, run: () => { if (taskWorkspace.activeTask) void taskWorkspace.action(taskWorkspace.activeTask, action); } });
+    commands.push({
+      id: `task.${action}`,
+      category: "Tasks",
+      title:
+        action === "start_task"
+          ? "Start task"
+          : action === "stop_task"
+            ? "Stop task"
+            : "Restart task",
+      enabled:
+        !!taskWorkspace.activeTask &&
+        !taskWorkspace.busy &&
+        (action === "start_task"
+          ? !taskWorkspace.activeTask.active_run
+          : action === "stop_task"
+            ? !!taskWorkspace.activeTask.active_run
+            : true),
+      focusTerminalAfterRun: false,
+      run: () => {
+        if (taskWorkspace.activeTask)
+          void taskWorkspace.action(taskWorkspace.activeTask, action);
+      },
+    });
   }
   const shortcutLabel = (id: string) => {
     const binding = keybindings.bindings.get(id);
@@ -1112,6 +1208,7 @@ export function TerminalPage() {
   const paletteShortcutLabel = shortcutLabel(COMMAND_IDS.showPalette);
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
   const dialogOpen =
+    taskWorkspace.editorId !== null ||
     keybindingsOpen ||
     newShellOpen ||
     importOpen ||
@@ -1170,65 +1267,90 @@ export function TerminalPage() {
           !workspace.ready || workspace.closing || dialogOpen || paletteOpen
         }
       >
-        <SessionSidebar
-          targets={targets}
-          targetErrors={targetErrors}
-          sessions={sessions}
-          shellStates={displayedSessionShellStates}
-          selectedSessionKey={activeTabKey}
-          openTabSessionKeys={openTabSessionKeys}
-          loading={loading || !workspace.ready}
-          error={listError ?? workspace.error}
-          creating={creating}
-          closingSessionKeys={closingSessionKeys}
-          disconnectingSessionKey={disconnectingSessionKey}
-          onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
-          onSelect={(session) =>
-            executeCommandById(COMMAND_IDS.selectSession, {
-              session_key: sessionKey(session),
-            })
+        <WorkspaceSidebar
+          selected={workspace.sidebar_view}
+          onSelect={(view) => workspace.update("sidebar_view", view)}
+          error={workspace.error}
+          tasks={
+            <TaskSidebar
+              model={taskWorkspace}
+              definitions={workspace.task_definitions}
+              references={workspace.task_references}
+            />
           }
-          onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
-          onDisconnect={(session) =>
-            executeCommandById(COMMAND_IDS.disconnect, {
-              session_key: sessionKey(session),
-            })
+          sessions={
+            <SessionSidebar
+              targets={targets}
+              targetErrors={targetErrors}
+              sessions={sessions}
+              shellStates={displayedSessionShellStates}
+              selectedSessionKey={activeTabKey}
+              openTabSessionKeys={openTabSessionKeys}
+              loading={loading || !workspace.ready}
+              error={listError}
+              creating={creating}
+              closingSessionKeys={closingSessionKeys}
+              disconnectingSessionKey={disconnectingSessionKey}
+              onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
+              onSelect={(session) =>
+                executeCommandById(COMMAND_IDS.selectSession, {
+                  session_key: sessionKey(session),
+                })
+              }
+              onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
+              onDisconnect={(session) =>
+                executeCommandById(COMMAND_IDS.disconnect, {
+                  session_key: sessionKey(session),
+                })
+              }
+              onRequestClose={(session) =>
+                executeCommandById(COMMAND_IDS.close, {
+                  session_key: sessionKey(session),
+                })
+              }
+              onForget={(session) =>
+                executeCommandById(COMMAND_IDS.forgetSession, {
+                  session_key: sessionKey(session),
+                })
+              }
+              onAddExisting={() =>
+                executeCommandById(COMMAND_IDS.addExistingSession)
+              }
+              onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
+              onConnectHost={(target) =>
+                executeCommandById(COMMAND_IDS.connectHost, {
+                  target_key: targetKey(target),
+                })
+              }
+              onRemoveHost={(target) =>
+                executeCommandById(COMMAND_IDS.removeHost, {
+                  target_key: targetKey(target),
+                })
+              }
+            />
           }
-          onRequestClose={(session) =>
-            executeCommandById(COMMAND_IDS.close, {
-              session_key: sessionKey(session),
-            })
-          }
-          onForget={(session) =>
-            executeCommandById(COMMAND_IDS.forgetSession, {
-              session_key: sessionKey(session),
-            })
-          }
-          onAddExisting={() =>
-            executeCommandById(COMMAND_IDS.addExistingSession)
-          }
-          onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
-          onConnectHost={(target) =>
-            executeCommandById(COMMAND_IDS.connectHost, {
-              target_key: targetKey(target),
-            })
-          }
-          onRemoveHost={(target) =>
-            executeCommandById(COMMAND_IDS.removeHost, {
-              target_key: targetKey(target),
-            })
-          }
-        ><TaskSidebar model={taskWorkspace} definitions={workspace.task_definitions} references={workspace.task_references} /></SessionSidebar>
+        />
         <section className="terminal-workspace">
           <TerminalTabs
             tabs={tabs}
             extra_tabs={workspace.task_tabs.map((tab) => {
-              const saved = tab.kind === "task_definition" ? workspace.task_definitions.find((item) => item.definition_id === tab.definition_id) : undefined;
-              const task = tab.kind === "task" ? taskWorkspace.tasks.find((item) => item.task_id === tab.task_id) : undefined;
-              return { tab_key: workspaceTabKey(tab), title: tab.kind === "task_definition" ? `${saved?.definition.name ?? "New task"}${taskWorkspace.drafts[tab.definition_id]?.dirty ? " *" : ""}` : task?.definition.name ?? "Saved task", host: tab.kind === "task_definition" ? "Definition" : tab.host_id === "local" ? "Local" : tab.host_id, status: task ? taskState(task) : "unknown" };
+              const task = taskWorkspace.tasks.find(
+                (item) => item.task_id === tab.task_id,
+              );
+              return {
+                tab_key: workspaceTabKey(tab),
+                title: task?.definition.name ?? "Saved task",
+                host: tab.host_id === "local" ? "Local" : tab.host_id,
+                status: task ? taskState(task) : "unknown",
+              };
             })}
             tab_order={workspace.tab_order}
-            on_select_extra={(key) => { const tab = workspace.task_tabs.find((item) => workspaceTabKey(item) === key); if (tab) taskWorkspace.open(tab); }}
+            on_select_extra={(key) => {
+              const tab = workspace.task_tabs.find(
+                (item) => workspaceTabKey(item) === key,
+              );
+              if (tab) taskWorkspace.open(tab);
+            }}
             on_close_extra={taskWorkspace.close}
             shellStates={displayedTabShellStates}
             activeSessionKey={activeTabKey}
@@ -1250,97 +1372,126 @@ export function TerminalPage() {
             }
             onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
           />
-          {taskWorkspace.active?.kind === "task_definition" ? <TaskEditor key={taskWorkspace.active.definition_id} model={taskWorkspace} saved={taskWorkspace.saved} /> : null}
-          {taskWorkspace.active?.kind === "task" ? <TaskDetail key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`} model={taskWorkspace} saved={workspace.task_definitions.find((definition) => definition.definition_id === workspace.task_references.find((reference) => reference.task_id === taskWorkspace.activeTask?.task_id || (taskWorkspace.active?.kind === "task" && reference.task_id === taskWorkspace.active.task_id))?.definition_id)} /> : null}
-          {taskWorkspace.pendingClose ? <div className="task-confirm" role="dialog" aria-label="Unsaved task definition"><p>Save changes before closing this definition?</p><button onClick={() => void taskWorkspace.saveBeforeClose()}>Save and close</button><button onClick={() => taskWorkspace.closeNow(taskWorkspace.pendingClose!)}>Discard changes</button><button onClick={taskWorkspace.cancelClose}>Cancel</button></div> : null}
-          <div className="terminal-pane" hidden={!!taskWorkspace.active && !(taskWorkspace.activeTask?.definition.execution_mode === "interactive" && taskWorkspace.activeTask.active_run)}>
-          <TerminalToolbar
-            state={attachment.state}
-            onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
-            onToggleResizeWithWindow={() =>
-              executeCommandById(COMMAND_IDS.toggleResize)
+          {taskWorkspace.active?.kind === "task" ? (
+            <TaskDetail
+              key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`}
+              model={taskWorkspace}
+              saved={workspace.task_definitions.find(
+                (definition) =>
+                  definition.definition_id ===
+                  workspace.task_references.find(
+                    (reference) =>
+                      reference.task_id === taskWorkspace.activeTask?.task_id ||
+                      (taskWorkspace.active?.kind === "task" &&
+                        reference.task_id === taskWorkspace.active.task_id),
+                  )?.definition_id,
+              )}
+            />
+          ) : null}
+          <div
+            className="terminal-pane"
+            hidden={
+              !!taskWorkspace.active &&
+              !(
+                taskWorkspace.activeTask?.definition.execution_mode ===
+                  "interactive" && taskWorkspace.activeTask.active_run
+              )
             }
-            onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
-            onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
-            commandShortcutLabel={paletteShortcutLabel}
-          />
-          <div className="terminal-notices">
-            {keybindings.error ? (
-              <div className="message-banner" role="alert">
-                Keyboard shortcuts: {keybindings.error} Last valid bindings
-                remain active.
-                <button
-                  type="button"
-                  onClick={() =>
-                    executeCommandById(COMMAND_IDS.reloadKeybindings)
-                  }
-                >
-                  Reload shortcuts
-                </button>
-              </div>
-            ) : null}
-            {workspace.error ? (
-              <div className="message-banner" role="alert">
-                Workspace: {workspace.error}
-                {workspace.ready ? (
+          >
+            <TerminalToolbar
+              state={attachment.state}
+              onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
+              onToggleResizeWithWindow={() =>
+                executeCommandById(COMMAND_IDS.toggleResize)
+              }
+              onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
+              onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
+              commandShortcutLabel={paletteShortcutLabel}
+            />
+            <div className="terminal-notices">
+              {keybindings.error ? (
+                <div className="message-banner" role="alert">
+                  Keyboard shortcuts: {keybindings.error} Last valid bindings
+                  remain active.
                   <button
                     type="button"
                     onClick={() =>
-                      executeCommandById(COMMAND_IDS.saveWorkspace)
+                      executeCommandById(COMMAND_IDS.reloadKeybindings)
                     }
                   >
-                    Retry saving
+                    Reload shortcuts
                   </button>
-                ) : null}
-              </div>
-            ) : null}
-            {activeTab && attachment.state.session === null ? (
-              <div className="message-banner" role="status">
-                {activeTab.target.kind === "ssh"
-                  ? "Connect this host to resume its saved tab. Cached paths are last-known."
-                  : "Local session is not connected. Cached paths are last-known."}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (activeTab.target.kind === "ssh") {
-                      executeCommandById(COMMAND_IDS.connectHost, {
-                        target_key: targetKey(activeTab.target),
-                      });
-                    } else {
-                      executeCommandById(COMMAND_IDS.selectSession, {
-                        session_key: sessionKey(activeTab),
-                      });
-                    }
-                  }}
-                >
+                </div>
+              ) : null}
+              {workspace.error ? (
+                <div className="message-banner" role="alert">
+                  Workspace: {workspace.error}
+                  {workspace.ready ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        executeCommandById(COMMAND_IDS.saveWorkspace)
+                      }
+                    >
+                      Retry saving
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              {activeTab && attachment.state.session === null ? (
+                <div className="message-banner" role="status">
                   {activeTab.target.kind === "ssh"
-                    ? "Connect host"
-                    : "Connect session"}
-                </button>
-              </div>
-            ) : null}
-            {attachment.state.history_gap ? (
-              <div className="history-gap-banner" role="status">
-                Earlier remote output is no longer contiguous. The live screen
-                was restored from a checkpoint.
-              </div>
-            ) : null}
-            {attachment.state.message ? (
-              <div className="message-banner" role="status">
-                {attachment.state.message}
-              </div>
-            ) : null}
-          </div>
-          <TerminalSurface
-            phase={attachment.state.phase}
-            hasSession={attachment.state.session !== null}
-            onInput={handleTerminalInput}
-            onReady={setRenderer}
-          />
-          <StatusBar state={attachment.state} />
+                    ? "Connect this host to resume its saved tab. Cached paths are last-known."
+                    : "Local session is not connected. Cached paths are last-known."}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (activeTab.target.kind === "ssh") {
+                        executeCommandById(COMMAND_IDS.connectHost, {
+                          target_key: targetKey(activeTab.target),
+                        });
+                      } else {
+                        executeCommandById(COMMAND_IDS.selectSession, {
+                          session_key: sessionKey(activeTab),
+                        });
+                      }
+                    }}
+                  >
+                    {activeTab.target.kind === "ssh"
+                      ? "Connect host"
+                      : "Connect session"}
+                  </button>
+                </div>
+              ) : null}
+              {attachment.state.history_gap ? (
+                <div className="history-gap-banner" role="status">
+                  Earlier remote output is no longer contiguous. The live screen
+                  was restored from a checkpoint.
+                </div>
+              ) : null}
+              {attachment.state.message ? (
+                <div className="message-banner" role="status">
+                  {attachment.state.message}
+                </div>
+              ) : null}
+            </div>
+            <TerminalSurface
+              phase={attachment.state.phase}
+              hasSession={attachment.state.session !== null}
+              onInput={handleTerminalInput}
+              onReady={setRenderer}
+            />
+            <StatusBar state={attachment.state} />
           </div>
         </section>
       </main>
+      {taskWorkspace.editorId ? (
+        <TaskEditor
+          key={taskWorkspace.editorId}
+          model={taskWorkspace}
+          saved={taskWorkspace.saved}
+        />
+      ) : null}
       {keybindingsOpen ? (
         <KeybindingsFlow
           commands={commands}

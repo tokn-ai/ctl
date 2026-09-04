@@ -1,6 +1,7 @@
 use std::{
   path::{Path, PathBuf},
   process::Stdio,
+  sync::OnceLock,
   time::Duration,
 };
 
@@ -10,12 +11,18 @@ use task_proto::{
 };
 use tokio::{
   process::{Child, Command},
+  sync::{Mutex, MutexGuard},
   task::JoinHandle,
   time::{Instant, sleep, timeout},
 };
 use uuid::Uuid;
 
+// Each fixture embeds rmuxd and owns real PTYs. Keep their lifetimes isolated,
+// as in rmuxd's reconnect suite, including process shutdown and pipe cleanup.
+static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 struct Fixture {
+  _pty_guard: MutexGuard<'static, ()>,
   root: PathBuf,
   task_socket: PathBuf,
   rmux_socket: PathBuf,
@@ -26,6 +33,7 @@ struct Fixture {
 
 impl Fixture {
   async fn start() -> Self {
+    let pty_guard = PTY_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await;
     let id = Uuid::new_v4().simple().to_string();
     #[cfg(unix)]
     let root = PathBuf::from("/tmp").join(format!("task-pty-{}", &id[..8]));
@@ -42,6 +50,7 @@ impl Fixture {
     let keepalive = connect_rmux(&rmux_socket).await;
     let taskd = launch_taskd(&root, &task_socket, &rmux_socket).await;
     Self {
+      _pty_guard: pty_guard,
       root,
       task_socket,
       rmux_socket,
@@ -156,30 +165,35 @@ fn spawn_rmux(socket_path: PathBuf) -> JoinHandle<Result<(), rmuxd::DaemonError>
 }
 
 async fn connect_rmux(socket: &Path) -> rmux_ipc::Stream {
-  let deadline = Instant::now() + Duration::from_secs(10);
-  loop {
-    match rmux_ipc::connect_existing_daemon(socket).await {
-      Ok(mut stream) => {
-        rmux_proto::write_frame(
-          &mut stream,
-          &rmux_proto::ClientMessage::Handshake {
-            protocol_version: rmux_proto::PROTOCOL_VERSION,
-            client_name: "task-test".into(),
-            client_version: "test".into(),
-          },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-          rmux_message(&mut stream).await,
-          rmux_proto::ServerMessage::HandshakeAccepted { .. }
-        ));
-        return stream;
+  timeout(Duration::from_secs(10), async {
+    loop {
+      if let Ok(mut stream) = rmux_ipc::connect_existing_daemon(socket).await {
+        // A replacement's pipe can connect before it can serve a handshake.
+        // Readiness requires a protocol response, not just an open transport.
+        let handshake = async {
+          rmux_proto::write_frame(
+            &mut stream,
+            &rmux_proto::ClientMessage::Handshake {
+              protocol_version: rmux_proto::PROTOCOL_VERSION,
+              client_name: "task-test".into(),
+              client_version: "test".into(),
+            },
+          )
+          .await?;
+          rmux_proto::read_frame::<_, rmux_proto::ServerMessage>(&mut stream).await
+        }
+        .await;
+        match handshake {
+          Ok(Some(rmux_proto::ServerMessage::HandshakeAccepted { .. })) => return stream,
+          Ok(None) | Err(rmux_proto::CodecError::Io(_)) => {}
+          other => panic!("unexpected rmuxd readiness response: {other:?}"),
+        }
       }
-      Err(_) if Instant::now() < deadline => sleep(Duration::from_millis(25)).await,
-      Err(error) => panic!("rmuxd did not start: {error}"),
+      sleep(Duration::from_millis(25)).await;
     }
-  }
+  })
+  .await
+  .expect("rmuxd did not complete its readiness handshake within 10 seconds")
 }
 
 async fn launch_taskd(root: &Path, socket: &Path, rmux: &Path) -> Child {

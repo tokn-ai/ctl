@@ -231,3 +231,7 @@ export async function watchTaskLogs(task_id: string, after_sequence: string | nu
 export async function cancelTaskLogs(subscription_id: string): Promise<void> {
   return invoke("cancel_task_logs", { subscriptionId: subscription_id });
 }
+
+export async function restartTaskDaemon(): Promise<void> {
+  await invoke("restart_task_daemon");
+}

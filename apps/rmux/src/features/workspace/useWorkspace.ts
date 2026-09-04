@@ -30,6 +30,8 @@ export function useWorkspace() {
   const writerRef = useRef<WorkspaceWriter | null>(null);
   const workspaceIdRef = useRef("default");
   const [ready, setReady] = useState(false);
+  const pendingWrites = useRef(0);
+  const [saving, setSaving] = useState(false);
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
   const closeBlockedRef = useRef<() => boolean>(() => false);
@@ -76,6 +78,8 @@ export function useWorkspace() {
   const persist = useCallback((retry = false): Promise<void> => {
     const writer = writerRef.current;
     if (!writer) return Promise.reject(new Error("Workspace is not loaded."));
+    pendingWrites.current += 1;
+    setSaving(true);
     return writer
       .write(workspaceDocument(viewRef.current, workspaceIdRef.current), retry)
       .then(
@@ -86,7 +90,11 @@ export function useWorkspace() {
           if (mounted.current) setError(errorMessage(failure));
           throw failure;
         },
-      );
+      )
+      .finally(() => {
+        pendingWrites.current -= 1;
+        if (mounted.current && pendingWrites.current === 0) setSaving(false);
+      });
   }, []);
 
   const update = useCallback(
@@ -105,8 +113,14 @@ export function useWorkspace() {
       if (value === previous[key]) return;
       const next = { ...previous, [key]: value };
       if (key === "tabs" || key === "task_tabs") {
-        const keys = [...next.tabs.map(sessionKey), ...next.task_tabs.map(workspaceTabKey)];
-        next.tab_order = [...previous.tab_order.filter((item) => keys.includes(item)), ...keys.filter((item) => !previous.tab_order.includes(item))];
+        const keys = [
+          ...next.tabs.map(sessionKey),
+          ...next.task_tabs.map(workspaceTabKey),
+        ];
+        next.tab_order = [
+          ...previous.tab_order.filter((item) => keys.includes(item)),
+          ...keys.filter((item) => !previous.tab_order.includes(item)),
+        ];
       }
       viewRef.current = next;
       setView(viewRef.current);
@@ -123,9 +137,7 @@ export function useWorkspace() {
       event.preventDefault();
       if (closingRef.current) return;
       if (closeBlockedRef.current()) {
-        setError(
-          "Save or discard unsaved task definitions and wait for ongoing operations before closing the window.",
-        );
+        setError("Wait for ongoing operations before closing the window.");
         return;
       }
       closingRef.current = true;
@@ -185,6 +197,7 @@ export function useWorkspace() {
     ...view,
     viewRef,
     ready,
+    saving,
     closing,
     closeBlockedRef,
     error,

@@ -123,3 +123,28 @@ The task CLI uses protocol version 3. On-disk task state remains schema version
 State replacement is atomic, with recovery designed for process crashes; no
 power-loss durability guarantee is added here. The latest completed result is
 persisted before release, and acknowledgement is retried after taskd restart.
+
+
+### Restarting taskd
+
+Use **Restart taskd** in the desktop app command palette, or run
+`ctl taskd restart`, after updating the task daemon. The app command can also
+be assigned a shortcut under **Configure Keyboard Shortcuts**. It starts taskd when
+absent, or cooperatively replaces an idle daemon. All tasks must be stopped
+first with `ctl task stop <task>`; restart refuses active tasks, including
+interactive ones, and never force-kills the daemon. Registered definitions,
+last-run results, the data directory, and the rmux endpoint are retained.
+Remote taskd control is not supported yet.
+
+Lifecycle control uses version 1 independently of the task protocol. A framed
+`restart_daemon { protocol_version: 1 }` is sent as the first message on the
+local task endpoint without a task handshake. The daemon serializes acceptance
+with task mutations and responds with `restart_accepted { data_directory,
+rmux_socket }`, or `error { message }`. After acceptance it drains client
+connections; EOF on the requesting connection means the endpoint and state lock
+have been released. The client starts the replacement and verifies the current
+task-protocol handshake before reporting success.
+
+Daemons predating lifecycle control require a one-time manual stop after their
+tasks have been stopped. The command reports this limitation instead of finding
+and killing processes by name.

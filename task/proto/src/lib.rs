@@ -1,3 +1,5 @@
+pub mod control;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io;
 use thiserror::Error;

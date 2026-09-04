@@ -27,6 +27,11 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Control the local task daemon.
+  Taskd {
+    #[command(subcommand)]
+    command: TaskdCommand,
+  },
   /// Run the canonical rmux command surface through the selected target.
   Rmux {
     #[command(subcommand)]
@@ -37,6 +42,12 @@ enum Command {
     #[command(subcommand)]
     command: TaskCommand,
   },
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskdCommand {
+  /// Restart an idle taskd, retaining saved task state. Starts it if absent.
+  Restart,
 }
 
 #[tokio::main]
@@ -113,6 +124,17 @@ mod tests {
       ])
       .is_err()
     );
+  }
+
+  #[test]
+  fn taskd_restart_is_separate_from_task_restart() {
+    let arguments = Arguments::try_parse_from(["ctl", "taskd", "restart"]).unwrap();
+    assert!(matches!(
+      arguments.command,
+      Command::Taskd {
+        command: TaskdCommand::Restart
+      }
+    ));
   }
 
   #[test]

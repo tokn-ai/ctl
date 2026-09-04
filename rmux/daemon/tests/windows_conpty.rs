@@ -187,6 +187,16 @@ async fn output_until(stream: &mut Stream, marker: &str) -> u64 {
           return sequence_end;
         }
       }
+      ServerMessage::Checkpoint { checkpoint, .. } => {
+        write_frame(
+          stream,
+          &ClientMessage::PresentationApplied {
+            sequence: checkpoint.sequence,
+          },
+        )
+        .await
+        .unwrap();
+      }
       ServerMessage::SessionEnded { .. } => panic!("session ended before marker: {output:?}"),
       _ => {}
     }

@@ -11,6 +11,9 @@ struct Arguments {
   #[arg(long)]
   data_directory: Option<PathBuf>,
 
+  #[arg(long)]
+  rmux_socket: Option<PathBuf>,
+
   #[arg(long, hide = true)]
   detach_from_terminal: bool,
 }
@@ -26,6 +29,7 @@ fn main() {
   }
 
   let config = DaemonConfig {
+    rmux_socket: arguments.rmux_socket.unwrap_or_else(rmux_ipc::socket_path),
     socket_path: arguments.socket.unwrap_or_else(socket_path),
     data_directory: arguments
       .data_directory

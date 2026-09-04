@@ -459,6 +459,7 @@ impl RestartCoordinator {
       return Err(error);
     }
 
+    sessions.clear_managed();
     drop(state);
     self.changed.notify_waiters();
     Ok(target_count)
@@ -519,52 +520,87 @@ async fn handle_local_control_connection(
   }
 }
 
-async fn handle_active_local_control_connection(
-  mut stream: Stream,
-  sessions: SessionManager,
-  restart: Arc<RestartCoordinator>,
-) -> Result<(), ConnectionError> {
-  let Some(handshake) =
-    read_local_control_request(&mut stream, LOCAL_CONTROL_HANDSHAKE_TIMEOUT).await?
+async fn accept_local_control_handshake(stream: &mut Stream) -> Result<bool, ConnectionError> {
+  let Some(handshake) = read_local_control_request(stream, LOCAL_CONTROL_HANDSHAKE_TIMEOUT).await?
   else {
-    return Ok(());
+    return Ok(false);
   };
   let LocalControlClientMessage::Handshake { protocol_version } = handshake else {
     send_local_control_error(
-      &mut stream,
+      stream,
       LocalControlErrorCode::InvalidRequest,
       "the first local-control message must be a handshake",
     )
     .await?;
-    return Ok(());
+    return Ok(false);
   };
   if protocol_version != LOCAL_CONTROL_PROTOCOL_VERSION {
     send_local_control_error(
-      &mut stream,
+      stream,
       LocalControlErrorCode::ProtocolVersionMismatch,
       &format!(
         "local-control client requested version {protocol_version}; this daemon supports {LOCAL_CONTROL_PROTOCOL_VERSION}"
       ),
     )
     .await?;
-    return Ok(());
+    return Ok(false);
   }
 
   write_local_control_frame(
-    &mut stream,
+    stream,
     &LocalControlServerMessage::HandshakeAccepted {
       protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
       restart_supported: true,
+      managed_sessions_supported: true,
     },
   )
   .await?;
 
+  Ok(true)
+}
+
+async fn handle_active_local_control_connection(
+  mut stream: Stream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+) -> Result<(), ConnectionError> {
+  if !accept_local_control_handshake(&mut stream).await? {
+    return Ok(());
+  }
   let Some(request) =
     read_local_control_request(&mut stream, LOCAL_CONTROL_ARMED_REQUEST_TIMEOUT).await?
   else {
     return Ok(());
   };
   match request {
+    LocalControlClientMessage::ManageSession {
+      expected_instance,
+      task_id,
+      run_id,
+      operation,
+    } => {
+      let result = tokio::task::spawn_blocking(move || {
+        restart.run_while_accepting(|| {
+          sessions.manage(expected_instance.as_deref(), &task_id, &run_id, operation)
+        })
+      })
+      .await?;
+      match result {
+        Some(Ok(response)) => write_local_control_frame(&mut stream, &response).await?,
+        Some(Err(message)) => {
+          send_local_control_error(&mut stream, LocalControlErrorCode::InvalidRequest, &message)
+            .await?;
+        }
+        None => {
+          send_local_control_error(
+            &mut stream,
+            LocalControlErrorCode::RestartInProgress,
+            DAEMON_DRAINING_MESSAGE,
+          )
+          .await?;
+        }
+      }
+    }
     LocalControlClientMessage::RestartDaemon => {
       match restart.begin_cooperative_restart(&sessions) {
         Ok(terminated_sessions) => {
@@ -606,7 +642,7 @@ async fn handle_active_local_control_connection(
       send_local_control_error(
         &mut stream,
         LocalControlErrorCode::InvalidRequest,
-        "only restart_daemon is valid after the local-control handshake",
+        "expected a local-control operation after handshake",
       )
       .await?;
     }

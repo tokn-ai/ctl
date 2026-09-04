@@ -210,3 +210,12 @@ not covered by the loopback fixture.
 
 The Unix whole-workspace gates remain unchanged. No unsupported daemon is
 included merely to make the Windows job look comprehensive.
+
+
+### Interactive managed tasks
+
+The taskd integration suite also runs against real ConPTY sessions on Windows.
+It verifies task start/stop/restart, normal rmux attachment and input/output,
+recovery after taskd restart, retained exit outcomes, idempotent creation, and
+failure of old runs after replacing rmuxd. Interactive runs use taskd lifecycle
+records and rmuxd process ownership; their output is not a taskd log stream.

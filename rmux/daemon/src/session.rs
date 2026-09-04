@@ -831,7 +831,11 @@ pub struct SessionManager {
   inner: Arc<SessionManagerInner>,
 }
 
+type ManagedSessions = HashMap<(Uuid, Uuid), Option<Arc<Session>>>;
+
 struct SessionManagerInner {
+  instance_id: String,
+  managed: Mutex<ManagedSessions>,
   registry: Mutex<SessionRegistry>,
   #[cfg(unix)]
   runtime_directory: std::path::PathBuf,
@@ -902,6 +906,8 @@ impl SessionManager {
     drop(runtime_directory);
     Self {
       inner: Arc::new(SessionManagerInner {
+        instance_id: Uuid::new_v4().to_string(),
+        managed: Mutex::new(HashMap::new()),
         registry: Mutex::new(SessionRegistry::default()),
         #[cfg(unix)]
         runtime_directory,
@@ -1037,6 +1043,91 @@ impl SessionManager {
     Ok(session)
   }
 
+  pub(crate) fn clear_managed(&self) {
+    lock(&self.inner.managed).clear();
+  }
+
+  pub(crate) fn manage(
+    &self,
+    expected_instance: Option<&str>,
+    task_id: &str,
+    run_id: &str,
+    operation: rmux_ipc::ManagedOperation,
+  ) -> Result<rmux_ipc::LocalControlServerMessage, String> {
+    use rmux_ipc::{LocalControlServerMessage, ManagedOperation, ManagedSessionInfo};
+    if expected_instance.is_some_and(|id| id != self.inner.instance_id) {
+      return Err("rmuxd instance changed".into());
+    }
+    let task_uuid = Uuid::parse_str(task_id).map_err(|error| error.to_string())?;
+    let run_uuid = Uuid::parse_str(run_id).map_err(|error| error.to_string())?;
+    if !matches!(operation, ManagedOperation::Status) && expected_instance.is_none() {
+      return Err("mutations require a pinned rmuxd instance".into());
+    }
+    let key = (task_uuid, run_uuid);
+    let mut managed = lock(&self.inner.managed);
+    if !managed.contains_key(&key)
+      && !matches!(operation, ManagedOperation::Status)
+      && managed.len() >= 4096
+    {
+      return Err("managed run capacity reached; restart rmuxd after stopping tasks".into());
+    }
+    match operation {
+      ManagedOperation::Start {
+        command,
+        working_directory,
+      } => {
+        if let std::collections::hash_map::Entry::Vacant(entry) = managed.entry(key) {
+          let session = self
+            .create(
+              Some(format!("task-{}", run_uuid.simple())),
+              Some(command),
+              working_directory,
+              TerminalSize::default(),
+            )
+            .map_err(|error| error.to_string())?;
+          entry.insert(Some(session));
+        } else if managed.get(&key).is_some_and(Option::is_none) {
+          return Err("this managed run has already been retired".into());
+        }
+      }
+      ManagedOperation::Stop => {
+        if let Some(Some(session)) = managed.get(&key) {
+          if matches!(*lock(&session.lifecycle), SessionLifecycle::Running) {
+            session.kill().map_err(|error| error.to_string())?;
+          }
+        } else {
+          managed.insert(key, None);
+        }
+      }
+      ManagedOperation::Release => {
+        if let Some(Some(session)) = managed.get(&key)
+          && matches!(*lock(&session.lifecycle), SessionLifecycle::Running)
+        {
+          return Err("stop a managed session before releasing its outcome".into());
+        }
+        managed.insert(key, None);
+        self.inner.changed.notify_one();
+      }
+      ManagedOperation::Status => {}
+    }
+    let session = managed.get(&key).and_then(Option::as_ref).map(|session| {
+      let lifecycle = lock(&session.lifecycle);
+      let (running, exit_code) = match *lifecycle {
+        SessionLifecycle::Running => (true, None),
+        SessionLifecycle::Ended { exit_code } => (false, exit_code),
+      };
+      ManagedSessionInfo {
+        session_id: session.id.clone(),
+        running,
+        exit_code,
+      }
+    });
+    Ok(LocalControlServerMessage::ManagedSession {
+      instance_id: self.inner.instance_id.clone(),
+      session,
+    })
+  }
+
   pub fn list(&self) -> Vec<SessionInfo> {
     let mut sessions: Vec<_> = lock(&self.inner.registry)
       .sessions
@@ -1083,7 +1174,14 @@ impl SessionManager {
   }
 
   pub fn session_count(&self) -> usize {
-    lock(&self.inner.registry).sessions.len()
+    let managed = lock(&self.inner.managed);
+    let registry = lock(&self.inner.registry);
+    let retained = managed
+      .values()
+      .filter_map(Option::as_ref)
+      .filter(|session| !registry.sessions.contains_key(&session.id))
+      .count();
+    registry.sessions.len() + retained
   }
 
   pub fn ever_had_session(&self) -> bool {

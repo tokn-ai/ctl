@@ -151,6 +151,7 @@ ctl task start <task>
 ctl task stop <task>
 ctl task restart <task>
 ctl task logs <task> [--follow]
+ctl task attach <task>
 ctl task remove <task>
 ```
 
@@ -210,12 +211,26 @@ proposals if later needed.
 
 ## Implementation status
 
-The first local background slice is implemented. It includes the versioned
-task protocol, persisted task and run records, taskd auto-start, background
-process groups on Unix and Job Objects on Windows, bounded in-memory stdout/stderr logs, log following, and the
-local `ctl task` command surface. Interactive rmux-backed execution, SSH
-routing, persistent logs, restart policies, and desktop workspace integration
-remain pending, so this proposal stays **Proposed**.
+Local background and interactive execution are implemented on Unix and Windows.
+The versioned task protocol supports task registration, start, stop, restart,
+show, list, remove, background logs, and interactive attachment. Taskd persists
+task definitions plus active and latest completed runs. Background execution
+uses process groups on Unix and Job Objects on Windows, with bounded in-memory
+stdout/stderr logs. Interactive execution uses the rmux local-control lifecycle
+API and normal rmux attachments.
+
+Interactive run intent is persisted before creation and pinned to an rmuxd
+instance UUID. Taskd reconciles by task/run UUID, adopts the existing session
+after restart, and acknowledges exit only after saving the result. Missing or
+replaced rmuxd instances fail the run without automatic recreation. Ambiguous
+transport failures leave the run `unknown` and block another start until
+reconciliation resolves its state. Pending creation is `starting`.
+
+SSH task routing, persistent background logs, full run history, restart policies,
+and desktop workspace integration remain pending, so this proposal stays
+**Proposed**. Definition editing is not yet exposed; the stored definition is
+unchanged throughout each run. Task protocol version 2 adds interactive backend
+references and the new states; existing background state records remain readable.
 
 ## Detailed specifications
 
@@ -224,6 +239,7 @@ remain pending, so this proposal stays **Proposed**.
 - [Architecture](../architecture.md)
 - [rmux protocol](../rmux-protocol.md)
 - [ctl SSH transport](../ctl-protocol.md)
+- [rmux local lifecycle control](../rmux-local-control.md)
 
 ### Windows background execution
 
@@ -237,4 +253,4 @@ failed and stopped; they are not adopted or automatically restarted.
 The state directory has a lifetime exclusive file lock, preventing multiple
 endpoints from writing the same state. State replacement uses the platform's
 rename operation. Windows files inherit the data directory's ACL; custom
-locations must retain user-private access. PTY tasks remain reserved for rmuxd.
+locations must retain user-private access. Interactive task PTYs are owned by rmuxd.

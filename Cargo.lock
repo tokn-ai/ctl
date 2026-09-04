@@ -652,16 +652,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctl-core"
-version = "0.1.0"
-dependencies = [
- "rmux-ipc",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "ctl-agent"
 version = "0.1.0"
 dependencies = [
@@ -671,6 +661,16 @@ dependencies = [
  "rmux-ipc",
  "rmux-proto",
  "rmuxd",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ctl-core"
+version = "0.1.0"
+dependencies = [
+ "rmux-ipc",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
@@ -3047,6 +3047,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "interprocess",
+ "rmux-proto",
  "rustix",
  "serde",
  "serde_json",
@@ -3715,6 +3716,7 @@ name = "task-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "rmux",
  "rustix",
  "task-ipc",
  "task-proto",
@@ -3752,6 +3754,9 @@ dependencies = [
  "dirs",
  "interprocess",
  "process-wrap",
+ "rmux-ipc",
+ "rmux-proto",
+ "rmuxd",
  "rustix",
  "serde",
  "serde_json",

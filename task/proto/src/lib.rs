@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +32,8 @@ pub enum DesiredState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
+  Starting,
+  Unknown,
   Running,
   Completed,
   Failed,
@@ -39,7 +41,18 @@ pub enum RunState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractiveRun {
+  #[serde(default)]
+  pub released: bool,
+  pub rmux_socket: std::path::PathBuf,
+  pub instance_id: String,
+  pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunInfo {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub interactive: Option<InteractiveRun>,
   pub run_id: String,
   pub state: RunState,
   pub started_at_ms: u64,
@@ -205,6 +218,16 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn legacy_background_runs_remain_readable() {
+    let run: RunInfo = serde_json::from_str(
+      r#"{"run_id":"old-run","state":"completed","started_at_ms":1,"ended_at_ms":2,"exit_code":0}"#,
+    )
+    .unwrap();
+    assert_eq!(run.state, RunState::Completed);
+    assert!(run.interactive.is_none());
+  }
 
   #[tokio::test]
   async fn frames_round_trip() {

@@ -522,3 +522,20 @@ emulator in headless mode:
   acquire layout ownership.
 - A stalled webview exhausts presentation credit instead of closing the
   transport; the Rust-to-webview queue stays bounded and heartbeats continue.
+
+
+## Managed local tasks
+
+Taskd owns task definitions, desired state, and run records. Background runs use
+pipes and process ownership in taskd; interactive runs use PTYs and process
+ownership in rmuxd. Taskd uses the owner-only rmux local-control endpoint for
+idempotent creation and lifecycle reconciliation. Terminal input, output, leases,
+and geometry continue through normal rmux attachments, including `ctl task attach`.
+
+Interactive run intent is persisted before creation, keyed by task/run UUID and
+pinned to the rmuxd instance UUID. Taskd can recover a live session or its retained
+exit result after restarting. It acknowledges the result only after saving it.
+An rmuxd replacement fails old runs without automatic recreation. No remote task
+service or desktop workspace task storage is implemented yet. See
+[proposal 0003](proposals/0003-task-system.md) and the
+[local-control protocol](rmux-local-control.md) for lifecycle and retention rules.

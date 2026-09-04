@@ -96,17 +96,31 @@ pub fn runtime_directory() -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalControlClientMessage {
-  Handshake { protocol_version: u16 },
+  Handshake {
+    protocol_version: u16,
+  },
   RestartDaemon,
+  ManageSession {
+    expected_instance: Option<String>,
+    task_id: String,
+    run_id: String,
+    operation: ManagedOperation,
+  },
 }
 
 /// Response messages emitted by `rmuxd`'s owner-only local-control endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalControlServerMessage {
+  ManagedSession {
+    instance_id: String,
+    session: Option<ManagedSessionInfo>,
+  },
   HandshakeAccepted {
     protocol_version: u16,
     restart_supported: bool,
+    #[serde(default)]
+    managed_sessions_supported: bool,
   },
   RestartAccepted {
     terminated_sessions: u32,
@@ -128,10 +142,32 @@ pub enum LocalControlErrorCode {
   Internal,
 }
 
+/// Local task lifecycle operations. Terminal I/O remains on the data endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum ManagedOperation {
+  Start {
+    command: rmux_proto::CommandSpec,
+    working_directory: Option<String>,
+  },
+  Status,
+  Stop,
+  Release,
+}
+
+/// A retained execution outcome; it contains no terminal journal or leases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedSessionInfo {
+  pub session_id: String,
+  pub running: bool,
+  pub exit_code: Option<u32>,
+}
+
 /// Capabilities negotiated with the owner-only local-control endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalControlCapabilities {
   pub restart_supported: bool,
+  pub managed_sessions_supported: bool,
 }
 
 /// Errors while framing the owner-only local-control protocol.
@@ -260,9 +296,11 @@ where
     Some(LocalControlServerMessage::HandshakeAccepted {
       protocol_version,
       restart_supported,
-    }) if protocol_version == LOCAL_CONTROL_PROTOCOL_VERSION => {
-      Ok(LocalControlCapabilities { restart_supported })
-    }
+      managed_sessions_supported,
+    }) if protocol_version == LOCAL_CONTROL_PROTOCOL_VERSION => Ok(LocalControlCapabilities {
+      restart_supported,
+      managed_sessions_supported,
+    }),
     Some(LocalControlServerMessage::Error { code, message }) => {
       Err(LocalControlClientError::Server { code, message })
     }
@@ -337,6 +375,7 @@ where
 
 fn local_control_response_name(response: &LocalControlServerMessage) -> &'static str {
   match response {
+    LocalControlServerMessage::ManagedSession { .. } => "managed_session",
     LocalControlServerMessage::HandshakeAccepted { .. } => "handshake_accepted",
     LocalControlServerMessage::RestartAccepted { .. } => "restart_accepted",
     LocalControlServerMessage::Error { .. } => "error",
@@ -679,6 +718,22 @@ mod tests {
   }
 
   #[cfg(unix)]
+  #[test]
+  fn older_handshake_does_not_advertise_managed_sessions() {
+    let response: LocalControlServerMessage = serde_json::from_str(
+      r#"{"type":"handshake_accepted","protocol_version":1,"restart_supported":true}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      response,
+      LocalControlServerMessage::HandshakeAccepted {
+        managed_sessions_supported: false,
+        restart_supported: true,
+        ..
+      }
+    ));
+  }
+
   #[tokio::test]
   async fn restart_request_refuses_a_control_endpoint_without_capability() {
     let (client, mut daemon) = tokio::io::duplex(1024);
@@ -698,6 +753,7 @@ mod tests {
         &LocalControlServerMessage::HandshakeAccepted {
           protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
           restart_supported: false,
+          managed_sessions_supported: false,
         },
       )
       .await

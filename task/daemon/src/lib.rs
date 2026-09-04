@@ -1,3 +1,4 @@
+mod interactive;
 mod process;
 
 #[cfg(windows)]
@@ -34,6 +35,7 @@ const MAX_LOG_BYTES_PER_RUN: usize = 4 * 1024 * 1024;
 pub struct DaemonConfig {
   pub socket_path: PathBuf,
   pub data_directory: PathBuf,
+  pub rmux_socket: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,11 +62,12 @@ struct State {
   logs: Mutex<HashMap<String, Vec<LogEvent>>>,
   activity: broadcast::Sender<Activity>,
   persistence_path: PathBuf,
+  rmux_socket: PathBuf,
   _state_lock: fs::File,
 }
 
 impl State {
-  fn load(data_directory: &Path) -> Result<Self, DaemonError> {
+  fn load(data_directory: &Path, rmux_socket: PathBuf) -> Result<Self, DaemonError> {
     prepare_data_directory(data_directory)?;
     let state_lock = fs::OpenOptions::new()
       .read(true)
@@ -94,6 +97,16 @@ impl State {
 
     let now = now_ms();
     for task in tasks.values_mut() {
+      if let Some(run) = task.active_run.as_mut()
+        && run.interactive.is_some()
+      {
+        run.state = if run.state == RunState::Starting {
+          RunState::Starting
+        } else {
+          RunState::Unknown
+        };
+        continue;
+      }
       if let Some(mut run) = task.active_run.take() {
         run.state = RunState::Failed;
         run.ended_at_ms = Some(now);
@@ -110,6 +123,7 @@ impl State {
       logs: Mutex::new(HashMap::new()),
       activity,
       persistence_path: state_path,
+      rmux_socket,
       _state_lock: state_lock,
     };
     state.persist_blocking(
@@ -182,15 +196,12 @@ impl State {
           format!("task {:?} is already running", task.definition.name),
         ));
       }
-      if task.definition.execution_mode != ExecutionMode::Background {
-        return Err(RequestError::new(
-          ErrorCode::UnsupportedExecutionMode,
-          "interactive task execution is not implemented yet",
-        ));
-      }
       (task.task_id.clone(), task.definition.clone())
     };
 
+    if definition.execution_mode == ExecutionMode::Interactive {
+      return self.start_interactive(&task_id, definition).await;
+    }
     let mut child = process::spawn(&definition).map_err(|error| {
       RequestError::new(
         ErrorCode::InvalidDefinition,
@@ -201,6 +212,7 @@ impl State {
     let stderr = child.stderr();
     let run_id = Uuid::new_v4().to_string();
     let run = RunInfo {
+      interactive: None,
       run_id: run_id.clone(),
       state: RunState::Running,
       started_at_ms: now_ms(),
@@ -308,13 +320,24 @@ impl State {
           format!("task {:?} is not running", task.definition.name),
         ));
       }
+      let previous = task.desired_state;
       task.desired_state = DesiredState::Stopped;
       let task_id = task.task_id.clone();
-      self
-        .persist_blocking(&tasks)
-        .map_err(RequestError::internal)?;
+      if let Err(error) = self.persist_blocking(&tasks) {
+        tasks.get_mut(&task_id).unwrap().desired_state = previous;
+        return Err(RequestError::internal(error));
+      }
       task_id
     };
+    if self
+      .show(&task_id)
+      .await?
+      .active_run
+      .as_ref()
+      .is_some_and(|run| run.interactive.is_some())
+    {
+      return self.stop_interactive(&task_id).await;
+    }
     let mut activity = self.activity.subscribe();
     let runtime = self.runtimes.lock().await.get(&task_id).cloned();
     let Some(runtime) = runtime else {
@@ -370,6 +393,8 @@ impl State {
   }
 
   async fn remove(&self, selector: &str) -> Result<String, RequestError> {
+    let task = self.show(selector).await?;
+    self.release_outcome(&task.task_id).await?;
     let mut tasks = self.tasks.lock().await;
     let task = resolve_task(&tasks, selector)?;
     if task.active_run.is_some() {
@@ -395,6 +420,12 @@ impl State {
   ) -> Result<(), RequestError> {
     let mut activity = self.activity.subscribe();
     let task = self.show(selector).await?;
+    if task.definition.execution_mode == ExecutionMode::Interactive {
+      return Err(RequestError::new(
+        ErrorCode::UnsupportedExecutionMode,
+        "interactive output belongs to rmuxd; use ctl task attach",
+      ));
+    }
     let run = task.active_run.as_ref().or(task.last_run.as_ref());
     let Some(run) = run else {
       write_frame(stream, &ServerMessage::LogsFinished)
@@ -483,9 +514,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   let listener = task_ipc::windows::bind(&config.socket_path).map_err(DaemonError::Socket)?;
   #[cfg(unix)]
   let _socket_guard = SocketGuard(config.socket_path.clone());
-  let state = Arc::new(State::load(&config.data_directory)?);
+  let state = Arc::new(State::load(&config.data_directory, config.rmux_socket)?);
+  let reconciliation = state.reconcile_interactive();
+  tokio::pin!(reconciliation);
   loop {
     tokio::select! {
+      () = &mut reconciliation => unreachable!("reconciliation runs until shutdown"),
       accepted = listener.accept() => {
         #[cfg(unix)]
         let (stream, _) = accepted.map_err(DaemonError::Accept)?;

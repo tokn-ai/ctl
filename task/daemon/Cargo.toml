@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+rmux-ipc.workspace = true
+rmux-proto.workspace = true
 clap.workspace = true
 dirs.workspace = true
 rustix.workspace = true
@@ -21,6 +23,7 @@ process-wrap = { version = "10.0.0", default-features = false, features = ["toki
 interprocess = { version = "2.4.4", features = ["tokio"] }
 
 [dev-dependencies]
+rmuxd.workspace = true
 task-proto.workspace = true
 tokio.workspace = true
 uuid.workspace = true

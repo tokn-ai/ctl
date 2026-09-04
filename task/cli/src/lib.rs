@@ -27,6 +27,9 @@ pub enum Command {
     #[arg(last = true, required = true)]
     command: Vec<String>,
   },
+  Attach {
+    task: String,
+  },
   List,
   Show {
     task: String,
@@ -107,6 +110,36 @@ pub async fn run(mut command: Command) -> Result<(), CommandError> {
   execute(command, stream, &socket).await
 }
 
+async fn attach_task(task: &TaskInfo) -> Result<(), CommandError> {
+  let backend = task
+    .active_run
+    .as_ref()
+    .and_then(|run| run.interactive.as_ref())
+    .ok_or_else(|| CommandError::Server {
+      code: task_proto::ErrorCode::NotRunning,
+      message: "task has no active interactive run".into(),
+    })?;
+  let session = backend
+    .session_id
+    .clone()
+    .ok_or_else(|| CommandError::Server {
+      code: task_proto::ErrorCode::NotRunning,
+      message: "interactive session is not ready".into(),
+    })?;
+  let connector = rmux_cli::LocalConnector::new(backend.rmux_socket.clone());
+  rmux_cli::run(
+    rmux_cli::Command::Attach {
+      session,
+      resume_from: None,
+      read_only: false,
+      resize: true,
+    },
+    &connector,
+  )
+  .await?;
+  Ok(())
+}
+
 async fn execute(command: Command, mut stream: Stream, socket: &Path) -> Result<(), CommandError> {
   match command {
     Command::Create {
@@ -139,6 +172,10 @@ async fn execute(command: Command, mut stream: Stream, socket: &Path) -> Result<
           one(&mut stream, ClientMessage::StartTask { task: task.task_id }).await?,
         )?);
       }
+    }
+    Command::Attach { task } => {
+      let task = expect_task(one(&mut stream, ClientMessage::ShowTask { task }).await?)?;
+      attach_task(&task).await?;
     }
     Command::List => match one(&mut stream, ClientMessage::ListTasks).await? {
       ServerMessage::TaskList { tasks } => {
@@ -216,24 +253,32 @@ async fn print_logs(
 }
 
 fn print_task(task: &TaskInfo) {
-  let state = task.active_run.as_ref().map_or_else(
-    || {
-      task
-        .last_run
-        .as_ref()
-        .map_or("stopped", |run| match run.state {
-          task_proto::RunState::Running => "running",
-          task_proto::RunState::Completed => "completed",
-          task_proto::RunState::Failed => "failed",
-          task_proto::RunState::Stopped => "stopped",
-        })
-    },
-    |_| "running",
-  );
+  let state =
+    task
+      .active_run
+      .as_ref()
+      .or(task.last_run.as_ref())
+      .map_or("stopped", |run| match run.state {
+        task_proto::RunState::Starting => "starting",
+        task_proto::RunState::Unknown => "unknown",
+        task_proto::RunState::Running => "running",
+        task_proto::RunState::Completed => "completed",
+        task_proto::RunState::Failed => "failed",
+        task_proto::RunState::Stopped => "stopped",
+      });
   println!(
     "{}\t{}\t{}\t{}",
     task.task_id, task.definition.name, state, task.definition.program
   );
+  if let Some(backend) = task
+    .active_run
+    .as_ref()
+    .or(task.last_run.as_ref())
+    .and_then(|run| run.interactive.as_ref())
+    && let Some(session) = &backend.session_id
+  {
+    println!("  rmux session: {session}");
+  }
 }
 
 async fn handshake(stream: &mut Stream) -> Result<(), CommandError> {
@@ -350,6 +395,8 @@ fn retryable(error: &io::Error) -> bool {
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error(transparent)]
+  Rmux(#[from] rmux_cli::CommandError),
   #[error("could not resolve task working directory: {0}")]
   WorkingDirectory(#[source] io::Error),
   #[error(transparent)]

@@ -230,9 +230,10 @@ the logical attachment and its leases for 30 seconds by default. An explicit
 
 ## Managed tasks
 
-The initial task implementation manages local noninteractive commands. Task
-definitions and completed run metadata persist in taskd; stdout and stderr are
-kept in a bounded in-memory log for the current daemon lifetime.
+Tasks support local background commands and interactive terminals on Unix and
+Windows. Task definitions and the latest run metadata persist in taskd.
+Background stdout and stderr use a bounded in-memory log; interactive input and
+output stay in rmuxd.
 
 ```sh
 ctl task create api --cwd ./service --start -- cargo run
@@ -245,11 +246,33 @@ ctl task restart api
 ctl task remove api
 ```
 
-On Unix, background tasks run in their own process group. Stop first sends a graceful
-termination signal to the group and escalates if it does not exit. Interactive
-rmux-backed tasks can be registered with `--mode interactive`, but starting
-them is reserved for the next implementation stage. Remote task routing and
-desktop workspace integration are also not implemented yet.
+Interactive tasks use `--mode interactive` and attach through rmux:
+
+```sh
+ctl task create shell --mode interactive --start -- bash
+ctl task attach shell
+ctl task stop shell
+ctl task restart shell
+```
+
+Use `cmd.exe /D /Q` instead of `bash` for a Windows command shell. Taskd manages
+the run; rmuxd owns its process and PTY (ConPTY on Windows). `ctl task show`
+also reports the session ID for `ctl rmux attach`. `ctl task logs` applies only
+to background tasks.
+
+Interactive runs survive taskd restart and are reconciled with the same rmuxd
+instance. Rmuxd retains exit results until taskd records them. Replacing or
+losing rmuxd fails the affected runs; taskd does not automatically recreate
+them. Starting and restarting remain explicit operations.
+
+Build and install `ctl`, `taskd`, and `rmuxd` together. This task protocol is
+version 2; restart an older taskd before using it. Restart an older rmuxd to
+enable managed sessions (this terminates its existing terminals). Existing
+background task records remain readable. Remote task routing, automatic restart
+policies, and desktop workspace task integration remain pending.
+
+On Unix, background tasks run in their own process group. Stop first sends a
+termination signal to the group and escalates if it does not exit.
 
 Windows background tasks use owner-restricted local named pipes and Job Objects.
 Stop terminates the entire process tree; taskd exit also terminates its jobs.

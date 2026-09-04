@@ -43,6 +43,7 @@ try {
   Copy-Item "$root\client.pub" "$root\authorized_keys"
   # SYSTEM runs sshd; only SYSTEM and Administrators may change its host key/config.
   Invoke-Native -Program 'icacls.exe' -Arguments @($root, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T')
+  Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/setowner', '*S-1-5-18')
   $rootSsh = $root.Replace('\', '/')
   $user = $env:USERNAME.ToLowerInvariant()
   New-Item -ItemType Directory -Force (Split-Path $serverConfig) | Out-Null
@@ -58,6 +59,7 @@ AllowUsers $user
 AllowTcpForwarding no
 AllowAgentForwarding no
 PermitTTY no
+SyslogFacility LOCAL0
 LogLevel DEBUG1
 "@ | Set-Content $serverConfig -Encoding ascii
   Invoke-Native -Program "$openssh\sshd.exe" -Arguments @('-t', '-f', $serverConfig)
@@ -83,6 +85,8 @@ $originalConfig
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctld', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
   Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'rmux', 'list')
 } catch {
+  Get-Content "$env:ProgramData\ssh\logs\sshd.log" -Tail 100 -ErrorAction SilentlyContinue
+  Get-CimInstance Win32_Service -Filter "Name = 'sshd'" | Format-List PathName, StartName, ExitCode
   Get-Service sshd | Format-List Name, Status, StartType
   Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddMinutes(-5) } -MaxEvents 10 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
   Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 20 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message

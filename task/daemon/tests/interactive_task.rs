@@ -156,30 +156,35 @@ fn spawn_rmux(socket_path: PathBuf) -> JoinHandle<Result<(), rmuxd::DaemonError>
 }
 
 async fn connect_rmux(socket: &Path) -> rmux_ipc::Stream {
-  let deadline = Instant::now() + Duration::from_secs(10);
-  loop {
-    match rmux_ipc::connect_existing_daemon(socket).await {
-      Ok(mut stream) => {
-        rmux_proto::write_frame(
-          &mut stream,
-          &rmux_proto::ClientMessage::Handshake {
-            protocol_version: rmux_proto::PROTOCOL_VERSION,
-            client_name: "task-test".into(),
-            client_version: "test".into(),
-          },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-          rmux_message(&mut stream).await,
-          rmux_proto::ServerMessage::HandshakeAccepted { .. }
-        ));
-        return stream;
+  timeout(Duration::from_secs(10), async {
+    loop {
+      if let Ok(mut stream) = rmux_ipc::connect_existing_daemon(socket).await {
+        // A replacement's pipe can connect before it can serve a handshake.
+        // Readiness requires a protocol response, not just an open transport.
+        let handshake = async {
+          rmux_proto::write_frame(
+            &mut stream,
+            &rmux_proto::ClientMessage::Handshake {
+              protocol_version: rmux_proto::PROTOCOL_VERSION,
+              client_name: "task-test".into(),
+              client_version: "test".into(),
+            },
+          )
+          .await?;
+          rmux_proto::read_frame::<_, rmux_proto::ServerMessage>(&mut stream).await
+        }
+        .await;
+        match handshake {
+          Ok(Some(rmux_proto::ServerMessage::HandshakeAccepted { .. })) => return stream,
+          Ok(None) | Err(rmux_proto::CodecError::Io(_)) => {}
+          other => panic!("unexpected rmuxd readiness response: {other:?}"),
+        }
       }
-      Err(_) if Instant::now() < deadline => sleep(Duration::from_millis(25)).await,
-      Err(error) => panic!("rmuxd did not start: {error}"),
+      sleep(Duration::from_millis(25)).await;
     }
-  }
+  })
+  .await
+  .expect("rmuxd did not complete its readiness handshake within 10 seconds")
 }
 
 async fn launch_taskd(root: &Path, socket: &Path, rmux: &Path) -> Child {

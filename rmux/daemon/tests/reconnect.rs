@@ -1878,6 +1878,52 @@ async fn required_message(stream: &mut UnixStream) -> TestResult<ServerMessage> 
     .ok_or_else(|| "rmuxd closed the connection unexpectedly".into())
 }
 
+// The daemon may close after queuing final output and SessionEnded. A late
+// acknowledgement must not stop us from draining those buffered messages.
+async fn acknowledge_output(stream: &mut UnixStream, sequence: u64) -> TestResult {
+  match write_frame(stream, &ClientMessage::PresentationApplied { sequence }).await {
+    Ok(()) => Ok(()),
+    Err(rmux_proto::CodecError::Io(error))
+      if matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+      ) =>
+    {
+      Ok(())
+    }
+    Err(error) => Err(error.into()),
+  }
+}
+
+#[tokio::test]
+async fn final_output_is_drained_when_presentation_acknowledgement_finds_a_closed_peer()
+-> TestResult {
+  let (mut client, mut server) = UnixStream::pair()?;
+  write_frame(
+    &mut server,
+    &ServerMessage::Output {
+      sequence_start: 0,
+      sequence_end: 5,
+      data: b"final".to_vec(),
+    },
+  )
+  .await?;
+  write_frame(
+    &mut server,
+    &ServerMessage::SessionEnded {
+      session_id: "finished".into(),
+      exit_code: Some(0),
+    },
+  )
+  .await?;
+  drop(server);
+
+  let (output, sequence) = read_output_until(&mut client, b"final").await?;
+  assert_eq!(output, b"final");
+  assert_eq!(sequence, 5);
+  wait_for_session_end(&mut client).await
+}
+
 async fn read_output_until(stream: &mut UnixStream, expected: &[u8]) -> TestResult<(Vec<u8>, u64)> {
   let mut output = Vec::new();
   loop {
@@ -1886,26 +1932,14 @@ async fn read_output_until(stream: &mut UnixStream, expected: &[u8]) -> TestResu
         sequence_end, data, ..
       } => {
         output.extend(data);
-        write_frame(
-          stream,
-          &ClientMessage::PresentationApplied {
-            sequence: sequence_end,
-          },
-        )
-        .await?;
+        acknowledge_output(stream, sequence_end).await?;
         if contains_bytes(&output, expected) {
           return Ok((output, sequence_end));
         }
       }
       ServerMessage::Checkpoint { checkpoint, .. } => {
         output = checkpoint.payload.clone();
-        write_frame(
-          stream,
-          &ClientMessage::PresentationApplied {
-            sequence: checkpoint.sequence,
-          },
-        )
-        .await?;
+        acknowledge_output(stream, checkpoint.sequence).await?;
         if contains_bytes(&output, expected) {
           return Ok((output, checkpoint.sequence));
         }

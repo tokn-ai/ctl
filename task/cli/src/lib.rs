@@ -75,7 +75,7 @@ impl From<Mode> for ExecutionMode {
 /// taskd rejects the operation, or log output cannot be written.
 pub async fn run(mut command: Command) -> Result<(), CommandError> {
   if let Command::Create { cwd, .. } = &mut command {
-    let current = env::current_dir()?;
+    let current = env::current_dir().map_err(CommandError::WorkingDirectory)?;
     let directory = cwd
       .as_ref()
       .map_or_else(|| current.clone(), |path| current.join(path));
@@ -87,7 +87,8 @@ pub async fn run(mut command: Command) -> Result<(), CommandError> {
             io::ErrorKind::InvalidInput,
             "task working directory must be valid Unicode",
           )
-        })?
+        })
+        .map_err(CommandError::WorkingDirectory)?
         .to_owned(),
     );
   }
@@ -349,6 +350,8 @@ fn retryable(error: &io::Error) -> bool {
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error("could not resolve task working directory: {0}")]
+  WorkingDirectory(#[source] io::Error),
   #[error(transparent)]
   Codec(#[from] task_proto::CodecError),
   #[error("could not connect to taskd: {0}")]

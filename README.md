@@ -9,12 +9,19 @@ This repository will contain two independently useful products:
 
 The current MVP supports local `rmux` sessions plus mixed local/SSH sessions
 in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
-local IPC is not implemented yet.
+supports local background tasks through `ctl task`; rmux terminal IPC is not
+implemented there yet.
 
 ## Build
 
 ```sh
 cargo build --workspace
+```
+
+For the Windows background-task slice:
+
+```sh
+cargo build -p ctl -p taskd
 ```
 
 The `rmux` and `rmuxd` binaries must be installed beside one another, or

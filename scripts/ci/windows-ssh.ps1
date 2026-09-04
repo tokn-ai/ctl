@@ -27,6 +27,7 @@ $originalServerConfig = if (Test-Path $serverConfig) { [IO.File]::ReadAllText($s
 $shellKey = 'HKLM:\SOFTWARE\OpenSSH'
 $originalShell = (Get-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell
 $installed = @()
+$originalAcls = @{}
 try {
   Stop-Service sshd -ErrorAction SilentlyContinue
   # The fixed remote command resolves installed executables through the server's PATH.
@@ -62,6 +63,22 @@ PermitTTY no
 SyslogFacility LOCAL0
 LogLevel DEBUG1
 "@ | Set-Content $serverConfig -Encoding ascii
+  # sshd validates these ACLs under SYSTEM, before it can initialize logging.
+  foreach ($path in @((Split-Path $serverConfig), "$env:ProgramData\ssh\logs", $serverConfig)) {
+    if (Test-Path $path) { $originalAcls[$path] = Get-Acl $path }
+    else { New-Item -ItemType Directory -Path $path | Out-Null }
+    $acl = if ((Get-Item $path).PSIsContainer) {
+      [Security.AccessControl.DirectorySecurity]::new()
+    } else { [Security.AccessControl.FileSecurity]::new() }
+    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+      $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow')
+      $acl.AddAccessRule($rule)
+    }
+    Set-Acl $path $acl
+  }
   Invoke-Native -Program "$openssh\sshd.exe" -Arguments @('-t', '-f', $serverConfig)
   $hostKey = (Get-Content "$root\host.pub").Split(' ')
   "[127.0.0.1]:22222 $($hostKey[0]) $($hostKey[1])" | Set-Content "$root\known_hosts" -Encoding ascii
@@ -90,6 +107,7 @@ $originalConfig
   Get-Service sshd | Format-List Name, Status, StartType
   Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddMinutes(-5) } -MaxEvents 10 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
   Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 20 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
+  Get-WinEvent -LogName 'OpenSSH/Admin' -MaxEvents 20 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
   throw
 } finally {
   Stop-Service sshd -ErrorAction SilentlyContinue
@@ -103,6 +121,7 @@ $originalConfig
   else { [IO.File]::WriteAllText($serverConfig, $originalServerConfig) }
   if ($null -eq $originalShell) { Remove-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue }
   else { Set-ItemProperty $shellKey -Name DefaultShell -Value $originalShell }
+  foreach ($path in $originalAcls.Keys) { Set-Acl $path $originalAcls[$path] }
   if ($wasRunning) { Start-Service sshd }
   Set-Service sshd -StartupType $originalStartType
   Remove-Item Env:CTL_TEST_SSH_HOST -ErrorAction SilentlyContinue

@@ -1,18 +1,15 @@
 use clap::{Subcommand, ValueEnum};
-use std::env;
+
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, Instant};
-use task_ipc::{Stream, connect, socket_path};
+use task_client::connect_or_start;
+
+use task_ipc::{Stream, socket_path};
 use task_proto::{
   ClientMessage, ExecutionMode, PROTOCOL_VERSION, ServerMessage, TaskDefinition, TaskInfo,
   read_frame, write_frame,
 };
 use thiserror::Error;
-use tokio::time::sleep;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -78,7 +75,7 @@ impl From<Mode> for ExecutionMode {
 /// taskd rejects the operation, or log output cannot be written.
 pub async fn run(mut command: Command) -> Result<(), CommandError> {
   if let Command::Create { cwd, .. } = &mut command {
-    let current = env::current_dir().map_err(CommandError::WorkingDirectory)?;
+    let current = std::env::current_dir().map_err(CommandError::WorkingDirectory)?;
     let directory = cwd
       .as_ref()
       .map_or_else(|| current.clone(), |path| current.join(path));
@@ -339,62 +336,10 @@ fn unexpected(expected: &'static str, response: &ServerMessage) -> CommandError 
   }
 }
 
-async fn connect_or_start(socket: &Path) -> Result<Stream, CommandError> {
-  match connect(socket).await {
-    Ok(stream) => return Ok(stream),
-    Err(error) if retryable(&error) => {}
-    Err(error) => return Err(CommandError::Connect(error)),
-  }
-  let executable = daemon_executable()?;
-  let mut daemon = std::process::Command::new(&executable);
-  #[cfg(windows)]
-  {
-    use std::os::windows::process::CommandExt;
-    // DETACHED_PROCESS: taskd survives the invoking console.
-    daemon.creation_flags(0x0000_0008);
-  }
-  daemon
-    .arg("--socket")
-    .arg(socket)
-    .arg("--detach-from-terminal")
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|source| CommandError::StartDaemon { executable, source })?;
-  let deadline = Instant::now() + CONNECT_TIMEOUT;
-  loop {
-    match connect(socket).await {
-      Ok(stream) => return Ok(stream),
-      Err(error) if retryable(&error) && Instant::now() < deadline => {
-        sleep(Duration::from_millis(25)).await;
-      }
-      Err(error) => return Err(CommandError::Connect(error)),
-    }
-  }
-}
-
-fn daemon_executable() -> Result<PathBuf, CommandError> {
-  if let Some(executable) = env::var_os("TASKD_BIN") {
-    return Ok(PathBuf::from(executable));
-  }
-  let current = env::current_exe().map_err(CommandError::CurrentExecutable)?;
-  let sibling = current.with_file_name(format!("taskd{}", env::consts::EXE_SUFFIX));
-  if sibling.is_file() {
-    return Ok(sibling);
-  }
-  Ok(PathBuf::from(format!("taskd{}", env::consts::EXE_SUFFIX)))
-}
-
-fn retryable(error: &io::Error) -> bool {
-  matches!(
-    error.kind(),
-    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-  )
-}
-
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error(transparent)]
+  Client(#[from] task_client::ClientError),
   #[error(transparent)]
   Rmux(#[from] rmux_cli::CommandError),
   #[error("could not resolve task working directory: {0}")]

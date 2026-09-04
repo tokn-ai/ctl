@@ -54,7 +54,11 @@ describe("workspace model", () => {
       true,
     );
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
-    expect(workspaceDocument(view)).toEqual(snapshot.document);
+    expect(workspaceDocument(view)).toEqual({ ...snapshot.document, schema_version: 2,
+      task_definitions: [], task_references: [],
+      tabs: snapshot.document.tabs.map((tab) => ({ ...tab, kind: "session" })),
+      active_tab: { ...snapshot.document.active_tab, kind: "session" },
+    });
   });
 
   it("never persists runtime status, output positions, commands, or credentials", () => {

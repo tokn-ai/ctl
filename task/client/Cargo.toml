@@ -1,13 +1,9 @@
 [package]
-name = "task-cli"
+name = "task-client"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-task-client.workspace = true
-rmux-cli.workspace = true
-clap.workspace = true
-rustix.workspace = true
 task-ipc.workspace = true
 task-proto.workspace = true
 thiserror.workspace = true

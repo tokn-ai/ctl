@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,8 @@ pub struct InteractiveRun {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunInfo {
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub definition: Option<TaskDefinition>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub interactive: Option<InteractiveRun>,
   pub run_id: String,
   pub state: RunState,
@@ -92,6 +94,14 @@ pub enum ClientMessage {
     client_name: String,
   },
   CreateTask {
+    definition: TaskDefinition,
+  },
+  RegisterTask {
+    task_id: String,
+    definition: TaskDefinition,
+  },
+  UpdateTask {
+    task: String,
     definition: TaskDefinition,
   },
   ListTasks,

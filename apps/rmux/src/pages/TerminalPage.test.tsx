@@ -35,6 +35,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 const api = vi.hoisted(() => ({
+  taskRequest: vi.fn(),
   loadWorkspace: vi.fn(),
   updateWorkspace: vi.fn(),
   listSessions: vi.fn(),
@@ -118,6 +119,7 @@ function snapshot(): WorkspaceSnapshot {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
   nativeEvents.listeners.clear();
   window.localStorage.clear();
   api.loadWorkspace.mockResolvedValue(snapshot());
@@ -845,6 +847,7 @@ describe("workspace-backed terminal page", () => {
     );
     await waitFor(() =>
       expect(disk.document.active_tab).toEqual({
+        kind: "session",
         host_id: "local",
         session_id: "new-local",
       }),

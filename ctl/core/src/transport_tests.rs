@@ -7,10 +7,10 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 // Exercise real OS process pipes, including Windows binary stdio. These
 // fixtures model the SSH child's stream boundary, not SSH authentication.
-fn fixture(unix: &str, windows: &str) -> Command {
+fn fixture(unix: &str, windows_script: &str) -> Command {
   #[cfg(unix)]
   {
-    let _ = windows;
+    let _ = windows_script;
     let mut command = Command::new("sh");
     command.args(["-c", unix]);
     command
@@ -23,9 +23,17 @@ fn fixture(unix: &str, windows: &str) -> Command {
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
-      "-Command",
-      windows,
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
     ]);
+    // Keep stdin exclusively for the binary protocol. Windows PowerShell
+    // command mode can consume redirected input before the fixture runs.
+    command.arg(
+      std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(windows_script),
+    );
     command
   }
 }
@@ -33,13 +41,7 @@ fn fixture(unix: &str, windows: &str) -> Command {
 #[tokio::test]
 async fn transport_consumes_marker_and_preserves_binary_io() {
   timeout(TEST_TIMEOUT, async {
-    let command = fixture(
-      "printf 'ctl-ssh-v1\n'; cat",
-      "$o = [Console]::OpenStandardOutput(); \
-       $b = [Text.Encoding]::ASCII.GetBytes(\"ctl-ssh-v1`n\"); \
-       $o.Write($b, 0, $b.Length); $o.Flush(); \
-       [Console]::OpenStandardInput().CopyTo($o)",
-    );
+    let command = fixture("printf 'ctl-ssh-v1\n'; cat", "echo-transport.ps1");
     let mut transport = start_ssh_transport(command).await.unwrap();
     let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
     transport.write_all(&payload).await.unwrap();
@@ -57,7 +59,7 @@ async fn startup_rejects_stdout_noise_and_retains_stderr() {
   timeout(TEST_TIMEOUT, async {
     let noisy = fixture(
       "printf 'unexpected startup output\n'",
-      "[Console]::Out.WriteLine('unexpected startup output')",
+      "noisy-transport.ps1",
     );
     assert!(matches!(
       start_ssh_transport(noisy).await,
@@ -65,7 +67,7 @@ async fn startup_rejects_stdout_noise_and_retains_stderr() {
     ));
     let failed = fixture(
       "printf 'Host key verification failed.\n' >&2; exit 255",
-      "[Console]::Error.WriteLine('Host key verification failed.'); exit 255",
+      "failed-transport.ps1",
     );
     let Err(CoreError::SshStartup(message)) = start_ssh_transport(failed).await else {
       panic!("expected SSH startup diagnostics");

@@ -69,12 +69,32 @@ impl Repository {
         "The workspace file is too large. It has not been changed.",
       ));
     }
-    let snapshot: WorkspaceSnapshot = serde_json::from_slice(&bytes).map_err(|error| {
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
       CommandErrorDto::new(
         "workspace_unreadable",
         format!("Could not read workspace.json; the file has been preserved: {error}"),
       )
     })?;
+    if value["document"]["schema_version"] == 1 {
+      let backup = self.directory.join("workspace-v1.backup.json");
+      regular_file_or_absent(&backup).map_err(io_error)?;
+      if !backup.exists() {
+        fs::copy(&path, &backup).map_err(io_error)?;
+      }
+      value["document"]["schema_version"] = 2.into();
+      if let Some(tabs) = value["document"]["tabs"].as_array_mut() {
+        for tab in tabs {
+          if let Some(tab) = tab.as_object_mut() {
+            tab.insert("kind".into(), "session".into());
+          }
+        }
+      }
+      if let Some(tab) = value["document"]["active_tab"].as_object_mut() {
+        tab.insert("kind".into(), "session".into());
+      }
+    }
+    let snapshot: WorkspaceSnapshot =
+      serde_json::from_value(value).map_err(CommandErrorDto::backend)?;
     snapshot.document.validate()?;
     if snapshot.revision.as_ref().is_none_or(String::is_empty) {
       return Err(CommandErrorDto::new(

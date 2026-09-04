@@ -36,7 +36,7 @@ fn populated() -> WorkspaceDocument {
     last_known_cwd: Some("/work".into()),
     last_known_cwd_display: Some("~/work".into()),
   });
-  document.tabs.push(document.sessions[0].reference());
+  document.tabs.push(document.sessions[0].reference().into());
   document.active_tab = document.tabs.first().cloned();
   document
 }
@@ -151,7 +151,10 @@ fn validates_membership_tabs_and_host_identity() {
   document.tabs.push(document.tabs[0].clone());
   assert!(document.validate().is_err());
   document = populated();
-  document.active_tab.as_mut().unwrap().session_id = "absent".into();
+  document.active_tab = Some(WorkspaceTab::Session {
+    host_id: "remote-id".into(),
+    session_id: "absent".into(),
+  });
   assert!(document.validate().is_err());
   document = populated();
   document.hosts.push(document.hosts[1].clone());
@@ -200,4 +203,51 @@ fn refuses_symlinks_without_modifying_their_target() {
       .is_err()
   );
   assert_eq!(fs::read_to_string(target).unwrap(), "preserve");
+}
+
+#[test]
+fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
+  let fixture = Fixture::new();
+  fixture.repository().load().unwrap();
+  let mut value = serde_json::to_value(WorkspaceSnapshot {
+    revision: Some("old".into()),
+    document: populated(),
+  })
+  .unwrap();
+  value["document"]["schema_version"] = 1.into();
+  for tab in value["document"]["tabs"].as_array_mut().unwrap() {
+    tab.as_object_mut().unwrap().remove("kind");
+  }
+  value["document"]["active_tab"]
+    .as_object_mut()
+    .unwrap()
+    .remove("kind");
+  value["document"]
+    .as_object_mut()
+    .unwrap()
+    .remove("task_definitions");
+  value["document"]
+    .as_object_mut()
+    .unwrap()
+    .remove("task_references");
+  let bytes = serde_json::to_vec(&value).unwrap();
+  fs::write(fixture.0.join("workspace.json"), &bytes).unwrap();
+  let loaded = fixture.repository().load().unwrap();
+  assert_eq!(loaded.document, populated());
+  assert_eq!(loaded.revision.as_deref(), Some("old"));
+  assert_eq!(
+    fs::read(fixture.0.join("workspace-v1.backup.json")).unwrap(),
+    bytes
+  );
+  fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: loaded.revision,
+      document: loaded.document,
+    })
+    .unwrap();
+  assert_eq!(
+    fixture.repository().load().unwrap().document.schema_version,
+    2
+  );
 }

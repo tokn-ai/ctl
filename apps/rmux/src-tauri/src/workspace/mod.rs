@@ -47,6 +47,38 @@ impl WorkspaceSession {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkspaceTab {
+  Session { host_id: String, session_id: String },
+  Task { host_id: String, task_id: String },
+  TaskDefinition { definition_id: String },
+}
+impl From<SessionReference> for WorkspaceTab {
+  fn from(reference: SessionReference) -> Self {
+    Self::Session {
+      host_id: reference.host_id,
+      session_id: reference.session_id,
+    }
+  }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedTaskDefinition {
+  pub definition_id: String,
+  pub revision: String,
+  pub definition: task_proto::TaskDefinition,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskReference {
+  pub host_id: String,
+  pub task_id: String,
+  pub definition_id: Option<String>,
+  pub applied_revision: Option<String>,
+  pub is_default: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceDocument {
@@ -54,20 +86,26 @@ pub struct WorkspaceDocument {
   pub workspace_id: String,
   pub hosts: Vec<WorkspaceHost>,
   pub sessions: Vec<WorkspaceSession>,
-  pub tabs: Vec<SessionReference>,
-  pub active_tab: Option<SessionReference>,
+  pub tabs: Vec<WorkspaceTab>,
+  pub active_tab: Option<WorkspaceTab>,
+  #[serde(default)]
+  pub task_definitions: Vec<SavedTaskDefinition>,
+  #[serde(default)]
+  pub task_references: Vec<TaskReference>,
 }
 
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
-      schema_version: 1,
+      schema_version: 2,
       workspace_id: "default".into(),
       hosts: vec![WorkspaceHost {
         host_id: "local".into(),
         target: ConnectionTargetDto::Local,
       }],
       sessions: Vec::new(),
+      task_definitions: Vec::new(),
+      task_references: Vec::new(),
       tabs: Vec::new(),
       active_tab: None,
     }
@@ -76,7 +114,7 @@ impl Default for WorkspaceDocument {
 
 impl WorkspaceDocument {
   fn validate(&self) -> CommandResult<()> {
-    if self.schema_version != 1 {
+    if self.schema_version != 2 {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "This workspace was written by another app version. Its file has not been changed.",
@@ -143,16 +181,89 @@ impl WorkspaceDocument {
         return Err(invalid());
       }
     }
+    self.validate_task_tabs(&hosts, &sessions)?;
     let mut tabs = HashSet::new();
-    if self
-      .tabs
-      .iter()
-      .any(|tab| !sessions.contains(tab) || !tabs.insert(tab))
+    if self.tabs.iter().any(|tab| !tabs.insert(tab))
       || self
         .active_tab
         .as_ref()
         .is_some_and(|tab| !tabs.contains(tab))
     {
+      return Err(invalid());
+    }
+    Ok(())
+  }
+  fn validate_task_tabs(
+    &self,
+    hosts: &HashSet<&str>,
+    sessions: &HashSet<SessionReference>,
+  ) -> CommandResult<()> {
+    let invalid = || {
+      CommandErrorDto::new(
+        "workspace_invalid",
+        "Invalid task definitions or references.",
+      )
+    };
+    let valid_text =
+      |text: &str| !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control);
+    let mut definitions = HashSet::new();
+    for saved in &self.task_definitions {
+      if !valid_text(&saved.definition_id)
+        || !valid_text(&saved.revision)
+        || !valid_text(&saved.definition.name)
+        || !valid_text(&saved.definition.program)
+        || saved.definition.arguments.len() > 4096
+        || saved
+          .definition
+          .arguments
+          .iter()
+          .any(|arg| arg.len() > 65536 || arg.contains('\0'))
+        || saved
+          .definition
+          .working_directory
+          .as_ref()
+          .is_some_and(|cwd| !valid_text(cwd))
+        || !definitions.insert(saved.definition_id.as_str())
+      {
+        return Err(invalid());
+      }
+    }
+    let mut task_ids = HashSet::new();
+    let mut defaults = HashSet::new();
+    for task in &self.task_references {
+      if !hosts.contains(task.host_id.as_str())
+        || uuid::Uuid::parse_str(&task.task_id).is_err()
+        || !task_ids.insert((task.host_id.as_str(), task.task_id.as_str()))
+        || task
+          .definition_id
+          .as_ref()
+          .is_some_and(|id| !definitions.contains(id.as_str()))
+        || (task.is_default
+          && task
+            .definition_id
+            .as_ref()
+            .is_some_and(|id| !defaults.insert((task.host_id.as_str(), id.as_str()))))
+      {
+        return Err(invalid());
+      }
+    }
+    let valid_tab = |tab: &WorkspaceTab| match tab {
+      WorkspaceTab::Session {
+        host_id,
+        session_id,
+      } => sessions.contains(&SessionReference {
+        host_id: host_id.clone(),
+        session_id: session_id.clone(),
+      }),
+      WorkspaceTab::Task { host_id, task_id } => {
+        task_ids.contains(&(host_id.as_str(), task_id.as_str()))
+      }
+      WorkspaceTab::TaskDefinition { definition_id } => {
+        definitions.contains(definition_id.as_str())
+      }
+    };
+
+    if self.tabs.iter().any(|tab| !valid_tab(tab)) {
       return Err(invalid());
     }
     Ok(())

@@ -14,6 +14,7 @@ mod ssh_auth;
 mod ssh_config;
 mod ssh_identity;
 mod state;
+mod tasks;
 mod transport;
 mod workspace;
 
@@ -26,7 +27,9 @@ pub use ssh_auth::helper_exit_code as ssh_askpass_exit_code;
 ///
 /// Panics when Tauri cannot initialize or run the configured application.
 pub fn run() {
-  let builder = tauri::Builder::default().manage(state::AppState::default());
+  let builder = tauri::Builder::default()
+    .manage(state::AppState::default())
+    .manage(tasks::TaskStreams::default());
   #[cfg(target_os = "macos")]
   let builder = builder
     .menu(native_menu::build)
@@ -37,7 +40,21 @@ pub fn run() {
       state::register_main_window_cleanup(app);
       Ok(())
     })
+    .on_window_event(|window, event| {
+      if matches!(event, tauri::WindowEvent::Destroyed) {
+        use tauri::Manager as _;
+        let streams = window.state::<tasks::TaskStreams>().inner().clone();
+        let label = window.label().to_owned();
+        tauri::async_runtime::spawn(async move {
+          streams.close_window(&label).await;
+        });
+      }
+    })
     .invoke_handler(tauri::generate_handler![
+      tasks::task_request,
+      tasks::watch_task_logs,
+      tasks::cancel_task_logs,
+      tasks::acknowledge_task_log,
       workspace::load_workspace,
       workspace::update_workspace,
       keybindings::load_keybindings,

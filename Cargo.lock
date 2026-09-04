@@ -3015,6 +3015,8 @@ dependencies = [
  "rmux-proto",
  "serde",
  "serde_json",
+ "task-client",
+ "task-proto",
  "tauri",
  "tauri-build",
  "thiserror 2.0.20",
@@ -3718,6 +3720,17 @@ dependencies = [
  "clap",
  "rmux",
  "rustix",
+ "task-client",
+ "task-ipc",
+ "task-proto",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "task-client"
+version = "0.1.0"
+dependencies = [
  "task-ipc",
  "task-proto",
  "thiserror 2.0.20",

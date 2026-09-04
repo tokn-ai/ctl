@@ -334,3 +334,82 @@ async fn daemon_crash_terminates_its_descendants() {
   assert_tree_exited(&daemon).await;
   let _ = std::fs::remove_dir_all(&daemon.root);
 }
+
+#[tokio::test]
+async fn registration_retries_reuse_identity_and_updates_preserve_run_definition() {
+  let daemon = TestDaemon::start().await;
+  let task_id = Uuid::new_v4().to_string();
+  let definition = TaskDefinition {
+    name: "Build preview".into(),
+    program: shell_program(),
+    arguments: shell_arguments("exit 0", "exit /b 0"),
+    working_directory: None,
+    execution_mode: ExecutionMode::Background,
+  };
+  for _ in 0..2 {
+    let response = daemon
+      .request(ClientMessage::RegisterTask {
+        task_id: task_id.clone(),
+        definition: definition.clone(),
+      })
+      .await;
+    assert!(matches!(response, ServerMessage::TaskCreated { task } if task.task_id == task_id));
+  }
+  assert!(
+    matches!(daemon.request(ClientMessage::ListTasks).await, ServerMessage::TaskList { tasks } if tasks.len() == 1)
+  );
+  daemon
+    .request(ClientMessage::StartTask {
+      task: task_id.clone(),
+    })
+    .await;
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    let response = daemon
+      .request(ClientMessage::ShowTask {
+        task: task_id.clone(),
+      })
+      .await;
+    if matches!(response, ServerMessage::TaskStatus { task } if task.last_run.is_some()) {
+      break;
+    }
+    assert!(Instant::now() < deadline);
+    sleep(Duration::from_millis(20)).await;
+  }
+  let updated = TaskDefinition {
+    arguments: shell_arguments("sleep 30 & wait", "ping -n 30 127.0.0.1 >nul"),
+    ..definition.clone()
+  };
+  let response = daemon
+    .request(ClientMessage::UpdateTask {
+      task: task_id.clone(),
+      definition: updated.clone(),
+    })
+    .await;
+  let ServerMessage::TaskStatus { task } = response else {
+    panic!("{response:?}")
+  };
+  assert_eq!(task.definition, updated);
+  assert_eq!(task.last_run.unwrap().definition, Some(definition.clone()));
+  daemon
+    .request(ClientMessage::StartTask {
+      task: task_id.clone(),
+    })
+    .await;
+  assert!(matches!(
+    daemon
+      .request(ClientMessage::UpdateTask {
+        task: task_id.clone(),
+        definition
+      })
+      .await,
+    ServerMessage::Error {
+      code: task_proto::ErrorCode::AlreadyRunning,
+      ..
+    }
+  ));
+  daemon
+    .request(ClientMessage::StopTask { task: task_id })
+    .await;
+  daemon.stop().await;
+}

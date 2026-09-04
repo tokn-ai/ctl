@@ -15,6 +15,7 @@ members = [
   "task/ipc",
   "task/daemon",
   "task/cli",
+  "task/client",
 ]
 resolver = "3"
 
@@ -46,6 +47,7 @@ thiserror = "2.0.20"
 task-ipc = { path = "task/ipc" }
 task-proto = { path = "task/proto" }
 task-cli = { path = "task/cli" }
+task-client = { path = "task/client" }
 tokio = { version = "1.53.1", features = [
   "io-std",
   "io-util",

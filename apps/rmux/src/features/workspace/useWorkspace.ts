@@ -13,12 +13,14 @@ import {
   clearLegacyRemoteTargets,
   readLegacyRemoteTargets,
 } from "../targets/targets";
+import { sessionKey } from "../targets/targets";
 import { WorkspaceWriter } from "./WorkspaceWriter";
 import {
   emptyWorkspaceView,
   restoreWorkspace,
   withHostId,
   workspaceDocument,
+  workspaceTabKey,
   type WorkspaceView,
 } from "./workspaceModel";
 
@@ -101,7 +103,12 @@ export function useWorkspace() {
             )
           : action;
       if (value === previous[key]) return;
-      viewRef.current = { ...previous, [key]: value };
+      const next = { ...previous, [key]: value };
+      if (key === "tabs" || key === "task_tabs") {
+        const keys = [...next.tabs.map(sessionKey), ...next.task_tabs.map(workspaceTabKey)];
+        next.tab_order = [...previous.tab_order.filter((item) => keys.includes(item)), ...keys.filter((item) => !previous.tab_order.includes(item))];
+      }
+      viewRef.current = next;
       setView(viewRef.current);
       void persist().catch(() => undefined);
     },
@@ -117,7 +124,7 @@ export function useWorkspace() {
       if (closingRef.current) return;
       if (closeBlockedRef.current()) {
         setError(
-          "Wait for the ongoing session operation to finish before closing the window.",
+          "Save or discard unsaved task definitions and wait for ongoing operations before closing the window.",
         );
         return;
       }
@@ -182,6 +189,7 @@ export function useWorkspace() {
     closeBlockedRef,
     error,
     persist,
+    update,
     setTargets,
     setSessions,
     setTabs,

@@ -27,6 +27,8 @@ $serverConfig = Join-Path $env:ProgramData 'ssh\sshd_config'
 $originalServerConfig = if (Test-Path $serverConfig) { [IO.File]::ReadAllText($serverConfig) } else { $null }
 $shellKey = 'HKLM:\SOFTWARE\OpenSSH'
 $originalShell = (Get-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell
+$authorizedKeys = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+$originalAuthorizedKeys = if (Test-Path $authorizedKeys) { [IO.File]::ReadAllBytes($authorizedKeys) } else { $null }
 $installed = @()
 $originalAcls = @{}
 try {
@@ -42,25 +44,21 @@ try {
   New-ItemProperty $shellKey -Name DefaultShell -Value "$env:WINDIR\System32\cmd.exe" -PropertyType String -Force | Out-Null
   Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\host")
   Invoke-Native -Program "$openssh\ssh-keygen.exe" -Arguments @('-q', '-t', 'ed25519', '-N', '', '-f', "$root\client")
-  Copy-Item "$root\client.pub" "$root\authorized_keys"
   # SYSTEM runs sshd; only SYSTEM and Administrators may change its host key/config.
   Invoke-Native -Program 'icacls.exe' -Arguments @($root, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T')
   Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/setowner', '*S-1-5-18')
   # ssh-keygen adds an explicit creator ACE; /grant:r does not remove it.
   $creatorSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   Invoke-Native -Program 'icacls.exe' -Arguments @("$root\host", '/remove:g', "*$creatorSid")
-  # Authentication reads this file under the user's token, which may not
-  # have an enabled Administrators SID. Do not inherit access onto the host key.
-  Invoke-Native -Program 'icacls.exe' -Arguments @($root, '/grant', "*${creatorSid}:(RX)")
-  Invoke-Native -Program 'icacls.exe' -Arguments @("$root\authorized_keys", '/grant', "*${creatorSid}:(R)")
   $rootSsh = $root.Replace('\', '/')
   $user = $env:USERNAME.ToLowerInvariant()
   New-Item -ItemType Directory -Force (Split-Path $serverConfig) | Out-Null
+  Copy-Item "$root\client.pub" $authorizedKeys -Force
   @"
 Port 22222
 ListenAddress 127.0.0.1
 HostKey $rootSsh/host
-AuthorizedKeysFile $rootSsh/authorized_keys
+AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -72,7 +70,7 @@ SyslogFacility LOCAL0
 LogLevel DEBUG1
 "@ | Set-Content $serverConfig -Encoding ascii
   # sshd validates these ACLs under SYSTEM, before it can initialize logging.
-  foreach ($path in @((Split-Path $serverConfig), "$env:ProgramData\ssh\logs", $serverConfig)) {
+  foreach ($path in @((Split-Path $serverConfig), "$env:ProgramData\ssh\logs", $serverConfig, $authorizedKeys)) {
     if (Test-Path $path) { $originalAcls[$path] = Get-Acl $path }
     else { New-Item -ItemType Directory -Path $path | Out-Null }
     $acl = if ((Get-Item $path).PSIsContainer) {
@@ -137,9 +135,11 @@ $originalConfig
   else { [IO.File]::WriteAllText($config, $originalConfig) }
   if ($null -eq $originalServerConfig) { Remove-Item $serverConfig -ErrorAction SilentlyContinue }
   else { [IO.File]::WriteAllText($serverConfig, $originalServerConfig) }
+  if ($null -eq $originalAuthorizedKeys) { Remove-Item $authorizedKeys -ErrorAction SilentlyContinue }
+  else { [IO.File]::WriteAllBytes($authorizedKeys, $originalAuthorizedKeys) }
   if ($null -eq $originalShell) { Remove-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue }
   else { Set-ItemProperty $shellKey -Name DefaultShell -Value $originalShell }
-  foreach ($path in $originalAcls.Keys) { Set-Acl $path $originalAcls[$path] }
+  foreach ($path in $originalAcls.Keys) { if (Test-Path $path) { Set-Acl $path $originalAcls[$path] } }
   Invoke-Native -Program 'sc.exe' -Arguments @('config', 'sshd', 'binPath=', $originalServicePath)
   if ($wasRunning) { Start-Service sshd }
   Set-Service sshd -StartupType $originalStartType

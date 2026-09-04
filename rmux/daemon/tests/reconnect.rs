@@ -85,18 +85,9 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
     },
   )
   .await?;
-  let (second_output, _) = read_output_until(&mut second_attach, b"after:go").await?;
+  let second_output = wait_for_session_end(&mut second_attach).await?;
   assert!(!contains_bytes(&second_output, b"before"));
   assert!(contains_bytes(&second_output, b"after:go"));
-
-  loop {
-    if matches!(
-      required_message(&mut second_attach).await?,
-      ServerMessage::SessionEnded { .. }
-    ) {
-      break;
-    }
-  }
   drop(second_attach);
 
   let daemon_result = timeout(Duration::from_secs(3), daemon)
@@ -847,17 +838,17 @@ async fn explicitly_released_leases_can_be_acquired_by_another_attachment() -> T
     },
   )
   .await?;
-  let (first_output, _) = read_output_until(&mut first_attach, b"authorized:from-second").await?;
-  let (second_output, _) = read_output_until(&mut second_attach, b"authorized:from-second").await?;
+  // Drain the final frames only after the daemon has closed both attachments.
+  // This exercises a slow reader without depending on thread scheduling.
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after release test").await?;
+  let first_output = wait_for_session_end(&mut first_attach).await?;
+  let second_output = wait_for_session_end(&mut second_attach).await?;
   assert!(contains_bytes(&first_output, b"authorized:from-second"));
   assert!(contains_bytes(&second_output, b"authorized:from-second"));
-
-  wait_for_session_end(&mut first_attach).await?;
-  wait_for_session_end(&mut second_attach).await?;
   drop(first_attach);
   drop(second_attach);
 
-  wait_for_daemon_exit(daemon, "rmuxd did not exit after release test").await
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -930,9 +921,8 @@ async fn disconnected_attachment_releases_its_leases_for_another_attachment() ->
     },
   )
   .await?;
-  let (output, _) = read_output_until(&mut second_attach, b"authorized:after-disconnect").await?;
+  let output = wait_for_session_end(&mut second_attach).await?;
   assert!(contains_bytes(&output, b"authorized:after-disconnect"));
-  wait_for_session_end(&mut second_attach).await?;
   drop(second_attach);
 
   wait_for_daemon_exit(daemon, "rmuxd did not exit after disconnect test").await
@@ -1008,9 +998,8 @@ async fn reconnect_token_rebinds_the_attachment_and_preserves_both_leases() -> T
     },
   )
   .await?;
-  let (output, _) = read_output_until(&mut resumed, b"authorized:after-resume").await?;
+  let output = wait_for_session_end(&mut resumed).await?;
   assert!(contains_bytes(&output, b"authorized:after-resume"));
-  wait_for_session_end(&mut resumed).await?;
   drop(resumed);
 
   wait_for_daemon_exit(daemon, "rmuxd did not exit after token-resume test").await
@@ -1087,9 +1076,8 @@ async fn silent_open_attachment_expires_and_cannot_renew_its_leases_late() -> Te
     },
   )
   .await?;
-  let (output, _) = read_output_until(&mut contender, b"authorized:after-expiry").await?;
+  let output = wait_for_session_end(&mut contender).await?;
   assert!(contains_bytes(&output, b"authorized:after-expiry"));
-  wait_for_session_end(&mut contender).await?;
   drop(stale_owner);
   drop(contender);
 
@@ -1775,14 +1763,17 @@ async fn expect_error(stream: &mut UnixStream, expected_code: ErrorCode) -> Test
   }
 }
 
-async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult {
+async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult<Vec<u8>> {
+  // Final-output assertions use fixtures that fit within one presentation
+  // window and stay below the checkpoint threshold. Drain without acknowledgements:
+  // rmuxd can close its socket before we read the buffered final frames.
+  let mut output = Vec::new();
   loop {
     match required_message(stream).await? {
-      ServerMessage::SessionEnded { .. } => return Ok(()),
-      ServerMessage::Output { .. }
-      | ServerMessage::Checkpoint { .. }
-      | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      ServerMessage::SessionEnded { .. } => return Ok(output),
+      ServerMessage::Output { data, .. } => output.extend(data),
+      ServerMessage::Checkpoint { checkpoint, .. } => output = checkpoint.payload,
+      ServerMessage::ShellStateChanged { .. } | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
         return Err(format!("expected output or session end, received {response:?}").into());
       }

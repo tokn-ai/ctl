@@ -54,11 +54,46 @@ describe("workspace model", () => {
       true,
     );
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
-    expect(workspaceDocument(view)).toEqual({ ...snapshot.document, schema_version: 2,
-      task_definitions: [], task_references: [],
+    expect(workspaceDocument(view)).toEqual({
+      ...snapshot.document,
+      schema_version: 2,
+      task_definitions: [],
+      task_references: [],
+      task_drafts: [],
+      sidebar_view: "sessions",
       tabs: snapshot.document.tabs.map((tab) => ({ ...tab, kind: "session" })),
       active_tab: { ...snapshot.document.active_tab, kind: "session" },
     });
+  });
+
+  it("retains incomplete drafts and sidebar selection while migrating definition tabs", () => {
+    const document = savedWorkspace().document;
+    const definition = {
+      name: "Half written",
+      program: "",
+      arguments: [""],
+      working_directory: "relative/incomplete",
+      execution_mode: "background" as const,
+    };
+    document.task_drafts = [{ definition_id: "draft-id", definition }];
+    document.task_definitions = [
+      {
+        definition_id: "saved-id",
+        revision: "r1",
+        definition: { ...definition, program: "cargo" },
+      },
+    ];
+    document.tabs.push({ kind: "task_definition", definition_id: "saved-id" });
+    document.active_tab = document.tabs[2];
+    document.sidebar_view = "tasks";
+    const view = restoreWorkspace(document);
+    const persisted = workspaceDocument(view);
+    expect(view.task_tabs).toEqual([]);
+    expect(persisted.tabs).toHaveLength(2);
+    expect(persisted.active_tab).toEqual(persisted.tabs[0]);
+    expect(persisted.task_drafts).toEqual(document.task_drafts);
+    expect(persisted.sidebar_view).toBe("tasks");
+    expect(persisted.task_definitions).toEqual(document.task_definitions);
   });
 
   it("never persists runtime status, output positions, commands, or credentials", () => {

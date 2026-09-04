@@ -81,6 +81,21 @@ pub struct TaskReference {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TaskDefinitionDraft {
+  pub definition_id: String,
+  pub definition: task_proto::TaskDefinition,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarView {
+  #[default]
+  Sessions,
+  Tasks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceDocument {
   pub schema_version: u32,
   pub workspace_id: String,
@@ -90,6 +105,10 @@ pub struct WorkspaceDocument {
   pub active_tab: Option<WorkspaceTab>,
   #[serde(default)]
   pub task_definitions: Vec<SavedTaskDefinition>,
+  #[serde(default)]
+  pub task_drafts: Vec<TaskDefinitionDraft>,
+  #[serde(default)]
+  pub sidebar_view: SidebarView,
   #[serde(default)]
   pub task_references: Vec<TaskReference>,
 }
@@ -105,6 +124,8 @@ impl Default for WorkspaceDocument {
       }],
       sessions: Vec::new(),
       task_definitions: Vec::new(),
+      task_drafts: Vec::new(),
+      sidebar_view: SidebarView::default(),
       task_references: Vec::new(),
       tabs: Vec::new(),
       active_tab: None,
@@ -181,6 +202,7 @@ impl WorkspaceDocument {
         return Err(invalid());
       }
     }
+    self.validate_task_drafts()?;
     self.validate_task_tabs(&hosts, &sessions)?;
     let mut tabs = HashSet::new();
     if self.tabs.iter().any(|tab| !tabs.insert(tab))
@@ -193,6 +215,38 @@ impl WorkspaceDocument {
     }
     Ok(())
   }
+  fn validate_task_drafts(&self) -> CommandResult<()> {
+    let mut ids = HashSet::new();
+    let valid_field = |value: &str| value.len() <= 65536 && !value.contains('\0');
+    if self.task_drafts.len() > 1024
+      || self.task_drafts.iter().any(|draft| {
+        draft.definition_id.is_empty()
+          || draft.definition_id.len() > 4096
+          || draft.definition_id.chars().any(char::is_control)
+          || !ids.insert(&draft.definition_id)
+          || !valid_field(&draft.definition.name)
+          || !valid_field(&draft.definition.program)
+          || draft.definition.arguments.len() > 4096
+          || draft
+            .definition
+            .arguments
+            .iter()
+            .any(|arg| !valid_field(arg))
+          || draft
+            .definition
+            .working_directory
+            .as_ref()
+            .is_some_and(|cwd| !valid_field(cwd))
+      })
+    {
+      return Err(CommandErrorDto::new(
+        "workspace_invalid",
+        "Invalid task draft data.",
+      ));
+    }
+    Ok(())
+  }
+
   fn validate_task_tabs(
     &self,
     hosts: &HashSet<&str>,

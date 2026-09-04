@@ -70,6 +70,8 @@ export interface WorkspaceDocument {
   tabs: WorkspaceTab[];
   active_tab: WorkspaceTab | null;
   task_definitions?: SavedTaskDefinition[];
+  task_drafts?: TaskDefinitionDraft[];
+  sidebar_view?: "sessions" | "tasks";
   task_references?: TaskReference[];
 }
 
@@ -390,6 +392,10 @@ export interface ManagedTask {
   active_run: TaskRun | null;
   last_run: TaskRun | null;
 }
+export interface TaskDefinitionDraft {
+  definition_id: string;
+  definition: TaskDefinition;
+}
 export interface SavedTaskDefinition {
   definition_id: string;
   revision: string;
@@ -406,7 +412,7 @@ export type WorkspaceTab =
   | (SessionReference & { kind?: "session" })
   | { kind: "task"; host_id: string; task_id: string }
   | { kind: "task_definition"; definition_id: string };
-export type TaskTab = Exclude<WorkspaceTab, SessionReference>;
+export type TaskTab = Extract<WorkspaceTab, { kind: "task" }>;
 export type TaskRequest =
   | { type: "list_tasks" }
   | { type: "show_task" | "start_task" | "stop_task" | "restart_task" | "remove_task"; task: string }

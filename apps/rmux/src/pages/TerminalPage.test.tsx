@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
@@ -201,27 +202,127 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("switches sidebar tabs and keeps an incomplete draft after dismissal and relaunch", async () => {
+    const first = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    expect(
+      screen.queryByRole("button", { name: "New shell" }),
+    ).toBeNull();
+    const existingTabs = within(
+      screen.getByRole("navigation", { name: "Workspace tabs" }),
+    ).getAllByRole("tab").length;
+    fireEvent.click(
+      screen.getByRole("button", { name: "New task definition" }),
+    );
+    const editor = screen.getByRole("dialog", { name: "Create task" });
+    fireEvent.change(
+      within(editor).getByRole("textbox", { name: "Name" }),
+      { target: { value: "Half written" } },
+    );
+    fireEvent.change(
+      within(editor).getByRole("textbox", { name: "Working directory" }),
+      { target: { value: "unfinished/path" } },
+    );
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      within(
+        screen.getByRole("navigation", { name: "Workspace tabs" }),
+      ).getAllByRole("tab"),
+    ).toHaveLength(existingTabs);
+    await waitFor(() => {
+      const document = api.updateWorkspace.mock.calls.slice(-1)[0]?.[1] as WorkspaceDocument;
+      expect(document.task_drafts?.[0].definition).toMatchObject({
+        name: "Half written",
+        program: "",
+        working_directory: "unfinished/path",
+      });
+    });
+    const persisted = api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument;
+    expect(persisted.task_definitions).toEqual([]);
+    expect(
+      api.taskRequest.mock.calls.every(
+        ([request]) => request.type === "list_tasks",
+      ),
+    ).toBe(true);
+    first.unmount();
+    api.loadWorkspace.mockResolvedValue({
+      revision: "saved-draft",
+      document: persisted,
+    });
+    render(<TerminalPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Resume draft Half written" }),
+    );
+    expect(
+      (
+        screen.getByRole("textbox", {
+          name: "Name",
+          }) as HTMLInputElement
+      ).value,
+    ).toBe("Half written");
+    expect(
+      (screen.getByRole("textbox", { name: "Executable" }) as HTMLInputElement)
+        .value,
+    ).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "Close task editor" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
+    expect(
+      screen.getByRole("button", { name: "New shell" }),
+    ).toBeDefined();
+  });
+
+  it("creates a definition explicitly from the autosaved draft without starting a task", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(screen.getByRole("button", { name: "New task definition" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Build" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Executable" }), { target: { value: "cargo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create definition" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    expect(document.task_definitions?.[0].definition).toMatchObject({ name: "Build", program: "cargo" });
+    expect(document.task_drafts).toEqual([]);
+    expect(document.task_references).toEqual([]);
+    expect(api.taskRequest.mock.calls.every(([request]) => request.type === "list_tasks")).toBe(true);
+  });
+
   it("restarts taskd from the palette and prevents duplicate requests while pending", async () => {
     let finish!: () => void;
-    api.restartTaskDaemon.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    api.restartTaskDaemon.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     shortcut("KeyP");
-    fireEvent.change(screen.getByRole("combobox", { name: "Search commands" }), {
-      target: { value: "Restart taskd" },
-    });
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Search commands" }),
+      {
+        target: { value: "Restart taskd" },
+      },
+    );
     fireEvent.click(screen.getByRole("option", { name: /Restart taskd/ }));
     await screen.findByText("Restarting taskd…");
     nativeCommand(COMMAND_IDS.restartTaskDaemon, 2);
     expect(api.restartTaskDaemon).toHaveBeenCalledTimes(1);
-    await act(async () => { finish(); });
+    await act(async () => {
+      finish();
+    });
     await screen.findByText("taskd restarted.");
     expect(api.taskRequest).toHaveBeenCalledWith({ type: "list_tasks" });
     expect(api.restartLocalDaemon).not.toHaveBeenCalled();
   });
 
   it("shows taskd restart errors in the task sidebar", async () => {
-    api.restartTaskDaemon.mockRejectedValueOnce(new Error("Stop active tasks before restarting taskd."));
+    api.restartTaskDaemon.mockRejectedValueOnce(
+      new Error("Stop active tasks before restarting taskd."),
+    );
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     nativeCommand(COMMAND_IDS.restartTaskDaemon);

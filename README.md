@@ -246,3 +246,5 @@ and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). Numbered
 [`design proposals`](docs/proposals/README.md) record feature intent and major
 ownership boundaries. The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).
+The [Windows CI exploration](docs/windows-ci.md) records verified compilation
+boundaries and a proposed Windows job; Windows tests are not enabled yet.

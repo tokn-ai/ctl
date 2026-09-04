@@ -22,6 +22,15 @@ pub async fn run(arguments: Arguments) -> Result<(), CliError> {
       });
       rmux_cli::run(command, &CtlConnector { target }).await?;
     }
+    Command::Taskd {
+      command: super::TaskdCommand::Restart,
+    } => {
+      if let Some(host) = arguments.host {
+        return Err(CliError::RemoteTaskUnsupported(host));
+      }
+      task_client::restart_daemon().await?;
+      println!("taskd is ready");
+    }
     Command::Task { command } => {
       if let Some(host) = arguments.host {
         return Err(CliError::RemoteTaskUnsupported(host));
@@ -77,6 +86,8 @@ impl Connector for CtlConnector {
 pub enum CliError {
   #[error(transparent)]
   Rmux(#[from] CommandError),
+  #[error(transparent)]
+  TaskDaemon(#[from] task_client::ClientError),
   #[error(transparent)]
   Task(#[from] task_cli::CommandError),
   #[error("remote task routing is not implemented yet for host {0:?}")]

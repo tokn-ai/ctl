@@ -647,6 +647,7 @@ dependencies = [
  "ctl-core",
  "rmux",
  "task-cli",
+ "task-client",
  "thiserror 2.0.20",
  "tokio",
 ]

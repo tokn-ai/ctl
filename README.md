@@ -10,7 +10,9 @@ This repository will contain two independently useful products:
 The current MVP supports local `rmux` sessions plus mixed local/SSH sessions
 in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
 supports local ConPTY sessions through `rmux` and `ctl rmux`, plus background
-tasks through `ctl task`. Windows desktop and SSH routing remain pending.
+tasks through `ctl task`. Windows `ctl --host HOST rmux ...` also routes through
+the system OpenSSH client to Unix hosts with `ctld` and `rmuxd` installed.
+Windows desktop and Windows SSH-server support remain pending.
 
 ## Build
 

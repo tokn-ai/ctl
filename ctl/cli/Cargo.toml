@@ -7,7 +7,6 @@ edition.workspace = true
 clap.workspace = true
 ctl-core.workspace = true
 rmux-cli.workspace = true
-rmux-ipc.workspace = true
 task-cli.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

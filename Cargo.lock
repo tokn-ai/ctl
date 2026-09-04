@@ -646,7 +646,6 @@ dependencies = [
  "clap",
  "ctl-core",
  "rmux",
- "rmux-ipc",
  "task-cli",
  "thiserror 2.0.20",
  "tokio",

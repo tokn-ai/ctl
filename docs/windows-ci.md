@@ -1,6 +1,6 @@
 # Windows CI exploration
 
-Status: Windows background tasks and local ConPTY sessions implemented,
+Status: Windows background tasks, local ConPTY sessions, and CLI SSH routing implemented,
 2026-09-04. Full workspace Windows tests remain deferred. The findings below distinguish source compatibility from runtime
 support.
 
@@ -159,6 +159,27 @@ ACL tests remain useful follow-up validation.
 Windows has no native process inspection or Bash/Zsh FIFO reporter in this
 slice, so unavailable shell metadata stays unknown. Terminal output and
 terminal-derived state continue to work.
+
+## Windows SSH client routing
+
+`ctl --host HOST rmux ...` now uses the same connector on Windows and Unix.
+`ctl-core` local transports use the shared `rmux-ipc::Stream`, so Windows local
+commands retain named-pipe discovery and daemon auto-start. Remote connections
+use the system `ssh` executable with binary stdin/stdout pipes. OpenSSH still
+owns authentication and host verification; no forwarding, arbitrary remote
+command, or local daemon maintenance capability is added.
+
+The supported remote endpoint remains a Unix host with `ctld` and `rmuxd`
+installed: the fixed command is `exec ctld connect`. This change does not enable
+Windows SSH servers or remote `ctl task` commands.
+
+Native CI runs `ctl-core` tests for named-pipe routing, binary subprocess I/O
+(including NUL, non-UTF-8 bytes, and CR/LF), transport-marker validation, and
+stderr diagnostics. A Windows-only test starts the installed OpenSSH client
+against an isolated loopback fixture that closes before authentication. The
+subprocess fixtures are transport tests, not an authenticated SSH session test;
+Windows-to-Unix authentication and interactive reconnect still need end-to-end
+coverage.
 
 ## Remaining Windows work
 

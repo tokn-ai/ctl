@@ -1,6 +1,6 @@
 //! Local and OpenSSH transport primitives for `ctl`.
 //!
-//! Local connections use the owner-only `rmuxd` Unix endpoint. Remote
+//! Local connections use the owner-only `rmuxd` endpoint. Remote
 //! authentication, host verification, proxying, and connection multiplexing
 //! belong to the user's OpenSSH installation and configuration.
 
@@ -12,8 +12,6 @@ use std::process::Stdio;
 use std::task::{Context, Poll};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-#[cfg(unix)]
-use tokio::net::UnixStream;
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
@@ -103,8 +101,7 @@ impl ConnectionTarget {
 
 /// A raw `rmux-proto` stream over either the local socket or OpenSSH.
 pub enum Transport {
-  #[cfg(unix)]
-  Local(UnixStream),
+  Local(rmux_ipc::Stream),
   Ssh(SshTransport),
 }
 
@@ -115,7 +112,6 @@ impl AsyncRead for Transport {
     buffer: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<()>> {
     match &mut *self {
-      #[cfg(unix)]
       Self::Local(stream) => Pin::new(stream).poll_read(context, buffer),
       Self::Ssh(stream) => Pin::new(stream).poll_read(context, buffer),
     }
@@ -129,7 +125,6 @@ impl AsyncWrite for Transport {
     buffer: &[u8],
   ) -> Poll<io::Result<usize>> {
     match &mut *self {
-      #[cfg(unix)]
       Self::Local(stream) => Pin::new(stream).poll_write(context, buffer),
       Self::Ssh(stream) => Pin::new(stream).poll_write(context, buffer),
     }
@@ -137,7 +132,6 @@ impl AsyncWrite for Transport {
 
   fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
     match &mut *self {
-      #[cfg(unix)]
       Self::Local(stream) => Pin::new(stream).poll_flush(context),
       Self::Ssh(stream) => Pin::new(stream).poll_flush(context),
     }
@@ -145,7 +139,6 @@ impl AsyncWrite for Transport {
 
   fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
     match &mut *self {
-      #[cfg(unix)]
       Self::Local(stream) => Pin::new(stream).poll_shutdown(context),
       Self::Ssh(stream) => Pin::new(stream).poll_shutdown(context),
     }
@@ -160,19 +153,9 @@ impl AsyncWrite for Transport {
 /// when the OpenSSH remote-command channel cannot be established.
 pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, CoreError> {
   match target {
-    ConnectionTarget::Local { socket_path } => {
-      #[cfg(unix)]
-      {
-        Ok(Transport::Local(
-          rmux_ipc::connect_or_start_daemon(socket_path).await?,
-        ))
-      }
-      #[cfg(not(unix))]
-      {
-        let _ = socket_path;
-        Err(CoreError::LocalTransportUnsupported)
-      }
-    }
+    ConnectionTarget::Local { socket_path } => Ok(Transport::Local(
+      rmux_ipc::connect_or_start_daemon(socket_path).await?,
+    )),
     ConnectionTarget::Ssh {
       destination,
       options,
@@ -292,9 +275,12 @@ pub async fn open_ssh_tunnel_interactive(
       ]
     }
   };
+  command.args(extra).args(arguments);
+  start_ssh_transport(command).await
+}
+
+async fn start_ssh_transport(mut command: Command) -> Result<SshTransport, CoreError> {
   command
-    .args(extra)
-    .args(arguments)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -346,7 +332,6 @@ pub async fn open_ssh_tunnel_interactive(
 #[must_use]
 pub fn is_retryable_connection_error(error: &CoreError) -> bool {
   match error {
-    #[cfg(unix)]
     CoreError::LocalIpc(source) => source.is_endpoint_unavailable(),
     CoreError::ReadSshPreface(source) => !matches!(
       source.kind(),
@@ -361,8 +346,6 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::MissingSshStdin
     | CoreError::MissingSshStdout
     | CoreError::InvalidSshPreface => false,
-    #[cfg(not(unix))]
-    CoreError::LocalTransportUnsupported => false,
   }
 }
 
@@ -442,12 +425,8 @@ fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsStr
 
 #[derive(Debug, Error)]
 pub enum CoreError {
-  #[cfg(unix)]
   #[error(transparent)]
   LocalIpc(#[from] rmux_ipc::ConnectError),
-  #[cfg(not(unix))]
-  #[error("local ctl transport is not implemented on this platform")]
-  LocalTransportUnsupported,
   #[error("invalid SSH destination '{0}'")]
   InvalidSshDestination(String),
   #[error("invalid structured SSH setting '{0}'")]
@@ -471,7 +450,6 @@ pub enum CoreError {
 #[cfg(test)]
 mod tests {
   use super::*;
-  #[cfg(unix)]
   use tokio::io::AsyncWriteExt;
 
   #[test]
@@ -549,14 +527,19 @@ mod tests {
     assert!(validate_ssh_target("label", &options).is_err());
   }
 
-  #[cfg(unix)]
   #[tokio::test]
   async fn local_target_uses_the_existing_owner_endpoint_without_ssh() {
     let directory =
       std::env::temp_dir().join(format!("ctl-core-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir(&directory).unwrap();
+    #[cfg(unix)]
     let socket_path = directory.join("rmux.sock");
+    #[cfg(unix)]
     let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    #[cfg(windows)]
+    let socket_path = PathBuf::from(format!(r"\\.\pipe\ctl-core-{}", uuid::Uuid::new_v4()));
+    #[cfg(windows)]
+    let listener = rmux_ipc::windows::Listener::bind(&socket_path).unwrap();
     let server = tokio::spawn(async move {
       let (mut stream, _) = listener.accept().await.unwrap();
       let mut request = [0_u8; 4];
@@ -576,7 +559,11 @@ mod tests {
 
     server.await.unwrap();
     drop(transport);
+    #[cfg(unix)]
     std::fs::remove_file(socket_path).unwrap();
     std::fs::remove_dir(directory).unwrap();
   }
 }
+
+#[cfg(test)]
+mod transport_tests;

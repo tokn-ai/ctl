@@ -57,10 +57,7 @@ impl CommandErrorDto {
         Self::new(code, error.to_string())
       }
       CoreError::InvalidSshPreface => Self::new("invalid_ssh_preface", error.to_string()),
-      #[cfg(unix)]
       CoreError::LocalIpc(_) => Self::new("local_connection_failed", error.to_string()),
-      #[cfg(not(unix))]
-      CoreError::LocalTransportUnsupported => Self::new("unsupported_platform", error.to_string()),
     }
   }
 }

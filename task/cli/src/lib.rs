@@ -4,12 +4,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use task_ipc::{Stream, connect, socket_path};
 use task_proto::{
   ClientMessage, ExecutionMode, PROTOCOL_VERSION, ServerMessage, TaskDefinition, TaskInfo,
   read_frame, write_frame,
 };
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio::time::sleep;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -73,7 +73,24 @@ impl From<Mode> for ExecutionMode {
 ///
 /// Returns an error when taskd cannot be reached, a protocol exchange fails,
 /// taskd rejects the operation, or log output cannot be written.
-pub async fn run(command: Command) -> Result<(), CommandError> {
+pub async fn run(mut command: Command) -> Result<(), CommandError> {
+  if let Command::Create { cwd, .. } = &mut command {
+    let current = env::current_dir()?;
+    let directory = cwd
+      .as_ref()
+      .map_or_else(|| current.clone(), |path| current.join(path));
+    *cwd = Some(
+      directory
+        .to_str()
+        .ok_or_else(|| {
+          io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "task working directory must be valid Unicode",
+          )
+        })?
+        .to_owned(),
+    );
+  }
   let socket = socket_path();
   let mut stream = connect_or_start(&socket).await?;
   request(
@@ -89,11 +106,7 @@ pub async fn run(command: Command) -> Result<(), CommandError> {
   execute(command, stream, &socket).await
 }
 
-async fn execute(
-  command: Command,
-  mut stream: UnixStream,
-  socket: &Path,
-) -> Result<(), CommandError> {
+async fn execute(command: Command, mut stream: Stream, socket: &Path) -> Result<(), CommandError> {
   match command {
     Command::Create {
       name,
@@ -168,7 +181,7 @@ async fn execute(
 }
 
 async fn print_logs(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   task: String,
   follow: bool,
   after_sequence: Option<u64>,
@@ -222,7 +235,7 @@ fn print_task(task: &TaskInfo) {
   );
 }
 
-async fn handshake(stream: &mut UnixStream) -> Result<(), CommandError> {
+async fn handshake(stream: &mut Stream) -> Result<(), CommandError> {
   request(
     stream,
     &ClientMessage::Handshake {
@@ -234,10 +247,7 @@ async fn handshake(stream: &mut UnixStream) -> Result<(), CommandError> {
   expect_handshake(read_required(stream).await?)
 }
 
-async fn one(
-  stream: &mut UnixStream,
-  message: ClientMessage,
-) -> Result<ServerMessage, CommandError> {
+async fn one(stream: &mut Stream, message: ClientMessage) -> Result<ServerMessage, CommandError> {
   request(stream, &message).await?;
   let response = read_required(stream).await?;
   if let ServerMessage::Error { code, message } = response {
@@ -246,12 +256,12 @@ async fn one(
   Ok(response)
 }
 
-async fn request(stream: &mut UnixStream, message: &ClientMessage) -> Result<(), CommandError> {
+async fn request(stream: &mut Stream, message: &ClientMessage) -> Result<(), CommandError> {
   write_frame(stream, message).await?;
   Ok(())
 }
 
-async fn read_required(stream: &mut UnixStream) -> Result<ServerMessage, CommandError> {
+async fn read_required(stream: &mut Stream) -> Result<ServerMessage, CommandError> {
   read_frame(stream)
     .await?
     .ok_or(CommandError::UnexpectedEndOfStream)
@@ -283,25 +293,21 @@ fn unexpected(expected: &'static str, response: &ServerMessage) -> CommandError 
   }
 }
 
-fn socket_path() -> PathBuf {
-  if let Some(directory) = env::var_os("TASKD_RUNTIME_DIR") {
-    return PathBuf::from(directory).join("taskd.sock");
-  }
-  if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
-    return PathBuf::from(directory).join("taskd/taskd.sock");
-  }
-  let uid = rustix::process::getuid().as_raw();
-  PathBuf::from("/tmp").join(format!("taskd-{uid}/taskd.sock"))
-}
-
-async fn connect_or_start(socket: &Path) -> Result<UnixStream, CommandError> {
-  match UnixStream::connect(socket).await {
+async fn connect_or_start(socket: &Path) -> Result<Stream, CommandError> {
+  match connect(socket).await {
     Ok(stream) => return Ok(stream),
     Err(error) if retryable(&error) => {}
     Err(error) => return Err(CommandError::Connect(error)),
   }
   let executable = daemon_executable()?;
-  std::process::Command::new(&executable)
+  let mut daemon = std::process::Command::new(&executable);
+  #[cfg(windows)]
+  {
+    use std::os::windows::process::CommandExt;
+    // DETACHED_PROCESS: taskd survives the invoking console.
+    daemon.creation_flags(0x0000_0008);
+  }
+  daemon
     .arg("--socket")
     .arg(socket)
     .arg("--detach-from-terminal")
@@ -312,7 +318,7 @@ async fn connect_or_start(socket: &Path) -> Result<UnixStream, CommandError> {
     .map_err(|source| CommandError::StartDaemon { executable, source })?;
   let deadline = Instant::now() + CONNECT_TIMEOUT;
   loop {
-    match UnixStream::connect(socket).await {
+    match connect(socket).await {
       Ok(stream) => return Ok(stream),
       Err(error) if retryable(&error) && Instant::now() < deadline => {
         sleep(Duration::from_millis(25)).await;
@@ -327,11 +333,11 @@ fn daemon_executable() -> Result<PathBuf, CommandError> {
     return Ok(PathBuf::from(executable));
   }
   let current = env::current_exe().map_err(CommandError::CurrentExecutable)?;
-  let sibling = current.with_file_name("taskd");
+  let sibling = current.with_file_name(format!("taskd{}", env::consts::EXE_SUFFIX));
   if sibling.is_file() {
     return Ok(sibling);
   }
-  Ok(PathBuf::from("taskd"))
+  Ok(PathBuf::from(format!("taskd{}", env::consts::EXE_SUFFIX)))
 }
 
 fn retryable(error: &io::Error) -> bool {

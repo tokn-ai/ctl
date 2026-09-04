@@ -1,13 +1,11 @@
-#![cfg(unix)]
-
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use task_ipc::{Stream, connect};
 use task_proto::{
   ClientMessage, ExecutionMode, PROTOCOL_VERSION, RunState, ServerMessage, TaskDefinition,
   read_frame, write_frame,
 };
-use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -21,13 +19,25 @@ struct TestDaemon {
 impl TestDaemon {
   async fn start() -> Self {
     let unique = Uuid::new_v4().simple().to_string();
-    let root = PathBuf::from("/tmp").join(format!("taskd-test-{}", &unique[..8]));
+    #[cfg(unix)]
+    let temporary = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let temporary = std::env::temp_dir();
+    let root = temporary.join(format!("taskd-test-{}", &unique[..8]));
+    #[cfg(unix)]
     let socket = root.join("run/taskd.sock");
+    #[cfg(windows)]
+    let socket = PathBuf::from(format!(r"\\.\pipe\taskd-test-{unique}"));
+    Self::launch(root, socket).await
+  }
+
+  async fn launch(root: PathBuf, socket: PathBuf) -> Self {
     let child = Command::new(env!("CARGO_BIN_EXE_taskd"))
       .arg("--socket")
       .arg(&socket)
       .arg("--data-directory")
       .arg(root.join("data"))
+      .kill_on_drop(true)
       .stdin(Stdio::null())
       .stdout(Stdio::null())
       .stderr(Stdio::inherit())
@@ -35,7 +45,7 @@ impl TestDaemon {
       .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-      match UnixStream::connect(&socket).await {
+      match connect(&socket).await {
         Ok(stream) => {
           drop(stream);
           break;
@@ -51,8 +61,8 @@ impl TestDaemon {
     }
   }
 
-  async fn connect(&self) -> UnixStream {
-    let mut stream = UnixStream::connect(&self.socket).await.unwrap();
+  async fn connect(&self) -> Stream {
+    let mut stream = connect(&self.socket).await.unwrap();
     write_frame(
       &mut stream,
       &ClientMessage::Handshake {
@@ -72,7 +82,11 @@ impl TestDaemon {
   async fn request(&self, request: ClientMessage) -> ServerMessage {
     let mut stream = self.connect().await;
     write_frame(&mut stream, &request).await.unwrap();
-    read_frame(&mut stream).await.unwrap().unwrap()
+    tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream))
+      .await
+      .expect("request timed out")
+      .unwrap()
+      .unwrap()
   }
 
   async fn stop(mut self) {
@@ -83,16 +97,16 @@ impl TestDaemon {
 
 #[tokio::test]
 async fn background_run_streams_tail_output_and_persists_its_result() {
-  let daemon = TestDaemon::start().await;
+  let mut daemon = TestDaemon::start().await;
   let created = daemon
     .request(ClientMessage::CreateTask {
       definition: TaskDefinition {
         name: "example".into(),
-        program: "/bin/sh".into(),
-        arguments: vec![
-          "-c".into(),
-          "printf stdout-tail; printf stderr-tail >&2".into(),
-        ],
+        program: shell_program(),
+        arguments: shell_arguments(
+          "printf stdout-tail; printf stderr-tail >&2",
+          "echo stdout-tail& echo stderr-tail 1>&2",
+        ),
         working_directory: None,
         execution_mode: ExecutionMode::Background,
       },
@@ -121,7 +135,12 @@ async fn background_run_streams_tail_output_and_persists_its_result() {
   .unwrap();
   let mut output = Vec::new();
   loop {
-    match read_frame(&mut logs).await.unwrap().unwrap() {
+    match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut logs))
+      .await
+      .expect("log follow timed out")
+      .unwrap()
+      .unwrap()
+    {
       ServerMessage::Log { event } => output.extend(event.data),
       ServerMessage::LogsFinished => break,
       response => panic!("unexpected log response: {response:?}"),
@@ -138,6 +157,18 @@ async fn background_run_streams_tail_output_and_persists_its_result() {
   };
   assert_eq!(task.last_run.unwrap().state, RunState::Completed);
   assert!(daemon.root.join("data/state.json").is_file());
+  daemon.child.kill().await.unwrap();
+  let daemon = TestDaemon::launch(daemon.root.clone(), daemon.socket.clone()).await;
+  let restored = daemon
+    .request(ClientMessage::ShowTask {
+      task: "example".into(),
+    })
+    .await;
+  let ServerMessage::TaskStatus { task } = restored else {
+    panic!("{restored:?}")
+  };
+  assert!(task.active_run.is_none());
+  assert_eq!(task.last_run.unwrap().state, RunState::Completed);
   daemon.stop().await;
 }
 
@@ -148,8 +179,8 @@ async fn stopping_a_background_task_records_an_intentional_stop() {
     .request(ClientMessage::CreateTask {
       definition: TaskDefinition {
         name: "long-running".into(),
-        program: "/bin/sh".into(),
-        arguments: vec!["-c".into(), "sleep 30 & wait".into()],
+        program: shell_program(),
+        arguments: shell_arguments("sleep 30 & wait", "ping -n 30 127.0.0.1 >nul"),
         working_directory: None,
         execution_mode: ExecutionMode::Background,
       },
@@ -174,4 +205,132 @@ async fn stopping_a_background_task_records_an_intentional_stop() {
   assert!(task.active_run.is_none());
   assert_eq!(task.last_run.unwrap().state, RunState::Stopped);
   daemon.stop().await;
+}
+
+fn shell_program() -> String {
+  if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into()
+}
+fn shell_arguments(unix: &str, windows: &str) -> Vec<String> {
+  if cfg!(windows) {
+    vec!["/D".into(), "/S".into(), "/C".into(), windows.into()]
+  } else {
+    vec!["-c".into(), unix.into()]
+  }
+}
+
+#[cfg(windows)]
+#[test]
+fn background_child_helper() {
+  if !std::path::Path::new("helper-enabled").exists() {
+    return;
+  }
+  let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    .args(["--exact", "background_leaf_helper", "--nocapture"])
+    .spawn()
+    .unwrap();
+  child.wait().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn background_leaf_helper() {
+  use std::os::windows::fs::OpenOptionsExt;
+  if !std::path::Path::new("helper-enabled").exists() {
+    return;
+  }
+  let _file = std::fs::OpenOptions::new()
+    .write(true)
+    .create(true)
+    .truncate(true)
+    .share_mode(0)
+    .open("alive")
+    .unwrap();
+  loop {
+    std::thread::sleep(Duration::from_secs(1));
+  }
+}
+
+#[cfg(windows)]
+async fn running_tree(daemon: &TestDaemon) -> String {
+  std::fs::write(daemon.root.join("helper-enabled"), "").unwrap();
+  let response = daemon
+    .request(ClientMessage::CreateTask {
+      definition: TaskDefinition {
+        name: "tree".into(),
+        program: std::env::current_exe().unwrap().to_str().unwrap().into(),
+        arguments: vec![
+          "--exact".into(),
+          "background_child_helper".into(),
+          "--nocapture".into(),
+        ],
+        working_directory: Some(daemon.root.to_str().unwrap().into()),
+        execution_mode: ExecutionMode::Background,
+      },
+    })
+    .await;
+  let ServerMessage::TaskCreated { task } = response else {
+    panic!("{response:?}")
+  };
+  assert!(matches!(
+    daemon
+      .request(ClientMessage::StartTask {
+        task: task.task_id.clone()
+      })
+      .await,
+    ServerMessage::TaskStatus { .. }
+  ));
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while !daemon.root.join("alive").exists() {
+    assert!(Instant::now() < deadline, "descendant never started");
+    sleep(Duration::from_millis(20)).await;
+  }
+  assert!(
+    std::fs::OpenOptions::new()
+      .write(true)
+      .open(daemon.root.join("alive"))
+      .is_err()
+  );
+  task.task_id
+}
+
+#[cfg(windows)]
+async fn assert_tree_exited(daemon: &TestDaemon) {
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    if std::fs::OpenOptions::new()
+      .write(true)
+      .open(daemon.root.join("alive"))
+      .is_ok()
+    {
+      return;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "descendant survived job termination"
+    );
+    sleep(Duration::from_millis(20)).await;
+  }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn stopping_task_terminates_its_descendants() {
+  let daemon = TestDaemon::start().await;
+  let task = running_tree(&daemon).await;
+  assert!(matches!(
+    daemon.request(ClientMessage::StopTask { task }).await,
+    ServerMessage::TaskStatus { .. }
+  ));
+  assert_tree_exited(&daemon).await;
+  daemon.stop().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn daemon_crash_terminates_its_descendants() {
+  let mut daemon = TestDaemon::start().await;
+  running_tree(&daemon).await;
+  daemon.child.kill().await.unwrap();
+  assert_tree_exited(&daemon).await;
+  let _ = std::fs::remove_dir_all(&daemon.root);
 }

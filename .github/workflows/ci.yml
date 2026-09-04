@@ -86,7 +86,7 @@ jobs:
         run: cargo test --workspace
 
   windows-check:
-    name: Windows portable compilation
+    name: Windows tasks and portable compilation
     runs-on: windows-2025
     timeout-minutes: 20
     defaults:
@@ -109,7 +109,16 @@ jobs:
         run: >-
           cargo check --locked --target x86_64-pc-windows-msvc --all-targets
           -p rmux-proto -p rmux-core -p rmux-client -p task-proto
-          -p ctl-core -p rmux-ipc
+          -p ctl-core -p rmux-ipc -p task-ipc -p task-cli -p taskd -p ctl
+
+      - name: Test Windows background tasks
+        run: cargo test --locked -p taskd -p task-ipc -p task-proto -p task-cli -p ctl
+
+      - name: Build Windows task executables
+        run: cargo build --locked -p ctl -p taskd
+
+      - name: Exercise ctl task auto-start and commands
+        run: ./scripts/ci/windows-tasks.ps1
 
   frontend:
     name: Frontend

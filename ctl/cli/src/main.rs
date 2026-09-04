@@ -41,9 +41,20 @@ async fn main() {
 }
 
 #[cfg(not(unix))]
-fn main() {
-  eprintln!("ctl: local rmux transport is not yet implemented on this platform");
-  std::process::exit(1);
+#[tokio::main]
+async fn main() {
+  let arguments = Arguments::parse();
+  let result = match arguments.command {
+    Command::Task { command } if arguments.host.is_none() => task_cli::run(command)
+      .await
+      .map_err(|error| error.to_string()),
+    Command::Task { .. } => Err("remote task routing is not implemented yet".into()),
+    Command::Rmux { .. } => Err("rmux transport is not yet implemented on this platform".into()),
+  };
+  if let Err(error) = result {
+    eprintln!("ctl: {error}");
+    std::process::exit(1);
+  }
 }
 
 #[cfg(test)]

@@ -235,11 +235,18 @@ ctl task restart api
 ctl task remove api
 ```
 
-Background tasks run in their own process group. Stop first sends a graceful
+On Unix, background tasks run in their own process group. Stop first sends a graceful
 termination signal to the group and escalates if it does not exit. Interactive
 rmux-backed tasks can be registered with `--mode interactive`, but starting
 them is reserved for the next implementation stage. Remote task routing and
 desktop workspace integration are also not implemented yet.
+
+Windows background tasks use owner-restricted local named pipes and Job Objects.
+Stop terminates the entire process tree; taskd exit also terminates its jobs.
+Task completion follows the root process and cleans up remaining descendants.
+`ctl task create` saves the caller's working directory unless `--cwd` is supplied.
+Windows state defaults to `%LOCALAPPDATA%\ctl\taskd` and inherits filesystem ACLs;
+custom data directories should be private to the user.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). Numbered
@@ -247,4 +254,5 @@ and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). Numbered
 ownership boundaries. The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).
 The [Windows CI exploration](docs/windows-ci.md) records verified compilation
-boundaries and the compile-only Windows job; Windows tests are not enabled yet.
+boundaries and native background-task tests. Windows rmux terminals and the
+desktop backend remain separate work.

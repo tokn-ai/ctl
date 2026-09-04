@@ -1,10 +1,10 @@
 # Windows CI exploration
 
-Status: compile-only CI enabled, 2026-09-04. Windows test execution remains
-deferred. The findings below distinguish source compatibility from runtime
+Status: Windows background-task implementation and native CI coverage added,
+2026-09-04. Full workspace Windows tests remain deferred. The findings below distinguish source compatibility from runtime
 support.
 
-## Evidence
+## Initial exploration evidence
 
 The following cross-check was run on macOS with Rust 1.97.0 and the installed
 `x86_64-pc-windows-msvc` target:
@@ -75,35 +75,58 @@ described in the [Tauri Windows prerequisites](https://v2.tauri.app/start/prereq
 plus Node 24, pnpm 10, and the frontend assets. Verify those separately rather
 than treating a successful portable-crate check as a desktop build result.
 
-## Runtime work before full workspace coverage
+## Windows background tasks
 
-- Define a Windows per-user IPC endpoint and access-control model for rmuxd
-  and taskd, including concurrent startup and stale-endpoint handling.
-- Integrate the Windows terminal backend into rmuxd while preserving its PTY,
-  process, journal, and lease ownership. Taskd must still never own a PTY.
-- Implement non-PTY task process-tree ownership and termination on Windows;
-  Windows Job Objects are a candidate to investigate in place of Unix process
-  groups. Specify graceful shutdown and daemon-crash behavior explicitly.
-- Replace Unix permission and signal assumptions with Windows equivalents.
-  Audit atomic state replacement and concurrent writer behavior on Windows.
-- Repair the task CLI and daemon platform boundaries before expecting `ctl`
-  to compile, even when only its remote or unsupported-platform path is used.
-- Audit fixtures that invoke `/bin/sh`, assume `/tmp`, create Unix sockets,
-  inspect POSIX permissions, or depend on Unix shell startup behavior.
+`task-ipc`, `task-cli`, `taskd`, and `ctl` now cross-compile for Windows. The
+native Windows job also builds both executables, runs task integration tests,
+and exercises `ctl task` auto-start, create, logs, restart, stop, remove, and list.
+The original six portable crates retain their explicit compile-only check.
 
-## Test enablement later
+Taskd uses local named pipes via `interprocess`. The default name is a stable
+UUID derived from the user's local data directory, or `TASKD_RUNTIME_DIR` when
+set. On Windows that override is a namespace seed, not a socket directory.
+`taskd --socket` accepts an explicit `\\.\pipe\...` name. First-instance
+creation prevents competing listeners; Windows removes the endpoint when its
+handles close. The pipe rejects remote clients and uses an owner-only DACL
+(`D:P(A;;GA;;;OW)`), rather than the Windows default pipe ACL, which includes
+read access for Everyone. See [Microsoft's named-pipe security documentation](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights).
 
-After native compilation is verified, enable Windows test execution for the
-explicit portable package set first. Review which tests are compiled out by
-platform guards so a green job is not mistaken for daemon coverage.
+Background processes use `process-wrap` Job Objects with kill-on-close.
+Creation is suspended until job assignment, preventing a process from launching
+children before ownership is established. Stop terminates the whole job.
+Completion follows the root process and terminates remaining descendants,
+then drains stdout/stderr before publishing the final run state. Taskd waits
+on the root using Tokio's cancellation-safe wait; it does not cancel the
+wrapper's blocking job-completion wait. See [process-wrap's Job Object API](https://docs.rs/process-wrap/10.0.0/process_wrap/tokio/struct.JobObject.html).
 
-Then validate the desktop frontend and native remote-client path separately.
-Full workspace and process/terminal integration tests follow Windows runtime
-implementation. Do not add `continue-on-error` or empty platform stubs merely
-to make an unsupported feature appear tested.
+State defaults to `%LOCALAPPDATA%\ctl\taskd` and inherits directory ACLs.
+`TASKD_DATA_DIR` and `--data-directory` overrides must point to a private user
+directory. An exclusive lifetime file lock prevents concurrent state writers.
+The temporary state file is replaced with `std::fs::rename`, which supports
+replacing an existing file on Windows. See [Rust's rename documentation](https://doc.rust-lang.org/std/fs/fn.rename.html).
+State is not fsynced; sudden power-loss durability remains outside this slice.
 
-## Next step
+On daemon restart, previously active runs are marked failed/stopped; there is
+no automatic restart or adoption. Windows closes job handles on daemon crash,
+terminating descendants. Native tests verify this by holding a file exclusively
+in a descendant and checking that stop/crash releases it. Other tests verify
+stdout/stderr tail output, completion, and metadata recovery after restart.
 
-Use the native compile-only result to assess test readiness. Windows runtime
-implementation and test execution remain separate follow-up work; a passing
-compile-only job does not establish either.
+`ctl` locates sibling `taskd.exe`, starts it detached, and records the caller's
+working directory when creating a definition. Background console programs use
+`CREATE_NO_WINDOW`. Commands are passed as a program plus arguments; taskd does
+not insert a shell. Invoke `cmd.exe` or PowerShell explicitly when needed.
+
+## Remaining Windows work
+
+- rmuxd's ConPTY, process, journal, lease, and local IPC integration. PTYs still
+  belong exclusively to rmuxd; interactive tasks cannot yet start.
+- ctld's fixed local gateway and remote task routing.
+- Native process inspection and the desktop app's local transport/build.
+- Broader Windows tests for portable crates, remote clients, and terminals.
+- Cross-account ACL tests and filesystem ACL hardening for custom data paths.
+- Persistent logs, restart policies, workspace task integration, and other
+  unfinished task features shared with Unix.
+
+The Unix whole-workspace gates remain unchanged. No unsupported daemon is
+included merely to make the Windows job look comprehensive.

@@ -1,31 +1,33 @@
-#![cfg(unix)]
+mod process;
 
-use rustix::process::{Pid, Signal, kill_process_group};
+#[cfg(windows)]
+use interprocess::local_socket::traits::tokio::Listener as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use task_ipc::Stream;
+pub use task_ipc::socket_path;
 use task_proto::{
   ClientMessage, DesiredState, ErrorCode, ExecutionMode, LogEvent, LogStream, PROTOCOL_VERSION,
   RunInfo, RunState, ServerMessage, TaskDefinition, TaskInfo, read_frame, write_frame,
 };
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::process::Command;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::{Instant, timeout};
 use uuid::Uuid;
 
 const STATE_SCHEMA_VERSION: u16 = 1;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
-const TERMINATE_GRACE: Duration = Duration::from_secs(3);
 const MAX_LOG_BYTES_PER_RUN: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -52,16 +54,28 @@ struct RuntimeHandle {
 }
 
 struct State {
+  mutations: Mutex<()>,
   tasks: Mutex<BTreeMap<String, TaskInfo>>,
   runtimes: Mutex<HashMap<String, RuntimeHandle>>,
   logs: Mutex<HashMap<String, Vec<LogEvent>>>,
   activity: broadcast::Sender<Activity>,
   persistence_path: PathBuf,
+  _state_lock: fs::File,
 }
 
 impl State {
   fn load(data_directory: &Path) -> Result<Self, DaemonError> {
     prepare_data_directory(data_directory)?;
+    let state_lock = fs::OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(false)
+      .open(data_directory.join("state.lock"))
+      .map_err(DaemonError::WriteState)?;
+    state_lock
+      .try_lock()
+      .map_err(|error| DaemonError::WriteState(error.into()))?;
     let state_path = data_directory.join("state.json");
     let mut tasks = if state_path.exists() {
       let bytes = fs::read(&state_path).map_err(DaemonError::ReadState)?;
@@ -90,11 +104,13 @@ impl State {
     }
     let (activity, _) = broadcast::channel(1024);
     let state = Self {
+      mutations: Mutex::new(()),
       tasks: Mutex::new(tasks),
       runtimes: Mutex::new(HashMap::new()),
       logs: Mutex::new(HashMap::new()),
       activity,
       persistence_path: state_path,
+      _state_lock: state_lock,
     };
     state.persist_blocking(
       &state
@@ -113,6 +129,7 @@ impl State {
     let bytes = serde_json::to_vec_pretty(&stored).map_err(DaemonError::SerializeState)?;
     let temporary = self.persistence_path.with_extension("json.tmp");
     fs::write(&temporary, bytes).map_err(DaemonError::WriteState)?;
+    #[cfg(unix)]
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
       .map_err(DaemonError::WriteState)?;
     fs::rename(&temporary, &self.persistence_path).map_err(DaemonError::WriteState)
@@ -174,19 +191,14 @@ impl State {
       (task.task_id.clone(), task.definition.clone())
     };
 
-    let mut command = background_command(&definition);
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = process::spawn(&definition).map_err(|error| {
       RequestError::new(
         ErrorCode::InvalidDefinition,
         format!("could not start {:?}: {error}", definition.program),
       )
     })?;
-    let process_group = child
-      .id()
-      .and_then(|id| i32::try_from(id).ok())
-      .and_then(Pid::from_raw);
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdout = child.stdout();
+    let stderr = child.stderr();
     let run_id = Uuid::new_v4().to_string();
     let run = RunInfo {
       run_id: run_id.clone(),
@@ -243,9 +255,10 @@ impl State {
       let (stopped, status) = tokio::select! {
         status = child.wait() => (false, status),
         _ = stop_receiver.recv() => {
-          (true, terminate_child(&mut child, process_group).await)
+          (true, child.terminate().await)
         }
       };
+      child.finish();
       let exit_code = status.ok().and_then(|status| status.code());
       for reader in log_readers {
         let _ = reader.await;
@@ -375,11 +388,12 @@ impl State {
 
   async fn send_logs(
     &self,
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     selector: &str,
     after_sequence: Option<u64>,
     follow: bool,
   ) -> Result<(), RequestError> {
+    let mut activity = self.activity.subscribe();
     let task = self.show(selector).await?;
     let run = task.active_run.as_ref().or(task.last_run.as_ref());
     let Some(run) = run else {
@@ -390,7 +404,6 @@ impl State {
     };
     let run_id = run.run_id.clone();
     let is_active = task.active_run.is_some();
-    let mut activity = self.activity.subscribe();
     let mut cursor = after_sequence;
     let existing = self
       .logs
@@ -462,14 +475,22 @@ impl State {
 /// Returns an error when local storage, the Unix endpoint, or signal handling
 /// cannot be initialized or operated safely.
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
+  #[cfg(unix)]
   prepare_runtime_directory(&config.socket_path)?;
+  #[cfg(unix)]
   let listener = bind_listener(&config.socket_path).await?;
+  #[cfg(windows)]
+  let listener = task_ipc::windows::bind(&config.socket_path).map_err(DaemonError::Socket)?;
+  #[cfg(unix)]
   let _socket_guard = SocketGuard(config.socket_path.clone());
   let state = Arc::new(State::load(&config.data_directory)?);
   loop {
     tokio::select! {
       accepted = listener.accept() => {
+        #[cfg(unix)]
         let (stream, _) = accepted.map_err(DaemonError::Accept)?;
+        #[cfg(windows)]
+        let stream = accepted.map_err(DaemonError::Accept)?;
         let state = Arc::clone(&state);
         tokio::spawn(async move {
           let _ = handle_connection(stream, state).await;
@@ -484,7 +505,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
 }
 
 async fn handle_connection(
-  mut stream: UnixStream,
+  mut stream: Stream,
   state: Arc<State>,
 ) -> Result<(), task_proto::CodecError> {
   let handshake = read_frame::<_, ClientMessage>(&mut stream).await?;
@@ -527,6 +548,28 @@ async fn handle_connection(
   let Some(request) = read_frame::<_, ClientMessage>(&mut stream).await? else {
     return Ok(());
   };
+  handle_request(&mut stream, &state, request).await
+}
+
+async fn handle_request(
+  stream: &mut Stream,
+  state: &Arc<State>,
+  request: ClientMessage,
+) -> Result<(), task_proto::CodecError> {
+  // Serialize state-changing requests through publication of each runtime handle.
+  // Log followers must not hold this guard, since stop may be their next event.
+  let _mutation = if matches!(
+    &request,
+    ClientMessage::CreateTask { .. }
+      | ClientMessage::StartTask { .. }
+      | ClientMessage::StopTask { .. }
+      | ClientMessage::RestartTask { .. }
+      | ClientMessage::RemoveTask { .. }
+  ) {
+    Some(state.mutations.lock().await)
+  } else {
+    None
+  };
   let result = match request {
     ClientMessage::CreateTask { definition } => state
       .create(definition)
@@ -560,11 +603,8 @@ async fn handle_connection(
       after_sequence,
       follow,
     } => {
-      if let Err(error) = state
-        .send_logs(&mut stream, &task, after_sequence, follow)
-        .await
-      {
-        send_error(&mut stream, error).await?;
+      if let Err(error) = state.send_logs(stream, &task, after_sequence, follow).await {
+        send_error(stream, error).await?;
       }
       return Ok(());
     }
@@ -574,8 +614,8 @@ async fn handle_connection(
     )),
   };
   match result {
-    Ok(response) => write_frame(&mut stream, &response).await?,
-    Err(error) => send_error(&mut stream, error).await?,
+    Ok(response) => write_frame(stream, &response).await?,
+    Err(error) => send_error(stream, error).await?,
   }
   Ok(())
 }
@@ -610,37 +650,6 @@ where
   })
 }
 
-fn background_command(definition: &TaskDefinition) -> Command {
-  let mut command = Command::new(&definition.program);
-  command
-    .args(&definition.arguments)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .process_group(0)
-    .kill_on_drop(false);
-  if let Some(directory) = &definition.working_directory {
-    command.current_dir(directory);
-  }
-  command
-}
-
-async fn terminate_child(
-  child: &mut tokio::process::Child,
-  process_group: Option<Pid>,
-) -> io::Result<std::process::ExitStatus> {
-  if let Some(process_group) = process_group {
-    let _ = kill_process_group(process_group, Signal::TERM);
-  }
-  if let Ok(status) = timeout(TERMINATE_GRACE, child.wait()).await {
-    return status;
-  }
-  if let Some(process_group) = process_group {
-    let _ = kill_process_group(process_group, Signal::KILL);
-  }
-  child.wait().await
-}
-
 fn trim_logs(events: &mut Vec<LogEvent>) {
   let mut bytes: usize = events.iter().map(|event| event.data.len()).sum();
   let remove_count = events
@@ -657,7 +666,7 @@ fn trim_logs(events: &mut Vec<LogEvent>) {
 }
 
 async fn send_error(
-  stream: &mut UnixStream,
+  stream: &mut Stream,
   error: RequestError,
 ) -> Result<(), task_proto::CodecError> {
   write_frame(
@@ -729,18 +738,6 @@ fn now_ms() -> u64 {
 }
 
 #[must_use]
-pub fn socket_path() -> PathBuf {
-  if let Some(directory) = env::var_os("TASKD_RUNTIME_DIR") {
-    return PathBuf::from(directory).join("taskd.sock");
-  }
-  if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
-    return PathBuf::from(directory).join("taskd/taskd.sock");
-  }
-  let uid = rustix::process::getuid().as_raw();
-  PathBuf::from("/tmp").join(format!("taskd-{uid}/taskd.sock"))
-}
-
-#[must_use]
 pub fn default_data_directory() -> PathBuf {
   env::var_os("TASKD_DATA_DIR").map_or_else(
     || {
@@ -752,6 +749,7 @@ pub fn default_data_directory() -> PathBuf {
   )
 }
 
+#[cfg(unix)]
 fn prepare_runtime_directory(socket_path: &Path) -> Result<(), DaemonError> {
   let directory = socket_path.parent().ok_or_else(|| {
     DaemonError::RuntimeDirectory(io::Error::new(
@@ -766,15 +764,18 @@ fn prepare_runtime_directory(socket_path: &Path) -> Result<(), DaemonError> {
 
 fn prepare_data_directory(directory: &Path) -> Result<(), DaemonError> {
   fs::create_dir_all(directory).map_err(DaemonError::DataDirectory)?;
+  #[cfg(unix)]
   fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-    .map_err(DaemonError::DataDirectory)
+    .map_err(DaemonError::DataDirectory)?;
+  Ok(())
 }
 
+#[cfg(unix)]
 async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
   let listener = match UnixListener::bind(path) {
     Ok(listener) => listener,
     Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-      if UnixStream::connect(path).await.is_ok() {
+      if Stream::connect(path).await.is_ok() {
         return Err(DaemonError::AlreadyRunning(path.into()));
       }
       let metadata = fs::symlink_metadata(path).map_err(DaemonError::Socket)?;
@@ -793,8 +794,10 @@ async fn bind_listener(path: &Path) -> Result<UnixListener, DaemonError> {
   Ok(listener)
 }
 
+#[cfg(unix)]
 struct SocketGuard(PathBuf);
 
+#[cfg(unix)]
 impl Drop for SocketGuard {
   fn drop(&mut self) {
     let _ = fs::remove_file(&self.0);

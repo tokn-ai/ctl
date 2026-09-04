@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 clap.workspace = true
 rustix.workspace = true
+task-ipc.workspace = true
 task-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -17,6 +17,7 @@ struct Arguments {
 
 fn main() {
   let arguments = Arguments::parse();
+  #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()
   {
@@ -50,9 +51,4 @@ fn main() {
 fn detach_from_terminal() -> std::io::Result<()> {
   rustix::process::setsid()?;
   std::env::set_current_dir("/")
-}
-
-#[cfg(not(unix))]
-fn detach_from_terminal() -> std::io::Result<()> {
-  Ok(())
 }

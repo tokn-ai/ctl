@@ -9,10 +9,16 @@ dirs.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+task-ipc.workspace = true
 task-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
+process-wrap = { version = "10.0.0", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "creation-flags"] }
+interprocess = { version = "2.4.4", features = ["tokio"] }
 
 [dev-dependencies]
 task-proto.workspace = true

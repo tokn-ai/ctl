@@ -212,7 +212,7 @@ proposals if later needed.
 
 The first local background slice is implemented. It includes the versioned
 task protocol, persisted task and run records, taskd auto-start, background
-process groups, bounded in-memory stdout/stderr logs, log following, and the
+process groups on Unix and Job Objects on Windows, bounded in-memory stdout/stderr logs, log following, and the
 local `ctl task` command surface. Interactive rmux-backed execution, SSH
 routing, persistent logs, restart policies, and desktop workspace integration
 remain pending, so this proposal stays **Proposed**.
@@ -224,3 +224,17 @@ remain pending, so this proposal stays **Proposed**.
 - [Architecture](../architecture.md)
 - [rmux protocol](../rmux-protocol.md)
 - [ctl SSH transport](../ctl-protocol.md)
+
+### Windows background execution
+
+Windows taskd uses a local named pipe with an owner-only DACL and remote clients
+rejected. Job assignment occurs before the new process resumes. A run ends with
+its root process; remaining descendants are terminated before logs finish.
+Stop terminates the job immediately, with no Unix signal emulation. Closing
+or crashing taskd kills its jobs. On recovery, previously active runs become
+failed and stopped; they are not adopted or automatically restarted.
+
+The state directory has a lifetime exclusive file lock, preventing multiple
+endpoints from writing the same state. State replacement uses the platform's
+rename operation. Windows files inherit the data directory's ACL; custom
+locations must retain user-private access. PTY tasks remain reserved for rmuxd.

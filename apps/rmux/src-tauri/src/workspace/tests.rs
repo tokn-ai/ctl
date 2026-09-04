@@ -258,6 +258,7 @@ fn incomplete_task_drafts_round_trip_without_becoming_runnable_definitions() {
   let mut document = populated();
   document.sidebar_view = SidebarView::Tasks;
   document.task_drafts.push(TaskDefinitionDraft {
+    command_line: Some("cargo run \"unfinished".into()),
     definition_id: uuid::Uuid::new_v4().to_string(),
     definition: task_proto::TaskDefinition {
       name: String::new(),

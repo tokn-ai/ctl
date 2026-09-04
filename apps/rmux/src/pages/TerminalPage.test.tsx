@@ -206,9 +206,7 @@ describe("workspace-backed terminal page", () => {
     const first = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
-    expect(
-      screen.queryByRole("button", { name: "New shell" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "New shell" })).toBeNull();
     const existingTabs = within(
       screen.getByRole("navigation", { name: "Workspace tabs" }),
     ).getAllByRole("tab").length;
@@ -216,10 +214,9 @@ describe("workspace-backed terminal page", () => {
       screen.getByRole("button", { name: "New task definition" }),
     );
     const editor = screen.getByRole("dialog", { name: "Create task" });
-    fireEvent.change(
-      within(editor).getByRole("textbox", { name: "Name" }),
-      { target: { value: "Half written" } },
-    );
+    fireEvent.change(within(editor).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Half written" },
+    });
     fireEvent.change(
       within(editor).getByRole("textbox", { name: "Working directory" }),
       { target: { value: "unfinished/path" } },
@@ -232,14 +229,18 @@ describe("workspace-backed terminal page", () => {
       ).getAllByRole("tab"),
     ).toHaveLength(existingTabs);
     await waitFor(() => {
-      const document = api.updateWorkspace.mock.calls.slice(-1)[0]?.[1] as WorkspaceDocument;
+      const document = api.updateWorkspace.mock.calls.slice(
+        -1,
+      )[0]?.[1] as WorkspaceDocument;
       expect(document.task_drafts?.[0].definition).toMatchObject({
         name: "Half written",
         program: "",
         working_directory: "unfinished/path",
       });
     });
-    const persisted = api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument;
+    const persisted = api.updateWorkspace.mock.calls.slice(
+      -1,
+    )[0]![1] as WorkspaceDocument;
     expect(persisted.task_definitions).toEqual([]);
     expect(
       api.taskRequest.mock.calls.every(
@@ -259,7 +260,7 @@ describe("workspace-backed terminal page", () => {
       (
         screen.getByRole("textbox", {
           name: "Name",
-          }) as HTMLInputElement
+        }) as HTMLInputElement
       ).value,
     ).toBe("Half written");
     expect(
@@ -269,25 +270,81 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close task editor" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
-    expect(
-      screen.getByRole("button", { name: "New shell" }),
-    ).toBeDefined();
+    expect(screen.getByRole("button", { name: "New shell" })).toBeDefined();
   });
 
   it("creates a definition explicitly from the autosaved draft without starting a task", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
-    fireEvent.click(screen.getByRole("button", { name: "New task definition" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Build" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "Executable" }), { target: { value: "cargo" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "New task definition" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+      target: { value: "Build" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Executable" }), {
+      target: { value: "cargo" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create definition" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
-    expect(document.task_definitions?.[0].definition).toMatchObject({ name: "Build", program: "cargo" });
+    const document = api.updateWorkspace.mock.calls.slice(
+      -1,
+    )[0][1] as WorkspaceDocument;
+    expect(document.task_definitions?.[0].definition).toMatchObject({
+      name: "Build",
+      program: "cargo",
+    });
     expect(document.task_drafts).toEqual([]);
     expect(document.task_references).toEqual([]);
-    expect(api.taskRequest.mock.calls.every(([request]) => request.type === "list_tasks")).toBe(true);
+    expect(
+      api.taskRequest.mock.calls.every(
+        ([request]) => request.type === "list_tasks",
+      ),
+    ).toBe(true);
+  });
+
+  it("parses command input and preserves unfinished quoting on dismissal", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "New task definition" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Command line" }), {
+      target: { value: 'cargo run --bin "api server"' },
+    });
+    expect(
+      (screen.getByRole("textbox", { name: "Executable" }) as HTMLInputElement)
+        .value,
+    ).toBe("cargo");
+    expect(
+      (screen.getByRole("textbox", { name: "Argument 3" }) as HTMLInputElement)
+        .value,
+    ).toBe("api server");
+    fireEvent.change(screen.getByRole("textbox", { name: "Command line" }), {
+      target: { value: 'cargo "unfinished' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close task editor" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Resume draft Untitled task" }),
+    );
+    expect(
+      (
+        screen.getByRole("textbox", {
+          name: "Command line",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe('cargo "unfinished');
+    fireEvent.click(screen.getByRole("button", { name: "Create definition" }));
+    expect(screen.getByRole("dialog", { name: "Create task" })).toBeDefined();
+    await waitFor(() => {
+      const document = api.updateWorkspace.mock.calls.slice(
+        -1,
+      )[0][1] as WorkspaceDocument;
+      expect(document.task_drafts?.[0].command_line).toBe('cargo "unfinished');
+      expect(document.task_definitions).toEqual([]);
+    });
   });
 
   it("restarts taskd from the palette and prevents duplicate requests while pending", async () => {

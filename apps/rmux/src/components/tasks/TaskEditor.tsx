@@ -72,9 +72,28 @@ export function TaskEditor({
           >
             <fieldset disabled={model.busy}>
               <label>
-                Name
+                Command line
                 <input
                   autoFocus
+                  aria-label="Command line"
+                  value={draft.command_line}
+                  placeholder='cargo run --bin "api server"'
+                  aria-invalid={!!draft.command_error}
+                  aria-describedby="task-command-help"
+                  onChange={(event) => model.editCommand(event.target.value)}
+                />
+                <small id="task-command-help">
+                  POSIX quoting. Runs directly; no shell expansion.
+                </small>
+              </label>
+              {draft.command_error ? (
+                <p className="task-inline-error" role="alert">
+                  {draft.command_error}
+                </p>
+              ) : null}
+              <label>
+                Name
+                <input
                   value={definition.name}
                   placeholder="e.g. API server"
                   onChange={(event) =>

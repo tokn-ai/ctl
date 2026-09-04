@@ -344,6 +344,7 @@ export function useTaskWorkspace(
     close: closeNow,
     closeNow,
     edit: editor.edit,
+    editCommand: editor.editCommand,
     save: (run = false) =>
       perform(async () => {
         const result = await editor.save();

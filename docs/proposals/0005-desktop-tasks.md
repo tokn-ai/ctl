@@ -175,3 +175,15 @@ remain available in the sidebar and open in the dialog. Ordinary session and
 managed-task tabs keep their relative order. The dialog does not detach a
 terminal, and its focus containment and the app command barrier prevent input
 from reaching the terminal while editing.
+
+
+### Command-line entry
+
+The task dialog focuses a command-line field by default. POSIX single/double
+quotes and backslash escapes split it into the executable and argument rows.
+Those rows remain editable and regenerate an equivalent quoted command line.
+No variables, globs, or command substitutions are expanded; shell operators
+require an explicitly invoked shell. An optional `command_line` draft field
+preserves exact input, including unfinished quotes, across dismissal and relaunch.
+Incomplete parsing blocks definition creation and execution, without blocking
+draft saving. Published definitions still store only executable and arguments.

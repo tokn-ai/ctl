@@ -82,6 +82,8 @@ pub struct TaskReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskDefinitionDraft {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub command_line: Option<String>,
   pub definition_id: String,
   pub definition: task_proto::TaskDefinition,
 }
@@ -224,6 +226,10 @@ impl WorkspaceDocument {
           || draft.definition_id.len() > 4096
           || draft.definition_id.chars().any(char::is_control)
           || !ids.insert(&draft.definition_id)
+          || draft
+            .command_line
+            .as_ref()
+            .is_some_and(|line| !valid_field(line))
           || !valid_field(&draft.definition.name)
           || !valid_field(&draft.definition.program)
           || draft.definition.arguments.len() > 4096

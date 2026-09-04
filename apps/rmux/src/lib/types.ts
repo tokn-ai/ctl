@@ -393,6 +393,7 @@ export interface ManagedTask {
   last_run: TaskRun | null;
 }
 export interface TaskDefinitionDraft {
+  command_line?: string;
   definition_id: string;
   definition: TaskDefinition;
 }

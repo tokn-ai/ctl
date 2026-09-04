@@ -38,7 +38,7 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
 
 fn companion_rmuxd_binary() -> Option<PathBuf> {
   let current = env::current_exe().ok()?;
-  let sibling = current.with_file_name("rmuxd");
+  let sibling = current.with_file_name(format!("rmuxd{}", env::consts::EXE_SUFFIX));
   sibling.is_file().then_some(sibling)
 }
 

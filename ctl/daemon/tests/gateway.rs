@@ -1,9 +1,10 @@
-#![cfg(unix)]
-
+#[cfg(windows)]
+use rmux_ipc::windows::Listener;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::net::UnixListener as Listener;
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -17,12 +18,13 @@ struct TestPaths {
 impl TestPaths {
   fn new() -> Self {
     let token = Uuid::new_v4().simple().to_string();
-    let root = PathBuf::from("/tmp").join(format!("ctld-gateway-{}", &token[..12]));
+    let root = std::env::temp_dir().join(format!("ctld-gateway-{}", &token[..12]));
     std::fs::create_dir(&root).expect("create test directory");
-    Self {
-      rmux_socket: root.join("rmux.sock"),
-      root,
-    }
+    #[cfg(unix)]
+    let rmux_socket = root.join("rmux.sock");
+    #[cfg(windows)]
+    let rmux_socket = PathBuf::from(format!(r"\\.\pipe\ctld-gateway-{token}"));
+    Self { root, rmux_socket }
   }
 }
 
@@ -38,9 +40,9 @@ impl Drop for TestPaths {
 #[tokio::test]
 async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
   let paths = TestPaths::new();
-  let listener = UnixListener::bind(&paths.rmux_socket).expect("bind fake rmux endpoint");
+  let listener = Listener::bind(&paths.rmux_socket).expect("bind fake rmux endpoint");
   let endpoint = tokio::spawn(async move {
-    let (mut relay, _) = listener.accept().await.expect("accept relay");
+    let mut relay = listener.accept().await.expect("accept relay").0;
     let mut payload = [0_u8; 19];
     relay.read_exact(&mut payload).await.expect("read payload");
     relay.write_all(&payload).await.expect("echo payload");
@@ -53,7 +55,7 @@ async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
     );
     drop(relay);
 
-    let (mut direct, _) = listener.accept().await.expect("accept direct probe");
+    let mut direct = listener.accept().await.expect("accept direct probe").0;
     let mut request = [0_u8; 4];
     direct.read_exact(&mut request).await.expect("read probe");
     assert_eq!(&request, b"ping");
@@ -87,7 +89,7 @@ async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
     .expect("join relay")
     .expect("relay closes cleanly");
 
-  let mut direct = UnixStream::connect(&paths.rmux_socket)
+  let mut direct = rmux_ipc::connect_existing_daemon(&paths.rmux_socket)
     .await
     .expect("local endpoint survives relay");
   direct.write_all(b"ping").await.expect("write direct probe");

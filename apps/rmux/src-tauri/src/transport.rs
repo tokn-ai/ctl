@@ -70,6 +70,7 @@ impl ConnectionTargetDto {
       } => ConnectionTarget::ssh_with_options(
         destination.clone(),
         SshConnectionOptions {
+          remote_platform: ctl_core::RemotePlatform::Unix,
           hostname: hostname.clone(),
           user: user.clone(),
           port: *port,
@@ -112,6 +113,7 @@ mod tests {
       ConnectionTarget::Ssh {
         destination: "rmux-remote-test".into(),
         options: SshConnectionOptions {
+          remote_platform: ctl_core::RemotePlatform::Unix,
           hostname: Some("127.0.0.1".into()),
           user: Some("rmux".into()),
           port: Some(2222),

@@ -11,8 +11,9 @@ The current MVP supports local `rmux` sessions plus mixed local/SSH sessions
 in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
 supports local ConPTY sessions through `rmux` and `ctl rmux`, plus background
 tasks through `ctl task`. Windows `ctl --host HOST rmux ...` also routes through
-the system OpenSSH client to Unix hosts with `ctld` and `rmuxd` installed.
-Windows desktop and Windows SSH-server support remain pending.
+the system OpenSSH client. Unix hosts use the default remote command; Windows
+hosts use `--remote-platform windows` and the default cmd.exe SSH shell.
+Windows desktop support remains pending.
 
 ## Build
 
@@ -23,7 +24,7 @@ cargo build --workspace
 For the Windows local CLI and daemon slice:
 
 ```sh
-cargo build -p ctl -p taskd -p rmux -p rmuxd
+cargo build -p ctl -p ctld -p taskd -p rmux -p rmuxd
 ```
 
 The `rmux` and `rmuxd` binaries must be installed beside one another, or
@@ -265,3 +266,20 @@ ownership boundaries. The remote setup is in
 The [Windows CI exploration](docs/windows-ci.md) records verified compilation
 boundaries and native tests for background tasks and ConPTY sessions. The
 Windows desktop backend and native shell metadata remain separate work.
+
+### Windows SSH hosts
+
+Install `ctld.exe` and `rmuxd.exe` beside each other in a directory on the
+remote user's PATH. Enable Windows OpenSSH Server with its default `cmd.exe`
+shell, then select the server platform explicitly from either client platform:
+
+```sh
+ctl --host windows-host --remote-platform windows rmux new development -- cmd.exe /D /Q
+ctl --host windows-host --remote-platform windows rmux attach development
+```
+
+The fixed Windows command is `ctld.exe connect`. The gateway relays only the
+user's rmux data pipe, and starts the companion daemon when absent. The daemon
+breaks away from the SSH job so its sessions survive disconnects. PowerShell
+and custom SSH shells are not covered by this implementation. Remote task
+routing and desktop remote-platform selection remain pending.

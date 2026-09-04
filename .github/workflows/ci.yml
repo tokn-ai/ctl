@@ -109,22 +109,25 @@ jobs:
         run: >-
           cargo check --locked --target x86_64-pc-windows-msvc --all-targets
           -p rmux-proto -p rmux-core -p rmux-client -p task-proto
-          -p ctl-core -p rmux-ipc -p task-ipc -p task-cli -p taskd -p ctl -p rmux -p rmuxd
+          -p ctl-core -p rmux-ipc -p task-ipc -p task-cli -p taskd -p ctl -p ctld -p rmux -p rmuxd
 
       - name: Test Windows tasks and protocol framing
-        run: cargo test --locked -p taskd -p task-ipc -p task-proto -p task-cli -p ctl -p ctl-core -p rmux-proto
+        run: cargo test --locked -p taskd -p task-ipc -p task-proto -p task-cli -p ctl -p ctl-core -p ctld -p rmux-proto
 
       - name: Test Windows ConPTY sessions
         run: cargo test --locked -p rmuxd --test windows_conpty
 
       - name: Build Windows executables
-        run: cargo build --locked -p ctl -p taskd -p rmux -p rmuxd
+        run: cargo build --locked -p ctl -p ctld -p taskd -p rmux -p rmuxd
 
       - name: Exercise ctl task auto-start and commands
         run: ./scripts/ci/windows-tasks.ps1
 
       - name: Exercise Windows rmux auto-start and local ctl routing
         run: ./scripts/ci/windows-rmux.ps1
+
+      - name: Test authenticated Windows SSH gateway and reconnect
+        run: ./scripts/ci/windows-ssh.ps1
 
   frontend:
     name: Frontend

@@ -1,4 +1,4 @@
-use super::{Arguments, Command};
+use super::{Arguments, Command, RemotePlatform};
 use ctl_core::{
   ConnectionTarget, CoreError, Transport, is_retryable_connection_error, open_transport,
 };
@@ -8,9 +8,18 @@ use thiserror::Error;
 pub async fn run(arguments: Arguments) -> Result<(), CliError> {
   match arguments.command {
     Command::Rmux { command } => {
-      let target = arguments
-        .host
-        .map_or_else(ConnectionTarget::local, ConnectionTarget::ssh);
+      let target = arguments.host.map_or_else(ConnectionTarget::local, |host| {
+        ConnectionTarget::ssh_with_options(
+          host,
+          ctl_core::SshConnectionOptions {
+            remote_platform: match arguments.remote_platform {
+              Some(RemotePlatform::Windows) => ctl_core::RemotePlatform::Windows,
+              Some(RemotePlatform::Unix) | None => ctl_core::RemotePlatform::Unix,
+            },
+            ..ctl_core::SshConnectionOptions::default()
+          },
+        )
+      });
       rmux_cli::run(command, &CtlConnector { target }).await?;
     }
     Command::Task { command } => {

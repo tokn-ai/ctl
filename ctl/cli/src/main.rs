@@ -1,6 +1,6 @@
 mod commands;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rmux_cli::Command as RmuxCommand;
 use task_cli::Command as TaskCommand;
 
@@ -11,8 +11,18 @@ struct Arguments {
   #[arg(long, short = 'H', global = true, value_name = "DESTINATION")]
   host: Option<String>,
 
+  /// Remote server platform (Windows currently requires the cmd.exe SSH shell).
+  #[arg(long, global = true, requires = "host", value_enum)]
+  remote_platform: Option<RemotePlatform>,
+
   #[command(subcommand)]
   command: Command,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RemotePlatform {
+  Unix,
+  Windows,
 }
 
 #[derive(Debug, Subcommand)]
@@ -72,6 +82,37 @@ mod tests {
         command: RmuxCommand::Attach { session, .. }
       } if session == "development"
     ));
+  }
+
+  #[test]
+  fn remote_platform_requires_host_and_rejects_arbitrary_commands() {
+    assert!(
+      Arguments::try_parse_from(["ctl", "--remote-platform", "windows", "rmux", "list"]).is_err()
+    );
+    assert!(
+      Arguments::try_parse_from([
+        "ctl",
+        "--host",
+        "server",
+        "--remote-platform",
+        "windows",
+        "rmux",
+        "list"
+      ])
+      .is_ok()
+    );
+    assert!(
+      Arguments::try_parse_from([
+        "ctl",
+        "--host",
+        "server",
+        "--remote-platform",
+        "custom command",
+        "rmux",
+        "list"
+      ])
+      .is_err()
+    );
   }
 
   #[test]

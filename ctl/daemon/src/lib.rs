@@ -4,16 +4,13 @@
 //! stdin/stdout to the fixed per-user `rmuxd` endpoint and owns no terminal,
 //! session, authorization, or reconnect state.
 
-#[cfg(not(unix))]
-compile_error!("ctld local rmux transport is currently implemented only for Unix platforms");
-
+use rmux_ipc::{Stream, connect_existing_daemon};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep};
 
 const RMUX_START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -71,7 +68,7 @@ where
     .await
     .map_err(DaemonError::Relay)?;
   client_writer.flush().await.map_err(DaemonError::Relay)?;
-  let (mut rmux_reader, mut rmux_writer) = rmux.into_split();
+  let (mut rmux_reader, mut rmux_writer) = tokio::io::split(rmux);
   let client_to_rmux = tokio::io::copy(&mut client_reader, &mut rmux_writer);
   let rmux_to_client = tokio::io::copy(&mut rmux_reader, &mut client_writer);
   tokio::pin!(client_to_rmux, rmux_to_client);
@@ -87,10 +84,10 @@ where
   Ok(())
 }
 
-async fn connect_or_start_rmuxd(config: &ConnectConfig) -> Result<UnixStream, DaemonError> {
-  match UnixStream::connect(&config.rmux_socket).await {
+async fn connect_or_start_rmuxd(config: &ConnectConfig) -> Result<Stream, DaemonError> {
+  match connect_existing_daemon(&config.rmux_socket).await {
     Ok(stream) => return Ok(stream),
-    Err(error) if is_endpoint_absent(&error) => {}
+    Err(error) if error.is_endpoint_unavailable() => {}
     Err(error) => return Err(DaemonError::RmuxConnect(error)),
   }
 
@@ -102,9 +99,9 @@ async fn connect_or_start_rmuxd(config: &ConnectConfig) -> Result<UnixStream, Da
 
   let deadline = Instant::now() + RMUX_START_TIMEOUT;
   loop {
-    match UnixStream::connect(&config.rmux_socket).await {
+    match connect_existing_daemon(&config.rmux_socket).await {
       Ok(stream) => return Ok(stream),
-      Err(error) if Instant::now() < deadline && is_endpoint_absent(&error) => {
+      Err(error) if Instant::now() < deadline && error.is_endpoint_unavailable() => {
         sleep(Duration::from_millis(25)).await;
       }
       Err(error) => return Err(DaemonError::RmuxConnect(error)),
@@ -116,7 +113,17 @@ fn start_rmuxd(executable: &Path, socket: &Path) -> Result<(), DaemonError> {
   if !executable.is_absolute() {
     return Err(DaemonError::RmuxdPathNotAbsolute(executable.into()));
   }
-  std::process::Command::new(executable)
+  let mut command = std::process::Command::new(executable);
+  #[cfg(windows)]
+  {
+    use std::os::windows::process::CommandExt;
+    // OpenSSH permits job breakaway. Detaching only from the console would
+    // still let the SSH job kill rmuxd when this disposable channel closes.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+  }
+  command
     .arg("--socket")
     .arg(socket)
     .arg("--detach-from-terminal")
@@ -131,19 +138,12 @@ fn start_rmuxd(executable: &Path, socket: &Path) -> Result<(), DaemonError> {
   Ok(())
 }
 
-fn is_endpoint_absent(error: &io::Error) -> bool {
-  matches!(
-    error.kind(),
-    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-  )
-}
-
 #[derive(Debug, Error)]
 pub enum DaemonError {
   #[error("the local rmux service is unavailable at {}", .0.display())]
   RmuxUnavailable(PathBuf),
   #[error("could not connect to the local rmux service: {0}")]
-  RmuxConnect(#[source] io::Error),
+  RmuxConnect(#[source] rmux_ipc::ConnectError),
   #[error("the rmuxd path must be absolute: {}", .0.display())]
   RmuxdPathNotAbsolute(PathBuf),
   #[error("could not start rmuxd at {}: {source}", executable.display())]

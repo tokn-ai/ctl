@@ -1,6 +1,6 @@
 # Windows CI exploration
 
-Status: Windows background tasks, local ConPTY sessions, and CLI SSH routing implemented,
+Status: Windows background tasks, local ConPTY sessions, and SSH client/gateway routing implemented,
 2026-09-04. Full workspace Windows tests remain deferred. The findings below distinguish source compatibility from runtime
 support.
 
@@ -169,23 +169,39 @@ use the system `ssh` executable with binary stdin/stdout pipes. OpenSSH still
 owns authentication and host verification; no forwarding, arbitrary remote
 command, or local daemon maintenance capability is added.
 
-The supported remote endpoint remains a Unix host with `ctld` and `rmuxd`
-installed: the fixed command is `exec ctld connect`. This change does not enable
-Windows SSH servers or remote `ctl task` commands.
+The default remote platform remains Unix (`exec ctld connect`). CLI clients
+can select `--remote-platform windows` to use the fixed `ctld.exe connect`
+command with the Windows OpenSSH server's default cmd.exe shell. The platform
+is independent of the client OS; arbitrary shell commands remain disallowed.
+The desktop currently selects Unix remote commands.
 
-Native CI runs `ctl-core` tests for named-pipe routing, binary subprocess I/O
-(including NUL, non-UTF-8 bytes, and CR/LF), transport-marker validation, and
-stderr diagnostics. A Windows-only test starts the installed OpenSSH client
-against an isolated loopback fixture that closes before authentication. The
-subprocess fixtures are transport tests, not an authenticated SSH session test;
-Windows-to-Unix authentication and interactive reconnect still need end-to-end
-coverage.
+`ctld` uses the shared IPC stream and only the data endpoint. Its installed
+companion is `rmuxd.exe` on Windows. Startup requests both `DETACHED_PROCESS`
+and `CREATE_BREAKAWAY_FROM_JOB`: Windows OpenSSH permits breakaway so the
+persistent daemon survives the disposable channel. If the enclosing job
+disallows breakaway, startup reports an error rather than creating a daemon
+that silently dies on disconnect. Standard streams are null on the daemon.
+See [OpenSSH job breakaway support](https://github.com/PowerShell/Win32-OpenSSH/issues/1032).
+
+Native CI runs portable gateway tests over owner-restricted named pipes,
+including byte transparency and endpoint survival. `windows-ssh.ps1` configures
+an authenticated loopback OpenSSH server on the ephemeral Windows runner using
+ephemeral client/host keys, an explicitly pinned host key, disabled passwords,
+and the default cmd.exe shell. It installs companion executables, then tests
+daemon auto-start, ConPTY creation, attachment, SSH disconnect/reconnect,
+resize, final output and exit status, and CLI routing. It restores configuration
+and removes its processes, binaries, and keys afterward. The script refuses to
+run outside GitHub Windows runners. See Microsoft's
+[Windows OpenSSH server configuration](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration).
+
+PowerShell/custom SSH shells and connections between different machines are
+not covered by the loopback fixture.
 
 ## Remaining Windows work
 
 - Interactive-task integration between taskd and rmuxd. PTYs remain owned
   exclusively by rmuxd.
-- ctld's fixed local gateway and remote task routing.
+- Remote task routing and desktop remote-platform selection.
 - Native process inspection and the desktop app's local transport/build.
 - Broader Windows tests for portable crates, remote clients, and terminals.
 - Cross-account ACL tests and filesystem ACL hardening for custom data paths.

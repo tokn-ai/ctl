@@ -18,7 +18,23 @@ use tokio::sync::watch;
 mod ssh_startup;
 
 const SSH_PROGRAM: &str = "ssh";
-const REMOTE_COMMAND: [&str; 3] = ["exec", "ctld", "connect"];
+/// Remote command-shell convention, independent of the client platform.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemotePlatform {
+  #[default]
+  Unix,
+  /// Windows OpenSSH with its default cmd.exe shell.
+  Windows,
+}
+
+impl RemotePlatform {
+  fn command(self) -> &'static [&'static str] {
+    match self {
+      Self::Unix => &["exec", "ctld", "connect"],
+      Self::Windows => &["ctld.exe", "connect"],
+    }
+  }
+}
 const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 
 /// The daemon endpoint selected for one `ctl` operation.
@@ -38,6 +54,7 @@ pub enum ConnectionTarget {
 /// command-line options.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SshConnectionOptions {
+  pub remote_platform: RemotePlatform,
   pub hostname: Option<String>,
   pub user: Option<String>,
   pub port: Option<u16>,
@@ -416,10 +433,8 @@ fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsStr
   arguments.extend([
     OsString::from("--"),
     OsString::from(options.hostname.as_deref().unwrap_or(destination)),
-    OsString::from(REMOTE_COMMAND[0]),
-    OsString::from(REMOTE_COMMAND[1]),
-    OsString::from(REMOTE_COMMAND[2]),
   ]);
+  arguments.extend(options.remote_platform.command().iter().map(OsString::from));
   arguments
 }
 
@@ -479,6 +494,19 @@ mod tests {
   }
 
   #[test]
+  fn windows_remote_command_is_fixed_and_independent_of_client_platform() {
+    let options = SshConnectionOptions {
+      remote_platform: RemotePlatform::Windows,
+      ..SshConnectionOptions::default()
+    };
+    let arguments = ssh_arguments("windows-host", &options);
+    assert_eq!(
+      &arguments[arguments.len() - 4..],
+      ["--", "windows-host", "ctld.exe", "connect"].map(OsString::from)
+    );
+  }
+
+  #[test]
   fn unsafe_destinations_are_rejected_before_starting_ssh() {
     assert!(validate_destination("").is_err());
     assert!(validate_destination("host\ncommand").is_err());
@@ -488,6 +516,7 @@ mod tests {
   #[test]
   fn structured_ssh_settings_are_separate_arguments_before_the_destination() {
     let options = SshConnectionOptions {
+      remote_platform: RemotePlatform::Unix,
       hostname: Some("127.0.0.1".into()),
       user: Some("rmux".into()),
       port: Some(2222),
@@ -518,6 +547,7 @@ mod tests {
   #[test]
   fn invalid_structured_ssh_settings_are_rejected() {
     let options = SshConnectionOptions {
+      remote_platform: RemotePlatform::Unix,
       hostname: Some("host with spaces".into()),
       user: None,
       port: Some(0),

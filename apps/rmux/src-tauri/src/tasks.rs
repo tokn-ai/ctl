@@ -53,6 +53,11 @@ pub async fn task_request(request: ClientMessage) -> CommandResult<ServerMessage
   task_client::request(&request).await.map_err(client_error)
 }
 
+#[tauri::command]
+pub async fn restart_task_daemon() -> CommandResult<()> {
+  task_client::restart_daemon().await.map_err(client_error)
+}
+
 #[derive(Deserialize)]
 pub struct LogRequest {
   task_id: String,

@@ -36,6 +36,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const api = vi.hoisted(() => ({
   taskRequest: vi.fn(),
+  restartTaskDaemon: vi.fn(),
   loadWorkspace: vi.fn(),
   updateWorkspace: vi.fn(),
   listSessions: vi.fn(),
@@ -119,6 +120,7 @@ function snapshot(): WorkspaceSnapshot {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.restartTaskDaemon.mockResolvedValue(undefined);
   api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
   nativeEvents.listeners.clear();
   window.localStorage.clear();
@@ -199,6 +201,35 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("restarts taskd from the palette and prevents duplicate requests while pending", async () => {
+    let finish!: () => void;
+    api.restartTaskDaemon.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyP");
+    fireEvent.change(screen.getByRole("combobox", { name: "Search commands" }), {
+      target: { value: "Restart taskd" },
+    });
+    fireEvent.click(screen.getByRole("option", { name: /Restart taskd/ }));
+    await screen.findByText("Restarting taskd…");
+    nativeCommand(COMMAND_IDS.restartTaskDaemon, 2);
+    expect(api.restartTaskDaemon).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(); });
+    await screen.findByText("taskd restarted.");
+    expect(api.taskRequest).toHaveBeenCalledWith({ type: "list_tasks" });
+    expect(api.restartLocalDaemon).not.toHaveBeenCalled();
+  });
+
+  it("shows taskd restart errors in the task sidebar", async () => {
+    api.restartTaskDaemon.mockRejectedValueOnce(new Error("Stop active tasks before restarting taskd."));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    nativeCommand(COMMAND_IDS.restartTaskDaemon);
+    await screen.findByText("Stop active tasks before restarting taskd.");
+    expect(screen.queryByText("taskd restarted.")).toBeNull();
+    expect(screen.queryByText("Restarting taskd…")).toBeNull();
+  });
+
   it("saves a remapped shortcut through quick input, updates labels, and restores it on restart", async () => {
     vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux");
     const first = render(<TerminalPage />);

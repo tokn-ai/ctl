@@ -52,6 +52,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       tasks::task_request,
+      tasks::restart_task_daemon,
       tasks::watch_task_logs,
       tasks::cancel_task_logs,
       tasks::acknowledge_task_log,

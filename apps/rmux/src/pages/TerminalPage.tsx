@@ -1101,6 +1101,16 @@ export function TerminalPage() {
     } };
     return base;
   });
+  commands.push({
+    id: COMMAND_IDS.restartTaskDaemon,
+    category: "Tasks",
+    title: "Restart taskd",
+    detail: "Restart the local task daemon. Stop active tasks first.",
+    enabled: workspace.ready && !taskWorkspace.busy,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.restartTaskDaemon),
+    focusTerminalAfterRun: false,
+    run: taskWorkspace.restartDaemon,
+  });
   commands.push({ id: "task.new", category: "Tasks", title: "New task definition", enabled: workspace.ready && !taskWorkspace.busy, focusTerminalAfterRun: false, run: taskWorkspace.newDefinition });
   for (const action of ["start_task", "stop_task", "restart_task"] as const) {
     commands.push({ id: `task.${action}`, category: "Tasks", title: action === "start_task" ? "Start task" : action === "stop_task" ? "Stop task" : "Restart task", enabled: !!taskWorkspace.activeTask && !taskWorkspace.busy && (action === "start_task" ? !taskWorkspace.activeTask.active_run : action === "stop_task" ? !!taskWorkspace.activeTask.active_run : true), focusTerminalAfterRun: false, run: () => { if (taskWorkspace.activeTask) void taskWorkspace.action(taskWorkspace.activeTask, action); } });

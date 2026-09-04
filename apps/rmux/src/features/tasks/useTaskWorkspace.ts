@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ManagedTask, SavedTaskDefinition, TaskDefinition, TaskTab, SessionSummary } from "../../lib/types";
-import { inspectKnownSessions, taskRequest } from "../../lib/tauri";
+import { inspectKnownSessions, restartTaskDaemon, taskRequest } from "../../lib/tauri";
 import { errorMessage } from "../../lib/errors";
 import type { useWorkspace } from "../workspace/useWorkspace";
 import { workspaceTabKey } from "../workspace/workspaceModel";
@@ -16,6 +16,7 @@ export function useTaskWorkspace(workspace: Workspace, connect: (session: Sessio
   const [loading, setLoading] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [daemonStatus, setDaemonStatus] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, TaskDraft>>({});
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const mutation = useRef(false);
@@ -55,7 +56,7 @@ export function useTaskWorkspace(workspace: Workspace, connect: (session: Sessio
 
   const perform = async (operation: () => Promise<void>) => {
     if (mutation.current) return;
-    mutation.current = true; epoch.current += 1; setBusy(true); setError(null);
+    mutation.current = true; epoch.current += 1; setBusy(true); setError(null); setDaemonStatus(null);
     try { await operation(); }
     catch (failure) { setError(errorMessage(failure)); }
     finally { mutation.current = false; epoch.current += 1; if (mounted.current) { setBusy(false); void refresh(true); } }
@@ -153,7 +154,19 @@ export function useTaskWorkspace(workspace: Workspace, connect: (session: Sessio
     return () => { attachmentVersion.current += 1; };
   }, [workspace.active_tab_key, desiredSession]);
 
-  return { tasks, connection_error: refreshError, error: error ?? refreshError, setError, loading, hasLoaded, busy, active, activeTask, draft, saved, drafts, pendingClose,
+  const restartDaemon = () => perform(async () => {
+    setDaemonStatus("Restarting taskd…");
+    try {
+      await restartTaskDaemon();
+      setRefreshError(null);
+      setDaemonStatus("taskd restarted.");
+    } catch (failure) {
+      setDaemonStatus(null);
+      throw failure;
+    }
+  });
+
+  return { tasks, daemonStatus, restartDaemon, connection_error: refreshError, error: error ?? refreshError, setError, loading, hasLoaded, busy, active, activeTask, draft, saved, drafts, pendingClose,
     hasDirtyDrafts: Object.values(drafts).some((value) => value.dirty), refresh, open, openTask, newDefinition, action, close, closeNow,
     edit: (definition: TaskDefinition) => { if (active?.kind === "task_definition") setDrafts((previous) => ({ ...previous, [active.definition_id]: { definition, dirty: true } })); },
     save: (run = false) => perform(async () => { if (active?.kind !== "task_definition" || !draft) return; const result = await save(active.definition_id, draft.definition); if (run) await startSaved(result); }),

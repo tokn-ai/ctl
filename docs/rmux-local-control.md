@@ -127,7 +127,9 @@ persisted before release, and acknowledgement is retried after taskd restart.
 
 ### Restarting taskd
 
-Run `ctl taskd restart` after updating the task daemon. It starts taskd when
+Use **Restart taskd** in the desktop app command palette, or run
+`ctl taskd restart`, after updating the task daemon. The app command can also
+be assigned a shortcut under **Configure Keyboard Shortcuts**. It starts taskd when
 absent, or cooperatively replaces an idle daemon. All tasks must be stopped
 first with `ctl task stop <task>`; restart refuses active tasks, including
 interactive ones, and never force-kills the daemon. Registered definitions,

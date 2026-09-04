@@ -11,7 +11,7 @@ marker precedes the raw stream so startup output cannot be mistaken for an
 `ctl rmux` uses the canonical rmux command implementation with a ctl-selected
 transport. When global `--host`/`-H` selects a remote target, every one-shot
 request or interactive attachment starts the system OpenSSH client with the
-equivalent fixed argument sequence:
+equivalent fixed argument sequence for the default Unix remote platform:
 
 ```text
 ssh -T \
@@ -22,6 +22,12 @@ ssh -T \
   -o RemoteCommand=none \
   -- <destination> exec ctld connect
 ```
+
+With `--remote-platform windows`, the suffix is `ctld.exe connect` instead
+of `exec ctld connect`. This is an enumerated server-platform choice, independent
+of the client OS, and currently requires the Windows server's default cmd.exe
+shell. Both choices retain the same SSH options and binary protocol. Omitting
+`--remote-platform` preserves Unix behavior; the option requires `--host`.
 
 `<destination>` is an OpenSSH destination or `Host` alias. Host-key checking,
 user authentication, certificates, agents, proxy jumps, ports, and connection
@@ -46,14 +52,20 @@ an absolute-path companion `rmuxd` when configured and necessary, writes
 `ctl-ssh-v1\n` to stdout, then copies raw bytes in both directions:
 
 ```text
-SSH stdin  -> ctld connect -> rmuxd Unix socket
-SSH stdout <- ctld connect <- rmuxd Unix socket
+SSH stdin  -> ctld connect -> rmuxd data endpoint
+SSH stdout <- ctld connect <- rmuxd data endpoint
 ```
 
 Completion or failure of either copy direction ends the relay and closes its
-local socket. Diagnostics use stderr exclusively. The remote command accepts
+local IPC stream. Diagnostics use stderr exclusively. The remote command accepts
 no arbitrary local socket, forwarded address, or service name from the SSH
 client. The sibling owner-only `rmuxd` maintenance endpoint is never exposed.
+
+The endpoint is a Unix socket or an owner-restricted Windows named pipe.
+Windows discovers `rmuxd.exe` beside `ctld.exe`. Auto-start detaches the daemon
+from the console and requests breakaway from the SSH job, with null standard
+streams. If job policy disallows breakaway, startup fails explicitly. The
+SSH gateway itself remains disposable and the maintenance pipe remains local.
 
 Non-interactive remote shell startup files must not write to stdout. Such bytes
 precede the readiness marker, so `ctl` rejects the connection with a focused

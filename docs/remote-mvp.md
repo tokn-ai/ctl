@@ -18,6 +18,10 @@ files produce no stdout:
 ssh -T <host> exec ctld connect
 ```
 
+For a Windows host using the default cmd.exe SSH shell, the corresponding
+probe is `ssh -T <host> ctld.exe connect`. Use
+`ctl --host <host> --remote-platform windows rmux ...` for normal commands.
+
 The command waits for `rmux-proto` input, so terminate this manual probe after
 confirming it starts without diagnostics.
 
@@ -137,8 +141,11 @@ raw sequence.
 - SSH authentication must work for a non-interactive remote command. Password
   and host-key prompts remain OpenSSH behavior, but key, agent, or certificate
   authentication is preferable for unattended reconnects.
-- `ctld` is currently Unix-only because its fixed local endpoint is a Unix
-  socket. A future Windows endpoint can retain the same SSH transport.
+- Windows hosts use `--remote-platform windows` with the server's default
+  cmd.exe shell. Install `ctld.exe` and `rmuxd.exe` together on the remote PATH.
+  Their data endpoint is an owner-restricted named pipe. PowerShell/custom
+  server shells and desktop remote-platform selection remain unverified or
+  unimplemented.
 - Journals, checkpoints, shell awareness, and reconnect tokens are memory-only.
 - Generic commands, files, jobs, port forwarding, desktop streaming, and
   `rmuxd` maintenance control are not exposed by `ctld`.

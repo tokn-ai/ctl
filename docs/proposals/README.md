@@ -35,3 +35,4 @@ clarifications and links may update the existing document.
 | [0001](0001-rmux.md) | Persistent terminal sessions with rmux | Implemented |
 | [0002](0002-ctl.md) | Local and SSH control routing with ctl | Implemented |
 | [0003](0003-task-system.md) | Managed tasks in ctl | Proposed |
+| [0004](0004-windows-ssh.md) | Windows SSH gateways | Implemented |

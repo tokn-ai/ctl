@@ -22,6 +22,7 @@ $originalConfig = if (Test-Path $config) { [IO.File]::ReadAllText($config) } els
 $service = Get-Service sshd
 $wasRunning = $service.Status -eq 'Running'
 $originalStartType = $service.StartType
+$originalServicePath = (Get-CimInstance Win32_Service -Filter "Name = 'sshd'").PathName
 $serverConfig = Join-Path $env:ProgramData 'ssh\sshd_config'
 $originalServerConfig = if (Test-Path $serverConfig) { [IO.File]::ReadAllText($serverConfig) } else { $null }
 $shellKey = 'HKLM:\SOFTWARE\OpenSSH'
@@ -97,11 +98,18 @@ Host ctl-windows-ci
 $originalConfig
 "@ | Set-Content $config -Encoding ascii
   Set-Service sshd -StartupType Manual
+  Invoke-Native -Program 'sc.exe' -Arguments @('config', 'sshd', 'binPath=', "`"$openssh\sshd.exe`" -E `"$root\service.log`"")
   Start-Service sshd
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctld', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
   Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'rmux', 'list')
 } catch {
+  Get-Content "$root\service.log" -Tail 100 -ErrorAction SilentlyContinue
+  if ((Get-Service sshd).Status -eq 'Stopped') {
+    $diagnostic = Start-Process "$openssh\sshd.exe" -ArgumentList @('-D', '-e', '-f', $serverConfig) -RedirectStandardError "$root\startup.log" -RedirectStandardOutput "$root\startup.out" -PassThru
+    if (-not $diagnostic.WaitForExit(2000)) { Stop-Process -Id $diagnostic.Id -Force }
+    Get-Content "$root\startup.log" -Tail 100 -ErrorAction SilentlyContinue
+  }
   Get-Content "$env:ProgramData\ssh\logs\sshd.log" -Tail 100 -ErrorAction SilentlyContinue
   Get-CimInstance Win32_Service -Filter "Name = 'sshd'" | Format-List PathName, StartName, ExitCode
   Get-Service sshd | Format-List Name, Status, StartType
@@ -122,6 +130,7 @@ $originalConfig
   if ($null -eq $originalShell) { Remove-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue }
   else { Set-ItemProperty $shellKey -Name DefaultShell -Value $originalShell }
   foreach ($path in $originalAcls.Keys) { Set-Acl $path $originalAcls[$path] }
+  Invoke-Native -Program 'sc.exe' -Arguments @('config', 'sshd', 'binPath=', $originalServicePath)
   if ($wasRunning) { Start-Service sshd }
   Set-Service sshd -StartupType $originalStartType
   Remove-Item Env:CTL_TEST_SSH_HOST -ErrorAction SilentlyContinue

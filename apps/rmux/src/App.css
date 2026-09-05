@@ -249,6 +249,31 @@ button:disabled {
   overflow-y: auto;
 }
 
+.session-group + .session-group {
+  margin-top: 12px;
+}
+
+.session-group > h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 7px 7px 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.session-group > h3 span {
+  font-variant-numeric: tabular-nums;
+}
+
+.task-session-row .session-indicator {
+  background: #74b9ff;
+  box-shadow: 0 0 0 3px #74b9ff19;
+}
+
 .session-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

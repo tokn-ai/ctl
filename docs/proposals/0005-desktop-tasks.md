@@ -64,6 +64,10 @@ Tasks                 [+] +--------------------------------+
 - Opening an interactive task's session from the terminal list focuses its task
   tab. If an ordinary session tab is already open, adopt it in place as the task
   tab. Deduplication uses host plus session ID, and task identity survives restart.
+- The Sessions sidebar groups ordinary sessions by host and derives a separate
+  Tasks group from taskd's active interactive runs. A task-owned rmux session is
+  shown only once, is never persisted as an ordinary workspace session, and is
+  stopped through taskd rather than killed directly through rmuxd.
 - Closing a tab only closes its view. Removing a saved definition does not stop
   or unregister tasks. Removing a managed task requires it to be stopped and
   names that task explicitly. Forgetting a workspace reference is separate.

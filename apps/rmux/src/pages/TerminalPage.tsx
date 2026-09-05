@@ -1283,6 +1283,7 @@ export function TerminalPage() {
               targets={targets}
               targetErrors={targetErrors}
               sessions={sessions}
+              interactiveTasks={taskWorkspace.tasks}
               shellStates={displayedSessionShellStates}
               selectedSessionKey={activeTabKey}
               openTabSessionKeys={openTabSessionKeys}
@@ -1312,6 +1313,10 @@ export function TerminalPage() {
                 executeCommandById(COMMAND_IDS.forgetSession, {
                   session_key: sessionKey(session),
                 })
+              }
+              onSelectTask={taskWorkspace.openTask}
+              onStopTask={(task) =>
+                void taskWorkspace.action(task, "stop_task")
               }
               onAddExisting={() =>
                 executeCommandById(COMMAND_IDS.addExistingSession)

@@ -1,6 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { SessionSummary, ShellStateSummary } from "../../lib/types";
+import type {
+  ManagedTask,
+  SessionSummary,
+  ShellStateSummary,
+} from "../../lib/types";
 import { sessionKey } from "../../features/targets/targets";
 import { SessionSidebar } from "./SessionSidebar";
 
@@ -176,5 +180,73 @@ describe("SessionSidebar", () => {
     expect(markup).toContain('aria-label="Disconnect from first"');
     expect(markup).toContain('aria-label="Disconnect from second"');
     expect(markup).not.toContain('aria-label="Disconnect from listed-only"');
+  });
+
+  it("groups ordinary sessions by host and lists active interactive tasks separately", () => {
+    const remote = { kind: "ssh" as const, destination: "build-host" };
+    const remoteSession = { ...secondSession, target: remote };
+    const taskSession = { ...listedOnlySession, session_id: "task-session" };
+    const task: ManagedTask = {
+      task_id: "task-1",
+      definition: {
+        name: "Dev server",
+        program: "cargo",
+        arguments: ["run"],
+        working_directory: null,
+        execution_mode: "interactive",
+      },
+      desired_state: "running",
+      active_run: {
+        run_id: "run-1",
+        state: "running",
+        started_at_ms: 1,
+        ended_at_ms: null,
+        exit_code: null,
+        interactive: {
+          session_id: "task-session",
+          instance_id: "rmux-1",
+          rmux_socket: "/tmp/rmux.sock",
+          released: false,
+        },
+      },
+      last_run: null,
+    };
+    const markup = renderToStaticMarkup(
+      <SessionSidebar
+        targets={[session.target, remote]}
+        targetErrors={new Map()}
+        sessions={[session, remoteSession, taskSession]}
+        interactiveTasks={[task]}
+        shellStates={new Map()}
+        selectedSessionKey="task:local:task-1"
+        openTabSessionKeys={new Set()}
+        loading={false}
+        error={null}
+        creating={false}
+        closingSessionKeys={new Set()}
+        disconnectingSessionKey={null}
+        onRefresh={vi.fn()}
+        onSelect={vi.fn()}
+        onNewShell={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRequestClose={vi.fn()}
+        onAddHost={vi.fn()}
+        onConnectHost={vi.fn()}
+        onRemoveHost={vi.fn()}
+        onAddExisting={vi.fn()}
+        onForget={vi.fn()}
+        onSelectTask={vi.fn()}
+        onStopTask={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('id="session-group-tasks"');
+    expect(markup).toContain("Dev server");
+    expect(markup).toContain('aria-label="local sessions"');
+    expect(markup).toContain('aria-label="build-host sessions"');
+    expect(markup).not.toContain("Shell — listed-only");
+    expect(markup.indexOf("session-group-tasks")).toBeLessThan(
+      markup.indexOf('aria-label="local sessions"'),
+    );
   });
 });

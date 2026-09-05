@@ -5,6 +5,7 @@ import {
 } from "../../features/tabs/terminalTitle";
 import type {
   ConnectionTarget,
+  ManagedTask,
   SessionSummary,
   ShellStateSummary,
 } from "../../lib/types";
@@ -20,6 +21,7 @@ interface SessionSidebarProps {
   targets: readonly ConnectionTarget[];
   targetErrors: ReadonlyMap<string, string>;
   sessions: SessionSummary[];
+  interactiveTasks?: ManagedTask[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
   selectedSessionKey: string | null;
   openTabSessionKeys: ReadonlySet<string>;
@@ -38,6 +40,8 @@ interface SessionSidebarProps {
   onRemoveHost(target: ConnectionTarget): void;
   onAddExisting(): void;
   onForget(session: SessionSummary): void;
+  onSelectTask?(task: ManagedTask): void;
+  onStopTask?(task: ManagedTask): void;
 }
 
 function sidebarTitle(
@@ -69,10 +73,15 @@ function sidebarTitle(
   };
 }
 
+function groupLabel(target: ConnectionTarget): string {
+  return target.kind === "local" ? "Local" : targetLabel(target);
+}
+
 export function SessionSidebar({
   targets,
   targetErrors,
   sessions,
+  interactiveTasks = [],
   shellStates,
   selectedSessionKey,
   openTabSessionKeys,
@@ -91,7 +100,30 @@ export function SessionSidebar({
   onRemoveHost,
   onAddExisting,
   onForget,
+  onSelectTask,
+  onStopTask,
 }: SessionSidebarProps) {
+  const taskSessions = interactiveTasks.filter(
+    (task) =>
+      task.definition.execution_mode === "interactive" &&
+      !!task.active_run?.interactive?.session_id &&
+      !task.active_run.interactive.released,
+  );
+  const taskSessionIds = new Set(
+    taskSessions.map((task) => task.active_run!.interactive!.session_id),
+  );
+  const ordinarySessions = sessions.filter(
+    (session) =>
+      session.target.kind !== "local" || !taskSessionIds.has(session.session_id),
+  );
+  const sessionGroups = targets
+    .map((target) => ({
+      target,
+      sessions: ordinarySessions.filter(
+        (session) => targetKey(session.target) === targetKey(target),
+      ),
+    }))
+    .filter((group) => group.sessions.length > 0);
   return (
     <aside className="session-sidebar" aria-label="rmux sessions">
       <div className="sidebar-connections">
@@ -166,7 +198,7 @@ export function SessionSidebar({
         {!loading &&
         !error &&
         targetErrors.size === 0 &&
-        sessions.length === 0 ? (
+        ordinarySessions.length === 0 && taskSessions.length === 0 ? (
           <div className="sidebar-state">
             <span className="empty-glyph">›_</span>
             <p>No known sessions.</p>
@@ -176,88 +208,142 @@ export function SessionSidebar({
             </small>
           </div>
         ) : null}
-        {sessions.map((session) => {
-          const identity = sessionKey(session);
-          const { fullTitle, compactTitle } = sidebarTitle(
-            session,
-            shellStates.get(identity) ?? null,
-          );
-          const selected = identity === selectedSessionKey;
-          const closing = closingSessionKeys.has(identity);
-          const disconnecting = identity === disconnectingSessionKey;
-          const canDisconnect = openTabSessionKeys.has(identity);
-          return (
-            <div
-              className={`session-row ${selected ? "active" : ""}`}
-              key={identity}
-            >
-              <button
-                className="session-select"
-                type="button"
-                onClick={() => onSelect(session)}
-                disabled={closing}
-                aria-current={selected ? "true" : undefined}
-                aria-label={`${fullTitle} — ${session.name}`}
-                title={fullTitle}
-              >
-                <span className="session-indicator" aria-hidden="true" />
-                <span className="session-copy">
-                  <strong>{compactTitle}</strong>
-                  <small>
-                    {targetLabel(session.target)}
-                    <span aria-hidden="true"> · </span>
-                    {session.name}
-                    <span aria-hidden="true"> · </span>
-                    {session.status === "running" ? (
-                      <>
-                        {session.terminal_size.columns}×
-                        {session.terminal_size.rows}
-                        <span aria-hidden="true"> · </span>
-                      </>
-                    ) : null}
-                    {session.status === "unknown"
-                      ? "unverified"
-                      : session.status}
-                  </small>
-                </span>
-              </button>
-              <div className="session-actions">
-                <button
-                  className="session-action"
-                  type="button"
-                  onClick={() => onForget(session)}
-                  disabled={closing || disconnecting}
-                  aria-label={`Remove ${session.name} from workspace`}
-                  title="Remove from workspace; keep the shell running"
+        {taskSessions.length > 0 ? (
+          <section className="session-group" aria-labelledby="session-group-tasks">
+            <h3 id="session-group-tasks">
+              Tasks <span>{taskSessions.length}</span>
+            </h3>
+            {taskSessions.map((task) => {
+              const run = task.active_run!;
+              const selected =
+                selectedSessionKey === `task:local:${task.task_id}`;
+              return (
+                <div
+                  className={`session-row task-session-row ${selected ? "active" : ""}`}
+                  key={task.task_id}
                 >
-                  −
-                </button>
-                {canDisconnect ? (
                   <button
-                    className="session-action"
+                    className="session-select"
                     type="button"
-                    onClick={() => onDisconnect(session)}
-                    disabled={disconnecting || closing}
-                    aria-label={`Disconnect from ${session.name}`}
-                    title="Disconnect this tab; keep the session running"
+                    onClick={() => onSelectTask?.(task)}
+                    aria-current={selected ? "true" : undefined}
+                    aria-label={`${task.definition.name} — interactive task`}
                   >
-                    <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
+                    <span className="session-indicator" aria-hidden="true" />
+                    <span className="session-copy">
+                      <strong>{task.definition.name}</strong>
+                      <small>local · {run.state}</small>
+                    </span>
                   </button>
-                ) : null}
-                <button
-                  className="session-action session-close"
-                  type="button"
-                  onClick={() => onRequestClose(session)}
-                  disabled={closing || disconnecting}
-                  aria-label={`Close ${session.name}`}
-                  title="Close the session and terminate its shell"
+                  <div className="session-actions">
+                    <button
+                      className="session-action session-close"
+                      type="button"
+                      onClick={() => onStopTask?.(task)}
+                      aria-label={`Stop ${task.definition.name}`}
+                      title="Stop the task and its terminal"
+                    >
+                      <span aria-hidden="true">■</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+        ) : null}
+        {sessionGroups.map(({ target, sessions: groupSessions }) => (
+          <section
+            className="session-group"
+            key={targetKey(target)}
+            aria-label={`${targetLabel(target)} sessions`}
+          >
+            <h3>
+              {groupLabel(target)} <span>{groupSessions.length}</span>
+            </h3>
+            {groupSessions.map((session) => {
+              const identity = sessionKey(session);
+              const { fullTitle, compactTitle } = sidebarTitle(
+                session,
+                shellStates.get(identity) ?? null,
+              );
+              const selected = identity === selectedSessionKey;
+              const closing = closingSessionKeys.has(identity);
+              const disconnecting = identity === disconnectingSessionKey;
+              const canDisconnect = openTabSessionKeys.has(identity);
+              return (
+                <div
+                  className={`session-row ${selected ? "active" : ""}`}
+                  key={identity}
                 >
-                  <span aria-hidden="true">{closing ? "…" : "×"}</span>
-                </button>
-              </div>
-            </div>
-          );
-        })}
+                  <button
+                    className="session-select"
+                    type="button"
+                    onClick={() => onSelect(session)}
+                    disabled={closing}
+                    aria-current={selected ? "true" : undefined}
+                    aria-label={`${fullTitle} — ${session.name}`}
+                    title={fullTitle}
+                  >
+                    <span className="session-indicator" aria-hidden="true" />
+                    <span className="session-copy">
+                      <strong>{compactTitle}</strong>
+                      <small>
+                        {targetLabel(session.target)}
+                        <span aria-hidden="true"> · </span>
+                        {session.name}
+                        <span aria-hidden="true"> · </span>
+                        {session.status === "running" ? (
+                          <>
+                            {session.terminal_size.columns}×
+                            {session.terminal_size.rows}
+                            <span aria-hidden="true"> · </span>
+                          </>
+                        ) : null}
+                        {session.status === "unknown"
+                          ? "unverified"
+                          : session.status}
+                      </small>
+                    </span>
+                  </button>
+                  <div className="session-actions">
+                    <button
+                      className="session-action"
+                      type="button"
+                      onClick={() => onForget(session)}
+                      disabled={closing || disconnecting}
+                      aria-label={`Remove ${session.name} from workspace`}
+                      title="Remove from workspace; keep the shell running"
+                    >
+                      −
+                    </button>
+                    {canDisconnect ? (
+                      <button
+                        className="session-action"
+                        type="button"
+                        onClick={() => onDisconnect(session)}
+                        disabled={disconnecting || closing}
+                        aria-label={`Disconnect from ${session.name}`}
+                        title="Disconnect this tab; keep the session running"
+                      >
+                        <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
+                      </button>
+                    ) : null}
+                    <button
+                      className="session-action session-close"
+                      type="button"
+                      onClick={() => onRequestClose(session)}
+                      disabled={closing || disconnecting}
+                      aria-label={`Close ${session.name}`}
+                      title="Close the session and terminate its shell"
+                    >
+                      <span aria-hidden="true">{closing ? "…" : "×"}</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+        ))}
       </div>
 
       <footer className="sidebar-footer">

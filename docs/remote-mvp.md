@@ -6,8 +6,9 @@ host verification, encryption, and user authentication.
 
 ## On the controlled device
 
-Build or install `rmuxd`, `taskd`, and `ctl-agent` for the same OS user. They should
-be available in the non-interactive SSH command environment. `ctl-agent` starts a
+Build or install `rmuxd`, `taskd`, and `ctl-agent` for the same OS user. They may
+be installed together in the app-managed data directory or made available in
+the non-interactive SSH command environment. `ctl-agent` starts a
 sibling daemon on demand when the binaries are installed together; either daemon
 may instead be started independently. Task control selects `taskd` explicitly,
 and interactive tasks also require `rmuxd` with managed-session support.
@@ -93,7 +94,8 @@ open at the command palette location. Verify any SSH host-key prompt against
 the fingerprint above. Once `ctl-agent connect` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
-not store the key contents. `ctl-agent` is assumed to be on the remote `PATH`.
+not store the key contents. A packaged app can install a missing `ctl-agent`,
+`rmuxd`, and `taskd` bundle into the remote user's data directory and retry.
 Password/passphrase and host-verification prompts use the same overlay on
 macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
 chip to authenticate again if SSH config/agent alone is insufficient.

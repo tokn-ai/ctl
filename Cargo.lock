@@ -3021,6 +3021,7 @@ dependencies = [
  "rmux-proto",
  "serde",
  "serde_json",
+ "sha2",
  "task-client",
  "task-proto",
  "task-store",

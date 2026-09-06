@@ -20,6 +20,7 @@ import type {
   SshHostDefinition,
   SshIdentityFileCatalog,
   SshPrompt,
+  RemoteAgentInstallResult,
   WorkspaceDocument,
   WorkspaceSnapshot,
   SessionInspection,
@@ -98,6 +99,19 @@ export async function probeSshHost(
   const channel = new Channel<SshPrompt>();
   channel.onmessage = onPrompt;
   await invoke("probe_ssh_host", {
+    request: { target, attempt_id },
+    on_prompt: channel,
+  });
+}
+
+export async function installRemoteAgent(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+): Promise<RemoteAgentInstallResult> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  return invoke<RemoteAgentInstallResult>("install_remote_agent", {
     request: { target, attempt_id },
     on_prompt: channel,
   });

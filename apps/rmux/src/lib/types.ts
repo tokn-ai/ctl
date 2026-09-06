@@ -120,6 +120,11 @@ export interface SshPrompt {
   message: string;
 }
 
+export interface RemoteAgentInstallResult {
+  version: string;
+  target_triple: string;
+}
+
 export interface TerminalSize {
   columns: number;
   rows: number;

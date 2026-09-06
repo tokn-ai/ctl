@@ -21,7 +21,8 @@ ssh -T \
   -o ForwardX11=no \
   -o PermitLocalCommand=no \
   -o RemoteCommand=none \
-  -- <destination> exec ctl-agent connect
+  -- <destination> \
+  'PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect'
 ```
 
 With `--remote-platform windows`, the suffix is `ctl-agent.exe connect` instead
@@ -35,8 +36,8 @@ fixed service suffix:
 
 | Domain | Unix remote command | Windows remote command |
 | --- | --- | --- |
-| rmux | `exec ctl-agent connect` | `ctl-agent.exe connect` |
-| task | `exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
+| rmux | `PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect` | `ctl-agent.exe connect` |
+| task | `PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
 
 The service is an enum selected by the command domain. Neither a socket path nor
 an arbitrary service or shell command is accepted from the client.

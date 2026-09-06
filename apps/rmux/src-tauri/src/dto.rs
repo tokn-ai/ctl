@@ -89,6 +89,12 @@ pub struct SaveSshConfigHostResponseDto {
   pub destination: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteAgentInstallResultDto {
+  pub version: String,
+  pub target_triple: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSizeDto {
   pub columns: u16,

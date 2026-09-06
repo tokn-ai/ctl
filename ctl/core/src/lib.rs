@@ -11,13 +11,45 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
 mod ssh_startup;
 
 const SSH_PROGRAM: &str = "ssh";
+const MAX_SSH_COMMAND_OUTPUT: usize = 8192;
+const UNIX_GATEWAY_COMMAND: &str =
+  r#"PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect"#;
+const UNIX_PLATFORM_PROBE_COMMAND: &str = "printf 'ctl-platform-v1\\n'; uname -s; uname -m";
+const UNIX_INSTALL_COMMAND: &str = r#"set -eu
+umask 077
+base="${XDG_DATA_HOME:-$HOME/.local/share}/ctl"
+versions="$base/versions"
+destination="$versions/__VERSION__"
+temporary="$versions/.install-__VERSION__-$$"
+link="$base/.current-$$"
+mkdir -p "$versions"
+test ! -e "$temporary"
+mkdir "$temporary"
+trap 'rm -rf "$temporary" "$link"' EXIT HUP INT TERM
+tar -xzf - -C "$temporary"
+test -f "$temporary/ctl-agent"
+test -f "$temporary/rmuxd"
+test -f "$temporary/taskd"
+chmod 700 "$temporary/ctl-agent" "$temporary/rmuxd" "$temporary/taskd"
+if [ -e "$destination" ]; then
+  rm -rf "$temporary"
+else
+  mv "$temporary" "$destination"
+fi
+test -x "$destination/ctl-agent"
+test -x "$destination/rmuxd"
+test -x "$destination/taskd"
+ln -s "versions/__VERSION__" "$link"
+mv -f "$link" "$base/current"
+trap - EXIT HUP INT TERM
+printf 'ctl-install-v1\n'"#;
 /// Remote command-shell convention, independent of the client platform.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RemotePlatform {
@@ -30,7 +62,7 @@ pub enum RemotePlatform {
 impl RemotePlatform {
   fn command(self) -> &'static [&'static str] {
     match self {
-      Self::Unix => &["exec", "ctl-agent", "connect"],
+      Self::Unix => &[UNIX_GATEWAY_COMMAND],
       Self::Windows => &["ctl-agent.exe", "connect"],
     }
   }
@@ -323,7 +355,13 @@ pub async fn open_ssh_service_interactive(
 
   // Insert local-only options before `--`; never append them to the remote command.
   let arguments = ssh_service_arguments(destination, options, service);
-  let extra: Vec<OsString> = match interaction {
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command.args(extra).args(arguments);
+  start_ssh_transport(command).await
+}
+
+fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction) -> Vec<OsString> {
+  match interaction {
     SshInteraction::Inherit => Vec::new(),
     SshInteraction::Batch => vec!["-o".into(), "BatchMode=yes".into()],
     SshInteraction::Askpass {
@@ -345,9 +383,134 @@ pub async fn open_ssh_service_interactive(
         "StrictHostKeyChecking=ask".into(),
       ]
     }
+  }
+}
+
+/// Detects the OS and architecture of a Unix SSH host with one fixed command.
+///
+/// The returned text starts with `ctl-platform-v1` followed by the `uname -s`
+/// and `uname -m` values on separate lines. Arbitrary remote commands remain
+/// unavailable to callers.
+///
+/// # Errors
+/// Returns validation, SSH startup, remote-command, or output-limit failures.
+pub async fn probe_ssh_unix_platform_interactive(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+) -> Result<String, CoreError> {
+  let output = run_ssh_command_interactive(
+    destination,
+    options,
+    interaction,
+    UNIX_PLATFORM_PROBE_COMMAND,
+    &[],
+  )
+  .await?;
+  String::from_utf8(output).map_err(|_| CoreError::InvalidSshCommandOutput)
+}
+
+/// Installs one trusted ctl-agent bundle into the fixed per-user Unix location.
+///
+/// `version` is restricted to a path-safe release identifier and the archive is
+/// expanded by a fixed script. The public API cannot supply a remote command or
+/// destination path.
+///
+/// # Errors
+/// Returns validation, SSH startup, remote-command, or output failures.
+pub async fn install_ssh_unix_agent_interactive(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  version: &str,
+  archive: &[u8],
+) -> Result<(), CoreError> {
+  validate_agent_version(version)?;
+  let script = UNIX_INSTALL_COMMAND.replace("__VERSION__", version);
+  let output =
+    run_ssh_command_interactive(destination, options, interaction, &script, archive).await?;
+  if output != b"ctl-install-v1\n" {
+    return Err(CoreError::InvalidSshCommandOutput);
+  }
+  Ok(())
+}
+
+fn validate_agent_version(version: &str) -> Result<(), CoreError> {
+  if version.is_empty()
+    || version.len() > 64
+    || !version
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
+  {
+    return Err(CoreError::InvalidAgentVersion(version.into()));
+  }
+  Ok(())
+}
+
+async fn run_ssh_command_interactive(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  remote_command: &str,
+  input: &[u8],
+) -> Result<Vec<u8>, CoreError> {
+  validate_ssh_target(destination, options)?;
+  if options.remote_platform != RemotePlatform::Unix {
+    return Err(CoreError::InvalidSshOption("remote_platform".into()));
+  }
+  let mut command = Command::new(SSH_PROGRAM);
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command
+    .args(extra)
+    .args(ssh_base_arguments(destination, options))
+    .arg(remote_command)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+
+  let mut child = command.spawn().map_err(CoreError::StartSsh)?;
+  let mut stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
+  let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
+  let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
+  let write = async {
+    stdin.write_all(input).await?;
+    stdin.shutdown().await
   };
-  command.args(extra).args(arguments);
-  start_ssh_transport(command).await
+  let read_stdout = read_bounded_output(&mut stdout);
+  let read_stderr = read_bounded_output(&mut stderr);
+  let wait = child.wait();
+  let (write, stdout, stderr, status) = tokio::join!(write, read_stdout, read_stderr, wait);
+  write.map_err(CoreError::WriteSshCommand)?;
+  let stdout = stdout.map_err(CoreError::ReadSshCommand)?;
+  let stderr = stderr.map_err(CoreError::ReadSshCommand)?;
+  let status = status.map_err(CoreError::WaitSshCommand)?;
+  if !status.success() {
+    let diagnostic = String::from_utf8_lossy(&stderr)
+      .chars()
+      .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+      .collect::<String>()
+      .trim()
+      .to_owned();
+    return Err(CoreError::SshCommandFailed {
+      status: status.to_string(),
+      diagnostic,
+    });
+  }
+  Ok(stdout)
+}
+
+async fn read_bounded_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
+  let mut retained = Vec::new();
+  let mut buffer = [0_u8; 1024];
+  loop {
+    let count = reader.read(&mut buffer).await?;
+    if count == 0 {
+      return Ok(retained);
+    }
+    let keep = count.min(MAX_SSH_COMMAND_OUTPUT.saturating_sub(retained.len()));
+    retained.extend_from_slice(&buffer[..keep]);
+  }
 }
 
 async fn start_ssh_transport(mut command: Command) -> Result<SshTransport, CoreError> {
@@ -421,6 +584,13 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::StartSsh(_)
     | CoreError::MissingSshStdin
     | CoreError::MissingSshStdout
+    | CoreError::MissingSshStderr
+    | CoreError::WriteSshCommand(_)
+    | CoreError::ReadSshCommand(_)
+    | CoreError::WaitSshCommand(_)
+    | CoreError::SshCommandFailed { .. }
+    | CoreError::InvalidSshCommandOutput
+    | CoreError::InvalidAgentVersion(_)
     | CoreError::InvalidSshPreface => false,
   }
 }
@@ -473,6 +643,15 @@ fn ssh_service_arguments(
   options: &SshConnectionOptions,
   service: RemoteService,
 ) -> Vec<OsString> {
+  let mut arguments = ssh_base_arguments(destination, options);
+  arguments.extend(options.remote_platform.command().iter().map(OsString::from));
+  if service == RemoteService::Task {
+    arguments.extend([OsString::from("--service"), OsString::from("task")]);
+  }
+  arguments
+}
+
+fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsString> {
   let mut arguments = [
     "-T",
     "-o",
@@ -502,10 +681,6 @@ fn ssh_service_arguments(
     OsString::from("--"),
     OsString::from(options.hostname.as_deref().unwrap_or(destination)),
   ]);
-  arguments.extend(options.remote_platform.command().iter().map(OsString::from));
-  if service == RemoteService::Task {
-    arguments.extend([OsString::from("--service"), OsString::from("task")]);
-  }
   arguments
 }
 
@@ -525,6 +700,20 @@ pub enum CoreError {
   MissingSshStdin,
   #[error("the ssh client did not expose a readable stdout pipe")]
   MissingSshStdout,
+  #[error("the ssh client did not expose a readable stderr pipe")]
+  MissingSshStderr,
+  #[error("could not write the fixed SSH command input: {0}")]
+  WriteSshCommand(#[source] io::Error),
+  #[error("could not read the fixed SSH command output: {0}")]
+  ReadSshCommand(#[source] io::Error),
+  #[error("could not wait for the fixed SSH command: {0}")]
+  WaitSshCommand(#[source] io::Error),
+  #[error("fixed SSH command failed with {status}: {diagnostic}")]
+  SshCommandFailed { status: String, diagnostic: String },
+  #[error("fixed SSH command returned invalid output")]
+  InvalidSshCommandOutput,
+  #[error("invalid ctl-agent version '{0}'")]
+  InvalidAgentVersion(String),
   #[error("could not read the ctl-agent transport marker from SSH: {0}")]
   ReadSshPreface(#[source] io::Error),
   #[error("SSH connection failed before ctl-agent was ready: {0}")]
@@ -558,9 +747,7 @@ mod tests {
         "RemoteCommand=none",
         "--",
         "workstation",
-        "exec",
-        "ctl-agent",
-        "connect",
+        UNIX_GATEWAY_COMMAND,
       ]
       .map(OsString::from)
     );
@@ -617,7 +804,7 @@ mod tests {
 
     assert!(validate_ssh_target("rmux-remote-test", &options).is_ok());
     assert_eq!(
-      &arguments[arguments.len() - 11..],
+      &arguments[arguments.len() - 9..],
       [
         "-p",
         "2222",
@@ -627,12 +814,111 @@ mod tests {
         "/tmp/key with spaces",
         "--",
         "127.0.0.1",
-        "exec",
-        "ctl-agent",
-        "connect",
+        UNIX_GATEWAY_COMMAND,
       ]
       .map(OsString::from)
     );
+  }
+
+  #[test]
+  fn managed_unix_gateway_precedes_the_legacy_path_without_user_input() {
+    assert_eq!(
+      UNIX_GATEWAY_COMMAND,
+      r#"PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect"#
+    );
+    assert!(!UNIX_GATEWAY_COMMAND.contains("workstation"));
+  }
+
+  #[test]
+  fn agent_versions_are_restricted_before_building_the_install_script() {
+    for version in ["", "../escape", "v1/release", "line\nbreak"] {
+      assert!(matches!(
+        validate_agent_version(version),
+        Err(CoreError::InvalidAgentVersion(_))
+      ));
+    }
+    assert!(validate_agent_version("0.1.0+build-42").is_ok());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn unix_install_script_extracts_siblings_and_switches_the_managed_version() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = std::env::temp_dir().join(format!(
+      "ctl-core-install-{}",
+      uuid::Uuid::new_v4().simple()
+    ));
+    let source = directory.join("source");
+    let data = directory.join("data");
+    let archive = directory.join("bundle.tar.gz");
+    std::fs::create_dir_all(&source).unwrap();
+    for binary in ["ctl-agent", "rmuxd", "taskd"] {
+      std::fs::write(source.join(binary), binary).unwrap();
+    }
+    assert!(
+      std::process::Command::new("tar")
+        .args(["-czf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(&source)
+        .args(["ctl-agent", "rmuxd", "taskd"])
+        .status()
+        .unwrap()
+        .success()
+    );
+
+    let script = UNIX_INSTALL_COMMAND.replace("__VERSION__", "0.1.0");
+    let mut child = std::process::Command::new("sh")
+      .args(["-c", &script])
+      .env("XDG_DATA_HOME", &data)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .unwrap();
+    child
+      .stdin
+      .as_mut()
+      .unwrap()
+      .write_all(&std::fs::read(&archive).unwrap())
+      .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(
+      output.status.success(),
+      "{}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ctl-install-v1\n");
+
+    let installation = data.join("ctl/versions/0.1.0");
+    assert_eq!(
+      std::fs::read_link(data.join("ctl/current")).unwrap(),
+      PathBuf::from("versions/0.1.0")
+    );
+    for binary in ["ctl-agent", "rmuxd", "taskd"] {
+      let path = installation.join(binary);
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), binary);
+      assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o700
+      );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[tokio::test]
+  async fn unix_bootstrap_rejects_a_windows_target_before_starting_ssh() {
+    let options = SshConnectionOptions {
+      remote_platform: RemotePlatform::Windows,
+      ..SshConnectionOptions::default()
+    };
+    assert!(matches!(
+      probe_ssh_unix_platform_interactive("host", &options, &SshInteraction::Batch).await,
+      Err(CoreError::InvalidSshOption(field)) if field == "remote_platform"
+    ));
   }
 
   #[test]

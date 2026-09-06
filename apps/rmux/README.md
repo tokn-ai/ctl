@@ -9,7 +9,7 @@ From the repository root, build the daemon so the development app can find it
 beside its own Cargo binary, then start Tauri:
 
 ```sh
-cargo build -p rmuxd
+cargo build -p rmuxd -p taskd
 cd apps/rmux
 pnpm install
 pnpm tauri dev
@@ -21,8 +21,10 @@ or enter `[user@]hostname[:port]`, then a name, then choose SSH config/agent,
 an identity-file path, or password/interactive authentication. These steps use
 the same quick-input overlay as the command palette. OpenSSH requests any
 required host-key confirmation, password, passphrase, or interactive response
-there. `ctl-agent` must already be on the remote `PATH`; custom command paths are
-not supported. After a successful connection, choose where to save the host.
+there. If `ctl-agent` is missing, packaged builds can install the matching
+checksummed `ctl-agent`, `rmuxd`, and `taskd` bundle for the remote user. Custom
+command paths are not supported. After a successful connection, choose where
+to save the host.
 **OpenSSH config**
 writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
 reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.
@@ -60,8 +62,9 @@ default for a new shell. The sidebar mixes remembered sessions from selected tar
 and labels each row with its host. A failed host reports its own error while
 last-known sessions from other targets remain usable.
 
-SSH uses `ctl-core` and the system `ssh` executable with the fixed remote
-command `exec ctl-agent connect`; forwarding, agent access, X11, local commands,
+SSH uses `ctl-core` and the system `ssh` executable with a fixed remote command
+that prepends the app-managed directory before running `ctl-agent connect`;
+forwarding, agent access, X11, local commands,
 and PTY allocation remain disabled. On macOS/Linux, a short-lived owner-only
 Unix socket connects OpenSSH's askpass helper to the quick-input UI. Host-key
 trust requires explicit confirmation and is managed by OpenSSH. Passwords and

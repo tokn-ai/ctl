@@ -78,7 +78,11 @@ impl Drop for Bridge {
 }
 
 impl Bridge {
-  fn start(secrets: Secrets, prompts: Option<PromptContext>) -> CommandResult<Self> {
+  fn start(
+    secrets: Secrets,
+    prompts: Option<PromptContext>,
+    reuse_cached_secrets: bool,
+  ) -> CommandResult<Self> {
     use std::os::unix::fs::DirBuilderExt as _;
     // macOS's per-user temp path can exceed sockaddr_un's 104-byte limit.
     // An unpredictable owner-only directory keeps the short socket path private.
@@ -118,7 +122,7 @@ impl Bridge {
         let cacheable = !request.confirm && cacheable_prompt(&request.message);
         // An explicit interactive attempt must ask again after a rejected
         // password, rather than automatically repeating the incorrect value.
-        let cached = if cacheable && prompts.is_none() {
+        let cached = if cacheable && reuse_cached_secrets {
           secrets.lock().unwrap().get(&request.message).cloned()
         } else {
           None
@@ -211,7 +215,10 @@ async fn connect_with(
     ));
   };
   let bridge = secrets
-    .map(|secrets| Bridge::start(secrets, prompts))
+    .map(|secrets| {
+      let reuse_cached_secrets = prompts.is_none();
+      Bridge::start(secrets, prompts, reuse_cached_secrets)
+    })
     .transpose()?;
   let interaction = bridge
     .as_ref()
@@ -269,13 +276,90 @@ pub async fn probe(
     }
     _ = cancelled.changed() => Err(CommandErrorDto::new("ssh_cancelled", "SSH connection cancelled.")),
   };
-  result?;
+  match result {
+    Ok(()) => {
+      registry()
+        .lock()
+        .unwrap()
+        .credentials
+        .insert(target, secrets);
+      Ok(())
+    }
+    Err(error) => {
+      if error.code == "ctl_agent_not_found" {
+        registry()
+          .lock()
+          .unwrap()
+          .credentials
+          .insert(target, secrets);
+      }
+      Err(error)
+    }
+  }
+}
+
+pub async fn install_agent(
+  app: tauri::AppHandle,
+  window: String,
+  attempt_id: String,
+  target: ConnectionTargetDto,
+  channel: Channel<SshPromptDto>,
+) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
+  let key = (window, attempt_id);
+  let (cancel, mut cancelled) = watch::channel(false);
+  let attempt = Arc::new(Attempt {
+    cancel,
+    responses: Mutex::default(),
+  });
+  {
+    let mut registry = registry().lock().unwrap();
+    if registry.attempts.contains_key(&key) {
+      return Err(CommandErrorDto::new(
+        "ssh_attempt_exists",
+        "This connection attempt is already running.",
+      ));
+    }
+    registry.attempts.insert(key.clone(), attempt.clone());
+  }
+  let _guard = AttemptGuard(key);
+  let secrets = registry()
+    .lock()
+    .unwrap()
+    .credentials
+    .get(&target)
+    .cloned()
+    .unwrap_or_default();
+  let context = PromptContext { attempt, channel };
+  // The preceding probe authenticated successfully before discovering that
+  // ctl-agent was absent. Reuse that known-good password or key passphrase;
+  // uncached challenges such as one-time codes still reach the prompt channel.
+  let bridge = Bridge::start(secrets.clone(), Some(context), true)?;
+  let interaction = bridge.interaction()?;
+  let ConnectionTarget::Ssh {
+    destination,
+    options,
+  } = target.to_core()
+  else {
+    return Err(CommandErrorDto::new(
+      "invalid_ssh_target",
+      "Select a remote SSH host.",
+    ));
+  };
+  let install = crate::remote_agent::install(&app, &destination, &options, &interaction);
+  let result = tokio::select! {
+    result = tokio::time::timeout(Duration::from_mins(3), install) => {
+      result.map_err(|_| CommandErrorDto::new("remote_agent_install_timeout", "Remote component installation timed out."))?
+    }
+    _ = cancelled.changed() => Err(CommandErrorDto::new("ssh_cancelled", "SSH connection cancelled.")),
+  };
+  drop(bridge);
+  let installed = result?;
   registry()
     .lock()
     .unwrap()
     .credentials
     .insert(target, secrets);
-  Ok(())
+  Ok(installed)
 }
 
 pub fn respond(

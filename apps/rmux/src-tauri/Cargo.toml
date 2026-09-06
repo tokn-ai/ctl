@@ -25,6 +25,7 @@ rmux-ipc.workspace = true
 rmux-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "2", features = [] }
 thiserror.workspace = true
 tokio.workspace = true

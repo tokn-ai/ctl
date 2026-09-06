@@ -2,10 +2,12 @@
 set -eu
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
-  "exec ctl-agent connect") service=rmux ;;
-  "exec ctl-agent connect --service task") service=task ;;
+  "exec ctl-agent connect"|\
+  'PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect') service=rmux ;;
+  "exec ctl-agent connect --service task"|\
+  'PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect --service task') service=task ;;
   *)
-    echo "rmux container: only 'exec ctl-agent connect' or 'exec ctl-agent connect --service task' is permitted" >&2
+    echo "rmux container: only the fixed ctl-agent rmux or task command is permitted" >&2
     exit 126
     ;;
 esac

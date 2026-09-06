@@ -49,6 +49,19 @@ pub async fn probe(
   .map_err(|_| CommandErrorDto::new("ssh_timeout", "SSH connection timed out."))?
 }
 
+pub async fn install_agent(
+  _app: tauri::AppHandle,
+  _window: String,
+  _attempt_id: String,
+  _target: ConnectionTargetDto,
+  _channel: Channel<SshPromptDto>,
+) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
+  Err(CommandErrorDto::new(
+    "remote_agent_install_unsupported",
+    "Remote component installation currently requires macOS or Linux.",
+  ))
+}
+
 pub fn respond(
   _window: &str,
   _attempt_id: &str,

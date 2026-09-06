@@ -7,6 +7,8 @@ mod local_transport;
 #[cfg(target_os = "macos")]
 mod native_menu;
 #[cfg(unix)]
+mod remote_agent;
+#[cfg(unix)]
 mod ssh_auth;
 #[cfg(not(unix))]
 #[path = "ssh_auth/unsupported.rs"]
@@ -71,6 +73,7 @@ pub fn run() {
       commands::list_ssh_identity_files,
       commands::save_ssh_config_host,
       ssh_auth::commands::probe_ssh_host,
+      ssh_auth::commands::install_remote_agent,
       ssh_auth::commands::respond_ssh_prompt,
       ssh_auth::commands::cancel_ssh_probe,
       ssh_auth::commands::forget_ssh_credentials,

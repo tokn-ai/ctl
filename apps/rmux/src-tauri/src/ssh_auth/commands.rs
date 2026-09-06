@@ -5,7 +5,7 @@ use super::SshPromptDto;
 use crate::dto::ConnectionTargetDto;
 use crate::error::CommandResult;
 use serde::Deserialize;
-use tauri::{WebviewWindow, ipc::Channel};
+use tauri::{AppHandle, WebviewWindow, ipc::Channel};
 
 #[derive(Deserialize)]
 pub struct ProbeRequest {
@@ -30,6 +30,23 @@ pub async fn probe_ssh_host(
   on_prompt: Channel<SshPromptDto>,
 ) -> CommandResult<()> {
   super::probe(
+    window.label().into(),
+    request.attempt_id,
+    request.target,
+    on_prompt,
+  )
+  .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn install_remote_agent(
+  app: AppHandle,
+  window: WebviewWindow,
+  request: ProbeRequest,
+  on_prompt: Channel<SshPromptDto>,
+) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
+  super::install_agent(
+    app,
     window.label().into(),
     request.attempt_id,
     request.target,

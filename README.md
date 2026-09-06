@@ -66,6 +66,12 @@ pnpm install
 pnpm tauri dev
 ```
 
+The `Desktop and remote-agent bundles` workflow builds static Linux and native
+macOS remote bundles for x86-64 and ARM64, downloads all four into each desktop
+packaging job, and stages the matching local `rmuxd` and `taskd` as Tauri
+sidecars. Its versioned desktop and remote-agent outputs can be downloaded from
+the workflow run; tag names must match the app version as `v<version>`.
+
 ## Use
 
 Create a detached persistent shell in the current directory:
@@ -162,7 +168,8 @@ storage prompts, with connection verification before saving. The same overlay
 handles destructive close/restart confirmations and **New Shell** input.
 **New Shell** asks for a host (Local first) and an optional working directory;
 blank uses that host's home directory. Escape cancels before creation starts,
-and progress/errors stay in the overlay. `ctl-agent` is assumed on the remote `PATH`.
+and progress/errors stay in the overlay. If `ctl-agent` is absent, the app can
+install its bundled, checksummed remote components for that user and retry.
 Each row and tab carries its host; create, attach, reconnect, and kill
 operations always use that session's original target.
 It renders one terminal pane and exposes input and layout ownership separately.
@@ -214,8 +221,10 @@ ctl rmux attach development
 ```
 
 Pass global `--host`/`-H` to redirect the same rmux command through SSH. The
-value is an ordinary OpenSSH destination or `~/.ssh/config` host alias, and
-the remote account must be able to run `ctl-agent connect` non-interactively:
+value is an ordinary OpenSSH destination or `~/.ssh/config` host alias. Unix
+clients first add the app-managed per-user installation to the fixed remote
+command's `PATH`, then fall back to the remote account's ordinary non-interactive
+`PATH`:
 
 ```sh
 ctl --host workstation rmux list
@@ -291,7 +300,8 @@ ctl --host workstation task stop shell
 ctl --host workstation task remove shell
 ```
 
-Task requests use the fixed `exec ctl-agent connect --service task` command.
+Task requests use the same fixed managed-directory `PATH` prefix and
+`ctl-agent connect --service task` command as rmux connections.
 Interactive attachment opens a separate rmux channel to that same host; remote
 socket paths in task metadata are never opened on the client. A local create
 defaults to the caller's working directory. A remote create defaults to the

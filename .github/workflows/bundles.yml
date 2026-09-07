@@ -2,7 +2,15 @@ name: Desktop and remote-agent bundles
 
 on:
   workflow_dispatch:
+    inputs:
+      build_desktop:
+        description: Also build installable desktop packages
+        required: true
+        default: false
+        type: boolean
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -18,8 +26,42 @@ env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
 jobs:
+  metadata:
+    name: Bundle metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      app_version: ${{ steps.metadata.outputs.app_version }}
+      bundle_id: ${{ steps.metadata.outputs.bundle_id }}
+      git_revision: ${{ steps.metadata.outputs.git_revision }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve immutable bundle identity
+        id: metadata
+        shell: bash
+        run: |
+          app_version=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' apps/rmux/src-tauri/tauri.conf.json)
+          if [[ -z "$app_version" ]]; then
+            echo "could not read the app version" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            if [[ "$GITHUB_REF_NAME" != "v$app_version" ]]; then
+              echo "tag $GITHUB_REF_NAME does not match app version $app_version" >&2
+              exit 1
+            fi
+            bundle_id=$app_version
+          else
+            bundle_id="$app_version-dev.${GITHUB_SHA:0:12}"
+          fi
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "bundle_id=$bundle_id" >> "$GITHUB_OUTPUT"
+          echo "git_revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
   remote-agent:
     name: Remote agent (${{ matrix.target }})
+    needs: metadata
     strategy:
       fail-fast: false
       matrix:
@@ -61,13 +103,13 @@ jobs:
 
       - name: Package remote components
         shell: bash
-        run: |
-          version=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' apps/rmux/src-tauri/tauri.conf.json)
-          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "tag $GITHUB_REF_NAME does not match app version $version" >&2
-            exit 1
-          fi
-          ./scripts/ci/package-agent-bundle.sh "${{ matrix.target }}" "$version" target/agent-bundles
+        run: >-
+          ./scripts/ci/package-agent-bundle.sh
+          "${{ matrix.target }}"
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/agent-bundles
 
       - name: Upload remote-agent bundle
         uses: actions/upload-artifact@v4
@@ -77,9 +119,47 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  remote-agent-set:
+    name: Remote agent bundle set
+    needs:
+      - metadata
+      - remote-agent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download remote-agent bundles
+        uses: actions/download-artifact@v5
+        with:
+          pattern: ctl-agent-bundle-*
+          path: target/agent-components
+          merge-multiple: true
+
+      - name: Validate and assemble bundle set
+        run: >-
+          ./scripts/ci/assemble-agent-bundle-set.sh
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/agent-components
+          target/agent-bundle-set
+
+      - name: Upload remote-agent bundle set
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctl-agent-bundle-set
+          path: target/agent-bundle-set/*
+          if-no-files-found: error
+          retention-days: 30
+
   desktop:
     name: Desktop (${{ matrix.target }})
-    needs: remote-agent
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_desktop)
+    needs:
+      - metadata
+      - remote-agent-set
     strategy:
       fail-fast: false
       matrix:
@@ -138,9 +218,8 @@ jobs:
       - name: Download remote-agent bundles
         uses: actions/download-artifact@v5
         with:
-          pattern: ctl-agent-bundle-*
+          name: ctl-agent-bundle-set
           path: apps/rmux/src-tauri/resources/agent-bundles
-          merge-multiple: true
 
       - name: Build and stage native daemons
         shell: bash

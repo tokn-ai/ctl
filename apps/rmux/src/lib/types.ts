@@ -121,7 +121,9 @@ export interface SshPrompt {
 }
 
 export interface RemoteAgentInstallResult {
-  version: string;
+  app_version: string;
+  bundle_id: string;
+  git_revision: string;
   target_triple: string;
 }
 

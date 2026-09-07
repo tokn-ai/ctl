@@ -297,7 +297,9 @@ describe("SSH host quick-input flow", () => {
       })
       .mockResolvedValueOnce(undefined);
     vi.mocked(installRemoteAgent).mockResolvedValue({
-      version: "0.1.0",
+      app_version: "0.1.0",
+      bundle_id: "0.1.0-dev.0123456789ab",
+      git_revision: "0123456789abcdef0123456789abcdef01234567",
       target_triple: "x86_64-unknown-linux-musl",
     });
     const { user } = setup();

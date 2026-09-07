@@ -15,6 +15,20 @@ pnpm install
 pnpm tauri dev
 ```
 
+Development startup performs a local-only bundle preflight. It warns but does
+not block local or already-provisioned SSH work when remote install bundles are
+absent. To test installation on a new SSH host, first commit and push the
+current branch, then run:
+
+```sh
+pnpm agents:sync
+```
+
+The command reuses or dispatches the bundle workflow for the exact commit,
+waits for it, verifies all four archives, and stages them in the ignored Tauri
+resource directory. `pnpm agents:sync --main` is an explicit compatibility
+shortcut for using the latest successful main-branch set.
+
 The app may also use the path in `RMUXD_BIN`. Open **+ Host** to activate a
 concrete alias discovered from `~/.ssh/config` (including its `Include` files)
 or enter `[user@]hostname[:port]`, then a name, then choose SSH config/agent,
@@ -23,8 +37,9 @@ the same quick-input overlay as the command palette. OpenSSH requests any
 required host-key confirmation, password, passphrase, or interactive response
 there. If `ctl-agent` is missing, packaged builds can install the matching
 checksummed `ctl-agent`, `rmuxd`, and `taskd` bundle for the remote user. Custom
-command paths are not supported. After a successful connection, choose where
-to save the host.
+command paths are not supported. Each development commit has a distinct bundle
+ID, so a remote host cannot silently retain an older build with the same app
+version. After a successful connection, choose where to save the host.
 **OpenSSH config**
 writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
 reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.

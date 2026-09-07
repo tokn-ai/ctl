@@ -94,8 +94,11 @@ open at the command palette location. Verify any SSH host-key prompt against
 the fingerprint above. Once `ctl-agent connect` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
-not store the key contents. A packaged app can install a missing `ctl-agent`,
-`rmuxd`, and `taskd` bundle into the remote user's data directory and retry.
+not store the key contents. An app with a synchronized bundle set can install a
+missing `ctl-agent`, `rmuxd`, and `taskd` bundle into the remote user's data
+directory and retry. Release bundles use the app version as their immutable
+install ID; development bundles include their Git revision so one source build
+cannot silently reuse another build's binaries.
 Password/passphrase and host-verification prompts use the same overlay on
 macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
 chip to authenticate again if SSH config/agent alone is insufficient.

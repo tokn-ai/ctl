@@ -10,3 +10,4 @@
 /binaries/
 /resources/agent-bundles/*.tar.gz
 /resources/agent-bundles/*.sha256
+/resources/agent-bundles/bundle-set.json

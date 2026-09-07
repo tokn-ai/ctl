@@ -1,9 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use ctl_core::{
   SshConnectionOptions, SshInteraction, install_ssh_unix_agent_interactive,
   probe_ssh_unix_platform_interactive,
 };
+use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use tauri::{AppHandle, Manager as _, path::BaseDirectory};
 
@@ -11,12 +13,46 @@ use crate::dto::RemoteAgentInstallResultDto;
 use crate::error::{CommandErrorDto, CommandResult};
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_BUNDLE_SET_BYTES: usize = 64 * 1024;
+const BUNDLE_SET_SCHEMA_VERSION: u32 = 1;
+const BUNDLE_SET_FILE: &str = "bundle-set.json";
 const PLATFORM_MARKER: &str = "ctl-platform-v1";
+const SUPPORTED_TARGETS: [&str; 4] = [
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemotePlatform {
   os: String,
   architecture: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleSetManifest {
+  schema_version: u32,
+  app_version: String,
+  bundle_id: String,
+  git_revision: String,
+  targets: BTreeMap<String, BundleTargetManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleTargetManifest {
+  archive: String,
+  sha256: String,
+}
+
+#[derive(Debug)]
+struct VerifiedBundle {
+  app_version: String,
+  bundle_id: String,
+  git_revision: String,
+  archive: Vec<u8>,
 }
 
 pub async fn install(
@@ -30,18 +66,22 @@ pub async fn install(
     .map_err(|error| CommandErrorDto::new("remote_platform_probe_failed", error.to_string()))?;
   let platform = parse_platform(&platform)?;
   let target_triple = platform.target_triple()?;
-  let version = env!("CARGO_PKG_VERSION");
-  let file_name = format!("ctl-agent-bundle-{version}-{target_triple}.tar.gz");
-  let bundle_path = resolve_bundle(app, &file_name)?;
-  let checksum_path = resolve_bundle(app, &format!("{file_name}.sha256"))?;
-  let archive = read_verified_bundle(bundle_path, checksum_path).await?;
+  let bundle = read_verified_bundle(bundle_directories(app)?, target_triple).await?;
 
-  install_ssh_unix_agent_interactive(destination, options, interaction, version, &archive)
-    .await
-    .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
+  install_ssh_unix_agent_interactive(
+    destination,
+    options,
+    interaction,
+    &bundle.bundle_id,
+    &bundle.archive,
+  )
+  .await
+  .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
 
   Ok(RemoteAgentInstallResultDto {
-    version: version.into(),
+    app_version: bundle.app_version,
+    bundle_id: bundle.bundle_id,
+    git_revision: bundle.git_revision,
     target_triple: target_triple.into(),
   })
 }
@@ -91,68 +131,157 @@ fn parse_platform(output: &str) -> CommandResult<RemotePlatform> {
   })
 }
 
-fn resolve_bundle(app: &AppHandle, file_name: &str) -> CommandResult<PathBuf> {
-  let relative = PathBuf::from("resources")
-    .join("agent-bundles")
-    .join(file_name);
+fn bundle_directories(app: &AppHandle) -> CommandResult<Vec<PathBuf>> {
+  let relative = PathBuf::from("resources").join("agent-bundles");
   let packaged = app
     .path()
     .resolve(&relative, BaseDirectory::Resource)
     .map_err(CommandErrorDto::backend)?;
-  if packaged.is_file() {
-    return Ok(packaged);
-  }
 
   #[cfg(debug_assertions)]
   {
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&relative);
-    if development.is_file() {
-      return Ok(development);
+    if packaged != development {
+      return Ok(vec![packaged, development]);
     }
   }
 
-  Err(CommandErrorDto::new(
-    "remote_agent_bundle_unavailable",
-    format!("The app does not include {file_name}."),
-  ))
+  Ok(vec![packaged])
 }
 
 async fn read_verified_bundle(
-  bundle_path: PathBuf,
-  checksum_path: PathBuf,
-) -> CommandResult<Vec<u8>> {
-  tokio::task::spawn_blocking(move || read_verified_bundle_sync(&bundle_path, &checksum_path))
+  directories: Vec<PathBuf>,
+  target_triple: &str,
+) -> CommandResult<VerifiedBundle> {
+  let target_triple = target_triple.to_owned();
+  tokio::task::spawn_blocking(move || read_verified_bundle_sync(&directories, &target_triple))
     .await
     .map_err(CommandErrorDto::backend)?
 }
 
-fn read_verified_bundle_sync(bundle_path: &Path, checksum_path: &Path) -> CommandResult<Vec<u8>> {
+fn read_verified_bundle_sync(
+  directories: &[PathBuf],
+  target_triple: &str,
+) -> CommandResult<VerifiedBundle> {
+  let directory = directories
+    .iter()
+    .find(|directory| directory.join(BUNDLE_SET_FILE).is_file())
+    .ok_or_else(bundle_unavailable)?;
+  let manifest_path = directory.join(BUNDLE_SET_FILE);
+  let manifest_bytes = std::fs::read(&manifest_path).map_err(CommandErrorDto::backend)?;
+  if manifest_bytes.len() > MAX_BUNDLE_SET_BYTES {
+    return Err(bundle_invalid(
+      "The remote bundle-set manifest is too large.",
+    ));
+  }
+  let manifest = parse_bundle_set(&manifest_bytes)?;
+  let target = manifest.targets.get(target_triple).ok_or_else(|| {
+    bundle_invalid(format!(
+      "The remote bundle set does not contain {target_triple}."
+    ))
+  })?;
+  let bundle_path = directory.join(&target.archive);
   let archive = std::fs::read(bundle_path).map_err(CommandErrorDto::backend)?;
   if archive.len() > MAX_BUNDLE_BYTES {
-    return Err(CommandErrorDto::new(
-      "remote_agent_bundle_invalid",
+    return Err(bundle_invalid(
       "The bundled ctl-agent archive exceeds the size limit.",
     ));
   }
-  let checksum = std::fs::read_to_string(checksum_path).map_err(CommandErrorDto::backend)?;
-  let expected = checksum
-    .split_ascii_whitespace()
-    .next()
-    .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    .ok_or_else(|| {
-      CommandErrorDto::new(
-        "remote_agent_bundle_invalid",
-        "The bundled ctl-agent checksum is invalid.",
-      )
-    })?;
   let actual = format!("{:x}", Sha256::digest(&archive));
-  if !actual.eq_ignore_ascii_case(expected) {
-    return Err(CommandErrorDto::new(
-      "remote_agent_bundle_invalid",
+  if !actual.eq_ignore_ascii_case(&target.sha256) {
+    return Err(bundle_invalid(
       "The bundled ctl-agent archive failed checksum verification.",
     ));
   }
-  Ok(archive)
+  Ok(VerifiedBundle {
+    app_version: manifest.app_version,
+    bundle_id: manifest.bundle_id,
+    git_revision: manifest.git_revision,
+    archive,
+  })
+}
+
+fn parse_bundle_set(bytes: &[u8]) -> CommandResult<BundleSetManifest> {
+  let manifest: BundleSetManifest = serde_json::from_slice(bytes)
+    .map_err(|_| bundle_invalid("The remote bundle-set manifest is invalid JSON."))?;
+  if manifest.schema_version != BUNDLE_SET_SCHEMA_VERSION {
+    return Err(bundle_invalid(
+      "The remote bundle-set schema version is unsupported.",
+    ));
+  }
+  if manifest.app_version != env!("CARGO_PKG_VERSION") {
+    return Err(bundle_invalid(format!(
+      "The remote bundle set targets app version {}, not {}.",
+      manifest.app_version,
+      env!("CARGO_PKG_VERSION")
+    )));
+  }
+  if !is_safe_bundle_id(&manifest.bundle_id) {
+    return Err(bundle_invalid("The remote bundle id is invalid."));
+  }
+  if manifest.git_revision.len() != 40
+    || !manifest
+      .git_revision
+      .bytes()
+      .all(|byte| byte.is_ascii_hexdigit())
+  {
+    return Err(bundle_invalid("The remote bundle git revision is invalid."));
+  }
+  let development_bundle_id = format!(
+    "{}-dev.{}",
+    manifest.app_version,
+    &manifest.git_revision[..12]
+  );
+  if manifest.bundle_id != manifest.app_version && manifest.bundle_id != development_bundle_id {
+    return Err(bundle_invalid(
+      "The remote bundle id does not match its version and Git revision.",
+    ));
+  }
+  if manifest.targets.len() != SUPPORTED_TARGETS.len()
+    || SUPPORTED_TARGETS
+      .iter()
+      .any(|target| !manifest.targets.contains_key(*target))
+  {
+    return Err(bundle_invalid(
+      "The remote bundle set does not contain every supported target.",
+    ));
+  }
+  for (target_triple, target) in &manifest.targets {
+    let expected_archive = format!(
+      "ctl-agent-bundle-{}-{target_triple}.tar.gz",
+      manifest.bundle_id
+    );
+    if target.archive != expected_archive
+      || target.sha256.len() != 64
+      || !target.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+      return Err(bundle_invalid(format!(
+        "The remote bundle metadata for {target_triple} is invalid."
+      )));
+    }
+  }
+  Ok(manifest)
+}
+
+fn is_safe_bundle_id(bundle_id: &str) -> bool {
+  !bundle_id.is_empty()
+    && bundle_id.len() <= 128
+    && bundle_id
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+}
+
+fn bundle_invalid(message: impl Into<String>) -> CommandErrorDto {
+  CommandErrorDto::new("remote_agent_bundle_invalid", message)
+}
+
+fn bundle_unavailable() -> CommandErrorDto {
+  let message = if cfg!(debug_assertions) {
+    "No remote bundle set is available for development. Run `pnpm agents:sync` from apps/rmux."
+  } else {
+    "The app package does not include its remote component bundle set."
+  };
+  CommandErrorDto::new("remote_agent_bundle_unavailable", message)
 }
 
 #[cfg(test)]
@@ -189,25 +318,64 @@ mod tests {
       uuid::Uuid::new_v4().simple()
     ));
     std::fs::create_dir(&directory).unwrap();
-    let bundle = directory.join("bundle.tar.gz");
-    let checksum = directory.join("bundle.tar.gz.sha256");
+    let bundle_id = "0.1.0-dev.0123456789ab";
+    let target_triple = "aarch64-apple-darwin";
+    let bundle_name = format!("ctl-agent-bundle-{bundle_id}-{target_triple}.tar.gz");
+    let bundle = directory.join(&bundle_name);
     std::fs::write(&bundle, b"trusted archive").unwrap();
+    let sha256 = format!("{:x}", Sha256::digest(b"trusted archive"));
+    let targets = SUPPORTED_TARGETS
+      .into_iter()
+      .map(|target| {
+        (
+          target.to_owned(),
+          serde_json::json!({
+            "archive": format!("ctl-agent-bundle-{bundle_id}-{target}.tar.gz"),
+            "sha256": sha256,
+          }),
+        )
+      })
+      .collect::<serde_json::Map<_, _>>();
+    let manifest = serde_json::json!({
+      "schema_version": 1,
+      "app_version": env!("CARGO_PKG_VERSION"),
+      "bundle_id": bundle_id,
+      "git_revision": "0123456789abcdef0123456789abcdef01234567",
+      "targets": targets,
+    });
     std::fs::write(
-      &checksum,
-      format!("{:x}  bundle.tar.gz\n", Sha256::digest(b"trusted archive")),
+      directory.join(BUNDLE_SET_FILE),
+      serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-      read_verified_bundle_sync(&bundle, &checksum).unwrap(),
-      b"trusted archive"
-    );
+    let directories = vec![directory.clone()];
+    let verified = read_verified_bundle_sync(&directories, target_triple).unwrap();
+    assert_eq!(verified.archive, b"trusted archive");
+    assert_eq!(verified.bundle_id, bundle_id);
     std::fs::write(&bundle, b"changed archive").unwrap();
     assert_eq!(
-      read_verified_bundle_sync(&bundle, &checksum)
+      read_verified_bundle_sync(&directories, target_triple)
         .unwrap_err()
         .code,
       "remote_agent_bundle_invalid"
     );
     std::fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn rejects_bundle_sets_for_another_app_version() {
+    let manifest = serde_json::json!({
+      "schema_version": 1,
+      "app_version": "999.0.0",
+      "bundle_id": "999.0.0",
+      "git_revision": "0123456789abcdef0123456789abcdef01234567",
+      "targets": {},
+    });
+    assert_eq!(
+      parse_bundle_set(&serde_json::to_vec(&manifest).unwrap())
+        .unwrap_err()
+        .code,
+      "remote_agent_bundle_invalid"
+    );
   }
 }

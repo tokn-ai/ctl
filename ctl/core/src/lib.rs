@@ -26,8 +26,8 @@ const UNIX_INSTALL_COMMAND: &str = r#"set -eu
 umask 077
 base="${XDG_DATA_HOME:-$HOME/.local/share}/ctl"
 versions="$base/versions"
-destination="$versions/__VERSION__"
-temporary="$versions/.install-__VERSION__-$$"
+destination="$versions/__BUNDLE_ID__"
+temporary="$versions/.install-__BUNDLE_ID__-$$"
 link="$base/.current-$$"
 mkdir -p "$versions"
 test ! -e "$temporary"
@@ -46,7 +46,7 @@ fi
 test -x "$destination/ctl-agent"
 test -x "$destination/rmuxd"
 test -x "$destination/taskd"
-ln -s "versions/__VERSION__" "$link"
+ln -s "versions/__BUNDLE_ID__" "$link"
 mv -f "$link" "$base/current"
 trap - EXIT HUP INT TERM
 printf 'ctl-install-v1\n'"#;
@@ -412,9 +412,9 @@ pub async fn probe_ssh_unix_platform_interactive(
 
 /// Installs one trusted ctl-agent bundle into the fixed per-user Unix location.
 ///
-/// `version` is restricted to a path-safe release identifier and the archive is
-/// expanded by a fixed script. The public API cannot supply a remote command or
-/// destination path.
+/// `bundle_id` is restricted to a path-safe immutable build identifier and the
+/// archive is expanded by a fixed script. The public API cannot supply a remote
+/// command or destination path.
 ///
 /// # Errors
 /// Returns validation, SSH startup, remote-command, or output failures.
@@ -422,11 +422,11 @@ pub async fn install_ssh_unix_agent_interactive(
   destination: &str,
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
-  version: &str,
+  bundle_id: &str,
   archive: &[u8],
 ) -> Result<(), CoreError> {
-  validate_agent_version(version)?;
-  let script = UNIX_INSTALL_COMMAND.replace("__VERSION__", version);
+  validate_agent_bundle_id(bundle_id)?;
+  let script = UNIX_INSTALL_COMMAND.replace("__BUNDLE_ID__", bundle_id);
   let output =
     run_ssh_command_interactive(destination, options, interaction, &script, archive).await?;
   if output != b"ctl-install-v1\n" {
@@ -435,14 +435,14 @@ pub async fn install_ssh_unix_agent_interactive(
   Ok(())
 }
 
-fn validate_agent_version(version: &str) -> Result<(), CoreError> {
-  if version.is_empty()
-    || version.len() > 64
-    || !version
+fn validate_agent_bundle_id(bundle_id: &str) -> Result<(), CoreError> {
+  if bundle_id.is_empty()
+    || bundle_id.len() > 128
+    || !bundle_id
       .bytes()
       .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
   {
-    return Err(CoreError::InvalidAgentVersion(version.into()));
+    return Err(CoreError::InvalidAgentBundleId(bundle_id.into()));
   }
   Ok(())
 }
@@ -590,7 +590,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::WaitSshCommand(_)
     | CoreError::SshCommandFailed { .. }
     | CoreError::InvalidSshCommandOutput
-    | CoreError::InvalidAgentVersion(_)
+    | CoreError::InvalidAgentBundleId(_)
     | CoreError::InvalidSshPreface => false,
   }
 }
@@ -712,8 +712,8 @@ pub enum CoreError {
   SshCommandFailed { status: String, diagnostic: String },
   #[error("fixed SSH command returned invalid output")]
   InvalidSshCommandOutput,
-  #[error("invalid ctl-agent version '{0}'")]
-  InvalidAgentVersion(String),
+  #[error("invalid ctl-agent bundle id '{0}'")]
+  InvalidAgentBundleId(String),
   #[error("could not read the ctl-agent transport marker from SSH: {0}")]
   ReadSshPreface(#[source] io::Error),
   #[error("SSH connection failed before ctl-agent was ready: {0}")]
@@ -830,14 +830,14 @@ mod tests {
   }
 
   #[test]
-  fn agent_versions_are_restricted_before_building_the_install_script() {
-    for version in ["", "../escape", "v1/release", "line\nbreak"] {
+  fn agent_bundle_ids_are_restricted_before_building_the_install_script() {
+    for bundle_id in ["", "../escape", "v1/release", "line\nbreak"] {
       assert!(matches!(
-        validate_agent_version(version),
-        Err(CoreError::InvalidAgentVersion(_))
+        validate_agent_bundle_id(bundle_id),
+        Err(CoreError::InvalidAgentBundleId(_))
       ));
     }
-    assert!(validate_agent_version("0.1.0+build-42").is_ok());
+    assert!(validate_agent_bundle_id("0.1.0-dev.0123456789ab").is_ok());
   }
 
   #[cfg(unix)]
@@ -869,7 +869,8 @@ mod tests {
         .success()
     );
 
-    let script = UNIX_INSTALL_COMMAND.replace("__VERSION__", "0.1.0");
+    let bundle_id = "0.1.0-dev.0123456789ab";
+    let script = UNIX_INSTALL_COMMAND.replace("__BUNDLE_ID__", bundle_id);
     let mut child = std::process::Command::new("sh")
       .args(["-c", &script])
       .env("XDG_DATA_HOME", &data)
@@ -893,10 +894,10 @@ mod tests {
     );
     assert_eq!(output.stdout, b"ctl-install-v1\n");
 
-    let installation = data.join("ctl/versions/0.1.0");
+    let installation = data.join("ctl/versions").join(bundle_id);
     assert_eq!(
       std::fs::read_link(data.join("ctl/current")).unwrap(),
-      PathBuf::from("versions/0.1.0")
+      PathBuf::from("versions").join(bundle_id)
     );
     for binary in ["ctl-agent", "rmuxd", "taskd"] {
       let path = installation.join(binary);

@@ -1,14 +1,16 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: package-agent-bundle.sh TARGET VERSION OUTPUT_DIRECTORY" >&2
+if [ "$#" -ne 5 ]; then
+  echo "usage: package-agent-bundle.sh TARGET APP_VERSION BUNDLE_ID GIT_REVISION OUTPUT_DIRECTORY" >&2
   exit 2
 fi
 
 target=$1
-version=$2
-output_directory=$3
+app_version=$2
+bundle_id=$3
+git_revision=$4
+output_directory=$5
 
 case "$target" in
   x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|x86_64-apple-darwin|aarch64-apple-darwin) ;;
@@ -18,17 +20,41 @@ case "$target" in
     ;;
 esac
 
-case "$version" in
+case "$app_version" in
   *[!a-zA-Z0-9._+-]*|'')
-    echo "invalid agent bundle version: $version" >&2
+    echo "invalid app version: $app_version" >&2
     exit 2
     ;;
 esac
 
+case "$bundle_id" in
+  *[!a-zA-Z0-9._+-]*|'')
+    echo "invalid bundle id: $bundle_id" >&2
+    exit 2
+    ;;
+esac
+
+if [ "${#bundle_id}" -gt 128 ]; then
+  echo "bundle id is too long" >&2
+  exit 2
+fi
+
+case "$git_revision" in
+  *[!0-9a-fA-F]*|'')
+    echo "invalid git revision: $git_revision" >&2
+    exit 2
+    ;;
+esac
+
+if [ "${#git_revision}" -ne 40 ]; then
+  echo "git revision must contain 40 hexadecimal characters" >&2
+  exit 2
+fi
+
 target_directory=${CARGO_TARGET_DIR:-target}
 binary_directory="$target_directory/$target/release"
 staging_directory="$output_directory/staging-$target"
-archive="ctl-agent-bundle-$version-$target.tar.gz"
+archive="ctl-agent-bundle-$bundle_id-$target.tar.gz"
 
 mkdir -p "$staging_directory" "$output_directory"
 for binary in ctl-agent rmuxd taskd; do
@@ -57,7 +83,9 @@ taskd_sha256=$(checksum "$staging_directory/taskd")
 printf '%s\n' \
   '{' \
   '  "schema_version": 1,' \
-  "  \"version\": \"$version\"," \
+  "  \"app_version\": \"$app_version\"," \
+  "  \"bundle_id\": \"$bundle_id\"," \
+  "  \"git_revision\": \"$git_revision\"," \
   "  \"target_triple\": \"$target\"," \
   '  "files": {' \
   "    \"ctl-agent\": \"$ctl_agent_sha256\"," \

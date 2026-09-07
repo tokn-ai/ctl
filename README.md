@@ -66,11 +66,26 @@ pnpm install
 pnpm tauri dev
 ```
 
+Tauri development starts even without remote install bundles and prints the
+explicit sync command when they are absent or stale. To test first-time remote
+installation, commit and push the current branch, then download or build the
+bundle set for that exact commit:
+
+```sh
+pnpm agents:sync
+```
+
+`pnpm agents:sync --main` deliberately uses the latest successful `main`
+bundle set when exact source parity is not required.
+
 The `Desktop and remote-agent bundles` workflow builds static Linux and native
-macOS remote bundles for x86-64 and ARM64, downloads all four into each desktop
-packaging job, and stages the matching local `rmuxd` and `taskd` as Tauri
-sidecars. Its versioned desktop and remote-agent outputs can be downloaded from
-the workflow run; tag names must match the app version as `v<version>`.
+macOS remote bundles for x86-64 and ARM64. Main-branch pushes refresh
+development bundles automatically; manual runs build remote bundles by default
+and can opt into desktop packages. Version tags build both, download all four
+remote targets into each desktop package, and stage the matching local `rmuxd`
+and `taskd` as Tauri sidecars. Release bundle IDs are semantic versions; other
+runs include the source revision so different development builds never share a
+remote install directory. Tag names must match the app version as `v<version>`.
 
 ## Use
 

@@ -63,7 +63,7 @@ impl CommandErrorDto {
       | CoreError::WaitSshCommand(_)
       | CoreError::SshCommandFailed { .. }
       | CoreError::InvalidSshCommandOutput
-      | CoreError::InvalidAgentVersion(_) => {
+      | CoreError::InvalidAgentBundleId(_) => {
         Self::new("remote_agent_install_failed", error.to_string())
       }
       CoreError::LocalIpc(_) | CoreError::LocalTask(_) => {

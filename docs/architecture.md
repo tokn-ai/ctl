@@ -67,8 +67,9 @@ OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
 `rmux-client`.
 Local IPC uses Unix-domain sockets on macOS and Linux and owner-restricted
 named pipes on Windows. `ctl-agent` relays the appropriate local data endpoint
-without changing the SSH transport or rmux protocol. Unix remote commands use
-`exec ctl-agent connect`; Windows hosts with the default cmd.exe SSH shell use
+without changing the SSH transport or rmux protocol. Unix remote commands prepend
+the fixed app-managed directory to `PATH` and use `exec ctl-agent connect`;
+Windows hosts with the default cmd.exe SSH shell use
 `ctl-agent.exe connect`, selected through `--remote-platform windows`.
 Task routing appends the fixed `--service task` arguments on either platform.
 
@@ -146,7 +147,7 @@ failures retain entries as unreachable, while not-found responses mark them
 missing rather than removing them. Opening a session connects on demand.
 
 App-local settings become separate, validated OpenSSH arguments and cannot
-introduce arbitrary options or change the fixed `exec ctl-agent connect` command.
+introduce arbitrary options or change the fixed ctl-agent command.
 Rows, tabs, shell-state caches, mutations, and reconnect intent use
 `(stable host ID, session ID)`, independent of an SSH alias's display spelling.
 A failed target reports its own error without hiding successful targets.
@@ -310,8 +311,11 @@ and checkpoint state remain intact.
 `ctl` connects directly to the current user's owner-only endpoint for the chosen
 command domain by default. Global `--host`/`-H` invokes the system OpenSSH client with
 PTY allocation and all forwarding disabled, an OpenSSH destination supplied
-by the user, and the fixed remote command `exec ctl-agent connect` for rmux or
-`exec ctl-agent connect --service task` for tasks. OpenSSH
+by the user, and a fixed managed-directory `PATH` prefix followed by
+`exec ctl-agent connect` for rmux or `exec ctl-agent connect --service task`
+for tasks. The desktop may additionally run closed, fixed platform-probe and
+per-user installation commands after explicit user action; callers cannot
+supply a command, version path, or archive destination. OpenSSH
 configuration owns host verification, user authentication, proxying, and
 healthy-connection multiplexing. `ctl` never disables host-key checking,
 enables agent forwarding, or accepts an arbitrary remote command.

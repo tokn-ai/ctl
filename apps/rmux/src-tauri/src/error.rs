@@ -35,9 +35,10 @@ impl CommandErrorDto {
       CoreError::InvalidSshDestination(_) | CoreError::InvalidSshOption(_) => {
         Self::new("invalid_ssh_destination", error.to_string())
       }
-      CoreError::StartSsh(_) | CoreError::MissingSshStdin | CoreError::MissingSshStdout => {
-        Self::new("ssh_start_failed", error.to_string())
-      }
+      CoreError::StartSsh(_)
+      | CoreError::MissingSshStdin
+      | CoreError::MissingSshStdout
+      | CoreError::MissingSshStderr => Self::new("ssh_start_failed", error.to_string()),
       CoreError::ReadSshPreface(_) => Self::new("ssh_connection_failed", error.to_string()),
       CoreError::SshStartup(message) => {
         let lower = message.to_lowercase();
@@ -57,6 +58,14 @@ impl CommandErrorDto {
         Self::new(code, error.to_string())
       }
       CoreError::InvalidSshPreface => Self::new("invalid_ssh_preface", error.to_string()),
+      CoreError::WriteSshCommand(_)
+      | CoreError::ReadSshCommand(_)
+      | CoreError::WaitSshCommand(_)
+      | CoreError::SshCommandFailed { .. }
+      | CoreError::InvalidSshCommandOutput
+      | CoreError::InvalidAgentBundleId(_) => {
+        Self::new("remote_agent_install_failed", error.to_string())
+      }
       CoreError::LocalIpc(_) | CoreError::LocalTask(_) => {
         Self::new("local_connection_failed", error.to_string())
       }

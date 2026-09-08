@@ -1,0 +1,246 @@
+name: Desktop and remote-agent bundles
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_desktop:
+        description: Also build installable desktop packages
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundles-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  metadata:
+    name: Bundle metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      app_version: ${{ steps.metadata.outputs.app_version }}
+      bundle_id: ${{ steps.metadata.outputs.bundle_id }}
+      git_revision: ${{ steps.metadata.outputs.git_revision }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve immutable bundle identity
+        id: metadata
+        shell: bash
+        run: |
+          app_version=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' apps/rmux/src-tauri/tauri.conf.json)
+          if [[ -z "$app_version" ]]; then
+            echo "could not read the app version" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            if [[ "$GITHUB_REF_NAME" != "v$app_version" ]]; then
+              echo "tag $GITHUB_REF_NAME does not match app version $app_version" >&2
+              exit 1
+            fi
+            bundle_id=$app_version
+          else
+            bundle_id="$app_version-dev.${GITHUB_SHA:0:12}"
+          fi
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "bundle_id=$bundle_id" >> "$GITHUB_OUTPUT"
+          echo "git_revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+  remote-agent:
+    name: Remote agent (${{ matrix.target }})
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-${{ matrix.target }}
+
+      - name: Build remote components
+        run: >-
+          cargo build --locked --release --target ${{ matrix.target }}
+          -p ctl-agent -p rmuxd -p taskd
+
+      - name: Package remote components
+        shell: bash
+        run: >-
+          ./scripts/ci/package-agent-bundle.sh
+          "${{ matrix.target }}"
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/agent-bundles
+
+      - name: Upload remote-agent bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctl-agent-bundle-${{ matrix.target }}
+          path: target/agent-bundles/*
+          if-no-files-found: error
+          retention-days: 30
+
+  remote-agent-set:
+    name: Remote agent bundle set
+    needs:
+      - metadata
+      - remote-agent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download remote-agent bundles
+        uses: actions/download-artifact@v5
+        with:
+          pattern: ctl-agent-bundle-*
+          path: target/agent-components
+          merge-multiple: true
+
+      - name: Validate and assemble bundle set
+        run: >-
+          ./scripts/ci/assemble-agent-bundle-set.sh
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/agent-components
+          target/agent-bundle-set
+
+      - name: Upload remote-agent bundle set
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctl-agent-bundle-set
+          path: target/agent-bundle-set/*
+          if-no-files-found: error
+          retention-days: 30
+
+  desktop:
+    name: Desktop (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_desktop)
+    needs:
+      - metadata
+      - remote-agent-set
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/rmux/pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: apps/rmux
+        run: pnpm install --frozen-lockfile
+
+      - name: Download remote-agent bundles
+        uses: actions/download-artifact@v5
+        with:
+          name: ctl-agent-bundle-set
+          path: apps/rmux/src-tauri/resources/agent-bundles
+
+      - name: Build and stage native daemons
+        shell: bash
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}" -p rmuxd -p taskd
+          mkdir -p apps/rmux/src-tauri/binaries
+          cp "target/${{ matrix.target }}/release/rmuxd" \
+            "apps/rmux/src-tauri/binaries/rmuxd-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/taskd" \
+            "apps/rmux/src-tauri/binaries/taskd-${{ matrix.target }}"
+
+      - name: Build desktop bundles
+        working-directory: apps/rmux
+        run: >-
+          pnpm tauri build --target ${{ matrix.target }}
+          --config src-tauri/tauri.bundle.conf.json
+
+      - name: Upload desktop bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: rmux-desktop-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bundle/
+          if-no-files-found: error
+          retention-days: 30

@@ -7,6 +7,7 @@ import { SshHostFlow } from "./SshHostFlow";
 import {
   cancelSshProbe,
   forgetSshCredentials,
+  installRemoteAgent,
   listSshIdentityFiles,
   probeSshHost,
   respondSshPrompt,
@@ -18,6 +19,7 @@ vi.mock("../../lib/tauri", () => ({
   cancelSshProbe: vi.fn(async () => undefined),
   respondSshPrompt: vi.fn(async () => undefined),
   forgetSshCredentials: vi.fn(async () => undefined),
+  installRemoteAgent: vi.fn(),
   listSshIdentityFiles: vi.fn(),
 }));
 afterEach(cleanup);
@@ -285,5 +287,35 @@ describe("SSH host quick-input flow", () => {
       screen.getByRole("dialog", { name: "Authentication · 3/3" }),
     ).toBeTruthy();
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it("installs a missing remote agent bundle and retries the connection", async () => {
+    vi.mocked(probeSshHost)
+      .mockRejectedValueOnce({
+        code: "ctl_agent_not_found",
+        message: "ctl-agent: command not found",
+      })
+      .mockResolvedValueOnce(undefined);
+    vi.mocked(installRemoteAgent).mockResolvedValue({
+      app_version: "0.1.0",
+      bundle_id: "0.1.0-dev.0123456789ab",
+      git_revision: "0123456789abcdef0123456789abcdef01234567",
+      target_triple: "x86_64-unknown-linux-musl",
+    });
+    const { user } = setup();
+    await details(user);
+    await user.click(
+      screen.getByRole("option", { name: /SSH config \/ agent/ }),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: /Install remote components/ }),
+    );
+    await screen.findByRole("dialog", { name: "Save host" });
+    expect(installRemoteAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: "rmux-test" }),
+      expect.any(String),
+      expect.any(Function),
+    );
+    expect(probeSshHost).toHaveBeenCalledTimes(2);
   });
 });

@@ -89,6 +89,14 @@ pub struct SaveSshConfigHostResponseDto {
   pub destination: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteAgentInstallResultDto {
+  pub app_version: String,
+  pub bundle_id: String,
+  pub git_revision: String,
+  pub target_triple: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSizeDto {
   pub columns: u16,
@@ -760,6 +768,22 @@ mod tests {
 
     assert_eq!(json["hosts"][0]["destination"], "rmux-docker");
     assert_eq!(json["warnings"][0], "partial discovery");
+  }
+
+  #[test]
+  fn remote_agent_result_keeps_bundle_identity_fields_stable() {
+    let json = serde_json::to_value(RemoteAgentInstallResultDto {
+      app_version: "0.1.0".into(),
+      bundle_id: "0.1.0-dev.0123456789ab".into(),
+      git_revision: "0123456789abcdef0123456789abcdef01234567".into(),
+      target_triple: "aarch64-apple-darwin".into(),
+    })
+    .unwrap();
+
+    assert_eq!(json["app_version"], "0.1.0");
+    assert_eq!(json["bundle_id"], "0.1.0-dev.0123456789ab");
+    assert_eq!(json["git_revision"].as_str().unwrap().len(), 40);
+    assert_eq!(json["target_triple"], "aarch64-apple-darwin");
   }
 
   #[test]

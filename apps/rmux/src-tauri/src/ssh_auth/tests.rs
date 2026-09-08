@@ -67,7 +67,7 @@ async fn bridge_is_private_checks_capabilities_and_removes_its_socket() {
     "test@host's password:".into(),
     Zeroizing::new("synthetic-secret".into()),
   );
-  let bridge = Bridge::start(secrets, None).unwrap();
+  let bridge = Bridge::start(secrets, None, true).unwrap();
   let directory = bridge.directory.clone();
   let socket = bridge.socket.clone();
   assert_eq!(
@@ -95,6 +95,39 @@ async fn bridge_is_private_checks_capabilities_and_removes_its_socket() {
   drop(bridge);
   assert!(!socket.exists());
   assert!(!directory.exists());
+}
+
+#[tokio::test]
+async fn installer_bridge_reuses_a_verified_secret_without_hiding_new_challenges() {
+  let secrets = Secrets::default();
+  secrets.lock().unwrap().insert(
+    "test@host's password:".into(),
+    Zeroizing::new("verified-secret".into()),
+  );
+  let (context, mut prompts) = prompt_context();
+  let bridge = Bridge::start(secrets, Some(context), true).unwrap();
+  assert_eq!(
+    request(bridge.socket.clone(), bridge.token.clone(), false)
+      .await
+      .as_deref(),
+    Some("verified-secret")
+  );
+  assert!(prompts.try_recv().is_err());
+
+  let new_challenge = HelperRequest {
+    token: bridge.token.clone(),
+    message: "Verification code:".into(),
+    confirm: false,
+  };
+  let mut stream = UnixStream::connect(&bridge.socket).await.unwrap();
+  let mut encoded = serde_json::to_vec(&new_challenge).unwrap();
+  encoded.push(b'\n');
+  stream.write_all(&encoded).await.unwrap();
+  let prompt = timeout(Duration::from_secs(5), prompts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(prompt["message"], "Verification code:");
 }
 
 #[tokio::test]
@@ -148,7 +181,7 @@ async fn built_binary_delivers_a_secret_without_starting_tauri() {
     "Password:".into(),
     Zeroizing::new("synthetic-secret".into()),
   );
-  let bridge = Bridge::start(secrets.clone(), None).unwrap();
+  let bridge = Bridge::start(secrets.clone(), None, true).unwrap();
   let program = std::env::var("RMUX_TEST_ASKPASS_PROGRAM").unwrap();
   let mut command = Command::new(program);
   command
@@ -183,7 +216,7 @@ async fn openssh_host_verification_uses_the_prompt_bridge() {
   let fingerprint = std::env::var("RMUX_TEST_SSH_FINGERPRINT").unwrap();
   let (context, mut prompts) = prompt_context();
   let attempt = context.attempt.clone();
-  let bridge = Bridge::start(Secrets::default(), Some(context)).unwrap();
+  let bridge = Bridge::start(Secrets::default(), Some(context), false).unwrap();
   let known_hosts = bridge.directory.join("known_hosts");
   let mut child = Command::new("ssh")
     .args([

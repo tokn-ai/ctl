@@ -169,7 +169,8 @@ use the system `ssh` executable with binary stdin/stdout pipes. OpenSSH still
 owns authentication and host verification; no forwarding, arbitrary remote
 command, or local daemon maintenance capability is added.
 
-The default remote platform remains Unix (`exec ctl-agent connect`). CLI clients
+The default remote platform remains Unix (a fixed managed-directory `PATH`
+prefix followed by `exec ctl-agent connect`). CLI clients
 can select `--remote-platform windows` to use the fixed `ctl-agent.exe connect`
 command with the Windows OpenSSH server's default cmd.exe shell. The platform
 is independent of the client OS; arbitrary shell commands remain disallowed.

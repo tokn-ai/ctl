@@ -6,10 +6,11 @@ import {
   appLocalSshTarget,
   configuredSshTarget,
 } from "../../features/targets/targets";
-import { errorMessage } from "../../lib/errors";
+import { errorCode, errorMessage } from "../../lib/errors";
 import {
   cancelSshProbe,
   forgetSshCredentials,
+  installRemoteAgent,
   probeSshHost,
   respondSshPrompt,
 } from "../../lib/tauri";
@@ -38,6 +39,7 @@ type Step =
   | "name"
   | "auth"
   | "identity"
+  | "installing"
   | "progress"
   | "storage"
   | "retry"
@@ -65,6 +67,7 @@ export function SshHostFlow({
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
+  const [canInstallAgent, setCanInstallAgent] = useState(false);
   const attemptRef = useRef<string | null>(null);
   const candidateRef = useRef<ConnectionTarget | null>(target ?? null);
   const configuredRef = useRef(false);
@@ -107,6 +110,7 @@ export function SshHostFlow({
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
     setError(null);
+    setCanInstallAgent(false);
     setPrompt(null);
     setStep("progress");
     try {
@@ -134,6 +138,33 @@ export function SshHostFlow({
       attemptRef.current = null;
       setPrompt(null);
       setError(errorMessage(failure));
+      setCanInstallAgent(errorCode(failure) === "ctl_agent_not_found");
+      setStep("retry");
+    }
+  }
+
+  async function installAgent(candidate: ConnectionTarget) {
+    cancelAttempt();
+    candidateRef.current = candidate;
+    const attempt = crypto.randomUUID();
+    attemptRef.current = attempt;
+    setError(null);
+    setPrompt(null);
+    setStep("installing");
+    try {
+      await installRemoteAgent(candidate, attempt, (next) => {
+        if (attemptRef.current === attempt && !closedRef.current)
+          setPrompt(next);
+      });
+      if (attemptRef.current !== attempt || closedRef.current) return;
+      attemptRef.current = null;
+      await connect(candidate);
+    } catch (failure) {
+      if (attemptRef.current !== attempt || closedRef.current) return;
+      attemptRef.current = null;
+      setPrompt(null);
+      setError(errorMessage(failure));
+      setCanInstallAgent(true);
       setStep("retry");
     }
   }
@@ -312,13 +343,35 @@ export function SshHostFlow({
     case "retry":
       title = step === "retry" ? "Could not connect" : "Connect host";
       description =
-        "OpenSSH will ask for host verification or authentication if needed. ctl-agent must be on the remote PATH.";
-      mode = { kind: "pick", choices: [{ id: "retry", label: "Connect" }] };
+        step === "retry" && canInstallAgent
+          ? "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually."
+          : "OpenSSH will ask for host verification or authentication if needed.";
+      mode = {
+        kind: "pick",
+        choices: [
+          ...(step === "retry" && canInstallAgent
+            ? [
+                {
+                  id: "install_agent",
+                  label: "Install remote components",
+                  detail: "Install the bundled ctl-agent, rmuxd, and taskd for this user.",
+                },
+              ]
+            : []),
+          { id: "retry", label: "Connect" },
+        ],
+      };
       if (!target) onBack = back(configuredRef.current ? "host" : "auth");
+      break;
+    case "installing":
+      title = "Installing remote components";
+      description =
+        "Detecting the remote platform and installing the matching checksummed app bundle for this user.";
+      mode = { kind: "progress" };
       break;
     case "progress":
       title = "Connecting to host";
-      description = "Starting the fixed remote command: exec ctl-agent connect";
+      description = "Starting the fixed ctl-agent remote command.";
       mode = { kind: "progress" };
   }
 
@@ -377,7 +430,8 @@ export function SshHostFlow({
       (step === "retry" || step === "reconnect") &&
       candidateRef.current
     ) {
-      void connect(candidateRef.current);
+      if (value === "install_agent") void installAgent(candidateRef.current);
+      else void connect(candidateRef.current);
     }
   }
 

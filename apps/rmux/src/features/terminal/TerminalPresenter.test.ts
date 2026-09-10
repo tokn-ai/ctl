@@ -110,4 +110,29 @@ describe("TerminalPresenter", () => {
 
     expect(calls).toEqual(["write:start", "write:end", "resize:120x32"]);
   });
+
+  it("lets an in-flight write finish on disposal and skips queued recreation", async () => {
+    const calls: string[] = [];
+    let finish!: () => void;
+    const presenter = new TerminalPresenter(() => {
+      calls.push("create");
+      return {
+        write: (_data, callback) => {
+          calls.push("write");
+          finish = callback;
+        },
+        resize: () => undefined,
+        dispose: () => { calls.push("dispose"); },
+      };
+    }, terminalSize(80, 24));
+    const pending = presenter.write(new Uint8Array([1]));
+    await Promise.resolve();
+    const recreate = presenter.recreate(terminalSize(100, 30));
+    presenter.dispose();
+    presenter.dispose();
+    expect(calls).toEqual(["create", "write"]);
+    finish();
+    await Promise.all([pending, recreate]);
+    expect(calls).toEqual(["create", "write", "dispose"]);
+  });
 });

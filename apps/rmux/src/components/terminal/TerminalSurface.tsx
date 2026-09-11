@@ -12,6 +12,7 @@ const INITIAL_SIZE: TerminalSize = {
 interface TerminalSurfaceProps {
   phase: ConnectionPhase;
   hasSession: boolean;
+  has_cached_content: boolean;
   onInput(data: Uint8Array): void;
   onReady(renderer: XtermRenderer | null): void;
 }
@@ -19,6 +20,7 @@ interface TerminalSurfaceProps {
 export function TerminalSurface({
   phase,
   hasSession,
+  has_cached_content,
   onInput,
   onReady,
 }: TerminalSurfaceProps) {
@@ -57,7 +59,7 @@ export function TerminalSurface({
           <p>Select a remembered session to connect, or create a new shell.</p>
         </div>
       ) : null}
-      {phase === "connecting" || phase === "reconnecting" ? (
+      {!has_cached_content && (phase === "connecting" || phase === "reconnecting") ? (
         <div className="terminal-overlay">
           <span className="spinner" aria-hidden="true" />
           {phase === "reconnecting" ? "Reconnecting…" : "Attaching…"}

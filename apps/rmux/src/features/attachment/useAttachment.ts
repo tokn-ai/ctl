@@ -78,8 +78,9 @@ export interface ConnectOptions {
 interface ConnectionRequest {
   generation: number;
   session: SessionSummary;
-  resumeFrom: string | null;
-  resizeWithWindow: boolean;
+  resume_from: string | null;
+  resize_with_window: boolean;
+  use_cached_state: boolean;
 }
 
 export interface AttachmentActions {
@@ -148,6 +149,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
 
   const setFailure = useCallback((error: unknown) => {
     const code = errorCode(error);
+    rendererRef.current?.invalidateResumeSequence();
     setState((current) => ({
       ...current,
       phase: "error",
@@ -407,6 +409,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
             event.history.lines,
             decodeBase64(event.checkpoint.payload_base64),
             decodeBase64(event.checkpoint.input_prefix_base64),
+            event.checkpoint.sequence,
           );
           if (!isCurrent()) {
             return;
@@ -431,7 +434,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
           }));
           break;
         case "output":
-          await renderer.write(decodeBase64(event.data_base64));
+          await renderer.write(decodeBase64(event.data_base64), event.sequence_end);
           if (!isCurrent()) {
             return;
           }
@@ -555,6 +558,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
           }));
           break;
         case "attachment_exited":
+          if (event.next_sequence === null) renderer.invalidateResumeSequence();
           const resumeResize =
             event.reason === "connection_closed" && resizeWithWindowRef.current;
           if (event.reason !== "connection_closed") {
@@ -591,6 +595,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
           }));
           break;
         case "attachment_error":
+          renderer.invalidateResumeSequence();
           activeAttachmentRef.current = null;
           channelRef.current = null;
           inputLeaseOwnedRef.current = false;
@@ -638,10 +643,26 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
 
   const performConnection = useCallback(
     async (request: ConnectionRequest) => {
-      const { generation, session, resumeFrom, resizeWithWindow } = request;
+      const { generation, session, resize_with_window: resizeWithWindow } = request;
       if (generation !== generationRef.current || !renderer) {
         return;
       }
+
+      // Finish any write already handed to xterm before reading its saved
+      // cursor. Queued events from the old generation are ignored.
+      await eventTailRef.current;
+      if (generation !== generationRef.current) return;
+      renderer.activateSession(session);
+      const resumeFrom = request.use_cached_state
+        ? renderer.resumeSequence()
+        : request.resume_from;
+      appliedSequenceRef.current = resumeFrom;
+      setState((current) => ({
+        ...current,
+        phase: resumeFrom !== null ? "reconnecting" : "connecting",
+        applied_sequence: resumeFrom,
+        reconnect_sequence: resumeFrom,
+      }));
 
       activeAttachmentRef.current = null;
       channelRef.current = null;
@@ -763,6 +784,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       session: SessionSummary,
       resumeFrom: string | null,
       resizeWithWindow: boolean,
+      use_cached_state = false,
     ): Promise<void> => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
@@ -773,21 +795,28 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       layoutLeasePumpRef.current?.reset();
       resizeCoordinatorRef.current?.reset(session.terminal_size);
       pendingShellStateRef.current = null;
+      rendererRef.current?.activateSession(session);
+      if (use_cached_state) {
+        resumeFrom = rendererRef.current?.resumeSequence() ?? null;
+      }
       appliedSequenceRef.current = resumeFrom;
-      setState({
+      const nextState: AttachmentViewState = {
         ...INITIAL_STATE,
         phase: resumeFrom ? "reconnecting" : "connecting",
         session,
         applied_sequence: resumeFrom,
         reconnect_sequence: resumeFrom,
         resize_with_window: resizeWithWindow,
-      });
+      };
+      stateRef.current = nextState;
+      setState(nextState);
 
       const request = {
         generation,
         session,
-        resumeFrom,
-        resizeWithWindow,
+        resume_from: resumeFrom,
+        resize_with_window: resizeWithWindow,
+        use_cached_state,
       };
       deferredConnectionRef.current!.begin(request);
       const completion = deferredConnectionRef.current!.defer(request);
@@ -800,7 +829,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   const connect = useCallback(
     async (session: SessionSummary, options: ConnectOptions = {}) => {
       resetRecovery();
-      return connectAt(session, null, options.resize_with_window ?? false);
+      return connectAt(session, null, options.resize_with_window ?? false, true);
     },
     [connectAt, resetRecovery],
   );

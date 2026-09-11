@@ -18,6 +18,7 @@ export type TerminalAdapterFactory = (terminalSize: TerminalSize) => TerminalAda
 export class TerminalPresenter {
   private adapter: TerminalAdapter;
   private operationTail = Promise.resolve();
+  private disposed = false;
 
   constructor(
     private readonly factory: TerminalAdapterFactory,
@@ -67,11 +68,17 @@ export class TerminalPresenter {
   }
 
   dispose(): void {
-    this.adapter.dispose();
+    if (this.disposed) return;
+    this.disposed = true;
+    // Let an in-flight write finish before disposing its parser; otherwise its
+    // callback may never run and attachment transitions can remain blocked.
+    void this.operationTail.then(() => this.adapter.dispose());
   }
 
   private enqueue(operation: () => void | Promise<void>): Promise<void> {
-    const result = this.operationTail.then(operation);
+    const result = this.operationTail.then(() => {
+      if (!this.disposed) return operation();
+    });
     this.operationTail = result.catch(() => undefined);
     return result;
   }

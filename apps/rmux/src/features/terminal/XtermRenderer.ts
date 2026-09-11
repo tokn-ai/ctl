@@ -2,7 +2,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { encodeTerminalBinary, encodeTerminalText } from "../../lib/bytes";
-import type { TerminalSize } from "../../lib/types";
+import type { SessionSummary, TerminalSize } from "../../lib/types";
+import { sessionKey } from "../targets/targets";
 import {
   TerminalPresenter,
   type ProposedDimensions,
@@ -11,6 +12,14 @@ import {
 
 const DEFAULT_SCROLLBACK_LINES = 10_000;
 const MAX_TERMINAL_DIMENSION = 65_535;
+
+interface CachedTerminal {
+  container: HTMLElement;
+  presenter: TerminalPresenter;
+  resume_from: string | null;
+  presentation_version: number;
+  is_local: boolean;
+}
 
 function validDimensions(
   dimensions: ProposedDimensions | null,
@@ -27,21 +36,70 @@ function validDimensions(
 }
 
 export class XtermRenderer {
-  private readonly presenter: TerminalPresenter;
+  private readonly sessions = new Map<string, CachedTerminal>();
+  private active: CachedTerminal;
 
   constructor(
     private readonly container: HTMLElement,
     private readonly onInput: (data: Uint8Array) => void,
     initialSize: TerminalSize,
   ) {
-    this.presenter = new TerminalPresenter(
-      (terminalSize) => this.createAdapter(terminalSize),
-      initialSize,
-    );
+    this.active = this.createTerminal(initialSize);
   }
 
-  write(data: Uint8Array): Promise<void> {
-    return this.presenter.write(data);
+  activateSession(session: SessionSummary): void {
+    const key = sessionKey(session);
+    let terminal = this.sessions.get(key);
+    if (terminal === this.active) return;
+
+    this.active.container.hidden = true;
+    if (![...this.sessions.values()].includes(this.active)) {
+      this.disposeTerminal(this.active);
+    }
+    if (!terminal) {
+      terminal = this.createTerminal(session.terminal_size);
+      terminal.is_local = session.target.kind === "local";
+      this.sessions.set(key, terminal);
+    }
+    this.active = terminal;
+    terminal.container.hidden = false;
+  }
+
+  resumeSequence(): string | null {
+    return this.active.resume_from;
+  }
+
+  invalidateResumeSequence(): void {
+    this.active.resume_from = null;
+    this.active.presentation_version += 1;
+  }
+
+  retainSessions(session_keys: ReadonlySet<string>): void {
+    for (const [key, terminal] of this.sessions) {
+      if (!session_keys.has(key)) {
+        this.sessions.delete(key);
+        // The current view remains visible until the next activation. Removing
+        // it from the cache prevents a closed tab from reusing its cursor.
+        if (terminal !== this.active) this.disposeTerminal(terminal);
+      }
+    }
+  }
+
+  forgetLocalSessions(): void {
+    this.retainSessions(
+      new Set(
+        [...this.sessions]
+          .filter(([, terminal]) => !terminal.is_local)
+          .map(([key]) => key),
+      ),
+    );
+    if (this.active.is_local) this.invalidateResumeSequence();
+  }
+
+  write(data: Uint8Array, sequence_end: string): Promise<void> {
+    return this.applyPresentation(sequence_end, (presenter) =>
+      presenter.write(data),
+    );
   }
 
   restoreCheckpoint(
@@ -49,25 +107,27 @@ export class XtermRenderer {
     historyLines: string[],
     payload: Uint8Array,
     inputPrefix: Uint8Array,
+    sequence: string,
   ): Promise<void> {
-    return this.presenter.restoreCheckpoint(
-      terminalSize,
-      historyLines,
-      payload,
-      inputPrefix,
+    return this.applyPresentation(sequence, (presenter) =>
+      presenter.restoreCheckpoint(terminalSize, historyLines, payload, inputPrefix),
     );
   }
 
   recreate(terminalSize: TerminalSize): Promise<void> {
-    return this.presenter.recreate(terminalSize);
+    return this.applyPresentation(null, (presenter) =>
+      presenter.recreate(terminalSize),
+    );
   }
 
   resize(terminalSize: TerminalSize): Promise<void> {
-    return this.presenter.resize(terminalSize);
+    return this.applyPresentation(this.active.resume_from, (presenter) =>
+      presenter.resize(terminalSize),
+    );
   }
 
   proposeDimensions(): ProposedDimensions | null {
-    const dimensions = this.presenter.proposeDimensions();
+    const dimensions = this.active.presenter.proposeDimensions();
     return validDimensions(dimensions) ? dimensions : null;
   }
 
@@ -101,15 +161,55 @@ export class XtermRenderer {
   }
 
   focus(): void {
-    this.presenter.focus();
+    this.active.presenter.focus();
   }
 
   dispose(): void {
-    this.presenter.dispose();
+    for (const terminal of new Set([...this.sessions.values(), this.active])) {
+      this.disposeTerminal(terminal);
+    }
+    this.sessions.clear();
   }
 
-  private createAdapter(terminalSize: TerminalSize): TerminalAdapter {
-    this.container.replaceChildren();
+  private createTerminal(terminalSize: TerminalSize): CachedTerminal {
+    const container = document.createElement("div");
+    container.className = "terminal-session";
+    this.container.append(container);
+    return {
+      container,
+      presenter: new TerminalPresenter(
+        (size) => this.createAdapter(container, size),
+        terminalSize,
+      ),
+      resume_from: null,
+      presentation_version: 0,
+      is_local: false,
+    };
+  }
+
+  private disposeTerminal(terminal: CachedTerminal): void {
+    terminal.presenter.dispose();
+    terminal.container.remove();
+  }
+
+  private async applyPresentation(
+    sequence: string | null,
+    operation: (presenter: TerminalPresenter) => Promise<void>,
+  ): Promise<void> {
+    // Capture the view before awaiting: activation may change while xterm is
+    // parsing bytes. Only a fully applied presentation is safe to resume.
+    const terminal = this.active;
+    const version = ++terminal.presentation_version;
+    terminal.resume_from = null;
+    await operation(terminal.presenter);
+    if (terminal.presentation_version === version) terminal.resume_from = sequence;
+  }
+
+  private createAdapter(
+    container: HTMLElement,
+    terminalSize: TerminalSize,
+  ): TerminalAdapter {
+    container.replaceChildren();
     const terminal = new Terminal({
       cols: terminalSize.columns,
       rows: terminalSize.rows,
@@ -147,9 +247,13 @@ export class XtermRenderer {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(this.container);
-    terminal.onData((data) => this.onInput(encodeTerminalText(data)));
-    terminal.onBinary((data) => this.onInput(encodeTerminalBinary(data)));
+    terminal.open(container);
+    terminal.onData((data) => {
+      if (this.active.container === container) this.onInput(encodeTerminalText(data));
+    });
+    terminal.onBinary((data) => {
+      if (this.active.container === container) this.onInput(encodeTerminalBinary(data));
+    });
 
     return {
       write: (data, callback) => terminal.write(data, callback),

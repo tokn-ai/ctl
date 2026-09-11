@@ -137,6 +137,19 @@ export function TerminalPage() {
   );
   const taskWorkspaceRef = useRef(taskWorkspace);
   taskWorkspaceRef.current = taskWorkspace;
+  useEffect(() => {
+    const session_keys = new Set(tabs.map(sessionKey));
+    for (const tab of workspace.task_tabs) {
+      if (tab.kind !== "task" || tab.host_id !== "local") continue;
+      const session_id = taskWorkspace.tasks.find(
+        (task) => task.task_id === tab.task_id,
+      )?.active_run?.interactive?.session_id;
+      if (session_id) {
+        session_keys.add(sessionKey({ target: { kind: "local" }, session_id }));
+      }
+    }
+    renderer?.retainSessions(session_keys);
+  }, [renderer, tabs, workspace.task_tabs, taskWorkspace.tasks]);
   const currentShellState = attachment.state.shell_state;
   const currentWorkingDirectory = currentShellState?.cwd || null;
   const currentWorkingDirectoryDisplay = currentShellState
@@ -833,6 +846,7 @@ export function TerminalPage() {
     refreshGuardRef.current.recordMutation();
     closingSessionKeysRef.current.clear();
     creatingRef.current = false;
+    renderer?.forgetLocalSessions();
     if (attachment.state.session?.target.kind === "local") {
       attachment.resetAfterDaemonRestart();
     }
@@ -857,7 +871,7 @@ export function TerminalPage() {
       next.delete("local");
       return next;
     });
-  }, [attachment, setSessions, setTabs]);
+  }, [attachment, renderer, setSessions, setTabs]);
 
   const restartDaemon = useCallback(async () => {
     if (restartingDaemonRef.current) {
@@ -1474,6 +1488,7 @@ export function TerminalPage() {
             <TerminalSurface
               phase={attachment.state.phase}
               hasSession={attachment.state.session !== null}
+              has_cached_content={attachment.state.applied_sequence !== null}
               onInput={handleTerminalInput}
               onReady={setRenderer}
             />

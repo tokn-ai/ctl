@@ -2,15 +2,21 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ctl_core::{
-  SshConnectionOptions, SshInteraction, install_ssh_unix_agent_interactive,
-  probe_ssh_unix_platform_interactive,
+  RemoteInstallEvent, SshConnectionOptions, SshInteraction,
+  install_ssh_unix_agent_interactive_with_progress, probe_ssh_unix_platform_interactive,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use tauri::{AppHandle, Manager as _, path::BaseDirectory};
+use tauri::{AppHandle, Manager as _, ipc::Channel, path::BaseDirectory};
+use tokio::sync::watch;
 
-use crate::dto::RemoteAgentInstallResultDto;
+use crate::dto::{
+  RemoteAgentInstallPhase as Phase, RemoteAgentInstallProgressDto as Progress,
+  RemoteAgentInstallResultDto,
+};
 use crate::error::{CommandErrorDto, CommandResult};
+
+mod progress;
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BUNDLE_SET_BYTES: usize = 64 * 1024;
@@ -53,6 +59,7 @@ struct VerifiedBundle {
   bundle_id: String,
   git_revision: String,
   archive: Vec<u8>,
+  file_name: String,
 }
 
 pub async fn install(
@@ -60,20 +67,65 @@ pub async fn install(
   destination: &str,
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
+  on_progress: Channel<Progress>,
+  authenticating: impl Fn() -> bool,
+) -> CommandResult<RemoteAgentInstallResultDto> {
+  let (updates, receiver) = watch::channel(progress::initial());
+  progress::monitor(
+    install_bundle(app, destination, options, interaction, &updates),
+    receiver,
+    &on_progress,
+    authenticating,
+  )
+  .await
+}
+
+async fn install_bundle(
+  app: &AppHandle,
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  updates: &watch::Sender<Progress>,
 ) -> CommandResult<RemoteAgentInstallResultDto> {
   let platform = probe_ssh_unix_platform_interactive(destination, options, interaction)
     .await
     .map_err(|error| CommandErrorDto::new("remote_platform_probe_failed", error.to_string()))?;
   let platform = parse_platform(&platform)?;
   let target_triple = platform.target_triple()?;
+  updates.send_modify(|progress| progress.phase = Phase::VerifyingBundle);
   let bundle = read_verified_bundle(bundle_directories(app)?, target_triple).await?;
+  updates.send_modify(|progress| {
+    progress.phase = Phase::Connecting;
+    progress.file_name = Some(bundle.file_name.clone());
+    progress.total_bytes = bundle.archive.len() as u64;
+  });
 
-  install_ssh_unix_agent_interactive(
+  install_ssh_unix_agent_interactive_with_progress(
     destination,
     options,
     interaction,
     &bundle.bundle_id,
     &bundle.archive,
+    |event| {
+      updates.send_modify(|progress| {
+        progress.phase = match event {
+          RemoteInstallEvent::Receiving { received_bytes } => {
+            progress.transferred_bytes = received_bytes;
+            Phase::Transferring
+          }
+          RemoteInstallEvent::Extracting => Phase::Extracting,
+          RemoteInstallEvent::Checking { file_name } => {
+            progress.file_name = Some(file_name.into());
+            Phase::Checking
+          }
+          RemoteInstallEvent::Activating => {
+            progress.file_name = None;
+            Phase::Activating
+          }
+          RemoteInstallEvent::Complete => Phase::Complete,
+        };
+      });
+    },
   )
   .await
   .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
@@ -198,6 +250,7 @@ fn read_verified_bundle_sync(
     bundle_id: manifest.bundle_id,
     git_revision: manifest.git_revision,
     archive,
+    file_name: target.archive.clone(),
   })
 }
 

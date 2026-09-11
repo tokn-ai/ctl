@@ -979,6 +979,16 @@ button:disabled {
   color: var(--muted);
   font-size: 11px;
 }
+.quick-input-progress progress {
+  display: block;
+  width: calc(100% - 24px);
+  height: 8px;
+  margin: 0 12px 12px;
+  accent-color: var(--accent);
+}
+.quick-input-progress-detail {
+  font-variant-numeric: tabular-nums;
+}
 .quick-input-error {
   margin: 0;
   padding: 12px;

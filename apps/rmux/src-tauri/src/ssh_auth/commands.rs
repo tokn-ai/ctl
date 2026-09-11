@@ -44,6 +44,7 @@ pub async fn install_remote_agent(
   window: WebviewWindow,
   request: ProbeRequest,
   on_prompt: Channel<SshPromptDto>,
+  on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
 ) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
   super::install_agent(
     app,
@@ -51,6 +52,7 @@ pub async fn install_remote_agent(
     request.attempt_id,
     request.target,
     on_prompt,
+    on_progress,
   )
   .await
 }

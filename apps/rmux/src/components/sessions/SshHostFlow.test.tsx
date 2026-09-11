@@ -12,7 +12,7 @@ import {
   probeSshHost,
   respondSshPrompt,
 } from "../../lib/tauri";
-import type { SshPrompt } from "../../lib/types";
+import type { RemoteAgentInstallProgress, SshPrompt } from "../../lib/types";
 
 vi.mock("../../lib/tauri", () => ({
   probeSshHost: vi.fn(),
@@ -315,7 +315,75 @@ describe("SSH host quick-input flow", () => {
       expect.objectContaining({ destination: "rmux-test" }),
       expect.any(String),
       expect.any(Function),
+      expect.any(Function),
     );
     expect(probeSshHost).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the current file, receiver progress, speed, and installation stages", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({
+      code: "ctl_agent_not_found",
+      message: "ctl-agent: command not found",
+    });
+    let report!: (progress: RemoteAgentInstallProgress) => void;
+    vi.mocked(installRemoteAgent).mockImplementation((_target, _attempt, _prompt, progress) => {
+      report = progress;
+      return new Promise(() => undefined);
+    });
+    const { user, close } = setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
+    const bar = screen.getByRole("progressbar", { name: "Remote component transfer" });
+    expect(bar.hasAttribute("value")).toBe(false);
+    expect(screen.getByRole("status").textContent).toContain("Detecting remote");
+    const progress: RemoteAgentInstallProgress = {
+      phase: "transferring",
+      file_name: "ctl-agent-bundle-linux.tar.gz",
+      transferred_bytes: 2 * 1024 * 1024,
+      total_bytes: 8 * 1024 * 1024,
+      bytes_per_second: 256 * 1024,
+    };
+    act(() => report(progress));
+    expect(screen.getByRole("status").textContent).toBe("Sending ctl-agent-bundle-linux.tar.gz…");
+    expect(bar.getAttribute("value")).toBe(String(progress.transferred_bytes));
+    expect(bar.getAttribute("max")).toBe(String(progress.total_bytes));
+    expect(screen.getByText("2 MiB / 8 MiB · 25% · 256 KiB/s")).toBeTruthy();
+    act(() => report({ ...progress, phase: "extracting", transferred_bytes: progress.total_bytes, bytes_per_second: 0 }));
+    expect(screen.getByRole("status").textContent).toContain("Extracting ctl-agent-bundle-linux.tar.gz");
+    expect(screen.getByText("8 MiB / 8 MiB · 100% · Transfer complete")).toBeTruthy();
+    act(() => report({ ...progress, phase: "checking", file_name: "rmuxd", transferred_bytes: progress.total_bytes }));
+    expect(screen.getByRole("status").textContent).toBe("Checking rmuxd…");
+    const attempt_id = vi.mocked(installRemoteAgent).mock.lastCall![1];
+    await user.keyboard("{Escape}");
+    expect(close).toHaveBeenCalledOnce();
+    expect(cancelSshProbe).toHaveBeenCalledWith(attempt_id);
+    act(() => report({ ...progress, phase: "activating" }));
+    expect(screen.getByRole("status").textContent).toBe("Checking rmuxd…");
+  });
+
+  it("clears transfer progress on retry and ignores events from the failed attempt", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "ctl_agent_not_found", message: "Missing" });
+    const reporters: ((progress: RemoteAgentInstallProgress) => void)[] = [];
+    let reject_install!: (failure: unknown) => void;
+    vi.mocked(installRemoteAgent).mockImplementation((_target, _attempt, _prompt, progress) => {
+      reporters.push(progress);
+      return new Promise((_resolve, reject) => { reject_install = reject; });
+    });
+    const { user } = setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
+    const progress: RemoteAgentInstallProgress = {
+      phase: "transferring", file_name: "old.tar.gz", transferred_bytes: 10, total_bytes: 20, bytes_per_second: 5,
+    };
+    act(() => reporters[0](progress));
+    await act(async () => reject_install({ code: "remote_agent_install_stalled", message: "Transfer stalled while sending old.tar.gz" }));
+    expect(screen.getByRole("alert").textContent).toContain("Transfer stalled");
+    await user.click(screen.getByRole("option", { name: /Install remote components/ }));
+    expect(screen.getByRole("progressbar").hasAttribute("value")).toBe(false);
+    act(() => reporters[0](progress));
+    expect(screen.getByRole("status").textContent).toContain("Detecting remote");
+    expect(screen.queryByText(/Sending old.tar.gz/)).toBeNull();
   });
 });

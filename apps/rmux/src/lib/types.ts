@@ -127,6 +127,22 @@ export interface RemoteAgentInstallResult {
   target_triple: string;
 }
 
+export interface RemoteAgentInstallProgress {
+  phase:
+    | "detecting_platform"
+    | "verifying_bundle"
+    | "connecting"
+    | "transferring"
+    | "extracting"
+    | "checking"
+    | "activating"
+    | "complete";
+  file_name: string | null;
+  transferred_bytes: number;
+  total_bytes: number;
+  bytes_per_second: number;
+}
+
 export interface TerminalSize {
   columns: number;
   rows: number;

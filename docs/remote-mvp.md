@@ -99,6 +99,14 @@ missing `ctl-agent`, `rmuxd`, and `taskd` bundle into the remote user's data
 directory and retry. Release bundles use the app version as their immutable
 install ID; development bundles include their Git revision so one source build
 cannot silently reuse another build's binaries.
+The installation overlay reports platform detection, checksum verification,
+the archive upload, extraction, component checks, and activation. Transfer
+percentages and speed use byte counts confirmed by the remote host. Healthy
+uploads can take longer than three minutes: a stall is detected only after no
+new bytes arrive for a speed-dependent interval of 30 seconds to five minutes.
+Platform detection and the upload connection each allow one minute of inactivity;
+extraction allows two minutes, and other installation stages allow 30 seconds.
+Time spent answering authentication prompts does not consume these intervals.
 Password/passphrase and host-verification prompts use the same overlay on
 macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
 chip to authenticate again if SSH config/agent alone is insufficient.

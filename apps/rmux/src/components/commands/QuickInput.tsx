@@ -19,7 +19,12 @@ export type QuickInputMode =
       choices: readonly { id: string; label: string; detail?: string }[];
     }
   | { kind: "confirm"; confirm_label: string; destructive?: boolean }
-  | { kind: "progress"; message?: string };
+  | {
+      kind: "progress";
+      message?: string;
+      detail?: string;
+      progress?: { value?: number; max: number; label: string };
+    };
 
 interface QuickInputProps {
   title: string;
@@ -205,9 +210,23 @@ export function QuickInput({
         </div>
       ) : null}
       {mode.kind === "progress" ? (
-        <p className="quick-input-description" role="status">
-          {mode.message ?? "Connecting…"}
-        </p>
+        <div className="quick-input-progress">
+          <p className="quick-input-description" role="status">
+            {mode.message ?? "Connecting…"}
+          </p>
+          {mode.progress ? (
+            <progress
+              aria-label={mode.progress.label}
+              value={mode.progress.value}
+              max={mode.progress.max}
+            />
+          ) : null}
+          {mode.detail ? (
+            <p className="quick-input-description quick-input-progress-detail">
+              {mode.detail}
+            </p>
+          ) : null}
+        </div>
       ) : null}
       {error ? (
         <p className="quick-input-error" role="alert">

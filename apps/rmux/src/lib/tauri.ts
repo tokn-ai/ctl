@@ -21,6 +21,7 @@ import type {
   SshIdentityFileCatalog,
   SshPrompt,
   RemoteAgentInstallResult,
+  RemoteAgentInstallProgress,
   WorkspaceDocument,
   WorkspaceSnapshot,
   SessionInspection,
@@ -108,12 +109,16 @@ export async function installRemoteAgent(
   target: ConnectionTarget,
   attempt_id: string,
   onPrompt: (prompt: SshPrompt) => void,
+  onProgress: (progress: RemoteAgentInstallProgress) => void,
 ): Promise<RemoteAgentInstallResult> {
   const channel = new Channel<SshPrompt>();
   channel.onmessage = onPrompt;
+  const progress_channel = new Channel<RemoteAgentInstallProgress>();
+  progress_channel.onmessage = onProgress;
   return invoke<RemoteAgentInstallResult>("install_remote_agent", {
     request: { target, attempt_id },
     on_prompt: channel,
+    on_progress: progress_channel,
   });
 }
 

@@ -185,6 +185,11 @@ handles destructive close/restart confirmations and **New Shell** input.
 blank uses that host's home directory. Escape cancels before creation starts,
 and progress/errors stay in the overlay. If `ctl-agent` is absent, the app can
 install its bundled, checksummed remote components for that user and retry.
+Installation shows the current archive or component, a transfer progress bar,
+bytes received by the host, and recent transfer speed. Uploads have no overall
+time limit while bytes continue advancing; a speed-aware stall watchdog replaces
+the old three-minute installation deadline. Authentication prompts pause that
+watchdog, and Escape cancels the installation.
 Each row and tab carries its host; create, attach, reconnect, and kill
 operations always use that session's original target.
 It renders one terminal pane and exposes input and layout ownership separately.

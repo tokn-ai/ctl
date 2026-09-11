@@ -15,41 +15,19 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+mod ssh_install;
 mod ssh_startup;
+
+pub use ssh_install::{
+  RemoteInstallEvent, install_ssh_unix_agent_interactive,
+  install_ssh_unix_agent_interactive_with_progress,
+};
 
 const SSH_PROGRAM: &str = "ssh";
 const MAX_SSH_COMMAND_OUTPUT: usize = 8192;
 const UNIX_GATEWAY_COMMAND: &str =
   r#"PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect"#;
 const UNIX_PLATFORM_PROBE_COMMAND: &str = "printf 'ctl-platform-v1\\n'; uname -s; uname -m";
-const UNIX_INSTALL_COMMAND: &str = r#"set -eu
-umask 077
-base="${XDG_DATA_HOME:-$HOME/.local/share}/ctl"
-versions="$base/versions"
-destination="$versions/__BUNDLE_ID__"
-temporary="$versions/.install-__BUNDLE_ID__-$$"
-link="$base/.current-$$"
-mkdir -p "$versions"
-test ! -e "$temporary"
-mkdir "$temporary"
-trap 'rm -rf "$temporary" "$link"' EXIT HUP INT TERM
-tar -xzf - -C "$temporary"
-test -f "$temporary/ctl-agent"
-test -f "$temporary/rmuxd"
-test -f "$temporary/taskd"
-chmod 700 "$temporary/ctl-agent" "$temporary/rmuxd" "$temporary/taskd"
-if [ -e "$destination" ]; then
-  rm -rf "$temporary"
-else
-  mv "$temporary" "$destination"
-fi
-test -x "$destination/ctl-agent"
-test -x "$destination/rmuxd"
-test -x "$destination/taskd"
-ln -s "versions/__BUNDLE_ID__" "$link"
-mv -f "$link" "$base/current"
-trap - EXIT HUP INT TERM
-printf 'ctl-install-v1\n'"#;
 /// Remote command-shell convention, independent of the client platform.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RemotePlatform {
@@ -408,43 +386,6 @@ pub async fn probe_ssh_unix_platform_interactive(
   )
   .await?;
   String::from_utf8(output).map_err(|_| CoreError::InvalidSshCommandOutput)
-}
-
-/// Installs one trusted ctl-agent bundle into the fixed per-user Unix location.
-///
-/// `bundle_id` is restricted to a path-safe immutable build identifier and the
-/// archive is expanded by a fixed script. The public API cannot supply a remote
-/// command or destination path.
-///
-/// # Errors
-/// Returns validation, SSH startup, remote-command, or output failures.
-pub async fn install_ssh_unix_agent_interactive(
-  destination: &str,
-  options: &SshConnectionOptions,
-  interaction: &SshInteraction,
-  bundle_id: &str,
-  archive: &[u8],
-) -> Result<(), CoreError> {
-  validate_agent_bundle_id(bundle_id)?;
-  let script = UNIX_INSTALL_COMMAND.replace("__BUNDLE_ID__", bundle_id);
-  let output =
-    run_ssh_command_interactive(destination, options, interaction, &script, archive).await?;
-  if output != b"ctl-install-v1\n" {
-    return Err(CoreError::InvalidSshCommandOutput);
-  }
-  Ok(())
-}
-
-fn validate_agent_bundle_id(bundle_id: &str) -> Result<(), CoreError> {
-  if bundle_id.is_empty()
-    || bundle_id.len() > 128
-    || !bundle_id
-      .bytes()
-      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
-  {
-    return Err(CoreError::InvalidAgentBundleId(bundle_id.into()));
-  }
-  Ok(())
 }
 
 async fn run_ssh_command_interactive(
@@ -827,87 +768,6 @@ mod tests {
       r#"PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect"#
     );
     assert!(!UNIX_GATEWAY_COMMAND.contains("workstation"));
-  }
-
-  #[test]
-  fn agent_bundle_ids_are_restricted_before_building_the_install_script() {
-    for bundle_id in ["", "../escape", "v1/release", "line\nbreak"] {
-      assert!(matches!(
-        validate_agent_bundle_id(bundle_id),
-        Err(CoreError::InvalidAgentBundleId(_))
-      ));
-    }
-    assert!(validate_agent_bundle_id("0.1.0-dev.0123456789ab").is_ok());
-  }
-
-  #[cfg(unix)]
-  #[test]
-  fn unix_install_script_extracts_siblings_and_switches_the_managed_version() {
-    use std::io::Write as _;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let directory = std::env::temp_dir().join(format!(
-      "ctl-core-install-{}",
-      uuid::Uuid::new_v4().simple()
-    ));
-    let source = directory.join("source");
-    let data = directory.join("data");
-    let archive = directory.join("bundle.tar.gz");
-    std::fs::create_dir_all(&source).unwrap();
-    for binary in ["ctl-agent", "rmuxd", "taskd"] {
-      std::fs::write(source.join(binary), binary).unwrap();
-    }
-    assert!(
-      std::process::Command::new("tar")
-        .args(["-czf"])
-        .arg(&archive)
-        .arg("-C")
-        .arg(&source)
-        .args(["ctl-agent", "rmuxd", "taskd"])
-        .status()
-        .unwrap()
-        .success()
-    );
-
-    let bundle_id = "0.1.0-dev.0123456789ab";
-    let script = UNIX_INSTALL_COMMAND.replace("__BUNDLE_ID__", bundle_id);
-    let mut child = std::process::Command::new("sh")
-      .args(["-c", &script])
-      .env("XDG_DATA_HOME", &data)
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .spawn()
-      .unwrap();
-    child
-      .stdin
-      .as_mut()
-      .unwrap()
-      .write_all(&std::fs::read(&archive).unwrap())
-      .unwrap();
-    drop(child.stdin.take());
-    let output = child.wait_with_output().unwrap();
-    assert!(
-      output.status.success(),
-      "{}",
-      String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"ctl-install-v1\n");
-
-    let installation = data.join("ctl/versions").join(bundle_id);
-    assert_eq!(
-      std::fs::read_link(data.join("ctl/current")).unwrap(),
-      PathBuf::from("versions").join(bundle_id)
-    );
-    for binary in ["ctl-agent", "rmuxd", "taskd"] {
-      let path = installation.join(binary);
-      assert_eq!(std::fs::read_to_string(&path).unwrap(), binary);
-      assert_eq!(
-        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-        0o700
-      );
-    }
-    std::fs::remove_dir_all(directory).unwrap();
   }
 
   #[tokio::test]

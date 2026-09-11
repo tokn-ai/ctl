@@ -97,6 +97,28 @@ pub struct RemoteAgentInstallResultDto {
   pub target_triple: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAgentInstallPhase {
+  DetectingPlatform,
+  VerifyingBundle,
+  Connecting,
+  Transferring,
+  Extracting,
+  Checking,
+  Activating,
+  Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteAgentInstallProgressDto {
+  pub phase: RemoteAgentInstallPhase,
+  pub file_name: Option<String>,
+  pub transferred_bytes: u64,
+  pub total_bytes: u64,
+  pub bytes_per_second: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSizeDto {
   pub columns: u16,
@@ -784,6 +806,25 @@ mod tests {
     assert_eq!(json["bundle_id"], "0.1.0-dev.0123456789ab");
     assert_eq!(json["git_revision"].as_str().unwrap().len(), 40);
     assert_eq!(json["target_triple"], "aarch64-apple-darwin");
+  }
+
+  #[test]
+  fn remote_agent_progress_uses_frontend_phase_and_byte_fields() {
+    let json = serde_json::to_value(RemoteAgentInstallProgressDto {
+      phase: RemoteAgentInstallPhase::Transferring,
+      file_name: Some("bundle.tar.gz".into()),
+      transferred_bytes: 1024,
+      total_bytes: 4096,
+      bytes_per_second: 512,
+    })
+    .unwrap();
+    assert_eq!(
+      json,
+      serde_json::json!({
+        "phase": "transferring", "file_name": "bundle.tar.gz",
+        "transferred_bytes": 1024, "total_bytes": 4096, "bytes_per_second": 512,
+      })
+    );
   }
 
   #[test]

@@ -304,6 +304,7 @@ pub async fn install_agent(
   attempt_id: String,
   target: ConnectionTargetDto,
   channel: Channel<SshPromptDto>,
+  on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
 ) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
@@ -329,10 +330,13 @@ pub async fn install_agent(
     .get(&target)
     .cloned()
     .unwrap_or_default();
-  let context = PromptContext { attempt, channel };
   // The preceding probe authenticated successfully before discovering that
   // ctl-agent was absent. Reuse that known-good password or key passphrase;
   // uncached challenges such as one-time codes still reach the prompt channel.
+  let context = PromptContext {
+    attempt: Arc::clone(&attempt),
+    channel,
+  };
   let bridge = Bridge::start(secrets.clone(), Some(context), true)?;
   let interaction = bridge.interaction()?;
   let ConnectionTarget::Ssh {
@@ -345,11 +349,16 @@ pub async fn install_agent(
       "Select a remote SSH host.",
     ));
   };
-  let install = crate::remote_agent::install(&app, &destination, &options, &interaction);
+  let install = crate::remote_agent::install(
+    &app,
+    &destination,
+    &options,
+    &interaction,
+    on_progress,
+    || !attempt.responses.lock().unwrap().is_empty(),
+  );
   let result = tokio::select! {
-    result = tokio::time::timeout(Duration::from_mins(3), install) => {
-      result.map_err(|_| CommandErrorDto::new("remote_agent_install_timeout", "Remote component installation timed out."))?
-    }
+    result = install => result,
     _ = cancelled.changed() => Err(CommandErrorDto::new("ssh_cancelled", "SSH connection cancelled.")),
   };
   drop(bridge);

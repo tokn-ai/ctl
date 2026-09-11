@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
+import { remoteInstallProgressMode } from "./remoteInstallProgress";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
@@ -19,6 +20,7 @@ import type {
   SshHostDefinition,
   SshHostStorage,
   SshPrompt,
+  RemoteAgentInstallProgress,
 } from "../../lib/types";
 
 interface SshHostFlowProps {
@@ -68,6 +70,7 @@ export function SshHostFlow({
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
   const [canInstallAgent, setCanInstallAgent] = useState(false);
+  const [install_progress, setInstallProgress] = useState<RemoteAgentInstallProgress | null>(null);
   const attemptRef = useRef<string | null>(null);
   const candidateRef = useRef<ConnectionTarget | null>(target ?? null);
   const configuredRef = useRef(false);
@@ -150,12 +153,19 @@ export function SshHostFlow({
     attemptRef.current = attempt;
     setError(null);
     setPrompt(null);
+    setInstallProgress(null);
     setStep("installing");
     try {
-      await installRemoteAgent(candidate, attempt, (next) => {
-        if (attemptRef.current === attempt && !closedRef.current)
-          setPrompt(next);
-      });
+      await installRemoteAgent(
+        candidate,
+        attempt,
+        (next) => {
+          if (attemptRef.current === attempt && !closedRef.current) setPrompt(next);
+        },
+        (next) => {
+          if (attemptRef.current === attempt && !closedRef.current) setInstallProgress(next);
+        },
+      );
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
       await connect(candidate);
@@ -365,9 +375,7 @@ export function SshHostFlow({
       break;
     case "installing":
       title = "Installing remote components";
-      description =
-        "Detecting the remote platform and installing the matching checksummed app bundle for this user.";
-      mode = { kind: "progress" };
+      mode = remoteInstallProgressMode(install_progress);
       break;
     case "progress":
       title = "Connecting to host";

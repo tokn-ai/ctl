@@ -39,6 +39,15 @@ impl Drop for TestPaths {
 /// owns or removes the local endpoint.
 #[tokio::test]
 async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
+  gateway_round_trip(false).await;
+}
+
+#[tokio::test]
+async fn identified_gateway_emits_metadata_before_service_bytes() {
+  gateway_round_trip(true).await;
+}
+
+async fn gateway_round_trip(identified: bool) {
   let paths = TestPaths::new();
   let listener = Listener::bind(&paths.rmux_socket).expect("bind fake rmux endpoint");
   let endpoint = tokio::spawn(async move {
@@ -62,7 +71,13 @@ async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
     direct.write_all(b"pong").await.expect("write probe");
   });
 
-  let config = ctl_agent::ConnectConfig::new(paths.rmux_socket.clone());
+  let mut config = ctl_agent::ConnectConfig::new(paths.rmux_socket.clone());
+  let identity = ctl_proto::RemoteIdentity {
+    remote_id: Uuid::new_v4().to_string(),
+    agent_version: "0.1.0".into(),
+    bundle: None,
+  };
+  config.identity = identified.then(|| identity.clone());
   let (mut client, gateway) = tokio::io::duplex(1024);
   let (gateway_reader, gateway_writer) = tokio::io::split(gateway);
   let relay =
@@ -73,7 +88,15 @@ async fn stdio_gateway_relays_bytes_and_leaves_the_local_endpoint_alive() {
     .read_exact(&mut preface)
     .await
     .expect("read transport preface");
-  assert_eq!(preface, ctl_agent::SSH_TRANSPORT_PREFACE);
+  if identified {
+    assert_eq!(preface, ctl_proto::IDENTITY_PREFACE);
+    assert_eq!(
+      ctl_proto::read_identity(&mut client).await.unwrap(),
+      identity
+    );
+  } else {
+    assert_eq!(preface, ctl_agent::SSH_TRANSPORT_PREFACE);
+  }
 
   let payload = b"\0raw rmux payload\xff\n";
   client.write_all(payload).await.expect("write raw payload");

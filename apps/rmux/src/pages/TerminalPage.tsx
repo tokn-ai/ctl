@@ -19,6 +19,11 @@ import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessio
 import { NewShellFlow } from "../components/sessions/NewShellFlow";
 import { useWorkspace } from "../features/workspace/useWorkspace";
 import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
+import {
+  recoverRemoteHost,
+  remapStateKeys,
+  sameSshEndpoint,
+} from "../features/workspace/remoteRecovery";
 import { withHostId } from "../features/workspace/workspaceModel";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
@@ -89,6 +94,7 @@ import {
 } from "../lib/tauri";
 import type {
   ConnectionTarget,
+  RemoteIdentity,
   SessionSummary,
   ShellStateSummary,
   SshConfigHost,
@@ -241,7 +247,7 @@ export function TerminalPage() {
       setListError(null);
       try {
         const results = await Promise.all(
-          targets
+          workspace.viewRef.current.targets
             .filter(
               (target) =>
                 (!selectedTarget || sameTarget(target, selectedTarget)) &&
@@ -271,10 +277,9 @@ export function TerminalPage() {
         }
         const refreshed = new Map<string, SessionSummary>();
         const inspections = new Map<string, ShellStateSummary>();
-        const errors = new Map(targetErrors);
+        const errors = new Map<string, string>();
         for (const result of results) {
           const key = targetKey(result.target);
-          errors.delete(key);
           if ("error" in result) {
             errors.set(key, errorMessage(result.error));
             for (const session of sessionsRef.current.filter((session) =>
@@ -321,7 +326,12 @@ export function TerminalPage() {
         const visibleIds = new Set(visible.map(sessionKey));
         sessionsRef.current = visible;
         setSessions(visible);
-        setTargetErrors(errors);
+        setTargetErrors((current) => {
+          const next = new Map(current);
+          for (const { target } of results) next.delete(targetKey(target));
+          for (const [key, message] of errors) next.set(key, message);
+          return next;
+        });
         setSessionShellStates((current) =>
           mergeShellStateInspections(current, inspections, visibleIds),
         );
@@ -347,7 +357,6 @@ export function TerminalPage() {
     [
       daemonRestartBlocksInteractions,
       targets,
-      targetErrors,
       workspace.ready,
       setSessions,
       setTabs,
@@ -378,9 +387,9 @@ export function TerminalPage() {
   );
 
   const activateConfiguredHost = useCallback(
-    async (destination: string): Promise<boolean> => {
+    async (destination: string, remote_info: RemoteIdentity): Promise<boolean> => {
       const target = configuredSshTarget(destination);
-      return target ? addTarget(target) : false;
+      return target ? addTarget({ ...target, remote_info }) : false;
     },
     [addTarget],
   );
@@ -389,6 +398,7 @@ export function TerminalPage() {
     async (
       definition: SshHostDefinition,
       storage: SshHostStorage,
+      remote_info: RemoteIdentity,
     ): Promise<void> => {
       if (
         targets.some(
@@ -404,7 +414,7 @@ export function TerminalPage() {
               (await saveSshConfigHost(definition)).destination,
             )
           : appLocalSshTarget(definition);
-      if (!target || !(await addTarget(target))) {
+      if (!target || !(await addTarget({ ...target, remote_info }))) {
         throw new Error("The host settings could not be saved.");
       }
       if (storage === "ssh_config") {
@@ -452,7 +462,10 @@ export function TerminalPage() {
       setTabs(nextTabs);
       setActiveTabKey(identity);
 
-      if (sameSession(attachment.state.session, session)) {
+      if (
+        sameSession(attachment.state.session, session) &&
+        sameSshEndpoint(attachment.state.session!.target, session.target)
+      ) {
         if (
           attachment.state.phase === "attached" ||
           attachment.state.phase === "connecting" ||
@@ -488,7 +501,33 @@ export function TerminalPage() {
     [attachment, daemonRestartBlocksInteractions, renderer],
   );
 
+  const recoverHost = async (
+    candidate: ConnectionTarget,
+    remote_info: RemoteIdentity,
+  ) => {
+    if (candidate.kind !== "ssh") return null;
+    const recovered = recoverRemoteHost(
+      workspace.viewRef.current,
+      candidate,
+      remote_info,
+    );
+    if (!recovered) return null;
+    refreshGuardRef.current.recordMutation();
+    renderer?.remapSessions(recovered.key_changes);
+    setTabShellStates((current) => remapStateKeys(current, recovered.key_changes));
+    const host_keys = new Set(recovered.view.targets.map(targetKey));
+    setTargetErrors((current) => new Map(
+      [...current].filter(([key]) => host_keys.has(key) && key !== targetKey(recovered.target)),
+    ));
+    sessionsRef.current = recovered.view.sessions;
+    tabsRef.current = recovered.view.tabs;
+    activeTabKeyRef.current = recovered.view.active_tab_key;
+    await workspace.replaceView(recovered.view);
+    return recovered.target;
+  };
+
   const resumeHost = useWorkspaceConnections({
+    getView: () => workspace.viewRef.current,
     ready: workspace.ready,
     closing: workspace.closing,
     tabs,
@@ -1551,13 +1590,13 @@ export function TerminalPage() {
           suggestions={hostSuggestions}
           warning={sshConfigWarning}
           target={hostFlow ?? undefined}
+          onVerified={recoverHost}
           onActivateHost={activateConfiguredHost}
           onSaveHost={saveHost}
-          onConnected={() => {
-            if (hostFlow)
-              void resumeHost(hostFlow).catch((failure) =>
-                setListError(errorMessage(failure)),
-              );
+          onConnected={(target) => {
+            void resumeHost(target).catch((failure) =>
+              setListError(errorMessage(failure)),
+            );
           }}
           onClose={() => {
             setHostFlow(undefined);

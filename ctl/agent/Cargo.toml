@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+ctl-proto.workspace = true
 clap.workspace = true
 rmux-ipc.workspace = true
 task-ipc.workspace = true
@@ -17,7 +22,6 @@ rmux-proto.workspace = true
 rmuxd = { path = "../../rmux/daemon" }
 task-proto.workspace = true
 taskd = { path = "../../task/daemon" }
-uuid.workspace = true
 
 [lints]
 workspace = true

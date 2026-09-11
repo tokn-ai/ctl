@@ -2,7 +2,10 @@
 //!
 //! `ctl-agent connect` is a disposable process. It relays one SSH channel's
 //! stdin/stdout to the fixed per-user `rmuxd` endpoint (or `taskd` with
-//! `--service task`) and owns no terminal, task, or reconnect state.
+//! `--service task`) and owns no terminal, task, or reconnect state. Identified
+//! connections read an account-owned ID that survives component upgrades.
+
+pub mod identity;
 
 use rmux_ipc::Stream;
 use std::io;
@@ -27,6 +30,8 @@ pub enum Service {
 #[derive(Debug, Clone)]
 pub struct ConnectConfig {
   pub service: Service,
+  /// Metadata emitted only when the client requested the identified protocol.
+  pub identity: Option<ctl_proto::RemoteIdentity>,
   /// Fixed per-user local `rmuxd` endpoint. It is never client controlled.
   pub rmux_socket: PathBuf,
   /// Absolute installed `rmuxd` path used only when the endpoint is absent.
@@ -42,6 +47,7 @@ impl ConnectConfig {
   pub fn new(rmux_socket: PathBuf) -> Self {
     Self {
       service: Service::Rmux,
+      identity: None,
       rmux_socket,
       rmuxd_bin: None,
       task_socket: task_ipc::socket_path(),
@@ -100,9 +106,18 @@ where
 {
   let daemon = connect_or_start_daemon(config).await?;
   client_writer
-    .write_all(SSH_TRANSPORT_PREFACE)
+    .write_all(if config.identity.is_some() {
+      ctl_proto::IDENTITY_PREFACE
+    } else {
+      SSH_TRANSPORT_PREFACE
+    })
     .await
     .map_err(AgentError::Relay)?;
+  if let Some(identity) = &config.identity {
+    ctl_proto::write_identity(&mut client_writer, identity)
+      .await
+      .map_err(AgentError::Relay)?;
+  }
   client_writer.flush().await.map_err(AgentError::Relay)?;
   let (mut daemon_reader, mut daemon_writer) = tokio::io::split(daemon);
   let client_to_daemon = tokio::io::copy(&mut client_reader, &mut daemon_writer);

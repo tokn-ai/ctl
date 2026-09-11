@@ -15,6 +15,9 @@ const NON_RECOVERABLE_ERROR_CODES = new Set([
   "invalid_session_name",
   "invalid_terminal_size",
   "protocol_version_mismatch",
+  "remote_identity_mismatch",
+  "invalid_remote_identity",
+  "ctl_agent_identity_unsupported",
   "session_not_found",
   "unsupported_platform",
 ]);

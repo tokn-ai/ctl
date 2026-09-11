@@ -21,6 +21,8 @@ use crate::error::{CommandErrorDto, CommandResult, protocol_error_code};
 pub enum ConnectionTargetDto {
   Local,
   Ssh {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_info: Option<ctl_proto::RemoteIdentity>,
     destination: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hostname: Option<String>,
@@ -34,10 +36,35 @@ pub enum ConnectionTargetDto {
 }
 
 impl ConnectionTargetDto {
+  /// Credential caches describe an SSH endpoint, independent of observed version.
+  pub fn credential_key(&self) -> Self {
+    let mut key = self.clone();
+    if let Self::Ssh { remote_info, .. } = &mut key {
+      *remote_info = None;
+    }
+    key
+  }
+
+  pub fn verify_remote_identity(&self, identity: &ctl_proto::RemoteIdentity) -> CommandResult<()> {
+    if let Self::Ssh {
+      remote_info: Some(expected),
+      ..
+    } = self
+      && expected.remote_id != identity.remote_id
+    {
+      return Err(CommandErrorDto::new(
+        "remote_identity_mismatch",
+        "This address now connects to a different remote environment. Add it as a separate host to keep the saved sessions intact.",
+      ));
+    }
+    Ok(())
+  }
+
   #[cfg(test)]
   #[must_use]
   pub fn ssh(destination: impl Into<String>) -> Self {
     Self::Ssh {
+      remote_info: None,
       destination: destination.into(),
       hostname: None,
       user: None,
@@ -719,6 +746,30 @@ pub fn parse_sequence(value: Option<String>) -> CommandResult<Option<u64>> {
 mod tests {
   use super::*;
   use rmux_proto::{ShellCapabilities, ShellDescriptor};
+
+  #[test]
+  fn identity_checks_pin_the_environment_but_not_its_version_or_credentials() {
+    let identity = ctl_proto::RemoteIdentity {
+      remote_id: uuid::Uuid::new_v4().to_string(),
+      agent_version: "0.1.0".into(),
+      bundle: None,
+    };
+    let mut target = ConnectionTargetDto::ssh("host");
+    let unverified = target.clone();
+    if let ConnectionTargetDto::Ssh { remote_info, .. } = &mut target {
+      *remote_info = Some(identity.clone());
+    }
+    let mut upgraded = identity.clone();
+    upgraded.agent_version = "0.2.0".into();
+    assert!(target.verify_remote_identity(&upgraded).is_ok());
+    assert_eq!(target.credential_key(), unverified);
+    upgraded.remote_id = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+      target.verify_remote_identity(&upgraded).unwrap_err().code,
+      "remote_identity_mismatch"
+    );
+    assert!(unverified.verify_remote_identity(&upgraded).is_ok());
+  }
 
   #[test]
   fn session_u64_values_are_decimal_strings() {

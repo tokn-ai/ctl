@@ -67,6 +67,7 @@ impl ConnectionTargetDto {
         user,
         port,
         identity_file,
+        ..
       } => ConnectionTarget::ssh_with_options(
         destination.clone(),
         SshConnectionOptions {
@@ -101,6 +102,7 @@ mod tests {
   #[test]
   fn app_local_settings_map_to_structured_core_options() {
     let target = ConnectionTargetDto::Ssh {
+      remote_info: None,
       destination: "rmux-remote-test".into(),
       hostname: Some("127.0.0.1".into()),
       user: Some("rmux".into()),

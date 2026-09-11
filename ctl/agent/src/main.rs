@@ -17,6 +17,9 @@ enum Command {
   Connect {
     #[arg(long, value_enum, default_value_t = Service::Rmux)]
     service: Service,
+    /// Send stable environment identity and installed version before relaying.
+    #[arg(long)]
+    identity: bool,
   },
 }
 
@@ -30,9 +33,16 @@ async fn main() {
 
 async fn run(arguments: Arguments) -> Result<(), MainError> {
   match arguments.command {
-    Command::Connect { service } => {
+    Command::Connect { service, identity } => {
       let mut config = ConnectConfig::new(rmux_ipc::socket_path());
       config.service = service;
+      if identity {
+        config.identity = Some(
+          tokio::task::spawn_blocking(ctl_agent::identity::discover)
+            .await
+            .map_err(std::io::Error::other)??,
+        );
+      }
       config.rmuxd_bin = companion_binary("rmuxd");
       config.taskd_bin = companion_binary("taskd");
       connect_stdio(&config).await?;
@@ -51,6 +61,8 @@ fn companion_binary(name: &str) -> Option<PathBuf> {
 enum MainError {
   #[error(transparent)]
   Agent(#[from] ctl_agent::AgentError),
+  #[error("could not identify remote environment: {0}")]
+  Identity(#[from] std::io::Error),
 }
 
 #[cfg(test)]
@@ -64,7 +76,8 @@ mod tests {
         .unwrap()
         .command,
       Command::Connect {
-        service: Service::Rmux
+        service: Service::Rmux,
+        identity: false
       }
     ));
     assert!(matches!(
@@ -72,9 +85,25 @@ mod tests {
         .unwrap()
         .command,
       Command::Connect {
-        service: Service::Task
+        service: Service::Task,
+        identity: false
       }
     ));
+  }
+
+  #[test]
+  fn connect_accepts_identity_for_each_service() {
+    for (args, expected) in [
+      (vec!["ctl-agent", "connect", "--identity"], Service::Rmux),
+      (
+        vec!["ctl-agent", "connect", "--identity", "--service", "task"],
+        Service::Task,
+      ),
+    ] {
+      let Command::Connect { service, identity } = Arguments::try_parse_from(args).unwrap().command;
+      assert_eq!(service, expected);
+      assert!(identity);
+    }
   }
 
   #[test]

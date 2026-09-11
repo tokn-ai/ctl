@@ -47,7 +47,7 @@ RUN chmod 0755 \
   /usr/local/libexec/rmux-forced-command
 
 EXPOSE 22
-VOLUME ["/etc/ssh/host_keys", "/var/lib/taskd"]
+VOLUME ["/etc/ssh/host_keys", "/var/lib/taskd", "/home/rmux/.tokn/ctl"]
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
   CMD ["/usr/sbin/sshd", "-t", "-f", "/etc/ssh/sshd_config"]

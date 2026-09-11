@@ -19,6 +19,8 @@ files produce no stdout:
 ```text
 ssh -T <host> exec ctl-agent connect
 ssh -T <host> exec ctl-agent connect --service task
+exec ctl-agent connect --identity
+exec ctl-agent connect --service task --identity
 ```
 
 For a Windows host using the default cmd.exe SSH shell, the corresponding
@@ -91,12 +93,14 @@ The app can also define the container without a pre-existing alias. In **+
 Host**, enter `rmux@127.0.0.1:2222`, use a name such as `rmux-remote-test`, then
 choose **Identity file** and enter the matching private-key path. These steps
 open at the command palette location. Verify any SSH host-key prompt against
-the fingerprint above. Once `ctl-agent connect` succeeds, choose **OpenSSH config** to create a
+the fingerprint above. Once `ctl-agent connect --identity` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
 not store the key contents. An app with a synchronized bundle set can install a
-missing `ctl-agent`, `rmuxd`, and `taskd` bundle into the remote user's data
-directory and retry. Release bundles use the app version as their immutable
+missing `ctl-agent`, `rmuxd`, and `taskd` bundle under the remote user's
+`~/.tokn/ctl/versions` directory and retry. `~/.tokn/ctl/current` selects the active
+bundle, and `~/.tokn/ctl/remote-id` stores the stable environment ID. Release
+bundles use the app version as their immutable
 install ID; development bundles include their Git revision so one source build
 cannot silently reuse another build's binaries.
 The installation overlay reports platform detection, checksum verification,
@@ -110,6 +114,13 @@ Time spent answering authentication prompts does not consume these intervals.
 Password/passphrase and host-verification prompts use the same overlay on
 macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
 chip to authenticate again if SSH config/agent alone is insufficient.
+
+The desktop discovers a stable ctl environment ID and installed version during
+connection verification. A different address with the same ID automatically recovers
+the saved host and tabs; older agents offer a component update first. The Docker
+fixture persists this ID in its `ctl_data` volume across container replacement.
+The fixed-command allowlist includes the identity flag without accepting arbitrary
+remote commands. See `docs/rmux-workspace.md` for identity storage and migration.
 
 The app restores known sessions from disk and automatically attaches the last
 selected tab if it is local. Remote hosts stay disconnected on startup.

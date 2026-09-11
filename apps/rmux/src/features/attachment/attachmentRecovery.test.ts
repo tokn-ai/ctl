@@ -86,6 +86,13 @@ describe("attachment recovery", () => {
     expect(canAutomaticallyRecoverAttachment("protocol_version_mismatch")).toBe(
       false,
     );
+    for (const code of [
+      "remote_identity_mismatch",
+      "invalid_remote_identity",
+      "ctl_agent_identity_unsupported",
+    ]) {
+      expect(canAutomaticallyRecoverAttachment(code)).toBe(false);
+    }
     expect(canAutomaticallyRecoverAttachment("backend_error")).toBe(true);
     expect(canAutomaticallyRecoverAttachment(null)).toBe(true);
   });

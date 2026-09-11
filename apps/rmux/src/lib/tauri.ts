@@ -21,6 +21,7 @@ import type {
   SshIdentityFileCatalog,
   SshPrompt,
   RemoteAgentInstallResult,
+  RemoteIdentity,
   RemoteAgentInstallProgress,
   WorkspaceDocument,
   WorkspaceSnapshot,
@@ -96,10 +97,10 @@ export async function probeSshHost(
   target: ConnectionTarget,
   attempt_id: string,
   onPrompt: (prompt: SshPrompt) => void,
-): Promise<void> {
+): Promise<RemoteIdentity> {
   const channel = new Channel<SshPrompt>();
   channel.onmessage = onPrompt;
-  await invoke("probe_ssh_host", {
+  return invoke<RemoteIdentity>("probe_ssh_host", {
     request: { target, attempt_id },
     on_prompt: channel,
   });

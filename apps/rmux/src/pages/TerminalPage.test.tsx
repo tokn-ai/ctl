@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
 import type {
+  AttachmentViewState,
   ConnectionTarget,
   SessionSummary,
   WorkspaceDocument,
@@ -29,6 +30,8 @@ import { NATIVE_COMMAND_EVENT } from "../features/commands/useNativeCommandEvent
 const nativeEvents = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: string }) => void>(),
 }));
+const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
+
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(
     async (name: string, callback: (event: { payload: string }) => void) => {
@@ -127,6 +130,8 @@ function snapshot(): WorkspaceSnapshot {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  attachment.state.phase = "idle";
+  attachment.state.session = null;
   api.restartTaskDaemon.mockResolvedValue(undefined);
   api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
   api.loadTaskDefinitions.mockImplementation(async (scope: TaskDefinitionScope) => ({ scope, path: "/test/definitions.json", definitions: [] }));
@@ -160,7 +165,7 @@ beforeEach(() => {
   });
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
-  api.probeSshHost.mockResolvedValue(undefined);
+  api.probeSshHost.mockResolvedValue(remoteInfo);
   api.cancelSshProbe.mockResolvedValue(undefined);
   api.inspectKnownSessions.mockResolvedValue([]);
   api.killSession.mockResolvedValue(undefined);
@@ -915,6 +920,38 @@ describe("workspace-backed terminal page", () => {
     expect(api.killSession).not.toHaveBeenCalled();
   });
 
+  it("recovers the existing host and tab through a different configured address", async () => {
+    const saved = snapshot();
+    saved.document.hosts[1].target = { kind: "ssh", destination: "test", remote_info: remoteInfo };
+    api.loadWorkspace.mockResolvedValue(saved);
+    const known = restoreWorkspace(saved.document).sessions[0];
+    api.inspectKnownSessions.mockImplementation(async (target: ConnectionTarget) => [{
+      session_id: known.session_id,
+      session: { ...known, target, status: "running", next_sequence: "42" },
+      shell_state: null, error: null,
+    }]);
+    api.inspectKnownSessions.mockRejectedValueOnce(new Error("Old address unavailable"));
+    Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "+ Host" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
+    await screen.findByText("Old address unavailable");
+    api.inspectKnownSessions.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "+ Host" }));
+    fireEvent.click(await screen.findByRole("option", { name: /only-in-ssh-config/ }));
+    await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
+    const expected = { kind: "ssh", host_id: "test-id", destination: "only-in-ssh-config", remote_info: remoteInfo };
+    expect(attachment.connect.mock.calls[0][0].target).toEqual(expected);
+    expect(api.inspectKnownSessions).toHaveBeenCalledExactlyOnceWith(expected, ["known-id"]);
+    const document = api.updateWorkspace.mock.calls[api.updateWorkspace.mock.calls.length - 1][1] as WorkspaceDocument;
+    expect(document.hosts).toHaveLength(3);
+    expect(document.hosts[1]).toEqual({ host_id: "test-id", target: { kind: "ssh", destination: "only-in-ssh-config", remote_info: remoteInfo } });
+    expect(document.sessions[0].host_id).toBe("test-id");
+    expect(document.active_tab).toEqual({ kind: "session", host_id: "test-id", session_id: "known-id" });
+    expect(screen.queryByText("Save host")).toBeNull();
+    expect(screen.queryByText("Old address unavailable")).toBeNull();
+  });
+
   it("keeps a restored remote tab cold, then resumes it after connecting its host", async () => {
     const known = restoreWorkspace(snapshot().document).sessions[0];
     api.inspectKnownSessions.mockResolvedValueOnce([
@@ -928,8 +965,8 @@ describe("workspace-backed terminal page", () => {
     let authenticated!: () => void;
     api.probeSshHost.mockImplementationOnce(
       () =>
-        new Promise<void>((resolve) => {
-          authenticated = resolve;
+        new Promise<typeof remoteInfo>((resolve) => {
+          authenticated = () => resolve(remoteInfo);
         }),
     );
     render(<TerminalPage />);
@@ -953,7 +990,7 @@ describe("workspace-backed terminal page", () => {
       next_sequence: "42",
     });
     expect(api.inspectKnownSessions).toHaveBeenCalledExactlyOnceWith(
-      { kind: "ssh", destination: "test", host_id: "test-id" },
+      { kind: "ssh", destination: "test", host_id: "test-id", remote_info: remoteInfo },
       ["known-id"],
     );
     expect(api.listSessions).not.toHaveBeenCalled();
@@ -1009,8 +1046,8 @@ describe("workspace-backed terminal page", () => {
     let authenticated!: () => void;
     api.probeSshHost.mockImplementationOnce(
       () =>
-        new Promise<void>((resolve) => {
-          authenticated = resolve;
+        new Promise<typeof remoteInfo>((resolve) => {
+          authenticated = () => resolve(remoteInfo);
         }),
     );
     fireEvent.click(screen.getByRole("option", { name: "Connect" }));

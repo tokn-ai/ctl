@@ -14,6 +14,8 @@ import {
 } from "../../lib/tauri";
 import type { RemoteAgentInstallProgress, SshPrompt } from "../../lib/types";
 
+const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
+
 vi.mock("../../lib/tauri", () => ({
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(async () => undefined),
@@ -39,6 +41,7 @@ function setup() {
       <SshHostFlow
         suggestions={[]}
         warning={null}
+        onVerified={async () => null}
         onSaveHost={save}
         onActivateHost={vi.fn(() => true)}
         onConnected={vi.fn()}
@@ -62,6 +65,32 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("SSH host quick-input flow", () => {
+  it("recovers a verified host automatically before offering storage", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const recovered = { kind: "ssh" as const, host_id: "known-host", destination: "new-ip", remote_info: remoteInfo };
+    const onVerified = vi.fn(async () => recovered);
+    const onConnected = vi.fn();
+    const onSaveHost = vi.fn();
+    const onClose = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} onVerified={onVerified} onActivateHost={vi.fn()} onSaveHost={onSaveHost} onConnected={onConnected} onClose={onClose} />);
+    const user = userEvent.setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(onConnected).toHaveBeenCalledExactlyOnceWith(recovered));
+    expect(onVerified).toHaveBeenCalledWith(expect.objectContaining({ hostname: "127.0.0.1" }), remoteInfo);
+    expect(onSaveHost).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Save host")).toBeNull();
+  });
+
+  it("offers an update for agents without identity support", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "ctl_agent_identity_unsupported", message: "Update required" });
+    const { user } = setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    expect(await screen.findByRole("option", { name: /Update remote components/ })).toBeTruthy();
+  });
+
   it("discovers identities only on the identity step and connects with a selected path", async () => {
     vi.mocked(listSshIdentityFiles).mockResolvedValue({
       identity_files: [
@@ -72,7 +101,7 @@ describe("SSH host quick-input flow", () => {
       ],
       warnings: [],
     });
-    vi.mocked(probeSshHost).mockResolvedValue(undefined);
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { user } = setup();
     await details(user);
     expect(listSshIdentityFiles).not.toHaveBeenCalled();
@@ -92,7 +121,7 @@ describe("SSH host quick-input flow", () => {
     vi.mocked(listSshIdentityFiles).mockRejectedValue(
       new Error("Permission denied"),
     );
-    vi.mocked(probeSshHost).mockResolvedValue(undefined);
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { user } = setup();
     await details(user);
     await user.click(screen.getByRole("option", { name: /Identity file/ }));
@@ -135,7 +164,7 @@ describe("SSH host quick-input flow", () => {
   });
 
   it("forgets unsaved credentials when the storage step is cancelled", async () => {
-    vi.mocked(probeSshHost).mockResolvedValue(undefined);
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { user, save, close } = setup();
     await details(user);
     await user.click(
@@ -193,7 +222,7 @@ describe("SSH host quick-input flow", () => {
   });
 
   it("keeps failed storage writes recoverable without connecting again", async () => {
-    vi.mocked(probeSshHost).mockResolvedValue(undefined);
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { user, save, close } = setup();
     save.mockRejectedValueOnce(new Error("Alias already exists"));
     await details(user);
@@ -211,7 +240,7 @@ describe("SSH host quick-input flow", () => {
   });
 
   it("types every stage, verifies before saving, and keeps the save location choice", async () => {
-    vi.mocked(probeSshHost).mockResolvedValue(undefined);
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { save, user } = setup();
     await details(user);
     await user.click(screen.getByRole("option", { name: /Identity file/ }));
@@ -233,6 +262,7 @@ describe("SSH host quick-input flow", () => {
         identity_file: "~/.ssh/local.id_rsa",
       },
       "local_storage",
+      remoteInfo,
     );
   });
 
@@ -295,7 +325,7 @@ describe("SSH host quick-input flow", () => {
         code: "ctl_agent_not_found",
         message: "ctl-agent: command not found",
       })
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce(remoteInfo);
     vi.mocked(installRemoteAgent).mockResolvedValue({
       app_version: "0.1.0",
       bundle_id: "0.1.0-dev.0123456789ab",

@@ -85,6 +85,17 @@ export class XtermRenderer {
     }
   }
 
+  remapSessions(key_changes: ReadonlyMap<string, string>): void {
+    for (const [old_key, new_key] of key_changes) {
+      if (old_key === new_key) continue;
+      const terminal = this.sessions.get(old_key);
+      if (!terminal) continue;
+      this.sessions.delete(old_key);
+      if (!this.sessions.has(new_key)) this.sessions.set(new_key, terminal);
+      else if (terminal !== this.active) this.disposeTerminal(terminal);
+    }
+  }
+
   forgetLocalSessions(): void {
     this.retainSessions(
       new Set(

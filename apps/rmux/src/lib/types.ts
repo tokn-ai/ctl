@@ -32,7 +32,15 @@ export interface NativeCommandBinding {
   enabled: boolean;
 }
 
+export interface RemoteIdentity {
+  remote_id: string;
+  agent_version: string;
+  bundle?: RemoteAgentInstallResult;
+}
+
 export interface SshConnectionTarget {
+  /** Verified remote environment and last observed installed version. */
+  remote_info?: RemoteIdentity;
   kind: "ssh";
   /** App-owned identity; stripped at the native transport boundary. */
   host_id?: string;

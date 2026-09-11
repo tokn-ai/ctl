@@ -658,10 +658,14 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ctl-core",
+ "ctl-proto",
+ "dirs",
  "rmux-client",
  "rmux-ipc",
  "rmux-proto",
  "rmuxd",
+ "serde",
+ "serde_json",
  "task-ipc",
  "task-proto",
  "taskd",
@@ -674,10 +678,22 @@ dependencies = [
 name = "ctl-core"
 version = "0.1.0"
 dependencies = [
+ "ctl-proto",
  "rmux-ipc",
+ "serde_json",
  "task-client",
  "task-ipc",
  "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ctl-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "tokio",
  "uuid",
 ]
@@ -3012,6 +3028,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ctl-core",
+ "ctl-proto",
  "dirs",
  "glob",
  "objc2",

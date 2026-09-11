@@ -178,6 +178,13 @@ opening a session connects on demand. Its **+ Host** picker discovers concrete
 aliases from the user's OpenSSH config without connecting to them; selecting
 one makes it an active target. A new hostname can be saved as a reusable,
 managed OpenSSH `Host` block or as structured app-local connection settings.
+The app records the remote environment ID and installed agent/bundle version.
+The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live under
+`~/.tokn/ctl/versions`, with `~/.tokn/ctl/current` selecting the active bundle.
+Connecting through another IP, hostname, or SSH alias with the same ID
+automatically updates the saved address and recovers its existing sessions and
+tabs. Hover over a host chip to see its last observed version and remote ID.
+An older agent offers **Update remote components** before identity discovery.
 Add Host uses the command-palette overlay for host, name, authentication, and
 storage prompts, with connection verification before saving. The same overlay
 handles destructive close/restart confirmations and **New Shell** input.

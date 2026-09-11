@@ -2,7 +2,7 @@
 
 The app's workspace answers “which sessions do I want to keep here?” It is
 separate from `rmuxd`'s live inventory and from SSH authorization. A session
-can be remembered by several clients. `ctl-agent` remains a stateless SSH bridge;
+can be remembered by several clients. `ctl-agent` stores only its environment ID;
 `rmuxd` continues to own all shells, PTYs, history, checkpoints, and leases.
 
 ## Disk format and ownership
@@ -12,7 +12,8 @@ directory (`~/Library/Application Support/io.rmux.desktop` on macOS). The
 versioned document contains:
 
 - `workspace_id`, `schema_version`;
-- `hosts`: stable `host_id` plus a local or structured SSH target;
+- `hosts`: stable `host_id` plus a local or structured SSH target, with optional
+  `remote_info` containing `remote_id`, `agent_version`, and bundle version metadata;
 - `sessions`: `(host_id, session_id)`, name, and last-known cwd/display cwd;
 - ordered `tabs` and optional `active_tab`, referencing sessions or managed tasks;
 - task references, sidebar selection, and task drafts with their source scopes
@@ -43,6 +44,42 @@ native workspace exists. It saves hosts without contacting them and removes the
 legacy value only after saving successfully. No earlier session membership was
 stored, so users must explicitly import their previous sessions. Migration
 never assumes every session on a remembered host belongs in this workspace.
+
+## Remote identity and address recovery
+
+**Connect host** discovers an account-owned UUID and the installed agent version
+on the same SSH stream used to verify the rmux service. Bundled installations also
+report the app version, bundle ID, Git revision, and target triple. The host chip's
+tooltip shows the last discovered metadata.
+
+When **+ Host** verifies a different address with a known UUID, the app automatically
+reuses the existing local `host_id`, updates its connection settings, and resumes its
+remembered tab. The change preserves tab order, selection, cwd metadata, and terminal
+caches. Previously saved aliases for that environment merge without duplicating
+session or task references. This changes the app workspace; it does not rewrite
+existing OpenSSH configuration blocks.
+
+Every subsequent desktop connection checks the expected UUID before sending service
+commands. A different UUID at a saved address is rejected without rebinding the saved
+sessions. Different SSH accounts normally have distinct ctl data directories and IDs.
+An old workspace learns its ID on its next successful **Connect host**; an unreachable
+legacy address without a previously recorded ID cannot be matched automatically.
+
+The identity is `~/.tokn/ctl/remote-id` under the remote user's home directory
+on all platforms. Unix component bundles use `~/.tokn/ctl/versions` and the
+`~/.tokn/ctl/current` symlink; upgrades leave the identity file in place.
+Concurrent first connections publish one complete UUID file without
+overwriting a competing creator; upgrades do not replace it. Corrupt identity files
+fail discovery instead of silently generating a new identity. The ID identifies a
+ctl environment, not hardware: copying its data directory copies its identity, so
+independent cloned environments must receive separate IDs. Keep the identity file
+when moving or restoring the same environment.
+
+The opt-in `ctl-agent connect --identity` protocol emits `ctl-ssh-v2\n`, a big-endian
+32-bit JSON byte length (at most 8192), then the identity JSON, before service bytes.
+Normal CLI connections retain the `ctl-ssh-v1\n` protocol. Older agents require an
+update for desktop identity discovery. SSH remains responsible for authentication
+and host-key verification; the UUID is not an authorization credential.
 
 ## Lifecycle
 

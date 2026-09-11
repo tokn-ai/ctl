@@ -3,6 +3,7 @@ import type { ConnectionTarget, SessionSummary } from "../../lib/types";
 import { sameTarget, sessionKey } from "../targets/targets";
 
 interface WorkspaceConnections {
+  getView?(): { tabs: readonly SessionSummary[]; active_tab_key: string | null };
   ready: boolean;
   closing: boolean;
   tabs: readonly SessionSummary[];
@@ -39,7 +40,7 @@ export function useWorkspaceConnections(options: WorkspaceConnections) {
   }, [options]);
 
   return useCallback(async (target: ConnectionTarget) => {
-    const before = current.current;
+    const before = { ...current.current, ...current.current.getView?.() };
     if (!before.ready || before.closing) return;
     const attempt = ++hostConnection.current;
     const hostTabs = before.tabs.filter((tab) =>
@@ -52,7 +53,7 @@ export function useWorkspaceConnections(options: WorkspaceConnections) {
     // Finish inspection first so attaching cannot invalidate its observations.
     await before.refreshHost(target);
 
-    const after = current.current;
+    const after = { ...current.current, ...current.current.getView?.() };
     if (
       !selected ||
       !mounted.current ||

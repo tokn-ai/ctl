@@ -104,3 +104,64 @@ async fn windows_openssh_reports_connection_failure() {
   .await
   .expect("Windows OpenSSH startup timed out");
 }
+
+#[tokio::test]
+async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
+  timeout(TEST_TIMEOUT, async {
+    let identity = ctl_proto::RemoteIdentity {
+      remote_id: uuid::Uuid::new_v4().to_string(),
+      agent_version: "0.1.0".into(),
+      bundle: None,
+    };
+    let json = serde_json::to_string(&identity).unwrap();
+    let command = identified_fixture(&json);
+    let mut transport = start_ssh_transport_identified(command, true).await.unwrap();
+    assert_eq!(transport.remote_identity, Some(identity));
+    let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
+    transport.write_all(&payload).await.unwrap();
+    transport.flush().await.unwrap();
+    let mut response = [0; 8];
+    transport.read_exact(&mut response).await.unwrap();
+    assert_eq!(response, payload);
+  })
+  .await
+  .unwrap();
+}
+
+fn identified_fixture(json: &str) -> Command {
+  use std::fmt::Write as _;
+  let size = u32::try_from(json.len())
+    .unwrap()
+    .to_be_bytes()
+    .iter()
+    .fold(String::new(), |mut out, byte| {
+      write!(out, "\\{byte:03o}").unwrap();
+      out
+    });
+  let mut command = fixture(
+    "printf 'ctl-ssh-v2\n'; printf '%b' \"$CTL_TEST_IDENTITY_SIZE\"; printf '%s' \"$CTL_TEST_IDENTITY_JSON\"; cat",
+    "identified-transport.ps1",
+  );
+  command
+    .env("CTL_TEST_IDENTITY_SIZE", size)
+    .env("CTL_TEST_IDENTITY_JSON", json);
+  command
+}
+
+#[tokio::test]
+async fn identified_transport_rejects_old_agents_and_invalid_metadata() {
+  timeout(TEST_TIMEOUT, async {
+    let legacy = fixture("printf 'ctl-ssh-v1\n'; cat", "echo-transport.ps1");
+    assert!(matches!(
+      start_ssh_transport_identified(legacy, true).await,
+      Err(CoreError::IdentityUnsupported)
+    ));
+    let malformed = identified_fixture("{}");
+    assert!(matches!(
+      start_ssh_transport_identified(malformed, true).await,
+      Err(CoreError::RemoteIdentity(_))
+    ));
+  })
+  .await
+  .unwrap();
+}

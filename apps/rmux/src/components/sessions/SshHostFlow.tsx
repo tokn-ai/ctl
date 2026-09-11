@@ -17,6 +17,7 @@ import {
 } from "../../lib/tauri";
 import type {
   ConnectionTarget,
+  RemoteIdentity,
   SshHostDefinition,
   SshHostStorage,
   SshPrompt,
@@ -27,12 +28,20 @@ interface SshHostFlowProps {
   suggestions: readonly string[];
   warning: string | null;
   target?: ConnectionTarget;
-  onActivateHost(destination: string): boolean | Promise<boolean>;
+  onVerified(
+    target: ConnectionTarget,
+    remote_info: RemoteIdentity,
+  ): Promise<ConnectionTarget | null>;
+  onActivateHost(
+    destination: string,
+    remote_info: RemoteIdentity,
+  ): boolean | Promise<boolean>;
   onSaveHost(
     definition: SshHostDefinition,
     storage: SshHostStorage,
+    remote_info: RemoteIdentity,
   ): Promise<void>;
-  onConnected(): void;
+  onConnected(target: ConnectionTarget): void;
   onClose(): void;
 }
 
@@ -52,6 +61,7 @@ export function SshHostFlow({
   warning,
   target,
   onActivateHost,
+  onVerified,
   onSaveHost,
   onConnected,
   onClose,
@@ -72,6 +82,8 @@ export function SshHostFlow({
   const [canInstallAgent, setCanInstallAgent] = useState(false);
   const [install_progress, setInstallProgress] = useState<RemoteAgentInstallProgress | null>(null);
   const attemptRef = useRef<string | null>(null);
+  const identityRef = useRef<RemoteIdentity | null>(null);
+  const [needsUpdate, setNeedsUpdate] = useState(false);
   const candidateRef = useRef<ConnectionTarget | null>(target ?? null);
   const configuredRef = useRef(false);
   const closedRef = useRef(false);
@@ -117,17 +129,21 @@ export function SshHostFlow({
     setPrompt(null);
     setStep("progress");
     try {
-      await probeSshHost(candidate, attempt, (next) => {
+      const remote_info = await probeSshHost(candidate, attempt, (next) => {
         if (attemptRef.current === attempt && !closedRef.current)
           setPrompt(next);
       });
       if (attemptRef.current !== attempt || closedRef.current) return;
       setPrompt(null);
-      if (target) {
-        onConnected();
+      identityRef.current = remote_info;
+      setSaving(true);
+      const recovered = await onVerified(candidate, remote_info);
+      if (attemptRef.current !== attempt || closedRef.current) return;
+      if (recovered || target) {
+        onConnected(recovered ?? target!);
         onClose();
       } else if (configuredRef.current && candidate.kind === "ssh") {
-        if (!(await onActivateHost(candidate.destination)))
+        if (!(await onActivateHost(candidate.destination, remote_info)))
           throw new Error("That SSH host is already active.");
         if (closedRef.current) return;
         onClose();
@@ -141,8 +157,12 @@ export function SshHostFlow({
       attemptRef.current = null;
       setPrompt(null);
       setError(errorMessage(failure));
-      setCanInstallAgent(errorCode(failure) === "ctl_agent_not_found");
+      const update = errorCode(failure) === "ctl_agent_identity_unsupported";
+      setNeedsUpdate(update);
+      setCanInstallAgent(update || errorCode(failure) === "ctl_agent_not_found");
       setStep("retry");
+    } finally {
+      if (!closedRef.current) setSaving(false);
     }
   }
 
@@ -203,7 +223,8 @@ export function SshHostFlow({
     setSaving(true);
     setError(null);
     try {
-      await onSaveHost(definition, storage);
+      if (!identityRef.current) throw new Error("Connect to the host before saving it.");
+      await onSaveHost(definition, storage, identityRef.current);
       uncommittedTargetRef.current = null;
       if (!closedRef.current) onClose();
     } catch (failure) {
@@ -354,7 +375,9 @@ export function SshHostFlow({
       title = step === "retry" ? "Could not connect" : "Connect host";
       description =
         step === "retry" && canInstallAgent
-          ? "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually."
+          ? (needsUpdate
+            ? "Update the remote components to identify this environment and recover it across address changes."
+            : "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually.")
           : "OpenSSH will ask for host verification or authentication if needed.";
       mode = {
         kind: "pick",
@@ -363,7 +386,7 @@ export function SshHostFlow({
             ? [
                 {
                   id: "install_agent",
-                  label: "Install remote components",
+                  label: needsUpdate ? "Update remote components" : "Install remote components",
                   detail: "Install the bundled ctl-agent, rmuxd, and taskd for this user.",
                 },
               ]

@@ -1,6 +1,6 @@
 set -eu
 umask 077
-base="${XDG_DATA_HOME:-$HOME/.local/share}/ctl"
+base="$HOME/.tokn/ctl"
 versions="$base/versions"
 destination="$versions/__BUNDLE_ID__"
 temporary="$versions/.install-__BUNDLE_ID__-$$"

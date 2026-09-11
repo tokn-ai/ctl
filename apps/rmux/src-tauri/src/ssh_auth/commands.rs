@@ -28,7 +28,7 @@ pub async fn probe_ssh_host(
   window: WebviewWindow,
   request: ProbeRequest,
   on_prompt: Channel<SshPromptDto>,
-) -> CommandResult<()> {
+) -> CommandResult<ctl_proto::RemoteIdentity> {
   super::probe(
     window.label().into(),
     request.attempt_id,

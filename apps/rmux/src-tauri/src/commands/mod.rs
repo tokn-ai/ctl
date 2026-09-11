@@ -460,6 +460,7 @@ mod tests {
     let destination = std::env::var("RMUX_TEST_SSH_TARGET")
       .expect("set RMUX_TEST_SSH_TARGET to an OpenSSH destination");
     let target = ConnectionTargetDto::Ssh {
+      remote_info: None,
       destination,
       hostname: std::env::var("RMUX_TEST_SSH_HOSTNAME").ok(),
       user: std::env::var("RMUX_TEST_SSH_USER").ok(),

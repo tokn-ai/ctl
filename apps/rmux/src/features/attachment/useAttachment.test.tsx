@@ -172,6 +172,27 @@ afterEach(async () => {
 });
 
 describe("opened session cache", () => {
+  it("moves an alias cache to the recovered host ID with its buffer and resume cursor", async () => {
+    const previous: SessionSummary = {
+      ...first,
+      target: { kind: "ssh", host_id: "alias", destination: "new-ip" },
+    };
+    const recovered: SessionSummary = {
+      ...previous,
+      target: { kind: "ssh", host_id: "canonical", destination: "new-ip" },
+    };
+    renderer.activateSession(previous);
+    await renderer.write(new TextEncoder().encode("cached remote output"), "20");
+    const cached = visibleTerminal();
+    renderer.remapSessions(new Map([[sessionKey(previous), sessionKey(recovered)]]));
+    renderer.retainSessions(new Set([sessionKey(recovered)]));
+    renderer.activateSession(recovered);
+    expect(visibleTerminal()).toBe(cached);
+    expect(line(cached.terminal)).toBe("cached remote output");
+    expect(renderer.resumeSequence()).toBe("20");
+    expect(cached.dispose).not.toHaveBeenCalled();
+  });
+
   it("reactivates the same buffer and resumes only missing output, including sequence zero", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first); });

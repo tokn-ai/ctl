@@ -85,7 +85,8 @@ impl BundleFixture {
     let mut command = Command::new("sh");
     command
       .args(["-c", &install_script("0.1.0-test", expected_bytes).unwrap()])
-      .env("XDG_DATA_HOME", self.directory.join("data"));
+      .env("HOME", self.directory.join("home"))
+      .env("XDG_DATA_HOME", self.directory.join("unused-data"));
     command
   }
 }
@@ -104,6 +105,10 @@ async fn installer_reports_receiver_progress_and_activates_executable_components
   use std::sync::Mutex;
   let fixture = BundleFixture::new();
   let events = Mutex::new(Vec::new());
+  let identity_path = fixture.directory.join("home/.tokn/ctl/remote-id");
+  std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+  let remote_id = uuid::Uuid::new_v4().to_string();
+  std::fs::write(&identity_path, &remote_id).unwrap();
   tokio::time::timeout(
     std::time::Duration::from_secs(10),
     run_install_command(
@@ -125,7 +130,9 @@ async fn installer_reports_receiver_progress_and_activates_executable_components
   }));
   assert!(events.contains(&RemoteInstallEvent::Extracting));
   assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
-  let current = fixture.directory.join("data/ctl/current");
+  assert_eq!(std::fs::read_to_string(identity_path).unwrap(), remote_id);
+  assert!(!fixture.directory.join("unused-data").exists());
+  let current = fixture.directory.join("home/.tokn/ctl/current");
   assert_eq!(
     std::fs::read_link(&current).unwrap(),
     std::path::PathBuf::from("versions/0.1.0-test")
@@ -162,9 +169,9 @@ async fn truncated_upload_does_not_activate_and_cleans_temporary_files() {
   .await
   .unwrap();
   assert!(matches!(result, Err(CoreError::SshCommandFailed { .. })));
-  assert!(!fixture.directory.join("data/ctl/current").exists());
+  assert!(!fixture.directory.join("home/.tokn/ctl/current").exists());
   assert_eq!(
-    std::fs::read_dir(fixture.directory.join("data/ctl/versions"))
+    std::fs::read_dir(fixture.directory.join("home/.tokn/ctl/versions"))
       .unwrap()
       .count(),
     0

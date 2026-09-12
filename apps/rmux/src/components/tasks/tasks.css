@@ -605,9 +605,6 @@
   overflow-wrap: anywhere;
 }
 @media (max-width: 820px) {
-  .app-shell {
-    grid-template-columns: 234px minmax(0, 1fr);
-  }
   .task-dialog-layer .task-editor {
     padding: 20px;
   }

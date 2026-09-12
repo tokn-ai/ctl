@@ -154,7 +154,9 @@ export function SessionSidebar({
                   type="button"
                   onClick={() => onConnectHost(target)}
                   disabled={target.kind === "local"}
-                  title={`Connect to ${targetLabel(target)}`}
+                  title={target.kind === "ssh" && target.remote_info
+                    ? `Connect to ${targetLabel(target)}\nAgent ${target.remote_info.agent_version}\nRemote ID: ${target.remote_info.remote_id}${target.remote_info.bundle ? `\nBundle: ${target.remote_info.bundle.bundle_id}\nRevision: ${target.remote_info.bundle.git_revision}` : ""}`
+                    : `Connect to ${targetLabel(target)}`}
                 >
                   {targetLabel(target)}
                 </button>

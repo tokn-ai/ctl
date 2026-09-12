@@ -447,3 +447,48 @@ fn draft_revision_distinguishes_unknown_base_from_new_definition() {
     DraftBaseRevision::Saved("saved-revision".into())
   );
 }
+
+#[test]
+fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_sessions() {
+  let fixture = Fixture::new();
+  let identity = ctl_proto::RemoteIdentity {
+    remote_id: uuid::Uuid::new_v4().to_string(),
+    agent_version: "0.1.0".into(),
+    bundle: Some(Box::new(ctl_proto::BundleVersion {
+      app_version: "0.1.0".into(),
+      bundle_id: "development-abc".into(),
+      git_revision: "abc".into(),
+      target_triple: "x86_64-unknown-linux-musl".into(),
+    })),
+  };
+  let mut document = populated();
+  if let ConnectionTargetDto::Ssh { remote_info, .. } = &mut document.hosts[1].target {
+    *remote_info = Some(identity);
+  }
+  let saved = fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load().unwrap(), saved);
+  let mut invalid = saved.document.clone();
+  if let ConnectionTargetDto::Ssh {
+    remote_info: Some(info),
+    ..
+  } = &mut invalid.hosts[1].target
+  {
+    info.remote_id = "bad-id".into();
+  }
+  assert!(
+    fixture
+      .repository()
+      .update(UpdateWorkspaceRequest {
+        expected_revision: saved.revision.clone(),
+        document: invalid
+      })
+      .is_err()
+  );
+  assert_eq!(fixture.repository().load().unwrap(), saved);
+}

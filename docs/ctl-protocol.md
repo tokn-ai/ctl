@@ -5,7 +5,11 @@ remote command. There is no separate network listener, TLS identity, pairing for
 or outer application-authentication protocol. A fixed `ctl-ssh-v1` readiness
 marker precedes the raw stream so startup output cannot be mistaken for a
 service protocol frame. The selected service performs its own protocol handshake
-after this transport marker.
+after this transport marker. Desktop connections append `--identity` and use
+`ctl-ssh-v2`, followed by bounded identity/version metadata before the service
+handshake. The remote generates its UUID in `~/.tokn/ctl/remote-id`; Unix bundles
+live in `~/.tokn/ctl/versions` and are selected by `~/.tokn/ctl/current`. See
+[remote identity and recovery](rmux-workspace.md#remote-identity-and-address-recovery).
 
 ## Connection command
 
@@ -22,7 +26,7 @@ ssh -T \
   -o PermitLocalCommand=no \
   -o RemoteCommand=none \
   -- <destination> \
-  'PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect'
+  'PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect'
 ```
 
 With `--remote-platform windows`, the suffix is `ctl-agent.exe connect` instead
@@ -36,8 +40,8 @@ fixed service suffix:
 
 | Domain | Unix remote command | Windows remote command |
 | --- | --- | --- |
-| rmux | `PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect` | `ctl-agent.exe connect` |
-| task | `PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
+| rmux | `PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect` | `ctl-agent.exe connect` |
+| task | `PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
 
 The service is an enum selected by the command domain. Neither a socket path nor
 an arbitrary service or shell command is accepted from the client.
@@ -99,8 +103,8 @@ output is safe.
 
 ## Authorization boundary
 
-SSH authenticates the device and user. `ctl-agent` adds no identity, authorization,
-or capability registry. It runs with the SSH account's existing authority and
+SSH authenticates the device and user. `ctl-agent` adds no authorization or
+capability registry; its environment ID only associates saved hosts with sessions. It runs with the SSH account's existing authority and
 can reach only that account's fixed rmux data or task endpoint.
 
 This does not grant a successfully authenticated SSH account new local
@@ -108,8 +112,8 @@ authority: the same account can already connect to those owner-only sockets.
 Task access permits registering and running commands with that account's
 authority. Deployments using an SSH forced command must explicitly allow the
 task form as well as the rmux form to enable remote task execution. The Docker
-target allowlists exactly the two Unix commands above and never evaluates the
-supplied SSH command as shell input.
+target allowlists the two Unix commands above, including their fixed `--identity`
+forms, and never evaluates the supplied SSH command as shell input.
 
 ## Reconnect lifecycle
 

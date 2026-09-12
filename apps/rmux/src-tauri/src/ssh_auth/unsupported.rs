@@ -6,7 +6,7 @@ mod verification;
 
 use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
-use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_ssh_tunnel_interactive};
+use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
 use serde::Serialize;
 use tauri::ipc::Channel;
 
@@ -20,6 +20,12 @@ pub fn helper_exit_code() -> Option<i32> {
 }
 
 pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
+  connect_identified(target).await.map(|(stream, _)| stream)
+}
+
+async fn connect_identified(
+  target: &ConnectionTargetDto,
+) -> CommandResult<(Transport, ctl_proto::RemoteIdentity)> {
   let ConnectionTarget::Ssh {
     destination,
     options,
@@ -30,10 +36,21 @@ pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
       "Select a remote SSH host.",
     ));
   };
-  open_ssh_tunnel_interactive(&destination, &options, &SshInteraction::Batch)
-    .await
-    .map(Transport::Ssh)
-    .map_err(|error| CommandErrorDto::transport(&error))
+  let stream = open_identified_ssh_service(
+    &destination,
+    &options,
+    &SshInteraction::Batch,
+    ctl_core::RemoteService::Rmux,
+  )
+  .await
+  .map_err(|error| CommandErrorDto::transport(&error))?;
+  let identity = stream
+    .remote_identity
+    .as_ref()
+    .expect("identified transport")
+    .clone();
+  target.verify_remote_identity(&identity)?;
+  Ok((Transport::Ssh(stream), identity))
 }
 
 pub async fn probe(
@@ -41,9 +58,11 @@ pub async fn probe(
   _attempt_id: String,
   target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
-) -> CommandResult<()> {
+) -> CommandResult<ctl_proto::RemoteIdentity> {
   tokio::time::timeout(std::time::Duration::from_secs(10), async {
-    verification::verify(connect(&target).await?).await
+    let (stream, identity) = connect_identified(&target).await?;
+    verification::verify(stream).await?;
+    Ok(identity)
   })
   .await
   .map_err(|_| CommandErrorDto::new("ssh_timeout", "SSH connection timed out."))?
@@ -55,6 +74,7 @@ pub async fn install_agent(
   _attempt_id: String,
   _target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
+  _on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
 ) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
   Err(CommandErrorDto::new(
     "remote_agent_install_unsupported",

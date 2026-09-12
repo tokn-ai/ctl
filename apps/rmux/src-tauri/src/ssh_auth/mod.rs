@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_ssh_tunnel_interactive};
+use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -195,15 +195,22 @@ async fn ask(context: Option<&PromptContext>, request: &HelperRequest) -> Option
 }
 
 pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
-  let secrets = registry().lock().unwrap().credentials.get(target).cloned();
-  connect_with(target, secrets, None).await
+  let secrets = registry()
+    .lock()
+    .unwrap()
+    .credentials
+    .get(&target.credential_key())
+    .cloned();
+  connect_with(target, secrets, None)
+    .await
+    .map(|(stream, _)| stream)
 }
 
 async fn connect_with(
   target: &ConnectionTargetDto,
   secrets: Option<Secrets>,
   prompts: Option<PromptContext>,
-) -> CommandResult<Transport> {
+) -> CommandResult<(Transport, ctl_proto::RemoteIdentity)> {
   let ConnectionTarget::Ssh {
     destination,
     options,
@@ -225,12 +232,23 @@ async fn connect_with(
     .map(Bridge::interaction)
     .transpose()?
     .unwrap_or(SshInteraction::Batch);
-  let stream = open_ssh_tunnel_interactive(&destination, &options, &interaction)
-    .await
-    .map_err(|error| CommandErrorDto::transport(&error))?;
+  let stream = open_identified_ssh_service(
+    &destination,
+    &options,
+    &interaction,
+    ctl_core::RemoteService::Rmux,
+  )
+  .await
+  .map_err(|error| CommandErrorDto::transport(&error))?;
   // Authentication is complete; removing the bridge also closes the secret-delivery capability.
   drop(bridge);
-  Ok(Transport::Ssh(stream))
+  let identity = stream
+    .remote_identity
+    .as_ref()
+    .expect("identified transport")
+    .clone();
+  target.verify_remote_identity(&identity)?;
+  Ok((Transport::Ssh(stream), identity))
 }
 
 struct AttemptGuard((String, String));
@@ -245,7 +263,7 @@ pub async fn probe(
   attempt_id: String,
   target: ConnectionTargetDto,
   channel: Channel<SshPromptDto>,
-) -> CommandResult<()> {
+) -> CommandResult<ctl_proto::RemoteIdentity> {
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
@@ -267,8 +285,9 @@ pub async fn probe(
   let secrets = Secrets::default();
   let context = PromptContext { attempt, channel };
   let establish = async {
-    let stream = connect_with(&target, Some(secrets.clone()), Some(context)).await?;
-    verification::verify(stream).await
+    let (stream, identity) = connect_with(&target, Some(secrets.clone()), Some(context)).await?;
+    verification::verify(stream).await?;
+    Ok(identity)
   };
   let result = tokio::select! {
     result = tokio::time::timeout(Duration::from_mins(3), establish) => {
@@ -277,21 +296,24 @@ pub async fn probe(
     _ = cancelled.changed() => Err(CommandErrorDto::new("ssh_cancelled", "SSH connection cancelled.")),
   };
   match result {
-    Ok(()) => {
+    Ok(identity) => {
       registry()
         .lock()
         .unwrap()
         .credentials
-        .insert(target, secrets);
-      Ok(())
+        .insert(target.credential_key(), secrets);
+      Ok(identity)
     }
     Err(error) => {
-      if error.code == "ctl_agent_not_found" {
+      if matches!(
+        error.code.as_str(),
+        "ctl_agent_not_found" | "ctl_agent_identity_unsupported"
+      ) {
         registry()
           .lock()
           .unwrap()
           .credentials
-          .insert(target, secrets);
+          .insert(target.credential_key(), secrets);
       }
       Err(error)
     }
@@ -327,7 +349,7 @@ pub async fn install_agent(
     .lock()
     .unwrap()
     .credentials
-    .get(&target)
+    .get(&target.credential_key())
     .cloned()
     .unwrap_or_default();
   // The preceding probe authenticated successfully before discovering that
@@ -367,7 +389,7 @@ pub async fn install_agent(
     .lock()
     .unwrap()
     .credentials
-    .insert(target, secrets);
+    .insert(target.credential_key(), secrets);
   Ok(installed)
 }
 
@@ -430,11 +452,16 @@ pub fn cancel_window(window: &str) {
 }
 
 pub fn forget(target: &ConnectionTargetDto) {
-  registry().lock().unwrap().credentials.remove(target);
+  registry()
+    .lock()
+    .unwrap()
+    .credentials
+    .remove(&target.credential_key());
 }
 
 pub fn remember_configured_alias(definition: &crate::ssh_config::SshHostDefinition) {
   let source = ConnectionTargetDto::Ssh {
+    remote_info: None,
     destination: definition.alias.clone(),
     hostname: Some(definition.hostname.clone()),
     user: definition.user.clone(),
@@ -442,6 +469,7 @@ pub fn remember_configured_alias(definition: &crate::ssh_config::SshHostDefiniti
     identity_file: definition.identity_file.clone(),
   };
   let alias = ConnectionTargetDto::Ssh {
+    remote_info: None,
     destination: definition.alias.clone(),
     hostname: None,
     user: None,

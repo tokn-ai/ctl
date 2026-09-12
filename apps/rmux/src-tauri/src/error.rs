@@ -32,6 +32,10 @@ impl CommandErrorDto {
 
   pub fn transport(error: &CoreError) -> Self {
     match error {
+      CoreError::IdentityUnsupported => {
+        Self::new("ctl_agent_identity_unsupported", error.to_string())
+      }
+      CoreError::RemoteIdentity(_) => Self::new("invalid_remote_identity", error.to_string()),
       CoreError::InvalidSshDestination(_) | CoreError::InvalidSshOption(_) => {
         Self::new("invalid_ssh_destination", error.to_string())
       }
@@ -48,6 +52,8 @@ impl CommandErrorDto {
           "ssh_host_key_failed"
         } else if lower.contains("permission denied") {
           "ssh_authentication_failed"
+        } else if lower.contains("--identity") && lower.contains("unexpected argument") {
+          "ctl_agent_identity_unsupported"
         } else if lower.contains("ctl-agent")
           && (lower.contains("not found") || lower.contains("no such file"))
         {
@@ -91,6 +97,18 @@ pub fn protocol_error_code(code: &ErrorCode) -> &'static str {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn old_agents_offer_an_update_without_masking_authentication_failures() {
+    let error = CommandErrorDto::transport(&CoreError::SshStartup(
+      "error: unexpected argument '--identity' found\nUsage: ctl-agent connect [OPTIONS]".into(),
+    ));
+    assert_eq!(error.code, "ctl_agent_identity_unsupported");
+    let error = CommandErrorDto::transport(&CoreError::SshStartup(
+      "Permission denied (publickey).".into(),
+    ));
+    assert_eq!(error.code, "ssh_authentication_failed");
+  }
 
   #[test]
   fn client_server_errors_preserve_the_protocol_code() {

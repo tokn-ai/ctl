@@ -97,6 +97,13 @@ export function useWorkspace() {
       });
   }, []);
 
+  const replaceView = useCallback((next: WorkspaceView) => {
+    if (!writerRef.current || closingRef.current) throw new Error("Workspace is not available.");
+    viewRef.current = next;
+    setView(next);
+    return persist();
+  }, [persist]);
+
   const update = useCallback(
     <K extends keyof WorkspaceView>(
       key: K,
@@ -196,6 +203,7 @@ export function useWorkspace() {
   return {
     ...view,
     viewRef,
+    replaceView,
     ready,
     saving,
     closing,

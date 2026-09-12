@@ -27,6 +27,7 @@ async fn docker_workspace_survives_client_restart() -> Result<(), String> {
     |_| "Set RMUX_WORKSPACE_TEST_IDENTITY to the development container's SSH identity path.",
   )?;
   let target = ConnectionTargetDto::Ssh {
+    remote_info: None,
     destination: "workspace-smoke".into(),
     hostname: Some("127.0.0.1".into()),
     user: Some("rmux".into()),

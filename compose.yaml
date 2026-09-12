@@ -12,8 +12,10 @@ services:
         read_only: true
       - rmux_ssh_host_keys:/etc/ssh/host_keys
       - taskd_data:/var/lib/taskd
+      - ctl_data:/home/rmux/.tokn/ctl
     restart: unless-stopped
 
 volumes:
   rmux_ssh_host_keys:
   taskd_data:
+  ctl_data:

@@ -25,8 +25,7 @@ pub use ssh_install::{
 
 const SSH_PROGRAM: &str = "ssh";
 const MAX_SSH_COMMAND_OUTPUT: usize = 8192;
-const UNIX_GATEWAY_COMMAND: &str =
-  r#"PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect"#;
+const UNIX_GATEWAY_COMMAND: &str = r#"PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#;
 const UNIX_PLATFORM_PROBE_COMMAND: &str = "printf 'ctl-platform-v1\\n'; uname -s; uname -m";
 /// Remote command-shell convention, independent of the client platform.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -236,6 +235,7 @@ pub async fn open_task_transport(target: &ConnectionTarget) -> Result<TaskTransp
 /// and reap the SSH child. A fresh reconnect always creates a fresh SSH
 /// channel; OpenSSH may transparently reuse a configured control master.
 pub struct SshTransport {
+  pub remote_identity: Option<ctl_proto::RemoteIdentity>,
   stdin: ChildStdin,
   stdout: ChildStdout,
   shutdown: watch::Sender<bool>,
@@ -336,6 +336,26 @@ pub async fn open_ssh_service_interactive(
   let extra = configure_ssh_interaction(&mut command, interaction);
   command.args(extra).args(arguments);
   start_ssh_transport(command).await
+}
+
+/// Opens a service stream with identity metadata on the same SSH channel.
+///
+/// # Errors
+/// Returns validation, startup, or identity protocol errors.
+pub async fn open_identified_ssh_service(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  service: RemoteService,
+) -> Result<SshTransport, CoreError> {
+  validate_ssh_target(destination, options)?;
+  let mut command = Command::new(SSH_PROGRAM);
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command
+    .args(extra)
+    .args(ssh_service_arguments(destination, options, service))
+    .arg("--identity");
+  start_ssh_transport_identified(command, true).await
 }
 
 fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction) -> Vec<OsString> {
@@ -454,7 +474,14 @@ async fn read_bounded_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Resul
   }
 }
 
-async fn start_ssh_transport(mut command: Command) -> Result<SshTransport, CoreError> {
+async fn start_ssh_transport(command: Command) -> Result<SshTransport, CoreError> {
+  start_ssh_transport_identified(command, false).await
+}
+
+async fn start_ssh_transport_identified(
+  mut command: Command,
+  identified: bool,
+) -> Result<SshTransport, CoreError> {
   command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -469,11 +496,28 @@ async fn start_ssh_transport(mut command: Command) -> Result<SshTransport, CoreE
   if let Err(error) = stdout.read_exact(&mut preface).await {
     return Err(ssh_startup::startup_error(child, diagnostics, error).await);
   }
-  if preface != SSH_TRANSPORT_PREFACE {
+  let expected = if identified {
+    ctl_proto::IDENTITY_PREFACE
+  } else {
+    SSH_TRANSPORT_PREFACE
+  };
+  if identified && preface == SSH_TRANSPORT_PREFACE {
+    return Err(CoreError::IdentityUnsupported);
+  }
+  if preface != expected {
     let _ = child.kill().await;
     drop(diagnostics);
     return Err(CoreError::InvalidSshPreface);
   }
+  let remote_identity = if identified {
+    Some(
+      ctl_proto::read_identity(&mut stdout)
+        .await
+        .map_err(CoreError::RemoteIdentity)?,
+    )
+  } else {
+    None
+  };
   let (shutdown, mut shutdown_requested) = watch::channel(false);
 
   tokio::spawn(async move {
@@ -496,6 +540,7 @@ async fn start_ssh_transport(mut command: Command) -> Result<SshTransport, CoreE
   });
 
   Ok(SshTransport {
+    remote_identity,
     stdin,
     stdout,
     shutdown,
@@ -532,7 +577,9 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::SshCommandFailed { .. }
     | CoreError::InvalidSshCommandOutput
     | CoreError::InvalidAgentBundleId(_)
-    | CoreError::InvalidSshPreface => false,
+    | CoreError::InvalidSshPreface
+    | CoreError::IdentityUnsupported
+    | CoreError::RemoteIdentity(_) => false,
   }
 }
 
@@ -627,6 +674,10 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+  #[error("remote components do not support environment identity; update the remote components")]
+  IdentityUnsupported,
+  #[error("could not read remote identity: {0}")]
+  RemoteIdentity(#[source] io::Error),
   #[error(transparent)]
   LocalIpc(#[from] rmux_ipc::ConnectError),
   #[error(transparent)]
@@ -765,7 +816,7 @@ mod tests {
   fn managed_unix_gateway_precedes_the_legacy_path_without_user_input() {
     assert_eq!(
       UNIX_GATEWAY_COMMAND,
-      r#"PATH="${XDG_DATA_HOME:-$HOME/.local/share}/ctl/current:$PATH" exec ctl-agent connect"#
+      r#"PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#
     );
     assert!(!UNIX_GATEWAY_COMMAND.contains("workstation"));
   }

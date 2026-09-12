@@ -198,8 +198,10 @@ impl WorkspaceDocument {
           user,
           port,
           identity_file,
+          remote_info,
         } => {
           if host.host_id == "local"
+            || remote_info.as_ref().is_some_and(|info| !info.is_valid())
             || !valid_text(destination)
             || !destinations.insert(destination)
             || *port == Some(0)

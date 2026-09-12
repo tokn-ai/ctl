@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 
 export interface QuickInputSuggestions {
   label: string;
@@ -38,15 +38,26 @@ export function QuickInputField({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const listId = useId();
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const suggestions = mode.secret ? undefined : mode.suggestions;
-  const query = value.trim().toLowerCase();
+  const query = mode.secret ? "" : value.trim().toLowerCase();
   const items =
     suggestions?.items.filter((item) =>
       [item.label, item.id].some((text) => text.toLowerCase().includes(query)),
     ) ?? [];
   const selectedIndex = items.findIndex((item) => item.id === selectedId);
   const selected = items[selectedIndex];
-  if (submissionValue) submissionValue.current = () => selected?.id ?? value;
+  if (submissionValue)
+    submissionValue.current = () =>
+      mode.secret
+        ? (inputRef.current?.value ?? "")
+        : (selected?.id ?? value);
+  useEffect(
+    () => () => {
+      if (mode.secret && inputRef.current) inputRef.current.value = "";
+    },
+    [mode.secret],
+  );
   const status = suggestions?.loading
     ? (suggestions.loading_message ?? "Loading suggestions…")
     : items.length === 0 && suggestions
@@ -61,12 +72,17 @@ export function QuickInputField({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          onSubmit(selected?.id ?? value);
+          const submitted = mode.secret
+            ? (inputRef.current?.value ?? "")
+            : (selected?.id ?? value);
+          onSubmit(submitted);
+          if (mode.secret && inputRef.current) inputRef.current.value = "";
         }}
       >
         <div className="command-palette-input-row">
           <span aria-hidden="true">›</span>
           <input
+            ref={inputRef}
             aria-label={mode.label}
             type={mode.secret ? "password" : "text"}
             role={suggestions ? "combobox" : undefined}
@@ -76,8 +92,10 @@ export function QuickInputField({
             aria-activedescendant={
               selected ? `${listId}-${selectedIndex}` : undefined
             }
-            value={value}
+            value={mode.secret ? undefined : value}
+            defaultValue={mode.secret ? (mode.initial_value ?? "") : undefined}
             onChange={(event) => {
+              if (mode.secret) return;
               setValue(event.currentTarget.value);
               setSelectedId(null);
               onChange?.(event.currentTarget.value);

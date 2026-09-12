@@ -67,7 +67,7 @@ async fn bridge_is_private_checks_capabilities_and_removes_its_socket() {
     "test@host's password:".into(),
     Zeroizing::new("synthetic-secret".into()),
   );
-  let bridge = Bridge::start(secrets, None, true).unwrap();
+  let bridge = Bridge::start(secrets, None, None, true).unwrap();
   let directory = bridge.directory.clone();
   let socket = bridge.socket.clone();
   assert_eq!(
@@ -105,7 +105,8 @@ async fn installer_bridge_reuses_a_verified_secret_without_hiding_new_challenges
     Zeroizing::new("verified-secret".into()),
   );
   let (context, mut prompts) = prompt_context();
-  let bridge = Bridge::start(secrets, Some(context), true).unwrap();
+  let attempt = context.attempt.clone();
+  let bridge = Bridge::start(secrets, None, Some(context), true).unwrap();
   assert_eq!(
     request(bridge.socket.clone(), bridge.token.clone(), false)
       .await
@@ -113,6 +114,24 @@ async fn installer_bridge_reuses_a_verified_secret_without_hiding_new_challenges
     Some("verified-secret")
   );
   assert!(prompts.try_recv().is_err());
+
+  let socket = bridge.socket.clone();
+  let token = bridge.token.clone();
+  let retry = tokio::spawn(async move { request(socket, token, false).await });
+  let prompt = timeout(Duration::from_secs(5), prompts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(prompt["message"], "test@host's password:");
+  attempt
+    .responses
+    .lock()
+    .unwrap()
+    .remove(prompt["prompt_id"].as_str().unwrap())
+    .unwrap()
+    .send(Some(Zeroizing::new("replacement-secret".into())))
+    .unwrap();
+  assert_eq!(retry.await.unwrap().as_deref(), Some("replacement-secret"));
 
   let new_challenge = HelperRequest {
     token: bridge.token.clone(),
@@ -165,7 +184,10 @@ async fn prompt_responses_are_window_scoped_single_use_and_cancellable() {
   assert!(respond(&key.0, &key.1, prompt_id, Some("invalid\nresponse".into())).is_err());
   respond(&key.0, &key.1, prompt_id, Some("synthetic-secret".into())).unwrap();
   assert!(respond(&key.0, &key.1, prompt_id, None).is_err());
-  assert_eq!(task.await.unwrap().as_deref(), Some("synthetic-secret"));
+  assert_eq!(
+    task.await.unwrap().as_deref().map(String::as_str),
+    Some("synthetic-secret")
+  );
   cancel_window(&key.0);
   cancelled.changed().await.unwrap();
   assert!(*cancelled.borrow());
@@ -181,7 +203,7 @@ async fn built_binary_delivers_a_secret_without_starting_tauri() {
     "Password:".into(),
     Zeroizing::new("synthetic-secret".into()),
   );
-  let bridge = Bridge::start(secrets.clone(), None, true).unwrap();
+  let bridge = Bridge::start(secrets.clone(), None, None, true).unwrap();
   let program = std::env::var("RMUX_TEST_ASKPASS_PROGRAM").unwrap();
   let mut command = Command::new(program);
   command
@@ -216,7 +238,7 @@ async fn openssh_host_verification_uses_the_prompt_bridge() {
   let fingerprint = std::env::var("RMUX_TEST_SSH_FINGERPRINT").unwrap();
   let (context, mut prompts) = prompt_context();
   let attempt = context.attempt.clone();
-  let bridge = Bridge::start(Secrets::default(), Some(context), false).unwrap();
+  let bridge = Bridge::start(Secrets::default(), None, Some(context), false).unwrap();
   let known_hosts = bridge.directory.join("known_hosts");
   let mut child = Command::new("ssh")
     .args([
@@ -263,7 +285,7 @@ async fn openssh_host_verification_uses_the_prompt_bridge() {
     .unwrap()
     .remove(prompt["prompt_id"].as_str().unwrap())
     .unwrap()
-    .send(Some("yes".into()))
+    .send(Some(Zeroizing::new("yes".into())))
     .unwrap();
   let mut marker = [0_u8; 11];
   timeout(

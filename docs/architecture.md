@@ -159,11 +159,14 @@ the same app binary (in helper mode, before Tauri starts) to one connection
 attempt. Prompt replies are window/attempt-scoped and single-use; cancellation
 or window destruction terminates the SSH attempt and removes the socket.
 Host trust is confirmed explicitly and remains in OpenSSH's known-hosts files.
-Passwords/passphrases are retained only in native process memory for later
-connections to the same target; other interactive responses are not cached.
-Background connections use cached credentials or batch mode, never unsolicited
-dialogs. SSH startup diagnostics are bounded and returned to the frontend
-instead of being lost behind a generic missing-transport-marker error.
+On macOS, verified passwords/passphrases are stored in the device-local Data
+Protection Keychain under `biometryCurrentSet`; retrieval requires Touch ID and
+changing the enrolled fingerprints invalidates the item. Plaintext is held only
+while satisfying an OpenSSH prompt and is wrapped in zeroizing native buffers.
+On Linux, reusable secrets remain process-memory-only. Other interactive
+responses are not stored. SSH startup diagnostics are bounded and returned to
+the frontend instead of being lost behind a generic missing-transport-marker
+error.
 
 Native workspace writes are serialized, revision-checked across app processes,
 and atomically replaced with owner-only files. Invalid/future files are

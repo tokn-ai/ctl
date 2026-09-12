@@ -1,11 +1,14 @@
-//! OpenSSH owns authentication and host verification. This module only supplies
-//! its askpass UI through an ephemeral owner-only socket; no secret is persisted.
+//! OpenSSH owns authentication and host verification. This module supplies its
+//! askpass UI through an ephemeral owner-only socket. macOS stores verified
+//! reusable secrets in the device-local, Touch ID-protected Keychain.
 
 pub mod commands;
 mod helper;
+#[cfg(target_os = "macos")]
+mod keychain;
 mod verification;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -28,6 +31,7 @@ type Secrets = Arc<Mutex<HashMap<String, Zeroizing<String>>>>;
 
 #[derive(Default)]
 struct Registry {
+  #[cfg(not(target_os = "macos"))]
   credentials: HashMap<ConnectionTargetDto, Secrets>,
   attempts: HashMap<(String, String), Arc<Attempt>>,
 }
@@ -39,7 +43,7 @@ fn registry() -> &'static Mutex<Registry> {
 
 struct Attempt {
   cancel: watch::Sender<bool>,
-  responses: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
+  responses: Mutex<HashMap<String, oneshot::Sender<Option<Zeroizing<String>>>>>,
 }
 
 #[derive(Clone)]
@@ -80,6 +84,7 @@ impl Drop for Bridge {
 impl Bridge {
   fn start(
     secrets: Secrets,
+    credential_target: Option<ConnectionTargetDto>,
     prompts: Option<PromptContext>,
     reuse_cached_secrets: bool,
   ) -> CommandResult<Self> {
@@ -102,6 +107,7 @@ impl Bridge {
     let token = uuid::Uuid::new_v4().to_string();
     let expected_token = token.clone();
     let task = tokio::spawn(async move {
+      let mut attempted_stored_secrets = HashSet::new();
       while let Ok((stream, _)) = listener.accept().await {
         let (reader, mut writer) = stream.into_split();
         let mut line = String::new();
@@ -120,18 +126,26 @@ impl Bridge {
           continue;
         }
         let cacheable = !request.confirm && cacheable_prompt(&request.message);
-        // An explicit interactive attempt must ask again after a rejected
-        // password, rather than automatically repeating the incorrect value.
-        let cached = if cacheable && reuse_cached_secrets {
-          secrets.lock().unwrap().get(&request.message).cloned()
+        // Try a stored secret only once so a rejected value is not replayed.
+        let cached = if cacheable
+          && reuse_cached_secrets
+          && attempted_stored_secrets.insert(request.message.clone())
+        {
+          stored_secret(credential_target.as_ref(), &request.message, &secrets).await
         } else {
-          None
+          Ok(None)
         };
-        let response = match cached {
-          Some(secret) => Some(secret),
-          None => ask(prompts.as_ref(), &request).await.map(Zeroizing::new),
+        let (response, newly_entered) = match cached {
+          Ok(Some(secret)) => (Some(secret), false),
+          Ok(None) => (ask(prompts.as_ref(), &request).await, true),
+          // A denied or cancelled Touch ID request must not fall back to an
+          // application password field.
+          Err(_) => (None, false),
         };
-        if cacheable && let Some(secret) = &response {
+        if cacheable
+          && newly_entered
+          && let Some(secret) = &response
+        {
           secrets
             .lock()
             .unwrap()
@@ -161,12 +175,39 @@ impl Bridge {
   }
 }
 
+#[cfg(target_os = "macos")]
+async fn stored_secret(
+  target: Option<&ConnectionTargetDto>,
+  prompt: &str,
+  secrets: &Secrets,
+) -> CommandResult<Option<Zeroizing<String>>> {
+  let Some(target) = target.cloned() else {
+    return Ok(secrets.lock().unwrap().get(prompt).cloned());
+  };
+  let prompt = prompt.to_owned();
+  tokio::task::spawn_blocking(move || keychain::load(&target, &prompt))
+    .await
+    .map_err(CommandErrorDto::backend)?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn stored_secret(
+  _target: Option<&ConnectionTargetDto>,
+  prompt: &str,
+  secrets: &Secrets,
+) -> CommandResult<Option<Zeroizing<String>>> {
+  Ok(secrets.lock().unwrap().get(prompt).cloned())
+}
+
 fn cacheable_prompt(message: &str) -> bool {
   let lower = message.to_lowercase();
   lower.contains("password:") || lower.starts_with("enter passphrase for key")
 }
 
-async fn ask(context: Option<&PromptContext>, request: &HelperRequest) -> Option<String> {
+async fn ask(
+  context: Option<&PromptContext>,
+  request: &HelperRequest,
+) -> Option<Zeroizing<String>> {
   let context = context?;
   let prompt_id = uuid::Uuid::new_v4().to_string();
   let (sender, receiver) = oneshot::channel();
@@ -195,6 +236,9 @@ async fn ask(context: Option<&PromptContext>, request: &HelperRequest) -> Option
 }
 
 pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
+  #[cfg(target_os = "macos")]
+  let secrets = Some(Secrets::default());
+  #[cfg(not(target_os = "macos"))]
   let secrets = registry()
     .lock()
     .unwrap()
@@ -223,8 +267,13 @@ async fn connect_with(
   };
   let bridge = secrets
     .map(|secrets| {
-      let reuse_cached_secrets = prompts.is_none();
-      Bridge::start(secrets, prompts, reuse_cached_secrets)
+      let reuse_cached_secrets = prompts.is_none() || cfg!(target_os = "macos");
+      Bridge::start(
+        secrets,
+        Some(target.credential_key()),
+        prompts,
+        reuse_cached_secrets,
+      )
     })
     .transpose()?;
   let interaction = bridge
@@ -281,11 +330,14 @@ pub async fn probe(
     registry.attempts.insert(key.clone(), attempt.clone());
   }
   let _guard = AttemptGuard(key);
-  // Fresh prompts on an explicit retry avoid replaying an incorrect cached password.
+  // A stored secret is tried at most once; if OpenSSH rejects it, its next
+  // prompt reaches the UI so the user can replace the credential.
   let secrets = Secrets::default();
   let context = PromptContext { attempt, channel };
   let establish = async {
     let (stream, identity) = connect_with(&target, Some(secrets.clone()), Some(context)).await?;
+    #[cfg(target_os = "macos")]
+    persist_credentials(target.clone(), secrets.clone()).await?;
     verification::verify(stream).await?;
     Ok(identity)
   };
@@ -297,6 +349,7 @@ pub async fn probe(
   };
   match result {
     Ok(identity) => {
+      #[cfg(not(target_os = "macos"))]
       registry()
         .lock()
         .unwrap()
@@ -305,6 +358,7 @@ pub async fn probe(
       Ok(identity)
     }
     Err(error) => {
+      #[cfg(not(target_os = "macos"))]
       if matches!(
         error.code.as_str(),
         "ctl_agent_not_found" | "ctl_agent_identity_unsupported"
@@ -345,6 +399,9 @@ pub async fn install_agent(
     registry.attempts.insert(key.clone(), attempt.clone());
   }
   let _guard = AttemptGuard(key);
+  #[cfg(target_os = "macos")]
+  let secrets = Secrets::default();
+  #[cfg(not(target_os = "macos"))]
   let secrets = registry()
     .lock()
     .unwrap()
@@ -359,7 +416,12 @@ pub async fn install_agent(
     attempt: Arc::clone(&attempt),
     channel,
   };
-  let bridge = Bridge::start(secrets.clone(), Some(context), true)?;
+  let bridge = Bridge::start(
+    secrets.clone(),
+    Some(target.credential_key()),
+    Some(context),
+    true,
+  )?;
   let interaction = bridge.interaction()?;
   let ConnectionTarget::Ssh {
     destination,
@@ -385,6 +447,9 @@ pub async fn install_agent(
   };
   drop(bridge);
   let installed = result?;
+  #[cfg(target_os = "macos")]
+  persist_credentials(target.clone(), secrets.clone()).await?;
+  #[cfg(not(target_os = "macos"))]
   registry()
     .lock()
     .unwrap()
@@ -428,7 +493,7 @@ pub fn respond(
         "SSH prompt has already been answered.",
       )
     })?;
-  let _ = sender.send(response);
+  let _ = sender.send(response.map(Zeroizing::new));
   Ok(())
 }
 
@@ -451,35 +516,57 @@ pub fn cancel_window(window: &str) {
   }
 }
 
-pub fn forget(target: &ConnectionTargetDto) {
+pub fn forget(target: &ConnectionTargetDto) -> CommandResult<()> {
+  #[cfg(target_os = "macos")]
+  return keychain::delete(target);
+
+  #[cfg(not(target_os = "macos"))]
   registry()
     .lock()
     .unwrap()
     .credentials
     .remove(&target.credential_key());
+  #[cfg(not(target_os = "macos"))]
+  Ok(())
 }
 
 pub fn remember_configured_alias(definition: &crate::ssh_config::SshHostDefinition) {
-  let source = ConnectionTargetDto::Ssh {
-    remote_info: None,
-    destination: definition.alias.clone(),
-    hostname: Some(definition.hostname.clone()),
-    user: definition.user.clone(),
-    port: definition.port,
-    identity_file: definition.identity_file.clone(),
-  };
-  let alias = ConnectionTargetDto::Ssh {
-    remote_info: None,
-    destination: definition.alias.clone(),
-    hostname: None,
-    user: None,
-    port: None,
-    identity_file: None,
-  };
-  let mut registry = registry().lock().unwrap();
-  if let Some(secrets) = registry.credentials.remove(&source) {
-    registry.credentials.insert(alias, secrets);
+  #[cfg(target_os = "macos")]
+  let _ = definition;
+
+  #[cfg(not(target_os = "macos"))]
+  {
+    let source = ConnectionTargetDto::Ssh {
+      remote_info: None,
+      destination: definition.alias.clone(),
+      hostname: Some(definition.hostname.clone()),
+      user: definition.user.clone(),
+      port: definition.port,
+      identity_file: definition.identity_file.clone(),
+    };
+    let alias = ConnectionTargetDto::Ssh {
+      remote_info: None,
+      destination: definition.alias.clone(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+    };
+    let mut registry = registry().lock().unwrap();
+    if let Some(secrets) = registry.credentials.remove(&source) {
+      registry.credentials.insert(alias, secrets);
+    }
   }
+}
+
+#[cfg(target_os = "macos")]
+async fn persist_credentials(target: ConnectionTargetDto, secrets: Secrets) -> CommandResult<()> {
+  if secrets.lock().unwrap().is_empty() {
+    return Ok(());
+  }
+  tokio::task::spawn_blocking(move || keychain::save(&target, &secrets))
+    .await
+    .map_err(CommandErrorDto::backend)?
 }
 
 #[cfg(test)]

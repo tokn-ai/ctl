@@ -120,7 +120,8 @@ export function SshHostFlow({
 
   async function connect(candidate: ConnectionTarget) {
     cancelAttempt();
-    forgetUncommitted();
+    if (uncommittedTargetRef.current !== candidate) forgetUncommitted();
+    if (!target) uncommittedTargetRef.current = candidate;
     candidateRef.current = candidate;
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
@@ -140,15 +141,16 @@ export function SshHostFlow({
       const recovered = await onVerified(candidate, remote_info);
       if (attemptRef.current !== attempt || closedRef.current) return;
       if (recovered || target) {
+        uncommittedTargetRef.current = null;
         onConnected(recovered ?? target!);
         onClose();
       } else if (configuredRef.current && candidate.kind === "ssh") {
         if (!(await onActivateHost(candidate.destination, remote_info)))
           throw new Error("That SSH host is already active.");
         if (closedRef.current) return;
+        uncommittedTargetRef.current = null;
         onClose();
       } else {
-        uncommittedTargetRef.current = candidate;
         setStep("storage");
       }
       attemptRef.current = null;
@@ -299,7 +301,7 @@ export function SshHostFlow({
     case "auth":
       title = "Authentication · 3/3";
       description =
-        "OpenSSH authenticates this host. Passwords and key passphrases stay in memory for this app process only.";
+        "OpenSSH authenticates this host. On macOS, verified passwords and key passphrases are saved device-locally in Keychain and require Touch ID for access.";
       mode = {
         kind: "pick",
         choices: [

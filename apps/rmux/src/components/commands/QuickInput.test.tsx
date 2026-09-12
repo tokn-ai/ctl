@@ -139,11 +139,13 @@ describe("QuickInput interactions", () => {
         onCancel={cancel}
       />,
     );
-    expect(
-      screen
-        .getByLabelText("Password", { selector: "input" })
-        .getAttribute("type"),
-    ).toBe("password");
+    const password = screen.getByLabelText("Password", {
+      selector: "input",
+    }) as HTMLInputElement;
+    expect(password.getAttribute("type")).toBe("password");
+    await user.type(password, "temporary-secret{Enter}");
+    expect(submit).toHaveBeenLastCalledWith("temporary-secret");
+    expect(password.value).toBe("");
     await user.keyboard("{Escape}");
     expect(cancel).toHaveBeenCalledOnce();
   });

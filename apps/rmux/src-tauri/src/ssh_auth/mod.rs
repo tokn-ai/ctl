@@ -127,11 +127,18 @@ impl Bridge {
         }
         let cacheable = !request.confirm && cacheable_prompt(&request.message);
         // Try a stored secret only once so a rejected value is not replayed.
-        let cached = if cacheable
+        let should_try_stored_secret = cacheable
           && reuse_cached_secrets
-          && attempted_stored_secrets.insert(request.message.clone())
-        {
+          && attempted_stored_secrets.insert(request.message.clone());
+        #[cfg(target_os = "macos")]
+        let cached = if should_try_stored_secret {
           stored_secret(credential_target.as_ref(), &request.message, &secrets).await
+        } else {
+          Ok(None)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let cached = if should_try_stored_secret {
+          stored_secret(credential_target.as_ref(), &request.message, &secrets)
         } else {
           Ok(None)
         };
@@ -191,7 +198,7 @@ async fn stored_secret(
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn stored_secret(
+fn stored_secret(
   _target: Option<&ConnectionTargetDto>,
   prompt: &str,
   secrets: &Secrets,
@@ -523,7 +530,12 @@ pub fn forget(target: &ConnectionTargetDto) -> CommandResult<()> {
   #[cfg(not(target_os = "macos"))]
   registry()
     .lock()
-    .unwrap()
+    .map_err(|_| {
+      CommandErrorDto::new(
+        "ssh_credentials_unavailable",
+        "SSH credentials are temporarily unavailable.",
+      )
+    })?
     .credentials
     .remove(&target.credential_key());
   #[cfg(not(target_os = "macos"))]

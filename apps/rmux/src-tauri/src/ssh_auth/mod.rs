@@ -137,11 +137,11 @@ impl Bridge {
           Ok(None)
         };
         #[cfg(not(target_os = "macos"))]
-        let cached = if should_try_stored_secret {
+        let cached: CommandResult<Option<Zeroizing<String>>> = Ok(if should_try_stored_secret {
           stored_secret(credential_target.as_ref(), &request.message, &secrets)
         } else {
-          Ok(None)
-        };
+          None
+        });
         let (response, newly_entered) = match cached {
           Ok(Some(secret)) => (Some(secret), false),
           Ok(None) => (ask(prompts.as_ref(), &request).await, true),
@@ -202,8 +202,8 @@ fn stored_secret(
   _target: Option<&ConnectionTargetDto>,
   prompt: &str,
   secrets: &Secrets,
-) -> CommandResult<Option<Zeroizing<String>>> {
-  Ok(secrets.lock().unwrap().get(prompt).cloned())
+) -> Option<Zeroizing<String>> {
+  secrets.lock().unwrap().get(prompt).cloned()
 }
 
 fn cacheable_prompt(message: &str) -> bool {

@@ -70,7 +70,8 @@ export class CommandDispatcher {
     const resolved = this.resolve(id);
     return Boolean(
       resolved &&
-        !this.busy.get(resolved.owner)?.has(resolved.command.id) &&
+        (resolved.command.allow_concurrent ||
+          !this.busy.get(resolved.owner)?.has(resolved.command.id)) &&
         (resolved.command.isEnabled?.(args) ?? resolved.command.enabled),
     );
   }
@@ -80,10 +81,15 @@ export class CommandDispatcher {
     const resolved = this.resolve(id);
     if (!resolved || !this.canExecute(id, args)) return false;
     const { command, owner } = resolved;
-    const busy = this.busy.get(owner) ?? new Set<string>();
-    this.busy.set(owner, busy);
-    busy.add(command.id);
+    const busy = command.allow_concurrent
+      ? null
+      : this.busy.get(owner) ?? new Set<string>();
+    if (busy) {
+      this.busy.set(owner, busy);
+      busy.add(command.id);
+    }
     const finish = () => {
+      if (!busy) return;
       busy.delete(command.id);
       if (busy.size === 0) this.busy.delete(owner);
     };

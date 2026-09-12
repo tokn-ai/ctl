@@ -9,6 +9,7 @@ export const ATTACHMENT_RECOVERY_STABILITY_MS =
 const EMPTY_LEASE = { held: false, owned_by_client: false };
 
 const NON_RECOVERABLE_ERROR_CODES = new Set([
+  "attachment_cancelled",
   "automatic_reconnect_timeout",
   "explicit_detach_failed",
   "invalid_request",

@@ -171,6 +171,72 @@ afterEach(async () => {
   await Promise.resolve();
 });
 
+describe("pending remote attachments", () => {
+  const remote: SessionSummary = {
+    ...first,
+    target: { kind: "ssh", destination: "offline-host" },
+  };
+
+  function stallNextOpen() {
+    const aborted = vi.fn();
+    api.openAttachment.mockImplementationOnce((_request, _on_event, signal: AbortSignal) =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          aborted();
+          reject({ code: "attachment_cancelled", message: "Cancelled" });
+        }, { once: true });
+      }),
+    );
+    return aborted;
+  }
+
+  it("switches to a local session without waiting for the stalled SSH connection", async () => {
+    const aborted = stallNextOpen();
+    const { result } = renderHook(() => useAttachment(renderer));
+    let opening!: Promise<void>;
+    await act(async () => { opening = result.current.connect(remote); });
+    expect(result.current.state.phase).toBe("connecting");
+
+    await act(async () => {
+      await result.current.connect(second);
+      await opening;
+    });
+    expect(aborted).toHaveBeenCalledOnce();
+    expect(result.current.state.phase).toBe("attached");
+    expect(result.current.state.session).toEqual(second);
+    expect(result.current.state.error_code).toBeNull();
+    await act(async () => { result.current.handleInput(new TextEncoder().encode("pwd\r")); });
+    await waitFor(() => expect(api.sendInput).toHaveBeenCalled());
+  });
+
+  it.each(["disconnect", "forget", "restart"])("cancels a pending open on %s", async (action) => {
+    const aborted = stallNextOpen();
+    const { result } = renderHook(() => useAttachment(renderer));
+    let opening!: Promise<void>;
+    await act(async () => { opening = result.current.connect(remote); });
+    await act(async () => {
+      if (action === "disconnect") await result.current.detach();
+      else if (action === "forget") result.current.cancelPendingConnection(remote);
+      else result.current.resetAfterDaemonRestart();
+      await opening;
+    });
+    expect(aborted).toHaveBeenCalledOnce();
+    expect(result.current.state.phase).toBe("idle");
+    expect(result.current.state.session).toBeNull();
+    expect(result.current.state.error_code).toBeNull();
+  });
+
+  it("cancels the pending native open when the hook unmounts", async () => {
+    const aborted = stallNextOpen();
+    const { result, unmount } = renderHook(() => useAttachment(renderer));
+    let opening!: Promise<void>;
+    await act(async () => { opening = result.current.connect(remote); });
+    unmount();
+    await opening;
+    expect(aborted).toHaveBeenCalledOnce();
+  });
+});
+
 describe("opened session cache", () => {
   it("moves an alias cache to the recovered host ID with its buffer and resume cursor", async () => {
     const previous: SessionSummary = {

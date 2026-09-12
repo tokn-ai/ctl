@@ -81,6 +81,7 @@ pub fn run() {
       commands::kill_session,
       commands::restart_local_daemon,
       commands::open_attachment,
+      commands::cancel_attachment_open,
       commands::send_input,
       commands::resize_attachment,
       commands::acquire_attachment_lease,

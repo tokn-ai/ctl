@@ -581,7 +581,7 @@ export function TerminalPage() {
       if (target.kind === "local" || daemonRestartBlocksInteractions()) {
         return;
       }
-      void forgetSshCredentials(target).catch(() => undefined);
+      await forgetSshCredentials(target);
       const removedTargetKey = targetKey(target);
       const activeTab = tabsRef.current.find(
         (tab) => sessionKey(tab) === activeTabKeyRef.current,

@@ -179,6 +179,24 @@ describe("SSH host quick-input flow", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("forgets credentials saved before an unfinished agent install", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({
+      code: "ctl_agent_not_found",
+      message: "Install required",
+    });
+    const { user, close } = setup();
+    await details(user);
+    await user.click(
+      screen.getByRole("option", { name: /SSH config \/ agent/ }),
+    );
+    await screen.findByRole("option", { name: /Install remote components/ });
+    await user.keyboard("{Escape}");
+    expect(forgetSshCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: "rmux-test" }),
+    );
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("requires an explicit trust choice and ignores late prompts after cancellation", async () => {
     let prompt: ((value: SshPrompt) => void) | undefined;
     vi.mocked(probeSshHost).mockImplementation(

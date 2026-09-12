@@ -96,5 +96,7 @@ pub fn respond(
 
 pub fn cancel(_window: &str, _attempt_id: &str) {}
 pub fn cancel_window(_window: &str) {}
-pub fn forget(_target: &ConnectionTargetDto) {}
+pub fn forget(_target: &ConnectionTargetDto) -> CommandResult<()> {
+  Ok(())
+}
 pub fn remember_configured_alias(_definition: &crate::ssh_config::SshHostDefinition) {}

@@ -21,6 +21,8 @@ export interface AppCommand {
   /** The native menu dispatches this shortcut on macOS to avoid duplicate handling. */
   macosNativeKeybinding?: boolean;
   enabled: boolean;
+  /** Navigation can replace an in-flight selection; mutations stay single-flight. */
+  allow_concurrent?: boolean;
   isEnabled?(args: CommandArguments): boolean;
   disabledReason?: string;
   visibleInPalette?: boolean;

@@ -14,6 +14,27 @@ function command(id: string, overrides: Partial<AppCommand> = {}): AppCommand {
 }
 
 describe("shared command dispatcher", () => {
+  it("accepts newer navigation while an earlier selection is pending and reports errors", async () => {
+    let reject!: (error: Error) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    const onError = vi.fn();
+    const action = command("select", {
+      allow_concurrent: true,
+      run: vi.fn().mockReturnValueOnce(pending).mockResolvedValue(undefined),
+    });
+    const dispatcher = new CommandDispatcher();
+    dispatcher.update([action], true, onError);
+    expect(dispatcher.execute("select", { session_key: "offline" })).toBe(true);
+    dispatcher.update([{ ...action }], true, onError);
+    expect(dispatcher.execute("select", { session_key: "local" })).toBe(true);
+    expect(action.run).toHaveBeenLastCalledWith({ session_key: "local" });
+    const error = new Error("offline");
+    reject(error);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onError).toHaveBeenCalledExactlyOnceWith(error);
+    expect(dispatcher.canExecute("select")).toBe(true);
+  });
+
   it("enforces readiness, availability, and fresh descriptors for every caller", () => {
     const dispatcher = new CommandDispatcher();
     const original = command("close");

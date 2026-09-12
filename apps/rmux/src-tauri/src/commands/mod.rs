@@ -259,32 +259,46 @@ pub async fn restart_local_daemon(
   })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn open_attachment(
   window: WebviewWindow,
   state: State<'_, AppState>,
   request: OpenAttachmentRequestDto,
   on_event: Channel<AttachmentEventDto>,
+  on_opening: Channel<String>,
 ) -> CommandResult<OpenAttachmentResponseDto> {
   let attachment_id = uuid::Uuid::new_v4().to_string();
   let window_label = window.label().to_owned();
-  let transition = state.window_transition(&window_label).await;
-  let _transition_guard = transition.lock().await;
-  state.detach_active_window(&window_label).await?;
-  state.reserve_window(&window_label, &attachment_id).await?;
+  state
+    .open_attachment(
+      &window_label,
+      &attachment_id,
+      || {
+        on_opening
+          .send(attachment_id.clone())
+          .map_err(CommandErrorDto::backend)
+      },
+      open_reserved_attachment(
+        state.inner().clone(),
+        window_label.clone(),
+        attachment_id.clone(),
+        request,
+        on_event,
+      ),
+    )
+    .await
+}
 
-  let result = open_reserved_attachment(
-    state.inner().clone(),
-    window_label.clone(),
-    attachment_id.clone(),
-    request,
-    on_event,
-  )
-  .await;
-  if result.is_err() {
-    state.release(&window_label, &attachment_id).await;
-  }
-  result
+#[tauri::command]
+pub async fn cancel_attachment_open(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: AttachmentRequestDto,
+) -> CommandResult<()> {
+  state
+    .cancel_opening(window.label(), &request.attachment_id)
+    .await;
+  Ok(())
 }
 
 async fn open_reserved_attachment(

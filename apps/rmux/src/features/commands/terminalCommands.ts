@@ -227,6 +227,7 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.nextTab,
+      allow_concurrent: true,
       category: "Terminal",
       title: "Switch to Next Tab",
       enabled: nextTab !== null && !daemonRestartInteractionBlocked,
@@ -235,12 +236,13 @@ export function buildTerminalCommands(
         : "There is no other tab to select.",
       run: () => {
         if (nextTab) {
-          actions.selectSession(nextTab);
+          return actions.selectSession(nextTab);
         }
       },
     },
     {
       id: COMMAND_IDS.previousTab,
+      allow_concurrent: true,
       category: "Terminal",
       title: "Switch to Previous Tab",
       enabled: previousTab !== null && !daemonRestartInteractionBlocked,
@@ -249,7 +251,7 @@ export function buildTerminalCommands(
         : "There is no other tab to select.",
       run: () => {
         if (previousTab) {
-          actions.selectSession(previousTab);
+          return actions.selectSession(previousTab);
         }
       },
     },
@@ -382,6 +384,7 @@ export function buildTerminalCommands(
   commands.push(
     {
       id: COMMAND_IDS.selectSession,
+      allow_concurrent: true,
       category: "Session",
       title: "Connect Active Session",
       enabled: sessionAvailable(activeSession),
@@ -468,6 +471,7 @@ export function buildTerminalCommands(
       : `${targetLabel(session.target)} · ${session.terminal_size.columns}×${session.terminal_size.rows} · ${session.status}`;
     commands.push({
       id: sessionSwitchCommandId(session),
+      allow_concurrent: true,
       category: "Session",
       title,
       detail,

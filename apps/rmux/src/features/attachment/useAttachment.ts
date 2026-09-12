@@ -104,6 +104,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   const stateRef = useRef(state);
   const rendererRef = useRef<XtermRenderer | null>(renderer);
   const activeAttachmentRef = useRef<string | null>(null);
+  const openingAbortRef = useRef<AbortController | null>(null);
   const channelRef = useRef<Channel<AttachmentEvent> | null>(null);
   const generationRef = useRef(0);
   const eventTailRef = useRef(Promise.resolve());
@@ -342,6 +343,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         interruptedAttachmentState(stateRef.current) ?? INITIAL_STATE;
       clearRecoveryTimer();
       generationRef.current += 1;
+      openingAbortRef.current?.abort();
       inputLeaseOwnedRef.current = false;
       layoutLeaseOwnedRef.current = false;
       resizeWithWindowRef.current = false;
@@ -673,6 +675,8 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         : terminalSize(80, 24);
       const pendingEvents: AttachmentEvent[] = [];
       let responseReady = false;
+      const openingAbort = new AbortController();
+      openingAbortRef.current = openingAbort;
       try {
         const result = await openAttachment(
           {
@@ -684,12 +688,14 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
             request_layout_lease: resizeWithWindow,
           },
           (event) => {
+            if (generation !== generationRef.current) return;
             if (responseReady) {
               queueEvent(event, generation);
             } else {
               pendingEvents.push(event);
             }
           },
+          openingAbort.signal,
         );
 
         if (generation !== generationRef.current) {
@@ -749,6 +755,10 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         if (generation === generationRef.current) {
           setFailure(error);
         }
+      } finally {
+        if (openingAbortRef.current === openingAbort) {
+          openingAbortRef.current = null;
+        }
       }
     },
     [publishShellState, queueEvent, renderer, setFailure],
@@ -788,6 +798,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     ): Promise<void> => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
+      openingAbortRef.current?.abort();
       inputLeaseOwnedRef.current = false;
       layoutLeaseOwnedRef.current = false;
       resizeWithWindowRef.current = resizeWithWindow;
@@ -955,6 +966,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
 
     resetRecovery();
     generationRef.current += 1;
+    openingAbortRef.current?.abort();
     connectionQueueRef.current?.cancelPending();
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
@@ -965,6 +977,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     resetRecovery();
     const generation = generationRef.current + 1;
     generationRef.current = generation;
+    openingAbortRef.current?.abort();
     inputLeaseOwnedRef.current = false;
     layoutLeaseOwnedRef.current = false;
     resizeWithWindowRef.current = false;
@@ -1007,6 +1020,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   const resetAfterDaemonRestart = useCallback(() => {
     resetRecovery();
     generationRef.current += 1;
+    openingAbortRef.current?.abort();
     inputLeaseOwnedRef.current = false;
     layoutLeaseOwnedRef.current = false;
     resizeWithWindowRef.current = false;

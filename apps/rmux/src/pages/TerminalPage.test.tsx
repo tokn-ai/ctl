@@ -1099,6 +1099,33 @@ describe("workspace-backed terminal page", () => {
     expect(api.killSession).not.toHaveBeenCalled();
   });
 
+  it("accepts another sidebar session click while a remote attachment is pending", async () => {
+    const saved = snapshot();
+    saved.document.sessions.push({
+      host_id: "local",
+      session_id: "local-shell",
+      name: "local-shell",
+      last_known_cwd: null,
+      last_known_cwd_display: null,
+    });
+    api.loadWorkspace.mockResolvedValue(saved);
+    let finish_open!: () => void;
+    attachment.connect.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finish_open = resolve;
+    }));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("button", { name: "~/work — remembered" }));
+    expect(attachment.connect).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Shell — local-shell" }));
+    expect(attachment.connect).toHaveBeenCalledTimes(2);
+    expect(attachment.connect).toHaveBeenLastCalledWith(
+      expect.objectContaining({ session_id: "local-shell" }),
+      expect.anything(),
+    );
+    await act(async () => { finish_open(); });
+  });
+
   it("removes workspace membership without terminating the daemon session", async () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });

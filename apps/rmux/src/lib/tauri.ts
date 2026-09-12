@@ -205,20 +205,44 @@ export async function restartLocalDaemon(): Promise<RestartLocalDaemonResponse> 
 export async function openAttachment(
   request: OpenAttachmentRequest,
   onEvent: (event: AttachmentEvent) => void,
+  signal?: AbortSignal,
 ): Promise<OpenAttachmentResult> {
+  signal?.throwIfAborted();
   const channel = new Channel<AttachmentEvent>();
   channel.onmessage = onEvent;
-  const attached = await invoke<OpenAttachmentResponse>("open_attachment", {
-    request,
-    onEvent: channel,
-  });
-  return {
-    attached: {
-      ...attached,
-      session: { ...attached.session, target: request.target },
-    },
-    channel,
+  const opening = new Channel<string>();
+  let opening_id: string | null = null;
+  let cancellation_sent = false;
+  const cancel = () => {
+    if (!signal?.aborted || opening_id === null || cancellation_sent) return;
+    cancellation_sent = true;
+    // The open's response remains authoritative, including a connection that
+    // completed just before cancellation. Its caller discards stale results.
+    void invoke("cancel_attachment_open", {
+      request: { attachment_id: opening_id },
+    }).catch(() => undefined);
   };
+  opening.onmessage = (attachment_id) => {
+    opening_id = attachment_id;
+    cancel();
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    const attached = await invoke<OpenAttachmentResponse>("open_attachment", {
+      request,
+      on_event: channel,
+      on_opening: opening,
+    });
+    return {
+      attached: {
+        ...attached,
+        session: { ...attached.session, target: request.target },
+      },
+      channel,
+    };
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+  }
 }
 
 export async function sendInput(

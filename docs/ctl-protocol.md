@@ -26,7 +26,7 @@ ssh -T \
   -o PermitLocalCommand=no \
   -o RemoteCommand=none \
   -- <destination> \
-  'PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect'
+  'PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; command -v ctl-agent >/dev/null 2>&1 || { printf "ctl-ssh-nf\n"; exit 127; }; exec ctl-agent connect'
 ```
 
 With `--remote-platform windows`, the suffix is `ctl-agent.exe connect` instead
@@ -40,8 +40,8 @@ fixed service suffix:
 
 | Domain | Unix remote command | Windows remote command |
 | --- | --- | --- |
-| rmux | `PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect` | `ctl-agent.exe connect` |
-| task | `PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
+| rmux | fixed PATH setup and presence check, then `exec ctl-agent connect` | `ctl-agent.exe connect` |
+| task | fixed PATH setup and presence check, then `exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
 
 The service is an enum selected by the command domain. Neither a socket path nor
 an arbitrary service or shell command is accepted from the client.
@@ -89,6 +89,11 @@ no arbitrary local socket, forwarded address, or service outside the rmux/task
 enum. The sibling owner-only `rmuxd` maintenance endpoint is never exposed.
 Taskd accesses that endpoint locally for managed interactive-session lifecycle;
 the gateway itself cannot route to it.
+
+Before execution, the Unix wrapper checks the managed and legacy PATH. If
+`ctl-agent` is absent, it writes the fixed `ctl-ssh-nf\n` control marker to
+stdout and exits. Clients map that marker to the install flow without parsing
+localized shell diagnostics.
 
 The endpoint is a Unix socket or an owner-restricted Windows named pipe.
 Windows discovers `rmuxd.exe` or `taskd.exe` beside `ctl-agent.exe`. Auto-start

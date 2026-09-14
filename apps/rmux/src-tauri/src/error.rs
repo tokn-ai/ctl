@@ -32,6 +32,7 @@ impl CommandErrorDto {
 
   pub fn transport(error: &CoreError) -> Self {
     match error {
+      CoreError::AgentNotFound => Self::new("ctl_agent_not_found", error.to_string()),
       CoreError::IdentityUnsupported => {
         Self::new("ctl_agent_identity_unsupported", error.to_string())
       }
@@ -108,6 +109,13 @@ mod tests {
       "Permission denied (publickey).".into(),
     ));
     assert_eq!(error.code, "ssh_authentication_failed");
+  }
+
+  #[test]
+  fn structured_missing_agent_error_offers_installation() {
+    let error = CommandErrorDto::transport(&CoreError::AgentNotFound);
+
+    assert_eq!(error.code, "ctl_agent_not_found");
   }
 
   #[test]

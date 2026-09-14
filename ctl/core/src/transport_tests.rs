@@ -174,7 +174,7 @@ async fn identified_transport_rejects_old_agents_and_invalid_metadata() {
 async fn authentication_hook_runs_when_the_remote_agent_is_missing() {
   timeout(TEST_TIMEOUT, async {
     let command = fixture(
-      "printf 'ctl-ssh-auth-v1\n'; printf 'ctl-agent: not found\n' >&2; exit 127",
+      "printf 'ctl-ssh-auth-v1\nctl-ssh-nf\n'; printf 'bash: ctl-agent: 未找到\n' >&2; exit 127",
       "authenticated-missing-agent.ps1",
     );
     let authenticated = Arc::new(AtomicBool::new(false));
@@ -185,11 +185,25 @@ async fn authentication_hook_runs_when_the_remote_agent_is_missing() {
     .await;
 
     assert!(authenticated.load(Ordering::SeqCst));
-    let Err(CoreError::SshStartup(message)) = result else {
-      panic!("expected missing-agent startup diagnostics");
-    };
-    assert!(message.contains("ctl-agent: not found"));
+    assert!(matches!(result, Err(CoreError::AgentNotFound)));
   })
   .await
   .expect("authenticated missing-agent handling timed out");
+}
+
+#[tokio::test]
+async fn transport_recognizes_the_missing_agent_protocol_marker() {
+  timeout(TEST_TIMEOUT, async {
+    let command = fixture(
+      "printf 'ctl-ssh-nf\n'; printf 'bash: ctl-agent: 未找到\n' >&2; exit 127",
+      "missing-agent.ps1",
+    );
+
+    assert!(matches!(
+      start_ssh_transport(command).await,
+      Err(CoreError::AgentNotFound)
+    ));
+  })
+  .await
+  .expect("missing-agent handling timed out");
 }

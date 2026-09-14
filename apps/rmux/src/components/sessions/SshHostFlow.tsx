@@ -240,17 +240,9 @@ export function SshHostFlow({
     return (
       <QuickInput
         key={prompt.prompt_id}
-        title={
-          prompt.kind === "confirm"
-            ? "SSH host verification"
-            : "SSH authentication"
-        }
+        title={promptTitle(prompt)}
         description={prompt.message}
-        mode={
-          prompt.kind === "confirm"
-            ? { kind: "confirm", confirm_label: "Trust and connect" }
-            : { kind: "input", label: "SSH response", secret: true }
-        }
+        mode={promptMode(prompt)}
         onSubmit={answer}
         onCancel={close}
       />
@@ -301,7 +293,7 @@ export function SshHostFlow({
     case "auth":
       title = "Authentication · 3/3";
       description =
-        "OpenSSH authenticates this host. On macOS, verified passwords and key passphrases are saved device-locally in Keychain and require Touch ID for access.";
+        "OpenSSH authenticates this host. On macOS, you can choose whether to save a verified password or key passphrase in Keychain for Touch ID access.";
       mode = {
         kind: "pick",
         choices: [
@@ -480,4 +472,49 @@ export function SshHostFlow({
       onBack={onBack}
     />
   );
+}
+
+function promptTitle(prompt: SshPrompt): string {
+  switch (prompt.kind) {
+    case "confirm":
+      return "SSH host verification";
+    case "secret":
+      return "SSH authentication";
+    case "credential_save":
+      return "Save SSH credential?";
+    case "credential_save_error":
+      return "Credential not saved";
+  }
+}
+
+function promptMode(prompt: SshPrompt): QuickInputMode {
+  switch (prompt.kind) {
+    case "confirm":
+      return { kind: "confirm", confirm_label: "Trust and connect" };
+    case "secret":
+      return { kind: "input", label: "SSH response", secret: true };
+    case "credential_save":
+      return {
+        kind: "pick",
+        choices: [
+          {
+            id: "yes",
+            label: "Yes",
+            detail: "Save in Keychain and require Touch ID for future access.",
+          },
+          {
+            id: "no",
+            label: "No",
+            detail: "Do not save this time; ask again after a future authentication.",
+          },
+          {
+            id: "never",
+            label: "Never",
+            detail: "Never offer to save credentials for this SSH host.",
+          },
+        ],
+      };
+    case "credential_save_error":
+      return { kind: "confirm", confirm_label: "Continue" };
+  }
 }

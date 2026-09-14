@@ -159,10 +159,13 @@ the same app binary (in helper mode, before Tauri starts) to one connection
 attempt. Prompt replies are window/attempt-scoped and single-use; cancellation
 or window destruction terminates the SSH attempt and removes the socket.
 Host trust is confirmed explicitly and remains in OpenSSH's known-hosts files.
-On macOS, verified passwords/passphrases are stored in the device-local Data
-Protection Keychain under `biometryCurrentSet`; retrieval requires Touch ID and
-changing the enrolled fingerprints invalidates the item. Plaintext is held only
-while satisfying an OpenSSH prompt and is wrapped in zeroizing native buffers.
+After OpenSSH authentication on macOS, but before comparing the reported remote
+environment identity, the app offers Yes, No, and Never choices for a newly
+entered password/passphrase. Yes stores it in the device-local Data Protection
+Keychain under `biometryCurrentSet`; retrieval requires Touch ID and changing
+the enrolled fingerprints invalidates the item. No discards it, while Never
+stores only a device-local per-endpoint suppression marker. Plaintext remains in
+zeroizing native buffers and is discarded as soon as the choice is handled.
 On Linux, reusable secrets remain process-memory-only. Other interactive
 responses are not stored. SSH startup diagnostics are bounded and returned to
 the frontend instead of being lost behind a generic missing-transport-marker

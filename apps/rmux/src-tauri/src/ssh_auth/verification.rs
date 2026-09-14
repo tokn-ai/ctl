@@ -22,7 +22,7 @@ mod tests {
   use rmux_proto::{ClientMessage, ErrorCode, ServerMessage, read_frame, write_frame};
 
   #[tokio::test]
-  async fn rejects_an_incompatible_daemon_before_saving_credentials() {
+  async fn rejects_an_incompatible_daemon_during_protocol_verification() {
     let (client, mut server) = tokio::io::duplex(4096);
     let task = tokio::spawn(async move {
       let message: ClientMessage = read_frame(&mut server).await.unwrap().unwrap();

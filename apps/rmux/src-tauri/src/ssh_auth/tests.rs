@@ -195,6 +195,36 @@ async fn prompt_responses_are_window_scoped_single_use_and_cancellable() {
   assert!(!registry().lock().unwrap().attempts.contains_key(&key));
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn credential_save_choices_use_the_prompt_channel_without_sending_a_secret() {
+  let (context, mut prompts) = prompt_context();
+  let attempt = context.attempt.clone();
+  let task = tokio::spawn(async move {
+    request_response(
+      Some(&context),
+      SshPromptKind::CredentialSave,
+      "Save this SSH credential?".into(),
+    )
+    .await
+  });
+  let prompt = timeout(Duration::from_secs(5), prompts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(prompt["kind"], "credential_save");
+  assert_eq!(prompt["message"], "Save this SSH credential?");
+  attempt
+    .responses
+    .lock()
+    .unwrap()
+    .remove(prompt["prompt_id"].as_str().unwrap())
+    .unwrap()
+    .send(Some(Zeroizing::new("never".into())))
+    .unwrap();
+  assert_eq!(task.await.unwrap().unwrap().as_str(), "never");
+}
+
 #[tokio::test]
 #[ignore = "requires RMUX_TEST_ASKPASS_PROGRAM pointing to the built rmux-app binary"]
 async fn built_binary_delivers_a_secret_without_starting_tauri() {

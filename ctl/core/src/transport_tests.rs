@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::time::timeout;
@@ -115,7 +117,9 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     };
     let json = serde_json::to_string(&identity).unwrap();
     let command = identified_fixture(&json);
-    let mut transport = start_ssh_transport_identified(command, true).await.unwrap();
+    let mut transport = start_ssh_transport_identified(command, true, false, ready(()))
+      .await
+      .unwrap();
     assert_eq!(transport.remote_identity, Some(identity));
     let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
     transport.write_all(&payload).await.unwrap();
@@ -153,15 +157,39 @@ async fn identified_transport_rejects_old_agents_and_invalid_metadata() {
   timeout(TEST_TIMEOUT, async {
     let legacy = fixture("printf 'ctl-ssh-v1\n'; cat", "echo-transport.ps1");
     assert!(matches!(
-      start_ssh_transport_identified(legacy, true).await,
+      start_ssh_transport_identified(legacy, true, false, ready(())).await,
       Err(CoreError::IdentityUnsupported)
     ));
     let malformed = identified_fixture("{}");
     assert!(matches!(
-      start_ssh_transport_identified(malformed, true).await,
+      start_ssh_transport_identified(malformed, true, false, ready(())).await,
       Err(CoreError::RemoteIdentity(_))
     ));
   })
   .await
   .unwrap();
+}
+
+#[tokio::test]
+async fn authentication_hook_runs_when_the_remote_agent_is_missing() {
+  timeout(TEST_TIMEOUT, async {
+    let command = fixture(
+      "printf 'ctl-ssh-auth-v1\n'; printf 'ctl-agent: not found\n' >&2; exit 127",
+      "authenticated-missing-agent.ps1",
+    );
+    let authenticated = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&authenticated);
+    let result = start_ssh_transport_identified(command, true, true, async move {
+      observed.store(true, Ordering::SeqCst);
+    })
+    .await;
+
+    assert!(authenticated.load(Ordering::SeqCst));
+    let Err(CoreError::SshStartup(message)) = result else {
+      panic!("expected missing-agent startup diagnostics");
+    };
+    assert!(message.contains("ctl-agent: not found"));
+  })
+  .await
+  .expect("authenticated missing-agent handling timed out");
 }

@@ -159,6 +159,10 @@ the same app binary (in helper mode, before Tauri starts) to one connection
 attempt. Prompt replies are window/attempt-scoped and single-use; cancellation
 or window destruction terminates the SSH attempt and removes the socket.
 Host trust is confirmed explicitly and remains in OpenSSH's known-hosts files.
+For interactive identified connections, the fixed remote command emits an
+authentication preface before attempting to execute `ctl-agent`. This lets the
+credential choice complete on the same SSH channel even when the agent is not
+installed, without mistaking password submission for successful authentication.
 After OpenSSH authentication on macOS, but before comparing the reported remote
 environment identity, the app offers Yes, No, and Never choices for a newly
 entered password/passphrase. Yes stores it in the device-local Data Protection

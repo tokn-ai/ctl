@@ -5,6 +5,7 @@
 //! belong to the user's OpenSSH installation and configuration.
 
 use std::ffi::OsString;
+use std::future::{Future, ready};
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -26,6 +27,8 @@ pub use ssh_install::{
 const SSH_PROGRAM: &str = "ssh";
 const MAX_SSH_COMMAND_OUTPUT: usize = 8192;
 const UNIX_GATEWAY_COMMAND: &str = r#"PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#;
+const UNIX_AUTHENTICATED_GATEWAY_COMMAND: &str =
+  r#"printf 'ctl-ssh-auth-v1\n'; PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#;
 const UNIX_PLATFORM_PROBE_COMMAND: &str = "printf 'ctl-platform-v1\\n'; uname -s; uname -m";
 /// Remote command-shell convention, independent of the client platform.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,6 +48,7 @@ impl RemotePlatform {
   }
 }
 const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
+const SSH_AUTHENTICATED_PREFACE: &[u8] = b"ctl-ssh-auth-v1\n";
 
 /// The fixed per-user service exposed through an SSH gateway.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -355,7 +359,40 @@ pub async fn open_identified_ssh_service(
     .args(extra)
     .args(ssh_service_arguments(destination, options, service))
     .arg("--identity");
-  start_ssh_transport_identified(command, true).await
+  start_ssh_transport_identified(command, true, false, ready(())).await
+}
+
+/// Opens an identified Unix service and pauses after SSH authentication.
+///
+/// The fixed remote command emits an authentication marker before attempting
+/// to execute `ctl-agent`. The callback therefore runs after OpenSSH accepts
+/// the connection even when the agent is absent, but before identity metadata
+/// is read or verified.
+///
+/// # Errors
+/// Returns validation, startup, or identity protocol errors.
+pub async fn open_identified_ssh_service_after_authentication(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  service: RemoteService,
+  on_authenticated: impl Future<Output = ()>,
+) -> Result<SshTransport, CoreError> {
+  validate_ssh_target(destination, options)?;
+  if options.remote_platform != RemotePlatform::Unix {
+    return Err(CoreError::InvalidSshOption("remote_platform".into()));
+  }
+  let mut command = Command::new(SSH_PROGRAM);
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command
+    .args(extra)
+    .args(ssh_authenticated_service_arguments(
+      destination,
+      options,
+      service,
+    ))
+    .arg("--identity");
+  start_ssh_transport_identified(command, true, true, on_authenticated).await
 }
 
 fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction) -> Vec<OsString> {
@@ -475,13 +512,18 @@ async fn read_bounded_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Resul
 }
 
 async fn start_ssh_transport(command: Command) -> Result<SshTransport, CoreError> {
-  start_ssh_transport_identified(command, false).await
+  start_ssh_transport_identified(command, false, false, ready(())).await
 }
 
-async fn start_ssh_transport_identified(
+async fn start_ssh_transport_identified<F>(
   mut command: Command,
   identified: bool,
-) -> Result<SshTransport, CoreError> {
+  authentication_marker: bool,
+  on_authenticated: F,
+) -> Result<SshTransport, CoreError>
+where
+  F: Future<Output = ()>,
+{
   command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -492,6 +534,18 @@ async fn start_ssh_transport_identified(
   let stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
   let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let diagnostics = ssh_startup::Diagnostics::start(child.stderr.take());
+  if authentication_marker {
+    let mut preface = vec![0_u8; SSH_AUTHENTICATED_PREFACE.len()];
+    if let Err(error) = stdout.read_exact(&mut preface).await {
+      return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+    }
+    if preface != SSH_AUTHENTICATED_PREFACE {
+      let _ = child.kill().await;
+      drop(diagnostics);
+      return Err(CoreError::InvalidSshPreface);
+    }
+    on_authenticated.await;
+  }
   let mut preface = vec![0_u8; SSH_TRANSPORT_PREFACE.len()];
   if let Err(error) = stdout.read_exact(&mut preface).await {
     return Err(ssh_startup::startup_error(child, diagnostics, error).await);
@@ -631,8 +685,35 @@ fn ssh_service_arguments(
   options: &SshConnectionOptions,
   service: RemoteService,
 ) -> Vec<OsString> {
+  ssh_service_arguments_with_command(
+    destination,
+    options,
+    options.remote_platform.command(),
+    service,
+  )
+}
+
+fn ssh_authenticated_service_arguments(
+  destination: &str,
+  options: &SshConnectionOptions,
+  service: RemoteService,
+) -> Vec<OsString> {
+  ssh_service_arguments_with_command(
+    destination,
+    options,
+    &[UNIX_AUTHENTICATED_GATEWAY_COMMAND],
+    service,
+  )
+}
+
+fn ssh_service_arguments_with_command(
+  destination: &str,
+  options: &SshConnectionOptions,
+  command: &[&str],
+  service: RemoteService,
+) -> Vec<OsString> {
   let mut arguments = ssh_base_arguments(destination, options);
-  arguments.extend(options.remote_platform.command().iter().map(OsString::from));
+  arguments.extend(command.iter().map(OsString::from));
   if service == RemoteService::Task {
     arguments.extend([OsString::from("--service"), OsString::from("task")]);
   }
@@ -774,6 +855,16 @@ mod tests {
         ["--service", "task"].map(OsString::from)
       );
     }
+  }
+
+  #[test]
+  fn authenticated_service_uses_a_fixed_marker_before_the_unix_gateway() {
+    let options = SshConnectionOptions::default();
+    let arguments = ssh_authenticated_service_arguments("host", &options, RemoteService::Rmux);
+    assert_eq!(
+      &arguments[arguments.len() - 3..],
+      ["--", "host", UNIX_AUTHENTICATED_GATEWAY_COMMAND].map(OsString::from)
+    );
   }
 
   #[test]

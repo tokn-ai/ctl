@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
+use ctl_core::{
+  ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service_after_authentication,
+};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -412,20 +414,24 @@ async fn connect_with(
     .map(Bridge::interaction)
     .transpose()?
     .unwrap_or(SshInteraction::Batch);
-  let stream = open_identified_ssh_service(
+  let authenticated = async {
+    #[cfg(target_os = "macos")]
+    if let (Some(secrets), Some(context)) = (pending_secrets, credential_prompt) {
+      offer_to_save_credentials(target, &secrets, &context).await;
+    }
+  };
+  let stream = open_identified_ssh_service_after_authentication(
     &destination,
     &options,
     &interaction,
     ctl_core::RemoteService::Rmux,
+    Box::pin(authenticated),
   )
   .await
   .map_err(|error| CommandErrorDto::transport(&error))?;
-  // Authentication is complete; removing the bridge also closes the secret-delivery capability.
+  // Identity framing is complete; closing the bridge now removes the
+  // secret-delivery capability before the transport reaches other callers.
   drop(bridge);
-  #[cfg(target_os = "macos")]
-  if let (Some(secrets), Some(context)) = (pending_secrets, credential_prompt) {
-    offer_to_save_credentials(target, &secrets, &context).await;
-  }
   let identity = stream
     .remote_identity
     .as_ref()

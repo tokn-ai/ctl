@@ -36,6 +36,7 @@ zeroize = "1.8"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent"] }
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
 
 [lints]
 workspace = true

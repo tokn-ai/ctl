@@ -124,7 +124,11 @@ export type SshHostStorage = "ssh_config" | "local_storage";
 
 export interface SshPrompt {
   prompt_id: string;
-  kind: "confirm" | "secret";
+  kind:
+    | "confirm"
+    | "secret"
+    | "credential_save"
+    | "credential_save_error";
   message: string;
 }
 

@@ -44,8 +44,10 @@ version. After a successful connection, choose where to save the host.
 writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
 reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.
 **This app only** stores the same non-secret settings in the native workspace file
-and supplies them to OpenSSH as fixed arguments. Passwords, private-key
-contents, arbitrary options, forwarding, and remote commands are never stored.
+and supplies them to OpenSSH as fixed arguments. On macOS, verified passwords
+and private-key passphrases are stored separately in the device-local,
+Touch ID-protected Keychain. Private-key contents, arbitrary options,
+forwarding, and remote commands are never stored.
 The app remembers the active alias in either case so it can restore the mixed
 host list on launch; config-backed targets keep only that alias locally.
 Existing WebView host settings migrate automatically after a successful disk write.
@@ -82,14 +84,21 @@ that prepends the app-managed directory before running `ctl-agent connect`;
 forwarding, agent access, X11, local commands,
 and PTY allocation remain disabled. On macOS/Linux, a short-lived owner-only
 Unix socket connects OpenSSH's askpass helper to the quick-input UI. Host-key
-trust requires explicit confirmation and is managed by OpenSSH. Passwords and
-key passphrases are cached only in native process memory, never saved to disk,
-command arguments, environment variables, or logs; one-time responses are not
-cached. Removing a host forgets its cached credentials. Click a host chip to
-authenticate again after relaunch or failed credentials. Background connections
-never open unsolicited prompts and time out after ten seconds; an explicit
-interactive attempt allows up to three minutes and Escape cancels it. On other
-platforms, preconfigured noninteractive SSH remains available.
+trust requires explicit confirmation and is managed by OpenSSH. On macOS,
+verified passwords and key passphrases are stored device-locally in Keychain
+under a Touch ID-only policy tied to the currently enrolled fingerprints. They
+are loaded only to satisfy an OpenSSH prompt and native plaintext buffers are
+zeroized after use. They never appear in command arguments, environment
+variables, or logs; one-time responses are not stored. Removing a host deletes
+its saved credentials. On Linux, reusable secrets remain zeroizing,
+process-memory-only values. Background connections time out after ten seconds;
+an explicit interactive attempt allows up to three minutes and Escape cancels
+it. On non-Unix platforms, preconfigured noninteractive SSH remains available.
+
+The macOS app must be signed with an application-identifier entitlement that is
+authorized by its embedded provisioning profile. Without it, the Data
+Protection Keychain rejects credential storage and rmux reports the signing
+error instead of silently weakening the access policy.
 
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also

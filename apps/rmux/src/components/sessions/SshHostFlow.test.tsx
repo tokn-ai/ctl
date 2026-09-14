@@ -179,6 +179,24 @@ describe("SSH host quick-input flow", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("clears transient credentials when an agent install is abandoned", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({
+      code: "ctl_agent_not_found",
+      message: "Install required",
+    });
+    const { user, close } = setup();
+    await details(user);
+    await user.click(
+      screen.getByRole("option", { name: /SSH config \/ agent/ }),
+    );
+    await screen.findByRole("option", { name: /Install remote components/ });
+    await user.keyboard("{Escape}");
+    expect(forgetSshCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: "rmux-test" }),
+    );
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("requires an explicit trust choice and ignores late prompts after cancellation", async () => {
     let prompt: ((value: SshPrompt) => void) | undefined;
     vi.mocked(probeSshHost).mockImplementation(
@@ -298,6 +316,68 @@ describe("SSH host quick-input flow", () => {
     expect(cancelSshProbe).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it("offers yes, no, and never after SSH authentication without exposing the secret", async () => {
+    let prompt: ((value: SshPrompt) => void) | undefined;
+    vi.mocked(probeSshHost).mockImplementation(
+      (_target, _attempt, callback) => {
+        prompt = callback;
+        return new Promise(() => undefined);
+      },
+    );
+    const { user } = setup();
+    await details(user);
+    await user.click(
+      screen.getByRole("option", { name: /Password \/ interactive/ }),
+    );
+    await act(async () =>
+      prompt?.({
+        prompt_id: "save-credential",
+        kind: "credential_save",
+        message: "Save this SSH credential?",
+      }),
+    );
+
+    expect(screen.getByRole("option", { name: /^Yes/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^No/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^Never/ })).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    await user.click(screen.getByRole("option", { name: /^Never/ }));
+    expect(respondSshPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      "save-credential",
+      "never",
+    );
+  });
+
+  it("continues the verified connection after acknowledging a Keychain save error", async () => {
+    let prompt: ((value: SshPrompt) => void) | undefined;
+    vi.mocked(probeSshHost).mockImplementation(
+      (_target, _attempt, callback) => {
+        prompt = callback;
+        return new Promise(() => undefined);
+      },
+    );
+    const { user } = setup();
+    await details(user);
+    await user.click(
+      screen.getByRole("option", { name: /Password \/ interactive/ }),
+    );
+    await act(async () =>
+      prompt?.({
+        prompt_id: "save-error",
+        kind: "credential_save_error",
+        message: "Connected, but the credential was not saved.",
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(respondSshPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      "save-error",
+      "confirm",
+    );
   });
 
   it("keeps preflight errors visible and lets the user backtrack", async () => {

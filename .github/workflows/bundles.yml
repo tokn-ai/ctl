@@ -224,12 +224,14 @@ jobs:
       - name: Build and stage native daemons
         shell: bash
         run: |
-          cargo build --locked --release --target "${{ matrix.target }}" -p rmuxd -p taskd
+          cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p rmuxd -p taskd
           mkdir -p apps/rmux/src-tauri/binaries
           cp "target/${{ matrix.target }}/release/rmuxd" \
             "apps/rmux/src-tauri/binaries/rmuxd-${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/taskd" \
             "apps/rmux/src-tauri/binaries/taskd-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/ctld" \
+            "apps/rmux/src-tauri/binaries/ctld-${{ matrix.target }}"
 
       - name: Build desktop bundles
         working-directory: apps/rmux

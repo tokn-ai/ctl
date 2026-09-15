@@ -1,4 +1,6 @@
 mod commands;
+#[cfg(unix)]
+mod ssh_broker;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rmux_cli::Command as RmuxCommand;

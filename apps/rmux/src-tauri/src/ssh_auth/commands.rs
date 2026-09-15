@@ -73,6 +73,6 @@ pub fn cancel_ssh_probe(window: WebviewWindow, request: CancelRequest) {
 }
 
 #[tauri::command]
-pub fn forget_ssh_credentials(request: crate::dto::TargetRequestDto) -> CommandResult<()> {
-  super::forget(&request.target)
+pub async fn forget_ssh_credentials(request: crate::dto::TargetRequestDto) -> CommandResult<()> {
+  super::forget(&request.target).await
 }

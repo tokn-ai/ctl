@@ -94,6 +94,9 @@ pub struct SshConnectionOptions {
 pub enum SshInteraction {
   Inherit,
   Batch,
+  Multiplexed {
+    control_path: PathBuf,
+  },
   Askpass {
     program: PathBuf,
     socket: PathBuf,
@@ -201,6 +204,20 @@ impl<LocalStream: AsyncWrite + Unpin> AsyncWrite for Transport<LocalStream> {
 /// Returns an error when the local daemon cannot be connected or started, or
 /// when the OpenSSH remote-command channel cannot be established.
 pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, CoreError> {
+  open_transport_with_interaction(target, &SshInteraction::Inherit).await
+}
+
+/// Opens a raw protocol stream with an explicit local SSH interaction policy.
+///
+/// Local targets ignore the interaction. SSH targets use it only for local
+/// authentication and multiplex selection; the remote command remains fixed.
+///
+/// # Errors
+/// Returns local daemon startup, SSH startup, or transport-marker failures.
+pub async fn open_transport_with_interaction(
+  target: &ConnectionTarget,
+  interaction: &SshInteraction,
+) -> Result<Transport, CoreError> {
   match target {
     ConnectionTarget::Local { socket_path } => Ok(Transport::Local(
       rmux_ipc::connect_or_start_daemon(socket_path).await?,
@@ -209,7 +226,7 @@ pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, Core
       destination,
       options,
     } => Ok(Transport::Ssh(
-      open_ssh_tunnel_with_options(destination, options).await?,
+      open_ssh_tunnel_interactive(destination, options, interaction).await?,
     )),
   }
 }
@@ -222,6 +239,17 @@ pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, Core
 /// # Errors
 /// Returns task daemon startup, SSH startup, or transport-marker failures.
 pub async fn open_task_transport(target: &ConnectionTarget) -> Result<TaskTransport, CoreError> {
+  open_task_transport_with_interaction(target, &SshInteraction::Inherit).await
+}
+
+/// Opens the selected task service with an explicit local SSH interaction policy.
+///
+/// # Errors
+/// Returns task daemon startup, SSH startup, or transport-marker failures.
+pub async fn open_task_transport_with_interaction(
+  target: &ConnectionTarget,
+  interaction: &SshInteraction,
+) -> Result<TaskTransport, CoreError> {
   match target {
     ConnectionTarget::Local { .. } => Ok(Transport::Local(
       task_client::connect_or_start(&task_ipc::socket_path()).await?,
@@ -230,13 +258,7 @@ pub async fn open_task_transport(target: &ConnectionTarget) -> Result<TaskTransp
       destination,
       options,
     } => Ok(Transport::Ssh(
-      open_ssh_service_interactive(
-        destination,
-        options,
-        &SshInteraction::Inherit,
-        RemoteService::Task,
-      )
-      .await?,
+      open_ssh_service_interactive(destination, options, interaction, RemoteService::Task).await?,
     )),
   }
 }
@@ -407,6 +429,14 @@ fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction
   match interaction {
     SshInteraction::Inherit => Vec::new(),
     SshInteraction::Batch => vec!["-o".into(), "BatchMode=yes".into()],
+    SshInteraction::Multiplexed { control_path } => vec![
+      "-S".into(),
+      control_path.as_os_str().to_owned(),
+      "-o".into(),
+      "ControlMaster=no".into(),
+      "-o".into(),
+      "BatchMode=yes".into(),
+    ],
     SshInteraction::Askpass {
       program,
       socket,
@@ -914,6 +944,30 @@ mod tests {
         "--",
         "127.0.0.1",
         UNIX_GATEWAY_COMMAND,
+      ]
+      .map(OsString::from)
+    );
+  }
+
+  #[test]
+  fn multiplexed_connections_require_the_selected_master_without_prompting() {
+    let mut command = Command::new("ssh");
+    let arguments = configure_ssh_interaction(
+      &mut command,
+      &SshInteraction::Multiplexed {
+        control_path: PathBuf::from("/tmp/ctld/master"),
+      },
+    );
+
+    assert_eq!(
+      arguments,
+      [
+        "-S",
+        "/tmp/ctld/master",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "BatchMode=yes",
       ]
       .map(OsString::from)
     );

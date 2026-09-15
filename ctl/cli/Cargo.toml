@@ -6,11 +6,16 @@ edition.workspace = true
 [dependencies]
 clap.workspace = true
 ctl-core.workspace = true
+ctld-ipc.workspace = true
 rmux-cli.workspace = true
 task-cli.workspace = true
 task-client.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rpassword.workspace = true
 
 [lints]
 workspace = true

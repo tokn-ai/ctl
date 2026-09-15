@@ -90,6 +90,9 @@ describe("attachment recovery", () => {
       "remote_identity_mismatch",
       "invalid_remote_identity",
       "ctl_agent_identity_unsupported",
+      "ssh_authentication_failed",
+      "ssh_authentication_required",
+      "ssh_start_failed",
     ]) {
       expect(canAutomaticallyRecoverAttachment(code)).toBe(false);
     }

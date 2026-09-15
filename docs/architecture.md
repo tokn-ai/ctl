@@ -151,29 +151,33 @@ introduce arbitrary options or change the fixed ctl-agent command.
 Rows, tabs, shell-state caches, mutations, and reconnect intent use
 `(stable host ID, session ID)`, independent of an SSH alias's display spelling.
 A failed target reports its own error without hiding successful targets.
-OpenSSH remains responsible for passwords,
-key contents, proxies, host verification, and connection multiplexing. The app
-brokers OpenSSH askpass prompts through its shared quick-input overlay on
-macOS/Linux. A random capability and ephemeral owner-only Unix socket connect
-the same app binary (in helper mode, before Tauri starts) to one connection
-attempt. Prompt replies are window/attempt-scoped and single-use; cancellation
-or window destruction terminates the SSH attempt and removes the socket.
+OpenSSH remains responsible for key contents, proxies, host verification, and
+the encrypted transport. On macOS/Linux, the per-user `ctld` owns explicit
+OpenSSH control masters shared by the desktop and `ctl`; each master persists
+for five idle minutes. All logical service channels require the selected master
+with batch mode enabled, so they cannot race by independently prompting or
+using incidental user `ControlMaster` configuration. The daemon's owner-only
+Unix socket carries a random-capability askpass request to the initiating
+client. Desktop prompt replies remain window/attempt-scoped and single-use;
+cancellation or window destruction terminates the authentication attempt.
 Host trust is confirmed explicitly and remains in OpenSSH's known-hosts files.
 For interactive identified connections, the fixed remote command emits an
 authentication preface before attempting to execute `ctl-agent`. This lets the
 credential choice complete on the same SSH channel even when the agent is not
 installed, without mistaking password submission for successful authentication.
-After OpenSSH authentication on macOS, but before comparing the reported remote
-environment identity, the app offers Yes, No, and Never choices for a newly
-entered password/passphrase. Yes stores it in the device-local Data Protection
-Keychain under `biometryCurrentSet`; retrieval requires Touch ID and changing
-the enrolled fingerprints invalidates the item. No discards it, while Never
-stores only a device-local per-endpoint suppression marker. Plaintext remains in
-zeroizing native buffers and is discarded as soon as the choice is handled.
-On Linux, reusable secrets remain process-memory-only. Other interactive
-responses are not stored. SSH startup diagnostics are bounded and returned to
-the frontend instead of being lost behind a generic missing-transport-marker
-error.
+After the control master authenticates on macOS, but before any remote identity
+command, `ctld` asks the initiating client to present Yes, No, and Never choices
+for a newly entered password/passphrase. Yes stores it in the device-local Data
+Protection Keychain under `biometryCurrentSet`; retrieval requires Touch ID and
+changing the enrolled fingerprints invalidates the item. No discards it, while
+Never stores only a device-local per-destination suppression marker. Only
+`ctld` links Keychain code, and a retrieved secret is answered directly to its
+OpenSSH askpass process rather than returned to a client. Plaintext remains in
+zeroizing native buffers and is discarded as soon as the choice is handled. On
+Linux, newly entered reusable secrets are discarded after authentication.
+Other interactive responses are not stored. SSH startup diagnostics are
+bounded and returned to the client instead of being lost behind a generic
+missing-transport-marker error.
 
 Native workspace writes are serialized, revision-checked across app processes,
 and atomically replaced with owner-only files. Invalid/future files are
@@ -326,9 +330,10 @@ by the user, and a fixed managed-directory `PATH` prefix followed by
 for tasks. The desktop may additionally run closed, fixed platform-probe and
 per-user installation commands after explicit user action; callers cannot
 supply a command, version path, or archive destination. OpenSSH
-configuration owns host verification, user authentication, proxying, and
-healthy-connection multiplexing. `ctl` never disables host-key checking,
-enables agent forwarding, or accepts an arbitrary remote command.
+configuration owns host verification, user authentication, and proxying. On
+Unix clients, `ctld` owns the explicit authenticated control master used by
+both `ctl` and the desktop. `ctl` never disables host-key checking, enables
+agent forwarding, or accepts an arbitrary remote command.
 
 `ctl-agent connect` has no network listener, persistent state, or identity
 registry. Its service enum chooses rmux or task. It writes one fixed readiness

@@ -114,14 +114,22 @@ Without the profile-authorized application identifier, the Data Protection
 Keychain rejects credential storage and rmux reports the signing error instead
 of silently weakening the access policy.
 
-The bundle workflow expects `APPLE_SIGNING_IDENTITY` as a repository variable,
-plus `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and
-`APPLE_CTLD_PROVISIONING_PROFILE` as secrets. Notarization additionally uses
-the `APPLE_API_ISSUER`, `APPLE_API_KEY`, and `APPLE_API_KEY_CONTENT` secrets for
-an App Store Connect API key. The certificate and profile must be for Developer
-ID distribution, and the profile must authorize exactly the team-prefixed
-`io.rmux.desktop.ctld` application identifier. Local unsigned bundles remain
-useful for development but cannot store Touch ID-protected credentials.
+For local Touch ID testing, run `pnpm tauri:dev:signed`. The launcher searches
+Xcode's downloaded profiles and
+`~/Library/Application Support/rmux/signing/ctld.provisionprofile`, selects the
+newest unexpired profile for `io.rmux.desktop.ctld`, discovers its matching
+signing certificate in the login Keychain, and runs an isolated
+signed `ctld` for the lifetime of `tauri dev`. It needs no signing environment
+variables. Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch
+ID-protected credentials.
+
+The release workflow derives the Team ID and signing identity from the profile
+and imported certificate. It expects `APPLE_API_ISSUER` and `APPLE_API_KEY` as
+non-secret repository variables. `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_CTLD_PROVISIONING_PROFILE`, and
+`APPLE_API_KEY_CONTENT` are repository secrets. The certificate and profile
+must be for Developer ID distribution, and the profile must authorize exactly
+the team-prefixed `io.rmux.desktop.ctld` application identifier.
 
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also

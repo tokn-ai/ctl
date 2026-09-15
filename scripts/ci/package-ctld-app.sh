@@ -37,16 +37,7 @@ case "$app_version" in
     ;;
 esac
 
-signing_identity=${APPLE_SIGNING_IDENTITY:-}
 provisioning_profile=${CTLD_PROVISIONING_PROFILE:-}
-if [ -n "$signing_identity" ] && [ -z "$provisioning_profile" ]; then
-  echo "CTLD_PROVISIONING_PROFILE is required when APPLE_SIGNING_IDENTITY is set" >&2
-  exit 2
-fi
-if [ -z "$signing_identity" ] && [ -n "$provisioning_profile" ]; then
-  echo "APPLE_SIGNING_IDENTITY is required when CTLD_PROVISIONING_PROFILE is set" >&2
-  exit 2
-fi
 
 staging_directory=$(mktemp -d "${TMPDIR:-/tmp}/ctld-app.XXXXXX")
 trap 'rm -rf "$staging_directory"' EXIT HUP INT TERM
@@ -57,7 +48,7 @@ sed "s/@APP_VERSION@/$app_version/g" \
   "$template_directory/Info.plist" > "$staged_app/Contents/Info.plist"
 plutil -lint "$staged_app/Contents/Info.plist" >/dev/null
 
-if [ -n "$signing_identity" ]; then
+if [ -n "$provisioning_profile" ]; then
   if [ ! -f "$provisioning_profile" ]; then
     echo "missing ctld provisioning profile: $provisioning_profile" >&2
     exit 1
@@ -87,6 +78,35 @@ if [ -n "$signing_identity" ]; then
       ;;
   esac
 
+  get_task_allow=$(
+    /usr/libexec/PlistBuddy \
+      -c 'Print :Entitlements:get-task-allow' \
+      "$decoded_profile" 2>/dev/null || printf 'false\n'
+  )
+  signing_identity=
+  valid_signing_identities=$(
+    security find-identity -v -p codesigning |
+      awk '/^[[:space:]]*[0-9]+\)/ { print $2 }'
+  )
+  certificate_index=0
+  while certificate_base64=$(
+    plutil -extract "DeveloperCertificates.$certificate_index" raw -o - \
+      "$decoded_profile" 2>/dev/null
+  ); do
+    certificate="$staging_directory/profile-certificate-$certificate_index.der"
+    printf '%s' "$certificate_base64" | base64 --decode -o "$certificate"
+    certificate_hash=$(shasum -a 1 "$certificate" | awk '{ print toupper($1) }')
+    if printf '%s\n' "$valid_signing_identities" | grep -Fqx "$certificate_hash"; then
+      signing_identity=$certificate_hash
+      break
+    fi
+    certificate_index=$((certificate_index + 1))
+  done
+  if [ -z "$signing_identity" ]; then
+    echo "no valid signing identity matches ctld's provisioning profile" >&2
+    exit 1
+  fi
+
   cp "$provisioning_profile" "$staged_app/Contents/embedded.provisionprofile"
   entitlements="$staging_directory/Entitlements.plist"
   sed \
@@ -94,13 +114,22 @@ if [ -n "$signing_identity" ]; then
     -e "s/@TEAM_IDENTIFIER@/$team_identifier/g" \
     "$template_directory/Entitlements.plist" > "$entitlements"
   plutil -lint "$entitlements" >/dev/null
-  codesign \
-    --force \
-    --options runtime \
-    --timestamp \
-    --entitlements "$entitlements" \
-    --sign "$signing_identity" \
-    "$staged_app"
+  if [ "$get_task_allow" = true ]; then
+    codesign \
+      --force \
+      --options runtime \
+      --entitlements "$entitlements" \
+      --sign "$signing_identity" \
+      "$staged_app"
+  else
+    codesign \
+      --force \
+      --options runtime \
+      --timestamp \
+      --entitlements "$entitlements" \
+      --sign "$signing_identity" \
+      "$staged_app"
+  fi
   codesign --verify --strict --verbose=2 "$staged_app"
 
   signed_entitlements="$staging_directory/signed-entitlements.plist"
@@ -125,6 +154,9 @@ if [ -n "$signing_identity" ]; then
     [ "$certificate_team_identifier" != "$team_identifier" ]; then
     echo "ctld signature, certificate, and provisioning profile identities do not agree" >&2
     exit 1
+  fi
+  if [ -n "${CTLD_SIGNING_IDENTITY_OUTPUT:-}" ]; then
+    printf '%s\n' "$signing_identity" > "$CTLD_SIGNING_IDENTITY_OUTPUT"
   fi
 fi
 

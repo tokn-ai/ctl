@@ -230,11 +230,10 @@ jobs:
         env:
           CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          NOTARY_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER }}
           NOTARY_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-          NOTARY_KEY_ID: ${{ secrets.APPLE_API_KEY }}
+          NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY }}
           PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
-          SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           missing=()
@@ -244,7 +243,6 @@ jobs:
           [[ -n "$NOTARY_KEY_CONTENT" ]] || missing+=(APPLE_API_KEY_CONTENT)
           [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
           [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
-          [[ -n "$SIGNING_IDENTITY" ]] || missing+=(APPLE_SIGNING_IDENTITY)
           if (( ${#missing[@]} > 0 )); then
             printf 'missing Apple signing configuration: %s\n' "${missing[*]}" >&2
             exit 1
@@ -260,9 +258,9 @@ jobs:
       - name: Prepare Apple signing assets
         if: runner.os == 'macOS'
         env:
-          APPLE_API_ISSUER_VALUE: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_ISSUER_VALUE: ${{ vars.APPLE_API_ISSUER }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-          APPLE_API_KEY_VALUE: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_VALUE: ${{ vars.APPLE_API_KEY }}
           PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
         shell: bash
         run: |
@@ -278,7 +276,7 @@ jobs:
 
       - name: Build and stage native daemons
         env:
-          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
         shell: bash
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p rmuxd -p taskd
@@ -288,14 +286,12 @@ jobs:
           cp "target/${{ matrix.target }}/release/taskd" \
             "apps/rmux/src-tauri/binaries/taskd-${{ matrix.target }}"
           if [[ "${{ runner.os }}" == macOS ]]; then
-            if [[ -z "$APPLE_SIGNING_IDENTITY" ]]; then
-              echo "APPLE_SIGNING_IDENTITY repository variable is not configured" >&2
-              exit 1
-            fi
             ./scripts/ci/package-ctld-app.sh \
               "target/${{ matrix.target }}/release/ctld" \
               target/ctld-app/ctld.app \
               "${{ needs.metadata.outputs.app_version }}"
+            echo "APPLE_SIGNING_IDENTITY=$(<"$CTLD_SIGNING_IDENTITY_OUTPUT")" \
+              >> "$GITHUB_ENV"
           else
             cp "target/${{ matrix.target }}/release/ctld" \
               "apps/rmux/src-tauri/binaries/ctld-${{ matrix.target }}"
@@ -303,8 +299,6 @@ jobs:
 
       - name: Build desktop bundles
         working-directory: apps/rmux
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && vars.APPLE_SIGNING_IDENTITY || '' }}
         run: >-
           pnpm tauri build --target ${{ matrix.target }}
           --config src-tauri/tauri.bundle.conf.json

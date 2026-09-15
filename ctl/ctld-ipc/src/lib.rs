@@ -272,7 +272,19 @@ fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if sibling.is_file() {
     return Ok(sibling);
   }
+  #[cfg(target_os = "macos")]
+  if let Some(helper) = bundled_macos_daemon(&current_executable)
+    && helper.is_file()
+  {
+    return Ok(helper);
+  }
   Ok(PathBuf::from(format!("ctld{}", env::consts::EXE_SUFFIX)))
+}
+
+#[cfg(target_os = "macos")]
+fn bundled_macos_daemon(current_executable: &Path) -> Option<PathBuf> {
+  let contents = current_executable.parent()?.parent()?;
+  Some(contents.join("Helpers/ctld.app/Contents/MacOS/ctld"))
 }
 
 fn retryable_connect_error(error: &io::Error) -> bool {
@@ -285,6 +297,18 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn locates_ctld_in_the_macos_helper_bundle() {
+    let executable = Path::new("/Applications/rmux.app/Contents/MacOS/rmux");
+    assert_eq!(
+      bundled_macos_daemon(executable),
+      Some(PathBuf::from(
+        "/Applications/rmux.app/Contents/Helpers/ctld.app/Contents/MacOS/ctld"
+      ))
+    );
+  }
 
   #[tokio::test]
   async fn frames_round_trip_secret_responses() {

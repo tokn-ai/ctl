@@ -105,10 +105,23 @@ then discards it. An explicit interactive attempt allows up to three minutes
 and Escape cancels it. On non-Unix platforms, preconfigured noninteractive SSH
 remains available.
 
-The macOS `ctld` executable must be signed with an application-identifier
-entitlement authorized by its provisioning profile. Without it, the Data
-Protection Keychain rejects credential storage and rmux reports the signing
-error instead of silently weakening the access policy.
+On macOS, `ctld` is packaged as the app-like helper
+`rmux.app/Contents/Helpers/ctld.app`. Release builds sign that helper with the
+permanent `io.rmux.desktop.ctld` bundle identifier and embed its matching
+Developer ID provisioning profile. This gives `ctld` its own Keychain identity;
+the main app and the other sidecars receive no credential-access entitlement.
+Without the profile-authorized application identifier, the Data Protection
+Keychain rejects credential storage and rmux reports the signing error instead
+of silently weakening the access policy.
+
+The bundle workflow expects `APPLE_SIGNING_IDENTITY` as a repository variable,
+plus `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and
+`APPLE_CTLD_PROVISIONING_PROFILE` as secrets. Notarization additionally uses
+the `APPLE_API_ISSUER`, `APPLE_API_KEY`, and `APPLE_API_KEY_CONTENT` secrets for
+an App Store Connect API key. The certificate and profile must be for Developer
+ID distribution, and the profile must authorize exactly the team-prefixed
+`io.rmux.desktop.ctld` application identifier. Local unsigned bundles remain
+useful for development but cannot store Touch ID-protected credentials.
 
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also

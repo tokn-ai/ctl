@@ -1,10 +1,5 @@
 {
   "bundle": {
-    "externalBin": [
-      "binaries/rmuxd",
-      "binaries/taskd",
-      "binaries/ctld"
-    ],
     "resources": [
       "resources/agent-bundles/"
     ]

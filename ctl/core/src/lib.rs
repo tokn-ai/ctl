@@ -26,9 +26,16 @@ pub use ssh_install::{
 
 const SSH_PROGRAM: &str = "ssh";
 const MAX_SSH_COMMAND_OUTPUT: usize = 8192;
-const UNIX_GATEWAY_COMMAND: &str = r#"PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#;
-const UNIX_AUTHENTICATED_GATEWAY_COMMAND: &str =
-  r#"printf 'ctl-ssh-auth-v1\n'; PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#;
+const UNIX_GATEWAY_COMMAND: &str = concat!(
+  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
+  "exec ctl-agent connect",
+);
+const UNIX_AUTHENTICATED_GATEWAY_COMMAND: &str = concat!(
+  r#"printf 'ctl-ssh-auth-v1\n'; PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
+  "exec ctl-agent connect",
+);
 const UNIX_PLATFORM_PROBE_COMMAND: &str = "printf 'ctl-platform-v1\\n'; uname -s; uname -m";
 /// Remote command-shell convention, independent of the client platform.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -49,6 +56,7 @@ impl RemotePlatform {
 }
 const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 const SSH_AUTHENTICATED_PREFACE: &[u8] = b"ctl-ssh-auth-v1\n";
+const SSH_AGENT_NOT_FOUND_PREFACE: &[u8] = b"ctl-ssh-nf\n";
 
 /// The fixed per-user service exposed through an SSH gateway.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -555,6 +563,11 @@ where
   } else {
     SSH_TRANSPORT_PREFACE
   };
+  if preface == SSH_AGENT_NOT_FOUND_PREFACE {
+    let _ = child.kill().await;
+    drop(diagnostics);
+    return Err(CoreError::AgentNotFound);
+  }
   if identified && preface == SSH_TRANSPORT_PREFACE {
     return Err(CoreError::IdentityUnsupported);
   }
@@ -632,6 +645,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::InvalidSshCommandOutput
     | CoreError::InvalidAgentBundleId(_)
     | CoreError::InvalidSshPreface
+    | CoreError::AgentNotFound
     | CoreError::IdentityUnsupported
     | CoreError::RemoteIdentity(_) => false,
   }
@@ -755,6 +769,8 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+  #[error("ctl-agent is not installed on the remote host")]
+  AgentNotFound,
   #[error("remote components do not support environment identity; update the remote components")]
   IdentityUnsupported,
   #[error("could not read remote identity: {0}")]
@@ -907,7 +923,11 @@ mod tests {
   fn managed_unix_gateway_precedes_the_legacy_path_without_user_input() {
     assert_eq!(
       UNIX_GATEWAY_COMMAND,
-      r#"PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#
+      concat!(
+        r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+        r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
+        "exec ctl-agent connect",
+      )
     );
     assert!(!UNIX_GATEWAY_COMMAND.contains("workstation"));
   }

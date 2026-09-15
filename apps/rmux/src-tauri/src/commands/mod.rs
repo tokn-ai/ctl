@@ -71,7 +71,6 @@ pub async fn save_ssh_config_host(
   };
   let destination = tauri::async_runtime::spawn_blocking(move || {
     let destination = ssh_config::save_host(&definition)?;
-    crate::ssh_auth::remember_configured_alias(&definition);
     Ok::<_, ssh_config::SaveSshConfigError>(destination)
   })
   .await

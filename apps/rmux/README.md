@@ -9,7 +9,7 @@ From the repository root, build the daemon so the development app can find it
 beside its own Cargo binary, then start Tauri:
 
 ```sh
-cargo build -p rmuxd -p taskd
+cargo build -p ctld -p rmuxd -p taskd
 cd apps/rmux
 pnpm install
 pnpm tauri dev
@@ -47,7 +47,11 @@ reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.
 and supplies them to OpenSSH as fixed arguments. On macOS, verified passwords
 and private-key passphrases are stored separately in the device-local,
 Touch ID-protected Keychain. Private-key contents, arbitrary options,
-forwarding, and remote commands are never stored.
+forwarding, and remote commands are never stored. A per-user `ctld` process
+owns the authenticated OpenSSH control masters and is the only local component
+that accesses Keychain; the desktop client only forwards attempt-scoped
+prompts. Masters remain available for five idle minutes so background channels
+do not race a discarded authentication connection.
 The app remembers the active alias in either case so it can restore the mixed
 host list on launch; config-backed targets keep only that alias locally.
 Existing WebView host settings migrate automatically after a successful disk write.
@@ -81,22 +85,28 @@ last-known sessions from other targets remain usable.
 
 SSH uses `ctl-core` and the system `ssh` executable with a fixed remote command
 that prepends the app-managed directory before running `ctl-agent connect`;
-forwarding, agent access, X11, local commands,
-and PTY allocation remain disabled. On macOS/Linux, a short-lived owner-only
-Unix socket connects OpenSSH's askpass helper to the quick-input UI. Host-key
-trust requires explicit confirmation and is managed by OpenSSH. On macOS,
-verified passwords and key passphrases are stored device-locally in Keychain
-under a Touch ID-only policy tied to the currently enrolled fingerprints. They
-are loaded only to satisfy an OpenSSH prompt and native plaintext buffers are
-zeroized after use. They never appear in command arguments, environment
-variables, or logs; one-time responses are not stored. Removing a host deletes
-its saved credentials. On Linux, reusable secrets remain zeroizing,
-process-memory-only values. Background connections time out after ten seconds;
-an explicit interactive attempt allows up to three minutes and Escape cancels
-it. On non-Unix platforms, preconfigured noninteractive SSH remains available.
+forwarding, agent access, X11, local commands, and PTY allocation remain
+disabled. On macOS/Linux, the per-user `ctld` owns one explicit OpenSSH control
+master per saved destination. Its owner-only Unix socket carries askpass
+requests to the quick-input UI for an active connection attempt. Host-key trust
+requires explicit confirmation and is managed by OpenSSH. A master remains
+available for five idle minutes, while all background channels require that
+master and cannot independently prompt or fall back to another connection.
 
-The macOS app must be signed with an application-identifier entitlement that is
-authorized by its embedded provisioning profile. Without it, the Data
+On macOS, only `ctld` links the Keychain implementation. Verified passwords and
+key passphrases are stored device-locally under a Touch ID-only policy tied to
+the currently enrolled fingerprints. They are loaded only inside `ctld` to
+satisfy one OpenSSH prompt and never return to the desktop client. Native
+plaintext buffers are zeroized after use; secrets never appear in command
+arguments, environment variables, or logs, and one-time responses are not
+stored. Removing a host asks `ctld` to delete its saved credentials. On Linux,
+`ctld` keeps a newly entered reusable secret only through authentication and
+then discards it. An explicit interactive attempt allows up to three minutes
+and Escape cancels it. On non-Unix platforms, preconfigured noninteractive SSH
+remains available.
+
+The macOS `ctld` executable must be signed with an application-identifier
+entitlement authorized by its provisioning profile. Without it, the Data
 Protection Keychain rejects credential storage and rmux reports the signing
 error instead of silently weakening the access policy.
 

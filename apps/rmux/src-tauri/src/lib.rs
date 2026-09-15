@@ -21,8 +21,6 @@ mod tasks;
 mod transport;
 mod workspace;
 
-pub use ssh_auth::helper_exit_code as ssh_askpass_exit_code;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the native rmux application runtime.
 ///

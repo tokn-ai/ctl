@@ -47,8 +47,9 @@ The service is an enum selected by the command domain. Neither a socket path nor
 an arbitrary service or shell command is accepted from the client.
 
 `<destination>` is an OpenSSH destination or `Host` alias. Host-key checking,
-user authentication, certificates, agents, proxy jumps, ports, and connection
-multiplexing remain OpenSSH configuration. `ctl` never disables host-key
+user authentication, certificates, agents, proxy jumps, and ports remain
+OpenSSH configuration. On Unix clients, `ctld` owns the explicit OpenSSH
+control master shared by `ctl` and the desktop. `ctl` never disables host-key
 verification, enables agent forwarding, creates a forwarding, or accepts a
 user-controlled remote command.
 

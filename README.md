@@ -38,12 +38,13 @@ cargo install --path rmux/cli
 ```
 
 For remote access, install `rmuxd`, `taskd`, and `ctl-agent` together on the
-controlled device and `ctl` on the client:
+controlled device and `ctl` with `ctld` on each Unix client:
 
 ```sh
 cargo install --path rmux/daemon
 cargo install --path task/daemon
 cargo install --path ctl/agent
+cargo install --path ctl/daemon
 cargo install --path ctl/cli
 ```
 
@@ -55,12 +56,12 @@ cargo install --path task/daemon
 cargo install --path ctl/cli
 ```
 
-The desktop app uses pnpm and Tauri 2. Build `rmuxd` into the shared Cargo
-target directory before starting it so the app can auto-start its sibling
-daemon:
+The desktop app uses pnpm and Tauri 2. Build its local daemons into the shared
+Cargo target directory before starting it so the app can auto-start the
+sibling executables:
 
 ```sh
-cargo build -p rmuxd
+cargo build -p ctld -p rmuxd -p taskd
 cd apps/rmux
 pnpm install
 pnpm tauri dev
@@ -82,8 +83,8 @@ The `Desktop and remote-agent bundles` workflow builds static Linux and native
 macOS remote bundles for x86-64 and ARM64. Main-branch pushes refresh
 development bundles automatically; manual runs build remote bundles by default
 and can opt into desktop packages. Version tags build both, download all four
-remote targets into each desktop package, and stage the matching local `rmuxd`
-and `taskd` as Tauri sidecars. Release bundle IDs are semantic versions; other
+remote targets into each desktop package, and stage the matching local `ctld`,
+`rmuxd`, and `taskd` as Tauri sidecars. Release bundle IDs are semantic versions; other
 runs include the source revision so different development builds never share a
 remote install directory. Tag names must match the app version as `v<version>`.
 
@@ -249,9 +250,10 @@ ctl rmux attach development
 
 Pass global `--host`/`-H` to redirect the same rmux command through SSH. The
 value is an ordinary OpenSSH destination or `~/.ssh/config` host alias. Unix
-clients first add the app-managed per-user installation to the fixed remote
-command's `PATH`, then fall back to the remote account's ordinary non-interactive
-`PATH`:
+clients ask the per-user `ctld` to establish or reuse an authenticated OpenSSH
+control master, then add the app-managed per-user installation to the fixed
+remote command's `PATH` before falling back to the remote account's ordinary
+non-interactive `PATH`:
 
 ```sh
 ctl --host workstation rmux list

@@ -36,15 +36,6 @@ pub enum ConnectionTargetDto {
 }
 
 impl ConnectionTargetDto {
-  /// Credential caches describe an SSH endpoint, independent of observed version.
-  pub fn credential_key(&self) -> Self {
-    let mut key = self.clone();
-    if let Self::Ssh { remote_info, .. } = &mut key {
-      *remote_info = None;
-    }
-    key
-  }
-
   pub fn verify_remote_identity(&self, identity: &ctl_proto::RemoteIdentity) -> CommandResult<()> {
     if let Self::Ssh {
       remote_info: Some(expected),
@@ -762,7 +753,6 @@ mod tests {
     let mut upgraded = identity.clone();
     upgraded.agent_version = "0.2.0".into();
     assert!(target.verify_remote_identity(&upgraded).is_ok());
-    assert_eq!(target.credential_key(), unverified);
     upgraded.remote_id = uuid::Uuid::new_v4().to_string();
     assert_eq!(
       target.verify_remote_identity(&upgraded).unwrap_err().code,

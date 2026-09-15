@@ -111,15 +111,16 @@ new bytes arrive for a speed-dependent interval of 30 seconds to five minutes.
 Platform detection and the upload connection each allow one minute of inactivity;
 extraction allows two minutes, and other installation stages allow 30 seconds.
 Time spent answering authentication prompts does not consume these intervals.
-Password/passphrase and host-verification prompts use the same overlay on
-macOS/Linux. After successful OpenSSH authentication on macOS, a newly entered
-reusable secret gets an explicit Yes, No, or Never save choice before remote
-environment identity comparison. A fixed authentication preface is emitted
-before `ctl-agent` starts, so this choice also works on hosts where the remote
-components are not installed. Yes stores the secret device-locally in Keychain
-and requires Touch ID when OpenSSH requests it again; Never suppresses future
-save offers for that endpoint without retaining the secret. Linux keeps
-reusable secrets only in zeroizing process memory.
+Password/passphrase and host-verification prompts originate in the per-user
+`ctld` broker on macOS/Linux and use the initiating client's prompt UI. After
+its OpenSSH control master authenticates on macOS, a newly entered reusable
+secret gets an explicit Yes, No, or Never save choice before any remote
+environment identity comparison. This also works when remote components are
+not installed because authentication belongs to the master rather than the
+`ctl-agent` channel. Yes stores the secret device-locally in Keychain and
+requires Touch ID when OpenSSH requests it again; Never suppresses future save
+offers for that destination without retaining the secret. Only `ctld` accesses
+Keychain, and Linux discards newly entered reusable secrets after authentication.
 
 The desktop discovers a stable ctl environment ID and installed version during
 connection verification. A different address with the same ID automatically recovers

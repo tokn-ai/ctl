@@ -19,6 +19,9 @@ const NON_RECOVERABLE_ERROR_CODES = new Set([
   "remote_identity_mismatch",
   "invalid_remote_identity",
   "ctl_agent_identity_unsupported",
+  "ssh_authentication_failed",
+  "ssh_authentication_required",
+  "ssh_start_failed",
   "session_not_found",
   "unsupported_platform",
 ]);

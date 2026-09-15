@@ -19,6 +19,7 @@ task-proto.workspace = true
 task-store.workspace = true
 base64.workspace = true
 ctl-core.workspace = true
+ctld-ipc.workspace = true
 dirs.workspace = true
 glob.workspace = true
 rmux-client.workspace = true
@@ -31,12 +32,11 @@ tauri = { version = "2", features = [] }
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-zeroize = "1.8"
+zeroize.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent"] }
-security-framework = { version = "3.7", features = ["OSX_10_15"] }
 
 [lints]
 workspace = true

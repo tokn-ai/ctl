@@ -15,6 +15,7 @@ import {
 } from "react";
 import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
+import { PortForwardingDialog } from "../components/sessions/PortForwardingDialog";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
 import { NewShellFlow } from "../components/sessions/NewShellFlow";
 import { useWorkspace } from "../features/workspace/useWorkspace";
@@ -91,6 +92,7 @@ import {
   restartLocalDaemon,
   saveSshConfigHost,
   forgetSshCredentials,
+  configurePortForward,
 } from "../lib/tauri";
 import type {
   ConnectionTarget,
@@ -101,6 +103,7 @@ import type {
   SshHostDefinition,
   SshHostStorage,
   TerminalSize,
+  SshConnectionTarget,
 } from "../lib/types";
 
 function measuredSize(renderer: XtermRenderer | null): TerminalSize {
@@ -181,6 +184,7 @@ export function TerminalPage() {
   const [hostFlow, setHostFlow] = useState<ConnectionTarget | null | undefined>(
     undefined,
   );
+  const [portForwardTarget, setPortForwardTarget] = useState<SshConnectionTarget | null>(null);
   const [
     daemonRestartConfirmationPending,
     setDaemonRestartConfirmationPending,
@@ -210,6 +214,21 @@ export function TerminalPage() {
   const daemonEpochRef = useRef(0);
   workspace.closeBlockedRef.current = () =>
     creatingRef.current || restartingDaemonRef.current || taskWorkspace.busy;
+
+  useEffect(() => {
+    if (!workspace.ready) return;
+    for (const forward of workspace.port_forwards.filter((item) => item.enabled)) {
+      const target = targets.find(
+        (item): item is SshConnectionTarget =>
+          item.kind === "ssh" && item.host_id === forward.host_id,
+      );
+      if (target) {
+        void configurePortForward(target, forward, true).catch((failure) =>
+          setListError(errorMessage(failure)),
+        );
+      }
+    }
+  }, [workspace.ready]);
 
   const daemonRestartBlocksInteractions = useCallback(
     () => daemonRestartConfirmationRef.current || restartingDaemonRef.current,
@@ -581,6 +600,11 @@ export function TerminalPage() {
       if (target.kind === "local" || daemonRestartBlocksInteractions()) {
         return;
       }
+      for (const forward of workspace.port_forwards.filter(
+        (item) => item.host_id === target.host_id && item.enabled,
+      )) {
+        await configurePortForward(target, forward, false);
+      }
       await forgetSshCredentials(target);
       const removedTargetKey = targetKey(target);
       const activeTab = tabsRef.current.find(
@@ -615,6 +639,9 @@ export function TerminalPage() {
       setSessions(nextSessions);
       setTabs(nextTabs);
       setActiveTabKey(nextActiveKey);
+      workspace.update("port_forwards", (current) =>
+        current.filter((forward) => forward.host_id !== target.host_id),
+      );
       await persistWorkspace();
       setSessionShellStates((current) =>
         retainShellStates(current, new Set(nextSessions.map(sessionKey))),
@@ -641,6 +668,8 @@ export function TerminalPage() {
       setActiveTabKey,
       setSessionShellStates,
       persistWorkspace,
+      workspace.port_forwards,
+      workspace.update,
     ],
   );
 
@@ -1162,6 +1191,9 @@ export function TerminalPage() {
         setHostFlow(target);
       },
       removeHost,
+      managePortForwards: (target) => {
+        if (target.kind === "ssh") setPortForwardTarget(target);
+      },
       saveWorkspace: () => persistWorkspace(true),
       configureKeybindings: () => setKeybindingsOpen(true),
       reloadKeybindings: keybindings.reload,
@@ -1262,6 +1294,7 @@ export function TerminalPage() {
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
   const dialogOpen =
     taskWorkspace.editorId !== null ||
+    portForwardTarget !== null ||
     keybindingsOpen ||
     newShellOpen ||
     importOpen ||
@@ -1382,6 +1415,11 @@ export function TerminalPage() {
               }
               onRemoveHost={(target) =>
                 executeCommandById(COMMAND_IDS.removeHost, {
+                  target_key: targetKey(target),
+                })
+              }
+              onPortForward={(target) =>
+                executeCommandById(COMMAND_IDS.managePortForwards, {
                   target_key: targetKey(target),
                 })
               }
@@ -1542,7 +1580,26 @@ export function TerminalPage() {
           saved={taskWorkspace.saved}
         />
       ) : null}
-      {keybindingsOpen ? (
+      {portForwardTarget ? (
+        <PortForwardingDialog
+          target={portForwardTarget}
+          forwards={workspace.port_forwards.filter(
+            (forward) => forward.host_id === portForwardTarget.host_id,
+          )}
+          onChange={(forwards) => {
+            workspace.update("port_forwards", (current) => [
+              ...current.filter(
+                (forward) => forward.host_id !== portForwardTarget.host_id,
+              ),
+              ...forwards,
+            ]);
+          }}
+          onClose={() => {
+            setPortForwardTarget(null);
+            requestAnimationFrame(() => renderer?.focus());
+          }}
+        />
+      ) : keybindingsOpen ? (
         <KeybindingsFlow
           commands={commands}
           document={keybindings.document}

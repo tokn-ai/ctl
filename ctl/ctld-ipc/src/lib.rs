@@ -22,7 +22,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SshTarget {
@@ -31,6 +31,30 @@ pub struct SshTarget {
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LocalPortForward {
+  pub forward_id: String,
+  pub bind_address: String,
+  pub local_port: u16,
+  pub remote_host: String,
+  pub remote_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardState {
+  WaitingForAuthentication,
+  Active,
+  Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortForwardStatus {
+  pub forward: LocalPortForward,
+  pub state: PortForwardState,
+  pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +90,14 @@ pub enum ClientMessage {
   DeleteCredentials {
     target: SshTarget,
   },
+  ConfigurePortForward {
+    target: SshTarget,
+    forward: LocalPortForward,
+    enabled: bool,
+  },
+  ListPortForwards {
+    target: SshTarget,
+  },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +119,12 @@ pub enum ServerMessage {
     response: Option<Zeroizing<String>>,
   },
   CredentialsDeleted,
+  PortForwardConfigured {
+    status: PortForwardStatus,
+  },
+  PortForwards {
+    statuses: Vec<PortForwardStatus>,
+  },
   Error {
     code: String,
     message: String,
@@ -118,16 +156,22 @@ pub enum ConnectError {
 
 #[must_use]
 pub fn socket_path() -> PathBuf {
+  if let Some(path) = env::var_os("CTLD_SOCKET_PATH") {
+    return PathBuf::from(path);
+  }
+  let socket_name = format!("ctld-v{PROTOCOL_VERSION}.sock");
   if let Some(directory) = env::var_os("CTLD_RUNTIME_DIR") {
-    return PathBuf::from(directory).join("ctld.sock");
+    return PathBuf::from(directory).join(socket_name);
   }
   #[cfg(unix)]
   {
     if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
-      return PathBuf::from(directory).join("ctld/ctld.sock");
+      return PathBuf::from(directory).join("ctld").join(socket_name);
     }
     let uid = rustix::process::getuid().as_raw();
-    PathBuf::from("/tmp").join(format!("ctld-{uid}/ctld.sock"))
+    PathBuf::from("/tmp")
+      .join(format!("ctld-{uid}"))
+      .join(socket_name)
   }
   #[cfg(windows)]
   {
@@ -139,7 +183,7 @@ pub fn socket_path() -> PathBuf {
       .flat_map(u16::to_le_bytes)
       .collect();
     let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes);
-    PathBuf::from(format!(r"\\.\pipe\ctld-{id}"))
+    PathBuf::from(format!(r"\\.\pipe\ctld-v{PROTOCOL_VERSION}-{id}"))
   }
 }
 

@@ -71,7 +71,7 @@ export interface WorkspaceSession extends SessionReference {
 }
 
 export interface WorkspaceDocument {
-  schema_version: 1 | 2 | 3;
+  schema_version: 1 | 2 | 3 | 4;
   workspace_id: string;
   hosts: WorkspaceHost[];
   sessions: WorkspaceSession[];
@@ -82,6 +82,32 @@ export interface WorkspaceDocument {
   task_definition_scope?: TaskDefinitionScope;
   sidebar_view?: "sessions" | "tasks";
   task_references?: TaskReference[];
+  port_forwards?: WorkspacePortForward[];
+}
+
+export interface LocalPortForward {
+  forward_id: string;
+  bind_address: "127.0.0.1";
+  local_port: number;
+  remote_host: string;
+  remote_port: number;
+}
+
+export interface WorkspacePortForward extends LocalPortForward {
+  host_id: string;
+  name: string;
+  enabled: boolean;
+}
+
+export type PortForwardState =
+  | "waiting_for_authentication"
+  | "active"
+  | "error";
+
+export interface PortForwardStatus {
+  forward: LocalPortForward;
+  state: PortForwardState;
+  message: string | null;
 }
 
 export interface WorkspaceSnapshot {

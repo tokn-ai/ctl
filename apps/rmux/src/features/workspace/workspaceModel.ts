@@ -10,6 +10,7 @@ import type {
   SessionSummary,
   ShellStateSummary,
   WorkspaceDocument,
+  WorkspacePortForward,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
 
@@ -26,6 +27,7 @@ export interface WorkspaceView {
   tabs: SessionSummary[];
   active_tab_key: string | null;
   shell_states: ReadonlyMap<string, ShellStateSummary>;
+  port_forwards: WorkspacePortForward[];
 }
 
 export function emptyWorkspaceView(): WorkspaceView {
@@ -42,6 +44,7 @@ export function emptyWorkspaceView(): WorkspaceView {
     tabs: [],
     active_tab_key: null,
     shell_states: new Map(),
+    port_forwards: [],
   };
 }
 
@@ -113,6 +116,7 @@ export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
   );
   return {
     targets,
+    port_forwards: document.port_forwards ?? [],
     sessions,
     shell_states,
     sidebar_view: document.sidebar_view ?? (document.active_tab?.kind === "task_definition" ? "tasks" : "sessions"),
@@ -174,7 +178,12 @@ export function workspaceDocument(
     (tab) => workspaceTabKey(tab) === view.active_tab_key,
   );
   return {
-    schema_version: 3,
+    schema_version: 4,
+    port_forwards: view.port_forwards.filter((forward) =>
+      view.targets.some(
+        (target) => target.kind === "ssh" && target.host_id === forward.host_id,
+      ),
+    ),
     sidebar_view: view.sidebar_view,
     task_drafts: view.task_drafts,
     task_definition_scope: view.task_definition_scope,

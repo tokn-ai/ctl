@@ -38,6 +38,7 @@ interface SessionSidebarProps {
   onAddHost(): void;
   onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
+  onPortForward?(target: ConnectionTarget): void;
   onAddExisting(): void;
   onForget(session: SessionSummary): void;
   onSelectTask?(task: ManagedTask): void;
@@ -98,6 +99,7 @@ export function SessionSidebar({
   onAddHost,
   onConnectHost,
   onRemoveHost,
+  onPortForward,
   onAddExisting,
   onForget,
   onSelectTask,
@@ -160,6 +162,16 @@ export function SessionSidebar({
                 >
                   {targetLabel(target)}
                 </button>
+                {target.kind === "ssh" ? (
+                  <button
+                    type="button"
+                    onClick={() => onPortForward?.(target)}
+                    aria-label={`Port forwarding for ${targetLabel(target)}`}
+                    title={`Port forwarding for ${targetLabel(target)}`}
+                  >
+                    ↪
+                  </button>
+                ) : null}
                 {target.kind === "ssh" ? (
                   <button
                     type="button"

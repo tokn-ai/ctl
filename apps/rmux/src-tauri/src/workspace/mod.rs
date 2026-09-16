@@ -23,6 +23,19 @@ pub struct WorkspaceHost {
   pub target: ConnectionTargetDto,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspacePortForward {
+  pub forward_id: String,
+  pub host_id: String,
+  pub name: String,
+  pub bind_address: String,
+  pub local_port: u16,
+  pub remote_host: String,
+  pub remote_port: u16,
+  pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionReference {
@@ -132,16 +145,22 @@ pub struct WorkspaceDocument {
   pub sidebar_view: SidebarView,
   #[serde(default)]
   pub task_references: Vec<TaskReference>,
+  #[serde(default)]
+  pub port_forwards: Vec<WorkspacePortForward>,
 }
 
 fn global_definition_scope() -> DefinitionScope {
   DefinitionScope::Global
 }
 
+fn valid_workspace_text(text: &str) -> bool {
+  !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)
+}
+
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
-      schema_version: 3,
+      schema_version: 4,
       workspace_id: "default".into(),
       hosts: vec![WorkspaceHost {
         host_id: "local".into(),
@@ -153,6 +172,7 @@ impl Default for WorkspaceDocument {
       task_drafts: Vec::new(),
       sidebar_view: SidebarView::default(),
       task_references: Vec::new(),
+      port_forwards: Vec::new(),
       tabs: Vec::new(),
       active_tab: None,
     }
@@ -161,13 +181,13 @@ impl Default for WorkspaceDocument {
 
 impl WorkspaceDocument {
   fn validate(&self) -> CommandResult<()> {
-    if !matches!(self.schema_version, 2 | 3) {
+    if !matches!(self.schema_version, 2..=4) {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "This workspace was written by another app version. Its file has not been changed.",
       ));
     }
-    if self.schema_version == 3 && !self.task_definitions.is_empty() {
+    if self.schema_version >= 3 && !self.task_definitions.is_empty() {
       return Err(CommandErrorDto::new(
         "workspace_invalid",
         "Saved task definitions belong in the shared definition store.",
@@ -179,15 +199,16 @@ impl WorkspaceDocument {
         "The workspace contains invalid or duplicate references.",
       )
     };
-    let valid_text =
-      |text: &str| !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control);
-    if !valid_text(&self.workspace_id) || self.hosts.len() > 1024 || self.sessions.len() > 10_000 {
+    if !valid_workspace_text(&self.workspace_id)
+      || self.hosts.len() > 1024
+      || self.sessions.len() > 10_000
+    {
       return Err(invalid());
     }
     let mut hosts = HashSet::new();
     let mut destinations = HashSet::new();
     for host in &self.hosts {
-      if !valid_text(&host.host_id) || !hosts.insert(host.host_id.as_str()) {
+      if !valid_workspace_text(&host.host_id) || !hosts.insert(host.host_id.as_str()) {
         return Err(invalid());
       }
       match &host.target {
@@ -202,13 +223,13 @@ impl WorkspaceDocument {
         } => {
           if host.host_id == "local"
             || remote_info.as_ref().is_some_and(|info| !info.is_valid())
-            || !valid_text(destination)
+            || !valid_workspace_text(destination)
             || !destinations.insert(destination)
             || *port == Some(0)
             || [hostname, user, identity_file]
               .into_iter()
               .flatten()
-              .any(|value| !valid_text(value))
+              .any(|value| !valid_workspace_text(value))
           {
             return Err(invalid());
           }
@@ -219,18 +240,21 @@ impl WorkspaceDocument {
     if !hosts.contains("local") {
       return Err(invalid());
     }
+    if !self.port_forwards_are_valid(&hosts) {
+      return Err(invalid());
+    }
     let mut sessions = HashSet::new();
     for session in &self.sessions {
       if !hosts.contains(session.host_id.as_str())
-        || !valid_text(&session.session_id)
-        || !valid_text(&session.name)
+        || !valid_workspace_text(&session.session_id)
+        || !valid_workspace_text(&session.name)
         || [
           session.last_known_cwd.as_ref(),
           session.last_known_cwd_display.as_ref(),
         ]
         .into_iter()
         .flatten()
-        .any(|value| !valid_text(value))
+        .any(|value| !valid_workspace_text(value))
         || !sessions.insert(session.reference())
       {
         return Err(invalid());
@@ -248,6 +272,24 @@ impl WorkspaceDocument {
       return Err(invalid());
     }
     Ok(())
+  }
+
+  fn port_forwards_are_valid(&self, hosts: &HashSet<&str>) -> bool {
+    let mut forward_ids = HashSet::new();
+    self.port_forwards.len() <= 4096
+      && self.port_forwards.iter().all(|forward| {
+        forward_ids.insert(forward.forward_id.as_str())
+          && valid_workspace_text(&forward.forward_id)
+          && valid_workspace_text(&forward.name)
+          && forward.name.len() <= 128
+          && forward.bind_address == "127.0.0.1"
+          && forward.local_port != 0
+          && forward.remote_port != 0
+          && valid_workspace_text(&forward.remote_host)
+          && !forward.remote_host.chars().any(char::is_whitespace)
+          && forward.host_id != "local"
+          && hosts.contains(forward.host_id.as_str())
+      })
   }
   fn validate_task_drafts(&self) -> CommandResult<()> {
     let mut ids = HashSet::new();
@@ -357,7 +399,7 @@ impl WorkspaceDocument {
       }
       WorkspaceTab::TaskDefinition { definition_id } => {
         valid_text(definition_id)
-          && (self.schema_version == 3 || definitions.contains(definition_id.as_str()))
+          && (self.schema_version >= 3 || definitions.contains(definition_id.as_str()))
       }
     };
 

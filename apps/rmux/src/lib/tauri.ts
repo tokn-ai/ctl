@@ -33,6 +33,8 @@ import type {
   TaskDefinitionScope,
   TaskDefinitionCatalog,
   SavedTaskDefinition,
+  LocalPortForward,
+  PortForwardStatus,
 } from "./types";
 
 export async function loadTaskDefinitions(scope: TaskDefinitionScope): Promise<TaskDefinitionCatalog> {
@@ -141,6 +143,22 @@ export async function forgetSshCredentials(
   target: ConnectionTarget,
 ): Promise<void> {
   await invoke("forget_ssh_credentials", { request: { target } });
+}
+
+export async function configurePortForward(
+  target: ConnectionTarget,
+  forward: LocalPortForward,
+  enabled: boolean,
+): Promise<PortForwardStatus> {
+  return invoke("configure_port_forward", {
+    request: { target, forward, enabled },
+  });
+}
+
+export async function listPortForwards(
+  target: ConnectionTarget,
+): Promise<PortForwardStatus[]> {
+  return invoke("list_port_forwards", { request: { target } });
 }
 
 export interface OpenAttachmentResult {

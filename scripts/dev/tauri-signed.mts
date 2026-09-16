@@ -93,6 +93,7 @@ async function main(): Promise<void> {
       ...process.env,
       CTLD_BIN: daemonExecutable,
       CTLD_RUNTIME_DIR: runtimeDirectory,
+      CTLD_SOCKET_PATH: socket,
     };
     daemon = spawn(daemonExecutable, ["--socket", socket], {
       cwd: repositoryRoot,

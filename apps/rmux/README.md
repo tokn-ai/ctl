@@ -114,12 +114,19 @@ Without the profile-authorized application identifier, the Data Protection
 Keychain rejects credential storage and rmux reports the signing error instead
 of silently weakening the access policy.
 
-For local Touch ID testing, run `pnpm tauri:dev:signed`. The launcher searches
-Xcode's downloaded profiles and
-`~/Library/Application Support/rmux/signing/ctld.provisionprofile`, selects the
-newest unexpired profile for `io.rmux.desktop.ctld`, discovers its matching
-signing certificate in the login Keychain, and runs an isolated
-signed `ctld` for the lifetime of `tauri dev`. It needs no signing environment
+For local Touch ID testing with any Apple Account, first run
+`pnpm tauri:dev:provision`. In the Xcode project it opens, select the
+`ctld-provisioning` target, choose your Personal Team under **Signing &
+Capabilities**, and build once. This Xcode project is copied under `target/`,
+so the local team selection does not modify tracked files. Free Personal Team
+profiles expire after seven days; after initial setup the signed-development
+launcher asks Xcode to refresh an expired profile automatically.
+
+Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
+profiles and `~/Library/Application Support/rmux/signing/ctld.provisionprofile`,
+selects the newest unexpired profile for `io.rmux.desktop.ctld`, discovers its
+matching signing certificate in the login Keychain, and runs an isolated signed
+`ctld` for the lifetime of `tauri dev`. It needs no signing environment
 variables. Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch
 ID-protected credentials.
 

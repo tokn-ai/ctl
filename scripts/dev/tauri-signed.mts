@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import {
+  cp,
   mkdtemp,
   readFile,
   readdir,
@@ -20,6 +21,10 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "../..");
 const appDirectory = path.join(repositoryRoot, "apps/rmux");
 const bundleIdentifier = "io.rmux.desktop.ctld";
+const provisioningTemplate = path.join(
+  scriptDirectory,
+  "macos/ctld-provisioning",
+);
 const localProfile = path.join(
   homedir(),
   "Library/Application Support/rmux/signing/ctld.provisionprofile",
@@ -35,16 +40,30 @@ async function main(): Promise<void> {
     throw new Error("signed Tauri development is only available on macOS");
   }
 
+  const targetDirectory = cargoTargetDirectory();
+  if (process.argv.slice(2).includes("--provision")) {
+    await openProvisioningProject(targetDirectory);
+    return;
+  }
+
   const inspectionDirectory = await mkdtemp(path.join(tmpdir(), "rmux-profile-"));
   let runtimeDirectory: string | undefined;
   let daemon: ChildProcess | undefined;
   let tauri: ChildProcess | undefined;
   try {
-    const profile = await findProfile(inspectionDirectory);
-    const targetDirectory = path.resolve(
-      repositoryRoot,
-      process.env.CARGO_TARGET_DIR ?? "target",
-    );
+    let profile = await findProfile(inspectionDirectory);
+    if (!profile && (await configuredProvisioningProject(targetDirectory))) {
+      await refreshPersonalTeamProfile(targetDirectory);
+      profile = await findProfile(inspectionDirectory);
+    }
+    if (!profile) {
+      throw new Error(
+        `No unexpired provisioning profile authorizes ${bundleIdentifier}. ` +
+          "Run `pnpm tauri:dev:provision`, select your Personal Team under " +
+          "Signing & Capabilities, and build the target once. Free Personal " +
+          "Team profiles expire after seven days.",
+      );
+    }
     const tauriConfig = JSON.parse(
       await readFile(path.join(appDirectory, "src-tauri/tauri.conf.json"), "utf8"),
     ) as { version?: string };
@@ -108,7 +127,74 @@ async function main(): Promise<void> {
   }
 }
 
-async function findProfile(inspectionDirectory: string): Promise<Profile> {
+function cargoTargetDirectory(): string {
+  return path.resolve(
+    repositoryRoot,
+    process.env.CARGO_TARGET_DIR ?? "target",
+  );
+}
+
+function provisioningProject(targetDirectory: string): string {
+  return path.join(
+    targetDirectory,
+    "ctld-provisioning/ctld-provisioning.xcodeproj",
+  );
+}
+
+async function openProvisioningProject(targetDirectory: string): Promise<void> {
+  const project = provisioningProject(targetDirectory);
+  if (!(await exists(project))) {
+    await cp(provisioningTemplate, path.dirname(project), { recursive: true });
+  }
+  console.log(
+    "In Xcode, select the ctld-provisioning target, choose your Personal Team " +
+      "under Signing & Capabilities, then use Product > Build once.",
+  );
+  await run("open", ["-a", "Xcode", project], repositoryRoot);
+}
+
+async function configuredProvisioningProject(
+  targetDirectory: string,
+): Promise<boolean> {
+  try {
+    const projectFile = path.join(
+      provisioningProject(targetDirectory),
+      "project.pbxproj",
+    );
+    const contents = await readFile(projectFile, "utf8");
+    return /DEVELOPMENT_TEAM = [A-Z0-9]+;/.test(contents);
+  } catch {
+    return false;
+  }
+}
+
+async function refreshPersonalTeamProfile(
+  targetDirectory: string,
+): Promise<void> {
+  await run(
+    "xcodebuild",
+    [
+      "-project",
+      provisioningProject(targetDirectory),
+      "-scheme",
+      "ctld-provisioning",
+      "-configuration",
+      "Debug",
+      "-destination",
+      "platform=macOS",
+      "-derivedDataPath",
+      path.join(targetDirectory, "ctld-provisioning-derived"),
+      "-allowProvisioningUpdates",
+      "-allowProvisioningDeviceRegistration",
+      "build",
+    ],
+    repositoryRoot,
+  );
+}
+
+async function findProfile(
+  inspectionDirectory: string,
+): Promise<Profile | undefined> {
   const override = process.env.CTLD_PROVISIONING_PROFILE;
   const candidates = override
     ? [path.resolve(override)]
@@ -142,14 +228,16 @@ async function findProfile(inspectionDirectory: string): Promise<Profile> {
     }
   }
   matches.sort((left, right) => right.expires_at.valueOf() - left.expires_at.valueOf());
-  const profile = matches[0];
-  if (!profile) {
-    throw new Error(
-      `No unexpired provisioning profile authorizes *.${bundleIdentifier}. ` +
-        `Download one with Xcode or place it at ${localProfile}.`,
-    );
+  return matches[0];
+}
+
+async function exists(candidate: string): Promise<boolean> {
+  try {
+    await stat(candidate);
+    return true;
+  } catch {
+    return false;
   }
-  return profile;
 }
 
 async function profileFiles(directory: string): Promise<string[]> {

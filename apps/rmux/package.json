@@ -12,6 +12,8 @@
     "agents:sync": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/sync-agent-bundles.mts",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev:provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/tauri-signed.mts --provision",
+    "tauri:dev:signed": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/tauri-signed.mts",
     "test": "vitest run"
   },
   "dependencies": {

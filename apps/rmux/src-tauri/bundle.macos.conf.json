@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [
+      "binaries/rmuxd",
+      "binaries/taskd"
+    ],
+    "macOS": {
+      "files": {
+        "Helpers/ctld.app": "../../../target/ctld-app/ctld.app"
+      }
+    }
+  }
+}

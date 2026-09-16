@@ -105,10 +105,38 @@ then discards it. An explicit interactive attempt allows up to three minutes
 and Escape cancels it. On non-Unix platforms, preconfigured noninteractive SSH
 remains available.
 
-The macOS `ctld` executable must be signed with an application-identifier
-entitlement authorized by its provisioning profile. Without it, the Data
-Protection Keychain rejects credential storage and rmux reports the signing
-error instead of silently weakening the access policy.
+On macOS, `ctld` is packaged as the app-like helper
+`rmux.app/Contents/Helpers/ctld.app`. Release builds sign that helper with the
+permanent `io.rmux.desktop.ctld` bundle identifier and embed its matching
+Developer ID provisioning profile. This gives `ctld` its own Keychain identity;
+the main app and the other sidecars receive no credential-access entitlement.
+Without the profile-authorized application identifier, the Data Protection
+Keychain rejects credential storage and rmux reports the signing error instead
+of silently weakening the access policy.
+
+For local Touch ID testing with any Apple Account, first run
+`pnpm tauri:dev:provision`. In the Xcode project it opens, select the
+`ctld-provisioning` target, choose your Personal Team under **Signing &
+Capabilities**, and build once. This Xcode project is copied under `target/`,
+so the local team selection does not modify tracked files. Free Personal Team
+profiles expire after seven days; after initial setup the signed-development
+launcher asks Xcode to refresh an expired profile automatically.
+
+Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
+profiles and `~/Library/Application Support/rmux/signing/ctld.provisionprofile`,
+selects the newest unexpired profile for `io.rmux.desktop.ctld`, discovers its
+matching signing certificate in the login Keychain, and runs an isolated signed
+`ctld` for the lifetime of `tauri dev`. It needs no signing environment
+variables. Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch
+ID-protected credentials.
+
+The release workflow derives the Team ID and signing identity from the profile
+and imported certificate. It expects `APPLE_API_ISSUER` and `APPLE_API_KEY` as
+non-secret repository variables. `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_CTLD_PROVISIONING_PROFILE`, and
+`APPLE_API_KEY_CONTENT` are repository secrets. The certificate and profile
+must be for Developer ID distribution, and the profile must authorize exactly
+the team-prefixed `io.rmux.desktop.ctld` application identifier.
 
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also

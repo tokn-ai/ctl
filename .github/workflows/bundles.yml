@@ -166,12 +166,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            bundle_config: bundle.linux.conf.json
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            bundle_config: bundle.linux.conf.json
           - runner: macos-latest
             target: x86_64-apple-darwin
+            bundle_config: bundle.macos.conf.json
           - runner: macos-latest
             target: aarch64-apple-darwin
+            bundle_config: bundle.macos.conf.json
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -221,7 +225,58 @@ jobs:
           name: ctl-agent-bundle-set
           path: apps/rmux/src-tauri/resources/agent-bundles
 
+      - name: Validate Apple signing configuration
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+          NOTARY_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY }}
+          PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
+        shell: bash
+        run: |
+          missing=()
+          [[ -n "$CERTIFICATE_BASE64" ]] || missing+=(APPLE_CERTIFICATE)
+          [[ -n "$CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+          [[ -n "$NOTARY_ISSUER" ]] || missing+=(APPLE_API_ISSUER)
+          [[ -n "$NOTARY_KEY_CONTENT" ]] || missing+=(APPLE_API_KEY_CONTENT)
+          [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
+          [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
+          if (( ${#missing[@]} > 0 )); then
+            printf 'missing Apple signing configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS'
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Prepare Apple signing assets
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_ISSUER_VALUE: ${{ vars.APPLE_API_ISSUER }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY_VALUE: ${{ vars.APPLE_API_KEY }}
+          PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
+        shell: bash
+        run: |
+          profile="$RUNNER_TEMP/ctld.provisionprofile"
+          printf '%s' "$PROFILE_BASE64" | base64 --decode -o "$profile"
+          notary_key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_VALUE.p8"
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$notary_key"
+          chmod 600 "$notary_key"
+          echo "CTLD_PROVISIONING_PROFILE=$profile" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_VALUE" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY=$APPLE_API_KEY_VALUE" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=$notary_key" >> "$GITHUB_ENV"
+
       - name: Build and stage native daemons
+        env:
+          CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
         shell: bash
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p rmuxd -p taskd
@@ -230,14 +285,53 @@ jobs:
             "apps/rmux/src-tauri/binaries/rmuxd-${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/taskd" \
             "apps/rmux/src-tauri/binaries/taskd-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/ctld" \
-            "apps/rmux/src-tauri/binaries/ctld-${{ matrix.target }}"
+          if [[ "${{ runner.os }}" == macOS ]]; then
+            ./scripts/ci/package-ctld-app.sh \
+              "target/${{ matrix.target }}/release/ctld" \
+              target/ctld-app/ctld.app \
+              "${{ needs.metadata.outputs.app_version }}"
+            echo "APPLE_SIGNING_IDENTITY=$(<"$CTLD_SIGNING_IDENTITY_OUTPUT")" \
+              >> "$GITHUB_ENV"
+          else
+            cp "target/${{ matrix.target }}/release/ctld" \
+              "apps/rmux/src-tauri/binaries/ctld-${{ matrix.target }}"
+          fi
 
       - name: Build desktop bundles
         working-directory: apps/rmux
         run: >-
           pnpm tauri build --target ${{ matrix.target }}
           --config src-tauri/tauri.bundle.conf.json
+          --config src-tauri/${{ matrix.bundle_config }}
+
+      - name: Verify signed ctld bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app="target/${{ matrix.target }}/release/bundle/macos/rmux.app"
+          ctld="$app/Contents/Helpers/ctld.app"
+          test -f "$ctld/Contents/embedded.provisionprofile"
+          codesign --verify --strict --verbose=2 "$ctld"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          security cms -D \
+            -i "$ctld/Contents/embedded.provisionprofile" \
+            -o "$RUNNER_TEMP/ctld-profile.plist"
+          actual_identifier=$(
+            codesign -d --entitlements :- "$ctld" \
+              > "$RUNNER_TEMP/ctld-entitlements.plist" 2>/dev/null
+            /usr/libexec/PlistBuddy -c \
+              'Print :com.apple.application-identifier' \
+              "$RUNNER_TEMP/ctld-entitlements.plist"
+          )
+          expected_identifier=$(
+            /usr/libexec/PlistBuddy -c \
+              'Print :Entitlements:com.apple.application-identifier' \
+              "$RUNNER_TEMP/ctld-profile.plist"
+          )
+          if [[ "$actual_identifier" != "$expected_identifier" ]]; then
+            echo "ctld entitlement is $actual_identifier, expected $expected_identifier" >&2
+            exit 1
+          fi
 
       - name: Upload desktop bundles
         uses: actions/upload-artifact@v4

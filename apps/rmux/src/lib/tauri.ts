@@ -35,6 +35,8 @@ import type {
   SavedTaskDefinition,
   LocalPortForward,
   PortForwardStatus,
+  TcpListenerCatalog,
+  LocalPortAvailability,
 } from "./types";
 
 export async function loadTaskDefinitions(scope: TaskDefinitionScope): Promise<TaskDefinitionCatalog> {
@@ -159,6 +161,18 @@ export async function listPortForwards(
   target: ConnectionTarget,
 ): Promise<PortForwardStatus[]> {
   return invoke("list_port_forwards", { request: { target } });
+}
+
+export async function listRemoteListeners(
+  target: ConnectionTarget,
+): Promise<TcpListenerCatalog> {
+  return invoke("list_remote_listeners", { request: { target } });
+}
+
+export async function checkLocalPort(
+  port: number,
+): Promise<LocalPortAvailability> {
+  return invoke("check_local_port", { request: { port } });
 }
 
 export interface OpenAttachmentResult {

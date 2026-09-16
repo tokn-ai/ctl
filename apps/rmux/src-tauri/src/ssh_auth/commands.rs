@@ -97,3 +97,10 @@ pub async fn list_port_forwards(
 ) -> CommandResult<Vec<ctld_ipc::PortForwardStatus>> {
   super::broker::list_port_forwards(&request.target).await
 }
+
+#[tauri::command]
+pub async fn list_remote_listeners(
+  request: crate::dto::TargetRequestDto,
+) -> CommandResult<ctl_proto::TcpListenerCatalog> {
+  super::broker::list_remote_listeners(&request.target).await
+}

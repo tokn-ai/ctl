@@ -30,6 +30,13 @@ const MASTER_START_TIMEOUT: Duration = Duration::from_mins(3);
 const MASTER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MASTER_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DIAGNOSTICS: usize = 8192;
+const MAX_LISTENER_CATALOG_BYTES: usize = 64 * 1024;
+const LISTENER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_LISTENERS_COMMAND: &str = concat!(
+  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-agent is not installed\n' >&2; exit 127; }; "#,
+  "exec ctl-agent listeners",
+);
 
 #[derive(Default)]
 struct State {
@@ -87,6 +94,8 @@ enum RequestError {
   MasterFailed(String),
   #[error("OpenSSH port forwarding failed: {0}")]
   PortForwardFailed(String),
+  #[error("remote listener discovery failed: {0}")]
+  RemoteListenerFailed(String),
 }
 
 /// Runs the per-user broker until it is interrupted.
@@ -188,6 +197,9 @@ async fn handle_connection(
     } => configure_port_forward(&mut stream, &state, target, forward, enabled).await,
     ClientMessage::ListPortForwards { target } => {
       list_port_forwards(&mut stream, &state, &target).await
+    }
+    ClientMessage::ListRemoteListeners { target } => {
+      list_remote_listeners(&mut stream, &state, &target).await
     }
     ClientMessage::Askpass {
       token,
@@ -358,6 +370,7 @@ impl RequestError {
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
       Self::PortForwardFailed(_) => "ssh_port_forward_failed",
+      Self::RemoteListenerFailed(_) => "ssh_listener_discovery_failed",
     }
   }
 }
@@ -699,6 +712,142 @@ async fn list_port_forwards(
   Ok(())
 }
 
+async fn list_remote_listeners(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+) -> Result<(), RequestError> {
+  validate_target(target)?;
+  let target_lock = {
+    let mut locks = state.target_locks.lock().unwrap();
+    Arc::clone(
+      locks
+        .entry(target.destination.clone())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+  };
+  let _target_guard = target_lock.lock().await;
+  let control_path = control_path(target);
+  if !control_master_is_ready(target, &control_path).await {
+    ctld_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
+    return Ok(());
+  }
+
+  let catalog = run_listener_discovery(target, &control_path).await?;
+  ctld_ipc::write_frame(stream, &ServerMessage::RemoteListeners { catalog }).await?;
+  Ok(())
+}
+
+async fn run_listener_discovery(
+  target: &SshTarget,
+  control_path: &Path,
+) -> Result<ctl_proto::TcpListenerCatalog, RequestError> {
+  let mut command = Command::new(SSH_PROGRAM);
+  command
+    .arg("-S")
+    .arg(control_path)
+    .arg("-T")
+    .args(["-o", "ClearAllForwardings=yes"])
+    .args(["-o", "ForwardAgent=no"])
+    .args(["-o", "ForwardX11=no"])
+    .args(["-o", "PermitLocalCommand=no"])
+    .args(["-o", "RemoteCommand=none"])
+    .args(["-o", "BatchMode=yes"]);
+  append_target_arguments(&mut command, target);
+  let mut child = command
+    .arg(REMOTE_LISTENERS_COMMAND)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .map_err(RequestError::StartMaster)?;
+  let mut stdout = child.stdout.take().ok_or(RequestError::InvalidRequest(
+    "listener stdout was not piped",
+  ))?;
+  let mut stderr = child.stderr.take().ok_or(RequestError::InvalidRequest(
+    "listener stderr was not piped",
+  ))?;
+  let output =
+    tokio::spawn(async move { read_bounded(&mut stdout, MAX_LISTENER_CATALOG_BYTES).await });
+  let diagnostics = tokio::spawn(async move { read_bounded(&mut stderr, MAX_DIAGNOSTICS).await });
+  let status =
+    if let Ok(result) = tokio::time::timeout(LISTENER_DISCOVERY_TIMEOUT, child.wait()).await {
+      result.map_err(RequestError::StartMaster)?
+    } else {
+      let _ = child.kill().await;
+      return Err(RequestError::RemoteListenerFailed(
+        "request timed out".into(),
+      ));
+    };
+  let (output, output_overflowed) = output
+    .await
+    .map_err(|_| RequestError::InvalidRequest("listener output worker stopped"))?
+    .map_err(RequestError::StartMaster)?;
+  let (diagnostics, _) = diagnostics
+    .await
+    .map_err(|_| RequestError::InvalidRequest("listener diagnostics worker stopped"))?
+    .map_err(RequestError::StartMaster)?;
+  let diagnostics = String::from_utf8_lossy(&diagnostics).trim().to_owned();
+  if output_overflowed {
+    return Err(RequestError::RemoteListenerFailed(
+      "ctl-agent returned too much listener data".into(),
+    ));
+  }
+  if !status.success() {
+    return Err(RequestError::RemoteListenerFailed(
+      if diagnostics.is_empty() {
+        status.to_string()
+      } else {
+        diagnostics
+      },
+    ));
+  }
+  let catalog: ctl_proto::TcpListenerCatalog =
+    serde_json::from_slice(&output).map_err(|error| {
+      RequestError::RemoteListenerFailed(format!("invalid ctl-agent output: {error}"))
+    })?;
+  validate_listener_catalog(&catalog)?;
+  Ok(catalog)
+}
+
+async fn read_bounded(
+  reader: &mut (impl tokio::io::AsyncRead + Unpin),
+  maximum: usize,
+) -> io::Result<(Vec<u8>, bool)> {
+  use tokio::io::AsyncReadExt as _;
+
+  let mut retained = Vec::new();
+  let mut overflowed = false;
+  let mut buffer = [0_u8; 4096];
+  loop {
+    let count = reader.read(&mut buffer).await?;
+    if count == 0 {
+      return Ok((retained, overflowed));
+    }
+    let keep = count.min(maximum.saturating_sub(retained.len()));
+    retained.extend_from_slice(&buffer[..keep]);
+    overflowed |= keep < count;
+  }
+}
+
+fn validate_listener_catalog(catalog: &ctl_proto::TcpListenerCatalog) -> Result<(), RequestError> {
+  if catalog.listeners.len() > 4096
+    || catalog.warnings.len() > 32
+    || catalog.listeners.iter().any(|listener| {
+      listener.port == 0 || listener.bind_address.parse::<std::net::IpAddr>().is_err()
+    })
+    || catalog.warnings.iter().any(|warning| {
+      warning.is_empty() || warning.len() > 1024 || warning.chars().any(char::is_control)
+    })
+  {
+    return Err(RequestError::RemoteListenerFailed(
+      "ctl-agent returned an invalid listener catalog".into(),
+    ));
+  }
+  Ok(())
+}
+
 async fn activate_configured_forwards(state: &State, target: &SshTarget, control_path: &Path) {
   let configured: Vec<_> = state
     .forwards
@@ -749,7 +898,10 @@ async fn run_forward_command(
 ) -> Result<(), RequestError> {
   let specification = format!(
     "{}:{}:{}:{}",
-    forward.bind_address, forward.local_port, forward.remote_host, forward.remote_port
+    forward.bind_address,
+    forward.local_port,
+    remote_forward_host(&forward.remote_host),
+    forward.remote_port
   );
   let mut command = Command::new(SSH_PROGRAM);
   command
@@ -777,6 +929,14 @@ async fn run_forward_command(
   } else {
     message
   }))
+}
+
+fn remote_forward_host(host: &str) -> String {
+  if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+    format!("[{host}]")
+  } else {
+    host.to_owned()
+  }
 }
 
 fn start_master(
@@ -1156,6 +1316,8 @@ mod tests {
       })
       .is_err()
     );
+    assert_eq!(remote_forward_host("127.0.0.1"), "127.0.0.1");
+    assert_eq!(remote_forward_host("::1"), "[::1]");
   }
 
   #[cfg(unix)]

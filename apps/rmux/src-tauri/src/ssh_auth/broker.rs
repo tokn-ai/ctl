@@ -164,6 +164,32 @@ pub async fn list_port_forwards(
   }
 }
 
+pub async fn list_remote_listeners(
+  target: &ConnectionTargetDto,
+) -> CommandResult<ctl_proto::TcpListenerCatalog> {
+  let mut stream = connect().await?;
+  ctld_ipc::write_frame(
+    &mut stream,
+    &ClientMessage::ListRemoteListeners {
+      target: broker_target(target)?,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::backend)?;
+  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+    .await
+    .map_err(CommandErrorDto::backend)?
+  {
+    Some(ServerMessage::RemoteListeners { catalog }) => Ok(catalog),
+    Some(ServerMessage::AuthenticationRequired) => Err(authentication_required()),
+    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
+    _ => Err(CommandErrorDto::new(
+      "ctld_protocol_error",
+      "ctld returned an unexpected remote-listener response.",
+    )),
+  }
+}
+
 async fn connect() -> CommandResult<ctld_ipc::Stream> {
   let mut stream = ctld_ipc::connect_or_start_daemon()
     .await

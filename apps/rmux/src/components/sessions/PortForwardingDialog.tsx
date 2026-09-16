@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage } from "../../lib/errors";
 import {
+  checkLocalPort,
   configurePortForward,
   listPortForwards,
+  listRemoteListeners,
 } from "../../lib/tauri";
 import type {
+  LocalPortAvailability,
   PortForwardStatus,
   SshConnectionTarget,
+  TcpListener,
   WorkspacePortForward,
 } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
@@ -34,6 +38,11 @@ export function PortForwardingDialog({
   const [localPort, setLocalPort] = useState("");
   const [remoteHost, setRemoteHost] = useState("127.0.0.1");
   const [remotePort, setRemotePort] = useState("");
+  const [listeners, setListeners] = useState<TcpListener[]>([]);
+  const [listenerWarnings, setListenerWarnings] = useState<string[]>([]);
+  const [listenerError, setListenerError] = useState<string | null>(null);
+  const [listenersLoading, setListenersLoading] = useState(true);
+  const [availability, setAvailability] = useState<LocalPortAvailability | null>(null);
 
   const enabled = useMemo(
     () => forwards.filter((forward) => forward.enabled),
@@ -59,6 +68,50 @@ export function PortForwardingDialog({
       cancelled = true;
     };
   }, [target, enabled]);
+
+  async function refreshListeners() {
+    setListenersLoading(true);
+    setListenerError(null);
+    try {
+      const catalog = await listRemoteListeners(target);
+      setListeners([...catalog.listeners].sort((left, right) =>
+        left.port - right.port || left.bind_address.localeCompare(right.bind_address),
+      ));
+      setListenerWarnings(catalog.warnings);
+    } catch (failure) {
+      setListenerError(errorMessage(failure));
+    } finally {
+      setListenersLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshListeners();
+  }, [target]);
+
+  useEffect(() => {
+    const port = Number(localPort);
+    setAvailability(null);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setAvailability(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void checkLocalPort(port).then(
+        (result) => {
+          if (!cancelled) setAvailability(result);
+        },
+        () => {
+          if (!cancelled) setAvailability(null);
+        },
+      );
+    }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [localPort]);
 
   async function setEnabled(forward: WorkspacePortForward, value: boolean) {
     setBusy((current) => new Set(current).add(forward.forward_id));
@@ -105,9 +158,14 @@ export function PortForwardingDialog({
       parsedLocal < 1 ||
       parsedLocal > 65535 ||
       parsedRemote < 1 ||
-      parsedRemote > 65535
+      parsedRemote > 65535 ||
+      availability?.available === false
     ) {
-      setError("Enter a name, remote host, and valid ports from 1 to 65535.");
+      setError(
+        availability?.available === false
+          ? `Local port ${parsedLocal} is already in use.`
+          : "Enter a name, remote host, and valid ports from 1 to 65535.",
+      );
       return;
     }
     onChange([
@@ -129,8 +187,17 @@ export function PortForwardingDialog({
     setError(null);
   }
 
+  function selectListener(listener: TcpListener) {
+    const host = remoteHostForListener(listener.bind_address);
+    setName(`Port ${listener.port}`);
+    setLocalPort(String(listener.port));
+    setRemoteHost(host);
+    setRemotePort(String(listener.port));
+    setError(null);
+  }
+
   return (
-    <QuickInputFrame title="Port forwarding" onDismiss={onClose}>
+    <QuickInputFrame title="Port forwarding" onDismiss={onClose} className="port-forward-dialog">
       <header className="quick-input-heading">
         <strong>Port forwarding · {targetLabel(target)}</strong>
         <button type="button" onClick={onClose}>Close</button>
@@ -138,6 +205,37 @@ export function PortForwardingDialog({
       <p className="quick-input-description">
         Local connections bind only to 127.0.0.1. Enabled forwards remain owned by ctld and are restored after SSH reconnects.
       </p>
+      <section className="remote-listeners" aria-labelledby="remote-listeners-heading">
+        <header>
+          <strong id="remote-listeners-heading">Remote TCP listeners</strong>
+          <button type="button" onClick={() => void refreshListeners()} disabled={listenersLoading}>
+            {listenersLoading ? "Scanning…" : "Refresh"}
+          </button>
+        </header>
+        {listenerError ? <p className="remote-listener-message error" role="status">{listenerError}</p> : null}
+        {!listenerError && !listenersLoading && listeners.length === 0 ? (
+          <p className="remote-listener-message">No visible TCP listeners.</p>
+        ) : null}
+        {listeners.length > 0 ? (
+          <div className="remote-listener-grid">
+            {listeners.map((listener) => (
+              <button
+                type="button"
+                key={`${listener.bind_address}:${listener.port}`}
+                onClick={() => selectListener(listener)}
+                title="Prefill a local forward"
+              >
+                <code>{listener.bind_address}:{listener.port}</code>
+                <small>{listenerScope(listener.bind_address)}</small>
+                <span>Forward</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {listenerWarnings.map((warning) => (
+          <p className="remote-listener-message warning" key={warning}>{warning}</p>
+        ))}
+      </section>
       <div className="port-forward-list">
         {forwards.length === 0 ? (
           <p className="port-forward-empty">No saved forwards for this host.</p>
@@ -181,7 +279,15 @@ export function PortForwardingDialog({
         }}
       >
         <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Database" /></label>
-        <label>Local port<input inputMode="numeric" value={localPort} onChange={(event) => setLocalPort(event.target.value)} placeholder="5432" /></label>
+        <label>
+          Local port
+          <input inputMode="numeric" value={localPort} onChange={(event) => setLocalPort(event.target.value)} placeholder="5432" />
+          {availability ? (
+            <small className={availability.available ? "available" : "unavailable"}>
+              {availability.available ? "Available" : "Already in use"}
+            </small>
+          ) : null}
+        </label>
         <label>Remote host<input value={remoteHost} onChange={(event) => setRemoteHost(event.target.value)} /></label>
         <label>Remote port<input inputMode="numeric" value={remotePort} onChange={(event) => setRemotePort(event.target.value)} placeholder="5432" /></label>
         <button type="submit" className="button-primary">Add stopped forward</button>
@@ -189,4 +295,16 @@ export function PortForwardingDialog({
       {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
     </QuickInputFrame>
   );
+}
+
+export function remoteHostForListener(address: string): string {
+  if (address === "0.0.0.0") return "127.0.0.1";
+  if (address === "::") return "::1";
+  return address;
+}
+
+export function listenerScope(address: string): string {
+  if (address === "127.0.0.1" || address === "::1") return "Loopback";
+  if (address === "0.0.0.0" || address === "::") return "All interfaces";
+  return "Specific interface";
 }

@@ -1028,6 +1028,90 @@ button:disabled {
   border-block: 1px solid var(--border);
 }
 
+.port-forward-dialog {
+  max-height: calc(100vh - 12vh);
+  overflow-y: auto;
+}
+
+.remote-listeners {
+  border-top: 1px solid var(--border);
+}
+
+.remote-listeners > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.remote-listeners > header strong {
+  flex: 1;
+  font-size: 11px;
+}
+
+.remote-listeners > header button,
+.remote-listener-grid button {
+  padding: 5px 8px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.remote-listener-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px;
+  max-height: 190px;
+  padding: 0 12px 10px;
+  overflow-y: auto;
+}
+
+.remote-listener-grid button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  text-align: left;
+}
+
+.remote-listener-grid code {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.remote-listener-grid small {
+  grid-column: 1;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.remote-listener-grid span {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.remote-listener-message {
+  margin: 0;
+  padding: 4px 12px 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.remote-listener-message.error,
+.remote-listener-message.warning,
+.port-forward-form small.unavailable {
+  color: var(--warning);
+}
+
+.port-forward-form small.available {
+  color: #76c893;
+}
+
 .port-forward-empty {
   margin: 0;
   padding: 20px 12px;

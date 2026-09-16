@@ -98,6 +98,9 @@ pub enum ClientMessage {
   ListPortForwards {
     target: SshTarget,
   },
+  ListRemoteListeners {
+    target: SshTarget,
+  },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +127,9 @@ pub enum ServerMessage {
   },
   PortForwards {
     statuses: Vec<PortForwardStatus>,
+  },
+  RemoteListeners {
+    catalog: ctl_proto::TcpListenerCatalog,
   },
   Error {
     code: String,

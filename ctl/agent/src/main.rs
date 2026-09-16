@@ -21,6 +21,8 @@ enum Command {
     #[arg(long)]
     identity: bool,
   },
+  /// List TCP listeners without exposing process arguments or environment.
+  Listeners,
 }
 
 #[tokio::main]
@@ -47,6 +49,12 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       config.taskd_bin = companion_binary("taskd");
       connect_stdio(&config).await?;
     }
+    Command::Listeners => {
+      let catalog = tokio::task::spawn_blocking(ctl_agent::listeners::discover)
+        .await
+        .map_err(std::io::Error::other)??;
+      println!("{}", serde_json::to_string(&catalog)?);
+    }
   }
   Ok(())
 }
@@ -63,6 +71,8 @@ enum MainError {
   Agent(#[from] ctl_agent::AgentError),
   #[error("could not identify remote environment: {0}")]
   Identity(#[from] std::io::Error),
+  #[error("could not encode listener catalog: {0}")]
+  Json(#[from] serde_json::Error),
 }
 
 #[cfg(test)]
@@ -100,7 +110,10 @@ mod tests {
         Service::Task,
       ),
     ] {
-      let Command::Connect { service, identity } = Arguments::try_parse_from(args).unwrap().command;
+      let Command::Connect { service, identity } = Arguments::try_parse_from(args).unwrap().command
+      else {
+        panic!("expected connect command")
+      };
       assert_eq!(service, expected);
       assert!(identity);
     }
@@ -123,5 +136,16 @@ mod tests {
         "must reject {arguments:?}"
       );
     }
+  }
+
+  #[test]
+  fn listeners_is_a_fixed_argument_free_operation() {
+    assert!(matches!(
+      Arguments::try_parse_from(["ctl-agent", "listeners"])
+        .unwrap()
+        .command,
+      Command::Listeners
+    ));
+    assert!(Arguments::try_parse_from(["ctl-agent", "listeners", "--command", "sh"]).is_err());
   }
 }

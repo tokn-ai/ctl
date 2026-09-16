@@ -110,6 +110,22 @@ export interface PortForwardStatus {
   message: string | null;
 }
 
+export interface TcpListener {
+  bind_address: string;
+  port: number;
+}
+
+export interface TcpListenerCatalog {
+  listeners: TcpListener[];
+  warnings: string[];
+}
+
+export interface LocalPortAvailability {
+  port: number;
+  available: boolean;
+  message: string | null;
+}
+
 export interface WorkspaceSnapshot {
   revision: string | null;
   document: WorkspaceDocument;

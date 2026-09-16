@@ -1,12 +1,8 @@
-use std::io;
-
 use ctl_proto::TcpListenerCatalog;
 
 /// Discovers listening TCP endpoints without reading process arguments or environment.
-///
-/// # Errors
-/// Returns an error only when the platform discovery process cannot be started.
-pub fn discover() -> io::Result<TcpListenerCatalog> {
+#[must_use]
+pub fn discover() -> TcpListenerCatalog {
   platform::discover()
 }
 
@@ -14,12 +10,11 @@ pub fn discover() -> io::Result<TcpListenerCatalog> {
 mod platform {
   use std::collections::BTreeSet;
   use std::fs;
-  use std::io;
   use std::net::{Ipv4Addr, Ipv6Addr};
 
   use ctl_proto::{TcpListener, TcpListenerCatalog};
 
-  pub fn discover() -> io::Result<TcpListenerCatalog> {
+  pub fn discover() -> TcpListenerCatalog {
     let mut listeners = BTreeSet::new();
     let mut warnings = Vec::new();
     for (path, ipv6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
@@ -28,10 +23,10 @@ mod platform {
         Err(error) => warnings.push(format!("Could not inspect {path}: {error}")),
       }
     }
-    Ok(TcpListenerCatalog {
+    TcpListenerCatalog {
       listeners: listeners.into_iter().collect(),
       warnings,
-    })
+    }
   }
 
   fn parse_proc(contents: &str, ipv6: bool) -> Vec<TcpListener> {
@@ -60,7 +55,11 @@ mod platform {
       return None;
     }
     let mut bytes = [0_u8; 16];
-    for (index, chunk) in value.as_bytes().chunks_exact(8).enumerate() {
+    let (chunks, remainder) = value.as_bytes().as_chunks::<8>();
+    if !remainder.is_empty() {
+      return None;
+    }
+    for (index, chunk) in chunks.iter().enumerate() {
       let word = u32::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
       bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
     }
@@ -96,15 +95,23 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
   use std::collections::BTreeSet;
-  use std::io;
   use std::process::Command;
 
   use ctl_proto::{TcpListener, TcpListenerCatalog};
 
-  pub fn discover() -> io::Result<TcpListenerCatalog> {
-    let output = Command::new("/usr/sbin/lsof")
+  pub fn discover() -> TcpListenerCatalog {
+    let output = match Command::new("/usr/sbin/lsof")
       .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fn"])
-      .output()?;
+      .output()
+    {
+      Ok(output) => output,
+      Err(error) => {
+        return TcpListenerCatalog {
+          listeners: Vec::new(),
+          warnings: vec![format!("Could not inspect TCP listeners: {error}")],
+        };
+      }
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let listeners: BTreeSet<_> = stdout.lines().filter_map(parse_name_field).collect();
     let mut warnings = Vec::new();
@@ -116,10 +123,10 @@ mod platform {
         message
       });
     }
-    Ok(TcpListenerCatalog {
+    TcpListenerCatalog {
       listeners: listeners.into_iter().collect(),
       warnings,
-    })
+    }
   }
 
   fn parse_name_field(line: &str) -> Option<TcpListener> {
@@ -162,14 +169,12 @@ mod platform {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
-  use std::io;
-
   use ctl_proto::TcpListenerCatalog;
 
-  pub fn discover() -> io::Result<TcpListenerCatalog> {
-    Ok(TcpListenerCatalog {
+  pub fn discover() -> TcpListenerCatalog {
+    TcpListenerCatalog {
       listeners: Vec::new(),
       warnings: vec!["TCP listener discovery is not supported on this platform.".into()],
-    })
+    }
   }
 }

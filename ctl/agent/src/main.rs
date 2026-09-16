@@ -52,7 +52,7 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
     Command::Listeners => {
       let catalog = tokio::task::spawn_blocking(ctl_agent::listeners::discover)
         .await
-        .map_err(std::io::Error::other)??;
+        .map_err(std::io::Error::other)?;
       println!("{}", serde_json::to_string(&catalog)?);
     }
   }

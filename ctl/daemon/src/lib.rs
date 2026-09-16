@@ -246,7 +246,7 @@ async fn ensure_master(
     )
   };
   let _target_guard = target_lock.lock().await;
-  let control_path = control_path(&target)?;
+  let control_path = control_path(&target);
   if control_master_is_ready(&target, &control_path).await {
     return ctld_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path })
       .await
@@ -537,7 +537,7 @@ async fn master_status(
   target: &SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
-  let path = control_path(target)?;
+  let path = control_path(target);
   let message = if control_master_is_ready(target, &path).await {
     ServerMessage::MasterReady { control_path: path }
   } else {
@@ -601,10 +601,16 @@ fn start_master(
 
 fn prepare_control_path(control_path: &Path) -> Result<(), RequestError> {
   if let Some(parent) = control_path.parent() {
-    std::fs::create_dir_all(parent).map_err(RequestError::StartMaster)?;
     #[cfg(unix)]
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-      .map_err(RequestError::StartMaster)?;
+    {
+      let base = parent.parent().ok_or(RequestError::InvalidRequest(
+        "control path has no private base",
+      ))?;
+      prepare_private_directory(base).map_err(RequestError::StartMaster)?;
+      prepare_private_directory(parent).map_err(RequestError::StartMaster)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(parent).map_err(RequestError::StartMaster)?;
   }
   if control_path.exists() {
     std::fs::remove_file(control_path).map_err(RequestError::StartMaster)?;
@@ -644,19 +650,31 @@ fn append_target_arguments(command: &mut Command, target: &SshTarget) {
     .arg(target.hostname.as_deref().unwrap_or(&target.destination));
 }
 
-fn control_path(target: &SshTarget) -> Result<PathBuf, RequestError> {
-  // Destination is the stable app/CLI identity. Structured settings are only
-  // needed until an equivalent ~/.ssh/config alias has been persisted.
-  let digest = Sha256::digest(target.destination.as_bytes());
+fn control_path(target: &SshTarget) -> PathBuf {
+  control_path_for_socket(target, &ctld_ipc::socket_path())
+}
+
+fn control_path_for_socket(target: &SshTarget, daemon_socket: &Path) -> PathBuf {
+  // OpenSSH adds a random suffix while binding a control socket. Keep the
+  // entire path independent of potentially long runtime-directory paths.
+  // Including the daemon endpoint prevents normal and development brokers
+  // from sharing a master for the same destination.
+  let mut hasher = Sha256::new();
+  hasher.update(daemon_socket.to_string_lossy().as_bytes());
+  hasher.update([0]);
+  hasher.update(target.destination.as_bytes());
+  let digest = hasher.finalize();
   let mut name = String::with_capacity(32);
   for byte in &digest[..16] {
     write!(name, "{byte:02x}").expect("writing to a String cannot fail");
   }
-  let socket = ctld_ipc::socket_path();
-  let directory = socket
-    .parent()
-    .ok_or(RequestError::InvalidRequest("ctld socket has no parent"))?;
-  Ok(directory.join("masters").join(name))
+  #[cfg(unix)]
+  let directory = PathBuf::from("/tmp")
+    .join(format!("ctld-{}", rustix::process::getuid().as_raw()))
+    .join("masters");
+  #[cfg(not(unix))]
+  let directory = std::env::temp_dir().join("ctld-masters");
+  directory.join(name)
 }
 
 fn validate_target(target: &SshTarget) -> Result<(), RequestError> {
@@ -701,17 +719,28 @@ fn prepare_runtime_directory(socket_path: &Path) -> io::Result<()> {
   let directory = socket_path
     .parent()
     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ctld socket has no parent"))?;
+  prepare_private_directory(directory)
+}
+
+#[cfg(unix)]
+fn prepare_private_directory(directory: &Path) -> io::Result<()> {
   let existed = directory.exists();
   std::fs::create_dir_all(directory)?;
-  if !existed {
-    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
-  }
-  let metadata = std::fs::symlink_metadata(directory)?;
+  let mut metadata = std::fs::symlink_metadata(directory)?;
   if metadata.file_type().is_symlink()
     || !metadata.is_dir()
     || metadata.uid() != rustix::process::getuid().as_raw()
-    || metadata.permissions().mode() & 0o077 != 0
   {
+    return Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      "ctld runtime directory is not an owner-controlled directory",
+    ));
+  }
+  if !existed {
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    metadata = std::fs::symlink_metadata(directory)?;
+  }
+  if metadata.permissions().mode() & 0o077 != 0 {
     return Err(io::Error::new(
       io::ErrorKind::PermissionDenied,
       "ctld runtime directory is not private and owner-only",
@@ -814,11 +843,14 @@ mod tests {
 
   #[test]
   fn control_paths_are_stable_short_and_target_specific() {
-    let first = control_path(&target()).unwrap();
-    let second = control_path(&target()).unwrap();
+    let daemon_socket = Path::new(
+      "/var/folders/very/long/runtime/directory/that/must/not/affect/control/paths/ctld.sock",
+    );
+    let first = control_path_for_socket(&target(), daemon_socket);
+    let second = control_path_for_socket(&target(), daemon_socket);
     let mut other = target();
     other.destination = "personal".into();
-    let other = control_path(&other).unwrap();
+    let other = control_path_for_socket(&other, daemon_socket);
 
     assert_eq!(first, second);
     assert_ne!(first, other);
@@ -827,8 +859,13 @@ mod tests {
     same_alias.user = None;
     same_alias.port = None;
     same_alias.identity_file = None;
-    assert_eq!(first, control_path(&same_alias).unwrap());
+    assert_eq!(first, control_path_for_socket(&same_alias, daemon_socket));
+    assert_ne!(
+      first,
+      control_path_for_socket(&target(), Path::new("/tmp/another-ctld.sock"))
+    );
     assert_eq!(first.file_name().unwrap().len(), 32);
+    assert!(first.as_os_str().len() < 80);
   }
 
   #[test]

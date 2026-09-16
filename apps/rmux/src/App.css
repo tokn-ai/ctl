@@ -1050,6 +1050,7 @@ button:disabled {
 }
 
 .remote-listeners > header button,
+.remote-agent-update button,
 .remote-listener-grid button {
   padding: 5px 8px;
   color: var(--text);
@@ -1057,6 +1058,21 @@ button:disabled {
   border-radius: 5px;
   background: var(--surface-2);
   cursor: pointer;
+}
+
+.remote-agent-update {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.remote-agent-update p {
+  margin: 0;
 }
 
 .remote-listener-grid {

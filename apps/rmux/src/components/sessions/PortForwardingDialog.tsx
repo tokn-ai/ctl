@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { errorMessage } from "../../lib/errors";
+import { errorCode, errorMessage } from "../../lib/errors";
 import {
   checkLocalPort,
   configurePortForward,
@@ -20,6 +20,7 @@ interface Props {
   target: SshConnectionTarget;
   forwards: WorkspacePortForward[];
   onChange(forwards: WorkspacePortForward[]): void;
+  onUpdateAgent(): void;
   onClose(): void;
 }
 
@@ -27,6 +28,7 @@ export function PortForwardingDialog({
   target,
   forwards,
   onChange,
+  onUpdateAgent,
   onClose,
 }: Props) {
   const [statuses, setStatuses] = useState<ReadonlyMap<string, PortForwardStatus>>(
@@ -41,6 +43,7 @@ export function PortForwardingDialog({
   const [listeners, setListeners] = useState<TcpListener[]>([]);
   const [listenerWarnings, setListenerWarnings] = useState<string[]>([]);
   const [listenerError, setListenerError] = useState<string | null>(null);
+  const [listenerUpdateRequired, setListenerUpdateRequired] = useState(false);
   const [listenersLoading, setListenersLoading] = useState(true);
   const [availability, setAvailability] = useState<LocalPortAvailability | null>(null);
 
@@ -72,6 +75,7 @@ export function PortForwardingDialog({
   async function refreshListeners() {
     setListenersLoading(true);
     setListenerError(null);
+    setListenerUpdateRequired(false);
     try {
       const catalog = await listRemoteListeners(target);
       setListeners([...catalog.listeners].sort((left, right) =>
@@ -79,7 +83,13 @@ export function PortForwardingDialog({
       ));
       setListenerWarnings(catalog.warnings);
     } catch (failure) {
-      setListenerError(errorMessage(failure));
+      if (errorCode(failure) === "ctl_agent_update_required") {
+        setListeners([]);
+        setListenerWarnings([]);
+        setListenerUpdateRequired(true);
+      } else {
+        setListenerError(errorMessage(failure));
+      }
     } finally {
       setListenersLoading(false);
     }
@@ -212,8 +222,14 @@ export function PortForwardingDialog({
             {listenersLoading ? "Scanning…" : "Refresh"}
           </button>
         </header>
+        {listenerUpdateRequired ? (
+          <div className="remote-agent-update" role="status">
+            <p>Update the remote components to discover TCP listeners on this host.</p>
+            <button type="button" onClick={onUpdateAgent}>Update remote components</button>
+          </div>
+        ) : null}
         {listenerError ? <p className="remote-listener-message error" role="status">{listenerError}</p> : null}
-        {!listenerError && !listenersLoading && listeners.length === 0 ? (
+        {!listenerError && !listenerUpdateRequired && !listenersLoading && listeners.length === 0 ? (
           <p className="remote-listener-message">No visible TCP listeners.</p>
         ) : null}
         {listeners.length > 0 ? (

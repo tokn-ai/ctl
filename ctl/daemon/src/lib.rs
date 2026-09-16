@@ -96,6 +96,8 @@ enum RequestError {
   PortForwardFailed(String),
   #[error("remote listener discovery failed: {0}")]
   RemoteListenerFailed(String),
+  #[error("remote components must be updated before TCP listeners can be discovered")]
+  RemoteAgentUpdateRequired,
 }
 
 /// Runs the per-user broker until it is interrupted.
@@ -371,6 +373,7 @@ impl RequestError {
       Self::MasterFailed(_) => "ssh_authentication_failed",
       Self::PortForwardFailed(_) => "ssh_port_forward_failed",
       Self::RemoteListenerFailed(_) => "ssh_listener_discovery_failed",
+      Self::RemoteAgentUpdateRequired => "ctl_agent_update_required",
     }
   }
 }
@@ -795,6 +798,9 @@ async fn run_listener_discovery(
     ));
   }
   if !status.success() {
+    if listener_discovery_requires_agent_update(&diagnostics) {
+      return Err(RequestError::RemoteAgentUpdateRequired);
+    }
     return Err(RequestError::RemoteListenerFailed(
       if diagnostics.is_empty() {
         status.to_string()
@@ -809,6 +815,20 @@ async fn run_listener_discovery(
     })?;
   validate_listener_catalog(&catalog)?;
   Ok(catalog)
+}
+
+fn listener_discovery_requires_agent_update(diagnostics: &str) -> bool {
+  let diagnostics = diagnostics.to_ascii_lowercase();
+  diagnostics == "ctl-agent is not installed"
+    || diagnostics.contains("usage: ctl-agent")
+      && [
+        "unrecognized subcommand 'listeners'",
+        "unrecognized subcommand `listeners`",
+        "unexpected argument 'listeners'",
+        "unexpected argument `listeners`",
+      ]
+      .iter()
+      .any(|message| diagnostics.contains(message))
 }
 
 async fn read_bounded(
@@ -1290,6 +1310,22 @@ mod tests {
     ] {
       assert!(validate_target(&invalid).is_err());
     }
+  }
+
+  #[test]
+  fn old_listener_commands_require_an_agent_update_without_masking_other_failures() {
+    assert!(listener_discovery_requires_agent_update(
+      "error: unrecognized subcommand 'listeners'\n\nUsage: ctl-agent <COMMAND>"
+    ));
+    assert!(listener_discovery_requires_agent_update(
+      "ctl-agent is not installed"
+    ));
+    assert!(!listener_discovery_requires_agent_update(
+      "Permission denied (publickey)."
+    ));
+    assert!(!listener_discovery_requires_agent_update(
+      "error: unrecognized subcommand 'connect'\nUsage: ctl-agent <COMMAND>"
+    ));
   }
 
   #[test]

@@ -28,6 +28,7 @@ interface SshHostFlowProps {
   suggestions: readonly string[];
   warning: string | null;
   target?: ConnectionTarget;
+  updateRequired?: boolean;
   onVerified(
     target: ConnectionTarget,
     remote_info: RemoteIdentity,
@@ -54,19 +55,23 @@ type Step =
   | "progress"
   | "storage"
   | "retry"
+  | "update"
   | "reconnect";
 
 export function SshHostFlow({
   suggestions,
   warning,
   target,
+  updateRequired = false,
   onActivateHost,
   onVerified,
   onSaveHost,
   onConnected,
   onClose,
 }: SshHostFlowProps) {
-  const [step, setStep] = useState<Step>(target ? "reconnect" : "host");
+  const [step, setStep] = useState<Step>(
+    updateRequired ? "update" : target ? "reconnect" : "host",
+  );
   const identityFiles = useSshIdentityFiles(step === "identity");
   const [address, setAddress] = useState("");
   const [definition, setDefinition] = useState<SshHostDefinition>({
@@ -79,11 +84,11 @@ export function SshHostFlow({
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
-  const [canInstallAgent, setCanInstallAgent] = useState(false);
+  const [canInstallAgent, setCanInstallAgent] = useState(updateRequired);
   const [install_progress, setInstallProgress] = useState<RemoteAgentInstallProgress | null>(null);
   const attemptRef = useRef<string | null>(null);
   const identityRef = useRef<RemoteIdentity | null>(null);
-  const [needsUpdate, setNeedsUpdate] = useState(false);
+  const [needsUpdate, setNeedsUpdate] = useState(updateRequired);
   const candidateRef = useRef<ConnectionTarget | null>(target ?? null);
   const configuredRef = useRef(false);
   const closedRef = useRef(false);
@@ -364,19 +369,24 @@ export function SshHostFlow({
           };
       if (!saving) onBack = back("auth");
       break;
+    case "update":
     case "reconnect":
     case "retry":
-      title = step === "retry" ? "Could not connect" : "Connect host";
+      title = step === "update"
+        ? "Update remote components"
+        : step === "retry"
+          ? "Could not connect"
+          : "Connect host";
       description =
-        step === "retry" && canInstallAgent
+        (step === "retry" || step === "update") && canInstallAgent
           ? (needsUpdate
-            ? "Update the remote components to identify this environment and recover it across address changes."
+            ? "Update the remote components to add listener discovery and keep this host compatible with the app."
             : "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually.")
           : "OpenSSH will ask for host verification or authentication if needed.";
       mode = {
         kind: "pick",
         choices: [
-          ...(step === "retry" && canInstallAgent
+          ...((step === "retry" || step === "update") && canInstallAgent
             ? [
                 {
                   id: "install_agent",
@@ -385,7 +395,7 @@ export function SshHostFlow({
                 },
               ]
             : []),
-          { id: "retry", label: "Connect" },
+          ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
         ],
       };
       if (!target) onBack = back(configuredRef.current ? "host" : "auth");
@@ -452,7 +462,7 @@ export function SshHostFlow({
       if (!saving && (value === "ssh_config" || value === "local_storage"))
         void save(value);
     } else if (
-      (step === "retry" || step === "reconnect") &&
+      (step === "retry" || step === "update" || step === "reconnect") &&
       candidateRef.current
     ) {
       if (value === "install_agent") void installAgent(candidateRef.current);

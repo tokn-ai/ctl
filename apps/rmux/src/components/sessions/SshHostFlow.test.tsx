@@ -65,6 +65,27 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("SSH host quick-input flow", () => {
+  it("opens directly on the confirmed remote-component update action", () => {
+    const target = { kind: "ssh" as const, host_id: "known-host", destination: "example" };
+    render(
+      <SshHostFlow
+        suggestions={[]}
+        warning={null}
+        target={target}
+        updateRequired
+        onVerified={async () => target}
+        onSaveHost={vi.fn()}
+        onActivateHost={vi.fn()}
+        onConnected={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("dialog", { name: "Update remote components" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Update remote components/ })).toBeTruthy();
+    expect(probeSshHost).not.toHaveBeenCalled();
+  });
+
   it("recovers a verified host automatically before offering storage", async () => {
     vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const recovered = { kind: "ssh" as const, host_id: "known-host", destination: "new-ip", remote_info: remoteInfo };

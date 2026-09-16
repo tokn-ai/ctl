@@ -185,6 +185,7 @@ export function TerminalPage() {
     undefined,
   );
   const [portForwardTarget, setPortForwardTarget] = useState<SshConnectionTarget | null>(null);
+  const [portForwardUpdateTarget, setPortForwardUpdateTarget] = useState<SshConnectionTarget | null>(null);
   const [
     daemonRestartConfirmationPending,
     setDaemonRestartConfirmationPending,
@@ -1594,6 +1595,11 @@ export function TerminalPage() {
               ...forwards,
             ]);
           }}
+          onUpdateAgent={() => {
+            setPortForwardUpdateTarget(portForwardTarget);
+            setPortForwardTarget(null);
+            setHostFlow(portForwardTarget);
+          }}
           onClose={() => {
             setPortForwardTarget(null);
             requestAnimationFrame(() => renderer?.focus());
@@ -1647,6 +1653,7 @@ export function TerminalPage() {
           suggestions={hostSuggestions}
           warning={sshConfigWarning}
           target={hostFlow ?? undefined}
+          updateRequired={portForwardUpdateTarget !== null}
           onVerified={recoverHost}
           onActivateHost={activateConfiguredHost}
           onSaveHost={saveHost}
@@ -1654,9 +1661,13 @@ export function TerminalPage() {
             void resumeHost(target).catch((failure) =>
               setListError(errorMessage(failure)),
             );
+            if (portForwardUpdateTarget && target.kind === "ssh") {
+              setPortForwardTarget(target);
+            }
           }}
           onClose={() => {
             setHostFlow(undefined);
+            setPortForwardUpdateTarget(null);
             requestAnimationFrame(() => renderer?.focus());
           }}
         />

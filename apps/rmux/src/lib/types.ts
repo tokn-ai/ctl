@@ -49,6 +49,35 @@ export interface SshConnectionTarget {
   user?: string;
   port?: number;
   identity_file?: string;
+  /** Persisted route references, resolved from workspace gateway records. */
+  gateway_route?: SshGatewayRouteStep[];
+  /** Runtime-only gateway definitions passed to the native SSH boundary. */
+  gateways?: ResolvedSshGateway[];
+}
+
+export type SshGatewayMode =
+  | "automatic"
+  | "native_only"
+  | "agent_relay_only";
+
+export interface SshGatewayRouteStep {
+  gateway_id: string;
+  mode: SshGatewayMode;
+}
+
+export interface WorkspaceSshGateway {
+  gateway_id: string;
+  name: string;
+  destination: string;
+  hostname?: string;
+  user?: string;
+  port?: number;
+  identity_file?: string;
+  remote_info?: RemoteIdentity;
+}
+
+export interface ResolvedSshGateway extends WorkspaceSshGateway {
+  mode: SshGatewayMode;
 }
 
 export type ConnectionTarget = { kind: "local" } | SshConnectionTarget;
@@ -71,7 +100,7 @@ export interface WorkspaceSession extends SessionReference {
 }
 
 export interface WorkspaceDocument {
-  schema_version: 1 | 2 | 3 | 4 | 5;
+  schema_version: 1 | 2 | 3 | 4 | 5 | 6;
   workspace_id: string;
   hosts: WorkspaceHost[];
   sessions: WorkspaceSession[];
@@ -83,6 +112,7 @@ export interface WorkspaceDocument {
   sidebar_view?: WorkspaceSidebarView;
   task_references?: TaskReference[];
   port_forwards?: WorkspacePortForward[];
+  ssh_gateways?: WorkspaceSshGateway[];
 }
 
 export type WorkspaceSidebarView = "sessions" | "tasks" | "ports";

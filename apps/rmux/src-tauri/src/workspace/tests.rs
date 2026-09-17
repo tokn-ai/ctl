@@ -4,6 +4,7 @@ use std::sync::{Arc, Barrier};
 
 use super::repository::Repository;
 use super::*;
+use crate::dto::SshGatewayModeDto;
 
 struct Fixture(PathBuf);
 
@@ -248,7 +249,7 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
     .unwrap();
   assert_eq!(
     fixture.repository().load().unwrap().document.schema_version,
-    5
+    6
   );
 }
 
@@ -267,7 +268,7 @@ fn migrates_v3_workspace_to_current_schema() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 5);
+  assert_eq!(loaded.document.schema_version, 6);
   assert!(loaded.document.port_forwards.is_empty());
   assert_eq!(
     fs::read(fixture.0.join("workspace-v3.backup.json")).unwrap(),
@@ -300,13 +301,70 @@ fn migrates_v4_workspace_to_sidebar_schema() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 5);
+  assert_eq!(loaded.document.schema_version, 6);
   assert_eq!(loaded.document.sidebar_view, SidebarView::Sessions);
   assert_eq!(loaded.document.port_forwards.len(), 1);
   assert_eq!(
     fs::read(fixture.0.join("workspace-v4.backup.json")).unwrap(),
     bytes
   );
+}
+
+#[test]
+fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
+  let fixture = Fixture::new();
+  fs::create_dir_all(&fixture.0).unwrap();
+  let mut document = populated();
+  document.schema_version = 5;
+  let bytes = serde_json::to_vec(&WorkspaceSnapshot {
+    revision: Some("before-gateway-routes".into()),
+    document,
+  })
+  .unwrap();
+  fs::write(fixture.0.join("workspace.json"), &bytes).unwrap();
+
+  let loaded = fixture.repository().load().unwrap();
+
+  assert_eq!(loaded.document.schema_version, 6);
+  assert!(loaded.document.ssh_gateways.is_empty());
+  assert_eq!(
+    fs::read(fixture.0.join("workspace-v5.backup.json")).unwrap(),
+    bytes
+  );
+}
+
+#[test]
+fn gateway_routes_require_unique_saved_gateway_references() {
+  let mut document = populated();
+  document.ssh_gateways.push(WorkspaceSshGateway {
+    gateway_id: "edge".into(),
+    name: "Edge".into(),
+    destination: "edge.example".into(),
+    hostname: None,
+    user: None,
+    port: None,
+    identity_file: None,
+    remote_info: None,
+  });
+  if let ConnectionTargetDto::Ssh { gateway_route, .. } = &mut document.hosts[1].target {
+    gateway_route.push(crate::dto::SshGatewayRouteStepDto {
+      gateway_id: "edge".into(),
+      mode: SshGatewayModeDto::Automatic,
+    });
+  } else {
+    panic!("expected SSH target");
+  }
+  assert!(document.validate().is_ok());
+
+  if let ConnectionTargetDto::Ssh { gateway_route, .. } = &mut document.hosts[1].target {
+    gateway_route.push(gateway_route[0].clone());
+  }
+  assert!(document.validate().is_err());
+  if let ConnectionTargetDto::Ssh { gateway_route, .. } = &mut document.hosts[1].target {
+    gateway_route.pop();
+    gateway_route[0].gateway_id = "missing".into();
+  }
+  assert!(document.validate().is_err());
 }
 
 #[test]
@@ -406,7 +464,7 @@ fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() 
   // Simulate a crash after import but before the workspace migration commits.
   store.import_legacy(std::slice::from_ref(&saved)).unwrap();
   let snapshot = fixture.repository().load().unwrap();
-  assert_eq!(snapshot.document.schema_version, 5);
+  assert_eq!(snapshot.document.schema_version, 6);
   assert!(snapshot.document.task_definitions.is_empty());
   let definitions = store.load().unwrap().definitions;
   assert_eq!(definitions.len(), 1);

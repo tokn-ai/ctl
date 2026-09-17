@@ -22,7 +22,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshGatewayMode {
+  Automatic,
+  NativeOnly,
+  AgentRelayOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SshGateway {
+  pub destination: String,
+  pub hostname: Option<String>,
+  pub user: Option<String>,
+  pub port: Option<u16>,
+  pub identity_file: Option<PathBuf>,
+  pub mode: SshGatewayMode,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SshTarget {
@@ -31,6 +49,8 @@ pub struct SshTarget {
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
+  #[serde(default)]
+  pub gateways: Vec<SshGateway>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

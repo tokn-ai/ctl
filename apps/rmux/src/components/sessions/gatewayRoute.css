@@ -1,0 +1,159 @@
+.gateway-route-dialog {
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+}
+
+.gateway-route-path {
+  padding: 4px 18px 12px;
+}
+
+.gateway-route-node,
+.gateway-route-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.gateway-route-node small,
+.gateway-route-card small,
+.gateway-library small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.gateway-route-connector {
+  height: 24px;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 24px;
+}
+
+.gateway-route-card {
+  gap: 9px;
+}
+
+.gateway-route-card > div:first-child,
+.gateway-library-list span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gateway-route-controls {
+  display: flex;
+  gap: 5px;
+}
+
+.gateway-route-controls button,
+.gateway-library button,
+.gateway-dialog-actions button {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.gateway-route-card label,
+.gateway-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.gateway-route-card select,
+.gateway-form input {
+  width: 100%;
+  padding: 7px 8px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-0);
+}
+
+.gateway-library {
+  margin: 0 18px 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.gateway-library > header,
+.gateway-library-list > div,
+.gateway-dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.gateway-library > header strong,
+.gateway-library-list span {
+  flex: 1;
+}
+
+.gateway-library > p {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.gateway-library-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.gateway-library-list > div {
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #14171c;
+}
+
+.gateway-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px 18px;
+}
+
+.gateway-form label:nth-child(-n + 2),
+.gateway-form label:last-child {
+  grid-column: 1 / -1;
+}
+
+.gateway-form > p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.gateway-shared-warning {
+  margin: 8px 18px 0;
+  padding: 8px 10px;
+  color: var(--warning);
+  font-size: 11px;
+  border-left: 2px solid var(--warning);
+  background: #2b271c;
+}
+
+.gateway-dialog-actions {
+  justify-content: flex-end;
+  padding: 12px 18px 18px;
+}
+
+@media (max-width: 640px) {
+  .gateway-form {
+    grid-template-columns: 1fr;
+  }
+
+  .gateway-form label {
+    grid-column: 1;
+  }
+}

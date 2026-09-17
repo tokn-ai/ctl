@@ -153,6 +153,7 @@ fn daemon_target(
     user: options.user.clone(),
     port: options.port,
     identity_file: options.identity_file.clone(),
+    gateways: Vec::new(),
   }
 }
 
@@ -210,6 +211,7 @@ mod tests {
         user: Some("alice".into()),
         port: Some(2222),
         identity_file: Some(PathBuf::from("/keys/work")),
+        gateways: Vec::new(),
       },
     );
     let ConnectionTarget::Ssh {
@@ -238,6 +240,7 @@ mod tests {
         user: Some("task-user".into()),
         port: Some(2222),
         identity_file: Some(PathBuf::from("task-key")),
+        gateways: Vec::new(),
       },
     );
     let connector = CtlConnector {

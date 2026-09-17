@@ -1,4 +1,6 @@
-use ctl_core::{ConnectionTarget, SshConnectionOptions, Transport, open_transport};
+use ctl_core::{
+  ConnectionTarget, SshConnectionOptions, SshGateway, SshGatewayMode, Transport, open_transport,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -67,6 +69,7 @@ impl ConnectionTargetDto {
         user,
         port,
         identity_file,
+        gateways,
         ..
       } => ConnectionTarget::ssh_with_options(
         destination.clone(),
@@ -76,6 +79,21 @@ impl ConnectionTargetDto {
           user: user.clone(),
           port: *port,
           identity_file: identity_file.as_ref().map(PathBuf::from),
+          gateways: gateways
+            .iter()
+            .map(|gateway| SshGateway {
+              destination: gateway.destination.clone(),
+              hostname: gateway.hostname.clone(),
+              user: gateway.user.clone(),
+              port: gateway.port,
+              identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
+              mode: match gateway.mode {
+                crate::dto::SshGatewayModeDto::Automatic => SshGatewayMode::Automatic,
+                crate::dto::SshGatewayModeDto::NativeOnly => SshGatewayMode::NativeOnly,
+                crate::dto::SshGatewayModeDto::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
+              },
+            })
+            .collect(),
         },
       ),
     }
@@ -108,6 +126,8 @@ mod tests {
       user: Some("rmux".into()),
       port: Some(2222),
       identity_file: Some("~/.ssh/local.id_rsa".into()),
+      gateway_route: Vec::new(),
+      gateways: Box::default(),
     };
 
     assert_eq!(
@@ -120,6 +140,7 @@ mod tests {
           user: Some("rmux".into()),
           port: Some(2222),
           identity_file: Some(PathBuf::from("~/.ssh/local.id_rsa")),
+          gateways: Vec::new(),
         },
       }
     );

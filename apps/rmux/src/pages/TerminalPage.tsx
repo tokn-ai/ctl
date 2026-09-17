@@ -4,7 +4,10 @@ import { TaskSidebar } from "../components/tasks/TaskSidebar";
 import { TaskEditor } from "../components/tasks/TaskEditor";
 import { TaskDetail } from "../components/tasks/TaskDetail";
 import { taskState } from "../features/tasks/taskModel";
-import { workspaceTabKey } from "../features/workspace/workspaceModel";
+import {
+  resolveSshGateways,
+  workspaceTabKey,
+} from "../features/workspace/workspaceModel";
 import "../components/tasks/tasks.css";
 import {
   useCallback,
@@ -16,6 +19,7 @@ import {
 import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { PortForwardingDialog } from "../components/sessions/PortForwardingDialog";
+import { GatewayRouteDialog } from "../components/sessions/GatewayRouteDialog";
 import { PortForwardingSidebar } from "../components/portForwarding/PortForwardingSidebar";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
 import { NewShellFlow } from "../components/sessions/NewShellFlow";
@@ -187,6 +191,7 @@ export function TerminalPage() {
     undefined,
   );
   const [portForwardTarget, setPortForwardTarget] = useState<SshConnectionTarget | null>(null);
+  const [gatewayRouteTarget, setGatewayRouteTarget] = useState<SshConnectionTarget | null>(null);
   const [portForwardUpdateTarget, setPortForwardUpdateTarget] = useState<SshConnectionTarget | null>(null);
   const [
     daemonRestartConfirmationPending,
@@ -1301,6 +1306,7 @@ export function TerminalPage() {
   const dialogOpen =
     taskWorkspace.editorId !== null ||
     portForwardTarget !== null ||
+    gatewayRouteTarget !== null ||
     keybindingsOpen ||
     newShellOpen ||
     importOpen ||
@@ -1432,6 +1438,9 @@ export function TerminalPage() {
                   target_key: targetKey(target),
                 })
               }
+              onGatewayRoute={(target) => {
+                if (target.kind === "ssh") setGatewayRouteTarget(target);
+              }}
             />
           }
           ports={
@@ -1613,7 +1622,37 @@ export function TerminalPage() {
           saved={taskWorkspace.saved}
         />
       ) : null}
-      {portForwardTarget ? (
+      {gatewayRouteTarget ? (
+        <GatewayRouteDialog
+          target={gatewayRouteTarget}
+          gateways={workspace.ssh_gateways}
+          targets={targets.filter(
+            (target): target is SshConnectionTarget => target.kind === "ssh",
+          )}
+          onSave={async (gateways, gateway_route) => {
+            const current = workspace.viewRef.current;
+            const nextTargets = current.targets.map((target) => {
+              if (target.kind !== "ssh") return target;
+              return resolveSshGateways(
+                target.host_id === gatewayRouteTarget.host_id
+                  ? { ...target, gateway_route }
+                  : target,
+                gateways,
+              );
+            });
+            await workspace.replaceView({
+              ...current,
+              ssh_gateways: gateways,
+              targets: nextTargets,
+            });
+            setGatewayRouteTarget(null);
+          }}
+          onClose={() => {
+            setGatewayRouteTarget(null);
+            requestAnimationFrame(() => renderer?.focus());
+          }}
+        />
+      ) : portForwardTarget ? (
         <PortForwardingDialog
           target={portForwardTarget}
           forwards={workspace.port_forwards.filter(

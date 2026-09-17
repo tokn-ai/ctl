@@ -16,6 +16,44 @@ use crate::error::{CommandErrorDto, CommandResult, protocol_error_code};
 /// The SSH value is an OpenSSH destination or configured host alias. Optional
 /// app-local settings are passed as fixed SSH arguments; arbitrary options,
 /// remote commands, credentials, and forwarding configuration remain absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshGatewayModeDto {
+  Automatic,
+  NativeOnly,
+  AgentRelayOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshGatewayRouteStepDto {
+  pub gateway_id: String,
+  pub mode: SshGatewayModeDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshGatewayDto {
+  pub gateway_id: String,
+  pub name: String,
+  pub destination: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hostname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub user: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub port: Option<u16>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub identity_file: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub remote_info: Option<ctl_proto::RemoteIdentity>,
+  pub mode: SshGatewayModeDto,
+}
+
+fn ssh_gateways_empty(gateways: &[SshGatewayDto]) -> bool {
+  gateways.is_empty()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConnectionTargetDto {
@@ -32,6 +70,10 @@ pub enum ConnectionTargetDto {
     port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     identity_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    gateway_route: Vec<SshGatewayRouteStepDto>,
+    #[serde(default, skip_serializing_if = "ssh_gateways_empty")]
+    gateways: Box<[SshGatewayDto]>,
   },
 }
 
@@ -61,6 +103,8 @@ impl ConnectionTargetDto {
       user: None,
       port: None,
       identity_file: None,
+      gateway_route: Vec::new(),
+      gateways: Box::default(),
     }
   }
 }

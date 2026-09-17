@@ -31,7 +31,7 @@ impl Repository {
   }
 
   pub fn update(&self, request: UpdateWorkspaceRequest) -> CommandResult<WorkspaceSnapshot> {
-    if request.document.schema_version != 5 {
+    if request.document.schema_version != 6 {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "Reload the workspace before saving with this app version.",
@@ -72,7 +72,7 @@ impl Repository {
     &self,
     mut snapshot: WorkspaceSnapshot,
   ) -> CommandResult<WorkspaceSnapshot> {
-    if snapshot.document.schema_version == 5 {
+    if snapshot.document.schema_version == 6 {
       return Ok(snapshot);
     }
     if snapshot.document.schema_version == 2 {
@@ -101,10 +101,12 @@ impl Repository {
       snapshot.document.task_definitions.clear();
     } else if snapshot.document.schema_version == 3 {
       self.ensure_backup("workspace-v3.backup.json")?;
-    } else {
+    } else if snapshot.document.schema_version == 4 {
       self.ensure_backup("workspace-v4.backup.json")?;
+    } else {
+      self.ensure_backup("workspace-v5.backup.json")?;
     }
-    snapshot.document.schema_version = 5;
+    snapshot.document.schema_version = 6;
     snapshot.revision = Some(uuid::Uuid::new_v4().to_string());
     snapshot.document.validate()?;
     self.persist_snapshot(&snapshot)?;

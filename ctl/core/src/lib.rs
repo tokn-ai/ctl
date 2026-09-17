@@ -88,6 +88,24 @@ pub struct SshConnectionOptions {
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
+  pub gateways: Vec<SshGateway>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshGatewayMode {
+  Automatic,
+  NativeOnly,
+  AgentRelayOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshGateway {
+  pub destination: String,
+  pub hostname: Option<String>,
+  pub user: Option<String>,
+  pub port: Option<u16>,
+  pub identity_file: Option<PathBuf>,
+  pub mode: SshGatewayMode,
 }
 
 /// Local prompt handling only; this cannot alter the remote command.
@@ -690,6 +708,42 @@ fn validate_destination(destination: &str) -> Result<(), CoreError> {
 
 fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Result<(), CoreError> {
   validate_destination(destination)?;
+  for gateway in &options.gateways {
+    validate_destination(&gateway.destination)?;
+    if gateway.mode == SshGatewayMode::AgentRelayOnly {
+      return Err(CoreError::InvalidSshOption(
+        "agent_relay_only requires managed relay support".into(),
+      ));
+    }
+    if gateway
+      .destination
+      .chars()
+      .any(|value| matches!(value, ',' | '@'))
+      || gateway.hostname.as_ref().is_some_and(|value| {
+        value.trim().is_empty()
+          || value.chars().any(|value| matches!(value, ',' | '@'))
+          || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+      })
+      || gateway.user.as_ref().is_some_and(|value| {
+        value.trim().is_empty()
+          || value.chars().any(|value| matches!(value, ',' | '@'))
+          || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+      })
+      || gateway.port == Some(0)
+    {
+      return Err(CoreError::InvalidSshOption("gateway".into()));
+    }
+    if gateway.identity_file.is_some() {
+      return Err(CoreError::InvalidSshOption(
+        "gateway identity_file requires managed relay support; configure it in OpenSSH for native jumping"
+          .into(),
+      ));
+    }
+  }
   if let Some(hostname) = &options.hostname
     && (hostname.trim().is_empty()
       || hostname
@@ -781,6 +835,19 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
   .into_iter()
   .map(OsString::from)
   .collect::<Vec<_>>();
+  if !options.gateways.is_empty() {
+    arguments.extend([
+      OsString::from("-J"),
+      OsString::from(
+        options
+          .gateways
+          .iter()
+          .map(gateway_jump_specification)
+          .collect::<Vec<_>>()
+          .join(","),
+      ),
+    ]);
+  }
   if let Some(port) = options.port {
     arguments.extend([OsString::from("-p"), OsString::from(port.to_string())]);
   }
@@ -795,6 +862,28 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
     OsString::from(options.hostname.as_deref().unwrap_or(destination)),
   ]);
   arguments
+}
+
+fn gateway_jump_specification(gateway: &SshGateway) -> String {
+  let host = gateway.hostname.as_deref().unwrap_or(&gateway.destination);
+  let host = if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+    format!("[{host}]")
+  } else {
+    host.to_owned()
+  };
+  format!(
+    "{}{}{}",
+    gateway
+      .user
+      .as_ref()
+      .map(|user| format!("{user}@"))
+      .unwrap_or_default(),
+    host,
+    gateway
+      .port
+      .map(|port| format!(":{port}"))
+      .unwrap_or_default(),
+  )
 }
 
 #[derive(Debug, Error)]
@@ -886,6 +975,38 @@ mod tests {
   }
 
   #[test]
+  fn ssh_command_preserves_the_order_and_endpoint_fields_of_native_gateways() {
+    let options = SshConnectionOptions {
+      gateways: vec![
+        SshGateway {
+          destination: "edge-alias".into(),
+          hostname: None,
+          user: None,
+          port: None,
+          identity_file: None,
+          mode: SshGatewayMode::Automatic,
+        },
+        SshGateway {
+          destination: "internal-alias".into(),
+          hostname: Some("2001:db8::2".into()),
+          user: Some("operator".into()),
+          port: Some(2222),
+          identity_file: None,
+          mode: SshGatewayMode::NativeOnly,
+        },
+      ],
+      ..SshConnectionOptions::default()
+    };
+
+    let arguments = ssh_arguments("server", &options);
+    let jump = arguments
+      .windows(2)
+      .find(|pair| pair[0] == "-J")
+      .expect("native jump arguments");
+    assert_eq!(jump[1], "edge-alias,operator@[2001:db8::2]:2222");
+  }
+
+  #[test]
   fn task_service_only_appends_fixed_arguments_on_either_remote_platform() {
     for remote_platform in [RemotePlatform::Unix, RemotePlatform::Windows] {
       let options = SshConnectionOptions {
@@ -928,6 +1049,7 @@ mod tests {
       user: Some("rmux".into()),
       port: Some(2222),
       identity_file: Some(PathBuf::from("/tmp/key with spaces")),
+      gateways: Vec::new(),
     };
     let arguments = ssh_arguments("rmux-remote-test", &options);
 
@@ -1006,6 +1128,7 @@ mod tests {
       user: None,
       port: Some(0),
       identity_file: None,
+      gateways: Vec::new(),
     };
 
     assert!(validate_ssh_target("label", &options).is_err());

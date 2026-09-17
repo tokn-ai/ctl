@@ -46,7 +46,11 @@ test -x "$destination/ctl-agent"
 test -x "$destination/rmuxd"
 test -x "$destination/taskd"
 ln -s "versions/__BUNDLE_ID__" "$link"
-mv -f "$link" "$base/current"
+case "$(uname -s)" in
+  Linux) mv -fT "$link" "$base/current" ;;
+  Darwin) mv -fh "$link" "$base/current" ;;
+  *) printf 'ctl install does not support this platform\n' >&2; exit 1 ;;
+esac
 rm -rf "$temporary"
 trap - EXIT HUP INT TERM
 printf 'ctl-install-v1\n'

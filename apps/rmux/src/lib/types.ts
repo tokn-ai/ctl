@@ -71,7 +71,7 @@ export interface WorkspaceSession extends SessionReference {
 }
 
 export interface WorkspaceDocument {
-  schema_version: 1 | 2 | 3 | 4;
+  schema_version: 1 | 2 | 3 | 4 | 5;
   workspace_id: string;
   hosts: WorkspaceHost[];
   sessions: WorkspaceSession[];
@@ -80,10 +80,12 @@ export interface WorkspaceDocument {
   task_definitions?: SavedTaskDefinition[];
   task_drafts?: TaskDefinitionDraft[];
   task_definition_scope?: TaskDefinitionScope;
-  sidebar_view?: "sessions" | "tasks";
+  sidebar_view?: WorkspaceSidebarView;
   task_references?: TaskReference[];
   port_forwards?: WorkspacePortForward[];
 }
+
+export type WorkspaceSidebarView = "sessions" | "tasks" | "ports";
 
 export interface LocalPortForward {
   forward_id: string;

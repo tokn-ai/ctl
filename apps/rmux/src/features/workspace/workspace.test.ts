@@ -56,7 +56,7 @@ describe("workspace model", () => {
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
     expect(workspaceDocument(view)).toEqual({
       ...snapshot.document,
-      schema_version: 4,
+      schema_version: 5,
       port_forwards: [],
       task_definition_scope: { kind: "global" },
       task_references: [],
@@ -96,6 +96,16 @@ describe("workspace model", () => {
     expect(persisted.sidebar_view).toBe("tasks");
     expect(view.task_definitions).toEqual(document.task_definitions);
     expect(persisted.task_definitions).toBeUndefined();
+  });
+
+  it("retains the central port forwarding panel selection", () => {
+    const view = restoreWorkspace({
+      ...savedWorkspace().document,
+      sidebar_view: "ports",
+    });
+
+    expect(view.sidebar_view).toBe("ports");
+    expect(workspaceDocument(view).sidebar_view).toBe("ports");
   });
 
   it("keeps external definition references and source scopes without rewriting the catalog", () => {

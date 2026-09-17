@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { errorCode, errorMessage } from "../../lib/errors";
 import {
   checkLocalPort,
-  configurePortForward,
-  listPortForwards,
   listRemoteListeners,
 } from "../../lib/tauri";
 import type {
@@ -19,7 +17,13 @@ import { QuickInputFrame } from "../commands/QuickInputFrame";
 interface Props {
   target: SshConnectionTarget;
   forwards: WorkspacePortForward[];
+  statuses: ReadonlyMap<string, PortForwardStatus>;
+  busy: ReadonlySet<string>;
   onChange(forwards: WorkspacePortForward[]): void;
+  onSetEnabled(
+    forward: WorkspacePortForward,
+    enabled: boolean,
+  ): Promise<void>;
   onUpdateAgent(): void;
   onClose(): void;
 }
@@ -27,15 +31,14 @@ interface Props {
 export function PortForwardingDialog({
   target,
   forwards,
+  statuses,
+  busy,
   onChange,
+  onSetEnabled,
   onUpdateAgent,
   onClose,
 }: Props) {
-  const [statuses, setStatuses] = useState<ReadonlyMap<string, PortForwardStatus>>(
-    new Map(),
-  );
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [name, setName] = useState("");
   const [localPort, setLocalPort] = useState("");
   const [remoteHost, setRemoteHost] = useState("127.0.0.1");
@@ -46,31 +49,6 @@ export function PortForwardingDialog({
   const [listenerUpdateRequired, setListenerUpdateRequired] = useState(false);
   const [listenersLoading, setListenersLoading] = useState(true);
   const [availability, setAvailability] = useState<LocalPortAvailability | null>(null);
-
-  const enabled = useMemo(
-    () => forwards.filter((forward) => forward.enabled),
-    [forwards],
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        for (const forward of enabled) {
-          await configurePortForward(target, forward, true);
-        }
-        const next = await listPortForwards(target);
-        if (!cancelled) {
-          setStatuses(new Map(next.map((status) => [status.forward.forward_id, status])));
-        }
-      } catch (failure) {
-        if (!cancelled) setError(errorMessage(failure));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [target, enabled]);
 
   async function refreshListeners() {
     setListenersLoading(true);
@@ -124,36 +102,23 @@ export function PortForwardingDialog({
   }, [localPort]);
 
   async function setEnabled(forward: WorkspacePortForward, value: boolean) {
-    setBusy((current) => new Set(current).add(forward.forward_id));
     setError(null);
     try {
-      const status = await configurePortForward(target, forward, value);
-      setStatuses((current) => {
-        const next = new Map(current);
-        if (value) next.set(forward.forward_id, status);
-        else next.delete(forward.forward_id);
-        return next;
-      });
-      onChange(
-        forwards.map((item) =>
-          item.forward_id === forward.forward_id
-            ? { ...item, enabled: value }
-            : item,
-        ),
-      );
+      await onSetEnabled(forward, value);
     } catch (failure) {
       setError(errorMessage(failure));
-    } finally {
-      setBusy((current) => {
-        const next = new Set(current);
-        next.delete(forward.forward_id);
-        return next;
-      });
+      throw failure;
     }
   }
 
   async function remove(forward: WorkspacePortForward) {
-    if (forward.enabled) await setEnabled(forward, false);
+    if (forward.enabled) {
+      try {
+        await setEnabled(forward, false);
+      } catch {
+        return;
+      }
+    }
     onChange(forwards.filter((item) => item.forward_id !== forward.forward_id));
   }
 
@@ -271,7 +236,7 @@ export function PortForwardingDialog({
               <button
                 type="button"
                 disabled={changing}
-                onClick={() => void setEnabled(forward, !forward.enabled)}
+                onClick={() => void setEnabled(forward, !forward.enabled).catch(() => undefined)}
               >
                 {forward.enabled ? "Stop" : "Start"}
               </button>

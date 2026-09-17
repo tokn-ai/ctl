@@ -56,7 +56,8 @@ describe("workspace model", () => {
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
     expect(workspaceDocument(view)).toEqual({
       ...snapshot.document,
-      schema_version: 3,
+      schema_version: 4,
+      port_forwards: [],
       task_definition_scope: { kind: "global" },
       task_references: [],
       task_drafts: [],

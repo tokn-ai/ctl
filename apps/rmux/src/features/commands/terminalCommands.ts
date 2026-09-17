@@ -52,6 +52,7 @@ interface TerminalCommandActions {
   requestDaemonRestart(): void;
   connectHost(target: ConnectionTarget): void;
   removeHost(target: ConnectionTarget): void | Promise<void>;
+  managePortForwards(target: ConnectionTarget): void;
   saveWorkspace(): void | Promise<void>;
   configureKeybindings(): void;
   reloadKeybindings(): void | Promise<void>;
@@ -418,6 +419,20 @@ export function buildTerminalCommands(
       run: (args) => {
         const target = targetFor(args);
         if (target) return actions.removeHost(target);
+      },
+    },
+    {
+      id: COMMAND_IDS.managePortForwards,
+      category: "Host",
+      title: "Manage Port Forwarding",
+      keywords: ["ssh", "local", "tunnel", "forward"],
+      enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      isEnabled: (args) =>
+        targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: (args) => {
+        const target = targetFor(args);
+        if (target?.kind === "ssh") actions.managePortForwards(target);
       },
     },
     {

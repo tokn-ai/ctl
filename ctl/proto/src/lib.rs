@@ -3,6 +3,18 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TcpListener {
+  pub bind_address: String,
+  pub port: u16,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpListenerCatalog {
+  pub listeners: Vec<TcpListener>,
+  pub warnings: Vec<String>,
+}
+
 pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-v2\n";
 const MAX_IDENTITY_BYTES: usize = 8192;
 

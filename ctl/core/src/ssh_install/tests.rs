@@ -82,9 +82,13 @@ impl BundleFixture {
   }
 
   fn command(&self, expected_bytes: usize) -> Command {
+    self.command_for("0.1.0-test", expected_bytes)
+  }
+
+  fn command_for(&self, bundle_id: &str, expected_bytes: usize) -> Command {
     let mut command = Command::new("sh");
     command
-      .args(["-c", &install_script("0.1.0-test", expected_bytes).unwrap()])
+      .args(["-c", &install_script(bundle_id, expected_bytes).unwrap()])
       .env("HOME", self.directory.join("home"))
       .env("XDG_DATA_HOME", self.directory.join("unused-data"));
     command
@@ -96,6 +100,30 @@ impl Drop for BundleFixture {
   fn drop(&mut self) {
     let _ = std::fs::remove_dir_all(&self.directory);
   }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installer_replaces_an_existing_current_directory_symlink() {
+  let fixture = BundleFixture::new();
+  let base = fixture.directory.join("home/.tokn/ctl");
+  let old = base.join("versions/0.1.0-old");
+  std::fs::create_dir_all(&old).unwrap();
+  std::os::unix::fs::symlink("versions/0.1.0-old", base.join("current")).unwrap();
+
+  run_install_command(
+    fixture.command_for("0.1.0-new", fixture.archive.len()),
+    &fixture.archive,
+    |_| {},
+  )
+  .await
+  .unwrap();
+
+  assert_eq!(
+    std::fs::read_link(base.join("current")).unwrap(),
+    std::path::PathBuf::from("versions/0.1.0-new")
+  );
+  assert_eq!(std::fs::read_dir(old).unwrap().count(), 0);
 }
 
 #[cfg(unix)]

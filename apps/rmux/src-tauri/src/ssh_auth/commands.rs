@@ -23,6 +23,13 @@ pub struct CancelRequest {
   attempt_id: String,
 }
 
+#[derive(Deserialize)]
+pub struct ConfigurePortForwardRequest {
+  target: ConnectionTargetDto,
+  forward: ctld_ipc::LocalPortForward,
+  enabled: bool,
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn probe_ssh_host(
   window: WebviewWindow,
@@ -75,4 +82,25 @@ pub fn cancel_ssh_probe(window: WebviewWindow, request: CancelRequest) {
 #[tauri::command]
 pub async fn forget_ssh_credentials(request: crate::dto::TargetRequestDto) -> CommandResult<()> {
   super::forget(&request.target).await
+}
+
+#[tauri::command]
+pub async fn configure_port_forward(
+  request: ConfigurePortForwardRequest,
+) -> CommandResult<ctld_ipc::PortForwardStatus> {
+  super::broker::configure_port_forward(&request.target, request.forward, request.enabled).await
+}
+
+#[tauri::command]
+pub async fn list_port_forwards(
+  request: crate::dto::TargetRequestDto,
+) -> CommandResult<Vec<ctld_ipc::PortForwardStatus>> {
+  super::broker::list_port_forwards(&request.target).await
+}
+
+#[tauri::command]
+pub async fn list_remote_listeners(
+  request: crate::dto::TargetRequestDto,
+) -> CommandResult<ctl_proto::TcpListenerCatalog> {
+  super::broker::list_remote_listeners(&request.target).await
 }

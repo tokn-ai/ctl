@@ -248,8 +248,53 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
     .unwrap();
   assert_eq!(
     fixture.repository().load().unwrap().document.schema_version,
-    3
+    4
   );
+}
+
+#[test]
+fn migrates_v3_workspace_to_port_forwarding_schema() {
+  let fixture = Fixture::new();
+  fs::create_dir_all(&fixture.0).unwrap();
+  let mut document = populated();
+  document.schema_version = 3;
+  let bytes = serde_json::to_vec(&WorkspaceSnapshot {
+    revision: Some("before-port-forwarding".into()),
+    document,
+  })
+  .unwrap();
+  fs::write(fixture.0.join("workspace.json"), &bytes).unwrap();
+
+  let loaded = fixture.repository().load().unwrap();
+
+  assert_eq!(loaded.document.schema_version, 4);
+  assert!(loaded.document.port_forwards.is_empty());
+  assert_eq!(
+    fs::read(fixture.0.join("workspace-v3.backup.json")).unwrap(),
+    bytes
+  );
+}
+
+#[test]
+fn port_forwards_require_a_remote_workspace_host_and_loopback_binding() {
+  let mut document = populated();
+  document.port_forwards.push(WorkspacePortForward {
+    forward_id: uuid::Uuid::new_v4().to_string(),
+    host_id: "remote-id".into(),
+    name: "Database".into(),
+    bind_address: "127.0.0.1".into(),
+    local_port: 5432,
+    remote_host: "127.0.0.1".into(),
+    remote_port: 5432,
+    enabled: true,
+  });
+  assert!(document.validate().is_ok());
+
+  document.port_forwards[0].bind_address = "0.0.0.0".into();
+  assert!(document.validate().is_err());
+  document.port_forwards[0].bind_address = "127.0.0.1".into();
+  document.port_forwards[0].host_id = "local".into();
+  assert!(document.validate().is_err());
 }
 
 #[test]
@@ -327,7 +372,7 @@ fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() 
   // Simulate a crash after import but before the workspace migration commits.
   store.import_legacy(std::slice::from_ref(&saved)).unwrap();
   let snapshot = fixture.repository().load().unwrap();
-  assert_eq!(snapshot.document.schema_version, 3);
+  assert_eq!(snapshot.document.schema_version, 4);
   assert!(snapshot.document.task_definitions.is_empty());
   let definitions = store.load().unwrap().definitions;
   assert_eq!(definitions.len(), 1);

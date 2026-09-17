@@ -706,9 +706,11 @@ name = "ctld"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ctl-proto",
  "ctld-ipc",
  "rustix",
  "security-framework",
+ "serde_json",
  "sha2",
  "thiserror 2.0.20",
  "tokio",
@@ -720,6 +722,7 @@ dependencies = [
 name = "ctld-ipc"
 version = "0.1.0"
 dependencies = [
+ "ctl-proto",
  "dirs",
  "interprocess",
  "rustix",

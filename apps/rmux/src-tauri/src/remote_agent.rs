@@ -193,12 +193,23 @@ fn bundle_directories(app: &AppHandle) -> CommandResult<Vec<PathBuf>> {
   #[cfg(debug_assertions)]
   {
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&relative);
-    if packaged != development {
-      return Ok(vec![packaged, development]);
-    }
+    Ok(development_bundle_directories(packaged, development))
   }
 
-  Ok(vec![packaged])
+  #[cfg(not(debug_assertions))]
+  {
+    Ok(vec![packaged])
+  }
+}
+
+#[cfg(debug_assertions)]
+fn development_bundle_directories(packaged: PathBuf, development: PathBuf) -> Vec<PathBuf> {
+  if packaged == development {
+    vec![development]
+  } else {
+    // Tauri's copied resources can outlive a development bundle sync.
+    vec![development, packaged]
+  }
 }
 
 async fn read_verified_bundle(
@@ -340,6 +351,22 @@ fn bundle_unavailable() -> CommandErrorDto {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(debug_assertions)]
+  #[test]
+  fn development_bundles_precede_stale_packaged_resource_copies() {
+    let packaged = PathBuf::from("target/debug/resources/agent-bundles");
+    let development = PathBuf::from("src-tauri/resources/agent-bundles");
+
+    assert_eq!(
+      development_bundle_directories(packaged.clone(), development.clone()),
+      vec![development.clone(), packaged]
+    );
+    assert_eq!(
+      development_bundle_directories(development.clone(), development.clone()),
+      vec![development]
+    );
+  }
 
   #[test]
   fn maps_supported_unix_platforms_to_release_targets() {

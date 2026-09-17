@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use ctld_ipc::{ClientMessage, PromptKind, ServerMessage, SshTarget};
+use ctld_ipc::{
+  ClientMessage, LocalPortForward, PortForwardStatus, PromptKind, ServerMessage, SshTarget,
+};
 
 use super::{PromptContext, SshPromptKind, request_response};
 use crate::dto::ConnectionTargetDto;
@@ -104,6 +106,86 @@ pub async fn delete_credentials(target: &ConnectionTargetDto) -> CommandResult<(
     _ => Err(CommandErrorDto::new(
       "ctld_protocol_error",
       "ctld returned an unexpected credential deletion response.",
+    )),
+  }
+}
+
+pub async fn configure_port_forward(
+  target: &ConnectionTargetDto,
+  forward: LocalPortForward,
+  enabled: bool,
+) -> CommandResult<PortForwardStatus> {
+  let mut stream = connect().await?;
+  ctld_ipc::write_frame(
+    &mut stream,
+    &ClientMessage::ConfigurePortForward {
+      target: broker_target(target)?,
+      forward,
+      enabled,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::backend)?;
+  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+    .await
+    .map_err(CommandErrorDto::backend)?
+  {
+    Some(ServerMessage::PortForwardConfigured { status }) => Ok(status),
+    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
+    _ => Err(CommandErrorDto::new(
+      "ctld_protocol_error",
+      "ctld returned an unexpected port-forward response.",
+    )),
+  }
+}
+
+pub async fn list_port_forwards(
+  target: &ConnectionTargetDto,
+) -> CommandResult<Vec<PortForwardStatus>> {
+  let mut stream = connect().await?;
+  ctld_ipc::write_frame(
+    &mut stream,
+    &ClientMessage::ListPortForwards {
+      target: broker_target(target)?,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::backend)?;
+  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+    .await
+    .map_err(CommandErrorDto::backend)?
+  {
+    Some(ServerMessage::PortForwards { statuses }) => Ok(statuses),
+    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
+    _ => Err(CommandErrorDto::new(
+      "ctld_protocol_error",
+      "ctld returned an unexpected port-forward list.",
+    )),
+  }
+}
+
+pub async fn list_remote_listeners(
+  target: &ConnectionTargetDto,
+) -> CommandResult<ctl_proto::TcpListenerCatalog> {
+  let mut stream = connect().await?;
+  ctld_ipc::write_frame(
+    &mut stream,
+    &ClientMessage::ListRemoteListeners {
+      target: broker_target(target)?,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::backend)?;
+  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+    .await
+    .map_err(CommandErrorDto::backend)?
+  {
+    Some(ServerMessage::RemoteListeners { catalog }) => Ok(catalog),
+    Some(ServerMessage::AuthenticationRequired) => Err(authentication_required()),
+    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
+    _ => Err(CommandErrorDto::new(
+      "ctld_protocol_error",
+      "ctld returned an unexpected remote-listener response.",
     )),
   }
 }

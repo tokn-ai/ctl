@@ -19,6 +19,7 @@ export const COMMAND_IDS = {
   selectSession: "session.select",
   connectHost: "host.connect",
   removeHost: "host.remove",
+  managePortForwards: "host.port_forwarding",
   saveWorkspace: "workspace.save",
   configureKeybindings: "settings.configure_keybindings",
   reloadKeybindings: "settings.reload_keybindings",

@@ -62,6 +62,7 @@ function setup(
     requestDaemonRestart: vi.fn(),
     connectHost: vi.fn(),
     removeHost: vi.fn(),
+    managePortForwards: vi.fn(),
     saveWorkspace: vi.fn(),
     configureKeybindings: vi.fn(),
     reloadKeybindings: vi.fn(),

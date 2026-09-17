@@ -31,7 +31,7 @@ impl Repository {
   }
 
   pub fn update(&self, request: UpdateWorkspaceRequest) -> CommandResult<WorkspaceSnapshot> {
-    if request.document.schema_version != 3 {
+    if request.document.schema_version != 4 {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "Reload the workspace before saving with this app version.",
@@ -72,33 +72,37 @@ impl Repository {
     &self,
     mut snapshot: WorkspaceSnapshot,
   ) -> CommandResult<WorkspaceSnapshot> {
-    if snapshot.document.schema_version == 3 {
+    if snapshot.document.schema_version == 4 {
       return Ok(snapshot);
     }
-    // Preserve the original workspace before writing to either store. Import is
-    // idempotent, so retrying after a crash between the two commits is safe.
-    self.ensure_backup("workspace-v2.backup.json")?;
-    let imported = task_store::Repository::new(self.definition_path.clone())
-      .import_legacy(&snapshot.document.task_definitions)
-      .map_err(crate::task_definitions::store_error)?;
-    for reference in &mut snapshot.document.task_references {
-      let saved = snapshot
-        .document
-        .task_definitions
-        .iter()
-        .find(|definition| Some(&definition.definition_id) == reference.definition_id.as_ref());
-      if let Some(saved) = saved
-        && reference.applied_revision.as_deref() == Some(saved.revision.as_str())
-        && let Some(definition) = imported
-          .definitions
+    if snapshot.document.schema_version == 2 {
+      // Preserve the original workspace before writing to either store. Import
+      // is idempotent, so retrying after a crash between commits is safe.
+      self.ensure_backup("workspace-v2.backup.json")?;
+      let imported = task_store::Repository::new(self.definition_path.clone())
+        .import_legacy(&snapshot.document.task_definitions)
+        .map_err(crate::task_definitions::store_error)?;
+      for reference in &mut snapshot.document.task_references {
+        let saved = snapshot
+          .document
+          .task_definitions
           .iter()
-          .find(|definition| definition.definition_id == saved.definition_id)
-      {
-        reference.applied_revision = Some(definition.revision.clone());
+          .find(|definition| Some(&definition.definition_id) == reference.definition_id.as_ref());
+        if let Some(saved) = saved
+          && reference.applied_revision.as_deref() == Some(saved.revision.as_str())
+          && let Some(definition) = imported
+            .definitions
+            .iter()
+            .find(|definition| definition.definition_id == saved.definition_id)
+        {
+          reference.applied_revision = Some(definition.revision.clone());
+        }
       }
+      snapshot.document.task_definitions.clear();
+    } else {
+      self.ensure_backup("workspace-v3.backup.json")?;
     }
-    snapshot.document.task_definitions.clear();
-    snapshot.document.schema_version = 3;
+    snapshot.document.schema_version = 4;
     snapshot.revision = Some(uuid::Uuid::new_v4().to_string());
     snapshot.document.validate()?;
     self.persist_snapshot(&snapshot)?;

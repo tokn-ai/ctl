@@ -3,7 +3,10 @@
 #[cfg(target_os = "macos")]
 mod keychain;
 
-use ctld_ipc::{ClientMessage, PromptKind, ServerMessage, SshTarget};
+use ctld_ipc::{
+  ClientMessage, LocalPortForward, PortForwardState, PortForwardStatus, PromptKind, ServerMessage,
+  SshTarget,
+};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -27,11 +30,19 @@ const MASTER_START_TIMEOUT: Duration = Duration::from_mins(3);
 const MASTER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MASTER_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DIAGNOSTICS: usize = 8192;
+const MAX_LISTENER_CATALOG_BYTES: usize = 64 * 1024;
+const LISTENER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_LISTENERS_COMMAND: &str = concat!(
+  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-agent is not installed\n' >&2; exit 127; }; "#,
+  "exec ctl-agent listeners",
+);
 
 #[derive(Default)]
 struct State {
   attempts: Mutex<HashMap<String, Attempt>>,
   target_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+  forwards: AsyncMutex<HashMap<String, HashMap<String, PortForwardStatus>>>,
 }
 
 struct Attempt {
@@ -81,6 +92,12 @@ enum RequestError {
   MasterTimeout,
   #[error("OpenSSH control master exited before becoming ready: {0}")]
   MasterFailed(String),
+  #[error("OpenSSH port forwarding failed: {0}")]
+  PortForwardFailed(String),
+  #[error("remote listener discovery failed: {0}")]
+  RemoteListenerFailed(String),
+  #[error("remote components must be updated before TCP listeners can be discovered")]
+  RemoteAgentUpdateRequired,
 }
 
 /// Runs the per-user broker until it is interrupted.
@@ -175,6 +192,17 @@ async fn handle_connection(
     ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
     ClientMessage::MasterStatus { target } => master_status(&mut stream, &target).await,
     ClientMessage::DeleteCredentials { target } => delete_credentials(&mut stream, &target).await,
+    ClientMessage::ConfigurePortForward {
+      target,
+      forward,
+      enabled,
+    } => configure_port_forward(&mut stream, &state, target, forward, enabled).await,
+    ClientMessage::ListPortForwards { target } => {
+      list_port_forwards(&mut stream, &state, &target).await
+    }
+    ClientMessage::ListRemoteListeners { target } => {
+      list_remote_listeners(&mut stream, &state, &target).await
+    }
     ClientMessage::Askpass {
       token,
       message,
@@ -290,6 +318,7 @@ async fn ensure_master(
       handle_save_offer(stream, &target, &mut captured).await?;
       #[cfg(not(target_os = "macos"))]
       captured.clear();
+      activate_configured_forwards(&state, &target, &control_path).await;
       ctld_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path }).await?;
       return Ok(());
     }
@@ -342,6 +371,9 @@ impl RequestError {
       Self::StartMaster(_) => "ssh_start_failed",
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
+      Self::PortForwardFailed(_) => "ssh_port_forward_failed",
+      Self::RemoteListenerFailed(_) => "ssh_listener_discovery_failed",
+      Self::RemoteAgentUpdateRequired => "ctl_agent_update_required",
     }
   }
 }
@@ -564,6 +596,369 @@ async fn delete_credentials(
   Ok(())
 }
 
+async fn configure_port_forward(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  target: SshTarget,
+  forward: LocalPortForward,
+  enabled: bool,
+) -> Result<(), RequestError> {
+  validate_target(&target)?;
+  validate_forward(&forward)?;
+  let target_lock = {
+    let mut locks = state.target_locks.lock().unwrap();
+    Arc::clone(
+      locks
+        .entry(target.destination.clone())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+  };
+  let _target_guard = target_lock.lock().await;
+  let control_path = control_path(&target);
+  let existing = state
+    .forwards
+    .lock()
+    .await
+    .get(&target.destination)
+    .and_then(|forwards| forwards.get(&forward.forward_id))
+    .cloned();
+
+  if !enabled {
+    if let Some(existing) = existing
+      && existing.state == PortForwardState::Active
+      && control_master_is_ready(&target, &control_path).await
+    {
+      run_forward_command(&target, &control_path, &existing.forward, true).await?;
+    }
+    let mut forwards = state.forwards.lock().await;
+    if let Some(items) = forwards.get_mut(&target.destination) {
+      items.remove(&forward.forward_id);
+      if items.is_empty() {
+        forwards.remove(&target.destination);
+      }
+    }
+    let status = PortForwardStatus {
+      forward,
+      state: PortForwardState::WaitingForAuthentication,
+      message: None,
+    };
+    ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
+    return Ok(());
+  }
+
+  if let Some(existing) = &existing
+    && existing.forward == forward
+    && existing.state == PortForwardState::Active
+    && control_master_is_ready(&target, &control_path).await
+  {
+    ctld_ipc::write_frame(
+      stream,
+      &ServerMessage::PortForwardConfigured {
+        status: existing.clone(),
+      },
+    )
+    .await?;
+    return Ok(());
+  }
+
+  if let Some(existing) = existing
+    && existing.forward != forward
+    && existing.state == PortForwardState::Active
+    && control_master_is_ready(&target, &control_path).await
+  {
+    run_forward_command(&target, &control_path, &existing.forward, true).await?;
+  }
+  let status = if control_master_is_ready(&target, &control_path).await {
+    forward_status(
+      forward.clone(),
+      run_forward_command(&target, &control_path, &forward, false).await,
+    )
+  } else {
+    PortForwardStatus {
+      forward: forward.clone(),
+      state: PortForwardState::WaitingForAuthentication,
+      message: Some("Connect this host to activate the forward.".into()),
+    }
+  };
+  state
+    .forwards
+    .lock()
+    .await
+    .entry(target.destination.clone())
+    .or_default()
+    .insert(forward.forward_id.clone(), status.clone());
+  ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
+  Ok(())
+}
+
+async fn list_port_forwards(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+) -> Result<(), RequestError> {
+  validate_target(target)?;
+  let ready = control_master_is_ready(target, &control_path(target)).await;
+  let mut forwards = state.forwards.lock().await;
+  let mut items = forwards.get_mut(&target.destination);
+  if !ready && let Some(items) = items.as_deref_mut() {
+    for status in items.values_mut() {
+      status.state = PortForwardState::WaitingForAuthentication;
+      status.message = Some("Connect this host to activate the forward.".into());
+    }
+  }
+  let mut statuses: Vec<_> = items
+    .map(|items| items.values().cloned().collect())
+    .unwrap_or_default();
+  drop(forwards);
+  statuses.sort_by(|left, right| left.forward.forward_id.cmp(&right.forward.forward_id));
+  ctld_ipc::write_frame(stream, &ServerMessage::PortForwards { statuses }).await?;
+  Ok(())
+}
+
+async fn list_remote_listeners(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+) -> Result<(), RequestError> {
+  validate_target(target)?;
+  let target_lock = {
+    let mut locks = state.target_locks.lock().unwrap();
+    Arc::clone(
+      locks
+        .entry(target.destination.clone())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+  };
+  let _target_guard = target_lock.lock().await;
+  let control_path = control_path(target);
+  if !control_master_is_ready(target, &control_path).await {
+    ctld_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
+    return Ok(());
+  }
+
+  let catalog = run_listener_discovery(target, &control_path).await?;
+  ctld_ipc::write_frame(stream, &ServerMessage::RemoteListeners { catalog }).await?;
+  Ok(())
+}
+
+async fn run_listener_discovery(
+  target: &SshTarget,
+  control_path: &Path,
+) -> Result<ctl_proto::TcpListenerCatalog, RequestError> {
+  let mut command = Command::new(SSH_PROGRAM);
+  command
+    .arg("-S")
+    .arg(control_path)
+    .arg("-T")
+    .args(["-o", "ClearAllForwardings=yes"])
+    .args(["-o", "ForwardAgent=no"])
+    .args(["-o", "ForwardX11=no"])
+    .args(["-o", "PermitLocalCommand=no"])
+    .args(["-o", "RemoteCommand=none"])
+    .args(["-o", "BatchMode=yes"]);
+  append_target_arguments(&mut command, target);
+  let mut child = command
+    .arg(REMOTE_LISTENERS_COMMAND)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .map_err(RequestError::StartMaster)?;
+  let mut stdout = child.stdout.take().ok_or(RequestError::InvalidRequest(
+    "listener stdout was not piped",
+  ))?;
+  let mut stderr = child.stderr.take().ok_or(RequestError::InvalidRequest(
+    "listener stderr was not piped",
+  ))?;
+  let output =
+    tokio::spawn(async move { read_bounded(&mut stdout, MAX_LISTENER_CATALOG_BYTES).await });
+  let diagnostics = tokio::spawn(async move { read_bounded(&mut stderr, MAX_DIAGNOSTICS).await });
+  let status =
+    if let Ok(result) = tokio::time::timeout(LISTENER_DISCOVERY_TIMEOUT, child.wait()).await {
+      result.map_err(RequestError::StartMaster)?
+    } else {
+      let _ = child.kill().await;
+      return Err(RequestError::RemoteListenerFailed(
+        "request timed out".into(),
+      ));
+    };
+  let (output, output_overflowed) = output
+    .await
+    .map_err(|_| RequestError::InvalidRequest("listener output worker stopped"))?
+    .map_err(RequestError::StartMaster)?;
+  let (diagnostics, _) = diagnostics
+    .await
+    .map_err(|_| RequestError::InvalidRequest("listener diagnostics worker stopped"))?
+    .map_err(RequestError::StartMaster)?;
+  let diagnostics = String::from_utf8_lossy(&diagnostics).trim().to_owned();
+  if output_overflowed {
+    return Err(RequestError::RemoteListenerFailed(
+      "ctl-agent returned too much listener data".into(),
+    ));
+  }
+  if !status.success() {
+    if listener_discovery_requires_agent_update(&diagnostics) {
+      return Err(RequestError::RemoteAgentUpdateRequired);
+    }
+    return Err(RequestError::RemoteListenerFailed(
+      if diagnostics.is_empty() {
+        status.to_string()
+      } else {
+        diagnostics
+      },
+    ));
+  }
+  let catalog: ctl_proto::TcpListenerCatalog =
+    serde_json::from_slice(&output).map_err(|error| {
+      RequestError::RemoteListenerFailed(format!("invalid ctl-agent output: {error}"))
+    })?;
+  validate_listener_catalog(&catalog)?;
+  Ok(catalog)
+}
+
+fn listener_discovery_requires_agent_update(diagnostics: &str) -> bool {
+  let diagnostics = diagnostics.to_ascii_lowercase();
+  diagnostics == "ctl-agent is not installed"
+    || diagnostics.contains("usage: ctl-agent")
+      && [
+        "unrecognized subcommand 'listeners'",
+        "unrecognized subcommand `listeners`",
+        "unexpected argument 'listeners'",
+        "unexpected argument `listeners`",
+      ]
+      .iter()
+      .any(|message| diagnostics.contains(message))
+}
+
+async fn read_bounded(
+  reader: &mut (impl tokio::io::AsyncRead + Unpin),
+  maximum: usize,
+) -> io::Result<(Vec<u8>, bool)> {
+  use tokio::io::AsyncReadExt as _;
+
+  let mut retained = Vec::new();
+  let mut overflowed = false;
+  let mut buffer = [0_u8; 4096];
+  loop {
+    let count = reader.read(&mut buffer).await?;
+    if count == 0 {
+      return Ok((retained, overflowed));
+    }
+    let keep = count.min(maximum.saturating_sub(retained.len()));
+    retained.extend_from_slice(&buffer[..keep]);
+    overflowed |= keep < count;
+  }
+}
+
+fn validate_listener_catalog(catalog: &ctl_proto::TcpListenerCatalog) -> Result<(), RequestError> {
+  if catalog.listeners.len() > 4096
+    || catalog.warnings.len() > 32
+    || catalog.listeners.iter().any(|listener| {
+      listener.port == 0 || listener.bind_address.parse::<std::net::IpAddr>().is_err()
+    })
+    || catalog.warnings.iter().any(|warning| {
+      warning.is_empty() || warning.len() > 1024 || warning.chars().any(char::is_control)
+    })
+  {
+    return Err(RequestError::RemoteListenerFailed(
+      "ctl-agent returned an invalid listener catalog".into(),
+    ));
+  }
+  Ok(())
+}
+
+async fn activate_configured_forwards(state: &State, target: &SshTarget, control_path: &Path) {
+  let configured: Vec<_> = state
+    .forwards
+    .lock()
+    .await
+    .get(&target.destination)
+    .map(|items| {
+      items
+        .values()
+        .map(|status| status.forward.clone())
+        .collect()
+    })
+    .unwrap_or_default();
+  for forward in configured {
+    let status = forward_status(
+      forward.clone(),
+      run_forward_command(target, control_path, &forward, false).await,
+    );
+    if let Some(items) = state.forwards.lock().await.get_mut(&target.destination) {
+      items.insert(forward.forward_id.clone(), status);
+    }
+  }
+}
+
+fn forward_status(
+  forward: LocalPortForward,
+  result: Result<(), RequestError>,
+) -> PortForwardStatus {
+  match result {
+    Ok(()) => PortForwardStatus {
+      forward,
+      state: PortForwardState::Active,
+      message: None,
+    },
+    Err(error) => PortForwardStatus {
+      forward,
+      state: PortForwardState::Error,
+      message: Some(error.to_string()),
+    },
+  }
+}
+
+async fn run_forward_command(
+  target: &SshTarget,
+  control_path: &Path,
+  forward: &LocalPortForward,
+  cancel: bool,
+) -> Result<(), RequestError> {
+  let specification = format!(
+    "{}:{}:{}:{}",
+    forward.bind_address,
+    forward.local_port,
+    remote_forward_host(&forward.remote_host),
+    forward.remote_port
+  );
+  let mut command = Command::new(SSH_PROGRAM);
+  command
+    .arg("-S")
+    .arg(control_path)
+    .args(["-O", if cancel { "cancel" } else { "forward" }])
+    .arg("-L")
+    .arg(specification);
+  append_target_arguments(&mut command, target);
+  command
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  let output = tokio::time::timeout(MASTER_CHECK_TIMEOUT, command.output())
+    .await
+    .map_err(|_| RequestError::PortForwardFailed("control command timed out".into()))?
+    .map_err(RequestError::StartMaster)?;
+  if output.status.success() {
+    return Ok(());
+  }
+  let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+  Err(RequestError::PortForwardFailed(if message.is_empty() {
+    output.status.to_string()
+  } else {
+    message
+  }))
+}
+
+fn remote_forward_host(host: &str) -> String {
+  if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+    format!("[{host}]")
+  } else {
+    host.to_owned()
+  }
+}
+
 fn start_master(
   target: &SshTarget,
   control_path: &Path,
@@ -699,6 +1094,27 @@ fn validate_target(target: &SshTarget) -> Result<(), RequestError> {
       .is_some_and(|path| path.as_os_str().is_empty())
   {
     return Err(RequestError::InvalidRequest("invalid SSH target"));
+  }
+  Ok(())
+}
+
+fn validate_forward(forward: &LocalPortForward) -> Result<(), RequestError> {
+  let valid_host = |value: &str| {
+    !value.trim().is_empty()
+      && value.len() <= 255
+      && !value
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+  };
+  if forward.forward_id.is_empty()
+    || forward.forward_id.len() > 128
+    || forward.forward_id.chars().any(char::is_control)
+    || !matches!(forward.bind_address.as_str(), "127.0.0.1" | "::1")
+    || forward.local_port == 0
+    || forward.remote_port == 0
+    || !valid_host(&forward.remote_host)
+  {
+    return Err(RequestError::InvalidRequest("invalid local port forward"));
   }
   Ok(())
 }
@@ -894,6 +1310,50 @@ mod tests {
     ] {
       assert!(validate_target(&invalid).is_err());
     }
+  }
+
+  #[test]
+  fn old_listener_commands_require_an_agent_update_without_masking_other_failures() {
+    assert!(listener_discovery_requires_agent_update(
+      "error: unrecognized subcommand 'listeners'\n\nUsage: ctl-agent <COMMAND>"
+    ));
+    assert!(listener_discovery_requires_agent_update(
+      "ctl-agent is not installed"
+    ));
+    assert!(!listener_discovery_requires_agent_update(
+      "Permission denied (publickey)."
+    ));
+    assert!(!listener_discovery_requires_agent_update(
+      "error: unrecognized subcommand 'connect'\nUsage: ctl-agent <COMMAND>"
+    ));
+  }
+
+  #[test]
+  fn local_forwards_are_structured_and_loopback_only() {
+    let valid = LocalPortForward {
+      forward_id: "database".into(),
+      bind_address: "127.0.0.1".into(),
+      local_port: 15432,
+      remote_host: "database.internal".into(),
+      remote_port: 5432,
+    };
+    assert!(validate_forward(&valid).is_ok());
+    assert!(
+      validate_forward(&LocalPortForward {
+        bind_address: "0.0.0.0".into(),
+        ..valid.clone()
+      })
+      .is_err()
+    );
+    assert!(
+      validate_forward(&LocalPortForward {
+        remote_host: "host name".into(),
+        ..valid
+      })
+      .is_err()
+    );
+    assert_eq!(remote_forward_host("127.0.0.1"), "127.0.0.1");
+    assert_eq!(remote_forward_host("::1"), "[::1]");
   }
 
   #[cfg(unix)]

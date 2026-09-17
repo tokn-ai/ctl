@@ -5,6 +5,7 @@ interface QuickInputFrameProps {
   children: ReactNode;
   onDismiss(): void;
   onKeyDown?(event: KeyboardEvent<HTMLElement>): void;
+  className?: string;
 }
 
 /** Shared positioning, cancellation, and focus containment for quick input. */
@@ -13,6 +14,7 @@ export function QuickInputFrame({
   children,
   onDismiss,
   onKeyDown,
+  className,
 }: QuickInputFrameProps) {
   const frameRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -30,7 +32,7 @@ export function QuickInputFrame({
       <section
         ref={frameRef}
         tabIndex={-1}
-        className="command-palette"
+        className={`command-palette${className ? ` ${className}` : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}

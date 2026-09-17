@@ -124,6 +124,7 @@ pub enum SidebarView {
   #[default]
   Sessions,
   Tasks,
+  Ports,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +161,7 @@ fn valid_workspace_text(text: &str) -> bool {
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
-      schema_version: 4,
+      schema_version: 5,
       workspace_id: "default".into(),
       hosts: vec![WorkspaceHost {
         host_id: "local".into(),
@@ -181,7 +182,7 @@ impl Default for WorkspaceDocument {
 
 impl WorkspaceDocument {
   fn validate(&self) -> CommandResult<()> {
-    if !matches!(self.schema_version, 2..=4) {
+    if !matches!(self.schema_version, 2..=5) {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "This workspace was written by another app version. Its file has not been changed.",

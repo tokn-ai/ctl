@@ -16,10 +16,12 @@ import {
 import { QuickInput } from "../components/commands/QuickInput";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { PortForwardingDialog } from "../components/sessions/PortForwardingDialog";
+import { PortForwardingSidebar } from "../components/portForwarding/PortForwardingSidebar";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
 import { NewShellFlow } from "../components/sessions/NewShellFlow";
 import { useWorkspace } from "../features/workspace/useWorkspace";
 import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
+import { usePortForwarding } from "../features/portForwarding/usePortForwarding";
 import {
   recoverRemoteHost,
   remapStateKeys,
@@ -216,20 +218,20 @@ export function TerminalPage() {
   workspace.closeBlockedRef.current = () =>
     creatingRef.current || restartingDaemonRef.current || taskWorkspace.busy;
 
-  useEffect(() => {
-    if (!workspace.ready) return;
-    for (const forward of workspace.port_forwards.filter((item) => item.enabled)) {
-      const target = targets.find(
-        (item): item is SshConnectionTarget =>
-          item.kind === "ssh" && item.host_id === forward.host_id,
-      );
-      if (target) {
-        void configurePortForward(target, forward, true).catch((failure) =>
-          setListError(errorMessage(failure)),
-        );
-      }
-    }
-  }, [workspace.ready]);
+  const updatePortForwards = useCallback(
+    (
+      update: (
+        current: typeof workspace.port_forwards,
+      ) => typeof workspace.port_forwards,
+    ) => workspace.update("port_forwards", update),
+    [workspace.update],
+  );
+  const portForwarding = usePortForwarding(
+    workspace.ready,
+    targets,
+    workspace.port_forwards,
+    updatePortForwards,
+  );
 
   const daemonRestartBlocksInteractions = useCallback(
     () => daemonRestartConfirmationRef.current || restartingDaemonRef.current,
@@ -1193,7 +1195,10 @@ export function TerminalPage() {
       },
       removeHost,
       managePortForwards: (target) => {
-        if (target.kind === "ssh") setPortForwardTarget(target);
+        if (target.kind === "ssh") {
+          setPortForwardTarget(target);
+          void portForwarding.refreshTarget(target);
+        }
       },
       saveWorkspace: () => persistWorkspace(true),
       configureKeybindings: () => setKeybindingsOpen(true),
@@ -1356,7 +1361,10 @@ export function TerminalPage() {
       >
         <WorkspaceSidebar
           selected={workspace.sidebar_view}
-          onSelect={(view) => workspace.update("sidebar_view", view)}
+          onSelect={(view) => {
+            workspace.update("sidebar_view", view);
+            if (view === "ports") void portForwarding.refreshAll();
+          }}
           error={workspace.error}
           tasks={
             <TaskSidebar
@@ -1424,6 +1432,30 @@ export function TerminalPage() {
                   target_key: targetKey(target),
                 })
               }
+            />
+          }
+          ports={
+            <PortForwardingSidebar
+              targets={targets.filter(
+                (target): target is SshConnectionTarget =>
+                  target.kind === "ssh",
+              )}
+              forwards={workspace.port_forwards}
+              statuses={portForwarding.statuses}
+              busy={portForwarding.busy}
+              hostErrors={portForwarding.hostErrors}
+              refreshing={portForwarding.refreshing}
+              lastRefreshedAt={portForwarding.lastRefreshedAt}
+              onRefresh={() => void portForwarding.refreshAll()}
+              onSetEnabled={(target, forward, enabled) => {
+                void portForwarding
+                  .setEnabled(target, forward, enabled)
+                  .catch(() => undefined);
+              }}
+              onManage={(target) => {
+                setPortForwardTarget(target);
+                void portForwarding.refreshTarget(target);
+              }}
             />
           }
         />
@@ -1587,6 +1619,11 @@ export function TerminalPage() {
           forwards={workspace.port_forwards.filter(
             (forward) => forward.host_id === portForwardTarget.host_id,
           )}
+          statuses={portForwarding.statuses}
+          busy={portForwarding.busy}
+          onSetEnabled={(forward, enabled) =>
+            portForwarding.setEnabled(portForwardTarget, forward, enabled)
+          }
           onChange={(forwards) => {
             workspace.update("port_forwards", (current) => [
               ...current.filter(

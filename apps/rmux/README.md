@@ -68,6 +68,12 @@ Sessions** inspects only remembered IDs; it does not adopt other apps' sessions.
 Old sessions were never saved, so the first migration requires explicit import.
 See [workspace persistence](../../docs/rmux-workspace.md) for recovery and tests.
 
+The Ports activity panel lists every saved local forward across SSH hosts,
+including stopped entries, and shows `ctld`'s current active, waiting, or error
+state. Start and Stop act on the shared `ctld` owner; selecting a row opens the
+host-specific forwarding dialog for discovery and editing. Runtime state is
+refreshed on launch, when the panel opens, and on demand, but is not persisted.
+
 The identity-file input suggests candidate files from the top level of
 `~/.ssh`. Type to filter, use the arrow keys and Enter, or click a file. Manual
 paths remain available, including when discovery fails. Rust lists names and

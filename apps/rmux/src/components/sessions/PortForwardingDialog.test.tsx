@@ -9,33 +9,17 @@ import {
 } from "./PortForwardingDialog";
 import {
   checkLocalPort,
-  configurePortForward,
-  listPortForwards,
   listRemoteListeners,
 } from "../../lib/tauri";
 
 vi.mock("../../lib/tauri", () => ({
   checkLocalPort: vi.fn(),
-  configurePortForward: vi.fn(),
-  listPortForwards: vi.fn(),
   listRemoteListeners: vi.fn(),
 }));
 
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(listPortForwards).mockResolvedValue([]);
-  vi.mocked(configurePortForward).mockResolvedValue({
-    forward: {
-      forward_id: "unused",
-      bind_address: "127.0.0.1",
-      local_port: 1,
-      remote_host: "127.0.0.1",
-      remote_port: 1,
-    },
-    state: "active",
-    message: null,
-  });
   vi.mocked(checkLocalPort).mockResolvedValue({
     port: 1,
     available: true,
@@ -68,7 +52,10 @@ describe("remote listener forwarding defaults", () => {
       <PortForwardingDialog
         target={{ kind: "ssh", host_id: "remote", destination: "example" }}
         forwards={[]}
+        statuses={new Map()}
+        busy={new Set()}
         onChange={vi.fn()}
+        onSetEnabled={vi.fn()}
         onUpdateAgent={onUpdateAgent}
         onClose={vi.fn()}
       />,

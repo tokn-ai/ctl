@@ -1,0 +1,177 @@
+.port-sidebar {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  background:
+    radial-gradient(circle at 0 0, #262b30 0, transparent 34%),
+    var(--surface-1);
+}
+
+.port-sidebar-count {
+  min-width: 20px;
+  padding: 2px 6px;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: center;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.port-sidebar-list {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.port-sidebar-group {
+  padding: 0 9px 12px;
+}
+
+.port-sidebar-group > header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 3px;
+}
+
+.port-sidebar-group h3 {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  overflow: hidden;
+  color: #b9c0ca;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.port-sidebar-group h3 span {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.port-sidebar-group > header button,
+.port-sidebar-toggle {
+  padding: 4px 7px;
+  color: var(--muted);
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.port-sidebar-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #14171c;
+}
+
+.port-sidebar-details {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.port-sidebar-details > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.port-sidebar-details strong,
+.port-sidebar-details code,
+.port-sidebar-details small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.port-sidebar-details strong {
+  font-size: 12px;
+  font-weight: 610;
+}
+
+.port-sidebar-details code,
+.port-sidebar-details small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.port-sidebar-indicator {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #666e79;
+}
+
+.port-sidebar-indicator.active {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px #8ee39d19;
+}
+
+.port-sidebar-indicator.waiting {
+  background: var(--warning);
+}
+
+.port-sidebar-indicator.error {
+  background: var(--danger);
+}
+
+.port-sidebar-status.active {
+  color: var(--accent);
+}
+
+.port-sidebar-status.waiting {
+  color: var(--warning);
+}
+
+.port-sidebar-status.error,
+.port-sidebar-error {
+  color: #ffb0b0;
+}
+
+.port-sidebar-toggle {
+  flex: 0 0 auto;
+  margin-right: 8px;
+}
+
+.port-sidebar-error {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+  font-size: 9px;
+  border-left: 2px solid #744144;
+  background: #2a2022;
+}
+
+.port-sidebar-footer {
+  min-height: 34px;
+  padding: 9px 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+}
+
+.port-sidebar-footer small {
+  font-size: 9px;
+}

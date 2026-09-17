@@ -11,11 +11,12 @@ import type {
   ShellStateSummary,
   WorkspaceDocument,
   WorkspacePortForward,
+  WorkspaceSidebarView,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
 
 export interface WorkspaceView {
-  sidebar_view: "sessions" | "tasks";
+  sidebar_view: WorkspaceSidebarView;
   task_drafts: TaskDefinitionDraft[];
   task_definitions: SavedTaskDefinition[];
   task_definition_scope: TaskDefinitionScope;
@@ -178,7 +179,7 @@ export function workspaceDocument(
     (tab) => workspaceTabKey(tab) === view.active_tab_key,
   );
   return {
-    schema_version: 4,
+    schema_version: 5,
     port_forwards: view.port_forwards.filter((forward) =>
       view.targets.some(
         (target) => target.kind === "ssh" && target.host_id === forward.host_id,

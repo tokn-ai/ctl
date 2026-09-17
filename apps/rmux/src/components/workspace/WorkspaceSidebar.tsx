@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
+import type { WorkspaceSidebarView } from "../../lib/types";
 
-type SidebarView = "sessions" | "tasks";
 interface Props {
-  selected: SidebarView;
-  onSelect(view: SidebarView): void;
+  selected: WorkspaceSidebarView;
+  onSelect(view: WorkspaceSidebarView): void;
   sessions: ReactNode;
   tasks: ReactNode;
+  ports: ReactNode;
   error: string | null;
 }
 
@@ -14,9 +15,15 @@ export function WorkspaceSidebar({
   onSelect,
   sessions,
   tasks,
+  ports,
   error,
 }: Props) {
-  const views = ["sessions", "tasks"] as const;
+  const views = ["sessions", "tasks", "ports"] as const;
+  const labels = {
+    sessions: "Sessions",
+    tasks: "Tasks",
+    ports: "Ports",
+  } as const;
   return (
     <div className="workspace-sidebar">
       <nav
@@ -30,8 +37,8 @@ export function WorkspaceSidebar({
             key={view}
             id={`sidebar-tab-${view}`}
             role="tab"
-            aria-label={view === "sessions" ? "Sessions" : "Tasks"}
-            title={view === "sessions" ? "Sessions" : "Tasks"}
+            aria-label={labels[view]}
+            title={labels[view]}
             aria-selected={selected === view}
             aria-controls={`sidebar-panel-${view}`}
             tabIndex={selected === view ? 0 : -1}
@@ -44,8 +51,10 @@ export function WorkspaceSidebar({
                 event.key === "Home"
                   ? views[0]
                   : event.key === "End"
-                    ? views[1]
-                    : views[(index + 1) % views.length];
+                    ? views[views.length - 1]
+                    : event.key === "ArrowUp"
+                      ? views[(index - 1 + views.length) % views.length]
+                      : views[(index + 1) % views.length];
               onSelect(next);
               document.getElementById(`sidebar-tab-${next}`)?.focus();
             }}
@@ -64,10 +73,16 @@ export function WorkspaceSidebar({
                   <rect x="3" y="4" width="18" height="16" rx="2" />
                   <path d="m7 9 3 3-3 3m6 0h4" />
                 </>
-              ) : (
+              ) : view === "tasks" ? (
                 <>
                   <rect x="4" y="3" width="16" height="18" rx="2" />
                   <path d="m7 8 1.5 1.5L11 7m2 2h4m-10 5 1.5 1.5L11 13m2 2h4" />
+                </>
+              ) : (
+                <>
+                  <path d="M4 7h6m4 0h6M8 4v6m8 4v6m-6-3h4" />
+                  <circle cx="8" cy="7" r="3" />
+                  <circle cx="16" cy="17" r="3" />
                 </>
               )}
             </svg>
@@ -90,6 +105,14 @@ export function WorkspaceSidebar({
           hidden={selected !== "tasks"}
         >
           {tasks}
+        </div>
+        <div
+          id="sidebar-panel-ports"
+          role="tabpanel"
+          aria-labelledby="sidebar-tab-ports"
+          hidden={selected !== "ports"}
+        >
+          {ports}
         </div>
         {error ? (
           <p className="task-inline-error" role="alert">

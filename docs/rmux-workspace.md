@@ -17,9 +17,15 @@ versioned document contains:
 - `sessions`: `(host_id, session_id)`, name, and last-known cwd/display cwd;
 - ordered `tabs` and optional `active_tab`, referencing sessions or managed tasks;
 - task references, sidebar selection, and task drafts with their source scopes
-  and original saved-definition revisions.
+  and original saved-definition revisions;
+- saved loopback-only port-forward definitions, including whether each forward
+  should be restored.
 
-Schema 3 stores saved task definitions in separate shared project/global
+Schema 5 adds the central Ports sidebar selection. It preserves the schema 4
+port-forward definitions and creates a recoverable v4 backup during migration.
+The Ports sidebar groups saved forwards by host, including stopped forwards,
+while runtime status remains owned by `ctld` and is never written to the
+workspace. Schema 3 stores saved task definitions in separate shared project/global
 catalogs. The workspace keeps `task_definition_scope` and references, while
 definitions are loaded as view data and excluded from subsequent workspace
 writes. Schema 2 definitions are imported into the global catalog with a

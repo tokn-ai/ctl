@@ -248,12 +248,12 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
     .unwrap();
   assert_eq!(
     fixture.repository().load().unwrap().document.schema_version,
-    4
+    5
   );
 }
 
 #[test]
-fn migrates_v3_workspace_to_port_forwarding_schema() {
+fn migrates_v3_workspace_to_current_schema() {
   let fixture = Fixture::new();
   fs::create_dir_all(&fixture.0).unwrap();
   let mut document = populated();
@@ -267,10 +267,44 @@ fn migrates_v3_workspace_to_port_forwarding_schema() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 4);
+  assert_eq!(loaded.document.schema_version, 5);
   assert!(loaded.document.port_forwards.is_empty());
   assert_eq!(
     fs::read(fixture.0.join("workspace-v3.backup.json")).unwrap(),
+    bytes
+  );
+}
+
+#[test]
+fn migrates_v4_workspace_to_sidebar_schema() {
+  let fixture = Fixture::new();
+  fs::create_dir_all(&fixture.0).unwrap();
+  let mut document = populated();
+  document.schema_version = 4;
+  document.port_forwards.push(WorkspacePortForward {
+    forward_id: uuid::Uuid::new_v4().to_string(),
+    host_id: "remote-id".into(),
+    name: "Database".into(),
+    bind_address: "127.0.0.1".into(),
+    local_port: 5432,
+    remote_host: "127.0.0.1".into(),
+    remote_port: 5432,
+    enabled: false,
+  });
+  let bytes = serde_json::to_vec(&WorkspaceSnapshot {
+    revision: Some("before-ports-sidebar".into()),
+    document,
+  })
+  .unwrap();
+  fs::write(fixture.0.join("workspace.json"), &bytes).unwrap();
+
+  let loaded = fixture.repository().load().unwrap();
+
+  assert_eq!(loaded.document.schema_version, 5);
+  assert_eq!(loaded.document.sidebar_view, SidebarView::Sessions);
+  assert_eq!(loaded.document.port_forwards.len(), 1);
+  assert_eq!(
+    fs::read(fixture.0.join("workspace-v4.backup.json")).unwrap(),
     bytes
   );
 }
@@ -372,7 +406,7 @@ fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() 
   // Simulate a crash after import but before the workspace migration commits.
   store.import_legacy(std::slice::from_ref(&saved)).unwrap();
   let snapshot = fixture.repository().load().unwrap();
-  assert_eq!(snapshot.document.schema_version, 4);
+  assert_eq!(snapshot.document.schema_version, 5);
   assert!(snapshot.document.task_definitions.is_empty());
   let definitions = store.load().unwrap().definitions;
   assert_eq!(definitions.len(), 1);

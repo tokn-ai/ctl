@@ -36,10 +36,10 @@ interface SessionSidebarProps {
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
+  onAddRoutedHost?(): void;
   onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
   onPortForward?(target: ConnectionTarget): void;
-  onGatewayRoute?(target: ConnectionTarget): void;
   onAddExisting(): void;
   onForget(session: SessionSummary): void;
   onSelectTask?(task: ManagedTask): void;
@@ -98,10 +98,10 @@ export function SessionSidebar({
   onDisconnect,
   onRequestClose,
   onAddHost,
+  onAddRoutedHost,
   onConnectHost,
   onRemoveHost,
   onPortForward,
-  onGatewayRoute,
   onAddExisting,
   onForget,
   onSelectTask,
@@ -148,6 +148,14 @@ export function SessionSidebar({
           </button>
         </header>
 
+        <button
+          className="routed-host-add-button"
+          type="button"
+          onClick={onAddRoutedHost}
+        >
+          + Add host with gateways
+        </button>
+
         <div className="sidebar-hosts" aria-label="Configured hosts">
           {targets.map((target) => {
             const key = targetKey(target);
@@ -164,16 +172,6 @@ export function SessionSidebar({
                 >
                   {targetLabel(target)}
                 </button>
-                {target.kind === "ssh" ? (
-                  <button
-                    type="button"
-                    onClick={() => onGatewayRoute?.(target)}
-                    aria-label={`Connection route for ${targetLabel(target)}`}
-                    title={`Connection route for ${targetLabel(target)}`}
-                  >
-                    ⛓
-                  </button>
-                ) : null}
                 {target.kind === "ssh" ? (
                   <button
                     type="button"

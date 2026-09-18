@@ -12,6 +12,9 @@ interface Props {
   target: SshConnectionTarget;
   gateways: readonly WorkspaceSshGateway[];
   targets: readonly SshConnectionTarget[];
+  readonlyExisting?: boolean;
+  requireGateway?: boolean;
+  closeLabel?: string;
   onSave(
     gateways: WorkspaceSshGateway[],
     route: SshGatewayRouteStep[],
@@ -33,6 +36,9 @@ export function GatewayRouteDialog({
   target,
   gateways,
   targets,
+  readonlyExisting = false,
+  requireGateway = false,
+  closeLabel = "Close",
   onSave,
   onClose,
 }: Props) {
@@ -51,6 +57,7 @@ export function GatewayRouteDialog({
     [target.host_id, targets],
   );
   const routeIds = new Set(route.map((step) => step.gateway_id));
+  const existingIds = new Set(gateways.map((gateway) => gateway.gateway_id));
 
   function addExisting(gateway: WorkspaceSshGateway) {
     if (routeIds.has(gateway.gateway_id) || route.length >= 8) return;
@@ -121,6 +128,10 @@ export function GatewayRouteDialog({
   }
 
   async function save() {
+    if (requireGateway && route.length === 0) {
+      setError("Add at least one gateway to this route.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -168,7 +179,7 @@ export function GatewayRouteDialog({
     >
       <header className="quick-input-heading">
         <strong>Connection route · {target.destination}</strong>
-        <button type="button" onClick={onClose} disabled={saving}>Close</button>
+        <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
       </header>
       <p className="quick-input-description">
         Gateways are tried in order. Automatic mode currently uses native SSH forwarding. Managed agent relay fallback is the next runtime phase.
@@ -192,7 +203,11 @@ export function GatewayRouteDialog({
                 <div className="gateway-route-controls">
                   <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move ${gateway.name} up`}>↑</button>
                   <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={`Move ${gateway.name} down`}>↓</button>
-                  <button type="button" onClick={() => editGateway(gateway)}>Edit</button>
+                  <button
+                    type="button"
+                    onClick={() => editGateway(gateway)}
+                    disabled={readonlyExisting && existingIds.has(gateway.gateway_id)}
+                  >Edit</button>
                   <button
                     type="button"
                     onClick={() => setRoute((current) =>
@@ -239,11 +254,16 @@ export function GatewayRouteDialog({
             {draftGateways.map((gateway) => (
               <div key={gateway.gateway_id}>
                 <span><strong>{gateway.name}</strong><small>{endpointLabel(gateway)}</small></span>
-                <button type="button" onClick={() => editGateway(gateway)}>Edit</button>
+                <button
+                  type="button"
+                  onClick={() => editGateway(gateway)}
+                  disabled={readonlyExisting && existingIds.has(gateway.gateway_id)}
+                >Edit</button>
                 <button
                   type="button"
                   onClick={() => deleteGateway(gateway)}
-                  disabled={(otherUsage.get(gateway.gateway_id) ?? 0) > 0 || routeIds.has(gateway.gateway_id)}
+                  disabled={(readonlyExisting && existingIds.has(gateway.gateway_id)) ||
+                    (otherUsage.get(gateway.gateway_id) ?? 0) > 0 || routeIds.has(gateway.gateway_id)}
                   title={(otherUsage.get(gateway.gateway_id) ?? 0) > 0 || routeIds.has(gateway.gateway_id)
                     ? "Remove this gateway from every route before deleting it."
                     : "Delete saved gateway"}
@@ -261,8 +281,8 @@ export function GatewayRouteDialog({
 
       {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
       <footer className="gateway-dialog-actions">
-        <button type="button" onClick={onClose} disabled={saving}>Cancel</button>
-        <button type="button" className="button-primary" onClick={() => void save()} disabled={saving}>
+        <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
+        <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || (requireGateway && route.length === 0)}>
           {saving ? "Saving…" : "Done"}
         </button>
       </footer>

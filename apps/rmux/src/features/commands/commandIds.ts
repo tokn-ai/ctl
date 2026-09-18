@@ -1,6 +1,7 @@
 export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
   addHost: "host.add",
+  addRoutedHost: "host.add_with_gateways",
   addExistingSession: "session.add_existing",
   forgetSession: "session.forget",
   newShell: "session.new_shell",

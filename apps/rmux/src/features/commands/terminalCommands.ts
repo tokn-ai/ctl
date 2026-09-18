@@ -36,6 +36,7 @@ interface TerminalCommandContext {
 interface TerminalCommandActions {
   showPalette(): void;
   showAddHost(): void;
+  showAddRoutedHost(): void;
   showAddExistingSession(): void;
   forgetSession(session: SessionSummary): void;
   showNewShell(): void;
@@ -164,6 +165,15 @@ export function buildTerminalCommands(
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,
       run: actions.showAddHost,
+    },
+    {
+      id: COMMAND_IDS.addRoutedHost,
+      category: "Host",
+      title: "Add SSH Host with Gateways",
+      keywords: ["remote", "ssh", "jump", "bastion", "gateway", "route"],
+      enabled: !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: actions.showAddRoutedHost,
     },
     {
       id: COMMAND_IDS.showPalette,

@@ -46,6 +46,7 @@ function setup(
   const actions = {
     showPalette: vi.fn(),
     showAddHost: vi.fn(),
+    showAddRoutedHost: vi.fn(),
     showAddExistingSession: vi.fn(),
     forgetSession: vi.fn(),
     showNewShell: vi.fn(),
@@ -107,6 +108,13 @@ function findCommand(
 }
 
 describe("terminal commands", () => {
+  it("opens the separate routed-host setup action", () => {
+    const { actions, commands } = setup();
+    findCommand(commands, COMMAND_IDS.addRoutedHost).run();
+    expect(actions.showAddRoutedHost).toHaveBeenCalledOnce();
+    expect(actions.showAddHost).not.toHaveBeenCalled();
+  });
+
   it("opens new-shell quick input without refocusing the terminal", () => {
     const { actions, commands } = setup();
     const command = findCommand(commands, COMMAND_IDS.newShell);

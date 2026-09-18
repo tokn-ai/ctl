@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
 import { remoteInstallProgressMode } from "./remoteInstallProgress";
+import { GatewayRouteDialog } from "./GatewayRouteDialog";
+import { resolveSshGateways } from "../../features/workspace/workspaceModel";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
@@ -22,6 +24,9 @@ import type {
   SshHostStorage,
   SshPrompt,
   RemoteAgentInstallProgress,
+  SshConnectionTarget,
+  SshGatewayRouteStep,
+  WorkspaceSshGateway,
 } from "../../lib/types";
 
 interface SshHostFlowProps {
@@ -29,6 +34,13 @@ interface SshHostFlowProps {
   warning: string | null;
   target?: ConnectionTarget;
   updateRequired?: boolean;
+  complex?: boolean;
+  gateways?: readonly WorkspaceSshGateway[];
+  onSaveRoutedHost?(
+    target: SshConnectionTarget,
+    gateways: WorkspaceSshGateway[],
+    remote_info: RemoteIdentity,
+  ): Promise<void>;
   onVerified(
     target: ConnectionTarget,
     remote_info: RemoteIdentity,
@@ -49,6 +61,7 @@ interface SshHostFlowProps {
 type Step =
   | "host"
   | "name"
+  | "route"
   | "auth"
   | "identity"
   | "installing"
@@ -63,6 +76,9 @@ export function SshHostFlow({
   warning,
   target,
   updateRequired = false,
+  complex = false,
+  gateways = [],
+  onSaveRoutedHost,
   onActivateHost,
   onVerified,
   onSaveHost,
@@ -81,6 +97,11 @@ export function SshHostFlow({
     port: null,
     identity_file: null,
   });
+  const [draftGateways, setDraftGateways] = useState<WorkspaceSshGateway[]>(
+    () => gateways.map((gateway) => ({ ...gateway })),
+  );
+  const draftGatewaysRef = useRef(draftGateways);
+  const [gatewayRoute, setGatewayRoute] = useState<SshGatewayRouteStep[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
@@ -123,6 +144,12 @@ export function SshHostFlow({
     onClose();
   }
 
+  function routed(candidate: SshConnectionTarget): SshConnectionTarget {
+    return complex
+      ? resolveSshGateways({ ...candidate, gateway_route: gatewayRoute }, draftGatewaysRef.current)
+      : candidate;
+  }
+
   async function connect(candidate: ConnectionTarget) {
     cancelAttempt();
     if (uncommittedTargetRef.current !== candidate) forgetUncommitted();
@@ -145,7 +172,13 @@ export function SshHostFlow({
       setSaving(true);
       const recovered = await onVerified(candidate, remote_info);
       if (attemptRef.current !== attempt || closedRef.current) return;
-      if (recovered || target) {
+      if (complex && !target && candidate.kind === "ssh") {
+        if (!onSaveRoutedHost) throw new Error("Routed host saving is unavailable.");
+        await onSaveRoutedHost(candidate, draftGatewaysRef.current, remote_info);
+        if (closedRef.current) return;
+        uncommittedTargetRef.current = null;
+        onClose();
+      } else if (recovered || target) {
         uncommittedTargetRef.current = null;
         onConnected(recovered ?? target!);
         onClose();
@@ -208,7 +241,7 @@ export function SshHostFlow({
 
   function connectDefinition(next = definition) {
     const candidate = appLocalSshTarget(next);
-    if (candidate) void connect(candidate);
+    if (candidate) void connect(routed(candidate));
   }
 
   function answer(value: string) {
@@ -253,6 +286,38 @@ export function SshHostFlow({
       />
     );
 
+  if (step === "route") {
+    const candidate = configuredRef.current
+      ? candidateRef.current
+      : appLocalSshTarget(definition);
+    if (candidate?.kind === "ssh") {
+      return (
+        <GatewayRouteDialog
+          target={{ ...candidate, gateway_route: gatewayRoute }}
+          gateways={draftGateways}
+          targets={[]}
+          readonlyExisting
+          requireGateway
+          closeLabel="Back"
+          onSave={async (nextGateways, nextRoute) => {
+            draftGatewaysRef.current = nextGateways;
+            setDraftGateways(nextGateways);
+            setGatewayRoute(nextRoute);
+            if (configuredRef.current) {
+              void connect(resolveSshGateways(
+                { ...candidate, gateway_route: nextRoute },
+                nextGateways,
+              ));
+            } else {
+              setStep("auth");
+            }
+          }}
+          onClose={() => setStep(configuredRef.current ? "host" : "name")}
+        />
+      );
+    }
+  }
+
   let title = "Add host";
   let description: string | undefined;
   let mode: QuickInputMode;
@@ -262,6 +327,10 @@ export function SshHostFlow({
     setStep(previous);
   };
   switch (step) {
+    case "route":
+      title = "Connection route";
+      mode = { kind: "progress", message: "Preparing route…" };
+      break;
     case "host":
       title = "Add host · 1/3";
       description =
@@ -419,7 +488,9 @@ export function SshHostFlow({
         );
         if (candidate) {
           configuredRef.current = true;
-          void connect(candidate);
+          candidateRef.current = candidate;
+          if (complex) setStep("route");
+          else void connect(candidate);
         }
         return;
       }
@@ -441,7 +512,7 @@ export function SshHostFlow({
         return;
       }
       setDefinition((current) => ({ ...current, alias }));
-      setStep("auth");
+      setStep(complex ? "route" : "auth");
     } else if (step === "auth") {
       if (value === "identity") setStep("identity");
       else {

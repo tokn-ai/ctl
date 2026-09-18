@@ -12,7 +12,18 @@ interface Props {
   target: SshConnectionTarget;
   gateways: readonly WorkspaceSshGateway[];
   targets: readonly SshConnectionTarget[];
+  hostSetup?: {
+    address: string;
+    alias: string;
+    identity_file: string;
+    suggestions: readonly string[];
+    warning: string | null;
+    onAddressChange(value: string): void;
+    onAliasChange(value: string): void;
+    onIdentityFileChange(value: string): void;
+  };
   readonlyExisting?: boolean;
+  readonlyGatewayIds?: readonly string[];
   requireGateway?: boolean;
   closeLabel?: string;
   onSave(
@@ -36,7 +47,9 @@ export function GatewayRouteDialog({
   target,
   gateways,
   targets,
+  hostSetup,
   readonlyExisting = false,
+  readonlyGatewayIds,
   requireGateway = false,
   closeLabel = "Close",
   onSave,
@@ -57,7 +70,9 @@ export function GatewayRouteDialog({
     [target.host_id, targets],
   );
   const routeIds = new Set(route.map((step) => step.gateway_id));
-  const existingIds = new Set(gateways.map((gateway) => gateway.gateway_id));
+  const existingIds = new Set(
+    readonlyGatewayIds ?? gateways.map((gateway) => gateway.gateway_id),
+  );
 
   function addExisting(gateway: WorkspaceSshGateway) {
     if (routeIds.has(gateway.gateway_id) || route.length >= 8) return;
@@ -173,14 +188,50 @@ export function GatewayRouteDialog({
 
   return (
     <QuickInputFrame
-      title="Connection route"
+      title={hostSetup ? "Add host with gateways" : "Connection route"}
       onDismiss={onClose}
       className="gateway-route-dialog"
     >
       <header className="quick-input-heading">
-        <strong>Connection route · {target.destination}</strong>
+        <strong>{hostSetup ? "Add host with gateways" : `Connection route · ${target.destination}`}</strong>
         <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
       </header>
+      {hostSetup ? (
+        <section className="gateway-host-form" aria-label="Host details">
+          <label>
+            SSH host or config alias
+            <input
+              autoFocus
+              list="routed-host-suggestions"
+              value={hostSetup.address}
+              onChange={(event) => hostSetup.onAddressChange(event.target.value)}
+              placeholder="operator@server.internal:2222"
+            />
+          </label>
+          <datalist id="routed-host-suggestions">
+            {hostSetup.suggestions.map((suggestion) => (
+              <option key={suggestion} value={suggestion} />
+            ))}
+          </datalist>
+          <label>
+            Name / SSH alias (optional)
+            <input
+              value={hostSetup.alias}
+              onChange={(event) => hostSetup.onAliasChange(event.target.value)}
+              placeholder="Defaults to the SSH host"
+            />
+          </label>
+          <label>
+            Identity file (optional)
+            <input
+              value={hostSetup.identity_file}
+              onChange={(event) => hostSetup.onIdentityFileChange(event.target.value)}
+              placeholder="~/.ssh/id_ed25519"
+            />
+          </label>
+          {hostSetup.warning ? <p role="status">{hostSetup.warning}</p> : null}
+        </section>
+      ) : null}
       <p className="quick-input-description">
         Gateways are tried in order. Automatic mode currently uses native SSH forwarding. Managed agent relay fallback is the next runtime phase.
       </p>
@@ -237,7 +288,7 @@ export function GatewayRouteDialog({
           );
         })}
         <div className="gateway-route-connector" aria-hidden="true">↓</div>
-        <RouteNode label={target.destination} detail="Destination" />
+        <RouteNode label={hostSetup?.address.trim() || target.destination} detail="Destination" />
       </div>
 
       <section className="gateway-library" aria-labelledby="gateway-library-heading">
@@ -283,7 +334,7 @@ export function GatewayRouteDialog({
       <footer className="gateway-dialog-actions">
         <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
         <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || (requireGateway && route.length === 0)}>
-          {saving ? "Saving…" : "Done"}
+          {saving ? (hostSetup ? "Connecting…" : "Saving…") : (hostSetup ? "Connect" : "Done")}
         </button>
       </footer>
     </QuickInputFrame>

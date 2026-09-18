@@ -65,6 +65,30 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("SSH host quick-input flow", () => {
+  it("validates routed host details in the initial dialog before probing", async () => {
+    const user = userEvent.setup();
+    render(
+      <SshHostFlow
+        complex
+        gateways={[{ gateway_id: "edge", name: "Edge", destination: "edge.example" }]}
+        suggestions={[]}
+        warning={null}
+        onVerified={async () => null}
+        onSaveHost={vi.fn()}
+        onSaveRoutedHost={vi.fn()}
+        onActivateHost={vi.fn()}
+        onConnected={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expect(screen.getByRole("alert").textContent).toContain("Enter the SSH host");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Add host with gateways" })).toBeTruthy();
+  });
+
   it("uses a saved gateway on the first connection and saves only after verification", async () => {
     let completeProbe: ((value: typeof remoteInfo) => void) | undefined;
     vi.mocked(probeSshHost).mockImplementationOnce(() =>
@@ -90,11 +114,12 @@ describe("SSH host quick-input flow", () => {
       />,
     );
 
-    await details(user);
-    expect(screen.getByRole("dialog", { name: "Connection route" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Add host with gateways" })).toBeTruthy();
+    expect(screen.queryByLabelText("SSH host")).toBeNull();
+    await user.type(screen.getByLabelText("SSH host or config alias"), "rmux@127.0.0.1:2222");
+    await user.type(screen.getByLabelText("Name / SSH alias (optional)"), "rmux-test");
     await user.click(screen.getByRole("button", { name: "Add" }));
-    await user.click(screen.getByRole("button", { name: "Done" }));
-    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     expect(probeSshHost).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -137,9 +162,9 @@ describe("SSH host quick-input flow", () => {
       />,
     );
 
-    await user.click(screen.getByRole("option", { name: "internal-server" }));
+    await user.type(screen.getByLabelText("SSH host or config alias"), "internal-server");
     await user.click(screen.getByRole("button", { name: "Add" }));
-    await user.click(screen.getByRole("button", { name: "Done" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(probeSshHost).toHaveBeenCalledWith(
       expect.objectContaining({
         destination: "internal-server",
@@ -170,14 +195,14 @@ describe("SSH host quick-input flow", () => {
       />,
     );
 
-    await details(user);
-    expect((screen.getByRole("button", { name: "Done" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText("SSH host or config alias"), "rmux@127.0.0.1:2222");
+    await user.type(screen.getByLabelText("Name / SSH alias (optional)"), "rmux-test");
+    expect((screen.getByRole("button", { name: "Connect" }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole("button", { name: "+ New gateway" }));
     await user.type(screen.getByLabelText("Name"), "Bastion");
     await user.type(screen.getByLabelText("SSH destination / alias"), "bastion.example");
     await user.click(screen.getByRole("button", { name: "Save gateway" }));
-    await user.click(screen.getByRole("button", { name: "Done" }));
-    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     expect(await screen.findByText("SSH unavailable")).toBeTruthy();
     expect(probeSshHost).toHaveBeenCalledWith(
@@ -188,6 +213,11 @@ describe("SSH host quick-input flow", () => {
       expect.any(Function),
     );
     expect(onSaveRoutedHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    expect(screen.getByRole("dialog", { name: "Add host with gateways" })).toBeTruthy();
+    expect((screen.getByLabelText("SSH host or config alias") as HTMLInputElement).value)
+      .toBe("rmux@127.0.0.1:2222");
+    expect(screen.getByText("1. Bastion")).toBeTruthy();
   });
 
   it("opens directly on the confirmed remote-component update action", () => {

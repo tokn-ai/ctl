@@ -33,6 +33,8 @@ async fn docker_workspace_survives_client_restart() -> Result<(), String> {
     user: Some("rmux".into()),
     port: Some(2222),
     identity_file: Some(identity_file),
+    gateway_route: Vec::new(),
+    gateways: Box::default(),
   };
   if let Ok(phase) = std::env::var("RMUX_WORKSPACE_TEST_PHASE") {
     let directory = PathBuf::from(

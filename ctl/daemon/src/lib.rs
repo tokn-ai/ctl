@@ -5,7 +5,7 @@ mod keychain;
 
 use ctld_ipc::{
   ClientMessage, LocalPortForward, PortForwardState, PortForwardStatus, PromptKind, ServerMessage,
-  SshTarget,
+  SshGateway, SshGatewayMode, SshTarget,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -269,7 +269,7 @@ async fn ensure_master(
     let mut locks = state.target_locks.lock().unwrap();
     Arc::clone(
       locks
-        .entry(target.destination.clone())
+        .entry(target_key(&target))
         .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
     )
   };
@@ -609,7 +609,7 @@ async fn configure_port_forward(
     let mut locks = state.target_locks.lock().unwrap();
     Arc::clone(
       locks
-        .entry(target.destination.clone())
+        .entry(target_key(&target))
         .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
     )
   };
@@ -619,7 +619,7 @@ async fn configure_port_forward(
     .forwards
     .lock()
     .await
-    .get(&target.destination)
+    .get(&target_key(&target))
     .and_then(|forwards| forwards.get(&forward.forward_id))
     .cloned();
 
@@ -631,10 +631,10 @@ async fn configure_port_forward(
       run_forward_command(&target, &control_path, &existing.forward, true).await?;
     }
     let mut forwards = state.forwards.lock().await;
-    if let Some(items) = forwards.get_mut(&target.destination) {
+    if let Some(items) = forwards.get_mut(&target_key(&target)) {
       items.remove(&forward.forward_id);
       if items.is_empty() {
-        forwards.remove(&target.destination);
+        forwards.remove(&target_key(&target));
       }
     }
     let status = PortForwardStatus {
@@ -684,7 +684,7 @@ async fn configure_port_forward(
     .forwards
     .lock()
     .await
-    .entry(target.destination.clone())
+    .entry(target_key(&target))
     .or_default()
     .insert(forward.forward_id.clone(), status.clone());
   ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
@@ -699,7 +699,7 @@ async fn list_port_forwards(
   validate_target(target)?;
   let ready = control_master_is_ready(target, &control_path(target)).await;
   let mut forwards = state.forwards.lock().await;
-  let mut items = forwards.get_mut(&target.destination);
+  let mut items = forwards.get_mut(&target_key(target));
   if !ready && let Some(items) = items.as_deref_mut() {
     for status in items.values_mut() {
       status.state = PortForwardState::WaitingForAuthentication;
@@ -725,7 +725,7 @@ async fn list_remote_listeners(
     let mut locks = state.target_locks.lock().unwrap();
     Arc::clone(
       locks
-        .entry(target.destination.clone())
+        .entry(target_key(target))
         .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
     )
   };
@@ -873,7 +873,7 @@ async fn activate_configured_forwards(state: &State, target: &SshTarget, control
     .forwards
     .lock()
     .await
-    .get(&target.destination)
+    .get(&target_key(target))
     .map(|items| {
       items
         .values()
@@ -886,7 +886,7 @@ async fn activate_configured_forwards(state: &State, target: &SshTarget, control
       forward.clone(),
       run_forward_command(target, control_path, &forward, false).await,
     );
-    if let Some(items) = state.forwards.lock().await.get_mut(&target.destination) {
+    if let Some(items) = state.forwards.lock().await.get_mut(&target_key(target)) {
       items.insert(forward.forward_id.clone(), status);
     }
   }
@@ -1031,6 +1031,16 @@ async fn control_master_is_ready(target: &SshTarget, path: &Path) -> bool {
 }
 
 fn append_target_arguments(command: &mut Command, target: &SshTarget) {
+  if !target.gateways.is_empty() {
+    command.arg("-J").arg(
+      target
+        .gateways
+        .iter()
+        .map(gateway_jump_specification)
+        .collect::<Vec<_>>()
+        .join(","),
+    );
+  }
   if let Some(port) = target.port {
     command.args(["-p", &port.to_string()]);
   }
@@ -1045,6 +1055,28 @@ fn append_target_arguments(command: &mut Command, target: &SshTarget) {
     .arg(target.hostname.as_deref().unwrap_or(&target.destination));
 }
 
+fn gateway_jump_specification(gateway: &SshGateway) -> String {
+  let host = gateway.hostname.as_deref().unwrap_or(&gateway.destination);
+  let host = if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+    format!("[{host}]")
+  } else {
+    host.to_owned()
+  };
+  format!(
+    "{}{}{}",
+    gateway
+      .user
+      .as_ref()
+      .map(|user| format!("{user}@"))
+      .unwrap_or_default(),
+    host,
+    gateway
+      .port
+      .map(|port| format!(":{port}"))
+      .unwrap_or_default(),
+  )
+}
+
 fn control_path(target: &SshTarget) -> PathBuf {
   control_path_for_socket(target, &ctld_ipc::socket_path())
 }
@@ -1057,7 +1089,7 @@ fn control_path_for_socket(target: &SshTarget, daemon_socket: &Path) -> PathBuf 
   let mut hasher = Sha256::new();
   hasher.update(daemon_socket.to_string_lossy().as_bytes());
   hasher.update([0]);
-  hasher.update(target.destination.as_bytes());
+  hasher.update(target_key(target).as_bytes());
   let digest = hasher.finalize();
   let mut name = String::with_capacity(32);
   for byte in &digest[..16] {
@@ -1095,7 +1127,46 @@ fn validate_target(target: &SshTarget) -> Result<(), RequestError> {
   {
     return Err(RequestError::InvalidRequest("invalid SSH target"));
   }
+  if target.gateways.len() > 8 || target.gateways.iter().any(invalid_gateway) {
+    return Err(RequestError::InvalidRequest("invalid SSH gateway route"));
+  }
   Ok(())
+}
+
+fn invalid_gateway(gateway: &SshGateway) -> bool {
+  gateway.destination.trim().is_empty()
+    || gateway.destination.chars().any(char::is_control)
+    || gateway
+      .destination
+      .chars()
+      .any(|value| matches!(value, ',' | '@'))
+    || gateway.hostname.as_ref().is_some_and(|value| {
+      value.trim().is_empty()
+        || value.chars().any(|value| matches!(value, ',' | '@'))
+        || value
+          .chars()
+          .any(|character| character.is_control() || character.is_whitespace())
+    })
+    || gateway.user.as_ref().is_some_and(|value| {
+      value.trim().is_empty()
+        || value.chars().any(|value| matches!(value, ',' | '@'))
+        || value
+          .chars()
+          .any(|character| character.is_control() || character.is_whitespace())
+    })
+    || gateway.port == Some(0)
+    || gateway.identity_file.is_some()
+    || gateway.mode == SshGatewayMode::AgentRelayOnly
+}
+
+fn target_key(target: &SshTarget) -> String {
+  let bytes = serde_json::to_vec(target).expect("SSH targets are always serializable");
+  Sha256::digest(bytes)
+    .iter()
+    .fold(String::with_capacity(64), |mut encoded, byte| {
+      write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+      encoded
+    })
 }
 
 fn validate_forward(forward: &LocalPortForward) -> Result<(), RequestError> {
@@ -1233,6 +1304,7 @@ mod tests {
       user: Some("alice".into()),
       port: Some(2222),
       identity_file: Some(PathBuf::from("/keys/work key")),
+      gateways: Vec::new(),
     }
   }
 
@@ -1275,7 +1347,17 @@ mod tests {
     same_alias.user = None;
     same_alias.port = None;
     same_alias.identity_file = None;
-    assert_eq!(first, control_path_for_socket(&same_alias, daemon_socket));
+    assert_ne!(first, control_path_for_socket(&same_alias, daemon_socket));
+    let mut routed = target();
+    routed.gateways.push(SshGateway {
+      destination: "edge.example".into(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      mode: SshGatewayMode::Automatic,
+    });
+    assert_ne!(first, control_path_for_socket(&routed, daemon_socket));
     assert_ne!(
       first,
       control_path_for_socket(&target(), Path::new("/tmp/another-ctld.sock"))

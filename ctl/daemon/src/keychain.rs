@@ -124,23 +124,22 @@ fn save_policy_options(target: &SshTarget) -> PasswordOptions {
 }
 
 fn service(target: &SshTarget) -> String {
-  format!(
-    "{KEYCHAIN_SERVICE_PREFIX}.{}",
-    digest(target_key(target).as_bytes())
-  )
+  format!("{KEYCHAIN_SERVICE_PREFIX}.{}", digest(&target_key(target)))
 }
 
 fn save_policy_service(target: &SshTarget) -> String {
   format!(
     "{SAVE_POLICY_SERVICE_PREFIX}.{}",
-    digest(target_key(target).as_bytes())
+    digest(&target_key(target))
   )
 }
 
-fn target_key(target: &SshTarget) -> &str {
-  // Keep credentials usable when app-local settings become the same named
-  // destination in ~/.ssh/config after the first authenticated connection.
-  &target.destination
+fn target_key(target: &SshTarget) -> Vec<u8> {
+  // Preserve direct-connection credentials when app-local settings later
+  // move into OpenSSH config, while isolating credentials by gateway chain.
+  // The exact prompt remains the per-item account key.
+  serde_json::to_vec(&(&target.destination, &target.gateways))
+    .expect("SSH credential scopes are always serializable")
 }
 
 fn digest(value: &[u8]) -> String {

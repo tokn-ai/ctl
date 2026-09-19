@@ -74,6 +74,7 @@ describe("SessionSidebar", () => {
 
     expect(markup).toContain('aria-label="Close first"');
     expect(markup).toContain("+ Host");
+    expect(markup).toContain("+ Add host with gateways");
     expect(markup).not.toContain("session-close-confirmation");
     expect(markup).not.toContain("host-form");
     expect(markup).toContain("New shell");

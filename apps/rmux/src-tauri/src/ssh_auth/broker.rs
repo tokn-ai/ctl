@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use ctld_ipc::{
-  ClientMessage, LocalPortForward, PortForwardStatus, PromptKind, ServerMessage, SshTarget,
+  ClientMessage, LocalPortForward, PortForwardStatus, PromptKind, ServerMessage, SshGateway,
+  SshGatewayMode, SshTarget,
 };
 
 use super::{PromptContext, SshPromptKind, request_response};
@@ -226,6 +227,7 @@ fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTarget> {
       user,
       port,
       identity_file,
+      gateways,
       ..
     } => Ok(SshTarget {
       destination: destination.clone(),
@@ -233,6 +235,21 @@ fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTarget> {
       user: user.clone(),
       port: *port,
       identity_file: identity_file.as_ref().map(PathBuf::from),
+      gateways: gateways
+        .iter()
+        .map(|gateway| SshGateway {
+          destination: gateway.destination.clone(),
+          hostname: gateway.hostname.clone(),
+          user: gateway.user.clone(),
+          port: gateway.port,
+          identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
+          mode: match gateway.mode {
+            crate::dto::SshGatewayModeDto::Automatic => SshGatewayMode::Automatic,
+            crate::dto::SshGatewayModeDto::NativeOnly => SshGatewayMode::NativeOnly,
+            crate::dto::SshGatewayModeDto::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
+          },
+        })
+        .collect(),
     }),
     ConnectionTargetDto::Local => Err(CommandErrorDto::new(
       "invalid_ssh_target",

@@ -18,7 +18,9 @@ export function sameSshEndpoint(
     left.hostname === right.hostname &&
     left.user === right.user &&
     left.port === right.port &&
-    left.identity_file === right.identity_file
+    left.identity_file === right.identity_file &&
+    JSON.stringify(left.gateway_route ?? []) ===
+      JSON.stringify(right.gateway_route ?? [])
   );
 }
 

@@ -36,6 +36,7 @@ interface SessionSidebarProps {
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
+  onAddRoutedHost?(): void;
   onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
   onPortForward?(target: ConnectionTarget): void;
@@ -97,6 +98,7 @@ export function SessionSidebar({
   onDisconnect,
   onRequestClose,
   onAddHost,
+  onAddRoutedHost,
   onConnectHost,
   onRemoveHost,
   onPortForward,
@@ -145,6 +147,14 @@ export function SessionSidebar({
             ↻
           </button>
         </header>
+
+        <button
+          className="routed-host-add-button"
+          type="button"
+          onClick={onAddRoutedHost}
+        >
+          + Add host with gateways
+        </button>
 
         <div className="sidebar-hosts" aria-label="Configured hosts">
           {targets.map((target) => {

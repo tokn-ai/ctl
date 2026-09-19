@@ -14,6 +14,24 @@ pub use task_store::SavedTaskDefinition;
 use tauri::Manager as _;
 
 use crate::dto::ConnectionTargetDto;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSshGateway {
+  pub gateway_id: String,
+  pub name: String,
+  pub destination: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hostname: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub user: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub port: Option<u16>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub identity_file: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub remote_info: Option<ctl_proto::RemoteIdentity>,
+}
 use crate::error::{CommandErrorDto, CommandResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +166,8 @@ pub struct WorkspaceDocument {
   pub task_references: Vec<TaskReference>,
   #[serde(default)]
   pub port_forwards: Vec<WorkspacePortForward>,
+  #[serde(default)]
+  pub ssh_gateways: Vec<WorkspaceSshGateway>,
 }
 
 fn global_definition_scope() -> DefinitionScope {
@@ -161,7 +181,7 @@ fn valid_workspace_text(text: &str) -> bool {
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
-      schema_version: 5,
+      schema_version: 6,
       workspace_id: "default".into(),
       hosts: vec![WorkspaceHost {
         host_id: "local".into(),
@@ -174,6 +194,7 @@ impl Default for WorkspaceDocument {
       sidebar_view: SidebarView::default(),
       task_references: Vec::new(),
       port_forwards: Vec::new(),
+      ssh_gateways: Vec::new(),
       tabs: Vec::new(),
       active_tab: None,
     }
@@ -181,8 +202,90 @@ impl Default for WorkspaceDocument {
 }
 
 impl WorkspaceDocument {
+  fn validated_gateway_ids(&self) -> Option<HashSet<&str>> {
+    let mut gateway_ids = HashSet::new();
+    let invalid = self.ssh_gateways.len() > 256
+      || self.ssh_gateways.iter().any(|gateway| {
+        !gateway_ids.insert(gateway.gateway_id.as_str())
+          || !valid_workspace_text(&gateway.gateway_id)
+          || !valid_workspace_text(&gateway.name)
+          || !valid_workspace_text(&gateway.destination)
+          || gateway
+            .destination
+            .chars()
+            .any(|value| matches!(value, ',' | '@'))
+          || gateway.port == Some(0)
+          || gateway
+            .remote_info
+            .as_ref()
+            .is_some_and(|info| !info.is_valid())
+          || [
+            gateway.hostname.as_ref(),
+            gateway.user.as_ref(),
+            gateway.identity_file.as_ref(),
+          ]
+          .into_iter()
+          .flatten()
+          .any(|value| !valid_workspace_text(value))
+          || gateway.hostname.as_ref().is_some_and(|value| {
+            value.chars().any(|value| matches!(value, ',' | '@'))
+              || value.chars().any(char::is_whitespace)
+          })
+          || gateway.user.as_ref().is_some_and(|value| {
+            value.chars().any(|value| matches!(value, ',' | '@'))
+              || value.chars().any(char::is_whitespace)
+          })
+      });
+    (!invalid).then_some(gateway_ids)
+  }
+
+  fn validated_host_ids<'a>(&'a self, gateway_ids: &HashSet<&str>) -> Option<HashSet<&'a str>> {
+    let mut hosts = HashSet::new();
+    let mut destinations = HashSet::new();
+    for host in &self.hosts {
+      if !valid_workspace_text(&host.host_id) || !hosts.insert(host.host_id.as_str()) {
+        return None;
+      }
+      match &host.target {
+        ConnectionTargetDto::Local if host.host_id == "local" => {}
+        ConnectionTargetDto::Ssh {
+          destination,
+          hostname,
+          user,
+          port,
+          identity_file,
+          remote_info,
+          gateway_route,
+          gateways,
+        } => {
+          let mut route_ids = HashSet::new();
+          if host.host_id == "local"
+            || remote_info.as_ref().is_some_and(|info| !info.is_valid())
+            || !valid_workspace_text(destination)
+            || !destinations.insert(destination)
+            || *port == Some(0)
+            || [hostname, user, identity_file]
+              .into_iter()
+              .flatten()
+              .any(|value| !valid_workspace_text(value))
+            || !gateways.is_empty()
+            || gateway_route.len() > 8
+            || gateway_route.iter().any(|step| {
+              !gateway_ids.contains(step.gateway_id.as_str())
+                || !route_ids.insert(step.gateway_id.as_str())
+            })
+          {
+            return None;
+          }
+        }
+        ConnectionTargetDto::Local => return None,
+      }
+    }
+    hosts.contains("local").then_some(hosts)
+  }
+
   fn validate(&self) -> CommandResult<()> {
-    if !matches!(self.schema_version, 2..=5) {
+    if !matches!(self.schema_version, 2..=6) {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "This workspace was written by another app version. Its file has not been changed.",
@@ -206,41 +309,8 @@ impl WorkspaceDocument {
     {
       return Err(invalid());
     }
-    let mut hosts = HashSet::new();
-    let mut destinations = HashSet::new();
-    for host in &self.hosts {
-      if !valid_workspace_text(&host.host_id) || !hosts.insert(host.host_id.as_str()) {
-        return Err(invalid());
-      }
-      match &host.target {
-        ConnectionTargetDto::Local if host.host_id == "local" => {}
-        ConnectionTargetDto::Ssh {
-          destination,
-          hostname,
-          user,
-          port,
-          identity_file,
-          remote_info,
-        } => {
-          if host.host_id == "local"
-            || remote_info.as_ref().is_some_and(|info| !info.is_valid())
-            || !valid_workspace_text(destination)
-            || !destinations.insert(destination)
-            || *port == Some(0)
-            || [hostname, user, identity_file]
-              .into_iter()
-              .flatten()
-              .any(|value| !valid_workspace_text(value))
-          {
-            return Err(invalid());
-          }
-        }
-        ConnectionTargetDto::Local => return Err(invalid()),
-      }
-    }
-    if !hosts.contains("local") {
-      return Err(invalid());
-    }
+    let gateway_ids = self.validated_gateway_ids().ok_or_else(invalid)?;
+    let hosts = self.validated_host_ids(&gateway_ids).ok_or_else(invalid)?;
     if !self.port_forwards_are_valid(&hosts) {
       return Err(invalid());
     }

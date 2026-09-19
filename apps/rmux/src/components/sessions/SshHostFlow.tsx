@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
 import { remoteInstallProgressMode } from "./remoteInstallProgress";
+import { GatewayRouteDialog } from "./GatewayRouteDialog";
+import { resolveSshGateways } from "../../features/workspace/workspaceModel";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
@@ -22,6 +24,9 @@ import type {
   SshHostStorage,
   SshPrompt,
   RemoteAgentInstallProgress,
+  SshConnectionTarget,
+  SshGatewayRouteStep,
+  WorkspaceSshGateway,
 } from "../../lib/types";
 
 interface SshHostFlowProps {
@@ -29,6 +34,13 @@ interface SshHostFlowProps {
   warning: string | null;
   target?: ConnectionTarget;
   updateRequired?: boolean;
+  complex?: boolean;
+  gateways?: readonly WorkspaceSshGateway[];
+  onSaveRoutedHost?(
+    target: SshConnectionTarget,
+    gateways: WorkspaceSshGateway[],
+    remote_info: RemoteIdentity,
+  ): Promise<void>;
   onVerified(
     target: ConnectionTarget,
     remote_info: RemoteIdentity,
@@ -49,6 +61,7 @@ interface SshHostFlowProps {
 type Step =
   | "host"
   | "name"
+  | "route"
   | "auth"
   | "identity"
   | "installing"
@@ -63,6 +76,9 @@ export function SshHostFlow({
   warning,
   target,
   updateRequired = false,
+  complex = false,
+  gateways = [],
+  onSaveRoutedHost,
   onActivateHost,
   onVerified,
   onSaveHost,
@@ -70,10 +86,12 @@ export function SshHostFlow({
   onClose,
 }: SshHostFlowProps) {
   const [step, setStep] = useState<Step>(
-    updateRequired ? "update" : target ? "reconnect" : "host",
+    updateRequired ? "update" : target ? "reconnect" : complex ? "route" : "host",
   );
   const identityFiles = useSshIdentityFiles(step === "identity");
   const [address, setAddress] = useState("");
+  const [hostAlias, setHostAlias] = useState("");
+  const [hostIdentityFile, setHostIdentityFile] = useState("");
   const [definition, setDefinition] = useState<SshHostDefinition>({
     alias: "",
     hostname: "",
@@ -81,6 +99,12 @@ export function SshHostFlow({
     port: null,
     identity_file: null,
   });
+  const [draftGateways, setDraftGateways] = useState<WorkspaceSshGateway[]>(
+    () => gateways.map((gateway) => ({ ...gateway })),
+  );
+  const draftGatewaysRef = useRef(draftGateways);
+  const originalGatewayIds = useRef(gateways.map((gateway) => gateway.gateway_id));
+  const [gatewayRoute, setGatewayRoute] = useState<SshGatewayRouteStep[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
@@ -145,7 +169,13 @@ export function SshHostFlow({
       setSaving(true);
       const recovered = await onVerified(candidate, remote_info);
       if (attemptRef.current !== attempt || closedRef.current) return;
-      if (recovered || target) {
+      if (complex && !target && candidate.kind === "ssh") {
+        if (!onSaveRoutedHost) throw new Error("Routed host saving is unavailable.");
+        await onSaveRoutedHost(candidate, draftGatewaysRef.current, remote_info);
+        if (closedRef.current) return;
+        uncommittedTargetRef.current = null;
+        onClose();
+      } else if (recovered || target) {
         uncommittedTargetRef.current = null;
         onConnected(recovered ?? target!);
         onClose();
@@ -211,6 +241,41 @@ export function SshHostFlow({
     if (candidate) void connect(candidate);
   }
 
+  function routedHostCandidate(): SshConnectionTarget {
+    const destination = address.trim();
+    const alias = hostAlias.trim();
+    const identity_file = hostIdentityFile.trim();
+    if (!destination) throw new Error("Enter the SSH host or config alias.");
+    if (identity_file && /[\x00-\x1f\x7f]/u.test(identity_file)) {
+      throw new Error("Enter a valid identity-file path.");
+    }
+    if (suggestions.includes(destination)) {
+      if (alias && alias !== destination) {
+        throw new Error("A saved SSH config host must keep its existing alias.");
+      }
+      const target = configuredSshTarget(destination);
+      if (!target) throw new Error("Enter a valid SSH config host.");
+      return { ...target, ...(identity_file ? { identity_file } : {}) };
+    }
+    const parsed = parseHostAddress(destination);
+    if (!parsed) {
+      throw new Error("Use [user@]hostname[:port], with IPv6 addresses in brackets. SSH flags are not accepted.");
+    }
+    const name = alias || parsed.hostname;
+    if (!/^[a-zA-Z0-9_.:-]+$/u.test(name) || name.startsWith("-")) {
+      throw new Error("Enter a name without spaces or SSH patterns.");
+    }
+    const target = appLocalSshTarget({
+      alias: name,
+      hostname: parsed.hostname,
+      user: parsed.user,
+      port: parsed.port,
+      identity_file: identity_file || null,
+    });
+    if (!target) throw new Error("Enter valid SSH host settings.");
+    return target;
+  }
+
   function answer(value: string) {
     const attempt = attemptRef.current;
     if (!attempt || !prompt) return;
@@ -252,6 +317,41 @@ export function SshHostFlow({
         onCancel={close}
       />
     );
+
+  if (step === "route") {
+    return (
+      <GatewayRouteDialog
+        target={{ kind: "ssh", destination: address.trim() || "New host", gateway_route: gatewayRoute }}
+        gateways={draftGateways}
+        targets={[]}
+        hostSetup={{
+          address,
+          alias: hostAlias,
+          identity_file: hostIdentityFile,
+          suggestions,
+          warning,
+          onAddressChange: setAddress,
+          onAliasChange: setHostAlias,
+          onIdentityFileChange: setHostIdentityFile,
+        }}
+        readonlyExisting
+        readonlyGatewayIds={originalGatewayIds.current}
+        requireGateway
+        closeLabel="Cancel"
+        onSave={async (nextGateways, nextRoute) => {
+          const candidate = routedHostCandidate();
+          draftGatewaysRef.current = nextGateways;
+          setDraftGateways(nextGateways);
+          setGatewayRoute(nextRoute);
+          void connect(resolveSshGateways(
+            { ...candidate, gateway_route: nextRoute },
+            nextGateways,
+          ));
+        }}
+        onClose={close}
+      />
+    );
+  }
 
   let title = "Add host";
   let description: string | undefined;
@@ -398,7 +498,7 @@ export function SshHostFlow({
           ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
         ],
       };
-      if (!target) onBack = back(configuredRef.current ? "host" : "auth");
+      if (!target) onBack = back(complex ? "route" : configuredRef.current ? "host" : "auth");
       break;
     case "installing":
       title = "Installing remote components";
@@ -419,6 +519,7 @@ export function SshHostFlow({
         );
         if (candidate) {
           configuredRef.current = true;
+          candidateRef.current = candidate;
           void connect(candidate);
         }
         return;

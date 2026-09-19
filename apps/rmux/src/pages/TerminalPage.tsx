@@ -106,6 +106,7 @@ import type {
   SshHostStorage,
   TerminalSize,
   SshConnectionTarget,
+  WorkspaceSshGateway,
 } from "../lib/types";
 
 function measuredSize(renderer: XtermRenderer | null): TerminalSize {
@@ -186,6 +187,7 @@ export function TerminalPage() {
   const [hostFlow, setHostFlow] = useState<ConnectionTarget | null | undefined>(
     undefined,
   );
+  const [complexHostFlow, setComplexHostFlow] = useState(false);
   const [portForwardTarget, setPortForwardTarget] = useState<SshConnectionTarget | null>(null);
   const [portForwardUpdateTarget, setPortForwardUpdateTarget] = useState<SshConnectionTarget | null>(null);
   const [
@@ -448,6 +450,34 @@ export function TerminalPage() {
       }
     },
     [addTarget, targets],
+  );
+
+  const saveRoutedHost = useCallback(
+    async (
+      target: SshConnectionTarget,
+      gateways: WorkspaceSshGateway[],
+      remote_info: RemoteIdentity,
+    ): Promise<void> => {
+      const current = workspace.viewRef.current;
+      if (
+        !workspace.ready ||
+        current.targets.some((known) =>
+          known.kind === "ssh" && known.destination === target.destination)
+      ) {
+        throw new Error(`Host ${target.destination} is already active.`);
+      }
+      if (current.targets.some((known) =>
+        known.kind === "ssh" && known.remote_info?.remote_id === remote_info.remote_id
+      )) {
+        throw new Error("This remote environment is already saved as a host.");
+      }
+      await workspace.replaceView({
+        ...current,
+        ssh_gateways: gateways,
+        targets: [...current.targets, withHostId({ ...target, remote_info })],
+      });
+    },
+    [workspace],
   );
 
   const hostSuggestions = inactiveSshConfigDestinations(
@@ -1152,7 +1182,14 @@ export function TerminalPage() {
     },
     {
       showPalette: () => setPaletteOpen(true),
-      showAddHost: () => setHostFlow(null),
+      showAddHost: () => {
+        setComplexHostFlow(false);
+        setHostFlow(null);
+      },
+      showAddRoutedHost: () => {
+        setComplexHostFlow(true);
+        setHostFlow(null);
+      },
       showAddExistingSession: () => setImportOpen(true),
       forgetSession: (session) => setPendingForget(session),
       showNewShell: () => {
@@ -1417,6 +1454,7 @@ export function TerminalPage() {
                 executeCommandById(COMMAND_IDS.addExistingSession)
               }
               onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
+              onAddRoutedHost={() => executeCommandById(COMMAND_IDS.addRoutedHost)}
               onConnectHost={(target) =>
                 executeCommandById(COMMAND_IDS.connectHost, {
                   target_key: targetKey(target),
@@ -1690,8 +1728,13 @@ export function TerminalPage() {
           suggestions={hostSuggestions}
           warning={sshConfigWarning}
           target={hostFlow ?? undefined}
+          complex={complexHostFlow && hostFlow === null}
+          gateways={workspace.ssh_gateways}
+          onSaveRoutedHost={saveRoutedHost}
           updateRequired={portForwardUpdateTarget !== null}
-          onVerified={recoverHost}
+          onVerified={complexHostFlow && hostFlow === null
+            ? async () => null
+            : recoverHost}
           onActivateHost={activateConfiguredHost}
           onSaveHost={saveHost}
           onConnected={(target) => {
@@ -1704,6 +1747,7 @@ export function TerminalPage() {
           }}
           onClose={() => {
             setHostFlow(undefined);
+            setComplexHostFlow(false);
             setPortForwardUpdateTarget(null);
             requestAnimationFrame(() => renderer?.focus());
           }}

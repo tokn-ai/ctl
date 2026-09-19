@@ -56,7 +56,8 @@ describe("workspace model", () => {
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
     expect(workspaceDocument(view)).toEqual({
       ...snapshot.document,
-      schema_version: 5,
+      schema_version: 6,
+      ssh_gateways: [],
       port_forwards: [],
       task_definition_scope: { kind: "global" },
       task_references: [],
@@ -106,6 +107,34 @@ describe("workspace model", () => {
 
     expect(view.sidebar_view).toBe("ports");
     expect(workspaceDocument(view).sidebar_view).toBe("ports");
+  });
+
+  it("resolves reusable SSH gateways at runtime without duplicating them on disk", () => {
+    const document = savedWorkspace().document;
+    document.schema_version = 6;
+    document.ssh_gateways = [{
+      gateway_id: "edge",
+      name: "Edge",
+      destination: "edge.example",
+    }];
+    const remote = document.hosts[1].target;
+    if (remote.kind !== "ssh") throw new Error("Expected SSH target");
+    remote.gateway_route = [{ gateway_id: "edge", mode: "native_only" }];
+
+    const view = restoreWorkspace(document);
+    const target = view.targets[1];
+    expect(target).toMatchObject({
+      gateways: [{
+        gateway_id: "edge",
+        destination: "edge.example",
+        mode: "native_only",
+      }],
+    });
+    const persisted = workspaceDocument(view);
+    expect(persisted.hosts[1].target).not.toHaveProperty("gateways");
+    expect(persisted.hosts[1].target).toHaveProperty("gateway_route", [
+      { gateway_id: "edge", mode: "native_only" },
+    ]);
   });
 
   it("keeps external definition references and source scopes without rewriting the catalog", () => {

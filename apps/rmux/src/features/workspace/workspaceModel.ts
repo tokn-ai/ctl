@@ -12,6 +12,8 @@ import type {
   WorkspaceDocument,
   WorkspacePortForward,
   WorkspaceSidebarView,
+  WorkspaceSshGateway,
+  SshConnectionTarget,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
 
@@ -29,6 +31,7 @@ export interface WorkspaceView {
   active_tab_key: string | null;
   shell_states: ReadonlyMap<string, ShellStateSummary>;
   port_forwards: WorkspacePortForward[];
+  ssh_gateways: WorkspaceSshGateway[];
 }
 
 export function emptyWorkspaceView(): WorkspaceView {
@@ -46,12 +49,30 @@ export function emptyWorkspaceView(): WorkspaceView {
     active_tab_key: null,
     shell_states: new Map(),
     port_forwards: [],
+    ssh_gateways: [],
   };
 }
 
 export function withHostId(target: ConnectionTarget): ConnectionTarget {
   if (target.kind === "local") return LOCAL_TARGET;
   return { ...target, host_id: target.host_id ?? crypto.randomUUID() };
+}
+
+export function resolveSshGateways(
+  target: SshConnectionTarget,
+  gateways: readonly WorkspaceSshGateway[],
+): SshConnectionTarget {
+  const byId = new Map(
+    gateways.map((gateway) => [gateway.gateway_id, gateway]),
+  );
+  const { gateways: _current, ...persistedTarget } = target;
+  const resolved = (target.gateway_route ?? []).flatMap((step) => {
+    const gateway = byId.get(step.gateway_id);
+    return gateway ? [{ ...gateway, mode: step.mode }] : [];
+  });
+  return resolved.length > 0
+    ? { ...persistedTarget, gateways: resolved }
+    : persistedTarget;
 }
 
 export function sessionReference(session: SessionSummary): SessionReference {
@@ -74,8 +95,11 @@ export function workspaceTabKey(reference: WorkspaceTab): string {
 }
 
 export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
+  const ssh_gateways = document.ssh_gateways ?? [];
   const targets = document.hosts.map(({ host_id, target }) =>
-    target.kind === "local" ? LOCAL_TARGET : { ...target, host_id },
+    target.kind === "local"
+      ? LOCAL_TARGET
+      : resolveSshGateways({ ...target, host_id }, ssh_gateways),
   );
   const targetsById = new Map(
     targets.map((target) => [
@@ -117,10 +141,13 @@ export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
   );
   return {
     targets,
+    ssh_gateways,
     port_forwards: document.port_forwards ?? [],
     sessions,
     shell_states,
-    sidebar_view: document.sidebar_view ?? (document.active_tab?.kind === "task_definition" ? "tasks" : "sessions"),
+    sidebar_view:
+      document.sidebar_view ??
+      (document.active_tab?.kind === "task_definition" ? "tasks" : "sessions"),
     task_drafts: document.task_drafts ?? [],
     task_definitions: document.task_definitions ?? [],
     task_definition_scope: document.task_definition_scope ?? { kind: "global" },
@@ -179,7 +206,8 @@ export function workspaceDocument(
     (tab) => workspaceTabKey(tab) === view.active_tab_key,
   );
   return {
-    schema_version: 5,
+    schema_version: 6,
+    ssh_gateways: view.ssh_gateways,
     port_forwards: view.port_forwards.filter((forward) =>
       view.targets.some(
         (target) => target.kind === "ssh" && target.host_id === forward.host_id,
@@ -193,7 +221,7 @@ export function workspaceDocument(
     hosts: view.targets.map((target) => {
       if (target.kind === "local")
         return { host_id: "local", target: LOCAL_TARGET };
-      const { host_id, ...connection } = target;
+      const { host_id, gateways: _gateways, ...connection } = target;
       return { host_id: host_id!, target: connection };
     }),
     sessions: sessions.map((session) => {

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::ready;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,26 +29,26 @@ impl Control {
 }
 
 impl ForwardControl for Control {
-  async fn is_ready(&self, target: &SshTarget) -> bool {
-    self.ready.lock().unwrap().contains(target)
+  fn is_ready(&self, target: &SshTarget) -> impl Future<Output = bool> + Send {
+    ready(self.ready.lock().unwrap().contains(target))
   }
 
-  async fn change(
+  fn change(
     &self,
     target: &SshTarget,
     forward: &LocalPortForward,
     cancel: bool,
-  ) -> Result<(), RequestError> {
+  ) -> impl Future<Output = Result<(), RequestError>> + Send {
     self.changes.lock().unwrap().push(Change {
       target: target.clone(),
       forward: forward.clone(),
       cancel,
     });
-    if cancel && self.fail_cancel.load(Ordering::SeqCst) {
+    ready(if cancel && self.fail_cancel.load(Ordering::SeqCst) {
       Err(RequestError::PortForwardFailed("cancel failed".into()))
     } else {
       Ok(())
-    }
+    })
   }
 }
 

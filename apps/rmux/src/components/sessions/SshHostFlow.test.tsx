@@ -110,6 +110,7 @@ describe("SSH host quick-input flow", () => {
   it("takes a selected SSH alias through naming and credentials while preserving its transport settings", async () => {
     vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { user, save } = setupNewHost(["build-alias"]);
+    expect(screen.getByRole("group", { name: "SSH config · Virtual" })).toBeTruthy();
     await user.click(screen.getByRole("option", { name: "build-alias" }));
     expect(screen.getByLabelText("Host name")).toHaveProperty("value", "build-alias");
     expect(probeSshHost).not.toHaveBeenCalled();

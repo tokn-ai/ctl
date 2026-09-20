@@ -104,7 +104,8 @@ config aliases or gateway routes; the host catalog remains authoritative for
 the saved method.
 
 Concrete aliases in `~/.ssh/config` and its `Include` files appear as hosts in
-memory, available through **Connect host** and session pickers. They stay out of
+memory, grouped under **SSH config · Virtual** in host and session pickers,
+separately from **Saved hosts**. They stay out of
 the sidebar until connected. Referenced hosts remain visible after restart;
 connections without remembered work stay visible only for the current run.
 Each uses a deterministic `ssh-config:<encoded alias>` ID and delegates

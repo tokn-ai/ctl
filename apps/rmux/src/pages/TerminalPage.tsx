@@ -20,6 +20,7 @@ import { PortForwardingDialog } from "../components/sessions/PortForwardingDialo
 import { PortForwardingSidebar } from "../components/portForwarding/PortForwardingSidebar";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
 import { NewShellFlow } from "../components/sessions/NewShellFlow";
+import { hostSelectorChoices } from "../components/sessions/hostChoices";
 import { useWorkspace } from "../features/workspace/useWorkspace";
 import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
 import { usePortForwarding } from "../features/portForwarding/usePortForwarding";
@@ -80,7 +81,6 @@ import {
   sameTarget,
   sessionKey,
   targetKey,
-  targetLabel,
 } from "../features/targets/targets";
 import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
@@ -1753,6 +1753,7 @@ export function TerminalPage() {
       ) : newShellOpen ? (
         <NewShellFlow
           targets={targets}
+          hosts={workspace.hosts}
           onCreate={create}
           onClose={() => {
             setNewShellOpen(false);
@@ -1762,6 +1763,7 @@ export function TerminalPage() {
       ) : importOpen ? (
         <AddExistingSessionFlow
           targets={targets}
+          hosts={workspace.hosts}
           known={sessions}
           onAdd={importSession}
           onClose={() => setImportOpen(false)}
@@ -1786,10 +1788,7 @@ export function TerminalPage() {
           description="Choose a saved host or an SSH config alias."
           mode={{
             kind: "pick",
-            choices: connectableTargets.map((target) => ({
-              id: targetKey(target),
-              label: targetLabel(target),
-            })),
+            choices: hostSelectorChoices(connectableTargets, workspace.hosts),
           }}
           onCancel={() => setConnectHostOpen(false)}
           onSubmit={(key) => {

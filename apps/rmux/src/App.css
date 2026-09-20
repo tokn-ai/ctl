@@ -1208,6 +1208,18 @@ button:disabled {
   overflow-y: auto;
 }
 
+.quick-input-group + .quick-input-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.quick-input-group-heading {
+  padding: 7px 9px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .command-palette-option {
   display: flex;
   width: 100%;

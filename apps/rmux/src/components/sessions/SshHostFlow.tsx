@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
 import { remoteInstallProgressMode } from "./remoteInstallProgress";
 import { GatewayRouteDialog } from "./GatewayRouteDialog";
+import { VIRTUAL_SSH_GROUP } from "./hostChoices";
 import { resolveSshGateways } from "../../features/workspace/workspaceModel";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
@@ -471,6 +472,7 @@ export function SshHostFlow({
               items: suggestions.map((host) => ({
                 id: `ssh-config:${host}`,
                 label: host,
+                group: VIRTUAL_SSH_GROUP,
               })),
               empty_message: "Enter a hostname to add a new host.",
               no_match_message:

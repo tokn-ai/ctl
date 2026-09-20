@@ -10,13 +10,13 @@ import {
   formatKeybinding,
 } from "../../features/commands/keybindings";
 import { QuickInputFrame } from "./QuickInputFrame";
-import { QuickInputField, type QuickInputFieldMode } from "./QuickInputField";
+import { QuickInputField, QuickInputOptionGroups, type QuickInputFieldMode } from "./QuickInputField";
 
 export type QuickInputMode =
   | QuickInputFieldMode
   | {
       kind: "pick";
-      choices: readonly { id: string; label: string; detail?: string }[];
+      choices: readonly { id: string; label: string; detail?: string; group?: string }[];
     }
   | { kind: "confirm"; confirm_label: string; destructive?: boolean }
   | {
@@ -167,7 +167,7 @@ export function QuickInput({
           role="listbox"
           aria-label={title}
         >
-          {mode.choices.map((choice, index) => (
+          <QuickInputOptionGroups items={mode.choices} renderOption={(choice, index) => (
             <button
               type="button"
               key={choice.id}
@@ -185,7 +185,7 @@ export function QuickInput({
                 ) : null}
               </span>
             </button>
-          ))}
+          )} />
         </div>
       ) : null}
       {mode.kind === "confirm" ? (

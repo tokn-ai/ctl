@@ -44,7 +44,8 @@ spaces; they are independent of SSH aliases. No storage-choice step or implicit
 OpenSSH config write is involved.
 
 Concrete aliases discovered from `~/.ssh/config`, including its `Include`
-files, are available in **Connect host** and session pickers. They enter the
+files, are grouped under **SSH config · Virtual** in Add host, Connect host,
+and session pickers, separately from **Saved hosts**. They enter the
 sidebar after a successful connection; hosts with remembered sessions, tasks,
 or forwards remain visible after restart. OpenSSH continues resolving their
 connection settings. Connecting does not save their definitions; saving a customization

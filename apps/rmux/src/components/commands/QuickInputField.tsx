@@ -1,8 +1,8 @@
-import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 
 export interface QuickInputSuggestions {
   label: string;
-  items: readonly { id: string; label: string }[];
+  items: readonly { id: string; label: string; group?: string }[];
   loading?: boolean;
   loading_message?: string;
   empty_message?: string;
@@ -25,6 +25,32 @@ interface QuickInputFieldProps {
   onSubmit(value: string): void;
   onChange?(value: string): void;
   submissionValue?: RefObject<() => string>;
+}
+
+/** Group contiguous options without changing their keyboard-selection indices. */
+export function QuickInputOptionGroups<Item extends { id: string; group?: string }>({
+  items,
+  renderOption,
+}: {
+  items: readonly Item[];
+  renderOption(item: Item, index: number): ReactNode;
+}) {
+  const groups: { label?: string; start_index: number; items: Item[] }[] = [];
+  items.forEach((item, index) => {
+    const label = item.group || undefined;
+    const previous = groups[groups.length - 1];
+    if (previous && previous.label === label) previous.items.push(item);
+    else groups.push({ label, start_index: index, items: [item] });
+  });
+  return groups.map((group) => {
+    const options = group.items.map((item, offset) => renderOption(item, group.start_index + offset));
+    return group.label ? (
+      <div key={group.items[0].id} className="quick-input-group" role="group" aria-label={group.label}>
+        <div className="quick-input-group-heading">{group.label}</div>
+        {options}
+      </div>
+    ) : <Fragment key={group.items[0].id}>{options}</Fragment>;
+  });
 }
 
 /** Editable input with optional suggestions; selection never overwrites a draft. */
@@ -122,7 +148,7 @@ export function QuickInputField({
                       items.length) %
                     items.length;
               setSelectedId(items[next].id);
-              listRef.current?.children[next]?.scrollIntoView?.({
+              listRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[next]?.scrollIntoView?.({
                 block: "nearest",
               });
             }}
@@ -144,7 +170,7 @@ export function QuickInputField({
             aria-label={suggestions.label}
             aria-busy={suggestions.loading ?? false}
           >
-            {items.map((item, index) => (
+            <QuickInputOptionGroups items={items} renderOption={(item, index) => (
               <button
                 type="button"
                 role="option"
@@ -157,7 +183,7 @@ export function QuickInputField({
               >
                 {item.label}
               </button>
-            ))}
+            )} />
           </div>
           {status ? (
             <p className="quick-input-description" role="status">

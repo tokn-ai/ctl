@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
+import { hostSelectorChoices } from "./hostChoices";
 import {
   sessionKey,
   targetKey,
@@ -12,10 +13,12 @@ import type {
   SessionListResponse,
   SessionSummary,
   ShellStateSummary,
+  WorkspaceHost,
 } from "../../lib/types";
 
 interface AddExistingSessionFlowProps {
   targets: readonly ConnectionTarget[];
+  hosts?: readonly WorkspaceHost[];
   known: readonly SessionSummary[];
   onAdd(
     session: SessionSummary,
@@ -43,10 +46,7 @@ export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
       description="Choose one host to discover its running sessions. Other hosts will not be contacted."
       mode={{
         kind: "pick",
-        choices: props.targets.map((candidate) => ({
-          id: targetKey(candidate),
-          label: targetLabel(candidate),
-        })),
+        choices: hostSelectorChoices(props.targets, props.hosts),
       }}
       onSubmit={(key) =>
         setTarget(

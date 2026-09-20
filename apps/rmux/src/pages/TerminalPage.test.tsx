@@ -978,6 +978,26 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(within(picker).getByRole("option", { name: "only-in-ssh-config" }));
   }
 
+  it.each([
+    ["Add host", false],
+    ["Choose host to connect", true],
+    ["New shell", true],
+    ["Add existing session", true],
+  ] as const)("labels virtual projections explicitly in the %s selector", async (button, includesSaved) => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Host settings for test" });
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    const virtual = screen.getByRole("group", { name: "SSH config · Virtual" });
+    expect(within(virtual).getByRole("option", { name: "only-in-ssh-config" })).toBeTruthy();
+    if (includesSaved) {
+      const saved = screen.getByRole("group", { name: "Saved hosts" });
+      expect(within(saved).getByRole("option", { name: "test" })).toBeTruthy();
+      expect(within(saved).queryByRole("option", { name: "only-in-ssh-config" })).toBeNull();
+    }
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+  });
+
   it("reveals a projected host after a successful connection without saving its definition", async () => {
     render(<TerminalPage />);
     await chooseProjectedConnection();

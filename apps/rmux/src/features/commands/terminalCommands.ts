@@ -301,10 +301,10 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.close,
       category: "Session",
       title: closeConfirmationPending
-        ? "Confirm Close Session"
-        : "Close Active Session",
+        ? "Confirm Terminate Session"
+        : "Terminate Active Session",
       detail: closeSession?.name,
-      keywords: ["exit", "kill", "terminate"],
+      keywords: ["exit", "kill", "terminate", "close"],
       enabled:
         !daemonRestartInteractionBlocked &&
         closeSession !== null &&

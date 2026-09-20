@@ -29,7 +29,7 @@ waits for it, verifies all four archives, and stages them in the ignored Tauri
 resource directory. `pnpm agents:sync --main` is an explicit compatibility
 shortcut for using the latest successful main-branch set.
 
-The app may also use the path in `RMUXD_BIN`. Open **+ Host** to activate a
+The app may also use the path in `RMUXD_BIN`. Open **Add host** to activate a
 concrete alias discovered from `~/.ssh/config` (including its `Include` files)
 or enter `[user@]hostname[:port]`, then a name, then choose SSH config/agent,
 an identity-file path, or password/interactive authentication. These steps use
@@ -147,7 +147,7 @@ the team-prefixed `io.rmux.desktop.ctld` application identifier.
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also
 detaches the live view; inactive tabs have no live attachment to detach.
-**Close** is deliberately destructive: after confirmation it terminates the
+**Terminate session** is deliberately destructive: after confirmation it terminates the
 session for all clients. **Remove from workspace** forgets an entry and closes
 its tab without terminating its shell. Closing the app itself only detaches its
 active view. Normal window close waits for pending workspace saves; save failures
@@ -192,7 +192,7 @@ terminal shortcuts are:
 
 The close shortcut opens a quick-input confirmation with **Cancel** focused.
 Press the close shortcut again (`Cmd-E` on macOS, `Ctrl-Shift-E` on Windows/Linux)
-or choose **Close session** to terminate the session named in the prompt.
+or choose **Terminate session** to terminate the session named in the prompt.
 Press `Esc` to cancel. Other commands remain blocked while confirmation is open.
 
 **New Shell**, from the sidebar, command palette, or `Cmd/Ctrl-Shift-N`, uses
@@ -246,6 +246,19 @@ Shortcuts are local to the focused app. Text editing, focus/list navigation,
 and raw xterm/PTY input remain widget behavior. Standard native editing/window
 commands (including Cmd-Q) and emergency reload after a renderer crash remain
 platform/recovery operations, outside the configurable app command registry.
+
+## Visual preview
+
+The workbench uses a compact activity bar for Sessions, Tasks, and Ports, a
+collapsible host/session tree, and shared tab and command styling. Host and
+session row actions appear on hover or keyboard focus. The keyboard icon at the
+bottom of the activity bar opens shortcut configuration. Closing a tab keeps its
+session running; **Terminate session** is the separate destructive action.
+
+For a browser preview with sample data, run `pnpm exec vite --host 127.0.0.1`
+and open `http://127.0.0.1:1430/preview.html`. This development-only entry renders
+the actual UI using in-memory Tauri mocks. It cannot execute terminal commands
+or open SSH connections. See [preview details](dev/README.md).
 
 ## Verify
 

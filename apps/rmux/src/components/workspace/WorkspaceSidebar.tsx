@@ -1,3 +1,4 @@
+import { Icon } from "../ui/Icon";
 import type { ReactNode } from "react";
 import type { WorkspaceSidebarView } from "../../lib/types";
 
@@ -8,6 +9,7 @@ interface Props {
   tasks: ReactNode;
   ports: ReactNode;
   error: string | null;
+  on_keybindings?(): void;
 }
 
 export function WorkspaceSidebar({
@@ -17,6 +19,7 @@ export function WorkspaceSidebar({
   tasks,
   ports,
   error,
+  on_keybindings,
 }: Props) {
   const views = ["sessions", "tasks", "ports"] as const;
   const labels = {
@@ -26,69 +29,59 @@ export function WorkspaceSidebar({
   } as const;
   return (
     <div className="workspace-sidebar">
-      <nav
-        className="sidebar-activity"
-        role="tablist"
-        aria-label="Sidebar"
-        aria-orientation="vertical"
-      >
-        {views.map((view, index) => (
-          <button
-            key={view}
-            id={`sidebar-tab-${view}`}
-            role="tab"
-            aria-label={labels[view]}
-            title={labels[view]}
-            aria-selected={selected === view}
-            aria-controls={`sidebar-panel-${view}`}
-            tabIndex={selected === view ? 0 : -1}
-            onClick={() => onSelect(view)}
-            onKeyDown={(event) => {
-              if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key))
-                return;
-              event.preventDefault();
-              const next =
-                event.key === "Home"
-                  ? views[0]
-                  : event.key === "End"
-                    ? views[views.length - 1]
-                    : event.key === "ArrowUp"
-                      ? views[(index - 1 + views.length) % views.length]
-                      : views[(index + 1) % views.length];
-              onSelect(next);
-              document.getElementById(`sidebar-tab-${next}`)?.focus();
-            }}
-          >
-            <svg
-              width="22"
-              height="22"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              aria-hidden="true"
+      <div className="sidebar-rail">
+        <div className="workbench-brand" title="rmux" aria-label="rmux">
+          <Icon name="terminal" size={24} />
+        </div>
+        <nav
+          className="sidebar-activity"
+          role="tablist"
+          aria-label="Sidebar"
+          aria-orientation="vertical"
+        >
+          {views.map((view, index) => (
+            <button
+              key={view}
+              id={`sidebar-tab-${view}`}
+              role="tab"
+              aria-label={labels[view]}
+              title={labels[view]}
+              aria-selected={selected === view}
+              aria-controls={`sidebar-panel-${view}`}
+              tabIndex={selected === view ? 0 : -1}
+              onClick={() => onSelect(view)}
+              onKeyDown={(event) => {
+                if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key))
+                  return;
+                event.preventDefault();
+                const next =
+                  event.key === "Home"
+                    ? views[0]
+                    : event.key === "End"
+                      ? views[views.length - 1]
+                      : event.key === "ArrowUp"
+                        ? views[(index - 1 + views.length) % views.length]
+                        : views[(index + 1) % views.length];
+                onSelect(next);
+                document.getElementById(`sidebar-tab-${next}`)?.focus();
+              }}
             >
-              {view === "sessions" ? (
-                <>
-                  <rect x="3" y="4" width="18" height="16" rx="2" />
-                  <path d="m7 9 3 3-3 3m6 0h4" />
-                </>
-              ) : view === "tasks" ? (
-                <>
-                  <rect x="4" y="3" width="16" height="18" rx="2" />
-                  <path d="m7 8 1.5 1.5L11 7m2 2h4m-10 5 1.5 1.5L11 13m2 2h4" />
-                </>
-              ) : (
-                <>
-                  <path d="M4 7h6m4 0h6M8 4v6m8 4v6m-6-3h4" />
-                  <circle cx="8" cy="7" r="3" />
-                  <circle cx="16" cy="17" r="3" />
-                </>
-              )}
-            </svg>
+              <Icon name={view === "sessions" ? "terminal" : view} size={23} />
+            </button>
+          ))}
+        </nav>
+        {on_keybindings ? (
+          <button
+            className="rail-settings"
+            type="button"
+            onClick={on_keybindings}
+            aria-label="Configure Keyboard Shortcuts"
+            title="Keyboard Shortcuts"
+          >
+            <Icon name="keyboard" size={21} />
           </button>
-        ))}
-      </nav>
+        ) : null}
+      </div>
       <div className="sidebar-content">
         <div
           id="sidebar-panel-sessions"

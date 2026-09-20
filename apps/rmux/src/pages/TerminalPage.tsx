@@ -1397,6 +1397,7 @@ export function TerminalPage() {
         }
       >
         <WorkspaceSidebar
+          on_keybindings={() => executeCommandById(COMMAND_IDS.configureKeybindings)}
           selected={workspace.sidebar_view}
           onSelect={(view) => {
             workspace.update("sidebar_view", view);
@@ -1754,12 +1755,12 @@ export function TerminalPage() {
         />
       ) : pendingCloseSessionKey ? (
         <QuickInput
-          title="Close session"
+          title="Terminate session"
           description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.${closeShortcutLabel ? ` Press ${closeShortcutLabel} to confirm.` : ""}`}
           confirm_command_id={COMMAND_IDS.close}
           mode={{
             kind: "confirm",
-            confirm_label: "Close session",
+            confirm_label: "Terminate session",
             destructive: true,
           }}
           onCancel={cancelClose}

@@ -1,6 +1,10 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ConnectionTarget,
   ManagedTask,
   SessionSummary,
   ShellStateSummary,
@@ -44,6 +48,8 @@ const shellState: ShellStateSummary = {
   observed_sequence: "1",
 };
 
+afterEach(cleanup);
+
 describe("SessionSidebar", () => {
   it("delegates close, add-host, and new-shell interactions without inline forms", () => {
     const markup = renderToStaticMarkup(
@@ -72,9 +78,9 @@ describe("SessionSidebar", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Close first"');
-    expect(markup).toContain("+ Host");
-    expect(markup).toContain("+ Add host with gateways");
+    expect(markup).toContain('aria-label="Terminate first"');
+    expect(markup).toContain('aria-label="Add host"');
+    expect(markup).toContain('aria-label="Add host with gateways"');
     expect(markup).not.toContain("session-close-confirmation");
     expect(markup).not.toContain("host-form");
     expect(markup).toContain("New shell");
@@ -113,7 +119,7 @@ describe("SessionSidebar", () => {
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…pps/rmux — …mux-app</strong>");
     expect(markup).toContain(
-      `<small>local<span aria-hidden="true"> · </span>${session.name}<span aria-hidden="true"> · </span>`,
+      `<small title="${session.name} · running · 80×24">${session.name}<span aria-hidden="true"> · </span>`,
     );
     expect(markup).not.toContain(`<strong>${session.name}</strong>`);
   });
@@ -181,6 +187,72 @@ describe("SessionSidebar", () => {
     expect(markup).toContain('aria-label="Disconnect from first"');
     expect(markup).toContain('aria-label="Disconnect from second"');
     expect(markup).not.toContain('aria-label="Disconnect from listed-only"');
+  });
+
+  it("keeps empty hosts actionable and supports keyboard disclosure without disconnecting sessions", async () => {
+    const user = userEvent.setup();
+    const remote: ConnectionTarget = {
+      kind: "ssh",
+      destination: "build-host",
+      remote_info: { remote_id: "remote-1", agent_version: "0.1.0" },
+    };
+    const onConnectHost = vi.fn();
+    const onPortForward = vi.fn();
+    const onRemoveHost = vi.fn();
+    const onDisconnect = vi.fn();
+    const onAddHost = vi.fn();
+    const onAddRoutedHost = vi.fn();
+    render(
+      <SessionSidebar
+        targets={[session.target, remote]}
+        targetErrors={new Map()}
+        sessions={[session]}
+        shellStates={new Map()}
+        selectedSessionKey={sessionKey(session)}
+        openTabSessionKeys={new Set([sessionKey(session)])}
+        loading={false}
+        error={null}
+        creating={false}
+        closingSessionKeys={new Set()}
+        disconnectingSessionKey={null}
+        onRefresh={vi.fn()}
+        onSelect={vi.fn()}
+        onNewShell={vi.fn()}
+        onDisconnect={onDisconnect}
+        onRequestClose={vi.fn()}
+        onAddHost={onAddHost}
+        onAddRoutedHost={onAddRoutedHost}
+        onConnectHost={onConnectHost}
+        onRemoveHost={onRemoveHost}
+        onPortForward={onPortForward}
+        onAddExisting={vi.fn()}
+        onForget={vi.fn()}
+      />,
+    );
+
+    const localGroup = screen.getByRole("button", { name: "Collapse local" });
+    localGroup.focus();
+    await user.keyboard("{Enter}");
+    expect(localGroup.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Shell — first" })).toBeNull();
+    expect(onDisconnect).not.toHaveBeenCalled();
+
+    await user.keyboard(" ");
+    expect(localGroup.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Shell — first" })).toBeTruthy();
+    expect(screen.getByText("No known sessions")).toBeTruthy();
+    const connect = screen.getByRole("button", { name: "Connect to build-host" });
+    expect(connect.title).toContain("Agent 0.1.0\nRemote ID: remote-1");
+    await user.click(connect);
+    await user.click(screen.getByRole("button", { name: "Port forwarding for build-host" }));
+    await user.click(screen.getByRole("button", { name: "Remove build-host" }));
+    expect(onConnectHost).toHaveBeenCalledWith(remote);
+    expect(onPortForward).toHaveBeenCalledWith(remote);
+    expect(onRemoveHost).toHaveBeenCalledWith(remote);
+
+    await user.click(screen.getByRole("button", { name: "Add host with gateways" }));
+    expect(onAddRoutedHost).toHaveBeenCalledOnce();
+    expect(onAddHost).not.toHaveBeenCalled();
   });
 
   it("groups ordinary sessions by host and lists active interactive tasks separately", () => {

@@ -3,18 +3,16 @@
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  background:
-    radial-gradient(circle at 0 0, #262b30 0, transparent 34%),
-    var(--surface-1);
+  background: var(--surface-1);
 }
 
 .port-sidebar-count {
-  min-width: 20px;
-  padding: 2px 6px;
+  min-width: 18px;
+  padding: 1px 5px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   text-align: center;
-  border-radius: 999px;
+  border-radius: 3px;
   background: var(--surface-2);
 }
 
@@ -25,7 +23,7 @@
 }
 
 .port-sidebar-group {
-  padding: 0 9px 12px;
+  padding: 0 0 12px;
 }
 
 .port-sidebar-group > header {
@@ -33,7 +31,8 @@
   min-width: 0;
   align-items: center;
   gap: 8px;
-  padding: 7px 3px;
+  min-height: 32px;
+  padding: 4px 12px 4px 16px;
 }
 
 .port-sidebar-group h3 {
@@ -41,9 +40,9 @@
   flex: 1;
   margin: 0;
   overflow: hidden;
-  color: #b9c0ca;
-  font-size: 11px;
-  font-weight: 650;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -51,29 +50,38 @@
 .port-sidebar-group h3 span {
   margin-left: 4px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
+  font-weight: 400;
 }
 
 .port-sidebar-group > header button,
 .port-sidebar-toggle {
-  padding: 4px 7px;
+  padding: 4px 6px;
   color: var(--muted);
-  font-size: 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface-2);
+  font-size: 11px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
   cursor: pointer;
+}
+
+.port-sidebar-group > header button:hover,
+.port-sidebar-toggle:hover {
+  color: var(--text);
+  background: var(--surface-3);
 }
 
 .port-sidebar-row {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 5px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #14171c;
+  gap: 4px;
+  background: transparent;
+}
+
+.port-sidebar-row:hover,
+.port-sidebar-row:focus-within {
+  background: var(--surface-2);
 }
 
 .port-sidebar-details {
@@ -81,8 +89,9 @@
   min-width: 0;
   flex: 1;
   align-items: flex-start;
-  gap: 8px;
-  padding: 9px;
+  gap: 9px;
+  padding: 8px 8px 8px 16px;
+  color: var(--text);
   text-align: left;
   border: 0;
   background: transparent;
@@ -106,28 +115,28 @@
 }
 
 .port-sidebar-details strong {
-  font-size: 12px;
-  font-weight: 610;
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .port-sidebar-details code,
 .port-sidebar-details small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .port-sidebar-indicator {
   width: 7px;
   height: 7px;
   flex: 0 0 7px;
-  margin-top: 4px;
+  margin-top: 5px;
   border-radius: 50%;
-  background: #666e79;
+  background: var(--muted);
 }
 
 .port-sidebar-indicator.active {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px #8ee39d19;
+  background: var(--success, #89d185);
 }
 
 .port-sidebar-indicator.waiting {
@@ -138,17 +147,17 @@
   background: var(--danger);
 }
 
-.port-sidebar-status.active {
-  color: var(--accent);
+.port-sidebar .port-sidebar-status.active {
+  color: var(--success, #89d185);
 }
 
-.port-sidebar-status.waiting {
+.port-sidebar .port-sidebar-status.waiting {
   color: var(--warning);
 }
 
-.port-sidebar-status.error,
+.port-sidebar .port-sidebar-status.error,
 .port-sidebar-error {
-  color: #ffb0b0;
+  color: var(--danger);
 }
 
 .port-sidebar-toggle {
@@ -156,22 +165,306 @@
   margin-right: 8px;
 }
 
+.port-sidebar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.port-sidebar button:focus-visible {
+  outline: 1px solid var(--accent-strong);
+  outline-offset: -1px;
+}
+
 .port-sidebar-error {
-  margin: 0 0 6px;
-  padding: 6px 8px;
+  margin: 0 12px 6px;
+  padding: 7px 8px;
   overflow-wrap: anywhere;
-  font-size: 9px;
-  border-left: 2px solid #744144;
-  background: #2a2022;
+  font-size: 12px;
+  line-height: 1.5;
+  border-left: 2px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface-1));
 }
 
 .port-sidebar-footer {
-  min-height: 34px;
-  padding: 9px 12px;
+  min-height: 32px;
+  padding: 8px 16px;
   color: var(--muted);
   border-top: 1px solid var(--border);
 }
 
 .port-sidebar-footer small {
-  font-size: 9px;
+  font-size: 11px;
+}
+
+.port-refreshing {
+  animation: port-refresh-spin 1.2s linear infinite;
+}
+
+@keyframes port-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .port-refreshing {
+    animation: none;
+  }
+}
+
+.port-forward-dialog {
+  max-height: calc(100vh - 12vh);
+  overflow-y: auto;
+}
+
+.port-forward-dialog .quick-input-heading,
+.port-forward-dialog .quick-input-description {
+  padding-inline: 16px;
+}
+
+.port-forward-dialog .quick-input-heading strong,
+.port-forward-dialog .remote-listeners > header strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.port-forward-dialog .quick-input-description {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.port-forward-dialog .port-forward-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border-block: 1px solid var(--border);
+}
+
+.port-forward-dialog .remote-listeners {
+  border-top: 1px solid var(--border);
+}
+
+.port-forward-dialog .remote-listeners > header {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+}
+
+.port-forward-dialog .remote-listeners > header strong {
+  flex: 1;
+}
+
+.port-forward-dialog .remote-listeners button,
+.port-forward-dialog .port-forward-row button,
+.port-forward-dialog .port-forward-form button {
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.port-forward-dialog .remote-listeners > header button,
+.port-forward-dialog .remote-agent-update button {
+  padding: 5px 8px;
+}
+
+.port-forward-dialog .remote-listeners button:hover,
+.port-forward-dialog .port-forward-row button:hover {
+  background: var(--surface-3);
+}
+
+.port-forward-dialog .remote-agent-update {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  font-size: 12px;
+}
+
+.port-forward-dialog .remote-agent-update p {
+  margin: 0;
+}
+
+.port-forward-dialog .remote-listener-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  max-height: 190px;
+  padding: 0 16px 12px;
+  overflow-y: auto;
+}
+
+.port-forward-dialog .remote-listener-grid button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(100px, auto) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  text-align: left;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.port-forward-dialog .remote-listener-grid code {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.port-forward-dialog .remote-listener-grid small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.port-forward-dialog .remote-listener-grid span {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: center;
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.port-forward-dialog .remote-listener-message {
+  margin: 0;
+  padding: 4px 12px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.port-forward-dialog .remote-listener-message.error,
+.port-forward-dialog .remote-listener-message.warning,
+.port-forward-dialog .port-forward-form small.unavailable {
+  color: var(--warning);
+}
+
+.port-forward-dialog .port-forward-empty {
+  margin: 0;
+  padding: 20px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.port-forward-dialog .port-forward-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.port-forward-dialog .port-forward-row:last-child {
+  border-bottom: 0;
+}
+
+.port-forward-dialog .port-forward-row > div {
+  min-width: 0;
+}
+
+.port-forward-dialog .port-forward-row strong,
+.port-forward-dialog .port-forward-row code,
+.port-forward-dialog .port-forward-row small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.port-forward-dialog .port-forward-row strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.port-forward-dialog .port-forward-row code {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.port-forward-dialog .port-forward-row small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.port-forward-dialog .port-forward-row .port-forward-state.active,
+.port-forward-dialog .port-forward-form small.available {
+  color: var(--success, #89d185);
+}
+
+.port-forward-dialog .port-forward-row .port-forward-state.error {
+  color: var(--danger);
+}
+
+.port-forward-dialog .port-forward-row button,
+.port-forward-dialog .port-forward-form button {
+  padding: 5px 9px;
+}
+
+.port-forward-dialog .port-forward-form {
+  display: grid;
+  grid-template-columns: 1.2fr 0.7fr 1.2fr 0.7fr;
+  gap: 12px 8px;
+  align-items: start;
+  padding: 16px;
+}
+
+.port-forward-dialog .port-forward-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.port-forward-dialog .port-forward-form input {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 8px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-2);
+  font-size: 13px;
+  outline: none;
+}
+
+.port-forward-dialog .port-forward-form input:focus {
+  border-color: var(--accent-strong);
+}
+
+.port-forward-dialog .port-forward-form .button-primary {
+  grid-column: 1 / -1;
+  justify-self: end;
+  padding: 7px 12px;
+  color: #fff;
+  border-color: transparent;
+  background: var(--accent);
+}
+
+.port-forward-dialog .port-forward-form .button-primary:hover {
+  background: color-mix(in srgb, var(--accent) 85%, white);
+}
+
+.port-forward-dialog button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.port-forward-dialog button:focus-visible {
+  outline: 1px solid var(--accent-strong);
+  outline-offset: -1px;
+}
+
+@media (max-width: 720px) {
+  .port-forward-dialog .port-forward-form {
+    grid-template-columns: 1fr 1fr;
+  }
 }

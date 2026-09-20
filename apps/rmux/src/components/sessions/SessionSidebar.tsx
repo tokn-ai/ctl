@@ -1,3 +1,5 @@
+import { useId, useState } from "react";
+import { Icon } from "../ui/Icon";
 import {
   compactTerminalTitle,
   compactTerminalTitleParts,
@@ -75,8 +77,21 @@ function sidebarTitle(
   };
 }
 
-function groupLabel(target: ConnectionTarget): string {
-  return target.kind === "local" ? "Local" : targetLabel(target);
+function hostTitle(target: ConnectionTarget): string {
+  const lines = [targetLabel(target)];
+  if (target.kind === "ssh" && target.remote_info) {
+    lines.push(
+      `Agent ${target.remote_info.agent_version}`,
+      `Remote ID: ${target.remote_info.remote_id}`,
+    );
+    if (target.remote_info.bundle) {
+      lines.push(
+        `Bundle: ${target.remote_info.bundle.bundle_id}`,
+        `Revision: ${target.remote_info.bundle.git_revision}`,
+      );
+    }
+  }
+  return lines.join("\n");
 }
 
 export function SessionSidebar({
@@ -107,6 +122,10 @@ export function SessionSidebar({
   onSelectTask,
   onStopTask,
 }: SessionSidebarProps) {
+  const groupId = useId();
+  const [collapsedHosts, setCollapsedHosts] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const taskSessions = interactiveTasks.filter(
     (task) =>
       task.definition.execution_mode === "interactive" &&
@@ -120,82 +139,65 @@ export function SessionSidebar({
     (session) =>
       session.target.kind !== "local" || !taskSessionIds.has(session.session_id),
   );
-  const sessionGroups = targets
-    .map((target) => ({
-      target,
-      sessions: ordinarySessions.filter(
-        (session) => targetKey(session.target) === targetKey(target),
-      ),
-    }))
-    .filter((group) => group.sessions.length > 0);
+  const sessionGroups = targets.map((target) => ({
+    target,
+    sessions: ordinarySessions.filter(
+      (session) => targetKey(session.target) === targetKey(target),
+    ),
+  }));
+  const orphanedErrors = [...targetErrors.entries()].filter(
+    ([key]) => !targets.some((target) => targetKey(target) === key),
+  );
+
+  function toggleHost(key: string) {
+    setCollapsedHosts((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+
   return (
     <aside className="session-sidebar" aria-label="rmux sessions">
       <div className="sidebar-connections">
         <header className="sidebar-header">
           <strong>Sessions</strong>
-          <button className="host-add-button" type="button" onClick={onAddHost}>
-            + Host
-          </button>
-          <button
-            className="icon-button"
-            type="button"
-            onClick={onRefresh}
-            disabled={loading}
-            aria-label="Refresh sessions"
-            title="Refresh sessions"
-          >
-            ↻
-          </button>
+          <div className="sidebar-header-actions">
+            <button
+              className="icon-button"
+              type="button"
+              onClick={onAddHost}
+              aria-label="Add host"
+              title="Add host"
+            >
+              <Icon name="plus" />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={onRefresh}
+              disabled={loading}
+              aria-label="Refresh sessions"
+              title="Refresh sessions"
+            >
+              <Icon name="refresh" />
+            </button>
+          </div>
         </header>
 
         <button
           className="routed-host-add-button"
           type="button"
           onClick={onAddRoutedHost}
+          aria-label="Add host with gateways"
+          title="Add host with gateways"
         >
-          + Add host with gateways
+          <Icon name="plus" size={14} /> Add host with gateways
         </button>
-
-        <div className="sidebar-hosts" aria-label="Configured hosts">
-          {targets.map((target) => {
-            const key = targetKey(target);
-            return (
-              <span className="host-chip" key={key} title={targetLabel(target)}>
-                <button
-                  className="host-connect"
-                  type="button"
-                  onClick={() => onConnectHost(target)}
-                  disabled={target.kind === "local"}
-                  title={target.kind === "ssh" && target.remote_info
-                    ? `Connect to ${targetLabel(target)}\nAgent ${target.remote_info.agent_version}\nRemote ID: ${target.remote_info.remote_id}${target.remote_info.bundle ? `\nBundle: ${target.remote_info.bundle.bundle_id}\nRevision: ${target.remote_info.bundle.git_revision}` : ""}`
-                    : `Connect to ${targetLabel(target)}`}
-                >
-                  {targetLabel(target)}
-                </button>
-                {target.kind === "ssh" ? (
-                  <button
-                    type="button"
-                    onClick={() => onPortForward?.(target)}
-                    aria-label={`Port forwarding for ${targetLabel(target)}`}
-                    title={`Port forwarding for ${targetLabel(target)}`}
-                  >
-                    ↪
-                  </button>
-                ) : null}
-                {target.kind === "ssh" ? (
-                  <button
-                    type="button"
-                    onClick={() => onRemoveHost(target)}
-                    aria-label={`Remove ${targetLabel(target)}`}
-                    title={`Remove ${targetLabel(target)}`}
-                  >
-                    ×
-                  </button>
-                ) : null}
-              </span>
-            );
-          })}
-        </div>
       </div>
 
       <div className="session-list">
@@ -203,35 +205,16 @@ export function SessionSidebar({
           <p className="sidebar-state">Loading workspace…</p>
         ) : null}
         {error ? (
-          <div className="sidebar-state error-state">
+          <div className="sidebar-state error-state" role="status">
             <p>{error}</p>
           </div>
         ) : null}
-        {[...targetErrors.entries()].map(([key, message]) => (
+        {orphanedErrors.map(([key, message]) => (
           <div className="host-error" key={key} role="status">
-            <strong>
-              {targets.find((target) => targetKey(target) === key)
-                ? targetLabel(
-                    targets.find((target) => targetKey(target) === key)!,
-                  )
-                : "Host"}
-            </strong>
+            <strong>Host</strong>
             <span>{message}</span>
           </div>
         ))}
-        {!loading &&
-        !error &&
-        targetErrors.size === 0 &&
-        ordinarySessions.length === 0 && taskSessions.length === 0 ? (
-          <div className="sidebar-state">
-            <span className="empty-glyph">›_</span>
-            <p>No known sessions.</p>
-            <small>
-              Create a shell or use “Add existing session” to remember one
-              already running.
-            </small>
-          </div>
-        ) : null}
         {taskSessions.length > 0 ? (
           <section className="session-group" aria-labelledby="session-group-tasks">
             <h3 id="session-group-tasks">
@@ -252,11 +235,12 @@ export function SessionSidebar({
                     onClick={() => onSelectTask?.(task)}
                     aria-current={selected ? "true" : undefined}
                     aria-label={`${task.definition.name} — interactive task`}
+                    title={task.definition.name}
                   >
-                    <span className="session-indicator" aria-hidden="true" />
+                    <Icon name="tasks" class_name="session-icon" />
                     <span className="session-copy">
                       <strong>{task.definition.name}</strong>
-                      <small>local · {run.state}</small>
+                      <small>Interactive · {run.state}</small>
                     </span>
                   </button>
                   <div className="session-actions">
@@ -267,7 +251,7 @@ export function SessionSidebar({
                       aria-label={`Stop ${task.definition.name}`}
                       title="Stop the task and its terminal"
                     >
-                      <span aria-hidden="true">■</span>
+                      <Icon name="stop" size={14} />
                     </button>
                   </div>
                 </div>
@@ -275,99 +259,176 @@ export function SessionSidebar({
             })}
           </section>
         ) : null}
-        {sessionGroups.map(({ target, sessions: groupSessions }) => (
-          <section
-            className="session-group"
-            key={targetKey(target)}
-            aria-label={`${targetLabel(target)} sessions`}
-          >
-            <h3>
-              {groupLabel(target)} <span>{groupSessions.length}</span>
-            </h3>
-            {groupSessions.map((session) => {
-              const identity = sessionKey(session);
-              const { fullTitle, compactTitle } = sidebarTitle(
-                session,
-                shellStates.get(identity) ?? null,
-              );
-              const selected = identity === selectedSessionKey;
-              const closing = closingSessionKeys.has(identity);
-              const disconnecting = identity === disconnectingSessionKey;
-              const canDisconnect = openTabSessionKeys.has(identity);
-              return (
-                <div
-                  className={`session-row ${selected ? "active" : ""}`}
-                  key={identity}
+        {sessionGroups.map(({ target, sessions: groupSessions }) => {
+          const key = targetKey(target);
+          const expanded = !collapsedHosts.has(key);
+          const childrenId = `${groupId}-${encodeURIComponent(key)}`;
+          const hostError = targetErrors.get(key);
+          return (
+            <section
+              className="session-group host-group"
+              key={key}
+              aria-label={`${targetLabel(target)} sessions`}
+            >
+              <div className={`host-group-header ${hostError ? "has-error" : ""}`}>
+                <button
+                  className="host-group-toggle"
+                  type="button"
+                  aria-expanded={expanded}
+                  aria-controls={childrenId}
+                  aria-label={`${expanded ? "Collapse" : "Expand"} ${targetLabel(target)}`}
+                  title={hostTitle(target)}
+                  onClick={() => toggleHost(key)}
                 >
-                  <button
-                    className="session-select"
-                    type="button"
-                    onClick={() => onSelect(session)}
-                    disabled={closing}
-                    aria-current={selected ? "true" : undefined}
-                    aria-label={`${fullTitle} — ${session.name}`}
-                    title={fullTitle}
-                  >
-                    <span className="session-indicator" aria-hidden="true" />
-                    <span className="session-copy">
-                      <strong>{compactTitle}</strong>
-                      <small>
-                        {targetLabel(session.target)}
-                        <span aria-hidden="true"> · </span>
-                        {session.name}
-                        <span aria-hidden="true"> · </span>
-                        {session.status === "running" ? (
-                          <>
-                            {session.terminal_size.columns}×
-                            {session.terminal_size.rows}
-                            <span aria-hidden="true"> · </span>
-                          </>
-                        ) : null}
-                        {session.status === "unknown"
-                          ? "unverified"
-                          : session.status}
-                      </small>
-                    </span>
-                  </button>
-                  <div className="session-actions">
+                  <Icon
+                    name={expanded ? "chevron_down" : "chevron_right"}
+                    size={14}
+                  />
+                  <Icon
+                    name={target.kind === "local" ? "monitor" : "server"}
+                    size={15}
+                  />
+                  <span className="host-group-name">
+                    {target.kind === "local" ? "Local" : targetLabel(target)}
+                  </span>
+                  <span className="host-group-count">{groupSessions.length}</span>
+                </button>
+                {target.kind === "ssh" ? (
+                  <div className="host-group-actions">
                     <button
                       className="session-action"
                       type="button"
-                      onClick={() => onForget(session)}
-                      disabled={closing || disconnecting}
-                      aria-label={`Remove ${session.name} from workspace`}
-                      title="Remove from workspace; keep the shell running"
+                      onClick={() => onConnectHost(target)}
+                      aria-label={`Connect to ${targetLabel(target)}`}
+                      title={`Connect to ${hostTitle(target)}`}
                     >
-                      −
+                      <Icon name="plug" size={14} />
                     </button>
-                    {canDisconnect ? (
+                    {onPortForward ? (
                       <button
                         className="session-action"
                         type="button"
-                        onClick={() => onDisconnect(session)}
-                        disabled={disconnecting || closing}
-                        aria-label={`Disconnect from ${session.name}`}
-                        title="Disconnect this tab; keep the session running"
+                        onClick={() => onPortForward(target)}
+                        aria-label={`Port forwarding for ${targetLabel(target)}`}
+                        title={`Port forwarding for ${targetLabel(target)}`}
                       >
-                        <span aria-hidden="true">{disconnecting ? "…" : "⏏"}</span>
+                        <Icon name="ports" size={14} />
                       </button>
                     ) : null}
                     <button
-                      className="session-action session-close"
+                      className="session-action"
                       type="button"
-                      onClick={() => onRequestClose(session)}
-                      disabled={closing || disconnecting}
-                      aria-label={`Close ${session.name}`}
-                      title="Close the session and terminate its shell"
+                      onClick={() => onRemoveHost(target)}
+                      aria-label={`Remove ${targetLabel(target)}`}
+                      title={`Remove ${targetLabel(target)} from workspace`}
                     >
-                      <span aria-hidden="true">{closing ? "…" : "×"}</span>
+                      <Icon name="close" size={14} />
                     </button>
                   </div>
-                </div>
-              );
-            })}
-          </section>
-        ))}
+                ) : null}
+              </div>
+              <div className="host-group-children" id={childrenId} hidden={!expanded}>
+                {hostError ? (
+                  <div className="host-error" role="status">
+                    <span>{hostError}</span>
+                  </div>
+                ) : null}
+                {!loading && groupSessions.length === 0 ? (
+                  <p className="host-empty-state">
+                    {hostError ? "Sessions unavailable" : "No known sessions"}
+                  </p>
+                ) : null}
+                {groupSessions.map((session) => {
+                  const identity = sessionKey(session);
+                  const { fullTitle, compactTitle } = sidebarTitle(
+                    session,
+                    shellStates.get(identity) ?? null,
+                  );
+                  const selected = identity === selectedSessionKey;
+                  const closing = closingSessionKeys.has(identity);
+                  const disconnecting = identity === disconnectingSessionKey;
+                  const canDisconnect = openTabSessionKeys.has(identity);
+                  const status = session.status === "unknown"
+                    ? "unverified"
+                    : session.status;
+                  const dimensions = session.status === "running"
+                    ? ` · ${session.terminal_size.columns}×${session.terminal_size.rows}`
+                    : "";
+                  return (
+                    <div
+                      className={`session-row ${selected ? "active" : ""}`}
+                      key={identity}
+                    >
+                      <button
+                        className="session-select"
+                        type="button"
+                        onClick={() => onSelect(session)}
+                        disabled={closing}
+                        aria-current={selected ? "true" : undefined}
+                        aria-label={`${fullTitle} — ${session.name}`}
+                        title={fullTitle}
+                      >
+                        <Icon name="terminal" class_name="session-icon" />
+                        <span className="session-copy">
+                          <strong>{compactTitle}</strong>
+                          <small title={`${session.name} · ${status}${dimensions}`}>
+                            {session.name}
+                            <span aria-hidden="true"> · </span>
+                            <span className="session-status" data-status={session.status}>
+                              {status}
+                            </span>
+                          </small>
+                        </span>
+                      </button>
+                      <div className="session-actions">
+                        <button
+                          className="session-action"
+                          type="button"
+                          onClick={() => onForget(session)}
+                          disabled={closing || disconnecting}
+                          aria-label={`Remove ${session.name} from workspace`}
+                          title="Remove from workspace; keep the shell running"
+                        >
+                          <Icon name="minus" size={14} />
+                        </button>
+                        {canDisconnect ? (
+                          <button
+                            className="session-action"
+                            type="button"
+                            onClick={() => onDisconnect(session)}
+                            disabled={disconnecting || closing}
+                            aria-label={`Disconnect from ${session.name}`}
+                            title="Disconnect this tab; keep the session running"
+                          >
+                            {disconnecting ? (
+                              <span aria-hidden="true">…</span>
+                            ) : (
+                              <Icon name="unplug" size={14} />
+                            )}
+                          </button>
+                        ) : null}
+                        <button
+                          className="session-action session-close"
+                          type="button"
+                          onClick={() => onRequestClose(session)}
+                          disabled={closing || disconnecting}
+                          aria-label={`Terminate ${session.name}`}
+                          title="Terminate the session and its shell"
+                        >
+                          {closing ? (
+                            <span aria-hidden="true">…</span>
+                          ) : (
+                            <Icon name="stop" size={14} />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
       </div>
 
       <footer className="sidebar-footer">
@@ -376,7 +437,7 @@ export function SessionSidebar({
           type="button"
           onClick={onAddExisting}
         >
-          Add existing session
+          <Icon name="plug" size={15} /> Add existing session
         </button>
         <button
           className="new-session-button"
@@ -384,7 +445,7 @@ export function SessionSidebar({
           onClick={onNewShell}
           disabled={creating}
         >
-          <span aria-hidden="true">＋</span> New shell
+          <Icon name="plus" size={15} /> New shell
         </button>
       </footer>
     </aside>

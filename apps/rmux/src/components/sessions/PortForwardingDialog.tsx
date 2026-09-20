@@ -13,6 +13,7 @@ import type {
 } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
+import "../portForwarding/portForwarding.css";
 
 interface Props {
   target: SshConnectionTarget;

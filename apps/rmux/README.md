@@ -44,8 +44,10 @@ spaces; they are independent of SSH aliases. No storage-choice step or implicit
 OpenSSH config write is involved.
 
 Concrete aliases discovered from `~/.ssh/config`, including its `Include`
-files, appear as hosts in memory. OpenSSH continues resolving their connection
-settings. Connecting does not save their definitions; saving a customization
+files, are available in **Connect host** and session pickers. They enter the
+sidebar after a successful connection; hosts with remembered sessions, tasks,
+or forwards remain visible after restart. OpenSSH continues resolving their
+connection settings. Connecting does not save their definitions; saving a customization
 from **Host settings** creates a saved host with the same ID. A saved pure alias
 method suppresses an otherwise-unused duplicate projection. Missing aliases
 with workspace references remain visible as unavailable; restoring the alias

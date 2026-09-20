@@ -12,6 +12,7 @@ import {
   restoreWorkspace,
   updateHostSettings,
   workspaceDocument,
+  workspaceSidebarTargets,
 } from "./workspaceModel";
 
 const empty_catalog: HostCatalogDocument = { schema_version: 1, hosts: [], ssh_gateways: [] };
@@ -40,6 +41,20 @@ describe("saved host catalog and SSH config projections", () => {
     expect(workspaceDocument(first)).not.toHaveProperty("hosts");
     expect(workspaceDocument(first)).not.toHaveProperty("ssh_gateways");
     expect(workspaceDocument(first).host_identities).toEqual([]);
+    expect(workspaceSidebarTargets(first).map((target) => target.kind)).toEqual(["local"]);
+  });
+
+  it("reveals a connected projection in the sidebar without saving its definition", () => {
+    const view = restoreWorkspace(document(), empty_catalog, aliases);
+    const recovered = recoverRemoteHost(view, view.targets[1] as SshConnectionTarget, remote_info)!;
+    expect(workspaceSidebarTargets(recovered.view)).toEqual([recovered.view.targets[0], recovered.target]);
+    const refreshed = refreshHostCatalog(recovered.view, empty_catalog, aliases);
+    expect(workspaceSidebarTargets(refreshed)).toEqual(refreshed.targets.slice(0, 2));
+    expect(hostCatalogDocument(refreshed)).toEqual(empty_catalog);
+    expect(workspaceDocument(refreshed).host_identities).toEqual([]);
+    // A connection with no remembered work remains a runtime-only choice.
+    const reloaded = restoreWorkspace(workspaceDocument(refreshed), empty_catalog, aliases);
+    expect(workspaceSidebarTargets(reloaded)).toEqual([reloaded.targets[0]]);
   });
 
   it("uses a saved ID override but never merges aliases, addresses, names, or accounts", () => {

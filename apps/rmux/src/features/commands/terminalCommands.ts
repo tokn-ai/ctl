@@ -36,6 +36,7 @@ interface TerminalCommandContext {
 interface TerminalCommandActions {
   showPalette(): void;
   showAddHost(): void;
+  showConnectHost(): void;
   showAddRoutedHost(): void;
   showAddExistingSession(): void;
   forgetSession(session: SessionSummary): void;
@@ -115,6 +116,9 @@ export function buildTerminalCommands(
       : (context.targets.find(
           (target) => targetKey(target) === args.target_key,
         ) ?? null);
+  const canConnectHost = (target: ConnectionTarget | null) =>
+    target?.kind === "ssh" && !target.unavailable && !daemonRestartInteractionBlocked;
+  const hasConnectableHost = context.targets.some(canConnectHost);
   const sessionAvailable = (session: SessionSummary | null) =>
     session !== null &&
     !daemonRestartInteractionBlocked &&
@@ -426,14 +430,24 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.connectHost,
       category: "Host",
-      title: "Connect Active Host",
-      enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
-      isEnabled: (args) =>
-        targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      title: "Connect Host",
+      detail: "Choose a saved host or SSH config alias.",
+      keywords: ["ssh", "remote", "alias"],
+      enabled: hasConnectableHost,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : "No SSH hosts are available.",
+      isEnabled: (args) => args.target_key === undefined
+        ? hasConnectableHost
+        : canConnectHost(targetFor(args)),
       focusTerminalAfterRun: false,
       run: (args) => {
+        if (args?.target_key === undefined) {
+          if (hasConnectableHost) actions.showConnectHost();
+          return;
+        }
         const target = targetFor(args);
-        if (target) actions.connectHost(target);
+        if (target && canConnectHost(target)) actions.connectHost(target);
       },
     },
     {

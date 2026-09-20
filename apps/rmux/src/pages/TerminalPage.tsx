@@ -28,7 +28,7 @@ import {
   remapStateKeys,
   sameSshEndpoint,
 } from "../features/workspace/remoteRecovery";
-import { connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, projectedHostId, promoteHost, updateHostSettings } from "../features/workspace/workspaceModel";
+import { connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, projectedHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
 import { removableHostCredentials } from "../features/workspace/hostCredentials";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
@@ -80,6 +80,7 @@ import {
   sameTarget,
   sessionKey,
   targetKey,
+  targetLabel,
 } from "../features/targets/targets";
 import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
@@ -192,6 +193,7 @@ export function TerminalPage() {
     undefined,
   );
   const [addHostOpen, setAddHostOpen] = useState(false);
+  const [connectHostOpen, setConnectHostOpen] = useState(false);
   const [methodNameOpen, setMethodNameOpen] = useState(false);
   const [methodDraft, setMethodDraft] = useState<MethodDraft | null>(null);
   const [hostSettingsId, setHostSettingsId] = useState<string | null>(null);
@@ -378,6 +380,9 @@ export function TerminalPage() {
   );
 
   const hostSuggestions = sshConfigHosts.map((host) => host.destination);
+  const sidebarTargets = workspaceSidebarTargets(workspace);
+  const connectableTargets = targets.filter((target): target is SshConnectionTarget =>
+    target.kind === "ssh" && !target.unavailable);
   const settingsHost = workspace.hosts.find((host) => host.host_id === hostSettingsId);
   const methodHost = workspace.hosts.find((host) => host.host_id === methodDraft?.host_id);
 
@@ -1277,6 +1282,10 @@ export function TerminalPage() {
         setPaletteOpen(false);
         connectHostMethod(target);
       },
+      showConnectHost: () => {
+        setPaletteOpen(false);
+        setConnectHostOpen(true);
+      },
       configureHost: (target) => {
         if (target.kind === "ssh") setHostSettingsId(target.host_id!);
       },
@@ -1388,7 +1397,7 @@ export function TerminalPage() {
     importOpen ||
     pendingForget !== null ||
     hostFlow !== undefined ||
-    addHostOpen || methodDraft !== null || hostSettingsId !== null ||
+    addHostOpen || connectHostOpen || methodDraft !== null || hostSettingsId !== null ||
     pendingCloseSessionKey !== null ||
     daemonRestartConfirmationPending;
 
@@ -1459,7 +1468,7 @@ export function TerminalPage() {
           }
           sessions={
             <SessionSidebar
-              targets={targets}
+              targets={sidebarTargets}
               hosts={workspace.hosts}
               targetErrors={targetErrors}
               sessions={sessions}
@@ -1502,6 +1511,9 @@ export function TerminalPage() {
                 executeCommandById(COMMAND_IDS.addExistingSession)
               }
               onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
+              onChooseHost={connectableTargets.length > 0
+                ? () => executeCommandById(COMMAND_IDS.connectHost)
+                : undefined}
               onHostSettings={(target) => {
                 executeCommandById(COMMAND_IDS.configureHost, { target_key: targetKey(target) });
               }}
@@ -1766,6 +1778,25 @@ export function TerminalPage() {
             return forgetSession(session).catch((failure) =>
               setListError(errorMessage(failure)),
             );
+          }}
+        />
+      ) : connectHostOpen ? (
+        <QuickInput
+          title="Connect host"
+          description="Choose a saved host or an SSH config alias."
+          mode={{
+            kind: "pick",
+            choices: connectableTargets.map((target) => ({
+              id: targetKey(target),
+              label: targetLabel(target),
+            })),
+          }}
+          onCancel={() => setConnectHostOpen(false)}
+          onSubmit={(key) => {
+            const target = connectableTargets.find((candidate) => targetKey(candidate) === key);
+            if (!target) return;
+            setConnectHostOpen(false);
+            connectHostMethod(target);
           }}
         />
       ) : addHostOpen ? (

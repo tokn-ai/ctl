@@ -126,6 +126,23 @@ export function expectedHostIdentity(host: WorkspaceHost): RemoteIdentity | unde
   return host.expected_remote_info ?? host.remote_info;
 }
 
+/** Discovery offers connection choices; the sidebar shows hosts already in use. */
+export function workspaceSidebarTargets(view: WorkspaceView): ConnectionTarget[] {
+  const referenced = new Set([
+    ...[...view.sessions, ...view.tabs].flatMap(({ target }) =>
+      target.kind === "ssh" && target.host_id ? [target.host_id] : []),
+    ...view.task_references.map((reference) => reference.host_id),
+    ...view.task_tabs.map((tab) => tab.host_id),
+    ...view.port_forwards.map((forward) => forward.host_id),
+  ]);
+  const hosts = new Map(view.hosts.map((host) => [host.host_id, host]));
+  return view.targets.filter((target) => {
+    if (target.kind === "local") return true;
+    const host = target.host_id ? hosts.get(target.host_id) : undefined;
+    return host?.source !== "ssh_config" || Boolean(expectedHostIdentity(host)) || referenced.has(host.host_id);
+  });
+}
+
 const SSH_CONFIG_PREFIX = "ssh-config:";
 
 export function projectedHostId(alias: string): string {

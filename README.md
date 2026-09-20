@@ -183,8 +183,10 @@ connection and automatically saves the named host to `~/.tokn/rmux/hosts.json`.
 Its initial method is named `SSH`; additional methods and gateway routes are
 available in **Host settings**. New-host creation does not modify OpenSSH config.
 
-Concrete aliases from `~/.ssh/config` and its `Include` files appear as hosts
-in memory. Connecting to an alias does not import its definition. Saving a
+Concrete aliases from `~/.ssh/config` and its `Include` files are available in
+**Connect host** and session pickers. They appear in the sidebar after connecting;
+aliases with remembered work remain visible after restart. Connecting to an
+alias does not import its definition. Saving a
 customization in **Host settings** creates a saved host with the same identity.
 Aliases already represented by a saved method are hidden unless their projected
 identity still has workspace references. **Host settings** lets you rename the

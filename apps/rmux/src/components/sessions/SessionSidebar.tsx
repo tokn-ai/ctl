@@ -40,6 +40,7 @@ interface SessionSidebarProps {
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
+  onChooseHost?(): void;
   onHostSettings?(target: ConnectionTarget): void;
   onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
@@ -116,6 +117,7 @@ export function SessionSidebar({
   onDisconnect,
   onRequestClose,
   onAddHost,
+  onChooseHost,
   onHostSettings,
   onConnectHost,
   onRemoveHost,
@@ -170,6 +172,17 @@ export function SessionSidebar({
         <header className="sidebar-header">
           <strong>Sessions</strong>
           <div className="sidebar-header-actions">
+            {onChooseHost ? (
+              <button
+                className="icon-button"
+                type="button"
+                onClick={onChooseHost}
+                aria-label="Choose host to connect"
+                title="Connect host"
+              >
+                <Icon name="plug" />
+              </button>
+            ) : null}
             <button
               className="icon-button"
               type="button"

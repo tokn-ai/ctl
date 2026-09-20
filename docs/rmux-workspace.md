@@ -104,7 +104,10 @@ config aliases or gateway routes; the host catalog remains authoritative for
 the saved method.
 
 Concrete aliases in `~/.ssh/config` and its `Include` files appear as hosts in
-memory. Each uses a deterministic `ssh-config:<encoded alias>` ID and delegates
+memory, available through **Connect host** and session pickers. They stay out of
+the sidebar until connected. Referenced hosts remain visible after restart;
+connections without remembered work stay visible only for the current run.
+Each uses a deterministic `ssh-config:<encoded alias>` ID and delegates
 connection settings to OpenSSH. Merely displaying or connecting to one never
 persists its definition. Saving a customization promotes it to a saved host with
 the same ID. A saved record with that ID overrides the projection. Otherwise,

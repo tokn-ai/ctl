@@ -5,17 +5,22 @@ sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
 ## Develop
 
-From the repository root, build the daemon so the development app can find it
-beside its own Cargo binary, then start Tauri:
+From the repository root, install the frontend dependencies and start Tauri:
 
 ```sh
-cargo build -p ctld -p rmuxd -p taskd
 cd apps/rmux
 pnpm install
 pnpm tauri dev
 ```
 
-Development startup performs a local-only bundle preflight. It warns but does
+Tauri development startup builds `ctld`, `rmuxd`, and `taskd` beside the app's
+Cargo binary so fresh starts use matching local daemon protocols. `pnpm dev`
+still starts only the frontend; `pnpm daemons:build` rebuilds the local daemons
+separately. After changing a daemon protocol during development, restart the
+affected daemon once its connections are idle; rebuilding does not replace an
+already running process.
+
+Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
 absent. To test installation on a new SSH host, first commit and push the
 current branch, then run:

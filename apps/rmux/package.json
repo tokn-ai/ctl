@@ -6,6 +6,7 @@
   "scripts": {
     "predev": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/sync-agent-bundles.mts --check",
     "dev": "vite",
+    "daemons:build": "cargo build --locked --manifest-path ../../Cargo.toml -p ctld -p rmuxd -p taskd",
     "build": "tsc && vite build",
     "check": "tsc --noEmit",
     "agents:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/sync-agent-bundles.mts --check",

@@ -7,9 +7,12 @@ can be remembered by several clients. `ctl-agent` stores only its environment ID
 
 ## Disk format and ownership
 
-The native backend reads and writes `workspace.json` in Tauri's app-data
-directory (`~/Library/Application Support/io.rmux.desktop` on macOS). The
-versioned document contains:
+The native backend reads and writes `~/.tokn/rmux/workspace.json` under the
+current user's home directory on every platform. Its lock file and new schema
+backups live alongside it. If this file is absent, rmux imports a valid workspace
+from the former Tauri app-data directory (`~/Library/Application Support/io.rmux.desktop`
+on macOS). The old file and backups remain there for recovery; an existing file
+at the new location always takes precedence. The versioned document contains:
 
 - `workspace_id`, `schema_version`;
 - `hosts`: stable `host_id` plus a local or structured SSH target, with optional

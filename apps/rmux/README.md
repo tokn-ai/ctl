@@ -56,7 +56,9 @@ The app remembers the active alias in either case so it can restore the mixed
 host list on launch; config-backed targets keep only that alias locally.
 Existing WebView host settings migrate automatically after a successful disk write.
 
-The workspace file lives in Tauri's app-data directory as `workspace.json`.
+The workspace file lives at `~/.tokn/rmux/workspace.json`. On first load, an
+existing workspace is imported from Tauri's former app-data directory if the
+new file does not exist; the original remains available for recovery.
 It remembers known sessions, cached paths, tab order, and selection. Startup
 restores those entries as unverified and automatically connects the selected
 local tab. Remote hosts stay disconnected until explicitly opened; **Connect

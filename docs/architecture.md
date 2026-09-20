@@ -120,7 +120,7 @@ Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
 The app persists workspace metadata through its native backend and always
-includes the local target. The versioned app-data `workspace.json` contains
+includes the local target. The versioned `~/.tokn/rmux/workspace.json` contains
 host definitions and stable IDs, known session references, cached cwd labels,
 tab order, and the selected tab. Runtime status, output, credentials, and
 attachment tokens are never written to the workspace. `ctl-agent` remains stateless.

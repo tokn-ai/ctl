@@ -4,11 +4,14 @@ import type {
   SshGatewayMode,
   SshGatewayRouteStep,
   WorkspaceSshGateway,
+  SshIdentityFile,
 } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import "./gatewayRoute.css";
 
 interface Props {
+  title?: string;
+  submitLabel?: string;
   target: SshConnectionTarget;
   gateways: readonly WorkspaceSshGateway[];
   targets: readonly SshConnectionTarget[];
@@ -18,6 +21,14 @@ interface Props {
     identity_file: string;
     suggestions: readonly string[];
     warning: string | null;
+    identity_files?: readonly SshIdentityFile[];
+    identity_loading?: boolean;
+    identity_warning?: string;
+    export_to_ssh_config?: {
+      checked: boolean;
+      allowed: boolean;
+      onChange(checked: boolean): void;
+    };
     onAddressChange(value: string): void;
     onAliasChange(value: string): void;
     onIdentityFileChange(value: string): void;
@@ -44,6 +55,8 @@ interface GatewayDraft {
 }
 
 export function GatewayRouteDialog({
+  title,
+  submitLabel,
   target,
   gateways,
   targets,
@@ -163,6 +176,12 @@ export function GatewayRouteDialog({
       <QuickInputFrame
         title="Edit SSH gateway"
         onDismiss={() => setEditing(null)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setEditing(null);
+          }
+        }}
         className="gateway-route-dialog"
       >
         <header className="quick-input-heading">
@@ -188,12 +207,18 @@ export function GatewayRouteDialog({
 
   return (
     <QuickInputFrame
-      title={hostSetup ? "Add host with gateways" : "Connection route"}
+      title={title ?? (hostSetup ? "Add host with gateways" : "Connection route")}
       onDismiss={onClose}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !saving) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
       className="gateway-route-dialog"
     >
       <header className="quick-input-heading">
-        <strong>{hostSetup ? "Add host with gateways" : `Connection route · ${target.destination}`}</strong>
+        <strong>{title ?? (hostSetup ? "Add host with gateways" : `Connection route · ${target.destination}`)}</strong>
         <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
       </header>
       {hostSetup ? (
@@ -214,7 +239,7 @@ export function GatewayRouteDialog({
             ))}
           </datalist>
           <label>
-            Name / SSH alias (optional)
+            SSH alias (optional)
             <input
               value={hostSetup.alias}
               onChange={(event) => hostSetup.onAliasChange(event.target.value)}
@@ -224,16 +249,38 @@ export function GatewayRouteDialog({
           <label>
             Identity file (optional)
             <input
+              list="connection-identity-suggestions"
+              aria-label="Identity file (optional)"
               value={hostSetup.identity_file}
               onChange={(event) => hostSetup.onIdentityFileChange(event.target.value)}
               placeholder="~/.ssh/id_ed25519"
             />
+            <datalist id="connection-identity-suggestions">
+              {hostSetup.identity_files?.map((file) => <option key={file.path} value={file.path}>{file.display_path}</option>)}
+            </datalist>
+            {hostSetup.identity_loading ? <span>Loading identity files…</span> : null}
+            {hostSetup.identity_warning ? <span role="status">{hostSetup.identity_warning}</span> : null}
           </label>
+          {hostSetup.export_to_ssh_config ? (
+            <label className="gateway-export-option">
+              <input
+                type="checkbox"
+                aria-label="Also save to OpenSSH config"
+                checked={hostSetup.export_to_ssh_config.checked && route.length === 0 && hostSetup.export_to_ssh_config.allowed}
+                disabled={route.length > 0 || !hostSetup.export_to_ssh_config.allowed}
+                onChange={(event) => hostSetup.export_to_ssh_config?.onChange(event.target.checked)}
+              />
+              Also save to OpenSSH config
+              {route.length > 0 || !hostSetup.export_to_ssh_config.allowed
+                ? <small>Available for a new direct SSH alias.</small>
+                : null}
+            </label>
+          ) : null}
           {hostSetup.warning ? <p role="status">{hostSetup.warning}</p> : null}
         </section>
       ) : null}
       <p className="quick-input-description">
-        Gateways are tried in order. Automatic mode currently uses native SSH forwarding. Managed agent relay fallback is the next runtime phase.
+        Connect directly, or add gateways in the order used to reach the destination.
       </p>
 
       <div className="gateway-route-path">
@@ -334,7 +381,7 @@ export function GatewayRouteDialog({
       <footer className="gateway-dialog-actions">
         <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
         <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || (requireGateway && route.length === 0)}>
-          {saving ? (hostSetup ? "Connecting…" : "Saving…") : (hostSetup ? "Connect" : "Done")}
+          {saving ? (hostSetup ? "Connecting…" : "Saving…") : (submitLabel ?? (hostSetup ? "Connect" : "Done"))}
         </button>
       </footer>
     </QuickInputFrame>

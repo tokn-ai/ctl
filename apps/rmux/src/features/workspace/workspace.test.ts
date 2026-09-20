@@ -56,7 +56,12 @@ describe("workspace model", () => {
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
     expect(workspaceDocument(view)).toEqual({
       ...snapshot.document,
-      schema_version: 6,
+      schema_version: 7,
+      hosts: [
+        { host_id: "local", name: "Local", connection_methods: [], preferred_method_id: null },
+        { host_id: "remote", name: "test", connection_methods: [{ method_id: "default", name: "SSH", target: { kind: "ssh", destination: "test" } }], preferred_method_id: "default" },
+        { host_id: "unused", name: "unused", connection_methods: [{ method_id: "default", name: "SSH", target: { kind: "ssh", destination: "unused" } }], preferred_method_id: "default" },
+      ],
       ssh_gateways: [],
       port_forwards: [],
       task_definition_scope: { kind: "global" },
@@ -117,7 +122,9 @@ describe("workspace model", () => {
       name: "Edge",
       destination: "edge.example",
     }];
-    const remote = document.hosts[1].target;
+    const host = document.hosts[1];
+    if (!("target" in host)) throw new Error("Expected legacy host");
+    const remote = host.target;
     if (remote.kind !== "ssh") throw new Error("Expected SSH target");
     remote.gateway_route = [{ gateway_id: "edge", mode: "native_only" }];
 
@@ -131,8 +138,8 @@ describe("workspace model", () => {
       }],
     });
     const persisted = workspaceDocument(view);
-    expect(persisted.hosts[1].target).not.toHaveProperty("gateways");
-    expect(persisted.hosts[1].target).toHaveProperty("gateway_route", [
+    expect(persisted.hosts[1].connection_methods[0].target).not.toHaveProperty("gateways");
+    expect(persisted.hosts[1].connection_methods[0].target).toHaveProperty("gateway_route", [
       { gateway_id: "edge", mode: "native_only" },
     ]);
   });

@@ -41,7 +41,7 @@ export function QuickInputFrame({
           if (event.key === "Tab") {
             const elements = [
               ...event.currentTarget.querySelectorAll<HTMLElement>(
-                'input:not(:disabled), button:not(:disabled):not([tabindex="-1"])',
+                'input:not(:disabled):not([tabindex="-1"]), button:not(:disabled):not([tabindex="-1"]), select:not(:disabled):not([tabindex="-1"]), textarea:not(:disabled):not([tabindex="-1"])',
               ),
             ];
             if (!elements.length) {

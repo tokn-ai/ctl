@@ -3,7 +3,7 @@ import { StrictMode } from "react";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "./useWorkspace";
-import { emptyWorkspaceView, workspaceDocument } from "./workspaceModel";
+import { emptyWorkspaceView, updateHostSettings, workspaceDocument } from "./workspaceModel";
 import type { WorkspaceDocument, WorkspaceSnapshot } from "../../lib/types";
 
 const api = vi.hoisted(() => ({
@@ -153,6 +153,59 @@ describe("workspace lifecycle", () => {
     });
     await waitFor(() => expect(result.current.error).toBe("disk full"));
     expect(result.current.sessions).toEqual([]);
+  });
+
+  it("publishes host settings only after saving and retains observations made during the write", async () => {
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    let finish!: (snapshot: WorkspaceSnapshot) => void;
+    api.updateWorkspace.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const host = { ...result.current.hosts[1], name: "Build machine" };
+    let saved!: Promise<void>;
+    act(() => { saved = result.current.replaceView((current) => updateHostSettings(current, host)); });
+    await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
+    expect(result.current.hosts[1].name).toBe("server");
+    act(() => {
+      result.current.update("sidebar_view", "ports");
+      result.current.setSessions((sessions) => sessions.map((session) => ({ ...session, name: "observed shell", status: "running" })));
+    });
+    expect(api.updateWorkspace).toHaveBeenCalledOnce();
+    await act(async () => {
+      finish({ revision: "host-saved", document: api.updateWorkspace.mock.calls[0][1] });
+      await saved;
+      await result.current.persist();
+    });
+    expect(result.current.hosts[1].name).toBe("Build machine");
+    expect(result.current.sidebar_view).toBe("ports");
+    expect(result.current.sessions[0]).toMatchObject({ name: "observed shell", status: "running" });
+    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1];
+    expect(document.hosts[1].name).toBe("Build machine");
+    expect(document.sidebar_view).toBe("ports");
+    expect(document.sessions[0].name).toBe("observed shell");
+  });
+
+  it("keeps failed host edits out of autosaves and retries the same staged change", async () => {
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    let fail!: (reason: Error) => void;
+    api.updateWorkspace.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const host = { ...result.current.hosts[1], name: "Build machine" };
+    let saved!: Promise<void>;
+    act(() => { saved = result.current.replaceView((current) => updateHostSettings(current, host)); });
+    const rejected = saved.catch((error: Error) => error.message);
+    await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledOnce());
+    act(() => result.current.update("sidebar_view", "tasks"));
+    await act(async () => {
+      fail(new Error("disk full"));
+      expect(await rejected).toBe("disk full");
+      await result.current.persist();
+    });
+    expect(result.current.hosts[1].name).toBe("server");
+    expect(result.current.sidebar_view).toBe("tasks");
+    expect(api.updateWorkspace.mock.calls.slice(-1)[0][1].hosts[1].name).toBe("server");
+    await act(async () => result.current.replaceView((current) => updateHostSettings(current, host)));
+    expect(result.current.hosts[1].name).toBe("Build machine");
+    expect(result.current.hosts).toHaveLength(2);
   });
 
   it("waits for pending writes before destroying the window and freezes later changes", async () => {

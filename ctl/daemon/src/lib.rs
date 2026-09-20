@@ -2,10 +2,10 @@
 
 #[cfg(target_os = "macos")]
 mod keychain;
+mod port_forwarding;
 
 use ctld_ipc::{
-  ClientMessage, LocalPortForward, PortForwardState, PortForwardStatus, PromptKind, ServerMessage,
-  SshGateway, SshGatewayMode, SshTarget,
+  ClientMessage, LocalPortForward, PromptKind, ServerMessage, SshGateway, SshGatewayMode, SshTarget,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -23,6 +23,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 use zeroize::Zeroizing;
+
+use port_forwarding::{ForwardRegistry, SshForwardControl};
 
 const SSH_PROGRAM: &str = "ssh";
 const MASTER_IDLE_SECONDS: u64 = 300;
@@ -42,7 +44,7 @@ const REMOTE_LISTENERS_COMMAND: &str = concat!(
 struct State {
   attempts: Mutex<HashMap<String, Attempt>>,
   target_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-  forwards: AsyncMutex<HashMap<String, HashMap<String, PortForwardStatus>>>,
+  forwards: AsyncMutex<ForwardRegistry>,
 }
 
 struct Attempt {
@@ -294,13 +296,11 @@ async fn ensure_master(
   };
   let _target_guard = target_lock.lock().await;
   let control_path = control_path(&target);
-  if control_master_is_ready(&target, &control_path).await {
+  if reuse_master_or_prepare(&state, &target, &control_path).await? {
     return ctld_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path })
       .await
       .map_err(Into::into);
   }
-  prepare_control_path(&control_path)?;
-
   let token = uuid::Uuid::new_v4().to_string();
   let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
   state
@@ -337,7 +337,9 @@ async fn ensure_master(
       handle_save_offer(stream, &target, &mut captured).await?;
       #[cfg(not(target_os = "macos"))]
       captured.clear();
-      activate_configured_forwards(&state, &target, &control_path).await;
+      let mut forwards = state.forwards.lock().await;
+      forwards.activate(&SshForwardControl, &target).await;
+      drop(forwards);
       ctld_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path }).await?;
       return Ok(());
     }
@@ -380,6 +382,23 @@ async fn ensure_master(
       () = sleep(MASTER_POLL_INTERVAL) => {}
     }
   }
+}
+
+async fn reuse_master_or_prepare(
+  state: &State,
+  target: &SshTarget,
+  control_path: &Path,
+) -> Result<bool, RequestError> {
+  // The caller holds the target lock. Coordinate socket replacement with
+  // listener tracking: configure may create a forward after the new master
+  // is ready but before the credential save offer finishes.
+  let mut forwards = state.forwards.lock().await;
+  if control_master_is_ready(target, control_path).await {
+    return Ok(true);
+  }
+  prepare_control_path(control_path)?;
+  forwards.master_replaced(target);
+  Ok(false)
 }
 
 impl RequestError {
@@ -625,88 +644,14 @@ async fn configure_port_forward(
 ) -> Result<(), RequestError> {
   validate_target(&target)?;
   validate_forward(&forward)?;
-  let target_lock = {
-    let mut locks = state.target_locks.lock().unwrap();
-    Arc::clone(
-      locks
-        .entry(target_key(&target))
-        .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-    )
-  };
-  let _target_guard = target_lock.lock().await;
-  let control_path = control_path(&target);
-  let existing = state
+  // No target lock here: ensure_master holds its target lock before activating
+  // forwards. The registry lock serializes all listener ownership changes.
+  let status = state
     .forwards
     .lock()
     .await
-    .get(&target_key(&target))
-    .and_then(|forwards| forwards.get(&forward.forward_id))
-    .cloned();
-
-  if !enabled {
-    if let Some(existing) = existing
-      && existing.state == PortForwardState::Active
-      && control_master_is_ready(&target, &control_path).await
-    {
-      run_forward_command(&target, &control_path, &existing.forward, true).await?;
-    }
-    let mut forwards = state.forwards.lock().await;
-    if let Some(items) = forwards.get_mut(&target_key(&target)) {
-      items.remove(&forward.forward_id);
-      if items.is_empty() {
-        forwards.remove(&target_key(&target));
-      }
-    }
-    let status = PortForwardStatus {
-      forward,
-      state: PortForwardState::WaitingForAuthentication,
-      message: None,
-    };
-    ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
-    return Ok(());
-  }
-
-  if let Some(existing) = &existing
-    && existing.forward == forward
-    && existing.state == PortForwardState::Active
-    && control_master_is_ready(&target, &control_path).await
-  {
-    ctld_ipc::write_frame(
-      stream,
-      &ServerMessage::PortForwardConfigured {
-        status: existing.clone(),
-      },
-    )
+    .configure(&SshForwardControl, target, forward, enabled)
     .await?;
-    return Ok(());
-  }
-
-  if let Some(existing) = existing
-    && existing.forward != forward
-    && existing.state == PortForwardState::Active
-    && control_master_is_ready(&target, &control_path).await
-  {
-    run_forward_command(&target, &control_path, &existing.forward, true).await?;
-  }
-  let status = if control_master_is_ready(&target, &control_path).await {
-    forward_status(
-      forward.clone(),
-      run_forward_command(&target, &control_path, &forward, false).await,
-    )
-  } else {
-    PortForwardStatus {
-      forward: forward.clone(),
-      state: PortForwardState::WaitingForAuthentication,
-      message: Some("Connect this host to activate the forward.".into()),
-    }
-  };
-  state
-    .forwards
-    .lock()
-    .await
-    .entry(target_key(&target))
-    .or_default()
-    .insert(forward.forward_id.clone(), status.clone());
   ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
   Ok(())
 }
@@ -717,20 +662,12 @@ async fn list_port_forwards(
   target: &SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
-  let ready = control_master_is_ready(target, &control_path(target)).await;
-  let mut forwards = state.forwards.lock().await;
-  let mut items = forwards.get_mut(&target_key(target));
-  if !ready && let Some(items) = items.as_deref_mut() {
-    for status in items.values_mut() {
-      status.state = PortForwardState::WaitingForAuthentication;
-      status.message = Some("Connect this host to activate the forward.".into());
-    }
-  }
-  let mut statuses: Vec<_> = items
-    .map(|items| items.values().cloned().collect())
-    .unwrap_or_default();
-  drop(forwards);
-  statuses.sort_by(|left, right| left.forward.forward_id.cmp(&right.forward.forward_id));
+  let statuses = state
+    .forwards
+    .lock()
+    .await
+    .list(&SshForwardControl, target)
+    .await;
   ctld_ipc::write_frame(stream, &ServerMessage::PortForwards { statuses }).await?;
   Ok(())
 }
@@ -886,48 +823,6 @@ fn validate_listener_catalog(catalog: &ctl_proto::TcpListenerCatalog) -> Result<
     ));
   }
   Ok(())
-}
-
-async fn activate_configured_forwards(state: &State, target: &SshTarget, control_path: &Path) {
-  let configured: Vec<_> = state
-    .forwards
-    .lock()
-    .await
-    .get(&target_key(target))
-    .map(|items| {
-      items
-        .values()
-        .map(|status| status.forward.clone())
-        .collect()
-    })
-    .unwrap_or_default();
-  for forward in configured {
-    let status = forward_status(
-      forward.clone(),
-      run_forward_command(target, control_path, &forward, false).await,
-    );
-    if let Some(items) = state.forwards.lock().await.get_mut(&target_key(target)) {
-      items.insert(forward.forward_id.clone(), status);
-    }
-  }
-}
-
-fn forward_status(
-  forward: LocalPortForward,
-  result: Result<(), RequestError>,
-) -> PortForwardStatus {
-  match result {
-    Ok(()) => PortForwardStatus {
-      forward,
-      state: PortForwardState::Active,
-      message: None,
-    },
-    Err(error) => PortForwardStatus {
-      forward,
-      state: PortForwardState::Error,
-      message: Some(error.to_string()),
-    },
-  }
 }
 
 async fn run_forward_command(

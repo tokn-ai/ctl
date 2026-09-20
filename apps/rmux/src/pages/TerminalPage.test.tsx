@@ -20,8 +20,9 @@ import type {
   TaskDefinition,
   TaskDefinitionScope,
   SavedTaskDefinition,
+  WorkspacePortForward,
 } from "../lib/types";
-import { restoreWorkspace } from "../features/workspace/workspaceModel";
+import { restoreWorkspace, workspaceDocument } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
 import { detectShortcutPlatform } from "../features/commands/keybindings";
 import { COMMAND_IDS } from "../features/commands/terminalCommands";
@@ -59,6 +60,8 @@ const api = vi.hoisted(() => ({
   forgetSshCredentials: vi.fn(),
   probeSshHost: vi.fn(),
   cancelSshProbe: vi.fn(),
+  configurePortForward: vi.fn(),
+  listPortForwards: vi.fn(),
   loadKeybindings: vi.fn(),
   saveKeybindings: vi.fn(),
   syncCommandMenu: vi.fn(),
@@ -167,6 +170,10 @@ beforeEach(() => {
   api.forgetSshCredentials.mockResolvedValue(undefined);
   api.probeSshHost.mockResolvedValue(remoteInfo);
   api.cancelSshProbe.mockResolvedValue(undefined);
+  api.listPortForwards.mockResolvedValue([]);
+  api.configurePortForward.mockImplementation(async (_target: ConnectionTarget, forward: WorkspacePortForward) => ({
+    forward, state: "active", message: null,
+  }));
   api.inspectKnownSessions.mockResolvedValue([]);
   api.killSession.mockResolvedValue(undefined);
   attachment.connect.mockResolvedValue(undefined);
@@ -716,7 +723,7 @@ describe("workspace-backed terminal page", () => {
     nativeCommand(COMMAND_IDS.close);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
-      target: { kind: "ssh", destination: "test", host_id: "test-id" },
+      target: { kind: "ssh", destination: "test", host_id: "test-id", host_name: "test", method_id: "default" },
       session_id: "known-id",
     });
     await act(async () => finishKill());
@@ -743,7 +750,7 @@ describe("workspace-backed terminal page", () => {
       expect(screen.queryByRole("button", { name: "Terminate other" })).toBeNull(),
     );
     expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
-      target: { kind: "ssh", destination: "test", host_id: "test-id" },
+      target: { kind: "ssh", destination: "test", host_id: "test-id", host_name: "test", method_id: "default" },
       session_id: "other-id",
     });
     expect(
@@ -833,6 +840,8 @@ describe("workspace-backed terminal page", () => {
       kind: "ssh" as const,
       destination: "test",
       host_id: "test-id",
+      host_name: "test",
+      method_id: "default",
     };
     const created = newSession(target);
     api.createSession.mockResolvedValue(created);
@@ -920,9 +929,60 @@ describe("workspace-backed terminal page", () => {
     expect(api.killSession).not.toHaveBeenCalled();
   });
 
-  it("recovers the existing host and tab through a different configured address", async () => {
+  it("adds a named host with a separate method name without merging another host at the same remote environment", async () => {
     const saved = snapshot();
-    saved.document.hosts[1].target = { kind: "ssh", destination: "test", remote_info: remoteInfo };
+    saved.document.hosts[1] = {
+      host_id: "test-id",
+      target: { kind: "ssh", destination: "test", remote_info: remoteInfo },
+    };
+    api.loadWorkspace.mockResolvedValue(saved);
+    api.listSshConfigHosts.mockResolvedValue({ hosts: [{ destination: "test" }], warnings: [] });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.change(screen.getByLabelText("Host name"), {
+      target: { value: "Build server at home" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect((screen.getByLabelText("Method name") as HTMLInputElement).value).toBe("SSH");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("SSH host or config alias"), {
+      target: { value: "test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and save" }));
+    await screen.findByRole("dialog", { name: "Host settings · Build server at home" });
+
+    const persisted = api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument;
+    const host = persisted.hosts[3];
+    if (!("connection_methods" in host)) throw new Error("Expected new host");
+    expect(persisted.hosts).toHaveLength(4);
+    expect(host).toMatchObject({ name: "Build server at home", remote_info: remoteInfo });
+    expect(host.host_id).not.toBe("test-id");
+    expect(host.connection_methods).toEqual([{
+      method_id: expect.any(String), name: "SSH", target: { kind: "ssh", destination: "test" },
+    }]);
+    expect(host.preferred_method_id).toBe(host.connection_methods[0].method_id);
+    expect(persisted.hosts[1]).toEqual({
+      host_id: "test-id", name: "test", remote_info: remoteInfo, preferred_method_id: "default",
+      connection_methods: [{ method_id: "default", name: "SSH", target: { kind: "ssh", destination: "test" } }],
+    });
+    expect(persisted.sessions).toEqual(saved.document.sessions);
+    expect(persisted.active_tab).toEqual({ kind: "session", host_id: "test-id", session_id: "known-id" });
+    expect(api.probeSshHost).toHaveBeenCalledOnce();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(attachment.detach).not.toHaveBeenCalled();
+  });
+
+  it("adds a connection without touching the active session, then explicitly switches through the saved method", async () => {
+    const saved = snapshot();
+    saved.document.hosts[1] = {
+      host_id: "test-id",
+      target: { kind: "ssh", destination: "test", remote_info: remoteInfo },
+    };
+    saved.document.port_forwards = [{
+      host_id: "test-id", forward_id: "web", name: "Web", enabled: true,
+      bind_address: "127.0.0.1", local_port: 8080, remote_host: "127.0.0.1", remote_port: 80,
+    }];
     api.loadWorkspace.mockResolvedValue(saved);
     const known = restoreWorkspace(saved.document).sessions[0];
     api.inspectKnownSessions.mockImplementation(async (target: ConnectionTarget) => [{
@@ -930,26 +990,191 @@ describe("workspace-backed terminal page", () => {
       session: { ...known, target, status: "running", next_sequence: "42" },
       shell_state: null, error: null,
     }]);
-    api.inspectKnownSessions.mockRejectedValueOnce(new Error("Old address unavailable"));
     Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "Add host" });
-    fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
-    await screen.findByText("Old address unavailable");
-    api.inspectKnownSessions.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "Add host" }));
-    fireEvent.click(await screen.findByRole("option", { name: /only-in-ssh-config/ }));
+    await screen.findByRole("button", { name: "Host settings for test" });
+    await waitFor(() => expect(api.listPortForwards).toHaveBeenCalledOnce());
+    api.configurePortForward.mockClear();
+    api.listPortForwards.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Host settings for test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
+    fireEvent.change(screen.getByLabelText("Method name"), { target: { value: "VPN" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("SSH host or config alias"), {
+      target: { value: "only-in-ssh-config" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and save" }));
+    const settings = await screen.findByRole("dialog", { name: "Host settings · test" });
+    expect(api.probeSshHost).toHaveBeenCalledOnce();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(attachment.detach).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(api.configurePortForward).not.toHaveBeenCalled();
+
+    const persisted = api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument;
+    const host = persisted.hosts[1];
+    if (!("connection_methods" in host)) throw new Error("Expected migrated host");
+    expect(persisted.hosts).toHaveLength(3);
+    expect(host).toMatchObject({ host_id: "test-id", name: "test", preferred_method_id: "default", remote_info: remoteInfo });
+    expect(host.connection_methods).toEqual([
+      { method_id: "default", name: "SSH", target: { kind: "ssh", destination: "test" } },
+      { method_id: expect.any(String), name: "VPN", target: { kind: "ssh", destination: "only-in-ssh-config" } },
+    ]);
+    expect(persisted.sessions).toEqual(saved.document.sessions);
+    expect(persisted.active_tab).toEqual({ kind: "session", host_id: "test-id", session_id: "known-id" });
+    expect(persisted.port_forwards).toEqual(saved.document.port_forwards);
+
+    fireEvent.click(within(within(settings).getByRole("region", { name: "VPN" })).getByRole("button", { name: "Connect using" }));
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
     await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
-    const expected = { kind: "ssh", host_id: "test-id", destination: "only-in-ssh-config", remote_info: remoteInfo };
-    expect(attachment.connect.mock.calls[0][0].target).toEqual(expected);
+    const expected = {
+      kind: "ssh", host_id: "test-id", host_name: "test", method_id: host.connection_methods[1].method_id,
+      destination: "only-in-ssh-config", remote_info: remoteInfo,
+    };
+    expect(attachment.connect.mock.calls[0][0]).toMatchObject({ target: expected, session_id: "known-id" });
     expect(api.inspectKnownSessions).toHaveBeenCalledExactlyOnceWith(expected, ["known-id"]);
-    const document = api.updateWorkspace.mock.calls[api.updateWorkspace.mock.calls.length - 1][1] as WorkspaceDocument;
+    expect(api.configurePortForward.mock.calls).toEqual([
+      [expected, saved.document.port_forwards[0], true],
+    ]);
+    expect(api.listPortForwards).toHaveBeenCalledExactlyOnceWith(expected);
+    const reloaded = restoreWorkspace(api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument);
+    expect(reloaded.hosts[1].preferred_method_id).toBe("default");
+    expect(reloaded.sessions[0].session_id).toBe("known-id");
+  });
+
+  it("retries a failed new-host save without adding duplicate hosts", async () => {
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Build machine" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("SSH host or config alias"), { target: { value: "build.example" } });
+    api.updateWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify and save" }));
+    await screen.findByRole("dialog", { name: "Could not connect" });
+    expect(screen.queryByRole("button", { name: "Host settings for Build machine" })).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await screen.findByRole("dialog", { name: "Host settings · Build machine" });
+    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    expect(document.hosts).toHaveLength(4);
+    const added = document.hosts.filter((host) => "name" in host && host.name === "Build machine");
+    expect(added).toHaveLength(1);
+    expect(api.probeSshHost).toHaveBeenCalledTimes(2);
+    expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed method save without retaining the failed method in workspace state", async () => {
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
+    fireEvent.change(screen.getByLabelText("Method name"), { target: { value: "VPN" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("SSH host or config alias"), { target: { value: "vpn.example" } });
+    api.updateWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify and save" }));
+    await screen.findByRole("dialog", { name: "Could not connect" });
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await screen.findByRole("dialog", { name: "Host settings · test" });
+    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    const host = document.hosts[1];
+    if (!("connection_methods" in host)) throw new Error("Expected migrated host");
     expect(document.hosts).toHaveLength(3);
-    expect(document.hosts[1]).toEqual({ host_id: "test-id", target: { kind: "ssh", destination: "only-in-ssh-config", remote_info: remoteInfo } });
-    expect(document.sessions[0].host_id).toBe("test-id");
-    expect(document.active_tab).toEqual({ kind: "session", host_id: "test-id", session_id: "known-id" });
-    expect(screen.queryByText("Save host")).toBeNull();
-    expect(screen.queryByText("Old address unavailable")).toBeNull();
+    expect(host.connection_methods).toHaveLength(2);
+    expect(host.connection_methods.filter((method) => method.name === "VPN")).toHaveLength(1);
+    expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  it("keeps host settings draft retryable after a failed save", async () => {
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Build machine" } });
+    api.updateWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save changes" })).toHaveProperty("disabled", false));
+    expect(screen.getByRole("dialog", { name: "Host settings · test" })).toBeTruthy();
+    expect(screen.getByLabelText("Host name")).toHaveProperty("value", "Build machine");
+    expect(screen.getByRole("button", { name: "Host settings for test" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: "Host settings for Build machine" })).toBeTruthy();
+    expect(api.updateWorkspace.mock.calls.slice(-1)[0][1].hosts[1].name).toBe("Build machine");
+    expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  it("renames a host and changes its preference without reconnecting, then Connect uses that preference", async () => {
+    const saved = workspaceDocument(restoreWorkspace(snapshot().document));
+    saved.hosts[1].remote_info = remoteInfo;
+    saved.hosts[1].connection_methods.push({
+      method_id: "vpn", name: "VPN", target: { kind: "ssh", destination: "vpn.example" },
+    });
+    api.loadWorkspace.mockResolvedValue({ revision: "one", document: saved });
+    const known = restoreWorkspace(saved).sessions[0];
+    Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
+    api.inspectKnownSessions.mockImplementation(async (target: ConnectionTarget) => [{
+      session_id: known.session_id,
+      session: { ...known, target, status: "running" }, shell_state: null, error: null,
+    }]);
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Build server" } });
+    fireEvent.click(within(screen.getByRole("region", { name: "VPN" })).getByRole("button", { name: "Make preferred" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: "Host settings for Build server" })).toBeTruthy();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(attachment.detach).not.toHaveBeenCalled();
+    const persisted = api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument;
+    expect(persisted.hosts[1]).toMatchObject({ host_id: "test-id", name: "Build server", preferred_method_id: "vpn" });
+    expect(persisted.sessions).toEqual(saved.sessions);
+    expect(persisted.active_tab).toEqual(saved.active_tab);
+
+    fireEvent.click(screen.getByRole("button", { name: "Connect to Build server" }));
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
+    const expected = {
+      kind: "ssh", host_id: "test-id", host_name: "Build server", method_id: "vpn",
+      destination: "vpn.example", remote_info: remoteInfo,
+    };
+    expect(api.probeSshHost.mock.calls[0][0]).toEqual(expected);
+    expect(api.inspectKnownSessions).toHaveBeenCalledExactlyOnceWith(expected, ["known-id"]);
+    expect(attachment.connect.mock.calls[0][0]).toMatchObject({ target: expected, session_id: "known-id" });
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("removes only unshared host credentials (gateway route: %s)", async (routed) => {
+    const document = workspaceDocument(restoreWorkspace(snapshot().document));
+    document.hosts[2].connection_methods[0].target = { kind: "ssh", destination: "test", user: "another-account" };
+    if (routed) {
+      document.ssh_gateways = [
+        { gateway_id: "edge-a", name: "Edge A", destination: "edge.example", user: "deploy", port: 2222 },
+        { gateway_id: "edge-b", name: "Edge B", destination: "edge.example", user: "deploy", port: 2222 },
+      ];
+      document.hosts[1].connection_methods[0].target.gateway_route = [{ gateway_id: "edge-a", mode: "native_only" }];
+      document.hosts[2].connection_methods[0].target.gateway_route = [{ gateway_id: "edge-b", mode: "native_only" }];
+    }
+    document.hosts[1].connection_methods.push({
+      method_id: "private", name: "Private method", target: { kind: "ssh", destination: "private.example" },
+    });
+    api.loadWorkspace.mockResolvedValue({ revision: "one", document });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove test" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove test" })).toBeNull());
+    expect(api.forgetSshCredentials).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      host_id: "test-id", destination: "private.example", method_id: "private",
+    }));
+    expect(screen.getByRole("button", { name: "Remove unused" })).toBeTruthy();
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
+  it("deletes an unshared credential scope once when removing its only host", async () => {
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove test" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove test" })).toBeNull());
+    expect(api.forgetSshCredentials).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      host_id: "test-id", destination: "test",
+    }));
   });
 
   it("keeps a restored remote tab cold, then resumes it after connecting its host", async () => {
@@ -990,7 +1215,7 @@ describe("workspace-backed terminal page", () => {
       next_sequence: "42",
     });
     expect(api.inspectKnownSessions).toHaveBeenCalledExactlyOnceWith(
-      { kind: "ssh", destination: "test", host_id: "test-id", remote_info: remoteInfo },
+      { kind: "ssh", destination: "test", host_id: "test-id", host_name: "test", method_id: "default", remote_info: remoteInfo },
       ["known-id"],
     );
     expect(api.listSessions).not.toHaveBeenCalled();
@@ -1074,7 +1299,7 @@ describe("workspace-backed terminal page", () => {
       expect(api.inspectKnownSessions).toHaveBeenCalledTimes(1),
     );
     expect(api.inspectKnownSessions.mock.calls[0]).toEqual([
-      { kind: "ssh", destination: "test", host_id: "test-id" },
+      { kind: "ssh", destination: "test", host_id: "test-id", host_name: "test", method_id: "default" },
       ["known-id"],
     ]);
     await screen.findByText("missing", { exact: false });
@@ -1170,7 +1395,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Terminate session" }));
     await waitFor(() =>
       expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
-        target: { kind: "ssh", destination: "test", host_id: "test-id" },
+        target: { kind: "ssh", destination: "test", host_id: "test-id", host_name: "test", method_id: "default" },
         session_id: "known-id",
       }),
     );

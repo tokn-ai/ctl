@@ -52,6 +52,7 @@ interface TerminalCommandActions {
   focusTerminal(): void;
   requestDaemonRestart(): void;
   connectHost(target: ConnectionTarget): void;
+  configureHost(target: ConnectionTarget): void;
   removeHost(target: ConnectionTarget): void | Promise<void>;
   managePortForwards(target: ConnectionTarget): void;
   saveWorkspace(): void | Promise<void>;
@@ -160,8 +161,9 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.addHost,
       category: "Host",
-      title: "Add SSH Host",
-      keywords: ["remote", "ssh", "connect"],
+      title: "Add Host",
+      detail: "Name a machine, then add a connection method.",
+      keywords: ["remote", "ssh", "connect", "gateway", "route"],
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,
       run: actions.showAddHost,
@@ -170,6 +172,8 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.addRoutedHost,
       category: "Host",
       title: "Add SSH Host with Gateways",
+      // Existing keybindings still open the unified host setup flow.
+      visibleInPalette: false,
       keywords: ["remote", "ssh", "jump", "bastion", "gateway", "route"],
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,
@@ -393,6 +397,20 @@ export function buildTerminalCommands(
   ];
 
   commands.push(
+    {
+      id: COMMAND_IDS.configureHost,
+      category: "Host",
+      title: "Host Settings",
+      detail: "Rename this host and manage its connection methods.",
+      keywords: ["connection", "method", "preferred", "gateway", "rename"],
+      enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      isEnabled: (args) => targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: (args) => {
+        const target = targetFor(args);
+        if (target?.kind === "ssh") actions.configureHost(target);
+      },
+    },
     {
       id: COMMAND_IDS.selectSession,
       allow_concurrent: true,

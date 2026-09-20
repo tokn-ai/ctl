@@ -44,6 +44,9 @@ export interface SshConnectionTarget {
   kind: "ssh";
   /** App-owned identity; stripped at the native transport boundary. */
   host_id?: string;
+  /** Display-only host identity and selected connection method. */
+  host_name?: string;
+  method_id?: string;
   destination: string;
   hostname?: string;
   user?: string;
@@ -84,6 +87,20 @@ export type ConnectionTarget = { kind: "local" } | SshConnectionTarget;
 
 export interface WorkspaceHost {
   host_id: string;
+  name: string;
+  connection_methods: WorkspaceConnectionMethod[];
+  preferred_method_id: string | null;
+  remote_info?: RemoteIdentity;
+}
+
+export interface WorkspaceConnectionMethod {
+  method_id: string;
+  name: string;
+  target: SshConnectionTarget;
+}
+
+export interface LegacyWorkspaceHost {
+  host_id: string;
   target: ConnectionTarget;
 }
 
@@ -100,9 +117,9 @@ export interface WorkspaceSession extends SessionReference {
 }
 
 export interface WorkspaceDocument {
-  schema_version: 1 | 2 | 3 | 4 | 5 | 6;
+  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   workspace_id: string;
-  hosts: WorkspaceHost[];
+  hosts: (WorkspaceHost | LegacyWorkspaceHost)[];
   sessions: WorkspaceSession[];
   tabs: WorkspaceTab[];
   active_tab: WorkspaceTab | null;

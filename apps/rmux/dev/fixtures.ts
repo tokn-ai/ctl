@@ -7,18 +7,21 @@ import type {
   WorkspaceDocument,
   WorkspaceSidebarView,
 } from "../src/lib/types";
+import { hostFromTarget } from "../src/features/workspace/workspaceModel";
 
 export const previewTargets: ConnectionTarget[] = [
   { kind: "local" },
   {
     kind: "ssh",
     host_id: "preview-dev",
+    host_name: "Development server",
     destination: "dev-server",
     remote_info: { remote_id: "sample-dev", agent_version: "0.1.0" },
   },
   {
     kind: "ssh",
     host_id: "preview-staging",
+    host_name: "Staging server",
     destination: "staging",
     remote_info: { remote_id: "sample-staging", agent_version: "0.1.0" },
   },
@@ -97,14 +100,21 @@ export function previewWorkspace(view: WorkspaceSidebarView): WorkspaceDocument 
     session_id: session.session_id,
   }));
   return {
-    schema_version: 6,
+    schema_version: 7,
     ssh_gateways: [],
     workspace_id: "sample-workspace",
     sidebar_view: view,
-    hosts: previewTargets.map((target) => ({
-      host_id: target.kind === "local" ? "local" : target.host_id!,
-      target,
-    })),
+    hosts: previewTargets.map((target) => {
+      const host = hostFromTarget(target);
+      if (host.host_id === "preview-dev") {
+        host.connection_methods[0].name = "SSH config";
+        host.connection_methods.push({
+          method_id: "lan", name: "Office network",
+          target: { kind: "ssh", destination: "dev-lan", hostname: "192.0.2.10", user: "developer" },
+        });
+      }
+      return host;
+    }),
     sessions: previewSessions.map((session, index) => ({
       ...session_refs[index],
       name: session.name,

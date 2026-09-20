@@ -19,6 +19,7 @@ export const COMMAND_IDS = {
   restartTaskDaemon: "taskd.restart",
   selectSession: "session.select",
   connectHost: "host.connect",
+  configureHost: "host.settings",
   removeHost: "host.remove",
   managePortForwards: "host.port_forwarding",
   saveWorkspace: "workspace.save",

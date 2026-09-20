@@ -14,6 +14,8 @@ import type {
   WorkspaceSidebarView,
   WorkspaceSshGateway,
   SshConnectionTarget,
+  WorkspaceHost,
+  LegacyWorkspaceHost,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
 
@@ -26,6 +28,7 @@ export interface WorkspaceView {
   task_tabs: TaskTab[];
   tab_order: string[];
   targets: ConnectionTarget[];
+  hosts: WorkspaceHost[];
   sessions: SessionSummary[];
   tabs: SessionSummary[];
   active_tab_key: string | null;
@@ -44,6 +47,7 @@ export function emptyWorkspaceView(): WorkspaceView {
     task_tabs: [],
     tab_order: [],
     targets: [LOCAL_TARGET],
+    hosts: [hostFromTarget(LOCAL_TARGET)],
     sessions: [],
     tabs: [],
     active_tab_key: null,
@@ -58,6 +62,72 @@ export function withHostId(target: ConnectionTarget): ConnectionTarget {
   return { ...target, host_id: target.host_id ?? crypto.randomUUID() };
 }
 
+/** Keep transport details out of the host's stable identity. */
+export function connectionSettings(target: SshConnectionTarget): SshConnectionTarget {
+  return {
+    kind: "ssh",
+    destination: target.destination,
+    ...(target.hostname ? { hostname: target.hostname } : {}),
+    ...(target.user ? { user: target.user } : {}),
+    ...(target.port ? { port: target.port } : {}),
+    ...(target.identity_file ? { identity_file: target.identity_file } : {}),
+    ...(target.gateway_route?.length ? { gateway_route: target.gateway_route } : {}),
+  };
+}
+
+export function hostFromTarget(target: ConnectionTarget, name?: string): WorkspaceHost {
+  if (target.kind === "local") return {
+    host_id: "local", name: "Local", connection_methods: [], preferred_method_id: null,
+  };
+  return {
+    host_id: target.host_id ?? crypto.randomUUID(),
+    name: name ?? target.host_name ?? target.destination,
+    remote_info: target.remote_info,
+    connection_methods: [{ method_id: "default", name: "SSH", target: connectionSettings(target) }],
+    preferred_method_id: "default",
+  };
+}
+
+export function normalizeWorkspaceHost(host: WorkspaceHost | LegacyWorkspaceHost): WorkspaceHost {
+  return "target" in host
+    ? hostFromTarget(host.target.kind === "local" ? host.target : { ...host.target, host_id: host.host_id })
+    : host;
+}
+
+export function hostTarget(
+  host: WorkspaceHost,
+  gateways: readonly WorkspaceSshGateway[],
+  method_id = host.preferred_method_id,
+): ConnectionTarget {
+  if (host.host_id === "local") return LOCAL_TARGET;
+  const method = host.connection_methods.find((item) => item.method_id === method_id);
+  if (!method) throw new Error(`Choose a connection method for ${host.name}.`);
+  return resolveSshGateways({
+    ...connectionSettings(method.target),
+    host_id: host.host_id,
+    host_name: host.name,
+    method_id: method.method_id,
+    ...(host.remote_info ? { remote_info: host.remote_info } : {}),
+  }, gateways);
+}
+
+/** Editing metadata never changes the transport used by existing sessions. */
+export function updateHostSettings(view: WorkspaceView, host: WorkspaceHost): WorkspaceView {
+  if (!view.hosts.some((known) => known.host_id === host.host_id))
+    throw new Error("This host is no longer in the workspace.");
+  const rename = (target: ConnectionTarget): ConnectionTarget =>
+    target.kind === "ssh" && target.host_id === host.host_id
+      ? { ...target, host_name: host.name }
+      : target;
+  return {
+    ...view,
+    hosts: view.hosts.map((known) => known.host_id === host.host_id ? host : known),
+    targets: view.targets.map(rename),
+    sessions: view.sessions.map((session) => ({ ...session, target: rename(session.target) })),
+    tabs: view.tabs.map((session) => ({ ...session, target: rename(session.target) })),
+  };
+}
+
 export function resolveSshGateways(
   target: SshConnectionTarget,
   gateways: readonly WorkspaceSshGateway[],
@@ -66,9 +136,10 @@ export function resolveSshGateways(
     gateways.map((gateway) => [gateway.gateway_id, gateway]),
   );
   const { gateways: _current, ...persistedTarget } = target;
-  const resolved = (target.gateway_route ?? []).flatMap((step) => {
+  const resolved = (target.gateway_route ?? []).map((step) => {
     const gateway = byId.get(step.gateway_id);
-    return gateway ? [{ ...gateway, mode: step.mode }] : [];
+    if (!gateway) throw new Error("A gateway for this connection method is missing. Edit the method before connecting.");
+    return { ...gateway, mode: step.mode };
   });
   return resolved.length > 0
     ? { ...persistedTarget, gateways: resolved }
@@ -96,11 +167,8 @@ export function workspaceTabKey(reference: WorkspaceTab): string {
 
 export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
   const ssh_gateways = document.ssh_gateways ?? [];
-  const targets = document.hosts.map(({ host_id, target }) =>
-    target.kind === "local"
-      ? LOCAL_TARGET
-      : resolveSshGateways({ ...target, host_id }, ssh_gateways),
-  );
+  const hosts = document.hosts.map(normalizeWorkspaceHost);
+  const targets = hosts.map((host) => hostTarget(host, ssh_gateways));
   const targetsById = new Map(
     targets.map((target) => [
       target.kind === "local" ? "local" : target.host_id!,
@@ -141,6 +209,7 @@ export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
   );
   return {
     targets,
+    hosts,
     ssh_gateways,
     port_forwards: document.port_forwards ?? [],
     sessions,
@@ -179,7 +248,7 @@ export function restoreWorkspace(document: WorkspaceDocument): WorkspaceView {
 export function workspaceDocument(
   view: WorkspaceView,
   workspace_id = "default",
-): WorkspaceDocument {
+): WorkspaceDocument & { hosts: WorkspaceHost[] } {
   const hostKeys = new Set(view.targets.map(targetKey));
   const sessions = view.sessions.filter((session) =>
     hostKeys.has(targetKey(session.target)),
@@ -206,7 +275,7 @@ export function workspaceDocument(
     (tab) => workspaceTabKey(tab) === view.active_tab_key,
   );
   return {
-    schema_version: 6,
+    schema_version: 7,
     ssh_gateways: view.ssh_gateways,
     port_forwards: view.port_forwards.filter((forward) =>
       view.targets.some(
@@ -219,10 +288,14 @@ export function workspaceDocument(
     task_references: view.task_references,
     workspace_id,
     hosts: view.targets.map((target) => {
-      if (target.kind === "local")
-        return { host_id: "local", target: LOCAL_TARGET };
-      const { host_id, gateways: _gateways, ...connection } = target;
-      return { host_id: host_id!, target: connection };
+      const host_id = target.kind === "local" ? "local" : target.host_id;
+      const host = view.hosts.find((known) => known.host_id === host_id) ?? hostFromTarget(target);
+      return {
+        ...host,
+        connection_methods: host.connection_methods.map((method) => ({
+          ...method, target: connectionSettings(method.target),
+        })),
+      };
     }),
     sessions: sessions.map((session) => {
       const shell = view.shell_states.get(sessionKey(session));

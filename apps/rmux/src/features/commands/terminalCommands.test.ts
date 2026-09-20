@@ -62,6 +62,7 @@ function setup(
     focusTerminal: vi.fn(),
     requestDaemonRestart: vi.fn(),
     connectHost: vi.fn(),
+    configureHost: vi.fn(),
     removeHost: vi.fn(),
     managePortForwards: vi.fn(),
     saveWorkspace: vi.fn(),

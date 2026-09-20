@@ -2,7 +2,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::{UpdateWorkspaceRequest, WorkspaceSnapshot};
+use super::{UpdateWorkspaceRequest, WorkspaceConnectionMethod, WorkspaceHost, WorkspaceSnapshot};
+use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
 
 const MAX_WORKSPACE_BYTES: u64 = 4 * 1024 * 1024;
@@ -37,11 +38,11 @@ impl Repository {
   pub fn load(&self) -> CommandResult<WorkspaceSnapshot> {
     let _lock = self.lock()?;
     self.migrate_location()?;
-    self.migrate_definitions(self.read()?)
+    self.migrate_document(self.read()?)
   }
 
   pub fn update(&self, request: UpdateWorkspaceRequest) -> CommandResult<WorkspaceSnapshot> {
-    if request.document.schema_version != 6 {
+    if request.document.schema_version != 7 {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "Reload the workspace before saving with this app version.",
@@ -52,7 +53,7 @@ impl Repository {
     self.migrate_location()?;
     // Read and validate even when the caller expects an absent file. Never
     // replace an unreadable, corrupt, unsupported, or concurrently edited file.
-    let current = self.migrate_definitions(self.read()?)?;
+    let current = self.migrate_document(self.read()?)?;
     if current.revision != request.expected_revision {
       return Err(CommandErrorDto::new(
         "workspace_conflict",
@@ -109,11 +110,8 @@ impl Repository {
     Ok(())
   }
 
-  fn migrate_definitions(
-    &self,
-    mut snapshot: WorkspaceSnapshot,
-  ) -> CommandResult<WorkspaceSnapshot> {
-    if snapshot.document.schema_version == 6 {
+  fn migrate_document(&self, mut snapshot: WorkspaceSnapshot) -> CommandResult<WorkspaceSnapshot> {
+    if snapshot.document.schema_version == 7 {
       return Ok(snapshot);
     }
     if snapshot.document.schema_version == 2 {
@@ -140,14 +138,13 @@ impl Repository {
         }
       }
       snapshot.document.task_definitions.clear();
-    } else if snapshot.document.schema_version == 3 {
-      self.ensure_backup("workspace-v3.backup.json")?;
-    } else if snapshot.document.schema_version == 4 {
-      self.ensure_backup("workspace-v4.backup.json")?;
     } else {
-      self.ensure_backup("workspace-v5.backup.json")?;
+      self.ensure_backup(&format!(
+        "workspace-v{}.backup.json",
+        snapshot.document.schema_version
+      ))?;
     }
-    snapshot.document.schema_version = 6;
+    snapshot.document.schema_version = 7;
     snapshot.revision = Some(uuid::Uuid::new_v4().to_string());
     snapshot.document.validate()?;
     self.persist_snapshot(&snapshot)?;
@@ -280,6 +277,12 @@ fn decode_snapshot(bytes: &[u8]) -> CommandResult<(WorkspaceSnapshot, bool)> {
       tab.insert("kind".into(), "session".into());
     }
   }
+  if value["document"]["schema_version"]
+    .as_u64()
+    .is_some_and(|version| (2..=6).contains(&version))
+  {
+    normalize_legacy_hosts(&mut value["document"]["hosts"])?;
+  }
   let snapshot: WorkspaceSnapshot =
     serde_json::from_value(value).map_err(CommandErrorDto::backend)?;
   snapshot.document.validate()?;
@@ -290,6 +293,53 @@ fn decode_snapshot(bytes: &[u8]) -> CommandResult<(WorkspaceSnapshot, bool)> {
     ));
   }
   Ok((snapshot, migrated_v1))
+}
+
+/// Convert only the old shape; already-normalized fixtures and documents retain
+/// all their fields and still pass through the current strict deserializer.
+fn normalize_legacy_hosts(hosts: &mut serde_json::Value) -> CommandResult<()> {
+  #[derive(serde::Deserialize)]
+  #[serde(deny_unknown_fields)]
+  struct LegacyHost {
+    host_id: String,
+    target: ConnectionTargetDto,
+  }
+
+  let Some(hosts) = hosts.as_array_mut() else {
+    return Ok(());
+  };
+  for host in hosts {
+    if host.get("target").is_none() {
+      continue;
+    }
+    let legacy: LegacyHost =
+      serde_json::from_value(host.clone()).map_err(CommandErrorDto::backend)?;
+    let mut migrated = WorkspaceHost {
+      host_id: legacy.host_id,
+      name: "Local".into(),
+      connection_methods: Vec::new(),
+      preferred_method_id: None,
+      remote_info: None,
+    };
+    let mut target = legacy.target;
+    if let ConnectionTargetDto::Ssh {
+      destination,
+      remote_info,
+      ..
+    } = &mut target
+    {
+      migrated.name.clone_from(destination);
+      migrated.remote_info = remote_info.take();
+      migrated.preferred_method_id = Some("default".into());
+      migrated.connection_methods.push(WorkspaceConnectionMethod {
+        method_id: "default".into(),
+        name: "SSH".into(),
+        target,
+      });
+    }
+    *host = serde_json::to_value(migrated).map_err(CommandErrorDto::backend)?;
+  }
+  Ok(())
 }
 
 struct TemporaryFile(PathBuf);

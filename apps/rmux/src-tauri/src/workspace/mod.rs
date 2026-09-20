@@ -1,5 +1,6 @@
 //! App-owned workspace metadata. Never connects to a daemon or stores runtime state.
 
+mod hosts;
 #[cfg(test)]
 mod location_tests;
 #[cfg(all(test, unix))]
@@ -15,7 +16,7 @@ use task_store::DefinitionScope;
 pub use task_store::SavedTaskDefinition;
 use tauri::Manager as _;
 
-use crate::dto::ConnectionTargetDto;
+pub use hosts::{WorkspaceConnectionMethod, WorkspaceHost};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,13 +36,6 @@ pub struct WorkspaceSshGateway {
   pub remote_info: Option<ctl_proto::RemoteIdentity>,
 }
 use crate::error::{CommandErrorDto, CommandResult};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceHost {
-  pub host_id: String,
-  pub target: ConnectionTargetDto,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,11 +177,14 @@ fn valid_workspace_text(text: &str) -> bool {
 impl Default for WorkspaceDocument {
   fn default() -> Self {
     Self {
-      schema_version: 6,
+      schema_version: 7,
       workspace_id: "default".into(),
       hosts: vec![WorkspaceHost {
         host_id: "local".into(),
-        target: ConnectionTargetDto::Local,
+        name: "Local".into(),
+        connection_methods: Vec::new(),
+        preferred_method_id: None,
+        remote_info: None,
       }],
       sessions: Vec::new(),
       task_definitions: Vec::new(),
@@ -243,51 +240,16 @@ impl WorkspaceDocument {
 
   fn validated_host_ids<'a>(&'a self, gateway_ids: &HashSet<&str>) -> Option<HashSet<&'a str>> {
     let mut hosts = HashSet::new();
-    let mut destinations = HashSet::new();
     for host in &self.hosts {
-      if !valid_workspace_text(&host.host_id) || !hosts.insert(host.host_id.as_str()) {
+      if !hosts.insert(host.host_id.as_str()) || !host.is_valid(gateway_ids) {
         return None;
-      }
-      match &host.target {
-        ConnectionTargetDto::Local if host.host_id == "local" => {}
-        ConnectionTargetDto::Ssh {
-          destination,
-          hostname,
-          user,
-          port,
-          identity_file,
-          remote_info,
-          gateway_route,
-          gateways,
-        } => {
-          let mut route_ids = HashSet::new();
-          if host.host_id == "local"
-            || remote_info.as_ref().is_some_and(|info| !info.is_valid())
-            || !valid_workspace_text(destination)
-            || !destinations.insert(destination)
-            || *port == Some(0)
-            || [hostname, user, identity_file]
-              .into_iter()
-              .flatten()
-              .any(|value| !valid_workspace_text(value))
-            || !gateways.is_empty()
-            || gateway_route.len() > 8
-            || gateway_route.iter().any(|step| {
-              !gateway_ids.contains(step.gateway_id.as_str())
-                || !route_ids.insert(step.gateway_id.as_str())
-            })
-          {
-            return None;
-          }
-        }
-        ConnectionTargetDto::Local => return None,
       }
     }
     hosts.contains("local").then_some(hosts)
   }
 
   fn validate(&self) -> CommandResult<()> {
-    if !matches!(self.schema_version, 2..=6) {
+    if !matches!(self.schema_version, 2..=7) {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "This workspace was written by another app version. Its file has not been changed.",

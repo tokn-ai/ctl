@@ -16,6 +16,7 @@ import {
   installRemoteAgent,
   probeSshHost,
   respondSshPrompt,
+  saveSshConfigHost,
 } from "../../lib/tauri";
 import type {
   ConnectionTarget,
@@ -35,26 +36,34 @@ interface SshHostFlowProps {
   target?: ConnectionTarget;
   updateRequired?: boolean;
   complex?: boolean;
+  /** Edit connection settings without entering the reconnect flow. */
+  initialTarget?: SshConnectionTarget;
+  expectedIdentity?: RemoteIdentity;
+  onSaveConnection?(
+    target: SshConnectionTarget,
+    gateways: WorkspaceSshGateway[],
+    remote_info: RemoteIdentity,
+  ): Promise<void>;
   gateways?: readonly WorkspaceSshGateway[];
   onSaveRoutedHost?(
     target: SshConnectionTarget,
     gateways: WorkspaceSshGateway[],
     remote_info: RemoteIdentity,
   ): Promise<void>;
-  onVerified(
+  onVerified?(
     target: ConnectionTarget,
     remote_info: RemoteIdentity,
   ): Promise<ConnectionTarget | null>;
-  onActivateHost(
+  onActivateHost?(
     destination: string,
     remote_info: RemoteIdentity,
   ): boolean | Promise<boolean>;
-  onSaveHost(
+  onSaveHost?(
     definition: SshHostDefinition,
     storage: SshHostStorage,
     remote_info: RemoteIdentity,
   ): Promise<void>;
-  onConnected(target: ConnectionTarget): void;
+  onConnected?(target: ConnectionTarget): void;
   onClose(): void;
 }
 
@@ -77,6 +86,9 @@ export function SshHostFlow({
   target,
   updateRequired = false,
   complex = false,
+  initialTarget,
+  expectedIdentity,
+  onSaveConnection,
   gateways = [],
   onSaveRoutedHost,
   onActivateHost,
@@ -85,13 +97,15 @@ export function SshHostFlow({
   onConnected,
   onClose,
 }: SshHostFlowProps) {
+  const editingConnection = Boolean(onSaveConnection);
   const [step, setStep] = useState<Step>(
-    updateRequired ? "update" : target ? "reconnect" : complex ? "route" : "host",
+    updateRequired ? "update" : target ? "reconnect" : complex || editingConnection ? "route" : "host",
   );
-  const identityFiles = useSshIdentityFiles(step === "identity");
-  const [address, setAddress] = useState("");
-  const [hostAlias, setHostAlias] = useState("");
-  const [hostIdentityFile, setHostIdentityFile] = useState("");
+  const identityFiles = useSshIdentityFiles(step === "identity" || (editingConnection && step === "route"));
+  const [address, setAddress] = useState(() => initialTarget ? targetAddress(initialTarget) : "");
+  const [hostAlias, setHostAlias] = useState(initialTarget?.hostname ? initialTarget.destination : "");
+  const [hostIdentityFile, setHostIdentityFile] = useState(initialTarget?.identity_file ?? "");
+  const [exportToSshConfig, setExportToSshConfig] = useState(false);
   const [definition, setDefinition] = useState<SshHostDefinition>({
     alias: "",
     hostname: "",
@@ -104,7 +118,7 @@ export function SshHostFlow({
   );
   const draftGatewaysRef = useRef(draftGateways);
   const originalGatewayIds = useRef(gateways.map((gateway) => gateway.gateway_id));
-  const [gatewayRoute, setGatewayRoute] = useState<SshGatewayRouteStep[]>([]);
+  const [gatewayRoute, setGatewayRoute] = useState<SshGatewayRouteStep[]>(initialTarget?.gateway_route ?? []);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
@@ -148,9 +162,14 @@ export function SshHostFlow({
   }
 
   async function connect(candidate: ConnectionTarget) {
+    if (candidate.kind === "ssh" && expectedIdentity) {
+      candidate = { ...candidate, remote_info: expectedIdentity };
+    }
     cancelAttempt();
     if (uncommittedTargetRef.current !== candidate) forgetUncommitted();
-    if (!target) uncommittedTargetRef.current = candidate;
+    // Methods may share credentials with another saved route. Only the legacy
+    // standalone-host flow owns credentials it can safely discard on cancel.
+    if (!target && !initialTarget && !onSaveConnection) uncommittedTargetRef.current = candidate;
     candidateRef.current = candidate;
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
@@ -165,9 +184,31 @@ export function SshHostFlow({
       });
       if (attemptRef.current !== attempt || closedRef.current) return;
       setPrompt(null);
+      if (expectedIdentity && expectedIdentity.remote_id !== remote_info.remote_id) {
+        throw new Error("This connection reaches a different remote environment. Choose a connection for this host and account.");
+      }
       identityRef.current = remote_info;
       setSaving(true);
-      const recovered = await onVerified(candidate, remote_info);
+      if (onSaveConnection && candidate.kind === "ssh") {
+        if (exportToSshConfig && !initialTarget && candidate.hostname &&
+          !candidate.gateway_route?.length && !suggestions.includes(candidate.destination)) {
+          await saveSshConfigHost({
+            alias: candidate.destination,
+            hostname: candidate.hostname,
+            user: candidate.user ?? null,
+            port: candidate.port ?? null,
+            identity_file: candidate.identity_file ?? null,
+          });
+          if (attemptRef.current !== attempt || closedRef.current) return;
+        }
+        await onSaveConnection(candidate, draftGatewaysRef.current, remote_info);
+        if (attemptRef.current !== attempt || closedRef.current) return;
+        uncommittedTargetRef.current = null;
+        attemptRef.current = null;
+        onClose();
+        return;
+      }
+      const recovered = await onVerified?.(candidate, remote_info);
       if (attemptRef.current !== attempt || closedRef.current) return;
       if (complex && !target && candidate.kind === "ssh") {
         if (!onSaveRoutedHost) throw new Error("Routed host saving is unavailable.");
@@ -177,10 +218,10 @@ export function SshHostFlow({
         onClose();
       } else if (recovered || target) {
         uncommittedTargetRef.current = null;
-        onConnected(recovered ?? target!);
+        onConnected?.(recovered ?? target!);
         onClose();
       } else if (configuredRef.current && candidate.kind === "ssh") {
-        if (!(await onActivateHost(candidate.destination, remote_info)))
+        if (!(await onActivateHost?.(candidate.destination, remote_info)))
           throw new Error("That SSH host is already active.");
         if (closedRef.current) return;
         uncommittedTargetRef.current = null;
@@ -249,13 +290,20 @@ export function SshHostFlow({
     if (identity_file && /[\x00-\x1f\x7f]/u.test(identity_file)) {
       throw new Error("Enter a valid identity-file path.");
     }
-    if (suggestions.includes(destination)) {
+    if (suggestions.includes(destination) ||
+      (initialTarget && !initialTarget.hostname && destination === initialTarget.destination)) {
       if (alias && alias !== destination) {
         throw new Error("A saved SSH config host must keep its existing alias.");
       }
       const target = configuredSshTarget(destination);
       if (!target) throw new Error("Enter a valid SSH config host.");
-      return { ...target, ...(identity_file ? { identity_file } : {}) };
+      return {
+        ...target,
+        ...(initialTarget && !initialTarget.hostname && destination === initialTarget.destination
+          ? { user: initialTarget.user, port: initialTarget.port }
+          : {}),
+        ...(identity_file ? { identity_file } : {}),
+      };
     }
     const parsed = parseHostAddress(destination);
     if (!parsed) {
@@ -296,6 +344,7 @@ export function SshHostFlow({
     setError(null);
     try {
       if (!identityRef.current) throw new Error("Connect to the host before saving it.");
+      if (!onSaveHost) throw new Error("Host saving is unavailable.");
       await onSaveHost(definition, storage, identityRef.current);
       uncommittedTargetRef.current = null;
       if (!closedRef.current) onClose();
@@ -321,6 +370,8 @@ export function SshHostFlow({
   if (step === "route") {
     return (
       <GatewayRouteDialog
+        title={editingConnection ? initialTarget ? "Edit connection method" : "Add connection method" : undefined}
+        submitLabel={editingConnection ? "Verify and save" : undefined}
         target={{ kind: "ssh", destination: address.trim() || "New host", gateway_route: gatewayRoute }}
         gateways={draftGateways}
         targets={[]}
@@ -330,13 +381,21 @@ export function SshHostFlow({
           identity_file: hostIdentityFile,
           suggestions,
           warning,
+          identity_files: editingConnection ? identityFiles.identity_files : undefined,
+          identity_loading: editingConnection && identityFiles.loading,
+          identity_warning: editingConnection ? identityFiles.warnings.join("\n") : undefined,
+          export_to_ssh_config: editingConnection && !initialTarget ? {
+            checked: exportToSshConfig,
+            allowed: !suggestions.includes(address.trim()) && !suggestions.includes(hostAlias.trim()),
+            onChange: setExportToSshConfig,
+          } : undefined,
           onAddressChange: setAddress,
           onAliasChange: setHostAlias,
           onIdentityFileChange: setHostIdentityFile,
         }}
         readonlyExisting
         readonlyGatewayIds={originalGatewayIds.current}
-        requireGateway
+        requireGateway={!editingConnection}
         closeLabel="Cancel"
         onSave={async (nextGateways, nextRoute) => {
           const candidate = routedHostCandidate();
@@ -498,7 +557,7 @@ export function SshHostFlow({
           ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
         ],
       };
-      if (!target) onBack = back(complex ? "route" : configuredRef.current ? "host" : "auth");
+      if (!target) onBack = back(complex || editingConnection ? "route" : configuredRef.current ? "host" : "auth");
       break;
     case "installing":
       title = "Installing remote components";
@@ -583,6 +642,12 @@ export function SshHostFlow({
       onBack={onBack}
     />
   );
+}
+
+function targetAddress(target: SshConnectionTarget): string {
+  if (!target.hostname) return target.destination;
+  const hostname = target.hostname.includes(":") ? `[${target.hostname}]` : target.hostname;
+  return `${target.user ? `${target.user}@` : ""}${hostname}${target.port ? `:${target.port}` : ""}`;
 }
 
 function promptTitle(prompt: SshPrompt): string {

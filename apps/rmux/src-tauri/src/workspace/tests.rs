@@ -4,7 +4,7 @@ use std::sync::{Arc, Barrier};
 
 use super::repository::Repository;
 use super::*;
-use crate::dto::SshGatewayModeDto;
+use crate::dto::{ConnectionTargetDto, SshGatewayModeDto};
 
 struct Fixture(PathBuf);
 
@@ -28,7 +28,14 @@ fn populated() -> WorkspaceDocument {
   let mut document = WorkspaceDocument::default();
   document.hosts.push(WorkspaceHost {
     host_id: "remote-id".into(),
-    target: ConnectionTargetDto::ssh("test"),
+    name: "test".into(),
+    connection_methods: vec![WorkspaceConnectionMethod {
+      method_id: "default".into(),
+      name: "SSH".into(),
+      target: ConnectionTargetDto::ssh("test"),
+    }],
+    preferred_method_id: Some("default".into()),
+    remote_info: None,
   });
   document.sessions.push(WorkspaceSession {
     host_id: "remote-id".into(),
@@ -249,7 +256,7 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
     .unwrap();
   assert_eq!(
     fixture.repository().load().unwrap().document.schema_version,
-    6
+    7
   );
 }
 
@@ -268,7 +275,7 @@ fn migrates_v3_workspace_to_current_schema() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 6);
+  assert_eq!(loaded.document.schema_version, 7);
   assert!(loaded.document.port_forwards.is_empty());
   assert_eq!(
     fs::read(fixture.0.join("workspace-v3.backup.json")).unwrap(),
@@ -301,7 +308,7 @@ fn migrates_v4_workspace_to_sidebar_schema() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 6);
+  assert_eq!(loaded.document.schema_version, 7);
   assert_eq!(loaded.document.sidebar_view, SidebarView::Sessions);
   assert_eq!(loaded.document.port_forwards.len(), 1);
   assert_eq!(
@@ -325,7 +332,7 @@ fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 6);
+  assert_eq!(loaded.document.schema_version, 7);
   assert!(loaded.document.ssh_gateways.is_empty());
   assert_eq!(
     fs::read(fixture.0.join("workspace-v5.backup.json")).unwrap(),
@@ -346,7 +353,9 @@ fn gateway_routes_require_unique_saved_gateway_references() {
     identity_file: None,
     remote_info: None,
   });
-  if let ConnectionTargetDto::Ssh { gateway_route, .. } = &mut document.hosts[1].target {
+  if let ConnectionTargetDto::Ssh { gateway_route, .. } =
+    &mut document.hosts[1].connection_methods[0].target
+  {
     gateway_route.push(crate::dto::SshGatewayRouteStepDto {
       gateway_id: "edge".into(),
       mode: SshGatewayModeDto::Automatic,
@@ -356,11 +365,15 @@ fn gateway_routes_require_unique_saved_gateway_references() {
   }
   assert!(document.validate().is_ok());
 
-  if let ConnectionTargetDto::Ssh { gateway_route, .. } = &mut document.hosts[1].target {
+  if let ConnectionTargetDto::Ssh { gateway_route, .. } =
+    &mut document.hosts[1].connection_methods[0].target
+  {
     gateway_route.push(gateway_route[0].clone());
   }
   assert!(document.validate().is_err());
-  if let ConnectionTargetDto::Ssh { gateway_route, .. } = &mut document.hosts[1].target {
+  if let ConnectionTargetDto::Ssh { gateway_route, .. } =
+    &mut document.hosts[1].connection_methods[0].target
+  {
     gateway_route.pop();
     gateway_route[0].gateway_id = "missing".into();
   }
@@ -464,7 +477,7 @@ fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() 
   // Simulate a crash after import but before the workspace migration commits.
   store.import_legacy(std::slice::from_ref(&saved)).unwrap();
   let snapshot = fixture.repository().load().unwrap();
-  assert_eq!(snapshot.document.schema_version, 6);
+  assert_eq!(snapshot.document.schema_version, 7);
   assert!(snapshot.document.task_definitions.is_empty());
   let definitions = store.load().unwrap().definitions;
   assert_eq!(definitions.len(), 1);
@@ -599,9 +612,7 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
     })),
   };
   let mut document = populated();
-  if let ConnectionTargetDto::Ssh { remote_info, .. } = &mut document.hosts[1].target {
-    *remote_info = Some(identity);
-  }
+  document.hosts[1].remote_info = Some(identity);
   let saved = fixture
     .repository()
     .update(UpdateWorkspaceRequest {
@@ -611,13 +622,7 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
     .unwrap();
   assert_eq!(fixture.repository().load().unwrap(), saved);
   let mut invalid = saved.document.clone();
-  if let ConnectionTargetDto::Ssh {
-    remote_info: Some(info),
-    ..
-  } = &mut invalid.hosts[1].target
-  {
-    info.remote_id = "bad-id".into();
-  }
+  invalid.hosts[1].remote_info.as_mut().unwrap().remote_id = "bad-id".into();
   assert!(
     fixture
       .repository()
@@ -628,4 +633,209 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
       .is_err()
   );
   assert_eq!(fixture.repository().load().unwrap(), saved);
+}
+
+#[test]
+fn named_hosts_and_methods_round_trip_without_rebinding_owned_references() {
+  let fixture = Fixture::new();
+  let mut document = populated();
+  let host = &mut document.hosts[1];
+  host.name = "Development machine".into();
+  let mut alternate = host.connection_methods[0].clone();
+  alternate.method_id = "vpn".into();
+  alternate.name = "Through the office VPN".into();
+  host.connection_methods.push(alternate);
+  host.preferred_method_id = Some("vpn".into());
+  // Addresses belong to methods and are not globally unique host identifiers.
+  let mut other = host.clone();
+  other.host_id = "another-machine".into();
+  document.hosts.push(other);
+  let saved = fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: None,
+      document: document.clone(),
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load().unwrap().document, document);
+  document.hosts[1].name = "Renamed machine".into();
+  document.hosts[1].preferred_method_id = Some("default".into());
+  let changed = fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: saved.revision,
+      document,
+    })
+    .unwrap();
+  assert_eq!(changed.document.sessions, saved.document.sessions);
+  assert_eq!(changed.document.tabs, saved.document.tabs);
+  assert_eq!(changed.document.active_tab, saved.document.active_tab);
+}
+
+#[test]
+fn host_methods_require_a_valid_preference_and_unique_ids() {
+  let mut document = populated();
+  document.hosts[1].preferred_method_id = None;
+  assert!(document.validate().is_err());
+  document.hosts[1].preferred_method_id = Some("missing".into());
+  assert!(document.validate().is_err());
+  document = populated();
+  let duplicate = document.hosts[1].connection_methods[0].clone();
+  document.hosts[1].connection_methods.push(duplicate);
+  assert!(document.validate().is_err());
+  document.hosts[1].connection_methods.clear();
+  assert!(document.validate().is_err());
+  document = populated();
+  document.hosts[1].connection_methods[0].target = ConnectionTargetDto::Local;
+  assert!(document.validate().is_err());
+  document = populated();
+  document.hosts[1].name = "bad\nname".into();
+  assert!(document.validate().is_err());
+  document = populated();
+  document.hosts[1].connection_methods[0].name = String::new();
+  assert!(document.validate().is_err());
+}
+
+#[test]
+fn local_host_cannot_have_methods_preferences_or_remote_identity() {
+  let mut document = populated();
+  let method = document.hosts[1].connection_methods[0].clone();
+  document.hosts[0].connection_methods.push(method);
+  assert!(document.validate().is_err());
+  document = populated();
+  document.hosts[0].preferred_method_id = Some("default".into());
+  assert!(document.validate().is_err());
+  document = populated();
+  document.hosts[0].remote_info = Some(test_remote_identity());
+  assert!(document.validate().is_err());
+}
+
+fn test_remote_identity() -> ctl_proto::RemoteIdentity {
+  ctl_proto::RemoteIdentity {
+    remote_id: uuid::Uuid::new_v4().to_string(),
+    agent_version: "0.1.0".into(),
+    bundle: None,
+  }
+}
+
+#[test]
+fn methods_cannot_override_the_hosts_verified_environment() {
+  let mut document = populated();
+  if let ConnectionTargetDto::Ssh { remote_info, .. } =
+    &mut document.hosts[1].connection_methods[0].target
+  {
+    *remote_info = Some(test_remote_identity());
+  }
+  assert!(document.validate().is_err());
+}
+
+fn legacy_host_document(schema_version: u32) -> serde_json::Value {
+  let mut value = serde_json::to_value(WorkspaceSnapshot {
+    revision: Some("before-host-methods".into()),
+    document: populated(),
+  })
+  .unwrap();
+  value["document"]["schema_version"] = schema_version.into();
+  value["document"]["hosts"] = serde_json::json!([
+    { "host_id": "local", "target": { "kind": "local" } },
+    { "host_id": "remote-id", "target": { "kind": "ssh", "destination": "test" } }
+  ]);
+  if schema_version == 1 {
+    for tab in value["document"]["tabs"].as_array_mut().unwrap() {
+      tab.as_object_mut().unwrap().remove("kind");
+    }
+    value["document"]["active_tab"]
+      .as_object_mut()
+      .unwrap()
+      .remove("kind");
+  }
+  value
+}
+
+#[test]
+fn all_legacy_host_schemas_migrate_without_changing_host_or_session_ids() {
+  for schema_version in 1..=6 {
+    let fixture = Fixture::new();
+    fs::create_dir_all(&fixture.0).unwrap();
+    let value = legacy_host_document(schema_version);
+    let original = serde_json::to_vec(&value).unwrap();
+    fs::write(fixture.0.join("workspace.json"), &original).unwrap();
+    let loaded = fixture.repository().load().unwrap();
+    assert_eq!(loaded.document, populated());
+    assert_ne!(loaded.revision.as_deref(), Some("before-host-methods"));
+    assert_eq!(
+      fs::read(
+        fixture
+          .0
+          .join(format!("workspace-v{schema_version}.backup.json"))
+      )
+      .unwrap(),
+      original
+    );
+    assert_eq!(fixture.repository().load().unwrap(), loaded);
+  }
+}
+
+#[test]
+fn v6_migration_preserves_identity_gateway_routes_and_port_ownership() {
+  let fixture = Fixture::new();
+  fs::create_dir_all(&fixture.0).unwrap();
+  let mut value = legacy_host_document(6);
+  let identity = test_remote_identity();
+  value["document"]["hosts"][1]["target"]["remote_info"] = serde_json::to_value(&identity).unwrap();
+  value["document"]["hosts"][1]["target"]["gateway_route"] = serde_json::json!([
+    { "gateway_id": "edge", "mode": "automatic" }
+  ]);
+  value["document"]["ssh_gateways"] = serde_json::json!([
+    { "gateway_id": "edge", "name": "Office gateway", "destination": "edge.example" }
+  ]);
+  value["document"]["port_forwards"] = serde_json::json!([{
+    "forward_id": "db", "host_id": "remote-id", "name": "Database",
+    "bind_address": "127.0.0.1", "local_port": 5432,
+    "remote_host": "127.0.0.1", "remote_port": 5432, "enabled": true
+  }]);
+  let original = serde_json::to_vec(&value).unwrap();
+  fs::write(fixture.0.join("workspace.json"), &original).unwrap();
+  let loaded = fixture.repository().load().unwrap();
+  let host = &loaded.document.hosts[1];
+  assert_eq!(host.remote_info.as_ref(), Some(&identity));
+  assert_eq!(host.preferred_method_id.as_deref(), Some("default"));
+  let ConnectionTargetDto::Ssh {
+    remote_info,
+    gateway_route,
+    ..
+  } = &host.connection_methods[0].target
+  else {
+    panic!("expected migrated SSH method");
+  };
+  assert!(remote_info.is_none());
+  assert_eq!(gateway_route[0].gateway_id, "edge");
+  assert_eq!(loaded.document.port_forwards[0].host_id, "remote-id");
+  assert_eq!(loaded.document.sessions, populated().sessions);
+  assert_eq!(loaded.document.tabs, populated().tabs);
+  assert_eq!(
+    fs::read(fixture.0.join("workspace-v6.backup.json")).unwrap(),
+    original
+  );
+}
+
+#[test]
+fn conflicting_v6_backup_preserves_the_original_document() {
+  let fixture = Fixture::new();
+  fs::create_dir_all(&fixture.0).unwrap();
+  let original = serde_json::to_vec(&legacy_host_document(6)).unwrap();
+  fs::write(fixture.0.join("workspace.json"), &original).unwrap();
+  fs::write(
+    fixture.0.join("workspace-v6.backup.json"),
+    b"other workspace",
+  )
+  .unwrap();
+  assert_eq!(
+    fixture.repository().load().unwrap_err().code,
+    "workspace_backup_conflict"
+  );
+  assert_eq!(
+    fs::read(fixture.0.join("workspace.json")).unwrap(),
+    original
+  );
 }

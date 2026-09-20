@@ -238,7 +238,7 @@ fn schema_migration_creates_its_backup_in_the_new_directory() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 6);
+  assert_eq!(loaded.document.schema_version, 7);
   assert_eq!(loaded.document.sessions, previous.document.sessions);
   assert_ne!(loaded.revision, previous.revision);
   assert_eq!(

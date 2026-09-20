@@ -10,7 +10,8 @@ use tokio::time::timeout;
 
 use super::repository::Repository;
 use super::{
-  SessionReference, UpdateWorkspaceRequest, WorkspaceDocument, WorkspaceHost, WorkspaceSession,
+  SessionReference, UpdateWorkspaceRequest, WorkspaceConnectionMethod, WorkspaceDocument,
+  WorkspaceHost, WorkspaceSession,
 };
 use crate::commands::inspection::{InspectKnownSessionsRequest, inspect_known_sessions};
 use crate::commands::{create_session, kill_session};
@@ -133,7 +134,14 @@ async fn create_phase(directory: &Path, target: &ConnectionTargetDto) -> Result<
   let mut document = WorkspaceDocument::default();
   document.hosts.push(WorkspaceHost {
     host_id: "remote".into(),
-    target: target.clone(),
+    name: "Workspace smoke test".into(),
+    connection_methods: vec![WorkspaceConnectionMethod {
+      method_id: "default".into(),
+      name: "SSH".into(),
+      target: target.clone(),
+    }],
+    preferred_method_id: Some("default".into()),
+    remote_info: None,
   });
   document.sessions.push(WorkspaceSession {
     host_id: "remote".into(),

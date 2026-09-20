@@ -38,7 +38,7 @@ interface SessionSidebarProps {
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
-  onAddRoutedHost?(): void;
+  onHostSettings?(target: ConnectionTarget): void;
   onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
   onPortForward?(target: ConnectionTarget): void;
@@ -113,7 +113,7 @@ export function SessionSidebar({
   onDisconnect,
   onRequestClose,
   onAddHost,
-  onAddRoutedHost,
+  onHostSettings,
   onConnectHost,
   onRemoveHost,
   onPortForward,
@@ -189,15 +189,6 @@ export function SessionSidebar({
           </div>
         </header>
 
-        <button
-          className="routed-host-add-button"
-          type="button"
-          onClick={onAddRoutedHost}
-          aria-label="Add host with gateways"
-          title="Add host with gateways"
-        >
-          <Icon name="plus" size={14} /> Add host with gateways
-        </button>
       </div>
 
       <div className="session-list">
@@ -295,6 +286,17 @@ export function SessionSidebar({
                 </button>
                 {target.kind === "ssh" ? (
                   <div className="host-group-actions">
+                    {onHostSettings ? (
+                      <button
+                        className="session-action"
+                        type="button"
+                        onClick={() => onHostSettings(target)}
+                        aria-label={`Host settings for ${targetLabel(target)}`}
+                        title={`Host settings for ${targetLabel(target)}`}
+                      >
+                        <Icon name="settings" size={14} />
+                      </button>
+                    ) : null}
                     <button
                       className="session-action"
                       type="button"

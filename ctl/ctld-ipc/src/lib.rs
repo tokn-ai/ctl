@@ -22,7 +22,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-pub const PROTOCOL_VERSION: u16 = 4;
+// Version 5 makes forward_id ownership independent of the SSH route. Clients
+// must not silently reconnect to a daemon with the former per-target registry.
+pub const PROTOCOL_VERSION: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

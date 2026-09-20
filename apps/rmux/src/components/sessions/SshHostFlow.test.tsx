@@ -11,6 +11,7 @@ import {
   listSshIdentityFiles,
   probeSshHost,
   respondSshPrompt,
+  saveSshConfigHost,
 } from "../../lib/tauri";
 import type { RemoteAgentInstallProgress, SshPrompt } from "../../lib/types";
 
@@ -23,6 +24,7 @@ vi.mock("../../lib/tauri", () => ({
   forgetSshCredentials: vi.fn(async () => undefined),
   installRemoteAgent: vi.fn(),
   listSshIdentityFiles: vi.fn(),
+  saveSshConfigHost: vi.fn(),
 }));
 afterEach(cleanup);
 beforeEach(() => {
@@ -65,6 +67,137 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("SSH host quick-input flow", () => {
+  it("verifies a direct connection method without recovering or reconnecting existing sessions", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const onVerified = vi.fn();
+    const onConnected = vi.fn();
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null} expectedIdentity={remoteInfo}
+      onSaveConnection={onSaveConnection} onVerified={onVerified} onConnected={onConnected} onClose={onClose} />);
+    expect(screen.getByRole("dialog", { name: "Add connection method" })).toBeTruthy();
+    await user.type(screen.getByLabelText("SSH host or config alias"), "deploy@10.0.0.8:2222");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining({
+      hostname: "10.0.0.8", user: "deploy", port: 2222, remote_info: remoteInfo,
+    }), expect.any(String), expect.any(Function));
+    expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({ hostname: "10.0.0.8" }), [], remoteInfo);
+    expect(onVerified).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("discovers identity suggestions for connection methods while retaining manual entry", async () => {
+    vi.mocked(listSshIdentityFiles).mockResolvedValue({
+      identity_files: [{ path: "/home/test/.ssh/deploy", display_path: "~/.ssh/deploy" }], warnings: [],
+    });
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null} onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByLabelText("Identity file (optional)").parentElement?.querySelector("option")?.value).toBe("/home/test/.ssh/deploy"));
+    await user.type(screen.getByLabelText("SSH host or config alias"), "deploy@10.0.0.8");
+    await user.type(screen.getByLabelText("Identity file (optional)"), "/custom/private-key");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({ identity_file: "/custom/private-key" }), [], remoteInfo));
+  });
+
+  it("exports a direct alias only when explicitly selected and after successful verification", async () => {
+    let finishProbe!: (value: typeof remoteInfo) => void;
+    vi.mocked(probeSshHost).mockImplementationOnce(() => new Promise((resolve) => { finishProbe = resolve; }));
+    vi.mocked(saveSshConfigHost).mockResolvedValue({ destination: "office-build" });
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null} onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText("SSH host or config alias"), "deploy@10.0.0.8:2222");
+    await user.type(screen.getByLabelText("SSH alias (optional)"), "office-build");
+    await user.click(screen.getByLabelText("Also save to OpenSSH config"));
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+    await act(async () => finishProbe(remoteInfo));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    expect(saveSshConfigHost).toHaveBeenCalledExactlyOnceWith({
+      alias: "office-build", hostname: "10.0.0.8", user: "deploy", port: 2222, identity_file: null,
+    });
+    expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({ destination: "office-build", hostname: "10.0.0.8" }), [], remoteInfo);
+  });
+
+  it("does not export an alias after the user adds a gateway to a direct method", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={["saved-alias"]} warning={null} onSaveConnection={onSaveConnection} onClose={vi.fn()}
+      gateways={[{ gateway_id: "edge", name: "Edge", destination: "edge.example" }]} />);
+    await user.type(screen.getByLabelText("SSH host or config alias"), "saved-alias");
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    await user.clear(screen.getByLabelText("SSH host or config alias"));
+    await user.type(screen.getByLabelText("SSH host or config alias"), "10.0.0.8");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("prepopulates connection editing and preserves its gateway route during verification", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null} expectedIdentity={remoteInfo}
+      initialTarget={{ kind: "ssh", destination: "build", hostname: "2001:db8::1", user: "deploy", port: 2222,
+        identity_file: "~/.ssh/deploy", gateway_route: [{ gateway_id: "edge", mode: "native_only" }] }}
+      gateways={[{ gateway_id: "edge", name: "Edge", destination: "edge.example" }]}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    expect(screen.getByRole("dialog", { name: "Edit connection method" })).toBeTruthy();
+    expect(screen.getByLabelText("SSH host or config alias")).toHaveProperty("value", "deploy@[2001:db8::1]:2222");
+    expect(screen.getByLabelText("SSH alias (optional)")).toHaveProperty("value", "build");
+    expect(screen.getByLabelText("Identity file (optional)")).toHaveProperty("value", "~/.ssh/deploy");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({
+      hostname: "2001:db8::1", destination: "build", user: "deploy", port: 2222,
+      gateway_route: [{ gateway_id: "edge", mode: "native_only" }],
+      gateways: [expect.objectContaining({ destination: "edge.example", mode: "native_only" })],
+    }), expect.any(Array), remoteInfo);
+  });
+
+  it("rejects methods that verify as another remote environment and preserves the draft", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue({ ...remoteInfo, remote_id: "different-environment" });
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null} expectedIdentity={remoteInfo}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText("SSH host or config alias"), "10.0.0.8");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    expect(await screen.findByText(/This connection reaches a different remote environment/)).toBeTruthy();
+    expect(onSaveConnection).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    expect(screen.getByLabelText("SSH host or config alias")).toHaveProperty("value", "10.0.0.8");
+  });
+
+  it("keeps existing method credentials after a failed edit is cancelled", async () => {
+    vi.mocked(probeSshHost).mockRejectedValue(new Error("Connection unavailable"));
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const { unmount } = render(<SshHostFlow suggestions={[]} warning={null} expectedIdentity={remoteInfo}
+      initialTarget={{ kind: "ssh", destination: "build-office", user: "deploy", port: 2222 }}
+      onSaveConnection={vi.fn()} onClose={onClose} />);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    expect(await screen.findByText("Connection unavailable")).toBeTruthy();
+    expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining({
+      destination: "build-office", user: "deploy", port: 2222,
+    }), expect.any(String), expect.any(Function));
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
+    unmount();
+    expect(forgetSshCredentials).not.toHaveBeenCalled();
+  });
+
   it("validates routed host details in the initial dialog before probing", async () => {
     const user = userEvent.setup();
     render(
@@ -117,7 +250,7 @@ describe("SSH host quick-input flow", () => {
     expect(screen.getByRole("dialog", { name: "Add host with gateways" })).toBeTruthy();
     expect(screen.queryByLabelText("SSH host")).toBeNull();
     await user.type(screen.getByLabelText("SSH host or config alias"), "rmux@127.0.0.1:2222");
-    await user.type(screen.getByLabelText("Name / SSH alias (optional)"), "rmux-test");
+    await user.type(screen.getByLabelText("SSH alias (optional)"), "rmux-test");
     await user.click(screen.getByRole("button", { name: "Add" }));
     await user.click(screen.getByRole("button", { name: "Connect" }));
 
@@ -196,7 +329,7 @@ describe("SSH host quick-input flow", () => {
     );
 
     await user.type(screen.getByLabelText("SSH host or config alias"), "rmux@127.0.0.1:2222");
-    await user.type(screen.getByLabelText("Name / SSH alias (optional)"), "rmux-test");
+    await user.type(screen.getByLabelText("SSH alias (optional)"), "rmux-test");
     expect((screen.getByRole("button", { name: "Connect" }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole("button", { name: "+ New gateway" }));
     await user.type(screen.getByLabelText("Name"), "Bastion");

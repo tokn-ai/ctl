@@ -19,6 +19,7 @@ import {
   emptyWorkspaceView,
   restoreWorkspace,
   withHostId,
+  hostFromTarget,
   workspaceDocument,
   workspaceTabKey,
   type WorkspaceView,
@@ -31,6 +32,7 @@ export function useWorkspace() {
   const workspaceIdRef = useRef("default");
   const [ready, setReady] = useState(false);
   const pendingWrites = useRef(0);
+  const writeQueue = useRef<Promise<void>>(Promise.resolve());
   const [saving, setSaving] = useState(false);
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
@@ -53,6 +55,7 @@ export function useWorkspace() {
             ...restored,
             targets: [...restored.targets, ...legacy.map(withHostId)],
           };
+          restored.hosts = restored.targets.map((target) => hostFromTarget(target));
           await writer.write(
             workspaceDocument(restored, snapshot.document.workspace_id),
           );
@@ -75,13 +78,14 @@ export function useWorkspace() {
     };
   }, []);
 
-  const persist = useCallback((retry = false): Promise<void> => {
+  const queueWrite = useCallback((write: (writer: WorkspaceWriter) => Promise<void>): Promise<void> => {
     const writer = writerRef.current;
     if (!writer) return Promise.reject(new Error("Workspace is not loaded."));
     pendingWrites.current += 1;
     setSaving(true);
-    return writer
-      .write(workspaceDocument(viewRef.current, workspaceIdRef.current), retry)
+    const operation = writeQueue.current
+      .catch(() => undefined)
+      .then(() => write(writer))
       .then(
         () => {
           if (mounted.current) setError(null);
@@ -95,14 +99,27 @@ export function useWorkspace() {
         pendingWrites.current -= 1;
         if (mounted.current && pendingWrites.current === 0) setSaving(false);
       });
+    writeQueue.current = operation;
+    return operation;
   }, []);
 
-  const replaceView = useCallback((next: WorkspaceView) => {
+  const persist = useCallback((retry = false): Promise<void> =>
+    queueWrite((writer) => writer.write(
+      workspaceDocument(viewRef.current, workspaceIdRef.current), retry,
+    )), [queueWrite]);
+
+  const replaceView = useCallback((replace: (current: WorkspaceView) => WorkspaceView) => {
     if (!writerRef.current || closingRef.current) throw new Error("Workspace is not available.");
-    viewRef.current = next;
-    setView(next);
-    return persist();
-  }, [persist]);
+    return queueWrite(async (writer) => {
+      const proposed = replace(viewRef.current);
+      await writer.write(workspaceDocument(proposed, workspaceIdRef.current), true);
+      // Autosaves queue behind this write. Reapply the host change to the latest
+      // view so observations made while saving retain their state and metadata.
+      const committed = replace(viewRef.current);
+      viewRef.current = committed;
+      if (mounted.current) setView(committed);
+    });
+  }, [queueWrite]);
 
   const update = useCallback(
     <K extends keyof WorkspaceView>(
@@ -119,6 +136,12 @@ export function useWorkspace() {
           : action;
       if (value === previous[key]) return;
       const next = { ...previous, [key]: value };
+      if (key === "targets") {
+        next.hosts = next.targets.map((target) => {
+          const id = target.kind === "local" ? "local" : target.host_id;
+          return previous.hosts.find((host) => host.host_id === id) ?? hostFromTarget(target);
+        });
+      }
       if (key === "tabs" || key === "task_tabs") {
         const keys = [
           ...next.tabs.map(sessionKey),

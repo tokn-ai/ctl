@@ -57,7 +57,7 @@ processes; its interactive tasks use rmuxd's PTYs and normal rmux attachments.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctl-agent connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
-- `ctl-agent`: stateless SSH remote-command adapter for the fixed local rmux
+- `ctl-agent`: per-connection SSH remote-command adapter for the fixed local rmux
   data and task endpoints.
 - `ctl`: control router. `ctl rmux` redirects the canonical rmux command
   surface locally by default or through an explicit OpenSSH destination.
@@ -120,23 +120,40 @@ Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
 The app persists workspace metadata through its native backend and always
-includes the local target. The versioned `~/.tokn/rmux/workspace.json` contains
-host definitions and stable IDs, known session references, cached cwd labels,
+includes the local target. Schema 7 of `~/.tokn/rmux/workspace.json` contains
+named hosts with stable IDs, their named SSH connection methods and preferred
+method IDs, reusable gateways, known session references, cached cwd labels,
 tab order, and the selected tab. Runtime status, output, credentials, and
-attachment tokens are never written to the workspace. `ctl-agent` remains stateless.
-A read-only backend command discovers concrete
-aliases from the user's OpenSSH config and recursive `Include` files for the
-**Add host** picker; wildcard and negated patterns are omitted, and discovery
-never opens a connection. Selecting a suggestion promotes it to a configured
-target. A new hostname can instead be saved as a managed, conflict-checked
-block in `~/.ssh/config`, or as structured app-local hostname, user, port, and
-identity-file-path fields. Config replacement uses a same-directory temporary
-file, preserves existing file permissions, and refuses to write when alias
-discovery is incomplete or the original changes during the operation.
+attachment tokens are never written to the workspace. A host represents a
+machine, with one remote account/ctl environment supported per host. Its
+addresses, existing OpenSSH aliases, and gateway routes are connection methods,
+not host identities. The host pins the account-owned remote UUID; each method
+must reach that environment. Matching remote UUIDs never merge separate hosts.
+
+**Add host** names the machine and first method, then uses the same connection
+editor as **Host settings** for direct SSH or an ordered gateway route. A
+read-only backend command discovers concrete aliases from OpenSSH config and
+recursive `Include` files; wildcard and negated patterns are omitted, and
+discovery never opens a connection. **Verify and save** checks the candidate and
+saves structured app-local settings. New direct methods may also export a
+managed OpenSSH `Host` block through **Also save to OpenSSH config**, off by
+default and unavailable for existing config aliases or gateway routes. Export
+follows verification and does not replace the app-owned method. Host settings
+also renames hosts/methods and chooses the preferred method. **Connect host**
+uses that preference; **Connect using** explicitly chooses another method.
+Failure does not trigger automatic fallback.
+
+The frontend derives transport targets from a saved method, resolved gateway
+definitions, and host-level expected identity. The selected runtime route is
+separate from saved preferences. Saving changes leaves existing session
+transport snapshots intact; verifying an edited method does not attach existing
+sessions. An explicit connection replaces the selected route while preserving
+session keys and invalidating older in-flight inspection results.
 
 Startup restores entries and tabs with unverified runtime status, then
-automatically attaches the selected tab if it is local. It does not open SSH
-connections or enumerate sessions. **Connect host** authenticates that host,
+automatically attaches the selected tab if it is local. Remote terminal tabs
+remain disconnected and session inventory is not enumerated; enabled port
+forwards restore separately. **Connect host** authenticates that host,
 inspects its known sessions, and resumes its selected tab (or first open tab
 if another host was selected). Hosts without open tabs are only inspected.
 The sidebar is workspace membership, not a mirror of
@@ -146,10 +163,24 @@ without attaching. Explicit refresh inspects only remembered IDs; connection
 failures retain entries as unreachable, while not-found responses mark them
 missing rather than removing them. Opening a session connects on demand.
 
+`ctld` owns each port forward globally by `forward_id` and retains its exact
+SSH target and listener definition. Moving a forward to another connection
+method cancels the previous listener before starting the new one; disabling it
+also uses the retained owner rather than the caller's current route. This works
+across desktop reloads and edits or removal of the previously selected method.
+Cancellation failure preserves the old ownership for retry. Configuration and
+post-authentication activation share a serialized registry so a late old-master
+activation cannot recreate a moved or disabled forward. Listener ownership is
+tracked separately from displayed status, and a forward configured during
+master startup is not activated twice. The local `ctld` IPC protocol is version
+5; older clients and daemons must be updated together. A running version-4
+daemon must be restarted before clients can use these ownership semantics.
+
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed ctl-agent command.
 Rows, tabs, shell-state caches, mutations, and reconnect intent use
-`(stable host ID, session ID)`, independent of an SSH alias's display spelling.
+`(stable host ID, session ID)`, independent of the host's name or selected
+connection method. Task references and port forwards also retain host ownership.
 A failed target reports its own error without hiding successful targets.
 OpenSSH remains responsible for key contents, proxies, host verification, and
 the encrypted transport. On macOS/Linux, the per-user `ctld` owns explicit
@@ -181,8 +212,11 @@ missing-transport-marker error.
 
 Native workspace writes are serialized, revision-checked across app processes,
 and atomically replaced with owner-only files. Invalid/future files are
-preserved and block writes. Legacy WebView host settings migrate only when no
-native workspace exists; the legacy copy is removed only after a successful
+preserved and block writes. Schema 6 hosts migrate into one named SSH method per
+host, preserving all IDs and references and extracting remote metadata to the
+host; `workspace-v6.backup.json` preserves the original before replacement.
+Legacy WebView host settings migrate only when no native workspace exists;
+the legacy copy is removed only after a successful
 disk write. Previous sessions were never persisted and require explicit import.
 See `docs/rmux-workspace.md` for the lifecycle and migration contract.
 
@@ -335,9 +369,10 @@ Unix clients, `ctld` owns the explicit authenticated control master used by
 both `ctl` and the desktop. `ctl` never disables host-key checking, enables
 agent forwarding, or accepts an arbitrary remote command.
 
-`ctl-agent connect` has no network listener, persistent state, or identity
-registry. Its service enum chooses rmux or task. It writes one fixed readiness
-marker, after which SSH stdin/stdout carries that service's raw protocol;
+`ctl-agent connect` has no network listener or session registry. Its persistent
+account-owned UUID lives in `~/.tokn/ctl/remote-id`; it is an environment identity,
+not a machine ID. Its service enum chooses rmux or task. It writes one fixed
+readiness marker, after which SSH stdin/stdout carries that service's raw protocol;
 diagnostics use stderr. The helper connects only to the current user's fixed
 data endpoint and cannot reach rmux's owner-only maintenance endpoint. Taskd
 may use maintenance locally to manage interactive runs. Its authority is exactly

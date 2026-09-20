@@ -38,7 +38,7 @@ export function targetKey(target: ConnectionTarget): string {
 }
 
 export function targetLabel(target: ConnectionTarget): string {
-  return target.kind === "local" ? "local" : target.destination;
+  return target.kind === "local" ? "local" : target.host_name ?? target.destination;
 }
 
 export function sameTarget(

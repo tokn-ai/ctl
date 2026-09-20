@@ -3,6 +3,7 @@ import type { TaskWorkspace } from "../../features/tasks/useTaskWorkspace";
 import type { SavedTaskDefinition } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import { definitionScopeLabel } from "../../features/tasks/useTaskDefinitions";
+import { Icon } from "../ui/Icon";
 
 export function TaskEditor({
   model,
@@ -63,7 +64,7 @@ export function TaskEditor({
               aria-label="Close task editor"
               onClick={model.closeEditor}
             >
-              ×
+              <Icon name="close" />
             </button>
           </header>
           <form
@@ -175,7 +176,7 @@ export function TaskEditor({
                       })
                     }
                   >
-                    ×
+                    <Icon name="close" size={14} />
                   </button>
                 </div>
               ))}
@@ -189,7 +190,7 @@ export function TaskEditor({
                   })
                 }
               >
-                + Add argument
+                <Icon name="plus" size={14} /> Add argument
               </button>
               <label>
                 Working directory

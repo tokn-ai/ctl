@@ -7,9 +7,12 @@ can be remembered by several clients. `ctl-agent` stores only its environment ID
 
 ## Disk format and ownership
 
-The native backend reads and writes `workspace.json` in Tauri's app-data
-directory (`~/Library/Application Support/io.rmux.desktop` on macOS). The
-versioned document contains:
+The native backend reads and writes `~/.tokn/rmux/workspace.json` under the
+current user's home directory on every platform. Its lock file and new schema
+backups live alongside it. If this file is absent, rmux imports a valid workspace
+from the former Tauri app-data directory (`~/Library/Application Support/io.rmux.desktop`
+on macOS). The old file and backups remain there for recovery; an existing file
+at the new location always takes precedence. The versioned document contains:
 
 - `workspace_id`, `schema_version`;
 - `hosts`: stable `host_id` plus a local or structured SSH target, with optional
@@ -55,10 +58,10 @@ never assumes every session on a remembered host belongs in this workspace.
 
 **Connect host** discovers an account-owned UUID and the installed agent version
 on the same SSH stream used to verify the rmux service. Bundled installations also
-report the app version, bundle ID, Git revision, and target triple. The host chip's
+report the app version, bundle ID, Git revision, and target triple. The host heading's
 tooltip shows the last discovered metadata.
 
-When **+ Host** verifies a different address with a known UUID, the app automatically
+When **Add host** verifies a different address with a known UUID, the app automatically
 reuses the existing local `host_id`, updates its connection settings, and resumes its
 remembered tab. The change preserves tab order, selection, cwd metadata, and terminal
 caches. Previously saved aliases for that environment merge without duplicating
@@ -101,7 +104,7 @@ installation does not depend on the remote shell's diagnostic language.
 | Refresh known sessions | Update observations; retain missing/unreachable entries | Inspect known IDs only, not full inventory |
 | Close/detach tab | Remove tab, retain membership | Detach its view; shell continues |
 | Remove from workspace | Remove membership and its tab | No kill |
-| Close session | Remove membership after accepted kill or not-found | Explicitly terminate the session |
+| Terminate session | Remove membership after accepted kill or not-found | Explicitly terminate the session |
 | Restart local rmuxd | Mark local entries missing | Terminate all local sessions, including other apps' sessions |
 
 An unreachable host is not evidence of a missing session. Successful inspection

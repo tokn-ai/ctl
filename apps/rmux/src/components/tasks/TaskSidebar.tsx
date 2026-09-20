@@ -3,6 +3,7 @@ import type { SavedTaskDefinition, TaskReference } from "../../lib/types";
 import { definitionScopeKey, definitionScopeLabel, GLOBAL_DEFINITION_SCOPE } from "../../features/tasks/useTaskDefinitions";
 import { TaskDefinitionSource } from "./TaskDefinitionSource";
 import { taskState } from "../../features/tasks/taskModel";
+import { Icon } from "../ui/Icon";
 export function TaskSidebar({
   model,
   definitions,
@@ -23,7 +24,7 @@ export function TaskSidebar({
           disabled={model.loading || model.busy}
           onClick={() => void model.refresh()}
         >
-          ↻
+          <Icon name="refresh" />
         </button>
         <button
           type="button"
@@ -32,7 +33,7 @@ export function TaskSidebar({
           disabled={model.busy}
           onClick={model.newDefinition}
         >
-          +
+          <Icon name="plus" />
         </button>
       </header>
       <TaskDefinitionSource model={model} />
@@ -58,7 +59,7 @@ export function TaskSidebar({
                   aria-label={`Resume draft ${draft.definition.name || "Untitled task"}`}
                   onClick={() => model.openEditor(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
                 >
-                  <span aria-hidden="true">◇</span>
+                  <Icon name="tasks" class_name="task-definition-icon" />
                   <span>
                     {draft.definition.name || "Untitled task"}
                     <small>Draft · {definitionScopeLabel(draft.scope ?? GLOBAL_DEFINITION_SCOPE)}</small>
@@ -69,7 +70,7 @@ export function TaskSidebar({
                   aria-label={`Delete draft ${draft.definition.name || "Untitled task"}`}
                   onClick={() => model.discardDraft(draft.definition_id, draft.scope ?? GLOBAL_DEFINITION_SCOPE)}
                 >
-                  ×
+                  <Icon name="close" size={14} />
                 </button>
               </div>
             ))}
@@ -82,7 +83,7 @@ export function TaskSidebar({
         <p className="task-sidebar-note">Loading definitions…</p>
       ) : model.definitions_loaded && definitions.length === 0 ? (
         <button className="task-empty-action" onClick={model.newDefinition}>
-          + Create a task definition
+          <Icon name="plus" size={14} /> Create a task definition
         </button>
       ) : (
         definitions.map((saved) => (
@@ -94,7 +95,7 @@ export function TaskSidebar({
               className="task-row-main"
               onClick={() => model.openEditor(saved.definition_id, model.definition_scope)}
             >
-              <span aria-hidden="true">◇</span>
+              <Icon name="tasks" class_name="task-definition-icon" />
               <span>
                 {saved.definition.name}
                 <small>
@@ -113,7 +114,7 @@ export function TaskSidebar({
               disabled={model.busy}
               onClick={() => void model.run(saved)}
             >
-              ▷
+              <Icon name="arrow_right" size={14} />
             </button>
           </div>
         ))

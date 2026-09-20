@@ -602,7 +602,7 @@ describe("workspace-backed terminal page", () => {
     shortcut("KeyY");
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "Close remembered" }),
+        screen.queryByRole("button", { name: "Terminate remembered" }),
       ).toBeNull(),
     );
     expect(api.killSession).toHaveBeenCalledOnce();
@@ -700,7 +700,7 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Connect host" });
     // Queued events before the dialog renders must only open confirmation.
     nativeCommand(COMMAND_IDS.close, 2);
-    const dialog = screen.getByRole("dialog", { name: "Close session" });
+    const dialog = screen.getByRole("dialog", { name: "Terminate session" });
     expect(dialog.textContent).toContain("Press ⌘E to confirm");
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Cancel" }),
@@ -734,20 +734,20 @@ describe("workspace-backed terminal page", () => {
     api.loadWorkspace.mockResolvedValue(saved);
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    fireEvent.click(screen.getByRole("button", { name: "Close other" }));
+    fireEvent.click(screen.getByRole("button", { name: "Terminate other" }));
     expect(screen.getByRole("dialog").textContent).toContain(
       "Terminate other for all clients?",
     );
     nativeCommand(COMMAND_IDS.close);
     await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "Close other" })).toBeNull(),
+      expect(screen.queryByRole("button", { name: "Terminate other" })).toBeNull(),
     );
     expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
       target: { kind: "ssh", destination: "test", host_id: "test-id" },
       session_id: "other-id",
     });
     expect(
-      screen.getByRole("button", { name: "Close remembered" }),
+      screen.getByRole("button", { name: "Terminate remembered" }),
     ).toBeTruthy();
   });
 
@@ -758,7 +758,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     nativeCommand(COMMAND_IDS.close);
-    expect(screen.getByRole("dialog", { name: "Close session" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Terminate session" })).toBeTruthy();
     expect(api.killSession).not.toHaveBeenCalled();
   });
 
@@ -767,7 +767,7 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     shortcut("KeyE");
-    const dialog = screen.getByRole("dialog", { name: "Close session" });
+    const dialog = screen.getByRole("dialog", { name: "Terminate session" });
     expect(dialog.textContent).toContain("Press Ctrl+Shift+E to confirm");
     fireEvent.keyDown(dialog, {
       code: "KeyE",
@@ -785,7 +785,7 @@ describe("workspace-backed terminal page", () => {
     shortcut("KeyE");
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "Close remembered" }),
+        screen.queryByRole("button", { name: "Terminate remembered" }),
       ).toBeNull(),
     );
     expect(api.killSession).toHaveBeenCalledOnce();
@@ -933,11 +933,11 @@ describe("workspace-backed terminal page", () => {
     api.inspectKnownSessions.mockRejectedValueOnce(new Error("Old address unavailable"));
     Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
     render(<TerminalPage />);
-    await screen.findByRole("button", { name: "+ Host" });
+    await screen.findByRole("button", { name: "Add host" });
     fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
     await screen.findByText("Old address unavailable");
     api.inspectKnownSessions.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "+ Host" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add host" }));
     fireEvent.click(await screen.findByRole("option", { name: /only-in-ssh-config/ }));
     await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
     const expected = { kind: "ssh", host_id: "test-id", destination: "only-in-ssh-config", remote_info: remoteInfo };
@@ -1166,8 +1166,8 @@ describe("workspace-backed terminal page", () => {
       screen.getByRole("button", { name: "~/work — remembered" }),
     ).toBeTruthy();
     expect(api.killSession).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Close remembered" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Terminate remembered" }));
+    fireEvent.click(screen.getByRole("button", { name: "Terminate session" }));
     await waitFor(() =>
       expect(api.killSession).toHaveBeenCalledExactlyOnceWith({
         target: { kind: "ssh", destination: "test", host_id: "test-id" },

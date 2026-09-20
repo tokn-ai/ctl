@@ -1,3 +1,4 @@
+import { Icon } from "../ui/Icon";
 import { useEffect, useRef } from "react";
 import type { ConnectionPhase, TerminalSize } from "../../lib/types";
 import { XtermRenderer } from "../../features/terminal/XtermRenderer";
@@ -54,7 +55,7 @@ export function TerminalSurface({
       </div>
       {!hasSession && phase === "idle" ? (
         <div className="terminal-placeholder">
-          <span className="terminal-mark">›_</span>
+          <span className="terminal-mark"><Icon name="terminal" size={64} /></span>
           <h2>A terminal that outlives its window.</h2>
           <p>Select a remembered session to connect, or create a new shell.</p>
         </div>

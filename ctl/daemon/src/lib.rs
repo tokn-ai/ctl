@@ -86,6 +86,10 @@ enum RequestError {
   ClientClosed,
   #[error("invalid ctld request: {0}")]
   InvalidRequest(&'static str),
+  #[error(
+    "ctld requires local protocol {expected}, but the client requested {actual}. Update the client and ctld together, then restart ctld."
+  )]
+  ProtocolVersionMismatch { expected: u16, actual: u16 },
   #[error("could not start the OpenSSH control master: {0}")]
   StartMaster(#[source] io::Error),
   #[error("OpenSSH control master timed out during authentication")]
@@ -255,6 +259,21 @@ async fn handshake_server(stream: &mut ctld_ipc::Stream) -> Result<(), RequestEr
       .await?;
       Ok(())
     }
+    Some(ClientMessage::Handshake { protocol_version }) => {
+      let error = RequestError::ProtocolVersionMismatch {
+        expected: ctld_ipc::PROTOCOL_VERSION,
+        actual: protocol_version,
+      };
+      ctld_ipc::write_frame(
+        stream,
+        &ServerMessage::Error {
+          code: error.code().to_owned(),
+          message: error.to_string(),
+        },
+      )
+      .await?;
+      Err(error)
+    }
     _ => Err(RequestError::InvalidRequest("protocol handshake required")),
   }
 }
@@ -368,6 +387,7 @@ impl RequestError {
     match self {
       Self::Codec(_) | Self::ClientClosed => "ctld_connection_error",
       Self::InvalidRequest(_) => "ctld_protocol_error",
+      Self::ProtocolVersionMismatch { .. } => "ctld_protocol_version_mismatch",
       Self::StartMaster(_) => "ssh_start_failed",
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
@@ -1296,6 +1316,59 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn handshake_accepts_the_current_protocol() {
+    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    let server = tokio::spawn(async move { handshake_server(&mut server).await });
+    ctld_ipc::write_frame(
+      &mut client,
+      &ClientMessage::Handshake {
+        protocol_version: ctld_ipc::PROTOCOL_VERSION,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      ctld_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+      Some(ServerMessage::HandshakeAccepted { protocol_version })
+        if protocol_version == ctld_ipc::PROTOCOL_VERSION
+    ));
+    server.await.unwrap().unwrap();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn handshake_rejection_reports_both_protocol_versions() {
+    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    let server = tokio::spawn(async move { handshake_server(&mut server).await });
+    let old_version = ctld_ipc::PROTOCOL_VERSION - 1;
+    ctld_ipc::write_frame(
+      &mut client,
+      &ClientMessage::Handshake {
+        protocol_version: old_version,
+      },
+    )
+    .await
+    .unwrap();
+    let Some(ServerMessage::Error { code, message }) =
+      ctld_ipc::read_frame(&mut client).await.unwrap()
+    else {
+      panic!("expected a structured handshake rejection");
+    };
+    assert_eq!(code, "ctld_protocol_version_mismatch");
+    assert!(message.contains(&format!(
+      "requires local protocol {}",
+      ctld_ipc::PROTOCOL_VERSION
+    )));
+    assert!(message.contains(&format!("client requested {old_version}")));
+    assert!(matches!(
+      server.await.unwrap(),
+      Err(RequestError::ProtocolVersionMismatch { expected, actual })
+        if expected == ctld_ipc::PROTOCOL_VERSION && actual == old_version
+    ));
+  }
 
   fn target() -> SshTarget {
     SshTarget {

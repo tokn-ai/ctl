@@ -4,6 +4,7 @@ import type {
   WorkspacePortForward,
 } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
+import { Icon } from "../ui/Icon";
 import "./portForwarding.css";
 
 interface Props {
@@ -59,14 +60,14 @@ export function PortForwardingSidebar({
           aria-label="Refresh port forwarding"
           title="Refresh port forwarding"
         >
-          {refreshing ? "…" : "↻"}
+          <Icon name="refresh" class_name={refreshing ? "port-refreshing" : undefined} />
         </button>
       </header>
 
       <div className="port-sidebar-list">
         {groups.length === 0 ? (
           <div className="sidebar-state">
-            <span className="empty-glyph">↪</span>
+            <Icon name="ports" size={28} class_name="empty-glyph" />
             <p>No saved port forwards.</p>
             <small>Use a host’s forwarding action to add one.</small>
           </div>

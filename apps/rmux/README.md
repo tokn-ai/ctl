@@ -5,17 +5,22 @@ sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
 ## Develop
 
-From the repository root, build the daemon so the development app can find it
-beside its own Cargo binary, then start Tauri:
+From the repository root, install the frontend dependencies and start Tauri:
 
 ```sh
-cargo build -p ctld -p rmuxd -p taskd
 cd apps/rmux
 pnpm install
 pnpm tauri dev
 ```
 
-Development startup performs a local-only bundle preflight. It warns but does
+Tauri development startup builds `ctld`, `rmuxd`, and `taskd` beside the app's
+Cargo binary so fresh starts use matching local daemon protocols. `pnpm dev`
+still starts only the frontend; `pnpm daemons:build` rebuilds the local daemons
+separately. After changing a daemon protocol during development, restart the
+affected daemon once its connections are idle; rebuilding does not replace an
+already running process.
+
+Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
 absent. To test installation on a new SSH host, first commit and push the
 current branch, then run:
@@ -29,7 +34,7 @@ waits for it, verifies all four archives, and stages them in the ignored Tauri
 resource directory. `pnpm agents:sync --main` is an explicit compatibility
 shortcut for using the latest successful main-branch set.
 
-The app may also use the path in `RMUXD_BIN`. Open **+ Host** to activate a
+The app may also use the path in `RMUXD_BIN`. Open **Add host** to activate a
 concrete alias discovered from `~/.ssh/config` (including its `Include` files)
 or enter `[user@]hostname[:port]`, then a name, then choose SSH config/agent,
 an identity-file path, or password/interactive authentication. These steps use
@@ -56,7 +61,9 @@ The app remembers the active alias in either case so it can restore the mixed
 host list on launch; config-backed targets keep only that alias locally.
 Existing WebView host settings migrate automatically after a successful disk write.
 
-The workspace file lives in Tauri's app-data directory as `workspace.json`.
+The workspace file lives at `~/.tokn/rmux/workspace.json`. On first load, an
+existing workspace is imported from Tauri's former app-data directory if the
+new file does not exist; the original remains available for recovery.
 It remembers known sessions, cached paths, tab order, and selection. Startup
 restores those entries as unverified and automatically connects the selected
 local tab. Remote hosts stay disconnected until explicitly opened; **Connect
@@ -147,7 +154,7 @@ the team-prefixed `io.rmux.desktop.ctld` application identifier.
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also
 detaches the live view; inactive tabs have no live attachment to detach.
-**Close** is deliberately destructive: after confirmation it terminates the
+**Terminate session** is deliberately destructive: after confirmation it terminates the
 session for all clients. **Remove from workspace** forgets an entry and closes
 its tab without terminating its shell. Closing the app itself only detaches its
 active view. Normal window close waits for pending workspace saves; save failures
@@ -192,7 +199,7 @@ terminal shortcuts are:
 
 The close shortcut opens a quick-input confirmation with **Cancel** focused.
 Press the close shortcut again (`Cmd-E` on macOS, `Ctrl-Shift-E` on Windows/Linux)
-or choose **Close session** to terminate the session named in the prompt.
+or choose **Terminate session** to terminate the session named in the prompt.
 Press `Esc` to cancel. Other commands remain blocked while confirmation is open.
 
 **New Shell**, from the sidebar, command palette, or `Cmd/Ctrl-Shift-N`, uses
@@ -246,6 +253,19 @@ Shortcuts are local to the focused app. Text editing, focus/list navigation,
 and raw xterm/PTY input remain widget behavior. Standard native editing/window
 commands (including Cmd-Q) and emergency reload after a renderer crash remain
 platform/recovery operations, outside the configurable app command registry.
+
+## Visual preview
+
+The workbench uses a compact activity bar for Sessions, Tasks, and Ports, a
+collapsible host/session tree, and shared tab and command styling. Host and
+session row actions appear on hover or keyboard focus. The keyboard icon at the
+bottom of the activity bar opens shortcut configuration. Closing a tab keeps its
+session running; **Terminate session** is the separate destructive action.
+
+For a browser preview with sample data, run `pnpm exec vite --host 127.0.0.1`
+and open `http://127.0.0.1:1430/preview.html`. This development-only entry renders
+the actual UI using in-memory Tauri mocks. It cannot execute terminal commands
+or open SSH connections. See [preview details](dev/README.md).
 
 ## Verify
 

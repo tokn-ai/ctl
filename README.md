@@ -175,7 +175,7 @@ remote sessions, automatically reconnecting the selected local tab on startup.
 Remote hosts stay disconnected until explicitly opened; **Connect host** resumes
 that host's selected tab, or its first open tab. **Add existing session**
 explicitly discovers one host's inventory and remembers only chosen entries;
-opening a session connects on demand. Its **+ Host** picker discovers concrete
+opening a session connects on demand. Its **Add host** picker discovers concrete
 aliases from the user's OpenSSH config without connecting to them; selecting
 one makes it an active target. A new hostname can be saved as a reusable,
 managed OpenSSH `Host` block or as structured app-local connection settings.
@@ -184,7 +184,7 @@ The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live unde
 `~/.tokn/ctl/versions`, with `~/.tokn/ctl/current` selecting the active bundle.
 Connecting through another IP, hostname, or SSH alias with the same ID
 automatically updates the saved address and recovers its existing sessions and
-tabs. Hover over a host chip to see its last observed version and remote ID.
+tabs. Hover over a host heading to see its last observed version and remote ID.
 An older agent offers **Update remote components** before identity discovery.
 Add Host uses the command-palette overlay for host, name, authentication, and
 storage prompts, with connection verification before saving. The same overlay
@@ -207,7 +207,7 @@ turning it off releases layout ownership. A session created in the GUI starts
 with this mode enabled because that window establishes its initial layout.
 GUI-created shells receive a daemon-assigned name. **Disconnect** closes the
 active tab and detaches its view while leaving the daemon-owned shell running;
-**Close** explicitly terminates the session for every attached client. Closing
+**Terminate session** explicitly terminates the session for every attached client. Closing
 the app itself detaches its active view and does not terminate any sessions.
 **Remove from workspace** forgets an entry without killing its shell. See
 [workspace persistence](docs/rmux-workspace.md) for disk storage and migration.

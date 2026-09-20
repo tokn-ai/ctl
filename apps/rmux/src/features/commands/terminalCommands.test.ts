@@ -168,7 +168,7 @@ describe("terminal commands", () => {
 
       const close = findCommand(commands, COMMAND_IDS.close);
       expect(close).toMatchObject({
-        title: "Confirm Close Session",
+        title: "Confirm Terminate Session",
         detail: "second",
         enabled: true,
       });

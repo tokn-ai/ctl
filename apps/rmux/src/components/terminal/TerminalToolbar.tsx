@@ -1,3 +1,4 @@
+import { Icon } from "../ui/Icon";
 import type { AttachmentViewState } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
 
@@ -41,7 +42,7 @@ export function TerminalToolbar({
       <div className="toolbar-actions">
         {canReconnect ? (
           <button type="button" onClick={onReconnect}>
-            Reconnect
+            <Icon name="refresh" size={14} /> Reconnect
           </button>
         ) : null}
         <button
@@ -50,11 +51,11 @@ export function TerminalToolbar({
           disabled={!attached}
           className={state.input_lease.owned_by_client ? "active-control" : ""}
           aria-pressed={state.input_lease.owned_by_client}
-          title="Input ownership is independent from terminal layout."
+          aria-label={state.input_lease.owned_by_client ? "Release input" : "Request input"}
+          title={state.input_lease.owned_by_client ? "Release input to make this terminal read-only" : "Request input control for this terminal"}
         >
-          {state.input_lease.owned_by_client
-            ? "Release input"
-            : "Request input"}
+          <Icon name="keyboard" size={14} />
+          {state.input_lease.owned_by_client ? "Input enabled" : "Read only"}
         </button>
         <button
           type="button"
@@ -62,13 +63,11 @@ export function TerminalToolbar({
           disabled={!attached}
           className={resizeActive ? "active-control" : ""}
           aria-pressed={resizeActive}
-          title="Acquire layout ownership and keep the PTY matched to this window."
+          aria-label={resizePending ? "Starting resize…" : resizeActive ? "Stop resizing" : "Resize with window"}
+          title="Keep the terminal size matched to this window"
         >
-          {resizePending
-            ? "Starting resize…"
-            : resizeActive
-              ? "Stop resizing"
-              : "Resize with window"}
+          <Icon name="monitor" size={14} />
+          {resizePending ? "Resizing…" : resizeActive ? "Auto resize" : "Fixed size"}
         </button>
         <button
           className="command-palette-trigger"
@@ -76,7 +75,8 @@ export function TerminalToolbar({
           onClick={onShowCommands}
           title={`Show command palette${commandShortcutLabel ? ` (${commandShortcutLabel})` : ""}`}
         >
-          Commands
+          <Icon name="command" size={14} />
+          <span>Commands</span>
           {commandShortcutLabel ? (
             <kbd aria-hidden="true">{commandShortcutLabel}</kbd>
           ) : null}

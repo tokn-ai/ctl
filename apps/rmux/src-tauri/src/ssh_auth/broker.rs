@@ -195,26 +195,49 @@ async fn connect() -> CommandResult<ctld_ipc::Stream> {
   let mut stream = ctld_ipc::connect_or_start_daemon()
     .await
     .map_err(CommandErrorDto::backend)?;
+  handshake(&mut stream).await?;
+  Ok(stream)
+}
+
+async fn handshake<S>(stream: &mut S) -> CommandResult<()>
+where
+  S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
   ctld_ipc::write_frame(
-    &mut stream,
+    stream,
     &ClientMessage::Handshake {
       protocol_version: ctld_ipc::PROTOCOL_VERSION,
     },
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  match ctld_ipc::read_frame::<_, ServerMessage>(stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
       if protocol_version == ctld_ipc::PROTOCOL_VERSION =>
     {
-      Ok(stream)
+      Ok(())
     }
+    Some(ServerMessage::HandshakeAccepted { protocol_version }) => Err(CommandErrorDto::new(
+      "ctld_protocol_version_mismatch",
+      format!(
+        "The app requires local protocol {}, but ctld accepted protocol {protocol_version}. Rebuild or update ctld to match the app, then restart ctld.",
+        ctld_ipc::PROTOCOL_VERSION,
+      ),
+    )),
+    Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
+    None => Err(CommandErrorDto::new(
+      "ctld_connection_closed",
+      format!(
+        "ctld closed the local handshake before replying to app protocol {}. A stale local ctld may be running. Rebuild or update ctld to match the app, then restart ctld.",
+        ctld_ipc::PROTOCOL_VERSION,
+      ),
+    )),
     _ => Err(CommandErrorDto::new(
       "ctld_protocol_error",
-      "ctld did not accept the local protocol handshake.",
+      "ctld returned an unexpected local handshake response. Rebuild or update ctld to match the app, then restart ctld.",
     )),
   }
 }
@@ -272,4 +295,80 @@ fn authentication_required() -> CommandErrorDto {
     "ssh_authentication_required",
     "SSH authentication is required. Use Connect host to authenticate.",
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  async fn handshake_reply(reply: Option<ServerMessage>) -> CommandResult<()> {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let daemon = tokio::spawn(async move {
+      assert!(matches!(
+        ctld_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+        Some(ClientMessage::Handshake { protocol_version })
+          if protocol_version == ctld_ipc::PROTOCOL_VERSION
+      ));
+      if let Some(reply) = reply {
+        ctld_ipc::write_frame(&mut server, &reply).await.unwrap();
+      }
+    });
+    let result = handshake(&mut client).await;
+    daemon.await.unwrap();
+    result
+  }
+
+  #[tokio::test]
+  async fn handshake_accepts_the_matching_protocol() {
+    handshake_reply(Some(ServerMessage::HandshakeAccepted {
+      protocol_version: ctld_ipc::PROTOCOL_VERSION,
+    }))
+    .await
+    .unwrap();
+  }
+
+  #[tokio::test]
+  async fn handshake_preserves_the_daemon_rejection() {
+    let error = handshake_reply(Some(ServerMessage::Error {
+      code: "ctld_protocol_version_mismatch".into(),
+      message: "ctld requires local protocol 3, but the client requested 4.".into(),
+    }))
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "ctld_protocol_version_mismatch");
+    assert_eq!(
+      error.message,
+      "ctld requires local protocol 3, but the client requested 4."
+    );
+  }
+
+  #[tokio::test]
+  async fn handshake_rejects_a_different_accepted_version() {
+    let old_version = ctld_ipc::PROTOCOL_VERSION - 1;
+    let error = handshake_reply(Some(ServerMessage::HandshakeAccepted {
+      protocol_version: old_version,
+    }))
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "ctld_protocol_version_mismatch");
+    assert!(error.message.contains(&format!(
+      "requires local protocol {}",
+      ctld_ipc::PROTOCOL_VERSION
+    )));
+    assert!(
+      error
+        .message
+        .contains(&format!("ctld accepted protocol {old_version}"))
+    );
+    assert!(error.message.contains("restart ctld"));
+  }
+
+  #[tokio::test]
+  async fn legacy_handshake_eof_explains_how_to_recover() {
+    let error = handshake_reply(None).await.unwrap_err();
+    assert_eq!(error.code, "ctld_connection_closed");
+    assert!(error.message.contains("closed the local handshake"));
+    assert!(error.message.contains("Rebuild or update ctld"));
+    assert!(error.message.contains("restart ctld"));
+  }
 }

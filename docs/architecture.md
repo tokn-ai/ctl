@@ -120,13 +120,13 @@ Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
 The app persists workspace metadata through its native backend and always
-includes the local target. The versioned app-data `workspace.json` contains
+includes the local target. The versioned `~/.tokn/rmux/workspace.json` contains
 host definitions and stable IDs, known session references, cached cwd labels,
 tab order, and the selected tab. Runtime status, output, credentials, and
 attachment tokens are never written to the workspace. `ctl-agent` remains stateless.
 A read-only backend command discovers concrete
 aliases from the user's OpenSSH config and recursive `Include` files for the
-**+ Host** picker; wildcard and negated patterns are omitted, and discovery
+**Add host** picker; wildcard and negated patterns are omitted, and discovery
 never opens a connection. Selecting a suggestion promotes it to a configured
 target. A new hostname can instead be saved as a managed, conflict-checked
 block in `~/.ssh/config`, or as structured app-local hostname, user, port, and
@@ -192,7 +192,7 @@ list merges authoritative geometry changes from the active attachment into the
 matching row. **Disconnect** removes a selected open tab and preserves the
 PTY; for the active tab it detaches the attachment, while an inactive tab is
 already detached and is removed only from this window. **Remove from workspace**
-also forgets membership without terminating the shell. **Close** is the
+also forgets membership without terminating the shell. **Terminate session** is the
 explicit one-shot kill operation and terminates the session for all attachments.
 
 `Restart rmuxd` is a command-palette-only, destructive maintenance action. It

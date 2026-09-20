@@ -1,5 +1,7 @@
 //! App-owned workspace metadata. Never connects to a daemon or stores runtime state.
 
+#[cfg(test)]
+mod location_tests;
 #[cfg(all(test, unix))]
 mod remote_test;
 mod repository;
@@ -498,18 +500,10 @@ pub struct UpdateWorkspaceRequest {
 
 #[tauri::command]
 pub async fn load_workspace(app: tauri::AppHandle) -> CommandResult<WorkspaceSnapshot> {
-  let directory = app
-    .path()
-    .app_data_dir()
-    .map_err(CommandErrorDto::backend)?;
-  let definition_path = task_store::global_path().map_err(crate::task_definitions::store_error)?;
-  tauri::async_runtime::spawn_blocking(move || {
-    repository::Repository::new(directory)
-      .with_definition_store(definition_path)
-      .load()
-  })
-  .await
-  .map_err(CommandErrorDto::backend)?
+  let repository = workspace_repository(&app)?;
+  tauri::async_runtime::spawn_blocking(move || repository.load())
+    .await
+    .map_err(CommandErrorDto::backend)?
 }
 
 #[tauri::command]
@@ -517,16 +511,27 @@ pub async fn update_workspace(
   app: tauri::AppHandle,
   request: UpdateWorkspaceRequest,
 ) -> CommandResult<WorkspaceSnapshot> {
-  let directory = app
+  let repository = workspace_repository(&app)?;
+  tauri::async_runtime::spawn_blocking(move || repository.update(request))
+    .await
+    .map_err(CommandErrorDto::backend)?
+}
+
+fn workspace_repository(app: &tauri::AppHandle) -> CommandResult<repository::Repository> {
+  let home = dirs::home_dir().ok_or_else(|| {
+    CommandErrorDto::new(
+      "home_directory_unavailable",
+      "Could not find the home directory for the workspace.",
+    )
+  })?;
+  let legacy_directory = app
     .path()
     .app_data_dir()
     .map_err(CommandErrorDto::backend)?;
   let definition_path = task_store::global_path().map_err(crate::task_definitions::store_error)?;
-  tauri::async_runtime::spawn_blocking(move || {
-    repository::Repository::new(directory)
-      .with_definition_store(definition_path)
-      .update(request)
-  })
-  .await
-  .map_err(CommandErrorDto::backend)?
+  Ok(
+    repository::Repository::new(home.join(".tokn").join("rmux"))
+      .with_legacy_directory(legacy_directory)
+      .with_definition_store(definition_path),
+  )
 }

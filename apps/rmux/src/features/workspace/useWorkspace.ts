@@ -6,7 +6,8 @@ import {
   type SetStateAction,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { loadWorkspace, updateWorkspace } from "../../lib/tauri";
+import { loadHosts, loadWorkspace, listSshConfigHosts, updateHosts, updateWorkspace } from "../../lib/tauri";
+import type { HostCatalogDocument, SshConfigHost } from "../../lib/types";
 import { errorMessage } from "../../lib/errors";
 import {
   browserStorage,
@@ -15,11 +16,14 @@ import {
 } from "../targets/targets";
 import { sessionKey } from "../targets/targets";
 import { WorkspaceWriter } from "./WorkspaceWriter";
+import { sameSshEndpoint } from "./remoteRecovery";
 import {
   emptyWorkspaceView,
   restoreWorkspace,
   withHostId,
   hostFromTarget,
+  hostCatalogDocument,
+  refreshHostCatalog,
   workspaceDocument,
   workspaceTabKey,
   type WorkspaceView,
@@ -29,6 +33,10 @@ export function useWorkspace() {
   const [view, setView] = useState(emptyWorkspaceView);
   const viewRef = useRef(view);
   const writerRef = useRef<WorkspaceWriter | null>(null);
+  const hostWriterRef = useRef<WorkspaceWriter<HostCatalogDocument> | null>(null);
+  const savedCatalogRef = useRef<HostCatalogDocument>({ schema_version: 1, hosts: [], ssh_gateways: [] });
+  const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHost[]>([]);
+  const [sshConfigWarning, setSshConfigWarning] = useState<string | null>(null);
   const workspaceIdRef = useRef("default");
   const [ready, setReady] = useState(false);
   const pendingWrites = useRef(0);
@@ -45,18 +53,34 @@ export function useWorkspace() {
     let cancelled = false;
     void (async () => {
       try {
-        const snapshot = await loadWorkspace();
+        const [snapshot, catalog, ssh] = await Promise.all([
+          loadWorkspace(),
+          loadHosts(),
+          listSshConfigHosts().catch((failure: unknown) => ({ hosts: [], warnings: [errorMessage(failure)] })),
+        ]);
         if (cancelled) return;
-        let restored = restoreWorkspace(snapshot.document);
+        let restored = restoreWorkspace(snapshot.document, catalog.document, ssh.hosts);
         const writer = new WorkspaceWriter(snapshot, updateWorkspace);
+        // Normalize native field order before comparing serialized snapshots.
+        let savedCatalog = hostCatalogDocument(restored);
+        const hostWriter = new WorkspaceWriter({ ...catalog, document: savedCatalog }, updateHosts);
         if (snapshot.revision === null) {
           const legacy = readLegacyRemoteTargets(browserStorage());
+          const additions = legacy.filter((target) => !restored.hosts.some((host) =>
+            (!host.source || host.source === "saved") && host.connection_methods.some((method) =>
+              sameSshEndpoint(method.target, target))));
           restored = {
             ...restored,
-            targets: [...restored.targets, ...legacy.map(withHostId)],
+            targets: [...restored.targets, ...additions.map(withHostId)],
           };
-          restored.hosts = restored.targets.map((target) => hostFromTarget(target));
-          await writer.write(
+          restored.hosts = restored.targets.map((target) => restored.hosts.find((host) =>
+            host.host_id === (target.kind === "local" ? "local" : target.host_id)) ?? hostFromTarget(target));
+          const imported = hostCatalogDocument(restored);
+          if (JSON.stringify(imported) !== JSON.stringify(savedCatalog)) {
+            await hostWriter.write(imported);
+            savedCatalog = imported;
+          }
+          if (legacy.length > 0) await writer.write(
             workspaceDocument(restored, snapshot.document.workspace_id),
           );
           if (cancelled) return;
@@ -64,6 +88,10 @@ export function useWorkspace() {
           clearLegacyRemoteTargets(browserStorage());
         }
         writerRef.current = writer;
+        hostWriterRef.current = hostWriter;
+        savedCatalogRef.current = savedCatalog;
+        setSshConfigHosts(ssh.hosts);
+        setSshConfigWarning(ssh.warnings.join("\n") || null);
         workspaceIdRef.current = snapshot.document.workspace_id;
         viewRef.current = restored;
         setView(restored);
@@ -78,48 +106,87 @@ export function useWorkspace() {
     };
   }, []);
 
-  const queueWrite = useCallback((write: (writer: WorkspaceWriter) => Promise<void>): Promise<void> => {
+  const queueOperation = useCallback((run: (writer: WorkspaceWriter) => Promise<void>, mode: "write" | "read" = "write"): Promise<void> => {
     const writer = writerRef.current;
     if (!writer) return Promise.reject(new Error("Workspace is not loaded."));
-    pendingWrites.current += 1;
-    setSaving(true);
+    if (mode === "write") {
+      pendingWrites.current += 1;
+      setSaving(true);
+    }
     const operation = writeQueue.current
       .catch(() => undefined)
-      .then(() => write(writer))
+      .then(() => run(writer))
       .then(
         () => {
-          if (mounted.current) setError(null);
+          if (mode === "write" && mounted.current) setError(null);
         },
         (failure: unknown) => {
-          if (mounted.current) setError(errorMessage(failure));
+          if (mode === "write" && mounted.current) setError(errorMessage(failure));
           throw failure;
         },
       )
       .finally(() => {
-        pendingWrites.current -= 1;
-        if (mounted.current && pendingWrites.current === 0) setSaving(false);
+        if (mode === "write") {
+          pendingWrites.current -= 1;
+          if (mounted.current && pendingWrites.current === 0) setSaving(false);
+        }
       });
     writeQueue.current = operation;
     return operation;
   }, []);
 
+  const persistCatalog = useCallback(async (next: WorkspaceView, retry = false) => {
+    const document = hostCatalogDocument(next);
+    if (JSON.stringify(document) === JSON.stringify(savedCatalogRef.current)) return false;
+    const writer = hostWriterRef.current;
+    if (!writer) throw new Error("Hosts are not loaded.");
+    await writer.write(document, retry);
+    savedCatalogRef.current = document;
+    return true;
+  }, []);
+
   const persist = useCallback((retry = false): Promise<void> =>
-    queueWrite((writer) => writer.write(
-      workspaceDocument(viewRef.current, workspaceIdRef.current), retry,
-    )), [queueWrite]);
+    queueOperation(async (writer) => {
+      await persistCatalog(viewRef.current, retry);
+      await writer.write(workspaceDocument(viewRef.current, workspaceIdRef.current), retry);
+    }), [queueOperation, persistCatalog]);
 
   const replaceView = useCallback((replace: (current: WorkspaceView) => WorkspaceView) => {
     if (!writerRef.current || closingRef.current) throw new Error("Workspace is not available.");
-    return queueWrite(async (writer) => {
+    return queueOperation(async (writer) => {
       const proposed = replace(viewRef.current);
-      await writer.write(workspaceDocument(proposed, workspaceIdRef.current), true);
-      // Autosaves queue behind this write. Reapply the host change to the latest
-      // view so observations made while saving retain their state and metadata.
+      const catalogChanged = await persistCatalog(proposed, true);
+      if (!catalogChanged) {
+        await writer.write(workspaceDocument(proposed, workspaceIdRef.current), true);
+      }
+      // The catalog commits independently of workspace observations. Once a
+      // host is saved, publish it even if a later workspace autosave fails.
       const committed = replace(viewRef.current);
       viewRef.current = committed;
       if (mounted.current) setView(committed);
+      if (catalogChanged) void persist().catch(() => undefined);
     });
-  }, [queueWrite]);
+  }, [queueOperation, persistCatalog, persist]);
+
+  const refreshSshConfig = useCallback(async () => {
+    try {
+      const catalog = await listSshConfigHosts();
+      if (mounted.current) {
+        setSshConfigHosts(catalog.hosts);
+        setSshConfigWarning(catalog.warnings.join("\n") || null);
+      }
+      if (!writerRef.current || closingRef.current) return;
+      // Keep discovery behind pending catalog commits. Removing an alias while
+      // its promotion is saving must not erase the newly saved host.
+      await queueOperation(async () => {
+        const next = refreshHostCatalog(viewRef.current, hostCatalogDocument(viewRef.current), catalog.hosts);
+        viewRef.current = next;
+        if (mounted.current) setView(next);
+      }, "read");
+    } catch (failure) {
+      if (mounted.current) setSshConfigWarning(errorMessage(failure));
+    }
+  }, [queueOperation]);
 
   const update = useCallback(
     <K extends keyof WorkspaceView>(
@@ -227,6 +294,9 @@ export function useWorkspace() {
     ...view,
     viewRef,
     replaceView,
+    sshConfigHosts,
+    sshConfigWarning,
+    refreshSshConfig,
     ready,
     saving,
     closing,

@@ -66,7 +66,118 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
   );
 }
 
+function setupNewHost(suggestions: string[] = []) {
+  const save = vi.fn(async (_name: string, _target: unknown, _remote_info: unknown) => undefined);
+  const close = vi.fn();
+  const recover = vi.fn();
+  render(
+    <StrictMode>
+      <SshHostFlow suggestions={suggestions} warning={null}
+        onSaveNewHost={save} onVerified={recover} onClose={close} />
+    </StrictMode>,
+  );
+  return { save, close, recover, user: userEvent.setup() };
+}
+
+async function newHostDetails(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText("SSH host"), "rmux@127.0.0.1:2222{Enter}");
+  await user.clear(screen.getByLabelText("Host name"));
+  await user.type(screen.getByLabelText("Host name"), "Development server{Enter}");
+}
+
 describe("SSH host quick-input flow", () => {
+  it("adds an address, display name, and credentials before automatically saving the verified host", async () => {
+    let finishProbe!: (value: typeof remoteInfo) => void;
+    vi.mocked(probeSshHost).mockImplementationOnce(() => new Promise((resolve) => { finishProbe = resolve; }));
+    const { user, save, close, recover } = setupNewHost();
+    await newHostDetails(user);
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      destination: "127.0.0.1", hostname: "127.0.0.1", user: "rmux", port: 2222,
+    }), expect.any(String), expect.any(Function));
+    expect(save).not.toHaveBeenCalled();
+    await act(async () => finishProbe(remoteInfo));
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({
+      destination: "127.0.0.1", hostname: "127.0.0.1", user: "rmux", port: 2222,
+    }), remoteInfo));
+    expect(close).toHaveBeenCalledOnce();
+    expect(recover).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Save host" })).toBeNull();
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("takes a selected SSH alias through naming and credentials while preserving its transport settings", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const { user, save } = setupNewHost(["build-alias"]);
+    await user.click(screen.getByRole("option", { name: "build-alias" }));
+    expect(screen.getByLabelText("Host name")).toHaveProperty("value", "build-alias");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.clear(screen.getByLabelText("Host name"));
+    await user.type(screen.getByLabelText("Host name"), "Office build machine{Enter}");
+    await user.click(screen.getByRole("option", { name: /Identity file/ }));
+    await user.type(screen.getByRole("combobox", { name: "Identity file" }), "~/.ssh/office{Enter}");
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Office build machine", {
+      kind: "ssh", destination: "build-alias", identity_file: "~/.ssh/office",
+    }, remoteInfo));
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("retries verification with the same named host after a connection failure", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce(new Error("SSH unavailable")).mockResolvedValueOnce(remoteInfo);
+    const { user, save, close } = setupNewHost();
+    await newHostDetails(user);
+    await user.click(screen.getByRole("option", { name: /Password \/ interactive/ }));
+    expect(await screen.findByText("SSH unavailable")).toBeTruthy();
+    expect(save).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({
+      destination: "127.0.0.1", user: "rmux", port: 2222,
+    }), remoteInfo));
+    expect(probeSshHost).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledOnce();
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed host save without verifying again or writing SSH config", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const { user, save, close } = setupNewHost();
+    save.mockRejectedValueOnce(new Error("Could not save hosts.json"));
+    await newHostDetails(user);
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    expect(await screen.findByText("Could not save hosts.json")).toBeTruthy();
+    expect(close).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: "Retry saving host" }));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]).toEqual(save.mock.calls[0]);
+    expect(probeSshHost).toHaveBeenCalledOnce();
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("installs missing remote components then saves the original named host", async () => {
+    vi.mocked(probeSshHost)
+      .mockRejectedValueOnce({ code: "ctl_agent_not_found", message: "Install required" })
+      .mockResolvedValueOnce(remoteInfo);
+    vi.mocked(installRemoteAgent).mockResolvedValue({
+      app_version: "0.1.0",
+      bundle_id: "0.1.0-dev.0123456789ab",
+      git_revision: "0123456789abcdef0123456789abcdef01234567",
+      target_triple: "x86_64-unknown-linux-musl",
+    });
+    const { user, save, close } = setupNewHost();
+    await newHostDetails(user);
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({
+      hostname: "127.0.0.1", user: "rmux", port: 2222,
+    }), remoteInfo));
+    expect(installRemoteAgent).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
   it("verifies a direct connection method without recovering or reconnecting existing sessions", async () => {
     vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const onSaveConnection = vi.fn(async () => undefined);

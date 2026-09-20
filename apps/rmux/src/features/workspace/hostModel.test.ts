@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type {
   RemoteIdentity,
-  WorkspaceDocument,
+  LegacyWorkspaceDocument,
   WorkspaceHost,
   WorkspaceSshGateway,
 } from "../../lib/types";
 import { sessionKey, targetKey, targetLabel } from "../targets/targets";
 import {
+  hostCatalogDocument,
   hostFromTarget,
   hostTarget,
   restoreWorkspace,
@@ -51,7 +52,7 @@ function host(): WorkspaceHost {
   };
 }
 
-function document(): WorkspaceDocument {
+function document(): LegacyWorkspaceDocument {
   return {
     schema_version: 7,
     workspace_id: "default",
@@ -88,7 +89,7 @@ function document(): WorkspaceDocument {
 
 describe("host identity and connection methods", () => {
   it.each([1, 2, 3, 4, 5, 6] as const)("migrates schema %s without changing host or session identity", (schema_version) => {
-    const legacy: WorkspaceDocument = {
+    const legacy: LegacyWorkspaceDocument = {
       ...document(),
       schema_version,
       hosts: [
@@ -110,8 +111,8 @@ describe("host identity and connection methods", () => {
     const view = restoreWorkspace(legacy);
     const saved = workspaceDocument(view);
 
-    expect(saved.schema_version).toBe(7);
-    expect(saved.hosts[1]).toEqual({
+    expect(saved.schema_version).toBe(8);
+    expect(hostCatalogDocument(view).hosts[0]).toEqual({
       host_id: "build-machine",
       name: "old-alias",
       remote_info,
@@ -182,8 +183,8 @@ describe("host identity and connection methods", () => {
     expect(after.task_references).toEqual(before.task_references);
     expect(after.port_forwards).toEqual(before.port_forwards);
     expect(before.hosts[1].name).toBe("Build machine");
-    expect(workspaceDocument(after).hosts[1]).toEqual(updated_host);
-    expect(restoreWorkspace(workspaceDocument(after)).targets[1]).toMatchObject({
+    expect(hostCatalogDocument(after).hosts[0]).toEqual({ ...updated_host, source: undefined });
+    expect(restoreWorkspace(workspaceDocument(after), hostCatalogDocument(after)).targets[1]).toMatchObject({
       method_id: "gateway", destination: "build.internal", host_name: "Production builder",
     });
   });
@@ -200,9 +201,12 @@ describe("host identity and connection methods", () => {
     };
 
     const saved = workspaceDocument(view);
-    expect(saved.hosts[1]).toEqual(host());
-    expect(saved.ssh_gateways).toEqual([gateway]);
-    expect(restoreWorkspace(saved).hosts).toEqual(saved.hosts);
+    const catalog = hostCatalogDocument(view);
+    expect(catalog.hosts[0]).toEqual(host());
+    expect(catalog.ssh_gateways).toEqual([gateway]);
+    expect(saved).not.toHaveProperty("hosts");
+    expect(saved).not.toHaveProperty("ssh_gateways");
+    expect(restoreWorkspace(saved, catalog).hosts[1]).toEqual({ ...catalog.hosts[0], source: "saved", expected_remote_info: remote_info });
   });
 
   it("refuses a missing gateway instead of silently falling back to direct SSH", () => {

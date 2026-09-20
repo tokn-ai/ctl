@@ -22,7 +22,38 @@ pub struct WorkspaceHost {
 pub struct WorkspaceConnectionMethod {
   pub method_id: String,
   pub name: String,
+  #[serde(deserialize_with = "deserialize_connection_settings")]
   pub target: ConnectionTargetDto,
+}
+
+// Transport DTOs tolerate additional runtime fields at the IPC boundary. Saved
+// configuration must reject unknown settings instead of silently erasing them.
+fn deserialize_connection_settings<'de, D>(deserializer: D) -> Result<ConnectionTargetDto, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  const FIELDS: &[&str] = &[
+    "kind",
+    "destination",
+    "hostname",
+    "user",
+    "port",
+    "identity_file",
+    "gateway_route",
+    "gateways",
+    "remote_info",
+  ];
+  let value = serde_json::Value::deserialize(deserializer)?;
+  if let Some(fields) = value.as_object()
+    && let Some(field) = fields
+      .keys()
+      .find(|field| !FIELDS.contains(&field.as_str()))
+  {
+    return Err(serde::de::Error::custom(format!(
+      "unsupported connection setting {field:?}"
+    )));
+  }
+  serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 impl WorkspaceHost {

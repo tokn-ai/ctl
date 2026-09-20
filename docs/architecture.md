@@ -119,29 +119,41 @@ checkpoint-production, or session-lifetime logic into the app process.
 Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
-The app persists workspace metadata through its native backend and always
-includes the local target. Schema 7 of `~/.tokn/rmux/workspace.json` contains
-named hosts with stable IDs, their named SSH connection methods and preferred
-method IDs, reusable gateways, known session references, cached cwd labels,
-tab order, and the selected tab. Runtime status, output, credentials, and
-attachment tokens are never written to the workspace. A host represents a
-machine, with one remote account/ctl environment supported per host. Its
-addresses, existing OpenSSH aliases, and gateway routes are connection methods,
-not host identities. The host pins the account-owned remote UUID; each method
-must reach that environment. Matching remote UUIDs never merge separate hosts.
+The app persists session/workspace state separately from saved host definitions.
+Schema 8 of `~/.tokn/rmux/workspace.json` contains session references, cached cwd
+labels, task references, forwards, tab order, selection, and observed remote
+identities for referenced hosts. Schema 1 of `~/.tokn/rmux/hosts.json` contains
+remote hosts with stable IDs, named connection methods and preferred method IDs,
+and reusable gateways. The local host is synthesized. Runtime status, output,
+credentials, and attachment tokens are never written to either file. A host
+represents a machine, with one remote account/ctl environment per host. Addresses,
+OpenSSH aliases, and gateway routes are connection methods. Each method must reach
+the pinned account-owned remote UUID; matching UUIDs never merge separate hosts.
 
-**Add host** names the machine and first method, then uses the same connection
-editor as **Host settings** for direct SSH or an ordered gateway route. A
-read-only backend command discovers concrete aliases from OpenSSH config and
-recursive `Include` files; wildcard and negated patterns are omitted, and
-discovery never opens a connection. **Verify and save** checks the candidate and
-saves structured app-local settings. New direct methods may also export a
-managed OpenSSH `Host` block through **Also save to OpenSSH config**, off by
-default and unavailable for existing config aliases or gateway routes. Export
-follows verification and does not replace the app-owned method. Host settings
-also renames hosts/methods and chooses the preferred method. **Connect host**
-uses that preference; **Connect using** explicitly chooses another method.
-Failure does not trigger automatic fallback.
+**Add host** collects the address, display name, and authentication, verifies the
+connection, and automatically saves a named host with an `SSH` method. Additional
+methods and gateway routes use **Host settings**. New-host creation does not
+write OpenSSH config. The advanced method editor can explicitly export a new
+direct method with **Also save to OpenSSH config**, off by default.
+
+A read-only native command discovers concrete aliases from OpenSSH config and
+recursive `Include` files; wildcard and negated patterns are omitted. Discovery
+never opens a connection. The frontend projects aliases into runtime hosts with
+deterministic `ssh-config:<encoded alias>` IDs. A saved record with the same ID
+wins; otherwise an unreferenced projection is hidden when a saved method already
+uses exactly that alias without overrides. Referenced projections remain distinct.
+Connecting does not persist their definitions. Saving a customization promotes
+the projection without changing its ID. Catalog serialization explicitly excludes
+projected/unavailable hosts and runtime fields. Missing definitions retain
+unavailable placeholders for workspace references; unavailable targets fail before
+transport creation instead of treating a vanished alias as a DNS name.
+
+Workspace identity observations are separate from catalog identities and take
+precedence when reconnecting remembered entries. They cannot overwrite catalog
+metadata merely because the workspace autosaves. Host settings renames hosts and
+methods and selects the preferred method. **Connect host** uses that preference;
+**Connect using** explicitly chooses another method. Failure never triggers an
+automatic fallback.
 
 The frontend derives transport targets from a saved method, resolved gateway
 definitions, and host-level expected identity. The selected runtime route is
@@ -210,14 +222,16 @@ Other interactive responses are not stored. SSH startup diagnostics are
 bounded and returned to the client instead of being lost behind a generic
 missing-transport-marker error.
 
-Native workspace writes are serialized, revision-checked across app processes,
-and atomically replaced with owner-only files. Invalid/future files are
-preserved and block writes. Schema 6 hosts migrate into one named SSH method per
-host, preserving all IDs and references and extracting remote metadata to the
-host; `workspace-v6.backup.json` preserves the original before replacement.
+Native workspace and host-catalog writes are serialized, content-revision checked
+across app processes, and atomically replaced with owner-only files. Invalid or
+future files are preserved and block writes. Schema 8 imports saved hosts and
+gateways into the separate catalog before committing the smaller workspace;
+the import is idempotent so a crash between commits is recoverable. Schema 7 is
+preserved in `workspace-v7.backup.json`; earlier versions receive their own
+backups and target-to-method migration. IDs and references never change.
 Legacy WebView host settings migrate only when no native workspace exists;
-the legacy copy is removed only after a successful
-disk write. Previous sessions were never persisted and require explicit import.
+the legacy copy is removed only after successful catalog and workspace writes.
+Previous sessions were never persisted and require explicit import.
 See `docs/rmux-workspace.md` for the lifecycle and migration contract.
 
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same

@@ -29,7 +29,7 @@ export function removableHostCredentials(
     ...view.sessions.map((session) => session.target),
     ...view.tabs.map((session) => session.target),
     ...(attachment_target ? [attachment_target] : []),
-  ].filter((target): target is SshConnectionTarget => target.kind === "ssh");
+  ].filter((target): target is SshConnectionTarget => target.kind === "ssh" && !target.unavailable);
   const shared = new Set(targets
     .filter((target) => target.host_id !== host_id)
     .map(credentialScope));

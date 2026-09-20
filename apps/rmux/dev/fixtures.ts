@@ -1,5 +1,6 @@
 import type {
   ConnectionTarget,
+  HostCatalogDocument,
   ManagedTask,
   SavedTaskDefinition,
   SessionSummary,
@@ -93,18 +94,11 @@ export const previewTasks: ManagedTask[] = previewDefinitions.map((saved, index)
   };
 });
 
-export function previewWorkspace(view: WorkspaceSidebarView): WorkspaceDocument {
-  const session_refs = previewSessions.map((session) => ({
-    kind: "session" as const,
-    host_id: session.target.kind === "local" ? "local" : session.target.host_id!,
-    session_id: session.session_id,
-  }));
+export function previewHostCatalog(): HostCatalogDocument {
   return {
-    schema_version: 7,
+    schema_version: 1,
     ssh_gateways: [],
-    workspace_id: "sample-workspace",
-    sidebar_view: view,
-    hosts: previewTargets.map((target) => {
+    hosts: previewTargets.filter((target) => target.kind === "ssh").map((target) => {
       const host = hostFromTarget(target);
       if (host.host_id === "preview-dev") {
         host.connection_methods[0].name = "SSH config";
@@ -115,6 +109,21 @@ export function previewWorkspace(view: WorkspaceSidebarView): WorkspaceDocument 
       }
       return host;
     }),
+  };
+}
+
+export function previewWorkspace(view: WorkspaceSidebarView): WorkspaceDocument {
+  const session_refs = previewSessions.map((session) => ({
+    kind: "session" as const,
+    host_id: session.target.kind === "local" ? "local" : session.target.host_id!,
+    session_id: session.session_id,
+  }));
+  return {
+    schema_version: 8,
+    host_identities: previewTargets.flatMap((target) => target.kind === "ssh" && target.remote_info
+      ? [{ host_id: target.host_id!, remote_info: target.remote_info }] : []),
+    workspace_id: "sample-workspace",
+    sidebar_view: view,
     sessions: previewSessions.map((session, index) => ({
       ...session_refs[index],
       name: session.name,

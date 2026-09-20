@@ -2,14 +2,18 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::{UpdateWorkspaceRequest, WorkspaceConnectionMethod, WorkspaceHost, WorkspaceSnapshot};
+use super::{
+  HostCatalogSnapshot, UpdateHostsRequest, UpdateWorkspaceRequest, WorkspaceConnectionMethod,
+  WorkspaceHost, WorkspaceHostIdentity, WorkspaceSnapshot,
+};
 use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
+use sha2::{Digest, Sha256};
 
-const MAX_WORKSPACE_BYTES: u64 = 4 * 1024 * 1024;
+pub(super) const MAX_WORKSPACE_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) struct Repository {
-  directory: PathBuf,
+  pub(super) directory: PathBuf,
   definition_path: PathBuf,
   legacy_directory: Option<PathBuf>,
 }
@@ -42,7 +46,7 @@ impl Repository {
   }
 
   pub fn update(&self, request: UpdateWorkspaceRequest) -> CommandResult<WorkspaceSnapshot> {
-    if request.document.schema_version != 7 {
+    if request.document.schema_version != 8 {
       return Err(CommandErrorDto::new(
         "workspace_version_unsupported",
         "Reload the workspace before saving with this app version.",
@@ -61,10 +65,37 @@ impl Repository {
       ));
     }
     let snapshot = WorkspaceSnapshot {
-      revision: Some(uuid::Uuid::new_v4().to_string()),
+      revision: Some(content_revision(&request.document)?),
       document: request.document,
     };
     self.persist_snapshot(&snapshot)?;
+    Ok(snapshot)
+  }
+
+  pub fn load_hosts(&self) -> CommandResult<HostCatalogSnapshot> {
+    let _lock = self.lock()?;
+    self.migrate_location()?;
+    self.migrate_document(self.read()?)?;
+    self.read_catalog()
+  }
+
+  pub fn update_hosts(&self, request: UpdateHostsRequest) -> CommandResult<HostCatalogSnapshot> {
+    request.document.validate()?;
+    let _lock = self.lock()?;
+    self.migrate_location()?;
+    self.migrate_document(self.read()?)?;
+    let current = self.read_catalog()?;
+    if current.revision != request.expected_revision {
+      return Err(CommandErrorDto::new(
+        "hosts_conflict",
+        "Another app instance or editor changed the hosts. Reload before saving further changes.",
+      ));
+    }
+    let snapshot = HostCatalogSnapshot {
+      revision: Some(content_revision(&request.document)?),
+      document: request.document,
+    };
+    self.persist_catalog(&snapshot)?;
     Ok(snapshot)
   }
 
@@ -111,7 +142,7 @@ impl Repository {
   }
 
   fn migrate_document(&self, mut snapshot: WorkspaceSnapshot) -> CommandResult<WorkspaceSnapshot> {
-    if snapshot.document.schema_version == 7 {
+    if snapshot.document.schema_version == 8 {
       return Ok(snapshot);
     }
     if snapshot.document.schema_version == 2 {
@@ -144,8 +175,48 @@ impl Repository {
         snapshot.document.schema_version
       ))?;
     }
-    snapshot.document.schema_version = 7;
-    snapshot.revision = Some(uuid::Uuid::new_v4().to_string());
+    // Import definitions first. Retrying the exact batch after a crash is safe;
+    // no host command can edit the imported catalog until migration completes.
+    self.import_hosts(&snapshot.document.hosts, &snapshot.document.ssh_gateways)?;
+    let referenced: std::collections::HashSet<&str> = snapshot
+      .document
+      .sessions
+      .iter()
+      .map(|item| item.host_id.as_str())
+      .chain(
+        snapshot
+          .document
+          .task_references
+          .iter()
+          .map(|item| item.host_id.as_str()),
+      )
+      .chain(
+        snapshot
+          .document
+          .port_forwards
+          .iter()
+          .map(|item| item.host_id.as_str()),
+      )
+      .collect();
+    snapshot.document.host_identities = snapshot
+      .document
+      .hosts
+      .iter()
+      .filter(|host| referenced.contains(host.host_id.as_str()))
+      .filter_map(|host| {
+        host
+          .remote_info
+          .as_ref()
+          .map(|remote_info| WorkspaceHostIdentity {
+            host_id: host.host_id.clone(),
+            remote_info: remote_info.clone(),
+          })
+      })
+      .collect();
+    snapshot.document.hosts.clear();
+    snapshot.document.ssh_gateways.clear();
+    snapshot.document.schema_version = 8;
+    snapshot.revision = Some(content_revision(&snapshot.document)?);
     snapshot.document.validate()?;
     self.persist_snapshot(&snapshot)?;
     Ok(snapshot)
@@ -233,10 +304,11 @@ impl Repository {
     self.write_named("workspace.json", bytes)
   }
 
-  fn write_named(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+  pub(super) fn write_named(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+    regular_file_or_absent(&self.directory.join(name))?;
     let path = self
       .directory
-      .join(format!(".workspace-{}.tmp", uuid::Uuid::new_v4()));
+      .join(format!(".{name}-{}.tmp", uuid::Uuid::new_v4()));
     let temporary = TemporaryFile(path);
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -283,7 +355,7 @@ fn decode_snapshot(bytes: &[u8]) -> CommandResult<(WorkspaceSnapshot, bool)> {
   {
     normalize_legacy_hosts(&mut value["document"]["hosts"])?;
   }
-  let snapshot: WorkspaceSnapshot =
+  let mut snapshot: WorkspaceSnapshot =
     serde_json::from_value(value).map_err(CommandErrorDto::backend)?;
   snapshot.document.validate()?;
   if snapshot.revision.as_ref().is_none_or(String::is_empty) {
@@ -291,6 +363,11 @@ fn decode_snapshot(bytes: &[u8]) -> CommandResult<(WorkspaceSnapshot, bool)> {
       "workspace_invalid",
       "The workspace file has no revision. It has not been changed.",
     ));
+  }
+  if snapshot.document.schema_version == 8 {
+    // The stored revision is informative; content is authoritative when an
+    // external editor changes JSON without updating that field.
+    snapshot.revision = Some(content_revision(&snapshot.document)?);
   }
   Ok((snapshot, migrated_v1))
 }
@@ -350,7 +427,7 @@ impl Drop for TemporaryFile {
   }
 }
 
-fn regular_file_or_absent(path: &Path) -> io::Result<()> {
+pub(super) fn regular_file_or_absent(path: &Path) -> io::Result<()> {
   match fs::symlink_metadata(path) {
     Ok(metadata) if metadata.is_file() => Ok(()),
     Ok(_) => Err(io::Error::other(
@@ -368,4 +445,10 @@ fn io_error(error: io::Error) -> CommandErrorDto {
     "workspace_io_failed",
     format!("Could not access workspace.json: {error}"),
   )
+}
+
+/// Content revisions detect external edits that leave the stored token intact.
+pub(super) fn content_revision(value: &impl serde::Serialize) -> CommandResult<String> {
+  let bytes = serde_json::to_vec(value).map_err(CommandErrorDto::backend)?;
+  Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }

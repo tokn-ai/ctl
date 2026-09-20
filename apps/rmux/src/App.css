@@ -1320,3 +1320,9 @@ button:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+.host-config-source {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}

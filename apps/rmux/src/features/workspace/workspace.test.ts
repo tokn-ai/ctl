@@ -2,14 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkspaceWriter } from "./WorkspaceWriter";
 import {
   emptyWorkspaceView,
+  hostCatalogDocument,
   restoreWorkspace,
   withHostId,
   workspaceDocument,
 } from "./workspaceModel";
 import { sessionKey, targetKey } from "../targets/targets";
-import type { WorkspaceDocument, WorkspaceSnapshot } from "../../lib/types";
+import type { LegacyWorkspaceDocument, WorkspaceDocument, WorkspaceSnapshot } from "../../lib/types";
 
-export function savedWorkspace(): WorkspaceSnapshot {
+export function savedWorkspace(): WorkspaceSnapshot & { document: LegacyWorkspaceDocument } {
   return {
     revision: "initial",
     document: {
@@ -56,13 +57,9 @@ describe("workspace model", () => {
     expect(view.active_tab_key).toBe(sessionKey(view.sessions[0]));
     expect(workspaceDocument(view)).toEqual({
       ...snapshot.document,
-      schema_version: 7,
-      hosts: [
-        { host_id: "local", name: "Local", connection_methods: [], preferred_method_id: null },
-        { host_id: "remote", name: "test", connection_methods: [{ method_id: "default", name: "SSH", target: { kind: "ssh", destination: "test" } }], preferred_method_id: "default" },
-        { host_id: "unused", name: "unused", connection_methods: [{ method_id: "default", name: "SSH", target: { kind: "ssh", destination: "unused" } }], preferred_method_id: "default" },
-      ],
-      ssh_gateways: [],
+      schema_version: 8,
+      hosts: undefined,
+      host_identities: [],
       port_forwards: [],
       task_definition_scope: { kind: "global" },
       task_references: [],
@@ -137,9 +134,9 @@ describe("workspace model", () => {
         mode: "native_only",
       }],
     });
-    const persisted = workspaceDocument(view);
-    expect(persisted.hosts[1].connection_methods[0].target).not.toHaveProperty("gateways");
-    expect(persisted.hosts[1].connection_methods[0].target).toHaveProperty("gateway_route", [
+    const persisted = hostCatalogDocument(view);
+    expect(persisted.hosts[0].connection_methods[0].target).not.toHaveProperty("gateways");
+    expect(persisted.hosts[0].connection_methods[0].target).toHaveProperty("gateway_route", [
       { gateway_id: "edge", mode: "native_only" },
     ]);
   });
@@ -191,7 +188,7 @@ describe("workspace model", () => {
     }
   });
 
-  it("keeps host identity stable across alias changes and drops orphaned tabs", () => {
+  it("keeps host identity stable across alias changes and retains unavailable references", () => {
     const target = withHostId({ kind: "ssh", destination: "before" });
     expect(target.kind).toBe("ssh");
     if (target.kind !== "ssh") throw new Error("Expected SSH");
@@ -201,9 +198,9 @@ describe("workspace model", () => {
     const view = restoreWorkspace(savedWorkspace().document);
     view.targets = [{ kind: "local" }];
     const saved = workspaceDocument(view);
-    expect(saved.sessions).toHaveLength(1);
-    expect(saved.tabs).toHaveLength(1);
-    expect(saved.active_tab).toBeNull();
+    expect(saved.sessions).toHaveLength(2);
+    expect(saved.tabs).toHaveLength(2);
+    expect(saved.active_tab).toEqual({ kind: "session", host_id: "remote", session_id: "first" });
   });
 });
 
@@ -215,7 +212,7 @@ describe("workspace writer", () => {
         document,
       }),
     );
-    const writer = new WorkspaceWriter(savedWorkspace(), save);
+    const writer = new WorkspaceWriter<WorkspaceDocument>(savedWorkspace(), save);
     const view = restoreWorkspace(savedWorkspace().document);
     view.tabs = [];
     const first = writer.write(workspaceDocument(view));
@@ -245,7 +242,7 @@ describe("workspace writer", () => {
         code: "workspace_conflict",
         message: "another writer",
       });
-    const writer = new WorkspaceWriter(savedWorkspace(), save);
+    const writer = new WorkspaceWriter<WorkspaceDocument>(savedWorkspace(), save);
     const document = workspaceDocument(emptyWorkspaceView());
     await expect(writer.write(document)).rejects.toMatchObject({
       code: "workspace_io_failed",

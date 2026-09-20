@@ -162,7 +162,7 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.addHost,
       category: "Host",
       title: "Add Host",
-      detail: "Name a machine, then add a connection method.",
+      detail: "Enter an SSH address, name the host, and authenticate.",
       keywords: ["remote", "ssh", "connect", "gateway", "route"],
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,

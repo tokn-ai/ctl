@@ -7,40 +7,54 @@ can be remembered by several clients. `ctl-agent` stores only its environment ID
 
 ## Disk format and ownership
 
-The native backend reads and writes `~/.tokn/rmux/workspace.json` under the
-current user's home directory on every platform. Its lock file and new schema
-backups live alongside it. If this file is absent, rmux imports a valid workspace
-from the former Tauri app-data directory (`~/Library/Application Support/io.rmux.desktop`
-on macOS). The old file and backups remain there for recovery; an existing file
-at the new location always takes precedence. The versioned document contains:
+The native backend keeps two files under `~/.tokn/rmux` on every platform:
+
+- `hosts.json` (schema 1) owns saved remote hosts and reusable gateways.
+- `workspace.json` (schema 8) owns session membership and presentation state.
+
+Their shared lock file and migration backups live alongside them. If `workspace.json`
+is absent, rmux imports a valid workspace from the former Tauri app-data
+directory (`~/Library/Application Support/io.rmux.desktop` on macOS). The original
+file and backups remain available for recovery. An existing new-location file
+always takes precedence.
+
+The host catalog contains:
+
+- `hosts`: stable `host_id`, display `name`, named `connection_methods`, and
+  `preferred_method_id`. Each method has a stable `method_id`, name, and structured
+  SSH `target`. Optional host-level `remote_info` contains the verified remote ID,
+  agent version, and bundle metadata;
+- reusable `ssh_gateways`, referenced in order by a method's `gateway_route`.
+
+The workspace contains:
 
 - `workspace_id`, `schema_version`;
-- `hosts`: stable `host_id`, display `name`, named `connection_methods`, and
-  `preferred_method_id`. Each method has a stable `method_id`, a name, and a
-  structured SSH `target`. Optional host-level `remote_info` contains `remote_id`,
-  `agent_version`, and bundle version metadata;
-- reusable `ssh_gateways`, referenced in order by a method's `gateway_route`;
 - `sessions`: `(host_id, session_id)`, name, and last-known cwd/display cwd;
 - ordered `tabs` and optional `active_tab`, referencing sessions or managed tasks;
-- task references, sidebar selection, and task drafts with their source scopes
-  and original saved-definition revisions;
-- saved loopback-only port-forward definitions, including whether each forward
-  should be restored.
+- task references, sidebar selection, and task drafts with source scopes and
+  original saved-definition revisions;
+- loopback-only port-forward definitions and whether each should be restored;
+- `host_identities`: observed remote identity pins only for hosts referenced by
+  sessions, tasks, or forwards. These observations are not host definitions.
 
-Schema 7 separates machines from their connection methods. Migration wraps each
-older SSH target in a single `default` method named `SSH`, uses its destination
-as the initial host name, and moves its verified environment metadata to the
-host. Host IDs and all session, tab, task, and port-forward references remain
-unchanged. The local host has ID `local`, name `Local`, no methods, and no
-preferred method or remote identity. Schema 6 is preserved in
-`workspace-v6.backup.json` before the new document is committed; schemas 1–5
-retain their corresponding migration backups. Saved hosts are not merged.
+Schema 8 imports existing saved hosts and gateways into the catalog before
+removing them from the workspace. Import is idempotent across a crash between
+file commits. Schema 7 is preserved in `workspace-v7.backup.json`; earlier schemas
+receive their corresponding backups. Existing conflicting catalog definitions
+are preserved and block migration rather than being overwritten. Host IDs and
+all session, tab, task, and forwarding references remain unchanged.
 
-Every remote host has at least one method and a preferred method that exists
-on that host. Method IDs are unique within their host. Destinations do not need
-to be globally unique. Persisted method targets exclude host metadata and
-resolved gateway copies; the app resolves gateway references and supplies the
-host's expected environment identity when opening a connection.
+Schema 7 introduced machines with multiple connection methods. Earlier SSH
+targets migrate to one `default` method named `SSH`, use the destination as the
+initial host name, and move verified environment metadata to the host. Saved
+hosts are never merged. The local host has ID `local`, name `Local`, and no SSH
+methods or remote identity; it is synthesized rather than saved in the catalog.
+
+Every saved remote host has at least one method and a preferred method that
+exists on that host. Method IDs are unique within a host; destinations need not
+be globally unique. Method targets exclude runtime host metadata and resolved
+gateway copies. The app resolves gateway references and supplies the expected
+remote identity when connecting.
 
 Schema 6 introduced reusable SSH gateways. Schema 5 adds the central Ports
 sidebar selection. It preserves the schema 4 port-forward definitions and
@@ -59,17 +73,19 @@ runtime command lines, terminal output, output sequences, passwords, and attachm
 tokens are excluded. Cached cwd is presentation only: it is not treated as live
 shell awareness or used to create a shell automatically.
 
-Native commands `load_workspace` and `update_workspace` run filesystem I/O off
-the UI thread. Writes use an interprocess lock, revision comparison, a private
+Native commands `load_workspace`, `update_workspace`, `load_hosts`, and
+`update_hosts` run filesystem I/O off the UI thread. Writes use an interprocess
+lock, revision comparison, a private
 same-directory temporary file, file sync, atomic replacement, and directory
-sync on Unix. Workspace files are owner-only on Unix. Invalid references,
+sync on Unix. Both files are owner-only on Unix. Malformed or duplicate references,
 corrupt/future schemas, symlinks, and oversized files are rejected without
 overwriting the existing document. The UI serializes its writes and offers
 retry for I/O failures; a revision conflict requires reloading the app.
 
 The first launch migrates the old `rmux.remote_hosts` WebView value only if no
-native workspace exists. It saves hosts without contacting them and removes the
-legacy value only after saving successfully. No earlier session membership was
+native workspace exists. It saves hosts into the catalog without contacting them
+and removes the legacy value only after both stores save successfully. No earlier
+session membership was
 stored, so users must explicitly import their previous sessions. Migration
 never assumes every session on a remembered host belongs in this workspace.
 
@@ -77,13 +93,32 @@ never assumes every session on a remembered host belongs in this workspace.
 
 A host represents a named machine, independently of the addresses and gateways
 used to reach it. This version supports one remote account/ctl environment per
-host. **Add host** asks for the machine name and first method name, then opens
-the shared direct/gateway connection editor. Existing OpenSSH aliases remain
-available as suggestions. **Verify and save** contacts the candidate, verifies
-its environment, and persists app-owned settings. A new direct method can also
-export a managed OpenSSH config entry when **Also save to OpenSSH config** is
-checked. Export is off by default and unavailable for existing config aliases
-or gateway routes; workspace storage remains authoritative for the saved method.
+host. **Add host** asks for an SSH address or existing alias, a display name, and
+authentication. It verifies the remote environment, then automatically saves the
+named host with an initial `SSH` method in `hosts.json`. Display names may contain
+spaces and do not rename SSH aliases. This flow does not write OpenSSH config.
+Additional methods and gateway routes use the connection editor in **Host settings**.
+A new direct method can explicitly export a managed OpenSSH entry with **Also
+save to OpenSSH config**. Export is off by default and unavailable for existing
+config aliases or gateway routes; the host catalog remains authoritative for
+the saved method.
+
+Concrete aliases in `~/.ssh/config` and its `Include` files appear as hosts in
+memory. Each uses a deterministic `ssh-config:<encoded alias>` ID and delegates
+connection settings to OpenSSH. Merely displaying or connecting to one never
+persists its definition. Saving a customization promotes it to a saved host with
+the same ID. A saved record with that ID overrides the projection. Otherwise,
+a saved pure alias method suppresses a duplicate projection only when no
+workspace sessions, tasks, or forwards refer to the projected ID. Addresses,
+names, and matching remote IDs never cause automatic host merging.
+
+When an alias or saved definition disappears, existing references remain as an
+unavailable host. Restoring the definition restores access. Connections to an
+unavailable alias are blocked before SSH can interpret it as a DNS hostname.
+For a promoted alias, an unavailable original alias method does not disable
+other inline methods on the same host. Runtime expected-identity observations
+protect remembered sessions even if catalog metadata changes; autosaving those
+observations does not overwrite the catalog identity.
 
 **Host settings** manages the host name, method names, connection settings, and
 preferred method. **Connect host** uses the preference; **Connect using** selects
@@ -136,6 +171,9 @@ installation does not depend on the remote shell's diagnostic language.
 | Action | Workspace effect | Remote effect |
 | --- | --- | --- |
 | Launch/restart app | Restore entries, tabs, selection as unverified; select each host's preferred method | Attach the selected tab automatically if local; remote terminal tabs remain disconnected; enabled forwards restore separately |
+| Add host | Save the verified named host in the catalog | Verify the candidate via SSH |
+| Discover SSH config aliases | Project hosts in memory; retain existing references | No connection or write |
+| Save projected host settings | Persist a host with the existing projected ID | No connection for metadata-only changes |
 | Add/edit connection method | Save the verified method on its host | Verify the candidate via SSH; leave existing terminal transports unchanged |
 | Rename host/method or change preference | Save metadata; preserve references | No connection or transport switch |
 | Connect host / Connect using | Select the preferred / explicitly chosen method; inspect known entries; resume the selected tab on that host, otherwise its first open tab | Authenticate through that method, inspect known IDs, then attach |

@@ -36,16 +36,28 @@ shortcut for using the latest successful main-branch set.
 
 The app may also use the path in `RMUXD_BIN`. A saved host represents a named
 machine with one remote account/environment. Addresses and gateway routes are
-named connection methods on that host. Open **Add host**, name the machine and
-its first method, then enter `[user@]hostname[:port]` or choose a concrete alias
-discovered from `~/.ssh/config` (including its `Include` files). The same editor
-supports direct SSH, optional identity-file paths, and ordered routes through
-reusable gateways. **Verify and save** verifies the remote environment and saves
-the non-secret settings in the app workspace. For a new direct method,
-**Also save to OpenSSH config** optionally exports a managed `Host` block to
-`~/.ssh/config` after verification. This option is off by default and unavailable
-for existing config aliases or gateway routes; the app retains its own method
-settings either way. OpenSSH requests host-key confirmation, passwords,
+named connection methods on that host. **Add host** guides you through
+`[user@]hostname[:port]` (or an SSH config alias), a display name, and
+authentication. After verification, it automatically saves the named host and
+its first `SSH` method in `~/.tokn/rmux/hosts.json`. Display names may contain
+spaces; they are independent of SSH aliases. No storage-choice step or implicit
+OpenSSH config write is involved.
+
+Concrete aliases discovered from `~/.ssh/config`, including its `Include`
+files, appear as hosts in memory. OpenSSH continues resolving their connection
+settings. Connecting does not save their definitions; saving a customization
+from **Host settings** creates a saved host with the same ID. A saved pure alias
+method suppresses an otherwise-unused duplicate projection. Missing aliases
+with workspace references remain visible as unavailable; restoring the alias
+restores access without losing session or task references.
+
+The connection-method editor supports direct SSH, optional identity-file paths,
+and ordered routes through reusable gateways. **Verify and save** verifies the
+remote environment and saves the method in the host catalog. For a new direct
+method, **Also save to OpenSSH config** optionally exports a managed `Host`
+block after verification. This option is off by default and unavailable for
+existing config aliases or gateway routes; the saved method remains in the
+host catalog. OpenSSH requests host-key confirmation, passwords,
 passphrases, or interactive responses through the quick-input overlay. If
 `ctl-agent` is missing, packaged builds can install the matching
 checksummed `ctl-agent`, `rmuxd`, and `taskd` bundle for the remote user. Custom
@@ -76,12 +88,14 @@ hosts automatically. Renaming a host or changing methods preserves session,
 tab, task, and port-forward ownership through the stable `host_id`.
 Existing WebView host settings migrate automatically after a successful disk write.
 
-The workspace file lives at `~/.tokn/rmux/workspace.json`. On first load, an
-existing workspace is imported from Tauri's former app-data directory if the
-new file does not exist; the original remains available for recovery.
-Schema 7 migrates each older remote host into one named host with an `SSH`
-method, preserving its IDs and references. Schema 6 is backed up as
-`workspace-v6.backup.json` before replacement.
+Saved host definitions and reusable gateways live in `~/.tokn/rmux/hosts.json`;
+sessions, tabs, tasks, forwarding, and observed remote identities live in
+`~/.tokn/rmux/workspace.json`. On first load, an existing workspace is imported
+from Tauri's former app-data directory if the new file does not exist; the
+original remains available for recovery. Schema 8 moves existing hosts and
+gateways into the catalog before removing them from the workspace. Schema 7 is
+backed up as `workspace-v7.backup.json`; earlier schemas retain their corresponding
+backups. Host IDs and all session/task/port references remain unchanged.
 It remembers known sessions, cached paths, tab order, and selection. Startup
 restores those entries as unverified and automatically connects the selected
 local tab. Remote terminal tabs stay disconnected until explicitly opened; **Connect

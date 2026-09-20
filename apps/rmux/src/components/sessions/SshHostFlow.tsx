@@ -39,6 +39,11 @@ interface SshHostFlowProps {
   /** Edit connection settings without entering the reconnect flow. */
   initialTarget?: SshConnectionTarget;
   expectedIdentity?: RemoteIdentity;
+  onSaveNewHost?(
+    name: string,
+    target: SshConnectionTarget,
+    remote_info: RemoteIdentity,
+  ): Promise<void>;
   onSaveConnection?(
     target: SshConnectionTarget,
     gateways: WorkspaceSshGateway[],
@@ -76,6 +81,7 @@ type Step =
   | "installing"
   | "progress"
   | "storage"
+  | "save_retry"
   | "retry"
   | "update"
   | "reconnect";
@@ -88,6 +94,7 @@ export function SshHostFlow({
   complex = false,
   initialTarget,
   expectedIdentity,
+  onSaveNewHost,
   onSaveConnection,
   gateways = [],
   onSaveRoutedHost,
@@ -103,6 +110,7 @@ export function SshHostFlow({
   );
   const identityFiles = useSshIdentityFiles(step === "identity" || (editingConnection && step === "route"));
   const [address, setAddress] = useState(() => initialTarget ? targetAddress(initialTarget) : "");
+  const [hostName, setHostName] = useState("");
   const [hostAlias, setHostAlias] = useState(initialTarget?.hostname ? initialTarget.destination : "");
   const [hostIdentityFile, setHostIdentityFile] = useState(initialTarget?.identity_file ?? "");
   const [exportToSshConfig, setExportToSshConfig] = useState(false);
@@ -169,7 +177,7 @@ export function SshHostFlow({
     if (uncommittedTargetRef.current !== candidate) forgetUncommitted();
     // Methods may share credentials with another saved route. Only the legacy
     // standalone-host flow owns credentials it can safely discard on cancel.
-    if (!target && !initialTarget && !onSaveConnection) uncommittedTargetRef.current = candidate;
+    if (!target && !initialTarget && !onSaveConnection && !onSaveNewHost) uncommittedTargetRef.current = candidate;
     candidateRef.current = candidate;
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
@@ -189,6 +197,11 @@ export function SshHostFlow({
       }
       identityRef.current = remote_info;
       setSaving(true);
+      if (onSaveNewHost && candidate.kind === "ssh") {
+        attemptRef.current = null;
+        await saveNewHost(candidate, remote_info);
+        return;
+      }
       if (onSaveConnection && candidate.kind === "ssh") {
         if (exportToSshConfig && !initialTarget && candidate.hostname &&
           !candidate.gateway_route?.length && !suggestions.includes(candidate.destination)) {
@@ -278,8 +291,29 @@ export function SshHostFlow({
   }
 
   function connectDefinition(next = definition) {
-    const candidate = appLocalSshTarget(next);
+    const candidate = onSaveNewHost && configuredRef.current
+      ? configuredSshTarget(address)
+      : appLocalSshTarget(next);
+    if (candidate && onSaveNewHost && configuredRef.current && next.identity_file) {
+      candidate.identity_file = next.identity_file;
+    }
     if (candidate) void connect(candidate);
+  }
+
+  async function saveNewHost(candidate: SshConnectionTarget, remote_info: RemoteIdentity) {
+    setSaving(true);
+    setError(null);
+    try {
+      await onSaveNewHost?.(hostName, candidate, remote_info);
+      if (!closedRef.current) onClose();
+    } catch (failure) {
+      if (!closedRef.current) {
+        setError(errorMessage(failure));
+        setStep("save_retry");
+      }
+    } finally {
+      if (!closedRef.current) setSaving(false);
+    }
   }
 
   function routedHostCandidate(): SshConnectionTarget {
@@ -449,8 +483,8 @@ export function SshHostFlow({
       title = "Host name · 2/3";
       mode = {
         kind: "input",
-        label: "Name / SSH alias",
-        initial_value: definition.alias,
+        label: onSaveNewHost ? "Host name" : "Name / SSH alias",
+        initial_value: onSaveNewHost ? hostName : definition.alias,
       };
       onBack = back("host");
       break;
@@ -528,6 +562,13 @@ export function SshHostFlow({
           };
       if (!saving) onBack = back("auth");
       break;
+    case "save_retry":
+      title = "Could not save host";
+      description = "The connection is verified. Retry saving this host to rmux.";
+      mode = saving
+        ? { kind: "progress", message: "Saving host…" }
+        : { kind: "pick", choices: [{ id: "save", label: "Retry saving host" }] };
+      break;
     case "update":
     case "reconnect":
     case "retry":
@@ -557,7 +598,7 @@ export function SshHostFlow({
           ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
         ],
       };
-      if (!target) onBack = back(complex || editingConnection ? "route" : configuredRef.current ? "host" : "auth");
+      if (!target) onBack = back(complex || editingConnection ? "route" : configuredRef.current && !onSaveNewHost ? "host" : "auth");
       break;
     case "installing":
       title = "Installing remote components";
@@ -572,14 +613,22 @@ export function SshHostFlow({
   function submit(value: string) {
     setError(null);
     if (step === "host") {
-      if (value.startsWith("ssh-config:")) {
-        const candidate = configuredSshTarget(
-          value.slice("ssh-config:".length),
-        );
+      const selectedAlias = value.startsWith("ssh-config:")
+        ? value.slice("ssh-config:".length)
+        : onSaveNewHost && suggestions.includes(value.trim()) ? value.trim() : null;
+      if (selectedAlias) {
+        const candidate = configuredSshTarget(selectedAlias);
         if (candidate) {
           configuredRef.current = true;
           candidateRef.current = candidate;
-          void connect(candidate);
+          if (onSaveNewHost) {
+            setAddress(selectedAlias);
+            setHostName(selectedAlias);
+            setDefinition({ alias: selectedAlias, hostname: "", user: null, port: null, identity_file: null });
+            setStep("name");
+          } else {
+            void connect(candidate);
+          }
         }
         return;
       }
@@ -592,15 +641,23 @@ export function SshHostFlow({
       }
       configuredRef.current = false;
       setAddress(value);
+      setHostName(parsed.hostname);
       setDefinition({ ...parsed, alias: parsed.hostname, identity_file: null });
       setStep("name");
     } else if (step === "name") {
       const alias = value.trim();
-      if (!/^[a-zA-Z0-9_.:-]+$/u.test(alias) || alias.startsWith("-")) {
+      if (onSaveNewHost) {
+        if (!alias || /[\x00-\x1f\x7f-\x9f]/u.test(alias)) {
+          setError("Enter a host name without control characters.");
+          return;
+        }
+        setHostName(alias);
+      } else if (!/^[a-zA-Z0-9_.:-]+$/u.test(alias) || alias.startsWith("-")) {
         setError("Enter a name without spaces or SSH patterns.");
         return;
+      } else {
+        setDefinition((current) => ({ ...current, alias }));
       }
-      setDefinition((current) => ({ ...current, alias }));
       setStep("auth");
     } else if (step === "auth") {
       if (value === "identity") setStep("identity");
@@ -621,6 +678,10 @@ export function SshHostFlow({
     } else if (step === "storage") {
       if (!saving && (value === "ssh_config" || value === "local_storage"))
         void save(value);
+    } else if (step === "save_retry") {
+      if (!saving && value === "save" && candidateRef.current?.kind === "ssh" && identityRef.current) {
+        void saveNewHost(candidateRef.current, identityRef.current);
+      }
     } else if (
       (step === "retry" || step === "update" || step === "reconnect") &&
       candidateRef.current

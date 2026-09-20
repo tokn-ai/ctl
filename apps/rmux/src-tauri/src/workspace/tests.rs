@@ -24,8 +24,18 @@ impl Drop for Fixture {
   }
 }
 
-fn populated() -> WorkspaceDocument {
-  let mut document = WorkspaceDocument::default();
+fn legacy_populated() -> WorkspaceDocument {
+  let mut document = WorkspaceDocument {
+    schema_version: 7,
+    ..WorkspaceDocument::default()
+  };
+  document.hosts.push(WorkspaceHost {
+    host_id: "local".into(),
+    name: "Local".into(),
+    connection_methods: Vec::new(),
+    preferred_method_id: None,
+    remote_info: None,
+  });
   document.hosts.push(WorkspaceHost {
     host_id: "remote-id".into(),
     name: "test".into(),
@@ -46,6 +56,13 @@ fn populated() -> WorkspaceDocument {
   });
   document.tabs.push(document.sessions[0].reference().into());
   document.active_tab = document.tabs.first().cloned();
+  document
+}
+
+fn populated() -> WorkspaceDocument {
+  let mut document = legacy_populated();
+  document.schema_version = 8;
+  document.hosts.clear();
   document
 }
 
@@ -153,7 +170,7 @@ fn stale_and_concurrent_writers_cannot_lose_updates() {
 #[test]
 fn validates_membership_tabs_and_host_identity() {
   let mut document = populated();
-  document.sessions[0].host_id = "absent".into();
+  document.sessions[0].host_id = String::new();
   assert!(document.validate().is_err());
   document = populated();
   document.tabs.push(document.tabs[0].clone());
@@ -164,7 +181,7 @@ fn validates_membership_tabs_and_host_identity() {
     session_id: "absent".into(),
   });
   assert!(document.validate().is_err());
-  document = populated();
+  document = legacy_populated();
   document.hosts.push(document.hosts[1].clone());
   assert!(document.validate().is_err());
 }
@@ -219,7 +236,7 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
   fixture.repository().load().unwrap();
   let mut value = serde_json::to_value(WorkspaceSnapshot {
     revision: Some("old".into()),
-    document: populated(),
+    document: legacy_populated(),
   })
   .unwrap();
   value["document"]["schema_version"] = 1.into();
@@ -256,7 +273,7 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
     .unwrap();
   assert_eq!(
     fixture.repository().load().unwrap().document.schema_version,
-    7
+    8
   );
 }
 
@@ -264,7 +281,7 @@ fn migrates_legacy_tabs_without_losing_order_and_preserves_a_backup() {
 fn migrates_v3_workspace_to_current_schema() {
   let fixture = Fixture::new();
   fs::create_dir_all(&fixture.0).unwrap();
-  let mut document = populated();
+  let mut document = legacy_populated();
   document.schema_version = 3;
   let bytes = serde_json::to_vec(&WorkspaceSnapshot {
     revision: Some("before-port-forwarding".into()),
@@ -275,7 +292,7 @@ fn migrates_v3_workspace_to_current_schema() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 7);
+  assert_eq!(loaded.document.schema_version, 8);
   assert!(loaded.document.port_forwards.is_empty());
   assert_eq!(
     fs::read(fixture.0.join("workspace-v3.backup.json")).unwrap(),
@@ -287,7 +304,7 @@ fn migrates_v3_workspace_to_current_schema() {
 fn migrates_v4_workspace_to_sidebar_schema() {
   let fixture = Fixture::new();
   fs::create_dir_all(&fixture.0).unwrap();
-  let mut document = populated();
+  let mut document = legacy_populated();
   document.schema_version = 4;
   document.port_forwards.push(WorkspacePortForward {
     forward_id: uuid::Uuid::new_v4().to_string(),
@@ -308,7 +325,7 @@ fn migrates_v4_workspace_to_sidebar_schema() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 7);
+  assert_eq!(loaded.document.schema_version, 8);
   assert_eq!(loaded.document.sidebar_view, SidebarView::Sessions);
   assert_eq!(loaded.document.port_forwards.len(), 1);
   assert_eq!(
@@ -321,7 +338,7 @@ fn migrates_v4_workspace_to_sidebar_schema() {
 fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
   let fixture = Fixture::new();
   fs::create_dir_all(&fixture.0).unwrap();
-  let mut document = populated();
+  let mut document = legacy_populated();
   document.schema_version = 5;
   let bytes = serde_json::to_vec(&WorkspaceSnapshot {
     revision: Some("before-gateway-routes".into()),
@@ -332,7 +349,7 @@ fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 7);
+  assert_eq!(loaded.document.schema_version, 8);
   assert!(loaded.document.ssh_gateways.is_empty());
   assert_eq!(
     fs::read(fixture.0.join("workspace-v5.backup.json")).unwrap(),
@@ -342,7 +359,7 @@ fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
 
 #[test]
 fn gateway_routes_require_unique_saved_gateway_references() {
-  let mut document = populated();
+  let mut document = legacy_populated();
   document.ssh_gateways.push(WorkspaceSshGateway {
     gateway_id: "edge".into(),
     name: "Edge".into(),
@@ -448,7 +465,7 @@ fn legacy_definition() -> SavedTaskDefinition {
 
 fn write_legacy(fixture: &Fixture, saved: &SavedTaskDefinition) -> Vec<u8> {
   fs::create_dir_all(&fixture.0).unwrap();
-  let mut document = populated();
+  let mut document = legacy_populated();
   document.schema_version = 2;
   document.task_definitions.push(saved.clone());
   document.task_references.push(TaskReference {
@@ -477,7 +494,7 @@ fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() 
   // Simulate a crash after import but before the workspace migration commits.
   store.import_legacy(std::slice::from_ref(&saved)).unwrap();
   let snapshot = fixture.repository().load().unwrap();
-  assert_eq!(snapshot.document.schema_version, 7);
+  assert_eq!(snapshot.document.schema_version, 8);
   assert!(snapshot.document.task_definitions.is_empty());
   let definitions = store.load().unwrap().definitions;
   assert_eq!(definitions.len(), 1);
@@ -612,7 +629,10 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
     })),
   };
   let mut document = populated();
-  document.hosts[1].remote_info = Some(identity);
+  document.host_identities.push(WorkspaceHostIdentity {
+    host_id: "remote-id".into(),
+    remote_info: identity,
+  });
   let saved = fixture
     .repository()
     .update(UpdateWorkspaceRequest {
@@ -622,7 +642,7 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
     .unwrap();
   assert_eq!(fixture.repository().load().unwrap(), saved);
   let mut invalid = saved.document.clone();
-  invalid.hosts[1].remote_info.as_mut().unwrap().remote_id = "bad-id".into();
+  invalid.host_identities[0].remote_info.remote_id = "bad-id".into();
   assert!(
     fixture
       .repository()
@@ -638,8 +658,22 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
 #[test]
 fn named_hosts_and_methods_round_trip_without_rebinding_owned_references() {
   let fixture = Fixture::new();
-  let mut document = populated();
-  let host = &mut document.hosts[1];
+  let workspace = fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: None,
+      document: populated(),
+    })
+    .unwrap();
+  let mut document = HostCatalogDocument {
+    hosts: legacy_populated()
+      .hosts
+      .into_iter()
+      .filter(|host| host.host_id != "local")
+      .collect(),
+    ..HostCatalogDocument::default()
+  };
+  let host = &mut document.hosts[0];
   host.name = "Development machine".into();
   let mut alternate = host.connection_methods[0].clone();
   alternate.method_id = "vpn".into();
@@ -652,60 +686,61 @@ fn named_hosts_and_methods_round_trip_without_rebinding_owned_references() {
   document.hosts.push(other);
   let saved = fixture
     .repository()
-    .update(UpdateWorkspaceRequest {
+    .update_hosts(UpdateHostsRequest {
       expected_revision: None,
       document: document.clone(),
     })
     .unwrap();
-  assert_eq!(fixture.repository().load().unwrap().document, document);
-  document.hosts[1].name = "Renamed machine".into();
-  document.hosts[1].preferred_method_id = Some("default".into());
-  let changed = fixture
+  assert_eq!(
+    fixture.repository().load_hosts().unwrap().document,
+    document
+  );
+  document.hosts[0].name = "Renamed machine".into();
+  document.hosts[0].preferred_method_id = Some("default".into());
+  fixture
     .repository()
-    .update(UpdateWorkspaceRequest {
+    .update_hosts(UpdateHostsRequest {
       expected_revision: saved.revision,
       document,
     })
     .unwrap();
-  assert_eq!(changed.document.sessions, saved.document.sessions);
-  assert_eq!(changed.document.tabs, saved.document.tabs);
-  assert_eq!(changed.document.active_tab, saved.document.active_tab);
+  assert_eq!(fixture.repository().load().unwrap(), workspace);
 }
 
 #[test]
 fn host_methods_require_a_valid_preference_and_unique_ids() {
-  let mut document = populated();
+  let mut document = legacy_populated();
   document.hosts[1].preferred_method_id = None;
   assert!(document.validate().is_err());
   document.hosts[1].preferred_method_id = Some("missing".into());
   assert!(document.validate().is_err());
-  document = populated();
+  document = legacy_populated();
   let duplicate = document.hosts[1].connection_methods[0].clone();
   document.hosts[1].connection_methods.push(duplicate);
   assert!(document.validate().is_err());
   document.hosts[1].connection_methods.clear();
   assert!(document.validate().is_err());
-  document = populated();
+  document = legacy_populated();
   document.hosts[1].connection_methods[0].target = ConnectionTargetDto::Local;
   assert!(document.validate().is_err());
-  document = populated();
+  document = legacy_populated();
   document.hosts[1].name = "bad\nname".into();
   assert!(document.validate().is_err());
-  document = populated();
+  document = legacy_populated();
   document.hosts[1].connection_methods[0].name = String::new();
   assert!(document.validate().is_err());
 }
 
 #[test]
 fn local_host_cannot_have_methods_preferences_or_remote_identity() {
-  let mut document = populated();
+  let mut document = legacy_populated();
   let method = document.hosts[1].connection_methods[0].clone();
   document.hosts[0].connection_methods.push(method);
   assert!(document.validate().is_err());
-  document = populated();
+  document = legacy_populated();
   document.hosts[0].preferred_method_id = Some("default".into());
   assert!(document.validate().is_err());
-  document = populated();
+  document = legacy_populated();
   document.hosts[0].remote_info = Some(test_remote_identity());
   assert!(document.validate().is_err());
 }
@@ -720,7 +755,7 @@ fn test_remote_identity() -> ctl_proto::RemoteIdentity {
 
 #[test]
 fn methods_cannot_override_the_hosts_verified_environment() {
-  let mut document = populated();
+  let mut document = legacy_populated();
   if let ConnectionTargetDto::Ssh { remote_info, .. } =
     &mut document.hosts[1].connection_methods[0].target
   {
@@ -732,7 +767,7 @@ fn methods_cannot_override_the_hosts_verified_environment() {
 fn legacy_host_document(schema_version: u32) -> serde_json::Value {
   let mut value = serde_json::to_value(WorkspaceSnapshot {
     revision: Some("before-host-methods".into()),
-    document: populated(),
+    document: legacy_populated(),
   })
   .unwrap();
   value["document"]["schema_version"] = schema_version.into();
@@ -797,7 +832,8 @@ fn v6_migration_preserves_identity_gateway_routes_and_port_ownership() {
   let original = serde_json::to_vec(&value).unwrap();
   fs::write(fixture.0.join("workspace.json"), &original).unwrap();
   let loaded = fixture.repository().load().unwrap();
-  let host = &loaded.document.hosts[1];
+  let catalog = fixture.repository().load_hosts().unwrap();
+  let host = &catalog.document.hosts[0];
   assert_eq!(host.remote_info.as_ref(), Some(&identity));
   assert_eq!(host.preferred_method_id.as_deref(), Some("default"));
   let ConnectionTargetDto::Ssh {

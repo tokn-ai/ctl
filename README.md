@@ -178,18 +178,24 @@ explicitly discovers one host's inventory and remembers only chosen entries;
 opening a session connects on demand. A host is a named machine, independent
 of its IP address, hostname, or gateway route. Each host supports one remote
 account/environment and multiple named connection methods. **Add host** asks
-for the machine name and first method name, then opens one editor for direct
-SSH or a route through reusable gateways. Existing OpenSSH aliases are offered
-as suggestions; new settings are verified and saved in the app workspace.
-New direct methods can optionally export a managed OpenSSH config entry with
-**Also save to OpenSSH config**; the method still belongs to its saved host.
-**Host settings** lets you rename the machine or methods, add or edit methods,
-choose the preferred method, and explicitly **Connect using** another method.
+for the SSH address, a display name, and authentication, then verifies the
+connection and automatically saves the named host to `~/.tokn/rmux/hosts.json`.
+Its initial method is named `SSH`; additional methods and gateway routes are
+available in **Host settings**. New-host creation does not modify OpenSSH config.
+
+Concrete aliases from `~/.ssh/config` and its `Include` files appear as hosts
+in memory. Connecting to an alias does not import its definition. Saving a
+customization in **Host settings** creates a saved host with the same identity.
+Aliases already represented by a saved method are hidden unless their projected
+identity still has workspace references. **Host settings** lets you rename the
+machine or methods, add or edit methods, choose the preferred method, and
+explicitly **Connect using** another method. New direct methods can optionally
+export a managed OpenSSH config entry with **Also save to OpenSSH config**.
 **Connect host** uses the preference; failures never select another method
 automatically. Saving settings leaves existing session transports unchanged
 until an explicit connection. Session, tab, and port references retain the same
-host ID through these changes. Workspace schema 7 migrates existing hosts while
-preserving their IDs and a backup of the previous file.
+host ID through these changes. Workspace schema 8 moves existing saved hosts and
+gateways into `hosts.json`, preserving their IDs and a backup of the workspace.
 
 The app records the host's remote environment ID and installed agent/bundle version.
 The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live under

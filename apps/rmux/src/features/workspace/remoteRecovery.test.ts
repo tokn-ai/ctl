@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { recoverRemoteHost, sameSshEndpoint } from "./remoteRecovery";
-import { hostTarget, restoreWorkspace, workspaceDocument } from "./workspaceModel";
-import type { RemoteIdentity, SshConnectionTarget, WorkspaceDocument } from "../../lib/types";
+import { hostCatalogDocument, hostTarget, restoreWorkspace, workspaceDocument } from "./workspaceModel";
+import type { RemoteIdentity, SshConnectionTarget, LegacyWorkspaceDocument } from "../../lib/types";
 
 const remote_info: RemoteIdentity = {
   remote_id: "b765c444-28d0-4772-bb16-d3b212290bcb",
   agent_version: "0.1.0",
 };
 
-function document(): WorkspaceDocument {
+function document(): LegacyWorkspaceDocument {
   return {
     schema_version: 3,
     workspace_id: "default",
@@ -51,7 +51,7 @@ describe("remote environment recovery", () => {
     expect(recovered.key_changes.size).toBe(0);
     expect(recovered.view.hosts[1]).toEqual({ ...before.hosts[1], remote_info: identity });
 
-    const reloaded = restoreWorkspace(workspaceDocument(recovered.view));
+    const reloaded = restoreWorkspace(workspaceDocument(recovered.view), hostCatalogDocument(recovered.view));
     expect(reloaded.targets[1]).toMatchObject({ destination: "old-ip", method_id: "default", remote_info: identity });
     expect(reloaded.hosts[1].connection_methods).toHaveLength(2);
     expect(before.targets[1]).toMatchObject({ destination: "old-ip", remote_info });
@@ -71,9 +71,10 @@ describe("remote environment recovery", () => {
     const persisted = workspaceDocument(recovered.view);
 
     expect(recovered.target.host_id).toBe("alias");
-    expect(persisted.hosts).toHaveLength(3);
-    expect(persisted.hosts[1].remote_info).toEqual(remote_info);
-    expect(persisted.hosts[2].remote_info).toEqual(identity);
+    const catalog = hostCatalogDocument(recovered.view);
+    expect(catalog.hosts).toHaveLength(2);
+    expect(catalog.hosts[0].remote_info).toEqual(remote_info);
+    expect(catalog.hosts[1].remote_info).toEqual(identity);
     expect(persisted.sessions).toEqual(saved.sessions);
     expect(persisted.tabs).toEqual([
       { kind: "session", host_id: "old", session_id: "shell" },
@@ -115,7 +116,7 @@ describe("remote environment recovery", () => {
 
     expect(result.view.active_tab_key).toBe(before.active_tab_key);
     expect(result.target).toMatchObject({ remote_info, method_id: "default" });
-    expect(workspaceDocument(result.view).hosts[1].remote_info).toEqual(remote_info);
+    expect(hostCatalogDocument(result.view).hosts[0].remote_info).toEqual(remote_info);
     expect(result.view.task_references).toEqual(before.task_references);
     expect(result.view.port_forwards).toEqual(before.port_forwards);
   });

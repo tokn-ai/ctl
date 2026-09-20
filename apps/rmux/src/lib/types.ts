@@ -39,6 +39,8 @@ export interface RemoteIdentity {
 }
 
 export interface SshConnectionTarget {
+  /** Runtime-only: retained workspace references cannot currently be connected. */
+  unavailable?: string;
   /** Verified remote environment and last observed installed version. */
   remote_info?: RemoteIdentity;
   kind: "ssh";
@@ -86,6 +88,10 @@ export interface ResolvedSshGateway extends WorkspaceSshGateway {
 export type ConnectionTarget = { kind: "local" } | SshConnectionTarget;
 
 export interface WorkspaceHost {
+  /** Runtime provenance; omitted on persisted records and legacy callers. */
+  source?: "saved" | "ssh_config" | "unavailable";
+  /** Runtime workspace observation, separate from the saved catalog identity. */
+  expected_remote_info?: RemoteIdentity;
   host_id: string;
   name: string;
   connection_methods: WorkspaceConnectionMethod[];
@@ -117,9 +123,11 @@ export interface WorkspaceSession extends SessionReference {
 }
 
 export interface WorkspaceDocument {
-  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
   workspace_id: string;
-  hosts: (WorkspaceHost | LegacyWorkspaceHost)[];
+  /** Legacy definitions, migrated to hosts.json in schema 8. */
+  hosts?: (WorkspaceHost | LegacyWorkspaceHost)[];
+  host_identities?: WorkspaceHostIdentity[];
   sessions: WorkspaceSession[];
   tabs: WorkspaceTab[];
   active_tab: WorkspaceTab | null;
@@ -130,6 +138,27 @@ export interface WorkspaceDocument {
   task_references?: TaskReference[];
   port_forwards?: WorkspacePortForward[];
   ssh_gateways?: WorkspaceSshGateway[];
+}
+
+export interface LegacyWorkspaceDocument extends WorkspaceDocument {
+  schema_version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  hosts: (WorkspaceHost | LegacyWorkspaceHost)[];
+}
+
+export interface WorkspaceHostIdentity {
+  host_id: string;
+  remote_info: RemoteIdentity;
+}
+
+export interface HostCatalogDocument {
+  schema_version: 1;
+  hosts: WorkspaceHost[];
+  ssh_gateways: WorkspaceSshGateway[];
+}
+
+export interface HostCatalogSnapshot {
+  revision: string | null;
+  document: HostCatalogDocument;
 }
 
 export type WorkspaceSidebarView = "sessions" | "tasks" | "ports";

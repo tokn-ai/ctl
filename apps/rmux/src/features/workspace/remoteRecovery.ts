@@ -5,7 +5,7 @@ import type {
   SshConnectionTarget,
 } from "../../lib/types";
 import { targetKey } from "../targets/targets";
-import type { WorkspaceView } from "./workspaceModel";
+import { expectedHostIdentity, type WorkspaceView } from "./workspaceModel";
 
 export function sameSshEndpoint(
   left: ConnectionTarget,
@@ -48,11 +48,16 @@ export function recoverRemoteHost(
   if (!candidate.host_id) return null;
   const host = view.hosts.find((item) => item.host_id === candidate.host_id);
   if (!host) throw new Error("This host is no longer in the workspace.");
-  if (host.remote_info && host.remote_info.remote_id !== remote_info.remote_id)
+  if (candidate.unavailable || host.source === "unavailable")
+    throw new Error(candidate.unavailable ?? "This host is unavailable. Restore its definition before connecting.");
+  const expected = expectedHostIdentity(host);
+  if (expected && expected.remote_id !== remote_info.remote_id)
     throw new Error("This connection reaches a different remote environment. Each host supports one account; add a separate host for another account.");
   const method_id = candidate.method_id ?? host.preferred_method_id;
-  if (!host.connection_methods.some((method) => method.method_id === method_id))
+  const method = host.connection_methods.find((method) => method.method_id === method_id);
+  if (!method)
     throw new Error("This connection method is no longer saved on the host.");
+  if (method.target.unavailable) throw new Error(method.target.unavailable);
   const target: SshConnectionTarget = {
     ...candidate,
     host_name: host.name,
@@ -66,7 +71,11 @@ export function recoverRemoteHost(
     key_changes: new Map<string, string>(),
     view: {
       ...view,
-      hosts: view.hosts.map((item) => item.host_id === host.host_id ? { ...item, remote_info } : item),
+      hosts: view.hosts.map((item) => item.host_id === host.host_id ? {
+        ...item,
+        remote_info,
+        ...(item.expected_remote_info ? { expected_remote_info: remote_info } : {}),
+      } : item),
       targets: view.targets.map((item) => targetKey(item) === targetKey(target) ? target : item),
       sessions: view.sessions.map(remap),
       tabs: view.tabs.map(remap),

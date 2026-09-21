@@ -192,7 +192,8 @@ of its IP address, hostname, or gateway route. Each host supports one remote
 account/environment and multiple named connection methods. **Add host** asks
 for the SSH address, a display name, and authentication, then verifies the
 connection and automatically saves the named host to `~/.tokn/rmux/hosts.json`.
-Its initial method is named `SSH`; additional methods and gateway routes are
+New addresses start with a method named `SSH`; saved aliases retain their `SSH config` method.
+Additional methods and gateway routes are
 available in **Host settings**. New-host creation does not modify OpenSSH config.
 
 Concrete aliases from `~/.ssh/config` and its `Include` files are available in
@@ -205,7 +206,8 @@ identity still has workspace references. **Host settings** lets you rename the
 machine or methods, add or edit methods, choose the preferred method, and
 explicitly **Connect using** another method. New direct methods can optionally
 export a managed OpenSSH config entry with **Also save to OpenSSH config**.
-**Connect host** uses the preference; failures never select another method
+**Connect host**, **New shell**, and **Add existing session** use the current preferred
+method; failures never select another method
 automatically. Saving settings leaves existing session transports unchanged
 until an explicit connection. Session, tab, and port references retain the same
 host ID through these changes. Workspace schema 8 moves existing saved hosts and

@@ -10,6 +10,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -425,7 +426,10 @@ export function TerminalPage() {
   );
 
   const hostSuggestions = sshConfigHosts.map((host) => host.destination);
-  const connectableTargets = targets.filter((target): target is SshConnectionTarget =>
+  // New connections use saved settings; live sessions retain their transport snapshots.
+  const connectionTargets = useMemo(() => workspace.hosts.map((host) =>
+    hostTarget(host, workspace.ssh_gateways)), [workspace.hosts, workspace.ssh_gateways]);
+  const connectableTargets = connectionTargets.filter((target): target is SshConnectionTarget =>
     target.kind === "ssh" && !target.unavailable);
   const settingsHost = workspace.hosts.find((host) => host.host_id === hostSettingsId);
   const methodHost = workspace.hosts.find((host) => host.host_id === methodDraft?.host_id);
@@ -448,10 +452,17 @@ export function TerminalPage() {
     const expected = projected ? expectedHostIdentity(projected) : undefined;
     if (expected && expected.remote_id !== remote_info.remote_id)
       throw new Error("This SSH alias now reaches a different remote environment. Restore its original connection before saving.");
-    const host = promoteHost({
-      ...hostFromTarget({ ...target, host_id: projected?.host_id, remote_info }, name),
-      ...(projected ? { host_id: projected.host_id } : {}),
-    });
+    const host = promoteHost(projected ? {
+      ...projected,
+      name,
+      remote_info,
+      ...(projected.expected_remote_info ? { expected_remote_info: remote_info } : {}),
+      // Promotion keeps method references held by existing sessions valid.
+      connection_methods: projected.connection_methods.map((method) =>
+        method.method_id === projected.preferred_method_id
+          ? { ...method, target: connectionSettings(target) }
+          : method),
+    } : hostFromTarget({ ...target, remote_info }, name));
     await workspace.replaceView((current) => projected
       ? updateHostSettings(current, host)
       : {
@@ -1786,7 +1797,7 @@ export function TerminalPage() {
           onUpdateAgent={() => {
             setPortForwardUpdateTarget(portForwardTarget);
             setPortForwardTarget(null);
-            setHostFlow(portForwardTarget);
+            connectHostMethod(portForwardTarget);
           }}
           onClose={() => {
             setPortForwardTarget(null);
@@ -1808,7 +1819,7 @@ export function TerminalPage() {
         />
       ) : newShellOpen ? (
         <NewShellFlow
-          targets={targets}
+          targets={connectionTargets}
           hosts={workspace.hosts}
           onVerifyHost={recoverHost}
           onConnectionChange={hostConnections.connectionChanged}
@@ -1820,7 +1831,7 @@ export function TerminalPage() {
         />
       ) : importOpen ? (
         <AddExistingSessionFlow
-          targets={targets}
+          targets={connectionTargets}
           hosts={workspace.hosts}
           known={sessions}
           onVerifyHost={recoverHost}

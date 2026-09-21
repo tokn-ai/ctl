@@ -80,13 +80,25 @@ pnpm agents:sync
 bundle set when exact source parity is not required.
 
 The `Desktop and remote-agent bundles` workflow builds static Linux and native
-macOS remote bundles for x86-64 and ARM64. Main-branch pushes refresh
-development bundles automatically; manual runs build remote bundles by default
-and can opt into desktop packages. Version tags build both, download all four
-remote targets into each desktop package, and stage the matching local `ctld`,
-`rmuxd`, and `taskd` as Tauri sidecars. Release bundle IDs are semantic versions; other
-runs include the source revision so different development builds never share a
-remote install directory. Tag names must match the app version as `v<version>`.
+macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
+pushes and manual runs build both; `build_desktop=false` keeps a manual run
+remote-only, as used by `pnpm agents:sync`. Each desktop package contains all
+four remote targets and matching local `ctld`, `rmuxd`, and `taskd` helpers.
+Release bundle IDs are semantic versions; other runs include the source
+revision so different development builds never share a remote install
+directory. Tag names must match the app version as `v<version>`.
+
+Successful full builds on main or a version tag create or refresh the
+`v<version>` draft release with installers, macOS app archives, remote bundles,
+manifests, and SHA-256 checksums. Branch builds remain Actions artifacts.
+The workflow never publishes a release, preserves manually added assets and
+notes, and leaves already-published versions unchanged. Bump the app version
+to start the next draft after publishing.
+
+When Apple signing credentials are incomplete, macOS packages still build
+without signing or notarization and the draft notes identify them as unsigned.
+These builds cannot store Touch ID-protected credentials. Configured signing
+errors still fail the build rather than silently producing unsigned packages.
 
 ## Use
 

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       build_desktop:
-        description: Also build installable desktop packages
+        description: Build desktop packages (main/tag runs also update the draft release)
         required: true
-        default: false
+        default: true
         type: boolean
   push:
     branches:
@@ -156,7 +156,7 @@ jobs:
 
   desktop:
     name: Desktop (${{ matrix.target }})
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_desktop)
+    if: github.event_name == 'push' || inputs.build_desktop
     needs:
       - metadata
       - remote-agent-set
@@ -225,7 +225,8 @@ jobs:
           name: ctl-agent-bundle-set
           path: apps/rmux/src-tauri/resources/agent-bundles
 
-      - name: Validate Apple signing configuration
+      - name: Detect Apple signing configuration
+        id: signing
         if: runner.os == 'macOS'
         env:
           CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
@@ -244,19 +245,22 @@ jobs:
           [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
           [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
           if (( ${#missing[@]} > 0 )); then
-            printf 'missing Apple signing configuration: %s\n' "${missing[*]}" >&2
-            exit 1
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            printf '::notice::Building unsigned macOS packages; missing Apple signing configuration: %s\n' "${missing[*]}"
+            echo 'macOS packages are unsigned and not notarized. Touch ID-protected credential storage requires a signed build.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Import Apple signing certificate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
         uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Prepare Apple signing assets
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
         env:
           APPLE_API_ISSUER_VALUE: ${{ vars.APPLE_API_ISSUER }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
@@ -277,6 +281,7 @@ jobs:
       - name: Build and stage native daemons
         env:
           CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
+          APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
         shell: bash
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p rmuxd -p taskd
@@ -290,8 +295,10 @@ jobs:
               "target/${{ matrix.target }}/release/ctld" \
               target/ctld-app/ctld.app \
               "${{ needs.metadata.outputs.app_version }}"
-            echo "APPLE_SIGNING_IDENTITY=$(<"$CTLD_SIGNING_IDENTITY_OUTPUT")" \
-              >> "$GITHUB_ENV"
+            if [[ "$APPLE_SIGNING_ENABLED" == true ]]; then
+              echo "APPLE_SIGNING_IDENTITY=$(<"$CTLD_SIGNING_IDENTITY_OUTPUT")" \
+                >> "$GITHUB_ENV"
+            fi
           else
             cp "target/${{ matrix.target }}/release/ctld" \
               "apps/rmux/src-tauri/binaries/ctld-${{ matrix.target }}"
@@ -299,13 +306,33 @@ jobs:
 
       - name: Build desktop bundles
         working-directory: apps/rmux
-        run: >-
-          pnpm tauri build --target ${{ matrix.target }}
-          --config src-tauri/tauri.bundle.conf.json
-          --config src-tauri/${{ matrix.bundle_config }}
+        env:
+          APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+        shell: bash
+        run: |
+          signing_args=()
+          if [[ "$RUNNER_OS" == macOS && "$APPLE_SIGNING_ENABLED" != true ]]; then
+            signing_args+=(--no-sign)
+          fi
+          pnpm tauri build --target "${{ matrix.target }}" \
+            --config src-tauri/tauri.bundle.conf.json \
+            --config "src-tauri/${{ matrix.bundle_config }}" \
+            "${signing_args[@]}"
+
+      - name: Verify macOS bundle contents
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app="target/${{ matrix.target }}/release/bundle/macos/rmux.app"
+          test -x "$app/Contents/MacOS/rmux-app"
+          test -x "$app/Contents/MacOS/rmuxd"
+          test -x "$app/Contents/MacOS/taskd"
+          test -x "$app/Contents/Helpers/ctld.app/Contents/MacOS/ctld"
+          plutil -lint "$app/Contents/Helpers/ctld.app/Contents/Info.plist"
+          test -f "$app/Contents/Resources/resources/agent-bundles/bundle-set.json"
 
       - name: Verify signed ctld bundle
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
           app="target/${{ matrix.target }}/release/bundle/macos/rmux.app"
@@ -333,10 +360,77 @@ jobs:
             exit 1
           fi
 
+      - name: Stage desktop release assets
+        env:
+          APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+        shell: bash
+        run: |
+          signing_mode=not_applicable
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            signing_mode=unsigned
+            if [[ "$APPLE_SIGNING_ENABLED" == true ]]; then
+              signing_mode=signed
+            fi
+          fi
+          node scripts/ci/package-desktop-bundle.mts \
+            "${{ matrix.target }}" \
+            "${{ needs.metadata.outputs.bundle_id }}" \
+            "${{ needs.metadata.outputs.git_revision }}" \
+            "$signing_mode" \
+            "target/${{ matrix.target }}/release/bundle" \
+            target/desktop-assets
+
       - name: Upload desktop bundles
         uses: actions/upload-artifact@v4
         with:
           name: rmux-desktop-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/bundle/
+          path: target/desktop-assets/*
           if-no-files-found: error
           retention-days: 30
+
+  draft-release:
+    name: Update draft release
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - metadata
+      - remote-agent-set
+      - desktop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: draft-release-${{ needs.metadata.outputs.app_version }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Download desktop assets
+        uses: actions/download-artifact@v5
+        with:
+          pattern: rmux-desktop-*
+          path: target/release-assets
+          merge-multiple: true
+
+      - name: Download remote-agent bundle set
+        uses: actions/download-artifact@v5
+        with:
+          name: ctl-agent-bundle-set
+          path: target/release-assets
+
+      - name: Create or refresh the version draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          node scripts/ci/update-draft-release.mts
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/release-assets

@@ -465,18 +465,25 @@ mod tests {
   }
 
   #[cfg(unix)]
+  static PROTOCOL_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+  #[cfg(unix)]
   struct ProtocolFixture {
     directory: PathBuf,
     executable: PathBuf,
+    _execution_guard: tokio::sync::MutexGuard<'static, ()>,
   }
 
   #[cfg(unix)]
   impl ProtocolFixture {
-    fn new(body: &str) -> Self {
+    async fn new(body: &str) -> Self {
       use std::os::unix::fs::PermissionsExt as _;
       use std::sync::atomic::{AtomicU64, Ordering};
 
       static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+      // A child can briefly inherit another fixture's writable descriptor
+      // before exec. Keep fixture writes and subprocess creation serialized.
+      let execution_guard = PROTOCOL_FIXTURE_LOCK.lock().await;
       let directory = env::temp_dir().join(format!(
         "ctld-protocol-{}-{}-{}",
         std::process::id(),
@@ -497,6 +504,7 @@ mod tests {
       Self {
         directory,
         executable,
+        _execution_guard: execution_guard,
       }
     }
   }
@@ -511,7 +519,7 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn protocol_probe_accepts_matching_helper() {
-    let fixture = ProtocolFixture::new(&format!("printf '%s\\n' {PROTOCOL_VERSION}"));
+    let fixture = ProtocolFixture::new(&format!("printf '%s\\n' {PROTOCOL_VERSION}")).await;
     check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
       .await
       .unwrap();
@@ -521,17 +529,20 @@ mod tests {
   #[tokio::test]
   async fn protocol_probe_rejects_outdated_helper_with_selected_path() {
     let previous_version = PROTOCOL_VERSION - 1;
-    let fixture = ProtocolFixture::new(&format!("printf '%s\\n' {previous_version}"));
+    let fixture = ProtocolFixture::new(&format!("printf '%s\\n' {previous_version}")).await;
     let error = check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
       .await
       .unwrap_err();
-    assert!(matches!(
-      &error,
-      ConnectError::IncompatibleDaemon { executable, expected, reported }
-        if executable == &fixture.executable
-          && *expected == PROTOCOL_VERSION
-          && *reported == previous_version
-    ));
+    assert!(
+      matches!(
+        &error,
+        ConnectError::IncompatibleDaemon { executable, expected, reported }
+          if executable == &fixture.executable
+            && *expected == PROTOCOL_VERSION
+            && *reported == previous_version
+      ),
+      "expected a protocol mismatch, got {error:?}"
+    );
     let message = error.to_string();
     assert!(message.contains(fixture.executable.to_str().unwrap()));
     assert!(message.contains("CTLD_BIN"));
@@ -540,32 +551,46 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn protocol_probe_rejects_unsupported_flag_and_invalid_output() {
-    for body in ["exit 2", "printf 'ctld 0.1.0\\n'"] {
-      let fixture = ProtocolFixture::new(body);
+    for (body, expected_kind) in [
+      ("exit 2", io::ErrorKind::Other),
+      ("printf 'ctld 0.1.0\\n'", io::ErrorKind::InvalidData),
+    ] {
+      let fixture = ProtocolFixture::new(body).await;
       let error = check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
         .await
         .unwrap_err();
-      assert!(matches!(
-        &error,
-        ConnectError::CheckDaemonProtocol { executable, expected, .. }
-          if executable == &fixture.executable && *expected == PROTOCOL_VERSION
-      ));
-      assert!(error.to_string().contains("--protocol-version"));
+      assert!(
+        matches!(
+          &error,
+          ConnectError::CheckDaemonProtocol { executable, expected, source }
+            if executable == &fixture.executable
+              && *expected == PROTOCOL_VERSION
+              && source.kind() == expected_kind
+        ),
+        "fixture {body:?} expected {expected_kind:?}, got {error:?}"
+      );
+      assert!(
+        error.to_string().contains("--protocol-version"),
+        "fixture {body:?} omitted the failed query from its diagnostic: {error:?}"
+      );
     }
   }
 
   #[cfg(unix)]
   #[tokio::test]
   async fn protocol_probe_times_out_unresponsive_helper() {
-    let fixture = ProtocolFixture::new("exec sleep 30");
+    let fixture = ProtocolFixture::new("exec sleep 30").await;
     let error = check_daemon_protocol(&fixture.executable, Duration::from_millis(100))
       .await
       .unwrap_err();
-    assert!(matches!(
-      error,
-      ConnectError::CheckDaemonProtocol { source, .. }
-        if source.kind() == io::ErrorKind::TimedOut
-    ));
+    assert!(
+      matches!(
+        &error,
+        ConnectError::CheckDaemonProtocol { source, .. }
+          if source.kind() == io::ErrorKind::TimedOut
+      ),
+      "expected the helper query to time out, got {error:?}"
+    );
   }
 
   #[cfg(target_os = "macos")]

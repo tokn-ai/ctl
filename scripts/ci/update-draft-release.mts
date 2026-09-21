@@ -378,6 +378,8 @@ export async function updateDraftRelease(
       return { status: "published", html_url: latest.html_url };
     }
     await writeFile(payloadPath, JSON.stringify({
+      // Keep the pending tag explicit; GitHub can otherwise retain its untagged draft placeholder.
+      tag_name: tag,
       name: `rmux ${tag}`,
       target_commitish: bundle.git_revision,
       body: releaseNotes(bundle, latest.body),

@@ -309,6 +309,7 @@ test("existing draft uploads managed assets, preserves manual assets and notes, 
     ["api", "repos/tokn-ai/ctl/releases/assets/3", "--method", "DELETE"],
     ["api", "repos/tokn-ai/ctl/releases/assets/1", "--method", "DELETE"],
   ]);
+  assert.equal(github.payloads[0]!.tag_name, "v0.1.0");
   assert.equal(github.payloads[0]!.name, "rmux v0.1.0");
   assert.equal(github.payloads[0]!.target_commitish, identity.git_revision);
   assert.ok(String(github.payloads[0]!.body).startsWith("Notes edited while the upload ran."));

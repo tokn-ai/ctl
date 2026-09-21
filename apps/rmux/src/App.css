@@ -223,6 +223,7 @@ svg {
 .host-group-header {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   min-height: 30px;
   padding-right: 6px;
@@ -257,6 +258,38 @@ svg {
   color: var(--muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+.host-connection-status {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: 5px;
+  margin: -1px 6px 5px 47px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.host-connection-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.host-connection-status[data-state="connected"] .host-connection-dot {
+  color: var(--success);
+  background: currentColor;
+}
+
+.host-connection-status:is([data-state="checking"], [data-state="connecting"], [data-state="disconnecting"]) .host-connection-dot {
+  color: var(--warning);
+}
+
+.host-connection-status[data-state="error"] {
+  color: var(--danger);
 }
 
 .host-group-actions {

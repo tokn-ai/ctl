@@ -1,4 +1,6 @@
 //! Keep non-Unix builds usable with preconfigured, noninteractive OpenSSH.
+#[path = "unsupported_broker.rs"]
+mod broker;
 #[path = "commands.rs"]
 pub mod commands;
 #[path = "verification.rs"]
@@ -98,4 +100,8 @@ pub fn cancel(_window: &str, _attempt_id: &str) {}
 pub fn cancel_window(_window: &str) {}
 pub async fn forget(_target: &ConnectionTargetDto) -> CommandResult<()> {
   Ok(())
+}
+
+pub fn disconnect(_targets: &[ConnectionTargetDto]) -> std::future::Ready<CommandResult<()>> {
+  broker::unsupported()
 }

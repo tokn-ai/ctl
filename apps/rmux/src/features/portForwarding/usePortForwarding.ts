@@ -27,6 +27,8 @@ export interface PortForwardingController {
   lastRefreshedAt: number | null;
   refreshAll(): Promise<void>;
   refreshTarget(target: SshConnectionTarget): Promise<void>;
+  pauseHost(host_id: string): Promise<void>;
+  resumeHost(host_id: string): void;
   setEnabled(
     target: SshConnectionTarget,
     forward: WorkspacePortForward,
@@ -53,6 +55,7 @@ export function usePortForwarding(
   const forwardsRef = useRef(forwards);
   const restoredRef = useRef(false);
   const operationsRef = useRef(new Map<string, HostOperation>());
+  const pausedHostsRef = useRef(new Set<string>());
   const busyCountsRef = useRef(new Map<string, number>());
   const refreshCountRef = useRef(0);
   const refreshGenerationRef = useRef(0);
@@ -104,57 +107,77 @@ export function usePortForwarding(
     return pending;
   }, []);
 
-  const refreshTarget = useCallback((target: SshConnectionTarget) => runHostOperation(target, async (isCurrent) => {
-    const hostId = target.host_id!;
-    setHostErrors((current) => isCurrent() ? withoutKey(current, hostId) : current);
-    try {
-      for (const forward of forwardsRef.current) {
-        if (!isCurrent()) return;
-        if (forward.host_id === hostId && forward.enabled) {
-          await configurePortForward(target, forward, true);
-          if (!isCurrent()) {
-            await configurePortForward(target, forward, false);
-            return;
-          }
-        }
-      }
-      if (!isCurrent()) return;
-      const next = await listPortForwards(target);
-      if (!isCurrent()) return;
-      const hostForwardIds = new Set(
-        forwardsRef.current
-          .filter((forward) => forward.host_id === hostId)
-          .map((forward) => forward.forward_id),
-      );
-      setStatuses((current) => {
-        if (!isCurrent()) return current;
-        const merged = new Map(current);
-        for (const forwardId of hostForwardIds) merged.delete(forwardId);
-        for (const status of next) {
-          if (hostForwardIds.has(status.forward.forward_id)) {
-            merged.set(status.forward.forward_id, status);
-          }
-        }
-        return merged;
-      });
-    } catch (failure) {
-      if (!isCurrent()) return;
-      setHostErrors((current) => isCurrent() ? new Map(current).set(hostId, errorMessage(failure)) : current);
-      const hostForwardIds = new Set(
-        forwardsRef.current
-          .filter((forward) => forward.host_id === hostId)
-          .map((forward) => forward.forward_id),
-      );
-      setStatuses(
-        (current) => isCurrent()
-          ? new Map(
-            [...current].filter(
-              ([forwardId]) => !hostForwardIds.has(forwardId),
-            ),
-          ) : current,
-      );
+  const pauseHost = useCallback((host_id: string) => {
+    const operation = operationsRef.current.get(host_id);
+    if (!pausedHostsRef.current.has(host_id)) {
+      pausedHostsRef.current.add(host_id);
+      if (operation) operation.generation += 1;
+      setHostErrors((current) => withoutKey(current, host_id));
+      setStatuses((current) => pausedStatuses(current, forwardsRef.current, pausedHostsRef.current));
     }
-  }), [runHostOperation]);
+    // In-flight enables clean themselves up after invalidation. Disconnecting
+    // the master must wait until that cleanup and the old queue have finished.
+    return operation?.pending ?? Promise.resolve();
+  }, []);
+
+  const resumeHost = useCallback((host_id: string) => {
+    pausedHostsRef.current.delete(host_id);
+  }, []);
+
+  const refreshTarget = useCallback((target: SshConnectionTarget) => {
+    if (pausedHostsRef.current.has(target.host_id!)) return Promise.resolve();
+    return runHostOperation(target, async (isCurrent) => {
+      const hostId = target.host_id!;
+      setHostErrors((current) => isCurrent() ? withoutKey(current, hostId) : current);
+      try {
+        for (const forward of forwardsRef.current) {
+          if (!isCurrent()) return;
+          if (forward.host_id === hostId && forward.enabled) {
+            await configurePortForward(target, forward, true);
+            if (!isCurrent()) {
+              await configurePortForward(target, forward, false);
+              return;
+            }
+          }
+        }
+        if (!isCurrent()) return;
+        const next = await listPortForwards(target);
+        if (!isCurrent()) return;
+        const hostForwardIds = new Set(
+          forwardsRef.current
+            .filter((forward) => forward.host_id === hostId)
+            .map((forward) => forward.forward_id),
+        );
+        setStatuses((current) => {
+          if (!isCurrent()) return current;
+          const merged = new Map(current);
+          for (const forwardId of hostForwardIds) merged.delete(forwardId);
+          for (const status of next) {
+            if (hostForwardIds.has(status.forward.forward_id)) {
+              merged.set(status.forward.forward_id, status);
+            }
+          }
+          return merged;
+        });
+      } catch (failure) {
+        if (!isCurrent()) return;
+        setHostErrors((current) => isCurrent() ? new Map(current).set(hostId, errorMessage(failure)) : current);
+        const hostForwardIds = new Set(
+          forwardsRef.current
+            .filter((forward) => forward.host_id === hostId)
+            .map((forward) => forward.forward_id),
+        );
+        setStatuses(
+          (current) => isCurrent()
+            ? new Map(
+              [...current].filter(
+                ([forwardId]) => !hostForwardIds.has(forwardId),
+              ),
+            ) : current,
+        );
+      }
+    });
+  }, [runHostOperation]);
 
   const refreshAll = useCallback(async () => {
     const generation = ++refreshGenerationRef.current;
@@ -184,6 +207,9 @@ export function usePortForwarding(
     ) => {
       target = selectedTarget(target);
       const hostId = target.host_id!;
+      if (enabled && pausedHostsRef.current.has(hostId)) {
+        throw new Error("Connect this host before starting forwards.");
+      }
       busyCountsRef.current.set(forward.forward_id, (busyCountsRef.current.get(forward.forward_id) ?? 0) + 1);
       setBusy((current) => new Set(current).add(forward.forward_id));
       try {
@@ -240,10 +266,10 @@ export function usePortForwarding(
   useEffect(() => {
     const valid = new Set(forwards.map((forward) => forward.forward_id));
     setStatuses((current) => {
-      if ([...current.keys()].every((forwardId) => valid.has(forwardId))) {
-        return current;
-      }
-      return new Map([...current].filter(([forwardId]) => valid.has(forwardId)));
+      const retained = [...current.keys()].every((forwardId) => valid.has(forwardId))
+        ? current
+        : new Map([...current].filter(([forwardId]) => valid.has(forwardId)));
+      return pausedStatuses(retained, forwards, pausedHostsRef.current);
     });
   }, [forwards]);
 
@@ -271,8 +297,41 @@ export function usePortForwarding(
     lastRefreshedAt,
     refreshAll,
     refreshTarget,
+    pauseHost,
+    resumeHost,
     setEnabled,
   };
+}
+
+function pausedStatuses(
+  current: ReadonlyMap<string, PortForwardStatus>,
+  forwards: readonly WorkspacePortForward[],
+  pausedHosts: ReadonlySet<string>,
+): ReadonlyMap<string, PortForwardStatus> {
+  let next: Map<string, PortForwardStatus> | undefined;
+  const message = "Host disconnected. Connect this host to resume forwarding.";
+  for (const forward of forwards) {
+    if (!pausedHosts.has(forward.host_id)) continue;
+    const status = (next ?? current).get(forward.forward_id);
+    if (!forward.enabled) {
+      if (status) {
+        next ??= new Map(current);
+        next.delete(forward.forward_id);
+      }
+    } else if (status?.state !== "waiting_for_authentication" || status.message !== message ||
+      status.forward.bind_address !== forward.bind_address ||
+      status.forward.local_port !== forward.local_port ||
+      status.forward.remote_host !== forward.remote_host ||
+      status.forward.remote_port !== forward.remote_port) {
+      next ??= new Map(current);
+      next.set(forward.forward_id, {
+        forward,
+        state: "waiting_for_authentication",
+        message,
+      });
+    }
+  }
+  return next ?? current;
 }
 
 function withoutKey<K, V>(map: ReadonlyMap<K, V>, key: K): Map<K, V> {

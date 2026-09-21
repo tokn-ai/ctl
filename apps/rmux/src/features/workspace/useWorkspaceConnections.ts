@@ -10,6 +10,7 @@ interface WorkspaceConnections {
   active_tab_key: string | null;
   activateTab(session: SessionSummary): Promise<void>;
   refreshHost(target: ConnectionTarget): Promise<void>;
+  canConnect?(target: ConnectionTarget): boolean;
 }
 
 /** Connection policy lives above storage: loading a document is still pure I/O. */
@@ -41,7 +42,7 @@ export function useWorkspaceConnections(options: WorkspaceConnections) {
 
   return useCallback(async (target: ConnectionTarget) => {
     const before = { ...current.current, ...current.current.getView?.() };
-    if (!before.ready || before.closing) return;
+    if (!before.ready || before.closing || before.canConnect?.(target) === false) return;
     const attempt = ++hostConnection.current;
     const hostTabs = before.tabs.filter((tab) =>
       sameTarget(tab.target, target),
@@ -60,6 +61,7 @@ export function useWorkspaceConnections(options: WorkspaceConnections) {
       hostConnection.current !== attempt ||
       !after.ready ||
       after.closing ||
+      after.canConnect?.(target) === false ||
       after.active_tab_key !== before.active_tab_key
     )
       return;

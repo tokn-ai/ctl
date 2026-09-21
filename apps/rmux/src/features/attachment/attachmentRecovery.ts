@@ -21,6 +21,7 @@ const NON_RECOVERABLE_ERROR_CODES = new Set([
   "ctl_agent_identity_unsupported",
   "ssh_authentication_failed",
   "ssh_authentication_required",
+  "ssh_host_disconnected",
   "ssh_start_failed",
   "session_not_found",
   "unsupported_platform",

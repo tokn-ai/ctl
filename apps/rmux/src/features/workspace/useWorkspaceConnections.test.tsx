@@ -208,4 +208,20 @@ describe("workspace connection policy", () => {
     });
     expect(initial.activateTab).toHaveBeenCalledExactlyOnceWith(otherTab);
   });
+
+  it("does not attach after the host is manually disconnected during inspection", async () => {
+    const { result, initial, rerender } = setup([session(remote, "selected")]);
+    let paused = false;
+    rerender({ ...initial, canConnect: () => !paused });
+    const inspection = pending();
+    vi.mocked(initial.refreshHost).mockReturnValueOnce(inspection.promise);
+    let connection!: Promise<void>;
+    act(() => { connection = result.current(remote); });
+    paused = true;
+    await act(async () => { inspection.resolve(); await connection; });
+    expect(initial.activateTab).not.toHaveBeenCalled();
+    vi.mocked(initial.refreshHost).mockClear();
+    await act(async () => result.current(remote));
+    expect(initial.refreshHost).not.toHaveBeenCalled();
+  });
 });

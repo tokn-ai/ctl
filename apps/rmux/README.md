@@ -85,6 +85,14 @@ connect. Adding or editing a method verifies its endpoint before saving, but
 does not switch an existing session's transport. Use an explicit connection to
 apply that route to the host's remembered sessions.
 
+Remote host rows show live **Connected**, **Connecting**, **Disconnected**, or
+**Error** status; hover the status to see active connection methods or diagnostics.
+**Disconnect host** closes the shared SSH masters for the host's saved and active
+methods and pauses its forwards. Remote shells and tasks keep running, and tabs,
+credentials, and saved forwarding preferences are retained. Use **Connect host**
+to resume. Other windows sharing those masters also disconnect. Status and manual
+pauses are runtime state; status checks never authenticate or start `ctld`.
+
 All methods on a host must reach its verified account-owned ctl environment.
 Use a separate host for another account. Matching remote IDs never merge saved
 hosts automatically. Renaming a host or changing methods preserves session,

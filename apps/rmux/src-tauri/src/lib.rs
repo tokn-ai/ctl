@@ -78,6 +78,8 @@ pub fn run() {
       ssh_auth::commands::respond_ssh_prompt,
       ssh_auth::commands::cancel_ssh_probe,
       ssh_auth::commands::forget_ssh_credentials,
+      ssh_auth::commands::ssh_connection_status,
+      ssh_auth::commands::disconnect_ssh_host,
       ssh_auth::commands::configure_port_forward,
       ssh_auth::commands::list_port_forwards,
       ssh_auth::commands::list_remote_listeners,

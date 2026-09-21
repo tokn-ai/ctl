@@ -12,6 +12,14 @@ fn prompt_context() -> (PromptContext, mpsc::UnboundedReceiver<serde_json::Value
   (
     PromptContext {
       attempt: Arc::new(Attempt {
+        target: ctld_ipc::SshTarget {
+          destination: "test".into(),
+          hostname: None,
+          user: None,
+          port: None,
+          identity_file: None,
+          gateways: Vec::new(),
+        },
         cancel,
         responses: Mutex::default(),
       }),

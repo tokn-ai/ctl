@@ -114,6 +114,12 @@ pub struct TargetRequestDto {
   pub target: ConnectionTargetDto,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SshConnectionStatusDto {
+  pub connected: bool,
+  pub manually_disconnected: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SshConfigHostDto {
   pub destination: String,

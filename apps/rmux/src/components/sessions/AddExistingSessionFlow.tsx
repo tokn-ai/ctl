@@ -12,6 +12,7 @@ import { errorMessage } from "../../lib/errors";
 import type {
   ConnectionTarget,
   RemoteIdentity,
+  HostConnectionChange,
   SessionListResponse,
   SessionSummary,
   ShellStateSummary,
@@ -21,6 +22,7 @@ import type {
 interface AddExistingSessionFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  onConnectionChange?: HostConnectionChange;
   known: readonly SessionSummary[];
   onVerifyHost(
     target: ConnectionTarget,
@@ -50,6 +52,7 @@ export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
         warning={null}
         target={target}
         autoConnect
+        onConnectionChange={props.onConnectionChange}
         onVerified={props.onVerifyHost}
         onConnected={(verified) => {
           connectedRef.current = true;

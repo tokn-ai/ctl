@@ -29,6 +29,7 @@ import type {
   SshConnectionTarget,
   SshGatewayRouteStep,
   WorkspaceSshGateway,
+  HostConnectionChange,
 } from "../../lib/types";
 
 interface SshHostFlowProps {
@@ -37,6 +38,7 @@ interface SshHostFlowProps {
   target?: ConnectionTarget;
   /** Begin verification on mount when a target was already selected. */
   autoConnect?: boolean;
+  onConnectionChange?: HostConnectionChange;
   updateRequired?: boolean;
   complex?: boolean;
   /** Edit connection settings without entering the reconnect flow. */
@@ -94,6 +96,7 @@ export function SshHostFlow({
   warning,
   target,
   autoConnect = false,
+  onConnectionChange,
   updateRequired = false,
   complex = false,
   initialTarget,
@@ -156,6 +159,7 @@ export function SshHostFlow({
     const attempt = attemptRef.current;
     attemptRef.current = null;
     if (attempt) void cancelSshProbe(attempt).catch(() => undefined);
+    if (attempt && candidateRef.current) onConnectionChange?.(candidateRef.current, "cancelled");
   }
 
   useEffect(() => {
@@ -193,6 +197,7 @@ export function SshHostFlow({
     // standalone-host flow owns credentials it can safely discard on cancel.
     if (!target && !initialTarget && !onSaveConnection && !onSaveNewHost) uncommittedTargetRef.current = candidate;
     candidateRef.current = candidate;
+    onConnectionChange?.(candidate, "connecting");
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
     setError(null);
@@ -230,6 +235,7 @@ export function SshHostFlow({
         }
         await onSaveConnection(candidate, draftGatewaysRef.current, remote_info);
         if (attemptRef.current !== attempt || closedRef.current) return;
+        onConnectionChange?.(candidate, "connected");
         uncommittedTargetRef.current = null;
         attemptRef.current = null;
         onClose();
@@ -237,6 +243,7 @@ export function SshHostFlow({
       }
       const recovered = await onVerified?.(candidate, remote_info);
       if (attemptRef.current !== attempt || closedRef.current) return;
+      onConnectionChange?.(recovered ?? candidate, "connected");
       if (complex && !target && candidate.kind === "ssh") {
         if (!onSaveRoutedHost) throw new Error("Routed host saving is unavailable.");
         await onSaveRoutedHost(candidate, draftGatewaysRef.current, remote_info);
@@ -262,6 +269,7 @@ export function SshHostFlow({
       attemptRef.current = null;
       setPrompt(null);
       setError(errorMessage(failure));
+      onConnectionChange?.(candidate, "error", errorMessage(failure));
       const update = errorCode(failure) === "ctl_agent_identity_unsupported";
       setNeedsUpdate(update);
       setCanInstallAgent(update || errorCode(failure) === "ctl_agent_not_found");
@@ -274,6 +282,7 @@ export function SshHostFlow({
   async function installAgent(candidate: ConnectionTarget) {
     cancelAttempt();
     candidateRef.current = candidate;
+    onConnectionChange?.(candidate, "connecting");
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
     setError(null);
@@ -300,6 +309,7 @@ export function SshHostFlow({
       setPrompt(null);
       setError(errorMessage(failure));
       setCanInstallAgent(true);
+      onConnectionChange?.(candidate, "error", errorMessage(failure));
       setStep("retry");
     }
   }
@@ -382,6 +392,7 @@ export function SshHostFlow({
       if (attemptRef.current === attempt) {
         cancelAttempt();
         setError(errorMessage(failure));
+        if (candidateRef.current) onConnectionChange?.(candidateRef.current, "error", errorMessage(failure));
         setStep("retry");
       }
     });

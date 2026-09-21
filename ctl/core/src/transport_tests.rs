@@ -7,6 +7,111 @@ use tokio::time::timeout;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[cfg(unix)]
+fn loopback_gateway(port: u16) -> SshGateway {
+  SshGateway {
+    destination: "127.0.0.1".into(),
+    hostname: None,
+    user: None,
+    port: Some(port),
+    identity_file: None,
+    mode: SshGatewayMode::Automatic,
+  }
+}
+
+#[cfg(unix)]
+fn multiplexed_ssh_command(options: &SshConnectionOptions, control_path: PathBuf) -> Command {
+  let mut command = Command::new(SSH_PROGRAM);
+  // Isolate the real OpenSSH client from personal configuration and credentials.
+  command.args(["-F", "/dev/null", "-o", "ConnectTimeout=1"]);
+  let interaction = SshInteraction::Multiplexed { control_path };
+  let extra = configure_ssh_interaction(&mut command, &interaction);
+  command
+    .args(extra)
+    .args(ssh_base_arguments("fixture", options))
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  command
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
+  for through_gateway in [false, true] {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let options = SshConnectionOptions {
+      hostname: Some("127.0.0.1".into()),
+      port: Some(port),
+      gateways: if through_gateway {
+        vec![loopback_gateway(port)]
+      } else {
+        Vec::new()
+      },
+      ..SshConnectionOptions::default()
+    };
+    let path = PathBuf::from(format!("/tmp/ctl-mux-{}", uuid::Uuid::new_v4().simple()));
+    assert!(!path.exists());
+    let mut command = multiplexed_ssh_command(&options, path);
+    command.arg("true");
+    let output = tokio::select! {
+      biased;
+      accepted = listener.accept() => {
+        drop(accepted);
+        panic!("missing master attempted a fresh SSH connection (gateway={through_gateway})");
+      }
+      output = timeout(TEST_TIMEOUT, command.output()) => output.unwrap().unwrap(),
+    };
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(!diagnostics.contains("Cannot specify -J with ProxyCommand"));
+    assert!(diagnostics.contains("Connection closed"), "{diagnostics}");
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openssh_gateway_options_preserve_master_only_precedence() {
+  let options = SshConnectionOptions {
+    hostname: Some("127.0.0.1".into()),
+    gateways: vec![loopback_gateway(2222)],
+    ..SshConnectionOptions::default()
+  };
+  for multiplexed in [false, true] {
+    let mut command = Command::new(SSH_PROGRAM);
+    command.args(["-F", "/dev/null", "-G"]);
+    if multiplexed {
+      let extra = configure_ssh_interaction(
+        &mut command,
+        &SshInteraction::Multiplexed {
+          control_path: PathBuf::from("/tmp/ctl-mux-config-test"),
+        },
+      );
+      command.args(extra);
+    }
+    command.args(ssh_base_arguments("fixture", &options));
+    let output = command.output().await.unwrap();
+    assert!(
+      output.status.success(),
+      "{}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    let config = String::from_utf8(output.stdout).unwrap();
+    if multiplexed {
+      assert!(config.lines().any(|line| line == "proxycommand false"));
+      assert!(!config.lines().any(|line| line.starts_with("proxyjump ")));
+    } else {
+      assert!(config.lines().any(|line| matches!(
+        line,
+        "proxyjump 127.0.0.1:2222" | "proxyjump [127.0.0.1]:2222"
+      )));
+      assert!(!config.lines().any(|line| line.starts_with("proxycommand ")));
+    }
+  }
+}
+
 // Exercise real OS process pipes, including Windows binary stdio. These
 // fixtures model the SSH child's stream boundary, not SSH authentication.
 fn fixture(unix: &str, windows_script: &str) -> Command {

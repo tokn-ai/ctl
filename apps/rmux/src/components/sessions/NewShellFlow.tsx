@@ -8,11 +8,12 @@ import {
   targetLabel,
 } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
-import type { ConnectionTarget, RemoteIdentity, WorkspaceHost } from "../../lib/types";
+import type { ConnectionTarget, HostConnectionChange, RemoteIdentity, WorkspaceHost } from "../../lib/types";
 
 interface NewShellFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  onConnectionChange?: HostConnectionChange;
   onVerifyHost(
     target: ConnectionTarget,
     remote_info: RemoteIdentity,
@@ -29,6 +30,7 @@ interface NewShellFlowProps {
 export function NewShellFlow({
   targets,
   hosts,
+  onConnectionChange,
   onVerifyHost,
   onCreate,
   onClose,
@@ -103,6 +105,7 @@ export function NewShellFlow({
         warning={null}
         target={connecting}
         autoConnect
+        onConnectionChange={onConnectionChange}
         onVerified={onVerifyHost}
         onConnected={(verified) => {
           const pending = pendingDirectoryRef.current;

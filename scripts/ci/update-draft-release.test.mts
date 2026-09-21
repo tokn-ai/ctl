@@ -84,6 +84,14 @@ interface MockRelease {
   html_url: string;
 }
 
+function isUpload(args: string[]): boolean {
+  return args[0] === "api" && args[1]?.startsWith("https://uploads.github.com/") === true;
+}
+
+function isMutation(args: string[]): boolean {
+  return args.includes("POST") || args.includes("PATCH") || args.includes("DELETE");
+}
+
 function mockGithub(options: {
   release?: MockRelease | null;
   assets?: { id: number; name: string; label: string | null }[];
@@ -96,9 +104,12 @@ function mockGithub(options: {
   gh: GhRunner;
   calls: string[][];
   payloads: Record<string, unknown>[];
+  creation_payloads: Record<string, unknown>[];
 } {
   const calls: string[][] = [];
   const payloads: Record<string, unknown>[] = [];
+  const creationPayloads: Record<string, unknown>[] = [];
+  let created = false;
   let release = options.release === undefined ? {
     id: 42,
     tag_name: "v0.1.0",
@@ -109,6 +120,9 @@ function mockGithub(options: {
   const gh: GhRunner = async (args) => {
     calls.push(args);
     if (args[0] === "api" && args[1] === "repos/tokn-ai/ctl/releases?per_page=100") {
+      if (created) {
+        throw new Error("The newly created draft is not yet visible in the release list");
+      }
       return JSON.stringify([[{ id: 1, tag_name: "v0.0.1", draft: false }], release ? [release] : []]);
     }
     if (args[0] === "api" && args[1] === "repos/tokn-ai/ctl/git/matching-refs/tags/v0.1.0") {
@@ -126,20 +140,24 @@ function mockGithub(options: {
       }
       return JSON.stringify({ object });
     }
-    if (args[0] === "release" && args[1] === "create") {
-      assert.ok(args.includes("--draft"));
-      assert.equal(args[args.indexOf("--target") + 1], identity.git_revision);
+    if (args[0] === "api" && args[1] === "repos/tokn-ai/ctl/releases" && args.includes("POST")) {
+      const payload = JSON.parse(await readFile(args[args.indexOf("--input") + 1]!, "utf8"));
+      creationPayloads.push(payload);
+      assert.equal(payload.draft, true);
+      assert.equal(payload.target_commitish, identity.git_revision);
       release = {
         id: 42, tag_name: "v0.1.0", draft: true,
-        body: await readFile(args[args.indexOf("--notes-file") + 1]!, "utf8"),
+        body: payload.body,
         html_url: "https://github.com/tokn-ai/ctl/releases/tag/v0.1.0",
       };
-      return release.html_url;
+      created = true;
+      return JSON.stringify(release);
     }
     if (args[1] === "repos/tokn-ai/ctl/releases/42/assets?per_page=100") {
       return JSON.stringify([options.assets ?? []]);
     }
-    if (args[0] === "release" && args[1] === "upload") {
+    if (isUpload(args)) {
+      assert.equal(new URL(args[1]!).pathname, "/repos/tokn-ai/ctl/releases/42/assets");
       if (options.upload_error) {
         throw new Error("Upload failed");
       }
@@ -161,7 +179,7 @@ function mockGithub(options: {
     }
     throw new Error(`Unexpected gh invocation: ${args.join(" ")}`);
   };
-  return { gh, calls, payloads };
+  return { gh, calls, payloads, creation_payloads: creationPayloads };
 }
 
 test("validates all four desktop and remote targets and their checksum files", async (t) => {
@@ -278,13 +296,17 @@ test("existing draft uploads managed assets, preserves manual assets and notes, 
   const result = await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh);
   assert.equal(result.status, "updated");
   assert.equal(result.html_url, "https://github.com/tokn-ai/ctl/releases/tag/v0.1.0");
-  const upload = github.calls.findIndex((args) => args[0] === "release" && args[1] === "upload");
+  const upload = github.calls.findIndex(isUpload);
   const patch = github.calls.findIndex((args) => args.includes("PATCH"));
-  const deletion = github.calls.findIndex((args) => args.includes("DELETE"));
+  const deletion = github.calls.findIndex((args) => args.includes("DELETE") && args[1] === "repos/tokn-ai/ctl/releases/assets/1");
   assert.ok(upload > 0 && patch > upload && deletion > patch);
-  assert.ok(github.calls[upload]!.includes("--clobber"));
-  assert.ok(github.calls[upload]!.includes("/tmp/bundles/new-package.dmg#rmux-ci: new-package.dmg"));
+  const uploadUrl = new URL(github.calls[upload]![1]!);
+  assert.equal(uploadUrl.searchParams.get("name"), "new-package.dmg");
+  assert.equal(uploadUrl.searchParams.get("label"), "rmux-ci: new-package.dmg");
+  assert.ok(github.calls[upload]!.includes("/tmp/bundles/new-package.dmg"));
+  assert.ok(github.calls[upload]!.includes("Content-Type: application/octet-stream"));
   assert.deepEqual(github.calls.filter((args) => args.includes("DELETE")), [
+    ["api", "repos/tokn-ai/ctl/releases/assets/3", "--method", "DELETE"],
     ["api", "repos/tokn-ai/ctl/releases/assets/1", "--method", "DELETE"],
   ]);
   assert.equal(github.payloads[0]!.name, "rmux v0.1.0");
@@ -293,12 +315,16 @@ test("existing draft uploads managed assets, preserves manual assets and notes, 
   assert.ok(!("draft" in github.payloads[0]!));
 });
 
-test("creates a missing release as a draft at the exact build revision", async () => {
+test("creates a draft at the exact build revision and uploads by returned ID without listing again", async () => {
   const github = mockGithub({ release: null });
   assert.equal((await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh)).status, "updated");
-  const creation = github.calls.find((args) => args[0] === "release" && args[1] === "create")!;
-  assert.ok(creation.includes("--draft"));
-  assert.equal(creation[creation.indexOf("--target") + 1], identity.git_revision);
+  assert.equal(github.creation_payloads.length, 1);
+  assert.equal(github.creation_payloads[0]!.draft, true);
+  assert.equal(github.creation_payloads[0]!.target_commitish, identity.git_revision);
+  assert.equal(github.creation_payloads[0]!.tag_name, "v0.1.0");
+  assert.equal(github.calls.filter((args) => args[1] === "repos/tokn-ai/ctl/releases?per_page=100").length, 1);
+  assert.equal(github.calls.filter(isUpload).length, exampleBundle.asset_names.length);
+  assert.ok(!github.calls.some((args) => args[0] === "release"));
 });
 
 test("leaves a published release unchanged", async () => {
@@ -340,7 +366,7 @@ test("rejects a mismatched existing tag before changing any release assets or no
         assets: [{ id: 1, name: "manual.pdf", label: null }],
       });
       await assert.rejects(updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh), /bundles were built from/);
-      assert.ok(!github.calls.some((args) => args[0] === "release" || args.includes("PATCH") || args.includes("DELETE")));
+      assert.ok(!github.calls.some(isMutation));
       assert.equal(github.payloads.length, 0);
     });
   }
@@ -354,13 +380,13 @@ test("bounds annotated tag resolution and rejects cycles", async () => {
   });
   await assert.rejects(updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh), /cyclic or excessively nested/);
   assert.equal(github.calls.filter((args) => args[1]?.includes("/git/tags/")).length, 1);
-  assert.ok(!github.calls.some((args) => args[0] === "release" || args.includes("PATCH") || args.includes("DELETE")));
+  assert.ok(!github.calls.some(isMutation));
 });
 
 test("rechecks draft status before uploading", async () => {
   const github = mockGithub({ published_before_upload: true });
   assert.equal((await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh)).status, "published");
-  assert.ok(!github.calls.some((args) => args[0] === "release" || args.includes("PATCH") || args.includes("DELETE")));
+  assert.ok(!github.calls.some(isMutation));
 });
 
 test("upload failure preserves obsolete assets and previous metadata", async () => {
@@ -375,7 +401,7 @@ test("upload failure preserves obsolete assets and previous metadata", async () 
 test("rejects a manual attachment collision before uploading anything", async () => {
   const github = mockGithub({ assets: [{ id: 2, name: "desktop.json", label: null }] });
   await assert.rejects(updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh), /manually managed/);
-  assert.ok(!github.calls.some((args) => args[0] === "release" || args.includes("DELETE") || args.includes("PATCH")));
+  assert.ok(!github.calls.some(isMutation));
   assert.deepEqual(planAssetUpdate([
     { id: 1, name: "manual.pdf", label: "" },
     { id: 2, name: "old.dmg", label: "rmux-ci: old.dmg" },

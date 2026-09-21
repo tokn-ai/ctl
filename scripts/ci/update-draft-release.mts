@@ -325,19 +325,29 @@ export async function updateDraftRelease(
   await verifyReleaseTag(gh, repository, tag, bundle.git_revision);
   const tempDirectory = await mkdtemp(join(tmpdir(), "rmux-release-"));
   try {
-    const notesPath = join(tempDirectory, "notes.md");
     // Validate markers before touching assets, including on an existing draft.
-    await writeFile(notesPath, releaseNotes(bundle, release?.body ?? null));
+    const notes = releaseNotes(bundle, release?.body ?? null);
+    const payloadPath = join(tempDirectory, "release.json");
     if (!release) {
-      await gh([
-        "release", "create", tag, "--repo", repository,
-        "--draft", "--target", bundle.git_revision,
-        "--title", `rmux ${tag}`, "--notes-file", notesPath,
-      ]);
-      release = await findRelease(gh, repository, tag);
-      if (!release) {
-        throw new Error(`Could not find the newly created draft ${tag}`);
+      await writeFile(payloadPath, JSON.stringify({
+        tag_name: tag,
+        draft: true,
+        target_commitish: bundle.git_revision,
+        name: `rmux ${tag}`,
+        body: notes,
+      }));
+      // The release list can lag behind creation. Use the returned ID immediately.
+      const created: unknown = JSON.parse(await gh([
+        "api", `repos/${repository}/releases`, "--method", "POST", "--input", payloadPath,
+      ]));
+      if (
+        !record(created) || !Number.isSafeInteger(created.id) ||
+        created.tag_name !== tag || created.draft !== true ||
+        typeof created.html_url !== "string"
+      ) {
+        throw new Error(`GitHub did not return the expected new draft ${tag}`);
       }
+      release = created as unknown as Release;
     }
     if (!release.draft) {
       return { status: "published", html_url: release.html_url };
@@ -349,16 +359,24 @@ export async function updateDraftRelease(
     if (!beforeUpload.draft) {
       return { status: "published", html_url: beforeUpload.html_url };
     }
-    // Upload first. A failure must not remove obsolete packages from the last complete build.
-    await gh([
-      "release", "upload", tag, "--repo", repository, "--clobber",
-      ...bundle.asset_names.map((name) => `${join(bundle.asset_directory, name)}#${managedLabelPrefix}${name}`),
-    ]);
+    // Upload by ID: tag-based release lookup can miss a newly created draft.
+    // Replace matching managed names, but keep obsolete packages until every upload succeeds.
+    for (const name of bundle.asset_names) {
+      const existing = assets.find((asset) => asset.name === name);
+      if (existing) {
+        await gh(["api", `repos/${repository}/releases/assets/${existing.id}`, "--method", "DELETE"]);
+      }
+      const query = `name=${encodeURIComponent(name)}&label=${encodeURIComponent(`${managedLabelPrefix}${name}`)}`;
+      await gh([
+        "api", `https://uploads.github.com/repos/${repository}/releases/${release.id}/assets?${query}`,
+        "--method", "POST", "--input", join(bundle.asset_directory, name),
+        "--header", "Content-Type: application/octet-stream",
+      ]);
+    }
     const latest: Release = JSON.parse(await gh(["api", releaseEndpoint]));
     if (!latest.draft) {
       return { status: "published", html_url: latest.html_url };
     }
-    const payloadPath = join(tempDirectory, "release.json");
     await writeFile(payloadPath, JSON.stringify({
       name: `rmux ${tag}`,
       target_commitish: bundle.git_revision,

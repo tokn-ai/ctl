@@ -9,6 +9,8 @@ import type {
   AttachmentResizeRequest,
   ConnectionTarget,
   CreateSessionRequest,
+  HostCatalogDocument,
+  HostCatalogSnapshot,
   KeybindingsDocument,
   LocalPortForward,
   OpenAttachmentRequest,
@@ -24,10 +26,12 @@ import type {
 } from "../src/lib/types";
 import {
   previewDefinitions,
+  previewHostCatalog,
   previewOutput,
   previewSessions,
   previewShell,
   previewTasks,
+  previewTargets,
   previewWorkspace,
 } from "./fixtures";
 
@@ -39,6 +43,8 @@ if (!import.meta.env.DEV) throw new Error("The sample workspace is development-o
 const view_param = new URLSearchParams(location.search).get("view");
 const initial_view = view_param === "tasks" || view_param === "ports" ? view_param : "sessions";
 let workspace: WorkspaceSnapshot = { revision: "preview-1", document: previewWorkspace(initial_view) };
+let hosts: HostCatalogSnapshot = { revision: "preview-hosts-1", document: previewHostCatalog() };
+const ssh_config_hosts = [{ destination: "dev-server" }, { destination: "staging" }, { destination: "research" }];
 let revision = 1;
 let sessions = structuredClone(previewSessions);
 let tasks = structuredClone(previewTasks);
@@ -91,6 +97,11 @@ mockIPC((command, payload) => {
     case "update_workspace":
       workspace = { revision: `preview-${++revision}`, document: request<{ document: WorkspaceDocument }>(payload).document };
       return structuredClone(workspace);
+    case "load_hosts":
+      return structuredClone(hosts);
+    case "update_hosts":
+      hosts = { revision: `preview-hosts-${++revision}`, document: request<{ document: HostCatalogDocument }>(payload).document };
+      return structuredClone(hosts);
     case "load_keybindings":
       return { path: "Sample workspace", revision: "1", document: keybindings };
     case "save_keybindings":
@@ -109,11 +120,16 @@ mockIPC((command, payload) => {
       document.title = `${(payload as { title: string }).title} · Sample workspace preview`;
       return;
     case "list_ssh_config_hosts":
-      return { hosts: [{ destination: "dev-server" }, { destination: "staging" }], warnings: [] };
+      return { hosts: structuredClone(ssh_config_hosts), warnings: [] };
     case "list_ssh_identity_files":
       return { identity_files: [{ path: "/sample/.ssh/id_ed25519", display_path: "~/.ssh/id_ed25519" }], warnings: [] };
-    case "probe_ssh_host":
-      return { remote_id: "sample-dev", agent_version: "0.1.0" };
+    case "probe_ssh_host": {
+      const { target } = request<{ target: ConnectionTarget }>(payload);
+      const configured = previewTargets.find((known) => sameTarget(known, target));
+      return configured?.kind === "ssh" ? configured.remote_info : {
+        remote_id: `sample-${target.kind === "ssh" ? target.destination : "local"}`, agent_version: "0.1.0",
+      };
+    }
     case "list_sessions": {
       const { target } = request<{ target: ConnectionTarget }>(payload);
       const matching = sessions.filter((session) => sameTarget(session.target, target));
@@ -245,8 +261,11 @@ mockIPC((command, payload) => {
       return { listeners: [5432, 8080, 9090].map((port) => ({ bind_address: "127.0.0.1", port })), warnings: [] };
     case "check_local_port":
       return { port: request<{ port: number }>(payload).port, available: true, message: null };
-    case "save_ssh_config_host":
-      return { destination: request<{ alias: string }>(payload).alias };
+    case "save_ssh_config_host": {
+      const { alias } = request<{ alias: string }>(payload);
+      if (!ssh_config_hosts.some((host) => host.destination === alias)) ssh_config_hosts.push({ destination: alias });
+      return { destination: alias };
+    }
     case "restart_local_daemon":
       return { terminated_sessions: sessions.filter((session) => session.target.kind === "local").length };
     case "restart_task_daemon":

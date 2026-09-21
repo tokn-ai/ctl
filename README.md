@@ -175,20 +175,39 @@ remote sessions, automatically reconnecting the selected local tab on startup.
 Remote hosts stay disconnected until explicitly opened; **Connect host** resumes
 that host's selected tab, or its first open tab. **Add existing session**
 explicitly discovers one host's inventory and remembers only chosen entries;
-opening a session connects on demand. Its **Add host** picker discovers concrete
-aliases from the user's OpenSSH config without connecting to them; selecting
-one makes it an active target. A new hostname can be saved as a reusable,
-managed OpenSSH `Host` block or as structured app-local connection settings.
-The app records the remote environment ID and installed agent/bundle version.
+opening a session connects on demand. A host is a named machine, independent
+of its IP address, hostname, or gateway route. Each host supports one remote
+account/environment and multiple named connection methods. **Add host** asks
+for the SSH address, a display name, and authentication, then verifies the
+connection and automatically saves the named host to `~/.tokn/rmux/hosts.json`.
+Its initial method is named `SSH`; additional methods and gateway routes are
+available in **Host settings**. New-host creation does not modify OpenSSH config.
+
+Concrete aliases from `~/.ssh/config` and its `Include` files are available in
+**Connect host** and session pickers. They appear in the sidebar after connecting;
+aliases with remembered work remain visible after restart. Connecting to an
+alias does not import its definition. Saving a
+customization in **Host settings** creates a saved host with the same identity.
+Aliases already represented by a saved method are hidden unless their projected
+identity still has workspace references. **Host settings** lets you rename the
+machine or methods, add or edit methods, choose the preferred method, and
+explicitly **Connect using** another method. New direct methods can optionally
+export a managed OpenSSH config entry with **Also save to OpenSSH config**.
+**Connect host** uses the preference; failures never select another method
+automatically. Saving settings leaves existing session transports unchanged
+until an explicit connection. Session, tab, and port references retain the same
+host ID through these changes. Workspace schema 8 moves existing saved hosts and
+gateways into `hosts.json`, preserving their IDs and a backup of the workspace.
+
+The app records the host's remote environment ID and installed agent/bundle version.
 The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live under
 `~/.tokn/ctl/versions`, with `~/.tokn/ctl/current` selecting the active bundle.
-Connecting through another IP, hostname, or SSH alias with the same ID
-automatically updates the saved address and recovers its existing sessions and
-tabs. Hover over a host heading to see its last observed version and remote ID.
+Every method on a host must reach that same environment. Hosts are never merged
+automatically because their remote IDs match. Hover over a host heading to see
+its last observed version and remote ID.
 An older agent offers **Update remote components** before identity discovery.
-Add Host uses the command-palette overlay for host, name, authentication, and
-storage prompts, with connection verification before saving. The same overlay
-handles destructive close/restart confirmations and **New Shell** input.
+Authentication uses the command-palette overlay, which also handles destructive
+close/restart confirmations and **New Shell** input.
 **New Shell** asks for a host (Local first) and an optional working directory;
 blank uses that host's home directory. Escape cancels before creation starts,
 and progress/errors stay in the overlay. If `ctl-agent` is absent, the app can
@@ -199,7 +218,8 @@ time limit while bytes continue advancing; a speed-aware stall watchdog replaces
 the old three-minute installation deadline. Authentication prompts pause that
 watchdog, and Escape cancels the installation.
 Each row and tab carries its host; create, attach, reconnect, and kill
-operations always use that session's original target.
+operations use that host's selected connection method without changing session
+identity.
 It renders one terminal pane and exposes input and layout ownership separately.
 Selecting a session does not resize its PTY. **Resize with window** explicitly
 acquires layout ownership and continuously matches the PTY to the window;

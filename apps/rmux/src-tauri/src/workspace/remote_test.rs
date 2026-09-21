@@ -10,7 +10,8 @@ use tokio::time::timeout;
 
 use super::repository::Repository;
 use super::{
-  SessionReference, UpdateWorkspaceRequest, WorkspaceDocument, WorkspaceHost, WorkspaceSession,
+  HostCatalogDocument, SessionReference, UpdateHostsRequest, UpdateWorkspaceRequest,
+  WorkspaceConnectionMethod, WorkspaceDocument, WorkspaceHost, WorkspaceSession,
 };
 use crate::commands::inspection::{InspectKnownSessionsRequest, inspect_known_sessions};
 use crate::commands::{create_session, kill_session};
@@ -131,10 +132,26 @@ async fn create_phase(directory: &Path, target: &ConnectionTargetDto) -> Result<
     session_id: session.session_id.clone(),
   };
   let mut document = WorkspaceDocument::default();
-  document.hosts.push(WorkspaceHost {
+  let host = WorkspaceHost {
     host_id: "remote".into(),
-    target: target.clone(),
-  });
+    name: "Workspace smoke test".into(),
+    connection_methods: vec![WorkspaceConnectionMethod {
+      method_id: "default".into(),
+      name: "SSH".into(),
+      target: target.clone(),
+    }],
+    preferred_method_id: Some("default".into()),
+    remote_info: None,
+  };
+  Repository::new(directory.to_path_buf())
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: None,
+      document: HostCatalogDocument {
+        hosts: vec![host],
+        ..HostCatalogDocument::default()
+      },
+    })
+    .map_err(|error| error.message)?;
   document.sessions.push(WorkspaceSession {
     host_id: "remote".into(),
     session_id: session.session_id,

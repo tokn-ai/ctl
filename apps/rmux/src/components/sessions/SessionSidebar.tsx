@@ -10,6 +10,7 @@ import type {
   ManagedTask,
   SessionSummary,
   ShellStateSummary,
+  WorkspaceHost,
 } from "../../lib/types";
 import {
   sessionKey,
@@ -21,6 +22,7 @@ const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 
 interface SessionSidebarProps {
   targets: readonly ConnectionTarget[];
+  hosts?: readonly WorkspaceHost[];
   targetErrors: ReadonlyMap<string, string>;
   sessions: SessionSummary[];
   interactiveTasks?: ManagedTask[];
@@ -38,7 +40,8 @@ interface SessionSidebarProps {
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
-  onAddRoutedHost?(): void;
+  onChooseHost?(): void;
+  onHostSettings?(target: ConnectionTarget): void;
   onConnectHost(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
   onPortForward?(target: ConnectionTarget): void;
@@ -96,6 +99,7 @@ function hostTitle(target: ConnectionTarget): string {
 
 export function SessionSidebar({
   targets,
+  hosts = [],
   targetErrors,
   sessions,
   interactiveTasks = [],
@@ -113,7 +117,8 @@ export function SessionSidebar({
   onDisconnect,
   onRequestClose,
   onAddHost,
-  onAddRoutedHost,
+  onChooseHost,
+  onHostSettings,
   onConnectHost,
   onRemoveHost,
   onPortForward,
@@ -167,6 +172,17 @@ export function SessionSidebar({
         <header className="sidebar-header">
           <strong>Sessions</strong>
           <div className="sidebar-header-actions">
+            {onChooseHost ? (
+              <button
+                className="icon-button"
+                type="button"
+                onClick={onChooseHost}
+                aria-label="Choose host to connect"
+                title="Connect host"
+              >
+                <Icon name="plug" />
+              </button>
+            ) : null}
             <button
               className="icon-button"
               type="button"
@@ -189,15 +205,6 @@ export function SessionSidebar({
           </div>
         </header>
 
-        <button
-          className="routed-host-add-button"
-          type="button"
-          onClick={onAddRoutedHost}
-          aria-label="Add host with gateways"
-          title="Add host with gateways"
-        >
-          <Icon name="plus" size={14} /> Add host with gateways
-        </button>
       </div>
 
       <div className="session-list">
@@ -263,7 +270,8 @@ export function SessionSidebar({
           const key = targetKey(target);
           const expanded = !collapsedHosts.has(key);
           const childrenId = `${groupId}-${encodeURIComponent(key)}`;
-          const hostError = targetErrors.get(key);
+          const host = hosts.find((item) => item.host_id === (target.kind === "local" ? "local" : target.host_id));
+          const hostError = targetErrors.get(key) ?? (target.kind === "ssh" ? target.unavailable : undefined);
           return (
             <section
               className="session-group host-group"
@@ -291,14 +299,28 @@ export function SessionSidebar({
                   <span className="host-group-name">
                     {target.kind === "local" ? "Local" : targetLabel(target)}
                   </span>
+                  {host?.source === "ssh_config" ? <span className="host-config-source" title="From SSH config; saved only when customized">SSH</span> : null}
                   <span className="host-group-count">{groupSessions.length}</span>
                 </button>
                 {target.kind === "ssh" ? (
                   <div className="host-group-actions">
+                    {onHostSettings ? (
+                      <button
+                        className="session-action"
+                        type="button"
+                        onClick={() => onHostSettings(target)}
+                        disabled={host?.source === "unavailable"}
+                        aria-label={`Host settings for ${targetLabel(target)}`}
+                        title={`Host settings for ${targetLabel(target)}`}
+                      >
+                        <Icon name="settings" size={14} />
+                      </button>
+                    ) : null}
                     <button
                       className="session-action"
                       type="button"
                       onClick={() => onConnectHost(target)}
+                      disabled={Boolean(target.unavailable)}
                       aria-label={`Connect to ${targetLabel(target)}`}
                       title={`Connect to ${hostTitle(target)}`}
                     >
@@ -309,13 +331,14 @@ export function SessionSidebar({
                         className="session-action"
                         type="button"
                         onClick={() => onPortForward(target)}
+                        disabled={Boolean(target.unavailable)}
                         aria-label={`Port forwarding for ${targetLabel(target)}`}
                         title={`Port forwarding for ${targetLabel(target)}`}
                       >
                         <Icon name="ports" size={14} />
                       </button>
                     ) : null}
-                    <button
+                    {host?.source !== "ssh_config" ? <button
                       className="session-action"
                       type="button"
                       onClick={() => onRemoveHost(target)}
@@ -323,7 +346,7 @@ export function SessionSidebar({
                       title={`Remove ${targetLabel(target)} from workspace`}
                     >
                       <Icon name="close" size={14} />
-                    </button>
+                    </button> : null}
                   </div>
                 ) : null}
               </div>

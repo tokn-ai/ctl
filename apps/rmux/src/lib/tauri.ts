@@ -1,4 +1,4 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   AttachmentAckRequest,
@@ -37,7 +37,30 @@ import type {
   PortForwardStatus,
   TcpListenerCatalog,
   LocalPortAvailability,
+  HostCatalogDocument,
+  HostCatalogSnapshot,
 } from "./types";
+
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const target = (args?.request as { target?: ConnectionTarget } | undefined)?.target;
+  const stopsForward = command === "configure_port_forward" &&
+    (args?.request as { enabled?: boolean } | undefined)?.enabled === false;
+  if (target?.kind === "ssh" && target.unavailable && !stopsForward) {
+    return Promise.reject(new Error(target.unavailable));
+  }
+  return nativeInvoke<T>(command, args);
+}
+
+export async function loadHosts(): Promise<HostCatalogSnapshot> {
+  return invoke("load_hosts");
+}
+
+export async function updateHosts(
+  expected_revision: string | null,
+  document: HostCatalogDocument,
+): Promise<HostCatalogSnapshot> {
+  return invoke("update_hosts", { request: { expected_revision, document } });
+}
 
 export async function loadTaskDefinitions(scope: TaskDefinitionScope): Promise<TaskDefinitionCatalog> {
   return invoke("load_task_definitions", { request: { scope } });

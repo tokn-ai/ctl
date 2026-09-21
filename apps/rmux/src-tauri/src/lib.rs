@@ -63,6 +63,8 @@ pub fn run() {
       task_definitions::remove_task_definition,
       workspace::load_workspace,
       workspace::update_workspace,
+      workspace::load_hosts,
+      workspace::update_hosts,
       keybindings::load_keybindings,
       keybindings::save_keybindings,
       command_menu::sync_command_menu,

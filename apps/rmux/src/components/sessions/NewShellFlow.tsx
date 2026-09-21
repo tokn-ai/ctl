@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
+import { hostSelectorChoices } from "./hostChoices";
 import {
   LOCAL_TARGET,
   targetKey,
   targetLabel,
 } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
-import type { ConnectionTarget } from "../../lib/types";
+import type { ConnectionTarget, WorkspaceHost } from "../../lib/types";
 
 interface NewShellFlowProps {
   targets: readonly ConnectionTarget[];
+  hosts?: readonly WorkspaceHost[];
   /** Resolve once created, even if subsequent persistence/attachment needs recovery. */
   onCreate(
     target: ConnectionTarget,
@@ -21,6 +23,7 @@ interface NewShellFlowProps {
 /** Collect inputs without contacting any host until the final submission. */
 export function NewShellFlow({
   targets,
+  hosts,
   onCreate,
   onClose,
 }: NewShellFlowProps) {
@@ -104,11 +107,7 @@ export function NewShellFlow({
         }
         mode={{
           kind: "pick",
-          choices: choices.map((candidate) => ({
-            id: targetKey(candidate),
-            label:
-              candidate.kind === "local" ? "Local" : targetLabel(candidate),
-          })),
+          choices: hostSelectorChoices(choices, hosts, "Local"),
         }}
         onSubmit={(key) => {
           if (closedRef.current) return;

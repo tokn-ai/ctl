@@ -1,5 +1,6 @@
 import type {
   ConnectionTarget,
+  HostCatalogDocument,
   ManagedTask,
   SavedTaskDefinition,
   SessionSummary,
@@ -7,18 +8,21 @@ import type {
   WorkspaceDocument,
   WorkspaceSidebarView,
 } from "../src/lib/types";
+import { hostFromTarget } from "../src/features/workspace/workspaceModel";
 
 export const previewTargets: ConnectionTarget[] = [
   { kind: "local" },
   {
     kind: "ssh",
     host_id: "preview-dev",
+    host_name: "Development server",
     destination: "dev-server",
     remote_info: { remote_id: "sample-dev", agent_version: "0.1.0" },
   },
   {
     kind: "ssh",
     host_id: "preview-staging",
+    host_name: "Staging server",
     destination: "staging",
     remote_info: { remote_id: "sample-staging", agent_version: "0.1.0" },
   },
@@ -90,6 +94,24 @@ export const previewTasks: ManagedTask[] = previewDefinitions.map((saved, index)
   };
 });
 
+export function previewHostCatalog(): HostCatalogDocument {
+  return {
+    schema_version: 1,
+    ssh_gateways: [],
+    hosts: previewTargets.filter((target) => target.kind === "ssh").map((target) => {
+      const host = hostFromTarget(target);
+      if (host.host_id === "preview-dev") {
+        host.connection_methods[0].name = "SSH config";
+        host.connection_methods.push({
+          method_id: "lan", name: "Office network",
+          target: { kind: "ssh", destination: "dev-lan", hostname: "192.0.2.10", user: "developer" },
+        });
+      }
+      return host;
+    }),
+  };
+}
+
 export function previewWorkspace(view: WorkspaceSidebarView): WorkspaceDocument {
   const session_refs = previewSessions.map((session) => ({
     kind: "session" as const,
@@ -97,14 +119,11 @@ export function previewWorkspace(view: WorkspaceSidebarView): WorkspaceDocument 
     session_id: session.session_id,
   }));
   return {
-    schema_version: 6,
-    ssh_gateways: [],
+    schema_version: 8,
+    host_identities: previewTargets.flatMap((target) => target.kind === "ssh" && target.remote_info
+      ? [{ host_id: target.host_id!, remote_info: target.remote_info }] : []),
     workspace_id: "sample-workspace",
     sidebar_view: view,
-    hosts: previewTargets.map((target) => ({
-      host_id: target.kind === "local" ? "local" : target.host_id!,
-      target,
-    })),
     sessions: previewSessions.map((session, index) => ({
       ...session_refs[index],
       name: session.name,

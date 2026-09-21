@@ -34,39 +34,74 @@ waits for it, verifies all four archives, and stages them in the ignored Tauri
 resource directory. `pnpm agents:sync --main` is an explicit compatibility
 shortcut for using the latest successful main-branch set.
 
-The app may also use the path in `RMUXD_BIN`. Open **Add host** to activate a
-concrete alias discovered from `~/.ssh/config` (including its `Include` files)
-or enter `[user@]hostname[:port]`, then a name, then choose SSH config/agent,
-an identity-file path, or password/interactive authentication. These steps use
-the same quick-input overlay as the command palette. OpenSSH requests any
-required host-key confirmation, password, passphrase, or interactive response
-there. If `ctl-agent` is missing, packaged builds can install the matching
+The app may also use the path in `RMUXD_BIN`. A saved host represents a named
+machine with one remote account/environment. Addresses and gateway routes are
+named connection methods on that host. **Add host** guides you through
+`[user@]hostname[:port]` (or an SSH config alias), a display name, and
+authentication. After verification, it automatically saves the named host and
+its first `SSH` method in `~/.tokn/rmux/hosts.json`. Display names may contain
+spaces; they are independent of SSH aliases. No storage-choice step or implicit
+OpenSSH config write is involved.
+
+Concrete aliases discovered from `~/.ssh/config`, including its `Include`
+files, are grouped under **SSH config · Virtual** in Add host, Connect host,
+and session pickers, separately from **Saved hosts**. They enter the
+sidebar after a successful connection; hosts with remembered sessions, tasks,
+or forwards remain visible after restart. OpenSSH continues resolving their
+connection settings. Connecting does not save their definitions; saving a customization
+from **Host settings** creates a saved host with the same ID. A saved pure alias
+method suppresses an otherwise-unused duplicate projection. Missing aliases
+with workspace references remain visible as unavailable; restoring the alias
+restores access without losing session or task references.
+
+The connection-method editor supports direct SSH, optional identity-file paths,
+and ordered routes through reusable gateways. **Verify and save** verifies the
+remote environment and saves the method in the host catalog. For a new direct
+method, **Also save to OpenSSH config** optionally exports a managed `Host`
+block after verification. This option is off by default and unavailable for
+existing config aliases or gateway routes; the saved method remains in the
+host catalog. OpenSSH requests host-key confirmation, passwords,
+passphrases, or interactive responses through the quick-input overlay. If
+`ctl-agent` is missing, packaged builds can install the matching
 checksummed `ctl-agent`, `rmuxd`, and `taskd` bundle for the remote user. Custom
 command paths are not supported. Each development commit has a distinct bundle
 ID, so a remote host cannot silently retain an older build with the same app
-version. After a successful connection, choose where to save the host.
-**OpenSSH config**
-writes a clearly marked `Host` block to `~/.ssh/config`, making the alias
-reusable by `ssh` and `ctl`; an existing unmanaged alias is never overwritten.
-**This app only** stores the same non-secret settings in the native workspace file
-and supplies them to OpenSSH as fixed arguments. On macOS, verified passwords
-and private-key passphrases are stored separately in the device-local,
+version. App-local connection settings are supplied to OpenSSH as fixed
+arguments; methods based on an existing SSH config alias retain that alias.
+On macOS, verified passwords and private-key passphrases are stored separately in the device-local,
 Touch ID-protected Keychain. Private-key contents, arbitrary options,
 forwarding, and remote commands are never stored. A per-user `ctld` process
 owns the authenticated OpenSSH control masters and is the only local component
 that accesses Keychain; the desktop client only forwards attempt-scoped
 prompts. Masters remain available for five idle minutes so background channels
 do not race a discarded authentication connection.
-The app remembers the active alias in either case so it can restore the mixed
-host list on launch; config-backed targets keep only that alias locally.
+
+Open **Host settings** from the host row to rename the machine or its methods,
+add or edit a connection, remove a method while retaining at least one, or
+**Make preferred**. **Connect host** uses the preferred method. **Connect using**
+chooses a specific method for the current connection without changing that
+preference; there is no automatic fallback. Saving names or preferences does not
+connect. Adding or editing a method verifies its endpoint before saving, but
+does not switch an existing session's transport. Use an explicit connection to
+apply that route to the host's remembered sessions.
+
+All methods on a host must reach its verified account-owned ctl environment.
+Use a separate host for another account. Matching remote IDs never merge saved
+hosts automatically. Renaming a host or changing methods preserves session,
+tab, task, and port-forward ownership through the stable `host_id`.
 Existing WebView host settings migrate automatically after a successful disk write.
 
-The workspace file lives at `~/.tokn/rmux/workspace.json`. On first load, an
-existing workspace is imported from Tauri's former app-data directory if the
-new file does not exist; the original remains available for recovery.
+Saved host definitions and reusable gateways live in `~/.tokn/rmux/hosts.json`;
+sessions, tabs, tasks, forwarding, and observed remote identities live in
+`~/.tokn/rmux/workspace.json`. On first load, an existing workspace is imported
+from Tauri's former app-data directory if the new file does not exist; the
+original remains available for recovery. Schema 8 moves existing hosts and
+gateways into the catalog before removing them from the workspace. Schema 7 is
+backed up as `workspace-v7.backup.json`; earlier schemas retain their corresponding
+backups. Host IDs and all session/task/port references remain unchanged.
 It remembers known sessions, cached paths, tab order, and selection. Startup
 restores those entries as unverified and automatically connects the selected
-local tab. Remote hosts stay disconnected until explicitly opened; **Connect
+local tab. Remote terminal tabs stay disconnected until explicitly opened; **Connect
 host** resumes that host's selected tab, or its first open tab if another host
 was selected. No daemon inventory is discovered automatically. Use **Add
 existing session** in the sidebar or command palette to discover one host's
@@ -90,18 +125,18 @@ supported. Suggestions are not proof that a file is a valid private key—OpenSS
 validates the selected identity when connecting.
 
 Wildcard and negated `Host` patterns are not destinations and are omitted from
-suggestions. Discovery only fills the picker: the app does not contact an SSH
-host until it is explicitly selected. Local is always present and remains the
-default for a new shell. The sidebar mixes remembered sessions from selected targets
-and labels each row with its host. A failed host reports its own error while
+suggestions. Discovery only fills the editor: the app contacts a candidate when
+**Verify and save** or an explicit connection is requested. Local is always
+present and remains the default for a new shell. The sidebar groups remembered
+sessions under their named hosts. A failed host reports its own error while
 last-known sessions from other targets remain usable.
 
 SSH uses `ctl-core` and the system `ssh` executable with a fixed remote command
 that prepends the app-managed directory before running `ctl-agent connect`;
 forwarding, agent access, X11, local commands, and PTY allocation remain
 disabled. On macOS/Linux, the per-user `ctld` owns one explicit OpenSSH control
-master per saved destination. Its owner-only Unix socket carries askpass
-requests to the quick-input UI for an active connection attempt. Host-key trust
+master for each connection configuration. Its owner-only Unix socket carries
+askpass requests to the quick-input UI for an active connection attempt. Host-key trust
 requires explicit confirmation and is managed by OpenSSH. A master remains
 available for five idle minutes, while all background channels require that
 master and cannot independently prompt or fall back to another connection.
@@ -112,8 +147,8 @@ the currently enrolled fingerprints. They are loaded only inside `ctld` to
 satisfy one OpenSSH prompt and never return to the desktop client. Native
 plaintext buffers are zeroized after use; secrets never appear in command
 arguments, environment variables, or logs, and one-time responses are not
-stored. Removing a host asks `ctld` to delete its saved credentials. On Linux,
-`ctld` keeps a newly entered reusable secret only through authentication and
+stored. Removing a host asks `ctld` to delete credentials for its saved and active methods, retaining any credential scope still used by another host.
+On Linux, `ctld` keeps a newly entered reusable secret only through authentication and
 then discards it. An explicit interactive attempt allows up to three minutes
 and Escape cancels it. On non-Unix platforms, preconfigured noninteractive SSH
 remains available.

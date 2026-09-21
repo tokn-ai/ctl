@@ -44,7 +44,7 @@ impl Drop for Fixture {
   }
 }
 
-fn populated(revision: &str) -> WorkspaceSnapshot {
+fn populated(_revision: &str) -> WorkspaceSnapshot {
   let mut document = WorkspaceDocument::default();
   document.sessions.push(WorkspaceSession {
     host_id: "local".into(),
@@ -56,7 +56,7 @@ fn populated(revision: &str) -> WorkspaceSnapshot {
   document.tabs.push(document.sessions[0].reference().into());
   document.active_tab = document.tabs.first().cloned();
   WorkspaceSnapshot {
-    revision: Some(revision.into()),
+    revision: Some(super::repository::content_revision(&document).unwrap()),
     document,
   }
 }
@@ -193,7 +193,7 @@ fn corrupt_unsupported_and_invalid_legacy_workspaces_are_not_copied() {
   let mut future = populated("future");
   future.document.schema_version = 99;
   let mut invalid = populated("invalid");
-  invalid.document.sessions[0].host_id = "missing-host".into();
+  invalid.document.sessions[0].host_id = String::new();
   let mut missing_revision = populated("unused");
   missing_revision.revision = None;
   for bytes in [
@@ -229,6 +229,14 @@ fn schema_migration_creates_its_backup_in_the_new_directory() {
   let fixture = Fixture::new();
   let mut previous = populated("before-gateway-routes");
   previous.document.schema_version = 5;
+  previous.revision = Some("before-gateway-routes".into());
+  previous.document.hosts.push(super::WorkspaceHost {
+    host_id: "local".into(),
+    name: "Local".into(),
+    connection_methods: Vec::new(),
+    preferred_method_id: None,
+    remote_info: None,
+  });
   let bytes = fixture.write_legacy(&previous);
   fs::write(
     fixture.legacy().join("workspace-v5.backup.json"),
@@ -238,7 +246,7 @@ fn schema_migration_creates_its_backup_in_the_new_directory() {
 
   let loaded = fixture.repository().load().unwrap();
 
-  assert_eq!(loaded.document.schema_version, 6);
+  assert_eq!(loaded.document.schema_version, 8);
   assert_eq!(loaded.document.sessions, previous.document.sessions);
   assert_ne!(loaded.revision, previous.revision);
   assert_eq!(

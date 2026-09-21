@@ -80,7 +80,7 @@ describe("SessionSidebar", () => {
 
     expect(markup).toContain('aria-label="Terminate first"');
     expect(markup).toContain('aria-label="Add host"');
-    expect(markup).toContain('aria-label="Add host with gateways"');
+    expect(markup).not.toContain('aria-label="Add host with gateways"');
     expect(markup).not.toContain("session-close-confirmation");
     expect(markup).not.toContain("host-form");
     expect(markup).toContain("New shell");
@@ -201,7 +201,7 @@ describe("SessionSidebar", () => {
     const onRemoveHost = vi.fn();
     const onDisconnect = vi.fn();
     const onAddHost = vi.fn();
-    const onAddRoutedHost = vi.fn();
+    const onHostSettings = vi.fn();
     render(
       <SessionSidebar
         targets={[session.target, remote]}
@@ -221,7 +221,7 @@ describe("SessionSidebar", () => {
         onDisconnect={onDisconnect}
         onRequestClose={vi.fn()}
         onAddHost={onAddHost}
-        onAddRoutedHost={onAddRoutedHost}
+        onHostSettings={onHostSettings}
         onConnectHost={onConnectHost}
         onRemoveHost={onRemoveHost}
         onPortForward={onPortForward}
@@ -250,9 +250,11 @@ describe("SessionSidebar", () => {
     expect(onPortForward).toHaveBeenCalledWith(remote);
     expect(onRemoveHost).toHaveBeenCalledWith(remote);
 
-    await user.click(screen.getByRole("button", { name: "Add host with gateways" }));
-    expect(onAddRoutedHost).toHaveBeenCalledOnce();
-    expect(onAddHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Host settings for build-host" }));
+    expect(onHostSettings).toHaveBeenCalledWith(remote);
+    await user.click(screen.getByRole("button", { name: "Add host" }));
+    expect(onAddHost).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Add host with gateways" })).toBeNull();
   });
 
   it("groups ordinary sessions by host and lists active interactive tasks separately", () => {

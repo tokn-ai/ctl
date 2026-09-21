@@ -370,27 +370,6 @@ svg {
   text-transform: uppercase;
 }
 
-.routed-host-add-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: calc(100% - 24px);
-  margin: 0 12px 8px;
-  padding: 5px 7px;
-  color: var(--muted);
-  text-align: left;
-  font-size: 12px;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  background: transparent;
-  cursor: pointer;
-}
-
-.routed-host-add-button:hover {
-  color: var(--text);
-  background: var(--surface-2);
-}
-
 .icon-button,
 .toolbar-actions button,
 .sidebar-state button {
@@ -1229,6 +1208,18 @@ button:disabled {
   overflow-y: auto;
 }
 
+.quick-input-group + .quick-input-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.quick-input-group-heading {
+  padding: 7px 9px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .command-palette-option {
   display: flex;
   width: 100%;
@@ -1340,4 +1331,10 @@ button:disabled {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+.host-config-source {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
 }

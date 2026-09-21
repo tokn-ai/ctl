@@ -16,6 +16,19 @@ const gateway: WorkspaceSshGateway = {
 };
 
 describe("GatewayRouteDialog", () => {
+  it("keeps gateway mode controls in keyboard navigation and cancels with Escape", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<GatewayRouteDialog
+      target={{ kind: "ssh", destination: "server", gateway_route: [{ gateway_id: gateway.gateway_id, mode: "automatic" }] }}
+      gateways={[gateway]} targets={[]} onSave={vi.fn()} onClose={onClose} />);
+    screen.getByRole("button", { name: "Remove Office edge from route" }).focus();
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByLabelText("Connection to next host"));
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("adds a reusable gateway to the ordered route", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QuickInput } from "./QuickInput";
@@ -21,6 +21,74 @@ const mode: QuickInputFieldMode = {
 };
 
 describe("quick-input suggestions", () => {
+  it("shows accessible groups for picker choices without adding keyboard stops or reordering options", async () => {
+    const submit = vi.fn();
+    render(<QuickInput title="Connect host" mode={{
+      kind: "pick",
+      choices: [
+        { id: "local", label: "Local" },
+        { id: "saved-build", label: "Build machine", group: "Saved hosts" },
+        { id: "virtual-office", label: "office", group: "SSH config · Virtual" },
+      ],
+    }} onSubmit={submit} onCancel={vi.fn()} />);
+    const saved = screen.getByRole("group", { name: "Saved hosts" });
+    const virtual = screen.getByRole("group", { name: "SSH config · Virtual" });
+    expect(within(saved).getByText("Saved hosts")).toBeTruthy();
+    expect(within(virtual).getByText("SSH config · Virtual")).toBeTruthy();
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Local", "Build machine", "office",
+    ]);
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Local" }));
+    const user = userEvent.setup();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(within(saved).getByRole("option", { name: "Build machine" }));
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(document.activeElement).toBe(within(virtual).getByRole("option", { name: "office" }));
+    expect(submit).toHaveBeenCalledExactlyOnceWith("virtual-office");
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Local" }));
+  });
+
+  it("filters out empty suggestion groups while retaining flat navigation and the editable draft", async () => {
+    const submit = vi.fn();
+    render(<QuickInput title="Add host" mode={{
+      kind: "input",
+      label: "SSH host",
+      suggestions: {
+        label: "Hosts",
+        items: [
+          { id: "saved-build", label: "build", group: "Saved hosts" },
+          { id: "ssh-config:office", label: "office", group: "SSH config · Virtual" },
+          { id: "ssh-config:office-vpn", label: "office-vpn", group: "SSH config · Virtual" },
+        ],
+      },
+    }} onSubmit={submit} onCancel={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "SSH host" });
+    const last = screen.getByRole("option", { name: "office-vpn" });
+    const scroll = vi.fn();
+    last.scrollIntoView = scroll;
+    const user = userEvent.setup();
+    await user.keyboard("{ArrowUp}");
+    expect(input.getAttribute("aria-activedescendant")).toBe(last.id);
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: "nearest" });
+    expect(document.activeElement).toBe(input);
+    await user.type(input, "office");
+    expect(screen.queryByRole("group", { name: "Saved hosts" })).toBeNull();
+    expect(within(screen.getByRole("group", { name: "SSH config · Virtual" })).getAllByRole("option")).toHaveLength(2);
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
+    await user.keyboard("{ArrowDown}{ArrowUp}");
+    expect(input).toHaveProperty("value", "office");
+    expect(screen.getByRole("option", { name: "office-vpn" }).getAttribute("aria-selected")).toBe("true");
+    await user.keyboard("{Enter}");
+    expect(submit).toHaveBeenLastCalledWith("ssh-config:office-vpn");
+    await user.clear(input);
+    expect(screen.getByRole("group", { name: "Saved hosts" })).toBeTruthy();
+    await user.type(input, "manual.example{Enter}");
+    expect(screen.queryAllByRole("group")).toHaveLength(0);
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(submit).toHaveBeenLastCalledWith("manual.example");
+  });
+
   it("filters suggestions and selects with arrows and Enter while retaining input focus", async () => {
     const submit = vi.fn();
     render(

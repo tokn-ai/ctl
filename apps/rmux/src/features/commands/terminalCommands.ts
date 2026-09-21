@@ -36,6 +36,7 @@ interface TerminalCommandContext {
 interface TerminalCommandActions {
   showPalette(): void;
   showAddHost(): void;
+  showConnectHost(): void;
   showAddRoutedHost(): void;
   showAddExistingSession(): void;
   forgetSession(session: SessionSummary): void;
@@ -52,6 +53,7 @@ interface TerminalCommandActions {
   focusTerminal(): void;
   requestDaemonRestart(): void;
   connectHost(target: ConnectionTarget): void;
+  configureHost(target: ConnectionTarget): void;
   removeHost(target: ConnectionTarget): void | Promise<void>;
   managePortForwards(target: ConnectionTarget): void;
   saveWorkspace(): void | Promise<void>;
@@ -114,6 +116,9 @@ export function buildTerminalCommands(
       : (context.targets.find(
           (target) => targetKey(target) === args.target_key,
         ) ?? null);
+  const canConnectHost = (target: ConnectionTarget | null) =>
+    target?.kind === "ssh" && !target.unavailable && !daemonRestartInteractionBlocked;
+  const hasConnectableHost = context.targets.some(canConnectHost);
   const sessionAvailable = (session: SessionSummary | null) =>
     session !== null &&
     !daemonRestartInteractionBlocked &&
@@ -160,8 +165,9 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.addHost,
       category: "Host",
-      title: "Add SSH Host",
-      keywords: ["remote", "ssh", "connect"],
+      title: "Add Host",
+      detail: "Enter an SSH address, name the host, and authenticate.",
+      keywords: ["remote", "ssh", "connect", "gateway", "route"],
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,
       run: actions.showAddHost,
@@ -170,6 +176,8 @@ export function buildTerminalCommands(
       id: COMMAND_IDS.addRoutedHost,
       category: "Host",
       title: "Add SSH Host with Gateways",
+      // Existing keybindings still open the unified host setup flow.
+      visibleInPalette: false,
       keywords: ["remote", "ssh", "jump", "bastion", "gateway", "route"],
       enabled: !daemonRestartInteractionBlocked,
       focusTerminalAfterRun: false,
@@ -394,6 +402,20 @@ export function buildTerminalCommands(
 
   commands.push(
     {
+      id: COMMAND_IDS.configureHost,
+      category: "Host",
+      title: "Host Settings",
+      detail: "Rename this host and manage its connection methods.",
+      keywords: ["connection", "method", "preferred", "gateway", "rename"],
+      enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      isEnabled: (args) => targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      focusTerminalAfterRun: false,
+      run: (args) => {
+        const target = targetFor(args);
+        if (target?.kind === "ssh") actions.configureHost(target);
+      },
+    },
+    {
       id: COMMAND_IDS.selectSession,
       allow_concurrent: true,
       category: "Session",
@@ -408,14 +430,24 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.connectHost,
       category: "Host",
-      title: "Connect Active Host",
-      enabled: targetFor()?.kind === "ssh" && !daemonRestartInteractionBlocked,
-      isEnabled: (args) =>
-        targetFor(args)?.kind === "ssh" && !daemonRestartInteractionBlocked,
+      title: "Connect Host",
+      detail: "Choose a saved host or SSH config alias.",
+      keywords: ["ssh", "remote", "alias"],
+      enabled: hasConnectableHost,
+      disabledReason: daemonRestartInteractionBlocked
+        ? daemonRestartInteractionDisabledReason
+        : "No SSH hosts are available.",
+      isEnabled: (args) => args.target_key === undefined
+        ? hasConnectableHost
+        : canConnectHost(targetFor(args)),
       focusTerminalAfterRun: false,
       run: (args) => {
+        if (args?.target_key === undefined) {
+          if (hasConnectableHost) actions.showConnectHost();
+          return;
+        }
         const target = targetFor(args);
-        if (target) actions.connectHost(target);
+        if (target && canConnectHost(target)) actions.connectHost(target);
       },
     },
     {

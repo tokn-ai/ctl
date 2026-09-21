@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ConnectionPhase, SessionSummary } from "../../lib/types";
+import type { ConnectionPhase, ConnectionTarget, SessionSummary } from "../../lib/types";
 import {
   buildTerminalCommands,
   COMMAND_IDS,
@@ -46,6 +46,7 @@ function setup(
   const actions = {
     showPalette: vi.fn(),
     showAddHost: vi.fn(),
+    showConnectHost: vi.fn(),
     showAddRoutedHost: vi.fn(),
     showAddExistingSession: vi.fn(),
     forgetSession: vi.fn(),
@@ -62,40 +63,39 @@ function setup(
     focusTerminal: vi.fn(),
     requestDaemonRestart: vi.fn(),
     connectHost: vi.fn(),
+    configureHost: vi.fn(),
     removeHost: vi.fn(),
     managePortForwards: vi.fn(),
     saveWorkspace: vi.fn(),
     configureKeybindings: vi.fn(),
     reloadKeybindings: vi.fn(),
   };
-  const commands = buildTerminalCommands(
-    {
-      targets: [{ kind: "local" }],
-      sessions,
-      tabs,
-      activeSessionKey: identityFor(activeSessionId),
-      attachmentSessionKey: identityFor(attachmentSessionId),
-      phase,
-      inputOwned: true,
-      resizeWithWindow: false,
-      listLoading: false,
-      creating: false,
-      newShellOpen: false,
-      pendingCloseSessionKey: identityFor(pendingCloseSessionId),
-      closingSessionKeys: new Set(
-        closingSessionIds.map((id) => sessionKey(session(id))),
-      ),
-      disconnectingSessionKey: identityFor(disconnectingSessionId),
-      terminalReady: true,
-      currentWorkingDirectory,
-      currentWorkingDirectoryDisplay,
-      daemonRestartConfirmationPending,
-      restartingDaemon,
-      shortcutPlatform,
-    },
-    actions,
-  );
-  return { sessions, tabs, actions, commands };
+  const context: Parameters<typeof buildTerminalCommands>[0] = {
+    targets: [{ kind: "local" }],
+    sessions,
+    tabs,
+    activeSessionKey: identityFor(activeSessionId),
+    attachmentSessionKey: identityFor(attachmentSessionId),
+    phase,
+    inputOwned: true,
+    resizeWithWindow: false,
+    listLoading: false,
+    creating: false,
+    newShellOpen: false,
+    pendingCloseSessionKey: identityFor(pendingCloseSessionId),
+    closingSessionKeys: new Set(
+      closingSessionIds.map((id) => sessionKey(session(id))),
+    ),
+    disconnectingSessionKey: identityFor(disconnectingSessionId),
+    terminalReady: true,
+    currentWorkingDirectory,
+    currentWorkingDirectoryDisplay,
+    daemonRestartConfirmationPending,
+    restartingDaemon,
+    shortcutPlatform,
+  };
+  const commands = buildTerminalCommands(context, actions);
+  return { sessions, tabs, actions, commands, context };
 }
 
 function findCommand(
@@ -108,6 +108,71 @@ function findCommand(
 }
 
 describe("terminal commands", () => {
+  it.each(["first", null])("offers the host picker when %s is active and an SSH target is available", (activeSessionId) => {
+    const { actions, context } = setup(activeSessionId);
+    const commands = buildTerminalCommands({ ...context, targets: [
+      { kind: "local" }, { kind: "ssh", host_id: "ssh-config:build", destination: "build" },
+    ] }, actions);
+    const command = findCommand(commands, COMMAND_IDS.connectHost);
+    expect(command).toMatchObject({ title: "Connect Host", enabled: true, focusTerminalAfterRun: false });
+    expect(command.isEnabled?.({})).toBe(true);
+    command.run();
+    expect(actions.showConnectHost).toHaveBeenCalledOnce();
+    expect(actions.connectHost).not.toHaveBeenCalled();
+  });
+
+  it("connects an explicitly selected host directly without opening the picker", () => {
+    const { actions, context } = setup();
+    const target: ConnectionTarget = { kind: "ssh", host_id: "build", destination: "build.example" };
+    const command = findCommand(buildTerminalCommands({ ...context, targets: [target] }, actions), COMMAND_IDS.connectHost);
+    expect(command.isEnabled?.({ target_key: "host:build" })).toBe(true);
+    command.run({ target_key: "host:build" });
+    expect(actions.connectHost).toHaveBeenCalledExactlyOnceWith(target);
+    expect(actions.showConnectHost).not.toHaveBeenCalled();
+  });
+
+  it("disables the picker when all targets are local or unavailable", () => {
+    const { actions, context } = setup();
+    const command = findCommand(buildTerminalCommands({ ...context, targets: [
+      { kind: "local" }, { kind: "ssh", host_id: "missing", destination: "missing", unavailable: "SSH alias is missing." },
+    ] }, actions), COMMAND_IDS.connectHost);
+    expect(command.enabled).toBe(false);
+    expect(command.isEnabled?.({})).toBe(false);
+    command.run();
+    expect(actions.showConnectHost).not.toHaveBeenCalled();
+    expect(actions.connectHost).not.toHaveBeenCalled();
+  });
+
+  it.each(["local", "host:missing", "host:unknown"])("does not connect an unusable explicit target %s or fall back to the picker", (target_key) => {
+    const { actions, context } = setup();
+    const command = findCommand(buildTerminalCommands({ ...context, targets: [
+      { kind: "local" },
+      { kind: "ssh", host_id: "available", destination: "available" },
+      { kind: "ssh", host_id: "missing", destination: "missing", unavailable: "SSH alias is missing." },
+    ] }, actions), COMMAND_IDS.connectHost);
+    expect(command.enabled).toBe(true);
+    expect(command.isEnabled?.({ target_key })).toBe(false);
+    command.run({ target_key });
+    expect(actions.connectHost).not.toHaveBeenCalled();
+    expect(actions.showConnectHost).not.toHaveBeenCalled();
+  });
+
+  it.each(["confirmation", "restarting"])("blocks host picking and explicit connection during daemon restart %s", (phase) => {
+    const { actions, context } = setup();
+    const command = findCommand(buildTerminalCommands({
+      ...context,
+      targets: [{ kind: "ssh", host_id: "build", destination: "build" }],
+      daemonRestartConfirmationPending: phase === "confirmation",
+      restartingDaemon: phase === "restarting",
+    }, actions), COMMAND_IDS.connectHost);
+    expect(command.enabled).toBe(false);
+    expect(command.isEnabled?.({ target_key: "host:build" })).toBe(false);
+    command.run();
+    command.run({ target_key: "host:build" });
+    expect(actions.showConnectHost).not.toHaveBeenCalled();
+    expect(actions.connectHost).not.toHaveBeenCalled();
+  });
+
   it("opens the separate routed-host setup action", () => {
     const { actions, commands } = setup();
     findCommand(commands, COMMAND_IDS.addRoutedHost).run();

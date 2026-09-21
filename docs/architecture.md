@@ -57,7 +57,7 @@ processes; its interactive tasks use rmuxd's PTYs and normal rmux attachments.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctl-agent connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
-- `ctl-agent`: stateless SSH remote-command adapter for the fixed local rmux
+- `ctl-agent`: per-connection SSH remote-command adapter for the fixed local rmux
   data and task endpoints.
 - `ctl`: control router. `ctl rmux` redirects the canonical rmux command
   surface locally by default or through an explicit OpenSSH destination.
@@ -119,24 +119,55 @@ checkpoint-production, or session-lifetime logic into the app process.
 Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
-The app persists workspace metadata through its native backend and always
-includes the local target. The versioned `~/.tokn/rmux/workspace.json` contains
-host definitions and stable IDs, known session references, cached cwd labels,
-tab order, and the selected tab. Runtime status, output, credentials, and
-attachment tokens are never written to the workspace. `ctl-agent` remains stateless.
-A read-only backend command discovers concrete
-aliases from the user's OpenSSH config and recursive `Include` files for the
-**Add host** picker; wildcard and negated patterns are omitted, and discovery
-never opens a connection. Selecting a suggestion promotes it to a configured
-target. A new hostname can instead be saved as a managed, conflict-checked
-block in `~/.ssh/config`, or as structured app-local hostname, user, port, and
-identity-file-path fields. Config replacement uses a same-directory temporary
-file, preserves existing file permissions, and refuses to write when alias
-discovery is incomplete or the original changes during the operation.
+The app persists session/workspace state separately from saved host definitions.
+Schema 8 of `~/.tokn/rmux/workspace.json` contains session references, cached cwd
+labels, task references, forwards, tab order, selection, and observed remote
+identities for referenced hosts. Schema 1 of `~/.tokn/rmux/hosts.json` contains
+remote hosts with stable IDs, named connection methods and preferred method IDs,
+and reusable gateways. The local host is synthesized. Runtime status, output,
+credentials, and attachment tokens are never written to either file. A host
+represents a machine, with one remote account/ctl environment per host. Addresses,
+OpenSSH aliases, and gateway routes are connection methods. Each method must reach
+the pinned account-owned remote UUID; matching UUIDs never merge separate hosts.
+
+**Add host** collects the address, display name, and authentication, verifies the
+connection, and automatically saves a named host with an `SSH` method. Additional
+methods and gateway routes use **Host settings**. New-host creation does not
+write OpenSSH config. The advanced method editor can explicitly export a new
+direct method with **Also save to OpenSSH config**, off by default.
+
+A read-only native command discovers concrete aliases from OpenSSH config and
+recursive `Include` files; wildcard and negated patterns are omitted. Discovery
+never opens a connection. The frontend projects aliases into runtime hosts with
+deterministic `ssh-config:<encoded alias>` IDs. A saved record with the same ID
+wins; otherwise an unreferenced projection is hidden when a saved method already
+uses exactly that alias without overrides. Referenced projections remain distinct.
+Unconnected projections stay in connection and session pickers. The sidebar
+shows them after successful verification or when they have workspace references.
+Connecting does not persist their definitions. Saving a customization promotes
+the projection without changing its ID. Catalog serialization explicitly excludes
+projected/unavailable hosts and runtime fields. Missing definitions retain
+unavailable placeholders for workspace references; unavailable targets fail before
+transport creation instead of treating a vanished alias as a DNS name.
+
+Workspace identity observations are separate from catalog identities and take
+precedence when reconnecting remembered entries. They cannot overwrite catalog
+metadata merely because the workspace autosaves. Host settings renames hosts and
+methods and selects the preferred method. **Connect host** uses that preference;
+**Connect using** explicitly chooses another method. Failure never triggers an
+automatic fallback.
+
+The frontend derives transport targets from a saved method, resolved gateway
+definitions, and host-level expected identity. The selected runtime route is
+separate from saved preferences. Saving changes leaves existing session
+transport snapshots intact; verifying an edited method does not attach existing
+sessions. An explicit connection replaces the selected route while preserving
+session keys and invalidating older in-flight inspection results.
 
 Startup restores entries and tabs with unverified runtime status, then
-automatically attaches the selected tab if it is local. It does not open SSH
-connections or enumerate sessions. **Connect host** authenticates that host,
+automatically attaches the selected tab if it is local. Remote terminal tabs
+remain disconnected and session inventory is not enumerated; enabled port
+forwards restore separately. **Connect host** authenticates that host,
 inspects its known sessions, and resumes its selected tab (or first open tab
 if another host was selected). Hosts without open tabs are only inspected.
 The sidebar is workspace membership, not a mirror of
@@ -146,10 +177,24 @@ without attaching. Explicit refresh inspects only remembered IDs; connection
 failures retain entries as unreachable, while not-found responses mark them
 missing rather than removing them. Opening a session connects on demand.
 
+`ctld` owns each port forward globally by `forward_id` and retains its exact
+SSH target and listener definition. Moving a forward to another connection
+method cancels the previous listener before starting the new one; disabling it
+also uses the retained owner rather than the caller's current route. This works
+across desktop reloads and edits or removal of the previously selected method.
+Cancellation failure preserves the old ownership for retry. Configuration and
+post-authentication activation share a serialized registry so a late old-master
+activation cannot recreate a moved or disabled forward. Listener ownership is
+tracked separately from displayed status, and a forward configured during
+master startup is not activated twice. The local `ctld` IPC protocol is version
+5; older clients and daemons must be updated together. A running version-4
+daemon must be restarted before clients can use these ownership semantics.
+
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed ctl-agent command.
 Rows, tabs, shell-state caches, mutations, and reconnect intent use
-`(stable host ID, session ID)`, independent of an SSH alias's display spelling.
+`(stable host ID, session ID)`, independent of the host's name or selected
+connection method. Task references and port forwards also retain host ownership.
 A failed target reports its own error without hiding successful targets.
 OpenSSH remains responsible for key contents, proxies, host verification, and
 the encrypted transport. On macOS/Linux, the per-user `ctld` owns explicit
@@ -179,11 +224,16 @@ Other interactive responses are not stored. SSH startup diagnostics are
 bounded and returned to the client instead of being lost behind a generic
 missing-transport-marker error.
 
-Native workspace writes are serialized, revision-checked across app processes,
-and atomically replaced with owner-only files. Invalid/future files are
-preserved and block writes. Legacy WebView host settings migrate only when no
-native workspace exists; the legacy copy is removed only after a successful
-disk write. Previous sessions were never persisted and require explicit import.
+Native workspace and host-catalog writes are serialized, content-revision checked
+across app processes, and atomically replaced with owner-only files. Invalid or
+future files are preserved and block writes. Schema 8 imports saved hosts and
+gateways into the separate catalog before committing the smaller workspace;
+the import is idempotent so a crash between commits is recoverable. Schema 7 is
+preserved in `workspace-v7.backup.json`; earlier versions receive their own
+backups and target-to-method migration. IDs and references never change.
+Legacy WebView host settings migrate only when no native workspace exists;
+the legacy copy is removed only after successful catalog and workspace writes.
+Previous sessions were never persisted and require explicit import.
 See `docs/rmux-workspace.md` for the lifecycle and migration contract.
 
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same
@@ -335,9 +385,10 @@ Unix clients, `ctld` owns the explicit authenticated control master used by
 both `ctl` and the desktop. `ctl` never disables host-key checking, enables
 agent forwarding, or accepts an arbitrary remote command.
 
-`ctl-agent connect` has no network listener, persistent state, or identity
-registry. Its service enum chooses rmux or task. It writes one fixed readiness
-marker, after which SSH stdin/stdout carries that service's raw protocol;
+`ctl-agent connect` has no network listener or session registry. Its persistent
+account-owned UUID lives in `~/.tokn/ctl/remote-id`; it is an environment identity,
+not a machine ID. Its service enum chooses rmux or task. It writes one fixed
+readiness marker, after which SSH stdin/stdout carries that service's raw protocol;
 diagnostics use stderr. The helper connects only to the current user's fixed
 data endpoint and cannot reach rmux's owner-only maintenance endpoint. Taskd
 may use maintenance locally to manage interactive runs. Its authority is exactly

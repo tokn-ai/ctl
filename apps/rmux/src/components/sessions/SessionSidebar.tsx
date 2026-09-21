@@ -332,6 +332,7 @@ export function SessionSidebar({
                     {target.kind === "local" ? "Local" : targetLabel(target)}
                   </span>
                   {host?.source === "ssh_config" ? <span className="host-config-source" title="From SSH config; saved only when customized">SSH</span> : null}
+                  {host?.source === "tailscale" ? <span className="host-config-source" title="Discovered from Tailscale; saved only when customized">Tailscale</span> : null}
                   <span className="host-group-count">{groupSessions.length}</span>
                 </button>
                 {target.kind === "ssh" ? (
@@ -395,7 +396,7 @@ export function SessionSidebar({
                         <Icon name="ports" size={14} />
                       </button>
                     ) : null}
-                    {host?.source !== "ssh_config" ? <button
+                    {host?.source !== "ssh_config" && host?.source !== "tailscale" ? <button
                       className="session-action"
                       type="button"
                       onClick={() => onRemoveHost(target)}

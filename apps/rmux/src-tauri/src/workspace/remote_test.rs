@@ -138,6 +138,7 @@ async fn create_phase(directory: &Path, target: &ConnectionTargetDto) -> Result<
     connection_methods: vec![WorkspaceConnectionMethod {
       method_id: "default".into(),
       name: "SSH".into(),
+      tailscale_node_id: None,
       target: target.clone(),
     }],
     preferred_method_id: Some("default".into()),

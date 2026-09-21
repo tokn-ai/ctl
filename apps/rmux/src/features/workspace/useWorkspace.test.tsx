@@ -6,12 +6,13 @@ import { useWorkspace } from "./useWorkspace";
 import {
   emptyWorkspaceView,
   projectedHostId,
+  tailscaleHostId,
   promoteHost,
   updateHostSettings,
   workspaceDocument,
 } from "./workspaceModel";
 import { recoverRemoteHost } from "./remoteRecovery";
-import type { HostCatalogDocument, HostCatalogSnapshot, WorkspaceDocument, WorkspaceSnapshot } from "../../lib/types";
+import type { HostCatalogDocument, HostCatalogSnapshot, TailscaleDeviceCatalog, WorkspaceDocument, WorkspaceSnapshot } from "../../lib/types";
 
 const api = vi.hoisted(() => ({
   loadWorkspace: vi.fn(),
@@ -19,6 +20,7 @@ const api = vi.hoisted(() => ({
   loadHosts: vi.fn(),
   updateHosts: vi.fn(),
   listSshConfigHosts: vi.fn(),
+  listTailscaleDevices: vi.fn(),
 }));
 const nativeWindow = vi.hoisted(() => ({
   onCloseRequested: vi.fn(),
@@ -76,6 +78,7 @@ beforeEach(() => {
   api.loadWorkspace.mockResolvedValue(initial);
   api.loadHosts.mockResolvedValue(initialHosts);
   api.listSshConfigHosts.mockResolvedValue({ hosts: [], warnings: [] });
+  api.listTailscaleDevices.mockResolvedValue({ devices: [], warnings: [], state: "not_installed" });
   api.updateWorkspace.mockImplementation(
     async (_revision: string | null, document: WorkspaceDocument) => ({
       revision: crypto.randomUUID(),
@@ -198,7 +201,7 @@ describe("workspace lifecycle", () => {
     api.listSshConfigHosts.mockResolvedValue({ hosts: [], warnings: [] });
     let refreshed!: Promise<void>;
     await act(async () => {
-      refreshed = result.current.refreshSshConfig();
+      refreshed = result.current.refreshHostDiscovery();
       await Promise.resolve();
     });
     expect(api.listSshConfigHosts).toHaveBeenCalledTimes(2);
@@ -404,7 +407,7 @@ describe("workspace lifecycle", () => {
     act(() => result.current.setTabs([]));
     await waitFor(() => expect(result.current.error).toBe("disk full"));
     api.listSshConfigHosts.mockResolvedValue({ hosts: [{ destination: "new-alias" }], warnings: [] });
-    await act(async () => { await result.current.refreshSshConfig(); });
+    await act(async () => { await result.current.refreshHostDiscovery(); });
     expect(result.current.hosts).toContainEqual(expect.objectContaining({
       name: "new-alias", source: "ssh_config",
     }));
@@ -557,5 +560,50 @@ describe("workspace lifecycle", () => {
     expect(api.updateWorkspace).not.toHaveBeenCalled();
     expect(api.updateHosts).not.toHaveBeenCalled();
     expect(window.localStorage.getItem("rmux.remote_hosts")).toBe(legacy);
+  });
+});
+
+const tailscaleCatalog: TailscaleDeviceCatalog = {
+  state: "available", warnings: [],
+  devices: [{ node_id: "n-builder", name: "Tailnet builder", dns_name: "builder.tail.ts.net", addresses: ["100.64.0.8"], online: true, os: "linux" }],
+};
+
+describe("optional Tailscale discovery", () => {
+  it("loads the workspace while discovery is pending and keeps discovered definitions virtual", async () => {
+    let finish!: (catalog: TailscaleDeviceCatalog) => void;
+    api.listTailscaleDevices.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    expect(result.current.discoveryLoading).toBe(true);
+    expect(result.current.hosts.some((host) => host.host_id === "server")).toBe(true);
+    await act(async () => finish(tailscaleCatalog));
+    expect(result.current.hosts.find((host) => host.host_id === tailscaleHostId("n-builder")))
+      .toMatchObject({ source: "tailscale", name: "Tailnet builder" });
+    expect(result.current.discoveryLoading).toBe(false);
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("reports optional discovery errors without disabling workspace persistence", async () => {
+    api.listTailscaleDevices.mockRejectedValue(new Error("client timed out"));
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.tailscaleWarning).toContain("client timed out"));
+    expect(result.current.ready).toBe(true);
+    expect(result.current.error).toBeNull();
+    await act(async () => result.current.persist());
+    expect(api.updateWorkspace).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an older discovery result after an explicit refresh completes", async () => {
+    let finish!: (catalog: TailscaleDeviceCatalog) => void;
+    api.listTailscaleDevices.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(api.listTailscaleDevices).toHaveBeenCalledOnce());
+    api.listTailscaleDevices.mockResolvedValue(tailscaleCatalog);
+    await act(async () => result.current.refreshHostDiscovery());
+    await act(async () => finish({ devices: [], warnings: ["old failure"], state: "error" }));
+    expect(result.current.tailscaleDevices).toEqual(tailscaleCatalog.devices);
+    expect(result.current.tailscaleWarning).toBeNull();
+    expect(result.current.hosts.some((host) => host.host_id === tailscaleHostId("n-builder"))).toBe(true);
   });
 });

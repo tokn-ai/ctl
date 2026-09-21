@@ -213,6 +213,22 @@ until an explicit connection. Session, tab, and port references retain the same
 host ID through these changes. Workspace schema 8 moves existing saved hosts and
 gateways into `hosts.json`, preserving their IDs and a backup of the workspace.
 
+Online devices from the installed Tailscale client appear separately as **Tailscale · Virtual**
+in Add host, Connect host, New shell, and Add existing session. Discovery runs in
+the background and leaves definitions in memory until customized or explicitly
+saved. Unused devices stay out of the main sidebar. Device Online/Offline is a
+Tailscale observation; the host's Connected status still means authenticated SSH.
+Opening Add host refreshes discovery, hiding stale device suggestions until it
+finishes; Refresh sessions also refreshes discovery. Saved hosts and remembered
+work remain available when devices go offline. Saved Tailscale methods retain
+a stable device binding across name/address changes and preserve the host's account
+identity. Connections use the existing SSH authentication flow.
+
+The client can be installed as a macOS app without adding it to `PATH`: rmux checks
+`/Applications/Tailscale.app` and `~/Applications/Tailscale.app`, as well as CLI
+locations, and forces CLI mode when invoking the app executable. Discovery does
+not install, sign in to, or reconfigure Tailscale.
+
 The app records the host's remote environment ID and installed agent/bundle version.
 The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live under
 `~/.tokn/ctl/versions`, with `~/.tokn/ctl/current` selecting the active bundle.

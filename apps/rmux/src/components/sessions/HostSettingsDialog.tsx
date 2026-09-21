@@ -83,6 +83,7 @@ export function HostSettingsDialog({ host, onSave, onAddMethod, onEditMethod, on
         </label>
         <p className="host-settings-description">One machine and remote account. Choose how to reach it; sessions stay with this host.</p>
         {host.source === "ssh_config" ? <p className="host-settings-description">From SSH config. Customizing this host saves a copy in hosts.json; your SSH config stays unchanged.</p> : null}
+        {host.source === "tailscale" ? <p className="host-settings-description">Discovered from Tailscale. Customizing this virtual host saves it in hosts.json.</p> : null}
         <div className="host-settings-section-heading">
           <strong>Connection methods</strong>
           <button type="button" onClick={onAddMethod} disabled={saving || dirty}>

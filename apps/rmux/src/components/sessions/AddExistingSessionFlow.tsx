@@ -22,6 +22,7 @@ import type {
 interface AddExistingSessionFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  discoveryMessage?: string | null;
   onConnectionChange?: HostConnectionChange;
   known: readonly SessionSummary[];
   onVerifyHost(
@@ -83,7 +84,7 @@ export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
   return (
     <QuickInput
       title="Add existing session — host"
-      description="Choose one host to discover its running sessions. Other hosts will not be contacted."
+      description={`Choose one host to discover its running sessions. Other hosts will not be contacted.${props.discoveryMessage ? `\n${props.discoveryMessage}` : ""}`}
       mode={{
         kind: "pick",
         choices: hostSelectorChoices(props.targets, props.hosts),

@@ -49,6 +49,8 @@ export interface SshConnectionTarget {
   /** Display-only host identity and selected connection method. */
   host_name?: string;
   method_id?: string;
+  /** Runtime provider binding; persisted on the connection method. */
+  tailscale_node_id?: string;
   destination: string;
   hostname?: string;
   user?: string;
@@ -107,7 +109,9 @@ export type HostConnectionChange = (
 
 export interface WorkspaceHost {
   /** Runtime provenance; omitted on persisted records and legacy callers. */
-  source?: "saved" | "ssh_config" | "unavailable";
+  source?: "saved" | "ssh_config" | "tailscale" | "unavailable";
+  /** Runtime discovery metadata, never a saved host definition. */
+  tailscale_device?: TailscaleDevice;
   /** Runtime workspace observation, separate from the saved catalog identity. */
   expected_remote_info?: RemoteIdentity;
   host_id: string;
@@ -121,6 +125,7 @@ export interface WorkspaceConnectionMethod {
   method_id: string;
   name: string;
   target: SshConnectionTarget;
+  tailscale_node_id?: string;
 }
 
 export interface LegacyWorkspaceHost {
@@ -234,6 +239,21 @@ export interface SshConfigHost {
 export interface SshConfigHostCatalog {
   hosts: SshConfigHost[];
   warnings: string[];
+}
+
+export interface TailscaleDevice {
+  node_id: string;
+  name: string;
+  dns_name: string | null;
+  addresses: string[];
+  online: boolean | null;
+  os: string | null;
+}
+
+export interface TailscaleDeviceCatalog {
+  devices: TailscaleDevice[];
+  warnings: string[];
+  state: "available" | "not_installed" | "not_running" | "needs_login" | "error";
 }
 
 export interface SshIdentityFile {

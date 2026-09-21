@@ -11,6 +11,7 @@ import type {
   ShellStateSummary,
 } from "../../lib/types";
 import { sessionKey } from "../../features/targets/targets";
+import { hostFromTarget } from "../../features/workspace/workspaceModel";
 import { SessionSidebar } from "./SessionSidebar";
 
 const session: SessionSummary = {
@@ -94,6 +95,15 @@ function renderHostConnection(
 afterEach(cleanup);
 
 describe("SessionSidebar", () => {
+  it("marks virtual Tailscale provenance separately from SSH connection status and omits removal", () => {
+    renderHostConnection({ state: "disconnected", method_names: [], message: null }, {
+      hosts: [{ ...hostFromTarget(remoteHost), source: "tailscale" }],
+    });
+    expect(screen.getByText("Tailscale").title).toBe("Discovered from Tailscale; saved only when customized");
+    expect(screen.getByRole("status", { name: "Host connection for Build machine: Disconnected" }).textContent).toBe("Disconnected");
+    expect(screen.queryByRole("button", { name: "Remove Build machine" })).toBeNull();
+  });
+
   it("keeps a readable connection status visible when the host is collapsed and disconnects the host independently", async () => {
     const user = userEvent.setup();
     const props = renderHostConnection({

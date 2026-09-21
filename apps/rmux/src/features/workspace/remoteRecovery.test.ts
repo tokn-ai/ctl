@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { recoverRemoteHost, sameSshEndpoint } from "./remoteRecovery";
-import { hostCatalogDocument, hostTarget, restoreWorkspace, workspaceDocument } from "./workspaceModel";
-import type { RemoteIdentity, SshConnectionTarget, LegacyWorkspaceDocument } from "../../lib/types";
+import { hostCatalogDocument, hostTarget, restoreWorkspace, tailscaleHostId, workspaceDocument } from "./workspaceModel";
+import type { RemoteIdentity, SshConnectionTarget, LegacyWorkspaceDocument, TailscaleDevice } from "../../lib/types";
 
 const remote_info: RemoteIdentity = {
   remote_id: "b765c444-28d0-4772-bb16-d3b212290bcb",
@@ -126,6 +126,88 @@ describe("remote environment recovery", () => {
     expect(() => recoverRemoteHost(before, {
       kind: "ssh", destination: "old-ip", host_id: "old", method_id: "removed",
     }, remote_info)).toThrow("connection method is no longer saved");
+  });
+});
+
+describe("Tailscale account recovery", () => {
+  const device: TailscaleDevice = {
+    node_id: "builder-node", name: "Builder", dns_name: "builder.tail.example.ts.net",
+    addresses: ["100.90.80.70"], online: true, os: "linux",
+  };
+
+  function virtualWorkspace() {
+    const host_id = tailscaleHostId(device.node_id);
+    return restoreWorkspace({
+      schema_version: 8,
+      workspace_id: "default",
+      sessions: [{ host_id, session_id: "shell", name: "Shell", last_known_cwd: null, last_known_cwd_display: null }],
+      tabs: [{ kind: "session", host_id, session_id: "shell" }],
+      active_tab: { kind: "session", host_id, session_id: "shell" },
+    }, { schema_version: 1, hosts: [], ssh_gateways: [] }, [], [device]);
+  }
+
+  it("saves an explicitly selected account and the verified settings under the existing host and method identities", () => {
+    const before = virtualWorkspace();
+    const candidate = {
+      ...before.targets[1] as SshConnectionTarget,
+      user: "developer", identity_file: "~/.ssh/builder", port: 2222,
+    };
+    const recovered = recoverRemoteHost(before, candidate, remote_info)!;
+    const catalog = hostCatalogDocument(recovered.view);
+
+    expect(recovered.view.hosts[1]).toMatchObject({ source: "saved", remote_info });
+    expect(catalog.hosts).toEqual([{
+      host_id: candidate.host_id, name: device.name, preferred_method_id: "tailscale", remote_info,
+      connection_methods: [{
+        method_id: "tailscale", name: "Tailscale", tailscale_node_id: device.node_id,
+        target: {
+          kind: "ssh", destination: device.dns_name, hostname: device.addresses[0],
+          user: "developer", identity_file: "~/.ssh/builder", port: 2222,
+        },
+      }],
+    }]);
+    expect(recovered.view.active_tab_key).toBe(before.active_tab_key);
+    expect(recovered.view.sessions[0].target).toBe(recovered.target);
+    expect(recovered.view.tabs[0].target).toBe(recovered.target);
+    expect(recovered.key_changes.size).toBe(0);
+    expect(before.hosts[1].source).toBe("tailscale");
+    expect(before.hosts[1].connection_methods[0].target).not.toHaveProperty("user");
+
+    const changed_device = { ...device, addresses: ["100.90.80.71"] };
+    const reloaded = restoreWorkspace(workspaceDocument(recovered.view), catalog, [], [changed_device]);
+    expect(reloaded.hosts).toHaveLength(2);
+    expect(reloaded.targets[1]).toMatchObject({
+      host_id: candidate.host_id, method_id: "tailscale", tailscale_node_id: device.node_id,
+      user: "developer", hostname: changed_device.addresses[0], remote_info,
+    });
+  });
+
+  it.each([undefined, ""])("keeps the default SSH account virtual (%s)", (user) => {
+    const before = virtualWorkspace();
+    const recovered = recoverRemoteHost(before, { ...before.targets[1] as SshConnectionTarget, user }, remote_info)!;
+    expect(recovered.view.hosts[1]).toMatchObject({ source: "tailscale", remote_info });
+    expect(hostCatalogDocument(recovered.view).hosts).toEqual([]);
+  });
+
+  it("checks the expected remote identity before saving an account customization", () => {
+    const before = virtualWorkspace();
+    before.hosts[1].expected_remote_info = remote_info;
+    const snapshot = structuredClone(before);
+    expect(() => recoverRemoteHost(before, {
+      ...before.targets[1] as SshConnectionTarget, user: "another-account",
+    }, { ...remote_info, remote_id: "another-environment" })).toThrow("different remote environment");
+    expect(before).toEqual(snapshot);
+    expect(hostCatalogDocument(before).hosts).toEqual([]);
+  });
+
+  it("rejects a removed connection method before saving an account customization", () => {
+    const before = virtualWorkspace();
+    const snapshot = structuredClone(before);
+    expect(() => recoverRemoteHost(before, {
+      ...before.targets[1] as SshConnectionTarget, method_id: "removed", user: "developer",
+    }, remote_info)).toThrow("connection method is no longer saved");
+    expect(before).toEqual(snapshot);
+    expect(hostCatalogDocument(before).hosts).toEqual([]);
   });
 });
 

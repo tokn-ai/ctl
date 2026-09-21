@@ -13,6 +13,7 @@ import type { ConnectionTarget, HostConnectionChange, RemoteIdentity, WorkspaceH
 interface NewShellFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  discoveryMessage?: string | null;
   onConnectionChange?: HostConnectionChange;
   onVerifyHost(
     target: ConnectionTarget,
@@ -30,6 +31,7 @@ interface NewShellFlowProps {
 export function NewShellFlow({
   targets,
   hosts,
+  discoveryMessage,
   onConnectionChange,
   onVerifyHost,
   onCreate,
@@ -147,7 +149,7 @@ export function NewShellFlow({
       <QuickInput
         key="host"
         title="New shell — host · 1/2"
-        description="Choose where to create the shell. Local is the default; hosts are not contacted until you create."
+        description={`Choose where to create the shell. Local is the default; hosts are not contacted until you create.${discoveryMessage ? `\n${discoveryMessage}` : ""}`}
         error={
           selectedTargetKey
             ? "That host is no longer available. Choose another host."

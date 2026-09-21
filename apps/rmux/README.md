@@ -101,6 +101,28 @@ hosts automatically. Renaming a host or changing methods preserves session,
 tab, task, and port-forward ownership through the stable `host_id`.
 Existing WebView host settings migrate automatically after a successful disk write.
 
+**Tailscale · Virtual** lists online devices discovered from the installed Tailscale
+client in Add host, Connect host, New shell, and Add existing session. Discovery
+does not block workspace startup, contact remote SSH servers, or save discovered
+definitions. A device enters the sidebar after connection or when it has remembered
+work; naming/saving it through Add host or customizing Host settings creates a
+saved definition. Each Add host opening refreshes discovery and hides stale
+Tailscale suggestions while loading. Refresh sessions also refreshes devices.
+Saved hosts and remembered work remain available when devices go offline. Online/Offline
+details describe Tailscale presence, separately from the host's SSH connection status.
+
+Discovery checks `PATH` and standard app/CLI installation locations. On macOS this
+includes `/Applications/Tailscale.app/Contents/MacOS/Tailscale` and the equivalent
+under `~/Applications`, with `TAILSCALE_BE_CLI=1`; no shell alias or PATH change is
+required. Missing, stopped, signed-out, or unresponsive clients produce a message
+in the host selectors while local and saved hosts remain usable.
+
+Saved methods bind to the Tailscale device ID, resolving its current address for
+new connections without changing active session transports. A missing device stays
+unavailable until discovery finds it again. Connections use ordinary SSH over the
+tailnet, including the usual SSH user/config and credential settings; browser
+approval for Tailscale SSH check mode is a separate follow-up.
+
 Saved host definitions and reusable gateways live in `~/.tokn/rmux/hosts.json`;
 sessions, tabs, tasks, forwarding, and observed remote identities live in
 `~/.tokn/rmux/workspace.json`. On first load, an existing workspace is imported

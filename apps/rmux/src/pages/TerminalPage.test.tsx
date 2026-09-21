@@ -24,8 +24,9 @@ import type {
   SavedTaskDefinition,
   WorkspacePortForward,
   SshPrompt,
+  TailscaleDeviceCatalog,
 } from "../lib/types";
-import { projectedHostId, restoreWorkspace } from "../features/workspace/workspaceModel";
+import { projectedHostId, tailscaleHostId, restoreWorkspace } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
 import { detectShortcutPlatform } from "../features/commands/keybindings";
 import { COMMAND_IDS } from "../features/commands/terminalCommands";
@@ -65,6 +66,7 @@ const api = vi.hoisted(() => ({
   listSessions: vi.fn(),
   inspectKnownSessions: vi.fn(),
   listSshConfigHosts: vi.fn(),
+  listTailscaleDevices: vi.fn(),
   listSshIdentityFiles: vi.fn(),
   setNativeWindowTitle: vi.fn(),
   createSession: vi.fn(),
@@ -203,6 +205,7 @@ beforeEach(() => {
     hosts: [{ destination: "only-in-ssh-config" }],
     warnings: [],
   });
+  api.listTailscaleDevices.mockResolvedValue({ devices: [], warnings: [], state: "not_installed" });
   api.listSshIdentityFiles.mockResolvedValue({ identity_files: [], warnings: [] });
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
@@ -990,6 +993,107 @@ describe("workspace-backed terminal page", () => {
     expect(api.probeSshHost).not.toHaveBeenCalled();
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
     expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  const tailscaleDevice = {
+    node_id: "n-tail-builder", name: "Tailnet builder", dns_name: "builder.tail.ts.net",
+    addresses: ["100.64.0.8"], online: true, os: "linux",
+  };
+
+  it.each(["Add host", "Choose host to connect", "New shell", "Add existing session"])("offers Tailscale separately in %s without connecting or saving", async (button) => {
+    api.listTailscaleDevices.mockResolvedValue({ devices: [
+      tailscaleDevice,
+      { ...tailscaleDevice, node_id: "offline", name: "Offline device", online: false },
+      { ...tailscaleDevice, node_id: "unknown", name: "Unknown device", online: null },
+    ], warnings: [], state: "available" });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: button }));
+    const group = await screen.findByRole("group", { name: "Tailscale · Virtual" });
+    expect(within(group).getByRole("option", { name: /Tailnet builder/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Offline device|Unknown device/ })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Tailnet builder sessions" })).toBeNull();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("refreshes Tailscale on every Add host opening and replaces stale suggestions with online peers", async () => {
+    let finishRefresh!: (catalog: TailscaleDeviceCatalog) => void;
+    const newDevice = { ...tailscaleDevice, node_id: "new-device", name: "New online device" };
+    api.listTailscaleDevices
+      .mockResolvedValueOnce({ devices: [tailscaleDevice], warnings: [], state: "available" })
+      .mockImplementationOnce(() => new Promise<TailscaleDeviceCatalog>((resolve) => { finishRefresh = resolve; }))
+      .mockResolvedValue({ devices: [tailscaleDevice, { ...newDevice, online: false }], warnings: [], state: "available" });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "New shell" }));
+    await screen.findByRole("option", { name: /Tailnet builder/ });
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(api.listTailscaleDevices).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add host" }));
+    expect(api.listTailscaleDevices).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("option", { name: /Tailnet builder/ })).toBeNull();
+    expect(screen.getByText("Discovering hosts…")).toBeTruthy();
+    expect((screen.getByLabelText("SSH host") as HTMLInputElement).disabled).toBe(false);
+    await act(async () => finishRefresh({
+      devices: [{ ...tailscaleDevice, online: false }, newDevice], warnings: [], state: "available",
+    }));
+    await screen.findByRole("option", { name: /New online device/ });
+    expect(screen.queryByRole("option", { name: /Tailnet builder/ })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add host" }));
+    expect(api.listTailscaleDevices).toHaveBeenCalledTimes(3);
+    await screen.findByRole("option", { name: /Tailnet builder/ });
+    expect(screen.queryByRole("option", { name: /New online device/ })).toBeNull();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("connects a Tailscale projection for a new shell without persisting its definition", async () => {
+    api.listTailscaleDevices.mockResolvedValue({ devices: [tailscaleDevice], warnings: [], state: "available" });
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "New shell" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Tailnet builder/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await screen.findByRole("textbox", { name: "SSH user" });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.createSession).toHaveBeenCalledOnce());
+    expect(api.createSession.mock.calls[0][0].target).toMatchObject({
+      host_id: tailscaleHostId(tailscaleDevice.node_id), method_id: "tailscale",
+      tailscale_node_id: tailscaleDevice.node_id, hostname: "100.64.0.8", remote_info: remoteInfo,
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("region", { name: "Tailnet builder sessions" })).toBeTruthy();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+  });
+
+  it("promotes a named Tailscale host while retaining its method for immediate session discovery", async () => {
+    api.listTailscaleDevices.mockResolvedValue({ devices: [tailscaleDevice], warnings: [], state: "available" });
+    api.listSessions.mockResolvedValue({ sessions: [], shell_states: {} });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Tailnet builder/ }));
+    fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Private builder" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "SSH user" }), { target: { value: "developer" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const saved = api.updateHosts.mock.calls.slice(-1)[0][1] as HostCatalogDocument;
+    expect(saved.hosts.find((host) => host.name === "Private builder")).toMatchObject({
+      host_id: tailscaleHostId(tailscaleDevice.node_id), preferred_method_id: "tailscale",
+      connection_methods: [{ method_id: "tailscale", tailscale_node_id: tailscaleDevice.node_id, target: { user: "developer" } }],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add existing session" }));
+    fireEvent.click(screen.getByRole("option", { name: /Private builder/ }));
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledOnce());
+    expect(api.listSessions.mock.calls[0][0]).toMatchObject({
+      host_id: tailscaleHostId(tailscaleDevice.node_id), method_id: "tailscale", remote_info: remoteInfo,
+    });
+    await screen.findByRole("option", { name: "Done" });
   });
 
   async function chooseProjectedConnection() {

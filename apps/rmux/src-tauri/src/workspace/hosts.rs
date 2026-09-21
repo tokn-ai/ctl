@@ -22,6 +22,8 @@ pub struct WorkspaceHost {
 pub struct WorkspaceConnectionMethod {
   pub method_id: String,
   pub name: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tailscale_node_id: Option<String>,
   #[serde(deserialize_with = "deserialize_connection_settings")]
   pub target: ConnectionTargetDto,
 }
@@ -106,6 +108,10 @@ impl WorkspaceConnectionMethod {
     let mut route_ids = HashSet::new();
     valid_workspace_text(&self.method_id)
       && valid_workspace_text(&self.name)
+      && self
+        .tailscale_node_id
+        .as_deref()
+        .is_none_or(crate::tailscale::valid_node_id)
       && valid_workspace_text(destination)
       && *port != Some(0)
       && [hostname, user, identity_file]

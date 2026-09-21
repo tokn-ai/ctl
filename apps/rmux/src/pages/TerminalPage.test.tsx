@@ -65,6 +65,7 @@ const api = vi.hoisted(() => ({
   listSessions: vi.fn(),
   inspectKnownSessions: vi.fn(),
   listSshConfigHosts: vi.fn(),
+  listSshIdentityFiles: vi.fn(),
   setNativeWindowTitle: vi.fn(),
   createSession: vi.fn(),
   killSession: vi.fn(),
@@ -202,6 +203,7 @@ beforeEach(() => {
     hosts: [{ destination: "only-in-ssh-config" }],
     warnings: [],
   });
+  api.listSshIdentityFiles.mockResolvedValue({ identity_files: [], warnings: [] });
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
   api.probeSshHost.mockReset().mockResolvedValue(remoteInfo);
@@ -1452,6 +1454,124 @@ describe("workspace-backed terminal page", () => {
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
     expect(attachment.connect).not.toHaveBeenCalled();
     expect(attachment.detach).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["New shell", null],
+    ["Add existing session", null],
+    ["New shell", "/keys/office"],
+    ["Add existing session", "/keys/office"],
+  ] as const)("keeps a projected method usable immediately after Add host saves its name for %s (identity: %s)", async (action, identity_file) => {
+    const host_id = projectedHostId("only-in-ssh-config");
+    const saved = snapshot();
+    saved.document.sessions[0].host_id = host_id;
+    saved.document.tabs = [{ host_id, session_id: "known-id" }];
+    saved.document.active_tab = { host_id, session_id: "known-id" };
+    saved.document.host_identities = [{ host_id, remote_info: { ...remoteInfo, agent_version: "older" } }];
+    api.loadWorkspace.mockResolvedValue(saved);
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    api.listSessions.mockImplementation(async (target: ConnectionTarget) => ({ sessions: [newSession(target)], shell_states: {} }));
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
+    fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Office machine" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    if (identity_file) {
+      fireEvent.click(screen.getByRole("option", { name: /Identity file/ }));
+      fireEvent.change(screen.getByRole("combobox", { name: "Identity file" }), { target: { value: identity_file } });
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    } else {
+      fireEvent.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    }
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const catalog = api.updateHosts.mock.calls.slice(-1)[0][1] as HostCatalogDocument;
+    expect(catalog.hosts.find((host) => host.host_id === host_id)).toMatchObject({
+      name: "Office machine", preferred_method_id: "ssh_config", remote_info: remoteInfo,
+      connection_methods: [{ method_id: "ssh_config", target: {
+        kind: "ssh", destination: "only-in-ssh-config", ...(identity_file ? { identity_file } : {}),
+      } }],
+    });
+    const document = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    expect(document.sessions).toEqual(saved.document.sessions);
+    expect(document.active_tab).toEqual({ kind: "session", host_id, session_id: "known-id" });
+    expect(attachment.connect).not.toHaveBeenCalled();
+    api.probeSshHost.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(screen.getByRole("option", { name: "Office machine" }));
+    if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    const target = {
+      kind: "ssh", destination: "only-in-ssh-config", host_id,
+      host_name: "Office machine", method_id: "ssh_config", remote_info: remoteInfo,
+      ...(identity_file ? { identity_file } : {}),
+    };
+    if (action === "New shell") {
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ target })));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    } else {
+      fireEvent.click(await screen.findByRole("option", { name: /created-shell/ }));
+      await waitFor(() => expect(api.updateWorkspace.mock.calls.some(([, saved]) =>
+        saved.sessions.some((session: { session_id: string }) => session.session_id === "created-id"))).toBe(true));
+      expect(api.listSessions).toHaveBeenCalledExactlyOnceWith(target);
+    }
+    expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
+    expect(screen.queryByText("This connection method is no longer saved on the host.")).toBeNull();
+  });
+
+  it.each([
+    ["removed", "New shell"],
+    ["removed", "Add existing session"],
+    ["edited", "New shell"],
+    ["edited", "Add existing session"],
+  ] as const)("uses the current saved method for %s runtime routes before %s", async (change, action) => {
+    const catalog = hostSnapshot();
+    catalog.document.hosts[0].remote_info = remoteInfo;
+    catalog.document.hosts[0].connection_methods.push({
+      method_id: "backup", name: "Backup", target: { kind: "ssh", destination: "backup.example" },
+    });
+    api.loadHosts.mockResolvedValue(catalog);
+    const known = restoreWorkspace(snapshot().document, catalog.document).sessions[0];
+    Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    api.listSessions.mockImplementation(async (target: ConnectionTarget) => ({ sessions: [newSession(target)], shell_states: {} }));
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    const method = within(screen.getByRole("region", { name: "SSH" }));
+    if (change === "removed") {
+      fireEvent.click(method.getByRole("button", { name: "Remove" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    } else {
+      fireEvent.click(method.getByRole("button", { name: "Edit connection" }));
+      fireEvent.change(screen.getByLabelText("SSH host or config alias"), { target: { value: "changed.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Verify and save" }));
+      const settings = await screen.findByRole("dialog", { name: "Host settings · test" });
+      fireEvent.click(within(settings).getAllByRole("button", { name: "Cancel" })[0]);
+    }
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(attachment.state.session).toBe(known);
+    expect(known.target).toMatchObject({ destination: "test", method_id: "default" });
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(attachment.detach).not.toHaveBeenCalled();
+    api.probeSshHost.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(screen.getByRole("option", { name: "test" }));
+    if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    const target = {
+      kind: "ssh", host_id: "test-id", host_name: "test", remote_info: remoteInfo,
+      ...(change === "removed"
+        ? { method_id: "backup", destination: "backup.example" }
+        : { method_id: "default", destination: "changed.example", hostname: "changed.example" }),
+    };
+    if (action === "New shell") {
+      await waitFor(() => expect(api.createSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ target })));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    } else {
+      await screen.findByRole("option", { name: /created-shell/ });
+      expect(api.listSessions).toHaveBeenCalledExactlyOnceWith(target);
+    }
+    expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
   });
 
   it("adds a connection without touching the active session, then explicitly switches through the saved method", async () => {

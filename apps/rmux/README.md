@@ -79,7 +79,8 @@ do not race a discarded authentication connection.
 
 Open **Host settings** from the host row to rename the machine or its methods,
 add or edit a connection, remove a method while retaining at least one, or
-**Make preferred**. **Connect host** uses the preferred method. **Connect using**
+**Make preferred**. **Connect host**, **New shell**, and **Add existing session** use
+the current saved preferred method. **Connect using**
 chooses a specific method for the current connection without changing that
 preference; there is no automatic fallback. Saving names or preferences does not
 connect. Adding or editing a method verifies its endpoint before saving, but

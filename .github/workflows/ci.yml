@@ -19,6 +19,28 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  dev-launcher:
+    name: Development launcher (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Test daemon preparation and reload lifecycle
+        run: node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts
+
   rust-quality:
     name: Rust quality
     runs-on: ubuntu-latest

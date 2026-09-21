@@ -182,8 +182,8 @@ installation does not depend on the remote shell's diagnostic language.
 | Rename host/method or change preference | Save metadata; preserve references | No connection or transport switch |
 | Connect host / Connect using | Select the preferred / explicitly chosen method; inspect known entries; resume the selected tab on that host, otherwise its first open tab | Authenticate through that method, inspect known IDs, then attach |
 | Open session | Select/open its tab | Connect to its host and attach |
-| Create shell | Persist new membership before attaching | Create one session |
-| Add existing session | Remember selected entries | Enumerate only the selected host; no attachment |
+| Create shell | Persist new membership before attaching | Authenticate and verify the selected SSH host if remote, then create one session |
+| Add existing session | Remember selected entries | Authenticate and verify the selected host, then enumerate its sessions; no attachment |
 | Refresh known sessions | Update observations; retain missing/unreachable entries | Inspect known IDs only, not full inventory |
 | Close/detach tab | Remove tab, retain membership | Detach its view; shell continues |
 | Remove from workspace | Remove membership and its tab | No kill |

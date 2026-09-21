@@ -107,6 +107,11 @@ was selected. No daemon inventory is discovered automatically. Use **Add
 existing session** in the sidebar or command palette to discover one host's
 inventory and explicitly remember sessions without attaching. **Refresh Known
 Sessions** inspects only remembered IDs; it does not adopt other apps' sessions.
+**New shell** and **Add existing session** authenticate the selected SSH host
+before creating or discovering sessions, reusing its connection when available.
+Credential prompts appear within the action, which continues after verification.
+Cancelling authentication creates or imports nothing; New shell keeps the working
+directory draft. Background refreshes never prompt for authentication.
 Old sessions were never saved, so the first migration requires explicit import.
 See [workspace persistence](../../docs/rmux-workspace.md) for recovery and tests.
 

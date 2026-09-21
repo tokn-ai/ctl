@@ -552,6 +552,7 @@ export function TerminalPage() {
     );
     if (!recovered) return null;
     await workspace.replaceView((current) => recoverRemoteHost(current, candidate, remote_info)!.view);
+    if (workspace.isClosing()) throw new Error("Workspace is closing.");
     refreshGuardRef.current.recordMutation();
     renderer?.remapSessions(recovered.key_changes);
     setTabShellStates((current) => remapStateKeys(current, recovered.key_changes));
@@ -563,6 +564,7 @@ export function TerminalPage() {
     tabsRef.current = workspace.viewRef.current.tabs;
     activeTabKeyRef.current = workspace.viewRef.current.active_tab_key;
     await portForwarding.refreshTarget(recovered.target);
+    if (workspace.isClosing()) throw new Error("Workspace is closing.");
     return recovered.target;
   };
 
@@ -764,6 +766,7 @@ export function TerminalPage() {
     ): Promise<void> => {
       if (
         !workspace.ready ||
+        workspace.isClosing() ||
         creatingRef.current ||
         daemonRestartConfirmationRef.current ||
         restartingDaemonRef.current
@@ -777,7 +780,6 @@ export function TerminalPage() {
       setCreating(true);
       setListError(null);
       try {
-        target = await prepareHostTarget(target);
         const session = await createSession({
           target,
           working_directory: workingDirectory,
@@ -818,7 +820,7 @@ export function TerminalPage() {
         }
       }
     },
-    [activateTab, renderer, workspace.ready, setSessions, persistWorkspace, prepareHostTarget],
+    [activateTab, renderer, workspace.ready, workspace.isClosing, setSessions, persistWorkspace],
   );
 
   const disconnect = useCallback(
@@ -849,7 +851,6 @@ export function TerminalPage() {
   const importSession = useCallback(
     async (session: SessionSummary, shell_state: ShellStateSummary | null) => {
       if (!workspace.ready || daemonRestartBlocksInteractions()) return;
-      session = { ...session, target: await prepareHostTarget(session.target) };
       refreshGuardRef.current.recordMutation();
       setSessions((current) => prependSession(current, session));
       if (shell_state) {
@@ -865,7 +866,6 @@ export function TerminalPage() {
       setSessions,
       setSessionShellStates,
       persistWorkspace,
-      prepareHostTarget,
     ],
   );
 
@@ -1754,6 +1754,7 @@ export function TerminalPage() {
         <NewShellFlow
           targets={targets}
           hosts={workspace.hosts}
+          onVerifyHost={recoverHost}
           onCreate={create}
           onClose={() => {
             setNewShellOpen(false);
@@ -1765,6 +1766,7 @@ export function TerminalPage() {
           targets={targets}
           hosts={workspace.hosts}
           known={sessions}
+          onVerifyHost={recoverHost}
           onAdd={importSession}
           onClose={() => setImportOpen(false)}
         />

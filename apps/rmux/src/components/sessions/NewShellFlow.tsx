@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
+import { SshHostFlow } from "./SshHostFlow";
 import { hostSelectorChoices } from "./hostChoices";
 import {
   LOCAL_TARGET,
@@ -7,11 +8,15 @@ import {
   targetLabel,
 } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
-import type { ConnectionTarget, WorkspaceHost } from "../../lib/types";
+import type { ConnectionTarget, RemoteIdentity, WorkspaceHost } from "../../lib/types";
 
 interface NewShellFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  onVerifyHost(
+    target: ConnectionTarget,
+    remote_info: RemoteIdentity,
+  ): Promise<ConnectionTarget | null>;
   /** Resolve once created, even if subsequent persistence/attachment needs recovery. */
   onCreate(
     target: ConnectionTarget,
@@ -24,6 +29,7 @@ interface NewShellFlowProps {
 export function NewShellFlow({
   targets,
   hosts,
+  onVerifyHost,
   onCreate,
   onClose,
 }: NewShellFlowProps) {
@@ -33,12 +39,15 @@ export function NewShellFlow({
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState<ConnectionTarget | null>(null);
+  const pendingDirectoryRef = useRef<{ working_directory: string | null } | null>(null);
   const busyRef = useRef(false);
   const closedRef = useRef(false);
   useEffect(() => {
     closedRef.current = false;
     return () => {
       closedRef.current = true;
+      pendingDirectoryRef.current = null;
     };
   }, []);
 
@@ -57,14 +66,24 @@ export function NewShellFlow({
     onClose();
   }
 
-  async function create(value: string) {
+  function submit(value: string) {
     if (!target || busyRef.current || closedRef.current) return;
     busyRef.current = true;
-    setCreating(true);
     setWorkingDirectory(value);
     setError(null);
+    const working_directory = value.trim() || null;
+    if (target.kind === "ssh") {
+      pendingDirectoryRef.current = { working_directory };
+      setConnecting(target);
+    } else {
+      void create(target, working_directory);
+    }
+  }
+
+  async function create(verified: ConnectionTarget, working_directory: string | null) {
+    setCreating(true);
     try {
-      await onCreate(target, value.trim() || null);
+      await onCreate(verified, working_directory);
       if (!closedRef.current) {
         closedRef.current = true;
         onClose();
@@ -75,6 +94,32 @@ export function NewShellFlow({
       busyRef.current = false;
       if (!closedRef.current) setCreating(false);
     }
+  }
+
+  if (connecting) {
+    return (
+      <SshHostFlow
+        suggestions={[]}
+        warning={null}
+        target={connecting}
+        autoConnect
+        onVerified={onVerifyHost}
+        onConnected={(verified) => {
+          const pending = pendingDirectoryRef.current;
+          if (!pending || closedRef.current) return;
+          // Consume the request before SshHostFlow's success-close callback.
+          pendingDirectoryRef.current = null;
+          setConnecting(null);
+          void create(verified, pending.working_directory);
+        }}
+        onClose={() => {
+          if (!pendingDirectoryRef.current || closedRef.current) return;
+          pendingDirectoryRef.current = null;
+          busyRef.current = false;
+          setConnecting(null);
+        }}
+      />
+    );
   }
 
   if (creating) {
@@ -123,7 +168,7 @@ export function NewShellFlow({
     <QuickInput
       key={`directory:${targetKey(target)}`}
       title="New shell — working directory · 2/2"
-      description={`Create on ${targetLabel(target)}. Leave blank for its home directory.${target.kind === "ssh" ? " If SSH authentication is needed, cancel and use Connect host first." : ""}`}
+      description={`Create on ${targetLabel(target)}. Leave blank for its home directory.${target.kind === "ssh" ? " You’ll be prompted if SSH authentication is needed." : ""}`}
       error={error}
       mode={{
         kind: "input",
@@ -133,7 +178,7 @@ export function NewShellFlow({
         submit_label: "Create shell",
       }}
       onChange={setWorkingDirectory}
-      onSubmit={create}
+      onSubmit={submit}
       onBack={() => {
         if (busyRef.current) return;
         setSelectedTargetKey(null);

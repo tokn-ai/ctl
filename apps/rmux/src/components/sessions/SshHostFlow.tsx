@@ -35,6 +35,8 @@ interface SshHostFlowProps {
   suggestions: readonly string[];
   warning: string | null;
   target?: ConnectionTarget;
+  /** Begin verification on mount when a target was already selected. */
+  autoConnect?: boolean;
   updateRequired?: boolean;
   complex?: boolean;
   /** Edit connection settings without entering the reconnect flow. */
@@ -91,6 +93,7 @@ export function SshHostFlow({
   suggestions,
   warning,
   target,
+  autoConnect = false,
   updateRequired = false,
   complex = false,
   initialTarget,
@@ -106,9 +109,11 @@ export function SshHostFlow({
   onClose,
 }: SshHostFlowProps) {
   const editingConnection = Boolean(onSaveConnection);
-  const [step, setStep] = useState<Step>(
-    updateRequired ? "update" : target ? "reconnect" : complex || editingConnection ? "route" : "host",
-  );
+  const [step, setStep] = useState<Step>(() => {
+    if (updateRequired) return "update";
+    if (target) return autoConnect ? "progress" : "reconnect";
+    return complex || editingConnection ? "route" : "host";
+  });
   const identityFiles = useSshIdentityFiles(step === "identity" || (editingConnection && step === "route"));
   const [address, setAddress] = useState(() => initialTarget ? targetAddress(initialTarget) : "");
   const [hostName, setHostName] = useState("");
@@ -155,7 +160,15 @@ export function SshHostFlow({
 
   useEffect(() => {
     closedRef.current = false;
+    let mounted = true;
+    if (autoConnect && target && !updateRequired) {
+      // Wait for StrictMode's setup/cleanup replay before starting one probe.
+      void Promise.resolve().then(() => {
+        if (mounted && !closedRef.current) void connect(target);
+      });
+    }
     return () => {
+      mounted = false;
       closedRef.current = true;
       cancelAttempt();
       forgetUncommitted();
@@ -608,7 +621,7 @@ export function SshHostFlow({
       break;
     case "progress":
       title = "Connecting to host";
-      description = "Starting the fixed ctl-agent remote command.";
+      description = "Verifying the SSH connection and remote environment.";
       mode = { kind: "progress" };
   }
 

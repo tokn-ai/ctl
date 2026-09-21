@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
+import { SshHostFlow } from "./SshHostFlow";
 import { hostSelectorChoices } from "./hostChoices";
 import {
   sessionKey,
@@ -10,6 +11,7 @@ import { listSessions } from "../../lib/tauri";
 import { errorMessage } from "../../lib/errors";
 import type {
   ConnectionTarget,
+  RemoteIdentity,
   SessionListResponse,
   SessionSummary,
   ShellStateSummary,
@@ -20,6 +22,10 @@ interface AddExistingSessionFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
   known: readonly SessionSummary[];
+  onVerifyHost(
+    target: ConnectionTarget,
+    remote_info: RemoteIdentity,
+  ): Promise<ConnectionTarget | null>;
   onAdd(
     session: SessionSummary,
     shell_state: ShellStateSummary | null,
@@ -30,13 +36,44 @@ interface AddExistingSessionFlowProps {
 /** Enumeration is confined to this explicit, single-host import flow. */
 export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
   const [target, setTarget] = useState<ConnectionTarget | null>(null);
+  const [connectedTarget, setConnectedTarget] = useState<ConnectionTarget | null>(null);
+  const connectedRef = useRef(false);
+  function chooseHost() {
+    connectedRef.current = false;
+    setConnectedTarget(null);
+    setTarget(null);
+  }
+  if (target?.kind === "ssh" && !connectedTarget) {
+    return (
+      <SshHostFlow
+        suggestions={[]}
+        warning={null}
+        target={target}
+        autoConnect
+        onVerified={props.onVerifyHost}
+        onConnected={(verified) => {
+          connectedRef.current = true;
+          setConnectedTarget(verified);
+        }}
+        onClose={() => {
+          // Successful connections close the SSH flow before discovery starts.
+          if (!connectedRef.current) chooseHost();
+        }}
+      />
+    );
+  }
   if (target) {
     return (
       <SessionChoices
         key={targetKey(target)}
         {...props}
-        target={target}
-        onBack={() => setTarget(null)}
+        target={connectedTarget ?? target}
+        onBack={chooseHost}
+        onReconnect={() => {
+          connectedRef.current = false;
+          setTarget(connectedTarget ?? target);
+          setConnectedTarget(null);
+        }}
       />
     );
   }
@@ -65,9 +102,11 @@ function SessionChoices({
   onAdd,
   onClose,
   onBack,
+  onReconnect,
 }: AddExistingSessionFlowProps & {
   target: ConnectionTarget;
   onBack(): void;
+  onReconnect(): void;
 }) {
   const [catalog, setCatalog] = useState<SessionListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -110,7 +149,8 @@ function SessionChoices({
       return;
     }
     if (id === "retry") {
-      setAttempt((current) => current + 1);
+      if (target.kind === "ssh") onReconnect();
+      else setAttempt((current) => current + 1);
       return;
     }
     const session = available.find((candidate) => sessionKey(candidate) === id);
@@ -138,7 +178,7 @@ function SessionChoices({
           ? undefined
           : catalog
             ? `${added ? `${added} added. ` : ""}${available.length ? "Choose sessions to remember without attaching. Select Done when finished." : "No additional running sessions. Existing workspace entries are hidden."}`
-            : "Discovery failed. If authentication is required, close this picker and use Connect host first."
+            : "Discovery failed. Retry to reconnect to this host and discover its sessions."
       }
       error={error}
       mode={

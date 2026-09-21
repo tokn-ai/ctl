@@ -9,9 +9,21 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionTarget } from "../../lib/types";
 import { NewShellFlow } from "./NewShellFlow";
+import { probeSshHost, cancelSshProbe } from "../../lib/tauri";
+
+vi.mock("../../lib/tauri", async (original) => ({
+  ...(await original<object>()),
+  probeSshHost: vi.fn(),
+  cancelSshProbe: vi.fn(),
+}));
+const remoteInfo = { remote_id: "remote-environment", agent_version: "0.1.0" };
+beforeEach(() => {
+  vi.mocked(probeSshHost).mockReset().mockResolvedValue(remoteInfo);
+  vi.mocked(cancelSshProbe).mockReset().mockResolvedValue(undefined);
+});
 
 const local: ConnectionTarget = { kind: "local" };
 const remote: ConnectionTarget = {
@@ -36,13 +48,14 @@ function setup() {
     >()
     .mockResolvedValue(undefined);
   const close = vi.fn();
-  const props = { targets: [remote, local], onCreate: create, onClose: close };
+  const verify = vi.fn(async (target: ConnectionTarget) => target);
+  const props = { targets: [remote, local], onVerifyHost: verify, onCreate: create, onClose: close };
   const view = render(
     <StrictMode>
       <NewShellFlow {...props} />
     </StrictMode>,
   );
-  return { create, close, props, view, user: userEvent.setup() };
+  return { create, close, verify, props, view, user: userEvent.setup() };
 }
 
 describe("new-shell quick-input flow", () => {
@@ -178,5 +191,47 @@ describe("new-shell quick-input flow", () => {
     await user.click(screen.getByRole("option", { name: "Local" }));
     await user.keyboard("{Enter}");
     expect(create).toHaveBeenCalledExactlyOnceWith(local, null);
+  });
+
+  it("waits for SSH verification and creates once using its returned connection method", async () => {
+    const { create, close, verify, user } = setup();
+    let finish!: (identity: typeof remoteInfo) => void;
+    vi.mocked(probeSshHost).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const verified: ConnectionTarget = { ...remote, method_id: "office", remote_info: remoteInfo };
+    verify.mockResolvedValue(verified);
+    await user.click(screen.getByRole("option", { name: "remote" }));
+    await user.type(screen.getByLabelText("Working directory"), "/work/project{Enter}");
+    await waitFor(() => expect(probeSshHost).toHaveBeenCalledOnce());
+    await user.keyboard("{Enter}{Enter}");
+    expect(create).not.toHaveBeenCalled();
+    await act(async () => finish(remoteInfo));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(create).toHaveBeenCalledExactlyOnceWith(verified, "/work/project");
+  });
+
+  it("does not create a shell when the host identity cannot be verified", async () => {
+    const { create, verify, close, user } = setup();
+    verify.mockRejectedValue(new Error("This method reaches a different remote environment."));
+    await user.click(screen.getByRole("option", { name: "remote" }));
+    await user.type(screen.getByLabelText("Working directory"), "/work{Enter}");
+    await screen.findByText(/different remote environment/);
+    expect(create).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    expect((screen.getByLabelText("Working directory") as HTMLInputElement).value).toBe("/work");
+  });
+
+  it("cancels a pending SSH probe on unmount without creating from its late result", async () => {
+    const { create, verify, view, user } = setup();
+    let finish!: (identity: typeof remoteInfo) => void;
+    vi.mocked(probeSshHost).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await user.click(screen.getByRole("option", { name: "remote" }));
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(probeSshHost).toHaveBeenCalledOnce());
+    view.unmount();
+    expect(cancelSshProbe).toHaveBeenCalledOnce();
+    await act(async () => finish(remoteInfo));
+    expect(verify).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
   });
 });

@@ -13,12 +13,13 @@ pnpm install
 pnpm tauri dev
 ```
 
-Tauri development startup builds `ctld`, `rmuxd`, and `taskd` beside the app's
-Cargo binary so fresh starts use matching local daemon protocols. `pnpm dev`
-still starts only the frontend; `pnpm daemons:build` rebuilds the local daemons
-separately. After changing a daemon protocol during development, restart the
-affected daemon once its connections are idle; rebuilding does not replace an
-already running process.
+On macOS and Linux, Tauri builds `ctld`, `rmuxd`, and `taskd` before every native
+launch, including Rust hot reloads. The Cargo runner preserves the selected
+target, profile, and output directory. On Windows, helpers are built once at
+development startup. `pnpm dev` starts only the frontend; `pnpm daemons:build`
+rebuilds local daemons separately. Ordinary development does not replace an
+already running daemon; `ctld` uses protocol-specific sockets, and rejects an
+incompatible helper executable before starting it.
 
 Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
@@ -186,10 +187,16 @@ launcher asks Xcode to refresh an expired profile automatically.
 Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
 profiles and `~/Library/Application Support/rmux/signing/ctld.provisionprofile`,
 selects the newest unexpired profile for `io.rmux.desktop.ctld`, discovers its
-matching signing certificate in the login Keychain, and runs an isolated signed
-`ctld` for the lifetime of `tauri dev`. It needs no signing environment
-variables. Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch
-ID-protected credentials.
+matching signing certificate in the login Keychain, and supervises an isolated
+signed `ctld` for the lifetime of `tauri dev`. Before each native launch, it
+uses Cargo's reported helper artifact, signs it when changed, and verifies the
+running helper's protocol handshake. A changed helper replaces only this
+launcher's daemon; an unchanged helper retains its live connections. Build or
+signing failures prevent the new client from starting. The launcher stops its
+helper on exit and needs no signing environment variables. Tauri arguments,
+such as `--release`, can be passed through `pnpm tauri:dev:signed --release`.
+Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch ID-protected
+credentials. Run the launcher regression tests with `pnpm test:dev`.
 
 The release workflow derives the Team ID and signing identity from the profile
 and imported certificate. It expects `APPLE_API_ISSUER` and `APPLE_API_KEY` as

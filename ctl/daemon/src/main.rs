@@ -4,6 +4,10 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(version, about = "Per-user SSH connection and credential broker")]
 struct Arguments {
+  /// Print the local IPC protocol version and exit.
+  #[arg(long)]
+  protocol_version: bool,
+
   #[arg(long)]
   socket: Option<PathBuf>,
 
@@ -16,6 +20,10 @@ fn main() {
     std::process::exit(code);
   }
   let arguments = Arguments::parse();
+  if arguments.protocol_version {
+    println!("{}", ctld_ipc::PROTOCOL_VERSION);
+    return;
+  }
   #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()

@@ -8,14 +8,15 @@
     "dev": "vite",
     "daemons:build": "cargo build --locked --manifest-path ../../Cargo.toml -p ctld -p rmuxd -p taskd",
     "build": "tsc && vite build",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "agents:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/sync-agent-bundles.mts --check",
     "agents:sync": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/sync-agent-bundles.mts",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev:provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/tauri-signed.mts --provision",
     "tauri:dev:signed": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/tauri-signed.mts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test ../../scripts/dev/*.test.mts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -28,6 +29,7 @@
     "@tauri-apps/cli": "^2",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
+    "@types/node": "^24.13.6",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",

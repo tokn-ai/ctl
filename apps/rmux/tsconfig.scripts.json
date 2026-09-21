@@ -10,5 +10,5 @@
     "types": ["node"],
     "typeRoots": ["./node_modules/@types"]
   },
-  "include": ["../../scripts/dev/*.mts"]
+  "include": ["../../scripts/dev/*.mts", "../../scripts/ci/*.mts"]
 }

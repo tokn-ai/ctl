@@ -16,7 +16,8 @@
     "tauri:dev:provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/tauri-signed.mts --provision",
     "tauri:dev:signed": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/tauri-signed.mts",
     "test": "vitest run",
-    "test:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test ../../scripts/dev/*.test.mts"
+    "test:dev": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test ../../scripts/dev/*.test.mts",
+    "test:ci": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test ../../scripts/ci/*.test.mts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

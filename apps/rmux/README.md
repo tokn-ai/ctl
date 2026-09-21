@@ -205,6 +205,13 @@ non-secret repository variables. `APPLE_CERTIFICATE`,
 `APPLE_API_KEY_CONTENT` are repository secrets. The certificate and profile
 must be for Developer ID distribution, and the profile must authorize exactly
 the team-prefixed `io.rmux.desktop.ctld` application identifier.
+If any required signing value is absent, CI explicitly skips Apple signing
+and notarization, builds the desktop packages, and labels the draft release's
+macOS assets as unsigned. Those builds cannot store Touch ID-protected
+credentials. A complete but invalid signing configuration fails the build.
+Main and version-tag builds refresh the app version's draft release only
+after every desktop target and remote bundle succeeds; releases are published
+manually. Manual branch builds upload artifacts without changing the draft.
 
 GUI-created shells receive an automatic `session-N` name. **Disconnect**
 removes an open tab while leaving its shell running. For the active tab it also

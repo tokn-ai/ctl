@@ -118,7 +118,7 @@ async function dispatchRun(
   previousRunIds: Set<number>,
 ): Promise<WorkflowRun> {
   const output = gh(
-    ["workflow", "run", WORKFLOW, "--ref", branch],
+    ["workflow", "run", WORKFLOW, "--ref", branch, "-f", "build_desktop=false"],
     repoRoot,
   );
   const runId = output.match(/\/actions\/runs\/(\d+)/)?.[1];

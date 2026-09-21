@@ -38,8 +38,8 @@ jobs:
         with:
           node-version: 24
 
-      - name: Test daemon preparation and reload lifecycle
-        run: node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts
+      - name: Test development and release scripts
+        run: node --experimental-strip-types --disable-warning=ExperimentalWarning --test scripts/dev/*.test.mts scripts/ci/*.test.mts
 
   rust-quality:
     name: Rust quality

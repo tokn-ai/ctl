@@ -90,6 +90,8 @@ function mockGithub(options: {
   upload_error?: boolean;
   latest_body?: string;
   published_before_upload?: boolean;
+  tag_ref?: { type: "commit" | "tag"; sha: string };
+  annotated_tags?: Record<string, { type: "commit" | "tag"; sha: string }>;
 } = {}): {
   gh: GhRunner;
   calls: string[][];
@@ -108,6 +110,21 @@ function mockGithub(options: {
     calls.push(args);
     if (args[0] === "api" && args[1] === "repos/tokn-ai/ctl/releases?per_page=100") {
       return JSON.stringify([[{ id: 1, tag_name: "v0.0.1", draft: false }], release ? [release] : []]);
+    }
+    if (args[0] === "api" && args[1] === "repos/tokn-ai/ctl/git/matching-refs/tags/v0.1.0") {
+      return JSON.stringify([
+        // Matching refs is a prefix lookup; another version must not block this draft.
+        { ref: "refs/tags/v0.1.0-rc1", object: { type: "commit", sha: "f".repeat(40) } },
+        ...(options.tag_ref ? [{ ref: "refs/tags/v0.1.0", object: options.tag_ref }] : []),
+      ]);
+    }
+    if (args[0] === "api" && args[1]?.startsWith("repos/tokn-ai/ctl/git/tags/")) {
+      const sha = args[1].split("/").at(-1)!;
+      const object = options.annotated_tags?.[sha];
+      if (!object) {
+        throw new Error(`Unexpected annotated tag ${sha}`);
+      }
+      return JSON.stringify({ object });
     }
     if (args[0] === "release" && args[1] === "create") {
       assert.ok(args.includes("--draft"));
@@ -291,6 +308,53 @@ test("leaves a published release unchanged", async () => {
   } });
   assert.equal((await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh)).status, "published");
   assert.equal(github.calls.length, 1);
+});
+
+test("accepts an existing lightweight tag at the build commit", async () => {
+  const github = mockGithub({ tag_ref: { type: "commit", sha: identity.git_revision } });
+  assert.equal((await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh)).status, "updated");
+});
+
+test("resolves annotated tag chains to the build commit", async () => {
+  const firstTag = "a".repeat(40);
+  const secondTag = "b".repeat(40);
+  const github = mockGithub({
+    tag_ref: { type: "tag", sha: firstTag },
+    annotated_tags: {
+      [firstTag]: { type: "tag", sha: secondTag },
+      [secondTag]: { type: "commit", sha: identity.git_revision },
+    },
+  });
+  assert.equal((await updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh)).status, "updated");
+  assert.equal(github.calls.filter((args) => args[1]?.includes("/git/tags/")).length, 2);
+});
+
+test("rejects a mismatched existing tag before changing any release assets or notes", async (t) => {
+  for (const annotated of [false, true]) {
+    await t.test(annotated ? "annotated tag" : "lightweight tag", async () => {
+      const tagSha = "a".repeat(40);
+      const otherCommit = "b".repeat(40);
+      const github = mockGithub({
+        tag_ref: { type: annotated ? "tag" : "commit", sha: annotated ? tagSha : otherCommit },
+        annotated_tags: { [tagSha]: { type: "commit", sha: otherCommit } },
+        assets: [{ id: 1, name: "manual.pdf", label: null }],
+      });
+      await assert.rejects(updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh), /bundles were built from/);
+      assert.ok(!github.calls.some((args) => args[0] === "release" || args.includes("PATCH") || args.includes("DELETE")));
+      assert.equal(github.payloads.length, 0);
+    });
+  }
+});
+
+test("bounds annotated tag resolution and rejects cycles", async () => {
+  const tagSha = "a".repeat(40);
+  const github = mockGithub({
+    tag_ref: { type: "tag", sha: tagSha },
+    annotated_tags: { [tagSha]: { type: "tag", sha: tagSha } },
+  });
+  await assert.rejects(updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh), /cyclic or excessively nested/);
+  assert.equal(github.calls.filter((args) => args[1]?.includes("/git/tags/")).length, 1);
+  assert.ok(!github.calls.some((args) => args[0] === "release" || args.includes("PATCH") || args.includes("DELETE")));
 });
 
 test("rechecks draft status before uploading", async () => {

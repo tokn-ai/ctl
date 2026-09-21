@@ -259,6 +259,45 @@ async function findRelease(gh: GhRunner, repository: string, tag: string): Promi
   return matches[0];
 }
 
+/** An existing tag takes precedence over target_commitish, even on a draft. */
+async function verifyReleaseTag(gh: GhRunner, repository: string, tag: string, git_revision: string): Promise<void> {
+  const refs: unknown = JSON.parse(await gh([
+    "api", `repos/${repository}/git/matching-refs/tags/${encodeURIComponent(tag)}`,
+  ]));
+  if (!Array.isArray(refs)) {
+    throw new Error(`Unexpected GitHub tag response for ${tag}`);
+  }
+  const matches = refs.filter((ref) => record(ref) && ref.ref === `refs/tags/${tag}`);
+  if (matches.length === 0) {
+    return;
+  }
+  if (matches.length !== 1) {
+    throw new Error(`Multiple Git references match ${tag}`);
+  }
+  let object: unknown = matches[0].object;
+  const visited = new Set<string>();
+  for (let depth = 0; depth <= 10; depth += 1) {
+    if (!record(object) || typeof object.sha !== "string" || !/^[a-fA-F0-9]{40}$/.test(object.sha)) {
+      throw new Error(`Invalid Git object for tag ${tag}`);
+    }
+    if (object.type === "commit") {
+      if (object.sha.toLowerCase() !== git_revision.toLowerCase()) {
+        throw new Error(`Tag ${tag} points to ${object.sha}, but the bundles were built from ${git_revision}; refusing to update the draft`);
+      }
+      return;
+    }
+    if (object.type !== "tag") {
+      throw new Error(`Tag ${tag} does not resolve to a commit`);
+    }
+    if (visited.has(object.sha) || depth === 10) {
+      throw new Error(`Tag ${tag} has a cyclic or excessively nested annotated tag chain`);
+    }
+    visited.add(object.sha);
+    const annotated: unknown = JSON.parse(await gh(["api", `repos/${repository}/git/tags/${object.sha}`]));
+    object = record(annotated) ? annotated.object : undefined;
+  }
+}
+
 /** Only this label permits replacement or removal; manual attachments stay untouched. */
 export function planAssetUpdate(existing: ReleaseAsset[], asset_names: string[]): ReleaseAsset[] {
   const names = new Set(asset_names);
@@ -283,6 +322,7 @@ export async function updateDraftRelease(
   if (release && !release.draft) {
     return { status: "published", html_url: release.html_url };
   }
+  await verifyReleaseTag(gh, repository, tag, bundle.git_revision);
   const tempDirectory = await mkdtemp(join(tmpdir(), "rmux-release-"));
   try {
     const notesPath = join(tempDirectory, "notes.md");

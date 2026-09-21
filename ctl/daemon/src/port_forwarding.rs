@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
 use ctld_ipc::{LocalPortForward, PortForwardState, PortForwardStatus, SshTarget};
@@ -23,6 +23,7 @@ struct OwnedForward {
 #[derive(Default)]
 pub(super) struct ForwardRegistry {
   records: HashMap<String, OwnedForward>,
+  paused: HashSet<SshTarget>,
 }
 
 pub(super) trait ForwardControl: Sync {
@@ -69,6 +70,7 @@ impl ForwardRegistry {
       && existing.listener_present
     {
       if enabled
+        && !self.paused.contains(&target)
         && existing.target == target
         && existing.status.forward == forward
         && control.is_ready(&existing.target).await
@@ -92,7 +94,7 @@ impl ForwardRegistry {
       });
     }
 
-    let status = if control.is_ready(&target).await {
+    let status = if !self.paused.contains(&target) && control.is_ready(&target).await {
       let result = control.change(&target, &forward, false).await;
       forward_status(forward, result)
     } else {
@@ -114,7 +116,7 @@ impl ForwardRegistry {
     control: &impl ForwardControl,
     target: &SshTarget,
   ) -> Vec<PortForwardStatus> {
-    let ready = control.is_ready(target).await;
+    let ready = !self.paused.contains(target) && control.is_ready(target).await;
     let mut statuses = Vec::new();
     for record in self
       .records
@@ -133,6 +135,9 @@ impl ForwardRegistry {
   }
 
   pub(super) async fn activate(&mut self, control: &impl ForwardControl, target: &SshTarget) {
+    if self.paused.contains(target) {
+      return;
+    }
     for record in self
       .records
       .values_mut()
@@ -142,6 +147,21 @@ impl ForwardRegistry {
       record.listener_present = result.is_ok();
       record.status = forward_status(record.status.forward.clone(), result);
     }
+  }
+
+  pub(super) fn pause(&mut self, target: &SshTarget) {
+    self.paused.insert(target.clone());
+    for record in self
+      .records
+      .values_mut()
+      .filter(|record| record.target == *target)
+    {
+      record.status = waiting_status(record.status.forward.clone());
+    }
+  }
+
+  pub(super) fn resume(&mut self, target: &SshTarget) {
+    self.paused.remove(target);
   }
 
   /// Called under the same registry lock when an unavailable control socket

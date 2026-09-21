@@ -87,6 +87,24 @@ export interface ResolvedSshGateway extends WorkspaceSshGateway {
 
 export type ConnectionTarget = { kind: "local" } | SshConnectionTarget;
 
+/** Live broker observation; never persisted in the host catalog. */
+export interface SshConnectionStatus {
+  connected: boolean;
+  manually_disconnected: boolean;
+}
+
+export interface HostConnectionStatus {
+  state: "checking" | "connected" | "connecting" | "disconnecting" | "disconnected" | "error";
+  method_names: string[];
+  message: string | null;
+}
+
+export type HostConnectionChange = (
+  target: ConnectionTarget,
+  state: "connecting" | "connected" | "error" | "cancelled",
+  message?: string,
+) => void;
+
 export interface WorkspaceHost {
   /** Runtime provenance; omitted on persisted records and legacy callers. */
   source?: "saved" | "ssh_config" | "unavailable";

@@ -288,3 +288,63 @@ async fn temporary_unready_status_does_not_erase_listener_cancellation_responsib
     }
   );
 }
+
+#[tokio::test]
+async fn disconnect_retains_definitions_and_suppresses_replay_until_explicit_resume() {
+  let target = target("paused");
+  let control = Control::ready(std::slice::from_ref(&target));
+  let mut registry = ForwardRegistry::default();
+  registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  registry.pause(&target);
+  registry.master_replaced(&target);
+  // A stale master check may still succeed while disconnect completes.
+  registry.activate(&control, &target).await;
+  let status = registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  assert_eq!(status.state, PortForwardState::WaitingForAuthentication);
+  assert_eq!(registry.list(&control, &target).await, vec![status]);
+  assert_eq!(registry.records.len(), 1);
+  assert_eq!(control.changes.lock().unwrap().len(), 1);
+
+  registry.resume(&target);
+  registry.activate(&control, &target).await;
+  assert_eq!(
+    registry.list(&control, &target).await[0].state,
+    PortForwardState::Active
+  );
+  assert_eq!(control.changes.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn failed_disconnect_retains_listener_cancellation_responsibility() {
+  let target = target("exit-failed");
+  let control = Control::ready(std::slice::from_ref(&target));
+  let mut registry = ForwardRegistry::default();
+  registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  registry.pause(&target);
+  assert!(registry.records[&forward().forward_id].listener_present);
+  control.fail_cancel.store(true, Ordering::SeqCst);
+  assert!(
+    registry
+      .configure(&control, target.clone(), forward(), false)
+      .await
+      .is_err()
+  );
+  registry.activate(&control, &target).await;
+  assert_eq!(control.changes.lock().unwrap().len(), 2);
+  assert!(registry.records[&forward().forward_id].listener_present);
+  control.fail_cancel.store(false, Ordering::SeqCst);
+  registry
+    .configure(&control, target, forward(), false)
+    .await
+    .unwrap();
+  assert!(registry.records.is_empty());
+}

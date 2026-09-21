@@ -39,6 +39,7 @@ import type {
   LocalPortAvailability,
   HostCatalogDocument,
   HostCatalogSnapshot,
+  SshConnectionStatus,
 } from "./types";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -131,6 +132,14 @@ export async function probeSshHost(
     request: { target, attempt_id },
     on_prompt: channel,
   });
+}
+
+export async function sshConnectionStatus(target: ConnectionTarget): Promise<SshConnectionStatus> {
+  return invoke("ssh_connection_status", { request: { target } });
+}
+
+export async function disconnectSshHost(targets: readonly ConnectionTarget[]): Promise<void> {
+  return invoke("disconnect_ssh_host", { request: { targets } });
 }
 
 export async function installRemoteAgent(

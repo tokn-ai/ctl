@@ -112,6 +112,8 @@ pub struct SshGateway {
 pub enum SshInteraction {
   Inherit,
   Batch,
+  /// Reuses this exact master and fails if it is unavailable; never starts a
+  /// separate SSH connection, even when noninteractive credentials are usable.
   Multiplexed {
     control_path: PathBuf,
   },
@@ -454,6 +456,11 @@ fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction
       "ControlMaster=no".into(),
       "-o".into(),
       "BatchMode=yes".into(),
+      // ControlMaster=no alone falls back to a fresh SSH connection when the
+      // socket disappears. An existing master bypasses ProxyCommand entirely.
+      // Keep this before route options so no proxy can restore that fallback.
+      "-o".into(),
+      "ProxyCommand=false".into(),
     ],
     SshInteraction::Askpass {
       program,
@@ -837,15 +844,18 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
   .collect::<Vec<_>>();
   if !options.gateways.is_empty() {
     arguments.extend([
-      OsString::from("-J"),
-      OsString::from(
+      // Unlike -J, this form respects an earlier ProxyCommand without treating
+      // it as a conflicting argument. Multiplexed mode disables fresh routes.
+      OsString::from("-o"),
+      OsString::from(format!(
+        "ProxyJump={}",
         options
           .gateways
           .iter()
           .map(gateway_jump_specification)
           .collect::<Vec<_>>()
           .join(","),
-      ),
+      )),
     ]);
   }
   if let Some(port) = options.port {
@@ -1001,9 +1011,9 @@ mod tests {
     let arguments = ssh_arguments("server", &options);
     let jump = arguments
       .windows(2)
-      .find(|pair| pair[0] == "-J")
+      .find(|pair| pair[0] == "-o" && pair[1].to_string_lossy().starts_with("ProxyJump="))
       .expect("native jump arguments");
-    assert_eq!(jump[1], "edge-alias,operator@[2001:db8::2]:2222");
+    assert_eq!(jump[1], "ProxyJump=edge-alias,operator@[2001:db8::2]:2222");
   }
 
   #[test]
@@ -1090,6 +1100,8 @@ mod tests {
         "ControlMaster=no",
         "-o",
         "BatchMode=yes",
+        "-o",
+        "ProxyCommand=false",
       ]
       .map(OsString::from)
     );

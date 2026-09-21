@@ -133,6 +133,22 @@ an SSH connection, but applying the method to remembered sessions requires an
 explicit connection. The current selected route is runtime state; after app
 restart the preferred method is used for subsequent connections.
 
+Host connection status comes from live OpenSSH master checks across saved and
+active methods, refreshed every five seconds and on window focus. It is separate
+from remembered remote identity and per-session attachment state. The sidebar
+shows status text and a dot, with method names or diagnostics in the tooltip.
+Checks neither start `ctld` nor request authentication.
+
+**Disconnect host** detaches its active terminal view, cancels pending connection
+work, pauses forwards, and closes all of the host's saved and active SSH masters.
+It retains tabs, session/task membership, credentials, and enabled forward
+preferences. Remote shells and tasks keep running. Masters are shared by desktop
+windows, so other windows using those routes also disconnect. The pause lives in
+the running app and `ctld`, not in `hosts.json` or `workspace.json`. Background
+refreshes and forwarding restoration cannot undo it; an explicit connection
+resumes the chosen route and its forwards. A failed disconnect remains visible
+as an error and can be retried.
+
 **Connect host** discovers an account-owned UUID and the installed agent version
 on the same SSH stream used to verify the rmux service. Bundled installations also
 report the app version, bundle ID, Git revision, and target triple. The host heading's
@@ -181,9 +197,10 @@ installation does not depend on the remote shell's diagnostic language.
 | Add/edit connection method | Save the verified method on its host | Verify the candidate via SSH; leave existing terminal transports unchanged |
 | Rename host/method or change preference | Save metadata; preserve references | No connection or transport switch |
 | Connect host / Connect using | Select the preferred / explicitly chosen method; inspect known entries; resume the selected tab on that host, otherwise its first open tab | Authenticate through that method, inspect known IDs, then attach |
-| Open session | Select/open its tab | Connect to its host and attach |
-| Create shell | Persist new membership before attaching | Create one session |
-| Add existing session | Remember selected entries | Enumerate only the selected host; no attachment |
+| Disconnect host | Retain entries, tabs, credentials, and forward preferences; pause runtime work | Close shared SSH masters and forwards; keep remote sessions and tasks running |
+| Open session | Select/open its tab | Attach through an available connection; a manually disconnected host requires Connect host first |
+| Create shell | Persist new membership before attaching | Authenticate and verify the selected SSH host if remote, then create one session |
+| Add existing session | Remember selected entries | Authenticate and verify the selected host, then enumerate its sessions; no attachment |
 | Refresh known sessions | Update observations; retain missing/unreachable entries | Inspect known IDs only, not full inventory |
 | Close/detach tab | Remove tab, retain membership | Detach its view; shell continues |
 | Remove from workspace | Remove membership and its tab | No kill |

@@ -23,6 +23,7 @@ import type {
   TaskDefinitionScope,
   SavedTaskDefinition,
   WorkspacePortForward,
+  SshPrompt,
 } from "../lib/types";
 import { projectedHostId, restoreWorkspace } from "../features/workspace/workspaceModel";
 import { TerminalPage } from "./TerminalPage";
@@ -33,6 +34,10 @@ import { NATIVE_COMMAND_EVENT } from "../features/commands/useNativeCommandEvent
 const nativeEvents = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: string }) => void>(),
 }));
+const nativeWindow = vi.hoisted(() => ({
+  onCloseRequested: vi.fn(),
+  destroy: vi.fn(),
+}));
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -42,6 +47,9 @@ vi.mock("@tauri-apps/api/event", () => ({
       return () => nativeEvents.listeners.delete(name);
     },
   ),
+}));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => nativeWindow,
 }));
 
 const api = vi.hoisted(() => ({
@@ -63,7 +71,10 @@ const api = vi.hoisted(() => ({
   restartLocalDaemon: vi.fn(),
   forgetSshCredentials: vi.fn(),
   probeSshHost: vi.fn(),
+  sshConnectionStatus: vi.fn(),
+  disconnectSshHost: vi.fn(),
   cancelSshProbe: vi.fn(),
+  respondSshPrompt: vi.fn(),
   configurePortForward: vi.fn(),
   listPortForwards: vi.fn(),
   listRemoteListeners: vi.fn(),
@@ -149,6 +160,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   attachment.state.phase = "idle";
   attachment.state.session = null;
+  attachment.state.shell_state = null;
+  delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  nativeWindow.onCloseRequested.mockResolvedValue(() => {});
+  nativeWindow.destroy.mockResolvedValue(undefined);
   api.restartTaskDaemon.mockResolvedValue(undefined);
   api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
   api.loadTaskDefinitions.mockImplementation(async (scope: TaskDefinitionScope) => ({ scope, path: "/test/definitions.json", definitions: [] }));
@@ -190,7 +205,10 @@ beforeEach(() => {
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
   api.probeSshHost.mockReset().mockResolvedValue(remoteInfo);
+  api.sshConnectionStatus.mockReset().mockResolvedValue({ connected: true, manually_disconnected: false });
+  api.disconnectSshHost.mockReset().mockResolvedValue(undefined);
   api.cancelSshProbe.mockResolvedValue(undefined);
+  api.respondSshPrompt.mockReset().mockResolvedValue(undefined);
   api.listPortForwards.mockResolvedValue([]);
   api.listRemoteListeners.mockResolvedValue({ listeners: [], warnings: [] });
   api.checkLocalPort.mockImplementation(async (port: number) => ({ port, available: true, message: null }));
@@ -204,6 +222,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   vi.restoreAllMocks();
 });
 
@@ -866,7 +885,8 @@ describe("workspace-backed terminal page", () => {
       host_name: "test",
       method_id: "default",
     };
-    const created = newSession(target);
+    const verified = { ...target, remote_info: remoteInfo };
+    const created = newSession(verified);
     api.createSession.mockResolvedValue(created);
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
@@ -889,7 +909,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(api.createSession).toHaveBeenCalledExactlyOnceWith({
-      target,
+      target: verified,
       working_directory: "/remote/work",
       terminal_size: {
         columns: 80,
@@ -902,7 +922,8 @@ describe("workspace-backed terminal page", () => {
       resize_with_window: true,
     });
     expect(api.listSessions).not.toHaveBeenCalled();
-    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
   });
 
   it("keeps backend failures in the dialog for correction and retry", async () => {
@@ -956,11 +977,11 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
     expect(screen.queryByRole("button", { name: "Host settings for only-in-ssh-config" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Connect to only-in-ssh-config" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
     expect(screen.getByRole("option", { name: "only-in-ssh-config" })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
-    expect(screen.queryByRole("button", { name: "Connect to only-in-ssh-config" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Remove only-in-ssh-config" })).toBeNull();
     expect(api.updateHosts).not.toHaveBeenCalled();
     expect(api.updateWorkspace).not.toHaveBeenCalled();
@@ -1001,9 +1022,9 @@ describe("workspace-backed terminal page", () => {
   it("reveals a projected host after a successful connection without saving its definition", async () => {
     render(<TerminalPage />);
     await chooseProjectedConnection();
-    expect(screen.queryByRole("button", { name: "Connect to only-in-ssh-config" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
     fireEvent.click(screen.getByRole("option", { name: "Connect" }));
-    expect(await screen.findByRole("button", { name: "Connect to only-in-ssh-config" })).toBeTruthy();
+    expect(await screen.findByRole("status", { name: "Host connection for only-in-ssh-config: Connected" })).toBeTruthy();
     expect(api.probeSshHost).toHaveBeenCalledOnce();
     expect(api.updateHosts).not.toHaveBeenCalled();
     for (const [, saved] of api.updateWorkspace.mock.calls) {
@@ -1018,7 +1039,7 @@ describe("workspace-backed terminal page", () => {
     await chooseProjectedConnection();
     fireEvent.click(screen.getByRole("option", { name: "Connect" }));
     await screen.findByRole("dialog", { name: "Could not connect" });
-    expect(screen.queryByRole("button", { name: "Connect to only-in-ssh-config" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
     expect(api.updateHosts).not.toHaveBeenCalled();
   });
 
@@ -1032,7 +1053,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await act(async () => finish(remoteInfo));
-    expect(screen.queryByRole("button", { name: "Connect to only-in-ssh-config" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "only-in-ssh-config sessions" })).toBeNull();
     expect(api.cancelSshProbe).toHaveBeenCalled();
     expect(api.updateHosts).not.toHaveBeenCalled();
     expect(api.updateWorkspace).not.toHaveBeenCalled();
@@ -1067,7 +1088,7 @@ describe("workspace-backed terminal page", () => {
     expect(saved.host_identities).toContainEqual({ host_id, remote_info: remoteInfo });
     expect(saved.sessions).toContainEqual(expect.objectContaining({ host_id, session_id: "created-id" }));
     if (!promoted) expect(api.updateHosts).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Connect to only-in-ssh-config" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Disconnect host only-in-ssh-config" })).toBeTruthy();
   });
 
   it.each(["session", "task", "forward"])("keeps SSH config projections with a %s reference visible", async (reference) => {
@@ -1084,23 +1105,31 @@ describe("workspace-backed terminal page", () => {
     }
     api.loadWorkspace.mockResolvedValue(saved);
     render(<TerminalPage />);
-    expect(await screen.findByRole("button", { name: "Connect to only-in-ssh-config" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Host settings for only-in-ssh-config" })).toBeTruthy();
     expect(api.probeSshHost).not.toHaveBeenCalled();
     expect(api.updateHosts).not.toHaveBeenCalled();
     expect(api.updateWorkspace).not.toHaveBeenCalled();
   });
 
-  it("pins a projected host before remembering an imported session", async () => {
+  it("verifies a projected host before discovery and uses its identity when importing", async () => {
     const host_id = projectedHostId("only-in-ssh-config");
+    let finish!: (identity: typeof remoteInfo) => void;
+    api.probeSshHost.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     api.listSessions.mockImplementation(async (target: ConnectionTarget) => ({ sessions: [newSession(target)], shell_states: {} }));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
     fireEvent.click(screen.getByRole("button", { name: "Add existing session" }));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
+    expect(api.listSessions).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    await act(async () => finish(remoteInfo));
     fireEvent.click(await screen.findByRole("option", { name: /created-shell/ }));
     await waitFor(() => expect(api.updateWorkspace.mock.calls.some(([, saved]) =>
       saved.host_identities?.some((identity: { host_id: string }) => identity.host_id === host_id))).toBe(true));
     expect(api.probeSshHost).toHaveBeenCalledOnce();
+    expect(api.listSessions).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ host_id, remote_info: remoteInfo }));
+    expect(api.probeSshHost.mock.invocationCallOrder[0]).toBeLessThan(api.listSessions.mock.invocationCallOrder[0]);
     expect(api.updateHosts).not.toHaveBeenCalled();
     const saved = api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument;
     expect(saved.host_identities).toContainEqual({ host_id, remote_info: remoteInfo });
@@ -1134,22 +1163,227 @@ describe("workspace-backed terminal page", () => {
     ));
   });
 
-  it("requires Connect host when first-use verification needs an authentication prompt", async () => {
+  it("answers first-use SSH credentials and resumes the requested new shell", async () => {
+    let showPrompt!: (prompt: SshPrompt) => void;
+    let finish!: (identity: typeof remoteInfo) => void;
     api.probeSshHost.mockImplementationOnce((_target, _attempt, prompt) => {
-      prompt({ prompt_id: "password", kind: "secret", message: "Password" });
-      return new Promise(() => {});
+      showPrompt = prompt;
+      return new Promise((resolve) => { finish = resolve; });
     });
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Host settings for test" });
     fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
+    fireEvent.change(screen.getByLabelText("Working directory"), { target: { value: "/project/work" } });
+    expect(api.probeSshHost).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
-    expect(await screen.findByText(/Authentication is required.*Connect host/)).toBeTruthy();
-    expect(api.cancelSshProbe).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("button", { name: "Connect to only-in-ssh-config" })).toBeNull();
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
+    await act(async () => showPrompt({ prompt_id: "password", kind: "secret", message: "Password:" }));
+    const input = screen.getByLabelText("SSH response");
+    expect(input).toHaveProperty("type", "password");
+    fireEvent.change(input, { target: { value: "test-only-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(api.respondSshPrompt).toHaveBeenCalledExactlyOnceWith(
+      api.probeSshHost.mock.calls[0][1], "password", "test-only-secret",
+    );
+    expect(api.cancelSshProbe).not.toHaveBeenCalled();
     expect(api.createSession).not.toHaveBeenCalled();
+    await act(async () => finish(remoteInfo));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.createSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      target: expect.objectContaining({ host_id: projectedHostId("only-in-ssh-config"), remote_info: remoteInfo }),
+      working_directory: "/project/work",
+    }));
+    expect(attachment.connect).toHaveBeenCalledOnce();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["New shell", "save"],
+    ["New shell", "refresh"],
+    ["Add existing session", "save"],
+    ["Add existing session", "refresh"],
+  ])("does not continue %s when native close overlaps the verification %s", async (action, stage) => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    let finish!: () => void;
+    if (stage === "save") {
+      api.updateHosts.mockImplementationOnce((_revision: string | null, document: HostCatalogDocument) =>
+        new Promise((resolve) => { finish = () => resolve({ revision: "verified-host", document }); }));
+    } else {
+      api.listPortForwards.mockImplementationOnce(() =>
+        new Promise((resolve) => { finish = () => resolve([]); }));
+    }
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    api.listSessions.mockImplementation(async () => ({ sessions: [], shell_states: {} }));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Host settings for test" });
+    await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(screen.getByRole("option", { name: "test" }));
+    if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(stage === "save" ? api.updateHosts : api.listPortForwards).toHaveBeenCalledOnce());
+    const preventDefault = vi.fn();
+    let closing!: Promise<void>;
+    act(() => { closing = nativeWindow.onCloseRequested.mock.calls[0][0]({ preventDefault }); });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    await act(async () => {
+      finish();
+      await closing;
+    });
+    await screen.findByText("Workspace is closing.");
+    expect(nativeWindow.destroy).toHaveBeenCalledOnce();
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    if (stage === "save") expect(api.listPortForwards).not.toHaveBeenCalled();
+  });
+
+  it.each(["Connect host", "New shell", "Add existing session"])("preserves verified batch SSH for %s when broker status is unsupported", async (action) => {
+    const unsupported = {
+      code: "ssh_broker_unsupported",
+      message: "SSH connection status requires macOS or Linux.",
+    };
+    api.sshConnectionStatus.mockRejectedValue(unsupported);
+    api.listPortForwards.mockRejectedValue(unsupported);
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    api.listSessions.mockResolvedValue({ sessions: [], shell_states: {} });
+    const known = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
+    api.inspectKnownSessions.mockResolvedValue([{
+      session_id: known.session_id,
+      session: { ...known, status: "running" },
+      shell_state: null,
+      error: null,
+    }]);
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(screen.getByRole("option", { name: action === "Connect host" ? "Connect" : "test" }));
+    if (action === "New shell") fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+
+    if (action === "Add existing session") {
+      await waitFor(() => expect(api.listSessions).toHaveBeenCalledOnce());
+    } else {
+      await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
+      expect(api.createSession).toHaveBeenCalledTimes(action === "New shell" ? 1 : 0);
+    }
+    expect(api.probeSshHost).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog", { name: "Could not connect" })).toBeNull();
+  });
+
+  it("does not bypass a failed live status check when the broker is supported", async () => {
+    api.sshConnectionStatus.mockRejectedValue({ code: "ctld_protocol_error", message: "ctld status failed" });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Connect host" }));
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await screen.findByRole("dialog", { name: "Could not connect" });
+    expect(screen.getByText("ctld status failed")).toBeTruthy();
+    expect(api.probeSshHost).toHaveBeenCalledOnce();
     expect(api.updateHosts).not.toHaveBeenCalled();
     expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  it("retains the directory after cancelled authentication and ignores late completion", async () => {
+    let showPrompt!: (prompt: SshPrompt) => void;
+    let finish!: (identity: typeof remoteInfo) => void;
+    api.probeSshHost.mockImplementationOnce((_target, _attempt, prompt) => {
+      showPrompt = prompt;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Host settings for test" });
+    fireEvent.click(screen.getByRole("button", { name: /New shell/ }));
+    fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
+    fireEvent.change(screen.getByLabelText("Working directory"), { target: { value: "/keep/this-draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Cancel quick input" }));
+    expect(await screen.findByLabelText("Working directory")).toHaveProperty("value", "/keep/this-draft");
+    expect(api.cancelSshProbe).toHaveBeenCalledExactlyOnceWith(api.probeSshHost.mock.calls[0][1]);
+    await act(async () => {
+      showPrompt({ prompt_id: "late", kind: "secret", message: "Stale password request" });
+      finish(remoteInfo);
+    });
+    expect(screen.queryByLabelText("SSH response")).toBeNull();
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.probeSshHost).toHaveBeenCalledTimes(2);
+    expect(api.createSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ working_directory: "/keep/this-draft" }));
+  });
+
+  it("returns to host selection after cancelled discovery authentication without listing sessions", async () => {
+    let showPrompt!: (prompt: SshPrompt) => void;
+    let finish!: (identity: typeof remoteInfo) => void;
+    api.probeSshHost.mockImplementationOnce((_target, _attempt, prompt) => {
+      showPrompt = prompt;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Host settings for test" });
+    fireEvent.click(screen.getByRole("button", { name: "Add existing session" }));
+    fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
+    await act(async () => showPrompt({ prompt_id: "password", kind: "secret", message: "Password:" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel quick input" }));
+    await screen.findByRole("dialog", { name: "Add existing session — host" });
+    await act(async () => {
+      showPrompt({ prompt_id: "late", kind: "secret", message: "Stale password request" });
+      finish(remoteInfo);
+    });
+    expect(screen.getByRole("option", { name: "only-in-ssh-config" })).toBeTruthy();
+    expect(screen.queryByLabelText("SSH response")).toBeNull();
+    expect(api.listSessions).not.toHaveBeenCalled();
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+  });
+
+  it.each(["New shell", "Add existing session"])("reconnects a saved pinned host before %s", async (action) => {
+    const catalog = hostSnapshot();
+    catalog.document.hosts[0].remote_info = remoteInfo;
+    api.loadHosts.mockResolvedValue(catalog);
+    let finish!: (identity: typeof remoteInfo) => void;
+    api.probeSshHost.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    api.listSessions.mockImplementation(async (target: ConnectionTarget) => ({ sessions: [newSession(target)], shell_states: {} }));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Host settings for test" });
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    fireEvent.click(screen.getByRole("option", { name: "test" }));
+    if (action === "New shell") {
+      expect(api.probeSshHost).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    }
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
+    const target = {
+      kind: "ssh", destination: "test", host_id: "test-id", host_name: "test", method_id: "default", remote_info: remoteInfo,
+    };
+    expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+    await act(async () => finish(remoteInfo));
+    if (action === "New shell") {
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(api.createSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ target }));
+    } else {
+      fireEvent.click(await screen.findByRole("option", { name: /created-shell/ }));
+      await waitFor(() => expect(api.updateWorkspace.mock.calls.some(([, saved]) =>
+        saved.sessions.some((session: { session_id: string }) => session.session_id === "created-id"))).toBe(true));
+      expect(api.listSessions).toHaveBeenCalledExactlyOnceWith(target);
+      expect(api.createSession).not.toHaveBeenCalled();
+      expect(attachment.connect).not.toHaveBeenCalled();
+    }
+    expect(api.probeSshHost).toHaveBeenCalledOnce();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
   });
 
   it("saves a customized SSH config projection while preserving its remembered session references", async () => {
@@ -1378,7 +1612,8 @@ describe("workspace-backed terminal page", () => {
     expect(persisted.sessions).toEqual(saved.sessions);
     expect(persisted.active_tab).toEqual({ ...saved.active_tab, kind: "session" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Connect to Build server" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose host to connect" }));
+    fireEvent.click(screen.getByRole("option", { name: "Build server" }));
     fireEvent.click(screen.getByRole("option", { name: "Connect" }));
     await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
     const expected = {
@@ -1468,6 +1703,178 @@ describe("workspace-backed terminal page", () => {
       ["known-id"],
     );
     expect(api.listSessions).not.toHaveBeenCalled();
+  });
+
+  it("shows live host connection methods without probing or persisting status", async () => {
+    const catalog = hostSnapshot();
+    catalog.document.hosts[0].connection_methods.push({
+      method_id: "vpn", name: "VPN", target: { kind: "ssh", destination: "vpn.example" },
+    });
+    catalog.document.hosts[1].remote_info = remoteInfo;
+    api.loadHosts.mockResolvedValue(catalog);
+    api.sshConnectionStatus.mockImplementation(async (target: ConnectionTarget) => ({
+      connected: target.kind === "ssh" && target.destination === "vpn.example",
+      manually_disconnected: false,
+    }));
+    render(<TerminalPage />);
+
+    const connected = await screen.findByRole("status", { name: "Host connection for test: Connected" });
+    expect(connected.title).toBe("Connected\nConnection methods: VPN");
+    expect(screen.getByRole("button", { name: "Disconnect host test" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Host connection for unused: Disconnected" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connect to unused" })).toBeTruthy();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  it("disconnects a host while preserving its tab, sessions, and enabled forwards, then resumes explicitly", async () => {
+    const saved = snapshot();
+    const forward: WorkspacePortForward = {
+      host_id: "test-id", forward_id: "web", name: "Web", enabled: true,
+      bind_address: "127.0.0.1", local_port: 8080, remote_host: "localhost", remote_port: 80,
+    };
+    saved.document.port_forwards = [forward];
+    api.loadWorkspace.mockResolvedValue(saved);
+    const known = restoreWorkspace(saved.document, hostSnapshot().document).sessions[0];
+    Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
+    attachment.detach.mockImplementationOnce(async () => {
+      attachment.state.phase = "idle";
+      attachment.state.session = null;
+    });
+    let manuallyDisconnected = false;
+    let finishDisconnect!: () => void;
+    api.sshConnectionStatus.mockImplementation(async (target: ConnectionTarget) => ({
+      connected: target.kind === "ssh" && (target.host_id !== "test-id" || !manuallyDisconnected),
+      manually_disconnected: target.kind === "ssh" && target.host_id === "test-id" && manuallyDisconnected,
+    }));
+    api.disconnectSshHost.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finishDisconnect = () => { manuallyDisconnected = true; resolve(); };
+    }));
+    api.probeSshHost.mockImplementation(async () => {
+      manuallyDisconnected = false;
+      return remoteInfo;
+    });
+    api.inspectKnownSessions.mockImplementation(async (target: ConnectionTarget) => [{
+      session_id: known.session_id,
+      session: { ...known, target, status: "running" }, shell_state: null, error: null,
+    }]);
+    render(<TerminalPage />);
+    const disconnect = await screen.findByRole("button", { name: "Disconnect host test" });
+    await waitFor(() => expect(api.listPortForwards).toHaveBeenCalledOnce());
+    const savedBefore = api.updateWorkspace.mock.calls.length;
+    api.configurePortForward.mockClear();
+    api.listPortForwards.mockClear();
+
+    fireEvent.click(disconnect);
+    await waitFor(() => expect(api.disconnectSshHost).toHaveBeenCalledOnce());
+    expect(screen.getByRole("status", { name: "Host connection for test: Disconnecting…" })).toBeTruthy();
+    expect(disconnect).toHaveProperty("disabled", true);
+    expect(attachment.detach).toHaveBeenCalledOnce();
+    expect(attachment.cancelPendingConnection).toHaveBeenCalledWith(known);
+    expect(api.disconnectSshHost).toHaveBeenCalledWith([known.target]);
+    await act(async () => finishDisconnect());
+
+    expect(screen.getByRole("status", { name: "Host connection for test: Disconnected" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "~/work — remembered" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "~/work on test" })).toHaveProperty("ariaSelected", "true");
+    expect(api.updateWorkspace).toHaveBeenCalledTimes(savedBefore);
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.killSession).not.toHaveBeenCalled();
+    expect(api.forgetSshCredentials).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
+    fireEvent.click(screen.getByRole("button", { name: "~/work — remembered" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Ports" }));
+    await screen.findByText("Host disconnected. Connect this host to resume forwarding.");
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(attachment.reconnect).not.toHaveBeenCalled();
+    expect(api.configurePortForward).not.toHaveBeenCalled();
+    expect(api.listPortForwards).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect to test" }));
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
+    expect(await screen.findByRole("status", { name: "Host connection for test: Connected" })).toBeTruthy();
+    expect(api.probeSshHost).toHaveBeenCalledOnce();
+    expect(api.configurePortForward).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ host_id: "test-id" }), forward, true,
+    );
+    const persisted = api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument;
+    expect(persisted.sessions).toEqual(saved.document.sessions);
+    expect(persisted.tabs).toEqual([{ kind: "session", host_id: "test-id", session_id: "known-id" }]);
+    expect(persisted.port_forwards).toEqual([forward]);
+    expect(api.killSession).not.toHaveBeenCalled();
+    expect(api.forgetSshCredentials).not.toHaveBeenCalled();
+  });
+
+  it("disconnects a non-active host without detaching the active host", async () => {
+    const saved = snapshot();
+    saved.document.sessions.push({
+      host_id: "unused-id", session_id: "other-id", name: "other shell",
+      last_known_cwd: null, last_known_cwd_display: null,
+    });
+    saved.document.tabs.push({ host_id: "unused-id", session_id: "other-id" });
+    api.loadWorkspace.mockResolvedValue(saved);
+    const restored = restoreWorkspace(saved.document, hostSnapshot().document);
+    Object.assign(attachment.state, { phase: "attached", session: restored.sessions[0] } satisfies Partial<AttachmentViewState>);
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect host unused" }));
+    await screen.findByRole("status", { name: "Host connection for unused: Disconnected" });
+
+    expect(api.disconnectSshHost).toHaveBeenCalledExactlyOnceWith([restored.sessions[1].target]);
+    expect(attachment.detach).not.toHaveBeenCalled();
+    expect(attachment.cancelPendingConnection).toHaveBeenCalledExactlyOnceWith(restored.sessions[1]);
+    expect(screen.getByRole("tab", { name: "~/work on test" })).toHaveProperty("ariaSelected", "true");
+    expect(screen.getByRole("tab", { name: "other shell on unused" })).toBeTruthy();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["authentication", false],
+    ["authentication", true],
+    ["forward refresh", false],
+    ["forward refresh", true],
+  ] as const)("does not resume when another client disconnects during %s (master still connected: %s)", async (stage, master_still_connected) => {
+    let finish!: () => void;
+    let manuallyDisconnected = false;
+    api.sshConnectionStatus.mockImplementation(async () => ({
+      connected: master_still_connected || !manuallyDisconnected,
+      manually_disconnected: manuallyDisconnected,
+    }));
+    if (stage === "authentication") {
+      api.probeSshHost.mockImplementationOnce(() => new Promise<typeof remoteInfo>((resolve) => {
+        finish = () => resolve(remoteInfo);
+      }));
+    } else {
+      api.listPortForwards.mockImplementationOnce(() => new Promise<[]>((resolve) => {
+        finish = () => resolve([]);
+      }));
+    }
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Connect host" }));
+    fireEvent.click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(stage === "authentication" ? api.probeSshHost : api.listPortForwards).toHaveBeenCalledOnce());
+    manuallyDisconnected = true;
+    await act(async () => finish());
+
+    await screen.findByRole("dialog", { name: "Could not connect" });
+    expect(screen.getByText("This host was disconnected. Connect again to resume.")).toBeTruthy();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(api.killSession).not.toHaveBeenCalled();
+    if (stage === "authentication") {
+      expect(api.updateHosts).not.toHaveBeenCalled();
+      expect(api.updateWorkspace).not.toHaveBeenCalled();
+    }
   });
 
   it("automatically attaches only the selected local tab once across rerenders", async () => {
@@ -1561,7 +1968,7 @@ describe("workspace-backed terminal page", () => {
 
   it("keeps unreachable sessions distinct from confirmed missing ones", async () => {
     api.inspectKnownSessions.mockRejectedValue({
-      code: "ssh_authentication_failed",
+      code: "ssh_authentication_required",
       message: "Authenticate first",
     });
     render(<TerminalPage />);
@@ -1571,6 +1978,9 @@ describe("workspace-backed terminal page", () => {
     expect(screen.getByText("Authenticate first")).toBeTruthy();
     expect(screen.queryByText("missing", { exact: false })).toBeNull();
     expect(api.killSession).not.toHaveBeenCalled();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.respondSshPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("accepts another sidebar session click while a remote attachment is pending", async () => {

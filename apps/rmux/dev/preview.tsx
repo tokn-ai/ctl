@@ -43,6 +43,9 @@ if (!import.meta.env.DEV) throw new Error("The sample workspace is development-o
 const view_param = new URLSearchParams(location.search).get("view");
 const initial_view = view_param === "tasks" || view_param === "ports" ? view_param : "sessions";
 let workspace: WorkspaceSnapshot = { revision: "preview-1", document: previewWorkspace(initial_view) };
+const connectedHosts = new Set(["dev-server"]);
+const pausedHosts = new Set<string>();
+const connectionKey = (target: ConnectionTarget) => target.kind === "ssh" ? target.destination : "local";
 let hosts: HostCatalogSnapshot = { revision: "preview-hosts-1", document: previewHostCatalog() };
 const ssh_config_hosts = [{ destination: "dev-server" }, { destination: "staging" }, { destination: "research" }];
 let revision = 1;
@@ -125,10 +128,24 @@ mockIPC((command, payload) => {
       return { identity_files: [{ path: "/sample/.ssh/id_ed25519", display_path: "~/.ssh/id_ed25519" }], warnings: [] };
     case "probe_ssh_host": {
       const { target } = request<{ target: ConnectionTarget }>(payload);
+      connectedHosts.add(connectionKey(target));
+      pausedHosts.delete(connectionKey(target));
       const configured = previewTargets.find((known) => sameTarget(known, target));
       return configured?.kind === "ssh" ? configured.remote_info : {
         remote_id: `sample-${target.kind === "ssh" ? target.destination : "local"}`, agent_version: "0.1.0",
       };
+    }
+    case "ssh_connection_status": {
+      const { target } = request<{ target: ConnectionTarget }>(payload);
+      return { connected: connectedHosts.has(connectionKey(target)), manually_disconnected: pausedHosts.has(connectionKey(target)) };
+    }
+    case "disconnect_ssh_host": {
+      const { targets } = request<{ targets: ConnectionTarget[] }>(payload);
+      for (const target of targets) {
+        connectedHosts.delete(connectionKey(target));
+        pausedHosts.add(connectionKey(target));
+      }
+      return;
     }
     case "list_sessions": {
       const { target } = request<{ target: ConnectionTarget }>(payload);
@@ -251,8 +268,9 @@ mockIPC((command, payload) => {
       return [...forwards.values()].filter((status) => ids.has(status.forward.forward_id));
     }
     case "configure_port_forward": {
-      const { forward, enabled } = request<{ forward: LocalPortForward; enabled: boolean }>(payload);
-      const status: PortForwardStatus = { forward, state: "active", message: null };
+      const { target, forward, enabled } = request<{ target: ConnectionTarget; forward: LocalPortForward; enabled: boolean }>(payload);
+      const connected = connectedHosts.has(connectionKey(target));
+      const status: PortForwardStatus = { forward, state: connected ? "active" : "waiting_for_authentication", message: connected ? null : "Connect this host to activate the forward." };
       if (enabled) forwards.set(forward.forward_id, status);
       else forwards.delete(forward.forward_id);
       return status;

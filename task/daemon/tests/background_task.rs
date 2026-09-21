@@ -32,6 +32,9 @@ impl TestDaemon {
   }
 
   async fn launch(root: PathBuf, socket: PathBuf) -> Self {
+    // The Windows named pipe can accept connections before task storage has
+    // created its directories. Fixture files must not depend on that timing.
+    std::fs::create_dir_all(&root).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_taskd"))
       .arg("--socket")
       .arg(&socket)

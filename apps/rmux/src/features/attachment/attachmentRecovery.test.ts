@@ -92,6 +92,7 @@ describe("attachment recovery", () => {
       "ctl_agent_identity_unsupported",
       "ssh_authentication_failed",
       "ssh_authentication_required",
+      "ssh_host_disconnected",
       "ssh_start_failed",
     ]) {
       expect(canAutomaticallyRecoverAttachment(code)).toBe(false);

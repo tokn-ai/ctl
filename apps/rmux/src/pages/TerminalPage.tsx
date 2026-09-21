@@ -23,6 +23,7 @@ import { NewShellFlow } from "../components/sessions/NewShellFlow";
 import { hostSelectorChoices } from "../components/sessions/hostChoices";
 import { useWorkspace } from "../features/workspace/useWorkspace";
 import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
+import { useHostConnections } from "../features/workspace/useHostConnections";
 import { usePortForwarding } from "../features/portForwarding/usePortForwarding";
 import {
   recoverRemoteHost,
@@ -93,6 +94,7 @@ import {
   cancelSshProbe,
   restartLocalDaemon,
   forgetSshCredentials,
+  sshConnectionStatus,
 } from "../lib/tauri";
 import type {
   ConnectionTarget,
@@ -123,6 +125,23 @@ function measuredSize(renderer: XtermRenderer | null): TerminalSize {
     pixel_width: null,
     pixel_height: null,
   };
+}
+
+async function verifyHostConnectionStatus(target: SshConnectionTarget): Promise<void> {
+  let connection;
+  try {
+    connection = await sshConnectionStatus(target);
+  } catch (failure) {
+    // Platforms without the Unix broker still support verified batch SSH.
+    if (errorCode(failure) === "ssh_broker_unsupported") return;
+    throw failure;
+  }
+  if (connection.manually_disconnected) {
+    throw new Error("This host was disconnected. Connect again to resume.");
+  }
+  if (!connection.connected) {
+    throw new Error("The SSH connection ended before verification completed. Try connecting again.");
+  }
 }
 
 export function TerminalPage() {
@@ -244,6 +263,30 @@ export function TerminalPage() {
     workspace.port_forwards,
     updatePortForwards,
   );
+  const sidebarTargets = workspaceSidebarTargets(workspace);
+  const hostConnections = useHostConnections({
+    ready: workspace.ready,
+    closing: workspace.closing,
+    hosts: workspace.hosts.filter((host) => sidebarTargets.some((target) =>
+      (target.kind === "local" ? "local" : target.host_id) === host.host_id)),
+    targets: [...targets, ...sessions.map((session) => session.target), ...tabs.map((session) => session.target)],
+    gateways: workspace.ssh_gateways,
+    onPause: async (host_id) => {
+      refreshGuardRef.current.recordMutation();
+      for (const session of sessionsRef.current) {
+        if (session.target.kind === "ssh" && session.target.host_id === host_id) attachment.cancelPendingConnection(session);
+      }
+      const selected = tabsRef.current.find((tab) => sessionKey(tab) === activeTabKeyRef.current);
+      const attached = attachment.state.session;
+      const shouldDetach = [selected, attached].some((session) =>
+        session?.target.kind === "ssh" && session.target.host_id === host_id);
+      await Promise.all([
+        portForwarding.pauseHost(host_id),
+        shouldDetach ? attachment.detach() : Promise.resolve(),
+      ]);
+    },
+    onResume: portForwarding.resumeHost,
+  });
 
   const daemonRestartBlocksInteractions = useCallback(
     () => daemonRestartConfirmationRef.current || restartingDaemonRef.current,
@@ -266,6 +309,7 @@ export function TerminalPage() {
             .filter(
               (target) =>
                 (!selectedTarget || sameTarget(target, selectedTarget)) &&
+                !hostConnections.isPaused(target) &&
                 sessionsRef.current.some((session) =>
                   sameTarget(session.target, target),
                 ),
@@ -376,11 +420,11 @@ export function TerminalPage() {
       setSessions,
       setTabs,
       setSessionShellStates,
+      hostConnections.isPaused,
     ],
   );
 
   const hostSuggestions = sshConfigHosts.map((host) => host.destination);
-  const sidebarTargets = workspaceSidebarTargets(workspace);
   const connectableTargets = targets.filter((target): target is SshConnectionTarget =>
     target.kind === "ssh" && !target.unavailable);
   const settingsHost = workspace.hosts.find((host) => host.host_id === hostSettingsId);
@@ -478,6 +522,10 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) {
         return;
       }
+      if (hostConnections.isPaused(requestedSession.target)) {
+        setListError("This host is disconnected. Connect the host to resume its sessions.");
+        return;
+      }
       const managed =
         requestedSession.target.kind === "local"
           ? taskWorkspaceRef.current.tasks.find(
@@ -537,7 +585,7 @@ export function TerminalPage() {
         resize_with_window: resizeWithWindow,
       });
     },
-    [attachment, daemonRestartBlocksInteractions, renderer],
+    [attachment, daemonRestartBlocksInteractions, renderer, hostConnections.isPaused],
   );
 
   const recoverHost = async (
@@ -545,6 +593,7 @@ export function TerminalPage() {
     remote_info: RemoteIdentity,
   ) => {
     if (candidate.kind !== "ssh") return null;
+    await verifyHostConnectionStatus(candidate);
     const recovered = recoverRemoteHost(
       workspace.viewRef.current,
       candidate,
@@ -552,6 +601,7 @@ export function TerminalPage() {
     );
     if (!recovered) return null;
     await workspace.replaceView((current) => recoverRemoteHost(current, candidate, remote_info)!.view);
+    if (workspace.isClosing()) throw new Error("Workspace is closing.");
     refreshGuardRef.current.recordMutation();
     renderer?.remapSessions(recovered.key_changes);
     setTabShellStates((current) => remapStateKeys(current, recovered.key_changes));
@@ -562,7 +612,10 @@ export function TerminalPage() {
     sessionsRef.current = workspace.viewRef.current.sessions;
     tabsRef.current = workspace.viewRef.current.tabs;
     activeTabKeyRef.current = workspace.viewRef.current.active_tab_key;
+    portForwarding.resumeHost(candidate.host_id!);
     await portForwarding.refreshTarget(recovered.target);
+    if (workspace.isClosing()) throw new Error("Workspace is closing.");
+    await verifyHostConnectionStatus(recovered.target);
     return recovered.target;
   };
 
@@ -632,6 +685,7 @@ export function TerminalPage() {
     active_tab_key: activeTabKey,
     activateTab,
     refreshHost: refresh,
+    canConnect: (target) => !hostConnections.isPaused(target),
   });
 
   const closeTab = useCallback(
@@ -764,6 +818,7 @@ export function TerminalPage() {
     ): Promise<void> => {
       if (
         !workspace.ready ||
+        workspace.isClosing() ||
         creatingRef.current ||
         daemonRestartConfirmationRef.current ||
         restartingDaemonRef.current
@@ -777,7 +832,6 @@ export function TerminalPage() {
       setCreating(true);
       setListError(null);
       try {
-        target = await prepareHostTarget(target);
         const session = await createSession({
           target,
           working_directory: workingDirectory,
@@ -818,7 +872,7 @@ export function TerminalPage() {
         }
       }
     },
-    [activateTab, renderer, workspace.ready, setSessions, persistWorkspace, prepareHostTarget],
+    [activateTab, renderer, workspace.ready, workspace.isClosing, setSessions, persistWorkspace],
   );
 
   const disconnect = useCallback(
@@ -849,7 +903,6 @@ export function TerminalPage() {
   const importSession = useCallback(
     async (session: SessionSummary, shell_state: ShellStateSummary | null) => {
       if (!workspace.ready || daemonRestartBlocksInteractions()) return;
-      session = { ...session, target: await prepareHostTarget(session.target) };
       refreshGuardRef.current.recordMutation();
       setSessions((current) => prependSession(current, session));
       if (shell_state) {
@@ -865,7 +918,6 @@ export function TerminalPage() {
       setSessions,
       setSessionShellStates,
       persistWorkspace,
-      prepareHostTarget,
     ],
   );
 
@@ -1470,6 +1522,10 @@ export function TerminalPage() {
             <SessionSidebar
               targets={sidebarTargets}
               hosts={workspace.hosts}
+              hostConnections={hostConnections.statuses}
+              onDisconnectHost={(target) => {
+                void hostConnections.disconnect(target).catch((failure) => setListError(errorMessage(failure)));
+              }}
               targetErrors={targetErrors}
               sessions={sessions}
               interactiveTasks={taskWorkspace.tasks}
@@ -1754,6 +1810,8 @@ export function TerminalPage() {
         <NewShellFlow
           targets={targets}
           hosts={workspace.hosts}
+          onVerifyHost={recoverHost}
+          onConnectionChange={hostConnections.connectionChanged}
           onCreate={create}
           onClose={() => {
             setNewShellOpen(false);
@@ -1765,6 +1823,8 @@ export function TerminalPage() {
           targets={targets}
           hosts={workspace.hosts}
           known={sessions}
+          onVerifyHost={recoverHost}
+          onConnectionChange={hostConnections.connectionChanged}
           onAdd={importSession}
           onClose={() => setImportOpen(false)}
         />
@@ -1827,6 +1887,11 @@ export function TerminalPage() {
           initialTarget={methodDraft.initial_target}
           expectedIdentity={methodHost ? expectedHostIdentity(methodHost) : undefined}
           onSaveConnection={saveConnection}
+          onConnectionChange={(target, state, message) => {
+            if (target.kind === "ssh" && methodDraft.host_id) {
+              hostConnections.connectionChanged({ ...target, host_id: methodDraft.host_id }, state, message);
+            }
+          }}
           onClose={() => { setMethodDraft(null); setMethodNameOpen(false); }}
         />
       ) : settingsHost ? (
@@ -1847,6 +1912,7 @@ export function TerminalPage() {
           gateways={workspace.ssh_gateways}
           updateRequired={portForwardUpdateTarget !== null}
           onVerified={recoverHost}
+          onConnectionChange={hostConnections.connectionChanged}
           onConnected={(target) => {
             void resumeHost(target).catch((failure) =>
               setListError(errorMessage(failure)),

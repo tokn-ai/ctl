@@ -302,12 +302,14 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
   loop {
     if let ServerMessage::Output {
       sequence_start,
+      sequence_end,
       data,
       ..
     } = required_message(&mut attachment).await?
     {
       assert_eq!(sequence_start, first_sequence_end);
       assert!(!data.is_empty());
+      acknowledge_output(&mut attachment, sequence_end).await?;
       break;
     }
   }
@@ -316,6 +318,130 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
   wait_for_session_end(&mut attachment).await?;
   drop(attachment);
   wait_for_daemon_exit(daemon, "rmuxd did not exit after presentation-window test").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ended_session_drains_output_after_a_delayed_checkpoint_ack() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let mut daemon = spawn_daemon(&socket_path, 64 * 1024, 64 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "final-checkpoint",
+    "IFS= read -r line; printf 'final:%s\\n' \"$line\"",
+  )
+  .await?;
+  let (mut attachment, checkpoint_sequence) = attach_with_pending_checkpoint(
+    &socket_path,
+    &session.session_id,
+    DEFAULT_PRESENTATION_WINDOW_BYTES,
+  )
+  .await?;
+  write_frame(
+    &mut attachment,
+    &ClientMessage::Input {
+      data: b"after-checkpoint\n".to_vec(),
+    },
+  )
+  .await?;
+  wait_for_session_removal(&socket_path, &session.session_id).await?;
+
+  // The child has exited, but terminal output still depends on this renderer's
+  // checkpoint acknowledgement. SessionEnded must not cut that output off.
+  assert!(
+    timeout(Duration::from_millis(100), &mut daemon)
+      .await
+      .is_err(),
+    "daemon closed an attachment with output blocked behind a checkpoint"
+  );
+  acknowledge_output(&mut attachment, checkpoint_sequence).await?;
+  let output = wait_for_session_end(&mut attachment).await?;
+  assert!(contains_bytes(&output, b"final:after-checkpoint"));
+  drop(attachment);
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after final checkpoint drain").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ended_session_drains_output_larger_than_the_presentation_window() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let mut daemon = spawn_daemon(&socket_path, 64 * 1024, 64 * 1024);
+  let session = create_shell_session(
+    &socket_path,
+    "final-window",
+    "IFS= read -r line; printf '%016384d' 0; printf ':final-tail\\n'",
+  )
+  .await?;
+  let (mut attachment, checkpoint_sequence) =
+    attach_with_pending_checkpoint(&socket_path, &session.session_id, 4 * 1024).await?;
+  acknowledge_output(&mut attachment, checkpoint_sequence).await?;
+  write_frame(
+    &mut attachment,
+    &ClientMessage::Input {
+      data: b"go\n".to_vec(),
+    },
+  )
+  .await?;
+  wait_for_session_removal(&socket_path, &session.session_id).await?;
+  assert!(
+    timeout(Duration::from_millis(100), &mut daemon)
+      .await
+      .is_err(),
+    "daemon closed an attachment before its final output fit the presentation window"
+  );
+
+  let output = wait_for_session_end(&mut attachment).await?;
+  assert!(contains_bytes(&output, &vec![b'0'; 16_384]));
+  assert!(contains_bytes(&output, b":final-tail"));
+  drop(attachment);
+  wait_for_daemon_exit(daemon, "rmuxd did not exit after final window drain").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ended_session_drain_expires_even_when_a_stalled_renderer_heartbeats() -> TestResult {
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("rmux.sock");
+  let daemon = spawn_daemon_with_liveness(
+    &socket_path,
+    64 * 1024,
+    64 * 1024,
+    Duration::from_millis(500),
+  );
+  let session = create_shell_session(
+    &socket_path,
+    "stalled-final",
+    "IFS= read -r line; printf 'final\\n'",
+  )
+  .await?;
+  let (mut attachment, _) = attach_with_pending_checkpoint(
+    &socket_path,
+    &session.session_id,
+    DEFAULT_PRESENTATION_WINDOW_BYTES,
+  )
+  .await?;
+  write_frame(
+    &mut attachment,
+    &ClientMessage::Input {
+      data: b"go\n".to_vec(),
+    },
+  )
+  .await?;
+  wait_for_session_removal(&socket_path, &session.session_id).await?;
+  let heartbeats = tokio::spawn(async move {
+    for nonce in 0..100 {
+      if heartbeat(&mut attachment, nonce).await.is_err() {
+        break;
+      }
+      sleep(Duration::from_millis(25)).await;
+    }
+  });
+  let result = timeout(Duration::from_secs(2), daemon).await;
+  heartbeats.abort();
+  result.map_err(|_| "heartbeats kept an ended session's stalled output drain alive")???;
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -802,6 +928,10 @@ async fn explicitly_released_leases_can_be_acquired_by_another_attachment() -> T
   assert_lease_status(&input_lease, true, false);
   assert_lease_status(&layout_lease, true, false);
 
+  // Establish a rendered boundary before exercising lease transfer and resize.
+  read_output_until(&mut first_attach, b"ready").await?;
+  read_output_until(&mut second_attach, b"ready").await?;
+
   let released_input = release_lease(&mut first_attach, LeaseKind::Input).await?;
   assert_lease_status(&released_input, false, false);
   let acquired_input = acquire_lease(&mut second_attach, LeaseKind::Input).await?;
@@ -820,9 +950,11 @@ async fn explicitly_released_leases_can_be_acquired_by_another_attachment() -> T
     },
   )
   .await?;
-  // `Resize` has no response of its own. The ordered heartbeat acknowledgement
-  // proves that rmuxd processed the preceding resize before observing session
-  // state from a separate connection.
+  // Resize can deliver a geometry checkpoint. Observe and acknowledge it on
+  // both clients before the deliberate slow-reader phase at session exit.
+  wait_for_geometry_change(&mut first_attach, &new_size).await?;
+  wait_for_geometry_change(&mut second_attach, &new_size).await?;
+  heartbeat(&mut first_attach, 1).await?;
   heartbeat(&mut second_attach, 1).await?;
   assert_eq!(
     session_info(&socket_path, &session.session_id)
@@ -1329,6 +1461,37 @@ async fn attach_session(
   .await
 }
 
+async fn attach_with_pending_checkpoint(
+  socket_path: &Path,
+  session: &str,
+  presentation_window_bytes: u64,
+) -> TestResult<(UnixStream, u64)> {
+  let mut stream = connect_when_ready(socket_path).await?;
+  handshake(&mut stream).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::AttachSession {
+      session: session.into(),
+      resume_from: None,
+      terminal_size: TerminalSize::default(),
+      request_input_lease: true,
+      request_layout_lease: false,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes,
+    },
+  )
+  .await?;
+  let ServerMessage::Attached {
+    checkpoint: Some(checkpoint),
+    ..
+  } = required_message(&mut stream).await?
+  else {
+    return Err("expected an initial checkpoint".into());
+  };
+  Ok((stream, checkpoint.sequence))
+}
+
 async fn attach_session_with_options(
   socket_path: &Path,
   session: &str,
@@ -1581,7 +1744,7 @@ async fn wait_for_shell_state_matching(
 
 async fn wait_for_tui_hint(stream: &mut UnixStream, expected: rmux_proto::TuiHint) -> TestResult {
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::ShellStateChanged { state } if state.tui_hint == expected => return Ok(()),
       ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
@@ -1599,7 +1762,7 @@ async fn wait_for_unredacted_command_line(
   after_revision: u64,
 ) -> TestResult<ShellState> {
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::ShellStateChanged { state }
         if state.revision > after_revision
           && !state.command_line_redacted
@@ -1623,7 +1786,7 @@ async fn wait_for_visible_running_command(
   after_revision: u64,
 ) -> TestResult<ShellState> {
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::ShellStateChanged { state }
         if state.revision > after_revision
           && !state.running_command_redacted
@@ -1647,7 +1810,7 @@ async fn wait_for_redacted_running_command(
   after_revision: u64,
 ) -> TestResult<ShellState> {
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::ShellStateChanged { state }
         if state.revision > after_revision
           && state.running_command_redacted
@@ -1680,6 +1843,28 @@ async fn session_info(socket_path: &Path, session_id: &str) -> TestResult<Sessio
     .ok_or_else(|| format!("session '{session_id}' was absent from session list").into())
 }
 
+async fn wait_for_session_removal(socket_path: &Path, session_id: &str) -> TestResult {
+  let deadline = Instant::now() + Duration::from_secs(3);
+  loop {
+    let mut stream = connect_when_ready(socket_path).await?;
+    handshake(&mut stream).await?;
+    write_frame(&mut stream, &ClientMessage::ListSessions).await?;
+    let ServerMessage::SessionList { sessions } = required_message(&mut stream).await? else {
+      return Err("expected session list while waiting for child exit".into());
+    };
+    if sessions
+      .iter()
+      .all(|session| session.session_id != session_id)
+    {
+      return Ok(());
+    }
+    if Instant::now() >= deadline {
+      return Err("session did not exit".into());
+    }
+    sleep(Duration::from_millis(10)).await;
+  }
+}
+
 async fn acquire_lease(stream: &mut UnixStream, lease: LeaseKind) -> TestResult<LeaseStatus> {
   write_frame(stream, &ClientMessage::AcquireLease { lease }).await?;
   lease_status_response(stream, lease).await
@@ -1693,7 +1878,7 @@ async fn release_lease(stream: &mut UnixStream, lease: LeaseKind) -> TestResult<
 async fn heartbeat(stream: &mut UnixStream, nonce: u64) -> TestResult {
   write_frame(stream, &ClientMessage::Heartbeat { nonce }).await?;
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::HeartbeatAck {
         nonce: acknowledged,
       } => {
@@ -1716,7 +1901,7 @@ async fn lease_status_response(
   expected_lease: LeaseKind,
 ) -> TestResult<LeaseStatus> {
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::LeaseStatus { lease, status } => {
         assert_eq!(lease, expected_lease);
         return Ok(status);
@@ -1749,7 +1934,7 @@ async fn acquire_lease_until_owned(
 
 async fn expect_error(stream: &mut UnixStream, expected_code: ErrorCode) -> TestResult {
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::Error { code, .. } => {
         assert_eq!(code, expected_code);
         return Ok(());
@@ -1764,12 +1949,11 @@ async fn expect_error(stream: &mut UnixStream, expected_code: ErrorCode) -> Test
 }
 
 async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult<Vec<u8>> {
-  // Final-output assertions use fixtures that fit within one presentation
-  // window and stay below the checkpoint threshold. Drain without acknowledgements:
-  // rmuxd can close its socket before we read the buffered final frames.
+  // Keep returning presentation credit while draining. The final frames may
+  // already be buffered after rmuxd closes; late acknowledgements are harmless.
   let mut output = Vec::new();
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::SessionEnded { .. } => return Ok(output),
       ServerMessage::Output { data, .. } => output.extend(data),
       ServerMessage::Checkpoint { checkpoint, .. } => output = checkpoint.payload,
@@ -1869,6 +2053,20 @@ async fn required_message(stream: &mut UnixStream) -> TestResult<ServerMessage> 
     .ok_or_else(|| "rmuxd closed the connection unexpectedly".into())
 }
 
+// Helpers that consume presentation frames behave like an active renderer.
+// Tests that intentionally withhold credit use required_message directly.
+async fn presented_message(stream: &mut UnixStream) -> TestResult<ServerMessage> {
+  let message = required_message(stream).await?;
+  match &message {
+    ServerMessage::Output { sequence_end, .. } => acknowledge_output(stream, *sequence_end).await?,
+    ServerMessage::Checkpoint { checkpoint, .. } => {
+      acknowledge_output(stream, checkpoint.sequence).await?;
+    }
+    _ => {}
+  }
+  Ok(message)
+}
+
 // The daemon may close after queuing final output and SessionEnded. A late
 // acknowledgement must not stop us from draining those buffered messages.
 async fn acknowledge_output(stream: &mut UnixStream, sequence: u64) -> TestResult {
@@ -1949,7 +2147,7 @@ async fn read_output_until_with_first_sequence(
   let mut output = Vec::new();
   let mut first_sequence = None;
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::Output {
         sequence_start,
         data,
@@ -1977,13 +2175,18 @@ async fn wait_for_geometry_change(
   expected_size: &TerminalSize,
 ) -> TestResult<u64> {
   loop {
-    match required_message(stream).await? {
+    match presented_message(stream).await? {
       ServerMessage::PtyGeometryChanged {
         terminal_size,
         observed_sequence,
       } => {
         assert_eq!(&terminal_size, expected_size);
         return Ok(observed_sequence);
+      }
+      ServerMessage::Checkpoint { checkpoint, .. }
+        if checkpoint.terminal_size == *expected_size =>
+      {
+        return Ok(checkpoint.sequence);
       }
       ServerMessage::Output { .. }
       | ServerMessage::ShellStateChanged { .. }

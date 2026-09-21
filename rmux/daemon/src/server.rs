@@ -1338,11 +1338,31 @@ async fn drive_attachment(
     attachment_id,
     attachment_liveness_timeout,
     deadline,
+    pending_session_end: None,
   };
   if !driver.send_available_output().await? {
     return Ok(AttachmentExit::Disconnected);
   }
   loop {
+    // Give the terminal event queue bounded progress even when incoming
+    // heartbeats are continuously ready. Process only one queued event here
+    // so presentation acknowledgements still get a turn during heavy output.
+    let queued_event = match driver.attachment.events.try_recv() {
+      Ok(event) => Some(Ok(event)),
+      Err(broadcast::error::TryRecvError::Closed) => Some(Err(broadcast::error::RecvError::Closed)),
+      Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+        Some(Err(broadcast::error::RecvError::Lagged(skipped)))
+      }
+      Err(broadcast::error::TryRecvError::Empty) => None,
+    };
+    if let Some(event) = queued_event
+      && !driver.process_session_event(event).await?
+    {
+      return Ok(AttachmentExit::Disconnected);
+    }
+    if driver.send_session_end_if_drained().await? {
+      return Ok(AttachmentExit::Disconnected);
+    }
     tokio::select! {
       biased;
       () = sleep_until(driver.deadline) => return Ok(AttachmentExit::Disconnected),
@@ -1358,9 +1378,10 @@ async fn drive_attachment(
           // Receipt of `detach` is authoritative even when its acknowledgement
           // cannot cross a concurrently failing transport. The guard still
           // closes the logical attachment immediately in either case.
-          let _acknowledgement = write_frame(
+          let _acknowledgement = write_before_deadline(
             &mut driver.attachment.writer,
             &ServerMessage::Detached,
+            driver.deadline,
           )
           .await;
           return Ok(AttachmentExit::Detached);
@@ -1376,8 +1397,9 @@ async fn drive_attachment(
       }
       // Raw PTY output is canonical and must take precedence over advisory
       // metadata. A watch receiver coalesces state updates, so delaying one
-      // here never loses the latest snapshot.
-      changed = driver.attachment.shell_state_updates.changed() => {
+      // here never loses the latest snapshot. During final output draining,
+      // the final snapshot is delivered immediately before SessionEnded.
+      changed = driver.attachment.shell_state_updates.changed(), if driver.pending_session_end.is_none() => {
         if !driver.process_shell_state_update(changed).await? {
           return Ok(AttachmentExit::Disconnected);
         }
@@ -1392,6 +1414,13 @@ struct AttachmentDriver {
   attachment_id: String,
   attachment_liveness_timeout: Duration,
   deadline: Instant,
+  pending_session_end: Option<PendingSessionEnd>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingSessionEnd {
+  exit_code: Option<u32>,
+  final_sequence: u64,
 }
 
 impl AttachmentDriver {
@@ -1404,19 +1433,22 @@ impl AttachmentDriver {
     }
     if let ClientMessage::PresentationApplied { sequence } = message {
       if let Err(message) = self.accept_presentation_progress(sequence) {
-        send_error(
+        return write_before_deadline(
           &mut self.attachment.writer,
-          ErrorCode::InvalidRequest,
-          message,
+          &ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: message.into(),
+          },
+          self.deadline,
         )
-        .await?;
-        return Ok(true);
+        .await
+        .map(|written| written.is_some());
       }
-      self.deadline = Instant::now() + self.attachment_liveness_timeout;
+      self.renew_liveness();
       return self.send_available_output().await;
     }
     if renews_attachment_liveness(&message) {
-      self.deadline = Instant::now() + self.attachment_liveness_timeout;
+      self.renew_liveness();
     }
     match timeout_at(
       self.deadline,
@@ -1434,6 +1466,52 @@ impl AttachmentDriver {
       Ok(result) => result,
       Err(_) => Ok(false),
     }
+  }
+
+  fn renew_liveness(&mut self) {
+    // Once the child exits, acknowledgements may drain its final output but
+    // must not extend the deadline. Heartbeats alone cannot keep an ended
+    // session's attachment, or the daemon, alive indefinitely.
+    if self.pending_session_end.is_none() {
+      self.deadline = Instant::now() + self.attachment_liveness_timeout;
+    }
+  }
+
+  async fn send_session_end_if_drained(&mut self) -> Result<bool, ConnectionError> {
+    let Some(ended) = self.pending_session_end else {
+      return Ok(false);
+    };
+    if self.attachment.sent_sequence < ended.final_sequence {
+      return Ok(false);
+    }
+
+    // Once every final byte is represented by queued output or a checkpoint,
+    // the peer can drain those frames after we close. Its acknowledgement of
+    // that last presentation is unnecessary for ordered end delivery.
+    let shell_state = self.session.shell_state_for_attachment(
+      &self.attachment_id,
+      self.attachment.request_command_line,
+      self.attachment.request_running_command,
+    );
+    if write_shell_state_snapshot(
+      &mut self.attachment.writer,
+      shell_state,
+      &mut self.attachment.shell_state_revision,
+      false,
+      self.deadline,
+    )
+    .await?
+    .is_none()
+    {
+      return Ok(true);
+    }
+    let message = ServerMessage::SessionEnded {
+      session_id: self.session.info().session_id,
+      exit_code: ended.exit_code,
+    };
+    write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
+      .await
+      .map(|_| true)
   }
 
   fn accept_presentation_progress(&mut self, sequence: u64) -> Result<(), &'static str> {
@@ -1575,30 +1653,13 @@ impl AttachmentDriver {
           .await
       }
       Ok(SessionEvent::Ended { exit_code }) => {
-        let shell_state = self.session.shell_state_for_attachment(
-          &self.attachment_id,
-          self.attachment.request_command_line,
-          self.attachment.request_running_command,
-        );
-        if write_shell_state_snapshot(
-          &mut self.attachment.writer,
-          shell_state,
-          &mut self.attachment.shell_state_revision,
-          false,
-          self.deadline,
-        )
-        .await?
-        .is_none()
-        {
-          return Ok(false);
-        }
-        let message = ServerMessage::SessionEnded {
-          session_id: self.session.info().session_id,
+        // The PTY reader publishes every byte before Ended. Retain its stable
+        // final boundary while flow control waits for presentation credit.
+        self.pending_session_end = Some(PendingSessionEnd {
           exit_code,
-        };
-        return write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
-          .await
-          .map(|_| false);
+          final_sequence: self.session.info().next_sequence,
+        });
+        self.send_available_output().await
       }
       Err(broadcast::error::RecvError::Lagged(_)) => {
         if !self.send_available_output().await? {

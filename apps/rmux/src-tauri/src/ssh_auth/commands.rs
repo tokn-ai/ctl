@@ -30,6 +30,11 @@ pub struct ConfigurePortForwardRequest {
   enabled: bool,
 }
 
+#[derive(Deserialize)]
+pub struct DisconnectSshHostRequest {
+  targets: Vec<ConnectionTargetDto>,
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn probe_ssh_host(
   window: WebviewWindow,
@@ -82,6 +87,18 @@ pub fn cancel_ssh_probe(window: WebviewWindow, request: CancelRequest) {
 #[tauri::command]
 pub async fn forget_ssh_credentials(request: crate::dto::TargetRequestDto) -> CommandResult<()> {
   super::forget(&request.target).await
+}
+
+#[tauri::command]
+pub async fn ssh_connection_status(
+  request: crate::dto::TargetRequestDto,
+) -> CommandResult<crate::dto::SshConnectionStatusDto> {
+  super::broker::connection_status(&request.target).await
+}
+
+#[tauri::command]
+pub async fn disconnect_ssh_host(request: DisconnectSshHostRequest) -> CommandResult<()> {
+  super::disconnect(&request.targets).await
 }
 
 #[tauri::command]

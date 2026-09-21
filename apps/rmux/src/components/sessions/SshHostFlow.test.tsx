@@ -86,6 +86,88 @@ async function newHostDetails(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("SSH host quick-input flow", () => {
+  it("automatically verifies a selected target once in StrictMode and returns the verified target", async () => {
+    const target = { kind: "ssh" as const, host_id: "build", destination: "build-alias", method_id: "ssh_config" };
+    const verified = { ...target, remote_info: remoteInfo };
+    const onVerified = vi.fn(async () => verified);
+    const onConnected = vi.fn();
+    const onClose = vi.fn();
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
+      onVerified={onVerified} onConnected={onConnected} onClose={onClose} /></StrictMode>);
+    expect(screen.getByRole("dialog", { name: "Connecting to host" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Connect" })).toBeNull();
+    await waitFor(() => expect(onConnected).toHaveBeenCalledExactlyOnceWith(verified));
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
+    expect(onVerified).toHaveBeenCalledExactlyOnceWith(target, remoteInfo);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(cancelSshProbe).not.toHaveBeenCalled();
+  });
+
+  it("answers automatic connection credentials before continuing with the verified target", async () => {
+    const target = { kind: "ssh" as const, host_id: "build", destination: "build-alias" };
+    const verified = { ...target, remote_info: remoteInfo };
+    const onConnected = vi.fn();
+    const onVerified = vi.fn(async () => verified);
+    let showPrompt!: (value: SshPrompt) => void;
+    let finish!: (value: typeof remoteInfo) => void;
+    vi.mocked(probeSshHost).mockImplementationOnce((_target, _attempt, prompt) => {
+      showPrompt = prompt;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
+      onVerified={onVerified} onConnected={onConnected} onClose={vi.fn()} />);
+    await waitFor(() => expect(probeSshHost).toHaveBeenCalledOnce());
+    await act(async () => showPrompt({ prompt_id: "password", kind: "secret", message: "Password:" }));
+    const input = screen.getByLabelText("SSH response");
+    expect(input.getAttribute("type")).toBe("password");
+    await userEvent.setup().type(input, "test-secret{Enter}");
+    expect(respondSshPrompt).toHaveBeenCalledExactlyOnceWith(
+      vi.mocked(probeSshHost).mock.calls[0][1], "password", "test-secret",
+    );
+    expect(onVerified).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
+    await act(async () => finish(remoteInfo));
+    expect(onConnected).toHaveBeenCalledExactlyOnceWith(verified);
+  });
+
+  it("cancels an automatic connection and ignores its late prompt and successful verification", async () => {
+    const target = { kind: "ssh" as const, host_id: "build", destination: "build-alias" };
+    const onVerified = vi.fn();
+    const onConnected = vi.fn();
+    const onClose = vi.fn();
+    let showPrompt!: (value: SshPrompt) => void;
+    let finish!: (value: typeof remoteInfo) => void;
+    vi.mocked(probeSshHost).mockImplementationOnce((_target, _attempt, prompt) => {
+      showPrompt = prompt;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { unmount } = render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
+      onVerified={onVerified} onConnected={onConnected} onClose={onClose} /></StrictMode>);
+    await waitFor(() => expect(probeSshHost).toHaveBeenCalledOnce());
+    await userEvent.setup().keyboard("{Escape}");
+    expect(cancelSshProbe).toHaveBeenCalledExactlyOnceWith(vi.mocked(probeSshHost).mock.calls[0][1]);
+    await act(async () => {
+      showPrompt({ prompt_id: "late", kind: "secret", message: "Late password:" });
+      finish(remoteInfo);
+    });
+    expect(screen.queryByText("Late password:")).toBeNull();
+    expect(onVerified).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledOnce();
+    unmount();
+    expect(forgetSshCredentials).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit component updates unchanged when automatic connection is requested", async () => {
+    render(<SshHostFlow suggestions={[]} warning={null}
+      target={{ kind: "ssh", destination: "build-alias" }} autoConnect updateRequired onClose={vi.fn()} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole("dialog", { name: "Update remote components" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Update remote components/ })).toBeTruthy();
+    expect(probeSshHost).not.toHaveBeenCalled();
+  });
+
   it("adds an address, display name, and credentials before automatically saving the verified host", async () => {
     let finishProbe!: (value: typeof remoteInfo) => void;
     vi.mocked(probeSshHost).mockImplementationOnce(() => new Promise((resolve) => { finishProbe = resolve; }));

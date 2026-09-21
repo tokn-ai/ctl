@@ -3,6 +3,7 @@
 #[cfg(target_os = "macos")]
 mod keychain;
 mod port_forwarding;
+mod target_lifecycle;
 
 use ctld_ipc::{
   ClientMessage, LocalPortForward, PromptKind, ServerMessage, SshGateway, SshGatewayMode, SshTarget,
@@ -25,6 +26,7 @@ use tokio::time::{Instant, sleep};
 use zeroize::Zeroizing;
 
 use port_forwarding::{ForwardRegistry, SshForwardControl};
+use target_lifecycle::TargetLifecycle;
 
 const SSH_PROGRAM: &str = "ssh";
 const MASTER_IDLE_SECONDS: u64 = 300;
@@ -43,8 +45,21 @@ const REMOTE_LISTENERS_COMMAND: &str = concat!(
 #[derive(Default)]
 struct State {
   attempts: Mutex<HashMap<String, Attempt>>,
-  target_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+  targets: Mutex<HashMap<String, Arc<TargetLifecycle>>>,
   forwards: AsyncMutex<ForwardRegistry>,
+}
+
+impl State {
+  fn target(&self, target: &SshTarget) -> Arc<TargetLifecycle> {
+    Arc::clone(
+      self
+        .targets
+        .lock()
+        .unwrap()
+        .entry(target_key(target))
+        .or_default(),
+    )
+  }
 }
 
 struct Attempt {
@@ -98,6 +113,10 @@ enum RequestError {
   MasterTimeout,
   #[error("OpenSSH control master exited before becoming ready: {0}")]
   MasterFailed(String),
+  #[error("This SSH host was disconnected. Use Connect host to reconnect.")]
+  HostDisconnected,
+  #[error("could not disconnect the OpenSSH control master: {0}")]
+  DisconnectFailed(String),
   #[error("OpenSSH port forwarding failed: {0}")]
   PortForwardFailed(String),
   #[error("remote listener discovery failed: {0}")]
@@ -196,7 +215,13 @@ async fn handle_connection(
     .ok_or(RequestError::ClientClosed)?;
   let result = match request {
     ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
-    ClientMessage::MasterStatus { target } => master_status(&mut stream, &target).await,
+    ClientMessage::MasterStatus { target } => master_status(&mut stream, &state, &target).await,
+    ClientMessage::ConnectionStatus { target } => {
+      connection_status(&mut stream, &state, &target).await
+    }
+    ClientMessage::DisconnectMaster { target } => {
+      disconnect_master(&mut stream, &state, &target).await
+    }
     ClientMessage::DeleteCredentials { target } => delete_credentials(&mut stream, &target).await,
     ClientMessage::ConfigurePortForward {
       target,
@@ -286,19 +311,34 @@ async fn ensure_master(
   target: SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(&target)?;
-  let target_lock = {
-    let mut locks = state.target_locks.lock().unwrap();
-    Arc::clone(
-      locks
-        .entry(target_key(&target))
-        .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-    )
-  };
-  let _target_guard = target_lock.lock().await;
+  let lifecycle = state.target(&target);
+  let mut attempt = lifecycle.attempt();
+  let _target_guard = attempt.run(lifecycle.lock.lock()).await?;
+  lifecycle.resume(&attempt)?;
+  attempt
+    .run(async { state.forwards.lock().await.resume(&target) })
+    .await?;
   let control_path = control_path(&target);
-  if reuse_master_or_prepare(&state, &target, &control_path).await? {
-    return ctld_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path })
-      .await
+  if attempt
+    .run(reuse_master_or_prepare(&state, &target, &control_path))
+    .await??
+  {
+    attempt
+      .run(async {
+        state
+          .forwards
+          .lock()
+          .await
+          .activate(&SshForwardControl, &target)
+          .await;
+      })
+      .await?;
+    return attempt
+      .run(ctld_ipc::write_frame(
+        stream,
+        &ServerMessage::MasterReady { control_path },
+      ))
+      .await?
       .map_err(Into::into);
   }
   let token = uuid::Uuid::new_v4().to_string();
@@ -313,6 +353,32 @@ async fn ensure_master(
     state: Arc::clone(&state),
   };
   let mut child = start_master(&target, &control_path, &token)?;
+  let result = attempt
+    .run(wait_for_master(
+      stream,
+      &state,
+      &target,
+      &control_path,
+      &mut child,
+      &mut prompt_rx,
+    ))
+    .await;
+  if !matches!(result, Ok(Ok(()))) {
+    // Reap the authentication process before releasing the target lock. The
+    // disconnect request then exits any master that forked before cancellation.
+    let _ = child.kill().await;
+  }
+  result?
+}
+
+async fn wait_for_master(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+  control_path: &Path,
+  child: &mut Child,
+  prompt_rx: &mut mpsc::Receiver<PromptRequest>,
+) -> Result<(), RequestError> {
   let mut diagnostics = child.stderr.take().map(|mut stderr| {
     tokio::spawn(async move {
       use tokio::io::AsyncReadExt as _;
@@ -332,15 +398,21 @@ async fn ensure_master(
   let mut captured = HashMap::new();
   let mut attempted_stored = HashSet::new();
   loop {
-    if control_master_is_ready(&target, &control_path).await {
+    if control_master_is_ready(target, control_path).await {
       #[cfg(target_os = "macos")]
-      handle_save_offer(stream, &target, &mut captured).await?;
+      handle_save_offer(stream, target, &mut captured).await?;
       #[cfg(not(target_os = "macos"))]
       captured.clear();
       let mut forwards = state.forwards.lock().await;
-      forwards.activate(&SshForwardControl, &target).await;
+      forwards.activate(&SshForwardControl, target).await;
       drop(forwards);
-      ctld_ipc::write_frame(stream, &ServerMessage::MasterReady { control_path }).await?;
+      ctld_ipc::write_frame(
+        stream,
+        &ServerMessage::MasterReady {
+          control_path: control_path.to_path_buf(),
+        },
+      )
+      .await?;
       return Ok(());
     }
     if let Some(status) = child.try_wait().map_err(RequestError::StartMaster)?
@@ -373,7 +445,7 @@ async fn ensure_master(
         };
         answer_prompt(
           stream,
-          &target,
+          target,
           prompt,
           &mut attempted_stored,
           &mut captured,
@@ -410,6 +482,8 @@ impl RequestError {
       Self::StartMaster(_) => "ssh_start_failed",
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
+      Self::HostDisconnected => "ssh_host_disconnected",
+      Self::DisconnectFailed(_) => "ssh_disconnect_failed",
       Self::PortForwardFailed(_) => "ssh_port_forward_failed",
       Self::RemoteListenerFailed(_) => "ssh_listener_discovery_failed",
       Self::RemoteAgentUpdateRequired => "ctl_agent_update_required",
@@ -605,17 +679,92 @@ async fn handle_askpass(
 
 async fn master_status(
   stream: &mut ctld_ipc::Stream,
+  state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
+  let lifecycle = state.target(target);
+  let mut attempt = lifecycle.attempt();
+  lifecycle.require_connected()?;
   let path = control_path(target);
-  let message = if control_master_is_ready(target, &path).await {
+  let message = if attempt.run(control_master_is_ready(target, &path)).await? {
     ServerMessage::MasterReady { control_path: path }
   } else {
     ServerMessage::AuthenticationRequired
   };
   ctld_ipc::write_frame(stream, &message).await?;
   Ok(())
+}
+
+async fn disconnect_master(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+) -> Result<(), RequestError> {
+  validate_target(target)?;
+  let lifecycle = state.target(target);
+  // Publish cancellation before waiting for the lock held by authentication,
+  // including an unanswered password or credential-save prompt.
+  lifecycle.pause();
+  let _target_guard = lifecycle.lock.lock().await;
+  let mut forwards = state.forwards.lock().await;
+  forwards.pause(target);
+  exit_master(target, &control_path(target)).await?;
+  forwards.master_replaced(target);
+  ctld_ipc::write_frame(stream, &ServerMessage::MasterDisconnected).await?;
+  Ok(())
+}
+
+async fn connection_status(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  target: &SshTarget,
+) -> Result<(), RequestError> {
+  validate_target(target)?;
+  let connected = control_master_is_ready(target, &control_path(target)).await;
+  ctld_ipc::write_frame(
+    stream,
+    &ServerMessage::ConnectionStatus {
+      connected,
+      manually_disconnected: state.target(target).is_paused(),
+    },
+  )
+  .await?;
+  Ok(())
+}
+
+fn exit_master_command(target: &SshTarget, control_path: &Path) -> Command {
+  let mut command = Command::new(SSH_PROGRAM);
+  command.arg("-S").arg(control_path).args(["-O", "exit"]);
+  append_target_arguments(&mut command, target);
+  command
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  command
+}
+
+async fn exit_master(target: &SshTarget, control_path: &Path) -> Result<(), RequestError> {
+  if !control_path.exists() {
+    return Ok(());
+  }
+  let output = tokio::time::timeout(
+    MASTER_CHECK_TIMEOUT,
+    exit_master_command(target, control_path).output(),
+  )
+  .await
+  .map_err(|_| RequestError::DisconnectFailed("control command timed out".into()))?
+  .map_err(|error| RequestError::DisconnectFailed(error.to_string()))?;
+  if output.status.success() || !control_path.exists() {
+    return Ok(());
+  }
+  let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+  Err(RequestError::DisconnectFailed(if message.is_empty() {
+    output.status.to_string()
+  } else {
+    message
+  }))
 }
 
 async fn delete_credentials(
@@ -646,10 +795,11 @@ async fn configure_port_forward(
   validate_forward(&forward)?;
   // No target lock here: ensure_master holds its target lock before activating
   // forwards. The registry lock serializes all listener ownership changes.
-  let status = state
-    .forwards
-    .lock()
-    .await
+  let mut forwards = state.forwards.lock().await;
+  if state.target(&target).is_paused() {
+    forwards.pause(&target);
+  }
+  let status = forwards
     .configure(&SshForwardControl, target, forward, enabled)
     .await?;
   ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
@@ -678,35 +828,37 @@ async fn list_remote_listeners(
   target: &SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
-  let target_lock = {
-    let mut locks = state.target_locks.lock().unwrap();
-    Arc::clone(
-      locks
-        .entry(target_key(target))
-        .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-    )
-  };
-  let _target_guard = target_lock.lock().await;
+  let lifecycle = state.target(target);
+  let mut attempt = lifecycle.attempt();
+  lifecycle.require_connected()?;
+  let _target_guard = attempt.run(lifecycle.lock.lock()).await?;
+  lifecycle.require_connected()?;
   let control_path = control_path(target);
-  if !control_master_is_ready(target, &control_path).await {
+  if !attempt
+    .run(control_master_is_ready(target, &control_path))
+    .await?
+  {
     ctld_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
     return Ok(());
   }
 
-  let catalog = run_listener_discovery(target, &control_path).await?;
+  let catalog = attempt
+    .run(run_listener_discovery(target, &control_path))
+    .await??;
   ctld_ipc::write_frame(stream, &ServerMessage::RemoteListeners { catalog }).await?;
   Ok(())
 }
 
-async fn run_listener_discovery(
-  target: &SshTarget,
-  control_path: &Path,
-) -> Result<ctl_proto::TcpListenerCatalog, RequestError> {
+fn listener_discovery_command(target: &SshTarget, control_path: &Path) -> Command {
   let mut command = Command::new(SSH_PROGRAM);
   command
     .arg("-S")
     .arg(control_path)
     .arg("-T")
+    .args(["-o", "ControlMaster=no"])
+    // The master can disappear after its readiness check. Never fall back to
+    // a new direct or gateway connection during this noninteractive request.
+    .args(["-o", "ProxyCommand=false"])
     .args(["-o", "ClearAllForwardings=yes"])
     .args(["-o", "ForwardAgent=no"])
     .args(["-o", "ForwardX11=no"])
@@ -714,12 +866,20 @@ async fn run_listener_discovery(
     .args(["-o", "RemoteCommand=none"])
     .args(["-o", "BatchMode=yes"]);
   append_target_arguments(&mut command, target);
-  let mut child = command
+  command
     .arg(REMOTE_LISTENERS_COMMAND)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
-    .kill_on_drop(true)
+    .kill_on_drop(true);
+  command
+}
+
+async fn run_listener_discovery(
+  target: &SshTarget,
+  control_path: &Path,
+) -> Result<ctl_proto::TcpListenerCatalog, RequestError> {
+  let mut child = listener_discovery_command(target, control_path)
     .spawn()
     .map_err(RequestError::StartMaster)?;
   let mut stdout = child.stdout.take().ok_or(RequestError::InvalidRequest(
@@ -947,14 +1107,16 @@ async fn control_master_is_ready(target: &SshTarget, path: &Path) -> bool {
 
 fn append_target_arguments(command: &mut Command, target: &SshTarget) {
   if !target.gateways.is_empty() {
-    command.arg("-J").arg(
+    // -o respects a prior fail-closed ProxyCommand; -J rejects that combination.
+    command.arg("-o").arg(format!(
+      "ProxyJump={}",
       target
         .gateways
         .iter()
         .map(gateway_jump_specification)
         .collect::<Vec<_>>()
         .join(","),
-    );
+    ));
   }
   if let Some(port) = target.port {
     command.args(["-p", &port.to_string()]);
@@ -1274,6 +1436,165 @@ mod tests {
       identity_file: Some(PathBuf::from("/keys/work key")),
       gateways: Vec::new(),
     }
+  }
+
+  #[test]
+  fn disconnect_exits_only_the_requested_control_master() {
+    let path = Path::new("/private/tmp/ctld-test/master.sock");
+    let command = exit_master_command(&target(), path);
+    let args: Vec<_> = command.as_std().get_args().collect();
+    assert_eq!(&args[..4], ["-S", path.to_str().unwrap(), "-O", "exit"]);
+    assert_eq!(*args.last().unwrap(), "example.test");
+    assert_eq!(command.as_std().get_program(), "ssh");
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn listener_discovery_missing_master_never_contacts_the_host_or_gateway() {
+    for through_gateway in [false, true] {
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let port = listener.local_addr().unwrap().port();
+      let target = SshTarget {
+        hostname: Some("127.0.0.1".into()),
+        port: Some(port),
+        identity_file: None,
+        gateways: if through_gateway {
+          vec![SshGateway {
+            destination: "127.0.0.1".into(),
+            hostname: None,
+            user: None,
+            port: Some(port),
+            identity_file: None,
+            mode: SshGatewayMode::Automatic,
+          }]
+        } else {
+          Vec::new()
+        },
+        ..target()
+      };
+      let path = PathBuf::from(format!("/tmp/ctld-mux-{}", uuid::Uuid::new_v4().simple()));
+      assert!(!path.exists());
+      let production = listener_discovery_command(&target, &path);
+      let mut command = Command::new(SSH_PROGRAM);
+      command
+        .args(["-F", "/dev/null", "-o", "ConnectTimeout=1"])
+        .args(production.as_std().get_args())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+      let output = tokio::select! {
+        biased;
+        accepted = listener.accept() => {
+          drop(accepted);
+          panic!("listener discovery attempted fresh SSH (gateway={through_gateway})");
+        }
+        output = tokio::time::timeout(Duration::from_secs(5), command.output()) => output.unwrap().unwrap(),
+      };
+      assert!(!output.status.success());
+      let diagnostics = String::from_utf8_lossy(&output.stderr);
+      assert!(!diagnostics.contains("Cannot specify -J with ProxyCommand"));
+      assert!(diagnostics.contains("Connection closed"), "{diagnostics}");
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn disconnect_is_idempotent_and_noninteractive_work_stays_paused() {
+    let state = State::default();
+    let target = SshTarget {
+      destination: uuid::Uuid::new_v4().to_string(),
+      ..target()
+    };
+    assert!(!control_path(&target).exists());
+    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    for _ in 0..2 {
+      disconnect_master(&mut server, &state, &target)
+        .await
+        .unwrap();
+      assert!(matches!(
+        ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+          .await
+          .unwrap(),
+        Some(ServerMessage::MasterDisconnected)
+      ));
+    }
+    assert!(matches!(
+      master_status(&mut server, &state, &target).await,
+      Err(RequestError::HostDisconnected)
+    ));
+    assert!(matches!(
+      list_remote_listeners(&mut server, &state, &target).await,
+      Err(RequestError::HostDisconnected)
+    ));
+    connection_status(&mut server, &state, &target)
+      .await
+      .unwrap();
+    assert!(matches!(
+      ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+        .await
+        .unwrap(),
+      Some(ServerMessage::ConnectionStatus {
+        connected: false,
+        manually_disconnected: true
+      })
+    ));
+    let other = SshTarget {
+      destination: "another-host".into(),
+      ..target.clone()
+    };
+    assert!(!state.target(&other).is_paused());
+    let lifecycle = state.target(&target);
+    lifecycle.resume(&lifecycle.attempt()).unwrap();
+    master_status(&mut server, &state, &target).await.unwrap();
+    assert!(matches!(
+      ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+        .await
+        .unwrap(),
+      Some(ServerMessage::AuthenticationRequired)
+    ));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn disconnect_interrupts_an_unanswered_ssh_prompt_and_releases_the_target_lock() {
+    let lifecycle = Arc::new(TargetLifecycle::default());
+    let worker_lifecycle = Arc::clone(&lifecycle);
+    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    let (response, response_rx) = oneshot::channel();
+    let worker = tokio::spawn(async move {
+      let mut attempt = worker_lifecycle.attempt();
+      let _guard = worker_lifecycle.lock.lock().await;
+      attempt
+        .run(answer_prompt(
+          &mut server,
+          &target(),
+          PromptRequest {
+            message: "Trust host?".into(),
+            confirm: true,
+            response,
+          },
+          &mut HashSet::new(),
+          &mut HashMap::new(),
+        ))
+        .await
+    });
+    assert!(matches!(
+      ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+        .await
+        .unwrap(),
+      Some(ServerMessage::Prompt { .. })
+    ));
+    lifecycle.pause();
+    assert!(matches!(
+      tokio::time::timeout(Duration::from_secs(1), worker)
+        .await
+        .unwrap()
+        .unwrap(),
+      Err(RequestError::HostDisconnected)
+    ));
+    assert!(response_rx.await.is_err());
+    assert!(lifecycle.lock.try_lock().is_ok());
   }
 
   #[test]

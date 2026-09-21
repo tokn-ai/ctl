@@ -85,6 +85,14 @@ connect. Adding or editing a method verifies its endpoint before saving, but
 does not switch an existing session's transport. Use an explicit connection to
 apply that route to the host's remembered sessions.
 
+Remote host rows show live **Connected**, **Connecting**, **Disconnected**, or
+**Error** status; hover the status to see active connection methods or diagnostics.
+**Disconnect host** closes the shared SSH masters for the host's saved and active
+methods and pauses its forwards. Remote shells and tasks keep running, and tabs,
+credentials, and saved forwarding preferences are retained. Use **Connect host**
+to resume. Other windows sharing those masters also disconnect. Status and manual
+pauses are runtime state; status checks never authenticate or start `ctld`.
+
 All methods on a host must reach its verified account-owned ctl environment.
 Use a separate host for another account. Matching remote IDs never merge saved
 hosts automatically. Renaming a host or changing methods preserves session,
@@ -107,6 +115,11 @@ was selected. No daemon inventory is discovered automatically. Use **Add
 existing session** in the sidebar or command palette to discover one host's
 inventory and explicitly remember sessions without attaching. **Refresh Known
 Sessions** inspects only remembered IDs; it does not adopt other apps' sessions.
+**New shell** and **Add existing session** authenticate the selected SSH host
+before creating or discovering sessions, reusing its connection when available.
+Credential prompts appear within the action, which continues after verification.
+Cancelling authentication creates or imports nothing; New shell keeps the working
+directory draft. Background refreshes never prompt for authentication.
 Old sessions were never saved, so the first migration requires explicit import.
 See [workspace persistence](../../docs/rmux-workspace.md) for recovery and tests.
 

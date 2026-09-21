@@ -14,9 +14,16 @@ import type {
   SessionSummary,
 } from "../../lib/types";
 import { AddExistingSessionFlow } from "./AddExistingSessionFlow";
+import { probeSshHost } from "../../lib/tauri";
 
 const list = vi.hoisted(() => vi.fn());
-vi.mock("../../lib/tauri", () => ({ listSessions: list }));
+vi.mock("../../lib/tauri", async (original) => ({
+  ...(await original<object>()),
+  listSessions: list,
+  probeSshHost: vi.fn(),
+  cancelSshProbe: vi.fn().mockResolvedValue(undefined),
+}));
+const verify = vi.fn(async (target: ConnectionTarget) => target);
 const targets: ConnectionTarget[] = [
   { kind: "local" },
   { kind: "ssh", destination: "remote", host_id: "remote-id" },
@@ -38,6 +45,8 @@ function session(id: string): SessionSummary {
 }
 beforeEach(() => {
   list.mockReset();
+  verify.mockReset().mockImplementation(async (target: ConnectionTarget) => target);
+  vi.mocked(probeSshHost).mockReset().mockResolvedValue({ remote_id: "remote-environment", agent_version: "0.1.0" });
 });
 afterEach(cleanup);
 
@@ -52,6 +61,7 @@ describe("explicit discovery", () => {
     const view = render(
       <AddExistingSessionFlow
         targets={targets}
+        onVerifyHost={verify}
         known={[session("known")]}
         onAdd={onAdd}
         onClose={onClose}
@@ -70,6 +80,7 @@ describe("explicit discovery", () => {
     view.rerender(
       <AddExistingSessionFlow
         targets={targets}
+        onVerifyHost={verify}
         known={[session("known"), session("other-app")]}
         onAdd={onAdd}
         onClose={onClose}
@@ -92,12 +103,14 @@ describe("explicit discovery", () => {
     render(
       <AddExistingSessionFlow
         targets={targets}
+        onVerifyHost={verify}
         known={[]}
         onAdd={onAdd}
         onClose={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("option", { name: "remote" }));
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole("button", { name: "Previous step" }));
     await act(async () =>
       resolve({ sessions: [session("late")], shell_states: {} }),
@@ -114,6 +127,7 @@ describe("explicit discovery", () => {
     render(
       <AddExistingSessionFlow
         targets={targets}
+        onVerifyHost={verify}
         known={[]}
         onAdd={vi.fn()}
         onClose={vi.fn()}
@@ -121,8 +135,26 @@ describe("explicit discovery", () => {
     );
     fireEvent.click(screen.getByRole("option", { name: "remote" }));
     await screen.findByText("Permission denied");
-    expect(screen.getByText(/Connect host first/)).toBeTruthy();
+    expect(screen.getByText(/Retry to reconnect/)).toBeTruthy();
     fireEvent.click(screen.getByRole("option", { name: "Retry discovery" }));
     await screen.findByText(/No additional running sessions/);
+    expect(probeSshHost).toHaveBeenCalledTimes(2);
+  });
+
+  it("discovers local sessions without starting SSH authentication", async () => {
+    list.mockResolvedValue({ sessions: [], shell_states: {} });
+    render(<AddExistingSessionFlow targets={targets} known={[]} onVerifyHost={verify} onAdd={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("option", { name: "local" }));
+    await screen.findByText(/No additional running sessions/);
+    expect(list).toHaveBeenCalledExactlyOnceWith(targets[0]);
+    expect(probeSshHost).not.toHaveBeenCalled();
+  });
+
+  it("does not enumerate an endpoint that fails identity verification", async () => {
+    verify.mockRejectedValue(new Error("The remote environment changed."));
+    render(<AddExistingSessionFlow targets={targets} known={[]} onVerifyHost={verify} onAdd={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("option", { name: "remote" }));
+    await screen.findByText("The remote environment changed.");
+    expect(list).not.toHaveBeenCalled();
   });
 });

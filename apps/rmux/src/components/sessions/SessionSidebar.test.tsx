@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConnectionTarget,
+  HostConnectionStatus,
   ManagedTask,
   SessionSummary,
   ShellStateSummary,
@@ -48,9 +49,144 @@ const shellState: ShellStateSummary = {
   observed_sequence: "1",
 };
 
+const remoteHost: ConnectionTarget = {
+  kind: "ssh",
+  host_id: "build",
+  host_name: "Build machine",
+  destination: "build-host",
+  remote_info: { remote_id: "remote-1", agent_version: "0.1.0" },
+};
+
+function renderHostConnection(
+  connection?: HostConnectionStatus,
+  overrides: Partial<Parameters<typeof SessionSidebar>[0]> = {},
+) {
+  const props = {
+    targets: [session.target, remoteHost],
+    targetErrors: new Map(),
+    hostConnections: connection ? new Map([["build", connection]]) : undefined,
+    sessions: [{ ...session, target: remoteHost }],
+    shellStates: new Map(),
+    selectedSessionKey: null,
+    openTabSessionKeys: new Set<string>(),
+    loading: false,
+    error: null,
+    creating: false,
+    closingSessionKeys: new Set<string>(),
+    disconnectingSessionKey: null,
+    onRefresh: vi.fn(),
+    onSelect: vi.fn(),
+    onNewShell: vi.fn(),
+    onDisconnect: vi.fn(),
+    onRequestClose: vi.fn(),
+    onAddHost: vi.fn(),
+    onConnectHost: vi.fn(),
+    onDisconnectHost: vi.fn(),
+    onRemoveHost: vi.fn(),
+    onAddExisting: vi.fn(),
+    onForget: vi.fn(),
+    ...overrides,
+  };
+  render(<SessionSidebar {...props} />);
+  return props;
+}
+
 afterEach(cleanup);
 
 describe("SessionSidebar", () => {
+  it("keeps a readable connection status visible when the host is collapsed and disconnects the host independently", async () => {
+    const user = userEvent.setup();
+    const props = renderHostConnection({
+      state: "connected",
+      method_names: ["Office network", "VPN"],
+      message: null,
+    });
+    const status = screen.getByRole("status", {
+      name: "Host connection for Build machine: Connected",
+    });
+    expect(status.textContent).toBe("Connected");
+    expect(status.title).toContain("Connection methods: Office network, VPN");
+    expect(status.querySelector(".host-connection-dot")?.getAttribute("aria-hidden")).toBe("true");
+    expect(status.closest("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Connect to Build machine" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Collapse Build machine" }));
+    expect(status.closest("[hidden]")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Shell — first" })).toBeNull();
+
+    const disconnect = screen.getByRole("button", { name: "Disconnect host Build machine" });
+    expect(disconnect.title).toBe("Close the shared SSH connection and pause forwards. Remote sessions keep running.");
+    await user.click(disconnect);
+    expect(props.onDisconnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
+    expect(props.onDisconnect).not.toHaveBeenCalled();
+    expect(props.onRequestClose).not.toHaveBeenCalled();
+    expect(props.onRemoveHost).not.toHaveBeenCalled();
+    expect(within(screen.getByRole("region", { name: "local sessions" })).queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disconnect host local" })).toBeNull();
+  });
+
+  it.each([
+    [undefined, "Checking…"],
+    [{ state: "disconnected", method_names: [], message: null } as HostConnectionStatus, "Disconnected"],
+  ])("does not infer a live connection from cached identity or running sessions (%s)", async (connection, label) => {
+    const user = userEvent.setup();
+    const props = renderHostConnection(connection);
+    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` }).textContent).toBe(label);
+    expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
+  });
+
+  it.each([
+    ["connecting", "Connecting…", "Connect to Build machine"],
+    ["disconnecting", "Disconnecting…", "Disconnect host Build machine"],
+  ] as const)("blocks repeated actions while %s", async (state, label, actionLabel) => {
+    const user = userEvent.setup();
+    const props = renderHostConnection({ state, method_names: ["Office network"], message: null });
+    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` }).textContent).toBe(label);
+    const action = screen.getByRole("button", { name: actionLabel }) as HTMLButtonElement;
+    expect(action.disabled).toBe(true);
+    await user.click(action);
+    expect(props.onConnectHost).not.toHaveBeenCalled();
+    expect(props.onDisconnectHost).not.toHaveBeenCalled();
+  });
+
+  it("can disconnect known connected methods when another method reports an error", async () => {
+    const user = userEvent.setup();
+    const props = renderHostConnection({
+      state: "error",
+      method_names: ["Office network"],
+      message: "VPN status check failed",
+    });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: Connection error" });
+    expect(status.textContent).toBe("Connection error");
+    expect(status.title).toContain("Office network");
+    expect(status.title).toContain("VPN status check failed");
+    await user.click(screen.getByRole("button", { name: "Disconnect host Build machine" }));
+    expect(props.onDisconnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
+  });
+
+  it("offers reconnect after a connection error without an active method", async () => {
+    const user = userEvent.setup();
+    const props = renderHostConnection({ state: "error", method_names: [], message: "SSH connection lost" });
+    expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
+  });
+
+  it("marks a missing SSH config entry unavailable and prevents connecting", async () => {
+    const user = userEvent.setup();
+    const unavailable = { ...remoteHost, unavailable: "SSH config alias build-host is missing" };
+    const props = renderHostConnection(undefined, { targets: [unavailable] });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: Unavailable" });
+    expect(status.textContent).toBe("Unavailable");
+    expect(status.title).toContain("SSH config alias build-host is missing");
+    const connect = screen.getByRole("button", { name: "Connect to Build machine" }) as HTMLButtonElement;
+    expect(connect.disabled).toBe(true);
+    await user.click(connect);
+    expect(props.onConnectHost).not.toHaveBeenCalled();
+  });
+
   it("delegates close, add-host, and new-shell interactions without inline forms", () => {
     const markup = renderToStaticMarkup(
       <SessionSidebar

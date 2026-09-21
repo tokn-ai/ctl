@@ -7,6 +7,7 @@ import {
 } from "../../features/tabs/terminalTitle";
 import type {
   ConnectionTarget,
+  HostConnectionStatus,
   ManagedTask,
   SessionSummary,
   ShellStateSummary,
@@ -24,6 +25,7 @@ interface SessionSidebarProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
   targetErrors: ReadonlyMap<string, string>;
+  hostConnections?: ReadonlyMap<string, HostConnectionStatus>;
   sessions: SessionSummary[];
   interactiveTasks?: ManagedTask[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
@@ -43,6 +45,7 @@ interface SessionSidebarProps {
   onChooseHost?(): void;
   onHostSettings?(target: ConnectionTarget): void;
   onConnectHost(target: ConnectionTarget): void;
+  onDisconnectHost?(target: ConnectionTarget): void;
   onRemoveHost(target: ConnectionTarget): void;
   onPortForward?(target: ConnectionTarget): void;
   onAddExisting(): void;
@@ -101,6 +104,7 @@ export function SessionSidebar({
   targets,
   hosts = [],
   targetErrors,
+  hostConnections,
   sessions,
   interactiveTasks = [],
   shellStates,
@@ -120,6 +124,7 @@ export function SessionSidebar({
   onChooseHost,
   onHostSettings,
   onConnectHost,
+  onDisconnectHost,
   onRemoveHost,
   onPortForward,
   onAddExisting,
@@ -272,6 +277,33 @@ export function SessionSidebar({
           const childrenId = `${groupId}-${encodeURIComponent(key)}`;
           const host = hosts.find((item) => item.host_id === (target.kind === "local" ? "local" : target.host_id));
           const hostError = targetErrors.get(key) ?? (target.kind === "ssh" ? target.unavailable : undefined);
+          const connection = target.kind === "ssh"
+            ? hostConnections?.get(target.host_id ?? "")
+            : undefined;
+          const unavailable = target.kind === "ssh" ? target.unavailable : undefined;
+          const connectionState = unavailable ? "error" : connection?.state ?? "checking";
+          const connectionLabel = unavailable ? "Unavailable" : {
+            checking: "Checking…",
+            connected: "Connected",
+            connecting: "Connecting…",
+            disconnecting: "Disconnecting…",
+            disconnected: "Disconnected",
+            error: "Connection error",
+          }[connectionState];
+          const connectionTitle = [
+            connectionLabel,
+            connection?.method_names.length
+              ? `Connection methods: ${connection.method_names.join(", ")}`
+              : null,
+            unavailable ?? connection?.message,
+          ].filter(Boolean).join("\n");
+          const connectionBusy = connection?.state === "connecting" ||
+            connection?.state === "disconnecting";
+          const showDisconnect = onDisconnectHost && (
+            connection?.state === "connected" ||
+            connection?.state === "disconnecting" ||
+            (connection?.state === "error" && connection.method_names.length > 0)
+          );
           return (
             <section
               className="session-group host-group"
@@ -303,6 +335,18 @@ export function SessionSidebar({
                   <span className="host-group-count">{groupSessions.length}</span>
                 </button>
                 {target.kind === "ssh" ? (
+                  <span
+                    className="host-connection-status"
+                    role="status"
+                    aria-label={`Host connection for ${targetLabel(target)}: ${connectionLabel}`}
+                    data-state={connectionState}
+                    title={connectionTitle}
+                  >
+                    <span className="host-connection-dot" aria-hidden="true" />
+                    <span>{connectionLabel}</span>
+                  </span>
+                ) : null}
+                {target.kind === "ssh" ? (
                   <div className="host-group-actions">
                     {onHostSettings ? (
                       <button
@@ -316,16 +360,29 @@ export function SessionSidebar({
                         <Icon name="settings" size={14} />
                       </button>
                     ) : null}
-                    <button
-                      className="session-action"
-                      type="button"
-                      onClick={() => onConnectHost(target)}
-                      disabled={Boolean(target.unavailable)}
-                      aria-label={`Connect to ${targetLabel(target)}`}
-                      title={`Connect to ${hostTitle(target)}`}
-                    >
-                      <Icon name="plug" size={14} />
-                    </button>
+                    {showDisconnect ? (
+                      <button
+                        className="session-action"
+                        type="button"
+                        onClick={() => onDisconnectHost?.(target)}
+                        disabled={connectionBusy}
+                        aria-label={`Disconnect host ${targetLabel(target)}`}
+                        title="Close the shared SSH connection and pause forwards. Remote sessions keep running."
+                      >
+                        <Icon name="unplug" size={14} />
+                      </button>
+                    ) : (
+                      <button
+                        className="session-action"
+                        type="button"
+                        onClick={() => onConnectHost(target)}
+                        disabled={Boolean(target.unavailable) || connectionBusy}
+                        aria-label={`Connect to ${targetLabel(target)}`}
+                        title={`Connect to ${hostTitle(target)}`}
+                      >
+                        <Icon name="plug" size={14} />
+                      </button>
+                    )}
                     {onPortForward ? (
                       <button
                         className="session-action"

@@ -44,6 +44,7 @@ export function useWorkspace() {
   const [saving, setSaving] = useState(false);
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
+  const isClosing = useCallback(() => closingRef.current, []);
   const closeBlockedRef = useRef<() => boolean>(() => false);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(false);
@@ -300,6 +301,7 @@ export function useWorkspace() {
     ready,
     saving,
     closing,
+    isClosing,
     closeBlockedRef,
     error,
     persist,

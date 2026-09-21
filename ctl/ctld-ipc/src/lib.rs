@@ -22,9 +22,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-// Version 5 makes forward_id ownership independent of the SSH route. Clients
-// must not silently reconnect to a daemon with the former per-target registry.
-pub const PROTOCOL_VERSION: u16 = 5;
+// Version 6 adds explicit master disconnection and preserves manual pauses
+// across noninteractive status requests and forward restoration.
+pub const PROTOCOL_VERSION: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,6 +109,12 @@ pub enum ClientMessage {
   MasterStatus {
     target: SshTarget,
   },
+  ConnectionStatus {
+    target: SshTarget,
+  },
+  DisconnectMaster {
+    target: SshTarget,
+  },
   DeleteCredentials {
     target: SshTarget,
   },
@@ -140,6 +146,11 @@ pub enum ServerMessage {
     control_path: PathBuf,
   },
   AuthenticationRequired,
+  MasterDisconnected,
+  ConnectionStatus {
+    connected: bool,
+    manually_disconnected: bool,
+  },
   AskpassResponse {
     response: Option<Zeroizing<String>>,
   },

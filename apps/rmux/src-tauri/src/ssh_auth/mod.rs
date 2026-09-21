@@ -29,6 +29,7 @@ fn registry() -> &'static Mutex<Registry> {
 }
 
 struct Attempt {
+  target: ctld_ipc::SshTarget,
   cancel: watch::Sender<bool>,
   responses: Mutex<HashMap<String, oneshot::Sender<Option<Zeroizing<String>>>>>,
 }
@@ -144,6 +145,7 @@ pub async fn probe(
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
+    target: broker::broker_target(&target)?,
     cancel,
     responses: Mutex::default(),
   });
@@ -184,6 +186,7 @@ pub async fn install_agent(
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
+    target: broker::broker_target(&target)?,
     cancel,
     responses: Mutex::default(),
   });
@@ -280,6 +283,22 @@ pub fn cancel(window: &str, attempt_id: &str) {
   {
     let _ = attempt.cancel.send(true);
   }
+}
+
+pub async fn disconnect(targets: &[ConnectionTargetDto]) -> CommandResult<()> {
+  let targets_to_cancel: std::collections::HashSet<_> = targets
+    .iter()
+    .filter_map(|target| broker::broker_target(target).ok())
+    .collect();
+  {
+    let registry = registry().lock().unwrap();
+    for attempt in registry.attempts.values() {
+      if targets_to_cancel.contains(&attempt.target) {
+        let _ = attempt.cancel.send(true);
+      }
+    }
+  }
+  broker::disconnect(targets).await
 }
 
 pub fn cancel_window(window: &str) {

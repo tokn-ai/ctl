@@ -276,4 +276,129 @@ describe("port forwarding controller", () => {
     expect(configurePortForward).not.toHaveBeenCalled();
     expect(listPortForwards).not.toHaveBeenCalled();
   });
+
+  it("pauses active forwards without changing saved preferences and resumes them after connecting", async () => {
+    const update = vi.fn();
+    const { result } = renderHook(() =>
+      usePortForwarding(false, [target], [forward], update));
+    await act(async () => result.current.refreshTarget(target));
+    expect(result.current.statuses.get(forward.forward_id)?.state).toBe("active");
+
+    await act(async () => result.current.pauseHost(target.host_id!));
+    expect(result.current.statuses.get(forward.forward_id)).toMatchObject({
+      state: "waiting_for_authentication",
+      message: "Host disconnected. Connect this host to resume forwarding.",
+    });
+    vi.mocked(configurePortForward).mockClear();
+    vi.mocked(listPortForwards).mockClear();
+    await act(async () => {
+      await result.current.refreshAll();
+      await result.current.refreshTarget(target);
+    });
+    expect(configurePortForward).not.toHaveBeenCalled();
+    expect(listPortForwards).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+
+    await act(async () => {
+      result.current.resumeHost(target.host_id!);
+      await result.current.refreshTarget(target);
+    });
+    expect(configurePortForward).toHaveBeenCalledExactlyOnceWith(target, forward, true);
+    expect(result.current.statuses.get(forward.forward_id)?.state).toBe("active");
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("does not restore a manually paused host when workspace startup finishes", async () => {
+    const { result, rerender } = renderHook(({ ready }) =>
+      usePortForwarding(ready, [target], [forward], vi.fn()),
+    { initialProps: { ready: false } });
+    await act(async () => result.current.pauseHost(target.host_id!));
+
+    rerender({ ready: true });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(configurePortForward).not.toHaveBeenCalled();
+    expect(listPortForwards).not.toHaveBeenCalled();
+    expect(result.current.statuses.get(forward.forward_id)?.state).toBe("waiting_for_authentication");
+  });
+
+  it("invalidates pending enables and queued refreshes, waiting for cleanup before disconnect", async () => {
+    const enabling = deferred<PortForwardStatus>();
+    const cleanup = deferred<PortForwardStatus>();
+    vi.mocked(configurePortForward)
+      .mockReturnValueOnce(enabling.promise)
+      .mockReturnValueOnce(cleanup.promise);
+    const disabled = { ...forward, enabled: false };
+    const update = vi.fn();
+    const { result } = renderHook(() =>
+      usePortForwarding(false, [target], [disabled], update));
+    let enable!: Promise<void>;
+    let refresh!: Promise<void>;
+    act(() => {
+      enable = result.current.setEnabled(target, disabled, true);
+      refresh = result.current.refreshTarget(target);
+    });
+    await waitFor(() => expect(configurePortForward).toHaveBeenCalledOnce());
+    const disconnected = vi.fn();
+    let pause!: Promise<void>;
+    act(() => { pause = result.current.pauseHost(target.host_id!).then(disconnected); });
+    await act(async () => { enabling.resolve(active); });
+    await waitFor(() => expect(configurePortForward).toHaveBeenCalledTimes(2));
+    expect(configurePortForward).toHaveBeenLastCalledWith(target, disabled, false);
+    expect(disconnected).not.toHaveBeenCalled();
+
+    await act(async () => {
+      cleanup.resolve(active);
+      await Promise.all([enable, refresh, pause]);
+    });
+    expect(disconnected).toHaveBeenCalledOnce();
+    expect(update).not.toHaveBeenCalled();
+    expect(listPortForwards).not.toHaveBeenCalled();
+    expect(result.current.busy.size).toBe(0);
+    expect(result.current.statuses.size).toBe(0);
+  });
+
+  it("rejects enabling while paused but allows an explicit disable preference to be saved", async () => {
+    const disabling = deferred<PortForwardStatus>();
+    vi.mocked(configurePortForward).mockReturnValueOnce(disabling.promise);
+    const update = vi.fn();
+    const { result } = renderHook(() =>
+      usePortForwarding(false, [target], [forward], update));
+    await act(async () => result.current.pauseHost(target.host_id!));
+    await act(async () => {
+      await expect(result.current.setEnabled(target, forward, true))
+        .rejects.toThrow("Connect this host before starting forwards.");
+    });
+    expect(configurePortForward).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+
+    let disable!: Promise<void>;
+    act(() => { disable = result.current.setEnabled(target, forward, false); });
+    await waitFor(() => expect(configurePortForward).toHaveBeenCalledOnce());
+    let repeatedPause!: Promise<void>;
+    act(() => { repeatedPause = result.current.pauseHost(target.host_id!); });
+    await act(async () => {
+      disabling.resolve(active);
+      await Promise.all([disable, repeatedPause]);
+    });
+    expect(configurePortForward).toHaveBeenCalledExactlyOnceWith(target, forward, false);
+    expect(update).toHaveBeenCalledOnce();
+    expect(update.mock.calls[0][0]([forward])[0].enabled).toBe(false);
+  });
+
+  it("discards a late active status response after the host is paused", async () => {
+    const pendingList = deferred<PortForwardStatus[]>();
+    vi.mocked(listPortForwards).mockReturnValueOnce(pendingList.promise);
+    const { result } = renderHook(() =>
+      usePortForwarding(false, [target], [forward], vi.fn()));
+    let refresh!: Promise<void>;
+    act(() => { refresh = result.current.refreshTarget(target); });
+    await waitFor(() => expect(listPortForwards).toHaveBeenCalledOnce());
+    let pause!: Promise<void>;
+    act(() => { pause = result.current.pauseHost(target.host_id!); });
+    await act(async () => {
+      pendingList.resolve([active]);
+      await Promise.all([refresh, pause]);
+    });
+    expect(result.current.statuses.get(forward.forward_id)?.state).toBe("waiting_for_authentication");
+  });
 });

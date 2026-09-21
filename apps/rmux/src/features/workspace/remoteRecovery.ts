@@ -5,7 +5,7 @@ import type {
   SshConnectionTarget,
 } from "../../lib/types";
 import { targetKey } from "../targets/targets";
-import { expectedHostIdentity, type WorkspaceView } from "./workspaceModel";
+import { connectionSettings, expectedHostIdentity, promoteHost, type WorkspaceView } from "./workspaceModel";
 
 export function sameSshEndpoint(
   left: ConnectionTarget,
@@ -39,7 +39,7 @@ export function remapStateKeys<T>(
   return next;
 }
 
-/** Explicitly connect one saved host; verifying an address never merges hosts. */
+/** Explicitly connect one host; verifying an address never merges hosts. */
 export function recoverRemoteHost(
   view: WorkspaceView,
   candidate: SshConnectionTarget,
@@ -58,6 +58,19 @@ export function recoverRemoteHost(
   if (!method)
     throw new Error("This connection method is no longer saved on the host.");
   if (method.target.unavailable) throw new Error(method.target.unavailable);
+  const save_ssh_user = host.source === "tailscale" && Boolean(candidate.user?.trim()) &&
+    candidate.user !== method.target.user;
+  const recovered_host = {
+    ...(save_ssh_user ? promoteHost(host) : host),
+    remote_info,
+    ...(host.expected_remote_info ? { expected_remote_info: remote_info } : {}),
+    ...(save_ssh_user ? {
+      connection_methods: host.connection_methods.map((item) => item.method_id === method_id ? {
+        ...item,
+        target: connectionSettings(candidate),
+      } : item),
+    } : {}),
+  };
   const target: SshConnectionTarget = {
     ...candidate,
     host_name: host.name,
@@ -71,11 +84,7 @@ export function recoverRemoteHost(
     key_changes: new Map<string, string>(),
     view: {
       ...view,
-      hosts: view.hosts.map((item) => item.host_id === host.host_id ? {
-        ...item,
-        remote_info,
-        ...(item.expected_remote_info ? { expected_remote_info: remote_info } : {}),
-      } : item),
+      hosts: view.hosts.map((item) => item.host_id === host.host_id ? recovered_host : item),
       targets: view.targets.map((item) => targetKey(item) === targetKey(target) ? target : item),
       sessions: view.sessions.map(remap),
       tabs: view.tabs.map(remap),

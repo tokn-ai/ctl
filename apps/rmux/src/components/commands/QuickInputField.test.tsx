@@ -227,4 +227,20 @@ describe("quick-input suggestions", () => {
     await userEvent.setup().keyboard("{ArrowDown}{Enter}");
     expect(submit).toHaveBeenCalledExactlyOnceWith("ssh-config:rmux-test");
   });
+
+  it("filters discovered hosts by their detail and submits the stable suggestion ID", async () => {
+    const submit = vi.fn();
+    render(<QuickInput title="Host" mode={{
+      kind: "input", label: "Host", suggestions: {
+        label: "Discovered hosts",
+        items: [{ id: "tailscale:n123", label: "Builder", detail: "Online · linux · 100.64.0.2", group: "Tailscale · Virtual" }],
+      },
+    }} onSubmit={submit} onCancel={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("combobox"), "100.64.0.2");
+    expect(screen.getByRole("option", { name: /Builder.*Online · linux · 100.64.0.2/ })).toBeTruthy();
+    expect(submit).not.toHaveBeenCalled();
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(submit).toHaveBeenCalledExactlyOnceWith("tailscale:n123");
+  });
 });

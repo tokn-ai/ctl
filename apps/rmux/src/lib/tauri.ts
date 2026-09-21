@@ -17,6 +17,7 @@ import type {
   SessionListResponse,
   SessionSummary,
   SshConfigHostCatalog,
+  TailscaleDeviceCatalog,
   SshHostDefinition,
   SshIdentityFileCatalog,
   SshPrompt,
@@ -239,6 +240,10 @@ export async function inspectKnownSessions(
 
 export async function listSshConfigHosts(): Promise<SshConfigHostCatalog> {
   return invoke<SshConfigHostCatalog>("list_ssh_config_hosts");
+}
+
+export async function listTailscaleDevices(): Promise<TailscaleDeviceCatalog> {
+  return invoke<TailscaleDeviceCatalog>("list_tailscale_devices");
 }
 
 export async function listSshIdentityFiles(): Promise<SshIdentityFileCatalog> {

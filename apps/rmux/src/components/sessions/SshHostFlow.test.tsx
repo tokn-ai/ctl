@@ -13,9 +13,13 @@ import {
   respondSshPrompt,
   saveSshConfigHost,
 } from "../../lib/tauri";
-import type { RemoteAgentInstallProgress, SshPrompt } from "../../lib/types";
+import type { RemoteAgentInstallProgress, SshPrompt, TailscaleDevice } from "../../lib/types";
 
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
+const tailscaleDevice: TailscaleDevice = {
+  node_id: "n123", name: "Builder", dns_name: "builder.tailnet.ts.net",
+  addresses: ["100.64.0.2"], online: true, os: "linux",
+};
 
 vi.mock("../../lib/tauri", () => ({
   probeSshHost: vi.fn(),
@@ -66,13 +70,13 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
   );
 }
 
-function setupNewHost(suggestions: string[] = []) {
+function setupNewHost(suggestions: string[] = [], tailscaleDevices: TailscaleDevice[] = []) {
   const save = vi.fn(async (_name: string, _target: unknown, _remote_info: unknown) => undefined);
   const close = vi.fn();
   const recover = vi.fn();
   render(
     <StrictMode>
-      <SshHostFlow suggestions={suggestions} warning={null}
+      <SshHostFlow suggestions={suggestions} tailscaleDevices={tailscaleDevices} warning={null}
         onSaveNewHost={save} onVerified={recover} onClose={close} />
     </StrictMode>,
   );
@@ -86,6 +90,66 @@ async function newHostDetails(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("SSH host quick-input flow", () => {
+  it.each([false, true])("chooses the SSH account before verifying a new Tailscale target (autoConnect=%s)", async (autoConnect) => {
+    const target = {
+      kind: "ssh" as const, host_id: "tailscale:n123", host_name: "Builder", method_id: "tailscale", tailscale_node_id: "n123",
+      destination: "builder.tailnet.ts.net", hostname: "100.64.0.2",
+    };
+    const onConnected = vi.fn();
+    const onVerified = vi.fn(async () => null);
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} autoConnect={autoConnect}
+      onVerified={onVerified} onConnected={onConnected} onClose={vi.fn()} /></StrictMode>);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole("textbox", { name: "SSH user" })).toHaveProperty("value", "");
+    expect(screen.getByText(/Choosing an account saves this host customization/)).toBeTruthy();
+    expect(probeSshHost).not.toHaveBeenCalled();
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "SSH user" }), "deploy");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    const candidate = { ...target, user: "deploy" };
+    await waitFor(() => expect(onConnected).toHaveBeenCalledExactlyOnceWith(candidate));
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(candidate, expect.any(String), expect.any(Function));
+    expect(onVerified).toHaveBeenCalledExactlyOnceWith(candidate, remoteInfo);
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("allows the SSH default for a new Tailscale target without persisting an explicit account", async () => {
+    const target = { kind: "ssh" as const, host_id: "tailscale:n123", tailscale_node_id: "n123", destination: "builder.tailnet.ts.net" };
+    const onVerified = vi.fn(async () => null);
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
+      onVerified={onVerified} onClose={vi.fn()} />);
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(onVerified).toHaveBeenCalledExactlyOnceWith(target, remoteInfo));
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
+  });
+
+  it.each([{ user: "deploy" }, { remote_info: remoteInfo }])("reuses a known Tailscale account without asking again (%j)", async (known) => {
+    const target = { kind: "ssh" as const, tailscale_node_id: "n123", destination: "builder.tailnet.ts.net", ...known };
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onClose={vi.fn()} /></StrictMode>);
+    expect(screen.queryByRole("textbox", { name: "SSH user" })).toBeNull();
+    await waitFor(() => expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function)));
+  });
+
+  it("can correct the chosen Tailscale account after failed verification", async () => {
+    const target = { kind: "ssh" as const, tailscale_node_id: "n123", destination: "builder.tailnet.ts.net" };
+    vi.mocked(probeSshHost).mockRejectedValueOnce(new Error("Unknown SSH user")).mockResolvedValueOnce(remoteInfo);
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "SSH user" }), "wrong{Enter}");
+    expect(await screen.findByText("Unknown SSH user")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    expect(screen.getByRole("textbox", { name: "SSH user" })).toHaveProperty("value", "wrong");
+    await user.clear(screen.getByRole("textbox", { name: "SSH user" }));
+    await user.type(screen.getByRole("textbox", { name: "SSH user" }), "deploy{Enter}");
+    await waitFor(() => expect(probeSshHost).toHaveBeenCalledTimes(2));
+    expect(probeSshHost).toHaveBeenNthCalledWith(2, { ...target, user: "deploy" }, expect.any(String), expect.any(Function));
+  });
+
   it("automatically verifies a selected target once in StrictMode and returns the verified target", async () => {
     const target = { kind: "ssh" as const, host_id: "build", destination: "build-alias", method_id: "ssh_config" };
     const verified = { ...target, remote_info: remoteInfo };
@@ -204,6 +268,89 @@ describe("SSH host quick-input flow", () => {
       kind: "ssh", destination: "build-alias", identity_file: "~/.ssh/office",
     }, remoteInfo));
     expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("names a virtual Tailscale device before authentication and retains its binding through key selection and retries", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce(new Error("Key unavailable")).mockResolvedValueOnce(remoteInfo);
+    const { user, save, close } = setupNewHost(["office"], [tailscaleDevice]);
+    expect(screen.getByRole("group", { name: "SSH config · Virtual" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Tailscale · Virtual" })).toBeTruthy();
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: /Builder.*Online · linux · builder.tailnet.ts.net/ }));
+    expect(screen.getByLabelText("Host name")).toHaveProperty("value", "Builder");
+    await user.clear(screen.getByLabelText("Host name"));
+    await user.type(screen.getByLabelText("Host name"), "Home builder{Enter}");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "SSH user" })).toHaveProperty("value", "");
+    await user.type(screen.getByRole("textbox", { name: "SSH user" }), "deploy{Enter}");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: /Identity file/ }));
+    await user.type(screen.getByRole("combobox", { name: "Identity file" }), "~/.ssh/home{Enter}");
+    expect(await screen.findByText("Key unavailable")).toBeTruthy();
+    const candidate = {
+      kind: "ssh", host_id: "tailscale:n123", host_name: "Builder", method_id: "tailscale", tailscale_node_id: "n123",
+      destination: "builder.tailnet.ts.net", hostname: "100.64.0.2", identity_file: "~/.ssh/home",
+      user: "deploy",
+    };
+    expect(probeSshHost).toHaveBeenNthCalledWith(1, candidate, expect.any(String), expect.any(Function));
+    expect(save).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Home builder", candidate, remoteInfo));
+    expect(probeSshHost).toHaveBeenNthCalledWith(2, candidate, expect.any(String), expect.any(Function));
+    expect(close).toHaveBeenCalledOnce();
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("clears a selected provider binding when replacing it with a manually entered host", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const { user, save } = setupNewHost([], [tailscaleDevice]);
+    await user.click(screen.getByRole("option", { name: /Builder/ }));
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    await user.clear(screen.getByLabelText("SSH host"));
+    await user.type(screen.getByLabelText("SSH host"), "deploy@10.0.0.8{Enter}");
+    await user.type(screen.getByLabelText("Host name"), "{Enter}");
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0][1]).toEqual({ kind: "ssh", destination: "10.0.0.8", hostname: "10.0.0.8", user: "deploy" });
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("keeps manual host input and SSH config available while hiding stale Tailscale devices during discovery", async () => {
+    render(<SshHostFlow suggestions={["office"]} tailscaleDevices={[tailscaleDevice]} discoveryLoading warning={null}
+      onSaveNewHost={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByRole("status").textContent).toContain("Discovering hosts");
+    expect(screen.getByRole("option", { name: "office" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Tailscale · Virtual" })).toBeNull();
+    expect(screen.queryByRole("option", { name: /Builder/ })).toBeNull();
+    await userEvent.setup().type(screen.getByLabelText("SSH host"), "10.0.0.8{Enter}");
+    expect(screen.getByLabelText("Host name")).toHaveProperty("value", "10.0.0.8");
+    expect(probeSshHost).not.toHaveBeenCalled();
+  });
+
+  it("only offers online Tailscale devices after discovery completes", () => {
+    const devices: TailscaleDevice[] = [
+      tailscaleDevice,
+      { ...tailscaleDevice, node_id: "offline", name: "Offline builder", online: false },
+      { ...tailscaleDevice, node_id: "unknown", name: "Unknown builder", online: null },
+    ];
+    const props = { suggestions: [], tailscaleDevices: devices, warning: null, onSaveNewHost: vi.fn(), onClose: vi.fn() };
+    const { rerender } = render(<SshHostFlow {...props} discoveryLoading />);
+    expect(screen.queryByRole("group", { name: "Tailscale · Virtual" })).toBeNull();
+    rerender(<SshHostFlow {...props} discoveryLoading={false} />);
+    expect(screen.getByRole("option", { name: /Builder.*Online/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Offline builder/ })).toBeNull();
+    expect(screen.queryByRole("option", { name: /Unknown builder/ })).toBeNull();
+  });
+
+  it.each([false, true])("rejects a stale virtual device selection while discoveryLoading=%s", async (discoveryLoading) => {
+    render(<SshHostFlow suggestions={[]} tailscaleDevices={[{ ...tailscaleDevice, online: false }]} discoveryLoading={discoveryLoading}
+      warning={null} onSaveNewHost={vi.fn()} onClose={vi.fn()} />);
+    await userEvent.setup().type(screen.getByLabelText("SSH host"), "tailscale:n123{Enter}");
+    expect(screen.getByText(discoveryLoading
+      ? "Wait for Tailscale discovery to finish before choosing a device."
+      : "This Tailscale device is no longer online. Choose another host.")).toBeTruthy();
+    expect(screen.queryByLabelText("Host name")).toBeNull();
+    expect(probeSshHost).not.toHaveBeenCalled();
   });
 
   it("retries verification with the same named host after a connection failure", async () => {
@@ -358,6 +505,28 @@ describe("SSH host quick-input flow", () => {
       gateway_route: [{ gateway_id: "edge", mode: "native_only" }],
       gateways: [expect.objectContaining({ destination: "edge.example", mode: "native_only" })],
     }), expect.any(Array), remoteInfo);
+  });
+
+  it.each([
+    ["deploy@100.64.0.2:2222", "n123"],
+    ["deploy@10.0.0.8:2222", undefined],
+  ])("retains a Tailscale node binding only while editing the same endpoint (%s)", async (address, nodeId) => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async (_target: unknown, _gateways: unknown, _identity: unknown) => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null} expectedIdentity={remoteInfo}
+      initialTarget={{ kind: "ssh", destination: "builder.tailnet.ts.net", hostname: "100.64.0.2", tailscale_node_id: "n123" }}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.clear(screen.getByLabelText("SSH host or config alias"));
+    await user.type(screen.getByLabelText("SSH host or config alias"), address);
+    await user.type(screen.getByLabelText("Identity file (optional)"), "~/.ssh/deploy");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    expect(onSaveConnection.mock.calls[0][0]).toMatchObject({ user: "deploy", port: 2222, identity_file: "~/.ssh/deploy" });
+    expect(onSaveConnection.mock.calls[0][0]).toHaveProperty("hostname", address.includes("10.0.0.8") ? "10.0.0.8" : "100.64.0.2");
+    expect((onSaveConnection.mock.calls[0][0] as { tailscale_node_id?: string }).tailscale_node_id).toBe(nodeId);
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
   });
 
   it("rejects methods that verify as another remote environment and preserves the draft", async () => {

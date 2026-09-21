@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
 import { remoteInstallProgressMode } from "./remoteInstallProgress";
 import { GatewayRouteDialog } from "./GatewayRouteDialog";
-import { VIRTUAL_SSH_GROUP } from "./hostChoices";
-import { resolveSshGateways } from "../../features/workspace/workspaceModel";
+import { tailscaleDeviceDetail, VIRTUAL_SSH_GROUP, VIRTUAL_TAILSCALE_GROUP } from "./hostChoices";
+import { resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
@@ -30,10 +30,13 @@ import type {
   SshGatewayRouteStep,
   WorkspaceSshGateway,
   HostConnectionChange,
+  TailscaleDevice,
 } from "../../lib/types";
 
 interface SshHostFlowProps {
   suggestions: readonly string[];
+  tailscaleDevices?: readonly TailscaleDevice[];
+  discoveryLoading?: boolean;
   warning: string | null;
   target?: ConnectionTarget;
   /** Begin verification on mount when a target was already selected. */
@@ -80,6 +83,7 @@ interface SshHostFlowProps {
 type Step =
   | "host"
   | "name"
+  | "ssh_user"
   | "route"
   | "auth"
   | "identity"
@@ -93,6 +97,8 @@ type Step =
 
 export function SshHostFlow({
   suggestions,
+  tailscaleDevices = [],
+  discoveryLoading = false,
   warning,
   target,
   autoConnect = false,
@@ -112,8 +118,11 @@ export function SshHostFlow({
   onClose,
 }: SshHostFlowProps) {
   const editingConnection = Boolean(onSaveConnection);
+  const availableTailscaleDevices = discoveryLoading ? [] : tailscaleDevices.filter((device) => device.online === true);
+  const needsSshUser = target?.kind === "ssh" && Boolean(target.tailscale_node_id) && !target.remote_info && !target.user;
   const [step, setStep] = useState<Step>(() => {
     if (updateRequired) return "update";
+    if (needsSshUser) return "ssh_user";
     if (target) return autoConnect ? "progress" : "reconnect";
     return complex || editingConnection ? "route" : "host";
   });
@@ -146,6 +155,7 @@ export function SshHostFlow({
   const [needsUpdate, setNeedsUpdate] = useState(updateRequired);
   const candidateRef = useRef<ConnectionTarget | null>(target ?? null);
   const configuredRef = useRef(false);
+  const selectedProviderTargetRef = useRef<SshConnectionTarget | null>(null);
   const closedRef = useRef(false);
   const uncommittedTargetRef = useRef<ConnectionTarget | null>(null);
 
@@ -165,7 +175,7 @@ export function SshHostFlow({
   useEffect(() => {
     closedRef.current = false;
     let mounted = true;
-    if (autoConnect && target && !updateRequired) {
+    if (autoConnect && target && !updateRequired && !needsSshUser) {
       // Wait for StrictMode's setup/cleanup replay before starting one probe.
       void Promise.resolve().then(() => {
         if (mounted && !closedRef.current) void connect(target);
@@ -252,7 +262,7 @@ export function SshHostFlow({
         onClose();
       } else if (recovered || target) {
         uncommittedTargetRef.current = null;
-        onConnected?.(recovered ?? target!);
+        onConnected?.(recovered ?? candidate);
         onClose();
       } else if (configuredRef.current && candidate.kind === "ssh") {
         if (!(await onActivateHost?.(candidate.destination, remote_info)))
@@ -315,10 +325,13 @@ export function SshHostFlow({
   }
 
   function connectDefinition(next = definition) {
-    const candidate = onSaveNewHost && configuredRef.current
-      ? configuredSshTarget(address)
-      : appLocalSshTarget(next);
-    if (candidate && onSaveNewHost && configuredRef.current && next.identity_file) {
+    const selected = selectedProviderTargetRef.current;
+    const candidate = selected
+      ? { ...selected }
+      : onSaveNewHost && configuredRef.current
+        ? configuredSshTarget(address)
+        : appLocalSshTarget(next);
+    if (candidate && (selected || onSaveNewHost && configuredRef.current) && next.identity_file) {
       candidate.identity_file = next.identity_file;
     }
     if (candidate) void connect(candidate);
@@ -358,7 +371,8 @@ export function SshHostFlow({
       return {
         ...target,
         ...(initialTarget && !initialTarget.hostname && destination === initialTarget.destination
-          ? { user: initialTarget.user, port: initialTarget.port }
+          ? { user: initialTarget.user, port: initialTarget.port,
+            ...(initialTarget.tailscale_node_id ? { tailscale_node_id: initialTarget.tailscale_node_id } : {}) }
           : {}),
         ...(identity_file ? { identity_file } : {}),
       };
@@ -379,6 +393,9 @@ export function SshHostFlow({
       identity_file: identity_file || null,
     });
     if (!target) throw new Error("Enter valid SSH host settings.");
+    if (initialTarget?.tailscale_node_id && parsed.hostname === (initialTarget.hostname ?? initialTarget.destination)) {
+      target.tailscale_node_id = initialTarget.tailscale_node_id;
+    }
     return target;
   }
 
@@ -483,30 +500,40 @@ export function SshHostFlow({
     case "host":
       title = "Add host · 1/3";
       description =
-        "Enter [user@]hostname[:port], or choose an SSH config host." +
+        "Enter [user@]hostname[:port], or choose a discovered host." +
         (warning ? `\n${warning}` : "");
       mode = {
         kind: "input",
         label: "SSH host",
         placeholder: "rmux@127.0.0.1:2222",
         initial_value: address,
-        suggestions: suggestions.length
+        suggestions: suggestions.length || availableTailscaleDevices.length || discoveryLoading
           ? {
-              label: "SSH config hosts",
-              items: suggestions.map((host) => ({
-                id: `ssh-config:${host}`,
-                label: host,
-                group: VIRTUAL_SSH_GROUP,
-              })),
+              label: "Discovered hosts",
+              items: [
+                ...suggestions.map((host) => ({
+                  id: `ssh-config:${host}`,
+                  label: host,
+                  group: VIRTUAL_SSH_GROUP,
+                })),
+                ...availableTailscaleDevices.map((device) => ({
+                  id: `tailscale:${device.node_id}`,
+                  label: device.name,
+                  detail: tailscaleDeviceDetail(device),
+                  group: VIRTUAL_TAILSCALE_GROUP,
+                })),
+              ],
+              loading: discoveryLoading,
+              loading_message: "Discovering hosts…",
               empty_message: "Enter a hostname to add a new host.",
               no_match_message:
-                "No matching SSH config hosts. Enter a hostname to add a new host.",
+                "No matching discovered hosts. Enter a hostname to add a new host.",
             }
           : undefined,
       };
       break;
     case "name":
-      title = "Host name · 2/3";
+      title = selectedProviderTargetRef.current ? "Host name · 2/4" : "Host name · 2/3";
       mode = {
         kind: "input",
         label: onSaveNewHost ? "Host name" : "Name / SSH alias",
@@ -514,8 +541,21 @@ export function SshHostFlow({
       };
       onBack = back("host");
       break;
+    case "ssh_user":
+      title = target ? "SSH user" : "SSH user · 3/4";
+      description = "Choose the SSH account on this Tailscale device. Leave blank to use your SSH default." +
+        (target ? " Choosing an account saves this host customization in rmux after verification." : "");
+      mode = {
+        kind: "input",
+        label: "SSH user",
+        placeholder: "SSH default",
+        initial_value: target && candidateRef.current?.kind === "ssh" ? candidateRef.current.user ?? "" : definition.user ?? "",
+        submit_label: target ? "Connect" : "Continue",
+      };
+      if (!target) onBack = back("name");
+      break;
     case "auth":
-      title = "Authentication · 3/3";
+      title = selectedProviderTargetRef.current ? "Authentication · 4/4" : "Authentication · 3/3";
       description =
         "OpenSSH authenticates this host. On macOS, you can choose whether to save a verified password or key passphrase in Keychain for Touch ID access.";
       mode = {
@@ -538,7 +578,7 @@ export function SshHostFlow({
           },
         ],
       };
-      onBack = back("name");
+      onBack = back(selectedProviderTargetRef.current ? "ssh_user" : "name");
       break;
     case "identity":
       title = "Identity file";
@@ -624,7 +664,8 @@ export function SshHostFlow({
           ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
         ],
       };
-      if (!target) onBack = back(complex || editingConnection ? "route" : configuredRef.current && !onSaveNewHost ? "host" : "auth");
+      if (target && needsSshUser) onBack = back("ssh_user");
+      else if (!target) onBack = back(complex || editingConnection ? "route" : configuredRef.current && !onSaveNewHost ? "host" : "auth");
       break;
     case "installing":
       title = "Installing remote components";
@@ -639,12 +680,41 @@ export function SshHostFlow({
   function submit(value: string) {
     setError(null);
     if (step === "host") {
+      const selectedDevice = availableTailscaleDevices.find((device) => value === `tailscale:${device.node_id}`);
+      if (selectedDevice) {
+        const candidate = tailscaleTarget(selectedDevice);
+        if (candidate.unavailable) {
+          setError(candidate.unavailable);
+          return;
+        }
+        selectedProviderTargetRef.current = candidate;
+        configuredRef.current = false;
+        candidateRef.current = candidate;
+        setAddress(candidate.destination);
+        setHostName(selectedDevice.name);
+        setDefinition({
+          alias: candidate.destination,
+          hostname: candidate.hostname ?? candidate.destination,
+          user: candidate.user ?? null,
+          port: candidate.port ?? null,
+          identity_file: candidate.identity_file ?? null,
+        });
+        setStep("name");
+        return;
+      }
+      if (value.startsWith("tailscale:")) {
+        setError(discoveryLoading
+          ? "Wait for Tailscale discovery to finish before choosing a device."
+          : "This Tailscale device is no longer online. Choose another host.");
+        return;
+      }
       const selectedAlias = value.startsWith("ssh-config:")
         ? value.slice("ssh-config:".length)
         : onSaveNewHost && suggestions.includes(value.trim()) ? value.trim() : null;
       if (selectedAlias) {
         const candidate = configuredSshTarget(selectedAlias);
         if (candidate) {
+          selectedProviderTargetRef.current = null;
           configuredRef.current = true;
           candidateRef.current = candidate;
           if (onSaveNewHost) {
@@ -666,6 +736,7 @@ export function SshHostFlow({
         return;
       }
       configuredRef.current = false;
+      selectedProviderTargetRef.current = null;
       setAddress(value);
       setHostName(parsed.hostname);
       setDefinition({ ...parsed, alias: parsed.hostname, identity_file: null });
@@ -684,7 +755,24 @@ export function SshHostFlow({
       } else {
         setDefinition((current) => ({ ...current, alias }));
       }
-      setStep("auth");
+      setStep(selectedProviderTargetRef.current ? "ssh_user" : "auth");
+    } else if (step === "ssh_user") {
+      const user = value.trim();
+      if (user && !/^[a-zA-Z0-9_.-]+$/u.test(user)) {
+        setError("Enter an SSH user without spaces, or leave blank to use your SSH default.");
+        return;
+      }
+      const selected = target ? candidateRef.current : selectedProviderTargetRef.current;
+      if (selected?.kind !== "ssh") return;
+      const { user: _previousUser, ...candidate } = selected;
+      const next = { ...candidate, ...(user ? { user } : {}) };
+      if (target) {
+        void connect(next);
+      } else {
+        selectedProviderTargetRef.current = next;
+        setDefinition((current) => ({ ...current, user: user || null }));
+        setStep("auth");
+      }
     } else if (step === "auth") {
       if (value === "identity") setStep("identity");
       else {

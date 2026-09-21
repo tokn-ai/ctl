@@ -6,8 +6,8 @@ import {
   type SetStateAction,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { loadHosts, loadWorkspace, listSshConfigHosts, updateHosts, updateWorkspace } from "../../lib/tauri";
-import type { HostCatalogDocument, SshConfigHost } from "../../lib/types";
+import { loadHosts, loadWorkspace, listSshConfigHosts, listTailscaleDevices, updateHosts, updateWorkspace } from "../../lib/tauri";
+import type { HostCatalogDocument, SshConfigHost, TailscaleDeviceCatalog } from "../../lib/types";
 import { errorMessage } from "../../lib/errors";
 import {
   browserStorage,
@@ -37,6 +37,10 @@ export function useWorkspace() {
   const savedCatalogRef = useRef<HostCatalogDocument>({ schema_version: 1, hosts: [], ssh_gateways: [] });
   const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHost[]>([]);
   const [sshConfigWarning, setSshConfigWarning] = useState<string | null>(null);
+  const [tailscaleCatalog, setTailscaleCatalog] = useState<TailscaleDeviceCatalog>({ devices: [], warnings: [], state: "not_installed" });
+  const sshConfigHostsRef = useRef<SshConfigHost[]>([]);
+  const discoveryGeneration = useRef(0);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const workspaceIdRef = useRef("default");
   const [ready, setReady] = useState(false);
   const pendingWrites = useRef(0);
@@ -92,6 +96,7 @@ export function useWorkspace() {
         hostWriterRef.current = hostWriter;
         savedCatalogRef.current = savedCatalog;
         setSshConfigHosts(ssh.hosts);
+        sshConfigHostsRef.current = ssh.hosts;
         setSshConfigWarning(ssh.warnings.join("\n") || null);
         workspaceIdRef.current = snapshot.document.workspace_id;
         viewRef.current = restored;
@@ -169,25 +174,48 @@ export function useWorkspace() {
     });
   }, [queueOperation, persistCatalog, persist]);
 
-  const refreshSshConfig = useCallback(async () => {
+  const refreshDiscovery = useCallback(async (include_ssh: boolean) => {
+    const generation = ++discoveryGeneration.current;
+    setDiscoveryLoading(true);
     try {
-      const catalog = await listSshConfigHosts();
-      if (mounted.current) {
-        setSshConfigHosts(catalog.hosts);
-        setSshConfigWarning(catalog.warnings.join("\n") || null);
+      const [ssh, tailscale] = await Promise.all([
+        include_ssh ? listSshConfigHosts().catch((failure: unknown) => ({
+          hosts: sshConfigHostsRef.current, warnings: [errorMessage(failure)],
+        })) : Promise.resolve(null),
+        listTailscaleDevices().catch((failure: unknown): TailscaleDeviceCatalog => ({
+          devices: [], warnings: [`Tailscale discovery: ${errorMessage(failure)}`], state: "error",
+        })),
+      ]);
+      if (!mounted.current || generation !== discoveryGeneration.current) return;
+      if (ssh) {
+        sshConfigHostsRef.current = ssh.hosts;
+        setSshConfigHosts(ssh.hosts);
+        setSshConfigWarning(ssh.warnings.join("\n") || null);
       }
+      setTailscaleCatalog(tailscale);
       if (!writerRef.current || closingRef.current) return;
       // Keep discovery behind pending catalog commits. Removing an alias while
       // its promotion is saving must not erase the newly saved host.
       await queueOperation(async () => {
-        const next = refreshHostCatalog(viewRef.current, hostCatalogDocument(viewRef.current), catalog.hosts);
+        if (generation !== discoveryGeneration.current) return;
+        const next = refreshHostCatalog(viewRef.current, hostCatalogDocument(viewRef.current), sshConfigHostsRef.current, tailscale.devices);
         viewRef.current = next;
         if (mounted.current) setView(next);
       }, "read");
     } catch (failure) {
-      if (mounted.current) setSshConfigWarning(errorMessage(failure));
+      if (mounted.current && generation === discoveryGeneration.current)
+        setTailscaleCatalog({ devices: [], warnings: [errorMessage(failure)], state: "error" });
+    } finally {
+      if (mounted.current && generation === discoveryGeneration.current) setDiscoveryLoading(false);
     }
   }, [queueOperation]);
+
+  const refreshHostDiscovery = useCallback(() => refreshDiscovery(true), [refreshDiscovery]);
+
+  // Optional device discovery must never delay loading local work or saved hosts.
+  useEffect(() => {
+    if (ready) void refreshDiscovery(false);
+  }, [ready, refreshDiscovery]);
 
   const update = useCallback(
     <K extends keyof WorkspaceView>(
@@ -297,7 +325,11 @@ export function useWorkspace() {
     replaceView,
     sshConfigHosts,
     sshConfigWarning,
-    refreshSshConfig,
+    tailscaleDevices: tailscaleCatalog.devices,
+    tailscaleWarning: tailscaleCatalog.warnings.join("\n") || null,
+    tailscaleState: tailscaleCatalog.state,
+    discoveryLoading,
+    refreshHostDiscovery,
     ready,
     saving,
     closing,

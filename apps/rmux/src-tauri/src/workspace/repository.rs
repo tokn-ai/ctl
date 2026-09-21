@@ -411,6 +411,7 @@ fn normalize_legacy_hosts(hosts: &mut serde_json::Value) -> CommandResult<()> {
       migrated.connection_methods.push(WorkspaceConnectionMethod {
         method_id: "default".into(),
         name: "SSH".into(),
+        tailscale_node_id: None,
         target,
       });
     }

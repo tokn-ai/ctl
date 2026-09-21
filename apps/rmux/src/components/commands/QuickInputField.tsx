@@ -2,7 +2,7 @@ import { Fragment, useEffect, useId, useRef, useState, type ReactNode, type RefO
 
 export interface QuickInputSuggestions {
   label: string;
-  items: readonly { id: string; label: string; group?: string }[];
+  items: readonly { id: string; label: string; detail?: string; group?: string }[];
   loading?: boolean;
   loading_message?: string;
   empty_message?: string;
@@ -69,7 +69,7 @@ export function QuickInputField({
   const query = mode.secret ? "" : value.trim().toLowerCase();
   const items =
     suggestions?.items.filter((item) =>
-      [item.label, item.id].some((text) => text.toLowerCase().includes(query)),
+      [item.label, item.id, item.detail].some((text) => text?.toLowerCase().includes(query)),
     ) ?? [];
   const selectedIndex = items.findIndex((item) => item.id === selectedId);
   const selected = items[selectedIndex];
@@ -181,7 +181,10 @@ export function QuickInputField({
                 className={`command-palette-option ${item.id === selected?.id ? "selected" : ""}`}
                 onClick={() => onSubmit(item.id)}
               >
-                {item.label}
+                <span>
+                  {item.label}
+                  {item.detail ? <small className="quick-input-detail">{item.detail}</small> : null}
+                </span>
               </button>
             )} />
           </div>

@@ -43,6 +43,7 @@ fn host() -> WorkspaceHost {
     connection_methods: vec![WorkspaceConnectionMethod {
       method_id: "default".into(),
       name: "SSH".into(),
+      tailscale_node_id: None,
       target: ConnectionTargetDto::ssh("office"),
     }],
     preferred_method_id: Some("default".into()),
@@ -62,6 +63,54 @@ fn catalog() -> HostCatalogDocument {
   HostCatalogDocument {
     hosts: vec![host()],
     ..HostCatalogDocument::default()
+  }
+}
+
+#[test]
+fn tailscale_method_binding_round_trips_without_becoming_a_transport_setting() {
+  let fixture = Fixture::new();
+  let mut document = catalog();
+  document.hosts[0].connection_methods[0].tailscale_node_id = Some("n-stable-device".into());
+  let saved = fixture
+    .repository()
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load_hosts().unwrap(), saved);
+  let value: serde_json::Value =
+    serde_json::from_slice(&fs::read(fixture.0.join("hosts.json")).unwrap()).unwrap();
+  let method = &value["document"]["hosts"][0]["connection_methods"][0];
+  assert_eq!(method["tailscale_node_id"], "n-stable-device");
+  assert!(method["target"].get("tailscale_node_id").is_none());
+}
+
+#[test]
+fn legacy_methods_need_no_tailscale_binding_and_invalid_bindings_are_rejected() {
+  let value = serde_json::to_value(host()).unwrap();
+  assert!(
+    value["connection_methods"][0]
+      .get("tailscale_node_id")
+      .is_none()
+  );
+  let restored: WorkspaceHost = serde_json::from_value(value).unwrap();
+  assert_eq!(restored.connection_methods[0].tailscale_node_id, None);
+  for node_id in ["", "n\nbad", "n bad", "../device"] {
+    let fixture = Fixture::new();
+    let mut document = catalog();
+    document.hosts[0].connection_methods[0].tailscale_node_id = Some(node_id.into());
+    assert!(
+      fixture
+        .repository()
+        .update_hosts(UpdateHostsRequest {
+          expected_revision: None,
+          document,
+        })
+        .is_err(),
+      "accepted {node_id:?}",
+    );
+    assert!(!fixture.0.join("hosts.json").exists());
   }
 }
 

@@ -17,6 +17,7 @@ mod ssh_auth;
 mod ssh_config;
 mod ssh_identity;
 mod state;
+mod tailscale;
 mod task_definitions;
 mod tasks;
 mod transport;
@@ -71,6 +72,7 @@ pub fn run() {
       commands::inspection::inspect_known_sessions,
       commands::list_sessions,
       commands::list_ssh_config_hosts,
+      tailscale::list_tailscale_devices,
       commands::list_ssh_identity_files,
       commands::save_ssh_config_host,
       ssh_auth::commands::probe_ssh_host,

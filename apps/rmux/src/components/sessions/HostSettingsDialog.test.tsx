@@ -30,6 +30,12 @@ function setup(saved = host) {
 }
 
 describe("host settings", () => {
+  it("explains that customizing a virtual Tailscale host saves it in the host catalog", () => {
+    const { onSave } = setup({ ...host, source: "tailscale" });
+    expect(screen.getByText("Discovered from Tailscale. Customizing this virtual host saves it in hosts.json.")).toBeTruthy();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("saves names and preferred method together without connecting or changing method identities", async () => {
     const { user, onSave, onClose, onConnect } = setup();
     await user.clear(screen.getByLabelText("Host name"));

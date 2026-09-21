@@ -18,9 +18,18 @@ import type {
   LegacyWorkspaceHost,
   HostCatalogDocument,
   SshConfigHost,
+  TailscaleDevice,
   RemoteIdentity,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
+import {
+  projectedTailscaleHost,
+  resolveTailscaleMethod,
+  tailscaleNodeId,
+  TAILSCALE_UNAVAILABLE,
+} from "./tailscaleProjection";
+
+export { tailscaleHostId, tailscaleTarget } from "./tailscaleProjection";
 
 export interface WorkspaceView {
   sidebar_view: WorkspaceSidebarView;
@@ -82,12 +91,18 @@ export function hostFromTarget(target: ConnectionTarget, name?: string): Workspa
   if (target.kind === "local") return {
     host_id: "local", name: "Local", connection_methods: [], preferred_method_id: null,
   };
+  const method_id = target.tailscale_node_id ? target.method_id ?? "tailscale" : "default";
   return {
     host_id: target.host_id ?? crypto.randomUUID(),
     name: name ?? target.host_name ?? target.destination,
     remote_info: target.remote_info,
-    connection_methods: [{ method_id: "default", name: "SSH", target: connectionSettings(target) }],
-    preferred_method_id: "default",
+    connection_methods: [{
+      method_id,
+      name: target.tailscale_node_id ? "Tailscale" : "SSH",
+      target: connectionSettings(target),
+      ...(target.tailscale_node_id ? { tailscale_node_id: target.tailscale_node_id } : {}),
+    }],
+    preferred_method_id: method_id,
   };
 }
 
@@ -110,6 +125,7 @@ export function hostTarget(
     host_id: host.host_id,
     host_name: host.name,
     method_id: method.method_id,
+    ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
     remote_info: expectedHostIdentity(host),
     unavailable: method.target.unavailable ?? "This host is no longer available. Restore its saved definition before connecting.",
   };
@@ -118,12 +134,17 @@ export function hostTarget(
     host_id: host.host_id,
     host_name: host.name,
     method_id: method.method_id,
+    ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
     ...(expectedHostIdentity(host) ? { remote_info: expectedHostIdentity(host) } : {}),
   }, gateways);
 }
 
 export function expectedHostIdentity(host: WorkspaceHost): RemoteIdentity | undefined {
   return host.expected_remote_info ?? host.remote_info;
+}
+
+export function isVirtualHost(host: WorkspaceHost): boolean {
+  return host.source === "ssh_config" || host.source === "tailscale";
 }
 
 /** Discovery offers connection choices; the sidebar shows hosts already in use. */
@@ -139,7 +160,7 @@ export function workspaceSidebarTargets(view: WorkspaceView): ConnectionTarget[]
   return view.targets.filter((target) => {
     if (target.kind === "local") return true;
     const host = target.host_id ? hosts.get(target.host_id) : undefined;
-    return host?.source !== "ssh_config" || Boolean(expectedHostIdentity(host)) || referenced.has(host.host_id);
+    return !host || !isVirtualHost(host) || Boolean(expectedHostIdentity(host)) || referenced.has(host.host_id);
   });
 }
 
@@ -201,18 +222,26 @@ function composeHosts(
   document: WorkspaceDocument,
   catalog: HostCatalogDocument | undefined,
   ssh_config_hosts: readonly SshConfigHost[],
+  tailscale_devices: readonly TailscaleDevice[],
 ): WorkspaceHost[] {
   const saved = catalog?.hosts ?? (document.hosts ?? []).map(normalizeWorkspaceHost);
   const referenced = referencedHostIds(document);
   const aliases = new Set(ssh_config_hosts.map((host) => host.destination));
+  const devices = new Map(tailscale_devices.map((device) => [device.node_id, device]));
   const hosts = new Map<string, WorkspaceHost>([["local", hostFromTarget(LOCAL_TARGET)]]);
   for (const host of saved) {
     if (host.host_id === "local") continue;
     const original_alias = projectedAlias(host.host_id);
+    const { tailscale_device: _previous_device, ...saved_host } = host;
+    const device = devices.get(host.connection_methods.find((method) => method.method_id === host.preferred_method_id)?.tailscale_node_id ?? "")
+      ?? host.connection_methods.flatMap((method) => method.tailscale_node_id ? [devices.get(method.tailscale_node_id)] : []).find(Boolean);
     hosts.set(host.host_id, {
-      ...host,
+      ...saved_host,
       source: "saved",
-      connection_methods: host.connection_methods.map((method) => original_alias &&
+      ...(device ? { tailscale_device: device } : {}),
+      connection_methods: host.connection_methods.map((method) => method.tailscale_node_id
+        ? resolveTailscaleMethod(method, devices.get(method.tailscale_node_id))
+        : original_alias &&
         !aliases.has(original_alias) && method.target.destination === original_alias && !method.target.hostname
         ? { ...method, target: {
             ...method.target,
@@ -227,11 +256,18 @@ function composeHosts(
       host.connection_methods.some((method) => isPureAliasTarget(method.target, destination)))) continue;
     if (!hosts.has(projected.host_id)) hosts.set(projected.host_id, projected);
   }
+  for (const device of tailscale_devices) {
+    const projected = projectedTailscaleHost(device);
+    if (!referenced.has(projected.host_id) && saved.some((host) =>
+      host.connection_methods.some((method) => method.tailscale_node_id === device.node_id))) continue;
+    if (!hosts.has(projected.host_id)) hosts.set(projected.host_id, projected);
+  }
   for (const host_id of referenced) {
     if (hosts.has(host_id)) continue;
     const alias = projectedAlias(host_id);
-    const name = alias ?? host_id;
-    const unavailable = alias
+    const node_id = tailscaleNodeId(host_id);
+    const name = alias ?? node_id ?? host_id;
+    const unavailable = node_id ? TAILSCALE_UNAVAILABLE : alias
       ? `The SSH config alias ${alias} is missing. Restore it in ~/.ssh/config before connecting.`
       : "This saved host is missing from hosts.json. Restore its definition before connecting.";
     hosts.set(host_id, {
@@ -241,6 +277,7 @@ function composeHosts(
       preferred_method_id: "unavailable",
       connection_methods: [{
         method_id: "unavailable", name: "Unavailable",
+        ...(node_id ? { tailscale_node_id: node_id } : {}),
         target: { kind: "ssh", destination: name, unavailable },
       }],
     });
@@ -267,6 +304,7 @@ export function hostCatalogDocument(view: WorkspaceView): HostCatalogDocument {
         connection_methods: host.connection_methods.map((method) => ({
           method_id: method.method_id,
           name: method.name,
+          ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
           target: connectionSettings(method.target),
         })),
       })),
@@ -288,8 +326,9 @@ export function refreshHostCatalog(
   view: WorkspaceView,
   catalog: HostCatalogDocument,
   ssh_config_hosts: readonly SshConfigHost[],
+  tailscale_devices: readonly TailscaleDevice[] = [],
 ): WorkspaceView {
-  const restored = restoreWorkspace(workspaceDocument(view), catalog, ssh_config_hosts);
+  const restored = restoreWorkspace(workspaceDocument(view), catalog, ssh_config_hosts, tailscale_devices);
   const previousHosts = new Map(view.hosts.map((host) => [host.host_id, host]));
   const hosts = restored.hosts.map((host) => {
     const previous = previousHosts.get(host.host_id);
@@ -384,9 +423,10 @@ export function restoreWorkspace(
   document: WorkspaceDocument,
   catalog?: HostCatalogDocument,
   ssh_config_hosts: readonly SshConfigHost[] = [],
+  tailscale_devices: readonly TailscaleDevice[] = [],
 ): WorkspaceView {
   const ssh_gateways = catalog?.ssh_gateways ?? document.ssh_gateways ?? [];
-  const hosts = composeHosts(document, catalog, ssh_config_hosts);
+  const hosts = composeHosts(document, catalog, ssh_config_hosts, tailscale_devices);
   const targets = hosts.map((host) => hostTarget(host, ssh_gateways));
   const targetsById = new Map(
     targets.map((target) => [

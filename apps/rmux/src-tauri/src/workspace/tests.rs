@@ -42,6 +42,7 @@ fn legacy_populated() -> WorkspaceDocument {
     connection_methods: vec![WorkspaceConnectionMethod {
       method_id: "default".into(),
       name: "SSH".into(),
+      tailscale_node_id: None,
       target: ConnectionTargetDto::ssh("test"),
     }],
     preferred_method_id: Some("default".into()),

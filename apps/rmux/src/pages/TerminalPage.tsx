@@ -31,7 +31,7 @@ import {
   remapStateKeys,
   sameSshEndpoint,
 } from "../features/workspace/remoteRecovery";
-import { connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, projectedHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
+import { connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
 import { removableHostCredentials } from "../features/workspace/hostCredentials";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
@@ -193,7 +193,8 @@ export function TerminalPage() {
   const currentWorkingDirectoryDisplay = currentShellState
     ? displayWorkingDirectory(currentShellState)
     : null;
-  const { sshConfigHosts, sshConfigWarning } = workspace;
+  const { sshConfigHosts, sshConfigWarning, tailscaleDevices, tailscaleWarning } = workspace;
+  const discoveryWarning = [sshConfigWarning, tailscaleWarning].filter(Boolean).join("\n") || null;
   const [targetErrors, setTargetErrors] = useState<ReadonlyMap<string, string>>(
     () => new Map(),
   );
@@ -213,6 +214,10 @@ export function TerminalPage() {
     undefined,
   );
   const [addHostOpen, setAddHostOpen] = useState(false);
+  const openAddHost = () => {
+    void workspace.refreshHostDiscovery();
+    setAddHostOpen(true);
+  };
   const [connectHostOpen, setConnectHostOpen] = useState(false);
   const [methodNameOpen, setMethodNameOpen] = useState(false);
   const [methodDraft, setMethodDraft] = useState<MethodDraft | null>(null);
@@ -441,17 +446,19 @@ export function TerminalPage() {
       host_name: host.name,
       method_id: method?.method_id ?? null,
       method_name: method?.name ?? "SSH",
-      initial_target: method?.target,
+      initial_target: method ? { ...method.target, tailscale_node_id: method.tailscale_node_id } : undefined,
     });
     setMethodNameOpen(!method);
   }
 
   async function saveNewHost(name: string, target: SshConnectionTarget, remote_info: RemoteIdentity) {
+    const projected_id = target.tailscale_node_id
+      ? tailscaleHostId(target.tailscale_node_id) : projectedHostId(target.destination);
     const projected = workspace.viewRef.current.hosts.find((host) =>
-      host.host_id === projectedHostId(target.destination) && host.source === "ssh_config");
+      host.host_id === projected_id && isVirtualHost(host));
     const expected = projected ? expectedHostIdentity(projected) : undefined;
     if (expected && expected.remote_id !== remote_info.remote_id)
-      throw new Error("This SSH alias now reaches a different remote environment. Restore its original connection before saving.");
+      throw new Error("This discovered host now reaches a different remote environment. Restore its original connection before saving.");
     const host = promoteHost(projected ? {
       ...projected,
       name,
@@ -462,7 +469,7 @@ export function TerminalPage() {
         method.method_id === projected.preferred_method_id
           ? { ...method, target: connectionSettings(target) }
           : method),
-    } : hostFromTarget({ ...target, remote_info }, name));
+    } : hostFromTarget({ ...target, host_id: undefined, remote_info }, name));
     await workspace.replaceView((current) => projected
       ? updateHostSettings(current, host)
       : {
@@ -490,6 +497,7 @@ export function TerminalPage() {
       method_id: methodDraft.method_id ?? crypto.randomUUID(),
       name: methodDraft.method_name,
       target: connectionSettings(target),
+      ...(target.tailscale_node_id ? { tailscale_node_id: target.tailscale_node_id } : {}),
     };
     const host: WorkspaceHost = existing ? {
       ...promoteHost(existing),
@@ -512,7 +520,7 @@ export function TerminalPage() {
       };
       return { ...next, ssh_gateways: gateways };
     });
-    void workspace.refreshSshConfig();
+    void workspace.refreshHostDiscovery();
     setHostSettingsId(host.host_id);
   }
 
@@ -636,7 +644,7 @@ export function TerminalPage() {
     if (target.kind !== "ssh") return target;
     if (target.unavailable) throw new Error(target.unavailable);
     const host = workspace.viewRef.current.hosts.find((item) => item.host_id === target.host_id);
-    if (!host || (host.source !== "ssh_config" && !host.host_id.startsWith("ssh-config:"))) return target;
+    if (!host || (!isVirtualHost(host) && !host.host_id.startsWith("ssh-config:") && !host.host_id.startsWith("tailscale:"))) return target;
     const expected = expectedHostIdentity(host);
     if (expected) return { ...target, remote_info: expected };
     const pending = hostVerificationRef.current.get(host.host_id);
@@ -1299,12 +1307,8 @@ export function TerminalPage() {
     },
     {
       showPalette: () => setPaletteOpen(true),
-      showAddHost: () => {
-        setAddHostOpen(true);
-      },
-      showAddRoutedHost: () => {
-        setAddHostOpen(true);
-      },
+      showAddHost: openAddHost,
+      showAddRoutedHost: openAddHost,
       showAddExistingSession: () => setImportOpen(true),
       forgetSession: (session) => setPendingForget(session),
       showNewShell: () => {
@@ -1319,7 +1323,7 @@ export function TerminalPage() {
           );
         }
       },
-      refreshSessions: () => void workspace.refreshSshConfig().then(() => refresh()),
+      refreshSessions: () => void workspace.refreshHostDiscovery().then(() => refresh()),
       selectSession: activateTab,
       disconnectSession: disconnect,
       requestCloseSession: requestClose,
@@ -1821,6 +1825,7 @@ export function TerminalPage() {
         <NewShellFlow
           targets={connectionTargets}
           hosts={workspace.hosts}
+          discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
           onVerifyHost={recoverHost}
           onConnectionChange={hostConnections.connectionChanged}
           onCreate={create}
@@ -1833,6 +1838,7 @@ export function TerminalPage() {
         <AddExistingSessionFlow
           targets={connectionTargets}
           hosts={workspace.hosts}
+          discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
           known={sessions}
           onVerifyHost={recoverHost}
           onConnectionChange={hostConnections.connectionChanged}
@@ -1856,7 +1862,7 @@ export function TerminalPage() {
       ) : connectHostOpen ? (
         <QuickInput
           title="Connect host"
-          description="Choose a saved host or an SSH config alias."
+          description={`Choose a saved host or a discovered SSH/Tailscale device.${discoveryWarning ? `\n${discoveryWarning}` : workspace.discoveryLoading ? "\nDiscovering Tailscale devices…" : ""}`}
           mode={{
             kind: "pick",
             choices: hostSelectorChoices(connectableTargets, workspace.hosts),
@@ -1872,7 +1878,9 @@ export function TerminalPage() {
       ) : addHostOpen ? (
         <SshHostFlow
           suggestions={hostSuggestions}
-          warning={sshConfigWarning}
+          tailscaleDevices={tailscaleDevices}
+          discoveryLoading={workspace.discoveryLoading}
+          warning={discoveryWarning}
           onSaveNewHost={saveNewHost}
           onClose={() => setAddHostOpen(false)}
         />
@@ -1893,7 +1901,7 @@ export function TerminalPage() {
       ) : methodDraft ? (
         <SshHostFlow
           suggestions={hostSuggestions}
-          warning={sshConfigWarning}
+          warning={discoveryWarning}
           gateways={workspace.ssh_gateways}
           initialTarget={methodDraft.initial_target}
           expectedIdentity={methodHost ? expectedHostIdentity(methodHost) : undefined}
@@ -1918,7 +1926,7 @@ export function TerminalPage() {
       ) : hostFlow !== undefined ? (
         <SshHostFlow
           suggestions={hostSuggestions}
-          warning={sshConfigWarning}
+          warning={discoveryWarning}
           target={hostFlow ?? undefined}
           gateways={workspace.ssh_gateways}
           updateRequired={portForwardUpdateTarget !== null}

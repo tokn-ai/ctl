@@ -111,6 +111,13 @@ adopt a checkpoint or geometry may replenish delivery credit while keeping its
 own reconnect cursor unset. Heartbeats, detach, input, and lease control remain
 independent of presentation credit.
 
+When the child exits, the daemon continues accepting presentation acknowledgements
+until all final output has been sent. It then sends the final shell state and
+`session_ended`; the last output frame need not be acknowledged before closure.
+This drain keeps the attachment's existing liveness deadline fixed, so a renderer
+that stops applying output cannot retain an ended session indefinitely by sending
+heartbeats. A stalled attachment closes when that deadline expires.
+
 ## Attachment leases
 
 Every `attach_session` creates one logical attachment. Input and layout are

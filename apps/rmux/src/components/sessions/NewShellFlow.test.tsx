@@ -10,7 +10,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionTarget } from "../../lib/types";
+import type { ConnectionTarget, WorkspaceHost } from "../../lib/types";
 import { NewShellFlow } from "./NewShellFlow";
 import { probeSshHost, cancelSshProbe } from "../../lib/tauri";
 
@@ -38,7 +38,7 @@ const remote: ConnectionTarget = {
 
 afterEach(cleanup);
 
-function setup() {
+function setup(overrides: Partial<Parameters<typeof NewShellFlow>[0]> = {}) {
   const create = vi
     .fn<
       (
@@ -49,7 +49,7 @@ function setup() {
     .mockResolvedValue(undefined);
   const close = vi.fn();
   const verify = vi.fn(async (target: ConnectionTarget) => target);
-  const props = { targets: [remote, local], onVerifyHost: verify, onCreate: create, onClose: close };
+  const props = { targets: [remote, local], onVerifyHost: verify, onCreate: create, onClose: close, ...overrides };
   const view = render(
     <StrictMode>
       <NewShellFlow {...props} />
@@ -233,5 +233,50 @@ describe("new-shell quick-input flow", () => {
     await act(async () => finish(remoteInfo));
     expect(verify).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("chooses a method after directory submission and creates through that method", async () => {
+    const host: WorkspaceHost = {
+      host_id: "remote-id", name: "Remote", preferred_method_id: "office",
+      connection_methods: [
+        { method_id: "office", name: "Office", target: { kind: "ssh", destination: "office" } },
+        { method_id: "home", name: "Home", target: { kind: "ssh", destination: "home" } },
+      ],
+    };
+    const { create, close, user } = setup({ hosts: [host] });
+    await user.click(screen.getByRole("option", { name: "remote" }));
+    await user.type(screen.getByLabelText("Working directory"), "/work/project{Enter}");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: /Office.*Preferred/ }));
+    await user.click(screen.getByRole("option", { name: /Home/ }));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(create).toHaveBeenCalledExactlyOnceWith({
+      kind: "ssh", host_id: "remote-id", host_name: "Remote", method_id: "home", destination: "home",
+    }, "/work/project");
+    expect(host.preferred_method_id).toBe("office");
+  });
+
+  it("retains the directory when method selection is cancelled and creates only after resubmission", async () => {
+    const host: WorkspaceHost = {
+      host_id: "remote-id", name: "Remote", preferred_method_id: "office",
+      connection_methods: [
+        { method_id: "office", name: "Office", target: { kind: "ssh", destination: "office" } },
+        { method_id: "home", name: "Home", target: { kind: "ssh", destination: "home" } },
+      ],
+    };
+    const { create, close, user } = setup({ hosts: [host] });
+    await user.click(screen.getByRole("option", { name: "remote" }));
+    await user.type(screen.getByLabelText("Working directory"), "/work/project{Enter}");
+    await user.keyboard("{Escape}");
+    expect(screen.getByLabelText("Working directory")).toHaveProperty("value", "/work/project");
+    expect(create).not.toHaveBeenCalled();
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("option", { name: /Office.*Preferred/ }));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ method_id: "office" }), "/work/project");
   });
 });

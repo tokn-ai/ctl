@@ -206,9 +206,12 @@ identity still has workspace references. **Host settings** lets you rename the
 machine or methods, add or edit methods, choose the preferred method, and
 explicitly **Connect using** another method. New direct methods can optionally
 export a managed OpenSSH config entry with **Also save to OpenSSH config**.
-**Connect host**, **New shell**, and **Add existing session** use the current preferred
-method; failures never select another method
-automatically. Saving settings leaves existing session transports unchanged
+**Connect host**, **New shell**, and **Add existing session** start connecting immediately
+when the host has one method. Hosts with several methods show a picker with the
+preferred method selected by default. Choosing another method connects through
+it without changing the preference; **Connect using** starts its named method
+directly. Failures never select another method automatically.
+Saving settings leaves existing session transports unchanged
 until an explicit connection. Session, tab, and port references retain the same
 host ID through these changes. Workspace schema 8 moves existing saved hosts and
 gateways into `hosts.json`, preserving their IDs and a backup of the workspace.

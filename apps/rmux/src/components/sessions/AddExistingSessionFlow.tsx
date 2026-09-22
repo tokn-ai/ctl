@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
-import { SshHostFlow } from "./SshHostFlow";
+import { ConnectHostFlow } from "./ConnectHostFlow";
 import { hostSelectorChoices } from "./hostChoices";
 import {
   sessionKey,
@@ -17,11 +17,13 @@ import type {
   SessionSummary,
   ShellStateSummary,
   WorkspaceHost,
+  WorkspaceSshGateway,
 } from "../../lib/types";
 
 interface AddExistingSessionFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  gateways?: readonly WorkspaceSshGateway[];
   discoveryMessage?: string | null;
   onConnectionChange?: HostConnectionChange;
   known: readonly SessionSummary[];
@@ -40,19 +42,23 @@ interface AddExistingSessionFlowProps {
 export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
   const [target, setTarget] = useState<ConnectionTarget | null>(null);
   const [connectedTarget, setConnectedTarget] = useState<ConnectionTarget | null>(null);
+  const [retryMethodId, setRetryMethodId] = useState<string | undefined>();
   const connectedRef = useRef(false);
   function chooseHost() {
     connectedRef.current = false;
     setConnectedTarget(null);
     setTarget(null);
+    setRetryMethodId(undefined);
   }
   if (target?.kind === "ssh" && !connectedTarget) {
     return (
-      <SshHostFlow
+      <ConnectHostFlow
         suggestions={[]}
         warning={null}
         target={target}
-        autoConnect
+        host={props.hosts?.find((host) => host.host_id === target.host_id)}
+        gateways={props.gateways}
+        selected_method_id={retryMethodId}
         onConnectionChange={props.onConnectionChange}
         onVerified={props.onVerifyHost}
         onConnected={(verified) => {
@@ -75,7 +81,9 @@ export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
         onBack={chooseHost}
         onReconnect={() => {
           connectedRef.current = false;
-          setTarget(connectedTarget ?? target);
+          const retryTarget = connectedTarget ?? target;
+          setTarget(retryTarget);
+          setRetryMethodId(retryTarget.kind === "ssh" ? retryTarget.method_id : undefined);
           setConnectedTarget(null);
         }}
       />

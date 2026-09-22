@@ -12,6 +12,8 @@ export { COMMAND_IDS } from "./commandIds";
 
 interface TerminalCommandContext {
   targets: readonly ConnectionTarget[];
+  /** Host-level availability can include an alternate to the target's method. */
+  connectableHostKeys?: ReadonlySet<string>;
   sessions: readonly SessionSummary[];
   tabs: readonly SessionSummary[];
   activeSessionKey: string | null;
@@ -117,7 +119,8 @@ export function buildTerminalCommands(
           (target) => targetKey(target) === args.target_key,
         ) ?? null);
   const canConnectHost = (target: ConnectionTarget | null) =>
-    target?.kind === "ssh" && !target.unavailable && !daemonRestartInteractionBlocked;
+    target?.kind === "ssh" && !daemonRestartInteractionBlocked &&
+    (context.connectableHostKeys?.has(targetKey(target)) ?? !target.unavailable);
   const hasConnectableHost = context.targets.some(canConnectHost);
   const sessionAvailable = (session: SessionSummary | null) =>
     session !== null &&

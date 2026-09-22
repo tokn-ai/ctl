@@ -17,6 +17,7 @@ import {
 import { QuickInput } from "../components/commands/QuickInput";
 import { HostSettingsDialog } from "../components/sessions/HostSettingsDialog";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
+import { ConnectHostFlow } from "../components/sessions/ConnectHostFlow";
 import { PortForwardingDialog } from "../components/sessions/PortForwardingDialog";
 import { PortForwardingSidebar } from "../components/portForwarding/PortForwardingSidebar";
 import { AddExistingSessionFlow } from "../components/sessions/AddExistingSessionFlow";
@@ -210,9 +211,10 @@ export function TerminalPage() {
   const [pendingForget, setPendingForget] = useState<SessionSummary | null>(
     null,
   );
-  const [hostFlow, setHostFlow] = useState<ConnectionTarget | null | undefined>(
-    undefined,
-  );
+  const [hostFlow, setHostFlow] = useState<{
+    target: SshConnectionTarget;
+    selected_method_id?: string;
+  } | null>(null);
   const [addHostOpen, setAddHostOpen] = useState(false);
   const openAddHost = () => {
     void workspace.refreshHostDiscovery();
@@ -434,8 +436,13 @@ export function TerminalPage() {
   // New connections use saved settings; live sessions retain their transport snapshots.
   const connectionTargets = useMemo(() => workspace.hosts.map((host) =>
     hostTarget(host, workspace.ssh_gateways)), [workspace.hosts, workspace.ssh_gateways]);
+  // A missing preferred route must not hide the host's working alternatives.
+  const connectableHostKeys = new Set(workspace.hosts
+    .filter((host) => host.host_id !== "local" && host.source !== "unavailable" &&
+      host.connection_methods.some((method) => !method.target.unavailable))
+    .map((host) => targetKey(hostTarget(host, workspace.ssh_gateways))));
   const connectableTargets = connectionTargets.filter((target): target is SshConnectionTarget =>
-    target.kind === "ssh" && !target.unavailable);
+    target.kind === "ssh" && connectableHostKeys.has(targetKey(target)));
   const settingsHost = workspace.hosts.find((host) => host.host_id === hostSettingsId);
   const methodHost = workspace.hosts.find((host) => host.host_id === methodDraft?.host_id);
 
@@ -531,9 +538,8 @@ export function TerminalPage() {
 
   function connectHostMethod(target: ConnectionTarget, method_id?: string) {
     if (target.kind !== "ssh") return;
-    const host = workspace.viewRef.current.hosts.find((item) => item.host_id === target.host_id);
     setHostSettingsId(null);
-    setHostFlow(host ? hostTarget(host, workspace.viewRef.current.ssh_gateways, method_id ?? host.preferred_method_id) : target);
+    setHostFlow({ target, selected_method_id: method_id });
   }
 
   const activateTab = useCallback(
@@ -1286,6 +1292,7 @@ export function TerminalPage() {
   const commands: AppCommand[] = buildTerminalCommands(
     {
       targets,
+      connectableHostKeys,
       sessions,
       tabs,
       activeSessionKey: activeTabKey,
@@ -1464,7 +1471,7 @@ export function TerminalPage() {
     newShellOpen ||
     importOpen ||
     pendingForget !== null ||
-    hostFlow !== undefined ||
+    hostFlow !== null ||
     addHostOpen || connectHostOpen || methodDraft !== null || hostSettingsId !== null ||
     pendingCloseSessionKey !== null ||
     daemonRestartConfirmationPending;
@@ -1538,6 +1545,7 @@ export function TerminalPage() {
             <SessionSidebar
               targets={sidebarTargets}
               hosts={workspace.hosts}
+              connectableHostKeys={connectableHostKeys}
               hostConnections={hostConnections.statuses}
               onDisconnectHost={(target) => {
                 void hostConnections.disconnect(target).catch((failure) => setListError(errorMessage(failure)));
@@ -1826,6 +1834,7 @@ export function TerminalPage() {
         <NewShellFlow
           targets={connectionTargets}
           hosts={workspace.hosts}
+          gateways={workspace.ssh_gateways}
           discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
           onVerifyHost={recoverHost}
           onConnectionChange={hostConnections.connectionChanged}
@@ -1839,6 +1848,7 @@ export function TerminalPage() {
         <AddExistingSessionFlow
           targets={connectionTargets}
           hosts={workspace.hosts}
+          gateways={workspace.ssh_gateways}
           discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
           known={sessions}
           onVerifyHost={recoverHost}
@@ -1924,11 +1934,13 @@ export function TerminalPage() {
           onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id), method.method_id)}
           onClose={() => setHostSettingsId(null)}
         />
-      ) : hostFlow !== undefined ? (
-        <SshHostFlow
+      ) : hostFlow !== null ? (
+        <ConnectHostFlow
           suggestions={hostSuggestions}
           warning={discoveryWarning}
-          target={hostFlow ?? undefined}
+          target={hostFlow.target}
+          host={workspace.hosts.find((host) => host.host_id === hostFlow.target.host_id)}
+          selected_method_id={hostFlow.selected_method_id}
           gateways={workspace.ssh_gateways}
           updateRequired={portForwardUpdateTarget !== null}
           onVerified={recoverHost}
@@ -1942,7 +1954,7 @@ export function TerminalPage() {
             }
           }}
           onClose={() => {
-            setHostFlow(undefined);
+            setHostFlow(null);
             setPortForwardUpdateTarget(null);
             requestAnimationFrame(() => renderer?.focus());
           }}

@@ -48,8 +48,12 @@ an arbitrary service or shell command is accepted from the client.
 
 `<destination>` is an OpenSSH destination or `Host` alias. Host-key checking,
 user authentication, certificates, agents, proxy jumps, and ports remain
-OpenSSH configuration. On Unix clients, `ctld` owns the explicit OpenSSH
-control master shared by `ctl` and the desktop. `ctl` never disables host-key
+OpenSSH configuration. On Unix clients, `ctl` uses an explicit private OpenSSH
+control master owned by `ctld`. Desktop methods with **Use SSH-config master**
+enabled can instead reuse a configured master, preserving
+`ControlMaster`, `ControlPath`, and `ControlPersist`; unconfigured sharing falls
+back to a private master. This preference defaults on for SSH-config aliases
+and off for direct and Tailscale methods. `ctl` never disables host-key
 verification, enables agent forwarding, creates a forwarding, or accepts a
 user-controlled remote command.
 
@@ -64,7 +68,8 @@ same target. `task attach` first obtains the interactive session ID from taskd,
 then opens the rmux transport on that target. A remote daemon's socket path is
 metadata, never a client-side endpoint.
 
-OpenSSH may reuse a healthy configured control master. A broken SSH transport
+Background channels require the exact master selected by `ctld` and cannot
+silently open a fresh SSH connection if it disappears. A broken SSH transport
 cannot resume an existing channel. For rmux attachments, `ctl` starts a
 replacement channel and uses the `rmux-proto` attachment token described below.
 

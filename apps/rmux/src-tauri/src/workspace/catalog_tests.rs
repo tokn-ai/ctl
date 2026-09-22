@@ -43,6 +43,8 @@ fn host() -> WorkspaceHost {
     connection_methods: vec![WorkspaceConnectionMethod {
       method_id: "default".into(),
       name: "SSH".into(),
+      ssh_config_alias: None,
+      use_ssh_config_master: None,
       tailscale_node_id: None,
       target: ConnectionTargetDto::ssh("office"),
     }],
@@ -84,6 +86,175 @@ fn tailscale_method_binding_round_trips_without_becoming_a_transport_setting() {
   let method = &value["document"]["hosts"][0]["connection_methods"][0];
   assert_eq!(method["tailscale_node_id"], "n-stable-device");
   assert!(method["target"].get("tailscale_node_id").is_none());
+}
+
+#[test]
+fn ssh_config_origin_round_trips_at_the_method_level() {
+  let fixture = Fixture::new();
+  let mut document = catalog();
+  document.hosts[0].connection_methods[0].ssh_config_alias = Some("office".into());
+  let saved = fixture
+    .repository()
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load_hosts().unwrap(), saved);
+  let value: serde_json::Value =
+    serde_json::from_slice(&fs::read(fixture.0.join("hosts.json")).unwrap()).unwrap();
+  let method = &value["document"]["hosts"][0]["connection_methods"][0];
+  assert_eq!(method["ssh_config_alias"], "office");
+  assert!(method["target"].get("ssh_config_alias").is_none());
+}
+
+#[test]
+fn explicit_ssh_master_policy_round_trips_at_the_method_level() {
+  for ssh_config_alias in [None, Some("office".to_owned())] {
+    for use_ssh_config_master in [false, true] {
+      let fixture = Fixture::new();
+      let mut document = catalog();
+      let method = &mut document.hosts[0].connection_methods[0];
+      method.ssh_config_alias.clone_from(&ssh_config_alias);
+      method.use_ssh_config_master = Some(use_ssh_config_master);
+      let saved = fixture
+        .repository()
+        .update_hosts(UpdateHostsRequest {
+          expected_revision: None,
+          document,
+        })
+        .unwrap();
+      assert_eq!(fixture.repository().load_hosts().unwrap(), saved);
+      let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.0.join("hosts.json")).unwrap()).unwrap();
+      let method = &value["document"]["hosts"][0]["connection_methods"][0];
+      assert_eq!(method["use_ssh_config_master"], use_ssh_config_master);
+      assert!(method["target"].get("use_ssh_config_master").is_none());
+    }
+  }
+}
+
+#[test]
+fn legacy_methods_keep_the_source_default_without_saving_an_explicit_policy() {
+  for ssh_config_alias in [None, Some("office".to_owned())] {
+    let mut host = host();
+    host.connection_methods[0].ssh_config_alias = ssh_config_alias;
+    let value = serde_json::to_value(&host).unwrap();
+    assert!(
+      value["connection_methods"][0]
+        .get("use_ssh_config_master")
+        .is_none()
+    );
+    let restored: WorkspaceHost = serde_json::from_value(value).unwrap();
+    assert_eq!(restored, host);
+    assert_eq!(restored.connection_methods[0].use_ssh_config_master, None);
+  }
+}
+
+#[test]
+fn persisted_targets_reject_runtime_ssh_master_policy() {
+  for use_ssh_config_master in [false, true] {
+    let mut value = serde_json::to_value(host()).unwrap();
+    value["connection_methods"][0]["target"]["use_ssh_config_master"] =
+      use_ssh_config_master.into();
+    assert!(serde_json::from_value::<WorkspaceHost>(value).is_err());
+
+    let fixture = Fixture::new();
+    let mut document = catalog();
+    let ConnectionTargetDto::Ssh {
+      use_ssh_config_master: target_policy,
+      ..
+    } = &mut document.hosts[0].connection_methods[0].target
+    else {
+      panic!("ssh method")
+    };
+    *target_policy = Some(use_ssh_config_master);
+    assert!(
+      fixture
+        .repository()
+        .update_hosts(UpdateHostsRequest {
+          expected_revision: None,
+          document,
+        })
+        .is_err()
+    );
+    assert!(!fixture.0.join("hosts.json").exists());
+  }
+}
+
+#[test]
+fn invalid_ssh_config_origins_and_runtime_target_origins_are_rejected() {
+  for alias in [
+    "",
+    "office\nother",
+    "office other",
+    "!office",
+    "-office",
+    "*",
+    "host?",
+  ] {
+    let fixture = Fixture::new();
+    let mut document = catalog();
+    document.hosts[0].connection_methods[0].ssh_config_alias = Some(alias.into());
+    assert!(
+      fixture
+        .repository()
+        .update_hosts(UpdateHostsRequest {
+          expected_revision: None,
+          document,
+        })
+        .is_err(),
+      "accepted {alias:?}",
+    );
+    assert!(!fixture.0.join("hosts.json").exists());
+  }
+
+  let mut value = serde_json::to_value(host()).unwrap();
+  value["connection_methods"][0]["target"]["ssh_config_alias"] = "office".into();
+  assert!(serde_json::from_value::<WorkspaceHost>(value).is_err());
+
+  let fixture = Fixture::new();
+  let mut document = catalog();
+  let ConnectionTargetDto::Ssh {
+    ssh_config_alias, ..
+  } = &mut document.hosts[0].connection_methods[0].target
+  else {
+    panic!("ssh method")
+  };
+  *ssh_config_alias = Some("office".into());
+  assert!(
+    fixture
+      .repository()
+      .update_hosts(UpdateHostsRequest {
+        expected_revision: None,
+        document,
+      })
+      .is_err()
+  );
+}
+
+#[test]
+fn ssh_config_methods_require_one_provider_and_the_original_destination() {
+  for (alias, tailscale_node_id) in [
+    ("another-host", None),
+    ("office", Some("n-stable-device".to_owned())),
+  ] {
+    let fixture = Fixture::new();
+    let mut document = catalog();
+    let method = &mut document.hosts[0].connection_methods[0];
+    method.ssh_config_alias = Some(alias.into());
+    method.tailscale_node_id = tailscale_node_id;
+    assert!(
+      fixture
+        .repository()
+        .update_hosts(UpdateHostsRequest {
+          expected_revision: None,
+          document,
+        })
+        .is_err()
+    );
+    assert!(!fixture.0.join("hosts.json").exists());
+  }
 }
 
 #[test]

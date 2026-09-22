@@ -15,6 +15,7 @@ import type {
   WorkspaceSshGateway,
   SshConnectionTarget,
   WorkspaceHost,
+  WorkspaceConnectionMethod,
   LegacyWorkspaceHost,
   HostCatalogDocument,
   SshConfigHost,
@@ -74,6 +75,20 @@ export function withHostId(target: ConnectionTarget): ConnectionTarget {
   return { ...target, host_id: target.host_id ?? crypto.randomUUID() };
 }
 
+/** Provider identity and connection preferences belong to a method, not its address. */
+export function connectionMethodOptions(source: Pick<WorkspaceConnectionMethod,
+  "tailscale_node_id" | "ssh_config_alias" | "use_ssh_config_master">) {
+  return {
+    ...(source.tailscale_node_id ? { tailscale_node_id: source.tailscale_node_id } : {}),
+    ...(source.ssh_config_alias ? { ssh_config_alias: source.ssh_config_alias } : {}),
+    ...(source.use_ssh_config_master !== undefined ? { use_ssh_config_master: source.use_ssh_config_master } : {}),
+  };
+}
+
+export function usesSshConfigMaster(target: SshConnectionTarget): boolean {
+  return target.use_ssh_config_master ?? Boolean(target.ssh_config_alias);
+}
+
 /** Keep transport details out of the host's stable identity. */
 export function connectionSettings(target: SshConnectionTarget): SshConnectionTarget {
   return {
@@ -100,7 +115,7 @@ export function hostFromTarget(target: ConnectionTarget, name?: string): Workspa
       method_id,
       name: target.tailscale_node_id ? "Tailscale" : "SSH",
       target: connectionSettings(target),
-      ...(target.tailscale_node_id ? { tailscale_node_id: target.tailscale_node_id } : {}),
+      ...connectionMethodOptions(target),
     }],
     preferred_method_id: method_id,
   };
@@ -125,7 +140,7 @@ export function hostTarget(
     host_id: host.host_id,
     host_name: host.name,
     method_id: method.method_id,
-    ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
+    ...connectionMethodOptions(method),
     remote_info: expectedHostIdentity(host),
     unavailable: method.target.unavailable ?? "This host is no longer available. Restore its saved definition before connecting.",
   };
@@ -134,7 +149,7 @@ export function hostTarget(
     host_id: host.host_id,
     host_name: host.name,
     method_id: method.method_id,
-    ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
+    ...connectionMethodOptions(method),
     ...(expectedHostIdentity(host) ? { remote_info: expectedHostIdentity(host) } : {}),
   }, gateways);
 }
@@ -188,6 +203,7 @@ function projectedHost(alias: string): WorkspaceHost {
     connection_methods: [{
       method_id: "ssh_config",
       name: "SSH config",
+      ssh_config_alias: alias,
       target: { kind: "ssh", destination: alias },
     }],
   };
@@ -197,6 +213,21 @@ function isPureAliasTarget(target: SshConnectionTarget, alias: string): boolean 
   return target.destination === alias && !target.hostname && !target.user &&
     !target.port && !target.identity_file && !target.gateway_route?.length &&
     !target.gateways?.length;
+}
+
+/** Migrate only alias-based methods; matching display names are not provenance. */
+function restoreSshConfigBinding(
+  method: WorkspaceConnectionMethod,
+  original_alias: string | null,
+  aliases: ReadonlySet<string>,
+): WorkspaceConnectionMethod {
+  if (method.tailscale_node_id || method.ssh_config_alias) return method;
+  const alias = method.target.destination;
+  if ((original_alias === alias && !method.target.hostname) ||
+    (aliases.has(alias) && isPureAliasTarget(method.target, alias))) {
+    return { ...method, ssh_config_alias: alias };
+  }
+  return method;
 }
 
 /** Saving a customization claims the projected identity without renaming references. */
@@ -239,15 +270,17 @@ function composeHosts(
       ...saved_host,
       source: "saved",
       ...(device ? { tailscale_device: device } : {}),
-      connection_methods: host.connection_methods.map((method) => method.tailscale_node_id
-        ? resolveTailscaleMethod(method, devices.get(method.tailscale_node_id))
-        : original_alias &&
-        !aliases.has(original_alias) && method.target.destination === original_alias && !method.target.hostname
-        ? { ...method, target: {
-            ...method.target,
-            unavailable: `The SSH config alias ${original_alias} is missing. Restore it in ~/.ssh/config before connecting.`,
-          } }
-        : method),
+      connection_methods: host.connection_methods.map((saved_method) => {
+        const method = restoreSshConfigBinding(saved_method, original_alias, aliases);
+        if (method.tailscale_node_id) return resolveTailscaleMethod(method, devices.get(method.tailscale_node_id));
+        if (method.ssh_config_alias && !aliases.has(method.ssh_config_alias) && !method.target.hostname) {
+          return { ...method, target: {
+              ...method.target,
+              unavailable: `The SSH config alias ${method.ssh_config_alias} is missing. Restore it in ~/.ssh/config before connecting.`,
+            } };
+        }
+        return method;
+      }),
     });
   }
   for (const { destination } of ssh_config_hosts) {
@@ -278,6 +311,7 @@ function composeHosts(
       connection_methods: [{
         method_id: "unavailable", name: "Unavailable",
         ...(node_id ? { tailscale_node_id: node_id } : {}),
+        ...(alias ? { ssh_config_alias: alias } : {}),
         target: { kind: "ssh", destination: name, unavailable },
       }],
     });
@@ -304,7 +338,7 @@ export function hostCatalogDocument(view: WorkspaceView): HostCatalogDocument {
         connection_methods: host.connection_methods.map((method) => ({
           method_id: method.method_id,
           name: method.name,
-          ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
+          ...connectionMethodOptions(method),
           target: connectionSettings(method.target),
         })),
       })),

@@ -3,6 +3,7 @@ import type { ConnectionTarget, SessionSummary } from "../../lib/types";
 import {
   LOCAL_TARGET,
   appLocalSshTarget,
+  configuredSshTarget,
   inactiveSshConfigDestinations,
   loadRemoteTargets,
   normalizeSshDestination,
@@ -44,6 +45,13 @@ describe("connection targets", () => {
     expect(normalizeSshDestination("  rmux-docker ")).toBe("rmux-docker");
     expect(normalizeSshDestination("  ")).toBeNull();
     expect(normalizeSshDestination("host\ncommand")).toBeNull();
+  });
+
+  it("marks configured aliases without changing directly configured methods", () => {
+    expect(configuredSshTarget("  build ")).toEqual({ kind: "ssh", destination: "build", ssh_config_alias: "build" });
+    expect(configuredSshTarget("build\ncommand")).toBeNull();
+    expect(appLocalSshTarget({ alias: "build", hostname: "10.0.0.5", user: null, port: null, identity_file: null }))
+      .not.toHaveProperty("ssh_config_alias");
   });
 
   it("reads unique normalized SSH destinations from legacy storage", () => {

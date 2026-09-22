@@ -211,8 +211,11 @@ to detach and release the attachment immediately without terminating the
 shell.
 
 After an unexpected SSH interruption, `ctl` reconnects with exponential
-backoff. OpenSSH may reuse a configured control master; otherwise it creates a
-new SSH connection. `rmuxd` preserves the logical attachment and both leases
+backoff. On Unix clients, it reopens channels through the private master managed
+by `ctld`; an expired master requires authentication through `ctld` before another
+channel can open. Desktop methods can enable **Use SSH-config master** to honor
+configured connection sharing, with a private master fallback when sharing is
+unconfigured; SSH-config aliases enable this by default. `rmuxd` preserves the logical attachment and both leases
 for 30 seconds by default, while output resumes from the last renderer-applied
 raw sequence.
 

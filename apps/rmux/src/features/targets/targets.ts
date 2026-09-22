@@ -173,7 +173,7 @@ export function configuredSshTarget(
   destination: string,
 ): SshConnectionTarget | null {
   const normalized = normalizeSshDestination(destination);
-  return normalized ? { kind: "ssh", destination: normalized } : null;
+  return normalized ? { kind: "ssh", destination: normalized, ssh_config_alias: normalized } : null;
 }
 
 function normalizeSshTarget(

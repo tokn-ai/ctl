@@ -212,6 +212,13 @@ describe("Tailscale account recovery", () => {
 });
 
 describe("SSH endpoint comparison", () => {
+  it.each([undefined, "build"])("compares the effective master policy for source %s", (ssh_config_alias) => {
+    const target: SshConnectionTarget = { kind: "ssh", destination: "build", ssh_config_alias };
+    const default_policy = Boolean(ssh_config_alias);
+    expect(sameSshEndpoint(target, { ...target, use_ssh_config_master: default_policy })).toBe(true);
+    expect(sameSshEndpoint(target, { ...target, use_ssh_config_master: !default_policy })).toBe(false);
+  });
+
   it("ignores host labels but detects a changed resolved gateway", () => {
     const before: SshConnectionTarget = {
       kind: "ssh",
@@ -228,5 +235,6 @@ describe("SSH endpoint comparison", () => {
       ...before,
       gateways: [{ ...before.gateways![0], destination: "edge.new" }],
     })).toBe(false);
+    expect(sameSshEndpoint(before, { ...before, ssh_config_alias: "build.internal" })).toBe(false);
   });
 });

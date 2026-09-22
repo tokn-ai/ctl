@@ -5,7 +5,7 @@ import type {
   SshConnectionTarget,
 } from "../../lib/types";
 import { targetKey } from "../targets/targets";
-import { connectionSettings, expectedHostIdentity, promoteHost, type WorkspaceView } from "./workspaceModel";
+import { connectionMethodOptions, connectionSettings, expectedHostIdentity, promoteHost, usesSshConfigMaster, type WorkspaceView } from "./workspaceModel";
 
 export function sameSshEndpoint(
   left: ConnectionTarget,
@@ -19,6 +19,8 @@ export function sameSshEndpoint(
     left.user === right.user &&
     left.port === right.port &&
     left.identity_file === right.identity_file &&
+    left.ssh_config_alias === right.ssh_config_alias &&
+    usesSshConfigMaster(left) === usesSshConfigMaster(right) &&
     JSON.stringify(left.gateway_route ?? []) ===
       JSON.stringify(right.gateway_route ?? []) &&
     JSON.stringify(left.gateways ?? []) === JSON.stringify(right.gateways ?? [])
@@ -67,6 +69,7 @@ export function recoverRemoteHost(
     ...(save_ssh_user ? {
       connection_methods: host.connection_methods.map((item) => item.method_id === method_id ? {
         ...item,
+        ...connectionMethodOptions(candidate),
         target: connectionSettings(candidate),
       } : item),
     } : {}),

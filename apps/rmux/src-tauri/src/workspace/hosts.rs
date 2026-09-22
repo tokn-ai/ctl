@@ -23,6 +23,10 @@ pub struct WorkspaceConnectionMethod {
   pub method_id: String,
   pub name: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ssh_config_alias: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub use_ssh_config_master: Option<bool>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub tailscale_node_id: Option<String>,
   #[serde(deserialize_with = "deserialize_connection_settings")]
   pub target: ConnectionTargetDto,
@@ -94,6 +98,8 @@ impl WorkspaceConnectionMethod {
   fn is_valid(&self, gateway_ids: &HashSet<&str>) -> bool {
     let ConnectionTargetDto::Ssh {
       destination,
+      ssh_config_alias,
+      use_ssh_config_master,
       hostname,
       user,
       port,
@@ -108,6 +114,14 @@ impl WorkspaceConnectionMethod {
     let mut route_ids = HashSet::new();
     valid_workspace_text(&self.method_id)
       && valid_workspace_text(&self.name)
+      && self.ssh_config_alias.as_deref().is_none_or(|alias| {
+        valid_workspace_text(alias)
+          && alias == destination
+          && self.tailscale_node_id.is_none()
+          && !alias.starts_with(['!', '-'])
+          && !alias.contains(['*', '?'])
+          && !alias.chars().any(char::is_whitespace)
+      })
       && self
         .tailscale_node_id
         .as_deref()
@@ -121,6 +135,8 @@ impl WorkspaceConnectionMethod {
       // One account-owned environment is verified at the host level. Resolved
       // gateways are transport snapshots, never durable method configuration.
       && remote_info.is_none()
+      && ssh_config_alias.is_none()
+      && use_ssh_config_master.is_none()
       && gateways.is_empty()
       && gateway_route.len() <= 8
       && gateway_route.iter().all(|step| {

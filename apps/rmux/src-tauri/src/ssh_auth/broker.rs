@@ -363,34 +363,42 @@ pub(super) fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTa
   match target {
     ConnectionTargetDto::Ssh {
       destination,
+      ssh_config_alias,
+      use_ssh_config_master,
       hostname,
       user,
       port,
       identity_file,
       gateways,
       ..
-    } => Ok(SshTarget {
-      destination: destination.clone(),
-      hostname: hostname.clone(),
-      user: user.clone(),
-      port: *port,
-      identity_file: identity_file.as_ref().map(PathBuf::from),
-      gateways: gateways
-        .iter()
-        .map(|gateway| SshGateway {
-          destination: gateway.destination.clone(),
-          hostname: gateway.hostname.clone(),
-          user: gateway.user.clone(),
-          port: gateway.port,
-          identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
-          mode: match gateway.mode {
-            crate::dto::SshGatewayModeDto::Automatic => SshGatewayMode::Automatic,
-            crate::dto::SshGatewayModeDto::NativeOnly => SshGatewayMode::NativeOnly,
-            crate::dto::SshGatewayModeDto::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
-          },
-        })
-        .collect(),
-    }),
+    } => {
+      let mut target = SshTarget {
+        destination: destination.clone(),
+        ssh_config_alias: ssh_config_alias.clone(),
+        use_ssh_config_master: *use_ssh_config_master,
+        hostname: hostname.clone(),
+        user: user.clone(),
+        port: *port,
+        identity_file: identity_file.as_ref().map(PathBuf::from),
+        gateways: gateways
+          .iter()
+          .map(|gateway| SshGateway {
+            destination: gateway.destination.clone(),
+            hostname: gateway.hostname.clone(),
+            user: gateway.user.clone(),
+            port: gateway.port,
+            identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
+            mode: match gateway.mode {
+              crate::dto::SshGatewayModeDto::Automatic => SshGatewayMode::Automatic,
+              crate::dto::SshGatewayModeDto::NativeOnly => SshGatewayMode::NativeOnly,
+              crate::dto::SshGatewayModeDto::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
+            },
+          })
+          .collect(),
+      };
+      target.normalize_master_policy();
+      Ok(target)
+    }
     ConnectionTargetDto::Local => Err(CommandErrorDto::new(
       "invalid_ssh_target",
       "Select a remote SSH host.",
@@ -417,6 +425,47 @@ fn authentication_required() -> CommandErrorDto {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn broker_target_preserves_ssh_config_origin() {
+    let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": "office",
+      "ssh_config_alias": "office",
+      "user": "alice"
+    }))
+    .unwrap();
+    let target = broker_target(&target).unwrap();
+    assert_eq!(target.ssh_config_alias.as_deref(), Some("office"));
+    assert_eq!(target.user.as_deref(), Some("alice"));
+  }
+
+  #[test]
+  fn broker_target_normalizes_defaults_and_preserves_explicit_policy_overrides() {
+    for (alias, policy, expected) in [
+      (None, None, None),
+      (None, Some(false), None),
+      (None, Some(true), Some(true)),
+      (Some("office"), None, None),
+      (Some("office"), Some(true), None),
+      (Some("office"), Some(false), Some(false)),
+    ] {
+      let mut value = serde_json::json!({
+        "kind": "ssh",
+        "destination": "office",
+      });
+      if let Some(alias) = alias {
+        value["ssh_config_alias"] = alias.into();
+      }
+      if let Some(policy) = policy {
+        value["use_ssh_config_master"] = policy.into();
+      }
+      let target: ConnectionTargetDto = serde_json::from_value(value).unwrap();
+      let target = broker_target(&target).unwrap();
+      assert_eq!(target.ssh_config_alias.as_deref(), alias);
+      assert_eq!(target.use_ssh_config_master, expected);
+    }
+  }
 
   #[test]
   fn connection_status_preserves_actual_connectivity_and_manual_pause_independently() {

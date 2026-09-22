@@ -60,8 +60,12 @@ pub enum ConnectionTargetDto {
   Local,
   Ssh {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    remote_info: Option<ctl_proto::RemoteIdentity>,
+    remote_info: Option<Box<ctl_proto::RemoteIdentity>>,
     destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh_config_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    use_ssh_config_master: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hostname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +103,8 @@ impl ConnectionTargetDto {
     Self::Ssh {
       remote_info: None,
       destination: destination.into(),
+      ssh_config_alias: None,
+      use_ssh_config_master: None,
       hostname: None,
       user: None,
       port: None,
@@ -798,7 +804,7 @@ mod tests {
     let mut target = ConnectionTargetDto::ssh("host");
     let unverified = target.clone();
     if let ConnectionTargetDto::Ssh { remote_info, .. } = &mut target {
-      *remote_info = Some(identity.clone());
+      *remote_info = Some(Box::new(identity.clone()));
     }
     let mut upgraded = identity.clone();
     upgraded.agent_version = "0.2.0".into();
@@ -842,6 +848,31 @@ mod tests {
       serde_json::to_value(target).unwrap(),
       serde_json::json!({ "kind": "ssh", "destination": "rmux-docker" })
     );
+  }
+
+  #[test]
+  fn ssh_config_alias_survives_runtime_target_serialization() {
+    let value = serde_json::json!({
+      "kind": "ssh",
+      "destination": "office",
+      "ssh_config_alias": "office",
+      "user": "alice"
+    });
+    let target: ConnectionTargetDto = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&target).unwrap(), value);
+  }
+
+  #[test]
+  fn explicit_ssh_master_policy_survives_runtime_target_serialization() {
+    for policy in [false, true] {
+      let value = serde_json::json!({
+        "kind": "ssh",
+        "destination": "office",
+        "use_ssh_config_master": policy,
+      });
+      let target: ConnectionTargetDto = serde_json::from_value(value.clone()).unwrap();
+      assert_eq!(serde_json::to_value(&target).unwrap(), value);
+    }
   }
 
   #[test]

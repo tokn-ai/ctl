@@ -23,9 +23,9 @@ const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-// Version 6 adds explicit master disconnection and preserves manual pauses
-// across noninteractive status requests and forward restoration.
-pub const PROTOCOL_VERSION: u16 = 6;
+// Version 8 adds per-method control over configured SSH master reuse. Older
+// brokers must not silently ignore an explicit private-master selection.
+pub const PROTOCOL_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,12 +48,34 @@ pub struct SshGateway {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SshTarget {
   pub destination: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ssh_config_alias: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub use_ssh_config_master: Option<bool>,
   pub hostname: Option<String>,
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
   #[serde(default)]
   pub gateways: Vec<SshGateway>,
+}
+
+impl SshTarget {
+  /// An omitted preference preserves the connection method's original policy.
+  #[must_use]
+  pub fn uses_ssh_config_master(&self) -> bool {
+    self
+      .use_ssh_config_master
+      .unwrap_or(self.ssh_config_alias.is_some())
+  }
+
+  /// Equivalent preferences must share authentication, pause, and forward state.
+  /// Omitting explicit defaults also preserves existing private socket hashes.
+  pub fn normalize_master_policy(&mut self) {
+    if self.use_ssh_config_master == Some(self.ssh_config_alias.is_some()) {
+      self.use_ssh_config_master = None;
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -452,6 +474,66 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn ssh_config_origin_is_optional_and_does_not_change_managed_target_json() {
+    let legacy = serde_json::json!({
+      "destination": "office",
+      "hostname": null,
+      "user": null,
+      "port": null,
+      "identity_file": null,
+      "gateways": []
+    });
+    let mut target: SshTarget = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(target.ssh_config_alias, None);
+    assert_eq!(target.use_ssh_config_master, None);
+    assert_eq!(serde_json::to_value(&target).unwrap(), legacy);
+
+    target.ssh_config_alias = Some("office".into());
+    let value = serde_json::to_value(&target).unwrap();
+    assert_eq!(value["ssh_config_alias"], "office");
+    assert_eq!(serde_json::from_value::<SshTarget>(value).unwrap(), target);
+  }
+
+  #[test]
+  fn master_preferences_preserve_defaults_and_canonical_transport_identity() {
+    for alias in [None, Some("office")] {
+      let target: SshTarget = serde_json::from_value(serde_json::json!({
+        "destination": "office",
+        "ssh_config_alias": alias,
+        "hostname": null,
+        "user": null,
+        "port": null,
+        "identity_file": null
+      }))
+      .unwrap();
+      let default = alias.is_some();
+      assert_eq!(target.uses_ssh_config_master(), default);
+      let legacy = serde_json::to_value(&target).unwrap();
+      assert!(legacy.get("use_ssh_config_master").is_none());
+      for selected in [false, true] {
+        let mut explicit = target.clone();
+        explicit.use_ssh_config_master = Some(selected);
+        assert_eq!(explicit.uses_ssh_config_master(), selected);
+        let value = serde_json::to_value(&explicit).unwrap();
+        assert_eq!(value["use_ssh_config_master"], selected);
+        assert_eq!(
+          serde_json::from_value::<SshTarget>(value).unwrap(),
+          explicit
+        );
+        explicit.normalize_master_policy();
+        assert_eq!(explicit.uses_ssh_config_master(), selected);
+        if selected == default {
+          assert_eq!(explicit, target);
+          assert_eq!(serde_json::to_value(&explicit).unwrap(), legacy);
+        } else {
+          assert_eq!(explicit.use_ssh_config_master, Some(selected));
+          assert_ne!(explicit, target);
+        }
+      }
+    }
+  }
 
   #[test]
   fn protocol_probe_requires_one_numeric_version() {

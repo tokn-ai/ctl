@@ -51,6 +51,10 @@ export interface SshConnectionTarget {
   method_id?: string;
   /** Runtime provider binding; persisted on the connection method. */
   tailscale_node_id?: string;
+  /** SSH-config origin, retained even when using a private master. */
+  ssh_config_alias?: string;
+  /** Runtime copy of the method's master preference; absent uses its source default. */
+  use_ssh_config_master?: boolean;
   destination: string;
   hostname?: string;
   user?: string;
@@ -126,6 +130,9 @@ export interface WorkspaceConnectionMethod {
   name: string;
   target: SshConnectionTarget;
   tailscale_node_id?: string;
+  ssh_config_alias?: string;
+  /** Absent uses SSH-config sharing for aliases and a private master otherwise. */
+  use_ssh_config_master?: boolean;
 }
 
 export interface LegacyWorkspaceHost {

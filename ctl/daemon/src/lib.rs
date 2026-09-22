@@ -3,7 +3,12 @@
 #[cfg(target_os = "macos")]
 mod keychain;
 mod port_forwarding;
+mod shared_forwarding;
+mod ssh_config_master;
 mod target_lifecycle;
+
+#[cfg(test)]
+mod master_policy_tests;
 
 use ctld_ipc::{
   ClientMessage, LocalPortForward, PromptKind, ServerMessage, SshGateway, SshGatewayMode, SshTarget,
@@ -20,12 +25,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 use zeroize::Zeroizing;
 
 use port_forwarding::{ForwardRegistry, SshForwardControl};
+use shared_forwarding::SharedForwardRegistry;
 use target_lifecycle::TargetLifecycle;
 
 const SSH_PROGRAM: &str = "ssh";
@@ -47,9 +53,90 @@ struct State {
   attempts: Mutex<HashMap<String, Attempt>>,
   targets: Mutex<HashMap<String, Arc<TargetLifecycle>>>,
   forwards: AsyncMutex<ForwardRegistry>,
+  configured_connections: Mutex<HashMap<String, ConnectionLease>>,
+  shared_forwards: AsyncMutex<SharedForwardRegistry>,
+}
+
+#[derive(Clone, Debug)]
+struct MasterEndpoint {
+  control_path: PathBuf,
+  shared: bool,
+  startup: SharedMasterStartup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedMasterStartup {
+  Create,
+  PrivateFallback,
+  ExternalOnly,
+}
+
+impl MasterEndpoint {
+  fn managed(target: &SshTarget) -> Self {
+    Self {
+      control_path: control_path(target),
+      shared: false,
+      startup: SharedMasterStartup::PrivateFallback,
+    }
+  }
+
+  /// A live reuse-only socket can disappear after config resolution. Retain
+  /// the resolved creation policy instead of accidentally starting a new one.
+  fn after_missing_master(self, target: &SshTarget) -> Result<Self, RequestError> {
+    if !self.shared {
+      return Ok(self);
+    }
+    match self.startup {
+      SharedMasterStartup::Create => Ok(self),
+      SharedMasterStartup::PrivateFallback => Ok(Self::managed(target)),
+      SharedMasterStartup::ExternalOnly => Err(ssh_config_master::external_master_required()),
+    }
+  }
+}
+
+struct ConnectionLease {
+  endpoint: MasterEndpoint,
+  // Closing our anchor session lets OpenSSH apply ControlPersist. The shared
+  // master may still serve channels owned by a terminal or another program.
+  anchor: Option<ChildStdin>,
 }
 
 impl State {
+  fn endpoint(&self, target: &SshTarget) -> Option<MasterEndpoint> {
+    if !target.uses_ssh_config_master() {
+      return Some(MasterEndpoint::managed(target));
+    }
+    self
+      .configured_connections
+      .lock()
+      .unwrap()
+      .get(&target_key(target))
+      .map(|lease| lease.endpoint.clone())
+  }
+
+  fn adopt(&self, target: &SshTarget, endpoint: &MasterEndpoint, anchor: Option<ChildStdin>) {
+    if target.uses_ssh_config_master() {
+      let mut connections = self.configured_connections.lock().unwrap();
+      // Repeated Connect must not drop an existing nonpersistent anchor.
+      if anchor.is_none()
+        && connections.get(&target_key(target)).is_some_and(|lease| {
+          lease.endpoint.control_path == endpoint.control_path
+            && lease.endpoint.shared == endpoint.shared
+            && lease.anchor.is_some()
+        })
+      {
+        return;
+      }
+      connections.insert(
+        target_key(target),
+        ConnectionLease {
+          endpoint: endpoint.clone(),
+          anchor,
+        },
+      );
+    }
+  }
+
   fn target(&self, target: &SshTarget) -> Arc<TargetLifecycle> {
     Arc::clone(
       self
@@ -113,6 +200,8 @@ enum RequestError {
   MasterTimeout,
   #[error("OpenSSH control master exited before becoming ready: {0}")]
   MasterFailed(String),
+  #[error("could not use SSH configuration: {0}")]
+  SshConfig(String),
   #[error("This SSH host was disconnected. Use Connect host to reconnect.")]
   HostDisconnected,
   #[error("could not disconnect the OpenSSH control master: {0}")]
@@ -210,9 +299,10 @@ async fn handle_connection(
   state: Arc<State>,
 ) -> Result<(), RequestError> {
   handshake_server(&mut stream).await?;
-  let request = ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
+  let mut request = ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
     .await?
     .ok_or(RequestError::ClientClosed)?;
+  normalize_request_target(&mut request);
   let result = match request {
     ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
     ClientMessage::MasterStatus { target } => master_status(&mut stream, &state, &target).await,
@@ -254,6 +344,22 @@ async fn handle_connection(
     .await;
   }
   result
+}
+
+fn normalize_request_target(request: &mut ClientMessage) {
+  match request {
+    ClientMessage::EnsureMaster { target }
+    | ClientMessage::MasterStatus { target }
+    | ClientMessage::ConnectionStatus { target }
+    | ClientMessage::DisconnectMaster { target }
+    | ClientMessage::DeleteCredentials { target }
+    | ClientMessage::ConfigurePortForward { target, .. }
+    | ClientMessage::ListPortForwards { target }
+    | ClientMessage::ListRemoteListeners { target } => target.normalize_master_policy(),
+    ClientMessage::Handshake { .. }
+    | ClientMessage::PromptResponse { .. }
+    | ClientMessage::Askpass { .. } => {}
+  }
 }
 
 async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), ctld_ipc::CodecError> {
@@ -318,18 +424,28 @@ async fn ensure_master(
   attempt
     .run(async { state.forwards.lock().await.resume(&target) })
     .await?;
-  let control_path = control_path(&target);
-  if attempt
-    .run(reuse_master_or_prepare(&state, &target, &control_path))
-    .await??
-  {
+  let mut endpoint = attempt.run(ssh_config_master::resolve(&target)).await??;
+  let mut reused = attempt
+    .run(reuse_master_or_prepare(&state, &target, &endpoint))
+    .await??;
+  if !reused && endpoint.shared {
+    endpoint = endpoint.after_missing_master(&target)?;
+    if !endpoint.shared {
+      reused = attempt
+        .run(reuse_master_or_prepare(&state, &target, &endpoint))
+        .await??;
+    }
+  }
+  let control_path = endpoint.control_path.clone();
+  if reused {
+    state.adopt(&target, &endpoint, None);
     attempt
       .run(async {
         state
           .forwards
           .lock()
           .await
-          .activate(&SshForwardControl, &target)
+          .activate(&SshForwardControl { state: &state }, &target)
           .await;
       })
       .await?;
@@ -352,20 +468,25 @@ async fn ensure_master(
     token: token.clone(),
     state: Arc::clone(&state),
   };
-  let mut child = start_master(&target, &control_path, &token)?;
+  let mut child = start_master(&target, &endpoint, &token)?;
   let result = attempt
     .run(wait_for_master(
       stream,
       &state,
       &target,
-      &control_path,
+      &endpoint,
       &mut child,
       &mut prompt_rx,
     ))
     .await;
-  if !matches!(result, Ok(Ok(()))) {
-    // Reap the authentication process before releasing the target lock. The
-    // disconnect request then exits any master that forked before cancellation.
+  if endpoint.shared {
+    if matches!(result, Ok(Ok(()))) {
+      state.adopt(&target, &endpoint, child.stdin.take());
+    }
+    // A configured master can already serve other applications. End only our
+    // anchor session; killing this process could terminate their channels.
+    release_shared_process(child);
+  } else if !matches!(result, Ok(Ok(()))) {
     let _ = child.kill().await;
   }
   result?
@@ -375,10 +496,12 @@ async fn wait_for_master(
   stream: &mut ctld_ipc::Stream,
   state: &State,
   target: &SshTarget,
-  control_path: &Path,
+  endpoint: &MasterEndpoint,
   child: &mut Child,
   prompt_rx: &mut mpsc::Receiver<PromptRequest>,
 ) -> Result<(), RequestError> {
+  let control_path = &endpoint.control_path;
+  let mut authenticated = shared_session_ready(child, endpoint.shared);
   let mut diagnostics = child.stderr.take().map(|mut stderr| {
     tokio::spawn(async move {
       use tokio::io::AsyncReadExt as _;
@@ -403,20 +526,36 @@ async fn wait_for_master(
       handle_save_offer(stream, target, &mut captured).await?;
       #[cfg(not(target_os = "macos"))]
       captured.clear();
+      state.adopt(target, endpoint, None);
       let mut forwards = state.forwards.lock().await;
-      forwards.activate(&SshForwardControl, target).await;
+      forwards
+        .activate(&SshForwardControl { state }, target)
+        .await;
       drop(forwards);
       ctld_ipc::write_frame(
         stream,
         &ServerMessage::MasterReady {
-          control_path: control_path.to_path_buf(),
+          control_path: control_path.clone(),
         },
       )
       .await?;
       return Ok(());
     }
+    if endpoint.shared
+      && authenticated
+        .as_mut()
+        .is_some_and(|ready| ready.try_recv().is_ok())
+    {
+      if control_master_is_ready(target, control_path).await {
+        continue;
+      }
+      return Err(RequestError::SshConfig(format!(
+        "OpenSSH connected without creating its configured control socket at {}. Check ControlPath and its parent directory.",
+        control_path.display()
+      )));
+    }
     if let Some(status) = child.try_wait().map_err(RequestError::StartMaster)?
-      && !status.success()
+      && (!status.success() || endpoint.shared)
     {
       let message = if let Some(task) = diagnostics.take() {
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -434,13 +573,11 @@ async fn wait_for_master(
       }));
     }
     if Instant::now() >= deadline {
-      let _ = child.kill().await;
       return Err(RequestError::MasterTimeout);
     }
     tokio::select! {
       prompt = prompt_rx.recv() => {
         let Some(prompt) = prompt else {
-          let _ = child.kill().await;
           return Err(RequestError::ClientClosed);
         };
         answer_prompt(
@@ -459,16 +596,41 @@ async fn wait_for_master(
 async fn reuse_master_or_prepare(
   state: &State,
   target: &SshTarget,
-  control_path: &Path,
+  endpoint: &MasterEndpoint,
 ) -> Result<bool, RequestError> {
+  let control_path = &endpoint.control_path;
   // The caller holds the target lock. Coordinate socket replacement with
   // listener tracking: configure may create a forward after the new master
   // is ready but before the credential save offer finishes.
   let mut forwards = state.forwards.lock().await;
-  if control_master_is_ready(target, control_path).await {
+  let ready = control_master_is_ready(target, control_path).await;
+  if let Some(previous) = state.endpoint(target) {
+    let changed = previous.control_path != *control_path || previous.shared != endpoint.shared;
+    if changed || !ready {
+      // Our shared listeners remain under ctld's control even when the master
+      // dies. A dead private master instead needs stale-socket cleanup; asking
+      // that socket to cancel a forward would prevent reconnection forever.
+      if previous.shared || changed && control_master_is_ready(target, &previous.control_path).await
+      {
+        forwards
+          .disconnect(&SshForwardControl { state }, target)
+          .await?;
+        forwards.resume(target);
+      }
+      state
+        .configured_connections
+        .lock()
+        .unwrap()
+        .remove(&target_key(target));
+      forwards.master_replaced(target);
+    }
+  }
+  if ready {
     return Ok(true);
   }
-  prepare_control_path(control_path)?;
+  if !endpoint.shared {
+    prepare_control_path(control_path)?;
+  }
   forwards.master_replaced(target);
   Ok(false)
 }
@@ -482,6 +644,7 @@ impl RequestError {
       Self::StartMaster(_) => "ssh_start_failed",
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
+      Self::SshConfig(_) => "ssh_config_error",
       Self::HostDisconnected => "ssh_host_disconnected",
       Self::DisconnectFailed(_) => "ssh_disconnect_failed",
       Self::PortForwardFailed(_) => "ssh_port_forward_failed",
@@ -686,9 +849,17 @@ async fn master_status(
   let lifecycle = state.target(target);
   let mut attempt = lifecycle.attempt();
   lifecycle.require_connected()?;
-  let path = control_path(target);
-  let message = if attempt.run(control_master_is_ready(target, &path)).await? {
-    ServerMessage::MasterReady { control_path: path }
+  let message = if let Some(endpoint) = state.endpoint(target) {
+    if attempt
+      .run(control_master_is_ready(target, &endpoint.control_path))
+      .await?
+    {
+      ServerMessage::MasterReady {
+        control_path: endpoint.control_path,
+      }
+    } else {
+      ServerMessage::AuthenticationRequired
+    }
   } else {
     ServerMessage::AuthenticationRequired
   };
@@ -709,7 +880,20 @@ async fn disconnect_master(
   let _target_guard = lifecycle.lock.lock().await;
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
-  exit_master(target, &control_path(target)).await?;
+  if let Some(endpoint) = state.endpoint(target) {
+    if endpoint.shared {
+      forwards
+        .disconnect(&SshForwardControl { state }, target)
+        .await?;
+    } else {
+      exit_master(target, &endpoint.control_path).await?;
+    }
+  }
+  state
+    .configured_connections
+    .lock()
+    .unwrap()
+    .remove(&target_key(target));
   forwards.master_replaced(target);
   ctld_ipc::write_frame(stream, &ServerMessage::MasterDisconnected).await?;
   Ok(())
@@ -721,7 +905,13 @@ async fn connection_status(
   target: &SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
-  let connected = control_master_is_ready(target, &control_path(target)).await;
+  let connected = if state.target(target).is_paused() {
+    false
+  } else if let Some(endpoint) = state.endpoint(target) {
+    control_master_is_ready(target, &endpoint.control_path).await
+  } else {
+    false
+  };
   ctld_ipc::write_frame(
     stream,
     &ServerMessage::ConnectionStatus {
@@ -800,7 +990,7 @@ async fn configure_port_forward(
     forwards.pause(&target);
   }
   let status = forwards
-    .configure(&SshForwardControl, target, forward, enabled)
+    .configure(&SshForwardControl { state }, target, forward, enabled)
     .await?;
   ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
   Ok(())
@@ -816,7 +1006,7 @@ async fn list_port_forwards(
     .forwards
     .lock()
     .await
-    .list(&SshForwardControl, target)
+    .list(&SshForwardControl { state }, target)
     .await;
   ctld_ipc::write_frame(stream, &ServerMessage::PortForwards { statuses }).await?;
   Ok(())
@@ -833,7 +1023,11 @@ async fn list_remote_listeners(
   lifecycle.require_connected()?;
   let _target_guard = attempt.run(lifecycle.lock.lock()).await?;
   lifecycle.require_connected()?;
-  let control_path = control_path(target);
+  let Some(endpoint) = state.endpoint(target) else {
+    ctld_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
+    return Ok(());
+  };
+  let control_path = endpoint.control_path;
   if !attempt
     .run(control_master_is_ready(target, &control_path))
     .await?
@@ -864,7 +1058,8 @@ fn listener_discovery_command(target: &SshTarget, control_path: &Path) -> Comman
     .args(["-o", "ForwardX11=no"])
     .args(["-o", "PermitLocalCommand=no"])
     .args(["-o", "RemoteCommand=none"])
-    .args(["-o", "BatchMode=yes"]);
+    .args(["-o", "BatchMode=yes"])
+    .args(["-o", "ForkAfterAuthentication=no"]);
   append_target_arguments(&mut command, target);
   command
     .arg(REMOTE_LISTENERS_COMMAND)
@@ -1034,39 +1229,93 @@ fn remote_forward_host(host: &str) -> String {
   }
 }
 
+fn master_command(target: &SshTarget, endpoint: &MasterEndpoint) -> Command {
+  let mut command = Command::new(SSH_PROGRAM);
+  if endpoint.shared {
+    ssh_config_master::append_session_options(&mut command);
+  } else {
+    command
+      .args(["-f", "-M", "-N", "-T"])
+      .args(["-o", "ControlMaster=yes"])
+      .args(["-o", &format!("ControlPersist={MASTER_IDLE_SECONDS}")])
+      .arg("-S")
+      .arg(&endpoint.control_path)
+      .args(["-o", "ClearAllForwardings=yes"])
+      .args(["-o", "ForwardAgent=no"])
+      .args(["-o", "ForwardX11=no"])
+      .args(["-o", "PermitLocalCommand=no"])
+      .args(["-o", "RemoteCommand=none"])
+      .args(["-o", "BatchMode=no"])
+      .args(["-o", "StrictHostKeyChecking=ask"]);
+  }
+  append_target_arguments(&mut command, target);
+  if endpoint.shared {
+    command.arg(ssh_config_master::SHARED_SESSION_COMMAND);
+  }
+  command
+}
+
 fn start_master(
   target: &SshTarget,
-  control_path: &Path,
+  endpoint: &MasterEndpoint,
   token: &str,
 ) -> Result<Child, RequestError> {
+  if endpoint.shared && endpoint.startup != SharedMasterStartup::Create {
+    return Err(RequestError::SshConfig(
+      "The configured SSH master disappeared before it could be reused. Connect again to reevaluate its configuration.".into(),
+    ));
+  }
   let current_executable = std::env::current_exe().map_err(RequestError::StartMaster)?;
-  let mut command = Command::new(SSH_PROGRAM);
-  command
-    .args(["-f", "-M", "-N", "-T"])
-    .args(["-o", "ControlMaster=yes"])
-    .args(["-o", &format!("ControlPersist={MASTER_IDLE_SECONDS}")])
-    .arg("-S")
-    .arg(control_path)
-    .args(["-o", "ClearAllForwardings=yes"])
-    .args(["-o", "ForwardAgent=no"])
-    .args(["-o", "ForwardX11=no"])
-    .args(["-o", "PermitLocalCommand=no"])
-    .args(["-o", "RemoteCommand=none"])
-    .args(["-o", "BatchMode=no"])
-    .args(["-o", "StrictHostKeyChecking=ask"]);
-  append_target_arguments(&mut command, target);
+  let mut command = master_command(target, endpoint);
   command
     .env("SSH_ASKPASS", current_executable)
     .env("SSH_ASKPASS_REQUIRE", "force")
     .env("DISPLAY", "ctld-askpass")
     .env("CTLD_ASKPASS", "1")
     .env("CTLD_ASKPASS_TOKEN", token)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
+    .stdin(if endpoint.shared {
+      Stdio::piped()
+    } else {
+      Stdio::null()
+    })
+    .stdout(if endpoint.shared {
+      Stdio::piped()
+    } else {
+      Stdio::null()
+    })
     .stderr(Stdio::piped())
-    .kill_on_drop(true)
+    .kill_on_drop(!endpoint.shared)
     .spawn()
     .map_err(RequestError::StartMaster)
+}
+
+fn release_shared_process(mut child: Child) {
+  drop(child.stdin.take());
+  // Socket publication can race with cancellation. Even a missing path cannot
+  // prove that killing this process is safe for other clients. Close only our
+  // session and let OpenSSH apply its configured lifetime and network timeouts.
+  tokio::spawn(async move {
+    let _ = child.wait().await;
+  });
+}
+
+fn shared_session_ready(child: &mut Child, shared: bool) -> Option<oneshot::Receiver<()>> {
+  if !shared {
+    return None;
+  }
+  let stdout = child.stdout.take()?;
+  let (ready, receiver) = oneshot::channel();
+  tokio::spawn(async move {
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
+    let mut lines = BufReader::new(stdout.take(MAX_DIAGNOSTICS as u64)).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+      if line == "ctld-master-ready" {
+        let _ = ready.send(());
+        return;
+      }
+    }
+  });
+  Some(receiver)
 }
 
 fn prepare_control_path(control_path: &Path) -> Result<(), RequestError> {
@@ -1127,9 +1376,16 @@ fn append_target_arguments(command: &mut Command, target: &SshTarget) {
   if let Some(identity_file) = &target.identity_file {
     command.arg("-i").arg(identity_file);
   }
-  command
-    .arg("--")
-    .arg(target.hostname.as_deref().unwrap_or(&target.destination));
+  if let Some(alias) = &target.ssh_config_alias {
+    if let Some(hostname) = &target.hostname {
+      command.arg("-o").arg(format!("HostName={hostname}"));
+    }
+    command.arg("--").arg(alias);
+  } else {
+    command
+      .arg("--")
+      .arg(target.hostname.as_deref().unwrap_or(&target.destination));
+  }
 }
 
 fn gateway_jump_specification(gateway: &SshGateway) -> String {
@@ -1182,7 +1438,13 @@ fn control_path_for_socket(target: &SshTarget, daemon_socket: &Path) -> PathBuf 
 }
 
 fn validate_target(target: &SshTarget) -> Result<(), RequestError> {
-  if target.destination.trim().is_empty()
+  if target.ssh_config_alias.as_ref().is_some_and(|alias| {
+    alias != &target.destination
+      || alias.starts_with(['-', '!'])
+      || alias
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '*' | '?'))
+  }) || target.destination.trim().is_empty()
     || target.destination.chars().any(char::is_control)
     || target.hostname.as_ref().is_some_and(|value| {
       value.trim().is_empty()
@@ -1429,6 +1691,8 @@ mod tests {
 
   fn target() -> SshTarget {
     SshTarget {
+      ssh_config_alias: None,
+      use_ssh_config_master: None,
       destination: "work".into(),
       hostname: Some("example.test".into()),
       user: Some("alice".into()),

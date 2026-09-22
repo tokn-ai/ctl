@@ -3,6 +3,7 @@ import type { HostCatalogDocument, RemoteIdentity, SshConnectionTarget, Workspac
 import { recoverRemoteHost } from "./remoteRecovery";
 import {
   expectedHostIdentity,
+  connectionSettings,
   hostCatalogDocument,
   hostFromTarget,
   hostTarget,
@@ -11,6 +12,7 @@ import {
   refreshHostCatalog,
   restoreWorkspace,
   updateHostSettings,
+  usesSshConfigMaster,
   workspaceDocument,
   workspaceSidebarTargets,
 } from "./workspaceModel";
@@ -36,7 +38,7 @@ describe("saved host catalog and SSH config projections", () => {
     expect(first.hosts.map((host) => host.host_id)).toEqual(["local", "ssh-config:build", "ssh-config:other-account"]);
     expect(second.hosts.find((host) => host.name === "build")?.host_id).toBe(first.hosts[1].host_id);
     expect(projectedHostId("name/%part")).toBe("ssh-config:name%2F%25part");
-    expect(first.targets[1]).toMatchObject({ destination: "build", method_id: "ssh_config" });
+    expect(first.targets[1]).toMatchObject({ destination: "build", method_id: "ssh_config", ssh_config_alias: "build" });
     expect(hostCatalogDocument(first)).toEqual(empty_catalog);
     expect(workspaceDocument(first)).not.toHaveProperty("hosts");
     expect(workspaceDocument(first)).not.toHaveProperty("ssh_gateways");
@@ -55,6 +57,86 @@ describe("saved host catalog and SSH config projections", () => {
     // A connection with no remembered work remains a runtime-only choice.
     const reloaded = restoreWorkspace(workspaceDocument(refreshed), empty_catalog, aliases);
     expect(workspaceSidebarTargets(reloaded)).toEqual([reloaded.targets[0]]);
+  });
+
+  it("persists SSH-config origin on named methods and restores it at the transport boundary", () => {
+    const target: SshConnectionTarget = {
+      kind: "ssh", destination: "build", ssh_config_alias: "build", user: "deploy", identity_file: "~/.ssh/deploy",
+      gateway_route: [{ gateway_id: "edge", mode: "native_only" }],
+    };
+    const host = hostFromTarget(target, "Named builder");
+    const view = restoreWorkspace(document(), {
+      ...empty_catalog, hosts: [host], ssh_gateways: [{ gateway_id: "edge", name: "Edge", destination: "gateway" }],
+    }, aliases);
+    const catalog = hostCatalogDocument(view);
+    expect(catalog.hosts[0].connection_methods[0]).toMatchObject({ ssh_config_alias: "build", target: { user: "deploy" } });
+    expect(catalog.hosts[0].connection_methods[0].target).not.toHaveProperty("ssh_config_alias");
+    expect(connectionSettings(target)).not.toHaveProperty("ssh_config_alias");
+    const reloaded = restoreWorkspace(workspaceDocument(view), catalog, aliases);
+    expect(hostTarget(reloaded.hosts[1], reloaded.ssh_gateways)).toMatchObject({
+      destination: "build", ssh_config_alias: "build", user: "deploy", identity_file: "~/.ssh/deploy",
+      gateways: [expect.objectContaining({ destination: "gateway" })],
+    });
+  });
+
+  it("infers legacy origin only for projected aliases or pure discovered aliases", () => {
+    const targets: SshConnectionTarget[] = [
+      { kind: "ssh", host_id: projectedHostId("build"), destination: "build", user: "deploy", identity_file: "~/.ssh/deploy" },
+      { kind: "ssh", host_id: "legacy-alias", destination: "other-account" },
+      { kind: "ssh", host_id: "direct", destination: "build", hostname: "10.0.0.5" },
+      { kind: "ssh", host_id: "custom-account", destination: "build", user: "other" },
+      { kind: "ssh", host_id: "tailnet", destination: "build", tailscale_node_id: "n123" },
+      { kind: "ssh", host_id: "unrecognized", destination: "missing-alias" },
+    ];
+    const view = restoreWorkspace(document(), { ...empty_catalog, hosts: targets.map((target) => hostFromTarget(target)) }, aliases);
+    expect(hostTarget(view.hosts[1], [])).toMatchObject({ ssh_config_alias: "build", user: "deploy" });
+    expect(hostTarget(view.hosts[2], [])).toMatchObject({ ssh_config_alias: "other-account" });
+    for (const host_id of ["direct", "custom-account", "tailnet", "unrecognized"]) {
+      const host = view.hosts.find((host) => host.host_id === host_id)!;
+      expect(host.connection_methods[0]).not.toHaveProperty("ssh_config_alias");
+      expect(hostTarget(host, [])).not.toHaveProperty("ssh_config_alias");
+    }
+    const missing = restoreWorkspace(document(), { ...empty_catalog, hosts: [hostFromTarget(targets[0])] }, []);
+    expect(hostTarget(missing.hosts[1], [])).toMatchObject({ ssh_config_alias: "build", unavailable: expect.any(String) });
+  });
+
+  it.each([
+    { destination: "build", ssh_config_alias: "build", use_ssh_config_master: false },
+    { destination: "direct", hostname: "10.0.0.8", use_ssh_config_master: true },
+    { destination: "tailnet", hostname: "100.64.0.8", tailscale_node_id: "n123", use_ssh_config_master: true },
+  ])("persists a master override on its method and restores it after reload (%j)", (options) => {
+    const target: SshConnectionTarget = { kind: "ssh", host_id: "builder", ...options };
+    const host = hostFromTarget(target);
+    const view = restoreWorkspace(document(), { ...empty_catalog, hosts: [host] }, aliases);
+    const catalog = hostCatalogDocument(view);
+    const method = catalog.hosts[0].connection_methods[0];
+    expect(method.use_ssh_config_master).toBe(options.use_ssh_config_master);
+    expect(method.target).not.toHaveProperty("use_ssh_config_master");
+    const reloaded = restoreWorkspace(document(), catalog, aliases);
+    const restored = hostTarget(reloaded.hosts[1], []) as SshConnectionTarget;
+    expect(restored.use_ssh_config_master).toBe(options.use_ssh_config_master);
+    expect(restored.ssh_config_alias).toBe(options.ssh_config_alias);
+    expect(usesSshConfigMaster(restored)).toBe(options.use_ssh_config_master);
+  });
+
+  it("leaves legacy defaults implicit and retains a live master selection through settings edits", () => {
+    const id = projectedHostId("build");
+    const original = restoreWorkspace(document(id), empty_catalog, aliases);
+    const host = promoteHost(original.hosts[1]);
+    const changed = updateHostSettings(original, {
+      ...host,
+      connection_methods: host.connection_methods.map((method) => ({ ...method, use_ssh_config_master: false })),
+    });
+    const latest = hostTarget(changed.hosts[1], []) as SshConnectionTarget;
+    expect(latest.use_ssh_config_master).toBe(false);
+    expect(changed.sessions[0].target).toEqual(original.sessions[0].target);
+    const refreshed = refreshHostCatalog(changed, hostCatalogDocument(changed), aliases);
+    expect(refreshed.targets[1]).toEqual(original.targets[1]);
+    expect(refreshed.sessions[0].target).toEqual(original.sessions[0].target);
+    expect(usesSshConfigMaster(refreshed.targets[1] as SshConnectionTarget)).toBe(true);
+    expect(hostCatalogDocument(original)).toEqual(empty_catalog);
+    expect(hostCatalogDocument({ ...original, hosts: [host] }).hosts[0].connection_methods[0])
+      .not.toHaveProperty("use_ssh_config_master");
   });
 
   it("uses a saved ID override but never merges aliases, addresses, names, or accounts", () => {
@@ -144,7 +226,7 @@ describe("saved host catalog and SSH config projections", () => {
     const reloaded = restoreWorkspace(workspaceDocument(edited), catalog, aliases);
     expect(reloaded.hosts).toHaveLength(3);
     expect(reloaded.active_tab_key).toBe(view.active_tab_key);
-    expect(reloaded.sessions[0].target).toMatchObject({ host_id: id, host_name: "Build machine" });
+    expect(reloaded.sessions[0].target).toMatchObject({ host_id: id, host_name: "Build machine", ssh_config_alias: "build" });
   });
 
   it("blocks a promoted alias that disappears while keeping its inline alternatives usable", () => {

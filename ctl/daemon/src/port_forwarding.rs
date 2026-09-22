@@ -8,7 +8,7 @@ use std::future::Future;
 
 use ctld_ipc::{LocalPortForward, PortForwardState, PortForwardStatus, SshTarget};
 
-use super::{RequestError, control_master_is_ready, control_path, run_forward_command};
+use super::{RequestError, State, control_master_is_ready, run_forward_command};
 
 struct OwnedForward {
   target: SshTarget,
@@ -37,11 +37,16 @@ pub(super) trait ForwardControl: Sync {
   ) -> impl Future<Output = Result<(), RequestError>> + Send;
 }
 
-pub(super) struct SshForwardControl;
+pub(super) struct SshForwardControl<'a> {
+  pub(super) state: &'a State,
+}
 
-impl ForwardControl for SshForwardControl {
+impl ForwardControl for SshForwardControl<'_> {
   async fn is_ready(&self, target: &SshTarget) -> bool {
-    control_master_is_ready(target, &control_path(target)).await
+    let Some(endpoint) = self.state.endpoint(target) else {
+      return false;
+    };
+    control_master_is_ready(target, &endpoint.control_path).await
   }
 
   async fn change(
@@ -50,11 +55,41 @@ impl ForwardControl for SshForwardControl {
     forward: &LocalPortForward,
     cancel: bool,
   ) -> Result<(), RequestError> {
-    let path = control_path(target);
-    if cancel && !path.exists() {
+    if cancel
+      && self
+        .state
+        .shared_forwards
+        .lock()
+        .await
+        .cancel(target, forward)
+        .await
+    {
       return Ok(());
     }
-    run_forward_command(target, &path, forward, cancel).await
+    let Some(endpoint) = self.state.endpoint(target) else {
+      return if cancel {
+        Ok(())
+      } else {
+        Err(RequestError::HostDisconnected)
+      };
+    };
+    if endpoint.shared {
+      return if cancel {
+        Ok(())
+      } else {
+        self
+          .state
+          .shared_forwards
+          .lock()
+          .await
+          .start(target, &endpoint.control_path, forward)
+          .await
+      };
+    }
+    if cancel && !endpoint.control_path.exists() {
+      return Ok(());
+    }
+    run_forward_command(target, &endpoint.control_path, forward, cancel).await
   }
 }
 
@@ -158,6 +193,27 @@ impl ForwardRegistry {
     {
       record.status = waiting_status(record.status.forward.clone());
     }
+  }
+
+  /// A shared master's lifetime is outside ctld's control. Disconnect only
+  /// this client's listeners, retaining definitions for an explicit reconnect.
+  pub(super) async fn disconnect(
+    &mut self,
+    control: &impl ForwardControl,
+    target: &SshTarget,
+  ) -> Result<(), RequestError> {
+    self.pause(target);
+    for record in self
+      .records
+      .values_mut()
+      .filter(|record| record.target == *target)
+    {
+      if record.listener_present {
+        control.change(target, &record.status.forward, true).await?;
+        record.listener_present = false;
+      }
+    }
+    Ok(())
   }
 
   pub(super) fn resume(&mut self, target: &SshTarget) {

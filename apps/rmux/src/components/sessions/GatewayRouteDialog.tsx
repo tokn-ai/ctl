@@ -24,6 +24,10 @@ interface Props {
     identity_files?: readonly SshIdentityFile[];
     identity_loading?: boolean;
     identity_warning?: string;
+    ssh_config_master?: {
+      checked: boolean;
+      onChange(checked: boolean): void;
+    };
     export_to_ssh_config?: {
       checked: boolean;
       allowed: boolean;
@@ -261,8 +265,25 @@ export function GatewayRouteDialog({
             {hostSetup.identity_loading ? <span>Loading identity files…</span> : null}
             {hostSetup.identity_warning ? <span role="status">{hostSetup.identity_warning}</span> : null}
           </label>
+          {hostSetup.ssh_config_master ? (
+            <label className="gateway-checkbox-option">
+              <input
+                type="checkbox"
+                aria-label="Use SSH-config master"
+                aria-describedby="ssh-config-master-description"
+                checked={hostSetup.ssh_config_master.checked}
+                onChange={(event) => hostSetup.ssh_config_master?.onChange(event.target.checked)}
+              />
+              Use SSH-config master
+              <small id="ssh-config-master-description">
+                {hostSetup.ssh_config_master.checked
+                  ? "Use OpenSSH sharing settings, with an rmux private master when sharing is not configured."
+                  : "Use an rmux private master for this connection."}
+              </small>
+            </label>
+          ) : null}
           {hostSetup.export_to_ssh_config ? (
-            <label className="gateway-export-option">
+            <label className="gateway-checkbox-option">
               <input
                 type="checkbox"
                 aria-label="Also save to OpenSSH config"

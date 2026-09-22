@@ -28,7 +28,7 @@
   grid-column: 1 / -1;
 }
 
-.gateway-host-form .gateway-export-option {
+.gateway-host-form .gateway-checkbox-option {
   grid-column: 1 / -1;
   display: flex;
   flex-flow: row wrap;
@@ -36,12 +36,14 @@
   gap: 7px;
 }
 
-.gateway-export-option input {
+.gateway-host-form .gateway-checkbox-option input {
   width: auto;
   accent-color: var(--accent);
 }
 
-.gateway-export-option small {
+.gateway-checkbox-option small {
+  flex-basis: 100%;
+  padding-left: 20px;
   color: var(--muted);
 }
 

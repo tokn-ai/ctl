@@ -1,3 +1,5 @@
+use std::future::{Future, ready};
+
 use super::*;
 
 fn target(alias: Option<&str>) -> SshTarget {
@@ -161,16 +163,16 @@ async fn an_external_socket_is_not_a_connection_until_adopted() {
 async fn a_stale_private_fallback_socket_does_not_block_reconnection_with_forwards() {
   struct ReadyControl;
   impl port_forwarding::ForwardControl for ReadyControl {
-    async fn is_ready(&self, _: &SshTarget) -> bool {
-      true
+    fn is_ready(&self, _: &SshTarget) -> impl Future<Output = bool> + Send {
+      ready(true)
     }
-    async fn change(
+    fn change(
       &self,
       _: &SshTarget,
       _: &LocalPortForward,
       _: bool,
-    ) -> Result<(), RequestError> {
-      Ok(())
+    ) -> impl Future<Output = Result<(), RequestError>> + Send {
+      ready(Ok(()))
     }
   }
   let root = std::env::temp_dir().join(format!("ctld-stale-{}", uuid::Uuid::new_v4()));

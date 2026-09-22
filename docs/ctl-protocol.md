@@ -49,10 +49,11 @@ an arbitrary service or shell command is accepted from the client.
 `<destination>` is an OpenSSH destination or `Host` alias. Host-key checking,
 user authentication, certificates, agents, proxy jumps, and ports remain
 OpenSSH configuration. On Unix clients, `ctl` uses an explicit private OpenSSH
-control master owned by `ctld`. Desktop methods originating from SSH-config
-aliases can instead reuse the alias's configured master, preserving
+control master owned by `ctld`. Desktop methods with **Use SSH-config master**
+enabled can instead reuse a configured master, preserving
 `ControlMaster`, `ControlPath`, and `ControlPersist`; unconfigured sharing falls
-back to a private master. `ctl` never disables host-key
+back to a private master. This preference defaults on for SSH-config aliases
+and off for direct and Tailscale methods. `ctl` never disables host-key
 verification, enables agent forwarding, creates a forwarding, or accepts a
 user-controlled remote command.
 

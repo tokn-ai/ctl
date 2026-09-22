@@ -150,6 +150,7 @@ fn daemon_target(
   ctld_ipc::SshTarget {
     destination: destination.to_owned(),
     ssh_config_alias: None,
+    use_ssh_config_master: None,
     hostname: options.hostname.clone(),
     user: options.user.clone(),
     port: options.port,

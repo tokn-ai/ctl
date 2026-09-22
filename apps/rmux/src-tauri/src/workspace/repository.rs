@@ -412,6 +412,7 @@ fn normalize_legacy_hosts(hosts: &mut serde_json::Value) -> CommandResult<()> {
         method_id: "default".into(),
         name: "SSH".into(),
         ssh_config_alias: None,
+        use_ssh_config_master: None,
         tailscale_node_id: None,
         target,
       });

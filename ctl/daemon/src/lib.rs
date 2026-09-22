@@ -103,7 +103,7 @@ struct ConnectionLease {
 
 impl State {
   fn endpoint(&self, target: &SshTarget) -> Option<MasterEndpoint> {
-    if target.ssh_config_alias.is_none() {
+    if !target.uses_ssh_config_master() {
       return Some(MasterEndpoint::managed(target));
     }
     self
@@ -115,7 +115,7 @@ impl State {
   }
 
   fn adopt(&self, target: &SshTarget, endpoint: &MasterEndpoint, anchor: Option<ChildStdin>) {
-    if target.ssh_config_alias.is_some() {
+    if target.uses_ssh_config_master() {
       let mut connections = self.configured_connections.lock().unwrap();
       // Repeated Connect must not drop an existing nonpersistent anchor.
       if anchor.is_none()
@@ -299,9 +299,10 @@ async fn handle_connection(
   state: Arc<State>,
 ) -> Result<(), RequestError> {
   handshake_server(&mut stream).await?;
-  let request = ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
+  let mut request = ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
     .await?
     .ok_or(RequestError::ClientClosed)?;
+  normalize_request_target(&mut request);
   let result = match request {
     ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
     ClientMessage::MasterStatus { target } => master_status(&mut stream, &state, &target).await,
@@ -343,6 +344,22 @@ async fn handle_connection(
     .await;
   }
   result
+}
+
+fn normalize_request_target(request: &mut ClientMessage) {
+  match request {
+    ClientMessage::EnsureMaster { target }
+    | ClientMessage::MasterStatus { target }
+    | ClientMessage::ConnectionStatus { target }
+    | ClientMessage::DisconnectMaster { target }
+    | ClientMessage::DeleteCredentials { target }
+    | ClientMessage::ConfigurePortForward { target, .. }
+    | ClientMessage::ListPortForwards { target }
+    | ClientMessage::ListRemoteListeners { target } => target.normalize_master_policy(),
+    ClientMessage::Handshake { .. }
+    | ClientMessage::PromptResponse { .. }
+    | ClientMessage::Askpass { .. } => {}
+  }
 }
 
 async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), ctld_ipc::CodecError> {
@@ -1675,6 +1692,7 @@ mod tests {
   fn target() -> SshTarget {
     SshTarget {
       ssh_config_alias: None,
+      use_ssh_config_master: None,
       destination: "work".into(),
       hostname: Some("example.test".into()),
       user: Some("alice".into()),

@@ -65,6 +65,8 @@ pub enum ConnectionTargetDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ssh_config_alias: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    use_ssh_config_master: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     hostname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user: Option<String>,
@@ -102,6 +104,7 @@ impl ConnectionTargetDto {
       remote_info: None,
       destination: destination.into(),
       ssh_config_alias: None,
+      use_ssh_config_master: None,
       hostname: None,
       user: None,
       port: None,
@@ -857,6 +860,19 @@ mod tests {
     });
     let target: ConnectionTargetDto = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(&target).unwrap(), value);
+  }
+
+  #[test]
+  fn explicit_ssh_master_policy_survives_runtime_target_serialization() {
+    for policy in [false, true] {
+      let value = serde_json::json!({
+        "kind": "ssh",
+        "destination": "office",
+        "use_ssh_config_master": policy,
+      });
+      let target: ConnectionTargetDto = serde_json::from_value(value.clone()).unwrap();
+      assert_eq!(serde_json::to_value(&target).unwrap(), value);
+    }
   }
 
   #[test]

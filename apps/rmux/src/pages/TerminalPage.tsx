@@ -31,7 +31,7 @@ import {
   remapStateKeys,
   sameSshEndpoint,
 } from "../features/workspace/remoteRecovery";
-import { connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
+import { connectionMethodOptions, connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
 import { removableHostCredentials } from "../features/workspace/hostCredentials";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
@@ -446,7 +446,7 @@ export function TerminalPage() {
       host_name: host.name,
       method_id: method?.method_id ?? null,
       method_name: method?.name ?? "SSH",
-      initial_target: method ? { ...method.target, tailscale_node_id: method.tailscale_node_id, ssh_config_alias: method.ssh_config_alias } : undefined,
+      initial_target: method ? { ...method.target, ...connectionMethodOptions(method) } : undefined,
     });
     setMethodNameOpen(!method);
   }
@@ -468,7 +468,7 @@ export function TerminalPage() {
       // Promotion keeps method references held by existing sessions valid.
       connection_methods: projected.connection_methods.map((method) =>
         method.method_id === projected.preferred_method_id
-          ? { ...method, target: connectionSettings(target) }
+          ? { ...method, ...connectionMethodOptions(target), target: connectionSettings(target) }
           : method),
     } : hostFromTarget({ ...target, host_id: undefined, remote_info }, name));
     await workspace.replaceView((current) => projected
@@ -498,8 +498,7 @@ export function TerminalPage() {
       method_id: methodDraft.method_id ?? crypto.randomUUID(),
       name: methodDraft.method_name,
       target: connectionSettings(target),
-      ...(target.tailscale_node_id ? { tailscale_node_id: target.tailscale_node_id } : {}),
-      ...(target.ssh_config_alias ? { ssh_config_alias: target.ssh_config_alias } : {}),
+      ...connectionMethodOptions(target),
     };
     const host: WorkspaceHost = existing ? {
       ...promoteHost(existing),

@@ -12,6 +12,7 @@ import {
   refreshHostCatalog,
   restoreWorkspace,
   updateHostSettings,
+  usesSshConfigMaster,
   workspaceDocument,
   workspaceSidebarTargets,
 } from "./workspaceModel";
@@ -97,6 +98,45 @@ describe("saved host catalog and SSH config projections", () => {
     }
     const missing = restoreWorkspace(document(), { ...empty_catalog, hosts: [hostFromTarget(targets[0])] }, []);
     expect(hostTarget(missing.hosts[1], [])).toMatchObject({ ssh_config_alias: "build", unavailable: expect.any(String) });
+  });
+
+  it.each([
+    { destination: "build", ssh_config_alias: "build", use_ssh_config_master: false },
+    { destination: "direct", hostname: "10.0.0.8", use_ssh_config_master: true },
+    { destination: "tailnet", hostname: "100.64.0.8", tailscale_node_id: "n123", use_ssh_config_master: true },
+  ])("persists a master override on its method and restores it after reload (%j)", (options) => {
+    const target: SshConnectionTarget = { kind: "ssh", host_id: "builder", ...options };
+    const host = hostFromTarget(target);
+    const view = restoreWorkspace(document(), { ...empty_catalog, hosts: [host] }, aliases);
+    const catalog = hostCatalogDocument(view);
+    const method = catalog.hosts[0].connection_methods[0];
+    expect(method.use_ssh_config_master).toBe(options.use_ssh_config_master);
+    expect(method.target).not.toHaveProperty("use_ssh_config_master");
+    const reloaded = restoreWorkspace(document(), catalog, aliases);
+    const restored = hostTarget(reloaded.hosts[1], []) as SshConnectionTarget;
+    expect(restored.use_ssh_config_master).toBe(options.use_ssh_config_master);
+    expect(restored.ssh_config_alias).toBe(options.ssh_config_alias);
+    expect(usesSshConfigMaster(restored)).toBe(options.use_ssh_config_master);
+  });
+
+  it("leaves legacy defaults implicit and retains a live master selection through settings edits", () => {
+    const id = projectedHostId("build");
+    const original = restoreWorkspace(document(id), empty_catalog, aliases);
+    const host = promoteHost(original.hosts[1]);
+    const changed = updateHostSettings(original, {
+      ...host,
+      connection_methods: host.connection_methods.map((method) => ({ ...method, use_ssh_config_master: false })),
+    });
+    const latest = hostTarget(changed.hosts[1], []) as SshConnectionTarget;
+    expect(latest.use_ssh_config_master).toBe(false);
+    expect(changed.sessions[0].target).toEqual(original.sessions[0].target);
+    const refreshed = refreshHostCatalog(changed, hostCatalogDocument(changed), aliases);
+    expect(refreshed.targets[1]).toEqual(original.targets[1]);
+    expect(refreshed.sessions[0].target).toEqual(original.sessions[0].target);
+    expect(usesSshConfigMaster(refreshed.targets[1] as SshConnectionTarget)).toBe(true);
+    expect(hostCatalogDocument(original)).toEqual(empty_catalog);
+    expect(hostCatalogDocument({ ...original, hosts: [host] }).hosts[0].connection_methods[0])
+      .not.toHaveProperty("use_ssh_config_master");
   });
 
   it("uses a saved ID override but never merges aliases, addresses, names, or accounts", () => {

@@ -5,6 +5,7 @@ use super::*;
 fn target(alias: Option<&str>) -> SshTarget {
   SshTarget {
     ssh_config_alias: alias.map(str::to_owned),
+    use_ssh_config_master: None,
     destination: "builder".into(),
     hostname: Some("example.test".into()),
     user: Some("developer".into()),
@@ -73,6 +74,96 @@ async fn managed_methods_do_not_evaluate_ssh_configuration() {
   let resolved = ssh_config_master::resolve(&managed).await.unwrap();
   assert!(!resolved.shared);
   assert_eq!(resolved.control_path, control_path(&managed));
+}
+
+#[tokio::test]
+async fn opting_out_uses_a_private_master_and_keeps_alias_matching() {
+  let mut configured = target(Some("builder"));
+  configured.use_ssh_config_master = Some(false);
+  let endpoint = ssh_config_master::resolve(&configured).await.unwrap();
+  assert!(!endpoint.shared);
+  let command = master_command(&configured, &endpoint);
+  let args: Vec<_> = command
+    .as_std()
+    .get_args()
+    .map(|item| item.to_string_lossy())
+    .collect();
+  assert!(args.iter().any(|arg| arg == "ControlMaster=yes"));
+  assert!(args.iter().any(|arg| arg == "HostName=example.test"));
+  assert_eq!(&args[args.len() - 2..], ["--", "builder"]);
+  assert_ne!(
+    control_path(&configured),
+    control_path(&target(Some("builder")))
+  );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_direct_method_can_adopt_and_release_a_configured_master() {
+  let mut direct = target(None);
+  direct.use_ssh_config_master = Some(true);
+  let endpoint = MasterEndpoint {
+    control_path: "/tmp/external-direct-master".into(),
+    shared: true,
+    startup: SharedMasterStartup::Create,
+  };
+  let state = State::default();
+  assert!(state.endpoint(&direct).is_none());
+  state.adopt(&direct, &endpoint, None);
+  assert_eq!(
+    state.endpoint(&direct).unwrap().control_path,
+    endpoint.control_path
+  );
+  let command = master_command(&direct, &endpoint);
+  let args: Vec<_> = command.as_std().get_args().collect();
+  assert_eq!(args[args.len() - 2], "example.test");
+  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  disconnect_master(&mut server, &state, &direct)
+    .await
+    .unwrap();
+  assert!(matches!(
+    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+      .await
+      .unwrap(),
+    Some(ServerMessage::MasterDisconnected)
+  ));
+  assert!(state.endpoint(&direct).is_none());
+  assert!(state.target(&direct).is_paused());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_explicit_default_and_omitted_preference_share_disconnect_state() {
+  for alias in [None, Some("builder")] {
+    let state = Arc::new(State::default());
+    let mut selected = target(alias);
+    selected.use_ssh_config_master = Some(alias.is_some());
+    for request in [
+      ClientMessage::DisconnectMaster { target: selected },
+      ClientMessage::ConnectionStatus {
+        target: target(alias),
+      },
+    ] {
+      let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+      let server = tokio::spawn(handle_connection(server, Arc::clone(&state)));
+      handshake(&mut client).await.unwrap();
+      ctld_ipc::write_frame(&mut client, &request).await.unwrap();
+      let response = ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+        .await
+        .unwrap();
+      assert!(matches!(
+        response,
+        Some(
+          ServerMessage::MasterDisconnected
+            | ServerMessage::ConnectionStatus {
+              connected: false,
+              manually_disconnected: true
+            }
+        )
+      ));
+      server.await.unwrap().unwrap();
+    }
+  }
 }
 
 #[cfg(unix)]

@@ -25,6 +25,8 @@ pub struct WorkspaceConnectionMethod {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ssh_config_alias: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub use_ssh_config_master: Option<bool>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub tailscale_node_id: Option<String>,
   #[serde(deserialize_with = "deserialize_connection_settings")]
   pub target: ConnectionTargetDto,
@@ -97,6 +99,7 @@ impl WorkspaceConnectionMethod {
     let ConnectionTargetDto::Ssh {
       destination,
       ssh_config_alias,
+      use_ssh_config_master,
       hostname,
       user,
       port,
@@ -133,6 +136,7 @@ impl WorkspaceConnectionMethod {
       // gateways are transport snapshots, never durable method configuration.
       && remote_info.is_none()
       && ssh_config_alias.is_none()
+      && use_ssh_config_master.is_none()
       && gateways.is_empty()
       && gateway_route.len() <= 8
       && gateway_route.iter().all(|step| {

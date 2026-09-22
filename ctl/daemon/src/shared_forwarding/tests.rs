@@ -12,6 +12,7 @@ fn target() -> SshTarget {
   SshTarget {
     destination: "work-alias".into(),
     ssh_config_alias: Some("work-alias".into()),
+    use_ssh_config_master: None,
     hostname: None,
     user: None,
     port: None,

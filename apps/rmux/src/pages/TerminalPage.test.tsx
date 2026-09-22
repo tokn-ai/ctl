@@ -1708,6 +1708,8 @@ describe("workspace-backed terminal page", () => {
     fireEvent.change(screen.getByLabelText("SSH host or config alias"), {
       target: { value: "only-in-ssh-config" },
     });
+    expect(screen.getByRole("checkbox", { name: "Use SSH-config master" })).toHaveProperty("checked", true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Use SSH-config master" }));
     fireEvent.click(screen.getByRole("button", { name: "Verify and save" }));
     const settings = await screen.findByRole("dialog", { name: "Host settings · test" });
     expect(api.probeSshHost).toHaveBeenCalledOnce();
@@ -1723,7 +1725,8 @@ describe("workspace-backed terminal page", () => {
     expect(host).toMatchObject({ host_id: "test-id", name: "test", preferred_method_id: "default", remote_info: remoteInfo });
     expect(host.connection_methods).toEqual([
       { method_id: "default", name: "SSH", target: { kind: "ssh", destination: "test" } },
-      { method_id: expect.any(String), name: "VPN", ssh_config_alias: "only-in-ssh-config", target: { kind: "ssh", destination: "only-in-ssh-config" } },
+      { method_id: expect.any(String), name: "VPN", ssh_config_alias: "only-in-ssh-config", use_ssh_config_master: false,
+        target: { kind: "ssh", destination: "only-in-ssh-config" } },
     ]);
     expect(persisted.sessions).toEqual(saved.document.sessions);
     expect(persisted.active_tab).toEqual({ kind: "session", host_id: "test-id", session_id: "known-id" });
@@ -1734,7 +1737,7 @@ describe("workspace-backed terminal page", () => {
     await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
     const expected = {
       kind: "ssh", host_id: "test-id", host_name: "test", method_id: host.connection_methods[1].method_id,
-      destination: "only-in-ssh-config", ssh_config_alias: "only-in-ssh-config", remote_info: remoteInfo,
+      destination: "only-in-ssh-config", ssh_config_alias: "only-in-ssh-config", use_ssh_config_master: false, remote_info: remoteInfo,
     };
     expect(attachment.connect.mock.calls[0][0]).toMatchObject({ target: expected, session_id: "known-id" });
     expect(api.inspectKnownSessions).toHaveBeenCalledExactlyOnceWith(expected, ["known-id"]);
@@ -1745,6 +1748,7 @@ describe("workspace-backed terminal page", () => {
     const reloaded = restoreWorkspace(api.updateWorkspace.mock.calls.slice(-1)[0]![1] as WorkspaceDocument, hosts);
     expect(reloaded.hosts[1].preferred_method_id).toBe("default");
     expect(reloaded.sessions[0].session_id).toBe("known-id");
+    expect(reloaded.hosts[1].connection_methods[1].use_ssh_config_master).toBe(false);
   });
 
   it("retries a failed new-host save without adding duplicate hosts", async () => {

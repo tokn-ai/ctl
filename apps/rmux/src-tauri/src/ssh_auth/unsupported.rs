@@ -28,6 +28,18 @@ pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
 async fn connect_identified(
   target: &ConnectionTargetDto,
 ) -> CommandResult<(Transport, ctl_proto::RemoteIdentity)> {
+  if matches!(
+    target,
+    ConnectionTargetDto::Ssh {
+      use_ssh_config_master: Some(_),
+      ..
+    }
+  ) {
+    return Err(CommandErrorDto::new(
+      "ssh_master_selection_unsupported",
+      "SSH master selection currently requires macOS or Linux.",
+    ));
+  }
   let ConnectionTarget::Ssh {
     destination,
     options,
@@ -104,4 +116,29 @@ pub async fn forget(_target: &ConnectionTargetDto) -> CommandResult<()> {
 
 pub fn disconnect(_targets: &[ConnectionTargetDto]) -> std::future::Ready<CommandResult<()>> {
   broker::unsupported()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn explicit_master_selections_are_rejected_before_opening_ssh() {
+    for policy in [false, true] {
+      let target = serde_json::from_value(serde_json::json!({
+        "kind": "ssh",
+        "destination": "office",
+        "use_ssh_config_master": policy,
+      }))
+      .unwrap();
+      let Err(error) = connect_identified(&target).await else {
+        panic!("unsupported master selection opened a connection")
+      };
+      assert_eq!(error.code, "ssh_master_selection_unsupported");
+      assert_eq!(
+        error.message,
+        "SSH master selection currently requires macOS or Linux.",
+      );
+    }
+  }
 }

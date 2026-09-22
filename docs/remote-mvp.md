@@ -213,9 +213,9 @@ shell.
 After an unexpected SSH interruption, `ctl` reconnects with exponential
 backoff. On Unix clients, it reopens channels through the private master managed
 by `ctld`; an expired master requires authentication through `ctld` before another
-channel can open. Desktop methods originating from SSH-config aliases also honor
+channel can open. Desktop methods can enable **Use SSH-config master** to honor
 configured connection sharing, with a private master fallback when sharing is
-unconfigured. `rmuxd` preserves the logical attachment and both leases
+unconfigured; SSH-config aliases enable this by default. `rmuxd` preserves the logical attachment and both leases
 for 30 seconds by default, while output resumes from the last renderer-applied
 raw sequence.
 

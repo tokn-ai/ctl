@@ -75,6 +75,20 @@ export function withHostId(target: ConnectionTarget): ConnectionTarget {
   return { ...target, host_id: target.host_id ?? crypto.randomUUID() };
 }
 
+/** Provider identity and connection preferences belong to a method, not its address. */
+export function connectionMethodOptions(source: Pick<WorkspaceConnectionMethod,
+  "tailscale_node_id" | "ssh_config_alias" | "use_ssh_config_master">) {
+  return {
+    ...(source.tailscale_node_id ? { tailscale_node_id: source.tailscale_node_id } : {}),
+    ...(source.ssh_config_alias ? { ssh_config_alias: source.ssh_config_alias } : {}),
+    ...(source.use_ssh_config_master !== undefined ? { use_ssh_config_master: source.use_ssh_config_master } : {}),
+  };
+}
+
+export function usesSshConfigMaster(target: SshConnectionTarget): boolean {
+  return target.use_ssh_config_master ?? Boolean(target.ssh_config_alias);
+}
+
 /** Keep transport details out of the host's stable identity. */
 export function connectionSettings(target: SshConnectionTarget): SshConnectionTarget {
   return {
@@ -101,8 +115,7 @@ export function hostFromTarget(target: ConnectionTarget, name?: string): Workspa
       method_id,
       name: target.tailscale_node_id ? "Tailscale" : "SSH",
       target: connectionSettings(target),
-      ...(target.tailscale_node_id ? { tailscale_node_id: target.tailscale_node_id } : {}),
-      ...(target.ssh_config_alias ? { ssh_config_alias: target.ssh_config_alias } : {}),
+      ...connectionMethodOptions(target),
     }],
     preferred_method_id: method_id,
   };
@@ -127,8 +140,7 @@ export function hostTarget(
     host_id: host.host_id,
     host_name: host.name,
     method_id: method.method_id,
-    ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
-    ...(method.ssh_config_alias ? { ssh_config_alias: method.ssh_config_alias } : {}),
+    ...connectionMethodOptions(method),
     remote_info: expectedHostIdentity(host),
     unavailable: method.target.unavailable ?? "This host is no longer available. Restore its saved definition before connecting.",
   };
@@ -137,8 +149,7 @@ export function hostTarget(
     host_id: host.host_id,
     host_name: host.name,
     method_id: method.method_id,
-    ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
-    ...(method.ssh_config_alias ? { ssh_config_alias: method.ssh_config_alias } : {}),
+    ...connectionMethodOptions(method),
     ...(expectedHostIdentity(host) ? { remote_info: expectedHostIdentity(host) } : {}),
   }, gateways);
 }
@@ -327,8 +338,7 @@ export function hostCatalogDocument(view: WorkspaceView): HostCatalogDocument {
         connection_methods: host.connection_methods.map((method) => ({
           method_id: method.method_id,
           name: method.name,
-          ...(method.tailscale_node_id ? { tailscale_node_id: method.tailscale_node_id } : {}),
-          ...(method.ssh_config_alias ? { ssh_config_alias: method.ssh_config_alias } : {}),
+          ...connectionMethodOptions(method),
           target: connectionSettings(method.target),
         })),
       })),

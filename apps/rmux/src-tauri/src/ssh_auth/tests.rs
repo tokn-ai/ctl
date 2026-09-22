@@ -15,6 +15,7 @@ fn prompt_context() -> (PromptContext, mpsc::UnboundedReceiver<serde_json::Value
         target: ctld_ipc::SshTarget {
           destination: "test".into(),
           ssh_config_alias: None,
+          use_ssh_config_master: None,
           hostname: None,
           user: None,
           port: None,

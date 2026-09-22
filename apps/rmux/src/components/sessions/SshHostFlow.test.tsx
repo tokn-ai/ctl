@@ -13,7 +13,7 @@ import {
   respondSshPrompt,
   saveSshConfigHost,
 } from "../../lib/tauri";
-import type { RemoteAgentInstallProgress, SshPrompt, TailscaleDevice } from "../../lib/types";
+import type { RemoteAgentInstallProgress, SshConnectionTarget, SshPrompt, TailscaleDevice } from "../../lib/types";
 
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
 const tailscaleDevice: TailscaleDevice = {
@@ -473,13 +473,13 @@ describe("SSH host quick-input flow", () => {
     render(<SshHostFlow suggestions={["saved-alias"]} warning={null} onSaveConnection={onSaveConnection} onClose={vi.fn()}
       gateways={[{ gateway_id: "edge", name: "Edge", destination: "edge.example" }]} />);
     await user.type(screen.getByLabelText("SSH host or config alias"), "saved-alias");
-    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "Also save to OpenSSH config" }) as HTMLInputElement).disabled).toBe(true);
     await user.clear(screen.getByLabelText("SSH host or config alias"));
     await user.type(screen.getByLabelText("SSH host or config alias"), "10.0.0.8");
-    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("checkbox", { name: "Also save to OpenSSH config" }));
     await user.click(screen.getByRole("button", { name: "Add" }));
-    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
-    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "Also save to OpenSSH config" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "Also save to OpenSSH config" }) as HTMLInputElement).checked).toBe(false);
     await user.click(screen.getByRole("button", { name: "Verify and save" }));
     await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
     expect(saveSshConfigHost).not.toHaveBeenCalled();
@@ -557,6 +557,89 @@ describe("SSH host quick-input flow", () => {
     expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining({ destination: "build", ssh_config_alias: "build" }),
       expect.any(String), expect.any(Function));
     expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({ ssh_config_alias: "build" }), [], remoteInfo);
+  });
+
+  it("follows the address source until the master checkbox is explicitly changed", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={["build"]} warning={null} onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    const checkbox = screen.getByRole("checkbox", { name: "Use SSH-config master" });
+    const address = screen.getByLabelText("SSH host or config alias");
+    expect(checkbox).toHaveProperty("checked", false);
+    await user.type(address, "deploy@build:2222");
+    expect(checkbox).toHaveProperty("checked", true);
+    await user.clear(address);
+    await user.type(address, "10.0.0.8");
+    expect(checkbox).toHaveProperty("checked", false);
+    await user.clear(address);
+    await user.type(address, "build");
+    await user.click(checkbox);
+    expect(checkbox).toHaveProperty("checked", false);
+    await user.clear(address);
+    await user.type(address, "deploy@build:2222");
+    expect(checkbox).toHaveProperty("checked", false);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({
+      destination: "build", ssh_config_alias: "build", user: "deploy", port: 2222, use_ssh_config_master: false,
+    }), [], remoteInfo));
+    expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining({ use_ssh_config_master: false, ssh_config_alias: "build" }),
+      expect.any(String), expect.any(Function));
+  });
+
+  it("omits master selection on Windows while retaining an imported preference for native validation", async () => {
+    const platform = vi.spyOn(window.navigator, "platform", "get").mockReturnValue("Win32");
+    try {
+      vi.mocked(probeSshHost).mockRejectedValue(new Error("SSH master selection is unavailable on this platform."));
+      const initialTarget: SshConnectionTarget = {
+        kind: "ssh", destination: "build", ssh_config_alias: "build", use_ssh_config_master: false,
+      };
+      const onSaveConnection = vi.fn(async () => undefined);
+      render(<SshHostFlow suggestions={["build"]} warning={null} initialTarget={initialTarget}
+        onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+      expect(screen.queryByRole("checkbox", { name: "Use SSH-config master" })).toBeNull();
+      await userEvent.setup().click(screen.getByRole("button", { name: "Verify and save" }));
+      expect(await screen.findByText("SSH master selection is unavailable on this platform.")).toBeTruthy();
+      expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining(initialTarget), expect.any(String), expect.any(Function));
+      expect(onSaveConnection).not.toHaveBeenCalled();
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it.each<SshConnectionTarget>([
+    { kind: "ssh", destination: "build", ssh_config_alias: "build" },
+    { kind: "ssh", destination: "build", hostname: "10.0.0.8", ssh_config_alias: "build" },
+    { kind: "ssh", destination: "direct", hostname: "10.0.0.8" },
+    { kind: "ssh", destination: "builder.tailnet.ts.net", hostname: "100.64.0.2", tailscale_node_id: "n123" },
+    { kind: "ssh", destination: "build", ssh_config_alias: "build", use_ssh_config_master: false },
+    { kind: "ssh", destination: "direct", hostname: "10.0.0.8", use_ssh_config_master: true },
+  ])("edits and verifies the master preference without losing provider identity (%j)", async (initialTarget) => {
+    const current = initialTarget.use_ssh_config_master ?? Boolean(initialTarget.ssh_config_alias);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const onClose = vi.fn();
+    let showPrompt!: (prompt: SshPrompt) => void;
+    let finish!: (identity: typeof remoteInfo) => void;
+    vi.mocked(probeSshHost).mockImplementationOnce((_target, _attempt, prompt) => {
+      showPrompt = prompt;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    render(<SshHostFlow suggestions={["build"]} warning={null} initialTarget={initialTarget}
+      onSaveConnection={onSaveConnection} onClose={onClose} />);
+    const user = userEvent.setup();
+    const checkbox = screen.getByRole("checkbox", { name: "Use SSH-config master" });
+    expect(checkbox).toHaveProperty("checked", current);
+    await user.click(checkbox);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    const expected = expect.objectContaining({ ...initialTarget, use_ssh_config_master: !current });
+    expect(probeSshHost).toHaveBeenCalledWith(expected, expect.any(String), expect.any(Function));
+    expect(onSaveConnection).not.toHaveBeenCalled();
+    await act(async () => showPrompt({ prompt_id: "password", kind: "secret", message: "Password:" }));
+    await user.type(screen.getByLabelText("SSH response"), "secret{Enter}");
+    expect(respondSshPrompt).toHaveBeenCalledWith(expect.any(String), "password", "secret");
+    await act(async () => finish(remoteInfo));
+    expect(onSaveConnection).toHaveBeenCalledWith(expected, [], remoteInfo);
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it.each([

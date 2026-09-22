@@ -56,6 +56,7 @@ fn target(destination: &str) -> SshTarget {
   SshTarget {
     destination: destination.into(),
     ssh_config_alias: None,
+    use_ssh_config_master: None,
     hostname: None,
     user: Some("developer".into()),
     port: None,

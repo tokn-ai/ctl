@@ -76,13 +76,18 @@ coordinates authenticated OpenSSH connections and is the only local component
 that accesses Keychain; the desktop client only forwards attempt-scoped
 prompts.
 
-Methods originating from **SSH config · Virtual** honor the alias's effective
+On macOS and Linux, connection methods have a **Use SSH-config master** checkbox
+in **Host settings → Edit connection method**. It defaults on for **SSH config · Virtual** methods and
+off for direct and Tailscale methods. Checked methods honor the destination's effective
 `ControlMaster`, `ControlPath`, and `ControlPersist` settings, including `Include`
-and `Match` rules. This origin is retained per method in `hosts.json` when the
-host is saved or customized. An existing configured master can be reused even
+and `Match` rules. Unchecked methods use rmux's private master while retaining
+their alias and other SSH settings. The choice and alias origin are retained per
+method in `hosts.json` when the host is saved or customized; older saved methods
+keep their defaults. Verification uses the selected mode, and an explicit
+connection applies it to remembered sessions. An existing configured master can be reused even
 with `ControlMaster no`. If no usable control path is configured, or sharing is
 disabled and no master is running, rmux uses its private master with a five-minute
-idle lifetime. Direct and Tailscale methods also use private masters. For
+idle lifetime. For
 `ControlMaster ask` or `autoask`, start the alias in a terminal first so its
 master retains a working helper for sharing confirmations; rmux can then reuse it.
 
@@ -184,8 +189,8 @@ SSH uses `ctl-core` and the system `ssh` executable with a fixed remote command
 that prepends the app-managed directory before running `ctl-agent connect`;
 forwarding, agent access, X11, local commands, and PTY allocation remain
 disabled. On macOS/Linux, the per-user `ctld` selects a configured OpenSSH master
-for SSH-config methods or owns a private master for other methods and the
-fallback described above. Its owner-only Unix socket carries
+when **Use SSH-config master** is enabled or owns a private master for other
+methods and the fallback described above. Its owner-only Unix socket carries
 askpass requests to the quick-input UI for an active connection attempt. Host-key trust
 requires explicit confirmation and is managed by OpenSSH. Private masters remain
 available for five idle minutes; configured masters retain their configured

@@ -58,7 +58,7 @@ pub(super) fn append_session_options(command: &mut Command) {
 }
 
 pub(super) async fn resolve(target: &SshTarget) -> Result<MasterEndpoint, RequestError> {
-  if target.ssh_config_alias.is_none() {
+  if !target.uses_ssh_config_master() {
     return Ok(MasterEndpoint::managed(target));
   }
   let policy = read_policy(config_command(target)).await?;

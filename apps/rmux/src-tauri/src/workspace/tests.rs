@@ -43,6 +43,7 @@ fn legacy_populated() -> WorkspaceDocument {
       method_id: "default".into(),
       name: "SSH".into(),
       ssh_config_alias: None,
+      use_ssh_config_master: None,
       tailscale_node_id: None,
       target: ConnectionTargetDto::ssh("test"),
     }],

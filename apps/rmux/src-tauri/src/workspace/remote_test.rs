@@ -29,6 +29,7 @@ async fn docker_workspace_survives_client_restart() -> Result<(), String> {
   )?;
   let target = ConnectionTargetDto::Ssh {
     ssh_config_alias: None,
+    use_ssh_config_master: None,
     remote_info: None,
     destination: "workspace-smoke".into(),
     hostname: Some("127.0.0.1".into()),
@@ -140,6 +141,7 @@ async fn create_phase(directory: &Path, target: &ConnectionTargetDto) -> Result<
       method_id: "default".into(),
       name: "SSH".into(),
       ssh_config_alias: None,
+      use_ssh_config_master: None,
       tailscale_node_id: None,
       target: target.clone(),
     }],

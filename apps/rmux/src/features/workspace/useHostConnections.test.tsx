@@ -165,6 +165,27 @@ describe("live host connections", () => {
     expect(result.current.statuses.get(host.host_id)?.state).toBe("disconnected");
   });
 
+  it("disconnects the previous master mode after a saved method is switched", async () => {
+    const previous: SshConnectionTarget = { ...target, ssh_config_alias: "direct" };
+    const updated: WorkspaceHost = {
+      ...host,
+      connection_methods: [{
+        ...host.connection_methods[0], ssh_config_alias: "direct", use_ssh_config_master: false,
+      }],
+    };
+    vi.mocked(sshConnectionStatus).mockImplementation(async (candidate) =>
+      candidate.kind === "ssh" && candidate.use_ssh_config_master === false ? disconnected : connected);
+    const { result } = setup({ hosts: [updated], targets: [previous] });
+    await waitFor(() => expect(result.current.statuses.get(host.host_id)).toMatchObject({
+      state: "connected", method_names: ["Previous connection"],
+    }));
+    await act(async () => result.current.disconnect(previous));
+    expect(disconnectSshHost).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ ssh_config_alias: "direct", use_ssh_config_master: false }),
+      previous,
+    ]);
+  });
+
   it.each(["connected", "error"] as const)("ignores stale %s observations after connection settings change", async (outcome) => {
     const observation = deferred<SshConnectionStatus>();
     vi.mocked(sshConnectionStatus).mockReturnValueOnce(observation.promise);

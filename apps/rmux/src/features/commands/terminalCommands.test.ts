@@ -143,6 +143,26 @@ describe("terminal commands", () => {
     expect(actions.connectHost).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])("uses saved host availability instead of a stale method snapshot (connectable: %s)", (connectable) => {
+    const { actions, context } = setup();
+    const target: ConnectionTarget = {
+      kind: "ssh", host_id: "build", destination: "build.example",
+      ...(connectable ? { unavailable: "The preferred SSH alias is missing." } : {}),
+    };
+    const command = findCommand(buildTerminalCommands({
+      ...context,
+      targets: [target],
+      connectableHostKeys: new Set(connectable ? ["host:build"] : []),
+    }, actions), COMMAND_IDS.connectHost);
+    expect(command.enabled).toBe(connectable);
+    expect(command.isEnabled?.({ target_key: "host:build" })).toBe(connectable);
+    command.run();
+    command.run({ target_key: "host:build" });
+    expect(actions.showConnectHost).toHaveBeenCalledTimes(connectable ? 1 : 0);
+    expect(actions.connectHost).toHaveBeenCalledTimes(connectable ? 1 : 0);
+    if (connectable) expect(actions.connectHost).toHaveBeenCalledWith(target);
+  });
+
   it.each(["local", "host:missing", "host:unknown"])("does not connect an unusable explicit target %s or fall back to the picker", (target_key) => {
     const { actions, context } = setup();
     const command = findCommand(buildTerminalCommands({ ...context, targets: [
@@ -162,6 +182,7 @@ describe("terminal commands", () => {
     const command = findCommand(buildTerminalCommands({
       ...context,
       targets: [{ kind: "ssh", host_id: "build", destination: "build" }],
+      connectableHostKeys: new Set(["host:build"]),
       daemonRestartConfirmationPending: phase === "confirmation",
       restartingDaemon: phase === "restarting",
     }, actions), COMMAND_IDS.connectHost);

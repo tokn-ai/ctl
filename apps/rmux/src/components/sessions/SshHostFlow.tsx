@@ -33,7 +33,7 @@ import type {
   TailscaleDevice,
 } from "../../lib/types";
 
-interface SshHostFlowProps {
+export interface SshHostFlowProps {
   suggestions: readonly string[];
   tailscaleDevices?: readonly TailscaleDevice[];
   discoveryLoading?: boolean;

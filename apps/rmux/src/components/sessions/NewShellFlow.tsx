@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
-import { SshHostFlow } from "./SshHostFlow";
+import { ConnectHostFlow } from "./ConnectHostFlow";
 import { hostSelectorChoices } from "./hostChoices";
 import {
   LOCAL_TARGET,
@@ -8,11 +8,12 @@ import {
   targetLabel,
 } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
-import type { ConnectionTarget, HostConnectionChange, RemoteIdentity, WorkspaceHost } from "../../lib/types";
+import type { ConnectionTarget, HostConnectionChange, RemoteIdentity, WorkspaceHost, WorkspaceSshGateway } from "../../lib/types";
 
 interface NewShellFlowProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  gateways?: readonly WorkspaceSshGateway[];
   discoveryMessage?: string | null;
   onConnectionChange?: HostConnectionChange;
   onVerifyHost(
@@ -31,6 +32,7 @@ interface NewShellFlowProps {
 export function NewShellFlow({
   targets,
   hosts,
+  gateways,
   discoveryMessage,
   onConnectionChange,
   onVerifyHost,
@@ -102,11 +104,12 @@ export function NewShellFlow({
 
   if (connecting) {
     return (
-      <SshHostFlow
+      <ConnectHostFlow
         suggestions={[]}
         warning={null}
         target={connecting}
-        autoConnect
+        host={connecting.kind === "ssh" ? hosts?.find((host) => host.host_id === connecting.host_id) : undefined}
+        gateways={gateways}
         onConnectionChange={onConnectionChange}
         onVerified={onVerifyHost}
         onConnected={(verified) => {

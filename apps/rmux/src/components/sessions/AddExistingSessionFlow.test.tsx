@@ -7,11 +7,13 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ConnectionTarget,
   SessionListResponse,
   SessionSummary,
+  WorkspaceHost,
 } from "../../lib/types";
 import { AddExistingSessionFlow } from "./AddExistingSessionFlow";
 import { probeSshHost } from "../../lib/tauri";
@@ -156,5 +158,53 @@ describe("explicit discovery", () => {
     fireEvent.click(screen.getByRole("option", { name: "remote" }));
     await screen.findByText("The remote environment changed.");
     expect(list).not.toHaveBeenCalled();
+  });
+
+  it("selects a method before discovery and retries the verified method directly", async () => {
+    const host: WorkspaceHost = {
+      host_id: "remote-id", name: "Remote", preferred_method_id: "office",
+      connection_methods: [
+        { method_id: "home", name: "Home", target: { kind: "ssh", destination: "home" } },
+        { method_id: "office", name: "Office", target: { kind: "ssh", destination: "office" } },
+      ],
+    };
+    list.mockRejectedValueOnce(new Error("Connection interrupted")).mockResolvedValue({ sessions: [], shell_states: {} });
+    const user = userEvent.setup();
+    render(<AddExistingSessionFlow targets={targets} hosts={[host]} known={[]}
+      onVerifyHost={verify} onAdd={vi.fn()} onClose={vi.fn()} />);
+    await user.click(screen.getByRole("option", { name: "remote" }));
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: /Office.*Preferred/ }));
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: /Home/ }));
+    await screen.findByText("Connection interrupted");
+    const selected = { kind: "ssh", host_id: "remote-id", host_name: "Remote", method_id: "home", destination: "home" };
+    expect(list).toHaveBeenCalledExactlyOnceWith(selected);
+    await user.click(screen.getByRole("option", { name: "Retry discovery" }));
+    await screen.findByText(/No additional running sessions/);
+    expect(screen.queryByRole("option", { name: /Office/ })).toBeNull();
+    expect(vi.mocked(probeSshHost).mock.calls.map(([candidate]) => candidate)).toEqual([selected, selected]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(host.preferred_method_id).toBe("office");
+  });
+
+  it("returns to host selection when the method picker is cancelled without discovering sessions", async () => {
+    const host: WorkspaceHost = {
+      host_id: "remote-id", name: "Remote", preferred_method_id: "office",
+      connection_methods: [
+        { method_id: "office", name: "Office", target: { kind: "ssh", destination: "office" } },
+        { method_id: "home", name: "Home", target: { kind: "ssh", destination: "home" } },
+      ],
+    };
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<AddExistingSessionFlow targets={targets} hosts={[host]} known={[]}
+      onVerifyHost={verify} onAdd={vi.fn()} onClose={onClose} />);
+    await user.click(screen.getByRole("option", { name: "remote" }));
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "Add existing session — host" })).toBeTruthy();
+    expect(list).not.toHaveBeenCalled();
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

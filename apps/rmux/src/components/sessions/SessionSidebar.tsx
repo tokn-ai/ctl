@@ -24,6 +24,8 @@ const SIDEBAR_TERMINAL_TITLE_MAX_LENGTH = 20;
 interface SessionSidebarProps {
   targets: readonly ConnectionTarget[];
   hosts?: readonly WorkspaceHost[];
+  /** Hosts with at least one available saved connection method. */
+  connectableHostKeys?: ReadonlySet<string>;
   targetErrors: ReadonlyMap<string, string>;
   hostConnections?: ReadonlyMap<string, HostConnectionStatus>;
   sessions: SessionSummary[];
@@ -103,6 +105,7 @@ function hostTitle(target: ConnectionTarget): string {
 export function SessionSidebar({
   targets,
   hosts = [],
+  connectableHostKeys,
   targetErrors,
   hostConnections,
   sessions,
@@ -377,7 +380,7 @@ export function SessionSidebar({
                         className="session-action"
                         type="button"
                         onClick={() => onConnectHost(target)}
-                        disabled={Boolean(target.unavailable) || connectionBusy}
+                        disabled={!(connectableHostKeys?.has(key) ?? !target.unavailable) || connectionBusy}
                         aria-label={`Connect to ${targetLabel(target)}`}
                         title={`Connect to ${hostTitle(target)}`}
                       >

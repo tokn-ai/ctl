@@ -10,7 +10,7 @@ import type {
   SessionSummary,
   ShellStateSummary,
 } from "../../lib/types";
-import { sessionKey } from "../../features/targets/targets";
+import { sessionKey, targetKey } from "../../features/targets/targets";
 import { hostFromTarget } from "../../features/workspace/workspaceModel";
 import { SessionSidebar } from "./SessionSidebar";
 
@@ -152,7 +152,9 @@ describe("SessionSidebar", () => {
     ["disconnecting", "Disconnecting…", "Disconnect host Build machine"],
   ] as const)("blocks repeated actions while %s", async (state, label, actionLabel) => {
     const user = userEvent.setup();
-    const props = renderHostConnection({ state, method_names: ["Office network"], message: null });
+    const props = renderHostConnection({ state, method_names: ["Office network"], message: null }, {
+      connectableHostKeys: new Set([targetKey(remoteHost)]),
+    });
     expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` }).textContent).toBe(label);
     const action = screen.getByRole("button", { name: actionLabel }) as HTMLButtonElement;
     expect(action.disabled).toBe(true);
@@ -195,6 +197,22 @@ describe("SessionSidebar", () => {
     expect(connect.disabled).toBe(true);
     await user.click(connect);
     expect(props.onConnectHost).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("uses saved host availability for Connect while retaining exact-route port availability (connectable: %s)", async (connectable) => {
+    const user = userEvent.setup();
+    const target = { ...remoteHost, ...(connectable ? { unavailable: "The preferred SSH alias is missing." } : {}) };
+    const props = renderHostConnection(undefined, {
+      targets: [target],
+      connectableHostKeys: new Set(connectable ? [targetKey(target)] : []),
+      onPortForward: vi.fn(),
+    });
+    const connect = screen.getByRole("button", { name: "Connect to Build machine" });
+    expect(connect).toHaveProperty("disabled", !connectable);
+    await user.click(connect);
+    expect(props.onConnectHost).toHaveBeenCalledTimes(connectable ? 1 : 0);
+    if (connectable) expect(props.onConnectHost).toHaveBeenCalledWith(target);
+    expect(screen.getByRole("button", { name: "Port forwarding for Build machine" })).toHaveProperty("disabled", connectable);
   });
 
   it("delegates close, add-host, and new-shell interactions without inline forms", () => {

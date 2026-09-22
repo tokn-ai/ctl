@@ -72,10 +72,19 @@ arguments; methods based on an existing SSH config alias retain that alias.
 On macOS, verified passwords and private-key passphrases are stored separately in the device-local,
 Touch ID-protected Keychain. Private-key contents, arbitrary options,
 forwarding, and remote commands are never stored. A per-user `ctld` process
-owns the authenticated OpenSSH control masters and is the only local component
+coordinates authenticated OpenSSH connections and is the only local component
 that accesses Keychain; the desktop client only forwards attempt-scoped
-prompts. Masters remain available for five idle minutes so background channels
-do not race a discarded authentication connection.
+prompts.
+
+Methods originating from **SSH config · Virtual** honor the alias's effective
+`ControlMaster`, `ControlPath`, and `ControlPersist` settings, including `Include`
+and `Match` rules. This origin is retained per method in `hosts.json` when the
+host is saved or customized. An existing configured master can be reused even
+with `ControlMaster no`. If no usable control path is configured, or sharing is
+disabled and no master is running, rmux uses its private master with a five-minute
+idle lifetime. Direct and Tailscale methods also use private masters. For
+`ControlMaster ask` or `autoask`, start the alias in a terminal first so its
+master retains a working helper for sharing confirmations; rmux can then reuse it.
 
 Open **Host settings** from the host row to rename the machine or its methods,
 add or edit a connection, remove a method while retaining at least one, or
@@ -89,10 +98,13 @@ apply that route to the host's remembered sessions.
 
 Remote host rows show live **Connected**, **Connecting**, **Disconnected**, or
 **Error** status; hover the status to see active connection methods or diagnostics.
-**Disconnect host** closes the shared SSH masters for the host's saved and active
-methods and pauses its forwards. Remote shells and tasks keep running, and tabs,
+**Disconnect host** closes rmux's channels for the host's saved and active
+methods and pauses its forwards. It stops private masters, but leaves configured
+masters and other applications' channels under OpenSSH's lifetime policy. Port
+forwards through a configured master use local listeners owned by rmux, so
+disconnecting cannot remove another application's forward. Remote shells and tasks keep running, and tabs,
 credentials, and saved forwarding preferences are retained. Use **Connect host**
-to resume. Other windows sharing those masters also disconnect. Status and manual
+to resume. Other rmux windows using those methods also disconnect. Status and manual
 pauses are runtime state; status checks never authenticate or start `ctld`.
 
 All methods on a host must reach its verified account-owned ctl environment.
@@ -171,12 +183,14 @@ last-known sessions from other targets remain usable.
 SSH uses `ctl-core` and the system `ssh` executable with a fixed remote command
 that prepends the app-managed directory before running `ctl-agent connect`;
 forwarding, agent access, X11, local commands, and PTY allocation remain
-disabled. On macOS/Linux, the per-user `ctld` owns one explicit OpenSSH control
-master for each connection configuration. Its owner-only Unix socket carries
+disabled. On macOS/Linux, the per-user `ctld` selects a configured OpenSSH master
+for SSH-config methods or owns a private master for other methods and the
+fallback described above. Its owner-only Unix socket carries
 askpass requests to the quick-input UI for an active connection attempt. Host-key trust
-requires explicit confirmation and is managed by OpenSSH. A master remains
-available for five idle minutes, while all background channels require that
-master and cannot independently prompt or fall back to another connection.
+requires explicit confirmation and is managed by OpenSSH. Private masters remain
+available for five idle minutes; configured masters retain their configured
+lifetime. All background channels require the selected master and cannot
+independently prompt or fall back to another connection.
 
 On macOS, only `ctld` links the Keychain implementation. Verified passwords and
 key passphrases are stored device-locally under a Touch ID-only policy tied to

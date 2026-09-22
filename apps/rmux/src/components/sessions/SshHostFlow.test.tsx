@@ -265,7 +265,7 @@ describe("SSH host quick-input flow", () => {
     await user.click(screen.getByRole("option", { name: /Identity file/ }));
     await user.type(screen.getByRole("combobox", { name: "Identity file" }), "~/.ssh/office{Enter}");
     await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Office build machine", {
-      kind: "ssh", destination: "build-alias", identity_file: "~/.ssh/office",
+      kind: "ssh", destination: "build-alias", identity_file: "~/.ssh/office", ssh_config_alias: "build-alias",
     }, remoteInfo));
     expect(saveSshConfigHost).not.toHaveBeenCalled();
   });
@@ -505,6 +505,58 @@ describe("SSH host quick-input flow", () => {
       gateway_route: [{ gateway_id: "edge", mode: "native_only" }],
       gateways: [expect.objectContaining({ destination: "edge.example", mode: "native_only" })],
     }), expect.any(Array), remoteInfo);
+  });
+
+  it.each([
+    ["build", "build"],
+    ["deploy@build:2222", "build"],
+    ["deploy@10.0.0.8:2222", undefined],
+  ])("retains SSH-config origin only while the alias remains the endpoint (%s)", async (address, sshConfigAlias) => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async (_target: unknown, _gateways: unknown, _identity: unknown) => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={["build"]} warning={null} expectedIdentity={remoteInfo}
+      initialTarget={{ kind: "ssh", destination: "build", ssh_config_alias: "build", user: "deploy", port: 2222,
+        gateway_route: [{ gateway_id: "edge", mode: "native_only" }] }}
+      gateways={[{ gateway_id: "edge", name: "Edge", destination: "edge.example" }]}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.clear(screen.getByLabelText("SSH host or config alias"));
+    await user.type(screen.getByLabelText("SSH host or config alias"), address);
+    await user.type(screen.getByLabelText("Identity file (optional)"), "~/.ssh/deploy");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    const target = onSaveConnection.mock.calls[0][0] as { ssh_config_alias?: string };
+    expect(target.ssh_config_alias).toBe(sshConfigAlias);
+    expect(target).toMatchObject({ user: "deploy", port: 2222, identity_file: "~/.ssh/deploy",
+      gateway_route: [{ gateway_id: "edge", mode: "native_only" }] });
+    if (sshConfigAlias) expect(target).not.toHaveProperty("hostname");
+    else expect(target).toHaveProperty("hostname", "10.0.0.8");
+  });
+
+  it("keeps a managed alias-shaped method managed when its SSH settings are edited", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async (_target: unknown, _gateways: unknown, _identity: unknown) => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={["build"]} warning={null}
+      initialTarget={{ kind: "ssh", destination: "build", user: "deploy" }}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText("Identity file (optional)"), "~/.ssh/deploy");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    expect(onSaveConnection.mock.calls[0][0]).not.toHaveProperty("ssh_config_alias");
+  });
+
+  it("marks a newly selected SSH-config method before probing", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={["build"]} warning={null} onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText("SSH host or config alias"), "build");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining({ destination: "build", ssh_config_alias: "build" }),
+      expect.any(String), expect.any(Function));
+    expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({ ssh_config_alias: "build" }), [], remoteInfo);
   });
 
   it.each([

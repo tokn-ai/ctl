@@ -171,7 +171,7 @@ describe("workspace lifecycle", () => {
       schema_version: 1,
       hosts: [{
         host_id, name: "Build machine", preferred_method_id: "ssh_config",
-        connection_methods: [{ method_id: "ssh_config", name: "SSH config", target: { kind: "ssh", destination: "build" } }],
+        connection_methods: [{ method_id: "ssh_config", name: "SSH config", ssh_config_alias: "build", target: { kind: "ssh", destination: "build" } }],
       }],
       ssh_gateways: [],
     });

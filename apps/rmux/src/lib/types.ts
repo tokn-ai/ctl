@@ -51,6 +51,8 @@ export interface SshConnectionTarget {
   method_id?: string;
   /** Runtime provider binding; persisted on the connection method. */
   tailscale_node_id?: string;
+  /** SSH-config origin: inherit this alias's OpenSSH multiplexing policy. */
+  ssh_config_alias?: string;
   destination: string;
   hostname?: string;
   user?: string;
@@ -126,6 +128,7 @@ export interface WorkspaceConnectionMethod {
   name: string;
   target: SshConnectionTarget;
   tailscale_node_id?: string;
+  ssh_config_alias?: string;
 }
 
 export interface LegacyWorkspaceHost {

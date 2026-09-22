@@ -363,6 +363,7 @@ pub(super) fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTa
   match target {
     ConnectionTargetDto::Ssh {
       destination,
+      ssh_config_alias,
       hostname,
       user,
       port,
@@ -371,6 +372,7 @@ pub(super) fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTa
       ..
     } => Ok(SshTarget {
       destination: destination.clone(),
+      ssh_config_alias: ssh_config_alias.clone(),
       hostname: hostname.clone(),
       user: user.clone(),
       port: *port,
@@ -417,6 +419,20 @@ fn authentication_required() -> CommandErrorDto {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn broker_target_preserves_ssh_config_origin() {
+    let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": "office",
+      "ssh_config_alias": "office",
+      "user": "alice"
+    }))
+    .unwrap();
+    let target = broker_target(&target).unwrap();
+    assert_eq!(target.ssh_config_alias.as_deref(), Some("office"));
+    assert_eq!(target.user.as_deref(), Some("alice"));
+  }
 
   #[test]
   fn connection_status_preserves_actual_connectivity_and_manual_pause_independently() {

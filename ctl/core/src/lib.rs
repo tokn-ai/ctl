@@ -461,6 +461,12 @@ fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction
       // Keep this before route options so no proxy can restore that fallback.
       "-o".into(),
       "ProxyCommand=false".into(),
+      // These are owned, piped channel processes even when the master belongs
+      // to another application. Never detach or discard their input via config.
+      "-o".into(),
+      "ForkAfterAuthentication=no".into(),
+      "-o".into(),
+      "StdinNull=no".into(),
     ],
     SshInteraction::Askpass {
       program,
@@ -1102,6 +1108,10 @@ mod tests {
         "BatchMode=yes",
         "-o",
         "ProxyCommand=false",
+        "-o",
+        "ForkAfterAuthentication=no",
+        "-o",
+        "StdinNull=no",
       ]
       .map(OsString::from)
     );

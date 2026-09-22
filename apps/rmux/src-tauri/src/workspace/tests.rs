@@ -42,6 +42,7 @@ fn legacy_populated() -> WorkspaceDocument {
     connection_methods: vec![WorkspaceConnectionMethod {
       method_id: "default".into(),
       name: "SSH".into(),
+      ssh_config_alias: None,
       tailscale_node_id: None,
       target: ConnectionTargetDto::ssh("test"),
     }],
@@ -760,7 +761,7 @@ fn methods_cannot_override_the_hosts_verified_environment() {
   if let ConnectionTargetDto::Ssh { remote_info, .. } =
     &mut document.hosts[1].connection_methods[0].target
   {
-    *remote_info = Some(test_remote_identity());
+    *remote_info = Some(Box::new(test_remote_identity()));
   }
   assert!(document.validate().is_err());
 }

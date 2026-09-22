@@ -55,6 +55,7 @@ impl ForwardControl for Control {
 fn target(destination: &str) -> SshTarget {
   SshTarget {
     destination: destination.into(),
+    ssh_config_alias: None,
     hostname: None,
     user: Some("developer".into()),
     port: None,
@@ -347,4 +348,60 @@ async fn failed_disconnect_retains_listener_cancellation_responsibility() {
     .await
     .unwrap();
   assert!(registry.records.is_empty());
+}
+
+#[tokio::test]
+async fn shared_disconnect_cancels_owned_listeners_and_reconnect_replays_the_definition() {
+  let target = target("shared-master");
+  let control = Control::ready(std::slice::from_ref(&target));
+  let mut registry = ForwardRegistry::default();
+  registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  registry.disconnect(&control, &target).await.unwrap();
+  assert!(!registry.records[&forward().forward_id].listener_present);
+  assert_eq!(registry.records.len(), 1);
+  assert_eq!(
+    control.changes.lock().unwrap()[1],
+    Change {
+      target: target.clone(),
+      forward: forward(),
+      cancel: true,
+    }
+  );
+  registry.activate(&control, &target).await;
+  assert_eq!(control.changes.lock().unwrap().len(), 2);
+  registry.resume(&target);
+  registry.activate(&control, &target).await;
+  assert_eq!(
+    control.changes.lock().unwrap()[2],
+    Change {
+      target: target.clone(),
+      forward: forward(),
+      cancel: false,
+    }
+  );
+  assert_eq!(
+    registry.list(&control, &target).await[0].state,
+    PortForwardState::Active
+  );
+}
+
+#[tokio::test]
+async fn shared_disconnect_retains_failed_listener_cancellation_for_retry() {
+  let target = target("shared-master");
+  let control = Control::ready(std::slice::from_ref(&target));
+  let mut registry = ForwardRegistry::default();
+  registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  control.fail_cancel.store(true, Ordering::SeqCst);
+  assert!(registry.disconnect(&control, &target).await.is_err());
+  assert!(registry.records[&forward().forward_id].listener_present);
+  assert!(registry.paused.contains(&target));
+  control.fail_cancel.store(false, Ordering::SeqCst);
+  registry.disconnect(&control, &target).await.unwrap();
+  assert!(!registry.records[&forward().forward_id].listener_present);
 }

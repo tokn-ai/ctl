@@ -23,9 +23,9 @@ const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-// Version 6 adds explicit master disconnection and preserves manual pauses
-// across noninteractive status requests and forward restoration.
-pub const PROTOCOL_VERSION: u16 = 6;
+// Version 7 identifies SSH-config connection methods so the broker can honor
+// their configured control master without treating it as a private socket.
+pub const PROTOCOL_VERSION: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +48,8 @@ pub struct SshGateway {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SshTarget {
   pub destination: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ssh_config_alias: Option<String>,
   pub hostname: Option<String>,
   pub user: Option<String>,
   pub port: Option<u16>,
@@ -452,6 +454,26 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn ssh_config_origin_is_optional_and_does_not_change_managed_target_json() {
+    let legacy = serde_json::json!({
+      "destination": "office",
+      "hostname": null,
+      "user": null,
+      "port": null,
+      "identity_file": null,
+      "gateways": []
+    });
+    let mut target: SshTarget = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(target.ssh_config_alias, None);
+    assert_eq!(serde_json::to_value(&target).unwrap(), legacy);
+
+    target.ssh_config_alias = Some("office".into());
+    let value = serde_json::to_value(&target).unwrap();
+    assert_eq!(value["ssh_config_alias"], "office");
+    assert_eq!(serde_json::from_value::<SshTarget>(value).unwrap(), target);
+  }
 
   #[test]
   fn protocol_probe_requires_one_numeric_version() {

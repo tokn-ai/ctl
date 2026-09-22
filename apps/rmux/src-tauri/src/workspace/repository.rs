@@ -406,11 +406,12 @@ fn normalize_legacy_hosts(hosts: &mut serde_json::Value) -> CommandResult<()> {
     } = &mut target
     {
       migrated.name.clone_from(destination);
-      migrated.remote_info = remote_info.take();
+      migrated.remote_info = remote_info.take().map(|info| *info);
       migrated.preferred_method_id = Some("default".into());
       migrated.connection_methods.push(WorkspaceConnectionMethod {
         method_id: "default".into(),
         name: "SSH".into(),
+        ssh_config_alias: None,
         tailscale_node_id: None,
         target,
       });

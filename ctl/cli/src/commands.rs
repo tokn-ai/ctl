@@ -149,6 +149,7 @@ fn daemon_target(
 ) -> ctld_ipc::SshTarget {
   ctld_ipc::SshTarget {
     destination: destination.to_owned(),
+    ssh_config_alias: None,
     hostname: options.hostname.clone(),
     user: options.user.clone(),
     port: options.port,
@@ -224,6 +225,7 @@ mod tests {
     let broker = daemon_target(destination, options);
 
     assert_eq!(broker.destination, "work");
+    assert_eq!(broker.ssh_config_alias, None);
     assert_eq!(broker.hostname.as_deref(), Some("example.test"));
     assert_eq!(broker.user.as_deref(), Some("alice"));
     assert_eq!(broker.port, Some(2222));

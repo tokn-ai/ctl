@@ -446,14 +446,15 @@ export function TerminalPage() {
       host_name: host.name,
       method_id: method?.method_id ?? null,
       method_name: method?.name ?? "SSH",
-      initial_target: method ? { ...method.target, tailscale_node_id: method.tailscale_node_id } : undefined,
+      initial_target: method ? { ...method.target, tailscale_node_id: method.tailscale_node_id, ssh_config_alias: method.ssh_config_alias } : undefined,
     });
     setMethodNameOpen(!method);
   }
 
   async function saveNewHost(name: string, target: SshConnectionTarget, remote_info: RemoteIdentity) {
     const projected_id = target.tailscale_node_id
-      ? tailscaleHostId(target.tailscale_node_id) : projectedHostId(target.destination);
+      ? tailscaleHostId(target.tailscale_node_id)
+      : target.ssh_config_alias ? projectedHostId(target.ssh_config_alias) : null;
     const projected = workspace.viewRef.current.hosts.find((host) =>
       host.host_id === projected_id && isVirtualHost(host));
     const expected = projected ? expectedHostIdentity(projected) : undefined;
@@ -498,6 +499,7 @@ export function TerminalPage() {
       name: methodDraft.method_name,
       target: connectionSettings(target),
       ...(target.tailscale_node_id ? { tailscale_node_id: target.tailscale_node_id } : {}),
+      ...(target.ssh_config_alias ? { ssh_config_alias: target.ssh_config_alias } : {}),
     };
     const host: WorkspaceHost = existing ? {
       ...promoteHost(existing),

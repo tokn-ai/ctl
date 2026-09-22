@@ -228,5 +228,6 @@ describe("SSH endpoint comparison", () => {
       ...before,
       gateways: [{ ...before.gateways![0], destination: "edge.new" }],
     })).toBe(false);
+    expect(sameSshEndpoint(before, { ...before, ssh_config_alias: "build.internal" })).toBe(false);
   });
 });

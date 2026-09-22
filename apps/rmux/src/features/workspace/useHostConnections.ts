@@ -18,7 +18,7 @@ interface Options {
   hosts: readonly WorkspaceHost[];
   targets: readonly ConnectionTarget[];
   gateways: readonly WorkspaceSshGateway[];
-  /** Quiesce local views and forwards before closing the shared SSH masters. */
+  /** Quiesce local views and forwards before releasing the host's connection. */
   onPause(host_id: string): Promise<void>;
   onResume(host_id: string): void;
 }

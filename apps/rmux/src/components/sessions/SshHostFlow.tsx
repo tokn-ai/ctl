@@ -361,23 +361,35 @@ export function SshHostFlow({
     if (identity_file && /[\x00-\x1f\x7f]/u.test(identity_file)) {
       throw new Error("Enter a valid identity-file path.");
     }
-    if (suggestions.includes(destination) ||
-      (initialTarget && !initialTarget.hostname && destination === initialTarget.destination)) {
-      if (alias && alias !== destination) {
+    const parsed = parseHostAddress(destination);
+    const unchangedAlias = initialTarget && !initialTarget.hostname && destination === initialTarget.destination;
+    const enteredAlias = parsed?.hostname ?? destination;
+    const configAlias = !initialTarget?.tailscale_node_id &&
+      (initialTarget?.ssh_config_alias === enteredAlias ||
+        !unchangedAlias && suggestions.includes(enteredAlias)) ? enteredAlias : null;
+    if (configAlias || unchangedAlias) {
+      const selectedAlias = configAlias ?? destination;
+      if (alias && alias !== selectedAlias) {
         throw new Error("A saved SSH config host must keep its existing alias.");
       }
-      const target = configuredSshTarget(destination);
+      const target = configAlias ? configuredSshTarget(configAlias) : {
+        kind: "ssh" as const,
+        destination,
+        ...(initialTarget?.ssh_config_alias ? { ssh_config_alias: initialTarget.ssh_config_alias } : {}),
+      };
       if (!target) throw new Error("Enter a valid SSH config host.");
+      const sameAlias = initialTarget && !initialTarget.hostname && selectedAlias === initialTarget.destination;
       return {
         ...target,
-        ...(initialTarget && !initialTarget.hostname && destination === initialTarget.destination
+        ...(sameAlias
           ? { user: initialTarget.user, port: initialTarget.port,
             ...(initialTarget.tailscale_node_id ? { tailscale_node_id: initialTarget.tailscale_node_id } : {}) }
           : {}),
+        ...(parsed?.user ? { user: parsed.user } : {}),
+        ...(parsed?.port ? { port: parsed.port } : {}),
         ...(identity_file ? { identity_file } : {}),
       };
     }
-    const parsed = parseHostAddress(destination);
     if (!parsed) {
       throw new Error("Use [user@]hostname[:port], with IPv6 addresses in brackets. SSH flags are not accepted.");
     }

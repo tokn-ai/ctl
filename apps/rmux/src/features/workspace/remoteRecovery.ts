@@ -19,6 +19,7 @@ export function sameSshEndpoint(
     left.user === right.user &&
     left.port === right.port &&
     left.identity_file === right.identity_file &&
+    left.ssh_config_alias === right.ssh_config_alias &&
     JSON.stringify(left.gateway_route ?? []) ===
       JSON.stringify(right.gateway_route ?? []) &&
     JSON.stringify(left.gateways ?? []) === JSON.stringify(right.gateways ?? [])

@@ -1,6 +1,6 @@
 use crate::session::{
-  AttachSnapshot, AttachmentRegistration, Session, SessionControlError, SessionEvent,
-  SessionManager, SessionManagerError,
+  AttachSnapshot, AttachmentRegistration, SessionControlError, SessionEvent, SessionManager,
+  SessionManagerError, Terminal,
 };
 use rmux_core::{JournalError, OutputChunk};
 use rmux_ipc::{
@@ -786,6 +786,72 @@ async fn handle_request(
       };
       write_frame(&mut stream, &response).await?;
     }
+    ClientMessage::GetView { session } => {
+      write_view_result(&mut stream, sessions.view(&session)).await?;
+    }
+    ClientMessage::UpdateView {
+      session,
+      expected_revision,
+      layout,
+    } => {
+      write_view_result(
+        &mut stream,
+        sessions.update_view(&session, expected_revision, layout),
+      )
+      .await?;
+    }
+    ClientMessage::PromoteTerminal { terminal_id, name } => {
+      write_view_result(&mut stream, sessions.promote_terminal(&terminal_id, name)).await?;
+    }
+    ClientMessage::MergeSessions {
+      source,
+      destination,
+    } => {
+      write_view_result(&mut stream, sessions.merge_sessions(&source, &destination)).await?;
+    }
+    ClientMessage::SplitTerminal {
+      terminal_id,
+      axis,
+      command,
+      working_directory,
+      terminal_size,
+    } => {
+      let result = tokio::task::spawn_blocking(move || {
+        restart
+          .run_while_accepting(|| {
+            let terminal = sessions.split_terminal(
+              terminal_id,
+              axis,
+              command,
+              working_directory,
+              terminal_size,
+            )?;
+            sessions.view(&terminal.info().session_id)
+          })
+          .unwrap_or_else(|| {
+            Err(SessionManagerError::InvalidView(
+              DAEMON_DRAINING_MESSAGE.into(),
+            ))
+          })
+      })
+      .await?;
+      write_view_result(&mut stream, result).await?;
+    }
+    ClientMessage::KillTerminal { terminal_id } => match sessions.resolve(&terminal_id) {
+      Ok(terminal) if terminal.info().terminal_id == terminal_id => match terminal.kill() {
+        Ok(()) => write_frame(&mut stream, &ServerMessage::Success).await?,
+        Err(error) => send_control_error(&mut stream, &error).await?,
+      },
+      Ok(_) => {
+        send_error(
+          &mut stream,
+          ErrorCode::InvalidRequest,
+          "expected a terminal ID",
+        )
+        .await?
+      }
+      Err(error) => send_session_manager_error(&mut stream, &error).await?,
+    },
     ClientMessage::GetShellState { session } => {
       handle_shell_state_request(&mut stream, &sessions, session).await?;
     }
@@ -856,16 +922,31 @@ async fn handle_request(
   Ok(())
 }
 
+async fn write_view_result(
+  stream: &mut Stream,
+  result: Result<rmux_proto::ViewInfo, SessionManagerError>,
+) -> Result<(), CodecError> {
+  match result {
+    Ok(view) => write_frame(stream, &ServerMessage::ViewSnapshot { view }).await,
+    Err(error) => send_session_manager_error(stream, &error).await,
+  }
+}
+
 async fn handle_kill_session_request(
   stream: &mut Stream,
   sessions: &SessionManager,
   session: &str,
 ) -> Result<(), ConnectionError> {
-  match sessions.resolve(session) {
-    Ok(session) => match session.kill() {
-      Ok(()) => write_frame(stream, &ServerMessage::Success).await?,
-      Err(error) => send_control_error(stream, &error).await?,
-    },
+  match sessions.begin_termination(session) {
+    Ok(terminals) => {
+      for terminal in terminals {
+        if let Err(error) = terminal.kill() {
+          send_control_error(stream, &error).await?;
+          return Ok(());
+        }
+      }
+      write_frame(stream, &ServerMessage::Success).await?;
+    }
     Err(error) => send_session_manager_error(stream, &error).await?,
   }
   Ok(())
@@ -1066,7 +1147,7 @@ async fn reject_invalid_presentation_window(
 /// cooperative restart cannot publish `SessionEnded` before this attachment is
 /// ready to receive it.
 struct PreparedAttachment {
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   attachment_id: String,
   attachment_token: String,
   attachment_generation: u64,
@@ -1078,7 +1159,7 @@ struct PreparedAttachment {
 }
 
 fn prepare_attachment(
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   request: &AttachParameters,
 ) -> Result<PreparedAttachment, Option<u32>> {
   // Subscribe before acquiring leases. If the child exits at any later point,
@@ -1104,7 +1185,7 @@ enum ResumePreparationError {
 }
 
 fn prepare_resumed_attachment(
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   attachment_token: &str,
 ) -> Result<PreparedAttachment, ResumePreparationError> {
   let events = session
@@ -1124,7 +1205,7 @@ fn prepare_resumed_attachment(
 }
 
 fn prepared_attachment(
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   registration: AttachmentRegistration,
   resumed: bool,
   events: broadcast::Receiver<SessionEvent>,
@@ -1251,7 +1332,7 @@ async fn handle_attach(
 
 async fn apply_initial_resize(
   stream: &mut Stream,
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   attachment_id: String,
   terminal_size: rmux_proto::TerminalSize,
   deadline: Instant,
@@ -1274,7 +1355,7 @@ async fn apply_initial_resize(
 
 async fn take_initial_snapshot(
   stream: &mut Stream,
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   resume_from: Option<u64>,
   deadline: Instant,
 ) -> Result<Option<AttachSnapshot>, ConnectionError> {
@@ -1327,7 +1408,7 @@ enum AttachmentExit {
 
 async fn drive_attachment(
   attachment: LiveAttachment,
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   attachment_id: String,
   attachment_liveness_timeout: Duration,
   deadline: Instant,
@@ -1410,7 +1491,7 @@ async fn drive_attachment(
 
 struct AttachmentDriver {
   attachment: LiveAttachment,
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   attachment_id: String,
   attachment_liveness_timeout: Duration,
   deadline: Instant,
@@ -1703,7 +1784,7 @@ impl AttachmentDriver {
       return Ok(true);
     }
 
-    // `Session::resize` serializes this event with output publication, so a
+    // `Terminal::resize` serializes this event with output publication, so a
     // live attachment can only see it at its next raw-output offset. Treat an
     // impossible gap as a recovery boundary instead of allowing a renderer to
     // resize ahead of unrendered raw output.
@@ -1837,7 +1918,7 @@ fn shell_state_for_attachment(
 
 async fn process_attach_input<W>(
   writer: &mut W,
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   attachment_id: &str,
   request_command_line: bool,
   request_running_command: bool,
@@ -1992,6 +2073,7 @@ async fn send_session_manager_error(
   error: &SessionManagerError,
 ) -> Result<(), CodecError> {
   let code = match error {
+    SessionManagerError::InvalidView(_) => ErrorCode::InvalidRequest,
     SessionManagerError::InvalidName { .. } => ErrorCode::InvalidSessionName,
     SessionManagerError::AlreadyExists { .. } => ErrorCode::SessionAlreadyExists,
     SessionManagerError::NotFound { .. } => ErrorCode::SessionNotFound,
@@ -2087,7 +2169,7 @@ struct ConnectionGuard {
 }
 
 struct AttachmentGuard {
-  session: Arc<Session>,
+  session: Arc<Terminal>,
   attachment_token: String,
   generation: u64,
   reconnect_grace: Duration,
@@ -2266,6 +2348,8 @@ mod tests {
     let next_sequence = u64::try_from(replay.len()).expect("test replay fits in u64");
     let snapshot = AttachSnapshot {
       session: rmux_proto::SessionInfo {
+        view_id: "view-test".into(),
+        terminal_id: "terminal-test".into(),
         session_id: "session-id".into(),
         name: "session".into(),
         status: SessionStatus::Running,

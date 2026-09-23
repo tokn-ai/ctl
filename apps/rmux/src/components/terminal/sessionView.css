@@ -1,0 +1,8 @@
+.session-view { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.view-panes { position: relative; flex: 1; min-height: 0; }
+.view-pane { position: absolute; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--border-subtle, #333); }
+.view-pane:focus-within { border-color: var(--accent, #7897c5); }
+.view-pane-toolbar, .view-tabs, .view-pane-leases { display: flex; gap: 6px; align-items: center; padding: 4px 8px; flex-shrink: 0; flex-wrap: wrap; }
+.view-pane-toolbar span { margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-pane-toolbar button, .view-tabs button, .view-pane-leases button { font: inherit; font-size: 11px; color: inherit; background: transparent; border: 1px solid var(--border-subtle, #555); border-radius: 4px; padding: 3px 6px; cursor: pointer; }
+.view-tabs [aria-selected="true"] { background: var(--surface-2, #333); }

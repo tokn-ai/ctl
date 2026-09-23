@@ -38,7 +38,7 @@ import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
-import { TerminalSurface } from "../components/terminal/TerminalSurface";
+import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
 import { useAttachment } from "../features/attachment/useAttachment";
 import { restartFailurePreservesLocalState } from "../features/daemon/restartFailurePolicy";
@@ -1770,7 +1770,17 @@ export function TerminalPage() {
                 </div>
               ) : null}
             </div>
-            <TerminalSurface
+            <SessionViewSurface
+              session={attachment.state.session}
+              available_sessions={sessions}
+              on_promoted={(session) => importSession(session, null)}
+              on_merged={async (source) => {
+                refreshGuardRef.current.recordMutation();
+                setSessions((current) => removeSession(current, sessionKey(source)));
+                setTabs((current) => current.filter((tab) => !sameSession(tab, source)));
+                await persistWorkspace();
+              }}
+              on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
               phase={attachment.state.phase}
               hasSession={attachment.state.session !== null}
               has_cached_content={attachment.state.applied_sequence !== null}

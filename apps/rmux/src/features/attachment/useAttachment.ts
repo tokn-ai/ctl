@@ -73,6 +73,8 @@ function matchesRecoveryPhase(phase: ConnectionPhase): boolean {
 
 export interface ConnectOptions {
   resize_with_window?: boolean;
+  /** Explicit pane selection. Root opens otherwise resolve the current first leaf. */
+  terminal_id?: string;
 }
 
 interface ConnectionRequest {
@@ -681,7 +683,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         const result = await openAttachment(
           {
             target: session.target,
-            session: session.session_id,
+            session: session.terminal_id ?? session.session_id,
             resume_from: resumeFrom,
             terminal_size: requestedTerminalSize,
             request_input_lease: true,
@@ -840,7 +842,8 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
   const connect = useCallback(
     async (session: SessionSummary, options: ConnectOptions = {}) => {
       resetRecovery();
-      return connectAt(session, null, options.resize_with_window ?? false, true);
+      const selected = { ...session, terminal_id: options.terminal_id };
+      return connectAt(selected, null, options.resize_with_window ?? false, Boolean(options.terminal_id));
     },
     [connectAt, resetRecovery],
   );

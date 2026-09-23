@@ -377,3 +377,7 @@ export async function cancelTaskLogs(subscription_id: string): Promise<void> {
 export async function restartTaskDaemon(): Promise<void> {
   await invoke("restart_task_daemon");
 }
+
+export async function sessionView(target: ConnectionTarget, action: import("./types").ViewAction): Promise<import("./types").SessionView | null> {
+  return invoke("session_view", { request: { target, action } });
+}

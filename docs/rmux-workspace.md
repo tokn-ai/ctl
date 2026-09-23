@@ -212,7 +212,24 @@ or attachment is authoritative for live state; `session_not_found` marks an
 entry missing. A session that exits while attached remains remembered as exited.
 On the next app restart, saved entries are again unverified until contacted.
 
-Only one terminal tab is attached per window. Local startup attachment is a
+Only one root session tab is active per desktop window. Its server-owned view
+may attach multiple terminals concurrently. Split-right and split-below update
+that shared view, and moving a pane to a new session remembers the new root in
+the workspace. Merging a remembered session into the active session removes the
+source workspace entry after the server accepts the transfer. Terminal IDs and
+layout are runtime metadata, not workspace-owned layout definitions.
+
+Opening a root resolves its current first terminal and restores a fresh
+checkpoint. Explicit terminal selection and reconnects use the terminal ID and
+can resume cached output; one terminal's cursor is never reused for another.
+
+The compositor refreshes the active view every two seconds, with immediate
+updates after local mutations. Existing terminal renderers remain mounted when
+split geometry or selected view tabs change. Each terminal keeps independent
+input and layout leases; clients can render the same layout at different sizes,
+but only the lease owner can resize each underlying PTY.
+
+ Local startup attachment is a
 one-shot intent and uses the normal connection/error handling once the renderer
 is ready. Background local tabs do not replace a selected remote tab. Remote
 tabs remain disconnected until opened explicitly or their host is connected.

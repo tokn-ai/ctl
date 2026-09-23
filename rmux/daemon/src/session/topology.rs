@@ -1,5 +1,10 @@
-use super::*;
+use super::{
+  SessionManager, SessionManagerError, SessionRegistry, Terminal, TerminalOwner, lock, unix_time_ms,
+};
 use rmux_proto::{SplitAxis, TerminalInfo, ViewInfo, ViewLayout};
+use std::collections::HashSet;
+use std::sync::Arc;
+use uuid::Uuid;
 
 pub(super) struct Session {
   pub closing: bool,
@@ -86,7 +91,7 @@ impl LayoutExt for ViewLayout {
           child.split_terminal(id, new_id, axis);
         }
       }
-      _ => {}
+      Self::Terminal { .. } => {}
     }
   }
 }
@@ -237,7 +242,7 @@ impl SessionManager {
       .ok_or_else(|| SessionManagerError::NotFound {
         selector: terminal_id.into(),
       })?;
-    if self.is_managed_terminal(&terminal) {
+    if terminal.managed {
       return Err(SessionManagerError::InvalidView(
         "managed task terminals cannot be moved".into(),
       ));
@@ -307,7 +312,7 @@ impl SessionManager {
         ));
       }
       for terminal_id in registry.sessions[id].view.layout.terminal_ids() {
-        if self.is_managed_terminal(&registry.terminals[&terminal_id]) {
+        if registry.terminals[&terminal_id].managed {
           return Err(SessionManagerError::InvalidView(
             "managed task sessions cannot be merged".into(),
           ));
@@ -350,11 +355,6 @@ impl SessionManager {
       *lock(&registry.terminals[&id].owner) = owner.clone();
     }
     registry.view_info(&destination_id)
-  }
-
-  // Managed runs keep a single terminal and stable root identity for taskd.
-  fn is_managed_terminal(&self, terminal: &Terminal) -> bool {
-    terminal.managed
   }
 
   pub fn begin_termination(

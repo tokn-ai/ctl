@@ -65,7 +65,7 @@ pub struct Terminal {
   id: String,
   name: String,
   created_at_ms: u64,
-  terminal: Mutex<TerminalState>,
+  state: Mutex<TerminalState>,
   checkpoint_interval_bytes: u64,
   leases: Mutex<AttachmentLeaseRegistry>,
   attachments: Mutex<HashMap<String, AttachmentRecord>>,
@@ -319,7 +319,7 @@ impl ShellStatePublication<'_> {
 
 impl Terminal {
   pub fn info(&self) -> SessionInfo {
-    let terminal = lock(&self.terminal);
+    let terminal = lock(&self.state);
     let owner = lock(&self.owner).clone();
     SessionInfo {
       session_id: owner.session_id,
@@ -526,7 +526,7 @@ impl Terminal {
     requested: Option<u64>,
     checkpoint_geometry_revision: Option<u64>,
   ) -> Result<AttachSnapshot, JournalError> {
-    let terminal = lock(&self.terminal);
+    let terminal = lock(&self.state);
     let earliest_sequence = terminal.journal.earliest_sequence();
     if let Some(sequence) = requested
       && sequence > terminal.journal.next_sequence()
@@ -641,7 +641,7 @@ impl Terminal {
     // every earlier raw byte is already broadcast, and later bytes cannot be
     // appended or broadcast until this event has been sent.
     let _publication = self.shell_state_publisher.begin();
-    let mut terminal = lock(&self.terminal);
+    let mut terminal = lock(&self.state);
     lock(&self.master)
       .as_ref()
       .ok_or_else(|| SessionControlError::Pty("terminal has closed".into()))?
@@ -694,7 +694,7 @@ impl Terminal {
   fn append_output(&self, data: &[u8]) {
     let publication = self.shell_state_publisher.begin();
     let (chunk, shell_state) = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       let alternate_screen = feed_terminal_output(&mut terminal, data);
       let chunk = terminal.journal.append(data);
       let shell_state = alternate_screen.and_then(|tui_hint| {
@@ -730,7 +730,7 @@ impl Terminal {
     self.shutdown_shell_reporter();
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       if terminal.shell_state.current_command_line.is_none()
         && terminal.shell_state.running_command.is_none()
         && terminal.shell_state.process.is_none()
@@ -762,7 +762,7 @@ impl Terminal {
   fn apply_shell_report(&self, report: ShellReport) {
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       apply_shell_report_to_terminal(&mut terminal, report)
     };
     if let Some(shell_state) = shell_state {
@@ -800,7 +800,7 @@ impl Terminal {
     if !self.process_observation_enabled() {
       return;
     }
-    let shell_state = apply_process_observation_to_terminal(&mut lock(&self.terminal), observation);
+    let shell_state = apply_process_observation_to_terminal(&mut lock(&self.state), observation);
     if let Some(state) = shell_state {
       publication.publish(state);
     }
@@ -812,7 +812,7 @@ impl Terminal {
   pub fn refresh_shell_state_for_visibility(&self) {
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       if terminal.shell_state.current_command_line.is_none()
         && terminal.shell_state.running_command.is_none()
       {
@@ -839,7 +839,7 @@ impl Terminal {
     may_view_command_line: bool,
     may_view_running_command: bool,
   ) -> ShellState {
-    lock(&self.terminal)
+    lock(&self.state)
       .shell_state
       .clone()
       .filtered_for_visibility(may_view_command_line, may_view_running_command)
@@ -874,6 +874,18 @@ struct SessionManagerInner {
 struct ShellReportTarget {
   session: Option<std::sync::Weak<Terminal>>,
   pending_report: Option<ShellReport>,
+}
+
+#[cfg(unix)]
+fn start_shell_reporter(
+  directory: &Path,
+) -> Result<(Arc<Mutex<ShellReportTarget>>, ShellReporter), ShellReporterError> {
+  let target = Arc::new(Mutex::new(ShellReportTarget::default()));
+  let reporter_target = Arc::clone(&target);
+  let reporter = ShellReporter::new(directory, move |report| {
+    deliver_shell_report(&reporter_target, report);
+  })?;
+  Ok((target, reporter))
 }
 
 #[cfg(unix)]
@@ -1016,14 +1028,8 @@ impl SessionManager {
     let reservation = self.reserve_name(requested_name)?;
     let name = reservation.name().to_owned();
     #[cfg(unix)]
-    let shell_report_target = Arc::new(Mutex::new(ShellReportTarget::default()));
-    #[cfg(unix)]
-    let reporter_target = Arc::clone(&shell_report_target);
-    #[cfg(unix)]
-    let shell_reporter = ShellReporter::new(&self.inner.runtime_directory, move |report| {
-      deliver_shell_report(&reporter_target, report);
-    })
-    .map_err(SessionManagerError::ShellReporter)?;
+    let (shell_report_target, shell_reporter) =
+      start_shell_reporter(&self.inner.runtime_directory)?;
     #[cfg(unix)]
     let shell_reporter_path = shell_reporter.path().to_path_buf();
 
@@ -1083,7 +1089,7 @@ impl SessionManager {
       id: session_id.clone(),
       name,
       created_at_ms: unix_time_ms(),
-      terminal: Mutex::new(terminal),
+      state: Mutex::new(terminal),
       checkpoint_interval_bytes: self.inner.checkpoint_interval_bytes as u64,
       leases: Mutex::new(AttachmentLeaseRegistry::default()),
       attachments: Mutex::new(HashMap::new()),

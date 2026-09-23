@@ -786,6 +786,76 @@ async fn handle_request(
       };
       write_frame(&mut stream, &response).await?;
     }
+    ClientMessage::GetShellState { session } => {
+      handle_shell_state_request(&mut stream, &sessions, session).await?;
+    }
+    ClientMessage::AttachSession {
+      session,
+      resume_from,
+      terminal_size,
+      request_input_lease,
+      request_layout_lease,
+      request_command_line,
+      request_running_command,
+      presentation_window_bytes,
+    } => {
+      let request = AttachParameters {
+        resume_from,
+        client_terminal_size: terminal_size,
+        request_input_lease,
+        request_layout_lease,
+        request_command_line,
+        request_running_command,
+        presentation_window_bytes,
+        attachment_liveness_timeout,
+      };
+      return handle_new_attachment_request(stream, sessions, restart, session, request).await;
+    }
+    ClientMessage::ResumeAttachment {
+      session,
+      attachment_token,
+      resume_from,
+      terminal_size,
+      request_command_line,
+      request_running_command,
+      presentation_window_bytes,
+    } => {
+      let request = AttachParameters {
+        resume_from,
+        client_terminal_size: terminal_size,
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line,
+        request_running_command,
+        presentation_window_bytes,
+        attachment_liveness_timeout,
+      };
+      return handle_resume_attachment_request(
+        stream,
+        sessions,
+        restart,
+        session,
+        attachment_token,
+        request,
+      )
+      .await;
+    }
+    ClientMessage::KillSession { session } => {
+      handle_kill_session_request(&mut stream, &sessions, &session).await?;
+    }
+    request => return handle_view_request(stream, sessions, restart, request).await,
+  }
+
+  Ok(())
+}
+
+async fn handle_view_request(
+  mut stream: Stream,
+  sessions: SessionManager,
+  restart: Arc<RestartCoordinator>,
+  request: ClientMessage,
+) -> Result<(), ConnectionError> {
+  match request {
     ClientMessage::GetView { session } => {
       write_view_result(&mut stream, sessions.view(&session)).await?;
     }
@@ -848,67 +918,10 @@ async fn handle_request(
           ErrorCode::InvalidRequest,
           "expected a terminal ID",
         )
-        .await?
+        .await?;
       }
       Err(error) => send_session_manager_error(&mut stream, &error).await?,
     },
-    ClientMessage::GetShellState { session } => {
-      handle_shell_state_request(&mut stream, &sessions, session).await?;
-    }
-    ClientMessage::AttachSession {
-      session,
-      resume_from,
-      terminal_size,
-      request_input_lease,
-      request_layout_lease,
-      request_command_line,
-      request_running_command,
-      presentation_window_bytes,
-    } => {
-      let request = AttachParameters {
-        resume_from,
-        client_terminal_size: terminal_size,
-        request_input_lease,
-        request_layout_lease,
-        request_command_line,
-        request_running_command,
-        presentation_window_bytes,
-        attachment_liveness_timeout,
-      };
-      return handle_new_attachment_request(stream, sessions, restart, session, request).await;
-    }
-    ClientMessage::ResumeAttachment {
-      session,
-      attachment_token,
-      resume_from,
-      terminal_size,
-      request_command_line,
-      request_running_command,
-      presentation_window_bytes,
-    } => {
-      let request = AttachParameters {
-        resume_from,
-        client_terminal_size: terminal_size,
-        request_input_lease: false,
-        request_layout_lease: false,
-        request_command_line,
-        request_running_command,
-        presentation_window_bytes,
-        attachment_liveness_timeout,
-      };
-      return handle_resume_attachment_request(
-        stream,
-        sessions,
-        restart,
-        session,
-        attachment_token,
-        request,
-      )
-      .await;
-    }
-    ClientMessage::KillSession { session } => {
-      handle_kill_session_request(&mut stream, &sessions, &session).await?;
-    }
     _ => {
       send_error(
         &mut stream,
@@ -918,7 +931,6 @@ async fn handle_request(
       .await?;
     }
   }
-
   Ok(())
 }
 

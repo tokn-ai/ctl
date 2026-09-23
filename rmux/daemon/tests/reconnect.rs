@@ -2258,26 +2258,7 @@ async fn view_membership_moves_preserve_terminal_identity_and_live_attachments()
   .await?;
   assert_ne!(root.session_id, root.terminal_id);
   assert_ne!(root.view_id, root.session_id);
-  let response = topology_request(
-    &socket,
-    ClientMessage::SplitTerminal {
-      terminal_id: root.terminal_id.clone(),
-      axis: rmux_proto::SplitAxis::Horizontal,
-      command: Some(CommandSpec {
-        program: "/bin/sh".into(),
-        arguments: vec![
-          "-c".into(),
-          "while IFS= read -r line; do printf 'child:%s\\n' \"$line\"; done".into(),
-        ],
-      }),
-      working_directory: None,
-      terminal_size: TerminalSize::default(),
-    },
-  )
-  .await?;
-  let ServerMessage::ViewSnapshot { view } = response else {
-    panic!("expected split view");
-  };
+  let view = split_topology_shell(&socket, &root).await?;
   assert_eq!(view.terminals.len(), 2);
   let child_id = view.terminals[1].terminal_id.clone();
   assert_eq!(view.session_id, root.session_id);
@@ -2286,92 +2267,7 @@ async fn view_membership_moves_preserve_terminal_identity_and_live_attachments()
     matches!(listed, ServerMessage::SessionList { sessions } if sessions.len() == 1 && sessions[0].session_id == root.session_id)
   );
 
-  let invalid = topology_request(
-    &socket,
-    ClientMessage::UpdateView {
-      session: root.session_id.clone(),
-      expected_revision: view.revision,
-      layout: rmux_proto::ViewLayout::Terminal {
-        terminal_id: child_id.clone(),
-      },
-    },
-  )
-  .await?;
-  assert!(matches!(
-    invalid,
-    ServerMessage::Error {
-      code: ErrorCode::InvalidRequest,
-      ..
-    }
-  ));
-  let stale = topology_request(
-    &socket,
-    ClientMessage::UpdateView {
-      session: root.session_id.clone(),
-      expected_revision: 0,
-      layout: view.layout.clone(),
-    },
-  )
-  .await?;
-  assert!(matches!(
-    stale,
-    ServerMessage::Error {
-      code: ErrorCode::InvalidRequest,
-      ..
-    }
-  ));
-
-  let duplicate = topology_request(
-    &socket,
-    ClientMessage::UpdateView {
-      session: root.session_id.clone(),
-      expected_revision: view.revision,
-      layout: rmux_proto::ViewLayout::Tabs {
-        children: vec![
-          rmux_proto::ViewLayout::Terminal {
-            terminal_id: child_id.clone(),
-          },
-          rmux_proto::ViewLayout::Terminal {
-            terminal_id: child_id.clone(),
-          },
-        ],
-      },
-    },
-  )
-  .await?;
-  assert!(matches!(
-    duplicate,
-    ServerMessage::Error {
-      code: ErrorCode::InvalidRequest,
-      ..
-    }
-  ));
-  let reordered = topology_request(
-    &socket,
-    ClientMessage::UpdateView {
-      session: root.session_id.clone(),
-      expected_revision: view.revision,
-      layout: rmux_proto::ViewLayout::Split {
-        axis: rmux_proto::SplitAxis::Vertical,
-        children: vec![
-          rmux_proto::ViewLayout::Terminal {
-            terminal_id: child_id.clone(),
-          },
-          rmux_proto::ViewLayout::Terminal {
-            terminal_id: root.terminal_id.clone(),
-          },
-        ],
-      },
-    },
-  )
-  .await?;
-  assert!(
-    matches!(reordered, ServerMessage::ViewSnapshot { view: updated } if updated.revision == view.revision + 1)
-  );
-  let listed = topology_request(&socket, ClientMessage::ListSessions).await?;
-  assert!(
-    matches!(listed, ServerMessage::SessionList { sessions } if sessions[0].terminal_id == child_id && sessions[0].created_at_ms == root.created_at_ms && sessions[0].name == root.name)
-  );
+  assert_view_layout_updates(&socket, &root, &view, &child_id).await?;
 
   let (mut attached, _) = attach_session(&socket, &child_id, None, true, false).await?;
   let promoted = topology_request(
@@ -2439,23 +2335,112 @@ async fn view_membership_moves_preserve_terminal_identity_and_live_attachments()
     ServerMessage::Success
   );
   wait_for_session_end(&mut attached).await?;
-  timeout(Duration::from_secs(3), async {
-    loop {
-      if topology_view(&socket, &root.session_id)
-        .await?
-        .terminals
-        .len()
-        == 1
-      {
-        return Ok::<_, Box<dyn Error + Send + Sync>>(());
-      }
-      sleep(Duration::from_millis(10)).await;
+  wait_for_single_terminal(&socket, &root.session_id).await?;
+  assert_root_termination(&socket, &root).await?;
+  timeout(Duration::from_secs(3), daemon).await???;
+  Ok(())
+}
+
+async fn assert_view_layout_updates(
+  socket: &Path,
+  root: &SessionInfo,
+  view: &rmux_proto::ViewInfo,
+  child_id: &str,
+) -> TestResult {
+  let invalid = topology_request(
+    socket,
+    ClientMessage::UpdateView {
+      session: root.session_id.clone(),
+      expected_revision: view.revision,
+      layout: rmux_proto::ViewLayout::Terminal {
+        terminal_id: child_id.to_owned(),
+      },
+    },
+  )
+  .await?;
+  assert!(matches!(
+    invalid,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
     }
-  })
-  .await??;
+  ));
+  let stale = topology_request(
+    socket,
+    ClientMessage::UpdateView {
+      session: root.session_id.clone(),
+      expected_revision: 0,
+      layout: view.layout.clone(),
+    },
+  )
+  .await?;
+  assert!(matches!(
+    stale,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+
+  let duplicate = topology_request(
+    socket,
+    ClientMessage::UpdateView {
+      session: root.session_id.clone(),
+      expected_revision: view.revision,
+      layout: rmux_proto::ViewLayout::Tabs {
+        children: vec![
+          rmux_proto::ViewLayout::Terminal {
+            terminal_id: child_id.to_owned(),
+          },
+          rmux_proto::ViewLayout::Terminal {
+            terminal_id: child_id.to_owned(),
+          },
+        ],
+      },
+    },
+  )
+  .await?;
+  assert!(matches!(
+    duplicate,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+  let reordered = topology_request(
+    socket,
+    ClientMessage::UpdateView {
+      session: root.session_id.clone(),
+      expected_revision: view.revision,
+      layout: rmux_proto::ViewLayout::Split {
+        axis: rmux_proto::SplitAxis::Vertical,
+        children: vec![
+          rmux_proto::ViewLayout::Terminal {
+            terminal_id: child_id.to_owned(),
+          },
+          rmux_proto::ViewLayout::Terminal {
+            terminal_id: root.terminal_id.clone(),
+          },
+        ],
+      },
+    },
+  )
+  .await?;
+  assert!(
+    matches!(reordered, ServerMessage::ViewSnapshot { view: updated } if updated.revision == view.revision + 1)
+  );
+  let listed = topology_request(socket, ClientMessage::ListSessions).await?;
+  assert!(
+    matches!(listed, ServerMessage::SessionList { sessions } if sessions[0].terminal_id == child_id && sessions[0].created_at_ms == root.created_at_ms && sessions[0].name == root.name)
+  );
+
+  Ok(())
+}
+
+async fn assert_root_termination(socket: &Path, root: &SessionInfo) -> TestResult {
   // Killing the root terminates every member, not just the first layout leaf.
   let split_again = topology_request(
-    &socket,
+    socket,
     ClientMessage::SplitTerminal {
       terminal_id: root.terminal_id.clone(),
       axis: rmux_proto::SplitAxis::Vertical,
@@ -2473,11 +2458,50 @@ async fn view_membership_moves_preserve_terminal_identity_and_live_attachments()
   };
   let other = &split_again.terminals[1].terminal_id;
   let (mut root_attachment, _) =
-    attach_session(&socket, &root.terminal_id, None, false, false).await?;
-  let (mut other_attachment, _) = attach_session(&socket, other, None, false, false).await?;
-  kill_shell_session(&socket, &root.session_id).await?;
+    attach_session(socket, &root.terminal_id, None, false, false).await?;
+  let (mut other_attachment, _) = attach_session(socket, other, None, false, false).await?;
+  kill_shell_session(socket, &root.session_id).await?;
   wait_for_session_end(&mut root_attachment).await?;
   wait_for_session_end(&mut other_attachment).await?;
-  timeout(Duration::from_secs(3), daemon).await???;
+  Ok(())
+}
+
+async fn split_topology_shell(
+  socket: &Path,
+  root: &SessionInfo,
+) -> TestResult<rmux_proto::ViewInfo> {
+  let response = topology_request(
+    socket,
+    ClientMessage::SplitTerminal {
+      terminal_id: root.terminal_id.clone(),
+      axis: rmux_proto::SplitAxis::Horizontal,
+      command: Some(CommandSpec {
+        program: "/bin/sh".into(),
+        arguments: vec![
+          "-c".into(),
+          "while IFS= read -r line; do printf 'child:%s\\n' \"$line\"; done".into(),
+        ],
+      }),
+      working_directory: None,
+      terminal_size: TerminalSize::default(),
+    },
+  )
+  .await?;
+  let ServerMessage::ViewSnapshot { view } = response else {
+    panic!("expected split view");
+  };
+  Ok(view)
+}
+
+async fn wait_for_single_terminal(socket: &Path, session_id: &str) -> TestResult {
+  timeout(Duration::from_secs(3), async {
+    loop {
+      if topology_view(socket, session_id).await?.terminals.len() == 1 {
+        return Ok::<_, Box<dyn Error + Send + Sync>>(());
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await??;
   Ok(())
 }

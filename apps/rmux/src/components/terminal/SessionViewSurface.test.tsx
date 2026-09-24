@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionSummary, SessionView } from "../../lib/types";
 import { SessionViewSurface } from "./SessionViewSurface";
+import type { AppCommand } from "../../features/commands/types";
+import { searchCommands } from "../../features/commands/commandSearch";
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn() }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
@@ -32,6 +34,45 @@ const props = () => ({ session, available_sessions: [session], on_promoted: vi.f
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 describe("session compositor", () => {
+  it.each([
+    ["pane.split_right", "horizontal"],
+    ["pane.split_below", "vertical"],
+  ] as const)("exposes %s to the palette and targets the focused pane", async (id, axis) => {
+    mocks.request.mockResolvedValue(split);
+    let commands: AppCommand[] = [];
+    const register = (next: AppCommand[]) => { commands = next; };
+    const actions = props();
+    const mounted = render(<SessionViewSurface {...actions} on_pane_commands={register} />);
+    await waitFor(() => expect(commands.find((command) => command.id === id)?.enabled).toBe(true));
+    expect(searchCommands(commands, "split")).toHaveLength(2);
+    const second = screen.getAllByLabelText("Terminal input")[1];
+    act(() => second.focus());
+    // Opening the palette moves DOM focus away; retain the selected pane.
+    act(() => second.blur());
+    await act(async () => { await commands.find((command) => command.id === id)!.run(); });
+    expect(mocks.request).toHaveBeenLastCalledWith(session.target, expect.objectContaining({ kind: "split", terminal_id: "b", axis }));
+    mounted.rerender(<SessionViewSurface {...actions} phase="disconnected" on_pane_commands={register} />);
+    await waitFor(() => expect(commands.every((command) => !command.enabled)).toBe(true));
+    mounted.unmount();
+    expect(commands).toEqual([]);
+  });
+
+  it("keeps a failed split visible across background refreshes until retry", async () => {
+    vi.useFakeTimers();
+    mocks.request.mockResolvedValueOnce(initial)
+      .mockRejectedValueOnce(new Error("Could not spawn shell"))
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(split);
+    await act(async () => { render(<SessionViewSurface {...props()} />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Split right" })); });
+    expect(screen.getByRole("alert").textContent).toBe("Could not spawn shell");
+    await act(async () => { vi.advanceTimersByTime(2000); });
+    expect(screen.getByRole("alert").textContent).toBe("Could not spawn shell");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Split right" })); });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
+  });
+
   it("splits without remounting the existing terminal", async () => {
     mocks.request.mockResolvedValueOnce(initial).mockResolvedValueOnce(split);
     render(<SessionViewSurface {...props()} />);

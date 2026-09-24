@@ -166,6 +166,7 @@ export function TerminalPage() {
   const keybindings = useKeybindings(shortcutPlatform);
   const [keybindingsOpen, setKeybindingsOpen] = useState(false);
   const [dispatcher] = useState(() => new CommandDispatcher());
+  const [pane_commands, setPaneCommands] = useState<AppCommand[]>([]);
   const attachment = useAttachment(renderer);
   const taskWorkspace = useTaskWorkspace(
     workspace,
@@ -1413,6 +1414,7 @@ export function TerminalPage() {
       };
     return base;
   });
+  commands.push(...pane_commands);
   commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
     category: "Tasks",
@@ -1788,6 +1790,7 @@ export function TerminalPage() {
               prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
               shortcuts_enabled={!dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
               on_command={executeCommandById}
+              on_pane_commands={setPaneCommands}
               session={attachment.state.session}
               available_sessions={sessions}
               on_promoted={(session) => importSession(session, null)}

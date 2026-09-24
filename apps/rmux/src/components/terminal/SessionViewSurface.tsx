@@ -12,7 +12,7 @@ import "./sessionView.css";
 import { resolvePrefix, prefixActionMode, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
 import { useTerminalPrefix } from "../../features/commands/useTerminalPrefix";
 import type { KeybindingsDocument } from "../../lib/types";
-import type { Keybinding, ShortcutPlatform } from "../../features/commands/types";
+import type { AppCommand, Keybinding, ShortcutPlatform } from "../../features/commands/types";
 
 type SurfaceProps = ComponentProps<typeof TerminalSurface>;
 interface Props extends SurfaceProps {
@@ -24,15 +24,17 @@ interface Props extends SurfaceProps {
   prefix_settings?: { document: KeybindingsDocument; bindings: ReadonlyMap<string, Keybinding>; platform: ShortcutPlatform };
   shortcuts_enabled?: boolean;
   on_command?(id: string): void;
+  on_pane_commands?(commands: AppCommand[]): void;
 }
 
-export function SessionViewSurface({ session, on_select_terminal, available_sessions, on_promoted, on_merged, prefix_settings, shortcuts_enabled = true, on_command, ...surface }: Props) {
+export function SessionViewSurface({ session, on_select_terminal, available_sessions, on_promoted, on_merged, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
   const [focused_id, setFocusedId] = useState<string | null>(null);
   const [zoomed_id, setZoomedId] = useState<string | null>(null);
   const pane_elements = useRef(new Map<string, HTMLDivElement>());
   const pane_inputs = useRef(new Map<string, (data: Uint8Array) => void>());
   const [view, setView] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busy_ref = useRef(false);
   const [merge_source, setMergeSource] = useState("");
@@ -51,6 +53,7 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     const current = ++generation.current;
     setView(null);
     setError(null);
+    setActionError(null);
     setSelectedTabs({});
     setFocusedId(null);
     setZoomedId(null);
@@ -93,7 +96,7 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     const current = generation.current;
     ++sequence.current;
     setBusy(true);
-    setError(null);
+    setActionError(null);
     try {
       const next = await sessionView(session.target, action);
       if (next && action.kind === "promote") {
@@ -115,7 +118,7 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
         }
       }
     } catch (failure) {
-      if (current === generation.current) setError(errorMessage(failure));
+      if (current === generation.current) setActionError(errorMessage(failure));
     } finally {
       busy_ref.current = false;
       setBusy(false);
@@ -127,6 +130,20 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
   const primary_id = session?.terminal_id;
   const panes = current_view ? viewPanes(current_view.layout, selected_tabs) : [];
   const focused = panes.some((pane) => pane.terminal_id === focused_id && pane.visible) ? focused_id! : panes.find((pane) => pane.visible)?.terminal_id ?? primary_id;
+  const can_split = connected && Boolean(current_view && focused) && !busy;
+  const split_focused = useRef<(axis: "horizontal" | "vertical") => Promise<void>>(async () => {});
+  split_focused.current = async (axis) => {
+    if (!can_split || !focused || !session) return;
+    await mutate({ kind: "split", terminal_id: focused, axis, terminal_size: session.terminal_size, working_directory: null });
+    requestAnimationFrame(() => pane_elements.current.get(focused)?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
+  };
+  useEffect(() => {
+    on_pane_commands?.([
+      { id: "pane.split_right", category: "Pane", title: "Split pane right", keywords: ["split right", "horizontal"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("horizontal") },
+      { id: "pane.split_below", category: "Pane", title: "Split pane below", keywords: ["split below", "vertical"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("vertical") },
+    ]);
+  }, [on_pane_commands, can_split]);
+  useEffect(() => () => on_pane_commands?.([]), [on_pane_commands]);
   const prefix_map = resolvePrefix(prefix_settings?.document ?? { schema_version: 1, overrides: [], prefix: { key: null, bindings: [] } }, prefix_settings?.bindings ?? new Map(), prefix_settings?.platform ?? "other");
   const prefix = useTerminalPrefix({
     enabled: shortcuts_enabled && connected && Boolean(current_view),
@@ -150,7 +167,7 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
         }
       } else if (action === "pane.zoom") setZoomedId((previous) => previous === focused ? null : focused);
       else if (action === "pane.split_right" || action === "pane.split_below") {
-        void mutate({ kind: "split", terminal_id: focused, axis: action === "pane.split_right" ? "horizontal" : "vertical", terminal_size: session!.terminal_size, working_directory: null });
+        void split_focused.current(action === "pane.split_right" ? "horizontal" : "vertical");
       } else if (action === "pane.promote") void mutate({ kind: "promote", terminal_id: focused, name: null });
       else on_command?.(action);
     },
@@ -196,6 +213,7 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
       <button disabled={busy || !merge_candidates.some((candidate) => candidate.session_id === merge_source)} onClick={() => void mutate({ kind: "merge", source: merge_source, destination: session!.session_id })}>Merge into this session</button>
     </div>}
     {error && <div className="message-banner" role="status">{error}</div>}
+    {action_error && <div className="message-banner" role="alert">{action_error}</div>}
     {current_view && viewTabs(current_view.layout).map((group) => <div className="view-tabs" key={group.path} role="tablist" aria-label="Terminal group">
       {Array.from({ length: group.count }, (_, index) => <button key={index} role="tab" aria-selected={(selected_tabs[group.path] ?? 0) === index} onClick={() => setSelectedTabs((previous) => ({ ...previous, [group.path]: index }))}>Group {index + 1}</button>)}
     </div>)}

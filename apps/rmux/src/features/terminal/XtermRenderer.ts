@@ -19,6 +19,7 @@ interface CachedTerminal {
   resume_from: string | null;
   presentation_version: number;
   is_local: boolean;
+  terminal_id?: string;
 }
 
 function validDimensions(
@@ -50,6 +51,11 @@ export class XtermRenderer {
   activateSession(session: SessionSummary): void {
     const key = sessionKey(session);
     let terminal = this.sessions.get(key);
+    if (terminal && terminal.terminal_id !== session.terminal_id) {
+      this.sessions.delete(key);
+      if (terminal !== this.active) this.disposeTerminal(terminal);
+      terminal = undefined;
+    }
     if (terminal === this.active) return;
 
     this.active.container.hidden = true;
@@ -59,6 +65,7 @@ export class XtermRenderer {
     if (!terminal) {
       terminal = this.createTerminal(session.terminal_size);
       terminal.is_local = session.target.kind === "local";
+      terminal.terminal_id = session.terminal_id;
       this.sessions.set(key, terminal);
     }
     this.active = terminal;

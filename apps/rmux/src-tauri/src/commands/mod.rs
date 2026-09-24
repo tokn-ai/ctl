@@ -1,4 +1,5 @@
 pub mod inspection;
+pub mod views;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

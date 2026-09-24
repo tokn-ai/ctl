@@ -247,6 +247,8 @@ impl From<SessionStatus> for SessionStatusDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionDto {
+  pub view_id: String,
+  pub terminal_id: String,
   pub target: ConnectionTargetDto,
   pub session_id: String,
   pub name: String,
@@ -261,6 +263,8 @@ impl SessionDto {
     Self {
       target,
       session_id: value.session_id,
+      view_id: value.view_id,
+      terminal_id: value.terminal_id,
       name: value.name,
       status: value.status.into(),
       next_sequence: value.next_sequence.to_string(),
@@ -821,6 +825,8 @@ mod tests {
   fn session_u64_values_are_decimal_strings() {
     let dto = SessionDto::new(
       SessionInfo {
+        view_id: "view-test".into(),
+        terminal_id: "terminal-test".into(),
         session_id: "session".into(),
         name: "large".into(),
         status: SessionStatus::Running,

@@ -1,3 +1,5 @@
+mod topology;
+
 use crate::process_monitor::ProcessMonitor;
 #[cfg(unix)]
 use crate::shell_reporter::{ShellReport, ShellReporter, ShellReporterError};
@@ -23,6 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, watch};
+use topology::{LayoutExt, Session, View};
 use uuid::Uuid;
 
 const TERMINAL_SCROLLBACK_MAX_ROWS: usize = 10_000;
@@ -47,11 +50,22 @@ pub enum SessionEvent {
   },
 }
 
-pub struct Session {
+#[derive(Clone)]
+struct TerminalOwner {
+  created_at_ms: u64,
+  session_id: String,
+  view_id: String,
+  name: String,
+}
+
+pub struct Terminal {
+  initial_working_directory: Option<String>,
+  managed: bool,
+  owner: Mutex<TerminalOwner>,
   id: String,
   name: String,
   created_at_ms: u64,
-  terminal: Mutex<TerminalState>,
+  state: Mutex<TerminalState>,
   checkpoint_interval_bytes: u64,
   leases: Mutex<AttachmentLeaseRegistry>,
   attachments: Mutex<HashMap<String, AttachmentRecord>>,
@@ -241,7 +255,7 @@ struct GeometryCheckpoint {
 
 #[derive(Debug, Clone)]
 pub struct AttachSnapshot {
-  /// Session metadata captured under the same terminal-state lock as the
+  /// Terminal metadata captured under the same terminal-state lock as the
   /// journal, checkpoint, and shell snapshot. Later PTY changes are delivered
   /// only as ordered stream events.
   pub session: SessionInfo,
@@ -303,14 +317,17 @@ impl ShellStatePublication<'_> {
   }
 }
 
-impl Session {
+impl Terminal {
   pub fn info(&self) -> SessionInfo {
-    let terminal = lock(&self.terminal);
+    let terminal = lock(&self.state);
+    let owner = lock(&self.owner).clone();
     SessionInfo {
-      session_id: self.id.clone(),
-      name: self.name.clone(),
+      session_id: owner.session_id,
+      view_id: owner.view_id,
+      terminal_id: self.id.clone(),
+      name: owner.name,
       status: SessionStatus::Running,
-      created_at_ms: self.created_at_ms,
+      created_at_ms: owner.created_at_ms,
       next_sequence: terminal.journal.next_sequence(),
       terminal_size: terminal.terminal_size.clone(),
     }
@@ -509,7 +526,7 @@ impl Session {
     requested: Option<u64>,
     checkpoint_geometry_revision: Option<u64>,
   ) -> Result<AttachSnapshot, JournalError> {
-    let terminal = lock(&self.terminal);
+    let terminal = lock(&self.state);
     let earliest_sequence = terminal.journal.earliest_sequence();
     if let Some(sequence) = requested
       && sequence > terminal.journal.next_sequence()
@@ -566,12 +583,15 @@ impl Session {
       || checkpoint_history
         .as_ref()
         .is_some_and(|history| history.truncated);
+    let owner = lock(&self.owner).clone();
     Ok(AttachSnapshot {
       session: SessionInfo {
-        session_id: self.id.clone(),
-        name: self.name.clone(),
+        session_id: owner.session_id,
+        view_id: owner.view_id,
+        terminal_id: self.id.clone(),
+        name: owner.name,
         status: SessionStatus::Running,
-        created_at_ms: self.created_at_ms,
+        created_at_ms: owner.created_at_ms,
         next_sequence: terminal.journal.next_sequence(),
         terminal_size: terminal.terminal_size.clone(),
       },
@@ -621,7 +641,7 @@ impl Session {
     // every earlier raw byte is already broadcast, and later bytes cannot be
     // appended or broadcast until this event has been sent.
     let _publication = self.shell_state_publisher.begin();
-    let mut terminal = lock(&self.terminal);
+    let mut terminal = lock(&self.state);
     lock(&self.master)
       .as_ref()
       .ok_or_else(|| SessionControlError::Pty("terminal has closed".into()))?
@@ -674,7 +694,7 @@ impl Session {
   fn append_output(&self, data: &[u8]) {
     let publication = self.shell_state_publisher.begin();
     let (chunk, shell_state) = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       let alternate_screen = feed_terminal_output(&mut terminal, data);
       let chunk = terminal.journal.append(data);
       let shell_state = alternate_screen.and_then(|tui_hint| {
@@ -710,7 +730,7 @@ impl Session {
     self.shutdown_shell_reporter();
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       if terminal.shell_state.current_command_line.is_none()
         && terminal.shell_state.running_command.is_none()
         && terminal.shell_state.process.is_none()
@@ -742,7 +762,7 @@ impl Session {
   fn apply_shell_report(&self, report: ShellReport) {
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       apply_shell_report_to_terminal(&mut terminal, report)
     };
     if let Some(shell_state) = shell_state {
@@ -780,7 +800,7 @@ impl Session {
     if !self.process_observation_enabled() {
       return;
     }
-    let shell_state = apply_process_observation_to_terminal(&mut lock(&self.terminal), observation);
+    let shell_state = apply_process_observation_to_terminal(&mut lock(&self.state), observation);
     if let Some(state) = shell_state {
       publication.publish(state);
     }
@@ -792,7 +812,7 @@ impl Session {
   pub fn refresh_shell_state_for_visibility(&self) {
     let publication = self.shell_state_publisher.begin();
     let shell_state = {
-      let mut terminal = lock(&self.terminal);
+      let mut terminal = lock(&self.state);
       if terminal.shell_state.current_command_line.is_none()
         && terminal.shell_state.running_command.is_none()
       {
@@ -819,7 +839,7 @@ impl Session {
     may_view_command_line: bool,
     may_view_running_command: bool,
   ) -> ShellState {
-    lock(&self.terminal)
+    lock(&self.state)
       .shell_state
       .clone()
       .filtered_for_visibility(may_view_command_line, may_view_running_command)
@@ -831,7 +851,7 @@ pub struct SessionManager {
   inner: Arc<SessionManagerInner>,
 }
 
-type ManagedSessions = HashMap<(Uuid, Uuid), Option<Arc<Session>>>;
+type ManagedSessions = HashMap<(Uuid, Uuid), Option<Arc<Terminal>>>;
 
 struct SessionManagerInner {
   instance_id: String,
@@ -846,14 +866,26 @@ struct SessionManagerInner {
   process_monitor: Option<ProcessMonitor>,
 }
 
-/// A reporter starts before its child process, while the [`Session`] is only
+/// A reporter starts before its child process, while the [`Terminal`] is only
 /// complete after the PTY child and master endpoints have been created. Keep
 /// the latest early report until the newly created session can own it.
 #[derive(Default)]
 #[cfg(unix)]
 struct ShellReportTarget {
-  session: Option<std::sync::Weak<Session>>,
+  session: Option<std::sync::Weak<Terminal>>,
   pending_report: Option<ShellReport>,
+}
+
+#[cfg(unix)]
+fn start_shell_reporter(
+  directory: &Path,
+) -> Result<(Arc<Mutex<ShellReportTarget>>, ShellReporter), ShellReporterError> {
+  let target = Arc::new(Mutex::new(ShellReportTarget::default()));
+  let reporter_target = Arc::clone(&target);
+  let reporter = ShellReporter::new(directory, move |report| {
+    deliver_shell_report(&reporter_target, report);
+  })?;
+  Ok((target, reporter))
 }
 
 #[cfg(unix)]
@@ -871,7 +903,7 @@ fn deliver_shell_report(target: &Arc<Mutex<ShellReportTarget>>, report: ShellRep
 }
 
 #[cfg(unix)]
-fn attach_shell_report_target(target: &Arc<Mutex<ShellReportTarget>>, session: &Arc<Session>) {
+fn attach_shell_report_target(target: &Arc<Mutex<ShellReportTarget>>, session: &Arc<Terminal>) {
   let mut target = lock(target);
   target.session = Some(Arc::downgrade(session));
   let pending_report = target.pending_report.take();
@@ -881,7 +913,8 @@ fn attach_shell_report_target(target: &Arc<Mutex<ShellReportTarget>>, session: &
 }
 
 struct SessionRegistry {
-  sessions: HashMap<String, Arc<Session>>,
+  terminals: HashMap<String, Arc<Terminal>>,
+  sessions: HashMap<String, Session>,
   pending_names: HashSet<String>,
   next_automatic_name: Option<u64>,
 }
@@ -890,6 +923,7 @@ impl Default for SessionRegistry {
   fn default() -> Self {
     Self {
       sessions: HashMap::new(),
+      terminals: HashMap::new(),
       pending_names: HashSet::new(),
       next_automatic_name: Some(1),
     }
@@ -945,19 +979,57 @@ impl SessionManager {
     command: Option<CommandSpec>,
     working_directory: Option<String>,
     terminal_size: TerminalSize,
-  ) -> Result<Arc<Session>, SessionManagerError> {
+  ) -> Result<Arc<Terminal>, SessionManagerError> {
+    self.create_terminal(
+      requested_name,
+      command,
+      working_directory,
+      terminal_size,
+      None,
+      false,
+    )
+  }
+
+  pub fn split_terminal(
+    &self,
+    terminal_id: String,
+    axis: rmux_proto::SplitAxis,
+    command: Option<CommandSpec>,
+    working_directory: Option<String>,
+    terminal_size: TerminalSize,
+  ) -> Result<Arc<Terminal>, SessionManagerError> {
+    let source = self.resolve(&terminal_id)?;
+    let working_directory = working_directory
+      .or_else(|| source.shell_state_for_inspection().cwd)
+      .or_else(|| source.initial_working_directory.clone());
+    self.create_terminal(
+      None,
+      command,
+      working_directory,
+      terminal_size,
+      Some((terminal_id, axis)),
+      false,
+    )
+  }
+
+  fn create_terminal(
+    &self,
+    requested_name: Option<String>,
+    command: Option<CommandSpec>,
+    working_directory: Option<String>,
+    terminal_size: TerminalSize,
+    placement: Option<(String, rmux_proto::SplitAxis)>,
+    managed: bool,
+  ) -> Result<Arc<Terminal>, SessionManagerError> {
     let session_id = Uuid::new_v4().to_string();
+    if let Some((target_id, axis)) = &placement {
+      lock(&self.inner.registry).plan_split(target_id, &session_id, *axis)?;
+    }
     let reservation = self.reserve_name(requested_name)?;
     let name = reservation.name().to_owned();
     #[cfg(unix)]
-    let shell_report_target = Arc::new(Mutex::new(ShellReportTarget::default()));
-    #[cfg(unix)]
-    let reporter_target = Arc::clone(&shell_report_target);
-    #[cfg(unix)]
-    let shell_reporter = ShellReporter::new(&self.inner.runtime_directory, move |report| {
-      deliver_shell_report(&reporter_target, report);
-    })
-    .map_err(SessionManagerError::ShellReporter)?;
+    let (shell_report_target, shell_reporter) =
+      start_shell_reporter(&self.inner.runtime_directory)?;
     #[cfg(unix)]
     let shell_reporter_path = shell_reporter.path().to_path_buf();
 
@@ -965,6 +1037,7 @@ impl SessionManager {
     let pair = pty_system
       .openpty(to_pty_size(&terminal_size))
       .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
+    let initial_working_directory = working_directory.clone();
     let mut command_builder = build_command(command, working_directory);
     command_builder.env("TERM", "xterm-256color");
     #[cfg(unix)]
@@ -1004,11 +1077,19 @@ impl SessionManager {
       TERMINAL_HISTORY_CAPACITY_BYTES,
     );
     let shell_state = terminal.shell_state.clone();
-    let session = Arc::new(Session {
+    let session = Arc::new(Terminal {
+      initial_working_directory,
+      managed,
+      owner: Mutex::new(TerminalOwner {
+        created_at_ms: unix_time_ms(),
+        session_id: Uuid::new_v4().to_string(),
+        view_id: Uuid::new_v4().to_string(),
+        name: name.clone(),
+      }),
       id: session_id.clone(),
       name,
       created_at_ms: unix_time_ms(),
-      terminal: Mutex::new(terminal),
+      state: Mutex::new(terminal),
       checkpoint_interval_bytes: self.inner.checkpoint_interval_bytes as u64,
       leases: Mutex::new(AttachmentLeaseRegistry::default()),
       attachments: Mutex::new(HashMap::new()),
@@ -1034,7 +1115,11 @@ impl SessionManager {
       monitor.register(inspector, &session);
     }
 
-    reservation.commit(session_id.clone(), Arc::clone(&session));
+    if let Err(error) = reservation.commit(session_id.clone(), Arc::clone(&session), placement) {
+      let _ = session.kill();
+      start_session_workers(child, reader, &session, &self.inner)?;
+      return Err(error);
+    }
     self.inner.ever_had_session.store(true, Ordering::Release);
     self.inner.changed.notify_one();
 
@@ -1078,11 +1163,13 @@ impl SessionManager {
       } => {
         if let std::collections::hash_map::Entry::Vacant(entry) = managed.entry(key) {
           let session = self
-            .create(
+            .create_terminal(
               Some(format!("task-{}", run_uuid.simple())),
               Some(command),
               working_directory,
               TerminalSize::default(),
+              None,
+              true,
             )
             .map_err(|error| error.to_string())?;
           entry.insert(Some(session));
@@ -1117,7 +1204,7 @@ impl SessionManager {
         SessionLifecycle::Ended { exit_code } => (false, exit_code),
       };
       ManagedSessionInfo {
-        session_id: session.id.clone(),
+        session_id: lock(&session.owner).session_id.clone(),
         running,
         exit_code,
       }
@@ -1129,10 +1216,16 @@ impl SessionManager {
   }
 
   pub fn list(&self) -> Vec<SessionInfo> {
-    let mut sessions: Vec<_> = lock(&self.inner.registry)
+    let registry = lock(&self.inner.registry);
+    let mut sessions: Vec<_> = registry
       .sessions
       .values()
-      .map(|session| session.info())
+      .filter_map(|session| {
+        registry
+          .terminals
+          .get(&session.view.layout.first_terminal())
+          .map(|terminal| terminal.info())
+      })
       .collect();
     sessions.sort_by(|left, right| {
       left
@@ -1143,30 +1236,24 @@ impl SessionManager {
     sessions
   }
 
-  /// Returns a stable snapshot of live sessions for a daemon-wide lifecycle
-  /// transition.
-  ///
-  /// Callers must hold the transition gate that serializes this snapshot with
-  /// [`Self::create`]. The returned `Arc`s keep selected sessions alive while
-  /// their termination is requested outside the registry lock.
-  pub(crate) fn snapshot_for_cooperative_restart(&self) -> Vec<Arc<Session>> {
+  pub(crate) fn snapshot_for_cooperative_restart(&self) -> Vec<Arc<Terminal>> {
     lock(&self.inner.registry)
-      .sessions
+      .terminals
       .values()
       .cloned()
       .collect()
   }
 
-  pub fn resolve(&self, selector: &str) -> Result<Arc<Session>, SessionManagerError> {
+  /// Root selectors open the first terminal; terminal IDs address execution directly.
+  pub fn resolve(&self, selector: &str) -> Result<Arc<Terminal>, SessionManagerError> {
     let registry = lock(&self.inner.registry);
-    if let Some(session) = registry.sessions.get(selector) {
-      return Ok(Arc::clone(session));
+    if let Some(terminal) = registry.terminals.get(selector) {
+      return Ok(Arc::clone(terminal));
     }
-
+    let session = registry.root(selector)?;
     registry
-      .sessions
-      .values()
-      .find(|session| session.name == selector)
+      .terminals
+      .get(&session.view.layout.first_terminal())
       .cloned()
       .ok_or_else(|| SessionManagerError::NotFound {
         selector: selector.into(),
@@ -1179,9 +1266,9 @@ impl SessionManager {
     let retained = managed
       .values()
       .filter_map(Option::as_ref)
-      .filter(|session| !registry.sessions.contains_key(&session.id))
+      .filter(|session| !registry.terminals.contains_key(&session.id))
       .count();
-    registry.sessions.len() + retained
+    registry.terminals.len() + retained
   }
 
   pub fn ever_had_session(&self) -> bool {
@@ -1253,11 +1340,46 @@ impl NameReservation {
     &self.name
   }
 
-  fn commit(mut self, session_id: String, session: Arc<Session>) {
+  fn commit(
+    mut self,
+    session_id: String,
+    session: Arc<Terminal>,
+    placement: Option<(String, rmux_proto::SplitAxis)>,
+  ) -> Result<(), SessionManagerError> {
     let mut registry = lock(&self.manager.registry);
     registry.pending_names.remove(&self.name);
-    registry.sessions.insert(session_id, session);
+    if let Some((target_id, axis)) = placement {
+      let (owner, layout) = registry.plan_split(&target_id, &session_id, axis)?;
+      let root = registry
+        .sessions
+        .get_mut(&owner.session_id)
+        .expect("terminal owner exists");
+      root.view.layout = layout;
+      root.view.revision += 1;
+      *lock(&session.owner) = owner;
+      registry.terminals.insert(session_id, session);
+      self.active = false;
+      return Ok(());
+    }
+    let owner = lock(&session.owner).clone();
+    registry.sessions.insert(
+      owner.session_id.clone(),
+      Session {
+        id: owner.session_id,
+        closing: false,
+        name: self.name.clone(),
+        view: View {
+          id: owner.view_id,
+          revision: 0,
+          layout: rmux_proto::ViewLayout::Terminal {
+            terminal_id: session_id.clone(),
+          },
+        },
+      },
+    );
+    registry.terminals.insert(session_id, session);
     self.active = false;
+    Ok(())
   }
 }
 
@@ -1274,7 +1396,7 @@ impl Drop for NameReservation {
 fn start_session_workers(
   mut child: Box<dyn portable_pty::Child + Send + Sync>,
   reader: Box<dyn Read + Send>,
-  session: &Arc<Session>,
+  session: &Arc<Terminal>,
   manager: &Arc<SessionManagerInner>,
 ) -> Result<(), SessionManagerError> {
   let session_id = session.id.clone();
@@ -1300,7 +1422,7 @@ fn start_session_workers(
       let _reader_result = reader_thread.join();
       waiter_session.publish_ended(exit_code);
       if let Some(manager) = manager.upgrade() {
-        lock(&manager.registry).sessions.remove(&session_id);
+        lock(&manager.registry).remove_terminal(&session_id);
         manager.changed.notify_one();
       }
     })
@@ -1311,6 +1433,8 @@ fn start_session_workers(
 
 #[derive(Debug, Error)]
 pub enum SessionManagerError {
+  #[error("invalid view operation: {0}")]
+  InvalidView(String),
   #[error("invalid session name: {message}")]
   InvalidName { message: String },
   #[error("a session named '{name}' already exists")]
@@ -1362,7 +1486,7 @@ fn build_command(
   builder
 }
 
-fn read_pty(mut reader: Box<dyn Read + Send>, session: &Session) {
+fn read_pty(mut reader: Box<dyn Read + Send>, session: &Terminal) {
   let mut buffer = vec![0_u8; 16 * 1024];
   loop {
     match reader.read(&mut buffer) {
@@ -1972,6 +2096,31 @@ mod tests {
     refresh_history(&mut terminal);
 
     assert_eq!(terminal.history.snapshot(0).lines, vec!["first"]);
+  }
+
+  #[test]
+  fn history_omits_trailing_padding_after_hard_line_breaks() {
+    for newline in ["\r\n", "\n"] {
+      let mut terminal = terminal_state_with_size(12, 2, 1024);
+      let output = format!("first{newline}{newline}live");
+
+      feed_terminal_bytes(&mut terminal, output.as_bytes());
+      refresh_history(&mut terminal);
+
+      let history = terminal.history.snapshot(0);
+      assert_eq!(history.lines, vec!["first"], "newline: {newline:?}");
+      assert_eq!(history.retained_bytes, 6);
+    }
+  }
+
+  #[test]
+  fn bare_line_feed_preserves_next_line_column_in_history() {
+    let mut terminal = terminal_state_with_size(12, 2, 1024);
+
+    feed_terminal_bytes(&mut terminal, b"first\nx\r\none\r\nlive");
+    refresh_history(&mut terminal);
+
+    assert_eq!(terminal.history.snapshot(0).lines, vec!["first", "     x"]);
   }
 
   #[test]

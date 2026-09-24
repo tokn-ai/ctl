@@ -29,6 +29,34 @@ pub enum Command {
   /// List running sessions.
   List,
 
+  /// Inspect the server-owned layout and terminal IDs.
+  View { session: String },
+
+  /// Split a terminal, creating another terminal in the same view.
+  Split {
+    terminal_id: String,
+    /// Stack panes vertically instead of side by side.
+    #[arg(long)]
+    vertical: bool,
+    #[arg(long)]
+    cwd: Option<String>,
+    #[arg(last = true)]
+    command: Vec<String>,
+  },
+
+  /// Move a terminal into a new top-level session.
+  Promote {
+    terminal_id: String,
+    #[arg(long)]
+    name: Option<String>,
+  },
+
+  /// Move all source terminals into the destination view as another tab group.
+  Merge { source: String, destination: String },
+
+  /// Terminate one terminal, keeping its siblings alive.
+  KillTerminal { terminal_id: String },
+
   /// Show non-sensitive shell-awareness metadata for a running session.
   State { session: String },
 

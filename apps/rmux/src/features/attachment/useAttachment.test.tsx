@@ -67,12 +67,14 @@ const size = { columns: 80, rows: 24, pixel_width: null, pixel_height: null };
 const first: SessionSummary = {
   target: { kind: "local" },
   session_id: "first",
+  terminal_id: "first-terminal",
+  view_id: "first-view",
   name: "first",
   status: "running",
   next_sequence: "0",
   terminal_size: size,
 };
-const second: SessionSummary = { ...first, session_id: "second", name: "second" };
+const second: SessionSummary = { ...first, session_id: "second", terminal_id: "second-terminal", view_id: "second-view", name: "second" };
 const sessions = [first, second];
 let renderer: XtermRenderer;
 let container: HTMLElement;
@@ -143,7 +145,7 @@ beforeEach(() => {
     return {
       attached: {
         attachment_id,
-        session: sessions.find((session) => session.session_id === request.session),
+        session: sessions.find((session) => session.session_id === request.session || session.terminal_id === request.session),
         replay_from: request.resume_from ?? "0",
         history_gap: false,
         terminal_size_mismatch: false,
@@ -238,6 +240,24 @@ describe("pending remote attachments", () => {
 });
 
 describe("opened session cache", () => {
+  it("resolves root opens afresh instead of reusing a stale terminal ID or sequence", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    await emit(checkpoint(result.current.state.attachment_id!, "old-terminal", "40"));
+    await act(async () => { await result.current.connect(first); });
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: "first", resume_from: null });
+  });
+
+  it("invalidates the cached output cursor when selecting another terminal in the same root", async () => {
+    renderer.activateSession(first);
+    await renderer.write(new TextEncoder().encode("first terminal"), "40");
+    const previous = visibleTerminal();
+    renderer.activateSession({ ...first, terminal_id: "replacement-terminal" });
+    expect(renderer.resumeSequence()).toBeNull();
+    expect(visibleTerminal()).not.toBe(previous);
+    await waitFor(() => expect(previous.dispose).toHaveBeenCalledOnce());
+  });
+
   it("moves an alias cache to the recovered host ID with its buffer and resume cursor", async () => {
     const previous: SessionSummary = {
       ...first,
@@ -261,11 +281,11 @@ describe("opened session cache", () => {
 
   it("reactivates the same buffer and resumes only missing output, including sequence zero", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
-    await act(async () => { await result.current.connect(first); });
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     await emit(checkpoint(result.current.state.attachment_id!, "first"));
     const saved = visibleTerminal();
 
-    await act(async () => { await result.current.connect(second); });
+    await act(async () => { await result.current.connect(second, { terminal_id: second.terminal_id }); });
     await emit(checkpoint(result.current.state.attachment_id!, "second"));
     const instance_count = xterm.instances.length;
     const open = api.openAttachment.getMockImplementation()!;
@@ -276,7 +296,7 @@ describe("opened session cache", () => {
       return open(...args);
     });
     let returning!: Promise<void>;
-    await act(async () => { returning = result.current.connect(first); });
+    await act(async () => { returning = result.current.connect(first, { terminal_id: first.terminal_id }); });
 
     // The cached view is already visible while the transport is still opening.
     expect(visibleTerminal()).toBe(saved);
@@ -289,7 +309,7 @@ describe("opened session cache", () => {
     });
     expect(saved.dispose).not.toHaveBeenCalled();
     expect(xterm.instances).toHaveLength(instance_count);
-    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: "first", resume_from: "0" });
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: "first-terminal", resume_from: "0" });
     expect(result.current.state.applied_sequence).toBe("0");
     await emit({
       event_type: "output",
@@ -304,7 +324,7 @@ describe("opened session cache", () => {
 
   it("preserves an incomplete UTF-8 character across deactivation", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
-    await act(async () => { await result.current.connect(first); });
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     await emit(checkpoint(result.current.state.attachment_id!, "amount: "));
     const saved = visibleTerminal();
     await emit({
@@ -315,8 +335,8 @@ describe("opened session cache", () => {
       sequence_end: "2",
       data_base64: btoa(String.fromCharCode(0xe2, 0x82)),
     });
-    await act(async () => { await result.current.connect(second); });
-    await act(async () => { await result.current.connect(first); });
+    await act(async () => { await result.current.connect(second, { terminal_id: second.terminal_id }); });
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     expect(api.openAttachment.mock.lastCall?.[0].resume_from).toBe("2");
     await emit({
       event_type: "output",
@@ -331,7 +351,7 @@ describe("opened session cache", () => {
 
   it("finishes an in-flight write before choosing the cached resume position", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
-    await act(async () => { await result.current.connect(first); });
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     await emit(checkpoint(result.current.state.attachment_id!, "first"));
     const saved = visibleTerminal();
     const write = saved.terminal.write.bind(saved.terminal);
@@ -354,15 +374,15 @@ describe("opened session cache", () => {
     let switching: Promise<void>;
     let returning: Promise<void>;
     await act(async () => {
-      switching = result.current.connect(second);
-      returning = result.current.connect(first);
+      switching = result.current.connect(second, { terminal_id: second.terminal_id });
+      returning = result.current.connect(first, { terminal_id: first.terminal_id });
     });
     expect(visibleTerminal()).toBe(saved);
     await act(async () => {
       finish!();
       await Promise.all([switching!, returning!]);
     });
-    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: "first", resume_from: "1" });
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: "first-terminal", resume_from: "1" });
     expect(line(saved.terminal)).toBe("first!");
     expect(api.acknowledgeAttachmentEvent).not.toHaveBeenCalledWith({
       attachment_id: old_attachment,
@@ -372,11 +392,11 @@ describe("opened session cache", () => {
 
   it("replaces a cached buffer when the server requires a checkpoint", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
-    await act(async () => { await result.current.connect(first); });
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     await emit(checkpoint(result.current.state.attachment_id!, "old"));
     const saved = visibleTerminal();
-    await act(async () => { await result.current.connect(second); });
-    await act(async () => { await result.current.connect(first); });
+    await act(async () => { await result.current.connect(second, { terminal_id: second.terminal_id }); });
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     const replacement = checkpoint(result.current.state.attachment_id!, "fresh", "20");
     replacement.history_gap = true;
     await emit(replacement);

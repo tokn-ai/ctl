@@ -120,6 +120,31 @@ rmux list
 rmux attach work
 ```
 
+A session is a listed root bound to a server-owned view. Each view owns one or
+more terminals with independent PTYs and histories. Inspect its layout and use
+the returned terminal IDs to split, promote, attach, or terminate a pane:
+
+```sh
+rmux view work
+rmux split <terminal-id>            # side by side
+rmux split <terminal-id> --vertical # stacked
+rmux attach <terminal-id>
+rmux promote <terminal-id> --name scratch
+rmux merge scratch work
+rmux kill-terminal <terminal-id>
+```
+
+Splitting inherits the source terminal's known cwd unless `--cwd` is supplied.
+Promotion and merging preserve terminal IDs, processes, history, and existing
+attachments. `rmux list` shows roots only; `rmux kill work` terminates every
+terminal in that root. These commands also work through `ctl rmux`.
+
+The desktop renders the server layout with **Split right**, **Split below**,
+**Move to new session**, and **Terminate pane** controls. Its merge selector
+combines remembered sessions on the same host. Protocol version 10 requires
+updating both the client and daemon; existing version 9 daemons are not migrated
+while running.
+
 On macOS and Linux, `rmuxd` observes the managed shell's physical cwd and
 foreground job on a background worker, including while detached. The reusable
 [`process-info`](process-info/README.md) crate reads OS process metadata without

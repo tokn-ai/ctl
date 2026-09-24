@@ -3055,6 +3055,7 @@ dependencies = [
  "rmux-client",
  "rmux-ipc",
  "rmux-proto",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
 ]

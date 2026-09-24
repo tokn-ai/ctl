@@ -341,6 +341,9 @@ export type SessionStatus =
   | "missing";
 
 export interface SessionSummary {
+  // Missing on saved workspace entries until the daemon is inspected.
+  view_id?: string;
+  terminal_id?: string;
   target: ConnectionTarget;
   session_id: string;
   name: string;
@@ -640,3 +643,25 @@ export type TaskLogEvent =
   | { event_type: "log"; subscription_id: string; run_id: string; sequence: string; stream: "stdout" | "stderr"; data: number[] }
   | { event_type: "finished" }
   | { event_type: "error"; message: string };
+
+export type ViewLayout =
+  | { kind: "terminal"; terminal_id: string }
+  | { kind: "split"; axis: "horizontal" | "vertical"; children: ViewLayout[] }
+  | { kind: "tabs"; children: ViewLayout[] };
+
+export interface SessionView {
+  session_name: string;
+  session_id: string;
+  view_id: string;
+  revision: string;
+  layout: ViewLayout;
+  terminals: { terminal_id: string; name: string; next_sequence: Sequence; terminal_size: TerminalSize }[];
+}
+
+export type ViewAction =
+  | { kind: "get"; session_id: string }
+  | { kind: "split"; terminal_id: string; axis: "horizontal" | "vertical"; terminal_size: TerminalSize; working_directory: string | null }
+  | { kind: "update"; session_id: string; expected_revision: string; layout: ViewLayout }
+  | { kind: "promote"; terminal_id: string; name: string | null }
+  | { kind: "merge"; source: string; destination: string }
+  | { kind: "kill_terminal"; terminal_id: string };

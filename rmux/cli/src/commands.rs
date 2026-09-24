@@ -101,6 +101,55 @@ where
     Command::New { name, cwd, command } => {
       create_session(connector, name, command_spec(command), cwd).await
     }
+    Command::View { session } => show_view(connector, ClientMessage::GetView { session }).await,
+    Command::Split {
+      terminal_id,
+      vertical,
+      cwd,
+      command,
+    } => {
+      show_view(
+        connector,
+        ClientMessage::SplitTerminal {
+          terminal_id,
+          axis: if vertical {
+            rmux_proto::SplitAxis::Vertical
+          } else {
+            rmux_proto::SplitAxis::Horizontal
+          },
+          command: command_spec(command),
+          working_directory: cwd,
+          terminal_size: current_terminal_size(),
+        },
+      )
+      .await
+    }
+    Command::Promote { terminal_id, name } => {
+      show_view(
+        connector,
+        ClientMessage::PromoteTerminal { terminal_id, name },
+      )
+      .await
+    }
+    Command::Merge {
+      source,
+      destination,
+    } => {
+      show_view(
+        connector,
+        ClientMessage::MergeSessions {
+          source,
+          destination,
+        },
+      )
+      .await
+    }
+    Command::KillTerminal { terminal_id } => {
+      match target_request(connector, ClientMessage::KillTerminal { terminal_id }).await? {
+        ServerMessage::Success => Ok(()),
+        response => Err(unexpected("success", &response)),
+      }
+    }
     Command::List => list_sessions(connector).await,
     Command::State { session } => show_shell_state(connector, &session).await,
     Command::Attach {
@@ -116,6 +165,22 @@ where
       print!("{}", shell::init_script(shell_kind.into()));
       Ok(())
     }
+  }
+}
+
+async fn show_view<C: Connector>(
+  connector: &C,
+  message: ClientMessage,
+) -> Result<(), CommandError> {
+  match target_request(connector, message).await? {
+    ServerMessage::ViewSnapshot { view } => {
+      println!(
+        "{}",
+        serde_json::to_string_pretty(&view).expect("view serialization")
+      );
+      Ok(())
+    }
+    response => Err(unexpected("view_snapshot", &response)),
   }
 }
 
@@ -230,6 +295,7 @@ async fn attach_session<C: Connector>(
   request_layout_lease: bool,
 ) -> Result<(), CommandError> {
   let identity = client_identity(connector);
+  let mut terminal_selector = session.to_owned();
   let mut resume_from = initial_resume_from;
   let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
   let mut recover_leases_after_connection_loss = false;
@@ -245,7 +311,7 @@ async fn attach_session<C: Connector>(
       Err(error) => return Err(connection_error(error)),
     };
     let request = AttachRequest {
-      session: session.into(),
+      session: terminal_selector.clone(),
       resume_from,
       terminal_size: current_terminal_size(),
       request_input_lease,
@@ -275,6 +341,7 @@ async fn attach_session<C: Connector>(
       }
       Err(error) => return Err(error.into()),
     };
+    terminal_selector = attached.session.terminal_id.clone();
     attachment_token = Some(attached.attachment_token.clone());
 
     let interactive_options = if recover_leases_after_connection_loss {

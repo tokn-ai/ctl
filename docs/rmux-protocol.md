@@ -1,7 +1,7 @@
-# rmux protocol version 9
+# rmux protocol version 10
 
 The protocol is independent of local IPC and future remote transport. Version
-9 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+10 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -16,6 +16,73 @@ and layout leases. Protocol versions still match exactly during handshake.
 Version 8 adds renderer-applied presentation flow control. Version 9 pairs
 every terminal checkpoint with a bounded normalized-history snapshot captured
 at the same raw sequence.
+
+## Sessions, views, and terminals
+
+Version 10 separates three identities:
+
+- A **session** is the named root returned by `list_sessions`.
+- Each session binds to one distinct, server-owned **view**.
+- Each **terminal** owns its PTY, process, history, attachments, and input/layout
+  leases. It belongs to exactly one view.
+
+Creation allocates a session, view, and initial terminal with distinct IDs.
+`SessionInfo` includes `session_id`, `view_id`, and `terminal_id`. Its size and
+output sequence describe the selected terminal, not an aggregate across a view.
+Listing selects the first leaf in each view; attachment and shell inspection
+select the requested terminal. The root name and creation time remain stable
+when terminals move or the first terminal exits.
+
+`attach_session`, `resume_attachment`, and `get_shell_state` accept a root name,
+root ID, or terminal ID. A root selector opens the first terminal in layout order.
+Clients must pin subsequent reconnects to the returned `terminal_id`, because
+layout order and ownership may change. Output and leases remain scoped to that
+terminal. The historical `session_ended` stream event indicates the attached
+terminal's exit; other terminals in the root may still be running.
+
+One-shot topology requests are:
+
+| Request | Effect |
+| --- | --- |
+| `get_view { session }` | Return the root's complete `view_snapshot` |
+| `split_terminal { terminal_id, axis, command, working_directory, terminal_size }` | Create a terminal beside the target in the same view |
+| `update_view { session, expected_revision, layout }` | Replace arrangement with exactly the same terminal membership; reject stale revisions |
+| `promote_terminal { terminal_id, name }` | Move one of a root's multiple terminals to a new session/view |
+| `merge_sessions { source, destination }` | Move source members to destination as another tab group; remove source root/view |
+| `kill_terminal { terminal_id }` | Terminate only that terminal |
+| `kill_session { session }` | Terminate every terminal owned by the root; prevent new splits or moves into it |
+
+Successful view operations return `view_snapshot { view }`; terminal termination
+returns `success`. A snapshot includes `session_id`, `session_name`, `view_id`,
+`revision`, `layout`, and terminal metadata. Revisions increase on changes to
+layout or membership, including exit. Layout nodes use `kind`:
+
+```json
+{
+  "kind": "split",
+  "axis": "horizontal",
+  "children": [
+    { "kind": "terminal", "terminal_id": "terminal-a" },
+    { "kind": "terminal", "terminal_id": "terminal-b" }
+  ]
+}
+```
+
+`horizontal` places children side by side, `vertical` stacks them, and `tabs`
+groups children without a split axis. Splits divide space equally. The server
+validates unique and complete membership, at most 64 terminals, and at most 16
+levels of nesting. Tab selection is client-local; layout and membership are
+server-owned. Membership transfers are atomic under the registry lock and keep
+terminal IDs, processes, history, and existing attachments intact.
+
+Exiting terminals are removed from their view; redundant one-child groups
+collapse. The last exit removes the session and view, retaining the existing
+daemon idle-exit behavior. Layouts survive client disconnects, but like PTYs,
+do not survive daemon restart. Task-managed roots retain one terminal and reject
+splits and transfers so task lifecycle ownership remains unambiguous.
+
+Protocol versions still match exactly. Version 10 clients require a version 10
+daemon; this is not an in-place migration of a running version 9 daemon.
 
 ## Connection lifecycle
 
@@ -371,6 +438,13 @@ have been interpreted. Soft-wrapped physical rows are merged into logical
 lines. Alternate-screen output is excluded. The snapshot is bounded by bytes,
 physical rows, and emulator cells; it is a full replacement, not an incremental
 patch. Version 1 does not preserve style runs in historical lines.
+
+The emulator strips trailing whitespace from each complete logical line before
+history storage; hard line breaks do not pad stored lines to the terminal width.
+This also strips explicitly written trailing whitespace, which the normalized
+text does not distinguish from unused cells. Leading and interior spaces remain,
+including the column offset preserved by a bare LF (without CR). Soft-wrapped
+rows are joined before trailing whitespace is stripped.
 
 `terminal_size` in a checkpoint is authoritative for its restored parser
 state. A graphical client must reset or recreate its terminal model at those

@@ -3298,6 +3298,8 @@ mod tests {
 
   fn session_info() -> SessionInfo {
     SessionInfo {
+      view_id: "view-test".into(),
+      terminal_id: "terminal-test".into(),
       session_id: "session-id".into(),
       name: "work".into(),
       status: rmux_proto::SessionStatus::Running,

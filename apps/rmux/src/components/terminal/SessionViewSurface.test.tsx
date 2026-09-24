@@ -53,6 +53,35 @@ describe("session compositor", () => {
     await waitFor(() => expect(actions.on_promoted).toHaveBeenCalledWith(expect.objectContaining({ session_id: "new-root", terminal_id: "b", name: "New root" })));
   });
 
+  it.each([
+    ["Split right", "horizontal"],
+    ["Split below", "vertical"],
+  ] as const)("reveals the new pane when clicking %s from a zoomed pane", async (label, axis) => {
+    const expanded: SessionView = {
+      ...split, revision: "2",
+      layout: { kind: "split", axis: "horizontal", children: [
+        { kind: "terminal", terminal_id: "a" },
+        { kind: "split", axis, children: [{ kind: "terminal", terminal_id: "b" }, { kind: "terminal", terminal_id: "c" }] },
+      ] },
+      terminals: [...split.terminals, terminal("c")],
+    };
+    mocks.request.mockResolvedValueOnce(split).mockResolvedValue(expanded);
+    render(<SessionViewSurface {...props()} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "other" }} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    act(() => second.focus());
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(second, { key: "z", code: "KeyZ" });
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(3));
+    expect(mocks.request).toHaveBeenLastCalledWith(session.target, expect.objectContaining({ kind: "split", terminal_id: "b", axis }));
+    for (const input of screen.getAllByLabelText("Terminal input")) {
+      expect(input.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible");
+    }
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
+
   it("releases the surviving pane attachment before transferring it to the primary renderer", async () => {
     vi.useFakeTimers();
     mocks.request.mockResolvedValueOnce(split).mockResolvedValueOnce({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, terminals: [terminal("b")] });

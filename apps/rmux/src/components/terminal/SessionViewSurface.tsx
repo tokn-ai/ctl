@@ -106,6 +106,8 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
       }
       if (current === generation.current) {
         ++sequence.current;
+        // Both toolbar and prefix splits must reveal the newly created pane.
+        if (action.kind === "split") setZoomedId(null);
         if (next?.session_id === session.session_id) setView(next);
         else {
           const refreshed = await sessionView(session.target, { kind: "get", session_id: session.session_id });
@@ -148,7 +150,6 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
         }
       } else if (action === "pane.zoom") setZoomedId((previous) => previous === focused ? null : focused);
       else if (action === "pane.split_right" || action === "pane.split_below") {
-        setZoomedId(null);
         void mutate({ kind: "split", terminal_id: focused, axis: action === "pane.split_right" ? "horizontal" : "vertical", terminal_size: session!.terminal_size, working_directory: null });
       } else if (action === "pane.promote") void mutate({ kind: "promote", terminal_id: focused, name: null });
       else on_command?.(action);

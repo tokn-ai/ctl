@@ -25,7 +25,7 @@ pub struct AppState {
 
 #[derive(Default)]
 struct AttachmentRegistry {
-  by_window: HashMap<String, AttachmentSlot>,
+  by_window: HashMap<String, HashMap<String, AttachmentSlot>>,
   window_transitions: HashMap<String, Arc<Mutex<()>>>,
 }
 
@@ -75,8 +75,8 @@ impl PendingPresentation {
 }
 
 impl AppState {
-  /// Serializes attachment ownership while allowing a stalled open to be
-  /// cancelled without waiting for the window transition lock.
+  /// Serializes opens without replacing sibling pane attachments. A stalled
+  /// open can be cancelled without waiting for the window transition lock.
   pub async fn open_attachment<T>(
     &self,
     window_label: &str,
@@ -86,7 +86,6 @@ impl AppState {
   ) -> CommandResult<T> {
     let transition = self.window_transition(window_label).await;
     let _transition_guard = transition.lock().await;
-    self.detach_active_window(window_label).await?;
     let mut cancelled = self.reserve_window(window_label, attachment_id).await?;
 
     let result = async {
@@ -114,7 +113,10 @@ impl AppState {
     if let Some(AttachmentSlot::Opening {
       attachment_id: current,
       cancel,
-    }) = registry.by_window.get(window_label)
+    }) = registry
+      .by_window
+      .get(window_label)
+      .and_then(|slots| slots.get(attachment_id))
       && current == attachment_id
     {
       let _ = cancel.send(true);
@@ -138,49 +140,37 @@ impl AppState {
     )
   }
 
-  pub async fn detach_active_window(&self, window_label: &str) -> CommandResult<()> {
-    let actor = {
-      let registry = self.registry.lock().await;
-      match registry.by_window.get(window_label) {
-        Some(AttachmentSlot::Opening { .. }) => {
-          return Err(CommandErrorDto::new(
-            "window_attachment_transition_in_progress",
-            "another attachment transition is already in progress for this window",
-          ));
-        }
-        Some(AttachmentSlot::Active(actor)) => Some(Arc::clone(actor)),
-        None => None,
-      }
-    };
-
-    match actor {
-      Some(actor) => actor.detach_and_wait().await,
-      None => Ok(()),
-    }
-  }
-
-  /// Detaches the active actor only when it belongs to the local daemon being
-  /// restarted. A remote SSH attachment in the same window is unrelated and
-  /// must remain live through local maintenance.
+  /// Detaches every local pane in the window before restarting its daemon.
+  /// Remote panes remain attached.
   pub async fn detach_active_local_window(&self, window_label: &str) -> CommandResult<()> {
-    let actor = {
+    let actors = {
       let registry = self.registry.lock().await;
-      match registry.by_window.get(window_label) {
-        Some(AttachmentSlot::Opening { .. }) => {
-          return Err(CommandErrorDto::new(
-            "window_attachment_transition_in_progress",
-            "another attachment transition is already in progress for this window",
-          ));
+      let mut actors = Vec::new();
+      for slot in registry
+        .by_window
+        .get(window_label)
+        .into_iter()
+        .flat_map(|slots| slots.values())
+      {
+        match slot {
+          AttachmentSlot::Opening { .. } => {
+            return Err(CommandErrorDto::new(
+              "window_attachment_transition_in_progress",
+              "another attachment transition is already in progress for this window",
+            ));
+          }
+          AttachmentSlot::Active(actor) if actor.target.is_local() => {
+            actors.push(Arc::clone(actor));
+          }
+          AttachmentSlot::Active(_) => {}
         }
-        Some(AttachmentSlot::Active(actor)) if actor.target.is_local() => Some(Arc::clone(actor)),
-        Some(AttachmentSlot::Active(_)) | None => None,
       }
+      actors
     };
-
-    match actor {
-      Some(actor) => actor.detach_and_wait().await,
-      None => Ok(()),
+    for actor in actors {
+      actor.detach_and_wait().await?;
     }
+    Ok(())
   }
 
   async fn reserve_window(
@@ -189,15 +179,16 @@ impl AppState {
     attachment_id: &str,
   ) -> CommandResult<watch::Receiver<bool>> {
     let mut registry = self.registry.lock().await;
-    if registry.by_window.contains_key(window_label) {
+    let slots = registry.by_window.entry(window_label.into()).or_default();
+    if slots.contains_key(attachment_id) {
       return Err(CommandErrorDto::new(
-        "window_already_attached",
-        "another attachment transition is already in progress for this window",
+        "attachment_already_registered",
+        "this attachment ID is already registered in the window",
       ));
     }
     let (cancel, cancelled) = watch::channel(false);
-    registry.by_window.insert(
-      window_label.into(),
+    slots.insert(
+      attachment_id.into(),
       AttachmentSlot::Opening {
         attachment_id: attachment_id.into(),
         cancel,
@@ -214,7 +205,7 @@ impl AppState {
   ) -> CommandResult<()> {
     let mut registry = self.registry.lock().await;
     let reservation_matches = matches!(
-      registry.by_window.get(window_label),
+      registry.by_window.get(window_label).and_then(|slots| slots.get(attachment_id)),
       Some(AttachmentSlot::Opening { attachment_id: reserved, .. }) if reserved == attachment_id
     );
     if !reservation_matches {
@@ -225,13 +216,19 @@ impl AppState {
     }
     registry
       .by_window
-      .insert(window_label.into(), AttachmentSlot::Active(actor));
+      .get_mut(window_label)
+      .expect("reservation exists")
+      .insert(attachment_id.into(), AttachmentSlot::Active(actor));
     Ok(())
   }
 
   pub async fn release(&self, window_label: &str, attachment_id: &str) {
     let mut registry = self.registry.lock().await;
-    let should_remove = match registry.by_window.get(window_label) {
+    let should_remove = match registry
+      .by_window
+      .get(window_label)
+      .and_then(|slots| slots.get(attachment_id))
+    {
       Some(AttachmentSlot::Opening {
         attachment_id: current,
         ..
@@ -239,8 +236,11 @@ impl AppState {
       Some(AttachmentSlot::Active(actor)) => actor.attachment_id == attachment_id,
       None => false,
     };
-    if should_remove {
-      registry.by_window.remove(window_label);
+    if should_remove && let Some(slots) = registry.by_window.get_mut(window_label) {
+      slots.remove(attachment_id);
+      if slots.is_empty() {
+        registry.by_window.remove(window_label);
+      }
     }
   }
 
@@ -250,10 +250,14 @@ impl AppState {
     attachment_id: &str,
   ) -> CommandResult<Arc<AttachmentActor>> {
     let registry = self.registry.lock().await;
-    let Some(AttachmentSlot::Active(actor)) = registry.by_window.get(window_label) else {
+    let Some(AttachmentSlot::Active(actor)) = registry
+      .by_window
+      .get(window_label)
+      .and_then(|slots| slots.get(attachment_id))
+    else {
       return Err(CommandErrorDto::new(
         "attachment_not_found",
-        "this window has no active attachment",
+        "this window has no active attachment with the requested ID",
       ));
     };
     if actor.attachment_id != attachment_id || actor.window_label != window_label {
@@ -266,20 +270,22 @@ impl AppState {
   }
 
   async fn detach_window(&self, window_label: &str) {
-    let actor = {
-      let mut registry = self.registry.lock().await;
-      match registry.by_window.get(window_label) {
-        Some(AttachmentSlot::Opening { cancel, .. }) => {
+    let slots = self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .remove(window_label)
+      .unwrap_or_default();
+    for slot in slots.into_values() {
+      match slot {
+        AttachmentSlot::Opening { cancel, .. } => {
           let _ = cancel.send(true);
-          registry.by_window.remove(window_label);
-          None
         }
-        Some(AttachmentSlot::Active(actor)) => Some(Arc::clone(actor)),
-        None => None,
+        AttachmentSlot::Active(actor) => {
+          let _ignored = actor.control.detach().await;
+        }
       }
-    };
-    if let Some(actor) = actor {
-      let _ignored = actor.control.detach().await;
     }
   }
 }
@@ -587,6 +593,36 @@ async fn forward_event(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn opening_and_releasing_a_pane_preserves_sibling_reservations() {
+    let state = AppState::default();
+    let first = state.reserve_window("main", "first").await.unwrap();
+    state
+      .open_attachment("main", "second", || Ok(()), async { Ok(()) })
+      .await
+      .unwrap();
+    assert!(!*first.borrow());
+    assert_eq!(state.registry.lock().await.by_window["main"].len(), 2);
+    state.release("main", "second").await;
+    assert!(!*first.borrow());
+    assert_eq!(state.registry.lock().await.by_window["main"].len(), 1);
+    state.cancel_opening("main", "first").await;
+    assert!(*first.borrow());
+  }
+
+  #[tokio::test]
+  async fn closing_a_window_cancels_all_its_panes_only() {
+    let state = AppState::default();
+    let first = state.reserve_window("main", "first").await.unwrap();
+    let second = state.reserve_window("main", "second").await.unwrap();
+    let other = state.reserve_window("other", "first").await.unwrap();
+    state.detach_window("main").await;
+    assert!(*first.borrow());
+    assert!(*second.borrow());
+    assert!(!*other.borrow());
+    assert!(!state.registry.lock().await.by_window.contains_key("main"));
+  }
 
   #[tokio::test]
   async fn cancelling_a_stalled_open_drops_its_work_and_releases_the_window() {

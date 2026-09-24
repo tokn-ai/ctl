@@ -227,3 +227,133 @@ async fn read_output_until(stream: &mut DuplexStream, marker: &[u8]) -> TestResu
     }
   }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() -> TestResult {
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("rmux.sock");
+  let daemon = spawn_rmuxd(&socket);
+  wait_for_socket(&socket).await?;
+  let identity = ClientIdentity {
+    name: "restart-test".into(),
+    version: "0.1.0".into(),
+  };
+  let created = request(
+    open_gateway(&socket).await?,
+    &identity,
+    ClientMessage::CreateSession {
+      name: Some("restart-me".into()),
+      command: None,
+      working_directory: None,
+      terminal_size: TerminalSize::default(),
+    },
+  )
+  .await?;
+  assert!(matches!(created, ServerMessage::SessionCreated { .. }));
+
+  // The fixture executable records startup; an in-process daemon supplies the
+  // replacement endpoint without depending on a separately built rmuxd binary.
+  let marker = directory.path.join("started");
+  let executable = directory.path.join("rmuxd");
+  std::fs::write(
+    &executable,
+    format!(
+      "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+      marker.display()
+    ),
+  )?;
+  std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+  let mut config = ctl_agent::ConnectConfig::new(socket.clone());
+  config.rmuxd_bin = Some(executable);
+
+  let rejected = ctl_agent::restart::restart_rmux(&config, "expected", "different").await;
+  assert!(rejected.is_err());
+  assert!(!daemon.is_finished());
+  assert!(!marker.exists());
+
+  let replacement_socket = socket.clone();
+  let replacement_marker = marker.clone();
+  let replacement = tokio::spawn(async move {
+    timeout(TEST_TIMEOUT, async {
+      while !replacement_marker.exists() {
+        sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .expect("installed companion started");
+    spawn_rmuxd(&replacement_socket)
+      .await
+      .expect("replacement daemon task")
+  });
+  let outcome = timeout(
+    TEST_TIMEOUT,
+    ctl_agent::restart::restart_rmux(&config, "expected", "expected"),
+  )
+  .await??;
+  assert_eq!(outcome.terminated_sessions, 1);
+  timeout(TEST_TIMEOUT, daemon).await???;
+  let arguments = std::fs::read_to_string(&marker)?;
+  assert!(arguments.contains(socket.to_str().unwrap()));
+  assert!(arguments.contains("--detach-from-terminal"));
+  let sessions = request(
+    open_gateway(&socket).await?,
+    &identity,
+    ClientMessage::ListSessions,
+  )
+  .await?;
+  assert!(matches!(sessions, ServerMessage::SessionList { sessions } if sessions.is_empty()));
+  let control = rmux_ipc::control_socket_path(&socket)?;
+  rmux_ipc::request_local_daemon_restart(UnixStream::connect(control).await?).await?;
+  timeout(TEST_TIMEOUT, replacement).await???;
+  Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_restart_does_not_touch_a_live_data_endpoint() -> TestResult {
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("rmux.sock");
+  let listener = tokio::net::UnixListener::bind(&socket)?;
+  let control = rmux_ipc::control_socket_path(&socket)?;
+  let control_listener = tokio::net::UnixListener::bind(&control)?;
+  let server = tokio::spawn(async move {
+    let (mut stream, _) = control_listener.accept().await.unwrap();
+    let hello: Option<rmux_ipc::LocalControlClientMessage> =
+      rmux_ipc::read_local_control_frame(&mut stream)
+        .await
+        .unwrap();
+    assert!(matches!(
+      hello,
+      Some(rmux_ipc::LocalControlClientMessage::Handshake { .. })
+    ));
+    rmux_ipc::write_local_control_frame(
+      &mut stream,
+      &rmux_ipc::LocalControlServerMessage::HandshakeAccepted {
+        protocol_version: rmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
+        restart_supported: false,
+        managed_sessions_supported: false,
+      },
+    )
+    .await
+    .unwrap();
+    let request: Option<rmux_ipc::LocalControlClientMessage> =
+      rmux_ipc::read_local_control_frame(&mut stream)
+        .await
+        .unwrap();
+    assert!(
+      request.is_none(),
+      "unsupported daemon must not receive restart"
+    );
+  });
+  let mut config = ctl_agent::ConnectConfig::new(socket.clone());
+  config.rmuxd_bin = Some("/bin/true".into());
+  assert!(
+    ctl_agent::restart::restart_rmux(&config, "expected", "expected")
+      .await
+      .is_err()
+  );
+  timeout(TEST_TIMEOUT, server).await??;
+  assert!(socket.exists());
+  drop(UnixStream::connect(&socket).await?);
+  drop(listener);
+  Ok(())
+}

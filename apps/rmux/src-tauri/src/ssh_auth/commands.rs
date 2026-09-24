@@ -11,6 +11,8 @@ use tauri::{AppHandle, WebviewWindow, ipc::Channel};
 pub struct ProbeRequest {
   target: ConnectionTargetDto,
   attempt_id: String,
+  #[serde(default)]
+  restart_check: bool,
 }
 #[derive(Deserialize)]
 pub struct ResponseRequest {
@@ -46,6 +48,7 @@ pub async fn probe_ssh_host(
     request.attempt_id,
     request.target,
     on_prompt,
+    request.restart_check,
   )
   .await
 }
@@ -65,6 +68,21 @@ pub async fn install_remote_agent(
     request.target,
     on_prompt,
     on_progress,
+  )
+  .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn restart_remote_rmux(
+  window: WebviewWindow,
+  request: ProbeRequest,
+  on_prompt: Channel<SshPromptDto>,
+) -> CommandResult<ctl_proto::RemoteRmuxRestartResult> {
+  super::restart_rmux(
+    window.label().into(),
+    request.attempt_id,
+    request.target,
+    on_prompt,
   )
   .await
 }

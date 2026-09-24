@@ -218,6 +218,7 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     let identity = ctl_proto::RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
+      rmux_restart_supported: false,
       bundle: None,
     };
     let json = serde_json::to_string(&identity).unwrap();
@@ -311,4 +312,21 @@ async fn transport_recognizes_the_missing_agent_protocol_marker() {
   })
   .await
   .expect("missing-agent handling timed out");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixed_command_closes_stdin_before_waiting_for_response() {
+  for input in [
+    b"".as_slice(),
+    b"{\"expected_remote_id\":\"test\"}".as_slice(),
+  ] {
+    let mut command = Command::new("sh");
+    command.args(["-c", "cat; printf '\nrequest-complete'"]);
+    let output = timeout(Duration::from_secs(2), run_fixed_command(command, input))
+      .await
+      .expect("command must receive EOF before the caller waits for output")
+      .expect("command should succeed");
+    assert_eq!(output, [input, b"\nrequest-complete"].concat());
+  }
 }

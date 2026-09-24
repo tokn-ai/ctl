@@ -101,3 +101,18 @@ async fn credential_save_choices_use_the_prompt_channel_without_sending_a_secret
     .unwrap();
   assert_eq!(task.await.unwrap().unwrap().as_str(), "never");
 }
+
+#[test]
+fn restart_support_is_opt_in_for_older_agents() {
+  let mut identity: ctl_proto::RemoteIdentity = serde_json::from_value(serde_json::json!({
+    "remote_id": "c2b68993-24c0-45a3-91f1-6fd5ff2eceb7",
+    "agent_version": "0.1.0"
+  }))
+  .unwrap();
+  assert_eq!(
+    require_restart_support(&identity).unwrap_err().code,
+    "remote_restart_unsupported"
+  );
+  identity.rmux_restart_supported = true;
+  assert!(require_restart_support(&identity).is_ok());
+}

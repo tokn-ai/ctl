@@ -141,6 +141,7 @@ pub async fn probe(
   attempt_id: String,
   target: ConnectionTargetDto,
   channel: Channel<SshPromptDto>,
+  restart_check: bool,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
@@ -163,7 +164,11 @@ pub async fn probe(
   let context = PromptContext { attempt, channel };
   let establish = async {
     let (stream, identity) = connect_with(&target, Some(context)).await?;
-    verification::verify(stream).await?;
+    if restart_check {
+      require_restart_support(&identity)?;
+    } else {
+      verification::verify(stream).await?;
+    }
     Ok(identity)
   };
   let result = tokio::select! {
@@ -233,6 +238,92 @@ pub async fn install_agent(
     _ = cancelled.changed() => Err(CommandErrorDto::new("ssh_cancelled", "SSH connection cancelled.")),
   };
   result
+}
+
+fn require_restart_support(identity: &ctl_proto::RemoteIdentity) -> CommandResult<()> {
+  if identity.rmux_restart_supported {
+    return Ok(());
+  }
+  Err(CommandErrorDto::new(
+    "remote_restart_unsupported",
+    "The installed ctl-agent does not support remote restart. Install a current component bundle, or restart rmuxd manually on the host.",
+  ))
+}
+
+/// Called only after the UI's destructive restart confirmation.
+pub async fn restart_rmux(
+  window: String,
+  attempt_id: String,
+  target: ConnectionTargetDto,
+  channel: Channel<SshPromptDto>,
+) -> CommandResult<ctl_proto::RemoteRmuxRestartResult> {
+  let key = (window, attempt_id);
+  let (cancel, mut cancelled) = watch::channel(false);
+  let attempt = Arc::new(Attempt {
+    target: broker::broker_target(&target)?,
+    cancel,
+    responses: Mutex::default(),
+  });
+  {
+    let mut registry = registry().lock().unwrap();
+    if registry.attempts.contains_key(&key) {
+      return Err(CommandErrorDto::new(
+        "ssh_attempt_exists",
+        "This connection attempt is already running.",
+      ));
+    }
+    registry.attempts.insert(key.clone(), attempt.clone());
+  }
+  let _guard = AttemptGuard(key);
+  let context = PromptContext { attempt, channel };
+  let restart = async {
+    let prepare = async {
+      // Identity discovery does not perform a session-protocol handshake.
+      let (stream, identity) = connect_with(&target, Some(context)).await?;
+      require_restart_support(&identity)?;
+      drop(stream);
+      let control_path = broker::existing_master(&target).await?;
+      Ok::<_, CommandErrorDto>((identity, control_path))
+    };
+    let (identity, control_path) = tokio::time::timeout(Duration::from_mins(3), prepare)
+      .await
+      .map_err(|_| {
+        CommandErrorDto::new(
+          "ssh_timeout",
+          "Preparing the SSH connection for restart timed out. No restart command was sent.",
+        )
+      })??;
+    let ConnectionTarget::Ssh {
+      destination,
+      options,
+    } = target.to_core()
+    else {
+      return Err(CommandErrorDto::new(
+        "invalid_ssh_target",
+        "Select a remote SSH host.",
+      ));
+    };
+    let interaction = SshInteraction::Multiplexed { control_path };
+    let command = ctl_core::restart_ssh_rmux_interactive(
+      &destination,
+      &options,
+      &interaction,
+      &identity.remote_id,
+    );
+    tokio::time::timeout(Duration::from_secs(45), command)
+      .await
+      .map_err(|_| {
+        CommandErrorDto::new(
+          "remote_daemon_restart_timeout",
+          "The remote restart command did not finish within 45 seconds. The daemon may have restarted; reconnect to check its state.",
+        )
+      })?
+      .map_err(|error| CommandErrorDto::new("remote_daemon_restart_failed", error.to_string()))
+  };
+  tokio::select! {
+    result = restart => result,
+    _ = cancelled.changed() => Err(CommandErrorDto::new("ssh_cancelled", "Stopped waiting for restart. The daemon may still restart; reconnect to check its state.")),
+  }
 }
 
 pub fn respond(

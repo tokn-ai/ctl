@@ -214,6 +214,7 @@ export function TerminalPage() {
   const [hostFlow, setHostFlow] = useState<{
     target: SshConnectionTarget;
     selected_method_id?: string;
+    update_required?: boolean;
   } | null>(null);
   const [addHostOpen, setAddHostOpen] = useState(false);
   const openAddHost = () => {
@@ -1767,6 +1768,19 @@ export function TerminalPage() {
               {attachment.state.message ? (
                 <div className="message-banner" role="status">
                   {attachment.state.message}
+                  {attachment.state.error_code === "protocol_version_mismatch" && attachment.state.session ? (
+                    <button type="button" onClick={() => {
+                      const target = attachment.state.session?.target;
+                      if (!target) return;
+                      if (target.kind === "ssh") {
+                        setHostFlow({ target, update_required: true });
+                      } else {
+                        executeCommandById(COMMAND_IDS.restartDaemon);
+                      }
+                    }}>
+                      {attachment.state.session.target.kind === "ssh" ? "Update remote components" : "Restart local daemon"}
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -1952,7 +1966,7 @@ export function TerminalPage() {
           host={workspace.hosts.find((host) => host.host_id === hostFlow.target.host_id)}
           selected_method_id={hostFlow.selected_method_id}
           gateways={workspace.ssh_gateways}
-          updateRequired={portForwardUpdateTarget !== null}
+          updateRequired={portForwardUpdateTarget !== null || hostFlow.update_required === true}
           onVerified={recoverHost}
           onConnectionChange={hostConnections.connectionChanged}
           onConnected={(target) => {

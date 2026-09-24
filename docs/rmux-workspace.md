@@ -186,6 +186,27 @@ and host-key verification; the UUID is not an authorization credential. Before
 starting the agent, the Unix wrapper emits `ctl-ssh-nf\n` when it is absent so
 installation does not depend on the remote shell's diagnostic language.
 
+When SSH verification reports an rmux protocol-version mismatch, the desktop
+offers **Update remote components** using the bundled installer and verifies the
+same connection again afterward. Attachment errors expose the same action.
+Installation preserves running sessions and does not restart an existing daemon;
+if it remains incompatible, the flow offers a separate **Force restart**
+confirmation warning that all rmux sessions for the remote account will end,
+including sessions used by other clients. **Not now** preserves those sessions.
+The agent advertises restart support in identity metadata; older agents default
+to unsupported, and the desktop checks this before offering confirmation and
+again before sending the command. Remote installation rejects bundles from a
+different source revision or an app built with uncommitted component changes.
+For development, commit and push the changes, run `pnpm agents:sync`, and rebuild
+the app so its bundled components and source revision agree.
+After confirmation, the fixed `ctl-agent restart-rmux` operation checks the remote
+identity, requests shutdown through the owner-only control endpoint, starts the
+installed companion daemon, and re-verifies the connection. It never signals
+processes by name or removes live sockets; unsupported control endpoints report
+an error and require manual restart. Closing the progress dialog cannot undo a
+restart already requested. Local attachment errors offer the existing confirmed daemon
+restart action.
+
 ## Lifecycle
 
 | Action | Workspace effect | Remote effect |

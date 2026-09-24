@@ -36,6 +36,7 @@ interface QuickInputProps {
   onBack?(): void;
   onChange?(value: string): void;
   cancel_disabled?: boolean;
+  cancel_label?: string;
   /** Reuse the initiating command's configured shortcut in this confirmation. */
   confirm_command_id?: string;
 }
@@ -51,6 +52,7 @@ export function QuickInput({
   onBack,
   onChange,
   cancel_disabled = false,
+  cancel_label = "Cancel",
   confirm_command_id,
 }: QuickInputProps) {
   const [selected, setSelected] = useState(0);
@@ -196,7 +198,7 @@ export function QuickInput({
             disabled={cancel_disabled}
             autoFocus
           >
-            Cancel
+            {cancel_label}
           </button>
           <button
             type="button"

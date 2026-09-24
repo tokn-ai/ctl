@@ -15,6 +15,19 @@ pub struct TcpListenerCatalog {
   pub warnings: Vec<String>,
 }
 
+/// Confirmation-bound maintenance request, sent on stdin rather than through a shell.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteRmuxRestartRequest {
+  pub expected_remote_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteRmuxRestartResult {
+  pub terminated_sessions: u32,
+}
+
 pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-v2\n";
 const MAX_IDENTITY_BYTES: usize = 8192;
 
@@ -23,6 +36,8 @@ const MAX_IDENTITY_BYTES: usize = 8192;
 pub struct RemoteIdentity {
   pub remote_id: String,
   pub agent_version: String,
+  #[serde(default)]
+  pub rmux_restart_supported: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub bundle: Option<Box<BundleVersion>>,
 }
@@ -111,6 +126,7 @@ mod tests {
     let identity = RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
+      rmux_restart_supported: false,
       bundle: None,
     };
     let mut bytes = Vec::new();

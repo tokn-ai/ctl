@@ -3,6 +3,7 @@ use ctl_agent::{ConnectConfig, Service, connect_stdio};
 use std::env;
 use std::path::PathBuf;
 use thiserror::Error;
+use tokio::io::AsyncReadExt as _;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "SSH remote-command gateway for ctl services")]
@@ -23,6 +24,8 @@ enum Command {
   },
   /// List TCP listeners without exposing process arguments or environment.
   Listeners,
+  /// End all rmux sessions and start the installed daemon after explicit confirmation.
+  RestartRmux,
 }
 
 #[tokio::main]
@@ -49,6 +52,26 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       config.taskd_bin = companion_binary("taskd");
       connect_stdio(&config).await?;
     }
+    Command::RestartRmux => {
+      let mut input = Vec::new();
+      tokio::io::stdin()
+        .take(8193)
+        .read_to_end(&mut input)
+        .await?;
+      if input.len() > 8192 {
+        return Err(std::io::Error::other("Restart request is too large.").into());
+      }
+      let request: ctl_proto::RemoteRmuxRestartRequest = serde_json::from_slice(&input)?;
+      let identity = tokio::task::spawn_blocking(ctl_agent::identity::discover)
+        .await
+        .map_err(std::io::Error::other)??;
+      let mut config = ConnectConfig::new(rmux_ipc::socket_path());
+      config.rmuxd_bin = companion_binary("rmuxd");
+      let result =
+        ctl_agent::restart::restart_rmux(&config, &request.expected_remote_id, &identity.remote_id)
+          .await?;
+      println!("{}", serde_json::to_string(&result)?);
+    }
     Command::Listeners => {
       let catalog = tokio::task::spawn_blocking(ctl_agent::listeners::discover)
         .await
@@ -69,9 +92,9 @@ fn companion_binary(name: &str) -> Option<PathBuf> {
 enum MainError {
   #[error(transparent)]
   Agent(#[from] ctl_agent::AgentError),
-  #[error("could not identify remote environment: {0}")]
+  #[error("remote operation failed: {0}")]
   Identity(#[from] std::io::Error),
-  #[error("could not encode listener catalog: {0}")]
+  #[error("invalid remote operation JSON: {0}")]
   Json(#[from] serde_json::Error),
 }
 
@@ -134,6 +157,21 @@ mod tests {
       assert!(
         Arguments::try_parse_from(std::iter::once("ctl-agent").chain(arguments.clone())).is_err(),
         "must reject {arguments:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn restart_is_a_fixed_operation_without_arbitrary_targets() {
+    assert!(matches!(
+      Arguments::try_parse_from(["ctl-agent", "restart-rmux"])
+        .unwrap()
+        .command,
+      Command::RestartRmux
+    ));
+    for argument in ["--socket", "--pid", "--command", "--service"] {
+      assert!(
+        Arguments::try_parse_from(["ctl-agent", "restart-rmux", argument, "anything"]).is_err()
       );
     }
   }

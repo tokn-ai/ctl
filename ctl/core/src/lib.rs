@@ -554,7 +554,12 @@ async fn run_ssh_command_interactive(
   command
     .args(extra)
     .args(ssh_base_arguments(destination, options))
-    .arg(remote_command)
+    .arg(remote_command);
+  run_fixed_command(command, input).await
+}
+
+async fn run_fixed_command(mut command: Command, input: &[u8]) -> Result<Vec<u8>, CoreError> {
+  command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -564,9 +569,12 @@ async fn run_ssh_command_interactive(
   let mut stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
   let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
-  let write = async {
-    stdin.write_all(input).await?;
-    stdin.shutdown().await
+  let write = async move {
+    let result = stdin.write_all(input).await;
+    // ChildStdin::shutdown is a no-op on Unix. Close the owned pipe so the
+    // remote command can observe EOF before we wait for its response/exit.
+    drop(stdin);
+    result
   };
   let read_stdout = read_bounded_output(&mut stdout);
   let read_stderr = read_bounded_output(&mut stderr);

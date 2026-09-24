@@ -313,3 +313,20 @@ async fn transport_recognizes_the_missing_agent_protocol_marker() {
   .await
   .expect("missing-agent handling timed out");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixed_command_closes_stdin_before_waiting_for_response() {
+  for input in [
+    b"".as_slice(),
+    b"{\"expected_remote_id\":\"test\"}".as_slice(),
+  ] {
+    let mut command = Command::new("sh");
+    command.args(["-c", "cat; printf '\nrequest-complete'"]);
+    let output = timeout(Duration::from_secs(2), run_fixed_command(command, input))
+      .await
+      .expect("command must receive EOF before the caller waits for output")
+      .expect("command should succeed");
+    assert_eq!(output, [input, b"\nrequest-complete"].concat());
+  }
+}

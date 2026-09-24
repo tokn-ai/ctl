@@ -277,11 +277,22 @@ pub async fn restart_rmux(
   let _guard = AttemptGuard(key);
   let context = PromptContext { attempt, channel };
   let restart = async {
-    // Identity discovery does not perform a session-protocol handshake.
-    let (stream, identity) = connect_with(&target, Some(context)).await?;
-    require_restart_support(&identity)?;
-    drop(stream);
-    let control_path = broker::existing_master(&target).await?;
+    let prepare = async {
+      // Identity discovery does not perform a session-protocol handshake.
+      let (stream, identity) = connect_with(&target, Some(context)).await?;
+      require_restart_support(&identity)?;
+      drop(stream);
+      let control_path = broker::existing_master(&target).await?;
+      Ok::<_, CommandErrorDto>((identity, control_path))
+    };
+    let (identity, control_path) = tokio::time::timeout(Duration::from_mins(3), prepare)
+      .await
+      .map_err(|_| {
+        CommandErrorDto::new(
+          "ssh_timeout",
+          "Preparing the SSH connection for restart timed out. No restart command was sent.",
+        )
+      })??;
     let ConnectionTarget::Ssh {
       destination,
       options,
@@ -292,19 +303,25 @@ pub async fn restart_rmux(
         "Select a remote SSH host.",
       ));
     };
-    ctl_core::restart_ssh_rmux_interactive(
+    let interaction = SshInteraction::Multiplexed { control_path };
+    let command = ctl_core::restart_ssh_rmux_interactive(
       &destination,
       &options,
-      &SshInteraction::Multiplexed { control_path },
+      &interaction,
       &identity.remote_id,
-    )
-    .await
-    .map_err(|error| CommandErrorDto::new("remote_daemon_restart_failed", error.to_string()))
+    );
+    tokio::time::timeout(Duration::from_secs(45), command)
+      .await
+      .map_err(|_| {
+        CommandErrorDto::new(
+          "remote_daemon_restart_timeout",
+          "The remote restart command did not finish within 45 seconds. The daemon may have restarted; reconnect to check its state.",
+        )
+      })?
+      .map_err(|error| CommandErrorDto::new("remote_daemon_restart_failed", error.to_string()))
   };
   tokio::select! {
-    result = tokio::time::timeout(Duration::from_mins(3), restart) => {
-      result.map_err(|_| CommandErrorDto::new("ssh_timeout", "Restart timed out. The daemon may have restarted; reconnect to check its state."))?
-    }
+    result = restart => result,
     _ = cancelled.changed() => Err(CommandErrorDto::new("ssh_cancelled", "Stopped waiting for restart. The daemon may still restart; reconnect to check its state.")),
   }
 }

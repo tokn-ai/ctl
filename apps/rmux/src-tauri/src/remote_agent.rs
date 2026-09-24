@@ -94,6 +94,11 @@ async fn install_bundle(
   let target_triple = platform.target_triple()?;
   updates.send_modify(|progress| progress.phase = Phase::VerifyingBundle);
   let bundle = read_verified_bundle(bundle_directories(app)?, target_triple).await?;
+  verify_bundle_revision(
+    &bundle.git_revision,
+    env!("RMUX_SOURCE_REVISION"),
+    env!("RMUX_COMPONENTS_DIRTY") == "true",
+  )?;
   updates.send_modify(|progress| {
     progress.phase = Phase::Connecting;
     progress.file_name = Some(bundle.file_name.clone());
@@ -327,6 +332,20 @@ fn parse_bundle_set(bytes: &[u8]) -> CommandResult<BundleSetManifest> {
   Ok(manifest)
 }
 
+fn verify_bundle_revision(
+  bundle_revision: &str,
+  source_revision: &str,
+  components_dirty: bool,
+) -> CommandResult<()> {
+  if components_dirty || source_revision.is_empty() || bundle_revision != source_revision {
+    return Err(CommandErrorDto::new(
+      "remote_agent_bundle_stale",
+      "The remote component bundle does not match this app build. Commit component changes, run `pnpm agents:sync` from apps/rmux for that exact revision, and rebuild the app before updating this host.",
+    ));
+  }
+  Ok(())
+}
+
 fn is_safe_bundle_id(bundle_id: &str) -> bool {
   !bundle_id.is_empty()
     && bundle_id.len() <= 128
@@ -366,6 +385,23 @@ mod tests {
       development_bundle_directories(development.clone(), development.clone()),
       vec![development]
     );
+  }
+
+  #[test]
+  fn rejects_stale_or_uncommitted_component_bundles() {
+    assert!(verify_bundle_revision("new", "new", false).is_ok());
+    for (bundle, source, dirty) in [
+      ("old", "new", false),
+      ("new", "new", true),
+      ("new", "", false),
+    ] {
+      assert_eq!(
+        verify_bundle_revision(bundle, source, dirty)
+          .unwrap_err()
+          .code,
+        "remote_agent_bundle_stale"
+      );
+    }
   }
 
   #[test]

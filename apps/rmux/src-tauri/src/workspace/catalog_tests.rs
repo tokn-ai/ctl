@@ -57,6 +57,7 @@ fn identity() -> ctl_proto::RemoteIdentity {
   ctl_proto::RemoteIdentity {
     remote_id: "9dcefd7e-2b35-43d8-97d9-7508186dbac0".into(),
     agent_version: "0.1.0".into(),
+    rmux_restart_supported: false,
     bundle: None,
   }
 }

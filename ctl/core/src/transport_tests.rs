@@ -218,6 +218,7 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     let identity = ctl_proto::RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
+      rmux_restart_supported: false,
       bundle: None,
     };
     let json = serde_json::to_string(&identity).unwrap();

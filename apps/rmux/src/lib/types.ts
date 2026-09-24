@@ -35,6 +35,7 @@ export interface NativeCommandBinding {
 export interface RemoteIdentity {
   remote_id: string;
   agent_version: string;
+  rmux_restart_supported?: boolean;
   bundle?: RemoteAgentInstallResult;
 }
 
@@ -295,6 +296,10 @@ export interface SshPrompt {
     | "credential_save"
     | "credential_save_error";
   message: string;
+}
+
+export interface RemoteRmuxRestartResult {
+  terminated_sessions: number;
 }
 
 export interface RemoteAgentInstallResult {

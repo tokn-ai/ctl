@@ -7,6 +7,7 @@
 
 pub mod identity;
 pub mod listeners;
+pub mod restart;
 
 use rmux_ipc::Stream;
 use std::io;

@@ -162,6 +162,8 @@ function hostSnapshot(): HostCatalogSnapshot {
 beforeEach(() => {
   vi.clearAllMocks();
   attachment.state.phase = "idle";
+  attachment.state.error_code = null;
+  attachment.state.message = null;
   attachment.state.session = null;
   attachment.state.shell_state = null;
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
@@ -270,6 +272,32 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("opens component updates from a remote protocol mismatch without probing or restarting automatically", async () => {
+    const session = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
+    Object.assign(attachment.state, {
+      phase: "error", session, error_code: "protocol_version_mismatch",
+      message: "client requested protocol version 10; this daemon supports 9",
+    });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Update remote components" }));
+    await screen.findByRole("dialog", { name: "Update remote components" });
+    expect(screen.getByRole("option", { name: /Update remote components/ })).toBeTruthy();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.restartLocalDaemon).not.toHaveBeenCalled();
+  });
+
+  it("requires the existing restart confirmation for a local protocol mismatch", async () => {
+    Object.assign(attachment.state, {
+      phase: "error", session: newSession(), error_code: "protocol_version_mismatch",
+      message: "client requested protocol version 10; this daemon supports 9",
+    });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Restart local daemon" }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(api.restartLocalDaemon).not.toHaveBeenCalled();
+    expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
+  });
+
   it("switches sidebar tabs and keeps an incomplete draft after dismissal and relaunch", async () => {
     const first = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
@@ -2022,6 +2050,8 @@ describe("workspace-backed terminal page", () => {
     Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
     attachment.detach.mockImplementationOnce(async () => {
       attachment.state.phase = "idle";
+  attachment.state.error_code = null;
+  attachment.state.message = null;
       attachment.state.session = null;
     });
     let manuallyDisconnected = false;

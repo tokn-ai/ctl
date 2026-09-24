@@ -4,6 +4,7 @@ import { remoteInstallProgressMode } from "./remoteInstallProgress";
 import { GatewayRouteDialog } from "./GatewayRouteDialog";
 import { tailscaleDeviceDetail, VIRTUAL_SSH_GROUP, VIRTUAL_TAILSCALE_GROUP } from "./hostChoices";
 import { resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
+import { sameSshEndpoint } from "../../features/workspace/remoteRecovery";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
@@ -15,6 +16,8 @@ import {
   cancelSshProbe,
   forgetSshCredentials,
   installRemoteAgent,
+  restartRemoteRmux,
+  checkRemoteRmuxRestart,
   probeSshHost,
   respondSshPrompt,
   saveSshConfigHost,
@@ -87,6 +90,8 @@ type Step =
   | "route"
   | "auth"
   | "identity"
+  | "restart_confirm"
+  | "restarting"
   | "installing"
   | "progress"
   | "storage"
@@ -154,6 +159,9 @@ export function SshHostFlow({
   const attemptRef = useRef<string | null>(null);
   const identityRef = useRef<RemoteIdentity | null>(null);
   const [needsUpdate, setNeedsUpdate] = useState(updateRequired);
+  const restartingRef = useRef(false);
+  const componentsUpdatedRef = useRef<ConnectionTarget | null>(null);
+  const [needsDaemonRestart, setNeedsDaemonRestart] = useState(false);
   const candidateRef = useRef<ConnectionTarget | null>(target ?? null);
   const configuredRef = useRef(false);
   const selectedProviderTargetRef = useRef<SshConnectionTarget | null>(null);
@@ -213,6 +221,7 @@ export function SshHostFlow({
     attemptRef.current = attempt;
     setError(null);
     setCanInstallAgent(false);
+    setNeedsDaemonRestart(false);
     setPrompt(null);
     setStep("progress");
     try {
@@ -281,10 +290,15 @@ export function SshHostFlow({
       setPrompt(null);
       setError(errorMessage(failure));
       onConnectionChange?.(candidate, "error", errorMessage(failure));
-      const update = errorCode(failure) === "ctl_agent_identity_unsupported";
+      const code = errorCode(failure);
+      const update = code === "ctl_agent_identity_unsupported" || code === "protocol_version_mismatch";
+      const restart = code === "protocol_version_mismatch" && componentsUpdatedRef.current !== null
+        && sameSshEndpoint(candidate, componentsUpdatedRef.current);
       setNeedsUpdate(update);
-      setCanInstallAgent(update || errorCode(failure) === "ctl_agent_not_found");
-      setStep("retry");
+      setNeedsDaemonRestart(restart);
+      setCanInstallAgent(!restart && (update || code === "ctl_agent_not_found"));
+      if (restart) await checkRestart(candidate);
+      else setStep("retry");
     } finally {
       if (!closedRef.current) setSaving(false);
     }
@@ -313,6 +327,7 @@ export function SshHostFlow({
       );
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
+      componentsUpdatedRef.current = candidate;
       await connect(candidate);
     } catch (failure) {
       if (attemptRef.current !== attempt || closedRef.current) return;
@@ -322,6 +337,58 @@ export function SshHostFlow({
       setCanInstallAgent(true);
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       setStep("retry");
+    }
+  }
+
+  async function checkRestart(candidate: ConnectionTarget) {
+    const attempt = crypto.randomUUID();
+    attemptRef.current = attempt;
+    setStep("progress");
+    try {
+      await checkRemoteRmuxRestart(candidate, attempt, (next) => {
+        if (attemptRef.current === attempt && !closedRef.current) setPrompt(next);
+      });
+      if (attemptRef.current !== attempt || closedRef.current) return;
+      setStep("restart_confirm");
+    } catch (failure) {
+      if (attemptRef.current !== attempt || closedRef.current) return;
+      setNeedsDaemonRestart(false);
+      setError(errorMessage(failure));
+      setStep("retry");
+    } finally {
+      if (attemptRef.current === attempt) {
+        attemptRef.current = null;
+        setPrompt(null);
+      }
+    }
+  }
+
+  async function restartDaemon(candidate: ConnectionTarget) {
+    if (restartingRef.current) return;
+    restartingRef.current = true;
+    cancelAttempt();
+    const attempt = crypto.randomUUID();
+    attemptRef.current = attempt;
+    setError(null);
+    setPrompt(null);
+    setStep("restarting");
+    onConnectionChange?.(candidate, "connecting");
+    try {
+      await restartRemoteRmux(candidate, attempt, (next) => {
+        if (attemptRef.current === attempt && !closedRef.current) setPrompt(next);
+      });
+      if (attemptRef.current !== attempt || closedRef.current) return;
+      attemptRef.current = null;
+      await connect(candidate);
+    } catch (failure) {
+      if (attemptRef.current !== attempt || closedRef.current) return;
+      attemptRef.current = null;
+      setPrompt(null);
+      setError(errorMessage(failure));
+      onConnectionChange?.(candidate, "error", errorMessage(failure));
+      setStep("retry");
+    } finally {
+      restartingRef.current = false;
     }
   }
 
@@ -673,10 +740,11 @@ export function SshHostFlow({
         : step === "retry"
           ? "Could not connect"
           : "Connect host";
-      description =
-        (step === "retry" || step === "update") && canInstallAgent
+      description = needsDaemonRestart
+        ? "The bundled components were installed, but the running rmux daemon is still incompatible. Choose Force restart to end its existing terminal sessions, or Connect to check again. The update has not stopped running sessions."
+        : (step === "retry" || step === "update") && canInstallAgent
           ? (needsUpdate
-            ? "Update the remote components to add listener discovery and keep this host compatible with the app."
+            ? "Update the remote components to match this app. Running sessions are preserved; an already-running daemon may still need to be restarted on the host."
             : "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually.")
           : "OpenSSH will ask for host verification or authentication if needed.";
       mode = {
@@ -691,11 +759,22 @@ export function SshHostFlow({
                 },
               ]
             : []),
+          ...(needsDaemonRestart ? [{ id: "restart_rmux", label: "Force restart remote rmux…" }] : []),
           ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
         ],
       };
       if (target && needsSshUser) onBack = back("ssh_user");
       else if (!target) onBack = back(complex || editingConnection ? "route" : configuredRef.current && !onSaveNewHost ? "host" : "auth");
+      break;
+    case "restart_confirm":
+      title = "Force restart remote rmux?";
+      description = "The components were updated, but the running daemon is still incompatible. Force restart ends all terminal sessions on this host for this account, including sessions used by other clients. Running commands may be interrupted.";
+      mode = { kind: "confirm", confirm_label: "Force restart", destructive: true };
+      break;
+    case "restarting":
+      title = "Restarting remote rmux";
+      description = "Ending terminal sessions and starting the updated daemon. Closing this dialog stops waiting; it cannot undo the restart.";
+      mode = { kind: "progress" };
       break;
     case "installing":
       title = "Installing remote components";
@@ -826,11 +905,14 @@ export function SshHostFlow({
       if (!saving && value === "save" && candidateRef.current?.kind === "ssh" && identityRef.current) {
         void saveNewHost(candidateRef.current, identityRef.current);
       }
+    } else if (step === "restart_confirm" && candidateRef.current && value === "confirm") {
+      void restartDaemon(candidateRef.current);
     } else if (
       (step === "retry" || step === "update" || step === "reconnect") &&
       candidateRef.current
     ) {
-      if (value === "install_agent") void installAgent(candidateRef.current);
+      if (value === "restart_rmux") setStep("restart_confirm");
+      else if (value === "install_agent") void installAgent(candidateRef.current);
       else void connect(candidateRef.current);
     }
   }
@@ -843,7 +925,8 @@ export function SshHostFlow({
       mode={mode}
       error={error}
       onSubmit={submit}
-      onCancel={close}
+      onCancel={step === "restart_confirm" ? () => setStep("retry") : close}
+      cancel_label={step === "restart_confirm" ? "Not now" : undefined}
       onBack={onBack}
     />
   );

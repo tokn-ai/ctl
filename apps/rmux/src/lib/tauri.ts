@@ -22,6 +22,7 @@ import type {
   SshIdentityFileCatalog,
   SshPrompt,
   RemoteAgentInstallResult,
+  RemoteRmuxRestartResult,
   RemoteIdentity,
   RemoteAgentInstallProgress,
   WorkspaceDocument,
@@ -157,6 +158,32 @@ export async function installRemoteAgent(
     request: { target, attempt_id },
     on_prompt: channel,
     on_progress: progress_channel,
+  });
+}
+
+export async function checkRemoteRmuxRestart(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+): Promise<RemoteIdentity> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  return invoke<RemoteIdentity>("probe_ssh_host", {
+    request: { target, attempt_id, restart_check: true },
+    on_prompt: channel,
+  });
+}
+
+export async function restartRemoteRmux(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+): Promise<RemoteRmuxRestartResult> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  return invoke<RemoteRmuxRestartResult>("restart_remote_rmux", {
+    request: { target, attempt_id },
+    on_prompt: channel,
   });
 }
 

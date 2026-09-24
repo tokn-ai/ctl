@@ -1792,6 +1792,7 @@ export function TerminalPage() {
               on_command={executeCommandById}
               on_pane_commands={setPaneCommands}
               session={attachment.state.session}
+              shell_state={attachment.state.shell_state}
               available_sessions={sessions}
               on_promoted={(session) => importSession(session, null)}
               on_merged={async (source) => {

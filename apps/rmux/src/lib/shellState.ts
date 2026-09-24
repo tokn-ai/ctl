@@ -10,3 +10,10 @@ export function displayWorkingDirectory(
 ): string | null {
   return shellState.cwd_display ?? shellState.cwd;
 }
+
+export function terminalPaneTitle(state: ShellStateSummary | null | undefined): string {
+  const activity = state?.running_command?.trim() ||
+    (state?.shell_type && state.shell_type !== "unknown" ? state.shell_type : "Terminal");
+  const directory = state ? displayWorkingDirectory(state) : null;
+  return directory ? `${activity} · ${directory}` : activity;
+}

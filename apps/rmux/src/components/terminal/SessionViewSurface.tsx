@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { useAttachment } from "../../features/attachment/useAttachment";
 import { adjacentPane, swapPanes, viewPanes, viewTabs } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sameTarget, sessionKey } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
 import { sessionView } from "../../lib/tauri";
-import type { SessionSummary, SessionView, ViewAction } from "../../lib/types";
+import type { SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
+import { terminalPaneTitle } from "../../lib/shellState";
 import { TerminalSurface } from "./TerminalSurface";
 import "./sessionView.css";
 import { resolvePrefix, prefixActionMode, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
@@ -17,6 +18,7 @@ import type { AppCommand, Keybinding, ShortcutPlatform } from "../../features/co
 type SurfaceProps = ComponentProps<typeof TerminalSurface>;
 interface Props extends SurfaceProps {
   session: SessionSummary | null;
+  shell_state?: ShellStateSummary | null;
   on_select_terminal(session: SessionSummary): Promise<void>;
   available_sessions: SessionSummary[];
   on_promoted(session: SessionSummary): Promise<void>;
@@ -27,7 +29,7 @@ interface Props extends SurfaceProps {
   on_pane_commands?(commands: AppCommand[]): void;
 }
 
-export function SessionViewSurface({ session, on_select_terminal, available_sessions, on_promoted, on_merged, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
+export function SessionViewSurface({ session, shell_state, on_select_terminal, available_sessions, on_promoted, on_merged, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
   const [focused_id, setFocusedId] = useState<string | null>(null);
   const [zoomed_id, setZoomedId] = useState<string | null>(null);
   const pane_elements = useRef(new Map<string, HTMLDivElement>());
@@ -187,9 +189,10 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     visibility: rect.visible ? "visible" as const : "hidden" as const,
   } : { inset: 0 };
 
-  function controls(terminal_id: string, label: string) {
+  function controls(terminal_id: string, state?: ShellStateSummary | null) {
+    const label = terminalPaneTitle(state);
     return <div className="view-pane-toolbar">
-      <span>{label}</span>
+      <span title={label}>{label}</span>
       <button disabled={busy} title="Split side by side" onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>Split right</button>
       <button disabled={busy} title="Split vertically" onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>Split below</button>
       <button disabled={busy} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>Terminate pane</button>
@@ -219,22 +222,22 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     </div>)}
     <div className="view-panes">
       <div className="view-pane" ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
-        {connected && primary_id && controls(primary_id, session?.name ?? "Terminal")}
+        {connected && primary_id && controls(primary_id, shell_state)}
         <TerminalSurface {...surface} />
       </div>
       {connected && session && current_view && panes.filter((pane) => pane.terminal_id !== primary_id && pane.terminal_id !== takeover_id).map((pane) => {
         const terminal = current_view.terminals.find((candidate) => candidate.terminal_id === pane.terminal_id)!;
         return <div className="view-pane" key={pane.terminal_id} ref={paneRef(pane.terminal_id)} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(pane)}>
-          {controls(pane.terminal_id, terminal.name)}
-          <AdditionalTerminal session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} />
+          <AdditionalTerminal session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} render_controls={(state) => controls(pane.terminal_id, state)} />
         </div>;
       })}
     </div>
   </div>;
 }
 
-function AdditionalTerminal({ session, detach_registry, input_registry }: {
+function AdditionalTerminal({ session, detach_registry, input_registry, render_controls }: {
   session: SessionSummary;
+  render_controls(state: ShellStateSummary | null): ReactNode;
   detach_registry: { current: Map<string, () => Promise<void>> };
   input_registry: { current: Map<string, (data: Uint8Array) => void> };
 }) {
@@ -259,6 +262,7 @@ function AdditionalTerminal({ session, detach_registry, input_registry }: {
     };
   }, [renderer, key, detach_registry, input_registry]);
   return <>
+    {render_controls(attachment.state.shell_state)}
     {attachment.state.message && <div role="status" className="message-banner">{attachment.state.message}</div>}
     <div className="view-pane-leases">
       <button onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>

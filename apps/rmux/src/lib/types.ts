@@ -13,9 +13,15 @@ export interface KeybindingOverride {
   keybinding: CommandKeybinding | null;
 }
 
+export interface TerminalPrefixSettings {
+  key: string | null;
+  bindings: { command_id: string; key: string | null }[];
+}
+
 export interface KeybindingsDocument {
   schema_version: 1;
   overrides: KeybindingOverride[];
+  prefix?: TerminalPrefixSettings;
 }
 
 export interface KeybindingsSnapshot {

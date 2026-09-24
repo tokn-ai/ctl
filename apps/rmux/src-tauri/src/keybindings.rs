@@ -32,9 +32,65 @@ pub struct KeybindingOverride {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PrefixBinding {
+  command_id: String,
+  #[serde(deserialize_with = "Option::deserialize")]
+  key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalPrefixSettings {
+  #[serde(deserialize_with = "Option::deserialize")]
+  key: Option<String>,
+  bindings: Vec<PrefixBinding>,
+}
+
+impl TerminalPrefixSettings {
+  fn validate(&self) -> CommandResult<()> {
+    if self.key.as_ref().is_some_and(|key| {
+      let Some((modifier, letter)) = key.split_once('+') else {
+        return true;
+      };
+      !["ctrl", "alt"].contains(&modifier.to_ascii_lowercase().as_str())
+        || letter.len() != 1
+        || !letter.bytes().all(|byte| byte.is_ascii_alphabetic())
+    }) {
+      return Err(error(
+        "Use Ctrl+letter or Alt+letter for the terminal prefix.",
+      ));
+    }
+    let mut ids = HashSet::new();
+    let mut keys = HashSet::new();
+    if self.bindings.len() > 128
+      || self.bindings.iter().any(|binding| {
+        !valid_command_id(&binding.command_id)
+          || !ids.insert(&binding.command_id)
+          || binding.key.as_ref().is_some_and(|key| {
+            let normalized = key.to_ascii_lowercase();
+            !keys.insert((
+              binding.command_id.starts_with("pane.move_"),
+              normalized.clone(),
+            )) || !((normalized.len() == 1
+              && normalized.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+              || ["left", "right", "up", "down", "!", ":", "%", "\""]
+                .contains(&normalized.as_str()))
+          })
+      })
+    {
+      return Err(error("Invalid or duplicate terminal prefix bindings."));
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeybindingsDocument {
   pub schema_version: u32,
   pub overrides: Vec<KeybindingOverride>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub prefix: Option<TerminalPrefixSettings>,
 }
 
 impl Default for KeybindingsDocument {
@@ -42,6 +98,7 @@ impl Default for KeybindingsDocument {
     Self {
       schema_version: 1,
       overrides: Vec::new(),
+      prefix: None,
     }
   }
 }
@@ -52,6 +109,9 @@ impl KeybindingsDocument {
       return Err(error(
         "Unsupported keybindings version; the file has not been changed.",
       ));
+    }
+    if let Some(prefix) = &self.prefix {
+      prefix.validate()?;
     }
     let mut ids = HashSet::new();
     if self.overrides.len() > 128
@@ -281,12 +341,47 @@ mod tests {
   use super::*;
 
   #[test]
+  fn prefix_settings_preserve_legacy_documents_and_validate_entries() {
+    let legacy: KeybindingsDocument =
+      serde_json::from_str(r#"{"schema_version":1,"overrides":[]}"#).unwrap();
+    assert!(legacy.prefix.is_none());
+    let mut document = legacy;
+    document.prefix = Some(TerminalPrefixSettings {
+      key: Some("Ctrl+A".into()),
+      bindings: vec![PrefixBinding {
+        command_id: "pane.zoom".into(),
+        key: Some("Q".into()),
+      }],
+    });
+    document.validate().unwrap();
+    let encoded = serde_json::to_string(&document).unwrap();
+    assert_eq!(
+      serde_json::from_str::<KeybindingsDocument>(&encoded).unwrap(),
+      document
+    );
+    document.prefix.as_mut().unwrap().key = Some("B".into());
+    assert!(document.validate().is_err());
+    document.prefix.as_mut().unwrap().key = None;
+    document
+      .prefix
+      .as_mut()
+      .unwrap()
+      .bindings
+      .push(PrefixBinding {
+        command_id: "pane.split_right".into(),
+        key: Some("q".into()),
+      });
+    assert!(document.validate().is_err());
+  }
+
+  #[test]
   fn editable_settings_round_trip_and_reject_stale_writes() {
     let dir = std::env::temp_dir().join(format!("rmux-keybindings-{}", uuid::Uuid::new_v4()));
     let initial = read(&dir).unwrap();
     assert!(initial.revision.is_none());
     let document = KeybindingsDocument {
       schema_version: 1,
+      prefix: None,
       overrides: vec![KeybindingOverride {
         command_id: "session.close".into(),
         keybinding: None,
@@ -369,7 +464,8 @@ mod tests {
     assert!(
       KeybindingsDocument {
         schema_version: 2,
-        overrides: Vec::new()
+        overrides: Vec::new(),
+        prefix: None
       }
       .validate()
       .is_err()

@@ -668,6 +668,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
         reconnect_sequence: resumeFrom,
       }));
 
+      const previous_attachment_id = activeAttachmentRef.current;
       activeAttachmentRef.current = null;
       channelRef.current = null;
 
@@ -680,6 +681,12 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       const openingAbort = new AbortController();
       openingAbortRef.current = openingAbort;
       try {
+        // Each renderer owns its attachment. Replacing this renderer's session
+        // must release its leases without detaching sibling panes.
+        if (previous_attachment_id) {
+          await detachAttachment({ attachment_id: previous_attachment_id });
+          if (generation !== generationRef.current) return;
+        }
         const result = await openAttachment(
           {
             target: session.target,

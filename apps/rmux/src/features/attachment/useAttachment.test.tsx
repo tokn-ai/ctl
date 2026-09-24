@@ -174,6 +174,21 @@ afterEach(async () => {
 });
 
 describe("pending remote attachments", () => {
+  it("releases only this renderer's attachment before opening its replacement", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const previous_id = result.current.state.attachment_id;
+    let finish!: () => void;
+    api.detachAttachment.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    let switching!: Promise<void>;
+    await act(async () => { switching = result.current.connect(second); });
+    expect(api.detachAttachment).toHaveBeenCalledExactlyOnceWith({ attachment_id: previous_id });
+    expect(api.openAttachment).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(); await switching; });
+    expect(api.openAttachment).toHaveBeenCalledTimes(2);
+    expect(result.current.state.session?.session_id).toBe(second.session_id);
+  });
+
   const remote: SessionSummary = {
     ...first,
     target: { kind: "ssh", destination: "offline-host" },

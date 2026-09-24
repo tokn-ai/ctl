@@ -1,3 +1,4 @@
+import { resolvePrefix } from "./prefixKeymap";
 import type { KeybindingsDocument } from "../../lib/types";
 import {
   COMMAND_IDS,
@@ -193,5 +194,6 @@ export function resolveKeymap(
       );
     occupied.set(signature, id);
   }
+  resolvePrefix(document, bindings, platform);
   return bindings;
 }

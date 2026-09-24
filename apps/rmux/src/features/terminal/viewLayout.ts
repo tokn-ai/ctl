@@ -46,3 +46,24 @@ export function viewTabs(layout: ViewLayout): { path: string; count: number }[] 
   visit(layout, "root");
   return groups;
 }
+
+export function adjacentPane(panes: readonly PaneRect[], terminal_id: string, direction: string): string | undefined {
+  const origin = panes.find((pane) => pane.terminal_id === terminal_id);
+  if (!origin) return;
+  const horizontal = direction === "left" || direction === "right";
+  const forward = direction === "right" || direction === "down" ? 1 : -1;
+  const x = origin.left + origin.width / 2;
+  const y = origin.top + origin.height / 2;
+  return panes.filter((pane) => pane.visible && pane.terminal_id !== terminal_id)
+    .map((pane) => {
+      const dx = pane.left + pane.width / 2 - x;
+      const dy = pane.top + pane.height / 2 - y;
+      return { id: pane.terminal_id, distance: (horizontal ? dx : dy) * forward, cross: Math.abs(horizontal ? dy : dx) };
+    }).filter((candidate) => candidate.distance > 0.01)
+    .sort((a, b) => a.cross - b.cross || a.distance - b.distance)[0]?.id;
+}
+
+export function swapPanes(layout: ViewLayout, first: string, second: string): ViewLayout {
+  if (layout.kind === "terminal") return { ...layout, terminal_id: layout.terminal_id === first ? second : layout.terminal_id === second ? first : layout.terminal_id };
+  return { ...layout, children: layout.children.map((child) => swapPanes(child, first, second)) };
+}

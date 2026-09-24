@@ -1785,6 +1785,9 @@ export function TerminalPage() {
               ) : null}
             </div>
             <SessionViewSurface
+              prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
+              shortcuts_enabled={!dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
+              on_command={executeCommandById}
               session={attachment.state.session}
               available_sessions={sessions}
               on_promoted={(session) => importSession(session, null)}

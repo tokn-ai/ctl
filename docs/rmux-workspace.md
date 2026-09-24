@@ -292,3 +292,37 @@ RMUX_WORKSPACE_TEST_IDENTITY=/absolute/path/to/private-key \
   workspace::remote_test::docker_workspace_survives_client_restart \
   -- --ignored --exact --nocapture
 ```
+
+## Terminal prefix shortcuts
+
+Keyboard Shortcuts includes a terminal prefix and individually editable prefix
+bindings, saved alongside direct app shortcuts in `keybindings.json`. Existing
+files retain their direct bindings. The default prefix is literal Ctrl+B on all
+platforms; if a legacy shortcut already uses it, the prefix stays disabled until
+explicitly configured. A prefix can be Ctrl+letter or Alt+letter; blank disables
+it and `default` restores it. Explicit conflicts are rejected before saving.
+The rmux preset uses V/S for splits; the tmux-style preset uses %/double quote.
+Both presets retain direct app shortcuts.
+
+With a terminal focused, press the prefix then:
+
+| Key | Action |
+| --- | --- |
+| V / S | Split right / below |
+| Arrow | Focus the adjacent visible pane |
+| Z | Zoom/unzoom the focused pane locally |
+| M, then arrows | Swap the focused pane with neighbors in the shared layout |
+| ! | Move the pane to a new session |
+| N / P | Next / previous session tab |
+| C | Create a new shell in the current target |
+| : | Open the command palette |
+
+Press the prefix twice to send its bytes to the focused terminal, subject to its
+input lease. Escape cancels the pending sequence or move mode; Enter also exits
+move mode. Unknown keys cancel a pending sequence without sending partial input.
+A floating hint overlay shows bindings without changing the terminal dimensions.
+Dialogs, nonterminal inputs, composition, and window blur do not retain a pending
+prefix. Pane focus and zoom preserve existing renderers, while moves use the
+server view revision to reject concurrent layout conflicts. This pass controls
+existing panes and session tabs; split ratios and tmux-style windows within a
+session are not introduced here.

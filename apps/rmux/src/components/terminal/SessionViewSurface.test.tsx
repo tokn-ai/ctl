@@ -4,11 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionSummary, SessionView } from "../../lib/types";
 import { SessionViewSurface } from "./SessionViewSurface";
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn() }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn() }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
 vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () => ({
   state: { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
-  connect: mocks.connect, detach: mocks.detach, handleInput: vi.fn(), toggleInputLease: vi.fn(), toggleResizeWithWindow: vi.fn(),
+  connect: mocks.connect, detach: mocks.detach, handleInput: mocks.input, toggleInputLease: vi.fn(), toggleResizeWithWindow: vi.fn(),
 }) }));
 vi.mock("./TerminalSurface", async () => {
   const { useEffect } = await import("react");
@@ -19,7 +19,7 @@ vi.mock("./TerminalSurface", async () => {
       onReady(renderer);
       return () => { mocks.unmount(); onReady(null); };
     }, []);
-    return <div data-testid="terminal-surface" />;
+    return <div data-testid="terminal-surface" className="terminal-container"><textarea aria-label="Terminal input" /></div>;
   } };
 });
 
@@ -74,4 +74,45 @@ describe("session compositor", () => {
     render(<SessionViewSurface {...actions} phase="ended" />);
     await waitFor(() => expect(actions.on_select_terminal).toHaveBeenCalledWith(expect.objectContaining({ session_id: "root", terminal_id: "b" })));
   });
+  it("routes prefix input and split commands to the focused pane without remounting", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = props();
+    render(<SessionViewSurface {...actions} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "macos" }} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    act(() => first.focus());
+    fireEvent.keyDown(first, { key: "b", code: "KeyB", ctrlKey: true });
+    expect(screen.getByText("Ctrl+B", { selector: "strong" })).toBeTruthy();
+    fireEvent.keyDown(first, { key: "ArrowRight", code: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement).toBe(second));
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    expect(mocks.input).toHaveBeenCalledExactlyOnceWith(new Uint8Array([2]));
+    expect(actions.onInput).not.toHaveBeenCalled();
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(second, { key: "v", code: "KeyV" });
+    await waitFor(() => expect(mocks.request).toHaveBeenLastCalledWith(session.target, expect.objectContaining({ kind: "split", terminal_id: "b" })));
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
+
+  it("zooms and moves panes through revision-checked layouts without remounting", async () => {
+    mocks.request.mockResolvedValue(split);
+    render(<SessionViewSurface {...props()} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "other" }} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    act(() => first.focus());
+    const prefix = () => fireEvent.keyDown(first, { key: "b", code: "KeyB", ctrlKey: true });
+    prefix(); fireEvent.keyDown(first, { key: "z", code: "KeyZ" });
+    expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    prefix(); fireEvent.keyDown(first, { key: "z", code: "KeyZ" });
+    expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible");
+    prefix(); fireEvent.keyDown(first, { key: "m", code: "KeyM" });
+    fireEvent.keyDown(first, { key: "ArrowRight", code: "ArrowRight" });
+    await waitFor(() => expect(mocks.request).toHaveBeenLastCalledWith(session.target, {
+      kind: "update", session_id: "root", expected_revision: "1",
+      layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "b" }, { kind: "terminal", terminal_id: "a" }] },
+    }));
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
+
 });

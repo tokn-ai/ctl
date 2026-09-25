@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
-import { adjacentPane, swapPanes, viewPanes, viewTabs } from "../../features/terminal/viewLayout";
+import { adjacentPane, swapPanes, viewDividers, viewPanes, viewTabs } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sameTarget, sessionKey } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
@@ -277,6 +277,10 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     </div>
     <div className="view-viewport" ref={setViewport}>
     <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : { width: "100%", height: "100%" }}>
+      {current_view && !active_zoom && viewDividers(current_view.layout, panes).map((divider) => <div
+        key={divider.path} className="view-divider" aria-hidden="true"
+        style={{ left: Math.round(divider.left * cell.width), top: Math.round(divider.top * cell.height), width: divider.vertical ? 1 : divider.length * cell.width, height: divider.vertical ? divider.length * cell.height : 1 }}
+      />)}
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
         <TerminalSurface {...surface} />
       </div>

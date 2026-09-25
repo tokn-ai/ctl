@@ -9,6 +9,36 @@ export interface PaneRect {
   visible: boolean;
 }
 
+// Derive decorative separators from the server's rectangles, including nested
+// splits and the selected tab. This never changes terminal geometry.
+export function viewDividers(layout: ViewLayout, panes: readonly PaneRect[]) {
+  const dividers: { path: string; vertical: boolean; left: number; top: number; length: number }[] = [];
+  function visit(node: ViewLayout, path: string): Omit<PaneRect, "terminal_id" | "visible"> | undefined {
+    if (node.kind === "terminal") return panes.find((pane) => pane.terminal_id === node.terminal_id && pane.visible);
+    const children = node.children.map((child, index) => visit(child, `${path}.${index}`)).filter((rect) => rect !== undefined);
+    if (!children.length) return;
+    const left = Math.min(...children.map((rect) => rect.left));
+    const top = Math.min(...children.map((rect) => rect.top));
+    const width = Math.max(...children.map((rect) => rect.left + rect.width)) - left;
+    const height = Math.max(...children.map((rect) => rect.top + rect.height)) - top;
+    if (node.kind === "split") {
+      const vertical = node.axis === "horizontal";
+      children.slice(1).forEach((next, index) => {
+        const previous = children[index];
+        dividers.push({
+          path: `${path}.${index}`, vertical,
+          left: vertical ? (previous.left + previous.width + next.left) / 2 : left,
+          top: vertical ? top : (previous.top + previous.height + next.top) / 2,
+          length: vertical ? height : width,
+        });
+      });
+    }
+    return { left, top, width, height };
+  }
+  visit(layout, "root");
+  return dividers;
+}
+
 // Flatten layout geometry so changing the tree never remounts terminal renderers.
 export function viewPanes(layout: ViewLayout, selected_tabs: Readonly<Record<string, number>>): PaneRect[] {
   const panes: PaneRect[] = [];

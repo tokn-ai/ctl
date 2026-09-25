@@ -1,7 +1,7 @@
-# rmux protocol version 10
+# rmux protocol version 11
 
 The protocol is independent of local IPC and future remote transport. Version
-10 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+11 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -23,8 +23,8 @@ Version 10 separates three identities:
 
 - A **session** is the named root returned by `list_sessions`.
 - Each session binds to one distinct, server-owned **view**.
-- Each **terminal** owns its PTY, process, history, attachments, and input/layout
-  leases. It belongs to exactly one view.
+- Each **terminal** owns its PTY, process, history, attachments, and input
+  lease. The view owns the layout (resize) lease. It belongs to exactly one view.
 
 Creation allocates a session, view, and initial terminal with distinct IDs.
 `SessionInfo` includes `session_id`, `view_id`, and `terminal_id`. Its size and
@@ -36,9 +36,26 @@ when terminals move or the first terminal exits.
 `attach_session`, `resume_attachment`, and `get_shell_state` accept a root name,
 root ID, or terminal ID. A root selector opens the first terminal in layout order.
 Clients must pin subsequent reconnects to the returned `terminal_id`, because
-layout order and ownership may change. Output and leases remain scoped to that
-terminal. The historical `session_ended` stream event indicates the attached
+layout order and ownership may change. Output and input ownership remain scoped to that
+terminal; layout ownership spans its entire view. The historical `session_ended` stream event indicates the attached
 terminal's exit; other terminals in the root may still be running.
+
+Version 11 makes `resize` and the layout lease view-wide. An attachment to any
+member terminal may acquire the one layout lease; input leases remain independent.
+The resize owner supplies the full canvas size. The daemon allocates integer cell
+rectangles and resizes every member PTY, including hidden tab groups. Horizontal
+splits divide columns, vertical splits divide rows; dividers consume one cell.
+Remainder cells go to earlier children. The minimum is two columns and one row
+per terminal. Resize requests smaller than the layout minimum use the minimum
+canvas, which smaller clients can scroll. Splits that cannot fit are rejected.
+
+`panes` entries contain `terminal_id`, `left`, `top`, `columns`, and `rows`.
+Their coordinates are relative to `canvas_size`. Tab children share bounds;
+clients retain their own selected tab and active pane. Observers display the
+shared grid through a viewport and must not resize individual PTYs to fit.
+Desktop and TUI clients can render the same coordinates without pixel-dependent
+layout calculations. Geometry stream events continue to describe each PTY's own
+allocated size, while `get_view` supplies the complete canvas geometry.
 
 One-shot topology requests are:
 
@@ -54,8 +71,8 @@ One-shot topology requests are:
 
 Successful view operations return `view_snapshot { view }`; terminal termination
 returns `success`. A snapshot includes `session_id`, `session_name`, `view_id`,
-`revision`, `layout`, and terminal metadata. Revisions increase on changes to
-layout or membership, including exit. Layout nodes use `kind`:
+`revision`, `layout`, `canvas_size`, cell-coordinate `panes`, and terminal metadata. Revisions increase on changes to
+layout, canvas size, or membership, including exit. Layout nodes use `kind`:
 
 ```json
 {
@@ -122,8 +139,8 @@ them until resume or grace expiry.
 and layout leases, plus independent `request_command_line` and
 `request_running_command` privacy requests.
 Requesting an unheld layout lease is an explicit resize: the daemon applies
-that terminal size before sending `attached`. Without that request, an attach
-never resizes the PTY; the size only lets the daemon report when a checkpoint
+that size to the shared canvas before sending `attached`. Without that request, an attach
+never resizes the view; the size only lets the daemon report when a checkpoint
 was made for another layout. Requesting command-line state never grants access
 by itself; daemon policy may redact it.
 

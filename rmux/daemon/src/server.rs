@@ -864,20 +864,24 @@ async fn handle_view_request(
       expected_revision,
       layout,
     } => {
-      write_view_result(
-        &mut stream,
-        sessions.update_view(&session, expected_revision, layout),
-      )
+      let result = tokio::task::spawn_blocking(move || {
+        sessions.update_view(&session, expected_revision, layout)
+      })
       .await?;
+      write_view_result(&mut stream, result).await?;
     }
     ClientMessage::PromoteTerminal { terminal_id, name } => {
-      write_view_result(&mut stream, sessions.promote_terminal(&terminal_id, name)).await?;
+      let result =
+        tokio::task::spawn_blocking(move || sessions.promote_terminal(&terminal_id, name)).await?;
+      write_view_result(&mut stream, result).await?;
     }
     ClientMessage::MergeSessions {
       source,
       destination,
     } => {
-      write_view_result(&mut stream, sessions.merge_sessions(&source, &destination)).await?;
+      let result =
+        tokio::task::spawn_blocking(move || sessions.merge_sessions(&source, &destination)).await?;
+      write_view_result(&mut stream, result).await?;
     }
     ClientMessage::SplitTerminal {
       terminal_id,

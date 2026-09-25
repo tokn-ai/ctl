@@ -37,6 +37,9 @@ function validDimensions(
 }
 
 export class XtermRenderer {
+  private viewport: HTMLElement | null = null;
+  setViewport(viewport: HTMLElement | null): void { this.viewport = viewport; }
+  cellDimensions() { return this.active.presenter.cellDimensions(); }
   private readonly sessions = new Map<string, CachedTerminal>();
   private active: CachedTerminal;
 
@@ -145,6 +148,12 @@ export class XtermRenderer {
   }
 
   proposeDimensions(): ProposedDimensions | null {
+    if (this.viewport) {
+      const cell = this.cellDimensions();
+      if (!cell) return null;
+      const dimensions = { columns: Math.floor(this.viewport.clientWidth / cell.width), rows: Math.floor(this.viewport.clientHeight / cell.height) };
+      return validDimensions(dimensions) ? dimensions : null;
+    }
     const dimensions = this.active.presenter.proposeDimensions();
     return validDimensions(dimensions) ? dimensions : null;
   }
@@ -167,7 +176,7 @@ export class XtermRenderer {
       animationFrame = requestAnimationFrame(publish);
     };
     const observer = new ResizeObserver(schedule);
-    observer.observe(this.container);
+    observer.observe(this.viewport ?? this.container);
     schedule();
 
     return () => {
@@ -278,6 +287,10 @@ export class XtermRenderer {
       resize: (columns, rows) => terminal.resize(columns, rows),
       dispose: () => terminal.dispose(),
       focus: () => terminal.focus(),
+      cellDimensions: () => {
+        const screen = container.querySelector(".xterm-screen")?.getBoundingClientRect();
+        return screen && screen.width > 0 && screen.height > 0 ? { width: screen.width / terminal.cols, height: screen.height / terminal.rows } : null;
+      },
       proposeDimensions: () => {
         const proposed = fitAddon.proposeDimensions();
         if (!proposed) {

@@ -47,6 +47,8 @@ pub struct ViewDto {
   view_id: String,
   session_id: String,
   revision: String,
+  canvas_size: TerminalSizeDto,
+  panes: Vec<rmux_proto::PaneGeometry>,
   layout: ViewLayout,
   terminals: Vec<TerminalDto>,
 }
@@ -110,6 +112,8 @@ pub async fn session_view(request: ViewRequest) -> CommandResult<Option<ViewDto>
       view_id: view.view_id,
       session_id: view.session_id,
       revision: view.revision.to_string(),
+      canvas_size: view.canvas_size.into(),
+      panes: view.panes,
       layout: view.layout,
       terminals: view
         .terminals

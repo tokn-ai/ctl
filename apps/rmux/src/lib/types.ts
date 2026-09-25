@@ -665,6 +665,8 @@ export interface SessionView {
   session_id: string;
   view_id: string;
   revision: string;
+  canvas_size: TerminalSize;
+  panes: { terminal_id: string; left: number; top: number; columns: number; rows: number }[];
   layout: ViewLayout;
   terminals: { terminal_id: string; name: string; next_sequence: Sequence; terminal_size: TerminalSize }[];
 }

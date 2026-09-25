@@ -101,7 +101,9 @@ export interface AttachmentActions {
   toggleResizeWithWindow(): Promise<void>;
 }
 
-export function useAttachment(renderer: XtermRenderer | null): AttachmentActions {
+export function useAttachment(renderer: XtermRenderer | null, view_resize = false): AttachmentActions {
+  const view_resize_ref = useRef(view_resize);
+  view_resize_ref.current = view_resize;
   const [state, setState] = useState(INITIAL_STATE);
   const stateRef = useRef(state);
   const rendererRef = useRef<XtermRenderer | null>(renderer);
@@ -244,6 +246,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
           attachment_id: resize.attachment_id,
           terminal_size: resize.terminal_size,
         });
+        if (view_resize_ref.current && resize.generation === generationRef.current) resizeCoordinatorRef.current?.setAuthoritative(resize.terminal_size);
       },
       (error, resize) => {
         if (
@@ -423,7 +426,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
             return;
           }
           publishAppliedSequence(event.checkpoint.sequence);
-          resizeCoordinatorRef.current?.setAuthoritative(
+          if (!view_resize_ref.current) resizeCoordinatorRef.current?.setAuthoritative(
             event.checkpoint.terminal_size,
           );
           setState((current) => ({
@@ -457,7 +460,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
           if (!isCurrent()) {
             return;
           }
-          resizeCoordinatorRef.current?.setAuthoritative(event.terminal_size);
+          if (!view_resize_ref.current) resizeCoordinatorRef.current?.setAuthoritative(event.terminal_size);
           setState((current) => ({
             ...current,
             session: current.session
@@ -731,7 +734,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
           resizeWithWindow && result.attached.layout_lease.owned_by_client;
         resizeWithWindowRef.current = resizeActive;
         resizeCoordinatorRef.current?.reset(
-          result.attached.session.terminal_size,
+          view_resize_ref.current ? (resizeActive ? requestedTerminalSize : null) : result.attached.session.terminal_size,
         );
         if (resizeActive) {
           resizeCoordinatorRef.current?.setDesired(requestedTerminalSize);
@@ -813,7 +816,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
       resizeWithWindowRef.current = resizeWithWindow;
       inputPumpRef.current?.clear();
       layoutLeasePumpRef.current?.reset();
-      resizeCoordinatorRef.current?.reset(session.terminal_size);
+      resizeCoordinatorRef.current?.reset(view_resize_ref.current ? null : session.terminal_size);
       pendingShellStateRef.current = null;
       rendererRef.current?.activateSession(session);
       if (use_cached_state) {
@@ -850,7 +853,7 @@ export function useAttachment(renderer: XtermRenderer | null): AttachmentActions
     async (session: SessionSummary, options: ConnectOptions = {}) => {
       resetRecovery();
       const selected = { ...session, terminal_id: options.terminal_id };
-      return connectAt(selected, null, options.resize_with_window ?? false, Boolean(options.terminal_id));
+      return connectAt(selected, null, options.resize_with_window ?? view_resize_ref.current, Boolean(options.terminal_id));
     },
     [connectAt, resetRecovery],
   );

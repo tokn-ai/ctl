@@ -174,6 +174,27 @@ afterEach(async () => {
 });
 
 describe("pending remote attachments", () => {
+  it("sizes the view without treating an individual pane geometry event as a canvas resize", async () => {
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementation(async (...args) => {
+      const result = await open(...args);
+      result.attached.layout_lease = { held: true, owned_by_client: true };
+      return result;
+    });
+    let measure!: (size: { columns: number; rows: number }) => void;
+    vi.spyOn(renderer, "observeDimensions").mockImplementation((callback) => { measure = callback; return () => {}; });
+    const { result } = renderHook(() => useAttachment(renderer, true));
+    await act(async () => { await result.current.connect(first); });
+    expect(api.openAttachment.mock.lastCall?.[0].request_layout_lease).toBe(true);
+    act(() => measure({ columns: 100, rows: 40 }));
+    await waitFor(() => expect(api.resizeAttachment).toHaveBeenCalledExactlyOnceWith({ attachment_id: "attachment-0", terminal_size: { ...size, columns: 100, rows: 40 } }));
+    await emit({ event_type: "pty_geometry_changed", attachment_id: "attachment-0", event_id: "pane-resized", terminal_size: { ...size, columns: 50, rows: 40 }, observed_sequence: "0" });
+    act(() => measure({ columns: 100, rows: 40 }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+    expect(api.resizeAttachment).toHaveBeenCalledTimes(1);
+    expect(result.current.state.session?.terminal_size.columns).toBe(50);
+  });
+
   it("releases only this renderer's attachment before opening its replacement", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first); });

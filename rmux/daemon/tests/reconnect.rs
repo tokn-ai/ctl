@@ -2505,3 +2505,123 @@ async fn wait_for_single_terminal(socket: &Path, session_id: &str) -> TestResult
   .await??;
   Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn view_resize_lease_spans_panes_and_resizes_the_whole_canvas() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("rmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "canvas",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  let view = split_topology_shell(&socket, &root).await?;
+  assert_eq!(view.panes[0].rows, view.panes[1].rows);
+  assert_eq!(
+    view.panes[0].columns + 1 + view.panes[1].columns,
+    view.canvas_size.columns
+  );
+  let (mut first, first_info) =
+    attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let (mut second, second_info) =
+    attach_session(&socket, &view.terminals[1].terminal_id, None, true, true).await?;
+  assert!(matches!(
+    first_info,
+    ServerMessage::Attached {
+      layout_lease: LeaseStatus {
+        owned_by_client: true,
+        ..
+      },
+      ..
+    }
+  ));
+  assert!(matches!(
+    second_info,
+    ServerMessage::Attached {
+      layout_lease: LeaseStatus {
+        held: true,
+        owned_by_client: false
+      },
+      input_lease: LeaseStatus {
+        owned_by_client: true,
+        ..
+      },
+      ..
+    }
+  ));
+  write_frame(
+    &mut second,
+    &ClientMessage::Resize {
+      terminal_size: terminal_size(100, 40),
+    },
+  )
+  .await?;
+  expect_error(&mut second, ErrorCode::LayoutLeaseRequired).await?;
+  write_frame(
+    &mut first,
+    &ClientMessage::Resize {
+      terminal_size: terminal_size(100, 40),
+    },
+  )
+  .await?;
+  wait_for_geometry_change(&mut first, &terminal_size(50, 40)).await?;
+  wait_for_geometry_change(&mut second, &terminal_size(49, 40)).await?;
+  let resized = topology_view(&socket, &root.session_id).await?;
+  assert_eq!(resized.canvas_size, terminal_size(100, 40));
+  for pane in &resized.panes {
+    let terminal = resized
+      .terminals
+      .iter()
+      .find(|entry| entry.terminal_id == pane.terminal_id)
+      .unwrap();
+    assert_eq!(
+      terminal.terminal_size,
+      terminal_size(pane.columns, pane.rows)
+    );
+  }
+  release_lease(&mut first, LeaseKind::Layout).await?;
+  assert_lease_status(
+    &acquire_lease(&mut second, LeaseKind::Layout).await?,
+    true,
+    true,
+  );
+  write_frame(
+    &mut second,
+    &ClientMessage::Resize {
+      terminal_size: terminal_size(120, 32),
+    },
+  )
+  .await?;
+  wait_for_geometry_change(&mut first, &terminal_size(60, 32)).await?;
+  wait_for_geometry_change(&mut second, &terminal_size(59, 32)).await?;
+  assert_minimum_canvas(&socket, &root.session_id, &mut first, &mut second).await?;
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(first);
+  drop(second);
+  wait_for_daemon_exit(daemon, "canvas daemon did not exit").await
+}
+
+async fn assert_minimum_canvas(
+  socket: &Path,
+  session_id: &str,
+  first: &mut UnixStream,
+  second: &mut UnixStream,
+) -> TestResult {
+  write_frame(
+    second,
+    &ClientMessage::Resize {
+      terminal_size: terminal_size(2, 1),
+    },
+  )
+  .await?;
+  wait_for_geometry_change(first, &terminal_size(2, 1)).await?;
+  wait_for_geometry_change(second, &terminal_size(2, 1)).await?;
+  assert_eq!(
+    topology_view(socket, session_id).await?.canvas_size,
+    terminal_size(5, 1)
+  );
+  Ok(())
+}

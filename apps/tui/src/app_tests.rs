@@ -325,3 +325,102 @@ async fn assert_copy_mode(app: &mut App, primary: &str) -> Result<()> {
   wait_for_text(app, primary, "echo:BUFFER_PASTE").await?;
   Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let primary = app.focused.clone();
+  app.split(SplitAxis::Horizontal).await?;
+  let child = app.focused.clone();
+  app.panes[&child]
+    .control
+    .input(b"printf 'FINAL_CHILD\\n'; exit 7\n".to_vec())
+    .await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&child].ended.is_none() {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  app.refresh().await?;
+  assert_eq!(app.panes.len(), 2);
+  assert!(
+    app.panes[&child]
+      .model
+      .copy_lines()
+      .join("\n")
+      .contains("FINAL_CHILD")
+  );
+  assert!(app.status().contains("code 7"));
+  assert!(
+    !app
+      .key(KeyEvent::new(
+        KeyCode::Char('z'),
+        crossterm::event::KeyModifiers::NONE
+      ))
+      .await?
+  );
+  assert_eq!(app.panes.len(), 1);
+  assert_eq!(app.focused, primary);
+  let archives = app.local_archives()?;
+  assert!(archives.iter().any(|archive| {
+    archive
+      .terminals
+      .iter()
+      .any(|pane| pane.lines.join("\n").contains("FINAL_CHILD"))
+  }));
+
+  let mut missing = daemon.app(true);
+  missing.start(Some("confirmed-absent".into())).await?;
+  assert!(missing.status().contains("no longer exists"));
+  assert!(
+    missing
+      .key(KeyEvent::new(
+        KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE
+      ))
+      .await?
+  );
+
+  app.request(ClientMessage::KillSession { session }).await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&primary].ended.is_none() {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  app.refresh().await?;
+  assert!(app.ended.is_some());
+  assert_eq!(app.panes.len(), 1);
+  assert!(
+    app
+      .key(KeyEvent::new(
+        KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE
+      ))
+      .await?
+  );
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test]
+async fn archived_output_opens_without_a_daemon() -> Result<()> {
+  let directory = std::env::temp_dir().join(format!("rtui-archive-{}", uuid::Uuid::new_v4()));
+  let socket = directory.join("absent.sock");
+  let mut app = App::new(socket.clone(), true, input::parse_prefix("Ctrl+b")?);
+  app.selected_id = "missing".into();
+  app.ended = Some("Session no longer exists".into());
+  app.save_archive()?;
+  app.open_archive("missing")?;
+  assert!(app.archive_only);
+  assert!(!socket.exists());
+  assert!(matches!(app.overlay, Overlay::ArchiveTerminals(..)));
+  std::fs::remove_dir_all(directory)?;
+  Ok(())
+}

@@ -1,3 +1,4 @@
+pub mod archive;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 pub use rmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use rmux_proto::{

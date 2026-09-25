@@ -41,6 +41,12 @@ pub enum Command {
   #[command(name = "list-sessions", visible_aliases = ["ls", "list"])]
   List,
 
+  /// List retained read-only session archives.
+  Archives,
+
+  /// Open a retained session archive by ID.
+  Archive { session_id: String },
+
   /// Inspect the server-owned layout and terminal IDs.
   View { session: String },
 

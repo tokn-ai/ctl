@@ -21,14 +21,22 @@ enum Overlay {
   Help,
   Sessions(usize),
   Kill(String),
+  Archives(usize),
+  ArchiveTerminals(Box<rmux_client::archive::SessionArchive>, usize),
 }
 
 pub struct App {
   socket: PathBuf,
+  archive_directory: Option<PathBuf>,
   read_only: bool,
+  archive_only: bool,
   prefix: Prefix,
   prefix_pending: bool,
   sessions: Vec<SessionInfo>,
+  archives: Vec<rmux_client::archive::SessionArchive>,
+  ended: Option<String>,
+  selected_id: String,
+  archived_panes: Vec<rmux_client::archive::ArchivedPane>,
   view: Option<ViewInfo>,
   panes: BTreeMap<String, Pane>,
   focused: String,
@@ -45,11 +53,17 @@ pub struct App {
 impl App {
   pub fn new(socket: PathBuf, read_only: bool, prefix: Prefix) -> Self {
     Self {
+      archive_directory: cfg!(test).then(|| socket.with_extension("client-archives")),
       socket,
       read_only,
+      archive_only: false,
       prefix,
       prefix_pending: false,
       sessions: Vec::new(),
+      archives: Vec::new(),
+      ended: None,
+      selected_id: String::new(),
+      archived_panes: Vec::new(),
       view: None,
       panes: BTreeMap::new(),
       focused: String::new(),
@@ -91,6 +105,85 @@ impl App {
     } else if !self.read_only {
       self.create().await?;
     }
+    Ok(())
+  }
+
+  pub fn open_archive(&mut self, session_id: &str) -> Result<()> {
+    self.archive_only = true;
+    self.archives = self.local_archives()?;
+    let archive = self
+      .archives
+      .iter()
+      .find(|archive| archive.session_id == session_id)
+      .cloned()
+      .ok_or("archive not found on this client")?;
+    self.overlay = Overlay::ArchiveTerminals(Box::new(archive), 0);
+    Ok(())
+  }
+
+  fn archive_store(&self) -> std::io::Result<rmux_client::archive::ArchiveStore> {
+    match &self.archive_directory {
+      Some(directory) => Ok(rmux_client::archive::ArchiveStore::new(directory.clone())),
+      None => rmux_client::archive::ArchiveStore::for_client("tui"),
+    }
+  }
+
+  fn local_archives(&self) -> Result<Vec<rmux_client::archive::SessionArchive>> {
+    Ok(
+      self
+        .archive_store()?
+        .list()?
+        .into_iter()
+        .filter(|archive| archive.host_key == self.socket.to_string_lossy())
+        .collect(),
+    )
+  }
+
+  fn save_archive(&self) -> Result<()> {
+    use rmux_client::archive::{ArchivedPane, SessionArchive};
+    let mut terminals = self.archived_panes.clone();
+    terminals.extend(
+      self
+        .panes
+        .iter()
+        .filter(|(_, pane)| pane.ended.is_some() || self.ended.is_some())
+        .map(|(id, pane)| ArchivedPane {
+          terminal_id: id.clone(),
+          reason: pane
+            .ended
+            .clone()
+            .or(self.ended.clone())
+            .unwrap_or_default(),
+          lines: pane.model.copy_lines(),
+        }),
+    );
+    if terminals.is_empty() {
+      terminals.push(ArchivedPane {
+        terminal_id: self.selected_id.clone(),
+        reason: self.ended.clone().unwrap_or_else(|| "Missing".into()),
+        lines: Vec::new(),
+      });
+    }
+    let session = self
+      .sessions
+      .iter()
+      .find(|session| session.session_id == self.selected_id);
+    self.archive_store()?.save(SessionArchive {
+      session_id: self.selected_id.clone(),
+      name: session.map_or_else(
+        || {
+          self.view.as_ref().map_or_else(
+            || self.selected_id.clone(),
+            |view| view.session_name.clone(),
+          )
+        },
+        |session| session.name.clone(),
+      ),
+      host_key: self.socket.to_string_lossy().into_owned(),
+      archived_at_ms: 0,
+      expires_at_ms: 0,
+      terminals,
+    })?;
     Ok(())
   }
 
@@ -159,7 +252,18 @@ impl App {
   }
 
   async fn select(&mut self, session: &str) -> Result<()> {
-    let view = self.find_view(session).await?;
+    session.clone_into(&mut self.selected_id);
+    let view = match self.find_view(session).await {
+      Ok(view) => view,
+      Err(error) if session_not_found(&error) => {
+        self.ended = Some("Session no longer exists — press any key to exit".into());
+        return Ok(());
+      }
+      Err(error) => return Err(error),
+    };
+    self.ended = None;
+    self.archived_panes.clear();
+    self.selected_id.clone_from(&view.session_id);
     self.detach().await;
     self.focused = view
       .panes
@@ -179,14 +283,42 @@ impl App {
     let Some(view) = &self.view else {
       return Ok(());
     };
-    let ServerMessage::ViewSnapshot { view } = self
+    if self.panes.values().any(|pane| pane.ended.is_some()) {
+      return Ok(());
+    }
+    let response = self
       .request(ClientMessage::GetView {
         session: view.session_id.clone(),
       })
-      .await?
-    else {
+      .await;
+    let response = match response {
+      Ok(response) => response,
+      Err(error) if session_not_found(&error) => {
+        self.ended = Some("Session no longer exists — press any key to exit".into());
+        return Ok(());
+      }
+      Err(error) => return Err(error),
+    };
+    let ServerMessage::ViewSnapshot { view } = response else {
       return Err("expected view snapshot".into());
     };
+    let mut missing = false;
+    for (id, pane) in &mut self.panes {
+      if !view
+        .terminals
+        .iter()
+        .any(|terminal| terminal.terminal_id == *id)
+      {
+        pane
+          .ended
+          .get_or_insert_with(|| "Terminal no longer exists".into());
+        pane.connected = false;
+        missing = true;
+      }
+    }
+    if missing {
+      return Ok(());
+    }
     self.view = Some(view);
     self.reconcile().await
   }
@@ -215,10 +347,14 @@ impl App {
       self.focused = ids.first().cloned().unwrap_or_default();
     }
     for id in &ids {
-      if self.panes.get(id).is_some_and(|pane| pane.connected) {
+      if self
+        .panes
+        .get(id)
+        .is_some_and(|pane| pane.connected || pane.ended.is_some())
+      {
         continue;
       }
-      let token = if let Some(mut old) = self.panes.remove(id) {
+      let token = if let Some(old) = self.panes.get_mut(id) {
         let token = old.token.clone();
         old.close().await;
         Some(token)
@@ -241,8 +377,21 @@ impl App {
           token,
         ),
       )
-      .await??;
-      self.panes.insert(id.clone(), opened);
+      .await?;
+      match opened {
+        Ok(opened) => {
+          self.panes.insert(id.clone(), opened);
+        }
+        Err(error) if session_not_found(&error) => {
+          if let Some(pane) = self.panes.get_mut(id) {
+            pane.connected = false;
+            pane.ended = Some("Terminal no longer exists".into());
+          } else {
+            self.ended = Some("Terminal no longer exists — press any key to exit".into());
+          }
+        }
+        Err(error) => return Err(error),
+      }
     }
     Ok(())
   }
@@ -270,7 +419,7 @@ impl App {
         }
         _ = tick.tick() => {
           self.drain().await;
-          if refreshed.elapsed() >= Duration::from_secs(2) {
+          if !self.archive_only && refreshed.elapsed() >= Duration::from_secs(2) {
             if let Err(error) = self.refresh().await { self.notice(error.to_string()); }
             refreshed = Instant::now();
           }
@@ -283,9 +432,7 @@ impl App {
   async fn drain(&mut self) {
     let mut notices = Vec::new();
     for pane in self.panes.values_mut() {
-      if !pane.connected {
-        continue;
-      }
+      // A closed transport may still have a final SessionEnded event queued.
       match pane.drain().await {
         Ok(Some(message)) => notices.push(message),
         Ok(None) => {}
@@ -312,6 +459,18 @@ impl App {
   }
 
   async fn refresh(&mut self) -> Result<()> {
+    if self.ended.is_some() {
+      return Ok(());
+    }
+    if !self.panes.is_empty() && self.panes.values().all(|pane| pane.ended.is_some()) {
+      let outcome = self
+        .panes
+        .get(&self.focused)
+        .and_then(|pane| pane.ended.as_deref())
+        .unwrap_or("Session ended");
+      self.ended = Some(format!("{outcome} — press any key to exit"));
+      return Ok(());
+    }
     self.list().await?;
     let exists = self.view.as_ref().is_some_and(|view| {
       self
@@ -322,10 +481,13 @@ impl App {
     if exists {
       self.refresh_view().await
     } else {
-      self.detach().await;
-      self.view = None;
-      if let Some(session) = self.sessions.first() {
-        self.select(&session.session_id.clone()).await?;
+      if self.view.is_some() {
+        let outcome = self
+          .panes
+          .get(&self.focused)
+          .and_then(|pane| pane.ended.clone())
+          .unwrap_or_else(|| "Session no longer exists".into());
+        self.ended = Some(format!("{outcome} — press any key to exit"));
       }
       Ok(())
     }
@@ -396,6 +558,33 @@ impl App {
       }
       return Ok(false);
     }
+    if self.ended.is_some() {
+      self.save_archive()?;
+      return Ok(true);
+    }
+    if self
+      .panes
+      .get(&self.focused)
+      .is_some_and(|pane| pane.ended.is_some())
+    {
+      self.save_archive()?;
+      if let Some(mut pane) = self.panes.remove(&self.focused) {
+        self
+          .archived_panes
+          .push(rmux_client::archive::ArchivedPane {
+            terminal_id: self.focused.clone(),
+            reason: pane.ended.clone().unwrap_or_default(),
+            lines: pane.model.copy_lines(),
+          });
+        pane.close().await;
+      }
+      if self.panes.is_empty() {
+        return Ok(true);
+      }
+      self.focused = self.panes.keys().next().cloned().unwrap_or_default();
+      self.refresh().await?;
+      return Ok(false);
+    }
     if !matches!(self.overlay, Overlay::None) {
       self.overlay_key(key).await?;
       return Ok(false);
@@ -428,6 +617,10 @@ impl App {
 
   async fn command(&mut self, code: KeyCode) -> Result<bool> {
     match code {
+      KeyCode::Char('A') => {
+        self.archives = self.local_archives()?;
+        self.overlay = Overlay::Archives(0);
+      }
       KeyCode::Char('[') => {
         if let Some(pane) = self.panes.get(&self.focused) {
           self.copy_mode = Some(CopyMode::new(pane.model.copy_lines()));
@@ -602,6 +795,28 @@ impl App {
           self.refresh().await?;
         }
       }
+      Overlay::Archives(index) => match key.code {
+        KeyCode::Up => *index = index.saturating_sub(1),
+        KeyCode::Down => *index = (*index + 1).min(self.archives.len().saturating_sub(1)),
+        KeyCode::Enter => {
+          if let Some(archive) = self.archives.get(*index).cloned() {
+            self.overlay = Overlay::ArchiveTerminals(Box::new(archive), 0);
+          }
+        }
+        KeyCode::Esc => self.overlay = Overlay::None,
+        _ => {}
+      },
+      Overlay::ArchiveTerminals(archive, index) => match key.code {
+        KeyCode::Up => *index = index.saturating_sub(1),
+        KeyCode::Down => *index = (*index + 1).min(archive.terminals.len().saturating_sub(1)),
+        KeyCode::Enter => {
+          if let Some(terminal) = archive.terminals.get(*index) {
+            self.copy_mode = Some(CopyMode::new(terminal.lines.clone()));
+          }
+        }
+        KeyCode::Esc => self.overlay = Overlay::Archives(0),
+        _ => {}
+      },
       Overlay::Help => self.overlay = Overlay::None,
       Overlay::None => {}
     }
@@ -625,7 +840,9 @@ impl App {
     if let Some(view) = &self.view {
       frame.canvas(view, &self.panes, &self.focused);
     } else {
-      let instructions = if self.read_only {
+      let instructions = if let Some(ended) = &self.ended {
+        ended.clone()
+      } else if self.read_only {
         format!("No running sessions. {} d detaches.", self.prefix.label)
       } else {
         format!(
@@ -644,6 +861,22 @@ impl App {
   }
 
   fn status(&self) -> String {
+    if matches!(
+      self.overlay,
+      Overlay::Archives(_) | Overlay::ArchiveTerminals(..)
+    ) {
+      return "Archived sessions — read only; Esc returns".into();
+    }
+    if let Some(ended) = &self.ended {
+      return ended.clone();
+    }
+    if let Some(ended) = self
+      .panes
+      .get(&self.focused)
+      .and_then(|pane| pane.ended.as_ref())
+    {
+      return format!("{ended} — press any key to close pane");
+    }
     if self.prefix_pending {
       return "PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help".into();
     }
@@ -698,6 +931,53 @@ impl App {
 
   fn overlay_lines(&self) -> Vec<String> {
     match &self.overlay {
+      Overlay::Archives(index) => {
+        let mut lines =
+          vec!["Archived sessions (read only) — arrows choose, Enter opens, Esc closes".into()];
+        if self.archives.is_empty() {
+          lines.push("No retained archives".into());
+        }
+        let start = index.saturating_sub(usize::from(self.size.1.saturating_sub(3)));
+        lines.extend(
+          self
+            .archives
+            .iter()
+            .enumerate()
+            .skip(start)
+            .map(|(i, archive)| {
+              format!(
+                "{} {}  {}",
+                if i == *index { ">" } else { " " },
+                archive.name,
+                archive.session_id
+              )
+            }),
+        );
+        lines
+      }
+      Overlay::ArchiveTerminals(archive, index) => {
+        let mut lines = vec![format!(
+          "{} — archived terminals; Enter browses/copies, Esc returns",
+          archive.name
+        )];
+        let start = index.saturating_sub(usize::from(self.size.1.saturating_sub(3)));
+        lines.extend(
+          archive
+            .terminals
+            .iter()
+            .enumerate()
+            .skip(start)
+            .map(|(i, terminal)| {
+              format!(
+                "{} {} {}",
+                if i == *index { ">" } else { " " },
+                terminal.terminal_id,
+                terminal.reason
+              )
+            }),
+        );
+        lines
+      }
       Overlay::None => Vec::new(),
       Overlay::Kill(_) => vec!["Terminate active pane? y confirms; any other key cancels".into()],
       Overlay::Sessions(index) => {
@@ -722,7 +1002,7 @@ impl App {
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    x: terminate (confirm)".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
-        "[: history/copy mode    ]: paste copied text".into(),
+        "[: history/copy mode    ]: paste copied text    A: archives".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),
         "d: detach (sessions keep running)    Esc: cancel prefix".into(),
         format!(

@@ -677,3 +677,19 @@ export type ViewAction =
   | { kind: "promote"; terminal_id: string; name: string | null }
   | { kind: "merge"; source: string; destination: string }
   | { kind: "kill_terminal"; terminal_id: string };
+
+export interface ArchivedTerminalInfo {
+  terminal_id: string;
+  reason: string;
+  lines: string[];
+}
+export interface SessionArchive {
+  session_id: string;
+  name: string;
+  host_key: string;
+  archived_at_ms: number;
+  expires_at_ms: number;
+  terminals: ArchivedTerminalInfo[];
+}
+export type ArchiveAction = { kind: "list" } | { kind: "save"; archive: SessionArchive };
+export type ArchiveResponse = { kind: "list"; archives: SessionArchive[] } | { kind: "saved" };

@@ -5,7 +5,7 @@ import { useAttachment } from "../../features/attachment/useAttachment";
 import { adjacentPane, swapPanes, viewDividers } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
-import { errorMessage } from "../../lib/errors";
+import { errorCode, errorMessage } from "../../lib/errors";
 import { sessionView } from "../../lib/tauri";
 import type { SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
 import { terminalPaneTitle } from "../../lib/shellState";
@@ -48,7 +48,12 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const pane_elements = useRef(new Map<string, HTMLDivElement>());
   const pane_toggle_inputs = useRef(new Map<string, () => Promise<void>>());
   const pane_inputs = useRef(new Map<string, (data: Uint8Array) => void>());
+  const [ended_ids, setEndedIds] = useState<ReadonlySet<string>>(new Set());
+  const ended_ref = useRef(ended_ids);
+  ended_ref.current = ended_ids;
   const [view, setView] = useState<SessionView | null>(null);
+  const view_ref = useRef(view);
+  view_ref.current = view;
   const [error, setError] = useState<string | null>(null);
   const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -57,44 +62,47 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const session_ref = useRef(session);
   session_ref.current = session;
   const key = session ? sessionKey(session) : "";
-  const connected = surface.phase === "attached" || surface.phase === "ended";
+  const connected = surface.phase === "attached" || surface.phase === "ended" || !!surface.ended_message;
+  const primary_ended = useRef(false);
+  primary_ended.current = surface.phase === "ended" || !!surface.ended_message;
   const generation = useRef(0);
   const sequence = useRef(0);
   const select_ref = useRef(on_select_terminal);
   select_ref.current = on_select_terminal;
 
   useEffect(() => {
-    const current = ++generation.current;
     setView(null);
+    setEndedIds(new Set());
     setError(null);
     setActionError(null);
     setFocusedId(null);
     setZoomedId(null);
+  }, [key]);
+
+  useEffect(() => {
+    const current = ++generation.current;
     if (!key || !connected) return;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       const root = session_ref.current;
       if (!root) return;
-      if (busy_ref.current) { timer = setTimeout(() => void refresh(), 2000); return; }
+      if (busy_ref.current || primary_ended.current || ended_ref.current.size > 0) { timer = setTimeout(() => void refresh(), 2000); return; }
       const request_sequence = ++sequence.current;
       try {
         const next = await sessionView(root.target, { kind: "get", session_id: root.session_id });
         if (generation.current !== current || request_sequence !== sequence.current) return;
-        setView(next);
+        const removed = view_ref.current?.terminals.filter((terminal) => !next?.terminals.some((candidate) => candidate.terminal_id === terminal.terminal_id)) ?? [];
+        if (removed.length) {
+          setEndedIds((previous) => new Set([...previous, ...removed.map((terminal) => terminal.terminal_id)]));
+        } else setView(next);
         setError(null);
-        if (next && root.terminal_id && !next.terminals.some((terminal) => terminal.terminal_id === root.terminal_id)) {
-          const first = next.terminals[0];
-          if (first) {
-            // Release the pane's existing leases before the primary attachment
-            // takes over; otherwise the two opens race for input ownership.
-            await pane_detachers.current.get(first.terminal_id)?.();
-            if (generation.current === current) {
-              await select_ref.current({ ...root, ...first, name: root.name, view_id: next.view_id });
-            }
-          }
-        }
+
       } catch (failure) {
-        if (generation.current === current && request_sequence === sequence.current) setError(errorMessage(failure));
+        if (generation.current === current && request_sequence === sequence.current) {
+          if (errorCode(failure) === "session_not_found") {
+            setEndedIds((previous) => new Set([...previous, ...(view_ref.current?.terminals.map((terminal) => terminal.terminal_id) ?? [root.terminal_id ?? root.session_id])]));
+          } else setError(errorMessage(failure));
+        }
       } finally {
         if (generation.current === current) timer = setTimeout(() => void refresh(), 2000);
       }
@@ -108,13 +116,35 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   useEffect(() => {
     const changed = previous_size.current !== primary_size;
     previous_size.current = primary_size;
-    if (!changed || !connected || busy_ref.current || !session) return;
+    if (!changed || !connected || busy_ref.current || primary_ended.current || ended_ref.current.size || !session) return;
     const current = generation.current;
     const request = ++sequence.current;
     void sessionView(session.target, { kind: "get", session_id: session.session_id }).then((next) => {
       if (generation.current === current && sequence.current === request) setView(next);
     }).catch(() => { /* The periodic refresh reports connectivity errors. */ });
   }, [primary_size, connected, key]);
+
+  async function dismissPane(id: string | null | undefined) {
+    if (!session) return;
+    if ((!view_ref.current && surface.phase !== "ended") || view_ref.current?.terminals.every((terminal) => ended_ref.current.has(terminal.terminal_id) || (terminal.terminal_id === session.terminal_id && primary_ended.current))) {
+      surface.on_dismiss?.();
+      return;
+    }
+    try {
+      const next = await sessionView(session.target, { kind: "get", session_id: session.session_id });
+      if (!next?.terminals.length) { surface.on_dismiss?.(); return; }
+      setEndedIds((previous) => new Set([...previous].filter((terminal) => terminal !== id)));
+      setView(next);
+      if (id === session.terminal_id || !next.terminals.some((terminal) => terminal.terminal_id === session.terminal_id)) {
+        const first = next.terminals[0];
+        await pane_detachers.current.get(first.terminal_id)?.();
+        await select_ref.current({ ...session, ...first, name: session.name, view_id: next.view_id });
+      }
+    } catch (failure) {
+      if (errorCode(failure) === "session_not_found") surface.on_dismiss?.();
+      else setActionError(errorMessage(failure));
+    }
+  }
 
   async function mutate(action: ViewAction) {
     if (!session || busy_ref.current) return;
@@ -125,6 +155,8 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     setActionError(null);
     try {
       const next = await sessionView(session.target, action);
+      // The exit event retains the final pane until the user dismisses it.
+      if (action.kind === "kill_terminal") return;
       if (next && action.kind === "promote") {
         const terminal = next.terminals[0];
         await on_promoted({ ...session, ...terminal, name: next.session_name, session_id: next.session_id, view_id: next.view_id });
@@ -151,7 +183,8 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const primary_id = session?.terminal_id;
   const panes = current_view?.panes.map((pane) => ({ terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: true })) ?? [];
   const focused = panes.some((pane) => pane.terminal_id === focused_id && pane.visible) ? focused_id! : panes.find((pane) => pane.visible)?.terminal_id ?? primary_id;
-  const can_split = connected && Boolean(current_view && focused) && !busy;
+  const focused_ended = ended_ids.has(focused ?? "") || (focused === primary_id && primary_ended.current);
+  const can_split = connected && Boolean(current_view && focused) && !busy && ended_ids.size === 0 && !primary_ended.current;
   const split_focused = useRef<(axis: "horizontal" | "vertical") => Promise<void>>(async () => {});
   split_focused.current = async (axis) => {
     if (!can_split || !focused || !session) return;
@@ -174,7 +207,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   useEffect(() => () => on_pane_commands?.([]), [on_pane_commands]);
   const prefix_map = resolvePrefix(prefix_settings?.document ?? { schema_version: 1, overrides: [], prefix: { key: null, bindings: [] } }, prefix_settings?.bindings ?? new Map(), prefix_settings?.platform ?? "other");
   const prefix = useTerminalPrefix({
-    enabled: shortcuts_enabled && connected && Boolean(current_view),
+    enabled: shortcuts_enabled && connected && Boolean(current_view) && !focused_ended,
     context: `${key}:${focused ?? ""}`,
     keymap: prefix_map,
     on_input: (data) => {
@@ -222,10 +255,10 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     return <div className="view-pane-toolbar">
       <span title={label}>{label}</span>
       {input_control}
-      <button disabled={busy} title="Split side by side" onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>Split right</button>
-      <button disabled={busy} title="Split vertically" onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>Split below</button>
-      <button disabled={busy} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>Terminate pane</button>
-      {panes.length > 1 && <button disabled={busy} onClick={() => void mutate({ kind: "promote", terminal_id, name: null })}>Move to new session</button>}
+      <button disabled={busy || ended_ids.size > 0 || primary_ended.current} title="Split side by side" onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>Split right</button>
+      <button disabled={busy || ended_ids.size > 0 || primary_ended.current} title="Split vertically" onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>Split below</button>
+      <button disabled={busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>Terminate pane</button>
+      {panes.length > 1 && <button disabled={busy || ended_ids.size > 0 || primary_ended.current} onClick={() => void mutate({ kind: "promote", terminal_id, name: null })}>Move to new session</button>}
     </div>;
   }
 
@@ -244,18 +277,18 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
         <button onClick={on_toggle_input}>{input_owned ? "Release input" : "Take input"}</button>)}
     </div>
     <div className="view-viewport" ref={setViewport}>
-    <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : { width: "100%", height: "100%" }}>
+    <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : session ? { width: session.terminal_size.columns * cell.width, height: session.terminal_size.rows * cell.height } : { width: "100%", height: "100%" }}>
       {current_view && !active_zoom && viewDividers(current_view.layout, panes).map((divider) => <div
         key={divider.path} className="view-divider" aria-hidden="true"
         style={{ left: Math.round(divider.left * cell.width), top: Math.round(divider.top * cell.height), width: divider.vertical ? 1 : divider.length * cell.width, height: divider.vertical ? divider.length * cell.height : 1 }}
       />)}
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
-        <TerminalSurface {...surface} />
+        <TerminalSurface {...surface} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
-      {connected && session && current_view && panes.filter((pane) => pane.terminal_id !== primary_id && pane.terminal_id !== takeover_id).map((pane) => {
+      {session && current_view && panes.filter((pane) => pane.terminal_id !== primary_id && pane.terminal_id !== takeover_id).map((pane) => {
         const terminal = current_view.terminals.find((candidate) => candidate.terminal_id === pane.terminal_id)!;
         return <div className="view-pane" data-active={focused === pane.terminal_id} key={pane.terminal_id} ref={paneRef(pane.terminal_id)} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(pane)}>
-          <AdditionalTerminal session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} toggle_registry={pane_toggle_inputs} render_controls={(state, input_control) => focused === pane.terminal_id && controls_host ? createPortal(controls(pane.terminal_id, state, input_control), controls_host) : null} />
+          <AdditionalTerminal on_ended={() => setEndedIds((previous) => new Set([...previous, pane.terminal_id]))} on_dismiss={() => void dismissPane(pane.terminal_id)} confirmed_missing={ended_ids.has(pane.terminal_id)} session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} toggle_registry={pane_toggle_inputs} render_controls={(state, input_control) => focused === pane.terminal_id && controls_host ? createPortal(controls(pane.terminal_id, state, input_control), controls_host) : null} />
         </div>;
       })}
     </div>
@@ -263,8 +296,11 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   </div>;
 }
 
-function AdditionalTerminal({ session, detach_registry, input_registry, toggle_registry, render_controls }: {
+function AdditionalTerminal({ on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
   session: SessionSummary;
+  on_ended(): void;
+  on_dismiss(): void;
+  confirmed_missing: boolean;
   toggle_registry: { current: Map<string, () => Promise<void>> };
   render_controls(state: ShellStateSummary | null, input_control: ReactNode): ReactNode;
   detach_registry: { current: Map<string, () => Promise<void>> };
@@ -272,6 +308,11 @@ function AdditionalTerminal({ session, detach_registry, input_registry, toggle_r
 }) {
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const attachment = useAttachment(renderer);
+  const on_ended_ref = useRef(on_ended);
+  on_ended_ref.current = on_ended;
+  const ended_message = attachment.state.phase === "ended" ? attachment.state.message ?? "Terminal exited"
+    : confirmed_missing || attachment.state.error_code === "session_not_found" ? "Terminal no longer exists" : null;
+  useEffect(() => { if (ended_message) on_ended_ref.current(); }, [ended_message]);
   const actions = useRef(attachment);
   actions.current = attachment;
   const session_ref = useRef(session);
@@ -295,6 +336,6 @@ function AdditionalTerminal({ session, detach_registry, input_registry, toggle_r
   return <>
     {render_controls(attachment.state.shell_state, <button onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>)}
     {attachment.state.message && <div role="status" className="pane-message">{attachment.state.message}</div>}
-    <TerminalSurface phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null} onInput={attachment.handleInput} onReady={setRenderer} />
+    <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null} onInput={attachment.handleInput} onReady={setRenderer} />
   </>;
 }

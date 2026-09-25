@@ -71,6 +71,7 @@ pub fn run() {
       command_menu::sync_command_menu,
       commands::inspection::inspect_known_sessions,
       commands::list_sessions,
+      commands::archives::session_archive,
       commands::views::session_view,
       commands::list_ssh_config_hosts,
       tailscale::list_tailscale_devices,

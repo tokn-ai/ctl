@@ -12,6 +12,8 @@ const INITIAL_SIZE: TerminalSize = {
 
 interface TerminalSurfaceProps {
   phase: ConnectionPhase;
+  ended_message?: string | null;
+  on_dismiss?(): void;
   hasSession: boolean;
   has_cached_content: boolean;
   onInput(data: Uint8Array): void;
@@ -20,6 +22,8 @@ interface TerminalSurfaceProps {
 
 export function TerminalSurface({
   phase,
+  ended_message,
+  on_dismiss,
   hasSession,
   has_cached_content,
   onInput,
@@ -28,7 +32,7 @@ export function TerminalSurface({
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef(onInput);
   const readyRef = useRef(onReady);
-  inputRef.current = onInput;
+  inputRef.current = ended_message ? () => {} : onInput;
   readyRef.current = onReady;
 
   useEffect(() => {
@@ -49,7 +53,16 @@ export function TerminalSurface({
   }, []);
 
   return (
-    <div className="terminal-shell">
+    <div className="terminal-shell" onKeyDownCapture={(event) => {
+      if (!ended_message || !on_dismiss || ["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      on_dismiss();
+    }}>
+      {ended_message && <div className="pane-message" role="status">
+        {ended_message} — press any key to close.
+        <button type="button" onClick={on_dismiss}>Close</button>
+      </div>}
       <div className="terminal-scroll-region">
         <div ref={containerRef} className="terminal-container" />
       </div>

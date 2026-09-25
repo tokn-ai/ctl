@@ -123,6 +123,21 @@ impl Frame {
           }
         }
       }
+      if let Some(ended) = pane.and_then(|pane| pane.ended.as_deref())
+        && let Some(y) = rect.top.checked_sub(offset_y).filter(|y| *y < height)
+      {
+        let mut label = avt::Vt::new(usize::from(rect.columns.max(1)), 1);
+        label.feed_str("\x1b[7m\x1b[?7l");
+        label.feed_str(&format!(" {ended} — press a key when focused"));
+        for (column, cell) in label.line(0).cells().iter().enumerate() {
+          if let Some(x) = (usize::from(rect.left) + column)
+            .checked_sub(usize::from(offset_x))
+            .filter(|x| *x < usize::from(self.columns))
+          {
+            self.set(u16::try_from(x).expect("bounded"), y, cell.into());
+          }
+        }
+      }
       if rect.terminal_id == focused
         && let Some(pane) = pane
       {

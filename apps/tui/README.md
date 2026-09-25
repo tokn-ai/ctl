@@ -62,6 +62,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `n` / `p` | Next / previous session |
 | `s` / `w` | Session picker; arrows select, Enter opens, Esc cancels |
 | `r` | Redraw the terminal |
+| `A` | Browse retained session archives |
 | `[` | Browse history and select text in copy mode |
 | `]` | Paste the local copy buffer into the active pane |
 | `I` | Take or release the active pane's input lease |
@@ -143,3 +144,27 @@ cargo fmt --all -- --check
 The Unix integration test uses a temporary daemon and real PTYs to check
 separate pane output, shared sizing, read-only viewing, reconnect, and lease
 release on detach. It needs permission to bind a local Unix socket.
+
+## Exited sessions and archives
+
+An exited pane keeps its final output and exit code visible until you press a
+key. That key dismisses only the ended pane; when the whole session has ended,
+it exits the TUI attachment. A confirmed missing session behaves the same way.
+Connection failures remain reconnectable and are not treated as confirmed exits.
+
+Dismissing an ended or confirmed missing session saves a client-local archive
+for seven days. Archives retain the session identity, per-pane end message,
+and text available in this client's buffers. Output the client never received
+cannot be recovered. Transport failures alone do not archive a session.
+
+Use `rmux archives` to list local TUI archives and `rmux archive SESSION_ID` to
+browse one read-only. **Ctrl+B A** opens the archive list; select a session and
+pane, then press Enter to inspect/search/copy its output. No daemon connection
+is needed for archives. The desktop **Archived** browser uses its own local store.
+
+Set `RMUX_ARCHIVE_DIRECTORY` to override the client storage directory.
+
+Archives live below the user's local data directory in `rmux/tui/archives/`
+(or `rmux/desktop/archives/` for the desktop). They expire after seven days and
+are removed when listing the store. No daemon flags or protocol changes are
+needed. `ctl rmux archives` also lists this client's TUI archive metadata.

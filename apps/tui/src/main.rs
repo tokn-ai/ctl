@@ -21,6 +21,7 @@ struct Arguments {
 async fn main() {
   let arguments = Arguments::parse();
   if let Err(error) = rmux_tui::run(rmux_tui::Options {
+    archive: None,
     socket: arguments.socket.unwrap_or_else(rmux_ipc::socket_path),
     session: arguments.session,
     read_only: arguments.read_only,

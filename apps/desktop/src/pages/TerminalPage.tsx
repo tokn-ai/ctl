@@ -35,6 +35,7 @@ import {
 import { connectionMethodOptions, connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
 import { removableHostCredentials } from "../features/workspace/hostCredentials";
 import { CommandPalette } from "../components/commands/CommandPalette";
+import { ArchiveBrowser } from "../components/sessions/ArchiveBrowser";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
@@ -89,6 +90,7 @@ import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
 import { displayWorkingDirectory } from "../lib/shellState";
 import {
+  sessionArchive,
   createSession,
   killSession,
   inspectKnownSessions,
@@ -756,6 +758,31 @@ export function TerminalPage() {
     [attachment, daemonRestartBlocksInteractions],
   );
 
+  const archiveSession = useCallback(async (session: SessionSummary, reason: string) => {
+    const panes = await renderer?.archivePanes(session, reason) ?? [];
+    await sessionArchive({ kind: "save", archive: {
+      session_id: session.session_id, name: session.name, host_key: targetKey(session.target),
+      archived_at_ms: 0, expires_at_ms: 0,
+      terminals: panes.length ? panes : [{ terminal_id: session.terminal_id ?? session.session_id, reason, lines: [] }],
+    } });
+  }, [renderer]);
+
+  const dismissingSessions = useRef(new Set<string>());
+  const dismissSession = useCallback(async (session: SessionSummary) => {
+    const key = sessionKey(session);
+    if (dismissingSessions.current.has(key)) return;
+    dismissingSessions.current.add(key);
+    try {
+      await archiveSession(session, attachment.state.message ?? "Session no longer exists");
+      refreshGuardRef.current.recordMutation();
+      setSessions((current) => removeSession(current, sessionKey(session)));
+      setSessionShellStates((current) => forgetShellState(current, sessionKey(session)));
+      await closeTab(session);
+      await persistWorkspace();
+    } catch (failure) { setListError(errorMessage(failure)); }
+    finally { dismissingSessions.current.delete(key); }
+  }, [archiveSession, attachment.state.message, closeTab, setSessions, setSessionShellStates, persistWorkspace]);
+
   const removeHost = useCallback(
     async (target: ConnectionTarget) => {
       if (target.kind === "local" || daemonRestartBlocksInteractions()) {
@@ -954,6 +981,7 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) return;
       attachment.cancelPendingConnection(session);
       refreshGuardRef.current.recordMutation();
+      await archiveSession(session, "Removed from this client");
       await closeTab(session);
       setSessions((current) => removeSession(current, sessionKey(session)));
       setSessionShellStates((current) =>
@@ -963,6 +991,7 @@ export function TerminalPage() {
     },
     [
       attachment,
+      archiveSession,
       closeTab,
       daemonRestartBlocksInteractions,
       setSessions,
@@ -1007,6 +1036,7 @@ export function TerminalPage() {
         if (daemonEpoch !== daemonEpochRef.current) {
           return;
         }
+        await archiveSession(session, "Session terminated");
         refreshGuardRef.current.recordMutation();
         setSessions((current) => {
           const next = removeSession(current, identity);
@@ -1018,6 +1048,8 @@ export function TerminalPage() {
         await closeTab(session);
         // The session is hidden after either an accepted kill or a not-found
         // response, which means another actor already achieved the same result.
+      } catch (failure) {
+        setListError(errorMessage(failure));
       } finally {
         closingSessionKeysRef.current.delete(identity);
         if (daemonEpoch === daemonEpochRef.current) {
@@ -1029,7 +1061,7 @@ export function TerminalPage() {
         }
       }
     },
-    [attachment, closeTab, daemonRestartBlocksInteractions],
+    [attachment, archiveSession, closeTab, daemonRestartBlocksInteractions],
   );
 
   const requestClose = useCallback(
@@ -1471,7 +1503,8 @@ export function TerminalPage() {
   };
   const paletteShortcutLabel = shortcutLabel(COMMAND_IDS.showPalette);
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
-  const dialogOpen =
+  const [archives_open, setArchivesOpen] = useState(false);
+  const dialogOpen = archives_open ||
     taskWorkspace.editorId !== null ||
     portForwardTarget !== null ||
     keybindingsOpen ||
@@ -1550,6 +1583,7 @@ export function TerminalPage() {
           }
           sessions={
             <SessionSidebar
+              on_archives={() => setArchivesOpen(true)}
               targets={sidebarTargets}
               hosts={workspace.hosts}
               connectableHostKeys={connectableHostKeys}
@@ -1803,6 +1837,8 @@ export function TerminalPage() {
               on_toggle_input={attachment.toggleInputLease}
               on_promoted={(session) => importSession(session, null)}
               on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
+              ended_message={attachment.state.phase === "ended" ? attachment.state.message ?? "Session exited" : attachment.state.error_code === "session_not_found" ? "Session no longer exists" : null}
+              on_dismiss={() => { if (attachment.state.session) void dismissSession(attachment.state.session); }}
               phase={attachment.state.phase}
               hasSession={attachment.state.session !== null}
               has_cached_content={attachment.state.applied_sequence !== null}
@@ -1813,6 +1849,7 @@ export function TerminalPage() {
           </div>
         </section>
       </main>
+      {archives_open && <ArchiveBrowser targets={sidebarTargets} on_close={() => setArchivesOpen(false)} />}
       {taskWorkspace.editorId ? (
         <TaskEditor
           key={taskWorkspace.editorKey}

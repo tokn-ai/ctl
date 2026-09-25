@@ -3055,9 +3055,12 @@ dependencies = [
  "rmux-client",
  "rmux-ipc",
  "rmux-proto",
+ "rmux-tui",
+ "rmuxd",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

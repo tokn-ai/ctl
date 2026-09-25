@@ -239,6 +239,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
+  pub fn invalidate(&mut self) {
+    self.previous = None;
+  }
+
   pub fn draw(&mut self, frame: Frame) -> io::Result<()> {
     if self.previous.as_ref() == Some(&frame) {
       return Ok(());

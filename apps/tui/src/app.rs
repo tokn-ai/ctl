@@ -119,19 +119,48 @@ impl App {
     self.select(&session.session_id).await
   }
 
-  async fn select(&mut self, session: &str) -> Result<()> {
-    let ServerMessage::ViewSnapshot { view } = self
+  async fn find_view(&self, selector: &str) -> Result<ViewInfo> {
+    let request = self
       .request(ClientMessage::GetView {
-        session: session.into(),
+        session: selector.into(),
       })
-      .await?
-    else {
-      return Err("expected view snapshot".into());
-    };
+      .await;
+    match request {
+      Ok(ServerMessage::ViewSnapshot { view }) => Ok(view),
+      Ok(_) => Err("expected view snapshot".into()),
+      Err(error) if session_not_found(&error) => {
+        // A terminal ID is also a valid attachment target. GetView itself takes
+        // a root selector, so resolve membership without taking any leases.
+        for root in &self.sessions {
+          match self
+            .request(ClientMessage::GetView {
+              session: root.session_id.clone(),
+            })
+            .await
+          {
+            Ok(ServerMessage::ViewSnapshot { view })
+              if view.panes.iter().any(|pane| pane.terminal_id == selector) =>
+            {
+              return Ok(view);
+            }
+            Err(failure) if !session_not_found(&failure) => return Err(failure),
+            _ => {}
+          }
+        }
+        Err(error)
+      }
+      Err(error) => Err(error),
+    }
+  }
+
+  async fn select(&mut self, session: &str) -> Result<()> {
+    let view = self.find_view(session).await?;
     self.detach().await;
     self.focused = view
       .panes
-      .first()
+      .iter()
+      .find(|pane| pane.terminal_id == session)
+      .or_else(|| view.panes.first())
       .map_or_else(String::new, |pane| pane.terminal_id.clone());
     self.view = Some(view);
     self.overlay = Overlay::None;
@@ -369,16 +398,18 @@ impl App {
   async fn command(&mut self, code: KeyCode) -> Result<bool> {
     match code {
       KeyCode::Char('d') => return Ok(true),
+      KeyCode::Char('r') => self.renderer.invalidate(),
+      KeyCode::Char('o') => self.next_pane(),
       KeyCode::Char('?') => self.overlay = Overlay::Help,
-      KeyCode::Char('w') => self.overlay = Overlay::Sessions(self.session_index()),
+      KeyCode::Char('s' | 'w') => self.overlay = Overlay::Sessions(self.session_index()),
       KeyCode::Char('n') => self.next_session(1).await?,
       KeyCode::Char('p') => self.next_session(-1).await?,
       KeyCode::Char('c') if !self.read_only => self.create().await?,
-      KeyCode::Char('%' | 'v') if !self.read_only => self.split(SplitAxis::Horizontal).await?,
-      KeyCode::Char('"' | 's') if !self.read_only => self.split(SplitAxis::Vertical).await?,
+      KeyCode::Char('%') if !self.read_only => self.split(SplitAxis::Horizontal).await?,
+      KeyCode::Char('"') if !self.read_only => self.split(SplitAxis::Vertical).await?,
       KeyCode::Char('x') if !self.read_only => self.overlay = Overlay::Kill(self.focused.clone()),
-      KeyCode::Char('i') if !self.read_only => self.toggle_lease(LeaseKind::Input).await?,
-      KeyCode::Char('r') if !self.read_only => self.toggle_lease(LeaseKind::Layout).await?,
+      KeyCode::Char('I') if !self.read_only => self.toggle_lease(LeaseKind::Input).await?,
+      KeyCode::Char('R') if !self.read_only => self.toggle_lease(LeaseKind::Layout).await?,
       KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => self.focus(code),
       KeyCode::Esc => {}
       _ => self.notice(format!("{} ? for commands", self.prefix.label)),
@@ -473,6 +504,23 @@ impl App {
     self.select(&self.sessions[index].session_id.clone()).await
   }
 
+  fn next_pane(&mut self) {
+    let Some(view) = &self.view else {
+      return;
+    };
+    if view.panes.is_empty() {
+      return;
+    }
+    let index = view
+      .panes
+      .iter()
+      .position(|pane| pane.terminal_id == self.focused)
+      .unwrap_or(0);
+    self
+      .focused
+      .clone_from(&view.panes[(index + 1) % view.panes.len()].terminal_id);
+  }
+
   fn focus(&mut self, direction: KeyCode) {
     let Some(view) = &self.view else {
       return;
@@ -541,7 +589,7 @@ impl App {
 
   fn status(&self) -> String {
     if self.prefix_pending {
-      return "PREFIX  %/v split right  \"/s split below  arrows focus  c new  w sessions  d detach  ? help".into();
+      return "PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help".into();
     }
     if Instant::now() < self.message_until {
       return self.message.clone();
@@ -615,10 +663,10 @@ impl App {
       }
       Overlay::Help => vec![
         format!("Commands after {} — any key closes help", self.prefix.label),
-        "% or v: split right    \" or s: split below".into(),
-        "Arrow keys: focus pane    x: terminate pane (confirm)".into(),
-        "c: new session    n/p: next/previous session    w: session list".into(),
-        "i: take/release pane input    r: take/release view resize".into(),
+        "%: split right    \": split below".into(),
+        "Arrows: focus pane    o: next pane    x: terminate (confirm)".into(),
+        "c: new session    n/p: next/previous session    s/w: session list".into(),
+        "r: redraw    I: take/release input    R: take/release resize".into(),
         "d: detach (sessions keep running)    Esc: cancel prefix".into(),
         format!(
           "{} twice sends the prefix to the active pane.",
@@ -627,6 +675,16 @@ impl App {
       ],
     }
   }
+}
+
+fn session_not_found(error: &crate::Error) -> bool {
+  matches!(
+    error.downcast_ref::<rmux_client::ClientError>(),
+    Some(rmux_client::ClientError::Server {
+      code: rmux_proto::ErrorCode::SessionNotFound,
+      ..
+    })
+  )
 }
 
 fn adjacent(

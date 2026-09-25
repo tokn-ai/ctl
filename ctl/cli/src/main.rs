@@ -93,7 +93,7 @@ mod tests {
       arguments.command,
       Command::Rmux {
         command: RmuxCommand::Attach { session, .. }
-      } if session == "development"
+      } if session.as_deref() == Some("development")
     ));
   }
 

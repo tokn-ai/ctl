@@ -116,6 +116,7 @@ async fn shared_canvas_input_viewer_reconnect_and_detach() -> Result<()> {
       .contains("CHILD_MARK")
   );
 
+  assert_tmux_shortcuts(&mut owner).await?;
   assert_viewer_does_not_resize(&daemon, &session).await?;
   assert_lease_handoff(&daemon, &mut owner, &session).await?;
   owner.size = (100, 31);
@@ -263,5 +264,33 @@ async fn assert_lease_handoff(daemon: &Daemon, owner: &mut App, session: &str) -
   owner.toggle_lease(LeaseKind::Layout).await?;
   wait_for_lease(owner, LeaseKind::Layout, true).await?;
   wait_for_canvas(owner, 80, 24).await?;
+  Ok(())
+}
+
+async fn assert_tmux_shortcuts(app: &mut App) -> Result<()> {
+  let focused = app.focused.clone();
+  let count = app.panes.len();
+  app.select(&focused).await?;
+  assert_eq!(app.focused, focused);
+  app.command(KeyCode::Char('s')).await?;
+  assert!(matches!(app.overlay, Overlay::Sessions(_)));
+  assert_eq!(app.panes.len(), count);
+  app.overlay = Overlay::None;
+  app.command(KeyCode::Char('o')).await?;
+  assert_ne!(app.focused, focused);
+  app.command(KeyCode::Char('o')).await?;
+  assert_eq!(app.focused, focused);
+  let owner = app
+    .panes
+    .values()
+    .any(|pane| pane.control.state().leases().layout.owned_by_client);
+  app.command(KeyCode::Char('r')).await?;
+  assert_eq!(
+    app
+      .panes
+      .values()
+      .any(|pane| pane.control.state().leases().layout.owned_by_client),
+    owner
+  );
   Ok(())
 }

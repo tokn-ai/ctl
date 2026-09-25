@@ -16,5 +16,11 @@ rmux-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+rmux-tui = { path = "../../apps/tui" }
+
+[dev-dependencies]
+rmuxd.workspace = true
+uuid.workspace = true
+
 [lints]
 workspace = true

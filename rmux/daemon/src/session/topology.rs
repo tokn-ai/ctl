@@ -34,16 +34,14 @@ impl LayoutExt for ViewLayout {
   fn first_terminal(&self) -> String {
     match self {
       Self::Terminal { terminal_id } => terminal_id.clone(),
-      Self::Split { children, .. } | Self::Tabs { children } => children[0].first_terminal(),
+      Self::Split { children, .. } => children[0].first_terminal(),
     }
   }
 
   fn terminal_ids(&self) -> Vec<String> {
     match self {
       Self::Terminal { terminal_id } => vec![terminal_id.clone()],
-      Self::Split { children, .. } | Self::Tabs { children } => {
-        children.iter().flat_map(Self::terminal_ids).collect()
-      }
+      Self::Split { children, .. } => children.iter().flat_map(Self::terminal_ids).collect(),
     }
   }
 
@@ -59,17 +57,6 @@ impl LayoutExt for ViewLayout {
           0 => None,
           1 => children.pop(),
           _ => Some(Self::Split { axis, children }),
-        }
-      }
-      Self::Tabs { children } => {
-        let mut children: Vec<_> = children
-          .into_iter()
-          .filter_map(|child| child.remove_terminal(id))
-          .collect();
-        match children.len() {
-          0 => None,
-          1 => children.pop(),
-          _ => Some(Self::Tabs { children }),
         }
       }
     }
@@ -88,7 +75,7 @@ impl LayoutExt for ViewLayout {
           ],
         };
       }
-      Self::Split { children, .. } | Self::Tabs { children } => {
+      Self::Split { children, .. } => {
         for child in children {
           child.split_terminal(id, new_id, axis);
         }
@@ -387,7 +374,8 @@ impl SessionManager {
         }
       }
     }
-    let merged_layout = ViewLayout::Tabs {
+    let merged_layout = ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
       children: vec![
         registry.sessions[&destination_id].view.layout.clone(),
         registry.sessions[&source_id].view.layout.clone(),
@@ -465,7 +453,7 @@ pub(super) fn validate_layout(
   }
   match layout {
     ViewLayout::Terminal { .. } => Ok(()),
-    ViewLayout::Split { children, .. } | ViewLayout::Tabs { children } => {
+    ViewLayout::Split { children, .. } => {
       if children.len() < 2 || children.len() > 64 {
         return Err(SessionManagerError::InvalidView(
           "layout groups require 2 to 64 children".into(),

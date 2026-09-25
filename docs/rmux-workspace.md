@@ -236,8 +236,7 @@ On the next app restart, saved entries are again unverified until contacted.
 Only one root session tab is active per desktop window. Its server-owned view
 may attach multiple terminals concurrently. Split-right and split-below update
 that shared view, and moving a pane to a new session remembers the new root in
-the workspace. Merging a remembered session into the active session removes the
-source workspace entry after the server accepts the transfer. Terminal IDs and
+the workspace. Session merging is not exposed in the GUI. Terminal IDs and
 layout are runtime metadata, not workspace-owned layout definitions.
 
 Opening a root resolves its current first terminal and restores a fresh
@@ -246,13 +245,14 @@ can resume cached output; one terminal's cursor is never reused for another.
 
 The compositor refreshes the active view every two seconds, with immediate
 updates after local mutations and primary PTY geometry changes. Existing terminal
-renderers remain mounted when split geometry or selected view tabs change.
+renderers remain mounted when split geometry changes. Each session has one
+split-only view; session tabs provide navigation without nested tab groups.
 
-Protocol 11 gives the view one shared cell canvas and one resize lease. The
+Protocol 12 gives the view one shared cell canvas and one resize lease. The
 controlling client measures the whole canvas viewport; the server divides it
 into PTY rectangles with one-cell dividers. Secondary panes never resize from
 their own DOM bounds. Other clients display the same geometry through a scrollable
-viewport. Input leases, selected tab groups, and active pane focus stay independent.
+viewport. Input leases and active pane focus stay independent.
 
 Pane controls sit above the canvas. Pane interiors contain only terminal cells,
 so side-by-side panes have equal height. An outline marks the active pane. Pane

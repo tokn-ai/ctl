@@ -6,10 +6,6 @@ impl ViewLayout {
   pub fn minimum_size(&self) -> (u32, u32) {
     match self {
       Self::Terminal { .. } => (2, 1),
-      Self::Tabs { children } => children
-        .iter()
-        .map(Self::minimum_size)
-        .fold((2, 1), |a, b| (a.0.max(b.0), a.1.max(b.1))),
       Self::Split { axis, children } => {
         let count = u32::try_from(children.len()).unwrap_or(u32::MAX);
         let largest = children
@@ -37,7 +33,6 @@ impl ViewLayout {
   }
 
   /// Allocates equal splits deterministically; remainder cells go to earlier children.
-  /// Tabs share the same rectangle and clients choose which child to display.
   ///
   /// # Errors
   /// Rejects an empty split or a canvas too small for its terminal cells and dividers.
@@ -70,11 +65,6 @@ impl ViewLayout {
         columns,
         rows,
       }),
-      Self::Tabs { children } => {
-        for child in children {
-          child.place(left, top, columns, rows, panes)?;
-        }
-      }
       Self::Split { axis, children } => {
         let count = u16::try_from(children.len()).map_err(|_| "too many split children")?;
         if count == 0 {
@@ -144,7 +134,7 @@ mod tests {
   }
 
   #[test]
-  fn insufficient_canvas_is_rejected_and_tabs_share_bounds() {
+  fn insufficient_canvas_is_rejected() {
     let layout = ViewLayout::Split {
       axis: SplitAxis::Horizontal,
       children: vec![leaf("a"), leaf("b")],
@@ -157,13 +147,36 @@ mod tests {
         })
         .is_err()
     );
-    let tabs = ViewLayout::Tabs {
-      children: vec![leaf("a"), leaf("b")],
-    };
-    let panes = tabs.pane_geometry(&TerminalSize::default()).unwrap();
+  }
+
+  #[test]
+  fn legacy_tabs_decode_as_nested_splits_without_losing_terminals() {
+    let layout: ViewLayout = serde_json::from_str(
+      r#"{
+      "kind": "tabs", "children": [
+        {"kind": "terminal", "terminal_id": "a"},
+        {"kind": "tabs", "children": [
+          {"kind": "terminal", "terminal_id": "b"},
+          {"kind": "terminal", "terminal_id": "c"}
+        ]}
+      ]
+    }"#,
+    )
+    .unwrap();
+    let panes = layout.pane_geometry(&TerminalSize::default()).unwrap();
     assert_eq!(
-      (panes[0].left, panes[0].columns, panes[0].rows),
-      (panes[1].left, panes[1].columns, panes[1].rows)
+      panes
+        .iter()
+        .map(|pane| pane.terminal_id.as_str())
+        .collect::<Vec<_>>(),
+      ["a", "b", "c"]
     );
+    assert!(
+      panes
+        .windows(2)
+        .all(|pair| pair[0].left + pair[0].columns < pair[1].left)
+    );
+    let serialized = serde_json::to_string(&layout).unwrap();
+    assert!(!serialized.contains("tabs"));
   }
 }

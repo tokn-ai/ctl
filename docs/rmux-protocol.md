@@ -1,4 +1,4 @@
-# rmux protocol version 11
+# rmux protocol version 12
 
 The protocol is independent of local IPC and future remote transport. Version
 11 uses length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -65,7 +65,7 @@ One-shot topology requests are:
 | `split_terminal { terminal_id, axis, command, working_directory, terminal_size }` | Create a terminal beside the target in the same view |
 | `update_view { session, expected_revision, layout }` | Replace arrangement with exactly the same terminal membership; reject stale revisions |
 | `promote_terminal { terminal_id, name }` | Move one of a root's multiple terminals to a new session/view |
-| `merge_sessions { source, destination }` | Move source members to destination as another tab group; remove source root/view |
+| `merge_sessions { source, destination }` | Join destination and source layouts in a horizontal split; remove source root/view |
 | `kill_terminal { terminal_id }` | Terminate only that terminal |
 | `kill_session { session }` | Terminate every terminal owned by the root; prevent new splits or moves into it |
 
@@ -85,10 +85,12 @@ layout, canvas size, or membership, including exit. Layout nodes use `kind`:
 }
 ```
 
-`horizontal` places children side by side, `vertical` stacks them, and `tabs`
-groups children without a split axis. Splits divide space equally. The server
+`horizontal` places children side by side and `vertical` stacks them.
+Splits divide space equally. Sessions provide tab-like navigation; views contain
+only terminals and splits. Legacy `tabs` input decodes recursively into horizontal
+splits, preserving terminal IDs and child order. The server
 validates unique and complete membership, at most 64 terminals, and at most 16
-levels of nesting. Tab selection is client-local; layout and membership are
+levels of nesting. Pane focus is client-local; layout and membership are
 server-owned. Membership transfers are atomic under the registry lock and keep
 terminal IDs, processes, history, and existing attachments intact.
 
@@ -98,8 +100,8 @@ daemon idle-exit behavior. Layouts survive client disconnects, but like PTYs,
 do not survive daemon restart. Task-managed roots retain one terminal and reject
 splits and transfers so task lifecycle ownership remains unambiguous.
 
-Protocol versions still match exactly. Version 10 clients require a version 10
-daemon; this is not an in-place migration of a running version 9 daemon.
+Protocol versions still match exactly. Version 12 removes tabbed views; app and
+daemon must be updated together. This does not migrate a running older daemon.
 
 ## Connection lifecycle
 

@@ -657,8 +657,7 @@ export type TaskLogEvent =
 
 export type ViewLayout =
   | { kind: "terminal"; terminal_id: string }
-  | { kind: "split"; axis: "horizontal" | "vertical"; children: ViewLayout[] }
-  | { kind: "tabs"; children: ViewLayout[] };
+  | { kind: "split"; axis: "horizontal" | "vertical"; children: ViewLayout[] };
 
 export interface SessionView {
   session_name: string;

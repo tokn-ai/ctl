@@ -4,7 +4,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
 ///
@@ -450,8 +450,21 @@ pub enum SplitAxis {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", from = "LegacyViewLayout")]
 pub enum ViewLayout {
+  Terminal {
+    terminal_id: String,
+  },
+  Split {
+    axis: SplitAxis,
+    children: Vec<ViewLayout>,
+  },
+}
+
+// Decode old tab groups as splits, preserving every terminal and child order.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LegacyViewLayout {
   Terminal {
     terminal_id: String,
   },
@@ -462,6 +475,19 @@ pub enum ViewLayout {
   Tabs {
     children: Vec<ViewLayout>,
   },
+}
+
+impl From<LegacyViewLayout> for ViewLayout {
+  fn from(layout: LegacyViewLayout) -> Self {
+    match layout {
+      LegacyViewLayout::Terminal { terminal_id } => Self::Terminal { terminal_id },
+      LegacyViewLayout::Split { axis, children } => Self::Split { axis, children },
+      LegacyViewLayout::Tabs { children } => Self::Split {
+        axis: SplitAxis::Horizontal,
+        children,
+      },
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1093,7 +1119,7 @@ mod tests {
 
   #[test]
   fn terminal_history_snapshots_use_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 11);
+    assert_eq!(PROTOCOL_VERSION, 12);
   }
 
   #[test]

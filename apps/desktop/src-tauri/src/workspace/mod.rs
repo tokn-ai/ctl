@@ -24,6 +24,8 @@ pub use catalog::HostCatalogDocument;
 pub use catalog::{HostCatalogSnapshot, UpdateHostsRequest};
 pub use hosts::{WorkspaceConnectionMethod, WorkspaceHost};
 
+// serde's skip_serializing_if callback must take a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_ssh_gateway_kind(kind: &ctld_ipc::GatewayKind) -> bool {
   *kind == ctld_ipc::GatewayKind::Ssh
 }

@@ -43,6 +43,8 @@ pub enum GatewayKind {
   Socks5,
 }
 
+// serde's skip_serializing_if callback must take a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn gateway_kind_is_ssh(kind: &GatewayKind) -> bool {
   *kind == GatewayKind::Ssh
 }
@@ -75,6 +77,12 @@ pub struct SshTarget {
 }
 
 /// OpenSSH expands %h and %p after parsing this option. The route contains no secrets.
+///
+/// # Errors
+/// Returns an error if the daemon executable cannot be located.
+///
+/// # Panics
+/// Panics if serialization of the gateway route unexpectedly fails.
 pub fn proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
   let executable = daemon_executable()?;
   let executable = executable.to_string_lossy().replace('\'', "'\\''");
@@ -475,6 +483,10 @@ fn parse_daemon_protocol(stdout: &[u8]) -> io::Result<u16> {
     })
 }
 
+/// Resolves the daemon executable bundled beside the current client.
+///
+/// # Errors
+/// Returns an error if the current executable path cannot be determined.
 pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));

@@ -1,4 +1,4 @@
-//! OpenSSH ProxyCommand helper for ordered SSH and SOCKS5 routes.
+//! OpenSSH `ProxyCommand` helper for ordered SSH and SOCKS5 routes.
 use std::io;
 use std::net::{IpAddr, Ipv6Addr};
 use std::pin::Pin;
@@ -146,9 +146,13 @@ async fn socks_connect(
     if user.len() > 255 || password.len() > 255 {
       return Err(io::Error::other("SOCKS5 credentials exceed 255 bytes"));
     }
-    let mut request = vec![1, user.len() as u8];
+    let user_len =
+      u8::try_from(user.len()).map_err(|_| io::Error::other("SOCKS5 username is too long"))?;
+    let password_len =
+      u8::try_from(password.len()).map_err(|_| io::Error::other("SOCKS5 password is too long"))?;
+    let mut request = vec![1, user_len];
     request.extend_from_slice(user.as_bytes());
-    request.push(password.len() as u8);
+    request.push(password_len);
     request.extend_from_slice(password.as_bytes());
     stream.write_all(&request).await?;
     request.fill(0);
@@ -174,7 +178,9 @@ async fn socks_connect(
     if host.is_empty() || host.len() > 255 {
       return Err(io::Error::other("invalid SOCKS5 destination"));
     }
-    let mut bytes = vec![3, host.len() as u8];
+    let host_len =
+      u8::try_from(host.len()).map_err(|_| io::Error::other("SOCKS5 destination is too long"))?;
+    let mut bytes = vec![3, host_len];
     bytes.extend_from_slice(host.as_bytes());
     bytes
   };
@@ -231,6 +237,10 @@ async fn askpass(gateway: &SshGateway) -> io::Result<Zeroizing<String>> {
   ))
 }
 
+/// Runs a proxy route from process stdin to stdout.
+///
+/// # Errors
+/// Returns an error for an invalid route, connection failure, or interrupted relay.
 pub async fn run(route: &str, host: &str, port: u16) -> io::Result<()> {
   let bytes = route
     .as_bytes()

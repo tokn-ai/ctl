@@ -6,12 +6,12 @@ use crossterm::{
   style::{Attribute, ResetColor, SetAttribute},
   terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::{
   Arc,
   atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub struct Terminal {
@@ -40,6 +40,13 @@ impl Terminal {
     guard.events = Some(receiver);
     guard.reader = Some(std::thread::spawn(move || {
       while !stop.load(Ordering::Acquire) {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+          let _ = sender.try_send(Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "Terminal disconnected",
+          )));
+          return;
+        }
         match event::poll(Duration::from_millis(50)) {
           Ok(false) => {}
           Ok(true) => {
@@ -83,7 +90,15 @@ impl Drop for Terminal {
   fn drop(&mut self) {
     self.stop.store(true, Ordering::Release);
     if let Some(reader) = self.reader.take() {
-      let _ = reader.join();
+      // Do not let a platform input backend prevent process shutdown. Healthy
+      // readers observe stop within the 50ms poll timeout; allow scheduling slack.
+      let deadline = Instant::now() + Duration::from_millis(250);
+      while !reader.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+      }
+      if reader.is_finished() {
+        let _ = reader.join();
+      }
     }
     let _ = execute!(
       io::stdout(),

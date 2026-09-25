@@ -14,7 +14,13 @@ rmux-proto.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# The default mio reader in 0.29 loops on terminal EOF/fatal read errors.
+# This backend propagates read errors and honors finite polling deadlines.
+crossterm = { workspace = true, features = ["use-dev-tty"] }
+
 [dev-dependencies]
+portable-pty.workspace = true
 rmuxd.workspace = true
 uuid.workspace = true
 

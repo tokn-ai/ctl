@@ -28,6 +28,7 @@ function headlessFactory(instances: Terminal[]) {
     });
     instances.push(terminal);
     return {
+      copyLines: () => Array.from({ length: terminal.buffer.active.length }, (_, index) => visibleLine(terminal, index)),
       write: (data, callback) => terminal.write(data, callback),
       resize: (columns, rows) => terminal.resize(columns, rows),
       dispose: () => terminal.dispose(),
@@ -36,6 +37,15 @@ function headlessFactory(instances: Terminal[]) {
 }
 
 describe("TerminalPresenter", () => {
+  it("archives buffered output after pending terminal writes finish", async () => {
+    const instances: Terminal[] = [];
+    const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(20, 2));
+    const pending = presenter.write(new TextEncoder().encode("old line\r\nlast output"));
+    expect(await presenter.copyLines()).toEqual(["old line", "last output"]);
+    await pending;
+    presenter.dispose();
+  });
+
   it("recreates a clean renderer for a checkpoint", async () => {
     const instances: Terminal[] = [];
     const presenter = new TerminalPresenter(headlessFactory(instances), terminalSize(12, 3));

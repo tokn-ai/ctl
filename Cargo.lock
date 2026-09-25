@@ -3097,9 +3097,14 @@ name = "rmux-client"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "dirs",
  "rmux-proto",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3159,7 +3164,6 @@ version = "0.1.0"
 dependencies = [
  "avt",
  "clap",
- "dirs",
  "nix 0.29.0",
  "portable-pty",
  "process-info",
@@ -3167,9 +3171,6 @@ dependencies = [
  "rmux-ipc",
  "rmux-proto",
  "rustix",
- "serde",
- "serde_json",
- "sha2",
  "thiserror 2.0.20",
  "tokio",
  "uuid",

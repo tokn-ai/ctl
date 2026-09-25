@@ -1,4 +1,3 @@
-mod archive;
 #[cfg(any(windows, test))]
 mod conpty;
 mod process_monitor;

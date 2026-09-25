@@ -1387,7 +1387,6 @@ fn spawn_daemon_with_liveness(
       checkpoint_interval_bytes,
       startup_idle_timeout: Duration::from_secs(5),
       attachment_liveness_timeout,
-      ..DaemonConfig::default()
     })
     .await;
     if let Err(error) = &result {

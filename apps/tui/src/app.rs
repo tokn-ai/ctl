@@ -22,17 +22,21 @@ enum Overlay {
   Sessions(usize),
   Kill(String),
   Archives(usize),
-  ArchiveTerminals(Box<rmux_proto::SessionArchive>, usize),
+  ArchiveTerminals(Box<rmux_client::archive::SessionArchive>, usize),
 }
 
 pub struct App {
   socket: PathBuf,
+  archive_directory: Option<PathBuf>,
   read_only: bool,
+  archive_only: bool,
   prefix: Prefix,
   prefix_pending: bool,
   sessions: Vec<SessionInfo>,
-  archives: Vec<rmux_proto::SessionArchive>,
+  archives: Vec<rmux_client::archive::SessionArchive>,
   ended: Option<String>,
+  selected_id: String,
+  archived_panes: Vec<rmux_client::archive::ArchivedPane>,
   view: Option<ViewInfo>,
   panes: BTreeMap<String, Pane>,
   focused: String,
@@ -49,13 +53,17 @@ pub struct App {
 impl App {
   pub fn new(socket: PathBuf, read_only: bool, prefix: Prefix) -> Self {
     Self {
+      archive_directory: cfg!(test).then(|| socket.with_extension("client-archives")),
       socket,
       read_only,
+      archive_only: false,
       prefix,
       prefix_pending: false,
       sessions: Vec::new(),
       archives: Vec::new(),
       ended: None,
+      selected_id: String::new(),
+      archived_panes: Vec::new(),
       view: None,
       panes: BTreeMap::new(),
       focused: String::new(),
@@ -100,19 +108,82 @@ impl App {
     Ok(())
   }
 
-  pub async fn open_archive(&mut self, session_id: String) -> Result<()> {
-    if let ServerMessage::ArchiveList { archives } =
-      self.request(ClientMessage::ListArchives).await?
-    {
-      self.archives = archives;
+  pub fn open_archive(&mut self, session_id: &str) -> Result<()> {
+    self.archive_only = true;
+    self.archives = self.local_archives()?;
+    let archive = self
+      .archives
+      .iter()
+      .find(|archive| archive.session_id == session_id)
+      .cloned()
+      .ok_or("archive not found on this client")?;
+    self.overlay = Overlay::ArchiveTerminals(Box::new(archive), 0);
+    Ok(())
+  }
+
+  fn archive_store(&self) -> std::io::Result<rmux_client::archive::ArchiveStore> {
+    match &self.archive_directory {
+      Some(directory) => Ok(rmux_client::archive::ArchiveStore::new(directory.clone())),
+      None => rmux_client::archive::ArchiveStore::for_client("tui"),
     }
-    let ServerMessage::ArchiveSnapshot { archive } = self
-      .request(ClientMessage::GetArchive { session_id })
-      .await?
-    else {
-      return Err("expected archive".into());
-    };
-    self.overlay = Overlay::ArchiveTerminals(archive, 0);
+  }
+
+  fn local_archives(&self) -> Result<Vec<rmux_client::archive::SessionArchive>> {
+    Ok(
+      self
+        .archive_store()?
+        .list()?
+        .into_iter()
+        .filter(|archive| archive.host_key == self.socket.to_string_lossy())
+        .collect(),
+    )
+  }
+
+  fn save_archive(&self) -> Result<()> {
+    use rmux_client::archive::{ArchivedPane, SessionArchive};
+    let mut terminals = self.archived_panes.clone();
+    terminals.extend(
+      self
+        .panes
+        .iter()
+        .filter(|(_, pane)| pane.ended.is_some() || self.ended.is_some())
+        .map(|(id, pane)| ArchivedPane {
+          terminal_id: id.clone(),
+          reason: pane
+            .ended
+            .clone()
+            .or(self.ended.clone())
+            .unwrap_or_default(),
+          lines: pane.model.copy_lines(),
+        }),
+    );
+    if terminals.is_empty() {
+      terminals.push(ArchivedPane {
+        terminal_id: self.selected_id.clone(),
+        reason: self.ended.clone().unwrap_or_else(|| "Missing".into()),
+        lines: Vec::new(),
+      });
+    }
+    let session = self
+      .sessions
+      .iter()
+      .find(|session| session.session_id == self.selected_id);
+    self.archive_store()?.save(SessionArchive {
+      session_id: self.selected_id.clone(),
+      name: session.map_or_else(
+        || {
+          self.view.as_ref().map_or_else(
+            || self.selected_id.clone(),
+            |view| view.session_name.clone(),
+          )
+        },
+        |session| session.name.clone(),
+      ),
+      host_key: self.socket.to_string_lossy().into_owned(),
+      archived_at_ms: 0,
+      expires_at_ms: 0,
+      terminals,
+    })?;
     Ok(())
   }
 
@@ -181,6 +252,7 @@ impl App {
   }
 
   async fn select(&mut self, session: &str) -> Result<()> {
+    session.clone_into(&mut self.selected_id);
     let view = match self.find_view(session).await {
       Ok(view) => view,
       Err(error) if session_not_found(&error) => {
@@ -190,6 +262,8 @@ impl App {
       Err(error) => return Err(error),
     };
     self.ended = None;
+    self.archived_panes.clear();
+    self.selected_id.clone_from(&view.session_id);
     self.detach().await;
     self.focused = view
       .panes
@@ -345,7 +419,7 @@ impl App {
         }
         _ = tick.tick() => {
           self.drain().await;
-          if refreshed.elapsed() >= Duration::from_secs(2) {
+          if !self.archive_only && refreshed.elapsed() >= Duration::from_secs(2) {
             if let Err(error) = self.refresh().await { self.notice(error.to_string()); }
             refreshed = Instant::now();
           }
@@ -358,9 +432,7 @@ impl App {
   async fn drain(&mut self) {
     let mut notices = Vec::new();
     for pane in self.panes.values_mut() {
-      if !pane.connected {
-        continue;
-      }
+      // A closed transport may still have a final SessionEnded event queued.
       match pane.drain().await {
         Ok(Some(message)) => notices.push(message),
         Ok(None) => {}
@@ -487,6 +559,7 @@ impl App {
       return Ok(false);
     }
     if self.ended.is_some() {
+      self.save_archive()?;
       return Ok(true);
     }
     if self
@@ -494,7 +567,15 @@ impl App {
       .get(&self.focused)
       .is_some_and(|pane| pane.ended.is_some())
     {
+      self.save_archive()?;
       if let Some(mut pane) = self.panes.remove(&self.focused) {
+        self
+          .archived_panes
+          .push(rmux_client::archive::ArchivedPane {
+            terminal_id: self.focused.clone(),
+            reason: pane.ended.clone().unwrap_or_default(),
+            lines: pane.model.copy_lines(),
+          });
         pane.close().await;
       }
       if self.panes.is_empty() {
@@ -537,12 +618,7 @@ impl App {
   async fn command(&mut self, code: KeyCode) -> Result<bool> {
     match code {
       KeyCode::Char('A') => {
-        let ServerMessage::ArchiveList { archives } =
-          self.request(ClientMessage::ListArchives).await?
-        else {
-          return Err("expected archive list".into());
-        };
-        self.archives = archives;
+        self.archives = self.local_archives()?;
         self.overlay = Overlay::Archives(0);
       }
       KeyCode::Char('[') => {
@@ -734,24 +810,8 @@ impl App {
         KeyCode::Up => *index = index.saturating_sub(1),
         KeyCode::Down => *index = (*index + 1).min(archive.terminals.len().saturating_sub(1)),
         KeyCode::Enter => {
-          let request =
-            archive
-              .terminals
-              .get(*index)
-              .map(|terminal| ClientMessage::GetArchivedTerminal {
-                session_id: archive.session.session_id.clone(),
-                terminal_id: terminal.terminal_id.clone(),
-              });
-          if let Some(request) = request {
-            let ServerMessage::ArchivedTerminalSnapshot { terminal } =
-              self.request(request).await?
-            else {
-              return Err("expected archived terminal".into());
-            };
-            let mut model = crate::model::Model::new(&terminal.checkpoint.terminal_size);
-            model.restore(&terminal.checkpoint);
-            model.set_history(terminal.history.lines);
-            self.copy_mode = Some(CopyMode::new(model.copy_lines()));
+          if let Some(terminal) = archive.terminals.get(*index) {
+            self.copy_mode = Some(CopyMode::new(terminal.lines.clone()));
           }
         }
         KeyCode::Esc => self.overlay = Overlay::Archives(0),
@@ -888,8 +948,8 @@ impl App {
               format!(
                 "{} {}  {}",
                 if i == *index { ">" } else { " " },
-                archive.session.name,
-                archive.session.session_id
+                archive.name,
+                archive.session_id
               )
             }),
         );
@@ -898,7 +958,7 @@ impl App {
       Overlay::ArchiveTerminals(archive, index) => {
         let mut lines = vec![format!(
           "{} — archived terminals; Enter browses/copies, Esc returns",
-          archive.session.name
+          archive.name
         )];
         let start = index.saturating_sub(usize::from(self.size.1.saturating_sub(3)));
         lines.extend(
@@ -909,11 +969,10 @@ impl App {
             .skip(start)
             .map(|(i, terminal)| {
               format!(
-                "{} {} {:?} {:?}",
+                "{} {} {}",
                 if i == *index { ">" } else { " " },
                 terminal.terminal_id,
-                terminal.reason,
-                terminal.exit_code
+                terminal.reason
               )
             }),
         );

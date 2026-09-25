@@ -57,6 +57,28 @@ describe("session compositor", () => {
     expect(stop).toHaveBeenCalled();
   });
 
+  it("keeps the cached layout and border dimensions while disconnected", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = props();
+    const mounted = render(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    mounted.rerender(<SessionViewSurface {...actions} phase="disconnected" />);
+    const panes = screen.getAllByLabelText("Terminal input").map((input) => input.closest<HTMLElement>(".view-pane")!);
+    expect(panes.map((pane) => pane.style.width)).toEqual(["320px", "312px"]);
+    expect(panes.map((pane) => pane.style.height)).toEqual(["384px", "384px"]);
+  });
+
+  it("bounds a missing session's fallback canvas and dismisses without a network request", async () => {
+    const actions = { ...props(), on_dismiss: vi.fn() };
+    render(<SessionViewSurface {...actions} phase="disconnected" ended_message="Session no longer exists" />);
+    const canvas = screen.getByLabelText("Terminal input").closest(".view-panes") as HTMLElement;
+    expect(canvas.style.width).toBe("640px");
+    expect(canvas.style.height).toBe("384px");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss ended pane" }));
+    expect(actions.on_dismiss).toHaveBeenCalledOnce();
+    expect(mocks.request).not.toHaveBeenCalled();
+  });
+
   it("uses server cell rectangles and keeps pane controls outside the canvas", async () => {
     mocks.request.mockResolvedValue(split);
     render(<SessionViewSurface {...props()} />);

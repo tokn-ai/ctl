@@ -366,6 +366,13 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
   );
   assert_eq!(app.panes.len(), 1);
   assert_eq!(app.focused, primary);
+  let archives = app.local_archives()?;
+  assert!(archives.iter().any(|archive| {
+    archive
+      .terminals
+      .iter()
+      .any(|pane| pane.lines.join("\n").contains("FINAL_CHILD"))
+  }));
 
   let mut missing = daemon.app(true);
   missing.start(Some("confirmed-absent".into())).await?;
@@ -399,5 +406,21 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
       .await?
   );
   app.detach().await;
+  Ok(())
+}
+
+#[tokio::test]
+async fn archived_output_opens_without_a_daemon() -> Result<()> {
+  let directory = std::env::temp_dir().join(format!("rtui-archive-{}", uuid::Uuid::new_v4()));
+  let socket = directory.join("absent.sock");
+  let mut app = App::new(socket.clone(), true, input::parse_prefix("Ctrl+b")?);
+  app.selected_id = "missing".into();
+  app.ended = Some("Session no longer exists".into());
+  app.save_archive()?;
+  app.open_archive("missing")?;
+  assert!(app.archive_only);
+  assert!(!socket.exists());
+  assert!(matches!(app.overlay, Overlay::ArchiveTerminals(..)));
+  std::fs::remove_dir_all(directory)?;
   Ok(())
 }

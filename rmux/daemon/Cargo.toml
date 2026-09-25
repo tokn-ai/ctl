@@ -5,10 +5,6 @@ edition.workspace = true
 
 [dependencies]
 clap.workspace = true
-dirs.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
 avt.workspace = true
 portable-pty.workspace = true
 process-info.workspace = true

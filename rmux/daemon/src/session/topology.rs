@@ -233,62 +233,6 @@ impl SessionRegistry {
     let _ = self.reflow_view(&owner_id);
   }
 
-  pub(super) fn archive_terminal(
-    &self,
-    store: &crate::archive::ArchiveStore,
-    id: &str,
-    exit_code: Option<u32>,
-  ) -> std::io::Result<()> {
-    use rmux_proto::{ArchivedTerminal, ArchivedTerminalInfo, SessionArchive, TerminalEndReason};
-    let Some(terminal) = self.terminals.get(id) else {
-      return Ok(());
-    };
-    let session = terminal.info();
-    let view = self
-      .view_info(&session.session_id)
-      .map_err(std::io::Error::other)?;
-    let complete = view.terminals.len() == 1;
-    let terminals = view
-      .terminals
-      .iter()
-      .filter_map(|info| self.terminals.get(&info.terminal_id))
-      .map(|terminal| {
-        let mut state = lock(&terminal.state);
-        super::refresh_checkpoint(&mut state);
-        ArchivedTerminal {
-          info: ArchivedTerminalInfo {
-            terminal_id: terminal.id.clone(),
-            ended_at_ms: if terminal.id == id { unix_time_ms() } else { 0 },
-            exit_code: if terminal.id == id { exit_code } else { None },
-            reason: if terminal
-              .terminated
-              .load(std::sync::atomic::Ordering::Acquire)
-            {
-              TerminalEndReason::Terminated
-            } else if terminal.id == id {
-              TerminalEndReason::Exited
-            } else {
-              TerminalEndReason::Missing
-            },
-          },
-          checkpoint: state.checkpoint.clone(),
-          history: state.checkpoint_history.clone(),
-        }
-      })
-      .collect();
-    store.save(
-      SessionArchive {
-        session,
-        view,
-        archived_at_ms: 0,
-        expires_at_ms: 0,
-        terminals: Vec::new(),
-      },
-      terminals,
-      complete,
-    )
-  }
-
   pub(super) fn remove_terminal(&mut self, id: &str) {
     self.detach_terminal(id);
     self.terminals.remove(id);

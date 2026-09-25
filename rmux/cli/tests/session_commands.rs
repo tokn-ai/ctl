@@ -37,6 +37,10 @@ impl Daemon {
 
   fn command(&self, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_rmux"))
+      .env(
+        "RMUX_ARCHIVE_DIRECTORY",
+        self.directory.join("client-archives"),
+      )
       .arg("-S")
       .arg(self.directory.join("rmux.sock"))
       .args(args)
@@ -91,4 +95,9 @@ async fn tmux_create_attach_existing_and_noninteractive_safety() {
   assert_eq!(daemon.success(&["list-sessions"]).lines().count(), 3);
   daemon.success(&["kill-session", "-t", "other"]);
   daemon.success(&["kill", "work"]);
+  // Archive reads are local and still work after the daemon is gone.
+  daemon.task.abort();
+  let archives = daemon.success(&["archives"]);
+  assert!(archives.contains("work"));
+  assert!(archives.contains("other"));
 }

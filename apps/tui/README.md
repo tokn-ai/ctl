@@ -152,25 +152,19 @@ key. That key dismisses only the ended pane; when the whole session has ended,
 it exits the TUI attachment. A confirmed missing session behaves the same way.
 Connection failures remain reconnectable and are not treated as confirmed exits.
 
-Normal exits and explicit termination are archived on the daemon's host for
-seven days by default. Archives retain the session identity, composition,
-per-terminal exit reason and code, final checkpoint, and bounded history. They
-survive daemon restarts and are separate from the running session list.
+Dismissing an ended or confirmed missing session saves a client-local archive
+for seven days. Archives retain the session identity, per-pane end message,
+and text available in this client's buffers. Output the client never received
+cannot be recovered. Transport failures alone do not archive a session.
 
-Use `rmux archives` to list archives and `rmux archive SESSION_ID` to browse one
-read-only. Within the TUI, **Ctrl+B A** opens the archive list; choose a session,
-then a terminal, and press Enter to inspect/search/copy its output. An archive
-cannot accept input or revive a process. `ctl rmux archives` and
-`ctl rmux archive SESSION_ID` expose archive metadata through the configured
-transport. The desktop's Sessions sidebar has an **Archived** browser as well.
+Use `rmux archives` to list local TUI archives and `rmux archive SESSION_ID` to
+browse one read-only. **Ctrl+B A** opens the archive list; select a session and
+pane, then press Enter to inspect/search/copy its output. No daemon connection
+is needed for archives. The desktop **Archived** browser uses its own local store.
 
-Configure retention with `rmuxd --archive-retention-days DAYS` and optionally
-`--archive-directory DIRECTORY` when starting the daemon. The default endpoint
-uses an endpoint-specific directory below the user's local data directory at
-`rmux/archives/`. Explicit custom sockets default to a sibling `.archives`
-directory so isolated daemons stay isolated. Expired archives are inaccessible
-immediately, and are removed at startup, when listing, or during the daemon's
-minute-by-minute cleanup. Cleanup resumes on the next start if the daemon is
-not running. Retention changes apply to newly completed sessions.
+Set `RMUX_ARCHIVE_DIRECTORY` to override the client storage directory.
 
-The archive API requires protocol version 13 on clients and daemons.
+Archives live below the user's local data directory in `rmux/tui/archives/`
+(or `rmux/desktop/archives/` for the desktop). They expire after seven days and
+are removed when listing the store. No daemon flags or protocol changes are
+needed. `ctl rmux archives` also lists this client's TUI archive metadata.

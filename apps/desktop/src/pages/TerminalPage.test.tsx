@@ -71,6 +71,7 @@ const api = vi.hoisted(() => ({
   setNativeWindowTitle: vi.fn(),
   createSession: vi.fn(),
   killSession: vi.fn(),
+  sessionArchive: vi.fn(),
   restartLocalDaemon: vi.fn(),
   forgetSshCredentials: vi.fn(),
   probeSshHost: vi.fn(),
@@ -119,7 +120,7 @@ vi.mock("../features/attachment/useAttachment", () => ({
   useAttachment: () => attachment,
 }));
 vi.mock("../components/terminal/TerminalSurface", () => ({
-  TerminalSurface: () => <div>Terminal renderer</div>,
+  TerminalSurface: ({ ended_message, on_dismiss }: { ended_message?: string; on_dismiss?(): void }) => <div>Terminal renderer{ended_message && <button onClick={on_dismiss}>Dismiss ended session</button>}</div>,
 }));
 
 function snapshot(): WorkspaceSnapshot {
@@ -211,6 +212,7 @@ beforeEach(() => {
   api.listSshIdentityFiles.mockResolvedValue({ identity_files: [], warnings: [] });
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
+  api.sessionArchive.mockResolvedValue({ kind: "saved" });
   api.probeSshHost.mockReset().mockResolvedValue(remoteInfo);
   api.sshConnectionStatus.mockReset().mockResolvedValue({ connected: true, manually_disconnected: false });
   api.disconnectSshHost.mockReset().mockResolvedValue(undefined);
@@ -828,6 +830,7 @@ describe("workspace-backed terminal page", () => {
       target: { kind: "ssh", destination: "test", host_id: "test-id", host_name: "test", method_id: "default" },
       session_id: "other-id",
     });
+    expect(api.sessionArchive).toHaveBeenCalledExactlyOnceWith({ kind: "save", archive: expect.objectContaining({ session_id: "other-id", name: "other" }) });
     expect(
       screen.getByRole("button", { name: "Terminate remembered" }),
     ).toBeTruthy();
@@ -2244,6 +2247,27 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.connect).not.toHaveBeenCalled();
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
     expect(api.cancelSshProbe).toHaveBeenCalledOnce();
+  });
+
+  it("archives a dismissed missing session locally before removing its tab and remembered entry", async () => {
+    const restored = restoreWorkspace(snapshot().document, hostSnapshot().document, []);
+    Object.assign(attachment.state, { phase: "disconnected", session: restored.sessions[0], error_code: "session_not_found", message: "Session no longer exists" });
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss ended session" }));
+    await waitFor(() => expect(api.sessionArchive).toHaveBeenCalledWith({ kind: "save", archive: expect.objectContaining({ session_id: "known-id", name: "remembered" }) }));
+    await waitFor(() => expect(api.updateWorkspace).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ sessions: [], tabs: [] })));
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps a missing tab available if its local archive cannot be saved", async () => {
+    const restored = restoreWorkspace(snapshot().document, hostSnapshot().document, []);
+    Object.assign(attachment.state, { phase: "disconnected", session: restored.sessions[0], error_code: "session_not_found", message: "Session no longer exists" });
+    api.sessionArchive.mockRejectedValueOnce(new Error("Local disk is full"));
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss ended session" }));
+    await screen.findByText("Local disk is full");
+    expect(screen.getByRole("button", { name: "~/work — remembered" })).toBeTruthy();
+    expect(attachment.detach).not.toHaveBeenCalled();
   });
 
   it("refreshes only remembered IDs and keeps missing sessions in the workspace", async () => {

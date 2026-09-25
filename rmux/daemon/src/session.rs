@@ -62,7 +62,6 @@ pub struct Terminal {
   manager: Weak<SessionManagerInner>,
   initial_working_directory: Option<String>,
   managed: bool,
-  terminated: AtomicBool,
   owner: Mutex<TerminalOwner>,
   id: String,
   name: String,
@@ -736,7 +735,6 @@ impl Terminal {
   }
 
   pub fn kill(&self) -> Result<(), SessionControlError> {
-    self.terminated.store(true, Ordering::Release);
     #[cfg(unix)]
     lock(&self.killer).kill()?;
     #[cfg(windows)]
@@ -914,7 +912,6 @@ type ManagedSessions = HashMap<(Uuid, Uuid), Option<Arc<Terminal>>>;
 
 struct SessionManagerInner {
   instance_id: String,
-  pub archives: Mutex<Option<Arc<crate::archive::ArchiveStore>>>,
   managed: Mutex<ManagedSessions>,
   registry: Mutex<SessionRegistry>,
   #[cfg(unix)]
@@ -1001,7 +998,6 @@ impl SessionManager {
     Self {
       inner: Arc::new(SessionManagerInner {
         instance_id: Uuid::new_v4().to_string(),
-        archives: Mutex::new(None),
         managed: Mutex::new(HashMap::new()),
         registry: Mutex::new(SessionRegistry::default()),
         #[cfg(unix)]
@@ -1142,7 +1138,6 @@ impl SessionManager {
       manager: Arc::downgrade(&self.inner),
       initial_working_directory,
       managed,
-      terminated: AtomicBool::new(false),
       owner: Mutex::new(TerminalOwner {
         created_at_ms: unix_time_ms(),
         session_id: Uuid::new_v4().to_string(),
@@ -1276,14 +1271,6 @@ impl SessionManager {
       instance_id: self.inner.instance_id.clone(),
       session,
     })
-  }
-
-  pub fn set_archive_store(&self, store: crate::archive::ArchiveStore) {
-    *lock(&self.inner.archives) = Some(Arc::new(store));
-  }
-
-  pub fn archive_store(&self) -> Option<Arc<crate::archive::ArchiveStore>> {
-    lock(&self.inner.archives).clone()
   }
 
   pub fn list(&self) -> Vec<SessionInfo> {
@@ -1496,18 +1483,10 @@ fn start_session_workers(
         drop(master);
       }
       let _reader_result = reader_thread.join();
+      waiter_session.publish_ended(exit_code);
       if let Some(manager) = manager.upgrade() {
-        let mut registry = lock(&manager.registry);
-        if let Some(store) = lock(&manager.archives).as_ref()
-          && let Err(error) = registry.archive_terminal(store, &session_id, exit_code)
-        {
-          eprintln!("rmuxd: could not archive terminal {session_id}: {error}");
-        }
-        waiter_session.publish_ended(exit_code);
-        registry.remove_terminal(&session_id);
+        lock(&manager.registry).remove_terminal(&session_id);
         manager.changed.notify_one();
-      } else {
-        waiter_session.publish_ended(exit_code);
       }
     })
     .map_err(SessionManagerError::WaiterThread)?;

@@ -37,6 +37,19 @@ function validDimensions(
 }
 
 export class XtermRenderer {
+  private static readonly renderers = new Set<XtermRenderer>();
+
+  async archivePanes(session: SessionSummary, reason: string) {
+    const panes = new Map<string, { terminal_id: string; reason: string; lines: string[] }>();
+    for (const renderer of XtermRenderer.renderers) {
+      const terminal = renderer.sessions.get(sessionKey(session));
+      if (!terminal) continue;
+      const terminal_id = terminal.terminal_id ?? session.session_id;
+      panes.set(terminal_id, { terminal_id, reason, lines: await terminal.presenter.copyLines() });
+    }
+    return [...panes.values()];
+  }
+
   private cellObserver: ResizeObserver | null = null;
   private cellFrame: number | null = null;
   private readonly cellListeners = new Set<(cell: { width: number; height: number }) => void>();
@@ -79,6 +92,7 @@ export class XtermRenderer {
     initialSize: TerminalSize,
   ) {
     this.active = this.createTerminal(initialSize);
+    XtermRenderer.renderers.add(this);
   }
 
   activateSession(session: SessionSummary): void {
@@ -225,6 +239,7 @@ export class XtermRenderer {
   }
 
   dispose(): void {
+    XtermRenderer.renderers.delete(this);
     this.cellObserver?.disconnect();
     this.cellObserver = null;
     this.cellListeners.clear();
@@ -326,6 +341,10 @@ export class XtermRenderer {
     });
 
     return {
+      copyLines: () => {
+        const buffer = terminal.buffer.active;
+        return Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)?.translateToString(true) ?? "");
+      },
       write: (data, callback) => terminal.write(data, callback),
       resize: (columns, rows) => terminal.resize(columns, rows),
       dispose: () => terminal.dispose(),

@@ -35,6 +35,9 @@ pub trait Connector {
   fn is_retryable(&self, error: &Self::Error) -> bool;
   fn is_local(&self) -> bool;
   fn label(&self) -> &str;
+  fn archive_key(&self) -> String {
+    self.label().to_owned()
+  }
   fn connection_kind(&self) -> &'static str;
   fn client_name(&self) -> &'static str;
   fn status_prefix(&self) -> &'static str;
@@ -71,6 +74,10 @@ impl Connector for LocalConnector {
 
   fn label(&self) -> &'static str {
     "local"
+  }
+
+  fn archive_key(&self) -> String {
+    self.socket_path.to_string_lossy().into_owned()
   }
 
   fn connection_kind(&self) -> &'static str {
@@ -158,8 +165,8 @@ where
       }
     }
     Command::List => list_sessions(connector).await,
-    Command::Archives => show_archives(connector, None).await,
-    Command::Archive { session_id } => show_archives(connector, Some(session_id)).await,
+    Command::Archives => show_archives(None),
+    Command::Archive { session_id } => show_archives(Some(&session_id)),
     Command::State { session } => show_shell_state(connector, &session).await,
     Command::Attach {
       session,
@@ -270,36 +277,17 @@ pub async fn resolve_session<C: Connector>(
     .ok_or(CommandError::MissingSession)
 }
 
-async fn show_archives<C: Connector>(
-  connector: &C,
-  id: Option<String>,
-) -> Result<(), CommandError> {
-  let message = id.map_or(ClientMessage::ListArchives, |session_id| {
-    ClientMessage::GetArchive { session_id }
-  });
-  match target_request(connector, message).await? {
-    ServerMessage::ArchiveList { archives } => {
-      println!("ID\tNAME\tARCHIVED_AT_MS\tEXPIRES_AT_MS");
-      for archive in archives {
-        println!(
-          "{}\t{}\t{}\t{}",
-          archive.session.session_id,
-          archive.session.name,
-          archive.archived_at_ms,
-          archive.expires_at_ms
-        );
-      }
-    }
-    ServerMessage::ArchiveSnapshot { archive } => {
-      println!("{}\t{}", archive.session.session_id, archive.session.name);
-      for terminal in archive.terminals {
-        println!(
-          "{}\t{:?}\t{:?}",
-          terminal.terminal_id, terminal.reason, terminal.exit_code
-        );
-      }
-    }
-    response => return Err(unexpected("archive response", &response)),
+fn show_archives(id: Option<&str>) -> Result<(), CommandError> {
+  let archives = rmux_client::archive::ArchiveStore::for_client("tui")?.list()?;
+  println!("ID\tNAME\tARCHIVED_AT_MS\tEXPIRES_AT_MS");
+  for archive in archives
+    .into_iter()
+    .filter(|archive| id.is_none_or(|id| id == archive.session_id))
+  {
+    println!(
+      "{}\t{}\t{}\t{}",
+      archive.session_id, archive.name, archive.archived_at_ms, archive.expires_at_ms
+    );
   }
   Ok(())
 }
@@ -367,6 +355,17 @@ async fn show_shell_state<C: Connector>(connector: &C, session: &str) -> Result<
 }
 
 async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), CommandError> {
+  let view = match target_request(
+    connector,
+    ClientMessage::GetView {
+      session: session.into(),
+    },
+  )
+  .await
+  {
+    Ok(ServerMessage::ViewSnapshot { view }) => Some(view),
+    _ => None,
+  };
   match target_request(
     connector,
     ClientMessage::KillSession {
@@ -375,7 +374,33 @@ async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), 
   )
   .await?
   {
-    ServerMessage::Success => Ok(()),
+    ServerMessage::Success => {
+      rmux_client::archive::ArchiveStore::for_client("tui")?.save(
+        rmux_client::archive::SessionArchive {
+          session_id: view
+            .as_ref()
+            .map_or_else(|| session.to_owned(), |view| view.session_id.clone()),
+          name: view
+            .as_ref()
+            .map_or_else(|| session.to_owned(), |view| view.session_name.clone()),
+          host_key: connector.archive_key(),
+          archived_at_ms: 0,
+          expires_at_ms: 0,
+          terminals: view.map_or_else(Vec::new, |view| {
+            view
+              .terminals
+              .into_iter()
+              .map(|terminal| rmux_client::archive::ArchivedPane {
+                terminal_id: terminal.terminal_id,
+                reason: "Session terminated".into(),
+                lines: Vec::new(),
+              })
+              .collect()
+          }),
+        },
+      )?;
+      Ok(())
+    }
     response => Err(unexpected("success", &response)),
   }
 }
@@ -602,6 +627,8 @@ fn connection_error(error: impl Error + Send + Sync + 'static) -> CommandError {
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error("local archive failed: {0}")]
+  Archive(#[from] io::Error),
   #[error("no running session; create one with rmux new")]
   MissingSession,
   #[error("transport connection failed: {0}")]

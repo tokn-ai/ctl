@@ -55,7 +55,7 @@ pub async fn run(options: Options) -> Result<()> {
     input::parse_prefix(&options.prefix)?,
   );
   let started = if let Some(id) = options.archive {
-    app.open_archive(id).await
+    app.open_archive(&id)
   } else {
     app.start(options.session).await
   };

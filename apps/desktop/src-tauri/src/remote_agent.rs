@@ -340,7 +340,7 @@ fn verify_bundle_revision(
   if components_dirty || source_revision.is_empty() || bundle_revision != source_revision {
     return Err(CommandErrorDto::new(
       "remote_agent_bundle_stale",
-      "The remote component bundle does not match this app build. Commit component changes, run `pnpm agents:sync` from apps/rmux for that exact revision, and rebuild the app before updating this host.",
+      "The remote component bundle does not match this app build. Commit component changes, run `pnpm agents:sync` from apps/desktop for that exact revision, and rebuild the app before updating this host.",
     ));
   }
   Ok(())
@@ -360,7 +360,7 @@ fn bundle_invalid(message: impl Into<String>) -> CommandErrorDto {
 
 fn bundle_unavailable() -> CommandErrorDto {
   let message = if cfg!(debug_assertions) {
-    "No remote bundle set is available for development. Run `pnpm agents:sync` from apps/rmux."
+    "No remote bundle set is available for development. Run `pnpm agents:sync` from apps/desktop."
   } else {
     "The app package does not include its remote component bundle set."
   };

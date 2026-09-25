@@ -51,7 +51,7 @@ pub enum Command {
     name: Option<String>,
   },
 
-  /// Move all source terminals into the destination view as another tab group.
+  /// Join the source and destination layouts in a horizontal split.
   Merge { source: String, destination: String },
 
   /// Terminate one terminal, keeping its siblings alive.

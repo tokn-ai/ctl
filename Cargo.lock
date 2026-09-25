@@ -3134,6 +3134,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmux-tui"
+version = "0.1.0"
+dependencies = [
+ "avt",
+ "clap",
+ "crossterm",
+ "rmux-client",
+ "rmux-ipc",
+ "rmux-proto",
+ "rmuxd",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "rmuxd"
 version = "0.1.0"
 dependencies = [

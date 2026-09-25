@@ -42,7 +42,7 @@ const listedOnlySession: SessionSummary = {
 
 const shellState: ShellStateSummary = {
   shell_type: "zsh",
-  cwd: "/Users/clouds/Projects/Tools/ctl/apps/rmux",
+  cwd: "/Users/clouds/Projects/Tools/ctl/apps/desktop",
   running_command: "cargo test -p rmux-app",
   prompt_phase: "running",
   tui_hint: "inline",
@@ -279,9 +279,9 @@ describe("SessionSidebar", () => {
     );
 
     const fullTitle =
-      "/Users/clouds/Projects/Tools/ctl/apps/rmux — cargo test -p rmux-app";
+      "/Users/clouds/Projects/Tools/ctl/apps/desktop — cargo test -p rmux-app";
     expect(markup).toContain(`title="${fullTitle}"`);
-    expect(markup).toContain("<strong>…pps/rmux — …mux-app</strong>");
+    expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(
       `<small title="${session.name} · running · 80×24">${session.name}<span aria-hidden="true"> · </span>`,
     );

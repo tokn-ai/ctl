@@ -62,7 +62,7 @@ export const previewDefinitions: SavedTaskDefinition[] = [
   {
     definition_id: "preview-web",
     revision: "1",
-    definition: { name: "Web development", program: "pnpm", arguments: ["dev"], working_directory: "/Users/developer/Projects/ctl/apps/rmux", execution_mode: "background" },
+    definition: { name: "Web development", program: "pnpm", arguments: ["dev"], working_directory: "/Users/developer/Projects/ctl/apps/desktop", execution_mode: "background" },
   },
   {
     definition_id: "preview-tests",
@@ -72,7 +72,7 @@ export const previewDefinitions: SavedTaskDefinition[] = [
   {
     definition_id: "preview-check",
     revision: "1",
-    definition: { name: "Type check", program: "pnpm", arguments: ["check"], working_directory: "/Users/developer/Projects/ctl/apps/rmux", execution_mode: "background" },
+    definition: { name: "Type check", program: "pnpm", arguments: ["check"], working_directory: "/Users/developer/Projects/ctl/apps/desktop", execution_mode: "background" },
   },
 ];
 
@@ -160,9 +160,9 @@ export function previewOutput(session: SessionSummary): string {
     "",
     `\x1b[36m${cwd}\x1b[0m \x1b[90mon\x1b[0m \x1b[35mmain\x1b[0m`,
     "\x1b[32m❯\x1b[0m git status --short",
-    " \x1b[33mM\x1b[0m apps/rmux/src/App.css",
-    " \x1b[33mM\x1b[0m apps/rmux/src/components/sessions/SessionSidebar.tsx",
-    " \x1b[33mM\x1b[0m apps/rmux/src/components/tabs/TerminalTabs.tsx",
+    " \x1b[33mM\x1b[0m apps/desktop/src/App.css",
+    " \x1b[33mM\x1b[0m apps/desktop/src/components/sessions/SessionSidebar.tsx",
+    " \x1b[33mM\x1b[0m apps/desktop/src/components/tabs/TerminalTabs.tsx",
     "",
     `\x1b[36m${cwd}\x1b[0m \x1b[90mon\x1b[0m \x1b[35mmain\x1b[0m`,
     "\x1b[32m❯\x1b[0m cargo check --workspace",

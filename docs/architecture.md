@@ -51,7 +51,7 @@ processes; its interactive tasks use rmuxd's PTYs and normal rmux attachments.
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
 - `rmux`: canonical local CLI and reusable rmux command implementation.
-- `rmux-app`: local/SSH Tauri/React terminal client in `apps/rmux`. Its Rust
+- `rmux-app`: local/SSH Tauri/React terminal client in `apps/desktop`. Its Rust
   adapter composes `ctl-core` transport with `rmux-client`; its webview owns
   xterm rendering, viewport, and local scrollback.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH

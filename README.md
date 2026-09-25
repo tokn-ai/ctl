@@ -21,6 +21,16 @@ Windows desktop support remains pending.
 cargo build --workspace
 ```
 
+For the tmux-style terminal UI (local sessions, including when run inside SSH):
+
+```sh
+cargo build -p rmux-tui -p rmuxd
+cargo run -p rmux-tui
+```
+
+Use Ctrl+B then `?` for help, `%` to split right, and `d` to detach.
+See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
+
 For the Windows local CLI and daemon slice:
 
 ```sh
@@ -62,7 +72,7 @@ sibling executables:
 
 ```sh
 cargo build -p ctld -p rmuxd -p taskd
-cd apps/rmux
+cd apps/desktop
 pnpm install
 pnpm tauri dev
 ```

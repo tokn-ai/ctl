@@ -99,7 +99,7 @@ describe("compactTerminalTitle", () => {
   it("omits the shared prefix and preserves the distinguishing tail", () => {
     expect(
       compactTerminalTitle(
-        "/Users/clouds/Projects/Tools/ctl/apps/rmux/src/features/tabs — cargo test",
+        "/Users/clouds/Projects/Tools/ctl/apps/desktop/src/features/tabs — cargo test",
         31,
       ),
     ).toBe("…src/features/tabs — cargo test");
@@ -117,7 +117,7 @@ describe("compactTerminalTitleParts", () => {
     const title = formatTerminalTitle(
       { name: "session-1" },
       shellState({
-        cwd: "/Users/clouds/Projects/Tools/ctl/apps/rmux/src/features/tabs",
+        cwd: "/Users/clouds/Projects/Tools/ctl/apps/desktop/src/features/tabs",
         running_command:
           "pnpm exec vitest run terminalTitle --watch=false --reporter=verbose",
         prompt_phase: "running",

@@ -8,7 +8,7 @@ sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 From the repository root, install the frontend dependencies and start Tauri:
 
 ```sh
-cd apps/rmux
+cd apps/desktop
 pnpm install
 pnpm tauri dev
 ```

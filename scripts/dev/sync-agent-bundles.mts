@@ -247,7 +247,7 @@ function readBundleSet(
 }
 
 function appVersion(repoRoot: string): string {
-  const configPath = join(repoRoot, "apps/rmux/src-tauri/tauri.conf.json");
+  const configPath = join(repoRoot, "apps/desktop/src-tauri/tauri.conf.json");
   const config = asRecord(JSON.parse(readFileSync(configPath, "utf8")), "Tauri config");
   return requireString(config, "version");
 }
@@ -255,12 +255,12 @@ function appVersion(repoRoot: string): string {
 function checkBundles(repoRoot: string): void {
   const destination = join(
     repoRoot,
-    "apps/rmux/src-tauri/resources/agent-bundles",
+    "apps/desktop/src-tauri/resources/agent-bundles",
   );
   const revision = git(["rev-parse", "HEAD"], repoRoot);
   if (!existsSync(join(destination, BUNDLE_SET_FILE))) {
     console.warn("Remote install bundles have not been synchronized for development.");
-    console.warn("Run `pnpm agents:sync` from apps/rmux when testing remote installation.");
+    console.warn("Run `pnpm agents:sync` from apps/desktop when testing remote installation.");
     return;
   }
   try {
@@ -268,7 +268,7 @@ function checkBundles(repoRoot: string): void {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(`Remote install bundles are not current: ${detail}`);
-    console.warn("Run `pnpm agents:sync` from apps/rmux when testing remote installation.");
+    console.warn("Run `pnpm agents:sync` from apps/desktop when testing remote installation.");
   }
 }
 
@@ -380,7 +380,7 @@ async function syncBundles(repoRoot: string, useMain: boolean): Promise<void> {
     const manifest = readBundleSet(temporaryDirectory, version, revision, true);
     const destination = join(
       repoRoot,
-      "apps/rmux/src-tauri/resources/agent-bundles",
+      "apps/desktop/src-tauri/resources/agent-bundles",
     );
     installBundleSet(temporaryDirectory, destination, manifest);
     console.log(

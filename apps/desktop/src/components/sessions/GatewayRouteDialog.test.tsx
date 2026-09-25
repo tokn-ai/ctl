@@ -102,4 +102,31 @@ describe("GatewayRouteDialog", () => {
       (screen.getByRole("button", { name: "Delete" }) as HTMLButtonElement).disabled,
     ).toBe(true);
   });
+  it("adds a SOCKS5 hop with proxy credentials requested at connection time", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<GatewayRouteDialog
+      target={{ kind: "ssh", host_id: "server", destination: "server.internal" }}
+      gateways={[]}
+      targets={[]}
+      onSave={onSave}
+      onClose={vi.fn()}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "+ New gateway" }));
+    await user.selectOptions(screen.getByLabelText("Type"), "socks5");
+    await user.type(screen.getByLabelText("Name"), "Proxy");
+    await user.type(screen.getByLabelText("SOCKS5 proxy address"), "proxy.internal");
+    await user.type(screen.getByLabelText("Username (optional)"), "alice");
+    await user.type(screen.getByLabelText("Port"), "1080");
+    await user.click(screen.getByRole("button", { name: "Save gateway" }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+    expect(onSave.mock.calls[0][0]).toMatchObject([{
+      kind: "socks5", name: "Proxy", destination: "proxy.internal", user: "alice", port: 1080,
+    }]);
+    expect(onSave.mock.calls[0][1]).toHaveLength(1);
+  });
+
 });

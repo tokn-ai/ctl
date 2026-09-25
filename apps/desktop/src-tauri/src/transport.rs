@@ -82,6 +82,7 @@ impl ConnectionTargetDto {
           gateways: gateways
             .iter()
             .map(|gateway| SshGateway {
+              kind: gateway.kind,
               destination: gateway.destination.clone(),
               hostname: gateway.hostname.clone(),
               user: gateway.user.clone(),

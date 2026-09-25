@@ -84,6 +84,7 @@ export interface SshGatewayRouteStep {
 }
 
 export interface WorkspaceSshGateway {
+  kind?: "ssh" | "socks5";
   gateway_id: string;
   name: string;
   destination: string;

@@ -34,6 +34,8 @@ pub struct SshGatewayRouteStepDto {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshGatewayDto {
+  #[serde(default)]
+  pub kind: ctld_ipc::GatewayKind,
   pub gateway_id: String,
   pub name: String,
   pub destination: String,

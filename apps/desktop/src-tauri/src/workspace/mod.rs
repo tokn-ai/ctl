@@ -24,9 +24,15 @@ pub use catalog::HostCatalogDocument;
 pub use catalog::{HostCatalogSnapshot, UpdateHostsRequest};
 pub use hosts::{WorkspaceConnectionMethod, WorkspaceHost};
 
+fn is_ssh_gateway_kind(kind: &ctld_ipc::GatewayKind) -> bool {
+  *kind == ctld_ipc::GatewayKind::Ssh
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSshGateway {
+  #[serde(default, skip_serializing_if = "is_ssh_gateway_kind")]
+  pub kind: ctld_ipc::GatewayKind,
   pub gateway_id: String,
   pub name: String,
   pub destination: String,
@@ -226,6 +232,11 @@ fn validated_gateway_ids(gateways: &[WorkspaceSshGateway]) -> Option<HashSet<&st
           .chars()
           .any(|value| matches!(value, ',' | '@'))
         || gateway.port == Some(0)
+        || (gateway.kind == ctld_ipc::GatewayKind::Socks5
+          && (gateway.port.is_none()
+            || gateway.hostname.is_some()
+            || gateway.identity_file.is_some()
+            || gateway.remote_info.is_some()))
         || gateway
           .remote_info
           .as_ref()

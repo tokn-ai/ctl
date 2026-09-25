@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 serde_json.workspace = true
 ctl-proto.workspace = true
+ctld-ipc.workspace = true
 rmux-ipc.workspace = true
 task-client.workspace = true
 task-ipc.workspace = true

@@ -522,6 +522,7 @@ fn host_and_gateway_import_is_one_validated_batch() {
   let fixture = Fixture::new();
   let mut old = legacy();
   let gateway = WorkspaceSshGateway {
+    kind: ctld_ipc::GatewayKind::Ssh,
     gateway_id: "edge".into(),
     name: "Office gateway".into(),
     destination: "edge".into(),

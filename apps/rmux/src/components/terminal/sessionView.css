@@ -1,10 +1,9 @@
 .session-view { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .view-panes { position: relative; flex: none; min-height: 0; background: var(--surface-0); }
 .view-pane { position: absolute; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border: 0; }
-.view-pane-toolbar, .view-tabs { display: flex; gap: 6px; align-items: center; padding: 4px 8px; flex-shrink: 0; flex-wrap: wrap; }
+.view-pane-toolbar { display: flex; gap: 6px; align-items: center; padding: 4px 8px; flex-shrink: 0; flex-wrap: wrap; }
 .view-pane-toolbar span { margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.view-pane-toolbar button, .view-tabs button { font: inherit; font-size: 11px; color: inherit; background: transparent; border: 1px solid var(--border-subtle, #555); border-radius: 4px; padding: 3px 6px; cursor: pointer; }
-.view-tabs [aria-selected="true"] { background: var(--surface-2, #333); }
+.view-pane-toolbar button { font: inherit; font-size: 11px; color: inherit; background: transparent; border: 1px solid var(--border-subtle, #555); border-radius: 4px; padding: 3px 6px; cursor: pointer; }
 
 .terminal-prefix-hints { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 5; pointer-events: none; display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 10px; background: var(--surface-2, #222); border: 1px solid var(--accent, #7897c5); font-size: 12px; }
 .terminal-prefix-hints kbd { font-weight: 600; }

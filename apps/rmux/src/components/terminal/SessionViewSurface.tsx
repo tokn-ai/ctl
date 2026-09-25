@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
-import { adjacentPane, swapPanes, viewDividers, viewPanes, viewTabs } from "../../features/terminal/viewLayout";
+import { adjacentPane, swapPanes, viewDividers } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
@@ -53,7 +53,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busy_ref = useRef(false);
-  const [selected_tabs, setSelectedTabs] = useState<Record<string, number>>({});
   const pane_detachers = useRef(new Map<string, () => Promise<void>>());
   const session_ref = useRef(session);
   session_ref.current = session;
@@ -69,7 +68,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     setView(null);
     setError(null);
     setActionError(null);
-    setSelectedTabs({});
     setFocusedId(null);
     setZoomedId(null);
     if (!key || !connected) return;
@@ -151,8 +149,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
 
   const current_view = view?.session_id === session?.session_id ? view : null;
   const primary_id = session?.terminal_id;
-  const visibility = new Map(current_view ? viewPanes(current_view.layout, selected_tabs).map((pane) => [pane.terminal_id, pane.visible]) : []);
-  const panes = current_view?.panes.map((pane) => ({ terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: visibility.get(pane.terminal_id) ?? false })) ?? [];
+  const panes = current_view?.panes.map((pane) => ({ terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: true })) ?? [];
   const focused = panes.some((pane) => pane.terminal_id === focused_id && pane.visible) ? focused_id! : panes.find((pane) => pane.visible)?.terminal_id ?? primary_id;
   const can_split = connected && Boolean(current_view && focused) && !busy;
   const split_focused = useRef<(axis: "horizontal" | "vertical") => Promise<void>>(async () => {});
@@ -242,9 +239,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     </div>}
     {error && <div className="message-banner" role="status">{error}</div>}
     {action_error && <div className="message-banner" role="alert">{action_error}</div>}
-    {current_view && viewTabs(current_view.layout).map((group) => <div className="view-tabs" key={group.path} role="tablist" aria-label="Terminal group">
-      {Array.from({ length: group.count }, (_, index) => <button key={index} role="tab" aria-selected={(selected_tabs[group.path] ?? 0) === index} onClick={() => setSelectedTabs((previous) => ({ ...previous, [group.path]: index }))}>Group {index + 1}</button>)}
-    </div>)}
     <div className="view-controls" ref={setControlsHost}>
       {connected && primary_id && focused === primary_id && controls(primary_id, shell_state,
         <button onClick={on_toggle_input}>{input_owned ? "Release input" : "Take input"}</button>)}

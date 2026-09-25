@@ -2307,9 +2307,35 @@ async fn view_membership_moves_preserve_terminal_identity_and_live_attachments()
     },
   )
   .await?;
-  assert!(
-    matches!(merged, ServerMessage::ViewSnapshot { view } if view.terminals.len() == 2 && matches!(view.layout, rmux_proto::ViewLayout::Tabs { .. }))
+  let ServerMessage::ViewSnapshot { view: merged } = merged else {
+    panic!("expected merged view");
+  };
+  assert_eq!(merged.terminals.len(), 2);
+  assert!(matches!(
+    merged.layout,
+    rmux_proto::ViewLayout::Split {
+      axis: rmux_proto::SplitAxis::Horizontal,
+      ..
+    }
+  ));
+  assert_eq!(merged.panes.len(), 2);
+  assert_eq!(
+    merged.panes[0].left + merged.panes[0].columns + 1,
+    merged.panes[1].left
   );
+  assert_eq!(
+    merged.panes[1].left + merged.panes[1].columns,
+    merged.canvas_size.columns
+  );
+  for pane in &merged.panes {
+    let terminal = merged
+      .terminals
+      .iter()
+      .find(|terminal| terminal.terminal_id == pane.terminal_id)
+      .unwrap();
+    assert_eq!(terminal.terminal_size.columns, pane.columns);
+    assert_eq!(terminal.terminal_size.rows, pane.rows);
+  }
   assert!(matches!(
     topology_request(
       &socket,
@@ -2387,7 +2413,8 @@ async fn assert_view_layout_updates(
     ClientMessage::UpdateView {
       session: root.session_id.clone(),
       expected_revision: view.revision,
-      layout: rmux_proto::ViewLayout::Tabs {
+      layout: rmux_proto::ViewLayout::Split {
+        axis: rmux_proto::SplitAxis::Horizontal,
         children: vec![
           rmux_proto::ViewLayout::Terminal {
             terminal_id: child_id.to_owned(),

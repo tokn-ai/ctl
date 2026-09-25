@@ -1099,9 +1099,10 @@ mod tests {
       .split(' ')
       .next()
       .unwrap();
-    let bytes = encoded
-      .as_bytes()
-      .chunks_exact(2)
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty());
+    let bytes = pairs
+      .iter()
       .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
       .collect::<Vec<_>>();
     let route: Vec<ctld_ipc::SshGateway> = serde_json::from_slice(&bytes).unwrap();

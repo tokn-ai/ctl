@@ -91,6 +91,14 @@ export class XtermRenderer {
   cellDimensions() { return this.active.presenter.cellDimensions(); }
   private readonly sessions = new Map<string, CachedTerminal>();
   private active: CachedTerminal;
+  private read_only = false;
+
+  setReadOnly(read_only: boolean): void {
+    this.read_only = read_only;
+    for (const terminal of new Set([...this.sessions.values(), this.active])) {
+      terminal.presenter.setReadOnly(read_only);
+    }
+  }
 
   constructor(
     private readonly container: HTMLElement,
@@ -388,7 +396,17 @@ export class XtermRenderer {
       if (this.active.container === container) this.onInput(encodeTerminalBinary(data));
     });
 
+    const setReadOnly = (read_only: boolean) => {
+      terminal.options.disableStdin = read_only;
+      terminal.options.cursorInactiveStyle = read_only ? "none" : "outline";
+      // A disabled input cannot regain focus and draw an active cursor when
+      // clicking cached output. Selection and scrolling remain available.
+      if (read_only) terminal.blur();
+      if (terminal.textarea) terminal.textarea.disabled = read_only;
+    };
+    setReadOnly(this.read_only);
     return {
+      setReadOnly,
       snapshot: () => serializer.serialize({ scrollback: 2000 }),
       copyLines: () => {
         const buffer = terminal.buffer.active;

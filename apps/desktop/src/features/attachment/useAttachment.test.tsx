@@ -43,6 +43,8 @@ vi.mock("@xterm/xterm", async () => {
           onData: () => undefined,
           onBinary: () => undefined,
           focus: () => undefined,
+          blur: () => undefined,
+          options: terminal.options,
         };
       }
     },

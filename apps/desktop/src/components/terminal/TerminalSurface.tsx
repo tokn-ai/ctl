@@ -30,6 +30,8 @@ export function TerminalSurface({
   onReady,
 }: TerminalSurfaceProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<XtermRenderer | null>(null);
+  const read_only = !ended_message && phase !== "attached" && phase !== "ended";
   const inputRef = useRef(onInput);
   const readyRef = useRef(onReady);
   inputRef.current = ended_message || phase !== "attached" ? () => {} : onInput;
@@ -45,12 +47,16 @@ export function TerminalSurface({
       (data) => inputRef.current(data),
       INITIAL_SIZE,
     );
+    rendererRef.current = renderer;
     readyRef.current(renderer);
     return () => {
+      rendererRef.current = null;
       readyRef.current(null);
       renderer.dispose();
     };
   }, []);
+
+  useEffect(() => { rendererRef.current?.setReadOnly(read_only); }, [read_only]);
 
   return (
     <div className="terminal-shell" onKeyDownCapture={(event) => {

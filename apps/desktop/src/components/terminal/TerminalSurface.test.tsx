@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({ input: null as null | ((data: Uint8Array) => v
 vi.mock("../../features/terminal/XtermRenderer", () => ({ XtermRenderer: class {
   constructor(_container: HTMLElement, input: (data: Uint8Array) => void) { mocks.input = input; }
   dispose = mocks.dispose;
+  setReadOnly = vi.fn();
 } }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe("terminal exit acknowledgement", () => {

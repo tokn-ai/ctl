@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
 import { adjacentPane, swapPanes, viewDividers, viewPanes, viewTabs } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
-import { sameTarget, sessionKey } from "../../features/targets/targets";
+import { sessionKey } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
 import { sessionView } from "../../lib/tauri";
 import type { SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
@@ -24,16 +24,14 @@ interface Props extends SurfaceProps {
   input_owned?: boolean;
   on_toggle_input?(): void;
   on_select_terminal(session: SessionSummary): Promise<void>;
-  available_sessions: SessionSummary[];
   on_promoted(session: SessionSummary): Promise<void>;
-  on_merged(source: SessionSummary): Promise<void>;
   prefix_settings?: { document: KeybindingsDocument; bindings: ReadonlyMap<string, Keybinding>; platform: ShortcutPlatform };
   shortcuts_enabled?: boolean;
   on_command?(id: string): void;
   on_pane_commands?(commands: AppCommand[]): void;
 }
 
-export function SessionViewSurface({ session, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, available_sessions, on_promoted, on_merged, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
+export function SessionViewSurface({ session, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [controls_host, setControlsHost] = useState<HTMLDivElement | null>(null);
   const [cell, setCell] = useState({ width: 8, height: 16 });
@@ -55,7 +53,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busy_ref = useRef(false);
-  const [merge_source, setMergeSource] = useState("");
   const [selected_tabs, setSelectedTabs] = useState<Record<string, number>>({});
   const pane_detachers = useRef(new Map<string, () => Promise<void>>());
   const session_ref = useRef(session);
@@ -134,10 +131,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
         const terminal = next.terminals[0];
         await on_promoted({ ...session, ...terminal, name: next.session_name, session_id: next.session_id, view_id: next.view_id });
       }
-      if (next && action.kind === "merge") {
-        const source = available_sessions.find((candidate) => candidate.session_id === action.source && sameTarget(candidate.target, session.target));
-        if (source) await on_merged(source);
-      }
       if (current === generation.current) {
         ++sequence.current;
         // Both toolbar and prefix splits must reveal the newly created pane.
@@ -156,7 +149,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     }
   }
 
-  const merge_candidates = session ? available_sessions.filter((candidate) => candidate.session_id !== session.session_id && sameTarget(candidate.target, session.target) && candidate.status === "running") : [];
   const current_view = view?.session_id === session?.session_id ? view : null;
   const primary_id = session?.terminal_id;
   const visibility = new Map(current_view ? viewPanes(current_view.layout, selected_tabs).map((pane) => [pane.terminal_id, pane.visible]) : []);
@@ -247,13 +239,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
       <strong>{prefix_map.label}{prefix.mode === "move" ? " · Move pane" : ""}</strong>
       {PREFIX_ACTIONS.filter((action) => prefixActionMode(action.id) === prefix.mode && prefix_map.bindings.has(action.id)).map((action) => <span key={action.id}><kbd>{prefix_map.bindings.get(action.id)}</kbd> {action.title}</span>)}
       <span>{prefix.mode === "move" ? "Enter or Esc finishes" : `${prefix_map.label} again sends the prefix · Esc cancels`}</span>
-    </div>}
-    {connected && merge_candidates.length > 0 && <div className="view-tabs">
-      <select aria-label="Session to merge" value={merge_source} onChange={(event) => setMergeSource(event.target.value)}>
-        <option value="">Merge another session…</option>
-        {merge_candidates.map((candidate) => <option key={candidate.session_id} value={candidate.session_id}>{candidate.name}</option>)}
-      </select>
-      <button disabled={busy || !merge_candidates.some((candidate) => candidate.session_id === merge_source)} onClick={() => void mutate({ kind: "merge", source: merge_source, destination: session!.session_id })}>Merge into this session</button>
     </div>}
     {error && <div className="message-banner" role="status">{error}</div>}
     {action_error && <div className="message-banner" role="alert">{action_error}</div>}

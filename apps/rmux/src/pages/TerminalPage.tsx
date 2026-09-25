@@ -1801,14 +1801,7 @@ export function TerminalPage() {
               renderer={renderer}
               input_owned={attachment.state.input_lease.owned_by_client}
               on_toggle_input={attachment.toggleInputLease}
-              available_sessions={sessions}
               on_promoted={(session) => importSession(session, null)}
-              on_merged={async (source) => {
-                refreshGuardRef.current.recordMutation();
-                setSessions((current) => removeSession(current, sessionKey(source)));
-                setTabs((current) => current.filter((tab) => !sameSession(tab, source)));
-                await persistWorkspace();
-              }}
               on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
               phase={attachment.state.phase}
               hasSession={attachment.state.session !== null}

@@ -5,6 +5,7 @@ import type { SessionSummary, SessionView } from "../../lib/types";
 import { SessionViewSurface } from "./SessionViewSurface";
 import type { AppCommand } from "../../features/commands/types";
 import { searchCommands } from "../../features/commands/commandSearch";
+import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn() }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
@@ -34,6 +35,28 @@ const props = () => ({ session, available_sessions: [session], on_promoted: vi.f
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 describe("session compositor", () => {
+  it("updates a single pane's active outline when rendered cell dimensions change", async () => {
+    mocks.request.mockResolvedValue(initial);
+    let measure!: (cell: { width: number; height: number }) => void;
+    const stop = vi.fn();
+    const renderer = {
+      setViewport: vi.fn(),
+      observeCellDimensions: vi.fn((callback) => { measure = callback; return stop; }),
+    } as unknown as XtermRenderer;
+    const mounted = render(<SessionViewSurface {...props()} renderer={renderer} />);
+    await waitFor(() => expect(screen.getByLabelText("Terminal input").closest<HTMLElement>(".view-pane")?.style.width).toBe("640px"));
+    act(() => measure({ width: 10, height: 20 }));
+    const pane = screen.getByLabelText("Terminal input").closest<HTMLElement>(".view-pane")!;
+    expect(pane.dataset.active).toBe("true");
+    expect(pane.style.width).toBe("800px");
+    expect(pane.style.height).toBe("480px");
+    act(() => measure({ width: 7, height: 15 }));
+    expect(pane.style.width).toBe("560px");
+    expect(pane.style.height).toBe("360px");
+    mounted.unmount();
+    expect(stop).toHaveBeenCalled();
+  });
+
   it("uses server cell rectangles and keeps pane controls outside the canvas", async () => {
     mocks.request.mockResolvedValue(split);
     render(<SessionViewSurface {...props()} />);

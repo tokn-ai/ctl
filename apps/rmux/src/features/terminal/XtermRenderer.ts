@@ -37,6 +37,36 @@ function validDimensions(
 }
 
 export class XtermRenderer {
+  private cellObserver: ResizeObserver | null = null;
+  private cellFrame: number | null = null;
+  private readonly cellListeners = new Set<(cell: { width: number; height: number }) => void>();
+
+  observeCellDimensions(listener: (cell: { width: number; height: number }) => void): () => void {
+    this.cellListeners.add(listener);
+    if (!this.cellObserver) {
+      this.cellObserver = new ResizeObserver(() => this.scheduleCellMeasurement());
+      this.container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver!.observe(screen));
+    }
+    this.scheduleCellMeasurement();
+    return () => {
+      this.cellListeners.delete(listener);
+      if (!this.cellListeners.size) {
+        this.cellObserver?.disconnect();
+        this.cellObserver = null;
+        if (this.cellFrame !== null) cancelAnimationFrame(this.cellFrame);
+        this.cellFrame = null;
+      }
+    };
+  }
+
+  private scheduleCellMeasurement(): void {
+    if (this.cellFrame !== null) return;
+    this.cellFrame = requestAnimationFrame(() => {
+      this.cellFrame = null;
+      const cell = this.cellDimensions();
+      if (cell) this.cellListeners.forEach((listener) => listener(cell));
+    });
+  }
   private viewport: HTMLElement | null = null;
   setViewport(viewport: HTMLElement | null): void { this.viewport = viewport; }
   cellDimensions() { return this.active.presenter.cellDimensions(); }
@@ -73,6 +103,7 @@ export class XtermRenderer {
     }
     this.active = terminal;
     terminal.container.hidden = false;
+    this.scheduleCellMeasurement();
   }
 
   resumeSequence(): string | null {
@@ -177,10 +208,12 @@ export class XtermRenderer {
     };
     const observer = new ResizeObserver(schedule);
     observer.observe(this.viewport ?? this.container);
+    const stopCellObservation = this.observeCellDimensions(schedule);
     schedule();
 
     return () => {
       observer.disconnect();
+      stopCellObservation();
       if (animationFrame !== null) {
         cancelAnimationFrame(animationFrame);
       }
@@ -192,6 +225,11 @@ export class XtermRenderer {
   }
 
   dispose(): void {
+    this.cellObserver?.disconnect();
+    this.cellObserver = null;
+    this.cellListeners.clear();
+    if (this.cellFrame !== null) cancelAnimationFrame(this.cellFrame);
+    this.cellFrame = null;
     for (const terminal of new Set([...this.sessions.values(), this.active])) {
       this.disposeTerminal(terminal);
     }
@@ -215,6 +253,7 @@ export class XtermRenderer {
   }
 
   private disposeTerminal(terminal: CachedTerminal): void {
+    terminal.container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
     terminal.presenter.dispose();
     terminal.container.remove();
   }
@@ -236,6 +275,7 @@ export class XtermRenderer {
     container: HTMLElement,
     terminalSize: TerminalSize,
   ): TerminalAdapter {
+    container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
     container.replaceChildren();
     const terminal = new Terminal({
       cols: terminalSize.columns,
@@ -275,6 +315,9 @@ export class XtermRenderer {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
+    const screen = container.querySelector(".xterm-screen");
+    if (screen) this.cellObserver?.observe(screen);
+    this.scheduleCellMeasurement();
     terminal.onData((data) => {
       if (this.active.container === container) this.onInput(encodeTerminalText(data));
     });

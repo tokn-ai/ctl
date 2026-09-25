@@ -40,14 +40,10 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   useLayoutEffect(() => {
     renderer?.setViewport(viewport);
     if (!renderer || !viewport) return;
-    const measure = () => {
-      const next = renderer.cellDimensions();
-      if (next) setCell((previous) => previous.width === next.width && previous.height === next.height ? previous : next);
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(viewport);
-    measure();
-    return () => { observer.disconnect(); renderer.setViewport(null); };
+    const stop = renderer.observeCellDimensions((next) => {
+      setCell((previous) => previous.width === next.width && previous.height === next.height ? previous : next);
+    });
+    return () => { stop(); renderer.setViewport(null); };
   }, [renderer, viewport]);
   const [focused_id, setFocusedId] = useState<string | null>(null);
   const [zoomed_id, setZoomedId] = useState<string | null>(null);
@@ -162,13 +158,6 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
 
   const merge_candidates = session ? available_sessions.filter((candidate) => candidate.session_id !== session.session_id && sameTarget(candidate.target, session.target) && candidate.status === "running") : [];
   const current_view = view?.session_id === session?.session_id ? view : null;
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      const next = renderer?.cellDimensions();
-      if (next) setCell((previous) => previous.width === next.width && previous.height === next.height ? previous : next);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [renderer, current_view?.revision, primary_size]);
   const primary_id = session?.terminal_id;
   const visibility = new Map(current_view ? viewPanes(current_view.layout, selected_tabs).map((pane) => [pane.terminal_id, pane.visible]) : []);
   const panes = current_view?.panes.map((pane) => ({ terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: visibility.get(pane.terminal_id) ?? false })) ?? [];

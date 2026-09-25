@@ -9,7 +9,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 it("reads local retained output even without any configured or reachable hosts", async () => {
   mocks.request.mockResolvedValue({ kind: "list", archives: [{ session_id: "root", host_key: "removed-host", name: "old shell", archived_at_ms: 1000, expires_at_ms: 604801000, terminals: [{ terminal_id: "pane", reason: "Exited (code 7)", lines: ["previous output", "final output"] }] }] });
   render(<ArchiveBrowser targets={[]} on_close={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Pane 1: Exited (code 7)" }));
+  fireEvent.click(await screen.findByRole("button", { name: /old shell/ }));
   expect(screen.getByLabelText("Archived terminal output").textContent).toBe("previous output\nfinal output");
   expect(mocks.request).toHaveBeenCalledExactlyOnceWith({ kind: "list" });
   expect(screen.getByText(/Retained until/)).toBeTruthy();

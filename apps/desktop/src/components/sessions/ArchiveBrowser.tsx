@@ -3,6 +3,7 @@ import { sessionArchive } from "../../lib/tauri";
 import { errorMessage } from "../../lib/errors";
 import { targetKey, targetLabel } from "../../features/targets/targets";
 import type { ConnectionTarget, SessionArchive } from "../../lib/types";
+import { Icon } from "../ui/Icon";
 import "./archiveBrowser.css";
 
 export function ArchiveBrowser({ targets, on_close }: {
@@ -10,7 +11,9 @@ export function ArchiveBrowser({ targets, on_close }: {
   on_close(): void;
 }) {
   const [archives, setArchives] = useState<SessionArchive[]>([]);
-  const [selected, setSelected] = useState<string[] | null>(null);
+  const [selected, setSelected] = useState<{ archive_key: string; terminal_id: string | null } | null>(null);
+  const selected_archive = archives.find((archive) => JSON.stringify([archive.host_key, archive.session_id]) === selected?.archive_key);
+  const selected_lines = selected_archive?.terminals.find((terminal) => terminal.terminal_id === selected?.terminal_id)?.lines;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -34,17 +37,31 @@ export function ArchiveBrowser({ targets, on_close }: {
     <div className="archive-browser-content">
       <nav aria-label="Retained sessions">{archives.map((archive) => {
         const target = targets.find((candidate) => targetKey(candidate) === archive.host_key);
-        return <section key={`${archive.host_key}:${archive.session_id}`}>
-          <strong>{archive.name}</strong>
-          <small>{target ? targetLabel(target) : archive.host_key}</small>
-          <small>Ended {new Date(archive.archived_at_ms).toLocaleString()} · Retained until {new Date(archive.expires_at_ms).toLocaleString()}</small>
-          {archive.terminals.map((terminal, index) => <button key={terminal.terminal_id} type="button"
-            aria-pressed={selected === terminal.lines} onClick={() => setSelected(terminal.lines)}>
-            Pane {index + 1}: {terminal.reason}
-          </button>)}
+        const archive_key = JSON.stringify([archive.host_key, archive.session_id]);
+        const active = selected?.archive_key === archive_key;
+        const host_label = target ? targetLabel(target) : archive.host_key;
+        return <section className={`session-row archive-card ${active ? "active" : ""}`} key={archive_key}>
+          <button className="session-select archive-card-select" type="button" aria-pressed={active}
+            onClick={() => setSelected({ archive_key, terminal_id: archive.terminals[0]?.terminal_id ?? null })}>
+            <Icon name="terminal" class_name="session-icon" />
+            <span className="session-copy">
+              <strong title={archive.name}>{archive.name}</strong>
+              <small title={host_label}>{host_label}</small>
+              <small title={new Date(archive.archived_at_ms).toLocaleString()}>Archived {new Date(archive.archived_at_ms).toLocaleDateString()}</small>
+              <small title={new Date(archive.expires_at_ms).toLocaleString()}>Retained until {new Date(archive.expires_at_ms).toLocaleDateString()}</small>
+              {archive.terminals.length === 1 && <small title={archive.terminals[0].reason}>{archive.terminals[0].reason}</small>}
+            </span>
+          </button>
+          {archive.terminals.length > 1 && <div className="archive-card-panes" aria-label={`${archive.name} panes`}>
+            {archive.terminals.map((terminal, index) => <button key={terminal.terminal_id} type="button"
+              aria-pressed={active && selected?.terminal_id === terminal.terminal_id}
+              onClick={() => setSelected({ archive_key, terminal_id: terminal.terminal_id })} title={terminal.reason}>
+              Pane {index + 1}<span>{terminal.reason}</span>
+            </button>)}
+          </div>}
         </section>;
       })}</nav>
-      <pre className="archive-terminal" aria-label="Archived terminal output">{selected ? selected.join("\n") || "No cached output was available." : "Select an archived pane."}</pre>
+      <pre className="archive-terminal" aria-label="Archived terminal output">{selected_archive ? selected_lines?.join("\n") || "No cached output was available." : "Select an archived session."}</pre>
     </div>
   </dialog>;
 }

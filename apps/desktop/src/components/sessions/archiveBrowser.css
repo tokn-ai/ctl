@@ -3,17 +3,24 @@
   height: min(800px, 88vh);
   color: var(--text-primary, #ddd);
   background: var(--surface-1, #181b21);
-  border: 1px solid var(--border-subtle, #555);
+  border: 1px solid var(--border, #313131);
   border-radius: 10px;
   padding: 20px;
 }
 .archive-browser::backdrop { background: #0009; }
-.archive-browser header, .archive-browser-controls { display: flex; gap: 16px; align-items: center; margin-bottom: 12px; }
+.archive-browser header { display: flex; gap: 16px; align-items: center; margin-bottom: 12px; }
 .archive-browser header { justify-content: space-between; }
 .archive-browser h2 { margin: 0; }
 .archive-browser-content { display: grid; grid-template-columns: 260px minmax(0, 1fr); height: calc(100% - 130px); gap: 16px; }
-.archive-browser nav { overflow: auto; }
-.archive-browser nav section { display: grid; gap: 8px; padding: 12px 0; border-bottom: 1px solid #555; }
-.archive-browser small { opacity: .7; }
-.archive-browser button[aria-pressed="true"] { outline: 2px solid #6aafff; }
+.archive-browser nav { display: flex; flex-direction: column; gap: 8px; overflow: auto; padding: 2px; }
+.archive-card { flex: none; border: 1px solid var(--border); border-left: 2px solid transparent; border-radius: 6px; background: var(--surface-0); overflow: hidden; }
+.archive-card .archive-card-select { padding: 12px; align-items: start; }
+.archive-card .session-icon { margin-top: 2px; }
+.archive-card .session-copy { gap: 4px; }
+.archive-card .session-copy strong { font-weight: 500; }
+.archive-card-select:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
+.archive-card-panes { display: grid; gap: 4px; padding: 0 12px 12px 36px; }
+.archive-card-panes button { min-width: 0; padding: 6px 8px; text-align: left; font-size: 11px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--surface-1); }
+.archive-card-panes button span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); margin-top: 2px; }
+.archive-card-panes button[aria-pressed="true"] { border-color: var(--accent-strong); background: var(--selection); }
 .archive-terminal { min-width: 0; min-height: 0; overflow: auto; }

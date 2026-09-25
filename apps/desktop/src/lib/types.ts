@@ -568,6 +568,7 @@ export type ConnectionPhase =
   | "error";
 
 export interface AttachmentViewState {
+  has_cached_snapshot?: boolean;
   phase: ConnectionPhase;
   error_code: string | null;
   attachment_id: string | null;
@@ -693,3 +694,15 @@ export interface SessionArchive {
 }
 export type ArchiveAction = { kind: "list" } | { kind: "save"; archive: SessionArchive };
 export type ArchiveResponse = { kind: "list"; archives: SessionArchive[] } | { kind: "saved" };
+
+export interface CachedTerminalSnapshot {
+  session: SessionSummary;
+  payload: string;
+  saved_at: number;
+}
+
+export interface CachedSessionView {
+  session: SessionSummary;
+  view: SessionView;
+  saved_at: number;
+}

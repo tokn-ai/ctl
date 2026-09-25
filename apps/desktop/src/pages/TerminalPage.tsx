@@ -1847,7 +1847,7 @@ export function TerminalPage() {
               on_dismiss={() => { if (attachment.state.session) void dismissSession(attachment.state.session); }}
               phase={attachment.state.phase}
               hasSession={attachment.state.session !== null}
-              has_cached_content={attachment.state.applied_sequence !== null}
+              has_cached_content={attachment.state.applied_sequence !== null || !!attachment.state.has_cached_snapshot}
               onInput={handleTerminalInput}
               onReady={setRenderer}
             />

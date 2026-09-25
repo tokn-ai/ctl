@@ -1,3 +1,5 @@
+import { SerializeAddon } from "@xterm/addon-serialize";
+import { loadTerminalSnapshot, saveTerminalSnapshot } from "./offlineCache";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -20,6 +22,10 @@ interface CachedTerminal {
   presentation_version: number;
   is_local: boolean;
   terminal_id?: string;
+  session?: SessionSummary;
+  snapshot_timer?: ReturnType<typeof setTimeout>;
+  offline_snapshot?: boolean;
+  has_content?: boolean;
 }
 
 function validDimensions(
@@ -105,6 +111,7 @@ export class XtermRenderer {
     }
     if (terminal === this.active) return;
 
+    void this.saveSnapshot(this.active);
     this.active.container.hidden = true;
     if (![...this.sessions.values()].includes(this.active)) {
       this.disposeTerminal(this.active);
@@ -120,8 +127,38 @@ export class XtermRenderer {
     this.scheduleCellMeasurement();
   }
 
+  rememberSession(session: SessionSummary): void {
+    this.active.session = session;
+    this.active.terminal_id = session.terminal_id;
+  }
+
+  async viewOffline(session: SessionSummary): Promise<boolean> {
+    this.activateSession(session, true);
+    if (this.active.has_content || this.active.offline_snapshot) return true;
+    const snapshot = loadTerminalSnapshot(session);
+    if (!snapshot) return false;
+    const terminal = this.active;
+    terminal.session = { ...snapshot.session, target: session.target };
+    terminal.terminal_id = snapshot.session.terminal_id;
+    await terminal.presenter.recreate(snapshot.session.terminal_size);
+    await terminal.presenter.write(new TextEncoder().encode(snapshot.payload));
+    terminal.offline_snapshot = true;
+    return true;
+  }
+
+  async saveSnapshot(terminal = this.active): Promise<void> {
+    if (terminal.snapshot_timer) clearTimeout(terminal.snapshot_timer);
+    terminal.snapshot_timer = undefined;
+    if (!terminal.session || terminal.offline_snapshot || !terminal.has_content) return;
+    const session = terminal.session;
+    let payload: string | null;
+    try { payload = await terminal.presenter.snapshot(); }
+    catch { return; } // A cache failure must not interrupt the live terminal.
+    if (payload !== null) saveTerminalSnapshot({ session, payload, saved_at: Date.now() });
+  }
+
   resumeSequence(): string | null {
-    return this.active.resume_from;
+    return this.active.offline_snapshot ? null : this.active.resume_from;
   }
 
   invalidateResumeSequence(): void {
@@ -187,6 +224,7 @@ export class XtermRenderer {
   }
 
   resize(terminalSize: TerminalSize): Promise<void> {
+    if (this.active.session) this.active.session = { ...this.active.session, terminal_size: terminalSize };
     return this.applyPresentation(this.active.resume_from, (presenter) =>
       presenter.resize(terminalSize),
     );
@@ -268,6 +306,7 @@ export class XtermRenderer {
   }
 
   private disposeTerminal(terminal: CachedTerminal): void {
+    void this.saveSnapshot(terminal);
     terminal.container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
     terminal.presenter.dispose();
     terminal.container.remove();
@@ -283,7 +322,14 @@ export class XtermRenderer {
     const version = ++terminal.presentation_version;
     terminal.resume_from = null;
     await operation(terminal.presenter);
-    if (terminal.presentation_version === version) terminal.resume_from = sequence;
+    if (terminal.presentation_version === version) {
+      terminal.resume_from = sequence;
+      terminal.has_content = sequence !== null;
+      terminal.offline_snapshot = false;
+      if (!terminal.snapshot_timer) {
+        terminal.snapshot_timer = setTimeout(() => { void this.saveSnapshot(terminal); }, 2000);
+      }
+    }
   }
 
   private createAdapter(
@@ -329,6 +375,8 @@ export class XtermRenderer {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    const serializer = new SerializeAddon();
+    terminal.loadAddon(serializer);
     terminal.open(container);
     const screen = container.querySelector(".xterm-screen");
     if (screen) this.cellObserver?.observe(screen);
@@ -341,6 +389,7 @@ export class XtermRenderer {
     });
 
     return {
+      snapshot: () => serializer.serialize({ scrollback: 2000 }),
       copyLines: () => {
         const buffer = terminal.buffer.active;
         return Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)?.translateToString(true) ?? "");

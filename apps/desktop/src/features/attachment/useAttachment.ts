@@ -1,3 +1,4 @@
+import { loadSessionView, loadTerminalSnapshot } from "../terminal/offlineCache";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Channel } from "@tauri-apps/api/core";
 import { decodeBase64, encodeBase64, sequenceAtLeast } from "../../lib/bytes";
@@ -731,6 +732,7 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
           }
           appliedSequenceRef.current = null;
         }
+        renderer.rememberSession(result.attached.session);
         activeAttachmentRef.current = result.attached.attachment_id;
         channelRef.current = result.channel;
         inputLeaseOwnedRef.current = result.attached.input_lease.owned_by_client;
@@ -1031,15 +1033,20 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
       await eventTailRef.current;
       if (generation !== generationRef.current) return;
       // List entries may lack the resolved pane identity and last visible size.
-      const cached_session = cachedSessionsRef.current.get(sessionKey(local_session));
+      const cached_session = cachedSessionsRef.current.get(sessionKey(local_session))
+        ?? (local_session.terminal_id ? loadTerminalSnapshot(local_session)?.session : loadSessionView(sessionKey(local_session))?.session)
+        ?? loadTerminalSnapshot(local_session)?.session;
       const session = cached_session
         ? { ...local_session, ...cached_session, target: local_session.target, name: local_session.name }
         : local_session;
-      rendererRef.current?.activateSession(session, true);
+      await rendererRef.current?.saveSnapshot();
+      const has_snapshot = await rendererRef.current?.viewOffline(session);
+      if (generation !== generationRef.current) return;
       const cached_sequence = rendererRef.current?.resumeSequence() ?? null;
       const next: AttachmentViewState = {
         ...INITIAL_STATE, phase: "disconnected", session,
         applied_sequence: cached_sequence, reconnect_sequence: cached_sequence,
+        has_cached_snapshot: has_snapshot,
         shell_state: sameSession(stateRef.current.session, local_session) ? stateRef.current.shell_state : null,
         message: "Disconnected — viewing locally cached output. Connect the host to resume.",
       };

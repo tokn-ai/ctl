@@ -7,6 +7,7 @@ export interface ProposedDimensions {
 
 export interface TerminalAdapter {
   copyLines?(): string[];
+  snapshot?(): string;
   write(data: Uint8Array, callback: () => void): void;
   resize(columns: number, rows: number): void;
   dispose(): void;
@@ -19,6 +20,7 @@ export type TerminalAdapterFactory = (terminalSize: TerminalSize) => TerminalAda
 
 export class TerminalPresenter {
   copyLines(): Promise<string[]> { return this.operationTail.then(() => this.adapter.copyLines?.() ?? []); }
+  snapshot(): Promise<string | null> { return this.operationTail.then(() => this.adapter.snapshot?.() ?? null); }
   cellDimensions() { return this.adapter.cellDimensions?.() ?? null; }
   private adapter: TerminalAdapter;
   private operationTail = Promise.resolve();

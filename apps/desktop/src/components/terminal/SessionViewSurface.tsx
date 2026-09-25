@@ -1,3 +1,4 @@
+import { loadSessionView, saveSessionView } from "../../features/terminal/offlineCache";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -74,12 +75,15 @@ export function SessionViewSurface({ session, offline = false, shell_state, rend
   select_ref.current = on_select_terminal;
 
   function rememberView(next: SessionView | null) {
-    if (next) cached_views.current.set(key, next);
+    if (next) {
+      cached_views.current.set(key, next);
+      if (session) saveSessionView(session, next);
+    }
     setView(next);
   }
 
   useEffect(() => {
-    setView(cached_views.current.get(key) ?? null);
+    setView(cached_views.current.get(key) ?? loadSessionView(key)?.view ?? null);
     setEndedIds(new Set());
     setError(null);
     setActionError(null);
@@ -347,6 +351,6 @@ function AdditionalTerminal({ offline, on_ended, on_dismiss, confirmed_missing, 
   return <>
     {!offline && render_controls(attachment.state.shell_state, <button onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>)}
     {attachment.state.message && <div role="status" className="pane-message">{attachment.state.message}</div>}
-    <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null} onInput={attachment.handleInput} onReady={setRenderer} />
+    <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null || !!attachment.state.has_cached_snapshot} onInput={attachment.handleInput} onReady={setRenderer} />
   </>;
 }

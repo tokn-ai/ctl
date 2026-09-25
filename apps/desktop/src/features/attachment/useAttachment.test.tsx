@@ -37,7 +37,9 @@ vi.mock("@xterm/xterm", async () => {
             container.append(document.createElement("div"));
             xterm.instances.push({ terminal, container, dispose });
           },
-          loadAddon: () => undefined,
+          loadAddon: (addon: { activate?(terminal: HeadlessTerminal): void }) => {
+            if (addon.activate) terminal.loadAddon(addon as Parameters<HeadlessTerminal["loadAddon"]>[0]);
+          },
           onData: () => undefined,
           onBinary: () => undefined,
           focus: () => undefined,
@@ -128,6 +130,7 @@ async function emit(event: AttachmentEvent) {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   vi.resetAllMocks();
   xterm.instances.length = 0;
   channels = new Map();
@@ -233,6 +236,26 @@ describe("pending remote attachments", () => {
     expect(line(visibleTerminal().terminal)).toBe("second cached output");
     expect(api.openAttachment).not.toHaveBeenCalled();
     expect(api.acquireAttachmentLease).not.toHaveBeenCalled();
+  });
+
+  it("restores a saved pane in a fresh renderer and reconnects without a replay cursor", async () => {
+    const first_hook = renderHook(() => useAttachment(renderer));
+    await act(async () => { await first_hook.result.current.connect(first); });
+    await emit(checkpoint("attachment-0", "\x1b[31msaved output\x1b[0m", "12"));
+    first_hook.unmount();
+    await act(async () => { renderer.dispose(); });
+    renderer = new XtermRenderer(container, () => undefined, size);
+    const restored = renderHook(() => useAttachment(renderer));
+    api.openAttachment.mockClear();
+    await act(async () => { await restored.result.current.viewOffline(first); });
+    expect(line(visibleTerminal().terminal)).toBe("saved output");
+    expect(visibleTerminal().terminal.buffer.active.getLine(0)?.getCell(0)?.getFgColor()).toBe(1);
+    expect(restored.result.current.state.has_cached_snapshot).toBe(true);
+    expect(restored.result.current.state.applied_sequence).toBeNull();
+    expect(renderer.resumeSequence()).toBeNull();
+    expect(api.openAttachment).not.toHaveBeenCalled();
+    await act(async () => { await restored.result.current.reconnect(); });
+    expect(api.openAttachment.mock.calls[0][0].resume_from).toBeNull();
   });
 
   function stallNextOpen() {

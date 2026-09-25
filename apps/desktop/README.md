@@ -148,7 +148,15 @@ original remains available for recovery. Schema 8 moves existing hosts and
 gateways into the catalog before removing them from the workspace. Schema 7 is
 backed up as `workspace-v7.backup.json`; earlier schemas retain their corresponding
 backups. Host IDs and all session/task/port references remain unchanged.
-It remembers known sessions, cached paths, tab order, and selection. Startup
+Offline terminal snapshots and split layouts are stored separately in this
+installation's WebView local storage (`rmux.offline_views.v1`). Snapshots include
+formatting and up to 2,000 scrollback lines per pane. The cache has a 2 MB budget
+and seven-day retention; older panes are evicted as needed. Live output is saved
+at most once every two seconds, with additional saves when switching or disposing
+panes and disconnecting. Saved screens are read-only and never supply a replay
+cursor when reconnecting. Previously uncached output cannot be recovered offline.
+
+The workspace remembers known sessions, cached paths, tab order, and selection. Startup
 restores those entries as unverified and automatically connects the selected
 local tab. Remote terminal tabs stay disconnected until explicitly opened; **Connect
 host** resumes that host's selected tab, or its first open tab if another host

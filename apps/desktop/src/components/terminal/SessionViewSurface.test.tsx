@@ -32,7 +32,7 @@ const initial: SessionView = { session_id: "root", session_name: "Root", view_id
 const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "a", left: 0, top: 0, columns: 40, rows: 24 }, { terminal_id: "b", left: 41, top: 0, columns: 39, rows: 24 }], layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] }, terminals: [terminal("a"), terminal("b")] };
 const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 describe("session compositor", () => {
   it("updates a single pane's active outline when rendered cell dimensions change", async () => {
@@ -66,6 +66,21 @@ describe("session compositor", () => {
     const panes = screen.getAllByLabelText("Terminal input").map((input) => input.closest<HTMLElement>(".view-pane")!);
     expect(panes.map((pane) => pane.style.width)).toEqual(["320px", "312px"]);
     expect(panes.map((pane) => pane.style.height)).toEqual(["384px", "384px"]);
+  });
+
+  it("restores the saved split layout after the compositor is remounted offline", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = props();
+    const live = render(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    live.unmount();
+    mocks.request.mockClear();
+    mocks.connect.mockClear();
+    render(<SessionViewSurface {...actions} offline phase="disconnected" />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.viewOffline).toHaveBeenCalledWith(expect.objectContaining({ terminal_id: "b" }));
   });
 
   it("keeps split panes locally while a host is paused and marks the active border disconnected", async () => {

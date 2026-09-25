@@ -12,6 +12,7 @@ members = [
   "rmux/core",
   "rmux/daemon",
   "apps/rmux/src-tauri",
+  "apps/tui",
   "rmux/ipc",
   "rmux/proto",
   "task/proto",

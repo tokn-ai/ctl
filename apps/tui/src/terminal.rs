@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use crossterm::{
   cursor::{Hide, Show},
   event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
@@ -5,7 +6,7 @@ use crossterm::{
   style::{Attribute, ResetColor, SetAttribute},
   terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::io;
+use std::io::{self, Write};
 use std::sync::{
   Arc,
   atomic::{AtomicBool, Ordering},
@@ -95,4 +96,17 @@ impl Drop for Terminal {
     );
     let _ = terminal::disable_raw_mode();
   }
+}
+
+/// OSC 52 writes only on an explicit copy action. The internal buffer also works
+/// in terminals that disable clipboard escapes or impose a smaller size limit.
+pub fn copy_to_clipboard(text: &str) -> io::Result<bool> {
+  if text.len() > 100_000 {
+    return Ok(false);
+  }
+  let payload = base64::engine::general_purpose::STANDARD.encode(text);
+  let mut output = io::stdout().lock();
+  write!(output, "\x1b]52;c;{payload}\x07")?;
+  output.flush()?;
+  Ok(true)
 }

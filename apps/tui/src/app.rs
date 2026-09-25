@@ -1,5 +1,6 @@
 use crate::{
   Result,
+  copy::{Action as CopyAction, CopyMode},
   input::{self, Prefix},
   pane::{Pane, identity},
   render::{Frame, Renderer},
@@ -33,6 +34,8 @@ pub struct App {
   focused: String,
   size: (u16, u16),
   overlay: Overlay,
+  copy_mode: Option<CopyMode>,
+  copy_buffer: Option<String>,
   message: String,
   message_until: Instant,
   renderer: Renderer,
@@ -52,6 +55,8 @@ impl App {
       focused: String::new(),
       size: crossterm::terminal::size().unwrap_or((80, 24)),
       overlay: Overlay::None,
+      copy_mode: None,
+      copy_buffer: None,
       message: String::new(),
       message_until: Instant::now(),
       renderer: Renderer::default(),
@@ -338,19 +343,28 @@ impl App {
         self.size = (columns, rows);
         self.resize().await?;
       }
-      Event::Paste(text) if matches!(self.overlay, Overlay::None) && !self.prefix_pending => {
-        if let Some(pane) = self.panes.get(&self.focused) {
-          let data = if pane.model.bracketed_paste {
-            format!("\x1b[200~{text}\x1b[201~").into_bytes()
-          } else {
-            text.into_bytes()
-          };
-          pane.control.input(data).await?;
-        }
+      Event::Paste(text)
+        if self.copy_mode.is_none()
+          && matches!(self.overlay, Overlay::None)
+          && !self.prefix_pending =>
+      {
+        self.paste(text).await?;
       }
       _ => {}
     }
     Ok(false)
+  }
+
+  async fn paste(&self, text: String) -> Result<()> {
+    if let Some(pane) = self.panes.get(&self.focused) {
+      let data = if pane.model.bracketed_paste {
+        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+      } else {
+        text.into_bytes()
+      };
+      pane.control.input(data).await?;
+    }
+    Ok(())
   }
 
   async fn resize(&self) -> Result<()> {
@@ -365,6 +379,23 @@ impl App {
   }
 
   async fn key(&mut self, key: KeyEvent) -> Result<bool> {
+    if let Some(mode) = &mut self.copy_mode {
+      match mode.key(key, usize::from(self.size.1.saturating_sub(2))) {
+        CopyAction::Stay => {}
+        CopyAction::Close => self.copy_mode = None,
+        CopyAction::Copy(text) => {
+          self.copy_mode = None;
+          self.copy_buffer = Some(text.clone());
+          let sent = crate::terminal::copy_to_clipboard(&text)?;
+          self.notice(if sent {
+            "Copied to rmux buffer; clipboard requested (OSC 52)".into()
+          } else {
+            "Copied to rmux buffer; selection exceeds clipboard limit".into()
+          });
+        }
+      }
+      return Ok(false);
+    }
     if !matches!(self.overlay, Overlay::None) {
       self.overlay_key(key).await?;
       return Ok(false);
@@ -397,6 +428,19 @@ impl App {
 
   async fn command(&mut self, code: KeyCode) -> Result<bool> {
     match code {
+      KeyCode::Char('[') => {
+        if let Some(pane) = self.panes.get(&self.focused) {
+          self.copy_mode = Some(CopyMode::new(pane.model.copy_lines()));
+        }
+      }
+      KeyCode::Char(']') if !self.read_only => {
+        if let Some(text) = self.copy_buffer.clone() {
+          // Reuse the same lease checks and bracketed-paste encoding as a host paste.
+          self.paste(text).await?;
+        } else {
+          self.notice("Copy buffer is empty".into());
+        }
+      }
       KeyCode::Char('d') => return Ok(true),
       KeyCode::Char('r') => self.renderer.invalidate(),
       KeyCode::Char('o') => self.next_pane(),
@@ -566,6 +610,18 @@ impl App {
 
   fn draw(&mut self) -> Result<()> {
     let mut frame = Frame::new(self.size.0, self.size.1);
+    if let Some(mode) = &mut self.copy_mode {
+      mode.fit(
+        usize::from(self.size.0),
+        usize::from(self.size.1.saturating_sub(1)),
+      );
+      frame.copy_mode(mode);
+      if self.size.1 > 0 {
+        frame.text(0, self.size.1 - 1, &mode.status(), true);
+      }
+      self.renderer.draw(frame)?;
+      return Ok(());
+    }
     if let Some(view) = &self.view {
       frame.canvas(view, &self.panes, &self.focused);
     } else {
@@ -666,6 +722,7 @@ impl App {
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    x: terminate (confirm)".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
+        "[: history/copy mode    ]: paste copied text".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),
         "d: detach (sessions keep running)    Esc: cancel prefix".into(),
         format!(

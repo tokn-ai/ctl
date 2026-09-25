@@ -4,6 +4,7 @@ use rmux_proto::{TerminalCheckpoint, TerminalSize};
 pub struct Model {
   pub vt: avt::Vt,
   pub bracketed_paste: bool,
+  history: Vec<String>,
   pending: Vec<u8>,
   escape: String,
   string_control: bool,
@@ -18,9 +19,10 @@ impl Model {
           usize::from(size.columns.max(2)),
           usize::from(size.rows.max(1)),
         )
-        .scrollback_limit(0)
+        .scrollback_limit(2_000)
         .build(),
       bracketed_paste: false,
+      history: Vec::new(),
       pending: Vec::new(),
       escape: String::new(),
       string_control: false,
@@ -35,10 +37,26 @@ impl Model {
     self.pending.extend_from_slice(&checkpoint.input_prefix);
   }
 
+  pub fn set_history(&mut self, history: Vec<String>) {
+    self.history = history;
+  }
+
+  pub fn copy_lines(&self) -> Vec<String> {
+    let mut lines = self.history.clone();
+    lines.extend(self.vt.text());
+    lines
+  }
+
   pub fn resize(&mut self, size: &TerminalSize) {
-    self
+    if self
       .vt
-      .resize(usize::from(size.columns), usize::from(size.rows));
+      .resize(usize::from(size.columns), usize::from(size.rows))
+      .scrollback
+      .next()
+      .is_some()
+    {
+      self.history.clear();
+    }
   }
 
   pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
@@ -64,7 +82,11 @@ impl Model {
         break;
       }
     }
-    self.vt.feed_str("");
+    if self.vt.feed_str("").scrollback.next().is_some() {
+      // Once local rows are evicted, the checkpoint's older history is no
+      // longer contiguous with this buffer. Keep only the retained suffix.
+      self.history.clear();
+    }
     replies
   }
 
@@ -101,6 +123,7 @@ impl Model {
     }
     let sequence = std::mem::take(&mut self.escape);
     match sequence.as_str() {
+      "\x1b[3J" => self.history.clear(),
       "\x1b[?2004h" => self.bracketed_paste = true,
       "\x1b[?2004l" => self.bracketed_paste = false,
       "\x1b[5n" => return b"\x1b[0n".to_vec(),
@@ -160,6 +183,60 @@ mod tests {
     });
     model.feed(&[0x8c]);
     assert!(model.vt.text()[0].starts_with("new界"));
+  }
+
+  #[test]
+  fn local_eviction_drops_the_older_checkpoint_prefix() {
+    let mut model = model();
+    model.set_history(vec!["old-checkpoint".into()]);
+    model.feed("row\r\n".repeat(2_100).as_bytes());
+    assert!(!model.copy_lines().join("\n").contains("old-checkpoint"));
+    assert!(model.copy_lines().len() <= 2_003);
+  }
+
+  #[test]
+  fn copy_joins_soft_wraps_and_preserves_interior_spaces_and_newlines() {
+    let mut model = model();
+    model.feed(b"abcd  efghijklmnop  \r\nnext");
+    let lines = model.copy_lines();
+    assert_eq!(lines[0], "abcd  efghijklmnop");
+    assert_eq!(lines[1], "next");
+  }
+
+  #[test]
+  fn history_survives_live_output_and_checkpoint_replacement_without_duplication() {
+    let mut model = model();
+    model.set_history(vec!["before-attach".into()]);
+    model.feed(b"one\r\ntwo\r\nthree\r\nfour");
+    let text = model.copy_lines().join("\n");
+    assert!(text.starts_with("before-attach\none\ntwo\nthree\nfour"));
+    let frozen = model.copy_lines();
+    model.feed(b"\r\nfive");
+    assert!(!frozen.join("\n").contains("five"));
+    model.restore(&TerminalCheckpoint {
+      format: rmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: rmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      sequence: 100,
+      terminal_size: TerminalSize {
+        columns: 12,
+        rows: 3,
+        pixel_width: 0,
+        pixel_height: 0,
+      },
+      payload: b"four\r\nfive".to_vec(),
+      input_prefix: Vec::new(),
+    });
+    model.set_history(vec![
+      "before-attach".into(),
+      "one".into(),
+      "two".into(),
+      "three".into(),
+    ]);
+    let text = model.copy_lines().join("\n");
+    assert_eq!(text.matches("one").count(), 1);
+    assert_eq!(text.matches("four").count(), 1);
+    model.feed(b"\x1b[3J");
+    assert!(!model.copy_lines().join("\n").contains("before-attach"));
   }
 
   #[test]

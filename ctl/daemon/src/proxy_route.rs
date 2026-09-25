@@ -242,9 +242,12 @@ async fn askpass(gateway: &SshGateway) -> io::Result<Zeroizing<String>> {
 /// # Errors
 /// Returns an error for an invalid route, connection failure, or interrupted relay.
 pub async fn run(route: &str, host: &str, port: u16) -> io::Result<()> {
-  let bytes = route
-    .as_bytes()
-    .chunks_exact(2)
+  let (pairs, remainder) = route.as_bytes().as_chunks::<2>();
+  if !remainder.is_empty() {
+    return Err(io::Error::other("invalid proxy route encoding"));
+  }
+  let bytes = pairs
+    .iter()
     .map(|pair| {
       let text = std::str::from_utf8(pair).map_err(io::Error::other)?;
       u8::from_str_radix(text, 16).map_err(io::Error::other)

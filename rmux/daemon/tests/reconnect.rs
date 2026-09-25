@@ -2307,35 +2307,7 @@ async fn view_membership_moves_preserve_terminal_identity_and_live_attachments()
     },
   )
   .await?;
-  let ServerMessage::ViewSnapshot { view: merged } = merged else {
-    panic!("expected merged view");
-  };
-  assert_eq!(merged.terminals.len(), 2);
-  assert!(matches!(
-    merged.layout,
-    rmux_proto::ViewLayout::Split {
-      axis: rmux_proto::SplitAxis::Horizontal,
-      ..
-    }
-  ));
-  assert_eq!(merged.panes.len(), 2);
-  assert_eq!(
-    merged.panes[0].left + merged.panes[0].columns + 1,
-    merged.panes[1].left
-  );
-  assert_eq!(
-    merged.panes[1].left + merged.panes[1].columns,
-    merged.canvas_size.columns
-  );
-  for pane in &merged.panes {
-    let terminal = merged
-      .terminals
-      .iter()
-      .find(|terminal| terminal.terminal_id == pane.terminal_id)
-      .unwrap();
-    assert_eq!(terminal.terminal_size.columns, pane.columns);
-    assert_eq!(terminal.terminal_size.rows, pane.rows);
-  }
+  assert_merged_split_geometry(merged);
   assert!(matches!(
     topology_request(
       &socket,
@@ -2365,6 +2337,38 @@ async fn view_membership_moves_preserve_terminal_identity_and_live_attachments()
   assert_root_termination(&socket, &root).await?;
   timeout(Duration::from_secs(3), daemon).await???;
   Ok(())
+}
+
+fn assert_merged_split_geometry(merged: ServerMessage) {
+  let ServerMessage::ViewSnapshot { view: merged } = merged else {
+    panic!("expected merged view");
+  };
+  assert_eq!(merged.terminals.len(), 2);
+  assert!(matches!(
+    merged.layout,
+    rmux_proto::ViewLayout::Split {
+      axis: rmux_proto::SplitAxis::Horizontal,
+      ..
+    }
+  ));
+  assert_eq!(merged.panes.len(), 2);
+  assert_eq!(
+    merged.panes[0].left + merged.panes[0].columns + 1,
+    merged.panes[1].left
+  );
+  assert_eq!(
+    merged.panes[1].left + merged.panes[1].columns,
+    merged.canvas_size.columns
+  );
+  for pane in &merged.panes {
+    let terminal = merged
+      .terminals
+      .iter()
+      .find(|terminal| terminal.terminal_id == pane.terminal_id)
+      .unwrap();
+    assert_eq!(terminal.terminal_size.columns, pane.columns);
+    assert_eq!(terminal.terminal_size.rows, pane.rows);
+  }
 }
 
 async fn assert_view_layout_updates(

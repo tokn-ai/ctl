@@ -11,7 +11,7 @@ members = [
   "rmux/cli",
   "rmux/core",
   "rmux/daemon",
-  "apps/rmux/src-tauri",
+  "apps/desktop/src-tauri",
   "apps/tui",
   "rmux/ipc",
   "rmux/proto",

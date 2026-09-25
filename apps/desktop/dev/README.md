@@ -1,6 +1,6 @@
 # Browser visual preview
 
-From `apps/rmux`, run `pnpm exec vite --host 127.0.0.1` and open
+From `apps/desktop`, run `pnpm exec vite --host 127.0.0.1` and open
 `http://127.0.0.1:1430/preview.html`.
 
 This renders the real application and xterm components with a sample workspace

@@ -157,7 +157,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: apps/rmux
+        working-directory: apps/desktop
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -172,7 +172,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: apps/rmux/pnpm-lock.yaml
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile

@@ -10,7 +10,7 @@ ctld_binary=$1
 output_app=$2
 app_version=$3
 bundle_identifier=io.rmux.desktop.ctld
-template_directory=apps/rmux/src-tauri/macos/ctld
+template_directory=apps/desktop/src-tauri/macos/ctld
 
 if [ "$(uname -s)" != Darwin ]; then
   echo "ctld.app can only be packaged on macOS" >&2

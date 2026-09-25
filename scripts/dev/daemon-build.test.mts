@@ -16,12 +16,12 @@ test("selects Cargo settings while excluding app targets, features, and argument
     "--bin=rmux-app", "--no-default-features", "--all-features",
     "--message-format", "json", "--target", "aarch64-apple-darwin",
     "--target-dir", "/tmp/custom target", "--profile=development",
-    "--manifest-path", "apps/rmux/src-tauri/Cargo.toml",
+    "--manifest-path", "apps/desktop/src-tauri/Cargo.toml",
     "--locked", "--offline", "--config", "build.incremental=false",
     "--color", "always", "--", "--target-dir", "/tmp/app-only",
   ]), [
     "--target", "aarch64-apple-darwin", "--target-dir", "/tmp/custom target",
-    "--profile=development", "--manifest-path", "apps/rmux/src-tauri/Cargo.toml",
+    "--profile=development", "--manifest-path", "apps/desktop/src-tauri/Cargo.toml",
     "--locked", "--offline", "--config", "build.incremental=false",
     "--color", "always",
   ]);

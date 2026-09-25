@@ -1,6 +1,6 @@
 .git
 .gitignore
 target
-apps/rmux/dist
-apps/rmux/node_modules
+apps/desktop/dist
+apps/desktop/node_modules
 **/.DS_Store

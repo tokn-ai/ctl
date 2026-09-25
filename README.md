@@ -72,7 +72,7 @@ sibling executables:
 
 ```sh
 cargo build -p ctld -p rmuxd -p taskd
-cd apps/rmux
+cd apps/desktop
 pnpm install
 pnpm tauri dev
 ```

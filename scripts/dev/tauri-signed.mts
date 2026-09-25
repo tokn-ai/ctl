@@ -21,7 +21,7 @@ import { SignedDaemon } from "./signed-daemon.mts";
 const execFile = promisify(execFileCallback);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "../..");
-const appDirectory = path.join(repositoryRoot, "apps/rmux");
+const appDirectory = path.join(repositoryRoot, "apps/desktop");
 const bundleIdentifier = "io.rmux.desktop.ctld";
 const provisioningTemplate = path.join(
   scriptDirectory,

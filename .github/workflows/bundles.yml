@@ -41,7 +41,7 @@ jobs:
         id: metadata
         shell: bash
         run: |
-          app_version=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' apps/rmux/src-tauri/tauri.conf.json)
+          app_version=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' apps/desktop/src-tauri/tauri.conf.json)
           if [[ -z "$app_version" ]]; then
             echo "could not read the app version" >&2
             exit 1
@@ -203,7 +203,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: apps/rmux/pnpm-lock.yaml
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -216,14 +216,14 @@ jobs:
           key: desktop-${{ matrix.target }}
 
       - name: Install frontend dependencies
-        working-directory: apps/rmux
+        working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
 
       - name: Download remote-agent bundles
         uses: actions/download-artifact@v5
         with:
           name: ctl-agent-bundle-set
-          path: apps/rmux/src-tauri/resources/agent-bundles
+          path: apps/desktop/src-tauri/resources/agent-bundles
 
       - name: Detect Apple signing configuration
         id: signing
@@ -285,11 +285,11 @@ jobs:
         shell: bash
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p rmuxd -p taskd
-          mkdir -p apps/rmux/src-tauri/binaries
+          mkdir -p apps/desktop/src-tauri/binaries
           cp "target/${{ matrix.target }}/release/rmuxd" \
-            "apps/rmux/src-tauri/binaries/rmuxd-${{ matrix.target }}"
+            "apps/desktop/src-tauri/binaries/rmuxd-${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/taskd" \
-            "apps/rmux/src-tauri/binaries/taskd-${{ matrix.target }}"
+            "apps/desktop/src-tauri/binaries/taskd-${{ matrix.target }}"
           if [[ "${{ runner.os }}" == macOS ]]; then
             ./scripts/ci/package-ctld-app.sh \
               "target/${{ matrix.target }}/release/ctld" \
@@ -301,11 +301,11 @@ jobs:
             fi
           else
             cp "target/${{ matrix.target }}/release/ctld" \
-              "apps/rmux/src-tauri/binaries/ctld-${{ matrix.target }}"
+              "apps/desktop/src-tauri/binaries/ctld-${{ matrix.target }}"
           fi
 
       - name: Build desktop bundles
-        working-directory: apps/rmux
+        working-directory: apps/desktop
         env:
           APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
         shell: bash

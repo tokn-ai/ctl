@@ -171,7 +171,7 @@ rather than accumulate task protocol and persistence logic.
 
 - [Proposal 0003: Managed tasks in ctl](0003-task-system.md)
 - [Proposal 0007: Local task definitions, runs, and schedules](0007-local-task-workflows.md)
-- [Workspace implementation](../../apps/rmux/src-tauri/src/workspace/mod.rs)
+- [Workspace implementation](../../apps/desktop/src-tauri/src/workspace/mod.rs)
 - [rmux local-control protocol](../rmux-local-control.md)
 
 

@@ -285,7 +285,7 @@ checkpoint; no old attachment token or keyboard input is replayed.
 Run the frontend suite and native persistence/transport tests:
 
 ```sh
-pnpm --dir apps/rmux test
+pnpm --dir apps/desktop test
 cargo test -p rmux-app -p ctl-agent
 ```
 

@@ -6,29 +6,46 @@ or tab groups.
 
 ## Run
 
-Build the client and its local daemon together:
+The main entry point is `rmux`; it embeds this TUI as a library.
 
 ```sh
-cargo build -p rmux-tui -p rmuxd
-cargo run -p rmux-tui
-cargo run -p rmux-tui -- my-session
-cargo run -p rmux-tui -- --read-only my-session
-cargo run -p rmux-tui -- --prefix Ctrl+a --socket /path/to/rmux.sock
+cargo build -p rmux -p rmuxd
+cargo run -p rmux                         # create a session and open the TUI
+cargo run -p rmux -- new -s work
+cargo run -p rmux -- new -As work         # attach if it exists, otherwise create
+cargo run -p rmux -- new -ds background   # create detached, including in scripts
+cargo run -p rmux -- attach -t work
+cargo run -p rmux -- attach -rt work      # read-only
+cargo run -p rmux -- ls
+cargo run -p rmux -- kill-session -t work
 ```
 
-With no session argument, the client opens the first running session, or creates
-a shell if none exist. Read-only mode never creates a shell. A named session must
-already exist. The daemon is auto-started through the existing local connector;
-install `rmuxd` beside `rmux-tui`, or set `RMUXD_BIN`.
+`new-session`, `attach-session`, and `list-sessions` accept the short aliases
+`new`, `attach`/`a`, and `ls`/`list`. Existing `attach NAME`, `kill NAME`,
+and `new --name NAME` syntax is retained. `attach` without a target selects the
+newest running session; it never creates one. `new -A` requires `-s NAME`.
+
+Use `-c DIRECTORY` with `new` to set its initial directory, and
+`-- PROGRAM ARGS...` to run a specific program. Global `-S PATH`/`--socket PATH`
+selects the local endpoint; `--prefix Ctrl+a` changes the TUI prefix.
+
+Install `rmuxd` beside `rmux`, or set `RMUXD_BIN`. They must use matching
+protocol versions; the client does not restart or upgrade an existing daemon.
 
 ```sh
 cargo install --path rmux/daemon
-cargo install --path apps/tui
+cargo install --path rmux/cli
 ```
 
-This first version connects locally. To use a remote daemon, SSH to the machine
-and run `rmux-tui` there. Protocol versions must match; the TUI does not restart
-or upgrade an existing daemon.
+The standalone `rmux-tui [SESSION]` launcher remains available. It retains its
+original behavior: open the first session, or create one when none exist.
+`rmux attach --raw NAME` (and `attach --from SEQUENCE`) uses the original
+single-terminal presenter with Ctrl+] detach. `ctl rmux` also retains its
+transport-based presenter and detached creation behavior, including over SSH.
+For the local TUI on a remote machine, SSH there and run `rmux`.
+
+Migration: standalone `rmux new` now attaches by default. Scripts that used it
+to create background sessions must add `-d`.
 
 ## Keys
 
@@ -37,18 +54,23 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 
 | After prefix | Action |
 | --- | --- |
-| `%` or `v` | Split right |
-| `"` or `s` | Split below |
+| `%` | Split right |
+| `"` | Split below |
 | Arrow keys | Focus an adjacent pane |
+| `o` | Cycle to the next pane |
 | `c` | Create and select a session |
 | `n` / `p` | Next / previous session |
-| `w` | Session picker; arrows select, Enter opens, Esc cancels |
-| `i` | Take or release the active pane's input lease |
-| `r` | Take or release the view's resize lease |
+| `s` / `w` | Session picker; arrows select, Enter opens, Esc cancels |
+| `r` | Redraw the terminal |
+| `I` | Take or release the active pane's input lease |
+| `R` | Take or release the view's resize lease |
 | `x` | Terminate the active pane; `y` confirms |
 | `d` | Detach and exit; sessions keep running |
 | `?` | Help |
 | Esc | Cancel prefix |
+
+Sessions take the place of tmux windows for `c`, `n`, `p`, and `w`; rmux
+has no extra window layer. Uppercase `I` and `R` are rmux-specific lease controls.
 
 Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm

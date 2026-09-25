@@ -24,8 +24,8 @@ cargo build --workspace
 For the tmux-style terminal UI (local sessions, including when run inside SSH):
 
 ```sh
-cargo build -p rmux-tui -p rmuxd
-cargo run -p rmux-tui
+cargo build -p rmux -p rmuxd
+cargo run -p rmux
 ```
 
 Use Ctrl+B then `?` for help, `%` to split right, and `d` to detach.
@@ -112,12 +112,17 @@ errors still fail the build rather than silently producing unsigned packages.
 
 ## Use
 
-Create a detached persistent shell in the current directory:
+Open a new persistent session in the TUI, or create one detached for scripts:
 
 ```sh
-rmux new
-rmux new --name work
+rmux
+rmux new -s work
+rmux new -As work       # attach if it exists, otherwise create
+rmux new -ds background # detached
 ```
+
+The standalone `rmux new` now attaches by default; existing scripts should add
+`-d`. The optional `rmux-tui` launcher remains available.
 
 Without `--name`, `rmuxd` assigns a short name such as `session-1`, increasing
 monotonically for that daemon lifetime. Explicit names remain available for
@@ -126,8 +131,8 @@ scripts and stable workflows.
 List and attach to sessions:
 
 ```sh
-rmux list
-rmux attach work
+rmux ls
+rmux attach -t work
 ```
 
 A session is a listed root bound to a server-owned view. Each view owns one or
@@ -186,11 +191,11 @@ deliberately leaves it redacted.
 That redaction applies to shell metadata; normal terminal echo remains part of
 the raw terminal stream seen by attached viewers.
 
-Press `Ctrl-]` to detach without terminating the shell. End the session
-explicitly with:
+Press `Ctrl+B`, then `d` to detach without terminating the shell. Use
+`Ctrl+B`, then `?` for TUI shortcuts. End the session explicitly with:
 
 ```sh
-rmux kill work
+rmux kill-session -t work
 ```
 
 The first normal attachment claims an unheld input lease, so another normal
@@ -201,11 +206,15 @@ explicitly with:
 rmux attach work --read-only
 ```
 
-Attaching never changes the existing PTY size. To deliberately claim layout
-ownership and resize it once to the current terminal, use:
+The TUI requests the shared view resize lease and fits the canvas when available.
+Use uppercase `I` and `R` after the prefix to take or release input and resize
+ownership. Read-only attachment requests neither lease.
+
+For the original single-terminal presenter, use `--raw`. It detaches with
+Ctrl+] and resizes only with an explicit `--resize` request:
 
 ```sh
-rmux attach work --resize
+rmux attach --raw work --resize
 ```
 
 The client starts a per-user `rmuxd` on demand. The daemon owns the PTY and
@@ -324,11 +333,12 @@ retains its standard meaning and quits the app without terminating sessions.
 
 ```sh
 rmux list
-rmux new --name development
-rmux attach development
+rmux new -ds development
+rmux attach -t development
 ```
 
-`ctl rmux` reuses that exact command surface through ctl's selected target.
+`ctl rmux` shares command parsing through ctl's selected target, retaining
+detached creation and the single-terminal presenter for local and SSH transports.
 The target is local by default; no SSH process or `ctl-agent` helper is involved:
 
 ```sh

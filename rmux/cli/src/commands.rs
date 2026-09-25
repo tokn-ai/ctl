@@ -6,8 +6,7 @@ use rmux_client::{
 };
 use rmux_ipc::Stream;
 use rmux_proto::{
-  ClientMessage, CodecError, CommandSpec, ErrorCode, PromptPhase, ServerMessage, SessionInfo,
-  ShellType, TuiHint,
+  ClientMessage, CodecError, ErrorCode, PromptPhase, ServerMessage, SessionInfo, ShellType, TuiHint,
 };
 use std::error::Error;
 use std::future::Future;
@@ -98,8 +97,16 @@ where
   C: Connector,
 {
   match command {
-    Command::New { name, cwd, command } => {
-      create_session(connector, name, command_spec(command), cwd).await
+    Command::New {
+      name,
+      cwd,
+      command,
+      attach_if_exists,
+      ..
+    } => {
+      let session = new_session(connector, name, command, cwd, attach_if_exists).await?;
+      println!("{}\t{}", session.session_id, session.name);
+      Ok(())
     }
     Command::View { session } => show_view(connector, ClientMessage::GetView { session }).await,
     Command::Split {
@@ -157,8 +164,16 @@ where
       resume_from,
       read_only,
       resize,
-    } => attach_session(connector, &session, resume_from, !read_only, resize).await,
-    Command::Kill { session } => kill_session(connector, &session).await,
+      target,
+      ..
+    } => {
+      let session = resolve_session(connector, target.or(session)).await?;
+      attach_session(connector, &session, resume_from, !read_only, resize).await
+    }
+    Command::Kill { session, target } => {
+      let session = target.or(session).ok_or(CommandError::MissingSession)?;
+      kill_session(connector, &session).await
+    }
     Command::Shell {
       command: ShellCommand::Init { shell: shell_kind },
     } => {
@@ -184,31 +199,73 @@ async fn show_view<C: Connector>(
   }
 }
 
-async fn create_session<C: Connector>(
+/// Create a session, or reuse an exact name when requested.
+///
+/// # Errors
+/// Returns transport, protocol, or working-directory errors.
+pub async fn new_session<C: Connector>(
   connector: &C,
   name: Option<String>,
-  command: Option<CommandSpec>,
+  command: Vec<String>,
   working_directory: Option<String>,
-) -> Result<(), CommandError> {
+  attach_if_exists: bool,
+) -> Result<SessionInfo, CommandError> {
   let working_directory = target_working_directory(connector, working_directory)?;
   let response = target_request(
     connector,
     ClientMessage::CreateSession {
-      name,
-      command,
+      name: name.clone(),
+      command: command_spec(command),
       working_directory,
       terminal_size: current_terminal_size(),
     },
   )
-  .await?;
-
+  .await;
   match response {
-    ServerMessage::SessionCreated { session } => {
-      println!("{}\t{}", session.session_id, session.name);
-      Ok(())
+    Ok(ServerMessage::SessionCreated { session }) => Ok(session),
+    Err(
+      error @ CommandError::Protocol(ProtocolError::Server {
+        code: ErrorCode::SessionAlreadyExists,
+        ..
+      }),
+    ) if attach_if_exists => {
+      let ServerMessage::SessionList { sessions } =
+        target_request(connector, ClientMessage::ListSessions).await?
+      else {
+        return Err(error);
+      };
+      sessions
+        .into_iter()
+        .find(|session| Some(&session.name) == name.as_ref())
+        .ok_or(error)
     }
-    response => Err(unexpected("session_created", &response)),
+    Ok(response) => Err(unexpected("session_created", &response)),
+    Err(error) => Err(error),
   }
+}
+
+/// Resolve an explicit selector or choose the newest running session.
+///
+/// # Errors
+/// Returns an error when discovery fails or there are no running sessions.
+pub async fn resolve_session<C: Connector>(
+  connector: &C,
+  selected: Option<String>,
+) -> Result<String, CommandError> {
+  if let Some(selected) = selected {
+    return Ok(selected);
+  }
+  let ServerMessage::SessionList { sessions } =
+    target_request(connector, ClientMessage::ListSessions).await?
+  else {
+    return Err(CommandError::MissingSession);
+  };
+  sessions
+    .into_iter()
+    .filter(|session| session.status == rmux_proto::SessionStatus::Running)
+    .max_by_key(|session| session.created_at_ms)
+    .map(|session| session.session_id)
+    .ok_or(CommandError::MissingSession)
 }
 
 async fn list_sessions<C: Connector>(connector: &C) -> Result<(), CommandError> {
@@ -509,6 +566,8 @@ fn connection_error(error: impl Error + Send + Sync + 'static) -> CommandError {
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error("no running session; create one with rmux new")]
+  MissingSession,
   #[error("transport connection failed: {0}")]
   Connection(#[source] Box<dyn Error + Send + Sync>),
   #[error("could not determine the current working directory: {0}")]

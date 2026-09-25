@@ -152,17 +152,22 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
       .await
       .map_err(|error| format!("first checkpoint attachment did not open: {error}"))?;
   assert!(matches!(first_attached, ServerMessage::Attached { .. }));
-  let initial_output = match &first_attached {
+  let (initial_output, initial_sequence) = match &first_attached {
     ServerMessage::Attached {
       checkpoint: Some(checkpoint),
       ..
-    } => checkpoint.payload.clone(),
-    _ => {
-      read_output_until(&mut first_attach, b"checkpoint-ready")
-        .await?
-        .0
-    }
+    } => (checkpoint.payload.clone(), checkpoint.sequence),
+    _ => (Vec::new(), 0),
   };
+  // Attachment can capture a checkpoint before the shell finishes printing.
+  // Apply subsequent presentation frames before asserting the terminal state.
+  let (initial_output, _) = read_output_until_from(
+    &mut first_attach,
+    b"checkpoint-ready",
+    initial_output,
+    initial_sequence,
+  )
+  .await?;
   assert!(contains_bytes(&initial_output, b"checkpoint-ready"));
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
   wait_for_detached(&mut first_attach).await?;
@@ -2114,8 +2119,51 @@ async fn final_output_is_drained_when_presentation_acknowledgement_finds_a_close
   Ok(())
 }
 
+#[tokio::test]
+async fn checkpoint_output_waits_for_remaining_marker_bytes() -> TestResult {
+  let (mut client, mut server) = UnixStream::pair()?;
+  write_frame(
+    &mut server,
+    &ServerMessage::Output {
+      sequence_start: 11,
+      sequence_end: 16,
+      data: b"ready".to_vec(),
+    },
+  )
+  .await?;
+  let (output, sequence) = read_output_until_from(
+    &mut client,
+    b"checkpoint-ready",
+    b"checkpoint-".to_vec(),
+    11,
+  )
+  .await?;
+  assert_eq!(output, b"checkpoint-ready");
+  assert_eq!(sequence, 16);
+  assert!(matches!(
+    timeout(
+      Duration::from_secs(3),
+      read_frame::<_, ClientMessage>(&mut server)
+    )
+    .await??,
+    Some(ClientMessage::PresentationApplied { sequence: 16 })
+  ));
+  Ok(())
+}
+
 async fn read_output_until(stream: &mut UnixStream, expected: &[u8]) -> TestResult<(Vec<u8>, u64)> {
-  let mut output = Vec::new();
+  read_output_until_from(stream, expected, Vec::new(), 0).await
+}
+
+async fn read_output_until_from(
+  stream: &mut UnixStream,
+  expected: &[u8],
+  mut output: Vec<u8>,
+  initial_sequence: u64,
+) -> TestResult<(Vec<u8>, u64)> {
+  if contains_bytes(&output, expected) {
+    return Ok((output, initial_sequence));
+  }
   loop {
     match required_message(stream).await? {
       ServerMessage::Output {

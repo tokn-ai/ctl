@@ -13,7 +13,7 @@ function Invoke-Rmux {
 }
 
 try {
-  Invoke-Rmux -Arguments @('new', '--name', 'smoke', '--', 'cmd.exe', '/D', '/Q')
+  Invoke-Rmux -Arguments @('new', '-d', '--name', 'smoke', '--', 'cmd.exe', '/D', '/Q')
   $sessions = & $ctl rmux list
   if ($LASTEXITCODE -ne 0 -or ($sessions -join "`n") -notmatch 'smoke') {
     throw 'ctl rmux did not find the session created by rmux'

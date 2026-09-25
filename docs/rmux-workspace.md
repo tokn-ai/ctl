@@ -245,10 +245,21 @@ checkpoint. Explicit terminal selection and reconnects use the terminal ID and
 can resume cached output; one terminal's cursor is never reused for another.
 
 The compositor refreshes the active view every two seconds, with immediate
-updates after local mutations. Existing terminal renderers remain mounted when
-split geometry or selected view tabs change. Each terminal keeps independent
-input and layout leases; clients can render the same layout at different sizes,
-but only the lease owner can resize each underlying PTY.
+updates after local mutations and primary PTY geometry changes. Existing terminal
+renderers remain mounted when split geometry or selected view tabs change.
+
+Protocol 11 gives the view one shared cell canvas and one resize lease. The
+controlling client measures the whole canvas viewport; the server divides it
+into PTY rectangles with one-cell dividers. Secondary panes never resize from
+their own DOM bounds. Other clients display the same geometry through a scrollable
+viewport. Input leases, selected tab groups, and active pane focus stay independent.
+
+Pane controls sit above the canvas. Pane interiors contain only terminal cells,
+so side-by-side panes have equal height. An outline marks the active pane. Pane
+labels use live command/shell and directory metadata instead of generated session
+names. If the viewport is too small for the split tree, the daemon preserves the
+minimum valid grid and the client scrolls it. Equal split proportions remain the
+default; no divider dragging is introduced here.
 
  Local startup attachment is a
 one-shot intent and uses the normal connection/error handling once the renderer

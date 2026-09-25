@@ -17,6 +17,8 @@ pub(super) struct View {
   pub id: String,
   pub revision: u64,
   pub layout: ViewLayout,
+  pub canvas_size: rmux_proto::TerminalSize,
+  pub leases: rmux_core::AttachmentLeaseRegistry,
 }
 
 pub(super) trait LayoutExt {
@@ -97,6 +99,48 @@ impl LayoutExt for ViewLayout {
 }
 
 impl SessionRegistry {
+  pub(super) fn resize_view(
+    &mut self,
+    id: &str,
+    size: rmux_proto::TerminalSize,
+  ) -> Result<(), super::SessionControlError> {
+    let root = &self.sessions[id];
+    let panes = root
+      .view
+      .layout
+      .pane_geometry(&size)
+      .map_err(super::SessionControlError::Pty)?;
+    for pane in panes {
+      if let Some(terminal) = self.terminals.get(&pane.terminal_id) {
+        terminal.resize_pty(rmux_proto::TerminalSize {
+          columns: pane.columns,
+          rows: pane.rows,
+          pixel_width: u16::try_from(
+            (u32::from(size.pixel_width) * u32::from(pane.columns)) / u32::from(size.columns),
+          )
+          .expect("pane is bounded by canvas"),
+          pixel_height: u16::try_from(
+            (u32::from(size.pixel_height) * u32::from(pane.rows)) / u32::from(size.rows),
+          )
+          .expect("pane is bounded by canvas"),
+        })?;
+      }
+    }
+    let root = self.sessions.get_mut(id).expect("view exists");
+    if root.view.canvas_size != size {
+      root.view.canvas_size = size;
+      root.view.revision += 1;
+    }
+    Ok(())
+  }
+
+  pub(super) fn reflow_view(&mut self, id: &str) -> Result<(), super::SessionControlError> {
+    let Some(root) = self.sessions.get(id) else {
+      return Ok(());
+    };
+    self.resize_view(id, root.view.canvas_size.clone())
+  }
+
   pub(super) fn plan_split(
     &self,
     target_id: &str,
@@ -124,6 +168,9 @@ impl SessionRegistry {
     let mut layout = root.view.layout.clone();
     layout.split_terminal(target_id, new_id, axis);
     validate_layout(&layout, 0)?;
+    layout
+      .pane_geometry(&root.view.canvas_size)
+      .map_err(SessionManagerError::InvalidView)?;
     Ok((owner, layout))
   }
 
@@ -166,6 +213,12 @@ impl SessionRegistry {
       session_id: session.id.clone(),
       view_id: session.view.id.clone(),
       revision: session.view.revision,
+      canvas_size: session.view.canvas_size.clone(),
+      panes: session
+        .view
+        .layout
+        .pane_geometry(&session.view.canvas_size)
+        .map_err(SessionManagerError::InvalidView)?,
       layout: session.view.layout.clone(),
       terminals,
     })
@@ -178,12 +231,19 @@ impl SessionRegistry {
     let owner_id = lock(&terminal.owner).session_id.clone();
     if let Some(session) = self.sessions.get_mut(&owner_id) {
       if let Some(layout) = session.view.layout.clone().remove_terminal(id) {
+        for record in lock(&terminal.attachments).values() {
+          session
+            .view
+            .leases
+            .release_attachment(&record.attachment_id);
+        }
         session.view.layout = layout;
         session.view.revision += 1;
       } else {
         self.sessions.remove(&owner_id);
       }
     }
+    let _ = self.reflow_view(&owner_id);
   }
 
   pub(super) fn remove_terminal(&mut self, id: &str) {
@@ -221,10 +281,16 @@ impl SessionManager {
         "layout must contain each owned terminal exactly once".into(),
       ));
     }
+    layout
+      .pane_geometry(&root.view.canvas_size)
+      .map_err(SessionManagerError::InvalidView)?;
     let id = root.id.clone();
     let root = registry.sessions.get_mut(&id).expect("validated root");
     root.view.layout = layout;
     root.view.revision += 1;
+    registry
+      .reflow_view(&id)
+      .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
     registry.view_info(&id)
   }
 
@@ -281,6 +347,8 @@ impl SessionManager {
         view: View {
           id: owner.view_id,
           revision: 0,
+          canvas_size: terminal.info().terminal_size,
+          leases: rmux_core::AttachmentLeaseRegistry::default(),
           layout: ViewLayout::Terminal {
             terminal_id: terminal_id.into(),
           },
@@ -326,6 +394,9 @@ impl SessionManager {
       ],
     };
     validate_layout(&merged_layout, 0)?;
+    merged_layout
+      .pane_geometry(&registry.sessions[&destination_id].view.canvas_size)
+      .map_err(SessionManagerError::InvalidView)?;
     let source = registry
       .sessions
       .remove(&source_id)
@@ -354,6 +425,9 @@ impl SessionManager {
     for id in moved_ids {
       *lock(&registry.terminals[&id].owner) = owner.clone();
     }
+    registry
+      .reflow_view(&destination_id)
+      .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
     registry.view_info(&destination_id)
   }
 

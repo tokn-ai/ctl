@@ -11,11 +11,13 @@ export interface TerminalAdapter {
   dispose(): void;
   focus?(): void;
   proposeDimensions?(): ProposedDimensions | null;
+  cellDimensions?(): { width: number; height: number } | null;
 }
 
 export type TerminalAdapterFactory = (terminalSize: TerminalSize) => TerminalAdapter;
 
 export class TerminalPresenter {
+  cellDimensions() { return this.adapter.cellDimensions?.() ?? null; }
   private adapter: TerminalAdapter;
   private operationTail = Promise.resolve();
   private disposed = false;

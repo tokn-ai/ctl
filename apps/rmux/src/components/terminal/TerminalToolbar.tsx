@@ -4,6 +4,7 @@ import { targetLabel } from "../../features/targets/targets";
 
 interface TerminalToolbarProps {
   state: AttachmentViewState;
+  showInputControl?: boolean;
   onToggleInput(): void;
   onToggleResizeWithWindow(): void;
   onReconnect(): void;
@@ -13,6 +14,7 @@ interface TerminalToolbarProps {
 
 export function TerminalToolbar({
   state,
+  showInputControl = true,
   onToggleInput,
   onToggleResizeWithWindow,
   onReconnect,
@@ -45,7 +47,7 @@ export function TerminalToolbar({
             <Icon name="refresh" size={14} /> Reconnect
           </button>
         ) : null}
-        <button
+        {showInputControl && <button
           type="button"
           onClick={onToggleInput}
           disabled={!attached}
@@ -56,7 +58,7 @@ export function TerminalToolbar({
         >
           <Icon name="keyboard" size={14} />
           {state.input_lease.owned_by_client ? "Input enabled" : "Read only"}
-        </button>
+        </button>}
         <button
           type="button"
           onClick={onToggleResizeWithWindow}
@@ -64,7 +66,7 @@ export function TerminalToolbar({
           className={resizeActive ? "active-control" : ""}
           aria-pressed={resizeActive}
           aria-label={resizePending ? "Starting resize…" : resizeActive ? "Stop resizing" : "Resize with window"}
-          title="Keep the terminal size matched to this window"
+          title="Control the shared view size from this window"
         >
           <Icon name="monitor" size={14} />
           {resizePending ? "Resizing…" : resizeActive ? "Auto resize" : "Fixed size"}

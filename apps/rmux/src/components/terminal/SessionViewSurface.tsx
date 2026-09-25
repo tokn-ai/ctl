@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from "react";
-import type { ComponentProps } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
-import { adjacentPane, swapPanes, viewPanes, viewTabs } from "../../features/terminal/viewLayout";
+import { adjacentPane, swapPanes, viewDividers, viewPanes, viewTabs } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
-import { sameTarget, sessionKey } from "../../features/targets/targets";
+import { sessionKey } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
 import { sessionView } from "../../lib/tauri";
-import type { SessionSummary, SessionView, ViewAction } from "../../lib/types";
+import type { SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
+import { terminalPaneTitle } from "../../lib/shellState";
 import { TerminalSurface } from "./TerminalSurface";
 import "./sessionView.css";
 import { resolvePrefix, prefixActionMode, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
@@ -17,27 +19,40 @@ import type { AppCommand, Keybinding, ShortcutPlatform } from "../../features/co
 type SurfaceProps = ComponentProps<typeof TerminalSurface>;
 interface Props extends SurfaceProps {
   session: SessionSummary | null;
+  shell_state?: ShellStateSummary | null;
+  renderer?: XtermRenderer | null;
+  input_owned?: boolean;
+  on_toggle_input?(): void;
   on_select_terminal(session: SessionSummary): Promise<void>;
-  available_sessions: SessionSummary[];
   on_promoted(session: SessionSummary): Promise<void>;
-  on_merged(source: SessionSummary): Promise<void>;
   prefix_settings?: { document: KeybindingsDocument; bindings: ReadonlyMap<string, Keybinding>; platform: ShortcutPlatform };
   shortcuts_enabled?: boolean;
   on_command?(id: string): void;
   on_pane_commands?(commands: AppCommand[]): void;
 }
 
-export function SessionViewSurface({ session, on_select_terminal, available_sessions, on_promoted, on_merged, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
+export function SessionViewSurface({ session, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
+  const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
+  const [controls_host, setControlsHost] = useState<HTMLDivElement | null>(null);
+  const [cell, setCell] = useState({ width: 8, height: 16 });
+  useLayoutEffect(() => {
+    renderer?.setViewport(viewport);
+    if (!renderer || !viewport) return;
+    const stop = renderer.observeCellDimensions((next) => {
+      setCell((previous) => previous.width === next.width && previous.height === next.height ? previous : next);
+    });
+    return () => { stop(); renderer.setViewport(null); };
+  }, [renderer, viewport]);
   const [focused_id, setFocusedId] = useState<string | null>(null);
   const [zoomed_id, setZoomedId] = useState<string | null>(null);
   const pane_elements = useRef(new Map<string, HTMLDivElement>());
+  const pane_toggle_inputs = useRef(new Map<string, () => Promise<void>>());
   const pane_inputs = useRef(new Map<string, (data: Uint8Array) => void>());
   const [view, setView] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busy_ref = useRef(false);
-  const [merge_source, setMergeSource] = useState("");
   const [selected_tabs, setSelectedTabs] = useState<Record<string, number>>({});
   const pane_detachers = useRef(new Map<string, () => Promise<void>>());
   const session_ref = useRef(session);
@@ -90,6 +105,19 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     return () => { generation.current++; clearTimeout(timer); };
   }, [key, connected]);
 
+  const primary_size = `${session?.terminal_size.columns}:${session?.terminal_size.rows}`;
+  const previous_size = useRef(primary_size);
+  useEffect(() => {
+    const changed = previous_size.current !== primary_size;
+    previous_size.current = primary_size;
+    if (!changed || !connected || busy_ref.current || !session) return;
+    const current = generation.current;
+    const request = ++sequence.current;
+    void sessionView(session.target, { kind: "get", session_id: session.session_id }).then((next) => {
+      if (generation.current === current && sequence.current === request) setView(next);
+    }).catch(() => { /* The periodic refresh reports connectivity errors. */ });
+  }, [primary_size, connected, key]);
+
   async function mutate(action: ViewAction) {
     if (!session || busy_ref.current) return;
     busy_ref.current = true;
@@ -102,10 +130,6 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
       if (next && action.kind === "promote") {
         const terminal = next.terminals[0];
         await on_promoted({ ...session, ...terminal, name: next.session_name, session_id: next.session_id, view_id: next.view_id });
-      }
-      if (next && action.kind === "merge") {
-        const source = available_sessions.find((candidate) => candidate.session_id === action.source && sameTarget(candidate.target, session.target));
-        if (source) await on_merged(source);
       }
       if (current === generation.current) {
         ++sequence.current;
@@ -125,10 +149,10 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     }
   }
 
-  const merge_candidates = session ? available_sessions.filter((candidate) => candidate.session_id !== session.session_id && sameTarget(candidate.target, session.target) && candidate.status === "running") : [];
   const current_view = view?.session_id === session?.session_id ? view : null;
   const primary_id = session?.terminal_id;
-  const panes = current_view ? viewPanes(current_view.layout, selected_tabs) : [];
+  const visibility = new Map(current_view ? viewPanes(current_view.layout, selected_tabs).map((pane) => [pane.terminal_id, pane.visible]) : []);
+  const panes = current_view?.panes.map((pane) => ({ terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: visibility.get(pane.terminal_id) ?? false })) ?? [];
   const focused = panes.some((pane) => pane.terminal_id === focused_id && pane.visible) ? focused_id! : panes.find((pane) => pane.visible)?.terminal_id ?? primary_id;
   const can_split = connected && Boolean(current_view && focused) && !busy;
   const split_focused = useRef<(axis: "horizontal" | "vertical") => Promise<void>>(async () => {});
@@ -137,8 +161,15 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     await mutate({ kind: "split", terminal_id: focused, axis, terminal_size: session.terminal_size, working_directory: null });
     requestAnimationFrame(() => pane_elements.current.get(focused)?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
   };
+  const toggle_focused = useRef<() => void>(() => {});
+  toggle_focused.current = () => {
+    if (focused === primary_id) on_toggle_input?.();
+    else if (focused) void pane_toggle_inputs.current.get(focused)?.();
+    requestAnimationFrame(() => focused && pane_elements.current.get(focused)?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
+  };
   useEffect(() => {
     on_pane_commands?.([
+      { id: "terminal.toggle_input", category: "Pane", title: "Toggle pane input", enabled: can_split, focusTerminalAfterRun: false, run: () => toggle_focused.current() },
       { id: "pane.split_right", category: "Pane", title: "Split pane right", keywords: ["split right", "horizontal"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("horizontal") },
       { id: "pane.split_below", category: "Pane", title: "Split pane below", keywords: ["split below", "vertical"], enabled: can_split, focusTerminalAfterRun: false, run: () => split_focused.current("vertical") },
     ]);
@@ -182,14 +213,18 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
     ? current_view.terminals[0]?.terminal_id
     : null;
   const active_zoom = panes.some((pane) => pane.terminal_id === zoomed_id && pane.visible) ? zoomed_id : null;
-  const paneStyle = (rect: typeof primary_rect) => rect && active_zoom ? { inset: 0, visibility: rect.terminal_id === active_zoom ? "visible" as const : "hidden" as const } : rect ? {
-    left: `${rect.left}%`, top: `${rect.top}%`, width: `${rect.width}%`, height: `${rect.height}%`,
-    visibility: rect.visible ? "visible" as const : "hidden" as const,
+  const paneStyle = (rect: typeof primary_rect) => rect ? {
+    left: active_zoom ? 0 : rect.left * cell.width,
+    top: active_zoom ? 0 : rect.top * cell.height,
+    width: rect.width * cell.width, height: rect.height * cell.height,
+    visibility: rect.visible && (!active_zoom || rect.terminal_id === active_zoom) ? "visible" as const : "hidden" as const,
   } : { inset: 0 };
 
-  function controls(terminal_id: string, label: string) {
+  function controls(terminal_id: string, state?: ShellStateSummary | null, input_control?: ReactNode) {
+    const label = terminalPaneTitle(state);
     return <div className="view-pane-toolbar">
-      <span>{label}</span>
+      <span title={label}>{label}</span>
+      {input_control}
       <button disabled={busy} title="Split side by side" onClick={() => void mutate({ kind: "split", terminal_id, axis: "horizontal", terminal_size: session!.terminal_size, working_directory: null })}>Split right</button>
       <button disabled={busy} title="Split vertically" onClick={() => void mutate({ kind: "split", terminal_id, axis: "vertical", terminal_size: session!.terminal_size, working_directory: null })}>Split below</button>
       <button disabled={busy} onClick={() => void mutate({ kind: "kill_terminal", terminal_id })}>Terminate pane</button>
@@ -205,36 +240,39 @@ export function SessionViewSurface({ session, on_select_terminal, available_sess
       {PREFIX_ACTIONS.filter((action) => prefixActionMode(action.id) === prefix.mode && prefix_map.bindings.has(action.id)).map((action) => <span key={action.id}><kbd>{prefix_map.bindings.get(action.id)}</kbd> {action.title}</span>)}
       <span>{prefix.mode === "move" ? "Enter or Esc finishes" : `${prefix_map.label} again sends the prefix · Esc cancels`}</span>
     </div>}
-    {connected && merge_candidates.length > 0 && <div className="view-tabs">
-      <select aria-label="Session to merge" value={merge_source} onChange={(event) => setMergeSource(event.target.value)}>
-        <option value="">Merge another session…</option>
-        {merge_candidates.map((candidate) => <option key={candidate.session_id} value={candidate.session_id}>{candidate.name}</option>)}
-      </select>
-      <button disabled={busy || !merge_candidates.some((candidate) => candidate.session_id === merge_source)} onClick={() => void mutate({ kind: "merge", source: merge_source, destination: session!.session_id })}>Merge into this session</button>
-    </div>}
     {error && <div className="message-banner" role="status">{error}</div>}
     {action_error && <div className="message-banner" role="alert">{action_error}</div>}
     {current_view && viewTabs(current_view.layout).map((group) => <div className="view-tabs" key={group.path} role="tablist" aria-label="Terminal group">
       {Array.from({ length: group.count }, (_, index) => <button key={index} role="tab" aria-selected={(selected_tabs[group.path] ?? 0) === index} onClick={() => setSelectedTabs((previous) => ({ ...previous, [group.path]: index }))}>Group {index + 1}</button>)}
     </div>)}
-    <div className="view-panes">
-      <div className="view-pane" ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
-        {connected && primary_id && controls(primary_id, session?.name ?? "Terminal")}
+    <div className="view-controls" ref={setControlsHost}>
+      {connected && primary_id && focused === primary_id && controls(primary_id, shell_state,
+        <button onClick={on_toggle_input}>{input_owned ? "Release input" : "Take input"}</button>)}
+    </div>
+    <div className="view-viewport" ref={setViewport}>
+    <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : { width: "100%", height: "100%" }}>
+      {current_view && !active_zoom && viewDividers(current_view.layout, panes).map((divider) => <div
+        key={divider.path} className="view-divider" aria-hidden="true"
+        style={{ left: Math.round(divider.left * cell.width), top: Math.round(divider.top * cell.height), width: divider.vertical ? 1 : divider.length * cell.width, height: divider.vertical ? divider.length * cell.height : 1 }}
+      />)}
+      <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
         <TerminalSurface {...surface} />
       </div>
       {connected && session && current_view && panes.filter((pane) => pane.terminal_id !== primary_id && pane.terminal_id !== takeover_id).map((pane) => {
         const terminal = current_view.terminals.find((candidate) => candidate.terminal_id === pane.terminal_id)!;
-        return <div className="view-pane" key={pane.terminal_id} ref={paneRef(pane.terminal_id)} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(pane)}>
-          {controls(pane.terminal_id, terminal.name)}
-          <AdditionalTerminal session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} />
+        return <div className="view-pane" data-active={focused === pane.terminal_id} key={pane.terminal_id} ref={paneRef(pane.terminal_id)} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(pane)}>
+          <AdditionalTerminal session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} toggle_registry={pane_toggle_inputs} render_controls={(state, input_control) => focused === pane.terminal_id && controls_host ? createPortal(controls(pane.terminal_id, state, input_control), controls_host) : null} />
         </div>;
       })}
+    </div>
     </div>
   </div>;
 }
 
-function AdditionalTerminal({ session, detach_registry, input_registry }: {
+function AdditionalTerminal({ session, detach_registry, input_registry, toggle_registry, render_controls }: {
   session: SessionSummary;
+  toggle_registry: { current: Map<string, () => Promise<void>> };
+  render_controls(state: ShellStateSummary | null, input_control: ReactNode): ReactNode;
   detach_registry: { current: Map<string, () => Promise<void>> };
   input_registry: { current: Map<string, (data: Uint8Array) => void> };
 }) {
@@ -250,20 +288,19 @@ function AdditionalTerminal({ session, detach_registry, input_registry }: {
     const terminal_id = session_ref.current.terminal_id!;
     const detach = () => actions.current.detach();
     detach_registry.current.set(terminal_id, detach);
+    toggle_registry.current.set(terminal_id, () => actions.current.toggleInputLease());
     input_registry.current.set(terminal_id, (data) => actions.current.handleInput(data));
-    void actions.current.connect(session_ref.current, { resize_with_window: true, terminal_id });
+    void actions.current.connect(session_ref.current, { resize_with_window: false, terminal_id });
     return () => {
       if (detach_registry.current.get(terminal_id) === detach) detach_registry.current.delete(terminal_id);
       input_registry.current.delete(terminal_id);
+      toggle_registry.current.delete(terminal_id);
       void detach();
     };
-  }, [renderer, key, detach_registry, input_registry]);
+  }, [renderer, key, detach_registry, input_registry, toggle_registry]);
   return <>
-    {attachment.state.message && <div role="status" className="message-banner">{attachment.state.message}</div>}
-    <div className="view-pane-leases">
-      <button onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>
-      <button onClick={() => void attachment.toggleResizeWithWindow()}>{attachment.state.resize_with_window ? "Stop resizing" : "Resize to pane"}</button>
-    </div>
+    {render_controls(attachment.state.shell_state, <button onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>)}
+    {attachment.state.message && <div role="status" className="pane-message">{attachment.state.message}</div>}
     <TerminalSurface phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null} onInput={attachment.handleInput} onReady={setRenderer} />
   </>;
 }

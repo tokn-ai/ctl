@@ -167,7 +167,7 @@ export function TerminalPage() {
   const [keybindingsOpen, setKeybindingsOpen] = useState(false);
   const [dispatcher] = useState(() => new CommandDispatcher());
   const [pane_commands, setPaneCommands] = useState<AppCommand[]>([]);
-  const attachment = useAttachment(renderer);
+  const attachment = useAttachment(renderer, true);
   const taskWorkspace = useTaskWorkspace(
     workspace,
     async (session) => {
@@ -1414,7 +1414,11 @@ export function TerminalPage() {
       };
     return base;
   });
-  commands.push(...pane_commands);
+  for (const command of pane_commands) {
+    const index = commands.findIndex((candidate) => candidate.id === command.id);
+    if (index >= 0) commands[index] = command;
+    else commands.push(command);
+  }
   commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
     category: "Tasks",
@@ -1697,6 +1701,7 @@ export function TerminalPage() {
             }
           >
             <TerminalToolbar
+              showInputControl={false}
               state={attachment.state}
               onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
               onToggleResizeWithWindow={() =>
@@ -1792,14 +1797,11 @@ export function TerminalPage() {
               on_command={executeCommandById}
               on_pane_commands={setPaneCommands}
               session={attachment.state.session}
-              available_sessions={sessions}
+              shell_state={attachment.state.shell_state}
+              renderer={renderer}
+              input_owned={attachment.state.input_lease.owned_by_client}
+              on_toggle_input={attachment.toggleInputLease}
               on_promoted={(session) => importSession(session, null)}
-              on_merged={async (source) => {
-                refreshGuardRef.current.recordMutation();
-                setSessions((current) => removeSession(current, sessionKey(source)));
-                setTabs((current) => current.filter((tab) => !sameSession(tab, source)));
-                await persistWorkspace();
-              }}
               on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
               phase={attachment.state.phase}
               hasSession={attachment.state.session !== null}

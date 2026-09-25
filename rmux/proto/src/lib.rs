@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+mod layout;
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
 ///
@@ -54,7 +55,7 @@ pub enum LeaseKind {
 /// Lease state as observed by one attached client.
 ///
 /// The daemon deliberately does not expose another attachment's identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseStatus {
   pub held: bool,
   pub owned_by_client: bool,
@@ -416,8 +417,20 @@ pub struct ViewInfo {
   pub view_id: String,
   pub session_id: String,
   pub revision: u64,
+  pub canvas_size: TerminalSize,
+  pub panes: Vec<PaneGeometry>,
   pub layout: ViewLayout,
   pub terminals: Vec<TerminalInfo>,
+}
+
+/// Cell coordinates within a view. Split dividers occupy one unallocated cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneGeometry {
+  pub terminal_id: String,
+  pub left: u16,
+  pub top: u16,
+  pub columns: u16,
+  pub rows: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1080,7 +1093,7 @@ mod tests {
 
   #[test]
   fn terminal_history_snapshots_use_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_eq!(PROTOCOL_VERSION, 11);
   }
 
   #[test]

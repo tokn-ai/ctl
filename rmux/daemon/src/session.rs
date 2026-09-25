@@ -21,7 +21,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, watch};
@@ -59,6 +59,7 @@ struct TerminalOwner {
 }
 
 pub struct Terminal {
+  manager: Weak<SessionManagerInner>,
   initial_working_directory: Option<String>,
   managed: bool,
   owner: Mutex<TerminalOwner>,
@@ -318,6 +319,22 @@ impl ShellStatePublication<'_> {
 }
 
 impl Terminal {
+  fn with_view_leases<T: Default>(
+    &self,
+    action: impl FnOnce(&mut AttachmentLeaseRegistry) -> T,
+  ) -> T {
+    let Some(manager) = self.manager.upgrade() else {
+      return T::default();
+    };
+    let mut registry = lock(&manager.registry);
+    let owner = lock(&self.owner).session_id.clone();
+    registry
+      .sessions
+      .get_mut(&owner)
+      .map(|root| action(&mut root.view.leases))
+      .unwrap_or_default()
+  }
+
   pub fn info(&self) -> SessionInfo {
     let terminal = lock(&self.state);
     let owner = lock(&self.owner).clone();
@@ -418,8 +435,15 @@ impl Terminal {
       );
       candidate
     };
-    let leases =
-      lock(&self.leases).request_initial(&attachment_id, request_input_lease, request_layout_lease);
+    let leases = lock(&self.leases).request_initial(&attachment_id, request_input_lease, false);
+    let leases = AttachmentLeases {
+      input: leases.input,
+      layout: self.with_view_leases(|leases| {
+        leases
+          .request_initial(&attachment_id, false, request_layout_lease)
+          .layout
+      }),
+    };
     AttachmentRegistration {
       attachment_id,
       attachment_token,
@@ -443,7 +467,10 @@ impl Terminal {
         record.superseded.subscribe(),
       )
     };
-    let leases = lock(&self.leases).attachment_leases(&attachment_id);
+    let leases = AttachmentLeases {
+      input: lock(&self.leases).status(&attachment_id, LeaseKind::Input),
+      layout: self.with_view_leases(|leases| leases.status(&attachment_id, LeaseKind::Layout)),
+    };
     Some(AttachmentRegistration {
       attachment_id,
       attachment_token: attachment_token.into(),
@@ -484,6 +511,7 @@ impl Terminal {
     };
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
+      self.with_view_leases(|leases| leases.release_attachment(&attachment_id));
     }
   }
 
@@ -503,14 +531,21 @@ impl Terminal {
     };
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
+      self.with_view_leases(|leases| leases.release_attachment(&attachment_id));
     }
   }
 
   pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+    if lease == LeaseKind::Layout {
+      return self.with_view_leases(|leases| leases.acquire(attachment_id, lease));
+    }
     lock(&self.leases).acquire(attachment_id, lease)
   }
 
   pub fn release_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
+    if lease == LeaseKind::Layout {
+      return self.with_view_leases(|leases| leases.release(attachment_id, lease));
+    }
     lock(&self.leases).release(attachment_id, lease)
   }
 
@@ -627,15 +662,37 @@ impl Terminal {
   pub fn resize(
     &self,
     attachment_id: &str,
-    terminal_size: TerminalSize,
+    mut terminal_size: TerminalSize,
   ) -> Result<(), SessionControlError> {
-    let leases = lock(&self.leases);
-    if !leases
+    let manager = self
+      .manager
+      .upgrade()
+      .ok_or_else(|| SessionControlError::Pty("view has closed".into()))?;
+    let mut registry = lock(&manager.registry);
+    let owner = lock(&self.owner).session_id.clone();
+    let root = registry
+      .sessions
+      .get(&owner)
+      .ok_or_else(|| SessionControlError::Pty("view has closed".into()))?;
+    if !root
+      .view
+      .leases
       .status(attachment_id, LeaseKind::Layout)
       .owned_by_client
     {
       return Err(SessionControlError::LayoutLeaseRequired);
     }
+    let minimum = root.view.layout.minimum_size();
+    terminal_size.columns = terminal_size.columns.max(
+      u16::try_from(minimum.0).map_err(|_| SessionControlError::Pty("view is too wide".into()))?,
+    );
+    terminal_size.rows = terminal_size.rows.max(
+      u16::try_from(minimum.1).map_err(|_| SessionControlError::Pty("view is too tall".into()))?,
+    );
+    registry.resize_view(&owner, terminal_size)
+  }
+
+  fn resize_pty(&self, terminal_size: TerminalSize) -> Result<(), SessionControlError> {
     // This gate also covers raw output publication. Holding it while the PTY
     // and terminal parser change makes the geometry event an exact boundary:
     // every earlier raw byte is already broadcast, and later bytes cannot be
@@ -1078,6 +1135,7 @@ impl SessionManager {
     );
     let shell_state = terminal.shell_state.clone();
     let session = Arc::new(Terminal {
+      manager: Arc::downgrade(&self.inner),
       initial_working_directory,
       managed,
       owner: Mutex::new(TerminalOwner {
@@ -1356,8 +1414,11 @@ impl NameReservation {
         .expect("terminal owner exists");
       root.view.layout = layout;
       root.view.revision += 1;
-      *lock(&session.owner) = owner;
+      *lock(&session.owner) = owner.clone();
       registry.terminals.insert(session_id, session);
+      registry
+        .reflow_view(&owner.session_id)
+        .map_err(|error| SessionManagerError::Pty(error.to_string()))?;
       self.active = false;
       return Ok(());
     }
@@ -1371,6 +1432,8 @@ impl NameReservation {
         view: View {
           id: owner.view_id,
           revision: 0,
+          canvas_size: session.info().terminal_size,
+          leases: AttachmentLeaseRegistry::default(),
           layout: rmux_proto::ViewLayout::Terminal {
             terminal_id: session_id.clone(),
           },

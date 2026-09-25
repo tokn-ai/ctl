@@ -5,6 +5,7 @@ import type { SessionSummary, SessionView } from "../../lib/types";
 import { SessionViewSurface } from "./SessionViewSurface";
 import type { AppCommand } from "../../features/commands/types";
 import { searchCommands } from "../../features/commands/commandSearch";
+import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn() }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
@@ -27,13 +28,51 @@ vi.mock("./TerminalSurface", async () => {
 
 const session: SessionSummary = { target: { kind: "local" }, session_id: "root", view_id: "view", terminal_id: "a", name: "Root", status: "running", next_sequence: "0", terminal_size: { columns: 80, rows: 24, pixel_width: null, pixel_height: null } };
 const terminal = (terminal_id: string) => ({ terminal_id, name: terminal_id, terminal_size: session.terminal_size, next_sequence: "0" });
-const initial: SessionView = { session_id: "root", session_name: "Root", view_id: "view", revision: "0", layout: { kind: "terminal", terminal_id: "a" }, terminals: [terminal("a")] };
-const split: SessionView = { ...initial, revision: "1", layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] }, terminals: [terminal("a"), terminal("b")] };
-const props = () => ({ session, available_sessions: [session], on_promoted: vi.fn(), on_merged: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
+const initial: SessionView = { session_id: "root", session_name: "Root", view_id: "view", revision: "0", canvas_size: session.terminal_size, panes: [{ terminal_id: "a", left: 0, top: 0, columns: 80, rows: 24 }], layout: { kind: "terminal", terminal_id: "a" }, terminals: [terminal("a")] };
+const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "a", left: 0, top: 0, columns: 40, rows: 24 }, { terminal_id: "b", left: 41, top: 0, columns: 39, rows: 24 }], layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] }, terminals: [terminal("a"), terminal("b")] };
+const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 describe("session compositor", () => {
+  it("updates a single pane's active outline when rendered cell dimensions change", async () => {
+    mocks.request.mockResolvedValue(initial);
+    let measure!: (cell: { width: number; height: number }) => void;
+    const stop = vi.fn();
+    const renderer = {
+      setViewport: vi.fn(),
+      observeCellDimensions: vi.fn((callback) => { measure = callback; return stop; }),
+    } as unknown as XtermRenderer;
+    const mounted = render(<SessionViewSurface {...props()} renderer={renderer} />);
+    await waitFor(() => expect(screen.getByLabelText("Terminal input").closest<HTMLElement>(".view-pane")?.style.width).toBe("640px"));
+    act(() => measure({ width: 10, height: 20 }));
+    const pane = screen.getByLabelText("Terminal input").closest<HTMLElement>(".view-pane")!;
+    expect(pane.dataset.active).toBe("true");
+    expect(pane.style.width).toBe("800px");
+    expect(pane.style.height).toBe("480px");
+    act(() => measure({ width: 7, height: 15 }));
+    expect(pane.style.width).toBe("560px");
+    expect(pane.style.height).toBe("360px");
+    mounted.unmount();
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it("uses server cell rectangles and keeps pane controls outside the canvas", async () => {
+    mocks.request.mockResolvedValue(split);
+    render(<SessionViewSurface {...props()} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [left, right] = screen.getAllByLabelText("Terminal input").map((input) => input.closest<HTMLElement>(".view-pane")!);
+    expect(left.style.height).toBe("384px");
+    expect(right.style.height).toBe(left.style.height);
+    expect(left.style.width).toBe("320px");
+    expect(right.style.left).toBe("328px");
+    expect(right.style.width).toBe("312px");
+    expect(left.querySelector("button")).toBeNull();
+    expect(right.querySelector("button")).toBeNull();
+    expect(screen.getByRole("button", { name: "Split right" }).closest(".view-viewport")).toBeNull();
+    await waitFor(() => expect(mocks.connect).toHaveBeenCalledWith(expect.objectContaining({ terminal_id: "b" }), { resize_with_window: false, terminal_id: "b" }));
+  });
+
   it.each([
     ["pane.split_right", "horizontal"],
     ["pane.split_below", "vertical"],
@@ -85,12 +124,13 @@ describe("session compositor", () => {
   });
 
   it("remembers the new root after promoting a pane", async () => {
-    const promoted: SessionView = { ...initial, session_id: "new-root", session_name: "New root", view_id: "new-view", layout: { kind: "terminal", terminal_id: "b" }, terminals: [terminal("b")] };
+    const promoted: SessionView = { ...initial, session_id: "new-root", session_name: "New root", view_id: "new-view", layout: { kind: "terminal", terminal_id: "b" }, panes: [{ terminal_id: "b", left: 0, top: 0, columns: 80, rows: 24 }], terminals: [terminal("b")] };
     mocks.request.mockResolvedValueOnce(split).mockResolvedValueOnce(promoted).mockResolvedValueOnce(initial);
     const actions = props();
     render(<SessionViewSurface {...actions} />);
-    await waitFor(() => expect(screen.getAllByRole("button", { name: "Move to new session" })).toHaveLength(2));
-    fireEvent.click(screen.getAllByRole("button", { name: "Move to new session" })[1]);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    act(() => screen.getAllByLabelText("Terminal input")[1].focus());
+    fireEvent.click(screen.getByRole("button", { name: "Move to new session" }));
     await waitFor(() => expect(actions.on_promoted).toHaveBeenCalledWith(expect.objectContaining({ session_id: "new-root", terminal_id: "b", name: "New root" })));
   });
 
@@ -99,7 +139,7 @@ describe("session compositor", () => {
     ["Split below", "vertical"],
   ] as const)("reveals the new pane when clicking %s from a zoomed pane", async (label, axis) => {
     const expanded: SessionView = {
-      ...split, revision: "2",
+      ...split, revision: "2", panes: [split.panes[0], { terminal_id: "b", left: 41, top: 0, columns: 19, rows: 24 }, { terminal_id: "c", left: 61, top: 0, columns: 19, rows: 24 }],
       layout: { kind: "split", axis: "horizontal", children: [
         { kind: "terminal", terminal_id: "a" },
         { kind: "split", axis, children: [{ kind: "terminal", terminal_id: "b" }, { kind: "terminal", terminal_id: "c" }] },
@@ -125,7 +165,7 @@ describe("session compositor", () => {
 
   it("releases the surviving pane attachment before transferring it to the primary renderer", async () => {
     vi.useFakeTimers();
-    mocks.request.mockResolvedValueOnce(split).mockResolvedValueOnce({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, terminals: [terminal("b")] });
+    mocks.request.mockResolvedValueOnce(split).mockResolvedValueOnce({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, panes: [{ terminal_id: "b", left: 0, top: 0, columns: 80, rows: 24 }], terminals: [terminal("b")] });
     let finish_detach!: () => void;
     mocks.detach.mockImplementationOnce(() => new Promise<void>((resolve) => { finish_detach = resolve; }));
     const actions = props();
@@ -139,7 +179,7 @@ describe("session compositor", () => {
   });
 
   it("opens the surviving terminal when the primary exits", async () => {
-    mocks.request.mockResolvedValueOnce({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, terminals: [terminal("b")] });
+    mocks.request.mockResolvedValueOnce({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, panes: [{ terminal_id: "b", left: 0, top: 0, columns: 80, rows: 24 }], terminals: [terminal("b")] });
     const actions = props();
     render(<SessionViewSurface {...actions} phase="ended" />);
     await waitFor(() => expect(actions.on_select_terminal).toHaveBeenCalledWith(expect.objectContaining({ session_id: "root", terminal_id: "b" })));

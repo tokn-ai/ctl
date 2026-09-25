@@ -35,6 +35,7 @@ import {
 import { connectionMethodOptions, connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
 import { removableHostCredentials } from "../features/workspace/hostCredentials";
 import { CommandPalette } from "../components/commands/CommandPalette";
+import { ArchiveBrowser } from "../components/sessions/ArchiveBrowser";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
@@ -1471,7 +1472,8 @@ export function TerminalPage() {
   };
   const paletteShortcutLabel = shortcutLabel(COMMAND_IDS.showPalette);
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
-  const dialogOpen =
+  const [archives_open, setArchivesOpen] = useState(false);
+  const dialogOpen = archives_open ||
     taskWorkspace.editorId !== null ||
     portForwardTarget !== null ||
     keybindingsOpen ||
@@ -1550,6 +1552,7 @@ export function TerminalPage() {
           }
           sessions={
             <SessionSidebar
+              on_archives={() => setArchivesOpen(true)}
               targets={sidebarTargets}
               hosts={workspace.hosts}
               connectableHostKeys={connectableHostKeys}
@@ -1803,6 +1806,8 @@ export function TerminalPage() {
               on_toggle_input={attachment.toggleInputLease}
               on_promoted={(session) => importSession(session, null)}
               on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
+              ended_message={attachment.state.phase === "ended" ? attachment.state.message ?? "Session exited" : attachment.state.error_code === "session_not_found" ? "Session no longer exists" : null}
+              on_dismiss={() => { if (attachment.state.session) void closeTab(attachment.state.session); }}
               phase={attachment.state.phase}
               hasSession={attachment.state.session !== null}
               has_cached_content={attachment.state.applied_sequence !== null}
@@ -1813,6 +1818,7 @@ export function TerminalPage() {
           </div>
         </section>
       </main>
+      {archives_open && <ArchiveBrowser targets={sidebarTargets} on_close={() => setArchivesOpen(false)} />}
       {taskWorkspace.editorId ? (
         <TaskEditor
           key={taskWorkspace.editorKey}

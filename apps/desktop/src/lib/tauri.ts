@@ -408,3 +408,7 @@ export async function restartTaskDaemon(): Promise<void> {
 export async function sessionView(target: ConnectionTarget, action: import("./types").ViewAction): Promise<import("./types").SessionView | null> {
   return invoke("session_view", { request: { target, action } });
 }
+
+export function sessionArchive(target: ConnectionTarget, action: import("./types").ArchiveAction): Promise<import("./types").ArchiveResponse> {
+  return invoke("session_archive", { request: { target, action } });
+}

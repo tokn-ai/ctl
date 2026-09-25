@@ -39,6 +39,7 @@ interface SessionSidebarProps {
   closingSessionKeys: ReadonlySet<string>;
   disconnectingSessionKey: string | null;
   onRefresh(): void;
+  on_archives?(): void;
   onSelect(session: SessionSummary): void;
   onNewShell(): void;
   onDisconnect(session: SessionSummary): void;
@@ -119,6 +120,7 @@ export function SessionSidebar({
   closingSessionKeys,
   disconnectingSessionKey,
   onRefresh,
+  on_archives,
   onSelect,
   onNewShell,
   onDisconnect,
@@ -179,6 +181,7 @@ export function SessionSidebar({
       <div className="sidebar-connections">
         <header className="sidebar-header">
           <strong>Sessions</strong>
+          {on_archives && <button type="button" onClick={on_archives}>Archived</button>}
           <div className="sidebar-header-actions">
             {onChooseHost ? (
               <button

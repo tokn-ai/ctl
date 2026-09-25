@@ -62,6 +62,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `n` / `p` | Next / previous session |
 | `s` / `w` | Session picker; arrows select, Enter opens, Esc cancels |
 | `r` | Redraw the terminal |
+| `A` | Browse retained session archives |
 | `[` | Browse history and select text in copy mode |
 | `]` | Paste the local copy buffer into the active pane |
 | `I` | Take or release the active pane's input lease |
@@ -143,3 +144,33 @@ cargo fmt --all -- --check
 The Unix integration test uses a temporary daemon and real PTYs to check
 separate pane output, shared sizing, read-only viewing, reconnect, and lease
 release on detach. It needs permission to bind a local Unix socket.
+
+## Exited sessions and archives
+
+An exited pane keeps its final output and exit code visible until you press a
+key. That key dismisses only the ended pane; when the whole session has ended,
+it exits the TUI attachment. A confirmed missing session behaves the same way.
+Connection failures remain reconnectable and are not treated as confirmed exits.
+
+Normal exits and explicit termination are archived on the daemon's host for
+seven days by default. Archives retain the session identity, composition,
+per-terminal exit reason and code, final checkpoint, and bounded history. They
+survive daemon restarts and are separate from the running session list.
+
+Use `rmux archives` to list archives and `rmux archive SESSION_ID` to browse one
+read-only. Within the TUI, **Ctrl+B A** opens the archive list; choose a session,
+then a terminal, and press Enter to inspect/search/copy its output. An archive
+cannot accept input or revive a process. `ctl rmux archives` and
+`ctl rmux archive SESSION_ID` expose archive metadata through the configured
+transport. The desktop's Sessions sidebar has an **Archived** browser as well.
+
+Configure retention with `rmuxd --archive-retention-days DAYS` and optionally
+`--archive-directory DIRECTORY` when starting the daemon. The default endpoint
+uses an endpoint-specific directory below the user's local data directory at
+`rmux/archives/`. Explicit custom sockets default to a sibling `.archives`
+directory so isolated daemons stay isolated. Expired archives are inaccessible
+immediately, and are removed at startup, when listing, or during the daemon's
+minute-by-minute cleanup. Cleanup resumes on the next start if the daemon is
+not running. Retention changes apply to newly completed sessions.
+
+The archive API requires protocol version 13 on clients and daemons.

@@ -325,3 +325,79 @@ async fn assert_copy_mode(app: &mut App, primary: &str) -> Result<()> {
   wait_for_text(app, primary, "echo:BUFFER_PASTE").await?;
   Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let primary = app.focused.clone();
+  app.split(SplitAxis::Horizontal).await?;
+  let child = app.focused.clone();
+  app.panes[&child]
+    .control
+    .input(b"printf 'FINAL_CHILD\\n'; exit 7\n".to_vec())
+    .await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&child].ended.is_none() {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  app.refresh().await?;
+  assert_eq!(app.panes.len(), 2);
+  assert!(
+    app.panes[&child]
+      .model
+      .copy_lines()
+      .join("\n")
+      .contains("FINAL_CHILD")
+  );
+  assert!(app.status().contains("code 7"));
+  assert!(
+    !app
+      .key(KeyEvent::new(
+        KeyCode::Char('z'),
+        crossterm::event::KeyModifiers::NONE
+      ))
+      .await?
+  );
+  assert_eq!(app.panes.len(), 1);
+  assert_eq!(app.focused, primary);
+
+  let mut missing = daemon.app(true);
+  missing.start(Some("confirmed-absent".into())).await?;
+  assert!(missing.status().contains("no longer exists"));
+  assert!(
+    missing
+      .key(KeyEvent::new(
+        KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE
+      ))
+      .await?
+  );
+
+  app.request(ClientMessage::KillSession { session }).await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&primary].ended.is_none() {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  app.refresh().await?;
+  assert!(app.ended.is_some());
+  assert_eq!(app.panes.len(), 1);
+  assert!(
+    app
+      .key(KeyEvent::new(
+        KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE
+      ))
+      .await?
+  );
+  app.detach().await;
+  Ok(())
+}

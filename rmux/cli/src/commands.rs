@@ -158,6 +158,8 @@ where
       }
     }
     Command::List => list_sessions(connector).await,
+    Command::Archives => show_archives(connector, None).await,
+    Command::Archive { session_id } => show_archives(connector, Some(session_id)).await,
     Command::State { session } => show_shell_state(connector, &session).await,
     Command::Attach {
       session,
@@ -266,6 +268,40 @@ pub async fn resolve_session<C: Connector>(
     .max_by_key(|session| session.created_at_ms)
     .map(|session| session.session_id)
     .ok_or(CommandError::MissingSession)
+}
+
+async fn show_archives<C: Connector>(
+  connector: &C,
+  id: Option<String>,
+) -> Result<(), CommandError> {
+  let message = id.map_or(ClientMessage::ListArchives, |session_id| {
+    ClientMessage::GetArchive { session_id }
+  });
+  match target_request(connector, message).await? {
+    ServerMessage::ArchiveList { archives } => {
+      println!("ID\tNAME\tARCHIVED_AT_MS\tEXPIRES_AT_MS");
+      for archive in archives {
+        println!(
+          "{}\t{}\t{}\t{}",
+          archive.session.session_id,
+          archive.session.name,
+          archive.archived_at_ms,
+          archive.expires_at_ms
+        );
+      }
+    }
+    ServerMessage::ArchiveSnapshot { archive } => {
+      println!("{}\t{}", archive.session.session_id, archive.session.name);
+      for terminal in archive.terminals {
+        println!(
+          "{}\t{:?}\t{:?}",
+          terminal.terminal_id, terminal.reason, terminal.exit_code
+        );
+      }
+    }
+    response => return Err(unexpected("archive response", &response)),
+  }
+  Ok(())
 }
 
 async fn list_sessions<C: Connector>(connector: &C) -> Result<(), CommandError> {

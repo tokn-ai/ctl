@@ -677,3 +677,26 @@ export type ViewAction =
   | { kind: "promote"; terminal_id: string; name: string | null }
   | { kind: "merge"; source: string; destination: string }
   | { kind: "kill_terminal"; terminal_id: string };
+
+export interface ArchivedTerminalInfo {
+  terminal_id: string;
+  ended_at_ms: number;
+  exit_code: number | null;
+  reason: "exited" | "terminated" | "missing";
+}
+export interface SessionArchive {
+  session_id: string;
+  name: string;
+  created_at_ms: number;
+  archived_at_ms: number;
+  expires_at_ms: number;
+  layout: ViewLayout;
+  terminals: ArchivedTerminalInfo[];
+}
+export type ArchiveAction = { kind: "list" } | { kind: "read"; session_id: string; terminal_id: string };
+export type ArchiveResponse = { kind: "list"; archives: SessionArchive[] } | {
+  kind: "terminal";
+  info: ArchivedTerminalInfo;
+  checkpoint: TerminalCheckpoint;
+  history: TerminalHistorySnapshot;
+};

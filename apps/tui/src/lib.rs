@@ -18,6 +18,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Local connection and presentation settings.
 pub struct Options {
   pub socket: PathBuf,
+  pub archive: Option<String>,
   pub session: Option<String>,
   pub read_only: bool,
   pub prefix: String,
@@ -53,7 +54,12 @@ pub async fn run(options: Options) -> Result<()> {
     options.read_only,
     input::parse_prefix(&options.prefix)?,
   );
-  if let Err(error) = app.start(options.session).await {
+  let started = if let Some(id) = options.archive {
+    app.open_archive(id).await
+  } else {
+    app.start(options.session).await
+  };
+  if let Err(error) = started {
     app.detach().await;
     return Err(error);
   }

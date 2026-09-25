@@ -38,6 +38,16 @@ async fn run(arguments: Arguments) -> rmux_tui::Result<()> {
     detached: false,
     attach_if_exists: false,
   });
+  if let Command::Archive { session_id } = command {
+    return rmux_tui::run(rmux_tui::Options {
+      socket,
+      archive: Some(session_id),
+      session: None,
+      read_only: true,
+      prefix: arguments.prefix,
+    })
+    .await;
+  }
   let (session, read_only) = match command {
     Command::New {
       name,
@@ -76,6 +86,7 @@ async fn run(arguments: Arguments) -> rmux_tui::Result<()> {
     }
   };
   rmux_tui::run(rmux_tui::Options {
+    archive: None,
     socket,
     session: Some(session),
     read_only,

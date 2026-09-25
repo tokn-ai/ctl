@@ -10,6 +10,14 @@ struct Arguments {
   #[arg(long)]
   socket: Option<PathBuf>,
 
+  /// Directory for durable read-only session archives.
+  #[arg(long)]
+  archive_directory: Option<PathBuf>,
+
+  /// Days to retain completed sessions (zero expires them immediately).
+  #[arg(long, default_value_t = 7)]
+  archive_retention_days: u64,
+
   /// Maximum number of raw output bytes retained per session.
   #[arg(long, default_value_t = 4 * 1024 * 1024)]
   journal_bytes: usize,
@@ -43,6 +51,8 @@ fn main() {
 
   let config = DaemonConfig {
     socket_path: arguments.socket.unwrap_or_else(rmux_ipc::socket_path),
+    archive_directory: arguments.archive_directory,
+    archive_retention_days: arguments.archive_retention_days,
     journal_capacity_bytes: arguments.journal_bytes,
     checkpoint_interval_bytes: arguments.checkpoint_bytes,
     startup_idle_timeout: Duration::from_secs(arguments.startup_idle_seconds),

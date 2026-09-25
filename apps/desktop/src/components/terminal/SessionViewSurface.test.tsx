@@ -16,13 +16,13 @@ vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () =>
 vi.mock("./TerminalSurface", async () => {
   const { useEffect } = await import("react");
   const renderer = {};
-  return { TerminalSurface: ({ onReady }: { onReady(renderer: unknown): void }) => {
+  return { TerminalSurface: ({ onReady, ended_message, on_dismiss }: { onReady(renderer: unknown): void; ended_message?: string | null; on_dismiss?(): void }) => {
     useEffect(() => {
       mocks.mount();
       onReady(renderer);
       return () => { mocks.unmount(); onReady(null); };
     }, []);
-    return <div data-testid="terminal-surface" className="terminal-container"><textarea aria-label="Terminal input" /></div>;
+    return <div data-testid="terminal-surface" className="terminal-container"><textarea aria-label="Terminal input" />{ended_message && <button onClick={on_dismiss}>Dismiss ended pane</button>}</div>;
   } };
 });
 
@@ -117,8 +117,10 @@ describe("session compositor", () => {
     render(<SessionViewSurface {...props()} />);
     await waitFor(() => expect(mocks.request).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Split right" }));
-    await waitFor(() => expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2));
-    expect(mocks.mount).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
+      expect(mocks.mount).toHaveBeenCalledTimes(2);
+    });
     expect(mocks.unmount).not.toHaveBeenCalled();
     expect(mocks.request).toHaveBeenLastCalledWith(session.target, expect.objectContaining({ kind: "split", terminal_id: "a", axis: "horizontal" }));
   });
@@ -163,25 +165,30 @@ describe("session compositor", () => {
     expect(mocks.unmount).not.toHaveBeenCalled();
   });
 
-  it("releases the surviving pane attachment before transferring it to the primary renderer", async () => {
+  it("retains the ended pane until dismissed, then transfers the survivor", async () => {
     vi.useFakeTimers();
-    mocks.request.mockResolvedValueOnce(split).mockResolvedValueOnce({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, panes: [{ terminal_id: "b", left: 0, top: 0, columns: 80, rows: 24 }], terminals: [terminal("b")] });
+    mocks.request.mockResolvedValueOnce(split).mockResolvedValue({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, panes: [{ terminal_id: "b", left: 0, top: 0, columns: 80, rows: 24 }], terminals: [terminal("b")] });
     let finish_detach!: () => void;
     mocks.detach.mockImplementationOnce(() => new Promise<void>((resolve) => { finish_detach = resolve; }));
     const actions = props();
     await act(async () => { render(<SessionViewSurface {...actions} />); });
     expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
     await act(async () => { vi.advanceTimersByTime(2000); });
+    expect(mocks.detach).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Dismiss ended pane" })); });
     expect(mocks.detach).toHaveBeenCalled();
     expect(actions.on_select_terminal).not.toHaveBeenCalled();
     await act(async () => { finish_detach(); });
     expect(actions.on_select_terminal).toHaveBeenCalledWith(expect.objectContaining({ terminal_id: "b" }));
   });
 
-  it("opens the surviving terminal when the primary exits", async () => {
+  it("waits for dismissal before opening the surviving terminal after exit", async () => {
     mocks.request.mockResolvedValueOnce({ ...initial, layout: { kind: "terminal", terminal_id: "b" }, panes: [{ terminal_id: "b", left: 0, top: 0, columns: 80, rows: 24 }], terminals: [terminal("b")] });
     const actions = props();
     render(<SessionViewSurface {...actions} phase="ended" />);
+    expect(actions.on_select_terminal).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss ended pane" }));
     await waitFor(() => expect(actions.on_select_terminal).toHaveBeenCalledWith(expect.objectContaining({ session_id: "root", terminal_id: "b" })));
   });
   it("routes prefix input and split commands to the focused pane without remounting", async () => {

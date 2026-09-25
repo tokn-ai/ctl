@@ -54,6 +54,8 @@ const DAEMON_DRAINING_MESSAGE: &str = "rmuxd is draining for a cooperative resta
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
   pub socket_path: PathBuf,
+  pub archive_directory: Option<PathBuf>,
+  pub archive_retention_days: u64,
   pub journal_capacity_bytes: usize,
   pub checkpoint_interval_bytes: usize,
   pub startup_idle_timeout: Duration,
@@ -66,6 +68,8 @@ impl Default for DaemonConfig {
   fn default() -> Self {
     Self {
       socket_path: rmux_ipc::socket_path(),
+      archive_directory: None,
+      archive_retention_days: 7,
       journal_capacity_bytes: 4 * 1024 * 1024,
       checkpoint_interval_bytes: 256 * 1024,
       startup_idle_timeout: Duration::from_secs(10),
@@ -140,6 +144,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
   let (connections, restart) = daemon_runtime();
   let startup_deadline = sleep_until(Instant::now() + config.startup_idle_timeout);
   tokio::pin!(startup_deadline);
+  let mut archive_cleanup = tokio::time::interval(Duration::from_mins(1));
 
   loop {
     if (sessions.ever_had_session() || restart.is_draining())
@@ -190,6 +195,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
           }
           drop(connection_guard);
         });
+      }
+      _ = archive_cleanup.tick() => {
+        if let Some(store) = sessions.archive_store() {
+          tokio::task::spawn_blocking(move || {
+            if let Err(error) = store.list() { eprintln!("rmuxd: archive cleanup failed: {error}"); }
+          });
+        }
       }
       () = sessions.changed() => {}
       () = connections.changed() => {}
@@ -254,11 +266,37 @@ async fn prepare_daemon(
   };
   #[cfg(windows)]
   let runtime_directory = rmux_ipc::runtime_directory();
+  let archive_directory = config.archive_directory.clone().unwrap_or_else(|| {
+    if config.socket_path == rmux_ipc::socket_path() {
+      use sha2::Digest as _;
+      let namespace = format!(
+        "{:x}",
+        sha2::Sha256::digest(config.socket_path.to_string_lossy().as_bytes())
+      );
+      dirs::data_local_dir()
+        .unwrap_or_else(|| runtime_directory.clone())
+        .join("rmux")
+        .join("archives")
+        .join(namespace)
+    } else {
+      runtime_directory.join(format!(
+        "{}.archives",
+        config
+          .socket_path
+          .file_name()
+          .unwrap_or_default()
+          .to_string_lossy()
+      ))
+    }
+  });
+  let archive_store =
+    crate::archive::ArchiveStore::new(archive_directory, config.archive_retention_days)?;
   let sessions = SessionManager::new(
     runtime_directory,
     config.journal_capacity_bytes,
     config.checkpoint_interval_bytes,
   );
+  sessions.set_archive_store(archive_store);
   Ok((endpoints, sessions))
 }
 
@@ -780,6 +818,11 @@ async fn handle_request(
       )
       .await?;
     }
+    request @ (ClientMessage::ListArchives
+    | ClientMessage::GetArchive { .. }
+    | ClientMessage::GetArchivedTerminal { .. }) => {
+      handle_archive_request(&mut stream, &sessions, request).await?;
+    }
     ClientMessage::ListSessions => {
       let response = ServerMessage::SessionList {
         sessions: sessions.list(),
@@ -844,6 +887,57 @@ async fn handle_request(
       handle_kill_session_request(&mut stream, &sessions, &session).await?;
     }
     request => return handle_view_request(stream, sessions, restart, request).await,
+  }
+
+  Ok(())
+}
+
+async fn handle_archive_request(
+  stream: &mut Stream,
+  sessions: &SessionManager,
+  request: ClientMessage,
+) -> Result<(), ConnectionError> {
+  let store = sessions
+    .archive_store()
+    .ok_or_else(|| CodecError::Io(io::Error::other("archives unavailable")))?;
+  let response = tokio::task::spawn_blocking(move || match request {
+    ClientMessage::ListArchives => store
+      .list()
+      .map(|archives| ServerMessage::ArchiveList { archives }),
+    ClientMessage::GetArchive { session_id } => {
+      store
+        .get(&session_id)
+        .map(|archive| ServerMessage::ArchiveSnapshot {
+          archive: Box::new(archive),
+        })
+    }
+    ClientMessage::GetArchivedTerminal {
+      session_id,
+      terminal_id,
+    } => store.terminal(&session_id, &terminal_id).map(|terminal| {
+      ServerMessage::ArchivedTerminalSnapshot {
+        terminal: Box::new(terminal),
+      }
+    }),
+    _ => unreachable!(),
+  })
+  .await?;
+  match response {
+    Ok(response) => write_frame(stream, &response).await?,
+    Err(error) => {
+      write_frame(
+        stream,
+        &ServerMessage::Error {
+          code: if error.kind() == io::ErrorKind::NotFound {
+            ErrorCode::SessionNotFound
+          } else {
+            ErrorCode::Internal
+          },
+          message: error.to_string(),
+        },
+      )
+      .await?;
+    }
   }
 
   Ok(())

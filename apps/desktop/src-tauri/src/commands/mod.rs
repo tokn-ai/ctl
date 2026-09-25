@@ -1,3 +1,4 @@
+pub mod archives;
 pub mod inspection;
 pub mod views;
 

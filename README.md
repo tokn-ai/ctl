@@ -489,3 +489,16 @@ The SSH gateway is named `ctl-agent` (`ctl-agent.exe` on Windows), reflecting
 its per-connection lifetime. When upgrading from the former gateway name,
 update the client, remote executable, and any SSH forced-command configuration
 together. The `ctl-ssh-v1` transport marker and rmux wire protocol are unchanged.
+
+### Exited sessions
+
+The desktop and TUI retain final terminal output after an exit or confirmed
+missing-session response. Press a key to dismiss the ended pane or session;
+transport outages continue to reconnect.
+
+Completed and terminated sessions are retained as server-owned, read-only
+archives for seven days by default. Open **Archived** in the desktop Sessions
+sidebar, use **Ctrl+B A** in the TUI, or run `rmux archives` followed by
+`rmux archive SESSION_ID`. Configure the daemon with `--archive-retention-days`
+and `--archive-directory`. Archives survive daemon restarts; starting a new
+process creates a new session. These APIs use rmux protocol version 13.

@@ -4,7 +4,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
 ///
@@ -423,6 +423,39 @@ pub struct ViewInfo {
   pub terminals: Vec<TerminalInfo>,
 }
 
+/// Durable, read-only metadata for a completed root session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionArchive {
+  pub session: SessionInfo,
+  pub view: ViewInfo,
+  pub archived_at_ms: u64,
+  pub expires_at_ms: u64,
+  pub terminals: Vec<ArchivedTerminalInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedTerminalInfo {
+  pub terminal_id: String,
+  pub ended_at_ms: u64,
+  pub exit_code: Option<u32>,
+  pub reason: TerminalEndReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalEndReason {
+  Exited,
+  Terminated,
+  Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedTerminal {
+  pub info: ArchivedTerminalInfo,
+  pub checkpoint: TerminalCheckpoint,
+  pub history: TerminalHistorySnapshot,
+}
+
 /// Cell coordinates within a view. Split dividers occupy one unallocated cell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneGeometry {
@@ -505,6 +538,14 @@ pub enum ClientMessage {
     terminal_size: TerminalSize,
   },
   ListSessions,
+  ListArchives,
+  GetArchive {
+    session_id: String,
+  },
+  GetArchivedTerminal {
+    session_id: String,
+    terminal_id: String,
+  },
   GetView {
     session: String,
   },
@@ -641,6 +682,15 @@ pub enum ServerMessage {
   },
   SessionList {
     sessions: Vec<SessionInfo>,
+  },
+  ArchiveList {
+    archives: Vec<SessionArchive>,
+  },
+  ArchiveSnapshot {
+    archive: Box<SessionArchive>,
+  },
+  ArchivedTerminalSnapshot {
+    terminal: Box<ArchivedTerminal>,
   },
   ShellStateResponse {
     session: SessionInfo,
@@ -1119,7 +1169,7 @@ mod tests {
 
   #[test]
   fn terminal_history_snapshots_use_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 12);
+    assert_eq!(PROTOCOL_VERSION, 13);
   }
 
   #[test]

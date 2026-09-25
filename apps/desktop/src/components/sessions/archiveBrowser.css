@@ -1,0 +1,19 @@
+.archive-browser {
+  width: min(1100px, 94vw);
+  height: min(800px, 88vh);
+  color: var(--text-primary, #ddd);
+  background: var(--surface-1, #181b21);
+  border: 1px solid var(--border-subtle, #555);
+  border-radius: 10px;
+  padding: 20px;
+}
+.archive-browser::backdrop { background: #0009; }
+.archive-browser header, .archive-browser-controls { display: flex; gap: 16px; align-items: center; margin-bottom: 12px; }
+.archive-browser header { justify-content: space-between; }
+.archive-browser h2 { margin: 0; }
+.archive-browser-content { display: grid; grid-template-columns: 260px minmax(0, 1fr); height: calc(100% - 130px); gap: 16px; }
+.archive-browser nav { overflow: auto; }
+.archive-browser nav section { display: grid; gap: 8px; padding: 12px 0; border-bottom: 1px solid #555; }
+.archive-browser small { opacity: .7; }
+.archive-browser button[aria-pressed="true"] { outline: 2px solid #6aafff; }
+.archive-terminal { min-width: 0; min-height: 0; overflow: auto; }

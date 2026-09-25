@@ -11,6 +11,7 @@ pub struct Pane {
   pub model: Model,
   pub control: AttachmentControl,
   pub connected: bool,
+  pub ended: Option<String>,
   events: AttachmentEvents,
   pub token: String,
   runner: Option<JoinHandle<()>>,
@@ -67,6 +68,7 @@ impl Pane {
       model,
       control,
       connected: true,
+      ended: None,
       events,
       token,
       runner: Some(runner),
@@ -115,9 +117,14 @@ impl Pane {
           self.control.acknowledge_geometry(observed_sequence).await?;
         }
         AttachmentEvent::ServerError { message: error, .. } => message = Some(error),
-        AttachmentEvent::SessionEnded { .. } | AttachmentEvent::Exited { .. } => {
+        AttachmentEvent::SessionEnded { exit_code, .. } => {
           self.connected = false;
+          self.ended = Some(exit_code.map_or_else(
+            || "Terminal ended".into(),
+            |code| format!("Exited (code {code})"),
+          ));
         }
+        AttachmentEvent::Exited { .. } => self.connected = false,
         _ => {}
       }
     }

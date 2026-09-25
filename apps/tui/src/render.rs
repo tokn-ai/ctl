@@ -1,4 +1,7 @@
-use crate::pane::Pane;
+use crate::{
+  copy::{CopyMode, Position},
+  pane::Pane,
+};
 use crossterm::{
   cursor::{Hide, MoveTo, Show},
   queue,
@@ -190,6 +193,63 @@ impl Frame {
           );
         }
       }
+    }
+  }
+
+  pub fn copy_mode(&mut self, mode: &CopyMode) {
+    let height = usize::from(self.rows.saturating_sub(1));
+    let mut palette = avt::Vt::new(2, 1);
+    palette.feed_str("\x1b[7mX");
+    let selected_pen = *palette.line(0).cells()[0].pen();
+    for (row, line) in mode.lines.iter().enumerate().skip(mode.top).take(height) {
+      let mut column = 0;
+      for (index, ch) in line.iter().enumerate() {
+        let width = CopyMode::width(*ch);
+        if width == 0 {
+          continue;
+        }
+        if column >= mode.left && column + width <= mode.left + usize::from(self.columns) {
+          let x = u16::try_from(column - mode.left).expect("bounded column");
+          let y = u16::try_from(row - mode.top).expect("bounded row");
+          let pen = if mode.selected(Position { row, column: index }) {
+            selected_pen
+          } else {
+            avt::Pen::default()
+          };
+          self.set(
+            x,
+            y,
+            Pixel {
+              ch: *ch,
+              width: u8::try_from(width).expect("glyph width"),
+              pen,
+            },
+          );
+          if width == 2 {
+            self.set(
+              x + 1,
+              y,
+              Pixel {
+                ch: ' ',
+                width: 0,
+                pen,
+              },
+            );
+          }
+        }
+        column += width;
+        if column >= mode.left + usize::from(self.columns) {
+          break;
+        }
+      }
+    }
+    let x = mode.cursor_column().saturating_sub(mode.left);
+    let y = mode.cursor.row.saturating_sub(mode.top);
+    if x < usize::from(self.columns) && y < height {
+      self.cursor = Some((
+        u16::try_from(x).expect("bounded"),
+        u16::try_from(y).expect("bounded"),
+      ));
     }
   }
 
@@ -385,6 +445,26 @@ mod tests {
     assert_eq!(frame.cells[4050].ch, ' ');
     frame.text(0, 40, "status", true);
     assert!(frame.cells[4099].pen.is_inverse());
+  }
+
+  #[test]
+  fn copy_view_clips_wide_glyphs_and_highlights_both_cells() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut mode = CopyMode::new(vec!["a界b".into()]);
+    mode.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), 2);
+    mode.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), 2);
+    let mut frame = Frame::new(4, 3);
+    frame.copy_mode(&mode);
+    assert_eq!(frame.cells[1].ch, '界');
+    assert_eq!(frame.cells[1].width, 2);
+    assert!(frame.cells[1].pen.is_inverse());
+    assert_eq!(frame.cells[2].width, 0);
+    assert!(frame.cells[2].pen.is_inverse());
+    mode.left = 2;
+    let mut clipped = Frame::new(2, 3);
+    clipped.copy_mode(&mode);
+    assert_eq!(clipped.cells[0].ch, ' ');
+    assert_eq!(clipped.cells[1].ch, 'b');
   }
 
   #[test]

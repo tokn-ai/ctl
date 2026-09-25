@@ -62,6 +62,8 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `n` / `p` | Next / previous session |
 | `s` / `w` | Session picker; arrows select, Enter opens, Esc cancels |
 | `r` | Redraw the terminal |
+| `[` | Browse history and select text in copy mode |
+| `]` | Paste the local copy buffer into the active pane |
 | `I` | Take or release the active pane's input lease |
 | `R` | Take or release the view's resize lease |
 | `x` | Terminate the active pane; `y` confirms |
@@ -75,6 +77,34 @@ has no extra window layer. Uppercase `I` and `R` are rmux-specific lease control
 Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm
 keys, modified arrows, function keys, Unicode input, and bracketed paste.
+
+## Scrollback and copy mode
+
+Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's primary
+screen and retained scrollback. The snapshot fills the terminal temporarily;
+all panes continue processing and acknowledging output in the background.
+It includes history supplied by the daemon on attachment/reconnection, plus up
+to 2,000 locally retained scrollback rows since the last checkpoint. Copy mode
+also works in a read-only attachment. If local retention evicts rows, the older
+checkpoint prefix is dropped too, keeping the displayed history contiguous.
+
+- Arrows or `h/j/k/l` move; Page Up/Down move a page.
+- `g` / `G` jump to the first / last line; Home/End or `0` / `$` move within a line.
+- `/` searches forward, `?` backward; Enter runs a case-sensitive literal search.
+  `n` repeats and `N` reverses direction, wrapping at the history boundary.
+- Space or `v` anchors a selection; Enter or `y` copies and exits.
+- Esc or `q` returns to the live view. Esc while entering a search cancels the prompt.
+
+Logical lines remain intact; long lines scroll horizontally with the cursor.
+Selection adds newlines only between logical lines, without terminal padding.
+New output, reconnects, and resizing do not change the frozen selection.
+Keyboard input and host paste are consumed locally while copy mode is open.
+
+Copied text is kept in this client's buffer. **Ctrl+B ]** pastes it using the
+active pane's input lease and bracketed-paste setting. Copy also requests the
+host clipboard through OSC 52; terminal support and permissions determine
+whether that request succeeds (including over SSH). Selections above 100 KB
+stay in the internal buffer without sending a clipboard request.
 
 ## Shared views and rendering
 

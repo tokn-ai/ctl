@@ -3141,6 +3141,7 @@ name = "rmux-tui"
 version = "0.1.0"
 dependencies = [
  "avt",
+ "base64 0.22.1",
  "clap",
  "crossterm",
  "rmux-client",
@@ -3148,6 +3149,7 @@ dependencies = [
  "rmux-proto",
  "rmuxd",
  "tokio",
+ "unicode-width",
  "uuid",
 ]
 

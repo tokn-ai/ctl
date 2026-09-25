@@ -69,6 +69,7 @@ tokio = { version = "1.53.1", features = [
   "sync",
   "time",
 ] }
+unicode-width = "0.1.14"
 uuid = { version = "1.26.0", features = ["v4"] }
 zeroize = { version = "1.8", features = ["serde"] }
 

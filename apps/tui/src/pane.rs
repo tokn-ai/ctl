@@ -86,8 +86,13 @@ impl Pane {
         }
       };
       match event {
-        AttachmentEvent::Checkpoint { checkpoint, .. } => {
+        AttachmentEvent::Checkpoint {
+          checkpoint,
+          history,
+          ..
+        } => {
           self.model.restore(&checkpoint);
+          self.model.set_history(history.lines);
           self
             .control
             .acknowledge_checkpoint(checkpoint.sequence)

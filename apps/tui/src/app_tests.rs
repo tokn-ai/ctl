@@ -97,6 +97,7 @@ async fn shared_canvas_input_viewer_reconnect_and_detach() -> Result<()> {
     .input(b"PRIMARY_MARK\n".to_vec())
     .await?;
   wait_for_text(&mut owner, &primary, "echo:PRIMARY_MARK").await?;
+  assert_copy_mode(&mut owner, &primary).await?;
 
   owner.split(SplitAxis::Horizontal).await?;
   assert_eq!(owner.panes.len(), 2);
@@ -292,5 +293,35 @@ async fn assert_tmux_shortcuts(app: &mut App) -> Result<()> {
       .any(|pane| pane.control.state().leases().layout.owned_by_client),
     owner
   );
+  Ok(())
+}
+
+async fn assert_copy_mode(app: &mut App, primary: &str) -> Result<()> {
+  app.command(KeyCode::Char('[')).await?;
+  let snapshot = app.copy_mode.as_ref().unwrap().lines.clone();
+  app.event(Event::Paste("IGNORED_PASTE\n".into())).await?;
+  app.panes[primary]
+    .control
+    .input(b"DURING_COPY\n".to_vec())
+    .await?;
+  wait_for_text(app, primary, "echo:DURING_COPY").await?;
+  assert_eq!(app.copy_mode.as_ref().unwrap().lines, snapshot);
+  assert!(
+    !app.panes[primary]
+      .model
+      .copy_lines()
+      .join("\n")
+      .contains("IGNORED_PASTE")
+  );
+  app
+    .key(KeyEvent::new(
+      KeyCode::Esc,
+      crossterm::event::KeyModifiers::NONE,
+    ))
+    .await?;
+  assert!(app.copy_mode.is_none());
+  app.copy_buffer = Some("BUFFER_PASTE\n".into());
+  app.command(KeyCode::Char(']')).await?;
+  wait_for_text(app, primary, "echo:BUFFER_PASTE").await?;
   Ok(())
 }

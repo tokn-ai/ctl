@@ -1,5 +1,6 @@
 //! Reusable local terminal UI, shared by rmux and the legacy rmux-tui launcher.
 mod app;
+mod copy;
 mod input;
 mod model;
 mod pane;

@@ -345,6 +345,7 @@ export function hostCatalogDocument(view: WorkspaceView): HostCatalogDocument {
     ssh_gateways: view.ssh_gateways.map((gateway) => ({
       gateway_id: gateway.gateway_id,
       name: gateway.name,
+      ...(gateway.kind === "socks5" ? { kind: "socks5" as const } : {}),
       destination: gateway.destination,
       ...(gateway.hostname ? { hostname: gateway.hostname } : {}),
       ...(gateway.user ? { user: gateway.user } : {}),

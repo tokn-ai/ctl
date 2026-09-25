@@ -683,6 +683,7 @@ name = "ctl-core"
 version = "0.1.0"
 dependencies = [
  "ctl-proto",
+ "ctld-ipc",
  "rmux-ipc",
  "serde_json",
  "task-client",
@@ -709,8 +710,10 @@ dependencies = [
  "clap",
  "ctl-proto",
  "ctld-ipc",
+ "rpassword",
  "rustix",
  "security-framework",
+ "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.20",

@@ -49,6 +49,7 @@ interface Props {
 }
 
 interface GatewayDraft {
+  kind: "ssh" | "socks5";
   gateway_id: string;
   name: string;
   destination: string;
@@ -108,7 +109,7 @@ export function GatewayRouteDialog({
     if (!editing) return;
     const gateway = fromDraft(editing);
     if (!gateway) {
-      setError("Enter a name, SSH destination, and a valid port from 1 to 65535.");
+      setError("Enter a name, gateway address, and a valid port from 1 to 65535.");
       return;
     }
     const duplicate = draftGateways.some(
@@ -178,7 +179,7 @@ export function GatewayRouteDialog({
     const sharedCount = usage.get(editing.gateway_id) ?? 0;
     return (
       <QuickInputFrame
-        title="Edit SSH gateway"
+        title="Edit gateway"
         onDismiss={() => setEditing(null)}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -189,7 +190,7 @@ export function GatewayRouteDialog({
         className="gateway-route-dialog"
       >
         <header className="quick-input-heading">
-          <strong>{sharedCount > 1 ? "Edit shared gateway" : "SSH gateway"}</strong>
+          <strong>{sharedCount > 1 ? "Edit shared gateway" : "Gateway"}</strong>
           <button type="button" onClick={() => setEditing(null)}>Back</button>
         </header>
         {sharedCount > 1 ? (
@@ -271,14 +272,17 @@ export function GatewayRouteDialog({
                 type="checkbox"
                 aria-label="Use SSH-config master"
                 aria-describedby="ssh-config-master-description"
-                checked={hostSetup.ssh_config_master.checked}
+                checked={hostSetup.ssh_config_master.checked && !route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5")}
+                disabled={route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5")}
                 onChange={(event) => hostSetup.ssh_config_master?.onChange(event.target.checked)}
               />
               Use SSH-config master
               <small id="ssh-config-master-description">
-                {hostSetup.ssh_config_master.checked
-                  ? "Use OpenSSH sharing settings, with an rmux private master when sharing is not configured."
-                  : "Use an rmux private master for this connection."}
+                {route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5")
+                  ? "SOCKS5 routes use a private SSH master to preserve the selected route."
+                  : hostSetup.ssh_config_master.checked
+                    ? "Use OpenSSH sharing settings, with an rmux private master when sharing is not configured."
+                    : "Use an rmux private master for this connection."}
               </small>
             </label>
           ) : null}
@@ -305,7 +309,7 @@ export function GatewayRouteDialog({
       </p>
 
       <div className="gateway-route-path">
-        <RouteNode label="This Mac" detail="Direct SSH" />
+        <RouteNode label="This Mac" detail="Start of route" />
         {route.map((step, index) => {
           const gateway = draftGateways.find(
             (item) => item.gateway_id === step.gateway_id,
@@ -336,7 +340,7 @@ export function GatewayRouteDialog({
                     Remove
                   </button>
                 </div>
-                <label>
+                {gateway.kind !== "socks5" ? <label>
                   Connection to next host
                   <select
                     value={step.mode}
@@ -350,7 +354,7 @@ export function GatewayRouteDialog({
                     <option value="native_only">Native SSH forwarding only</option>
                     <option value="agent_relay_only" disabled>Managed agent relay only · coming next</option>
                   </select>
-                </label>
+                </label> : <small>SOCKS5 CONNECT to the next hop</small>}
               </div>
             </div>
           );
@@ -425,13 +429,21 @@ function GatewayForm({
       onChange({ ...draft, [key]: event.target.value });
   return (
     <form className="gateway-form" onSubmit={(event) => event.preventDefault()}>
+      <label>Type
+        <select value={draft.kind} onChange={(event) => onChange({ ...draft, kind: event.target.value as GatewayDraft["kind"], hostname: "", identity_file: "", port: "" })}>
+          <option value="ssh">SSH</option>
+          <option value="socks5">SOCKS5</option>
+        </select>
+      </label>
       <label>Name<input value={draft.name} onChange={field("name")} placeholder="Office gateway" /></label>
-      <label>SSH destination / alias<input value={draft.destination} onChange={field("destination")} placeholder="edge.example" /></label>
-      <label>Hostname override<input value={draft.hostname} onChange={field("hostname")} placeholder="Optional" /></label>
-      <label>User<input value={draft.user} onChange={field("user")} placeholder="From SSH config" /></label>
-      <label>Port<input inputMode="numeric" value={draft.port} onChange={field("port")} placeholder="22" /></label>
+      <label>{draft.kind === "socks5" ? "SOCKS5 proxy address" : "SSH destination / alias"}<input value={draft.destination} onChange={field("destination")} placeholder="edge.example" /></label>
+      {draft.kind === "ssh" ? <label>Hostname override<input value={draft.hostname} onChange={field("hostname")} placeholder="Optional" /></label> : null}
+      <label>{draft.kind === "socks5" ? "Username (optional)" : "User"}<input value={draft.user} onChange={field("user")} placeholder={draft.kind === "socks5" ? "Prompts for password when connecting" : "From SSH config"} /></label>
+      <label>Port<input inputMode="numeric" value={draft.port} onChange={field("port")} placeholder={draft.kind === "socks5" ? "1080" : "22"} /></label>
       <p className="quick-input-description">
-        Configure a gateway-specific identity file in your OpenSSH config. Per-gateway identity selection will be enabled with managed relay.
+        {draft.kind === "socks5"
+          ? "Hostnames are resolved by the proxy. If a username is set, the password is requested when connecting."
+          : "Configure a gateway-specific identity file in your OpenSSH config. Per-gateway identity selection will be enabled with managed relay."}
       </p>
     </form>
   );
@@ -439,6 +451,7 @@ function GatewayForm({
 
 function emptyDraft(): GatewayDraft {
   return {
+    kind: "ssh",
     gateway_id: crypto.randomUUID(),
     name: "",
     destination: "",
@@ -451,6 +464,7 @@ function emptyDraft(): GatewayDraft {
 
 function toDraft(gateway: WorkspaceSshGateway): GatewayDraft {
   return {
+    kind: gateway.kind ?? "ssh",
     gateway_id: gateway.gateway_id,
     name: gateway.name,
     destination: gateway.destination,
@@ -471,10 +485,12 @@ function fromDraft(draft: GatewayDraft): WorkspaceSshGateway | null {
     /[,@]/u.test(draft.destination) ||
     /[,@]/u.test(draft.hostname) ||
     /[,@]/u.test(draft.user) ||
-    (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535))
+    (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) ||
+    (draft.kind === "socks5" && (port === undefined || !!draft.hostname.trim() || !!draft.identity_file.trim()))
   ) return null;
   return {
     gateway_id: draft.gateway_id,
+    ...(draft.kind === "socks5" ? { kind: "socks5" as const } : {}),
     name: draft.name.trim(),
     destination: draft.destination.trim(),
     ...(draft.hostname.trim() ? { hostname: draft.hostname.trim() } : {}),
@@ -486,11 +502,12 @@ function fromDraft(draft: GatewayDraft): WorkspaceSshGateway | null {
 
 function endpointLabel(gateway: WorkspaceSshGateway): string {
   const host = gateway.hostname ?? gateway.destination;
-  return `${gateway.user ? `${gateway.user}@` : ""}${host}${gateway.port ? `:${gateway.port}` : ""}`;
+  return `${gateway.kind === "socks5" ? "SOCKS5 · " : "SSH · "}${gateway.user ? `${gateway.user}@` : ""}${host}${gateway.port ? `:${gateway.port}` : ""}`;
 }
 
 function sameEndpoint(left: WorkspaceSshGateway, right: WorkspaceSshGateway): boolean {
-  return left.destination === right.destination &&
+  return (left.kind ?? "ssh") === (right.kind ?? "ssh") &&
+    left.destination === right.destination &&
     left.hostname === right.hostname &&
     left.user === right.user &&
     left.port === right.port &&

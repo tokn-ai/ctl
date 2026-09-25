@@ -3,6 +3,7 @@
 #[cfg(target_os = "macos")]
 mod keychain;
 mod port_forwarding;
+pub mod proxy_route;
 mod shared_forwarding;
 mod ssh_config_master;
 mod target_lifecycle;
@@ -11,7 +12,8 @@ mod target_lifecycle;
 mod master_policy_tests;
 
 use ctld_ipc::{
-  ClientMessage, LocalPortForward, PromptKind, ServerMessage, SshGateway, SshGatewayMode, SshTarget,
+  ClientMessage, GatewayKind, LocalPortForward, PromptKind, ServerMessage, SshGateway,
+  SshGatewayMode, SshTarget,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -248,7 +250,9 @@ pub async fn run(_socket_path: PathBuf) -> Result<(), DaemonError> {
 
 #[must_use]
 pub fn askpass_exit_code() -> Option<i32> {
-  if std::env::var("CTLD_ASKPASS").ok().as_deref() != Some("1") {
+  if std::env::var("CTLD_ASKPASS").ok().as_deref() != Some("1")
+    || std::env::args().nth(1).as_deref() == Some("--proxy-route")
+  {
     return None;
   }
   let result = tokio::runtime::Builder::new_current_thread()
@@ -1355,7 +1359,14 @@ async fn control_master_is_ready(target: &SshTarget, path: &Path) -> bool {
 }
 
 fn append_target_arguments(command: &mut Command, target: &SshTarget) {
-  if !target.gateways.is_empty() {
+  if target
+    .gateways
+    .iter()
+    .any(|gateway| gateway.kind == GatewayKind::Socks5)
+  {
+    let proxy = ctld_ipc::proxy_command(&target.gateways).unwrap_or_else(|_| "false".into());
+    command.arg("-o").arg(format!("ProxyCommand={proxy}"));
+  } else if !target.gateways.is_empty() {
     // -o respects a prior fail-closed ProxyCommand; -J rejects that combination.
     command.arg("-o").arg(format!(
       "ProxyJump={}",
@@ -1496,6 +1507,7 @@ fn invalid_gateway(gateway: &SshGateway) -> bool {
     || gateway.port == Some(0)
     || gateway.identity_file.is_some()
     || gateway.mode == SshGatewayMode::AgentRelayOnly
+    || (gateway.kind == GatewayKind::Socks5 && gateway.port.is_none())
 }
 
 fn target_key(target: &SshTarget) -> String {
@@ -1724,6 +1736,7 @@ mod tests {
         identity_file: None,
         gateways: if through_gateway {
           vec![SshGateway {
+            kind: ctld_ipc::GatewayKind::Ssh,
             destination: "127.0.0.1".into(),
             hostname: None,
             user: None,
@@ -1903,6 +1916,7 @@ mod tests {
     assert_ne!(first, control_path_for_socket(&same_alias, daemon_socket));
     let mut routed = target();
     routed.gateways.push(SshGateway {
+      kind: ctld_ipc::GatewayKind::Ssh,
       destination: "edge.example".into(),
       hostname: None,
       user: None,

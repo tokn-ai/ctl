@@ -100,6 +100,7 @@ pub enum SshGatewayMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshGateway {
+  pub kind: ctld_ipc::GatewayKind,
   pub destination: String,
   pub hostname: Option<String>,
   pub user: Option<String>,
@@ -782,6 +783,9 @@ fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Res
     {
       return Err(CoreError::InvalidSshOption("gateway".into()));
     }
+    if gateway.kind == ctld_ipc::GatewayKind::Socks5 && gateway.port.is_none() {
+      return Err(CoreError::InvalidSshOption("SOCKS5 gateway port".into()));
+    }
     if gateway.identity_file.is_some() {
       return Err(CoreError::InvalidSshOption(
         "gateway identity_file requires managed relay support; configure it in OpenSSH for native jumping"
@@ -880,7 +884,36 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
   .into_iter()
   .map(OsString::from)
   .collect::<Vec<_>>();
-  if !options.gateways.is_empty() {
+  if options
+    .gateways
+    .iter()
+    .any(|gateway| gateway.kind == ctld_ipc::GatewayKind::Socks5)
+  {
+    let gateways = options
+      .gateways
+      .iter()
+      .map(|gateway| ctld_ipc::SshGateway {
+        kind: gateway.kind,
+        destination: gateway.destination.clone(),
+        hostname: gateway.hostname.clone(),
+        user: gateway.user.clone(),
+        port: gateway.port,
+        identity_file: gateway.identity_file.clone(),
+        mode: match gateway.mode {
+          SshGatewayMode::Automatic => ctld_ipc::SshGatewayMode::Automatic,
+          SshGatewayMode::NativeOnly => ctld_ipc::SshGatewayMode::NativeOnly,
+          SshGatewayMode::AgentRelayOnly => ctld_ipc::SshGatewayMode::AgentRelayOnly,
+        },
+      })
+      .collect::<Vec<_>>();
+    let proxy = ctld_ipc::proxy_command(&gateways).unwrap_or_else(|_| "false".into());
+    arguments.extend([
+      OsString::from("-o"),
+      OsString::from(format!("ProxyCommand={proxy}")),
+      OsString::from("-o"),
+      OsString::from("ControlPath=none"),
+    ]);
+  } else if !options.gateways.is_empty() {
     arguments.extend([
       // Unlike -J, this form respects an earlier ProxyCommand without treating
       // it as a conflicting argument. Multiplexed mode disables fresh routes.
@@ -1023,10 +1056,66 @@ mod tests {
   }
 
   #[test]
+  fn mixed_gateway_route_uses_the_ordered_proxy_helper() {
+    let options = SshConnectionOptions {
+      gateways: vec![
+        SshGateway {
+          kind: ctld_ipc::GatewayKind::Socks5,
+          destination: "proxy.internal".into(),
+          hostname: None,
+          user: None,
+          port: Some(1080),
+          identity_file: None,
+          mode: SshGatewayMode::Automatic,
+        },
+        SshGateway {
+          kind: ctld_ipc::GatewayKind::Ssh,
+          destination: "bastion.internal".into(),
+          hostname: None,
+          user: None,
+          port: None,
+          identity_file: None,
+          mode: SshGatewayMode::Automatic,
+        },
+      ],
+      ..SshConnectionOptions::default()
+    };
+    let args = ssh_base_arguments("target.internal", &options);
+    let proxy = args
+      .iter()
+      .find(|arg| arg.to_string_lossy().starts_with("ProxyCommand="))
+      .unwrap();
+    let proxy = proxy.to_string_lossy();
+    assert!(proxy.contains("--proxy-route"));
+    assert!(
+      !args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("ProxyJump="))
+    );
+    let encoded = proxy
+      .split("--proxy-route ")
+      .nth(1)
+      .unwrap()
+      .split(' ')
+      .next()
+      .unwrap();
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty());
+    let bytes = pairs
+      .iter()
+      .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+      .collect::<Vec<_>>();
+    let route: Vec<ctld_ipc::SshGateway> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(route[0].kind, ctld_ipc::GatewayKind::Socks5);
+    assert_eq!(route[1].destination, "bastion.internal");
+  }
+
+  #[test]
   fn ssh_command_preserves_the_order_and_endpoint_fields_of_native_gateways() {
     let options = SshConnectionOptions {
       gateways: vec![
         SshGateway {
+          kind: ctld_ipc::GatewayKind::Ssh,
           destination: "edge-alias".into(),
           hostname: None,
           user: None,
@@ -1035,6 +1124,7 @@ mod tests {
           mode: SshGatewayMode::Automatic,
         },
         SshGateway {
+          kind: ctld_ipc::GatewayKind::Ssh,
           destination: "internal-alias".into(),
           hostname: Some("2001:db8::2".into()),
           user: Some("operator".into()),

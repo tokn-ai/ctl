@@ -41,7 +41,7 @@ interface SessionSidebarProps {
   onRefresh(): void;
   on_archives?(): void;
   onSelect(session: SessionSummary): void;
-  onNewShell(): void;
+  onNewShell(target?: ConnectionTarget): void;
   onDisconnect(session: SessionSummary): void;
   onRequestClose(session: SessionSummary): void;
   onAddHost(): void;
@@ -421,9 +421,13 @@ export function SessionSidebar({
                   </div>
                 ) : null}
                 {!loading && groupSessions.length === 0 ? (
-                  <p className="host-empty-state">
-                    {hostError ? "Sessions unavailable" : "No known sessions"}
-                  </p>
+                  hostError ? <p className="host-empty-state">Sessions unavailable</p> : (
+                    <button className="host-empty-state host-empty-create" type="button"
+                      onClick={() => onNewShell(target)} disabled={creating || connectionBusy}
+                      title={`Create a session on ${targetLabel(target)}`}>
+                      No known sessions <span aria-hidden="true">· New shell</span>
+                    </button>
+                  )
                 ) : null}
                 {groupSessions.map((session) => {
                   const identity = sessionKey(session);
@@ -529,7 +533,7 @@ export function SessionSidebar({
         <button
           className="new-session-button"
           type="button"
-          onClick={onNewShell}
+          onClick={() => onNewShell()}
           disabled={creating}
         >
           <Icon name="plus" size={15} /> New shell

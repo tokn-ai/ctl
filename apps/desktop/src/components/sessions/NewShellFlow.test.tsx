@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionTarget, WorkspaceHost } from "../../lib/types";
+import { targetKey } from "../../features/targets/targets";
 import { NewShellFlow } from "./NewShellFlow";
 import { probeSshHost, cancelSshProbe } from "../../lib/tauri";
 
@@ -73,6 +74,15 @@ describe("new-shell quick-input flow", () => {
     await user.keyboard("{Enter}");
     await waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(create).toHaveBeenCalledExactlyOnceWith(local, null);
+  });
+
+  it("starts at the selected host's directory step without creating until submitted", async () => {
+    const { create, user } = setup({ initial_target_key: targetKey(local) });
+    expect(screen.getByLabelText("Working directory")).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Local" })).toBeNull();
+    expect(create).not.toHaveBeenCalled();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(create).toHaveBeenCalledExactlyOnceWith(local, null));
   });
 
   it("creates on only the selected host and preserves a directory draft through Back", async () => {

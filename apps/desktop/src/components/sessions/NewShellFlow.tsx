@@ -12,6 +12,7 @@ import type { ConnectionTarget, HostConnectionChange, RemoteIdentity, WorkspaceH
 
 interface NewShellFlowProps {
   targets: readonly ConnectionTarget[];
+  initial_target_key?: string | null;
   hosts?: readonly WorkspaceHost[];
   gateways?: readonly WorkspaceSshGateway[];
   discoveryMessage?: string | null;
@@ -31,6 +32,7 @@ interface NewShellFlowProps {
 /** Collect inputs without contacting any host until the final submission. */
 export function NewShellFlow({
   targets,
+  initial_target_key,
   hosts,
   gateways,
   discoveryMessage,
@@ -40,7 +42,7 @@ export function NewShellFlow({
   onClose,
 }: NewShellFlowProps) {
   const [selectedTargetKey, setSelectedTargetKey] = useState<string | null>(
-    null,
+    initial_target_key ?? null,
   );
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [creating, setCreating] = useState(false);

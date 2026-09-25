@@ -42,7 +42,7 @@ interface TerminalCommandActions {
   showAddRoutedHost(): void;
   showAddExistingSession(): void;
   forgetSession(session: SessionSummary): void;
-  showNewShell(): void;
+  showNewShell(args?: CommandArguments): void;
   openShellTab(): void;
   refreshSessions(): void;
   selectSession(session: SessionSummary): void | Promise<void>;

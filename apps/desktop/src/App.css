@@ -338,6 +338,25 @@ svg {
   font-size: 11px;
 }
 
+.host-empty-create {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.host-empty-create:hover:not(:disabled),
+.host-empty-create:focus-visible {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.host-empty-create:focus-visible {
+  outline: 1px solid var(--accent-strong);
+  outline-offset: -1px;
+}
+
 .session-icon {
   color: var(--muted);
 }

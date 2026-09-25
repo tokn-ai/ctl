@@ -209,6 +209,7 @@ export function TerminalPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newShellOpen, setNewShellOpen] = useState(false);
+  const [newShellTargetKey, setNewShellTargetKey] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [pendingForget, setPendingForget] = useState<SessionSummary | null>(
@@ -1353,8 +1354,9 @@ export function TerminalPage() {
       showAddRoutedHost: openAddHost,
       showAddExistingSession: () => setImportOpen(true),
       forgetSession: (session) => setPendingForget(session),
-      showNewShell: () => {
+      showNewShell: (args) => {
         if (!daemonRestartBlocksInteractions()) {
+          setNewShellTargetKey(args?.target_key ?? null);
           setNewShellOpen(true);
         }
       },
@@ -1608,7 +1610,7 @@ export function TerminalPage() {
                   session_key: sessionKey(session),
                 })
               }
-              onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
+              onNewShell={(target) => executeCommandById(COMMAND_IDS.newShell, target ? { target_key: targetKey(target) } : undefined)}
               onDisconnect={(session) =>
                 executeCommandById(COMMAND_IDS.disconnect, {
                   session_key: sessionKey(session),
@@ -1901,6 +1903,7 @@ export function TerminalPage() {
         />
       ) : newShellOpen ? (
         <NewShellFlow
+          initial_target_key={newShellTargetKey}
           targets={connectionTargets}
           hosts={workspace.hosts}
           gateways={workspace.ssh_gateways}

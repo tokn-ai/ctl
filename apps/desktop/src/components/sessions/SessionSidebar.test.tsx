@@ -361,6 +361,7 @@ describe("SessionSidebar", () => {
       remote_info: { remote_id: "remote-1", agent_version: "0.1.0" },
     };
     const onConnectHost = vi.fn();
+    const onNewShell = vi.fn();
     const onPortForward = vi.fn();
     const onRemoveHost = vi.fn();
     const onDisconnect = vi.fn();
@@ -381,7 +382,7 @@ describe("SessionSidebar", () => {
         disconnectingSessionKey={null}
         onRefresh={vi.fn()}
         onSelect={vi.fn()}
-        onNewShell={vi.fn()}
+        onNewShell={onNewShell}
         onDisconnect={onDisconnect}
         onRequestClose={vi.fn()}
         onAddHost={onAddHost}
@@ -404,7 +405,8 @@ describe("SessionSidebar", () => {
     await user.keyboard(" ");
     expect(localGroup.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("button", { name: "Shell — first" })).toBeTruthy();
-    expect(screen.getByText("No known sessions")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "No known sessions" }));
+    expect(onNewShell).toHaveBeenCalledExactlyOnceWith(remote);
     const connect = screen.getByRole("button", { name: "Connect to build-host" });
     expect(connect.title).toContain("Agent 0.1.0\nRemote ID: remote-1");
     await user.click(connect);

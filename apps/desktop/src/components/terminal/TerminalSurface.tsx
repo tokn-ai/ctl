@@ -32,7 +32,7 @@ export function TerminalSurface({
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef(onInput);
   const readyRef = useRef(onReady);
-  inputRef.current = ended_message ? () => {} : onInput;
+  inputRef.current = ended_message || phase !== "attached" ? () => {} : onInput;
   readyRef.current = onReady;
 
   useEffect(() => {
@@ -72,6 +72,9 @@ export function TerminalSurface({
           <h2>A terminal that outlives its window.</h2>
           <p>Select a remembered session to connect, or create a new shell.</p>
         </div>
+      ) : null}
+      {hasSession && !has_cached_content && phase === "disconnected" && !ended_message ? (
+        <div className="terminal-placeholder"><p>No cached output on this device. Connect the host to view this session.</p></div>
       ) : null}
       {!has_cached_content && (phase === "connecting" || phase === "reconnecting") ? (
         <div className="terminal-overlay">

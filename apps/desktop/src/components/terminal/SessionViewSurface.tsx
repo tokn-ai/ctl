@@ -19,6 +19,7 @@ import type { AppCommand, Keybinding, ShortcutPlatform } from "../../features/co
 type SurfaceProps = ComponentProps<typeof TerminalSurface>;
 interface Props extends SurfaceProps {
   session: SessionSummary | null;
+  offline?: boolean;
   shell_state?: ShellStateSummary | null;
   renderer?: XtermRenderer | null;
   input_owned?: boolean;
@@ -31,7 +32,7 @@ interface Props extends SurfaceProps {
   on_pane_commands?(commands: AppCommand[]): void;
 }
 
-export function SessionViewSurface({ session, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
+export function SessionViewSurface({ session, offline = false, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [controls_host, setControlsHost] = useState<HTMLDivElement | null>(null);
   const [cell, setCell] = useState({ width: 8, height: 16 });
@@ -52,6 +53,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const ended_ref = useRef(ended_ids);
   ended_ref.current = ended_ids;
   const [view, setView] = useState<SessionView | null>(null);
+  const cached_views = useRef(new Map<string, SessionView>());
   const view_ref = useRef(view);
   view_ref.current = view;
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +64,8 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const session_ref = useRef(session);
   session_ref.current = session;
   const key = session ? sessionKey(session) : "";
-  const connected = surface.phase === "attached" || surface.phase === "ended" || !!surface.ended_message;
+  const connected = !offline && (surface.phase === "attached" || surface.phase === "ended" || !!surface.ended_message);
+  const disconnected = offline || ["disconnected", "reconnecting", "error"].includes(surface.phase);
   const primary_ended = useRef(false);
   primary_ended.current = surface.phase === "ended" || !!surface.ended_message;
   const generation = useRef(0);
@@ -70,8 +73,13 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const select_ref = useRef(on_select_terminal);
   select_ref.current = on_select_terminal;
 
+  function rememberView(next: SessionView | null) {
+    if (next) cached_views.current.set(key, next);
+    setView(next);
+  }
+
   useEffect(() => {
-    setView(null);
+    setView(cached_views.current.get(key) ?? null);
     setEndedIds(new Set());
     setError(null);
     setActionError(null);
@@ -94,7 +102,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
         const removed = view_ref.current?.terminals.filter((terminal) => !next?.terminals.some((candidate) => candidate.terminal_id === terminal.terminal_id)) ?? [];
         if (removed.length) {
           setEndedIds((previous) => new Set([...previous, ...removed.map((terminal) => terminal.terminal_id)]));
-        } else setView(next);
+        } else rememberView(next);
         setError(null);
 
       } catch (failure) {
@@ -120,7 +128,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     const current = generation.current;
     const request = ++sequence.current;
     void sessionView(session.target, { kind: "get", session_id: session.session_id }).then((next) => {
-      if (generation.current === current && sequence.current === request) setView(next);
+      if (generation.current === current && sequence.current === request) rememberView(next);
     }).catch(() => { /* The periodic refresh reports connectivity errors. */ });
   }, [primary_size, connected, key]);
 
@@ -134,7 +142,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
       const next = await sessionView(session.target, { kind: "get", session_id: session.session_id });
       if (!next?.terminals.length) { surface.on_dismiss?.(); return; }
       setEndedIds((previous) => new Set([...previous].filter((terminal) => terminal !== id)));
-      setView(next);
+      rememberView(next);
       if (id === session.terminal_id || !next.terminals.some((terminal) => terminal.terminal_id === session.terminal_id)) {
         const first = next.terminals[0];
         await pane_detachers.current.get(first.terminal_id)?.();
@@ -165,10 +173,10 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
         ++sequence.current;
         // Both toolbar and prefix splits must reveal the newly created pane.
         if (action.kind === "split") setZoomedId(null);
-        if (next?.session_id === session.session_id) setView(next);
+        if (next?.session_id === session.session_id) rememberView(next);
         else {
           const refreshed = await sessionView(session.target, { kind: "get", session_id: session.session_id });
-          if (current === generation.current) setView(refreshed);
+          if (current === generation.current) rememberView(refreshed);
         }
       }
     } catch (failure) {
@@ -273,6 +281,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     {error && <div className="message-banner" role="status">{error}</div>}
     {action_error && <div className="message-banner" role="alert">{action_error}</div>}
     <div className="view-controls" ref={setControlsHost}>
+      {disconnected && <span className="view-disconnected-label" role="status">Disconnected · cached view</span>}
       {connected && primary_id && focused === primary_id && controls(primary_id, shell_state,
         <button onClick={on_toggle_input}>{input_owned ? "Release input" : "Take input"}</button>)}
     </div>
@@ -282,13 +291,13 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
         key={divider.path} className="view-divider" aria-hidden="true"
         style={{ left: Math.round(divider.left * cell.width), top: Math.round(divider.top * cell.height), width: divider.vertical ? 1 : divider.length * cell.width, height: divider.vertical ? divider.length * cell.height : 1 }}
       />)}
-      <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
+      <div className="view-pane" data-disconnected={disconnected} data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
         <TerminalSurface {...surface} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
       {session && current_view && panes.filter((pane) => pane.terminal_id !== primary_id && pane.terminal_id !== takeover_id).map((pane) => {
         const terminal = current_view.terminals.find((candidate) => candidate.terminal_id === pane.terminal_id)!;
-        return <div className="view-pane" data-active={focused === pane.terminal_id} key={pane.terminal_id} ref={paneRef(pane.terminal_id)} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(pane)}>
-          <AdditionalTerminal on_ended={() => setEndedIds((previous) => new Set([...previous, pane.terminal_id]))} on_dismiss={() => void dismissPane(pane.terminal_id)} confirmed_missing={ended_ids.has(pane.terminal_id)} session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} toggle_registry={pane_toggle_inputs} render_controls={(state, input_control) => focused === pane.terminal_id && controls_host ? createPortal(controls(pane.terminal_id, state, input_control), controls_host) : null} />
+        return <div className="view-pane" data-disconnected={disconnected} data-active={focused === pane.terminal_id} key={pane.terminal_id} ref={paneRef(pane.terminal_id)} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(pane)}>
+          <AdditionalTerminal offline={offline} on_ended={() => setEndedIds((previous) => new Set([...previous, pane.terminal_id]))} on_dismiss={() => void dismissPane(pane.terminal_id)} confirmed_missing={ended_ids.has(pane.terminal_id)} session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} toggle_registry={pane_toggle_inputs} render_controls={(state, input_control) => focused === pane.terminal_id && controls_host ? createPortal(controls(pane.terminal_id, state, input_control), controls_host) : null} />
         </div>;
       })}
     </div>
@@ -296,8 +305,9 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   </div>;
 }
 
-function AdditionalTerminal({ on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
+function AdditionalTerminal({ offline, on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
   session: SessionSummary;
+  offline: boolean;
   on_ended(): void;
   on_dismiss(): void;
   confirmed_missing: boolean;
@@ -325,16 +335,17 @@ function AdditionalTerminal({ on_ended, on_dismiss, confirmed_missing, session, 
     detach_registry.current.set(terminal_id, detach);
     toggle_registry.current.set(terminal_id, () => actions.current.toggleInputLease());
     input_registry.current.set(terminal_id, (data) => actions.current.handleInput(data));
-    void actions.current.connect(session_ref.current, { resize_with_window: false, terminal_id });
+    if (offline) void actions.current.viewOffline(session_ref.current);
+    else void actions.current.connect(session_ref.current, { resize_with_window: false, terminal_id });
     return () => {
       if (detach_registry.current.get(terminal_id) === detach) detach_registry.current.delete(terminal_id);
       input_registry.current.delete(terminal_id);
       toggle_registry.current.delete(terminal_id);
       void detach();
     };
-  }, [renderer, key, detach_registry, input_registry, toggle_registry]);
+  }, [renderer, key, offline, detach_registry, input_registry, toggle_registry]);
   return <>
-    {render_controls(attachment.state.shell_state, <button onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>)}
+    {!offline && render_controls(attachment.state.shell_state, <button onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>)}
     {attachment.state.message && <div role="status" className="pane-message">{attachment.state.message}</div>}
     <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null} onInput={attachment.handleInput} onReady={setRenderer} />
   </>;

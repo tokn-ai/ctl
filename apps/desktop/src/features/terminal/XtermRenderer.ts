@@ -95,10 +95,10 @@ export class XtermRenderer {
     XtermRenderer.renderers.add(this);
   }
 
-  activateSession(session: SessionSummary): void {
+  activateSession(session: SessionSummary, use_cached_terminal = false): void {
     const key = sessionKey(session);
     let terminal = this.sessions.get(key);
-    if (terminal && terminal.terminal_id !== session.terminal_id) {
+    if (terminal && !use_cached_terminal && terminal.terminal_id !== session.terminal_id) {
       this.sessions.delete(key);
       if (terminal !== this.active) this.disposeTerminal(terminal);
       terminal = undefined;

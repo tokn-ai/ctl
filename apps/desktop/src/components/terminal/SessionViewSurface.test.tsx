@@ -7,11 +7,11 @@ import type { AppCommand } from "../../features/commands/types";
 import { searchCommands } from "../../features/commands/commandSearch";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn() }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), viewOffline: vi.fn(), input: vi.fn() }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
 vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () => ({
   state: { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
-  connect: mocks.connect, detach: mocks.detach, handleInput: mocks.input, toggleInputLease: vi.fn(), toggleResizeWithWindow: vi.fn(),
+  connect: mocks.connect, detach: mocks.detach, viewOffline: mocks.viewOffline, handleInput: mocks.input, toggleInputLease: vi.fn(), toggleResizeWithWindow: vi.fn(),
 }) }));
 vi.mock("./TerminalSurface", async () => {
   const { useEffect } = await import("react");
@@ -66,6 +66,26 @@ describe("session compositor", () => {
     const panes = screen.getAllByLabelText("Terminal input").map((input) => input.closest<HTMLElement>(".view-pane")!);
     expect(panes.map((pane) => pane.style.width)).toEqual(["320px", "312px"]);
     expect(panes.map((pane) => pane.style.height)).toEqual(["384px", "384px"]);
+  });
+
+  it("keeps split panes locally while a host is paused and marks the active border disconnected", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = props();
+    const mounted = render(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    mocks.connect.mockClear();
+    mocks.request.mockClear();
+    mounted.rerender(<SessionViewSurface {...actions} offline phase="disconnected" />);
+    await waitFor(() => expect(mocks.viewOffline).toHaveBeenCalledWith(expect.objectContaining({ terminal_id: "b" })));
+    expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2);
+    const active = mounted.container.querySelector('[data-active="true"]');
+    expect(active?.getAttribute("data-disconnected")).toBe("true");
+    expect(screen.getByText("Disconnected · cached view")).toBeTruthy();
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(mocks.connect).not.toHaveBeenCalled();
+    mounted.rerender(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+    expect(active?.getAttribute("data-disconnected")).toBe("false");
   });
 
   it("bounds a missing session's fallback canvas and dismisses without a network request", async () => {

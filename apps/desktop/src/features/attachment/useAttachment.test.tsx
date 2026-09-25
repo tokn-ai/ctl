@@ -215,6 +215,26 @@ describe("pending remote attachments", () => {
     target: { kind: "ssh", destination: "offline-host" },
   };
 
+  it("views cached sessions offline without opening a transport or forwarding input", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    await emit(checkpoint("attachment-0", "first cached output", "10"));
+    await act(async () => { await result.current.connect(second); });
+    await emit(checkpoint("attachment-1", "second cached output", "20"));
+    api.openAttachment.mockClear();
+    await act(async () => { await result.current.viewOffline({ ...first, terminal_id: undefined }); });
+    expect(result.current.state.phase).toBe("disconnected");
+    expect(result.current.state.session).toEqual(first);
+    expect(result.current.state.applied_sequence).toBe("10");
+    expect(line(visibleTerminal().terminal)).toBe("first cached output");
+    act(() => result.current.handleInput(new Uint8Array([65])));
+    expect(api.sendInput).not.toHaveBeenCalled();
+    await act(async () => { await result.current.viewOffline(second); });
+    expect(line(visibleTerminal().terminal)).toBe("second cached output");
+    expect(api.openAttachment).not.toHaveBeenCalled();
+    expect(api.acquireAttachmentLease).not.toHaveBeenCalled();
+  });
+
   function stallNextOpen() {
     const aborted = vi.fn();
     api.openAttachment.mockImplementationOnce((_request, _on_event, signal: AbortSignal) =>

@@ -291,11 +291,11 @@ export function TerminalPage() {
       }
       const selected = tabsRef.current.find((tab) => sessionKey(tab) === activeTabKeyRef.current);
       const attached = attachment.state.session;
-      const shouldDetach = [selected, attached].some((session) =>
+      const local_session = [selected, attached].find((session) =>
         session?.target.kind === "ssh" && session.target.host_id === host_id);
       await Promise.all([
         portForwarding.pauseHost(host_id),
-        shouldDetach ? attachment.detach() : Promise.resolve(),
+        local_session ? attachment.viewOffline(local_session) : Promise.resolve(),
       ]);
     },
     onResume: portForwarding.resumeHost,
@@ -553,10 +553,6 @@ export function TerminalPage() {
       if (daemonRestartBlocksInteractions()) {
         return;
       }
-      if (hostConnections.isPaused(requestedSession.target)) {
-        setListError("This host is disconnected. Connect the host to resume its sessions.");
-        return;
-      }
       const managed =
         requestedSession.target.kind === "local"
           ? taskWorkspaceRef.current.tasks.find(
@@ -580,6 +576,12 @@ export function TerminalPage() {
       setTabs(nextTabs);
       setActiveTabKey(identity);
 
+      if (hostConnections.isPaused(session.target)) {
+        setListError(null);
+        await attachment.viewOffline(session);
+        renderer?.focus();
+        return;
+      }
       if (
         sameSession(attachment.state.session, session) &&
         sameSshEndpoint(attachment.state.session!.target, session.target)
@@ -751,12 +753,13 @@ export function TerminalPage() {
       }
       // Closing a restored, disconnected tab must not open a new SSH channel.
       if (nextTab && attachment.state.session !== null) {
-        await attachment.connect(nextTab);
+        if (hostConnections.isPaused(nextTab.target)) await attachment.viewOffline(nextTab);
+        else await attachment.connect(nextTab);
       } else {
         await attachment.detach();
       }
     },
-    [attachment, daemonRestartBlocksInteractions],
+    [attachment, daemonRestartBlocksInteractions, hostConnections.isPaused],
   );
 
   const archiveSession = useCallback(async (session: SessionSummary, reason: string) => {
@@ -1828,6 +1831,7 @@ export function TerminalPage() {
               ) : null}
             </div>
             <SessionViewSurface
+              offline={attachment.state.session !== null && hostConnections.isPaused(attachment.state.session.target)}
               prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
               shortcuts_enabled={!dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
               on_command={executeCommandById}

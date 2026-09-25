@@ -91,6 +91,7 @@ export interface AttachmentActions {
   reconnect(): Promise<void>;
   cancelPendingConnection(session: SessionSummary): void;
   detach(): Promise<void>;
+  viewOffline(session: SessionSummary): Promise<void>;
   /**
    * Forget local attachment state for a daemon restart. The restart command
    * owns backend detachment, so this deliberately does not send DetachAttachment.
@@ -118,6 +119,7 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
   const layoutLeaseOwnedRef = useRef(false);
   const resizeWithWindowRef = useRef(false);
   const lifecycleRecoveryStateRef = useRef<AttachmentViewState | null>(null);
+  const cachedSessionsRef = useRef(new Map<string, SessionSummary>());
   const recoveryBackoffRef = useRef(new AttachmentRecoveryBackoff());
   const recoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const drainDeferredConnectionRef = useRef<() => void>(() => {});
@@ -138,6 +140,9 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
 
   useEffect(() => {
     stateRef.current = state;
+    if (state.phase === "attached" && state.session) {
+      cachedSessionsRef.current.set(sessionKey(state.session), state.session);
+    }
   }, [state]);
 
   const clearRecoveryTimer = useCallback(() => {
@@ -986,7 +991,7 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
     setState(INITIAL_STATE);
   }, [resetRecovery]);
 
-  const detach = useCallback(async () => {
+  const disconnect = useCallback(async (local_session?: SessionSummary) => {
     resetRecovery();
     const generation = generationRef.current + 1;
     generationRef.current = generation;
@@ -1009,7 +1014,7 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
         if (generation === generationRef.current) {
           setState((current) => ({
             ...current,
-            phase: "error",
+            phase: local_session ? "disconnected" : "error",
             error_code: "explicit_detach_failed",
             attachment_id: null,
             input_lease: EMPTY_LEASE,
@@ -1022,13 +1027,37 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
         return;
       }
     }
-    if (generation !== generationRef.current) {
+    if (local_session) {
+      await eventTailRef.current;
+      if (generation !== generationRef.current) return;
+      // List entries may lack the resolved pane identity and last visible size.
+      const cached_session = cachedSessionsRef.current.get(sessionKey(local_session));
+      const session = cached_session
+        ? { ...local_session, ...cached_session, target: local_session.target, name: local_session.name }
+        : local_session;
+      rendererRef.current?.activateSession(session, true);
+      const cached_sequence = rendererRef.current?.resumeSequence() ?? null;
+      const next: AttachmentViewState = {
+        ...INITIAL_STATE, phase: "disconnected", session,
+        applied_sequence: cached_sequence, reconnect_sequence: cached_sequence,
+        shell_state: sameSession(stateRef.current.session, local_session) ? stateRef.current.shell_state : null,
+        message: "Disconnected — viewing locally cached output. Connect the host to resume.",
+      };
+      appliedSequenceRef.current = cached_sequence;
+      pendingShellStateRef.current = null;
+      stateRef.current = next;
+      setState(next);
+    }
+    if (generation !== generationRef.current || local_session) {
       return;
     }
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
   }, [resetRecovery]);
+
+  const detach = useCallback(() => disconnect(), [disconnect]);
+  const viewOffline = useCallback((session: SessionSummary) => disconnect(session), [disconnect]);
 
   const resetAfterDaemonRestart = useCallback(() => {
     resetRecovery();
@@ -1147,6 +1176,7 @@ export function useAttachment(renderer: XtermRenderer | null, view_resize = fals
     reconnect,
     cancelPendingConnection,
     detach,
+    viewOffline,
     resetAfterDaemonRestart,
     handleInput,
     toggleInputLease,

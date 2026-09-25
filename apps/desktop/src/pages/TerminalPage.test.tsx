@@ -105,7 +105,7 @@ const attachment = vi.hoisted(() => ({
   },
   connect: vi.fn(),
   reconnect: vi.fn(),
-  detach: vi.fn(),
+  detach: vi.fn(), viewOffline: vi.fn(),
   handleInput: vi.fn(),
   toggleInputLease: vi.fn(),
   toggleResizeWithWindow: vi.fn(),
@@ -2051,11 +2051,8 @@ describe("workspace-backed terminal page", () => {
     api.loadWorkspace.mockResolvedValue(saved);
     const known = restoreWorkspace(saved.document, hostSnapshot().document).sessions[0];
     Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
-    attachment.detach.mockImplementationOnce(async () => {
-      attachment.state.phase = "idle";
-  attachment.state.error_code = null;
-  attachment.state.message = null;
-      attachment.state.session = null;
+    attachment.viewOffline.mockImplementation(async (session) => {
+      Object.assign(attachment.state, { phase: "disconnected", session, error_code: null, message: "Disconnected — viewing locally cached output." });
     });
     let manuallyDisconnected = false;
     let finishDisconnect!: () => void;
@@ -2085,7 +2082,7 @@ describe("workspace-backed terminal page", () => {
     await waitFor(() => expect(api.disconnectSshHost).toHaveBeenCalledOnce());
     expect(screen.getByRole("status", { name: "Host connection for test: Disconnecting…" })).toBeTruthy();
     expect(disconnect).toHaveProperty("disabled", true);
-    expect(attachment.detach).toHaveBeenCalledOnce();
+    expect(attachment.viewOffline).toHaveBeenCalledOnce();
     expect(attachment.cancelPendingConnection).toHaveBeenCalledWith(known);
     expect(api.disconnectSshHost).toHaveBeenCalledWith([known.target]);
     await act(async () => finishDisconnect());
@@ -2110,7 +2107,7 @@ describe("workspace-backed terminal page", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect to test" }));
-    await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
+    await waitFor(() => expect(attachment.reconnect).toHaveBeenCalledOnce());
     expect(await screen.findByRole("status", { name: "Host connection for test: Connected" })).toBeTruthy();
     expect(api.probeSshHost).toHaveBeenCalledOnce();
     expect(api.configurePortForward).toHaveBeenCalledExactlyOnceWith(

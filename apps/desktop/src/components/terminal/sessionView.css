@@ -20,3 +20,6 @@
 .view-pane .xterm-viewport::-webkit-scrollbar { display: none; }
 
 .view-divider { position: absolute; pointer-events: none; background: var(--border-subtle, #333); }
+
+.view-pane[data-active="true"][data-disconnected="true"]::after { box-shadow: inset 0 0 0 1px var(--warning, #e9bd67); }
+.view-disconnected-label { display: inline-block; padding: 8px; color: var(--warning, #e9bd67); font-size: 11px; }

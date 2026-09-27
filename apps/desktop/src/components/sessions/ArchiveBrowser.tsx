@@ -13,7 +13,13 @@ export function ArchiveBrowser({ targets, on_close }: {
   const [archives, setArchives] = useState<SessionArchive[]>([]);
   const [selected, setSelected] = useState<{ archive_key: string; terminal_id: string | null } | null>(null);
   const selected_archive = archives.find((archive) => JSON.stringify([archive.host_key, archive.session_id]) === selected?.archive_key);
-  const selected_lines = selected_archive?.terminals.find((terminal) => terminal.terminal_id === selected?.terminal_id)?.lines;
+  const selected_pane = selected_archive?.terminals.find((terminal) => terminal.terminal_id === selected?.terminal_id);
+  const output_key = selected_archive && selected_pane ? JSON.stringify([selected_archive.host_key, selected_archive.session_id, selected_pane.terminal_id]) : null;
+  const [output, setOutput] = useState<{ key: string; lines: string[]; next_offset: string | null } | null>(null);
+  const [reading, setReading] = useState(false);
+  const read_generation = useRef(0);
+  const selected_lines = output?.key === output_key ? output.lines : selected_pane?.lines;
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -28,9 +34,42 @@ export function ArchiveBrowser({ targets, on_close }: {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
+  useEffect(() => {
+    const generation = ++read_generation.current;
+    if (!selected_archive || !selected_pane || !output_key || selected_pane.lines.length) {
+      setReading(false);
+      return;
+    }
+    setReading(true);
+    setError(null);
+    void sessionArchive({ kind: "read", host_key: selected_archive.host_key, session_id: selected_archive.session_id, terminal_id: selected_pane.terminal_id, offset: "0" })
+      .then((response) => {
+        if (generation !== read_generation.current) return;
+        if (response.kind !== "output") throw new Error("Unexpected archive output response");
+        setOutput({ key: output_key, lines: response.lines, next_offset: response.next_offset });
+      })
+      .catch((failure) => { if (generation === read_generation.current) setError(errorMessage(failure)); })
+      .finally(() => { if (generation === read_generation.current) setReading(false); });
+    return () => { read_generation.current++; };
+  }, [output_key, selected_archive, selected_pane]);
+
+  function readMore() {
+    if (!selected_archive || !selected_pane || !output || output.key !== output_key || !output.next_offset || reading) return;
+    const generation = read_generation.current;
+    setReading(true);
+    setError(null);
+    void sessionArchive({ kind: "read", host_key: selected_archive.host_key, session_id: selected_archive.session_id, terminal_id: selected_pane.terminal_id, offset: output.next_offset })
+      .then((response) => {
+        if (generation !== read_generation.current) return;
+        if (response.kind !== "output") throw new Error("Unexpected archive output response");
+        setOutput((previous) => previous?.key === output_key ? { ...previous, lines: [...previous.lines, ...response.lines], next_offset: response.next_offset } : previous);
+      })
+      .catch((failure) => { if (generation === read_generation.current) setError(errorMessage(failure)); })
+      .finally(() => { if (generation === read_generation.current) setReading(false); });
+  }
   return <dialog ref={dialog} className="archive-browser" aria-label="Archived sessions" onCancel={on_close}>
     <header><h2>Archived sessions</h2><button type="button" onClick={on_close}>Close</button></header>
-    <p>Stored on this device for seven days. Retained text is read only.</p>
+    <p>Stored on this device until deleted. Retained text is read only.</p>
     {loading && <p role="status">Loading archive…</p>}
     {error && <p role="alert">{error}</p>}
     {!loading && !error && !archives.length && <p>No retained archives on this device.</p>}
@@ -48,10 +87,14 @@ export function ArchiveBrowser({ targets, on_close }: {
               <strong title={archive.name}>{archive.name}</strong>
               <small title={host_label}>{host_label}</small>
               <small title={new Date(archive.archived_at_ms).toLocaleString()}>Archived {new Date(archive.archived_at_ms).toLocaleDateString()}</small>
-              <small title={new Date(archive.expires_at_ms).toLocaleString()}>Retained until {new Date(archive.expires_at_ms).toLocaleDateString()}</small>
               {archive.terminals.length === 1 && <small title={archive.terminals[0].reason}>{archive.terminals[0].reason}</small>}
             </span>
           </button>
+          <button type="button" onClick={() => {
+            void sessionArchive({ kind: "delete", host_key: archive.host_key, session_id: archive.session_id })
+              .then(() => { setError(null); setArchives((previous) => previous.filter((item) => item !== archive)); if (active) setSelected(null); })
+              .catch((failure) => setError(errorMessage(failure)));
+          }}>Delete archive</button>
           {archive.terminals.length > 1 && <div className="archive-card-panes" aria-label={`${archive.name} panes`}>
             {archive.terminals.map((terminal, index) => <button key={terminal.terminal_id} type="button"
               aria-pressed={active && selected?.terminal_id === terminal.terminal_id}
@@ -61,7 +104,8 @@ export function ArchiveBrowser({ targets, on_close }: {
           </div>}
         </section>;
       })}</nav>
-      <pre className="archive-terminal" aria-label="Archived terminal output">{selected_archive ? selected_lines?.join("\n") || "No cached output was available." : "Select an archived session."}</pre>
+      <pre className="archive-terminal" aria-label="Archived terminal output">{reading && !selected_lines?.length ? "Loading retained output…" : selected_archive ? selected_lines?.join("\n") || "No cached output was available." : "Select an archived session."}</pre>
     </div>
+    {output?.key === output_key && output?.next_offset && <button type="button" disabled={reading} onClick={readMore}>{reading ? "Loading…" : "Load more output"}</button>}
   </dialog>;
 }

@@ -90,7 +90,7 @@ import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
 import { displayWorkingDirectory } from "../lib/shellState";
 import {
-  sessionArchive,
+  sessionCache,
   createSession,
   killSession,
   inspectKnownSessions,
@@ -730,12 +730,13 @@ export function TerminalPage() {
         return;
       }
 
+      await attachment.closeSession(session);
+      await sessionCache({ kind: "archive", host_key: targetKey(session.target), session_id: session.session_id, reason: "Tab closed" });
       const wasActive = activeTabKeyRef.current === identity;
       const closed = closeTerminalTab(currentTabs, identity);
       tabsRef.current = closed.tabs;
       setTabs(closed.tabs);
       setTabShellStates((current) => forgetShellState(current, identity));
-      await attachment.closeSession(session);
       if (!wasActive) {
         return;
       }
@@ -760,13 +761,8 @@ export function TerminalPage() {
   );
 
   const archiveSession = useCallback(async (session: SessionSummary, reason: string) => {
-    const panes = await renderer?.archivePanes(session, reason) ?? [];
-    await sessionArchive({ kind: "save", archive: {
-      session_id: session.session_id, name: session.name, host_key: targetKey(session.target),
-      archived_at_ms: 0, expires_at_ms: 0,
-      terminals: panes.length ? panes : [{ terminal_id: session.terminal_id ?? session.session_id, reason, lines: [] }],
-    } });
-  }, [renderer]);
+    await sessionCache({ kind: "archive", host_key: targetKey(session.target), session_id: session.session_id, reason });
+  }, []);
 
   const dismissingSessions = useRef(new Set<string>());
   const dismissSession = useCallback(async (session: SessionSummary) => {

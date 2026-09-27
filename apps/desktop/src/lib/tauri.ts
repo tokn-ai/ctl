@@ -325,7 +325,7 @@ export async function openAttachment(
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     const attached = await invoke<OpenAttachmentResponse>("open_attachment", {
-      request,
+      request: { ...request, cache_host_key: request.target.kind === "local" ? "local" : request.target.host_id ? `host:${request.target.host_id}` : `ssh:${request.target.destination}` },
       on_event: channel,
       on_opening: opening,
     });
@@ -411,4 +411,9 @@ export async function sessionView(target: ConnectionTarget, action: import("./ty
 
 export function sessionArchive(action: import("./types").ArchiveAction): Promise<import("./types").ArchiveResponse> {
   return invoke("session_archive", { request: { action } });
+}
+
+
+export function sessionCache(action: import("./types").SessionCacheAction): Promise<import("./types").SessionCacheResponse> {
+  return invoke("session_cache", { request: { action } });
 }

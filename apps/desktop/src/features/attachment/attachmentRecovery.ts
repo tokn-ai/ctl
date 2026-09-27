@@ -12,6 +12,7 @@ const NON_RECOVERABLE_ERROR_CODES = new Set([
   "attachment_cancelled",
   "automatic_reconnect_timeout",
   "explicit_detach_failed",
+  "local_cache_failed",
   "invalid_request",
   "invalid_session_name",
   "invalid_terminal_size",

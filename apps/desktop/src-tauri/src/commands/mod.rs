@@ -1,4 +1,5 @@
 pub mod archives;
+pub mod cache;
 pub mod inspection;
 pub mod views;
 
@@ -18,11 +19,11 @@ use tokio::time::timeout;
 
 use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
-  AttachmentRequestDto, CreateSessionRequestDto, KillSessionRequestDto, OpenAttachmentRequestDto,
-  OpenAttachmentResponseDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
-  SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto, SendInputRequestDto, SessionDto,
-  SessionListDto, ShellStateDto, SshConfigHostCatalogDto, SshConfigHostDto, TargetRequestDto,
-  decode_input, parse_sequence,
+  AttachmentRequestDto, ConnectionTargetDto, CreateSessionRequestDto, KillSessionRequestDto,
+  OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentRequestDto,
+  RestartLocalDaemonResponseDto, SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto,
+  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, SshConfigHostCatalogDto,
+  SshConfigHostDto, TargetRequestDto, decode_input, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -310,6 +311,7 @@ async fn open_reserved_attachment(
   on_event: Channel<AttachmentEventDto>,
 ) -> CommandResult<OpenAttachmentResponseDto> {
   let target = request.target.clone();
+  let root_requested = request.session.clone();
   let terminal_size = request.terminal_size.into_proto()?;
   let resume_from = parse_sequence(request.resume_from)?;
   let stream = transport::connect(&target).await?;
@@ -346,12 +348,23 @@ async fn open_reserved_attachment(
   let (controller, control, events) =
     AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
   let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
-  let actor = Arc::new(AttachmentActor::new(
-    attachment_id.clone(),
-    window_label.clone(),
-    target,
-    control,
-  ));
+  let actor = Arc::new(
+    AttachmentActor::new(attachment_id.clone(), window_label.clone(), target, control).with_cache(
+      rmux_client::cache::CacheIdentity {
+        host_key: request
+          .cache_host_key
+          .unwrap_or_else(|| match &request.target {
+            ConnectionTargetDto::Local => "local".into(),
+            ConnectionTargetDto::Ssh { destination, .. } => format!("ssh:{destination}"),
+          }),
+        session_id: attached.session.session_id.clone(),
+        terminal_id: attached.session.terminal_id.clone(),
+        name: attached.session.name.clone(),
+        terminal_size: attached.session.terminal_size.clone(),
+        primary: root_requested == attached.session.session_id,
+      },
+    ),
+  );
   state
     .activate(&window_label, &attachment_id, Arc::clone(&actor))
     .await?;

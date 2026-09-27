@@ -41,7 +41,7 @@ import { StatusBar } from "../components/status/StatusBar";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
-import { useAttachment } from "../features/attachment/useAttachment";
+import { useSessionAttachments } from "../features/attachment/useSessionAttachments";
 import { restartFailurePreservesLocalState } from "../features/daemon/restartFailurePolicy";
 import {
   detectShortcutPlatform,
@@ -169,7 +169,7 @@ export function TerminalPage() {
   const [keybindingsOpen, setKeybindingsOpen] = useState(false);
   const [dispatcher] = useState(() => new CommandDispatcher());
   const [pane_commands, setPaneCommands] = useState<AppCommand[]>([]);
-  const attachment = useAttachment(renderer, true);
+  const attachment = useSessionAttachments(renderer);
   const taskWorkspace = useTaskWorkspace(
     workspace,
     async (session) => {
@@ -179,7 +179,7 @@ export function TerminalPage() {
   );
   const taskWorkspaceRef = useRef(taskWorkspace);
   taskWorkspaceRef.current = taskWorkspace;
-  useEffect(() => {
+  const open_session_keys = useMemo(() => {
     const session_keys = new Set(tabs.map(sessionKey));
     for (const tab of workspace.task_tabs) {
       if (tab.kind !== "task" || tab.host_id !== "local") continue;
@@ -190,8 +190,12 @@ export function TerminalPage() {
         session_keys.add(sessionKey({ target: { kind: "local" }, session_id }));
       }
     }
-    renderer?.retainSessions(session_keys);
-  }, [renderer, tabs, workspace.task_tabs, taskWorkspace.tasks]);
+    return session_keys;
+  }, [tabs, workspace.task_tabs, taskWorkspace.tasks]);
+  useEffect(() => {
+    attachment.retainSessions(open_session_keys);
+    renderer?.retainSessions(open_session_keys);
+  }, [renderer, open_session_keys, attachment.retainSessions]);
   const currentShellState = attachment.state.shell_state;
   const currentWorkingDirectory = currentShellState?.cwd || null;
   const currentWorkingDirectoryDisplay = currentShellState
@@ -288,13 +292,9 @@ export function TerminalPage() {
       for (const session of sessionsRef.current) {
         if (session.target.kind === "ssh" && session.target.host_id === host_id) attachment.cancelPendingConnection(session);
       }
-      const selected = tabsRef.current.find((tab) => sessionKey(tab) === activeTabKeyRef.current);
-      const attached = attachment.state.session;
-      const shouldDetach = [selected, attached].some((session) =>
-        session?.target.kind === "ssh" && session.target.host_id === host_id);
       await Promise.all([
         portForwarding.pauseHost(host_id),
-        shouldDetach ? attachment.detach() : Promise.resolve(),
+        attachment.disconnectHost(host_id),
       ]);
     },
     onResume: portForwarding.resumeHost,
@@ -735,6 +735,7 @@ export function TerminalPage() {
       tabsRef.current = closed.tabs;
       setTabs(closed.tabs);
       setTabShellStates((current) => forgetShellState(current, identity));
+      await attachment.closeSession(session);
       if (!wasActive) {
         return;
       }
@@ -1114,9 +1115,7 @@ export function TerminalPage() {
     closingSessionKeysRef.current.clear();
     creatingRef.current = false;
     renderer?.forgetLocalSessions();
-    if (attachment.state.session?.target.kind === "local") {
-      attachment.resetAfterDaemonRestart();
-    }
+    attachment.resetAfterDaemonRestart();
     const markLocalMissing = (current: SessionSummary[]): SessionSummary[] =>
       current.map((session) =>
         session.target.kind === "local"
@@ -1184,6 +1183,39 @@ export function TerminalPage() {
     }
     void restartDaemon();
   }, [restartDaemon]);
+
+  useEffect(() => {
+    for (const state of attachment.states) {
+      const session = state.session;
+      if (!session || sameSession(session, attachment.state.session) || !tabsRef.current.some((tab) => sameSession(tab, session))) continue;
+      const key = sessionKey(session);
+      if (state.shell_state) {
+        const shell_state = state.shell_state;
+        setTabShellStates((current) => rememberShellState(current, key, shell_state, { replaceEqualRevision: true }));
+        setSessionShellStates((current) => rememberShellState(current, key, shell_state, { replaceEqualRevision: true }));
+      }
+      const status: SessionSummary["status"] | null = state.phase === "ended" ? "exited"
+        : state.phase === "error" ? state.error_code === "session_not_found" ? "missing" : "unreachable"
+        : state.phase === "attached" ? "running" : null;
+      const update = (current: SessionSummary[]) => {
+        const resized = syncSessionTerminalSize(current, key, session.terminal_size);
+        return status && resized.some((candidate) => sameSession(candidate, session) && candidate.status !== status)
+          ? resized.map((candidate) => sameSession(candidate, session) ? { ...candidate, status } : candidate)
+          : resized;
+      };
+      refreshGuardRef.current.recordMutation();
+      setSessions((current) => {
+        const next = update(current);
+        sessionsRef.current = next;
+        return next;
+      });
+      setTabs((current) => {
+        const next = update(current);
+        tabsRef.current = next;
+        return next;
+      });
+    }
+  }, [attachment.states, setSessions, setTabs, setSessionShellStates]);
 
   const attachedSession = attachment.state.session;
   const attachedSessionKey = attachedSession
@@ -1830,6 +1862,7 @@ export function TerminalPage() {
               shortcuts_enabled={!dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
               on_command={executeCommandById}
               on_pane_commands={setPaneCommands}
+              open_session_keys={attachment.session_keys}
               session={attachment.state.session}
               shell_state={attachment.state.shell_state}
               renderer={renderer}
@@ -1845,6 +1878,7 @@ export function TerminalPage() {
               onInput={handleTerminalInput}
               onReady={setRenderer}
             />
+            {attachment.controllers}
             <StatusBar state={attachment.state} />
           </div>
         </section>

@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionSummary, SessionView } from "../../lib/types";
+import { sessionKey } from "../../features/targets/targets";
 import { SessionViewSurface } from "./SessionViewSurface";
 import type { AppCommand } from "../../features/commands/types";
 import { searchCommands } from "../../features/commands/commandSearch";
@@ -55,6 +56,24 @@ describe("session compositor", () => {
     expect(pane.style.height).toBe("360px");
     mounted.unmount();
     expect(stop).toHaveBeenCalled();
+  });
+
+  it("keeps split pane channels mounted while another opened session is selected", async () => {
+    const other = { ...session, session_id: "other", terminal_id: "other-a", view_id: "other-view" };
+    const other_view = { ...initial, session_id: "other", view_id: "other-view", panes: [{ ...initial.panes[0], terminal_id: "other-a" }], terminals: [terminal("other-a")] };
+    mocks.request.mockImplementation((_target, action) => Promise.resolve(action.session_id === "other" ? other_view : split));
+    const open_session_keys = new Set([sessionKey(session), sessionKey(other)]);
+    const mounted = render(<SessionViewSurface {...props()} open_session_keys={open_session_keys} />);
+    await waitFor(() => expect(mocks.connect).toHaveBeenCalledTimes(1));
+    mounted.rerender(<SessionViewSurface {...props()} session={other} open_session_keys={open_session_keys} />);
+    await waitFor(() => expect(mocks.request).toHaveBeenCalledWith(other.target, { kind: "get", session_id: "other" }));
+    expect(mocks.detach).not.toHaveBeenCalled();
+    mounted.rerender(<SessionViewSurface {...props()} open_session_keys={open_session_keys} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(mocks.detach).not.toHaveBeenCalled();
+    mounted.rerender(<SessionViewSurface {...props()} session={other} open_session_keys={new Set([sessionKey(other)])} />);
+    await waitFor(() => expect(mocks.detach).toHaveBeenCalled());
   });
 
   it("keeps the cached layout and border dimensions while disconnected", async () => {

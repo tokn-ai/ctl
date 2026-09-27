@@ -95,7 +95,40 @@ export class XtermRenderer {
     XtermRenderer.renderers.add(this);
   }
 
-  activateSession(session: SessionSummary): void {
+  /** A stream writes only to its own terminal, independently of the visible tab. */
+  sessionRenderer(session: SessionSummary): AttachmentRenderer {
+    let selected = session;
+    const terminal = () => this.ensureSession(selected);
+    return {
+      activateSession: (next) => {
+        const visible = this.sessions.get(sessionKey(selected)) === this.active;
+        selected = next;
+        if (visible) this.activateSession(next);
+        else this.ensureSession(next);
+      },
+      resumeSequence: () => terminal().resume_from,
+      invalidateResumeSequence: () => {
+        const cached = terminal();
+        cached.resume_from = null;
+        cached.presentation_version += 1;
+      },
+      write: (data, sequence) => this.applyToTerminal(terminal(), sequence, (presenter) => presenter.write(data)),
+      restoreCheckpoint: (size, history, payload, prefix, sequence) =>
+        this.applyToTerminal(terminal(), sequence, (presenter) => presenter.restoreCheckpoint(size, history, payload, prefix)),
+      recreate: (size) => this.applyToTerminal(terminal(), null, (presenter) => presenter.recreate(size)),
+      resize: (size) => {
+        const cached = terminal();
+        return this.applyToTerminal(cached, cached.resume_from, (presenter) => presenter.resize(size));
+      },
+      proposeDimensions: () => terminal() === this.active ? this.proposeDimensions() : null,
+      observeDimensions: (listener) => this.observeDimensions((dimensions) => {
+        if (terminal() === this.active) listener(dimensions);
+      }),
+      focus: () => { if (terminal() === this.active) this.focus(); },
+    };
+  }
+
+  private ensureSession(session: SessionSummary): CachedTerminal {
     const key = sessionKey(session);
     let terminal = this.sessions.get(key);
     if (terminal && terminal.terminal_id !== session.terminal_id) {
@@ -103,17 +136,30 @@ export class XtermRenderer {
       if (terminal !== this.active) this.disposeTerminal(terminal);
       terminal = undefined;
     }
-    if (terminal === this.active) return;
-
-    this.active.container.hidden = true;
-    if (![...this.sessions.values()].includes(this.active)) {
-      this.disposeTerminal(this.active);
-    }
     if (!terminal) {
       terminal = this.createTerminal(session.terminal_size);
       terminal.is_local = session.target.kind === "local";
       terminal.terminal_id = session.terminal_id;
+      terminal.container.hidden = true;
       this.sessions.set(key, terminal);
+    }
+    return terminal;
+  }
+
+  /** Display an opened session without replacing its selected terminal or cache. */
+  selectSession(session: SessionSummary): void {
+    this.showTerminal(this.sessions.get(sessionKey(session)) ?? this.ensureSession(session));
+  }
+
+  activateSession(session: SessionSummary): void {
+    this.showTerminal(this.ensureSession(session));
+  }
+
+  private showTerminal(terminal: CachedTerminal): void {
+    if (terminal === this.active) return;
+    this.active.container.hidden = true;
+    if (![...this.sessions.values()].includes(this.active)) {
+      this.disposeTerminal(this.active);
     }
     this.active = terminal;
     terminal.container.hidden = false;
@@ -279,7 +325,14 @@ export class XtermRenderer {
   ): Promise<void> {
     // Capture the view before awaiting: activation may change while xterm is
     // parsing bytes. Only a fully applied presentation is safe to resume.
-    const terminal = this.active;
+    return this.applyToTerminal(this.active, sequence, operation);
+  }
+
+  private async applyToTerminal(
+    terminal: CachedTerminal,
+    sequence: string | null,
+    operation: (presenter: TerminalPresenter) => Promise<void>,
+  ): Promise<void> {
     const version = ++terminal.presentation_version;
     terminal.resume_from = null;
     await operation(terminal.presenter);
@@ -366,3 +419,9 @@ export class XtermRenderer {
     };
   }
 }
+
+export type AttachmentRenderer = Pick<XtermRenderer,
+  "activateSession" | "resumeSequence" | "invalidateResumeSequence" |
+  "write" | "restoreCheckpoint" | "recreate" | "resize" |
+  "proposeDimensions" | "observeDimensions" | "focus"
+>;

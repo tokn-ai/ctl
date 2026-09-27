@@ -21,7 +21,7 @@ import type {
   TerminalSize,
 } from "../../lib/types";
 import type { ProposedDimensions } from "../terminal/TerminalPresenter";
-import type { XtermRenderer } from "../terminal/XtermRenderer";
+import type { AttachmentRenderer } from "../terminal/XtermRenderer";
 import { sameSession, sessionKey } from "../targets/targets";
 import {
   ATTACHMENT_RECOVERY_STABILITY_MS,
@@ -101,12 +101,12 @@ export interface AttachmentActions {
   toggleResizeWithWindow(): Promise<void>;
 }
 
-export function useAttachment(renderer: XtermRenderer | null, view_resize = false): AttachmentActions {
+export function useAttachment(renderer: AttachmentRenderer | null, view_resize = false): AttachmentActions {
   const view_resize_ref = useRef(view_resize);
   view_resize_ref.current = view_resize;
   const [state, setState] = useState(INITIAL_STATE);
   const stateRef = useRef(state);
-  const rendererRef = useRef<XtermRenderer | null>(renderer);
+  const rendererRef = useRef<AttachmentRenderer | null>(renderer);
   const activeAttachmentRef = useRef<string | null>(null);
   const openingAbortRef = useRef<AbortController | null>(null);
   const channelRef = useRef<Channel<AttachmentEvent> | null>(null);

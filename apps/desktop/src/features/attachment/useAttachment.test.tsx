@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Terminal as HeadlessTerminal } from "@xterm/headless";
 import type {
@@ -11,6 +11,7 @@ import type {
 import { sessionKey } from "../targets/targets";
 import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment } from "./useAttachment";
+import { useSessionAttachments } from "./useSessionAttachments";
 
 const xterm = vi.hoisted(() => ({
   instances: [] as {
@@ -476,4 +477,90 @@ describe("opened session cache", () => {
     expect(line(visibleTerminal().terminal)).toBe("pending");
     expect(renderer.resumeSequence()).toBeNull();
   });
+});
+
+
+describe("opened session channels", () => {
+  it("keeps receiving background output and switches without reopening either channel", async () => {
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<Harness />);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await emit(checkpoint("attachment-0", "first"));
+    act(() => { void attachments.connect(second); });
+    await waitFor(() => expect(attachments.state.session?.session_id).toBe("second"));
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await emit(checkpoint("attachment-1", "second"));
+    await emit({ event_type: "output", attachment_id: "attachment-0", event_id: "background-output", sequence_start: "0", sequence_end: "8", data_base64: btoa(" background") });
+    expect(line(visibleTerminal().terminal)).toBe("second");
+    await act(async () => { await attachments.connect(first); });
+    expect(line(visibleTerminal().terminal)).toBe("first background");
+    expect(renderer.resumeSequence()).toBe("8");
+    expect(api.openAttachment).toHaveBeenCalledTimes(2);
+    expect(api.detachAttachment).not.toHaveBeenCalled();
+    await act(async () => { attachments.handleInput(new TextEncoder().encode("pwd\r")); });
+    await waitFor(() => expect(api.sendInput).toHaveBeenCalledWith({ attachment_id: "attachment-0", data_base64: btoa("pwd\r") }));
+    await act(async () => { await attachments.detach(); });
+    await emit(checkpoint("attachment-1", "background second", "9"));
+    await act(async () => { await attachments.connect(second); });
+    expect(line(visibleTerminal().terminal)).toBe("background second");
+    expect(api.openAttachment).toHaveBeenCalledTimes(2);
+    await act(async () => { await attachments.closeSession(first); });
+    await waitFor(() => expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id: "attachment-0" }));
+    expect(api.detachAttachment).not.toHaveBeenCalledWith({ attachment_id: "attachment-1" });
+    await emit(checkpoint("attachment-1", "still connected", "10"));
+    expect(line(visibleTerminal().terminal)).toBe("still connected");
+  });
+
+  it("preserves a recovered session's cache when returning to its tab", async () => {
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<Harness />);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await act(async () => { await attachments.reconnect(); });
+    await emit(checkpoint("attachment-1", "recovered", "7"));
+    act(() => { void attachments.connect(second); });
+    await waitFor(() => expect(attachments.state.session?.session_id).toBe("second"));
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await act(async () => { await attachments.connect(first); });
+    expect(line(visibleTerminal().terminal)).toBe("recovered");
+    expect(renderer.resumeSequence()).toBe("7");
+    expect(api.openAttachment).toHaveBeenCalledTimes(3);
+  });
+
+  it("disconnects background streams only for the requested host", async () => {
+    const remote: SessionSummary = { ...first, target: { kind: "ssh", host_id: "remote-host", destination: "example.test" } };
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementation(async (...args) => {
+      const result = await open(...args);
+      if (args[0].target.kind === "ssh") result.attached.session = remote;
+      return result;
+    });
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<Harness />);
+    act(() => { void attachments.connect(remote); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    act(() => { void attachments.connect(second); });
+    await waitFor(() => expect(attachments.state.session?.session_id).toBe("second"));
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await act(async () => { await attachments.disconnectHost("remote-host"); });
+    expect(api.detachAttachment).toHaveBeenCalledExactlyOnceWith({ attachment_id: "attachment-0" });
+    expect(attachments.state.session?.session_id).toBe("second");
+    expect(attachments.state.phase).toBe("attached");
+    await emit(checkpoint("attachment-1", "local unaffected"));
+    expect(line(visibleTerminal().terminal)).toBe("local unaffected");
+  });
+
 });

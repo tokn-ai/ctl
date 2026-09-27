@@ -23,9 +23,9 @@ const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-// Version 8 adds per-method control over configured SSH master reuse. Older
-// brokers must not silently ignore an explicit private-master selection.
-pub const PROTOCOL_VERSION: u16 = 8;
+// Version 9 adds typed gateway hops. Older brokers must not silently ignore
+// SOCKS5 hops and connect directly.
+pub const PROTOCOL_VERSION: u16 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,8 +35,24 @@ pub enum SshGatewayMode {
   AgentRelayOnly,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayKind {
+  #[default]
+  Ssh,
+  Socks5,
+}
+
+// serde's skip_serializing_if callback must take a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn gateway_kind_is_ssh(kind: &GatewayKind) -> bool {
+  *kind == GatewayKind::Ssh
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SshGateway {
+  #[serde(default, skip_serializing_if = "gateway_kind_is_ssh")]
+  pub kind: GatewayKind,
   pub destination: String,
   pub hostname: Option<String>,
   pub user: Option<String>,
@@ -60,13 +76,40 @@ pub struct SshTarget {
   pub gateways: Vec<SshGateway>,
 }
 
+/// OpenSSH expands %h and %p after parsing this option. The route contains no secrets.
+///
+/// # Errors
+/// Returns an error if the daemon executable cannot be located.
+///
+/// # Panics
+/// Panics if serialization of the gateway route unexpectedly fails.
+pub fn proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
+  let executable = daemon_executable()?;
+  let executable = executable.to_string_lossy().replace('\'', "'\\''");
+  let bytes = serde_json::to_vec(gateways).expect("gateway route is serializable");
+  let encoded = bytes
+    .iter()
+    .fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
+      use std::fmt::Write as _;
+      write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+      text
+    });
+  Ok(format!(
+    "'{executable}' --proxy-route {encoded} --proxy-host %h --proxy-port %p"
+  ))
+}
+
 impl SshTarget {
   /// An omitted preference preserves the connection method's original policy.
   #[must_use]
   pub fn uses_ssh_config_master(&self) -> bool {
-    self
-      .use_ssh_config_master
-      .unwrap_or(self.ssh_config_alias.is_some())
+    !self
+      .gateways
+      .iter()
+      .any(|gateway| gateway.kind == GatewayKind::Socks5)
+      && self
+        .use_ssh_config_master
+        .unwrap_or(self.ssh_config_alias.is_some())
   }
 
   /// Equivalent preferences must share authentication, pause, and forward state.
@@ -440,7 +483,11 @@ fn parse_daemon_protocol(stdout: &[u8]) -> io::Result<u16> {
     })
 }
 
-fn daemon_executable() -> Result<PathBuf, ConnectError> {
+/// Resolves the daemon executable bundled beside the current client.
+///
+/// # Errors
+/// Returns an error if the current executable path cannot be determined.
+pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
   }

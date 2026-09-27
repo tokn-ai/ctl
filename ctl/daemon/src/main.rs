@@ -13,6 +13,13 @@ struct Arguments {
 
   #[arg(long, hide = true)]
   detach_from_terminal: bool,
+
+  #[arg(long, hide = true)]
+  proxy_route: Option<String>,
+  #[arg(long, hide = true)]
+  proxy_host: Option<String>,
+  #[arg(long, hide = true)]
+  proxy_port: Option<u16>,
 }
 
 fn main() {
@@ -20,6 +27,21 @@ fn main() {
     std::process::exit(code);
   }
   let arguments = Arguments::parse();
+  if let Some(route) = arguments.proxy_route.as_deref() {
+    let (Some(host), Some(port)) = (arguments.proxy_host.as_deref(), arguments.proxy_port) else {
+      eprintln!("ctld: missing proxy destination");
+      std::process::exit(2);
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .expect("proxy runtime");
+    if let Err(error) = runtime.block_on(ctld::proxy_route::run(route, host, port)) {
+      eprintln!("ctld: {error}");
+      std::process::exit(1);
+    }
+    return;
+  }
   if arguments.protocol_version {
     println!("{}", ctld_ipc::PROTOCOL_VERSION);
     return;

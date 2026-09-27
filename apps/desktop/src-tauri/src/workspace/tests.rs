@@ -364,6 +364,7 @@ fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
 fn gateway_routes_require_unique_saved_gateway_references() {
   let mut document = legacy_populated();
   document.ssh_gateways.push(WorkspaceSshGateway {
+    kind: ctld_ipc::GatewayKind::Ssh,
     gateway_id: "edge".into(),
     name: "Edge".into(),
     destination: "edge.example".into(),
@@ -397,6 +398,28 @@ fn gateway_routes_require_unique_saved_gateway_references() {
     gateway_route.pop();
     gateway_route[0].gateway_id = "missing".into();
   }
+  assert!(document.validate().is_err());
+}
+
+#[test]
+fn socks5_gateway_round_trips_and_requires_a_port() {
+  let mut document = legacy_populated();
+  document.ssh_gateways.push(WorkspaceSshGateway {
+    kind: ctld_ipc::GatewayKind::Socks5,
+    gateway_id: "proxy".into(),
+    name: "Proxy".into(),
+    destination: "proxy.internal".into(),
+    hostname: None,
+    user: Some("alice".into()),
+    port: Some(1080),
+    identity_file: None,
+    remote_info: None,
+  });
+  let restored: super::WorkspaceDocument =
+    serde_json::from_value(serde_json::to_value(&document).unwrap()).unwrap();
+  assert_eq!(restored.ssh_gateways[0].kind, ctld_ipc::GatewayKind::Socks5);
+  assert!(restored.validate().is_ok());
+  document.ssh_gateways[0].port = None;
   assert!(document.validate().is_err());
 }
 

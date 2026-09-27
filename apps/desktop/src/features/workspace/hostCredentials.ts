@@ -6,6 +6,7 @@ function credentialScope(target: SshConnectionTarget): string {
   return JSON.stringify([
     target.destination,
     (target.gateways ?? []).map((gateway) => ({
+      kind: gateway.kind ?? "ssh",
       destination: gateway.destination,
       hostname: gateway.hostname ?? null,
       user: gateway.user ?? null,

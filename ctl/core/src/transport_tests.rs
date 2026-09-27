@@ -10,6 +10,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(unix)]
 fn loopback_gateway(port: u16) -> SshGateway {
   SshGateway {
+    kind: ctld_ipc::GatewayKind::Ssh,
     destination: "127.0.0.1".into(),
     hostname: None,
     user: None,
@@ -39,17 +40,23 @@ fn multiplexed_ssh_command(options: &SshConnectionOptions, control_path: PathBuf
 #[cfg(unix)]
 #[tokio::test]
 async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
-  for through_gateway in [false, true] {
+  for gateway_kind in [
+    None,
+    Some(ctld_ipc::GatewayKind::Ssh),
+    Some(ctld_ipc::GatewayKind::Socks5),
+  ] {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let options = SshConnectionOptions {
       hostname: Some("127.0.0.1".into()),
       port: Some(port),
-      gateways: if through_gateway {
-        vec![loopback_gateway(port)]
-      } else {
-        Vec::new()
-      },
+      gateways: gateway_kind
+        .map(|kind| {
+          let mut gateway = loopback_gateway(port);
+          gateway.kind = kind;
+          vec![gateway]
+        })
+        .unwrap_or_default(),
       ..SshConnectionOptions::default()
     };
     let path = PathBuf::from(format!("/tmp/ctl-mux-{}", uuid::Uuid::new_v4().simple()));
@@ -60,7 +67,7 @@ async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
       biased;
       accepted = listener.accept() => {
         drop(accepted);
-        panic!("missing master attempted a fresh SSH connection (gateway={through_gateway})");
+        panic!("missing master attempted a fresh SSH connection (gateway={gateway_kind:?})");
       }
       output = timeout(TEST_TIMEOUT, command.output()) => output.unwrap().unwrap(),
     };

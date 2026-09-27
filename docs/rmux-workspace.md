@@ -337,3 +337,38 @@ prefix. Pane focus and zoom preserve existing renderers, while moves use the
 server view revision to reject concurrent layout conflicts. This pass controls
 existing panes and session tabs; split ratios and tmux-style windows within a
 session are not introduced here.
+
+
+## Local terminal persistence
+
+The desktop records output received by opened sessions, including background tabs,
+split panes, and interactive task terminals. Each host/session/terminal has two
+local files under the platform data directory's `rmux/desktop/sessions` store:
+
+- `history.jsonl` appends completed logical scrollback lines. Wrapped rows are
+  joined, replayed sequence ranges are skipped, and saved history is not evicted
+  when the daemon's bounded history rolls over.
+- `current.json` atomically replaces the latest terminal presentation, including
+  its VT state, size, UTF-8/parser continuation, sequence, and committed history
+  byte offset. TUI redraws replace this state; intermediate frames never enter
+  disk history.
+
+Writes occur in the Rust attachment bridge before forwarding and acknowledging
+presentation events. Filesystem work runs off the async executor. A cross-process
+file lock serializes writes, and the current snapshot's committed offset allows
+an interrupted history append to be discarded on the next write. Storage errors
+are surfaced and stop capture rather than pretending that output was saved.
+
+Opening a session can display its saved screen while connecting, including when
+the host is offline. Disk restoration asks the daemon for an authoritative
+checkpoint before accepting live output; in-memory tab switches retain their
+existing channel. The renderer receives a bounded history tail, while all captured
+history remains on disk. Capture cannot recover output already evicted by the
+daemon before this client observed it; checkpoint history gaps stay marked.
+
+Closing a session tab detaches its pane channels and moves its local record into
+the read-only archive store. Reopening seeds a live continuation from that record while keeping the archived
+snapshot frozen. The next tab close replaces the archive with the latest record.
+Archives remain until explicitly deleted and are read in pages. Existing text
+archives remain readable and no longer expire automatically. Closing the app
+leaves live caches on disk for workspace restoration.

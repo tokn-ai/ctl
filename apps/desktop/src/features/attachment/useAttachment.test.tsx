@@ -61,6 +61,7 @@ const api = vi.hoisted(() => ({
   releaseAttachmentLease: vi.fn(),
   resizeAttachment: vi.fn(),
   sendInput: vi.fn(),
+  sessionCache: vi.fn(),
 }));
 vi.mock("../../lib/tauri", () => api);
 
@@ -135,6 +136,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   renderer = new XtermRenderer(container, () => undefined, size);
+  api.sessionCache.mockResolvedValue({ kind: "loaded", cache: null });
   api.detachAttachment.mockResolvedValue(undefined);
   api.acknowledgeAttachmentEvent.mockResolvedValue(undefined);
   api.openAttachment.mockImplementation(async (
@@ -480,6 +482,31 @@ describe("opened session cache", () => {
 });
 
 
+describe("durable terminal previews", () => {
+  it("shows the saved screen when the daemon is offline without using it as an unsafe replay cursor", async () => {
+    api.sessionCache.mockResolvedValue({ kind: "loaded", cache: {
+      terminal_id: first.terminal_id, checkpoint: checkpoint("saved", "saved current", "7").checkpoint,
+      history: [], history_gap: false,
+    } });
+    api.openAttachment.mockRejectedValue({ code: "session_not_found", message: "Session no longer exists" });
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    expect(line(visibleTerminal().terminal)).toBe("saved current");
+    expect(result.current.state.applied_sequence).toBe("7");
+    expect(result.current.state.phase).toBe("error");
+    expect(api.openAttachment).toHaveBeenCalledWith(expect.objectContaining({ resume_from: null }), expect.any(Function), expect.any(AbortSignal));
+  });
+
+  it("reports a disk-cache failure before opening a live channel", async () => {
+    api.sessionCache.mockRejectedValue(new Error("Local cache is unreadable"));
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    expect(result.current.state.error_code).toBe("local_cache_failed");
+    expect(result.current.state.message).toBe("Local cache is unreadable");
+    expect(api.openAttachment).not.toHaveBeenCalled();
+  });
+});
+
 describe("opened session channels", () => {
   it("keeps receiving background output and switches without reopening either channel", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
@@ -534,6 +561,24 @@ describe("opened session channels", () => {
     expect(line(visibleTerminal().terminal)).toBe("recovered");
     expect(renderer.resumeSequence()).toBe("7");
     expect(api.openAttachment).toHaveBeenCalledTimes(3);
+  });
+
+  it("archives a removed interactive session after detaching its channel", async () => {
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<Harness />);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    api.sessionCache.mockImplementation(async (action) => {
+      if (action.kind === "archive") expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id: "attachment-0" });
+      return { kind: "archived" };
+    });
+    act(() => attachments.retainSessions(new Set()));
+    await waitFor(() => expect(api.sessionCache).toHaveBeenCalledWith({ kind: "archive", host_key: "local", session_id: "first", reason: "Tab closed" }));
+    expect(attachments.session_keys.size).toBe(0);
   });
 
   it("disconnects background streams only for the requested host", async () => {

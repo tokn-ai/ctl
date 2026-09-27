@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AttachmentViewState, SessionSummary } from "../../lib/types";
-import { sessionKey } from "../targets/targets";
+import { sessionCache } from "../../lib/tauri";
+import { errorMessage } from "../../lib/errors";
+import { sessionKey, targetKey } from "../targets/targets";
 import { sameSshEndpoint } from "../workspace/remoteRecovery";
 import type { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment, type AttachmentActions, type ConnectOptions } from "./useAttachment";
@@ -51,6 +53,8 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
   const idle = useAttachment(null, true);
   const entries = useRef(new Map<string, Entry>());
   const selected = useRef<string | null>(null);
+  const archiving = useRef(new Set<string>());
+  const [storage_error, setStorageError] = useState<string | null>(null);
   const [revision, refresh] = useState(0);
   const notify = useCallback(() => refresh((revision) => revision + 1), []);
   const renderer_ref = useRef(renderer);
@@ -63,6 +67,7 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
 
   const connect = useCallback(async (session: SessionSummary, options: ConnectOptions = {}) => {
     const key = sessionKey(session);
+    setStorageError(null);
     selected.current = key;
     let entry = entries.current.get(key);
     renderer_ref.current?.selectSession({ ...(entry?.session ?? session), terminal_id: entry?.options.terminal_id ?? options.terminal_id });
@@ -99,11 +104,18 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
     if (selected.current === key) selected.current = null;
     notify();
     await entry?.actions?.detach();
+    renderer_ref.current?.retainSessions(new Set(entries.current.keys()));
   }, [notify]);
 
   const retainSessions = useCallback((keys: ReadonlySet<string>) => {
     for (const [key, entry] of entries.current) {
-      if (!keys.has(key)) void closeSession(entry.session);
+      if (!keys.has(key) && !archiving.current.has(key)) {
+        archiving.current.add(key);
+        void closeSession(entry.session)
+          .then(() => sessionCache({ kind: "archive", host_key: targetKey(entry.session.target), session_id: entry.session.session_id, reason: "Tab closed" }))
+          .catch((error) => setStorageError(errorMessage(error)))
+          .finally(() => archiving.current.delete(key));
+      }
     }
   }, [closeSession]);
 
@@ -112,7 +124,7 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
   const active = () => entries.current.get(selected.current ?? "")?.actions;
   const actions = active() ?? idle;
   return {
-    state: actions.state,
+    state: storage_error ? { ...actions.state, message: storage_error } : actions.state,
     states,
     session_keys,
     connect,

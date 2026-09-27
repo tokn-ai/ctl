@@ -3100,6 +3100,7 @@ dependencies = [
 name = "rmux-client"
 version = "0.1.0"
 dependencies = [
+ "avt",
  "crossterm",
  "dirs",
  "rmux-proto",

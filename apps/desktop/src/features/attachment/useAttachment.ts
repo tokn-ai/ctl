@@ -9,6 +9,7 @@ import {
   releaseAttachmentLease,
   resizeAttachment,
   sendInput,
+  sessionCache,
 } from "../../lib/tauri";
 import { errorCode, errorMessage } from "../../lib/errors";
 import type {
@@ -22,7 +23,7 @@ import type {
 } from "../../lib/types";
 import type { ProposedDimensions } from "../terminal/TerminalPresenter";
 import type { AttachmentRenderer } from "../terminal/XtermRenderer";
-import { sameSession, sessionKey } from "../targets/targets";
+import { sameSession, sessionKey, targetKey } from "../targets/targets";
 import {
   ATTACHMENT_RECOVERY_STABILITY_MS,
   AttachmentRecoveryBackoff,
@@ -660,9 +661,29 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       await eventTailRef.current;
       if (generation !== generationRef.current) return;
       renderer.activateSession(session);
-      const resumeFrom = request.use_cached_state
+      let resumeFrom = request.use_cached_state
         ? renderer.resumeSequence()
         : request.resume_from;
+      let restored_local_cache = false;
+      try {
+        if (resumeFrom === null && renderer.resumeSequence() === null) {
+          const response = await sessionCache({ kind: "load", host_key: targetKey(session.target), session_id: session.session_id, terminal_id: session.terminal_id });
+          if (generation !== generationRef.current) return;
+          if (response.kind === "loaded" && response.cache) {
+            const cached = response.cache;
+            await renderer.restoreCheckpoint(cached.checkpoint.terminal_size, cached.history,
+              decodeBase64(cached.checkpoint.payload_base64), decodeBase64(cached.checkpoint.input_prefix_base64), cached.checkpoint.sequence);
+            if (generation !== generationRef.current) return;
+            resumeFrom = cached.checkpoint.sequence;
+            restored_local_cache = true;
+            setState((current) => ({ ...current, history_gap: cached.history_gap }));
+          }
+        }
+      } catch (error) {
+        if (generation !== generationRef.current) return;
+        setState((current) => ({ ...current, phase: "error", error_code: "local_cache_failed", message: errorMessage(error) }));
+        return;
+      }
       appliedSequenceRef.current = resumeFrom;
       setState((current) => ({
         ...current,
@@ -694,7 +715,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           {
             target: session.target,
             session: session.terminal_id ?? session.session_id,
-            resume_from: resumeFrom,
+            // Disk content is a preview. Ask for an authoritative checkpoint
+            // before resuming a session whose root pane may have changed.
+            resume_from: restored_local_cache ? null : resumeFrom,
             terminal_size: requestedTerminalSize,
             request_input_lease: true,
             request_layout_lease: resizeWithWindow,
@@ -750,7 +773,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           input_lease: result.attached.input_lease,
           layout_lease: result.attached.layout_lease,
           terminal_size_mismatch: result.attached.terminal_size_mismatch,
-          history_gap: result.attached.history_gap,
+          history_gap: current.history_gap || result.attached.history_gap,
           reconnect_sequence: null,
           resize_with_window: resizeActive,
           message:

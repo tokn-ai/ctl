@@ -692,5 +692,23 @@ export interface SessionArchive {
   expires_at_ms: number;
   terminals: ArchivedTerminalInfo[];
 }
-export type ArchiveAction = { kind: "list" } | { kind: "save"; archive: SessionArchive };
-export type ArchiveResponse = { kind: "list"; archives: SessionArchive[] } | { kind: "saved" };
+export type ArchiveAction =
+  | { kind: "list" }
+  | { kind: "save"; archive: SessionArchive }
+  | { kind: "delete"; host_key: string; session_id: string }
+  | { kind: "read"; host_key: string; session_id: string; terminal_id: string; offset: string };
+export type ArchiveResponse = { kind: "list"; archives: SessionArchive[] } | { kind: "saved" } | { kind: "deleted" } | { kind: "output"; lines: string[]; next_offset: string | null };
+
+
+export interface CachedSessionPresentation {
+  terminal_id: string;
+  checkpoint: TerminalCheckpoint;
+  history: string[];
+  history_gap: boolean;
+}
+export type SessionCacheAction =
+  | { kind: "load"; host_key: string; session_id: string; terminal_id?: string }
+  | { kind: "archive"; host_key: string; session_id: string; reason: string };
+export type SessionCacheResponse =
+  | { kind: "loaded"; cache: CachedSessionPresentation | null }
+  | { kind: "archived" };

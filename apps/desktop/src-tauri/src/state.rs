@@ -42,6 +42,7 @@ pub struct AttachmentActor {
   pub window_label: String,
   pub target: ConnectionTargetDto,
   pub control: AttachmentControl,
+  pub cache_identity: Option<rmux_client::cache::CacheIdentity>,
   pending: Mutex<Option<PendingPresentation>>,
   pending_changed: Notify,
   closed: AtomicBool,
@@ -167,6 +168,37 @@ impl AppState {
       }
       actors
     };
+    for actor in actors {
+      actor.detach_and_wait().await?;
+    }
+    Ok(())
+  }
+
+  pub async fn detach_session(
+    &self,
+    window_label: &str,
+    host_key: &str,
+    session_id: &str,
+  ) -> CommandResult<()> {
+    let actors: Vec<_> = self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .get(window_label)
+      .into_iter()
+      .flat_map(|slots| slots.values())
+      .filter_map(|slot| match slot {
+        AttachmentSlot::Active(actor)
+          if actor.cache_identity.as_ref().is_some_and(|identity| {
+            identity.host_key == host_key && identity.session_id == session_id
+          }) =>
+        {
+          Some(Arc::clone(actor))
+        }
+        _ => None,
+      })
+      .collect();
     for actor in actors {
       actor.detach_and_wait().await?;
     }
@@ -320,11 +352,17 @@ impl AttachmentActor {
       window_label,
       target,
       control,
+      cache_identity: None,
       pending: Mutex::new(None),
       pending_changed: Notify::new(),
       closed: AtomicBool::new(false),
       closed_changed: Notify::new(),
     }
+  }
+
+  pub fn with_cache(mut self, identity: rmux_client::cache::CacheIdentity) -> Self {
+    self.cache_identity = Some(identity);
+    self
   }
 
   pub async fn set_pending(
@@ -476,7 +514,18 @@ pub async fn forward_attachment_events(
         let Some(event) = event else {
           break controller.await;
         };
-        if let Err(error) = forward_event(&actor, &channel, event).await {
+        let forwarding = forward_event(&actor, &channel, event);
+        tokio::pin!(forwarding);
+        let forwarded = tokio::select! {
+          result = &mut forwarding => result,
+          outcome = &mut controller => {
+            // Keep transport heartbeats running during filesystem work, and
+            // finish a pending disk write before publishing actor closure.
+            let _ignored = forwarding.await;
+            break outcome;
+          }
+        };
+        if let Err(error) = forwarded {
           bridge_error = Some(error);
           let _ignored = actor.control.detach().await;
           break controller.await;
@@ -523,6 +572,11 @@ async fn forward_event(
   channel: &Channel<AttachmentEventDto>,
   event: AttachmentEvent,
 ) -> CommandResult<()> {
+  let event = if let Some(identity) = &actor.cache_identity {
+    crate::commands::cache::persist_event(identity.clone(), event).await?
+  } else {
+    event
+  };
   let event = match event {
     AttachmentEvent::Checkpoint {
       checkpoint,

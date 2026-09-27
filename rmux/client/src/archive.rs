@@ -53,7 +53,7 @@ impl ArchiveStore {
     Self { directory }
   }
 
-  /// Atomically retains locally observed output for seven days.
+  /// Atomically retains locally observed output until explicitly deleted.
   /// # Errors
   /// Returns filesystem or serialization errors; callers should keep the tab open.
   pub fn save(&self, mut archive: SessionArchive) -> io::Result<()> {
@@ -64,7 +64,7 @@ impl ArchiveStore {
       fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
     }
     archive.archived_at_ms = now_ms();
-    archive.expires_at_ms = archive.archived_at_ms.saturating_add(7 * 86_400_000);
+    archive.expires_at_ms = 0;
     let key = format!(
       "{:x}",
       Sha256::digest(format!("{}\0{}", archive.host_key, archive.session_id))
@@ -72,7 +72,6 @@ impl ArchiveStore {
     let path = self.directory.join(format!("{key}.json"));
     if let Ok(file) = fs::File::open(&path)
       && let Ok(previous) = serde_json::from_reader::<_, SessionArchive>(file)
-      && previous.expires_at_ms > now_ms()
     {
       for old in previous.terminals {
         if let Some(pane) = archive
@@ -110,7 +109,18 @@ impl ArchiveStore {
     result
   }
 
-  /// Lists unexpired records and removes expired files.
+  /// Deletes a client-owned archive.
+  /// # Errors
+  /// Returns a filesystem error.
+  pub fn delete(&self, host_key: &str, session_id: &str) -> io::Result<()> {
+    let key = format!("{:x}", Sha256::digest(format!("{host_key}\0{session_id}")));
+    match fs::remove_file(self.directory.join(format!("{key}.json"))) {
+      Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+      result => result,
+    }
+  }
+
+  /// Lists records, including legacy records with a former expiry timestamp.
   /// # Errors
   /// Returns filesystem or malformed-record errors.
   pub fn list(&self) -> io::Result<Vec<SessionArchive>> {
@@ -127,11 +137,7 @@ impl ArchiveStore {
       }
       let archive: SessionArchive =
         serde_json::from_reader(fs::File::open(&path)?).map_err(io::Error::other)?;
-      if archive.expires_at_ms <= now_ms() {
-        fs::remove_file(path)?;
-      } else {
-        archives.push(archive);
-      }
+      archives.push(archive);
     }
     archives.sort_by_key(|archive| std::cmp::Reverse(archive.archived_at_ms));
     Ok(archives)
@@ -143,7 +149,7 @@ mod tests {
   use super::*;
 
   #[test]
-  fn local_records_survive_restart_are_host_scoped_and_expire() -> io::Result<()> {
+  fn local_records_survive_restart_are_host_scoped_and_require_deletion() -> io::Result<()> {
     let directory =
       std::env::temp_dir().join(format!("rmux-client-archives-{}", uuid::Uuid::new_v4()));
     let store = ArchiveStore::new(directory.clone());
@@ -168,18 +174,18 @@ mod tests {
     let archives = reopened.list()?;
     assert_eq!(archives.len(), 2);
     assert_eq!(archives[0].terminals[0].lines, ["final output"]);
-    assert_eq!(
-      archives[0].expires_at_ms - archives[0].archived_at_ms,
-      7 * 86_400_000
-    );
+    assert_eq!(archives[0].expires_at_ms, 0);
     for entry in fs::read_dir(&directory)? {
       let path = entry?.path();
       let mut archive: SessionArchive = serde_json::from_reader(fs::File::open(&path)?)?;
       archive.expires_at_ms = 1;
       fs::write(&path, serde_json::to_vec(&archive)?)?;
     }
+    assert_eq!(reopened.list()?.len(), 2);
+    reopened.delete("offline-host", "missing-session")?;
+    assert_eq!(reopened.list()?.len(), 1);
+    reopened.delete("another-host", "missing-session")?;
     assert!(reopened.list()?.is_empty());
-    assert_eq!(fs::read_dir(&directory)?.count(), 0);
     fs::remove_dir_all(directory)
   }
 }

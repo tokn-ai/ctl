@@ -447,6 +447,8 @@ pub struct KillSessionRequestDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OpenAttachmentRequestDto {
+  #[serde(default)]
+  pub cache_host_key: Option<String>,
   pub target: ConnectionTargetDto,
   pub session: String,
   pub terminal_size: TerminalSizeDto,

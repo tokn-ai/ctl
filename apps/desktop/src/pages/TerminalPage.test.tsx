@@ -116,8 +116,19 @@ vi.mock("../lib/tauri", async (original) => ({
   ...(await original<object>()),
   ...api,
 }));
-vi.mock("../features/attachment/useAttachment", () => ({
-  useAttachment: () => attachment,
+vi.mock("../features/attachment/useSessionAttachments", () => ({
+  useSessionAttachments: () => ({
+    ...attachment,
+    controllers: null,
+    states: [],
+    session_keys: new Set(),
+    closeSession: vi.fn(),
+    retainSessions: vi.fn(),
+    disconnectHost: async (host_id: string) => {
+      const session = attachment.state.session as SessionSummary | null;
+      if (session?.target.kind === "ssh" && session.target.host_id === host_id) await attachment.detach();
+    },
+  }),
 }));
 vi.mock("../components/terminal/TerminalSurface", () => ({
   TerminalSurface: ({ ended_message, on_dismiss }: { ended_message?: string; on_dismiss?(): void }) => <div>Terminal renderer{ended_message && <button onClick={on_dismiss}>Dismiss ended session</button>}</div>,

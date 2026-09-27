@@ -19,6 +19,7 @@ import type { AppCommand, Keybinding, ShortcutPlatform } from "../../features/co
 type SurfaceProps = ComponentProps<typeof TerminalSurface>;
 interface Props extends SurfaceProps {
   session: SessionSummary | null;
+  open_session_keys?: ReadonlySet<string>;
   shell_state?: ShellStateSummary | null;
   renderer?: XtermRenderer | null;
   input_owned?: boolean;
@@ -31,7 +32,7 @@ interface Props extends SurfaceProps {
   on_pane_commands?(commands: AppCommand[]): void;
 }
 
-export function SessionViewSurface({ session, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
+export function SessionViewSurface({ session, open_session_keys, shell_state, renderer, input_owned, on_toggle_input, on_select_terminal, on_promoted, prefix_settings, shortcuts_enabled = true, on_command, on_pane_commands, ...surface }: Props) {
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [controls_host, setControlsHost] = useState<HTMLDivElement | null>(null);
   const [cell, setCell] = useState({ width: 8, height: 16 });
@@ -51,9 +52,21 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
   const [ended_ids, setEndedIds] = useState<ReadonlySet<string>>(new Set());
   const ended_ref = useRef(ended_ids);
   ended_ref.current = ended_ids;
+  const [cached_views, setCachedViews] = useState(new Map<string, { session: SessionSummary; view: SessionView }>());
   const [view, setView] = useState<SessionView | null>(null);
+  useEffect(() => {
+    if (!session || !view || view.session_id !== session.session_id) return;
+    setCachedViews((previous) => new Map(previous).set(sessionKey(session), { session, view }));
+  }, [session, view]);
+  useEffect(() => {
+    if (!open_session_keys) return;
+    setCachedViews((previous) => {
+      if ([...previous.keys()].every((key) => open_session_keys.has(key))) return previous;
+      return new Map([...previous].filter(([key]) => open_session_keys.has(key)));
+    });
+  }, [open_session_keys]);
   const view_ref = useRef(view);
-  view_ref.current = view;
+  view_ref.current = view?.session_id === session?.session_id ? view : session ? cached_views.get(sessionKey(session))?.view ?? null : null;
   const [error, setError] = useState<string | null>(null);
   const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -179,7 +192,7 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     }
   }
 
-  const current_view = view?.session_id === session?.session_id ? view : null;
+  const current_view = view?.session_id === session?.session_id ? view : cached_views.get(key)?.view ?? null;
   const primary_id = session?.terminal_id;
   const panes = current_view?.panes.map((pane) => ({ terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: true })) ?? [];
   const focused = panes.some((pane) => pane.terminal_id === focused_id && pane.visible) ? focused_id! : panes.find((pane) => pane.visible)?.terminal_id ?? primary_id;
@@ -262,6 +275,10 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
     </div>;
   }
 
+  // Keep secondary panes mounted for every opened session, even when hidden.
+  const rendered_views = new Map(cached_views);
+  if (session && current_view) rendered_views.set(key, { session, view: current_view });
+
   return <div className="session-view" onKeyDownCapture={prefix.onKeyDown} onBlurCapture={(event) => {
     if (!(event.relatedTarget instanceof Element) || !event.currentTarget.contains(event.relatedTarget) || !event.relatedTarget.closest(".terminal-container")) prefix.cancel();
   }}>
@@ -285,19 +302,25 @@ export function SessionViewSurface({ session, shell_state, renderer, input_owned
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
         <TerminalSurface {...surface} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
-      {session && current_view && panes.filter((pane) => pane.terminal_id !== primary_id && pane.terminal_id !== takeover_id).map((pane) => {
-        const terminal = current_view.terminals.find((candidate) => candidate.terminal_id === pane.terminal_id)!;
-        return <div className="view-pane" data-active={focused === pane.terminal_id} key={pane.terminal_id} ref={paneRef(pane.terminal_id)} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(pane)}>
-          <AdditionalTerminal on_ended={() => setEndedIds((previous) => new Set([...previous, pane.terminal_id]))} on_dismiss={() => void dismissPane(pane.terminal_id)} confirmed_missing={ended_ids.has(pane.terminal_id)} session={{ ...session, ...terminal, view_id: current_view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} toggle_registry={pane_toggle_inputs} render_controls={(state, input_control) => focused === pane.terminal_id && controls_host ? createPortal(controls(pane.terminal_id, state, input_control), controls_host) : null} />
-        </div>;
+      {[...rendered_views].flatMap(([owner_key, cached]) => {
+        const visible = owner_key === key;
+        const owner_primary = cached.session.terminal_id;
+        return cached.view.panes.filter((pane) => pane.terminal_id !== owner_primary && (!visible || pane.terminal_id !== takeover_id)).map((pane) => {
+          const terminal = cached.view.terminals.find((candidate) => candidate.terminal_id === pane.terminal_id)!;
+          const rect = { terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: true };
+          return <div className="view-pane" hidden={!visible} data-active={visible && focused === pane.terminal_id} key={`${owner_key}:${pane.terminal_id}`} ref={visible ? paneRef(pane.terminal_id) : undefined} onFocusCapture={() => setFocusedId(pane.terminal_id)} style={paneStyle(rect)}>
+            <AdditionalTerminal visible={visible} on_ended={() => { if (visible) setEndedIds((previous) => new Set([...previous, pane.terminal_id])); }} on_dismiss={() => void dismissPane(pane.terminal_id)} confirmed_missing={visible && ended_ids.has(pane.terminal_id)} session={{ ...cached.session, ...terminal, view_id: cached.view.view_id }} detach_registry={pane_detachers} input_registry={pane_inputs} toggle_registry={pane_toggle_inputs} render_controls={(state, input_control) => visible && focused === pane.terminal_id && controls_host ? createPortal(controls(pane.terminal_id, state, input_control), controls_host) : null} />
+          </div>;
+        });
       })}
     </div>
     </div>
   </div>;
 }
 
-function AdditionalTerminal({ on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
+function AdditionalTerminal({ visible, on_ended, on_dismiss, confirmed_missing, session, detach_registry, input_registry, toggle_registry, render_controls }: {
   session: SessionSummary;
+  visible: boolean;
   on_ended(): void;
   on_dismiss(): void;
   confirmed_missing: boolean;
@@ -312,7 +335,7 @@ function AdditionalTerminal({ on_ended, on_dismiss, confirmed_missing, session, 
   on_ended_ref.current = on_ended;
   const ended_message = attachment.state.phase === "ended" ? attachment.state.message ?? "Terminal exited"
     : confirmed_missing || attachment.state.error_code === "session_not_found" ? "Terminal no longer exists" : null;
-  useEffect(() => { if (ended_message) on_ended_ref.current(); }, [ended_message]);
+  useEffect(() => { if (ended_message && visible) on_ended_ref.current(); }, [ended_message, visible]);
   const actions = useRef(attachment);
   actions.current = attachment;
   const session_ref = useRef(session);

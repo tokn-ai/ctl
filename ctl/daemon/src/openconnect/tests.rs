@@ -80,36 +80,10 @@ mod engine {
   use super::*;
 
   const TEST_TIMEOUT: Duration = Duration::from_secs(5);
-  const FAKE_ENGINE: &str = r#"#!/bin/sh
-set -eu
-root=${0%/*}
-case "$1" in
-  run)
-    printf '%s\n' "$@" > "$root/run.args"
-    printf '%s\n' "$$" > "$root/run.pid"
-    if [ -f "$root/failure" ]; then
-      cat "$root/failure" >&2
-      exit 1
-    fi
-    while IFS= read -r heartbeat; do
-      printf '%s\n' "$heartbeat" >> "$root/heartbeats"
-    done
-    ;;
-  inspect)
-    touch "$root/inspected"
-    [ -f "$root/ready" ] || exit 1
-    printf '%s\n' '{"1080/tcp":[{"HostIp":"127.0.0.1","HostPort":"49152"}]}'
-    ;;
-  exec)
-    touch "$root/healthchecked"
-    [ -f "$root/ready" ]
-    ;;
-  rm)
-    printf '%s\n' "$@" > "$root/remove.args"
-    ;;
-  *) exit 2 ;;
-esac
-"#;
+  const FAKE_ENGINE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/openconnect/fixtures/engine.sh"
+  );
 
   struct FakeEngine {
     root: PathBuf,
@@ -122,8 +96,10 @@ esac
       let root = std::env::temp_dir().join(format!("ctld-vpn-test-{}", uuid::Uuid::new_v4()));
       fs::create_dir(&root).unwrap();
       let executable = root.join("engine");
-      fs::write(&executable, FAKE_ENGINE).unwrap();
-      fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+      // A concurrent fork can retain a writable script descriptor until exec,
+      // causing ETXTBSY on Linux. Never write the executable during these tests.
+      // The symlink preserves a distinct $0 directory for each fixture's files.
+      std::os::unix::fs::symlink(FAKE_ENGINE_PATH, &executable).unwrap();
       let config = root.join("vpn.env");
       fs::write(
         &config,
@@ -336,7 +312,10 @@ esac
     .err()
     .expect("failed engine must not become ready");
     let message = error.to_string();
-    assert!(message.contains("server name could not be resolved"));
+    assert!(
+      message.contains("server name could not be resolved"),
+      "expected classified DNS failure, got {error:?}"
+    );
     assert!(!message.contains("private"));
     assert!(!message.contains("cookie"));
     assert!(engine.root.join("remove.args").exists());
@@ -356,7 +335,10 @@ esac
     .err()
     .expect("failed engine must not become ready");
     let message = error.to_string();
-    assert!(message.contains("OpenConnect container exited"));
+    assert!(
+      message.contains("OpenConnect container exited"),
+      "expected generic container exit failure, got {error:?}"
+    );
     assert!(!message.contains("private"));
     engine.wait_for_exit().await;
   }

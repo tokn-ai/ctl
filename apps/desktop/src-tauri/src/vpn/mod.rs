@@ -1,5 +1,6 @@
 //! Saved VPN connections and native adapters for the ctld-owned VPN service.
 
+mod client;
 mod coordinator;
 mod repository;
 
@@ -8,18 +9,19 @@ mod tests;
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
-use ctld_ipc::{VpnConnection, VpnStatus};
+use ctld_ipc::{VpnConnection, VpnSnapshot, VpnStatus};
 use serde::{Deserialize, Serialize};
 use tauri::Manager as _;
 use zeroize::Zeroizing;
 
 use crate::error::{CommandErrorDto, CommandResult};
-use coordinator::{Cancellation, Coordinator};
+use coordinator::{Cancellation, Coordinators};
 use repository::Repository;
 
-// A delete must not race a connect from another window in this app instance.
-static COORDINATOR: Coordinator = Coordinator::new();
+// Each VPN coordinates independently across windows, including profile loading.
+static COORDINATORS: LazyLock<Coordinators> = LazyLock::new(Coordinators::default);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VpnConnectionSummary {
@@ -85,6 +87,12 @@ pub struct ConnectVpnRequest {
   connection_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopVpnRequest {
+  vpn_id: String,
+}
+
 fn directory(app: &tauri::AppHandle) -> CommandResult<PathBuf> {
   app
     .path()
@@ -106,7 +114,8 @@ pub async fn save_vpn_connection(
   request: SaveVpnConnectionRequest,
 ) -> CommandResult<VpnConnectionsSnapshot> {
   let directory = directory(&app)?;
-  let _change = COORDINATOR.changes.lock().await;
+  let coordinator = COORDINATORS.get(&request.connection.connection_id);
+  let _change = coordinator.changes.lock().await;
   let status = mutation_status().await?;
   tauri::async_runtime::spawn_blocking(move || {
     Repository::new(directory).save_with_status(request, &status)
@@ -121,7 +130,8 @@ pub async fn delete_vpn_connection(
   request: DeleteVpnConnectionRequest,
 ) -> CommandResult<VpnConnectionsSnapshot> {
   let directory = directory(&app)?;
-  let _change = COORDINATOR.changes.lock().await;
+  let coordinator = COORDINATORS.get(&request.connection_id);
+  let _change = coordinator.changes.lock().await;
   let status = mutation_status().await?;
   tauri::async_runtime::spawn_blocking(move || Repository::new(directory).delete(&request, &status))
     .await
@@ -136,12 +146,13 @@ pub async fn connect_vpn(
   if !cfg!(unix) {
     return Err(runtime_error(ctld_ipc::vpn::VpnError::UnsupportedPlatform));
   }
-  COORDINATOR
+  let coordinator = COORDINATORS.get(&request.connection_id);
+  coordinator
     .connect(|cancellation| async move {
       connect_with_cancellation(
         directory(&app)?,
         request,
-        ctld_ipc::vpn::start_connection,
+        |connection| async move { client::client()?.start_connection(connection).await },
         Some(cancellation),
       )
       .await
@@ -194,22 +205,33 @@ where
 }
 
 #[tauri::command]
-pub async fn vpn_status() -> CommandResult<VpnStatus> {
-  ctld_ipc::vpn::status().await.map_err(runtime_error)
+pub async fn vpn_status() -> CommandResult<VpnSnapshot> {
+  client::client()
+    .map_err(runtime_error)?
+    .list()
+    .await
+    .map_err(runtime_error)
 }
 
 #[tauri::command]
-pub async fn stop_vpn() -> CommandResult<VpnStatus> {
-  COORDINATOR
-    .stop(|| async { ctld_ipc::vpn::stop().await.map_err(runtime_error) })
+pub async fn stop_vpn(request: StopVpnRequest) -> CommandResult<VpnStatus> {
+  let coordinator = COORDINATORS.get(&request.vpn_id);
+  coordinator
+    .stop(|| async {
+      client::client()
+        .map_err(runtime_error)?
+        .stop_id(&request.vpn_id)
+        .await
+        .map_err(runtime_error)
+    })
     .await
 }
 
-async fn mutation_status() -> CommandResult<VpnStatus> {
+async fn mutation_status() -> CommandResult<VpnSnapshot> {
   #[cfg(unix)]
   return vpn_status().await;
   #[cfg(not(unix))]
-  Ok(VpnStatus::default())
+  Ok(VpnSnapshot::default())
 }
 
 // Owned adapter for Result::map_err.

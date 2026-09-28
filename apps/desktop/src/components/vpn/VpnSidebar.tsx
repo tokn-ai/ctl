@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom";
+import { vpnRuntimeId } from "../../features/vpn/status";
 import type { VpnController } from "../../features/vpn/useVpn";
 import { Icon } from "../ui/Icon";
 import { VpnConnectionEditor } from "./VpnConnectionEditor";
@@ -10,14 +11,10 @@ interface Props {
 }
 
 export function VpnSidebar({ model }: Props) {
-  const recovery_stop = model.status_stale && model.action?.kind === "stop" &&
-    !model.status.connection_id && !model.status.container_name && !model.status.endpoint &&
-    !model.status.vpn_url && !model.status.username;
-  const active = !recovery_stop && (model.status.state !== "stopped" || model.action !== null);
-  const active_connection_id = model.status.connection_id ?? (model.action?.kind === "connect" ? model.action.connection_id : null);
-  const current_connection = active ? model.connections.find((connection) => connection.connection_id === active_connection_id) : null;
-  const external = active && !current_connection;
-  const item_count = model.connections.length + Number(external);
+  const external = model.statuses.filter((status) => !model.connections.some((connection) => connection.connection_id === status.connection_id));
+  const item_count = model.connections.length + external.length;
+  const assigned_ids = new Set([...model.connections.map((connection) => connection.connection_id), ...model.statuses.map(vpnRuntimeId)]);
+  const detached_errors = [...model.action_errors].filter(([vpn_id]) => !assigned_ids.has(vpn_id));
   const refreshing = model.catalog_loading || model.status_loading;
 
   return (
@@ -34,27 +31,25 @@ export function VpnSidebar({ model }: Props) {
           </button>
         </header>
         <div className="vpn-sidebar-body">
-          {!active && (!model.status_loaded || model.status_stale) ? (
+          {model.statuses.length === 0 && (!model.status_loaded || model.status_stale) ? (
             <div className="vpn-notice">
               <p role="status">{model.status_stale ? "VPN status unavailable." : "Checking VPN…"}</p>
-              {model.status_stale ? (
-                <button type="button" disabled={recovery_stop} onClick={() => void model.stop()}>
-                  {recovery_stop ? "Disconnecting…" : "Disconnect VPN"}
-                </button>
-              ) : null}
             </div>
           ) : null}
-          {[model.status_error, model.action_error, model.catalog_error].filter(Boolean).map((message, index) => (
+          {model.status_loaded && !model.supports_multiple ? (
+            <p className="vpn-notice">Update ctld to manage individual VPNs and connect to multiple VPNs at the same time.</p>
+          ) : null}
+          {[model.status_error, model.catalog_error, ...detached_errors.map(([, message]) => message)].filter(Boolean).map((message, index) => (
             <p className="vpn-error" role="alert" key={`${index}-${message}`}>{message}</p>
           ))}
-          {model.catalog_loading && !model.catalog_loaded && !external ? <p className="vpn-loading" role="status">Loading saved connections…</p> : null}
+          {model.catalog_loading && !model.catalog_loaded && external.length === 0 ? <p className="vpn-loading" role="status">Loading saved connections…</p> : null}
           <div className="vpn-connection-list">
-            {external ? <VpnConnectionItem connection={null} active model={model} /> : null}
+            {external.map((runtime) => <VpnConnectionItem key={`runtime-${vpnRuntimeId(runtime)}`} connection={null} runtime={runtime} model={model} />)}
             {model.connections.map((connection) => (
               <VpnConnectionItem
                 key={connection.connection_id}
                 connection={connection}
-                active={active && connection.connection_id === active_connection_id}
+                runtime={model.statuses.find((status) => status.connection_id === connection.connection_id) ?? null}
                 model={model}
               />
             ))}

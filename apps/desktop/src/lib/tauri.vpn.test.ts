@@ -33,7 +33,7 @@ describe("VPN native boundary", () => {
     expect(ipc.invoke).toHaveBeenLastCalledWith("connect_vpn", { request: { connection_id: "work" } });
     await vpnStatus();
     expect(ipc.invoke).toHaveBeenLastCalledWith("vpn_status", undefined);
-    await stopVpn();
-    expect(ipc.invoke).toHaveBeenLastCalledWith("stop_vpn", undefined);
+    await stopVpn("work");
+    expect(ipc.invoke).toHaveBeenLastCalledWith("stop_vpn", { request: { vpn_id: "work" } });
   });
 });

@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use ctld_ipc::{VpnConnection, VpnState, VpnStatus};
+use ctld_ipc::{VpnConnection, VpnSnapshot, VpnState};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
@@ -96,13 +96,13 @@ impl Repository {
     &self,
     request: SaveVpnConnectionRequest,
   ) -> CommandResult<VpnConnectionsSnapshot> {
-    self.save_with_status(request, &VpnStatus::default())
+    self.save_with_status(request, &VpnSnapshot::default())
   }
 
   pub(super) fn save_with_status(
     &self,
     request: SaveVpnConnectionRequest,
-    status: &VpnStatus,
+    status: &VpnSnapshot,
   ) -> CommandResult<VpnConnectionsSnapshot> {
     require_disconnected(&request.connection.connection_id, status)?;
     let _lock = self.lock()?;
@@ -142,7 +142,7 @@ impl Repository {
   pub(super) fn delete(
     &self,
     request: &DeleteVpnConnectionRequest,
-    status: &VpnStatus,
+    status: &VpnSnapshot,
   ) -> CommandResult<VpnConnectionsSnapshot> {
     require_disconnected(&request.connection_id, status)?;
     let _lock = self.lock()?;
@@ -340,8 +340,11 @@ fn not_found() -> CommandErrorDto {
   )
 }
 
-fn require_disconnected(connection_id: &str, status: &VpnStatus) -> CommandResult<()> {
-  if status.connection_id.as_deref() == Some(connection_id) && status.state != VpnState::Stopped {
+fn require_disconnected(connection_id: &str, status: &VpnSnapshot) -> CommandResult<()> {
+  if status.connections.iter().any(|connection| {
+    connection.connection_id.as_deref() == Some(connection_id)
+      && connection.state != VpnState::Stopped
+  }) {
     return Err(error(
       "vpn_connection_active",
       "Disconnect this VPN before changing its saved connection.",

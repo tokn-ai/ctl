@@ -26,6 +26,7 @@ import type {
   VpnConnectionInput,
   VpnConnectionsSnapshot,
   VpnStatus,
+  VpnSnapshot,
 } from "../src/lib/types";
 import {
   previewDefinitions,
@@ -63,6 +64,9 @@ let vpn_connections: VpnConnectionsSnapshot = {
   connections: [{
     connection_id: "sample-vpn", name: "Office", url: "https://vpn.example.com",
     username: "sample", has_password: true, auth_method: null, target_ip: null,
+  }, {
+    connection_id: "research-vpn", name: "Research", url: "https://research.example.com",
+    username: "researcher", has_password: true, auth_method: null, target_ip: null,
   }],
 };
 const stopped_vpn: VpnStatus = {
@@ -70,12 +74,23 @@ const stopped_vpn: VpnStatus = {
   vpn_url: null, username: null,
 };
 const vpn_param = new URLSearchParams(location.search).get("vpn");
-let vpn_status: VpnStatus = vpn_param === "connected" || vpn_param === "external" ? {
-  state: "connected", running: true,
-  connection_id: vpn_param === "external" ? null : "sample-vpn",
-  vpn_url: "https://vpn.example.com", username: "sample",
-  endpoint: "socks5h://127.0.0.1:49152", container_name: "preview-vpn",
-} : { ...stopped_vpn };
+let vpn_snapshot: VpnSnapshot = { supports_multiple: vpn_param !== "legacy", connections: [] };
+let next_vpn_port = 49160;
+if (["connected", "external", "legacy", "multiple"].includes(vpn_param ?? "")) {
+  const external = vpn_param === "external" || vpn_param === "legacy";
+  vpn_snapshot.connections.push({
+    vpn_id: external ? "preview-external" : "sample-vpn", state: "connected", running: true,
+    connection_id: external ? null : "sample-vpn", vpn_url: "https://vpn.example.com", username: "sample",
+    endpoint: "socks5h://127.0.0.1:49152", container_name: "preview-vpn",
+  });
+}
+if (vpn_param === "multiple") {
+  vpn_snapshot.connections.push({
+    vpn_id: "research-external", state: "connected", running: true, connection_id: null,
+    vpn_url: "https://research.example.com", username: "researcher",
+    endpoint: "socks5h://127.0.0.1:49153", container_name: "preview-research-vpn",
+  });
+}
 
 function request<T>(payload: InvokeArgs | undefined): T {
   return (payload as { request: T }).request;
@@ -150,18 +165,22 @@ mockIPC((command, payload) => {
       const { connection_id } = request<{ connection_id: string }>(payload);
       const connection = vpn_connections.connections.find((item) => item.connection_id === connection_id);
       if (!connection) throw new Error("This sample VPN connection no longer exists.");
-      vpn_status = {
-        state: "connected", running: true,
+      if (!vpn_snapshot.supports_multiple && vpn_snapshot.connections.length > 0) throw new Error("Update ctld to connect multiple VPNs.");
+      const status: VpnStatus = {
+        vpn_id: connection_id, state: "connected", running: true,
         connection_id, vpn_url: connection.url, username: connection.username,
-        endpoint: "socks5h://127.0.0.1:49152", container_name: "preview-vpn",
+        endpoint: `socks5h://127.0.0.1:${next_vpn_port++}`, container_name: `preview-${connection_id}`,
       };
-      return structuredClone(vpn_status);
+      vpn_snapshot.connections = [...vpn_snapshot.connections.filter((item) => item.vpn_id !== connection_id), status];
+      return structuredClone(status);
     }
     case "vpn_status":
-      return structuredClone(vpn_status);
-    case "stop_vpn":
-      vpn_status = { ...stopped_vpn };
-      return structuredClone(vpn_status);
+      return structuredClone(vpn_snapshot);
+    case "stop_vpn": {
+      const { vpn_id } = request<{ vpn_id: string }>(payload);
+      vpn_snapshot.connections = vpn_snapshot.connections.filter((item) => item.vpn_id !== vpn_id);
+      return { ...stopped_vpn, vpn_id };
+    }
     case "update_hosts":
       hosts = { revision: `preview-hosts-${++revision}`, document: request<{ document: HostCatalogDocument }>(payload).document };
       return structuredClone(hosts);

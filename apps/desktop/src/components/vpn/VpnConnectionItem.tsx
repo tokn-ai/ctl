@@ -1,32 +1,35 @@
 import { useEffect, useState } from "react";
 import type { VpnController } from "../../features/vpn/useVpn";
 import { errorMessage } from "../../lib/errors";
-import type { VpnConnection, VpnState } from "../../lib/types";
+import { vpnRuntimeId } from "../../features/vpn/status";
+import type { VpnConnection, VpnState, VpnStatus } from "../../lib/types";
 import { Icon } from "../ui/Icon";
 
 interface Props {
   connection: VpnConnection | null;
-  active: boolean;
+  runtime: VpnStatus | null;
   model: VpnController;
 }
 
-export function VpnConnectionItem({ connection, active, model }: Props) {
+export function VpnConnectionItem({ connection, runtime, model }: Props) {
   const [copied_endpoint, setCopiedEndpoint] = useState<string | null>(null);
   const [copy_error, setCopyError] = useState<string | null>(null);
-  const state = active
-    ? model.action?.kind === "stop" ? "stopping"
-      : model.status.state === "stopped" && model.action?.kind === "connect" ? "starting"
-        : model.status.state
-    : "stopped";
+  const vpn_id = runtime ? vpnRuntimeId(runtime) : connection?.connection_id ?? "legacy";
+  const uncertain = model.uncertain_ids.has(vpn_id);
+  const action = model.actions.get(vpn_id);
+  const active = runtime !== null || uncertain || action !== undefined;
+  const action_error = model.action_errors.get(vpn_id);
+  const state = action?.kind === "stop" ? "stopping" : action?.kind === "connect" && !runtime ? "starting" : runtime?.state ?? "stopped";
   const name = connection?.name ?? (state === "connected" ? "Connected VPN" : "VPN connection");
   const stopping = state === "stopping";
-  const checking = !model.status_loaded && !(active && model.action);
-  const stale = model.status_stale && !(active && model.action);
+  const checking = (!model.status_loaded || uncertain) && !action;
+  const stale = model.status_stale && !action;
   const status_label = stale ? "Status unavailable" : checking ? "Checking…" : statusLabel(state);
-  const endpoint = active ? model.status.endpoint : null;
-  const vpn_url = vpnServerLabel(active ? model.status.vpn_url ?? connection?.url : connection?.url);
-  const username = active ? model.status.username ?? connection?.username : connection?.username;
-  const can_connect = model.status_loaded && !model.status_stale && model.status.state === "stopped" && !model.action;
+  const endpoint = runtime?.endpoint;
+  const vpn_url = vpnServerLabel(runtime?.vpn_url ?? connection?.url);
+  const username = runtime?.username ?? connection?.username;
+  const can_connect = model.status_loaded && !model.status_stale && !action &&
+    !uncertain && (model.supports_multiple || (model.statuses.length === 0 && model.actions.size === 0 && model.uncertain_ids.size === 0));
   const source_note = model.catalog_loading && !model.catalog_loaded ? "Loading saved connections…"
     : !model.catalog_loaded || model.catalog_error ? "Saved connection unavailable"
       : "Not saved in this app";
@@ -59,7 +62,7 @@ export function VpnConnectionItem({ connection, active, model }: Props) {
         <span>{status_label}</span>
       </div>
       {!connection ? <small>{source_note}</small> : null}
-      {active && stale && model.status_loaded ? <small>Last known state: {statusLabel(model.status.state)}</small> : null}
+      {runtime && stale && model.status_loaded ? <small>Last known state: {statusLabel(runtime.state)}</small> : null}
       <dl className="vpn-connection-details">
         <div>
           <dt>VPN server</dt>
@@ -74,7 +77,7 @@ export function VpnConnectionItem({ connection, active, model }: Props) {
             <dt className="vpn-endpoint-heading">
               <span>SOCKS5 endpoint</span>
               {endpoint ? (
-                <button type="button" onClick={() => void copyEndpoint()} disabled={model.status_stale || state !== "connected"} aria-label="Copy SOCKS endpoint" title="Copy SOCKS endpoint">
+                <button type="button" onClick={() => void copyEndpoint()} disabled={model.status_stale || uncertain || state !== "connected"} aria-label="Copy SOCKS endpoint" title="Copy SOCKS endpoint">
                   <Icon name={copied_endpoint === endpoint ? "check" : "copy"} size={12} />
                 </button>
               ) : null}
@@ -83,13 +86,16 @@ export function VpnConnectionItem({ connection, active, model }: Props) {
           </div>
         ) : null}
       </dl>
-      {copy_error ? <p className="vpn-error" role="alert">{copy_error}</p> : null}
+      {[action_error, copy_error].filter(Boolean).map((message, index) => (
+        <p className="vpn-error" role="alert" key={`${index}-${message}`}>{message}</p>
+      ))}
       <div className="vpn-connection-actions">
         {active ? (
           <button
             type="button"
-            disabled={stopping}
-            onClick={() => void model.stop()}
+            disabled={stopping || !model.supports_multiple}
+            title={!model.supports_multiple ? "Update ctld to disconnect this VPN safely." : undefined}
+            onClick={() => void model.stop(vpn_id)}
             aria-label={connection
               ? `${state === "starting" ? "Cancel connection to" : "Disconnect"} ${connection.name}`
               : state === "starting" ? "Cancel connection" : "Disconnect VPN"}

@@ -1,13 +1,36 @@
 //! Orders native Connect/Stop requests before and during daemon dispatch.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as RegistryMutex, Weak};
 use std::time::Duration;
 
 use ctld_ipc::VpnStatus;
 use tokio::sync::{Mutex, Notify};
 
 use crate::error::{CommandErrorDto, CommandResult};
+
+#[derive(Default)]
+pub(super) struct Coordinators {
+  entries: RegistryMutex<HashMap<String, Weak<Coordinator>>>,
+}
+
+impl Coordinators {
+  pub(super) fn get(&self, vpn_id: &str) -> Arc<Coordinator> {
+    let mut entries = self
+      .entries
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    entries.retain(|_, coordinator| coordinator.strong_count() > 0);
+    if let Some(coordinator) = entries.get(vpn_id).and_then(Weak::upgrade) {
+      return coordinator;
+    }
+    let coordinator = Arc::new(Coordinator::new());
+    entries.insert(vpn_id.to_owned(), Arc::downgrade(&coordinator));
+    coordinator
+  }
+}
 
 pub(super) struct Coordinator {
   pub(super) changes: Mutex<()>,
@@ -105,6 +128,53 @@ mod tests {
   use tokio::time::timeout;
 
   use super::*;
+
+  #[tokio::test]
+  async fn stopping_one_connection_does_not_cancel_another_connection() {
+    let coordinators = Coordinators::default();
+    let first = coordinators.get("first");
+    let second = coordinators.get("second");
+    let (first_started, first_ready) = oneshot::channel();
+    let (second_started, second_ready) = oneshot::channel();
+    let (release_second, finish_second) = oneshot::channel();
+    let first_task = tokio::spawn(async move {
+      first
+        .connect(|cancellation| async move {
+          first_started.send(()).unwrap();
+          cancellation.wait().await;
+          Err(cancelled())
+        })
+        .await
+    });
+    let second_task = tokio::spawn(async move {
+      second
+        .connect(|cancellation| async move {
+          second_started.send(()).unwrap();
+          finish_second.await.unwrap();
+          cancellation.check()?;
+          Ok(VpnStatus::default())
+        })
+        .await
+    });
+    first_ready.await.unwrap();
+    second_ready.await.unwrap();
+    timeout(
+      Duration::from_secs(2),
+      coordinators
+        .get("first")
+        .stop(|| async { Ok(VpnStatus::default()) }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+      first_task.await.unwrap().unwrap_err().code,
+      "vpn_start_cancelled"
+    );
+    assert!(!second_task.is_finished());
+    release_second.send(()).unwrap();
+    second_task.await.unwrap().unwrap();
+  }
 
   #[tokio::test]
   async fn stop_during_profile_load_prevents_any_later_start_dispatch() {

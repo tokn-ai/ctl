@@ -194,14 +194,6 @@ async fn stop_cancels_startup_and_finishes_the_waiting_request() {
   assert_eq!(status.connection_id, None);
   assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
   assert_eq!(status.username.as_deref(), Some("test-user"));
-  assert!(
-    harness
-      .service
-      .start(harness.other_env_file.clone())
-      .await
-      .unwrap_err()
-      .contains("already starting")
-  );
   assert!(!harness.service.stop().await.unwrap().running);
   assert!(request.await.unwrap().unwrap_err().contains("cancelled"));
   assert!(ready.is_closed());
@@ -210,7 +202,7 @@ async fn stop_cancels_startup_and_finishes_the_waiting_request() {
 }
 
 #[tokio::test]
-async fn same_config_reuses_the_lease_and_another_config_requires_stop() {
+async fn same_config_reuses_the_lease_and_keeps_its_original_metadata() {
   let mut harness = Harness::new();
   let _exit = harness.start_ready().await;
   let first = harness.service.status().await.unwrap();
@@ -237,12 +229,6 @@ async fn same_config_reuses_the_lease_and_another_config_requires_stop() {
     .await
     .unwrap();
   assert_eq!(first, duplicate);
-  let error = harness
-    .service
-    .start(harness.other_env_file.clone())
-    .await
-    .unwrap_err();
-  assert!(error.contains("stop it first"));
   assert!(harness.starts.try_recv().is_err());
   assert!(!harness.service.stop().await.unwrap().running);
   assert_eq!(harness.probe.shutdowns.load(Ordering::SeqCst), 1);
@@ -252,67 +238,42 @@ async fn same_config_reuses_the_lease_and_another_config_requires_stop() {
 }
 
 #[tokio::test]
-async fn preparation_queue_is_bounded_and_stop_cancellation_releases_all_admitted_requests() {
-  let probe = Arc::new(Probe::default());
-  let guard = StartupGuard(Arc::clone(&probe));
-  let (reply, result) = oneshot::channel();
-  let mut preparing = Some(Preparing {
-    future: Box::pin(async move {
-      let _guard = guard;
-      pending().await
-    }),
-    reply,
-  });
-  let mut results = vec![result];
-  let mut queued = VecDeque::new();
-  for _ in 0..MAX_QUEUED_PREPARATIONS {
+async fn registry_capacity_is_bounded_and_targeted_stop_releases_only_its_entry() {
+  let mut registry = Registry::new(|_| std::future::pending::<io::Result<FakeLease>>());
+  let mut results = Vec::new();
+  for index in 0..MAX_CONNECTIONS {
+    let mut connection = saved_connection();
+    connection.connection_id = format!("profile-{index}");
     let (reply, result) = oneshot::channel();
-    enqueue_preparation(
-      Source::Connection(saved_connection()),
-      reply,
-      &mut preparing,
-      &mut queued,
-    );
+    registry.start(Source::Connection(connection), reply);
     results.push(result);
   }
-  assert_eq!(queued.len(), MAX_QUEUED_PREPARATIONS);
-  let (reply, rejected) = oneshot::channel();
-  enqueue_preparation(
-    Source::Connection(saved_connection()),
-    reply,
-    &mut preparing,
-    &mut queued,
+  let (reply, result) = oneshot::channel();
+  registry.start(Source::Connection(saved_connection()), reply);
+  assert!(result.await.unwrap().unwrap_err().contains("At most 16"));
+  assert_eq!(registry.snapshot().connections.len(), MAX_CONNECTIONS);
+  let (reply, stopped) = oneshot::channel();
+  registry.stop(Some("profile-0".into()), reply);
+  assert_eq!(stopped.await.unwrap().unwrap(), VpnStatus::default());
+  assert!(
+    results
+      .remove(0)
+      .await
+      .unwrap()
+      .unwrap_err()
+      .contains("cancelled")
   );
-  assert_eq!(
-    rejected.await.unwrap().unwrap_err(),
-    "Too many pending VPN start requests; wait or stop the VPN before trying again"
-  );
-  assert_eq!(queued.len(), MAX_QUEUED_PREPARATIONS);
+  assert_eq!(registry.snapshot().connections.len(), MAX_CONNECTIONS - 1);
   for result in &mut results {
     assert!(matches!(
       result.try_recv(),
       Err(oneshot::error::TryRecvError::Empty)
     ));
   }
-  cancel_preparations(&mut preparing, &mut queued);
-  assert!(preparing.is_none());
-  assert!(queued.is_empty());
-  assert_eq!(probe.startup_drops.load(Ordering::SeqCst), 1);
+  registry.shutdown().await;
   for result in results {
     assert!(result.await.unwrap().unwrap_err().contains("cancelled"));
   }
-  // Cancellation releases admission capacity, including the active slot.
-  let (reply, result) = oneshot::channel();
-  enqueue_preparation(
-    Source::Connection(saved_connection()),
-    reply,
-    &mut preparing,
-    &mut queued,
-  );
-  assert!(preparing.is_some());
-  assert!(queued.is_empty());
-  cancel_preparations(&mut preparing, &mut queued);
-  assert!(result.await.unwrap().unwrap_err().contains("cancelled"));
 }
 
 #[tokio::test]
@@ -405,6 +366,136 @@ fn saved_connection() -> VpnConnection {
 }
 
 #[tokio::test]
+async fn concurrent_connections_cancel_fail_and_stop_independently() {
+  let mut harness = Harness::new();
+  let first_exit = harness.start_ready().await;
+  let first = harness.service.status().await.unwrap();
+  let first_id = first.vpn_id.clone().unwrap();
+
+  let service = harness.service.clone();
+  let starting = tokio::spawn(async move { service.start_connection(saved_connection()).await });
+  let ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  let snapshot = harness.service.list().await.unwrap();
+  assert!(snapshot.supports_multiple);
+  assert_eq!(snapshot.connections.len(), 2);
+  assert!(snapshot.connections.contains(&first));
+  assert!(
+    harness
+      .service
+      .stop()
+      .await
+      .unwrap_err()
+      .contains("specify a VPN ID")
+  );
+  assert_eq!(harness.service.list().await.unwrap(), snapshot);
+
+  assert_eq!(
+    harness
+      .service
+      .stop_id("profile-test".into())
+      .await
+      .unwrap(),
+    VpnStatus::default()
+  );
+  assert!(starting.await.unwrap().unwrap_err().contains("cancelled"));
+  assert!(ready.is_closed());
+  assert_eq!(
+    harness.service.list().await.unwrap().connections,
+    vec![first.clone()]
+  );
+
+  let service = harness.service.clone();
+  let failing = tokio::spawn(async move { service.start_connection(saved_connection()).await });
+  let ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(
+    ready
+      .send(Err(io::Error::other("synthetic failure")))
+      .is_ok()
+  );
+  assert!(failing.await.unwrap().is_err());
+  assert_eq!(
+    harness.service.list().await.unwrap().connections,
+    vec![first.clone()]
+  );
+
+  let service = harness.service.clone();
+  let starting = tokio::spawn(async move { service.start_connection(saved_connection()).await });
+  let ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  let (lease, _second_exit) = FakeLease::new(&harness.probe);
+  assert!(ready.send(Ok(lease)).is_ok());
+  let second = starting.await.unwrap().unwrap();
+  assert_eq!(second.vpn_id.as_deref(), Some("profile-test"));
+  assert_eq!(harness.service.list().await.unwrap().connections.len(), 2);
+
+  assert_eq!(
+    harness.service.stop_id("not-owned".into()).await.unwrap(),
+    VpnStatus::default()
+  );
+  assert_eq!(harness.service.list().await.unwrap().connections.len(), 2);
+  first_exit.send(()).unwrap();
+  wait_for_count(&harness.probe.shutdowns, 1).await;
+  wait_for_count(&harness.probe.lease_drops, 1).await;
+  assert_eq!(
+    harness.service.list().await.unwrap().connections,
+    vec![second.clone()]
+  );
+  assert_eq!(
+    harness.service.stop_id(first_id).await.unwrap(),
+    VpnStatus::default()
+  );
+  assert_eq!(
+    harness.service.list().await.unwrap().connections,
+    vec![second]
+  );
+  harness.owner.shutdown().await;
+  assert_eq!(harness.probe.shutdowns.load(Ordering::SeqCst), 2);
+  assert_eq!(harness.probe.lease_drops.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn different_env_files_start_concurrently_and_shutdown_cleans_every_lease() {
+  let mut harness = Harness::new();
+  let (first_request, first_ready) = harness.begin_start().await;
+  let service = harness.service.clone();
+  let path = harness.other_env_file.clone();
+  let second_request = tokio::spawn(async move { service.start(path).await });
+  let second_ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  let snapshot = harness.service.list().await.unwrap();
+  assert_eq!(snapshot.connections.len(), 2);
+  assert!(
+    snapshot
+      .connections
+      .iter()
+      .all(|status| status.state == VpnState::Starting && status.connection_id.is_none())
+  );
+  assert_ne!(
+    snapshot.connections[0].vpn_id,
+    snapshot.connections[1].vpn_id
+  );
+  let (first_lease, _first_exit) = FakeLease::new(&harness.probe);
+  let (second_lease, _second_exit) = FakeLease::new(&harness.probe);
+  assert!(first_ready.send(Ok(first_lease)).is_ok());
+  assert!(second_ready.send(Ok(second_lease)).is_ok());
+  assert!(first_request.await.unwrap().unwrap().running);
+  assert!(second_request.await.unwrap().unwrap().running);
+  harness.owner.shutdown().await;
+  assert_eq!(harness.probe.shutdowns.load(Ordering::SeqCst), 2);
+  assert_eq!(harness.probe.lease_drops.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn saved_connections_report_phases_and_require_stop_before_config_changes() {
   let mut harness = Harness::new();
   let service = harness.service.clone();
@@ -416,6 +507,7 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   let status = harness.service.status().await.unwrap();
   assert_eq!(status.state, VpnState::Starting);
   assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert_eq!(status.vpn_id.as_deref(), Some("profile-test"));
   assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
   assert_eq!(status.username.as_deref(), Some("test-user"));
   assert!(!status.running);
@@ -427,6 +519,7 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   let status = request.await.unwrap().unwrap();
   assert_eq!(status.state, VpnState::Connected);
   assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert_eq!(status.vpn_id.as_deref(), Some("profile-test"));
   assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
   assert_eq!(status.username.as_deref(), Some("test-user"));
   assert_eq!(duplicate.await.unwrap().unwrap(), status);
@@ -435,7 +528,7 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   let mut changed = saved_connection();
   changed.password = Zeroizing::new("changed-password".into());
   let error = harness.service.start_connection(changed).await.unwrap_err();
-  assert!(error.contains("stop it first"));
+  assert!(error.contains("stop this connection"));
   assert!(!error.contains("changed-password"));
 
   let (release, wait) = oneshot::channel();
@@ -446,6 +539,7 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   let status = harness.service.status().await.unwrap();
   assert_eq!(status.state, VpnState::Stopping);
   assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert_eq!(status.vpn_id.as_deref(), Some("profile-test"));
   assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
   assert_eq!(status.username.as_deref(), Some("test-user"));
   assert!(!status.running);
@@ -453,7 +547,7 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   assert!(
     harness
       .service
-      .start(harness.env_file.with_extension("missing"))
+      .start_connection(saved_connection())
       .await
       .unwrap_err()
       .contains("VPN is stopping")

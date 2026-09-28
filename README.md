@@ -372,11 +372,13 @@ Manage a local OpenConnect VPN through `ctld` using the `ctl` CLI:
 ```sh
 ctl vpn start --env-file .env
 ctl vpn status
-ctl vpn stop
+ctl vpn stop VPN_ID
 ```
 
-These commands print readable status with the VPN server, username, and randomly
-allocated loopback SOCKS5 endpoint. Add `--json` for scripts. Start launches `ctld`
+Status prints a table of VPN IDs, states, servers, usernames, and randomly
+allocated loopback SOCKS5 endpoints. Multiple VPNs can run independently. Use the
+ID from the table to stop one; an untargeted stop requires at most one active VPN.
+Add `--json` for scripts. Start launches `ctld`
 if needed. Stop leaves `ctld` running, and
 the container also exits when `ctld` exits. See the
 [OpenConnect setup](docker/openconnect/README.md) for building the image and

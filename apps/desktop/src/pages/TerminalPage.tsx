@@ -28,6 +28,7 @@ import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConne
 import { useHostConnections } from "../features/workspace/useHostConnections";
 import { usePortForwarding } from "../features/portForwarding/usePortForwarding";
 import { useVpn } from "../features/vpn/useVpn";
+import { vpnAggregateState } from "../features/vpn/status";
 import { VpnSidebar } from "../components/vpn/VpnSidebar";
 import {
   recoverRemoteHost,
@@ -1607,7 +1608,8 @@ export function TerminalPage() {
           }}
           error={workspace.error}
           vpn={<VpnSidebar model={vpn} />}
-          vpn_state={vpn.status_loaded ? vpn.status.state : undefined}
+          vpn_state={vpn.status_loaded ? vpnAggregateState(vpn.statuses) : undefined}
+          vpn_active_count={vpn.statuses.length}
           vpn_status_stale={vpn.status_stale}
           tasks={
             <TaskSidebar

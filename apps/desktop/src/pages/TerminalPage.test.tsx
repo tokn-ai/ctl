@@ -241,7 +241,7 @@ beforeEach(() => {
   api.respondSshPrompt.mockReset().mockResolvedValue(undefined);
   api.listPortForwards.mockResolvedValue([]);
   api.loadVpnConnections.mockResolvedValue({ revision: null, connections: [] });
-  api.vpnStatus.mockResolvedValue({ state: "stopped", running: false, connection_id: null, endpoint: null, container_name: null });
+  api.vpnStatus.mockResolvedValue({ connections: [], supports_multiple: true });
   api.listRemoteListeners.mockResolvedValue({ listeners: [], warnings: [] });
   api.checkLocalPort.mockImplementation(async (port: number) => ({ port, available: true, message: null }));
   api.configurePortForward.mockImplementation(async (_target: ConnectionTarget, forward: WorkspacePortForward) => ({
@@ -324,11 +324,11 @@ describe("workspace-backed terminal page", () => {
   });
 
   it("discovers a CLI VPN before opening the VPN panel", async () => {
-    api.vpnStatus.mockResolvedValue({
-      state: "connected", running: true, connection_id: null,
+    api.vpnStatus.mockResolvedValue({ connections: [{
+      vpn_id: "sample-vpn", state: "connected", running: true, connection_id: null,
       vpn_url: "https://vpn.example.test", username: "cli-user",
       endpoint: "socks5h://127.0.0.1:49152", container_name: "sample-vpn",
-    });
+    }], supports_multiple: true });
     render(<TerminalPage />);
     const vpn_tab = await screen.findByRole("tab", { name: "VPN" });
     await waitFor(() => expect(vpn_tab.getAttribute("aria-description")).toBe("Connected"));
@@ -339,6 +339,36 @@ describe("workspace-backed terminal page", () => {
     expect(screen.getByText("socks5h://127.0.0.1:49152")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Disconnect VPN" })).toBeTruthy();
     expect(api.connectVpn).not.toHaveBeenCalled();
+  });
+
+  it("shows concurrent CLI VPNs and disconnects only the selected item", async () => {
+    const first = {
+      vpn_id: "sample-alpha", state: "connected", running: true, connection_id: null,
+      vpn_url: "https://alpha.example.test", username: "alpha-user",
+      endpoint: "socks5h://127.0.0.1:49152", container_name: "sample-alpha",
+    };
+    const second = {
+      ...first, vpn_id: "sample-bravo", vpn_url: "https://bravo.example.test",
+      username: "bravo-user", endpoint: "socks5h://127.0.0.1:49153", container_name: "sample-bravo",
+    };
+    api.vpnStatus.mockResolvedValue({ connections: [first, second], supports_multiple: true });
+    api.stopVpn.mockImplementation(async () => {
+      api.vpnStatus.mockResolvedValue({ connections: [second], supports_multiple: true });
+      return { ...first, state: "stopped", running: false, endpoint: null };
+    });
+    render(<TerminalPage />);
+    const vpn_tab = await screen.findByRole("tab", { name: "VPN" });
+    await waitFor(() => expect(vpn_tab.getAttribute("aria-description")).toBe("2 active VPNs"));
+    fireEvent.click(vpn_tab);
+    const items = screen.getAllByRole("region", { name: "Connected VPN" });
+    const first_item = items.find((item) => within(item).queryByText(first.endpoint));
+    expect(first_item).toBeTruthy();
+    fireEvent.click(within(first_item!).getByRole("button", { name: "Disconnect VPN" }));
+    await waitFor(() => expect(api.stopVpn).toHaveBeenCalledWith("sample-alpha"));
+    await waitFor(() => expect(screen.queryByText(first.endpoint)).toBeNull());
+    expect(screen.getByText(second.endpoint)).toBeTruthy();
+    expect(screen.getByText("bravo-user")).toBeTruthy();
+    expect(vpn_tab.getAttribute("aria-description")).toBe("Connected");
   });
 
   it("opens the VPN editor outside the inert workspace and remembers the VPN tab", async () => {

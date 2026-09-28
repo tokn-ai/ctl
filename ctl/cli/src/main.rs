@@ -98,10 +98,16 @@ mod tests {
         Command::Vpn {
           command: vpn::Command::Start { json: true, .. }
             | vpn::Command::Status { json: true }
-            | vpn::Command::Stop { json: true }
+            | vpn::Command::Stop { json: true, .. }
         }
       ));
     }
+    let arguments = Arguments::try_parse_from(["ctl", "vpn", "stop", "test-vpn"]).unwrap();
+    assert!(matches!(
+      arguments.command,
+      Command::Vpn { command: vpn::Command::Stop { vpn_id: Some(vpn_id), json: false } }
+        if vpn_id == "test-vpn"
+    ));
   }
 
   #[test]

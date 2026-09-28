@@ -132,7 +132,7 @@ fn external_edits_and_stale_deletes_do_not_overwrite_the_file() {
           expected_revision: saved.revision,
           connection_id: "connection-one".into(),
         },
-        &VpnStatus::default()
+        &VpnSnapshot::default()
       )
       .unwrap_err()
       .code,
@@ -149,10 +149,20 @@ fn deleting_an_active_connection_is_rejected_for_each_active_state() {
     .save(save_request(None, Some("test-secret")))
     .unwrap();
   for state in [VpnState::Starting, VpnState::Connected, VpnState::Stopping] {
-    let status = VpnStatus {
-      connection_id: Some("connection-one".into()),
-      state,
-      ..VpnStatus::default()
+    let status = VpnSnapshot {
+      connections: vec![
+        VpnStatus {
+          connection_id: Some("another-connection".into()),
+          state: VpnState::Connected,
+          ..VpnStatus::default()
+        },
+        VpnStatus {
+          connection_id: Some("connection-one".into()),
+          state,
+          ..VpnStatus::default()
+        },
+      ],
+      supports_multiple: true,
     };
     assert_eq!(
       repository
@@ -181,11 +191,42 @@ fn deleting_an_active_connection_is_rejected_for_each_active_state() {
         expected_revision: saved.revision,
         connection_id: "connection-one".into(),
       },
-      &VpnStatus::default(),
+      &VpnSnapshot::default(),
     )
     .unwrap();
   assert!(deleted.connections.is_empty());
   assert!(repository.connection("connection-one").is_err());
+}
+
+#[test]
+fn unrelated_active_vpns_do_not_block_saved_connection_changes() {
+  let fixture = Fixture::new();
+  let repository = fixture.repository();
+  let saved = repository
+    .save(save_request(None, Some("test-secret")))
+    .unwrap();
+  let status = VpnSnapshot {
+    supports_multiple: true,
+    connections: vec![VpnStatus {
+      vpn_id: Some("another-connection".into()),
+      connection_id: Some("another-connection".into()),
+      state: VpnState::Connected,
+      ..VpnStatus::default()
+    }],
+  };
+  let changed = repository
+    .save_with_status(save_request(saved.revision, None), &status)
+    .unwrap();
+  let deleted = repository
+    .delete(
+      &DeleteVpnConnectionRequest {
+        expected_revision: changed.revision,
+        connection_id: "connection-one".into(),
+      },
+      &status,
+    )
+    .unwrap();
+  assert!(deleted.connections.is_empty());
 }
 
 #[test]

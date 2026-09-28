@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnStatus } from "../../lib/types";
+import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnSnapshot, VpnStatus } from "../../lib/types";
 import { connectVpn, deleteVpnConnection, loadVpnConnections, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
 import { useVpn, VPN_STATUS_INTERVAL_MS } from "./useVpn";
 
@@ -14,51 +14,65 @@ const connection: VpnConnection = {
   connection_id: "work", name: "Work", url: "https://vpn.example.test", username: "example-user",
   has_password: true, auth_method: null, target_ip: null,
 };
-const snapshot: VpnConnectionsSnapshot = { revision: "revision-1", connections: [connection] };
-const stopped: VpnStatus = { endpoint: null, container_name: null, connection_id: null, running: false, state: "stopped" };
-const connected: VpnStatus = {
-  endpoint: "socks5h://127.0.0.1:49152", container_name: "test-vpn", connection_id: connection.connection_id,
-  vpn_url: connection.url, username: connection.username, running: true, state: "connected",
-};
+const research = { ...connection, connection_id: "research", name: "Research" };
+const catalog: VpnConnectionsSnapshot = { revision: "revision-1", connections: [connection, research] };
 const input: VpnConnectionInput = {
-  connection_id: connection.connection_id, name: "Updated work", url: connection.url, username: connection.username,
+  connection_id: "work", name: "Updated work", url: connection.url, username: connection.username,
   password: null, auth_method: null, target_ip: null,
 };
+const stopped: VpnStatus = { state: "stopped", running: false, connection_id: null, endpoint: null, container_name: null };
+let backend: VpnSnapshot;
 
+function runtime(vpn_id = "work", overrides: Partial<VpnStatus> = {}): VpnStatus {
+  return {
+    vpn_id, connection_id: vpn_id, state: "connected", running: true,
+    vpn_url: "https://vpn.example.test", username: "example-user",
+    endpoint: `socks5h://127.0.0.1:${vpn_id === "work" ? "49152" : "49153"}`, container_name: `sample-${vpn_id}`,
+    ...overrides,
+  };
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
   const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
   return { promise, resolve, reject };
 }
-
-beforeEach(() => {
-  vi.resetAllMocks();
-  vi.mocked(loadVpnConnections).mockResolvedValue(snapshot);
-  vi.mocked(vpnStatus).mockResolvedValue(stopped);
-  vi.mocked(connectVpn).mockResolvedValue(connected);
-  vi.mocked(stopVpn).mockResolvedValue(stopped);
-  vi.mocked(saveVpnConnection).mockResolvedValue({ revision: "revision-2", connections: [{ ...connection, name: input.name }] });
-  vi.mocked(deleteVpnConnection).mockResolvedValue({ revision: "revision-2", connections: [] });
-});
-afterEach(() => {
-  cleanup();
-  vi.useRealTimers();
-});
-
+function observe(...connections: VpnStatus[]): VpnSnapshot {
+  return { connections, supports_multiple: true };
+}
+function status(result: { current: ReturnType<typeof useVpn> }, vpn_id: string) {
+  return result.current.statuses.find((item) => item.vpn_id === vpn_id);
+}
 async function ready(result: { current: ReturnType<typeof useVpn> }) {
   await waitFor(() => expect(result.current.catalog_loaded && result.current.status_loaded).toBe(true));
 }
 
+beforeEach(() => {
+  vi.resetAllMocks();
+  backend = observe();
+  vi.mocked(loadVpnConnections).mockResolvedValue(catalog);
+  vi.mocked(vpnStatus).mockImplementation(async () => ({ ...backend, connections: [...backend.connections] }));
+  vi.mocked(connectVpn).mockImplementation(async (vpn_id) => {
+    const next = runtime(vpn_id);
+    backend.connections = [...backend.connections.filter((item) => item.vpn_id !== vpn_id), next];
+    return next;
+  });
+  vi.mocked(stopVpn).mockImplementation(async (vpn_id) => {
+    backend.connections = backend.connections.filter((item) => item.vpn_id !== vpn_id);
+    return { ...stopped, vpn_id };
+  });
+  vi.mocked(saveVpnConnection).mockResolvedValue({ revision: "revision-2", connections: [{ ...connection, name: input.name }, research] });
+  vi.mocked(deleteVpnConnection).mockResolvedValue({ revision: "revision-2", connections: [research] });
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+
 describe("VPN controller", () => {
-  it("observes only while enabled and never stops a VPN when the workspace closes", async () => {
+  it("observes only while enabled and never owns a VPN's lifetime", async () => {
     const { result, rerender, unmount } = renderHook(({ enabled }) => useVpn(enabled), { initialProps: { enabled: false } });
-    expect(loadVpnConnections).not.toHaveBeenCalled();
     expect(vpnStatus).not.toHaveBeenCalled();
     rerender({ enabled: true });
     await ready(result);
     expect(connectVpn).not.toHaveBeenCalled();
-    expect(stopVpn).not.toHaveBeenCalled();
     const calls = vi.mocked(vpnStatus).mock.calls.length;
     rerender({ enabled: false });
     act(() => window.dispatchEvent(new Event("focus")));
@@ -67,221 +81,228 @@ describe("VPN controller", () => {
     expect(stopVpn).not.toHaveBeenCalled();
   });
 
-  it("discovers and updates an external VPN without mounting the VPN panel", async () => {
+  it("discovers multiple external VPNs without mounting the VPN panel", async () => {
     vi.useFakeTimers();
-    const external = { ...connected, connection_id: null };
     const { result, unmount } = renderHook(() => useVpn(true));
     await act(async () => {});
-    expect(result.current.status.state).toBe("stopped");
-    vi.mocked(vpnStatus).mockResolvedValue(external);
+    backend = observe(runtime("cli-a", { connection_id: null }), runtime("cli-b", { connection_id: null }));
     await act(async () => { await vi.advanceTimersByTimeAsync(VPN_STATUS_INTERVAL_MS); });
-    expect(result.current.status).toEqual(external);
+    expect(result.current.statuses).toEqual(backend.connections);
     expect(loadVpnConnections).toHaveBeenCalledOnce();
-
-    vi.mocked(vpnStatus).mockResolvedValue(stopped);
+    backend = observe();
     await act(async () => { await vi.advanceTimersByTimeAsync(VPN_STATUS_INTERVAL_MS); });
-    expect(result.current.status).toEqual(stopped);
-    expect(connectVpn).not.toHaveBeenCalled();
+    expect(result.current.statuses).toEqual([]);
     unmount();
-    await act(async () => { await vi.advanceTimersByTimeAsync(VPN_STATUS_INTERVAL_MS); });
-    expect(vpnStatus).toHaveBeenCalledTimes(3);
+    expect(connectVpn).not.toHaveBeenCalled();
     expect(stopVpn).not.toHaveBeenCalled();
   });
 
-  it("can observe and disconnect a CLI VPN when the saved connections cannot load", async () => {
-    const external = { ...connected, connection_id: null };
-    vi.mocked(loadVpnConnections).mockRejectedValue(new Error("Saved connections unavailable"));
-    vi.mocked(vpnStatus).mockResolvedValueOnce(external).mockResolvedValue(stopped);
+  it("observes and targets a CLI VPN despite a catalog failure", async () => {
+    vi.mocked(loadVpnConnections).mockRejectedValue(new Error("Catalog unavailable"));
+    backend = observe(runtime("cli", { connection_id: null }));
     const { result } = renderHook(() => useVpn(true));
     await waitFor(() => expect(result.current.status_loaded).toBe(true));
     expect(result.current.catalog_loaded).toBe(false);
-    expect(result.current.catalog_error).toBe("Saved connections unavailable");
-    expect(result.current.status).toEqual(external);
-    await act(async () => { await result.current.stop(); });
-    expect(stopVpn).toHaveBeenCalledOnce();
-    expect(result.current.status).toEqual(stopped);
-    expect(connectVpn).not.toHaveBeenCalled();
+    await act(async () => { await result.current.stop("cli"); });
+    expect(stopVpn).toHaveBeenCalledWith("cli");
+    expect(result.current.statuses).toEqual([]);
   });
 
-  it("cancels a pending connection and ignores its late success after Stop", async () => {
+  it("connects two profiles concurrently and isolates their results and errors", async () => {
+    const work = deferred<VpnStatus>();
+    const other = deferred<VpnStatus>();
+    vi.mocked(connectVpn).mockImplementation((id) => id === "work" ? work.promise : other.promise);
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => { first = result.current.connect("work"); second = result.current.connect("research"); });
+    expect(result.current.actions.size).toBe(2);
+    expect(result.current.statuses.every((item) => item.state === "starting")).toBe(true);
+    backend = observe(runtime("research"));
+    await act(async () => { other.resolve(runtime("research")); await second; });
+    expect(status(result, "research")?.state).toBe("connected");
+    expect(status(result, "work")?.state).toBe("starting");
+    await act(async () => { work.reject(new Error("Work authentication failed")); await first; });
+    expect(result.current.action_errors.get("work")).toBe("Work authentication failed");
+    expect(result.current.action_errors.has("research")).toBe(false);
+    expect(result.current.statuses).toEqual([runtime("research")]);
+    expect(stopVpn).not.toHaveBeenCalled();
+  });
+
+  it("stops only the selected VPN while the other remains connected", async () => {
+    backend = observe(runtime(), runtime("research"));
+    const stop = deferred<VpnStatus>();
+    vi.mocked(stopVpn).mockReturnValueOnce(stop.promise);
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.stop("work"); });
+    expect(status(result, "work")?.state).toBe("stopping");
+    expect(status(result, "research")?.state).toBe("connected");
+    backend = observe(runtime("research"));
+    await act(async () => { stop.resolve({ ...stopped, vpn_id: "work" }); await pending; });
+    expect(stopVpn).toHaveBeenCalledExactlyOnceWith("work");
+    expect(result.current.statuses).toEqual([runtime("research")]);
+  });
+
+  it("cancels one pending connection and ignores its late success without canceling another", async () => {
+    const pending = deferred<VpnStatus>();
+    vi.mocked(connectVpn).mockImplementation((id) => id === "work" ? pending.promise : Promise.resolve(runtime(id)));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    let first!: Promise<void>;
+    act(() => { first = result.current.connect("work"); });
+    backend = observe(runtime("research"));
+    await act(async () => { await result.current.connect("research"); await result.current.stop("work"); });
+    await act(async () => { pending.resolve(runtime()); await first; });
+    expect(result.current.statuses).toEqual([runtime("research")]);
+    expect(result.current.actions.size).toBe(0);
+    expect(stopVpn).toHaveBeenCalledExactlyOnceWith("work");
+  });
+
+  it("merges polling changes for other VPNs while one is starting", async () => {
     const pending = deferred<VpnStatus>();
     vi.mocked(connectVpn).mockReturnValueOnce(pending.promise);
     const { result } = renderHook(() => useVpn(true));
     await ready(result);
-    let connect!: Promise<void>;
-    act(() => { connect = result.current.connect(connection.connection_id); });
-    expect(result.current.status.state).toBe("starting");
-    await act(async () => { await result.current.stop(); });
-    expect(stopVpn).toHaveBeenCalledOnce();
-    expect(result.current.status.state).toBe("stopped");
-    await act(async () => { pending.resolve(connected); await connect; });
-    expect(result.current.status).toEqual(stopped);
-    expect(result.current.action).toBeNull();
-    expect(result.current.action_error).toBeNull();
+    act(() => { void result.current.connect("work"); });
+    backend = observe(runtime("external", { connection_id: null }));
+    await act(async () => { await result.current.refresh(); });
+    expect(status(result, "work")?.state).toBe("starting");
+    expect(status(result, "external")?.state).toBe("connected");
   });
 
-  it("coalesces simultaneous observations instead of starving a slow reply", async () => {
-    const pending_status = deferred<VpnStatus>();
-    const pending_catalog = deferred<VpnConnectionsSnapshot>();
-    vi.mocked(vpnStatus).mockReturnValueOnce(pending_status.promise);
-    vi.mocked(loadVpnConnections).mockReturnValueOnce(pending_catalog.promise);
+  it("starts a fresh reconciliation after completion and rejects an older in-flight snapshot", async () => {
+    const old = deferred<VpnSnapshot>();
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    vi.mocked(vpnStatus).mockReturnValueOnce(old.promise);
+    let refresh!: Promise<void>;
+    act(() => { refresh = result.current.refresh(); });
+    const calls = vi.mocked(vpnStatus).mock.calls.length;
+    await act(async () => { await result.current.connect("work"); });
+    expect(vi.mocked(vpnStatus).mock.calls.length).toBeGreaterThan(calls);
+    await act(async () => { old.resolve(observe()); await refresh; });
+    expect(status(result, "work")?.state).toBe("connected");
+  });
+
+  it("keeps a failed start uncertain until observed and does not freeze another profile", async () => {
+    vi.mocked(connectVpn).mockRejectedValueOnce(new Error("Request timed out"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    const reconcile = deferred<VpnSnapshot>();
+    vi.mocked(vpnStatus).mockReturnValueOnce(reconcile.promise);
+    await act(async () => { await result.current.connect("work"); });
+    expect(result.current.uncertain_ids.has("work")).toBe(true);
+    await act(async () => { await result.current.connect("work"); });
+    act(() => result.current.editConnection(connection));
+    await act(async () => { await result.current.deleteConnection("work"); });
+    expect(connectVpn).toHaveBeenCalledOnce();
+    expect(result.current.editor).toBeNull();
+    expect(deleteVpnConnection).not.toHaveBeenCalled();
+    const other = deferred<VpnStatus>();
+    vi.mocked(connectVpn).mockReturnValueOnce(other.promise);
+    act(() => { void result.current.connect("research"); });
+    expect(connectVpn).toHaveBeenCalledTimes(2);
+    expect(status(result, "research")?.state).toBe("starting");
+    await act(async () => { reconcile.resolve(observe(runtime())); });
+    expect(result.current.uncertain_ids.has("work")).toBe(false);
+    expect(result.current.action_errors.has("work")).toBe(false);
+    expect(status(result, "work")?.state).toBe("connected");
+    expect(status(result, "research")?.state).toBe("starting");
+  });
+
+  it("coalesces simultaneous observations", async () => {
+    const pending = deferred<VpnSnapshot>();
+    vi.mocked(vpnStatus).mockReturnValueOnce(pending.promise);
     const { result } = renderHook(() => useVpn(true));
     let refresh!: Promise<void>;
     act(() => { refresh = result.current.refresh(); });
     expect(vpnStatus).toHaveBeenCalledOnce();
-    expect(loadVpnConnections).toHaveBeenCalledOnce();
-    await act(async () => {
-      pending_status.resolve(stopped);
-      pending_catalog.resolve(snapshot);
-      await refresh;
-    });
-    expect(result.current.status_loaded && result.current.catalog_loaded).toBe(true);
-    expect(result.current.status_loading || result.current.catalog_loading).toBe(false);
+    await act(async () => { pending.resolve(observe()); await refresh; });
+    expect(result.current.status_loaded).toBe(true);
+    expect(result.current.status_loading).toBe(false);
   });
 
-  it("does not let a stale status refresh replace a successful connection", async () => {
-    const old_status = deferred<VpnStatus>();
-    const { result } = renderHook(() => useVpn(true));
-    await ready(result);
-    vi.mocked(vpnStatus).mockReturnValueOnce(old_status.promise).mockResolvedValue(connected);
-    let refresh!: Promise<void>;
-    act(() => { refresh = result.current.refresh(); });
-    await act(async () => { await result.current.connect(connection.connection_id); });
-    expect(result.current.status.state).toBe("connected");
-    await act(async () => { old_status.resolve(stopped); await refresh; });
-    expect(result.current.status).toEqual(connected);
-  });
-
-  it("keeps the editor's revision and fences a pre-save catalog response", async () => {
-    const old_catalog = deferred<VpnConnectionsSnapshot>();
-    const { result } = renderHook(() => useVpn(true));
-    await ready(result);
-    act(() => result.current.editConnection(connection));
-    vi.mocked(loadVpnConnections).mockReturnValueOnce(old_catalog.promise);
-    let refresh!: Promise<void>;
-    act(() => { refresh = result.current.refresh(); });
-    await act(async () => { expect(await result.current.saveConnection(input)).toBe(true); });
-    expect(saveVpnConnection).toHaveBeenCalledWith("revision-1", input);
-    expect(result.current.editor).toBeNull();
-    await act(async () => { old_catalog.resolve(snapshot); await refresh; });
-    expect(result.current.connections[0].name).toBe("Updated work");
-    expect(result.current.catalog_loading).toBe(false);
-  });
-
-  it("marks failed status observations stale while retaining the last endpoint", async () => {
-    vi.mocked(vpnStatus).mockResolvedValue(connected);
+  it("keeps existing VPNs visible when polling fails and permits a targeted stop", async () => {
+    backend = observe(runtime(), runtime("research"));
     const { result } = renderHook(() => useVpn(true));
     await ready(result);
     vi.mocked(vpnStatus).mockRejectedValueOnce(new Error("Broker unavailable"));
     await act(async () => { await result.current.refresh(); });
-    expect(result.current.status).toEqual(connected);
+    expect(result.current.statuses).toHaveLength(2);
     expect(result.current.status_stale).toBe(true);
-    expect(result.current.status_error).toBe("Broker unavailable");
-    await act(async () => { await result.current.connect(connection.connection_id); });
+    await act(async () => { await result.current.stop("work"); });
+    expect(result.current.statuses).toEqual([runtime("research")]);
+  });
+
+  it("preserves an older daemon's active VPN and blocks only unsupported additional connects", async () => {
+    backend = { supports_multiple: false, connections: [runtime("legacy", { connection_id: null })] };
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.connect("work"); });
     expect(connectVpn).not.toHaveBeenCalled();
+    expect(result.current.supports_multiple).toBe(false);
+    await act(async () => { await result.current.stop("legacy"); });
+    expect(stopVpn).not.toHaveBeenCalled();
+    expect(result.current.statuses).toHaveLength(1);
+    backend.connections = [];
+    await act(async () => { await result.current.refresh(); });
+    await act(async () => { await result.current.connect("work"); });
+    expect(connectVpn).toHaveBeenCalledWith("work");
   });
 
-  it("reports a connection error, then permits a fresh connection attempt", async () => {
-    vi.mocked(connectVpn).mockRejectedValueOnce(new Error("Authentication failed"));
+  it("clears failed stop errors only when that runtime disappears", async () => {
+    backend = observe(runtime(), runtime("research"));
+    vi.mocked(stopVpn).mockRejectedValueOnce(new Error("Unable to stop work"));
     const { result } = renderHook(() => useVpn(true));
     await ready(result);
-    await act(async () => { await result.current.connect(connection.connection_id); });
-    await waitFor(() => expect(result.current.status_stale).toBe(false));
-    expect(result.current.action_error).toBe("Authentication failed");
-    expect(result.current.status.state).toBe("stopped");
-    vi.mocked(vpnStatus).mockResolvedValue(connected);
-    await act(async () => { await result.current.connect(connection.connection_id); });
-    expect(result.current.action_error).toBeNull();
-    expect(result.current.status.state).toBe("connected");
+    await act(async () => { await result.current.stop("work"); });
+    expect(result.current.action_errors.get("work")).toBe("Unable to stop work");
+    backend = observe(runtime());
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_errors.has("work")).toBe(true);
+    backend = observe();
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_errors.has("work")).toBe(false);
   });
 
-  it("clears a failed connection only after observing the same profile connected", async () => {
-    vi.mocked(connectVpn).mockRejectedValueOnce(new Error("Authentication failed"));
-    const { result } = renderHook(() => useVpn(true));
-    await ready(result);
-    await act(async () => { await result.current.connect(connection.connection_id); });
-    await waitFor(() => expect(result.current.status_stale).toBe(false));
-    expect(result.current.status.state).toBe("stopped");
-    expect(result.current.action_error).toBe("Authentication failed");
-
-    vi.mocked(vpnStatus).mockResolvedValue({ ...connected, state: "starting", running: false });
-    await act(async () => { await result.current.refresh(); });
-    expect(result.current.action_error).toBe("Authentication failed");
-
-    vi.mocked(vpnStatus).mockResolvedValue({ ...connected, connection_id: "another-profile" });
-    await act(async () => { await result.current.refresh(); });
-    expect(result.current.action_error).toBe("Authentication failed");
-
-    vi.mocked(vpnStatus).mockResolvedValue(connected);
-    await act(async () => { await result.current.refresh(); });
-    expect(result.current.action_error).toBeNull();
-    expect(connectVpn).toHaveBeenCalledOnce();
-  });
-
-  it("does not clear a newer connection failure with a stale successful observation", async () => {
-    vi.mocked(connectVpn)
-      .mockRejectedValueOnce(new Error("First attempt failed"))
-      .mockRejectedValueOnce(new Error("Latest attempt failed"));
-    const { result } = renderHook(() => useVpn(true));
-    await ready(result);
-    await act(async () => { await result.current.connect(connection.connection_id); });
-    await waitFor(() => expect(result.current.status_stale).toBe(false));
-    const old_status = deferred<VpnStatus>();
-    vi.mocked(vpnStatus).mockReturnValueOnce(old_status.promise);
-    let refresh!: Promise<void>;
-    act(() => { refresh = result.current.refresh(); });
-
-    await act(async () => { await result.current.connect(connection.connection_id); });
-    await waitFor(() => expect(result.current.status_stale).toBe(false));
-    expect(result.current.action_error).toBe("Latest attempt failed");
-    await act(async () => { old_status.resolve(connected); await refresh; });
-    expect(result.current.action_error).toBe("Latest attempt failed");
-    expect(result.current.status).toEqual(stopped);
-  });
-
-  it("blocks active-profile edit/delete and keeps disconnect errors distinct", async () => {
-    vi.mocked(vpnStatus).mockResolvedValue(connected);
+  it("blocks active-profile edits and deletes while allowing changes to another profile", async () => {
+    backend = observe(runtime());
     const { result } = renderHook(() => useVpn(true));
     await ready(result);
     act(() => result.current.editConnection(connection));
-    await act(async () => { await result.current.deleteConnection(connection.connection_id); });
+    await act(async () => { await result.current.deleteConnection("work"); });
     expect(result.current.editor).toBeNull();
     expect(deleteVpnConnection).not.toHaveBeenCalled();
-    vi.mocked(stopVpn).mockRejectedValueOnce(new Error("Unable to stop container"));
-    await act(async () => { await result.current.stop(); });
-    expect(result.current.action_error).toBe("Unable to stop container");
-    expect(result.current.status.state).toBe("connected");
+    act(() => result.current.editConnection(research));
+    expect(result.current.editor?.connection).toEqual(research);
   });
 
-  it("clears a failed stop only after observing the VPN stopped", async () => {
-    vi.mocked(vpnStatus).mockResolvedValue(connected);
-    vi.mocked(stopVpn).mockRejectedValueOnce(new Error("Unable to stop container"));
-    const { result } = renderHook(() => useVpn(true));
-    await ready(result);
-    await act(async () => { await result.current.stop(); });
-    await waitFor(() => expect(result.current.status_stale).toBe(false));
-    expect(result.current.action_error).toBe("Unable to stop container");
-
-    vi.mocked(vpnStatus).mockResolvedValue({ ...connected, state: "stopping", running: false });
-    await act(async () => { await result.current.refresh(); });
-    expect(result.current.action_error).toBe("Unable to stop container");
-
-    vi.mocked(vpnStatus).mockResolvedValue(stopped);
-    await act(async () => { await result.current.refresh(); });
-    expect(result.current.action_error).toBeNull();
-    expect(stopVpn).toHaveBeenCalledOnce();
-  });
-
-  it("retains a failed editor without ever adding the submitted password to its state", async () => {
-    vi.mocked(saveVpnConnection).mockRejectedValueOnce(new Error("Settings changed; reload before saving"));
+  it("keeps the editor revision and fences a pre-save catalog response", async () => {
+    const old = deferred<VpnConnectionsSnapshot>();
     const { result } = renderHook(() => useVpn(true));
     await ready(result);
     act(() => result.current.editConnection(connection));
-    await act(async () => { expect(await result.current.saveConnection({ ...input, password: "example-password" })).toBe(false); });
+    vi.mocked(loadVpnConnections).mockReturnValueOnce(old.promise);
+    let refresh!: Promise<void>;
+    act(() => { refresh = result.current.refresh(); });
+    await act(async () => { expect(await result.current.saveConnection(input)).toBe(true); });
+    expect(saveVpnConnection).toHaveBeenCalledWith("revision-1", input);
+    await act(async () => { old.resolve(catalog); await refresh; });
+    expect(result.current.connections[0].name).toBe("Updated work");
+    expect(result.current.editor).toBeNull();
+  });
+
+  it("retains a failed editor without keeping its submitted password", async () => {
+    vi.mocked(saveVpnConnection).mockRejectedValueOnce(new Error("Settings changed"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    act(() => result.current.editConnection(connection));
+    await act(async () => { expect(await result.current.saveConnection({ ...input, password: "sample-password" })).toBe(false); });
     expect(result.current.editor?.connection).toEqual(connection);
-    expect(result.current.editor_error).toBe("Settings changed; reload before saving");
-    expect(JSON.stringify(result.current.editor)).not.toContain("example-password");
-    expect(result.current.connections).toEqual([connection]);
-    expect(result.current.editor_saving).toBe(false);
+    expect(JSON.stringify(result.current.editor)).not.toContain("sample-password");
+    expect(result.current.editor_error).toBe("Settings changed");
   });
 });

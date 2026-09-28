@@ -231,6 +231,7 @@ export interface VpnConnectionsSnapshot {
 export type VpnState = "stopped" | "starting" | "connected" | "stopping";
 
 export interface VpnStatus {
+  vpn_id?: string | null;
   state: VpnState;
   running: boolean;
   connection_id: string | null;
@@ -240,6 +241,11 @@ export interface VpnStatus {
   /** Local SOCKS5 proxy, distinct from the VPN server. */
   endpoint: string | null;
   container_name: string | null;
+}
+
+export interface VpnSnapshot {
+  connections: VpnStatus[];
+  supports_multiple: boolean;
 }
 
 export interface LocalPortForward {

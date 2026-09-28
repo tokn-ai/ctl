@@ -39,6 +39,19 @@ describe("workspace sidebar", () => {
     expect(tab.querySelector(".vpn-activity-indicator")).toBeNull();
   });
 
+  it("reports the number of active VPNs and marks stale counts unavailable", () => {
+    const props = {
+      selected: "sessions" as const, onSelect: vi.fn(),
+      sessions: null, tasks: null, ports: null, vpn: null, error: null,
+      vpn_state: "connected" as const, vpn_active_count: 2,
+    };
+    const panel = render(<WorkspaceSidebar {...props} />);
+    const tab = screen.getByRole("tab", { name: "VPN" });
+    expect(tab.getAttribute("aria-description")).toBe("2 active VPNs");
+    panel.rerender(<WorkspaceSidebar {...props} vpn_status_stale />);
+    expect(tab.getAttribute("aria-description")).toBe("Status unavailable");
+  });
+
   it("selects the ports panel from the activity rail", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();

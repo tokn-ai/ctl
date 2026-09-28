@@ -1,12 +1,13 @@
-//! Serializes VPN requests while keeping container ownership inside ctld.
+//! Owns independent VPN leases and serializes changes to their registry.
 
-use std::collections::VecDeque;
-use std::future::{Future, pending};
+use std::collections::{BTreeMap, HashSet};
+use std::future::{Future, poll_fn};
 use std::io;
 use std::path::PathBuf;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
+use std::task::{Context, Poll};
 
-use ctld_ipc::{VpnConnection, VpnState, VpnStatus};
+use ctld_ipc::{VpnConnection, VpnSnapshot, VpnState, VpnStatus};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -15,13 +16,19 @@ use zeroize::Zeroizing;
 use crate::openconnect::{self, Config, ManagedVpn, Metadata};
 
 type Reply = oneshot::Sender<Result<VpnStatus, String>>;
-
-const MAX_QUEUED_PREPARATIONS: usize = 16;
+const MAX_CONNECTIONS: usize = 16;
+const MAX_WAITING_REPLIES: usize = 16;
 
 enum Request {
-  Start { source: Source, reply: Reply },
-  Stop(Reply),
-  Status(Reply),
+  Start {
+    source: Source,
+    reply: Reply,
+  },
+  Stop {
+    vpn_id: Option<String>,
+    reply: Reply,
+  },
+  List(oneshot::Sender<Result<VpnSnapshot, String>>),
 }
 
 #[derive(Clone)]
@@ -31,49 +38,56 @@ pub(super) struct VpnService {
 
 impl VpnService {
   pub(super) async fn start(&self, env_file: PathBuf) -> Result<VpnStatus, String> {
-    let (reply, result) = oneshot::channel();
-    self
-      .request(
-        Request::Start {
-          source: Source::EnvFile(env_file),
-          reply,
-        },
-        result,
-      )
-      .await
+    self.start_source(Source::EnvFile(env_file)).await
   }
 
   pub(super) async fn start_connection(
     &self,
     connection: VpnConnection,
   ) -> Result<VpnStatus, String> {
+    self.start_source(Source::Connection(connection)).await
+  }
+
+  async fn start_source(&self, source: Source) -> Result<VpnStatus, String> {
     let (reply, result) = oneshot::channel();
-    self
-      .request(
-        Request::Start {
-          source: Source::Connection(connection),
-          reply,
-        },
-        result,
-      )
-      .await
+    self.request(Request::Start { source, reply }, result).await
   }
 
   pub(super) async fn stop(&self) -> Result<VpnStatus, String> {
+    self.stop_selected(None).await
+  }
+
+  pub(super) async fn stop_id(&self, vpn_id: String) -> Result<VpnStatus, String> {
+    self.stop_selected(Some(vpn_id)).await
+  }
+
+  async fn stop_selected(&self, vpn_id: Option<String>) -> Result<VpnStatus, String> {
     let (reply, result) = oneshot::channel();
-    self.request(Request::Stop(reply), result).await
+    self.request(Request::Stop { vpn_id, reply }, result).await
   }
 
   pub(super) async fn status(&self) -> Result<VpnStatus, String> {
-    let (reply, result) = oneshot::channel();
-    self.request(Request::Status(reply), result).await
+    Ok(
+      self
+        .list()
+        .await?
+        .connections
+        .into_iter()
+        .next()
+        .unwrap_or_default(),
+    )
   }
 
-  async fn request(
+  pub(super) async fn list(&self) -> Result<VpnSnapshot, String> {
+    let (reply, result) = oneshot::channel();
+    self.request(Request::List(reply), result).await
+  }
+
+  async fn request<T>(
     &self,
     request: Request,
-    result: oneshot::Receiver<Result<VpnStatus, String>>,
-  ) -> Result<VpnStatus, String> {
+    result: oneshot::Receiver<Result<T, String>>,
+  ) -> Result<T, String> {
     self
       .requests
       .send(request)
@@ -154,44 +168,6 @@ enum Identity {
   },
 }
 
-struct Prepared {
-  identity: Identity,
-  config: Config,
-}
-
-struct Preparing {
-  future: Pin<Box<dyn Future<Output = Result<Prepared, String>> + Send>>,
-  reply: Reply,
-}
-
-impl Source {
-  async fn prepare(self) -> Result<Prepared, String> {
-    match self {
-      Self::EnvFile(path) => {
-        let (path, config) = openconnect::read_file(path)
-          .await
-          .map_err(|error| error.to_string())?;
-        Ok(Prepared {
-          identity: Identity::EnvFile(path),
-          config,
-        })
-      }
-      Self::Connection(connection) => {
-        let config = Config::from_connection(&connection).map_err(|error| error.to_string())?;
-        let serialized =
-          Zeroizing::new(serde_json::to_vec(&connection).map_err(|_| "invalid VPN connection")?);
-        Ok(Prepared {
-          identity: Identity::Connection {
-            connection_id: connection.connection_id,
-            fingerprint: Sha256::digest(serialized.as_slice()).into(),
-          },
-          config,
-        })
-      }
-    }
-  }
-}
-
 impl Identity {
   fn connection_id(&self) -> Option<String> {
     match self {
@@ -199,63 +175,340 @@ impl Identity {
       Self::Connection { connection_id, .. } => Some(connection_id.clone()),
     }
   }
+}
 
-  fn status(&self, metadata: &Metadata, state: VpnState) -> VpnStatus {
-    VpnStatus {
-      connection_id: self.connection_id(),
-      vpn_url: metadata.vpn_url.clone(),
-      username: metadata.username.clone(),
-      state,
-      ..VpnStatus::default()
+struct Prepared {
+  identity: Identity,
+  config: Config,
+}
+
+type Preparation = Pin<Box<dyn Future<Output = Result<Prepared, String>> + Send>>;
+type Cleanup = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+enum Phase<L, S> {
+  Preparing(Preparation),
+  Starting(Pin<Box<S>>),
+  Connected(L),
+  Stopping(Cleanup),
+}
+
+struct Entry<L, S> {
+  identity: Option<Identity>,
+  env_paths: HashSet<PathBuf>,
+  metadata: Metadata,
+  phase: Phase<L, S>,
+  replies: Vec<Reply>,
+}
+
+impl<L: Lease, S> Entry<L, S> {
+  fn status(&self, vpn_id: &str) -> VpnStatus {
+    let mut status = match &self.phase {
+      Phase::Connected(lease) => lease.status(),
+      Phase::Preparing(_) | Phase::Starting(_) => VpnStatus {
+        state: VpnState::Starting,
+        ..VpnStatus::default()
+      },
+      Phase::Stopping(_) => VpnStatus {
+        state: VpnState::Stopping,
+        ..VpnStatus::default()
+      },
+    };
+    status.vpn_id = Some(vpn_id.to_owned());
+    status.connection_id = self.identity.as_ref().and_then(Identity::connection_id);
+    status.vpn_url.clone_from(&self.metadata.vpn_url);
+    status.username.clone_from(&self.metadata.username);
+    status
+  }
+
+  fn join_start(&mut self, vpn_id: &str, replies: Vec<Reply>) {
+    for reply in replies {
+      match self.phase {
+        Phase::Connected(_) => {
+          let _ = reply.send(Ok(self.status(vpn_id)));
+        }
+        Phase::Stopping(_) => {
+          let _ = reply.send(Err("VPN is stopping; wait before starting it again".into()));
+        }
+        _ => push_reply(&mut self.replies, reply),
+      }
     }
   }
 }
 
-struct Active<L> {
-  identity: Identity,
-  metadata: Metadata,
-  lease: L,
+enum Event<L> {
+  Prepared(Result<Prepared, String>),
+  Started(io::Result<L>),
+  Exited(io::Result<()>),
+  Stopped,
 }
 
-impl<L: Lease> Active<L> {
-  fn status(&self) -> VpnStatus {
-    VpnStatus {
-      connection_id: self.identity.connection_id(),
-      vpn_url: self.metadata.vpn_url.clone(),
-      username: self.metadata.username.clone(),
-      state: VpnState::Connected,
-      ..self.lease.status()
+struct Registry<L, F, S> {
+  entries: BTreeMap<String, Entry<L, S>>,
+  start: F,
+}
+
+impl<L, F, S> Registry<L, F, S>
+where
+  L: Lease + 'static,
+  F: Fn(Config) -> S,
+  S: Future<Output = io::Result<L>>,
+{
+  fn new(start: F) -> Self {
+    Self {
+      entries: BTreeMap::new(),
+      start,
+    }
+  }
+
+  fn snapshot(&self) -> VpnSnapshot {
+    VpnSnapshot {
+      connections: self
+        .entries
+        .iter()
+        .map(|(id, entry)| entry.status(id))
+        .collect(),
+      supports_multiple: true,
+    }
+  }
+
+  fn start(&mut self, source: Source, reply: Reply) {
+    match source {
+      Source::Connection(connection) => match prepare_connection(connection) {
+        Ok(prepared) => self.start_prepared(prepared, reply),
+        Err(error) => {
+          let _ = reply.send(Err(error));
+        }
+      },
+      Source::EnvFile(path) => {
+        if let Some((id, entry)) = self
+          .entries
+          .iter_mut()
+          .find(|(_, entry)| entry.env_paths.contains(&path))
+        {
+          entry.join_start(id, vec![reply]);
+          return;
+        }
+        if self.entries.len() >= MAX_CONNECTIONS {
+          let _ = reply.send(Err(
+            "At most 16 VPN connections can be active or starting".into(),
+          ));
+          return;
+        }
+        let id = format!("env-{}", uuid::Uuid::new_v4().simple());
+        let env_paths = HashSet::from([path.clone()]);
+        let future = Box::pin(async move {
+          let (path, config) = openconnect::read_file(path)
+            .await
+            .map_err(|error| error.to_string())?;
+          Ok(Prepared {
+            identity: Identity::EnvFile(path),
+            config,
+          })
+        });
+        self.entries.insert(
+          id,
+          Entry {
+            identity: None,
+            env_paths,
+            metadata: Metadata::default(),
+            phase: Phase::Preparing(future),
+            replies: vec![reply],
+          },
+        );
+      }
+    }
+  }
+
+  fn start_prepared(&mut self, prepared: Prepared, reply: Reply) {
+    let id = prepared
+      .identity
+      .connection_id()
+      .expect("saved connection has an ID");
+    if let Some(entry) = self.entries.get_mut(&id) {
+      if entry.identity.as_ref() == Some(&prepared.identity) {
+        entry.join_start(&id, vec![reply]);
+      } else {
+        let _ = reply.send(Err(
+          "VPN settings changed; stop this connection before starting it again".into(),
+        ));
+      }
+      return;
+    }
+    if self.entries.len() >= MAX_CONNECTIONS {
+      let _ = reply.send(Err(
+        "At most 16 VPN connections can be active or starting".into(),
+      ));
+      return;
+    }
+    let metadata = prepared.config.metadata.clone();
+    self.entries.insert(
+      id,
+      Entry {
+        identity: Some(prepared.identity),
+        env_paths: HashSet::new(),
+        metadata,
+        phase: Phase::Starting(Box::pin((self.start)(prepared.config))),
+        replies: vec![reply],
+      },
+    );
+  }
+
+  fn stop(&mut self, vpn_id: Option<String>, reply: Reply) {
+    let id = if let Some(id) = vpn_id {
+      id
+    } else {
+      if self.entries.len() > 1 {
+        let _ = reply.send(Err(
+          "Multiple VPN connections are active; specify a VPN ID to disconnect".into(),
+        ));
+        return;
+      }
+      self.entries.keys().next().cloned().unwrap_or_default()
+    };
+    self.stop_entry(&id, Some(reply));
+  }
+
+  fn stop_entry(&mut self, id: &str, reply: Option<Reply>) {
+    let Some(mut entry) = self.entries.remove(id) else {
+      if let Some(reply) = reply {
+        let _ = reply.send(Ok(VpnStatus::default()));
+      }
+      return;
+    };
+    match entry.phase {
+      Phase::Connected(mut lease) => {
+        entry.phase = Phase::Stopping(Box::pin(async move {
+          lease.shutdown().await;
+        }));
+        if let Some(reply) = reply {
+          push_reply(&mut entry.replies, reply);
+        }
+        self.entries.insert(id.to_owned(), entry);
+      }
+      Phase::Stopping(future) => {
+        entry.phase = Phase::Stopping(future);
+        if let Some(reply) = reply {
+          push_reply(&mut entry.replies, reply);
+        }
+        self.entries.insert(id.to_owned(), entry);
+      }
+      Phase::Preparing(_) | Phase::Starting(_) => {
+        answer(&mut entry.replies, Err("VPN startup was cancelled".into()));
+        if let Some(reply) = reply {
+          let _ = reply.send(Ok(VpnStatus::default()));
+        }
+      }
+    }
+  }
+
+  fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<(String, Event<L>)> {
+    for (id, entry) in &mut self.entries {
+      let event = match &mut entry.phase {
+        Phase::Preparing(future) => future.as_mut().poll(cx).map(Event::Prepared),
+        Phase::Starting(future) => future.as_mut().poll(cx).map(Event::Started),
+        Phase::Stopping(future) => future.as_mut().poll(cx).map(|()| Event::Stopped),
+        Phase::Connected(lease) => pin!(lease.exited()).poll(cx).map(Event::Exited),
+      };
+      if let Poll::Ready(event) = event {
+        return Poll::Ready((id.clone(), event));
+      }
+    }
+    Poll::Pending
+  }
+
+  fn event(&mut self, id: String, event: Event<L>) {
+    let mut entry = self
+      .entries
+      .remove(&id)
+      .expect("completed operation has an owner");
+    match event {
+      Event::Prepared(Ok(prepared)) => {
+        if let Some((other_id, other)) = self
+          .entries
+          .iter_mut()
+          .find(|(_, other)| other.identity.as_ref() == Some(&prepared.identity))
+        {
+          other.join_start(other_id, entry.replies);
+          return;
+        }
+        if let Identity::EnvFile(path) = &prepared.identity {
+          entry.env_paths.insert(path.clone());
+        }
+        entry.identity = Some(prepared.identity);
+        entry.metadata = prepared.config.metadata.clone();
+        entry.phase = Phase::Starting(Box::pin((self.start)(prepared.config)));
+      }
+      Event::Prepared(Err(error)) => {
+        answer(&mut entry.replies, Err(error));
+        return;
+      }
+      Event::Started(Ok(lease)) => {
+        entry.phase = Phase::Connected(lease);
+        let status = entry.status(&id);
+        answer(&mut entry.replies, Ok(status));
+      }
+      Event::Started(Err(error)) => {
+        answer(
+          &mut entry.replies,
+          Err(format!("could not start VPN: {error}")),
+        );
+        return;
+      }
+      Event::Exited(result) => {
+        if result.is_err() {
+          eprintln!("Could not monitor OpenConnect; cleaning up its VPN connection.");
+        }
+        self.entries.insert(id.clone(), entry);
+        self.stop_entry(&id, None);
+        return;
+      }
+      Event::Stopped => {
+        answer(&mut entry.replies, Ok(VpnStatus::default()));
+        return;
+      }
+    }
+    self.entries.insert(id, entry);
+  }
+
+  async fn shutdown(mut self) {
+    let ids: Vec<_> = self.entries.keys().cloned().collect();
+    for id in ids {
+      self.stop_entry(&id, None);
+    }
+    while !self.entries.is_empty() {
+      let (id, event) = poll_fn(|cx| self.poll_event(cx)).await;
+      self.event(id, event);
     }
   }
 }
 
-struct Starting<F> {
-  identity: Identity,
-  metadata: Metadata,
-  future: Pin<Box<F>>,
-  replies: Vec<Reply>,
+fn prepare_connection(connection: VpnConnection) -> Result<Prepared, String> {
+  let config = Config::from_connection(&connection).map_err(|error| error.to_string())?;
+  let serialized =
+    Zeroizing::new(serde_json::to_vec(&connection).map_err(|_| "invalid VPN connection")?);
+  let identity = Identity::Connection {
+    connection_id: connection.connection_id,
+    fingerprint: Sha256::digest(serialized.as_slice()).into(),
+  };
+  Ok(Prepared { identity, config })
 }
 
-struct Stopping {
-  identity: Identity,
-  metadata: Metadata,
-  future: Pin<Box<dyn Future<Output = ()> + Send>>,
-  replies: Vec<Reply>,
+fn answer(replies: &mut Vec<Reply>, result: Result<VpnStatus, String>) {
+  if let Some(last) = replies.pop() {
+    for reply in replies.drain(..) {
+      let _ = reply.send(result.clone());
+    }
+    let _ = last.send(result);
+  }
 }
 
-fn begin_stop<L: Lease + 'static>(active: Active<L>, replies: Vec<Reply>) -> Stopping {
-  let Active {
-    identity,
-    metadata,
-    mut lease,
-  } = active;
-  Stopping {
-    identity,
-    metadata,
-    future: Box::pin(async move {
-      lease.shutdown().await;
-    }),
-    replies,
+fn push_reply(replies: &mut Vec<Reply>, reply: Reply) {
+  if replies.len() < MAX_WAITING_REPLIES {
+    replies.push(reply);
+  } else {
+    let _ = reply.send(Err(
+      "Too many pending requests for this VPN connection".into(),
+    ));
   }
 }
 
@@ -265,9 +518,25 @@ where
   F: Fn(Config) -> S + Send + 'static,
   S: Future<Output = io::Result<L>> + Send + 'static,
 {
-  let (requests, receiver) = mpsc::channel(16);
-  let (shutdown, shutdown_receiver) = oneshot::channel();
-  let task = tokio::spawn(serve(receiver, shutdown_receiver, start));
+  let (requests, mut receiver) = mpsc::channel(16);
+  let (shutdown, mut shutdown_receiver) = oneshot::channel();
+  let task = tokio::spawn(async move {
+    let mut registry = Registry::new(start);
+    loop {
+      tokio::select! {
+        biased;
+        _ = &mut shutdown_receiver => break,
+        (id, event) = poll_fn(|cx| registry.poll_event(cx)) => registry.event(id, event),
+        request = receiver.recv() => match request {
+          Some(Request::Start { source, reply }) => registry.start(source, reply),
+          Some(Request::Stop { vpn_id, reply }) => registry.stop(vpn_id, reply),
+          Some(Request::List(reply)) => { let _ = reply.send(Ok(registry.snapshot())); }
+          None => break,
+        }
+      }
+    }
+    registry.shutdown().await;
+  });
   (
     VpnService { requests },
     VpnOwner {
@@ -275,243 +544,6 @@ where
       task: Some(task),
     },
   )
-}
-
-async fn serve<L, F, S>(
-  mut requests: mpsc::Receiver<Request>,
-  mut shutdown: oneshot::Receiver<()>,
-  start: F,
-) where
-  L: Lease + 'static,
-  F: Fn(Config) -> S,
-  S: Future<Output = io::Result<L>>,
-{
-  let mut preparing: Option<Preparing> = None;
-  let mut queued = VecDeque::new();
-  let mut active: Option<Active<L>> = None;
-  let mut starting: Option<Starting<S>> = None;
-  let mut stopping: Option<Stopping> = None;
-  loop {
-    tokio::select! {
-      biased;
-      _ = &mut shutdown => break,
-      prepared = async {
-        match &mut preparing {
-          Some(preparing) => (&mut preparing.future).await,
-          None => pending().await,
-        }
-      } => {
-        let preparation = preparing.take().expect("preparation completion has an owner");
-        match prepared {
-          Ok(prepared) => schedule_start(prepared, preparation.reply, active.as_ref(), &mut starting, stopping.is_some(), &start),
-          Err(error) => { let _ = preparation.reply.send(Err(error)); }
-        }
-        preparing = queued.pop_front().map(begin_prepare);
-      }
-      started = async {
-        match &mut starting {
-          Some(starting) => (&mut starting.future).await,
-          None => pending().await,
-        }
-      } => {
-        let starting = starting.take().expect("startup completion has an owner");
-        let result = match started {
-          Ok(lease) => {
-            let connection = Active { identity: starting.identity, metadata: starting.metadata, lease };
-            let status = connection.status();
-            active = Some(connection);
-            Ok(status)
-          }
-          Err(error) => Err(format!("could not start VPN: {error}")),
-        };
-        for reply in starting.replies {
-          let _ = reply.send(result.clone());
-        }
-      }
-      () = async {
-        match &mut stopping {
-          Some(stopping) => (&mut stopping.future).await,
-          None => pending().await,
-        }
-      } => {
-        for reply in stopping.take().expect("shutdown completion has an owner").replies {
-          let _ = reply.send(Ok(VpnStatus::default()));
-        }
-      }
-      exited = async {
-        match &mut active {
-          Some(active) => active.lease.exited().await,
-          None => pending().await,
-        }
-      } => {
-        match exited {
-          Ok(()) => eprintln!("OpenConnect container exited; the VPN is stopped."),
-          Err(error) => eprintln!("Could not monitor OpenConnect: {error}; the VPN is stopped."),
-        }
-        stopping = active.take().map(|active| begin_stop(active, Vec::new()));
-      }
-      request = requests.recv() => {
-        match request {
-          Some(Request::Start { source, reply }) => {
-            if stopping.is_some() {
-              let _ = reply.send(Err("VPN is stopping; wait before starting it again".to_owned()));
-            } else {
-              enqueue_preparation(source, reply, &mut preparing, &mut queued);
-            }
-          }
-          Some(Request::Stop(reply)) => {
-            cancel_preparations(&mut preparing, &mut queued);
-            cancel_start(&mut starting);
-            if let Some(stopping) = &mut stopping {
-              stopping.replies.push(reply);
-            } else if let Some(active) = active.take() {
-              stopping = Some(begin_stop(active, vec![reply]));
-            } else {
-              let _ = reply.send(Ok(VpnStatus::default()));
-            }
-          }
-          Some(Request::Status(reply)) => {
-            let status = current_status(active.as_ref(), starting.as_ref(), stopping.as_ref(), preparing.is_some());
-            let _ = reply.send(Ok(status));
-          }
-          None => break,
-        }
-      }
-    }
-  }
-  cancel_preparations(&mut preparing, &mut queued);
-  cancel_start(&mut starting);
-  shutdown_leases(active, stopping).await;
-}
-
-fn current_status<L: Lease, S>(
-  active: Option<&Active<L>>,
-  starting: Option<&Starting<S>>,
-  stopping: Option<&Stopping>,
-  preparing: bool,
-) -> VpnStatus {
-  if let Some(starting) = starting {
-    starting
-      .identity
-      .status(&starting.metadata, VpnState::Starting)
-  } else if let Some(stopping) = stopping {
-    stopping
-      .identity
-      .status(&stopping.metadata, VpnState::Stopping)
-  } else if let Some(active) = active {
-    active.status()
-  } else if preparing {
-    VpnStatus {
-      state: VpnState::Starting,
-      ..VpnStatus::default()
-    }
-  } else {
-    VpnStatus::default()
-  }
-}
-
-async fn shutdown_leases<L: Lease>(active: Option<Active<L>>, stopping: Option<Stopping>) {
-  if let Some(mut active) = active {
-    active.lease.shutdown().await;
-  }
-  if let Some(mut stopping) = stopping {
-    (&mut stopping.future).await;
-    for reply in stopping.replies {
-      let _ = reply.send(Ok(VpnStatus::default()));
-    }
-  }
-}
-
-fn schedule_start<L, F, S>(
-  prepared: Prepared,
-  reply: Reply,
-  active: Option<&Active<L>>,
-  starting: &mut Option<Starting<S>>,
-  stopping: bool,
-  start: &F,
-) where
-  L: Lease,
-  F: Fn(Config) -> S,
-{
-  if stopping {
-    let _ = reply.send(Err(
-      "VPN is stopping; wait before starting it again".to_owned(),
-    ));
-    return;
-  }
-  let Prepared { identity, config } = prepared;
-  if let Some(starting) = starting {
-    if starting.identity == identity {
-      starting.replies.push(reply);
-    } else {
-      let _ = reply.send(Err(
-        "VPN is already starting with another configuration; stop it first".to_owned(),
-      ));
-    }
-    return;
-  }
-  if let Some(active) = active {
-    let result = if active.identity == identity {
-      Ok(active.status())
-    } else {
-      Err("VPN is already running with another configuration; stop it first".to_owned())
-    };
-    let _ = reply.send(result);
-    return;
-  }
-  *starting = Some(Starting {
-    metadata: config.metadata.clone(),
-    future: Box::pin(start(config)),
-    identity,
-    replies: vec![reply],
-  });
-}
-
-fn begin_prepare((source, reply): (Source, Reply)) -> Preparing {
-  Preparing {
-    future: Box::pin(source.prepare()),
-    reply,
-  }
-}
-
-fn enqueue_preparation(
-  source: Source,
-  reply: Reply,
-  preparing: &mut Option<Preparing>,
-  queued: &mut VecDeque<(Source, Reply)>,
-) {
-  if preparing.is_none() {
-    *preparing = Some(begin_prepare((source, reply)));
-  } else if queued.len() < MAX_QUEUED_PREPARATIONS {
-    queued.push_back((source, reply));
-  } else {
-    // Do not let a slow configuration read turn the bounded IPC channel into
-    // an unbounded store of credential-bearing connection requests.
-    let _ = reply.send(Err(
-      "Too many pending VPN start requests; wait or stop the VPN before trying again".to_owned(),
-    ));
-  }
-}
-
-fn cancel_preparations(preparing: &mut Option<Preparing>, queued: &mut VecDeque<(Source, Reply)>) {
-  if let Some(preparing) = preparing.take() {
-    drop(preparing.future);
-    let _ = preparing
-      .reply
-      .send(Err("VPN startup was cancelled".to_owned()));
-  }
-  for (_, reply) in queued.drain(..) {
-    let _ = reply.send(Err("VPN startup was cancelled".to_owned()));
-  }
-}
-
-fn cancel_start<F>(starting: &mut Option<Starting<F>>) {
-  if let Some(starting) = starting.take() {
-    drop(starting.future);
-    for reply in starting.replies {
-      let _ = reply.send(Err("VPN startup was cancelled".to_owned()));
-    }
-  }
 }
 
 #[cfg(test)]

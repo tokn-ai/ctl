@@ -1,28 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/errors";
-import {
-  connectVpn,
-  deleteVpnConnection,
-  loadVpnConnections,
-  saveVpnConnection,
-  stopVpn,
-  vpnStatus,
-} from "../../lib/tauri";
-import type {
-  VpnConnection,
-  VpnConnectionInput,
-  VpnConnectionsSnapshot,
-  VpnStatus,
-} from "../../lib/types";
+import { connectVpn, deleteVpnConnection, loadVpnConnections, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
+import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnStatus } from "../../lib/types";
+import { vpnRuntimeId } from "./status";
 
 export const VPN_STATUS_INTERVAL_MS = 5_000;
-const STOPPED: VpnStatus = {
-  endpoint: null,
-  container_name: null,
-  connection_id: null,
-  running: false,
-  state: "stopped",
-};
 
 export interface VpnEditor {
   editor_id: number;
@@ -45,14 +27,16 @@ export interface VpnController {
   catalog_loaded: boolean;
   catalog_loading: boolean;
   catalog_error: string | null;
-  status: VpnStatus;
+  statuses: readonly VpnStatus[];
+  supports_multiple: boolean;
   status_loaded: boolean;
   status_loading: boolean;
   status_stale: boolean;
   status_error: string | null;
   last_checked_at: number | null;
-  action: VpnAction | null;
-  action_error: string | null;
+  actions: ReadonlyMap<string, VpnAction>;
+  action_errors: ReadonlyMap<string, string>;
+  uncertain_ids: ReadonlySet<string>;
   profile_busy: boolean;
   deleting_id: string | null;
   editor: VpnEditor | null;
@@ -60,7 +44,7 @@ export interface VpnController {
   editor_saving: boolean;
   refresh(): Promise<void>;
   connect(connection_id: string): Promise<void>;
-  stop(): Promise<void>;
+  stop(vpn_id: string): Promise<void>;
   addConnection(): void;
   editConnection(connection: VpnConnection): void;
   closeEditor(): void;
@@ -68,38 +52,44 @@ export interface VpnController {
   deleteConnection(connection_id: string): Promise<void>;
 }
 
-/** Observe ctld while the workspace is ready. Component lifetime never owns or stops the VPN. */
+/** Observe ctld while the workspace is ready. Component lifetime never owns or stops VPNs. */
 export function useVpn(enabled: boolean): VpnController {
   const [catalog, setCatalog] = useState<VpnConnectionsSnapshot>({ revision: null, connections: [] });
   const [catalog_loaded, setCatalogLoaded] = useState(false);
   const [catalog_loading, setCatalogLoading] = useState(false);
   const [catalog_error, setCatalogError] = useState<string | null>(null);
-  const [status, setStatus] = useState<VpnStatus>(STOPPED);
+  const [statuses, setStatuses] = useState<VpnStatus[]>([]);
+  const [supports_multiple, setSupportsMultiple] = useState(false);
   const [status_loaded, setStatusLoaded] = useState(false);
   const [status_loading, setStatusLoading] = useState(false);
   const [status_stale, setStatusStale] = useState(false);
   const [status_error, setStatusError] = useState<string | null>(null);
   const [last_checked_at, setLastCheckedAt] = useState<number | null>(null);
-  const [action, setAction] = useState<VpnAction | null>(null);
-  const [action_error, setActionError] = useState<string | null>(null);
+  const [actions, setActions] = useState<ReadonlyMap<string, VpnAction>>(new Map());
+  const [action_errors, setActionErrors] = useState<ReadonlyMap<string, string>>(new Map());
+  const [uncertain_ids, setUncertainIds] = useState<ReadonlySet<string>>(new Set());
   const [profile_busy, setProfileBusy] = useState(false);
   const [deleting_id, setDeletingId] = useState<string | null>(null);
   const [editor, setEditor] = useState<VpnEditor | null>(null);
   const [editor_error, setEditorError] = useState<string | null>(null);
   const [editor_saving, setEditorSaving] = useState(false);
   const mounted = useRef(false);
+  const lifetime = useRef(0);
   const catalog_ref = useRef(catalog);
   const catalog_loaded_ref = useRef(false);
   const catalog_generation = useRef(0);
   const catalog_request = useRef<PendingRefresh | null>(null);
-  const status_ref = useRef(status);
+  const statuses_ref = useRef(new Map<string, VpnStatus>());
+  const supports_multiple_ref = useRef(false);
   const status_loaded_ref = useRef(false);
   const status_stale_ref = useRef(false);
   const status_generation = useRef(0);
   const status_request = useRef<PendingRefresh | null>(null);
-  const action_ref = useRef<VpnAction | null>(null);
-  const action_generation = useRef(0);
-  const failed_action_ref = useRef<(VpnAction & { generation: number }) | null>(null);
+  const actions_ref = useRef(new Map<string, VpnAction>());
+  const action_errors_ref = useRef(new Map<string, string>());
+  const uncertain_ids_ref = useRef(new Set<string>());
+  const runtime_generations = useRef(new Map<string, number>());
+  const failed_actions = useRef(new Map<string, VpnAction & { generation: number }>());
   const profile_busy_ref = useRef(false);
   const editor_ref = useRef<VpnEditor | null>(null);
   const editor_generation = useRef(0);
@@ -113,25 +103,17 @@ export function useVpn(enabled: boolean): VpnController {
     setCatalogError(null);
   }, []);
 
-  const publishStatus = useCallback((next: VpnStatus) => {
-    status_ref.current = next;
-    status_loaded_ref.current = true;
-    status_stale_ref.current = false;
-    if (!mounted.current) return;
-    setStatus(next);
-    setStatusLoaded(true);
-    setStatusStale(false);
-    setStatusError(null);
-    setLastCheckedAt(Date.now());
-    const failed_action = failed_action_ref.current;
-    if (failed_action?.generation === action_generation.current && (
-      (failed_action.kind === "connect" && next.state === "connected" && next.connection_id === failed_action.connection_id) ||
-      (failed_action.kind === "stop" && next.state === "stopped")
-    )) {
-      failed_action_ref.current = null;
-      setActionError(null);
-    }
+  const publishRuntimes = useCallback((next: Map<string, VpnStatus>) => {
+    statuses_ref.current = next;
+    if (mounted.current) setStatuses([...next.values()]);
   }, []);
+
+  const publishRuntime = useCallback((vpn_id: string, next: VpnStatus | undefined) => {
+    const updated = new Map(statuses_ref.current);
+    updated.delete(vpn_id);
+    if (next && next.state !== "stopped") updated.set(vpnRuntimeId(next), next);
+    publishRuntimes(updated);
+  }, [publishRuntimes]);
 
   const refreshCatalog = useCallback(async () => {
     if (!mounted.current || profile_busy_ref.current) return;
@@ -154,14 +136,46 @@ export function useVpn(enabled: boolean): VpnController {
   }, [publishCatalog]);
 
   const refreshStatus = useCallback(async () => {
-    if (!mounted.current || action_ref.current) return;
+    if (!mounted.current) return;
     if (status_request.current?.generation === status_generation.current) return status_request.current.pending;
     const generation = ++status_generation.current;
+    const observed_generations = new Map(runtime_generations.current);
     setStatusLoading(true);
     const pending = (async () => {
       try {
-        const next = await vpnStatus();
-        if (mounted.current && generation === status_generation.current) publishStatus(next);
+        const snapshot = await vpnStatus();
+        if (!mounted.current || generation !== status_generation.current) return;
+        const next = new Map(snapshot.connections.filter((status) => status.state !== "stopped").map((status) => [vpnRuntimeId(status), status]));
+        // A whole-daemon observation must not undo newer or pending work on an individual VPN.
+        for (const [vpn_id, current_generation] of runtime_generations.current) {
+          if (observed_generations.get(vpn_id) !== current_generation || actions_ref.current.has(vpn_id)) {
+            const current = statuses_ref.current.get(vpn_id);
+            if (current) next.set(vpn_id, current);
+            else next.delete(vpn_id);
+            continue;
+          }
+          const failure = failed_actions.current.get(vpn_id);
+          const observed = next.get(vpn_id);
+          uncertain_ids_ref.current.delete(vpn_id);
+          if (failure?.generation === current_generation && (
+            (failure.kind === "stop" && !observed) ||
+            (failure.kind === "connect" && observed?.state === "connected" && observed.connection_id === failure.connection_id)
+          )) {
+            failed_actions.current.delete(vpn_id);
+            action_errors_ref.current.delete(vpn_id);
+          }
+        }
+        publishRuntimes(next);
+        supports_multiple_ref.current = snapshot.supports_multiple;
+        status_loaded_ref.current = true;
+        status_stale_ref.current = false;
+        setSupportsMultiple(snapshot.supports_multiple);
+        setStatusLoaded(true);
+        setStatusStale(false);
+        setStatusError(null);
+        setLastCheckedAt(Date.now());
+        setActionErrors(new Map(action_errors_ref.current));
+        setUncertainIds(new Set(uncertain_ids_ref.current));
       } catch (failure) {
         if (mounted.current && generation === status_generation.current) {
           status_stale_ref.current = true;
@@ -175,7 +189,7 @@ export function useVpn(enabled: boolean): VpnController {
     })();
     status_request.current = { generation, pending };
     return pending;
-  }, [publishStatus]);
+  }, [publishRuntimes]);
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshCatalog(), refreshStatus()]);
@@ -185,9 +199,9 @@ export function useVpn(enabled: boolean): VpnController {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      lifetime.current += 1;
       catalog_generation.current += 1;
       status_generation.current += 1;
-      action_generation.current += 1;
     };
   }, []);
 
@@ -211,85 +225,71 @@ export function useVpn(enabled: boolean): VpnController {
   }, [enabled, refresh, refreshStatus]);
 
   const isActive = useCallback((connection_id: string) =>
-    (status_ref.current.state !== "stopped" && status_ref.current.connection_id === connection_id) ||
-    (action_ref.current?.kind === "connect" && action_ref.current.connection_id === connection_id), []);
+    uncertain_ids_ref.current.has(connection_id) ||
+    [...statuses_ref.current.values()].some((status) => status.connection_id === connection_id) ||
+    [...actions_ref.current.values()].some((action) => action.connection_id === connection_id), []);
+
+  const runAction = useCallback(async (vpn_id: string, action: VpnAction, optimistic: VpnStatus, operation: () => Promise<VpnStatus>) => {
+    const generation = (runtime_generations.current.get(vpn_id) ?? 0) + 1;
+    const started_lifetime = lifetime.current;
+    runtime_generations.current.set(vpn_id, generation);
+    const previous = statuses_ref.current.get(vpn_id);
+    actions_ref.current.set(vpn_id, action);
+    action_errors_ref.current.delete(vpn_id);
+    uncertain_ids_ref.current.delete(vpn_id);
+    failed_actions.current.delete(vpn_id);
+    setActions(new Map(actions_ref.current));
+    setActionErrors(new Map(action_errors_ref.current));
+    setUncertainIds(new Set(uncertain_ids_ref.current));
+    publishRuntime(vpn_id, optimistic);
+    const current = () => mounted.current && started_lifetime === lifetime.current && runtime_generations.current.get(vpn_id) === generation;
+    try {
+      const next = await operation();
+      if (current()) publishRuntime(vpn_id, next);
+    } catch (failure) {
+      if (current()) {
+        publishRuntime(vpn_id, previous);
+        failed_actions.current.set(vpn_id, { ...action, generation });
+        action_errors_ref.current.set(vpn_id, errorMessage(failure));
+        uncertain_ids_ref.current.add(vpn_id);
+        setActionErrors(new Map(action_errors_ref.current));
+        setUncertainIds(new Set(uncertain_ids_ref.current));
+      }
+    } finally {
+      if (current()) {
+        // Fence observations that began before this result, including polls during this action.
+        const completed_generation = generation + 1;
+        runtime_generations.current.set(vpn_id, completed_generation);
+        const failure = failed_actions.current.get(vpn_id);
+        if (failure) failure.generation = completed_generation;
+        actions_ref.current.delete(vpn_id);
+        setActions(new Map(actions_ref.current));
+        status_generation.current += 1;
+        void refreshStatus();
+      }
+    }
+  }, [publishRuntime, refreshStatus]);
 
   const connect = useCallback(async (connection_id: string) => {
-    if (!mounted.current || action_ref.current || !status_loaded_ref.current ||
-      status_stale_ref.current || status_ref.current.state !== "stopped") return;
-    if (!catalog_ref.current.connections.some((connection) => connection.connection_id === connection_id)) return;
-    const generation = ++action_generation.current;
-    status_generation.current += 1;
-    const previous = status_ref.current;
-    const next_action: VpnAction = { kind: "connect", connection_id };
-    action_ref.current = next_action;
-    failed_action_ref.current = null;
-    setAction(next_action);
-    setActionError(null);
-    setStatusLoading(false);
-    status_ref.current = { ...STOPPED, connection_id, state: "starting" };
-    setStatus(status_ref.current);
-    try {
-      const next = await connectVpn(connection_id);
-      if (mounted.current && generation === action_generation.current) {
-        status_generation.current += 1;
-        publishStatus(next);
-      }
-    } catch (failure) {
-      if (mounted.current && generation === action_generation.current) {
-        status_ref.current = previous;
-        setStatus(previous);
-        status_stale_ref.current = true;
-        setStatusStale(true);
-        failed_action_ref.current = { ...next_action, generation };
-        setActionError(errorMessage(failure));
-      }
-    } finally {
-      if (mounted.current && generation === action_generation.current) {
-        action_ref.current = null;
-        setAction(null);
-        void refreshStatus();
-      }
-    }
-  }, [publishStatus, refreshStatus]);
+    if (!mounted.current || !status_loaded_ref.current || status_stale_ref.current || isActive(connection_id)) return;
+    if (!supports_multiple_ref.current && (statuses_ref.current.size > 0 || actions_ref.current.size > 0 || uncertain_ids_ref.current.size > 0)) return;
+    const connection = catalog_ref.current.connections.find((item) => item.connection_id === connection_id);
+    if (!connection) return;
+    await runAction(connection_id, { kind: "connect", connection_id }, {
+      vpn_id: connection_id, connection_id, state: "starting", running: false,
+      vpn_url: connection.url, username: connection.username, endpoint: null, container_name: null,
+    }, () => connectVpn(connection_id));
+  }, [isActive, runAction]);
 
-  const stop = useCallback(async () => {
-    if (!mounted.current || action_ref.current?.kind === "stop") return;
-    if (!action_ref.current && status_ref.current.state === "stopped" && !status_stale_ref.current) return;
-    const generation = ++action_generation.current;
-    status_generation.current += 1;
-    const previous = status_ref.current;
-    const next_action: VpnAction = { kind: "stop", connection_id: previous.connection_id };
-    action_ref.current = next_action;
-    failed_action_ref.current = null;
-    setAction(next_action);
-    setActionError(null);
-    setStatusLoading(false);
-    status_ref.current = { ...previous, running: false, state: "stopping" };
-    setStatus(status_ref.current);
-    try {
-      const next = await stopVpn();
-      if (mounted.current && generation === action_generation.current) {
-        status_generation.current += 1;
-        publishStatus(next);
-      }
-    } catch (failure) {
-      if (mounted.current && generation === action_generation.current) {
-        status_ref.current = previous;
-        setStatus(previous);
-        status_stale_ref.current = true;
-        setStatusStale(true);
-        failed_action_ref.current = { ...next_action, generation };
-        setActionError(errorMessage(failure));
-      }
-    } finally {
-      if (mounted.current && generation === action_generation.current) {
-        action_ref.current = null;
-        setAction(null);
-        void refreshStatus();
-      }
-    }
-  }, [publishStatus, refreshStatus]);
+  const stop = useCallback(async (vpn_id: string) => {
+    if (!mounted.current || !supports_multiple_ref.current || actions_ref.current.get(vpn_id)?.kind === "stop") return;
+    const previous = statuses_ref.current.get(vpn_id);
+    if (!previous && !uncertain_ids_ref.current.has(vpn_id)) return;
+    const connection_id = previous?.connection_id ?? (catalog_ref.current.connections.some((connection) => connection.connection_id === vpn_id) ? vpn_id : null);
+    await runAction(vpn_id, { kind: "stop", connection_id }, {
+      endpoint: null, container_name: null, ...previous, connection_id, vpn_id, state: "stopping", running: false,
+    }, () => stopVpn(vpn_id));
+  }, [runAction]);
 
   const addConnection = useCallback(() => {
     if (profile_busy_ref.current || !catalog_loaded_ref.current) return;
@@ -388,8 +388,8 @@ export function useVpn(enabled: boolean): VpnController {
   return {
     connections: catalog.connections,
     catalog_loaded, catalog_loading, catalog_error,
-    status, status_loaded, status_loading, status_stale, status_error, last_checked_at,
-    action, action_error, profile_busy, deleting_id, editor, editor_error, editor_saving,
+    statuses, supports_multiple, status_loaded, status_loading, status_stale, status_error, last_checked_at,
+    actions, action_errors, uncertain_ids, profile_busy, deleting_id, editor, editor_error, editor_saving,
     refresh, connect, stop, addConnection, editConnection, closeEditor, saveConnection, deleteConnection,
   };
 }

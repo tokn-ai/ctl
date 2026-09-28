@@ -12,14 +12,22 @@ Each saved connection has one item combining its settings and live status,
 including the VPN server, username, and copyable SOCKS5 endpoint when connected.
 An active connection without a matching saved profile appears as a temporary item. The VPN tab shows an active
 indicator even while another panel is open. Connections started from the CLI are
-also visible, including their server and username. Only one VPN can run at a time. **Disconnect**
-also cancels a connection that is still starting.
+also visible, including their server and username. Multiple VPNs can run at once,
+each with its own SOCKS5 endpoint. **Disconnect** targets only that item and also
+cancels its pending startup. An older daemon can still be inspected, but must be
+updated to connect multiple VPNs or disconnect a connection by ID. The CLI's
+untargeted `ctl vpn stop` remains available for its current connection.
 
 Connections, including passwords, are stored in a private `vpns.json` file in
 the app's configuration directory. The webview receives metadata and a
 password-presence flag; editing with an empty password keeps the stored password.
 The Docker adapter generates its environment file internally when connecting.
 Users do not need to create or select an environment file.
+
+Signed development keeps VPN ownership on the normal per-user daemon even though
+SSH uses a temporary signed helper. This makes VPNs started by the CLI visible
+in the app. Set `CTLD_VPN_SOCKET_PATH` to select a custom VPN owner for the app;
+use the same path as `CTLD_SOCKET_PATH` in the CLI.
 
 This requires a running Docker-compatible engine and the OpenConnect image built
 with `./docker/openconnect/run.sh build` from the repository root. On macOS and

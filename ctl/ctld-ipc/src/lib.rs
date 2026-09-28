@@ -149,6 +149,8 @@ pub struct PortForwardStatus {
 /// The endpoint is available only after the managed VPN and SOCKS5 listener are ready.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnStatus {
+  #[serde(default)]
+  pub vpn_id: Option<String>,
   pub endpoint: Option<String>,
   /// The connected gateway origin, without credentials, path, query, or fragment.
   #[serde(default)]
@@ -159,6 +161,21 @@ pub struct VpnStatus {
   pub running: bool,
   pub connection_id: Option<String>,
   pub state: VpnState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnSnapshot {
+  pub connections: Vec<VpnStatus>,
+  pub supports_multiple: bool,
+}
+
+impl Default for VpnSnapshot {
+  fn default() -> Self {
+    Self {
+      connections: Vec::new(),
+      supports_multiple: true,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,6 +311,9 @@ pub enum ClientMessage {
   },
   VpnStatus,
   StopVpn,
+  StopVpnById {
+    vpn_id: String,
+  },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +351,8 @@ pub enum ServerMessage {
   },
   VpnStatus {
     status: VpnStatus,
+    #[serde(default)]
+    snapshot: Option<VpnSnapshot>,
   },
   Error {
     code: String,
@@ -379,17 +401,25 @@ pub enum ConnectError {
   },
 }
 
+/// Resolves the daemon endpoint, including explicit socket/runtime overrides.
 #[must_use]
 pub fn socket_path() -> PathBuf {
   if let Some(path) = env::var_os("CTLD_SOCKET_PATH") {
     return PathBuf::from(path);
   }
-  let socket_name = format!("ctld-v{PROTOCOL_VERSION}.sock");
   if let Some(directory) = env::var_os("CTLD_RUNTIME_DIR") {
-    return PathBuf::from(directory).join(socket_name);
+    return PathBuf::from(directory).join(format!("ctld-v{PROTOCOL_VERSION}.sock"));
   }
+  default_socket_path()
+}
+
+/// Resolves the normal per-user endpoint without `CTLD_SOCKET_PATH` or
+/// `CTLD_RUNTIME_DIR` overrides. Unix still respects `XDG_RUNTIME_DIR`.
+#[must_use]
+pub fn default_socket_path() -> PathBuf {
   #[cfg(unix)]
   {
+    let socket_name = format!("ctld-v{PROTOCOL_VERSION}.sock");
     if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
       return PathBuf::from(directory).join("ctld").join(socket_name);
     }
@@ -418,16 +448,36 @@ pub fn socket_path() -> PathBuf {
 /// Returns an error when the endpoint cannot be reached or `ctld` cannot be
 /// located and started.
 pub async fn connect_or_start_daemon() -> Result<Stream, ConnectError> {
-  let path = socket_path();
-  match connect(&path).await {
+  connect_or_start_daemon_at(&socket_path()).await
+}
+
+/// Connects to the selected endpoint, starting `ctld` on that exact endpoint if
+/// necessary. Never falls back to another daemon endpoint.
+///
+/// # Errors
+/// Returns connection, daemon location, protocol, or startup failures.
+pub async fn connect_or_start_daemon_at(path: &Path) -> Result<Stream, ConnectError> {
+  connect_or_start_daemon_at_with_executable(path, None).await
+}
+
+/// Connects to one endpoint, using the selected executable only if an owner
+/// needs to be started. Existing owners are never replaced or probed on disk.
+///
+/// # Errors
+/// Returns connection, daemon location, protocol, or startup failures.
+pub async fn connect_or_start_daemon_at_with_executable(
+  path: &Path,
+  executable: Option<&Path>,
+) -> Result<Stream, ConnectError> {
+  match connect(path).await {
     Ok(stream) => return Ok(stream),
     Err(error) if retryable_connect_error(&error) => {}
     Err(error) => return Err(ConnectError::Connect(error)),
   }
-  start_daemon(&path).await?;
+  start_daemon(path, executable).await?;
   let deadline = Instant::now() + CONNECT_TIMEOUT;
   loop {
-    match connect(&path).await {
+    match connect(path).await {
       Ok(stream) => return Ok(stream),
       Err(error) if retryable_connect_error(&error) && Instant::now() < deadline => {
         sleep(CONNECT_RETRY_INTERVAL).await;
@@ -520,8 +570,11 @@ async fn connect(path: &Path) -> io::Result<Stream> {
   }
 }
 
-async fn start_daemon(path: &Path) -> Result<(), ConnectError> {
-  let executable = daemon_executable()?;
+async fn start_daemon(path: &Path, executable: Option<&Path>) -> Result<(), ConnectError> {
+  let executable = match executable {
+    Some(executable) => executable.to_path_buf(),
+    None => daemon_executable()?,
+  };
   check_daemon_protocol(&executable, PROTOCOL_QUERY_TIMEOUT).await?;
   let mut command = std::process::Command::new(&executable);
   #[cfg(windows)]
@@ -533,6 +586,10 @@ async fn start_daemon(path: &Path) -> Result<(), ConnectError> {
     .arg("--socket")
     .arg(path)
     .arg("--detach-from-terminal")
+    // Broker children (including SSH askpass) must contact this same owner even
+    // when the caller selected a different endpoint from its environment.
+    .env("CTLD_SOCKET_PATH", path)
+    .env(DAEMON_EXECUTABLE_ENV, &executable)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null())
@@ -601,6 +658,14 @@ pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
   }
+  default_daemon_executable()
+}
+
+/// Resolves the sibling, bundled helper, or PATH daemon without `CTLD_BIN`.
+///
+/// # Errors
+/// Returns an error if the current executable path cannot be determined.
+pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
   let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
   let sibling = current_executable.with_file_name(format!("ctld{}", env::consts::EXE_SUFFIX));
   if sibling.is_file() {
@@ -829,6 +894,93 @@ mod tests {
           if source.kind() == io::ErrorKind::TimedOut
       ),
       "expected the helper query to time out, got {error:?}"
+    );
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn pinned_daemon_bootstrap_ignores_environment_and_preserves_existing_owners() {
+    for mode in ["bootstrap", "existing"] {
+      let fixture = ProtocolFixture::new("exit 1").await;
+      std::fs::write(
+        &fixture.executable,
+        format!(
+          "#!/bin/sh\nset -eu\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {PROTOCOL_VERSION}\n  exit 0\nfi\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$CTLD_SOCKET_PATH\" \"$CTLD_BIN\" > \"$CTLD_PINNED_TEST_MARKER\"\n"
+        ),
+      )
+      .unwrap();
+      let output = timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(env::current_exe().unwrap())
+          .args(["--exact", "tests::pinned_daemon_child", "--nocapture"])
+          .env("CTLD_PINNED_TEST_MODE", mode)
+          .env("CTLD_PINNED_TEST_EXECUTABLE", &fixture.executable)
+          .env("CTLD_PINNED_TEST_MARKER", fixture.directory.join("started"))
+          .env(
+            DAEMON_EXECUTABLE_ENV,
+            fixture.directory.join("missing-override"),
+          )
+          .kill_on_drop(true)
+          .output(),
+      )
+      .await
+      .unwrap()
+      .unwrap();
+      assert!(output.status.success(), "{mode}: {output:?}");
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn pinned_daemon_child() {
+    struct Endpoint(PathBuf);
+    impl Drop for Endpoint {
+      fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+      }
+    }
+    let Ok(mode) = env::var("CTLD_PINNED_TEST_MODE") else {
+      return;
+    };
+    let endpoint = Endpoint(PathBuf::from(format!(
+      "/tmp/ctld-pinned-executable-{}.sock",
+      std::process::id()
+    )));
+    let executable = PathBuf::from(env::var_os("CTLD_PINNED_TEST_EXECUTABLE").unwrap());
+    let marker = PathBuf::from(env::var_os("CTLD_PINNED_TEST_MARKER").unwrap());
+    let inherited = PathBuf::from(env::var_os(DAEMON_EXECUTABLE_ENV).unwrap());
+    assert_eq!(daemon_executable().unwrap(), inherited);
+    assert_ne!(default_daemon_executable().unwrap(), inherited);
+    if mode == "existing" {
+      let _owner = tokio::net::UnixListener::bind(&endpoint.0).unwrap();
+      connect_or_start_daemon_at_with_executable(&endpoint.0, Some(&inherited))
+        .await
+        .unwrap();
+      assert!(!marker.exists());
+      return;
+    }
+    let server = async {
+      while !marker.exists() {
+        sleep(Duration::from_millis(5)).await;
+      }
+      let owner = tokio::net::UnixListener::bind(&endpoint.0).unwrap();
+      owner.accept().await.unwrap();
+    };
+    let (connection, ()) = tokio::join!(
+      connect_or_start_daemon_at_with_executable(&endpoint.0, Some(&executable)),
+      server
+    );
+    connection.unwrap();
+    let invocation = std::fs::read_to_string(marker).unwrap();
+    assert_eq!(
+      invocation.lines().collect::<Vec<_>>(),
+      [
+        "--socket",
+        endpoint.0.to_str().unwrap(),
+        "--detach-from-terminal",
+        endpoint.0.to_str().unwrap(),
+        executable.to_str().unwrap(),
+      ]
     );
   }
 

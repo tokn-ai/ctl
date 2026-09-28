@@ -45,6 +45,7 @@ import type {
   VpnConnectionInput,
   VpnConnectionsSnapshot,
   VpnStatus,
+  VpnSnapshot,
 } from "./types";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -83,12 +84,12 @@ export async function connectVpn(connection_id: string): Promise<VpnStatus> {
   return invoke("connect_vpn", { request: { connection_id } });
 }
 
-export async function vpnStatus(): Promise<VpnStatus> {
+export async function vpnStatus(): Promise<VpnSnapshot> {
   return invoke("vpn_status");
 }
 
-export async function stopVpn(): Promise<VpnStatus> {
-  return invoke("stop_vpn");
+export async function stopVpn(vpn_id: string): Promise<VpnStatus> {
+  return invoke("stop_vpn", { request: { vpn_id } });
 }
 
 export async function updateHosts(

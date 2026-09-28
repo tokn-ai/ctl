@@ -43,6 +43,7 @@ impl ManagedVpn {
   #[must_use]
   pub fn status(&self) -> VpnStatus {
     VpnStatus {
+      vpn_id: None,
       endpoint: self.endpoint.clone(),
       vpn_url: self.endpoint.as_ref().and(self.metadata.vpn_url.clone()),
       username: self.endpoint.as_ref().and(self.metadata.username.clone()),

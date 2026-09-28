@@ -10,6 +10,7 @@ interface Props {
   ports: ReactNode;
   vpn: ReactNode;
   vpn_state?: VpnState;
+  vpn_active_count?: number;
   vpn_status_stale?: boolean;
   error: string | null;
   on_keybindings?(): void;
@@ -23,6 +24,7 @@ export function WorkspaceSidebar({
   ports,
   vpn,
   vpn_state,
+  vpn_active_count = 0,
   vpn_status_stale = false,
   error,
   on_keybindings,
@@ -34,12 +36,13 @@ export function WorkspaceSidebar({
     ports: "Ports",
     vpn: "VPN",
   } as const;
-  const vpn_description = vpn_status_stale ? "Status unavailable" : vpn_state ? {
+  const vpn_state_description = vpn_status_stale ? "Status unavailable" : vpn_state ? {
     starting: "Connecting",
     connected: "Connected",
     stopping: "Disconnecting",
     stopped: "Disconnected",
   }[vpn_state] : undefined;
+  const vpn_description = !vpn_status_stale && vpn_active_count > 1 ? `${vpn_active_count} active VPNs` : vpn_state_description;
   return (
     <div className="workspace-sidebar">
       <div className="sidebar-rail">

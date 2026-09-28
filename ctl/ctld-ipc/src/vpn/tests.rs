@@ -58,6 +58,7 @@ fn connection_validation_rejects_env_injection_without_echoing_values() {
 async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
   let (mut client, mut server) = tokio::io::duplex(16384);
   let expected = VpnStatus {
+    vpn_id: Some("test".into()),
     state: VpnState::Connected,
     connection_id: Some("test".into()),
     running: true,
@@ -86,9 +87,15 @@ async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
       panic!("expected saved connection");
     };
     assert!(actual == connection());
-    crate::write_frame(&mut server, &ServerMessage::VpnStatus { status: response })
-      .await
-      .unwrap();
+    crate::write_frame(
+      &mut server,
+      &ServerMessage::VpnStatus {
+        status: response,
+        snapshot: None,
+      },
+    )
+    .await
+    .unwrap();
   });
   let actual = exchange(
     &mut client,
@@ -98,8 +105,11 @@ async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
   )
   .await
   .unwrap();
-  assert_eq!(actual, expected);
-  assert_eq!(serde_json::to_value(actual).unwrap()["state"], "connected");
+  assert_eq!(actual.status, expected);
+  assert_eq!(
+    serde_json::to_value(actual.status).unwrap()["state"],
+    "connected"
+  );
   daemon.await.unwrap();
 }
 
@@ -143,4 +153,300 @@ fn status_from_older_protocol_eleven_daemon_defaults_missing_metadata() {
   assert_eq!(status.vpn_url, None);
   assert_eq!(status.username, None);
   assert_eq!(crate::PROTOCOL_VERSION, 11);
+}
+
+#[cfg(unix)]
+mod endpoints {
+  use std::os::unix::fs::PermissionsExt as _;
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  use tokio::net::UnixListener;
+
+  use super::*;
+
+  struct Fixture(PathBuf);
+
+  impl Fixture {
+    fn new() -> Self {
+      static NEXT: AtomicU64 = AtomicU64::new(0);
+      // Keep Unix socket paths short even when macOS uses a long TMPDIR.
+      let directory = PathBuf::from("/tmp").join(format!(
+        "ctld-vpn-client-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+      ));
+      std::fs::create_dir(&directory).unwrap();
+      std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+      Self(directory)
+    }
+  }
+
+  impl Drop for Fixture {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  async fn read_request(listener: &UnixListener) -> (crate::Stream, ClientMessage) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    assert!(matches!(
+      crate::read_frame(&mut stream).await.unwrap(),
+      Some(ClientMessage::Handshake { protocol_version }) if protocol_version == crate::PROTOCOL_VERSION
+    ));
+    crate::write_frame(
+      &mut stream,
+      &ServerMessage::HandshakeAccepted {
+        protocol_version: crate::PROTOCOL_VERSION,
+      },
+    )
+    .await
+    .unwrap();
+    let request = crate::read_frame(&mut stream).await.unwrap().unwrap();
+    (stream, request)
+  }
+
+  #[tokio::test]
+  async fn every_operation_uses_the_explicit_endpoint() {
+    let fixture = Fixture::new();
+    let selected = fixture.0.join("selected.sock");
+    let other = UnixListener::bind(fixture.0.join("other.sock")).unwrap();
+    let listener = UnixListener::bind(&selected).unwrap();
+    let client = Client::new(selected);
+    let expected = VpnStatus {
+      vpn_id: Some("legacy".into()),
+      endpoint: Some("socks5h://127.0.0.1:49152".into()),
+      running: true,
+      state: VpnState::Connected,
+      ..VpnStatus::default()
+    };
+    let response = expected.clone();
+    let daemon = tokio::spawn(async move {
+      for operation in 0..4 {
+        let (mut stream, request) = read_request(&listener).await;
+        match (operation, request) {
+          (0, ClientMessage::VpnStatus) | (3, ClientMessage::StopVpn) => {}
+          (1, ClientMessage::StartVpn { env_file }) => {
+            assert_eq!(env_file, std::path::absolute("test.env").unwrap());
+          }
+          (2, ClientMessage::StartVpnConnection { connection: actual }) => {
+            assert!(actual == connection());
+          }
+          _ => panic!("VPN client sent an unexpected operation"),
+        }
+        crate::write_frame(
+          &mut stream,
+          &ServerMessage::VpnStatus {
+            status: response.clone(),
+            snapshot: None,
+          },
+        )
+        .await
+        .unwrap();
+      }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+      assert_eq!(client.status().await.unwrap(), expected);
+      assert_eq!(client.start("test.env".into()).await.unwrap(), expected);
+      assert_eq!(
+        client.start_connection(connection()).await.unwrap(),
+        expected
+      );
+      assert_eq!(client.stop().await.unwrap(), expected);
+      daemon.await.unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(
+      tokio::time::timeout(Duration::from_millis(20), other.accept())
+        .await
+        .is_err()
+    );
+  }
+
+  #[tokio::test]
+  async fn missing_or_stale_explicit_endpoint_does_not_start_a_daemon() {
+    let fixture = Fixture::new();
+    for stale in [false, true] {
+      let selected = fixture
+        .0
+        .join(if stale { "stale.sock" } else { "missing.sock" });
+      if stale {
+        drop(UnixListener::bind(&selected).unwrap());
+      }
+      let existed = selected.exists();
+      let client = Client::new(selected.clone());
+      assert_eq!(client.status().await.unwrap(), VpnStatus::default());
+      assert_eq!(client.stop().await.unwrap(), VpnStatus::default());
+      assert_eq!(client.list().await.unwrap(), VpnSnapshot::default());
+      assert_eq!(
+        client.stop_id("missing").await.unwrap(),
+        VpnStatus::default()
+      );
+      assert_eq!(selected.exists(), existed);
+    }
+  }
+
+  #[tokio::test]
+  async fn explicit_endpoint_connection_errors_are_not_reported_as_stopped() {
+    let fixture = Fixture::new();
+    let selected = fixture.0.join("not-a-directory");
+    std::fs::write(&selected, "fixture").unwrap();
+    let client = Client::new(selected.join("ctld.sock"));
+    assert_eq!(
+      client.status().await.unwrap_err().code(),
+      "ctld_connection_failed"
+    );
+    assert_eq!(
+      client.stop().await.unwrap_err().code(),
+      "ctld_connection_failed"
+    );
+  }
+
+  #[tokio::test]
+  async fn targeted_stop_uses_the_selected_id_when_supported() {
+    let fixture = Fixture::new();
+    let selected = fixture.0.join("selected.sock");
+    let listener = UnixListener::bind(&selected).unwrap();
+    let client = Client::new(selected);
+    let server = tokio::spawn(async move {
+      let (mut stream, request) = read_request(&listener).await;
+      assert!(matches!(request, ClientMessage::VpnStatus));
+      let status = VpnStatus {
+        vpn_id: Some("selected-profile".into()),
+        connection_id: Some("selected-profile".into()),
+        state: VpnState::Connected,
+        running: true,
+        ..VpnStatus::default()
+      };
+      let snapshot = Some(VpnSnapshot {
+        connections: vec![
+          status.clone(),
+          VpnStatus {
+            vpn_id: Some("other-profile".into()),
+            state: VpnState::Starting,
+            ..VpnStatus::default()
+          },
+        ],
+        supports_multiple: true,
+      });
+      crate::write_frame(&mut stream, &ServerMessage::VpnStatus { status, snapshot })
+        .await
+        .unwrap();
+      let (mut stream, request) = read_request(&listener).await;
+      assert!(
+        matches!(request, ClientMessage::StopVpnById { vpn_id } if vpn_id == "selected-profile")
+      );
+      crate::write_frame(
+        &mut stream,
+        &ServerMessage::VpnStatus {
+          status: VpnStatus::default(),
+          snapshot: None,
+        },
+      )
+      .await
+      .unwrap();
+    });
+    assert_eq!(
+      client.stop_id("selected-profile").await.unwrap(),
+      VpnStatus::default()
+    );
+    server.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn legacy_targeted_stop_never_sends_an_unqualified_stop() {
+    for (connection_id, expected_error) in [
+      (
+        Some("selected-profile"),
+        Some("vpn_targeted_stop_unsupported"),
+      ),
+      (Some("different-profile"), Some("vpn_not_found")),
+      (None, None),
+    ] {
+      let fixture = Fixture::new();
+      let selected = fixture.0.join("selected.sock");
+      let listener = UnixListener::bind(&selected).unwrap();
+      let client = Client::new(selected);
+      let server = tokio::spawn(async move {
+        let (mut stream, request) = read_request(&listener).await;
+        assert!(matches!(request, ClientMessage::VpnStatus));
+        let status = connection_id.map_or_else(VpnStatus::default, |id| VpnStatus {
+          connection_id: Some(id.into()),
+          state: VpnState::Connected,
+          running: true,
+          ..VpnStatus::default()
+        });
+        crate::write_frame(
+          &mut stream,
+          &ServerMessage::VpnStatus {
+            status,
+            snapshot: None,
+          },
+        )
+        .await
+        .unwrap();
+        assert!(
+          tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+        );
+      });
+      let result = client.stop_id("selected-profile").await;
+      if let Some(code) = expected_error {
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), code);
+        if code == "vpn_targeted_stop_unsupported" {
+          assert!(error.to_string().contains("update ctld"));
+          assert!(error.to_string().contains("ctl vpn stop"));
+        }
+      } else {
+        assert_eq!(result.unwrap(), VpnStatus::default());
+      }
+      server.await.unwrap();
+    }
+  }
+}
+
+#[test]
+fn legacy_status_ids_are_stable_and_do_not_claim_multi_connection_support() {
+  for (connection_id, container_name, expected) in [
+    (Some("saved"), Some("container"), "saved"),
+    (None, Some("container"), "container"),
+    (None, None, "legacy"),
+  ] {
+    let status = VpnStatus {
+      connection_id: connection_id.map(str::to_owned),
+      container_name: container_name.map(str::to_owned),
+      running: true,
+      state: VpnState::Connected,
+      ..VpnStatus::default()
+    };
+    let leaf = normalize_status(status.clone());
+    let snapshot = Response {
+      status,
+      snapshot: None,
+    }
+    .snapshot();
+    assert!(!snapshot.supports_multiple);
+    assert_eq!(snapshot.connections, vec![leaf]);
+    assert_eq!(snapshot.connections[0].vpn_id.as_deref(), Some(expected));
+  }
+  let legacy: ServerMessage = serde_json::from_value(serde_json::json!({
+    "type":"vpn_status", "status": { "endpoint":null,"container_name":null,"running":false,"connection_id":null,"state":"stopped" }
+  })).unwrap();
+  assert!(matches!(
+    legacy,
+    ServerMessage::VpnStatus { snapshot: None, .. }
+  ));
+  assert_eq!(
+    Response {
+      status: VpnStatus::default(),
+      snapshot: None
+    }
+    .snapshot(),
+    VpnSnapshot {
+      connections: vec![],
+      supports_multiple: false
+    }
+  );
 }

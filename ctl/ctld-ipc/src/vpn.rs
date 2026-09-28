@@ -6,87 +6,266 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{ClientMessage, ConnectError, ServerMessage, VpnConnection, VpnStatus};
+use crate::{
+  ClientMessage, ConnectError, ServerMessage, VpnConnection, VpnSnapshot, VpnState, VpnStatus,
+};
 
-/// Starts a VPN from an existing private env file, starting ctld if necessary.
+/// A VPN client pinned to one daemon endpoint for every operation.
+#[derive(Clone, Debug)]
+pub struct Client {
+  socket_path: PathBuf,
+  daemon_executable: Option<PathBuf>,
+}
+
+impl Client {
+  #[must_use]
+  pub fn new(socket_path: PathBuf) -> Self {
+    Self {
+      socket_path,
+      daemon_executable: None,
+    }
+  }
+
+  /// Selects the helper used only when this endpoint has no running daemon.
+  #[must_use]
+  pub fn with_daemon_executable(mut self, executable: PathBuf) -> Self {
+    self.daemon_executable = Some(executable);
+    self
+  }
+
+  /// Starts a VPN from an existing private env file, starting ctld if necessary.
+  ///
+  /// # Errors
+  /// Returns connection, protocol, configuration, or daemon startup failures.
+  pub async fn start(&self, env_file: PathBuf) -> Result<VpnStatus, VpnError> {
+    self
+      .request(
+        ClientMessage::StartVpn {
+          env_file: std::path::absolute(env_file).map_err(VpnError::EnvFile)?,
+        },
+        true,
+        Duration::from_secs(100),
+      )
+      .await
+      .map(|response| response.status)
+  }
+
+  /// Starts a saved connection, starting ctld on the selected endpoint if needed.
+  ///
+  /// # Errors
+  /// Returns connection, protocol, configuration, or daemon startup failures.
+  pub async fn start_connection(&self, connection: VpnConnection) -> Result<VpnStatus, VpnError> {
+    connection.validate().map_err(VpnError::InvalidConnection)?;
+    self
+      .request(
+        ClientMessage::StartVpnConnection { connection },
+        true,
+        Duration::from_secs(100),
+      )
+      .await
+      .map(|response| response.status)
+  }
+
+  /// Reads VPN status without starting a daemon or searching other endpoints.
+  ///
+  /// # Errors
+  /// Returns an error for an inaccessible daemon or invalid/late response.
+  pub async fn status(&self) -> Result<VpnStatus, VpnError> {
+    self
+      .request(ClientMessage::VpnStatus, false, Duration::from_secs(5))
+      .await
+      .map(|response| response.status)
+  }
+
+  /// Stops the selected owner's VPN without starting or stopping ctld itself.
+  ///
+  /// # Errors
+  /// Returns an error for an inaccessible daemon or invalid/late response.
+  pub async fn stop(&self) -> Result<VpnStatus, VpnError> {
+    self
+      .request(ClientMessage::StopVpn, false, Duration::from_secs(15))
+      .await
+      .map(|response| response.status)
+  }
+
+  /// Lists every connection owned by the selected daemon without starting it.
+  ///
+  /// # Errors
+  /// Returns connection, protocol, or timeout failures.
+  pub async fn list(&self) -> Result<VpnSnapshot, VpnError> {
+    self
+      .request(ClientMessage::VpnStatus, false, Duration::from_secs(5))
+      .await
+      .map(Response::snapshot)
+  }
+
+  /// Stops exactly one connection. Legacy owners cannot stop by ID atomically,
+  /// so an active legacy connection requires an update or an explicit `stop()`.
+  ///
+  /// # Errors
+  /// Returns unsupported targeting, a target mismatch, connection, protocol,
+  /// or timeout failure.
+  pub async fn stop_id(&self, vpn_id: &str) -> Result<VpnStatus, VpnError> {
+    let snapshot = self.list().await?;
+    if snapshot.supports_multiple {
+      return self
+        .request(
+          ClientMessage::StopVpnById {
+            vpn_id: vpn_id.to_owned(),
+          },
+          false,
+          Duration::from_secs(15),
+        )
+        .await
+        .map(|response| response.status);
+    }
+    if snapshot.connections.is_empty() {
+      return Ok(VpnStatus::default());
+    }
+    if snapshot.connections.len() != 1 || snapshot.connections[0].vpn_id.as_deref() != Some(vpn_id)
+    {
+      return Err(VpnError::Daemon {
+        code: "vpn_not_found".into(),
+        message: "The selected VPN is not owned by this daemon".into(),
+      });
+    }
+    Err(VpnError::Daemon {
+      code: "vpn_targeted_stop_unsupported".into(),
+      message: "This daemon cannot safely disconnect a VPN by ID; update ctld, or use `ctl vpn stop` to disconnect its current VPN".into(),
+    })
+  }
+
+  async fn request(
+    &self,
+    message: ClientMessage,
+    start_daemon: bool,
+    deadline: Duration,
+  ) -> Result<Response, VpnError> {
+    if !cfg!(unix) {
+      return Err(VpnError::UnsupportedPlatform);
+    }
+    tokio::time::timeout(deadline, async {
+      let connected = if start_daemon {
+        crate::connect_or_start_daemon_at_with_executable(
+          &self.socket_path,
+          self.daemon_executable.as_deref(),
+        )
+        .await
+      } else {
+        crate::connect_existing_at(&self.socket_path).await
+      };
+      let mut stream = match connected {
+        Ok(stream) => stream,
+        Err(ConnectError::Connect(error))
+          if !start_daemon
+            && matches!(
+              error.kind(),
+              io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+          return Ok(Response {
+            status: VpnStatus::default(),
+            snapshot: Some(VpnSnapshot::default()),
+          });
+        }
+        Err(error) => return Err(error.into()),
+      };
+      exchange(&mut stream, &message).await
+    })
+    .await
+    .map_err(|_| VpnError::Timeout)?
+  }
+}
+
+impl Default for Client {
+  fn default() -> Self {
+    Self::new(crate::socket_path())
+  }
+}
+
+/// Starts a VPN through the environment-selected daemon, starting it if needed.
 ///
 /// # Errors
 /// Returns connection, protocol, configuration, or daemon startup failures.
 pub async fn start(env_file: PathBuf) -> Result<VpnStatus, VpnError> {
-  request(
-    ClientMessage::StartVpn {
-      env_file: std::path::absolute(env_file).map_err(VpnError::EnvFile)?,
-    },
-    true,
-    Duration::from_secs(100),
-  )
-  .await
+  Client::default().start(env_file).await
 }
 
-/// Starts a saved connection, starting ctld if necessary.
+/// Starts saved settings through the environment-selected daemon.
 ///
 /// # Errors
 /// Returns connection, protocol, configuration, or daemon startup failures.
 pub async fn start_connection(connection: VpnConnection) -> Result<VpnStatus, VpnError> {
-  connection.validate().map_err(VpnError::InvalidConnection)?;
-  request(
-    ClientMessage::StartVpnConnection { connection },
-    true,
-    Duration::from_secs(100),
-  )
-  .await
+  Client::default().start_connection(connection).await
 }
 
-/// Reads VPN status without starting a daemon.
+/// Reads VPN status from the environment-selected daemon without starting it.
 ///
 /// # Errors
 /// Returns an error for an inaccessible daemon or invalid/late response.
 pub async fn status() -> Result<VpnStatus, VpnError> {
-  request(ClientMessage::VpnStatus, false, Duration::from_secs(5)).await
+  Client::default().status().await
 }
 
-/// Stops the owned VPN without starting or stopping ctld itself.
+/// Stops the environment-selected owner's VPN without starting a daemon.
 ///
 /// # Errors
 /// Returns an error for an inaccessible daemon or invalid/late response.
 pub async fn stop() -> Result<VpnStatus, VpnError> {
-  request(ClientMessage::StopVpn, false, Duration::from_secs(15)).await
+  Client::default().stop().await
 }
 
-async fn request(
-  message: ClientMessage,
-  start_daemon: bool,
-  deadline: Duration,
-) -> Result<VpnStatus, VpnError> {
-  if !cfg!(unix) {
-    return Err(VpnError::UnsupportedPlatform);
-  }
-  tokio::time::timeout(deadline, async {
-    let connected = if start_daemon {
-      crate::connect_or_start_daemon().await
-    } else {
-      crate::connect_existing().await
-    };
-    let mut stream = match connected {
-      Ok(stream) => stream,
-      Err(ConnectError::Connect(error))
-        if !start_daemon
-          && matches!(
-            error.kind(),
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-          ) =>
-      {
-        return Ok(VpnStatus::default());
+/// Lists connections through the environment-selected daemon.
+///
+/// # Errors
+/// Returns connection, protocol, or timeout failures.
+pub async fn list() -> Result<VpnSnapshot, VpnError> {
+  Client::default().list().await
+}
+
+/// Stops a selected connection through the environment-selected daemon.
+/// Active legacy owners require an update or an explicit untargeted `stop()`.
+///
+/// # Errors
+/// Returns unsupported targeting, a target mismatch, connection, protocol,
+/// or timeout failure.
+pub async fn stop_id(vpn_id: &str) -> Result<VpnStatus, VpnError> {
+  Client::default().stop_id(vpn_id).await
+}
+
+#[derive(Debug)]
+struct Response {
+  status: VpnStatus,
+  snapshot: Option<VpnSnapshot>,
+}
+
+impl Response {
+  fn snapshot(self) -> VpnSnapshot {
+    self.snapshot.unwrap_or_else(|| {
+      let status = normalize_status(self.status);
+      let active = status.running || status.state != VpnState::Stopped;
+      VpnSnapshot {
+        connections: if active { vec![status] } else { Vec::new() },
+        supports_multiple: false,
       }
-      Err(error) => return Err(error.into()),
-    };
-    exchange(&mut stream, &message).await
-  })
-  .await
-  .map_err(|_| VpnError::Timeout)?
+    })
+  }
 }
 
-async fn exchange<S>(stream: &mut S, message: &ClientMessage) -> Result<VpnStatus, VpnError>
+fn normalize_status(mut status: VpnStatus) -> VpnStatus {
+  if (status.running || status.state != VpnState::Stopped) && status.vpn_id.is_none() {
+    status.vpn_id = Some(
+      status
+        .connection_id
+        .clone()
+        .or_else(|| status.container_name.clone())
+        .unwrap_or_else(|| "legacy".into()),
+    );
+  }
+  status
+}
+
+async fn exchange<S>(stream: &mut S, message: &ClientMessage) -> Result<Response, VpnError>
 where
   S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -112,7 +291,10 @@ where
   }
   crate::write_frame(stream, message).await?;
   match crate::read_frame::<_, ServerMessage>(stream).await? {
-    Some(ServerMessage::VpnStatus { status }) => Ok(status),
+    Some(ServerMessage::VpnStatus { status, snapshot }) => Ok(Response {
+      status: normalize_status(status),
+      snapshot,
+    }),
     Some(ServerMessage::Error { code, message }) => Err(VpnError::Daemon { code, message }),
     None => Err(VpnError::ConnectionClosed),
     Some(_) => Err(VpnError::UnexpectedResponse),

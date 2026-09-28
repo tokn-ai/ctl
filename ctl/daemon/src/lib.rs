@@ -348,6 +348,7 @@ async fn handle_connection(
     }
     request @ (ClientMessage::StartVpn { .. }
     | ClientMessage::StartVpnConnection { .. }
+    | ClientMessage::StopVpnById { .. }
     | ClientMessage::StopVpn
     | ClientMessage::VpnStatus) => handle_vpn_request(&mut stream, &state, request).await,
     ClientMessage::Askpass {
@@ -385,11 +386,13 @@ async fn handle_vpn_request(
     ClientMessage::StartVpn { env_file } => service.start(env_file).await,
     ClientMessage::StartVpnConnection { connection } => service.start_connection(connection).await,
     ClientMessage::StopVpn => service.stop().await,
+    ClientMessage::StopVpnById { vpn_id } => service.stop_id(vpn_id).await,
     ClientMessage::VpnStatus => service.status().await,
     _ => return Err(RequestError::InvalidRequest("expected a VPN request")),
   }
   .map_err(RequestError::VpnFailed)?;
-  ctld_ipc::write_frame(stream, &ServerMessage::VpnStatus { status })
+  let snapshot = Some(service.list().await.map_err(RequestError::VpnFailed)?);
+  ctld_ipc::write_frame(stream, &ServerMessage::VpnStatus { status, snapshot })
     .await
     .map_err(Into::into)
 }
@@ -410,6 +413,7 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::VpnStatus
     | ClientMessage::StartVpn { .. }
     | ClientMessage::StartVpnConnection { .. }
+    | ClientMessage::StopVpnById { .. }
     | ClientMessage::StopVpn => {}
   }
 }

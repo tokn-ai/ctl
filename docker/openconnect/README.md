@@ -68,18 +68,25 @@ Build the image once, then use the current ctl and ctld binaries:
 ./docker/openconnect/run.sh build
 ctl vpn start --env-file .env
 ctl vpn status
-ctl vpn stop
+ctl vpn stop VPN_ID
 ```
 
 `ctl` talks to ctld and starts the daemon automatically if needed. Starting the
 VPN waits for its tunnel interface, routes, DNS, and SOCKS listener to become
-ready, then prints readable status with the VPN server, username, and randomly
+ready, then prints a table with the VPN state, server, username, and randomly
 assigned SOCKS5 endpoint. Start, status, and stop accept `--json` for scripts.
-JSON contains `vpn_url`, `username`, `endpoint`, `container_name`, `running`,
-`connection_id`, and `state`. The VPN server is its HTTPS origin; credentials,
+Status JSON is a snapshot with `connections` and `supports_multiple`. Each
+connection includes `vpn_id`, `vpn_url`, `username`, `endpoint`, `container_name`,
+`running`, `connection_id`, and `state`. Start and stop JSON return the affected
+connection. Saved connections use their profile ID as `vpn_id`; file-based starts
+receive an ID for the active connection. The VPN server is its HTTPS origin; credentials,
 paths, queries, and fragments are omitted. `state` is `stopped`, `starting`,
 `connected`, or `stopping`; CLI-started connections have a null `connection_id`.
 The ready proxy endpoint is a `socks5h://127.0.0.1:PORT` URL.
+
+Each VPN owns a separate container and random SOCKS5 endpoint. Use `ctl vpn stop VPN_ID` to disconnect one. Without an ID, stop succeeds only when there are zero
+or one active VPNs; it never implicitly stops several. Repeating a start for the
+same saved connection or settings path reuses its active connection.
 
 Connection metadata comes from the settings used to start the VPN and stays
 unchanged until it stops. An already running older ctld may return no server or
@@ -97,12 +104,17 @@ binaries, then invokes ctl with the root `.env`:
 
 The helper sets `CTLD_BIN` to the matching `target/debug/ctld` binary for daemon
 auto-start. Use `CTLD_SOCKET_PATH=/absolute/path/to/ctld.sock` consistently when
-using a custom broker socket.
+using a custom broker socket. The desktop app accepts `CTLD_VPN_SOCKET_PATH`
+when its VPN owner should differ from its SSH helper. Signed development uses
+the shared per-user VPN owner by default, keeping existing CLI VPNs visible.
+An older daemon returns `supports_multiple: false` and its existing connection
+remains visible. Update and restart that owner before starting simultaneous VPNs
+or stopping a connection by ID. Explicit `ctl vpn stop` can stop its current VPN.
 
 The VPN keeps running after `ctl vpn start` exits because ctld owns its
-container and heartbeat stream. `ctl vpn stop` stops and removes only the VPN
-container; the broker remains available for other ctl commands. Exiting ctld
-also stops the VPN. Stop and start the VPN after changing its settings.
+container and heartbeat stream. `ctl vpn stop VPN_ID` stops and removes only the VPN
+container selected by ID; the broker remains available for other ctl commands. Exiting ctld
+stops all of its VPN containers. Stop and start the VPN after changing its settings.
 
 ## Use the current endpoint
 
@@ -111,8 +123,9 @@ ctl status. `socks5h` resolves names inside the container using its current DNS
 configuration, including VPN-provided DNS servers:
 
 ```sh
+vpn_id=VPN_ID
 endpoint=$(ctl vpn status --json | python3 -c \
-  'import json, sys; print(json.load(sys.stdin)["endpoint"])')
+  'import json, sys; print(next(v["endpoint"] for v in json.load(sys.stdin)["connections"] if v["vpn_id"] == sys.argv[1]))' "$vpn_id")
 curl --proxy "$endpoint" https://example.com
 ```
 
@@ -138,7 +151,7 @@ against the settings provided for the VPN. Diagnostics return fixed messages;
 ctld does not retain or return raw container output, which may contain private
 gateway details. Unrecognized failures retain a generic exit or timeout message.
 
-Use `container_name` from `ctl vpn status --json` with Docker to inspect logs or run the optional
+Use a connection's `container_name` from `ctl vpn status --json` with Docker to inspect logs or run the optional
 connectivity probe while the VPN is running:
 
 ```sh

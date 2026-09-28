@@ -22,12 +22,12 @@ function runtime(vpn_id = "work", overrides: Partial<VpnStatus> = {}): VpnStatus
 function model(overrides: Partial<VpnController> = {}): VpnController {
   return {
     connections: [connection], catalog_loaded: true, catalog_loading: false, catalog_error: null,
-    statuses: [], supports_multiple: true,
+    statuses: [], supports_multiple: true, supported_providers: ["openconnect", "tailscale"], signing_in_ids: new Set(),
     status_loaded: true, status_loading: false, status_stale: false, status_error: null, last_checked_at: null,
     actions: new Map(), action_errors: new Map(), uncertain_ids: new Set(), profile_busy: false, deleting_id: null,
     editor: null, editor_error: null, editor_saving: false,
     refresh: vi.fn().mockResolvedValue(undefined), connect: vi.fn().mockResolvedValue(undefined), stop: vi.fn().mockResolvedValue(undefined),
-    addConnection: vi.fn(), editConnection: vi.fn(), closeEditor: vi.fn(),
+    signIn: vi.fn().mockResolvedValue(undefined), addConnection: vi.fn(), editConnection: vi.fn(), closeEditor: vi.fn(),
     saveConnection: vi.fn().mockResolvedValue(true), deleteConnection: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -221,5 +221,55 @@ describe("VPN sidebar", () => {
   it("keeps the editor outside the inert workspace", () => {
     render(<div inert><VpnSidebar model={model({ editor: { editor_id: 1, connection, expected_revision: "revision-1" } })} /></div>);
     expect(screen.getByRole("dialog").closest("[inert]")).toBeNull();
+  });
+});
+
+
+describe("Tailscale VPN items", () => {
+  const tailscale: VpnConnection = { provider: "tailscale", connection_id: "tailnet", name: "Tailnet", hostname: "rmux-work", accept_routes: false };
+  const pending = runtime("tailnet", { provider: "tailscale", state: "starting", running: false, endpoint: null,
+    auth_url: "https://login.tailscale.com/a/example", vpn_url: null, username: null });
+
+  it("connects without a password and disables unsupported providers on an old owner", async () => {
+    const user = userEvent.setup();
+    const state = model({ connections: [tailscale] });
+    const { rerender } = render(<VpnSidebar model={state} />);
+    await user.click(region("Tailnet").getByRole("button", { name: "Connect Tailnet" }));
+    expect(state.connect).toHaveBeenCalledWith("tailnet");
+    expect(region("Tailnet").getByText("Tailscale")).toBeTruthy();
+    expect(region("Tailnet").queryByText("VPN server")).toBeNull();
+    rerender(<VpnSidebar model={{ ...state, supported_providers: ["openconnect"] }} />);
+    expect((region("Tailnet").getByRole("button", { name: "Connect Tailnet" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(region("Tailnet").getByText("Update ctld to connect with Tailscale.")).toBeTruthy();
+  });
+
+  it("opens native sign-in by runtime ID and keeps cancellation available", async () => {
+    const user = userEvent.setup();
+    const state = model({ connections: [tailscale], statuses: [pending] });
+    const { rerender } = render(<VpnSidebar model={state} />);
+    expect(region("Tailnet").getByText("Sign-in required")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.queryByText(pending.auth_url!)).toBeNull();
+    await user.click(region("Tailnet").getByRole("button", { name: "Sign in to Tailnet" }));
+    expect(state.signIn).toHaveBeenCalledWith("tailnet");
+    rerender(<VpnSidebar model={{ ...state, signing_in_ids: new Set(["tailnet"]) }} />);
+    expect((region("Tailnet").getByRole("button", { name: "Sign in to Tailnet" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(region("Tailnet").getByRole("button", { name: "Cancel connection to Tailnet" }));
+    expect(state.stop).toHaveBeenCalledWith("tailnet");
+    rerender(<VpnSidebar model={{ ...state, statuses: [{ ...pending, state: "connected", auth_url: null, hostname: "rmux-node", tailnet: "example.test", username: "user@example.test" }] }} />);
+    expect(region("Tailnet").getByText("Connected")).toBeTruthy();
+    expect(region("Tailnet").getByText("rmux-node")).toBeTruthy();
+    expect(region("Tailnet").getByText("example.test")).toBeTruthy();
+    expect(region("Tailnet").queryByRole("button", { name: /Sign in/ })).toBeNull();
+  });
+
+  it("supports an external pending runtime and prevents sign-in from stale status", async () => {
+    const user = userEvent.setup();
+    const state = model({ connections: [], statuses: [{ ...pending, vpn_id: "cli-tailnet", connection_id: null }] });
+    const { rerender } = render(<VpnSidebar model={state} />);
+    await user.click(screen.getByRole("button", { name: "Sign in to Tailscale" }));
+    expect(state.signIn).toHaveBeenCalledWith("cli-tailnet");
+    rerender(<VpnSidebar model={{ ...state, status_stale: true }} />);
+    expect((screen.getByRole("button", { name: "Sign in to Tailscale" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

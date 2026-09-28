@@ -75,6 +75,7 @@ pub fn run() {
       vpn::connect_vpn,
       vpn::vpn_status,
       vpn::stop_vpn,
+      vpn::open_vpn_sign_in,
       command_menu::sync_command_menu,
       commands::inspection::inspect_known_sessions,
       commands::list_sessions,

@@ -2,12 +2,12 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnSnapshot, VpnStatus } from "../../lib/types";
-import { connectVpn, deleteVpnConnection, loadVpnConnections, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
+import { connectVpn, deleteVpnConnection, loadVpnConnections, openVpnSignIn, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
 import { useVpn, VPN_STATUS_INTERVAL_MS } from "./useVpn";
 
 vi.mock("../../lib/tauri", () => ({
   connectVpn: vi.fn(), deleteVpnConnection: vi.fn(), loadVpnConnections: vi.fn(),
-  saveVpnConnection: vi.fn(), stopVpn: vi.fn(), vpnStatus: vi.fn(),
+  openVpnSignIn: vi.fn(), saveVpnConnection: vi.fn(), stopVpn: vi.fn(), vpnStatus: vi.fn(),
 }));
 
 const connection: VpnConnection = {
@@ -304,5 +304,70 @@ describe("VPN controller", () => {
     expect(result.current.editor?.connection).toEqual(connection);
     expect(JSON.stringify(result.current.editor)).not.toContain("sample-password");
     expect(result.current.editor_error).toBe("Settings changed");
+  });
+});
+
+
+describe("Tailscale VPN controller", () => {
+  const tailscale: VpnConnection = { provider: "tailscale", connection_id: "tailnet", name: "Tailnet", hostname: null, accept_routes: false };
+  const pending = runtime("tailnet", { provider: "tailscale", state: "starting", running: false, endpoint: null,
+    auth_url: "https://login.tailscale.com/a/example" });
+
+  it("treats missing provider capabilities as OpenConnect-only", async () => {
+    vi.mocked(loadVpnConnections).mockResolvedValue({ revision: "1", connections: [tailscale] });
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    expect(result.current.supported_providers).toEqual(["openconnect"]);
+    await act(async () => { await result.current.connect("tailnet"); });
+    expect(connectVpn).not.toHaveBeenCalled();
+  });
+
+  it("returns from connect while browser sign-in is pending, observes completion, and retains targeted stop", async () => {
+    vi.mocked(loadVpnConnections).mockResolvedValue({ revision: "1", connections: [tailscale] });
+    backend.supported_providers = ["openconnect", "tailscale"];
+    vi.mocked(connectVpn).mockImplementation(async () => { backend.connections = [pending]; return pending; });
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.connect("tailnet"); });
+    expect(result.current.actions.size).toBe(0);
+    expect(status(result, "tailnet")?.auth_url).toBe(pending.auth_url);
+    await act(async () => { await result.current.signIn("tailnet"); });
+    expect(openVpnSignIn).toHaveBeenCalledExactlyOnceWith("tailnet");
+    backend.connections = [{ ...pending, state: "connected", running: true, auth_url: null }];
+    await act(async () => { await result.current.refresh(); });
+    expect(status(result, "tailnet")?.state).toBe("connected");
+    await act(async () => { await result.current.stop("tailnet"); });
+    expect(stopVpn).toHaveBeenCalledWith("tailnet");
+    expect(result.current.statuses).toEqual([]);
+  });
+
+  it("does not undo a stop or block cancellation while browser opening is pending", async () => {
+    backend = { ...observe(pending), supported_providers: ["openconnect", "tailscale"] };
+    const opening = deferred<void>();
+    vi.mocked(openVpnSignIn).mockReturnValue(opening.promise);
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    let sign_in!: Promise<void>;
+    act(() => { sign_in = result.current.signIn("tailnet"); });
+    expect(result.current.signing_in_ids.has("tailnet")).toBe(true);
+    await act(async () => { await result.current.stop("tailnet"); });
+    await act(async () => { opening.reject(new Error("Browser unavailable")); await sign_in; });
+    expect(result.current.statuses).toEqual([]);
+    expect(result.current.action_errors.has("tailnet")).toBe(false);
+    expect(result.current.signing_in_ids.size).toBe(0);
+  });
+
+  it("reports sign-in failure without treating runtime state as uncertain", async () => {
+    backend = observe(pending);
+    vi.mocked(openVpnSignIn).mockRejectedValue(new Error("Browser unavailable"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.signIn("tailnet"); });
+    expect(result.current.action_errors.get("tailnet")).toBe("Browser unavailable");
+    expect(result.current.uncertain_ids.size).toBe(0);
+    expect(status(result, "tailnet")).toEqual(pending);
+    backend.connections = [{ ...pending, state: "connected", auth_url: null }];
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_errors.has("tailnet")).toBe(false);
   });
 });

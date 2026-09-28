@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use unicode_width::UnicodeWidthStr as _;
@@ -10,6 +11,23 @@ pub enum Command {
     #[arg(long, default_value = ".env", value_name = "PATH")]
     env_file: PathBuf,
     /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+  },
+  /// Start a Tailscale container with browser sign-in and persistent identity.
+  StartTailscale {
+    /// Stable connection ID; reuse it to retain this node's login on restart.
+    #[arg(long = "id", value_name = "CONNECTION_ID")]
+    connection_id: String,
+    #[arg(long, default_value = "Tailscale")]
+    name: String,
+    /// Optional device name shown in the tailnet.
+    #[arg(long)]
+    hostname: Option<String>,
+    /// Allow access through subnet routes advertised in the tailnet.
+    #[arg(long)]
+    accept_routes: bool,
+    /// Print machine-readable JSON, including any pending sign-in URL.
     #[arg(long)]
     json: bool,
   },
@@ -33,6 +51,23 @@ pub enum Command {
 pub async fn run(command: Command) -> Result<(), Error> {
   let (status, json) = match command {
     Command::Start { env_file, json } => (ctld_ipc::vpn::start(env_file).await?, json),
+    Command::StartTailscale {
+      connection_id,
+      name,
+      hostname,
+      accept_routes,
+      json,
+    } => {
+      let connection = ctld_ipc::VpnConnection {
+        connection_id,
+        name,
+        settings: ctld_ipc::VpnSettings::Tailscale {
+          hostname,
+          accept_routes,
+        },
+      };
+      (ctld_ipc::vpn::start_connection(connection).await?, json)
+    }
     Command::Status { json } => {
       let snapshot = ctld_ipc::vpn::list().await?;
       let output = if json {
@@ -59,23 +94,36 @@ pub async fn run(command: Command) -> Result<(), Error> {
   Ok(())
 }
 
-fn status_row(status: &ctld_ipc::VpnStatus) -> [String; 5] {
+fn status_row(status: &ctld_ipc::VpnStatus) -> [String; 6] {
   use ctld_ipc::VpnState;
 
   let state = match status.state {
     VpnState::Stopped => "disconnected",
+    VpnState::Starting if status.auth_url.is_some() => "sign-in required",
     VpnState::Starting => "starting",
     VpnState::Connected => "connected",
     VpnState::Stopping => "stopping",
   };
   let vpn_id = display_value(status.vpn_id.as_deref().or(Some("-")));
+  let provider = match status.provider {
+    ctld_ipc::VpnProvider::Openconnect => "OpenConnect",
+    ctld_ipc::VpnProvider::Tailscale => "Tailscale",
+  };
   if status.state == VpnState::Stopped {
-    [vpn_id, state.to_owned(), "-".into(), "-".into(), "-".into()]
+    [
+      vpn_id,
+      "-".into(),
+      state.to_owned(),
+      "-".into(),
+      "-".into(),
+      "-".into(),
+    ]
   } else {
     [
       vpn_id,
+      provider.to_owned(),
       state.to_owned(),
-      display_value(status.vpn_url.as_deref()),
+      display_value(status.tailnet.as_deref().or(status.vpn_url.as_deref())),
       display_value(status.username.as_deref()),
       display_value(status.endpoint.as_deref()),
     ]
@@ -88,7 +136,14 @@ fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
   } else {
     statuses.iter().map(status_row).collect()
   };
-  let headers = ["VPN ID", "STATE", "SERVER", "USERNAME", "SOCKS5 ENDPOINT"];
+  let headers = [
+    "VPN ID",
+    "PROVIDER",
+    "STATE",
+    "SERVER",
+    "USERNAME",
+    "SOCKS5 ENDPOINT",
+  ];
   let widths = std::array::from_fn(|index| {
     rows
       .iter()
@@ -99,6 +154,28 @@ fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
   for row in &rows {
     table.push('\n');
     table.push_str(&format_row(row.each_ref().map(String::as_str), widths));
+  }
+  for status in statuses {
+    if let Some(url) = &status.auth_url
+      && ctld_ipc::vpn::is_tailscale_auth_url(url)
+    {
+      let _ = write!(
+        table,
+        "\n\nSign in for {}: {url}",
+        display_value(status.vpn_id.as_deref())
+      );
+    } else if let Some(message) = status
+      .message
+      .as_deref()
+      .filter(|message| !message.is_empty())
+    {
+      let _ = write!(
+        table,
+        "\n\n{}: {}",
+        display_value(status.vpn_id.as_deref()),
+        display_value(Some(message))
+      );
+    }
   }
   table
 }

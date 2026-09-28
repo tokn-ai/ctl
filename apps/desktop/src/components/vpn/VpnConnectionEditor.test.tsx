@@ -40,7 +40,7 @@ describe("VPN connection editor", () => {
     expect((screen.getByLabelText("Password") as HTMLInputElement).value).toBe("");
     await user.click(screen.getByRole("button", { name: "Save connection" }));
     expect(on_save).toHaveBeenCalledWith({
-      connection_id: "work", name: "Work", url: "https://vpn.example.test", username: "example-user",
+      provider: "openconnect", connection_id: "work", name: "Work", url: "https://vpn.example.test", username: "example-user",
       password: null, auth_method: "example-method", target_ip: "192.0.2.10",
     });
   });
@@ -75,5 +75,50 @@ describe("VPN connection editor", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(password.value).toBe("");
     expect(on_close).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe("Tailscale connection editor", () => {
+  it("defaults to OpenConnect, then saves a Tailscale profile without credential fields", async () => {
+    const user = userEvent.setup();
+    const on_save = vi.fn().mockResolvedValue(true);
+    render(<VpnConnectionEditor connection={null} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
+    expect((screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement).value).toBe("openconnect");
+    await user.type(screen.getByLabelText("Password"), "discarded-example");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "tailscale");
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(screen.queryByLabelText("VPN server")).toBeNull();
+    await user.type(screen.getByLabelText("Name"), "Tailnet");
+    await user.type(screen.getByLabelText(/Device hostname/), "rmux-work");
+    expect((screen.getByRole("checkbox", { name: /Accept subnet routes/ }) as HTMLInputElement).checked).toBe(false);
+    await user.click(screen.getByRole("checkbox", { name: /Accept subnet routes/ }));
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(on_save).toHaveBeenCalledWith({
+      provider: "tailscale", connection_id: expect.any(String), name: "Tailnet", hostname: "rmux-work", accept_routes: true,
+    });
+  });
+
+  it("preserves the provider and stable identity when editing", async () => {
+    const user = userEvent.setup();
+    const on_save = vi.fn().mockResolvedValue(true);
+    const tailscale: VpnConnection = { provider: "tailscale", connection_id: "tailnet", name: "Tailnet", hostname: null, accept_routes: false };
+    render(<VpnConnectionEditor connection={tailscale} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
+    expect((screen.getByRole("combobox", { name: /Provider/ }) as HTMLSelectElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(on_save).toHaveBeenCalledWith(tailscale);
+    expect(screen.getByText(/keeps its Tailscale login across restarts/)).toBeTruthy();
+  });
+
+  it("rejects invalid device hostnames without saving", async () => {
+    const user = userEvent.setup();
+    const on_save = vi.fn();
+    render(<VpnConnectionEditor connection={null} saving={false} error={null} on_save={on_save} on_close={vi.fn()} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "tailscale");
+    await user.type(screen.getByLabelText("Name"), "Tailnet");
+    await user.type(screen.getByLabelText(/Device hostname/), "invalid host");
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    expect(screen.getByRole("alert").textContent).toContain("device hostname");
+    expect(on_save).not.toHaveBeenCalled();
   });
 });

@@ -67,6 +67,8 @@ let vpn_connections: VpnConnectionsSnapshot = {
   }, {
     connection_id: "research-vpn", name: "Research", url: "https://research.example.com",
     username: "researcher", has_password: true, auth_method: null, target_ip: null,
+  }, {
+    provider: "tailscale", connection_id: "tailnet-vpn", name: "Tailnet", hostname: "rmux-preview", accept_routes: false,
   }],
 };
 const stopped_vpn: VpnStatus = {
@@ -74,7 +76,8 @@ const stopped_vpn: VpnStatus = {
   vpn_url: null, username: null,
 };
 const vpn_param = new URLSearchParams(location.search).get("vpn");
-let vpn_snapshot: VpnSnapshot = { supports_multiple: vpn_param !== "legacy", connections: [] };
+let vpn_snapshot: VpnSnapshot = { supports_multiple: vpn_param !== "legacy", supported_providers: vpn_param === "legacy" ? ["openconnect"] : ["openconnect", "tailscale"], connections: [] };
+const signed_in_tailnets = new Set<string>();
 let next_vpn_port = 49160;
 if (["connected", "external", "legacy", "multiple"].includes(vpn_param ?? "")) {
   const external = vpn_param === "external" || vpn_param === "legacy";
@@ -89,6 +92,19 @@ if (vpn_param === "multiple") {
     vpn_id: "research-external", state: "connected", running: true, connection_id: null,
     vpn_url: "https://research.example.com", username: "researcher",
     endpoint: "socks5h://127.0.0.1:49153", container_name: "preview-research-vpn",
+  });
+}
+
+if (vpn_param === "tailscale-sign-in" || vpn_param === "tailscale-connected") {
+  const connected = vpn_param === "tailscale-connected";
+  if (connected) signed_in_tailnets.add("tailnet-vpn");
+  vpn_snapshot.connections.push({
+    provider: "tailscale", vpn_id: "tailnet-vpn", connection_id: "tailnet-vpn",
+    state: connected ? "connected" : "starting", running: connected, hostname: "rmux-preview",
+    tailnet: connected ? "example.test" : null, username: connected ? "sample@example.test" : null,
+    auth_url: connected ? null : "https://login.tailscale.com/a/example-preview",
+    message: connected ? null : "Sign in to finish connecting.",
+    endpoint: connected ? "socks5h://127.0.0.1:49154" : null, container_name: "preview-tailscale",
   });
 }
 
@@ -142,13 +158,16 @@ mockIPC((command, payload) => {
       return structuredClone(vpn_connections);
     case "save_vpn_connection": {
       const { connection } = request<{ connection: VpnConnectionInput }>(payload);
-      const { password, ...summary } = connection;
       const prior = vpn_connections.connections.find((item) => item.connection_id === connection.connection_id);
+      const summary = connection.provider === "tailscale" ? connection : (() => {
+        const { password, ...settings } = connection;
+        return { ...settings, has_password: password !== null || (prior?.provider !== "tailscale" && prior?.has_password === true) };
+      })();
       vpn_connections = {
         revision: `preview-vpn-${++revision}`,
         connections: [
           ...vpn_connections.connections.filter((item) => item.connection_id !== connection.connection_id),
-          { ...summary, has_password: password !== null || prior?.has_password === true },
+          summary,
         ],
       };
       return structuredClone(vpn_connections);
@@ -166,13 +185,26 @@ mockIPC((command, payload) => {
       const connection = vpn_connections.connections.find((item) => item.connection_id === connection_id);
       if (!connection) throw new Error("This sample VPN connection no longer exists.");
       if (!vpn_snapshot.supports_multiple && vpn_snapshot.connections.length > 0) throw new Error("Update ctld to connect multiple VPNs.");
+      const tailscale = connection.provider === "tailscale";
+      const connected = !tailscale || signed_in_tailnets.has(connection_id);
       const status: VpnStatus = {
-        vpn_id: connection_id, state: "connected", running: true,
-        connection_id, vpn_url: connection.url, username: connection.username,
-        endpoint: `socks5h://127.0.0.1:${next_vpn_port++}`, container_name: `preview-${connection_id}`,
+        provider: connection.provider ?? "openconnect",
+        vpn_id: connection_id, state: connected ? "connected" : "starting", running: connected, connection_id,
+        ...(tailscale ? { hostname: connection.hostname, auth_url: connected ? null : "https://login.tailscale.com/a/example-preview" }
+          : { vpn_url: connection.url, username: connection.username }),
+        endpoint: connected ? `socks5h://127.0.0.1:${next_vpn_port++}` : null, container_name: `preview-${connection_id}`,
       };
       vpn_snapshot.connections = [...vpn_snapshot.connections.filter((item) => item.vpn_id !== connection_id), status];
       return structuredClone(status);
+    }
+    case "open_vpn_sign_in": {
+      const { vpn_id } = request<{ vpn_id: string }>(payload);
+      signed_in_tailnets.add(vpn_id);
+      vpn_snapshot.connections = vpn_snapshot.connections.map((status) => status.vpn_id === vpn_id ? {
+        ...status, state: "connected", running: true, auth_url: null, message: null,
+        tailnet: "example.test", username: "sample@example.test", endpoint: `socks5h://127.0.0.1:${next_vpn_port++}`,
+      } : status);
+      return;
     }
     case "vpn_status":
       return structuredClone(vpn_snapshot);

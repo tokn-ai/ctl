@@ -84,6 +84,10 @@ export async function connectVpn(connection_id: string): Promise<VpnStatus> {
   return invoke("connect_vpn", { request: { connection_id } });
 }
 
+export async function openVpnSignIn(vpn_id: string): Promise<void> {
+  return invoke("open_vpn_sign_in", { request: { vpn_id } });
+}
+
 export async function vpnStatus(): Promise<VpnSnapshot> {
   return invoke("vpn_status");
 }

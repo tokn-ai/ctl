@@ -205,7 +205,7 @@ The desktop VPN panel stores named connection details in private, schema-version
 `vpns.json` under the app configuration directory. Native commands return metadata
 and password-presence flags, use hashed revisions for optimistic writes, and load
 the saved secret only when connecting. Both desktop and CLI use the shared
-`ctld-ipc::vpn` client. Structured starts send the configuration to the container
+`ctld-ipc::vpn` client. OpenConnect structured starts send the configuration to the container
 over its attached stdin; the container writes a mode-0600 environment file on
 private tmpfs. No generated credential file is left on the host. CLI-provided
 environment files are read as bounded private snapshots and use the same
@@ -225,6 +225,34 @@ its temporary SSH helper; `CTLD_VPN_SOCKET_PATH` explicitly selects another VPN
 owner for all native VPN operations. Status polling never starts a daemon or
 reconnects automatically; closing the panel or app does not stop the daemon-owned
 VPN.
+
+Tailscale uses the same per-profile owner and stable route IDs. Profiles carry a
+provider tag; schema 1 OpenConnect files are read without rewriting and migrate
+to schema 2 on a successful mutation. Tailscale settings contain only an optional
+device hostname and an `accept_routes` preference. Its node identity lives in a
+durable Docker volume keyed by the local owner and profile ID. Disconnect and
+profile deletion retain that volume. Container names reserve each identity
+exclusively, and lease labels plus immutable container IDs prevent another
+daemon's launch from being adopted or removed.
+
+`ctl vpn start-tailscale --id ID` and the desktop app launch a pinned official
+image in userspace mode, with a random loopback SOCKS5 port and no host route
+changes. The attached stdin heartbeat controls the container lifetime, including
+when `ctld` is killed. Startup waits for the local service and SOCKS5 listener,
+then returns when connected or when browser sign-in or device approval is needed.
+Browser authentication can remain pending without a deadline.
+Status reports `starting` plus an optional `auth_url` until Tailscale is running,
+then exposes the endpoint only while the backend and proxy are ready. Stop also
+cancels pending sign-in. The app asks native code to open sign-in by runtime ID;
+native code fetches fresh owner status and validates the HTTPS Tailscale login
+URL before opening the default browser. No caller-supplied URL is accepted.
+Host connection attempts that need login return an actionable sign-in-and-retry
+result, while preserving their selected VPN ID.
+
+IPC 11 snapshots add `supported_providers`, defaulting to OpenConnect when absent.
+Tailscale starts probe this capability on the selected owner before sending any
+profile settings. Additive status fields retain compatibility with clients that
+only understand the existing stopped/starting/connected/stopping states.
 
 Host methods persist an optional `vpn_connection_id`, independent of the VPN's
 runtime port. Native mapping prepends a typed VPN hop containing that ID and the

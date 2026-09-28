@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/errors";
-import { connectVpn, deleteVpnConnection, loadVpnConnections, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
-import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnStatus } from "../../lib/types";
-import { vpnRuntimeId } from "./status";
+import { connectVpn, deleteVpnConnection, loadVpnConnections, openVpnSignIn, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
+import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnProvider, VpnStatus } from "../../lib/types";
+import { vpnNeedsSignIn, vpnRuntimeId } from "./status";
 
 export const VPN_STATUS_INTERVAL_MS = 5_000;
 
@@ -29,6 +29,8 @@ export interface VpnController {
   catalog_error: string | null;
   statuses: readonly VpnStatus[];
   supports_multiple: boolean;
+  supported_providers: readonly VpnProvider[];
+  signing_in_ids: ReadonlySet<string>;
   status_loaded: boolean;
   status_loading: boolean;
   status_stale: boolean;
@@ -45,6 +47,7 @@ export interface VpnController {
   refresh(): Promise<void>;
   connect(connection_id: string): Promise<void>;
   stop(vpn_id: string): Promise<void>;
+  signIn(vpn_id: string): Promise<void>;
   addConnection(): void;
   editConnection(connection: VpnConnection): void;
   closeEditor(): void;
@@ -60,6 +63,8 @@ export function useVpn(enabled: boolean): VpnController {
   const [catalog_error, setCatalogError] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<VpnStatus[]>([]);
   const [supports_multiple, setSupportsMultiple] = useState(false);
+  const [supported_providers, setSupportedProviders] = useState<readonly VpnProvider[]>(["openconnect"]);
+  const [signing_in_ids, setSigningInIds] = useState<ReadonlySet<string>>(new Set());
   const [status_loaded, setStatusLoaded] = useState(false);
   const [status_loading, setStatusLoading] = useState(false);
   const [status_stale, setStatusStale] = useState(false);
@@ -81,6 +86,9 @@ export function useVpn(enabled: boolean): VpnController {
   const catalog_request = useRef<PendingRefresh | null>(null);
   const statuses_ref = useRef(new Map<string, VpnStatus>());
   const supports_multiple_ref = useRef(false);
+  const supported_providers_ref = useRef<readonly VpnProvider[]>(["openconnect"]);
+  const signing_in_ref = useRef(new Set<string>());
+  const sign_in_failed_ids = useRef(new Set<string>());
   const status_loaded_ref = useRef(false);
   const status_stale_ref = useRef(false);
   const status_generation = useRef(0);
@@ -165,8 +173,16 @@ export function useVpn(enabled: boolean): VpnController {
             action_errors_ref.current.delete(vpn_id);
           }
         }
+        for (const vpn_id of sign_in_failed_ids.current) {
+          if (!vpnNeedsSignIn(next.get(vpn_id))) {
+            sign_in_failed_ids.current.delete(vpn_id);
+            action_errors_ref.current.delete(vpn_id);
+          }
+        }
         publishRuntimes(next);
         supports_multiple_ref.current = snapshot.supports_multiple;
+        supported_providers_ref.current = snapshot.supported_providers ?? ["openconnect"];
+        setSupportedProviders(supported_providers_ref.current);
         status_loaded_ref.current = true;
         status_stale_ref.current = false;
         setSupportsMultiple(snapshot.supports_multiple);
@@ -236,6 +252,7 @@ export function useVpn(enabled: boolean): VpnController {
     const previous = statuses_ref.current.get(vpn_id);
     actions_ref.current.set(vpn_id, action);
     action_errors_ref.current.delete(vpn_id);
+    sign_in_failed_ids.current.delete(vpn_id);
     uncertain_ids_ref.current.delete(vpn_id);
     failed_actions.current.delete(vpn_id);
     setActions(new Map(actions_ref.current));
@@ -274,10 +291,12 @@ export function useVpn(enabled: boolean): VpnController {
     if (!mounted.current || !status_loaded_ref.current || status_stale_ref.current || isActive(connection_id)) return;
     if (!supports_multiple_ref.current && (statuses_ref.current.size > 0 || actions_ref.current.size > 0 || uncertain_ids_ref.current.size > 0)) return;
     const connection = catalog_ref.current.connections.find((item) => item.connection_id === connection_id);
-    if (!connection) return;
+    if (!connection || !supported_providers_ref.current.includes(connection.provider ?? "openconnect")) return;
     await runAction(connection_id, { kind: "connect", connection_id }, {
       vpn_id: connection_id, connection_id, state: "starting", running: false,
-      vpn_url: connection.url, username: connection.username, endpoint: null, container_name: null,
+      provider: connection.provider ?? "openconnect",
+      ...(connection.provider === "tailscale" ? { hostname: connection.hostname } : { vpn_url: connection.url, username: connection.username }),
+      endpoint: null, container_name: null,
     }, () => connectVpn(connection_id));
   }, [isActive, runAction]);
 
@@ -290,6 +309,31 @@ export function useVpn(enabled: boolean): VpnController {
       endpoint: null, container_name: null, ...previous, connection_id, vpn_id, state: "stopping", running: false,
     }, () => stopVpn(vpn_id));
   }, [runAction]);
+
+  const signIn = useCallback(async (vpn_id: string) => {
+    if (!mounted.current || status_stale_ref.current || signing_in_ref.current.has(vpn_id) ||
+      actions_ref.current.get(vpn_id)?.kind === "stop" || !vpnNeedsSignIn(statuses_ref.current.get(vpn_id))) return;
+    const generation = runtime_generations.current.get(vpn_id);
+    const started_lifetime = lifetime.current;
+    signing_in_ref.current.add(vpn_id);
+    action_errors_ref.current.delete(vpn_id);
+    sign_in_failed_ids.current.delete(vpn_id);
+    setSigningInIds(new Set(signing_in_ref.current));
+    setActionErrors(new Map(action_errors_ref.current));
+    try {
+      // The native command reloads the runtime and validates its URL before opening the browser.
+      await openVpnSignIn(vpn_id);
+    } catch (failure) {
+      if (mounted.current && started_lifetime === lifetime.current && runtime_generations.current.get(vpn_id) === generation) {
+        sign_in_failed_ids.current.add(vpn_id);
+        action_errors_ref.current.set(vpn_id, errorMessage(failure));
+        setActionErrors(new Map(action_errors_ref.current));
+      }
+    } finally {
+      signing_in_ref.current.delete(vpn_id);
+      if (mounted.current && started_lifetime === lifetime.current) setSigningInIds(new Set(signing_in_ref.current));
+    }
+  }, []);
 
   const addConnection = useCallback(() => {
     if (profile_busy_ref.current || !catalog_loaded_ref.current) return;
@@ -388,8 +432,8 @@ export function useVpn(enabled: boolean): VpnController {
   return {
     connections: catalog.connections,
     catalog_loaded, catalog_loading, catalog_error,
-    statuses, supports_multiple, status_loaded, status_loading, status_stale, status_error, last_checked_at,
+    statuses, supports_multiple, supported_providers, signing_in_ids, status_loaded, status_loading, status_stale, status_error, last_checked_at,
     actions, action_errors, uncertain_ids, profile_busy, deleting_id, editor, editor_error, editor_saving,
-    refresh, connect, stop, addConnection, editConnection, closeEditor, saveConnection, deleteConnection,
+    refresh, connect, stop, signIn, addConnection, editConnection, closeEditor, saveConnection, deleteConnection,
   };
 }

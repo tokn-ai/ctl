@@ -55,6 +55,7 @@ impl ManagedVpn {
       } else {
         VpnState::Stopped
       },
+      ..VpnStatus::default()
     }
   }
 
@@ -157,7 +158,7 @@ impl Drop for ManagedVpn {
   }
 }
 
-fn engine_command(engine: &Path) -> Command {
+pub(super) fn engine_command(engine: &Path) -> Command {
   let mut command = Command::new(engine);
   command
     .stdin(Stdio::null())
@@ -255,7 +256,7 @@ async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
   Ok(vpn)
 }
 
-fn find_engine() -> io::Result<PathBuf> {
+pub(super) fn find_engine() -> io::Result<PathBuf> {
   engine_candidates(
     std::env::var_os("PATH").as_deref(),
     dirs::home_dir().as_deref(),
@@ -323,7 +324,7 @@ struct PortBinding {
   host_port: String,
 }
 
-fn parse_published_port(bytes: &[u8]) -> io::Result<u16> {
+pub(super) fn parse_published_port(bytes: &[u8]) -> io::Result<u16> {
   let bindings: HashMap<String, Option<Vec<PortBinding>>> = serde_json::from_slice(bytes)?;
   let bindings = bindings
     .get("1080/tcp")

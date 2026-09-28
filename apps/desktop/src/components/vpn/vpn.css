@@ -233,7 +233,8 @@
   font-size: 12px;
 }
 
-.vpn-editor-form input {
+.vpn-editor-form input,
+.vpn-editor-form select {
   min-width: 0;
   width: 100%;
   padding: 8px;
@@ -244,7 +245,8 @@
   background: var(--surface-2);
 }
 
-.vpn-editor-form input:focus {
+.vpn-editor-form input:focus,
+.vpn-editor-form select:focus {
   outline: none;
   border-color: var(--accent-strong);
 }
@@ -292,4 +294,25 @@
 
 @media (prefers-reduced-motion: reduce) {
   .vpn-refreshing { animation: none; }
+}
+
+.vpn-editor-form .vpn-checkbox-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.vpn-editor-form .vpn-checkbox-option input {
+  width: auto;
+  margin: 0;
+}
+
+.vpn-checkbox-option small {
+  grid-column: 2;
+}
+
+.vpn-provider {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
 }

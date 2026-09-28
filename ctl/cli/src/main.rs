@@ -111,6 +111,38 @@ mod tests {
   }
 
   #[test]
+  fn tailscale_start_requires_stable_id_and_exposes_only_supported_options() {
+    assert!(Arguments::try_parse_from(["ctl", "vpn", "start-tailscale"]).is_err());
+    let arguments = Arguments::try_parse_from([
+      "ctl",
+      "vpn",
+      "start-tailscale",
+      "--id",
+      "team",
+      "--hostname",
+      "rmux-test",
+      "--accept-routes",
+      "--json",
+    ])
+    .unwrap();
+    assert!(matches!(arguments.command, Command::Vpn {
+      command: vpn::Command::StartTailscale { connection_id, hostname: Some(hostname), accept_routes: true, json: true, .. }
+    } if connection_id == "team" && hostname == "rmux-test"));
+    assert!(
+      Arguments::try_parse_from([
+        "ctl",
+        "vpn",
+        "start-tailscale",
+        "--id",
+        "team",
+        "--auth-key",
+        "secret"
+      ])
+      .is_err()
+    );
+  }
+
+  #[test]
   fn rmux_uses_the_local_target_by_default() {
     let arguments = Arguments::try_parse_from(["ctl", "rmux", "list"]).unwrap();
     assert_eq!(arguments.host, None);

@@ -1,8 +1,10 @@
 use std::fs;
 
-use ctld_ipc::VpnState;
+use ctld_ipc::{VpnProvider, VpnSettings, VpnState};
 use serde_json::json;
+use zeroize::Zeroizing;
 
+use super::models::VpnConnectionInput;
 use super::*;
 
 struct Fixture(PathBuf);
@@ -31,11 +33,20 @@ fn input(password: Option<&str>) -> VpnConnectionInput {
   VpnConnectionInput {
     connection_id: "connection-one".into(),
     name: "Work VPN".into(),
-    url: "https://vpn.example.test/group".into(),
-    username: "test-user".into(),
-    password: password.map(|password| Zeroizing::new(password.to_owned())),
-    auth_method: None,
-    target_ip: None,
+    settings: VpnSettingsInput::Openconnect {
+      url: "https://vpn.example.test/group".into(),
+      username: "test-user".into(),
+      password: password.map(|password| Zeroizing::new(password.to_owned())),
+      auth_method: None,
+      target_ip: None,
+    },
+  }
+}
+
+fn password(connection: &VpnConnection) -> &str {
+  match &connection.settings {
+    VpnSettings::Openconnect { password, .. } => password,
+    VpnSettings::Tailscale { .. } => panic!("expected OpenConnect password"),
   }
 }
 
@@ -56,7 +67,13 @@ fn round_trip_returns_summaries_and_an_opaque_revision() {
   let password = "test '$literal' #password";
   let saved = repository.save(save_request(None, Some(password))).unwrap();
   assert_eq!(repository.load().unwrap(), saved);
-  assert!(saved.connections[0].has_password);
+  assert!(matches!(
+    saved.connections[0].settings,
+    models::VpnSettingsSummary::Openconnect {
+      has_password: true,
+      ..
+    }
+  ));
   let revision = saved.revision.as_ref().unwrap();
   assert!(revision.starts_with("sha256:"));
   assert_eq!(revision.len(), 71);
@@ -64,7 +81,8 @@ fn round_trip_returns_summaries_and_an_opaque_revision() {
   assert!(response["connections"][0].get("password").is_none());
   assert!(!serde_json::to_string(&saved).unwrap().contains(password));
   let stored: serde_json::Value = serde_json::from_slice(&fixture.bytes()).unwrap();
-  assert_eq!(stored["schema_version"], 1);
+  assert_eq!(stored["schema_version"], 2);
+  assert_eq!(stored["connections"][0]["provider"], "openconnect");
   assert_eq!(stored["connections"][0]["password"], password);
   assert!(stored.get("revision").is_none());
   for field in ["endpoint", "running", "state", "container_name"] {
@@ -88,7 +106,7 @@ fn null_password_preserves_edits_and_new_connections_require_a_password() {
   let edited = repository.save(edit).unwrap();
   assert_eq!(edited.connections[0].name, "Renamed VPN");
   assert_eq!(
-    &**repository.connection("connection-one").unwrap().password,
+    password(&repository.connection("connection-one").unwrap()),
     "original-test-secret"
   );
   let changed = repository
@@ -98,7 +116,7 @@ fn null_password_preserves_edits_and_new_connections_require_a_password() {
     ))
     .unwrap();
   assert_eq!(
-    &**repository.connection("connection-one").unwrap().password,
+    password(&repository.connection("connection-one").unwrap()),
     "replacement-test-secret"
   );
   assert!(
@@ -163,6 +181,7 @@ fn deleting_an_active_connection_is_rejected_for_each_active_state() {
         },
       ],
       supports_multiple: true,
+      ..VpnSnapshot::default()
     };
     assert_eq!(
       repository
@@ -213,6 +232,7 @@ fn unrelated_active_vpns_do_not_block_saved_connection_changes() {
       state: VpnState::Connected,
       ..VpnStatus::default()
     }],
+    ..VpnSnapshot::default()
   };
   let changed = repository
     .save_with_status(save_request(saved.revision, None), &status)
@@ -245,10 +265,14 @@ fn invalid_fields_and_corrupt_json_are_rejected_without_exposing_secrets() {
     assert_eq!(fixture.bytes(), original);
   }
   let mut invalid_url = save_request(saved.revision.clone(), None);
-  invalid_url.connection.url = "http://vpn.example.test".into();
+  if let VpnSettingsInput::Openconnect { url, .. } = &mut invalid_url.connection.settings {
+    *url = "http://vpn.example.test".into();
+  }
   assert!(repository.save(invalid_url).is_err());
   let mut invalid_target = save_request(saved.revision, None);
-  invalid_target.connection.target_ip = Some("target.example.test".into());
+  if let VpnSettingsInput::Openconnect { target_ip, .. } = &mut invalid_target.connection.settings {
+    *target_ip = Some("target.example.test".into());
+  }
   assert!(repository.save(invalid_target).is_err());
   let malformed = br#"{"schema_version":1,"connections":[{"password":"hidden-test-secret","connection_id":false}]}"#;
   fs::write(fixture.0.join("vpns.json"), malformed).unwrap();
@@ -275,7 +299,7 @@ fn unsupported_versions_duplicate_ids_and_oversized_fields_are_preserved() {
   assert!(repository.save(request).is_err());
   assert_eq!(fixture.bytes(), original);
   let mut document: serde_json::Value = serde_json::from_slice(&original).unwrap();
-  document["schema_version"] = json!(2);
+  document["schema_version"] = json!(3);
   fs::write(
     fixture.0.join("vpns.json"),
     serde_json::to_vec(&document).unwrap(),
@@ -380,11 +404,14 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     connection_id: "connection-one".into(),
   };
   let status = connect_with(fixture.0.clone(), request, |connection| async move {
-    assert_eq!(&**connection.password, "adapter-test-secret");
+    assert_eq!(password(&connection), "adapter-test-secret");
+    let VpnSettings::Openconnect { url, username, .. } = connection.settings else {
+      panic!("expected OpenConnect connection");
+    };
     Ok(VpnStatus {
       connection_id: Some(connection.connection_id),
-      vpn_url: Some(connection.url),
-      username: Some(connection.username),
+      vpn_url: Some(url),
+      username: Some(username),
       state: VpnState::Connected,
       running: true,
       ..VpnStatus::default()
@@ -478,4 +505,178 @@ fn host_connections_require_a_ready_vpn_proxy() {
       "vpn_not_connected"
     );
   }
+}
+
+#[test]
+fn legacy_profiles_migrate_only_when_saved_and_keep_their_password() {
+  let fixture = Fixture::new();
+  let repository = fixture.repository();
+  repository.load().unwrap();
+  let legacy = serde_json::to_vec_pretty(&json!({
+    "schema_version": 1,
+    "connections": [{
+      "connection_id": "connection-one", "name": "Legacy VPN",
+      "url": "https://vpn.example.test/group", "username": "test-user",
+      "password": "legacy-test-secret", "auth_method": "password", "target_ip": null,
+    }],
+  }))
+  .unwrap();
+  let path = fixture.0.join("vpns.json");
+  fs::write(&path, &legacy).unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+  }
+  let loaded = repository.load().unwrap();
+  assert_eq!(fixture.bytes(), legacy);
+  let connection = repository.connection("connection-one").unwrap();
+  assert_eq!(connection.provider(), VpnProvider::Openconnect);
+  assert_eq!(password(&connection), "legacy-test-secret");
+  assert_eq!(fixture.bytes(), legacy);
+  repository
+    .save(save_request(loaded.revision, None))
+    .unwrap();
+  let saved: serde_json::Value = serde_json::from_slice(&fixture.bytes()).unwrap();
+  assert_eq!(saved["schema_version"], 2);
+  assert_eq!(saved["connections"][0]["provider"], "openconnect");
+  assert_eq!(saved["connections"][0]["password"], "legacy-test-secret");
+}
+
+#[test]
+fn tailscale_profiles_store_settings_without_openconnect_credentials() {
+  let fixture = Fixture::new();
+  let repository = fixture.repository();
+  let saved = repository
+    .save(SaveVpnConnectionRequest {
+      expected_revision: None,
+      connection: VpnConnectionInput {
+        connection_id: "tailscale-one".into(),
+        name: "Tailnet".into(),
+        settings: VpnSettingsInput::Tailscale {
+          hostname: Some("rmux-test".into()),
+          accept_routes: true,
+        },
+      },
+    })
+    .unwrap();
+  let summary = serde_json::to_value(&saved.connections[0]).unwrap();
+  let stored: serde_json::Value = serde_json::from_slice(&fixture.bytes()).unwrap();
+  for value in [&summary, &stored["connections"][0]] {
+    assert_eq!(value["provider"], "tailscale");
+    assert_eq!(value["hostname"], "rmux-test");
+    assert_eq!(value["accept_routes"], true);
+    for field in [
+      "url",
+      "username",
+      "password",
+      "has_password",
+      "auth_method",
+      "target_ip",
+    ] {
+      assert!(value.get(field).is_none(), "unexpected field: {field}");
+    }
+  }
+  assert_eq!(repository.load().unwrap(), saved);
+  let input: VpnConnectionInput = serde_json::from_value(summary.clone()).unwrap();
+  assert!(matches!(
+    input.settings,
+    VpnSettingsInput::Tailscale {
+      accept_routes: true,
+      ..
+    }
+  ));
+  for field in [
+    "url",
+    "username",
+    "password",
+    "has_password",
+    "auth_method",
+    "target_ip",
+  ] {
+    let mut invalid = summary.clone();
+    invalid[field] = json!(null);
+    assert!(
+      serde_json::from_value::<VpnConnectionInput>(invalid).is_err(),
+      "accepted field: {field}"
+    );
+  }
+}
+
+#[test]
+fn existing_openconnect_secret_is_dropped_when_switching_provider() {
+  let fixture = Fixture::new();
+  let repository = fixture.repository();
+  let saved = repository
+    .save(save_request(None, Some("previous-test-secret")))
+    .unwrap();
+  let switched = repository
+    .save(SaveVpnConnectionRequest {
+      expected_revision: saved.revision,
+      connection: VpnConnectionInput {
+        connection_id: "connection-one".into(),
+        name: "Tailnet".into(),
+        settings: VpnSettingsInput::Tailscale {
+          hostname: None,
+          accept_routes: false,
+        },
+      },
+    })
+    .unwrap();
+  assert!(
+    !String::from_utf8(fixture.bytes())
+      .unwrap()
+      .contains("previous-test-secret")
+  );
+  assert_eq!(
+    repository
+      .save(save_request(switched.revision, None))
+      .unwrap_err()
+      .code,
+    "vpn_connections_invalid"
+  );
+}
+
+#[test]
+fn host_connection_with_pending_browser_auth_returns_an_actionable_error() {
+  let status = VpnStatus {
+    provider: VpnProvider::Tailscale,
+    state: VpnState::Starting,
+    running: true,
+    auth_url: Some("https://login.tailscale.com/a/testToken123".into()),
+    ..VpnStatus::default()
+  };
+  let error = require_connected(&status).unwrap_err();
+  assert_eq!(error.code, "vpn_sign_in_required");
+  assert!(error.message.contains("VPN page"));
+}
+
+#[test]
+fn input_accepts_legacy_openconnect_but_rejects_unknown_provider_fields() {
+  let legacy = json!({
+    "connection_id": "connection-one", "name": "Work VPN",
+    "url": "https://vpn.example.test", "username": "test-user", "password": null,
+  });
+  for tagged in [false, true] {
+    let mut value = legacy.clone();
+    if tagged {
+      value["provider"] = json!("openconnect");
+    }
+    let parsed: VpnConnectionInput = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(
+      parsed.settings,
+      VpnSettingsInput::Openconnect { password: None, .. }
+    ));
+    value["hostname"] = json!("unrelated-device-name");
+    assert!(serde_json::from_value::<VpnConnectionInput>(value).is_err());
+  }
+  let mut unknown = legacy;
+  unknown["provider"] = json!("unknown");
+  assert!(serde_json::from_value::<VpnConnectionInput>(unknown).is_err());
+  assert!(
+    serde_json::from_value::<OpenVpnSignInRequest>(json!({
+      "vpn_id": "tailscale-one", "url": "https://login.tailscale.com/a/testToken123",
+    }))
+    .is_err()
+  );
 }

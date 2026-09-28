@@ -40,6 +40,7 @@ impl OwnerFixture {
             snapshot: Some(VpnSnapshot {
               connections,
               supports_multiple: true,
+              ..VpnSnapshot::default()
             }),
           },
         )

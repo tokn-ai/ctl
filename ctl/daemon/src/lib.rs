@@ -7,6 +7,7 @@ mod port_forwarding;
 pub mod proxy_route;
 mod shared_forwarding;
 mod ssh_config_master;
+mod tailscale;
 mod target_lifecycle;
 mod vpn_service;
 

@@ -3,12 +3,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use ctld_ipc::{VpnConnection, VpnSnapshot, VpnState};
+use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
-use super::{DeleteVpnConnectionRequest, SaveVpnConnectionRequest, VpnConnectionsSnapshot};
+use super::{
+  DeleteVpnConnectionRequest, SaveVpnConnectionRequest, VpnConnectionsSnapshot, VpnSettingsInput,
+};
 use crate::error::{CommandErrorDto, CommandResult};
 
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -24,7 +26,7 @@ struct Document {
 impl Default for Document {
   fn default() -> Self {
     Self {
-      schema_version: 1,
+      schema_version: 2,
       connections: Vec::new(),
     }
   }
@@ -32,7 +34,7 @@ impl Default for Document {
 
 impl Document {
   fn validate(&self) -> CommandResult<()> {
-    if self.schema_version != 1 {
+    if !matches!(self.schema_version, 1 | 2) {
       return Err(error(
         "vpn_version_unsupported",
         "This VPN settings version is not supported.",
@@ -43,6 +45,11 @@ impl Document {
     }
     let mut ids = HashSet::new();
     for connection in &self.connections {
+      if self.schema_version == 1 && connection.provider() != VpnProvider::Openconnect {
+        return Err(invalid(
+          "Tailscale connections require VPN settings version 2.",
+        ));
+      }
       connection.validate().map_err(invalid)?;
       if !ids.insert(&connection.connection_id) {
         return Err(invalid("VPN connection IDs must be unique."));
@@ -117,18 +124,44 @@ impl Repository {
       .connections
       .iter()
       .position(|connection| connection.connection_id == input.connection_id);
-    let password = input
-      .password
-      .or_else(|| existing.map(|index| current.document.connections[index].password.clone()))
-      .ok_or_else(|| invalid("A new VPN connection requires a password."))?;
+    let settings = match input.settings {
+      VpnSettingsInput::Openconnect {
+        url,
+        username,
+        password,
+        auth_method,
+        target_ip,
+      } => {
+        let password = password
+          .or_else(|| {
+            existing.and_then(
+              |index| match &current.document.connections[index].settings {
+                VpnSettings::Openconnect { password, .. } => Some(password.clone()),
+                VpnSettings::Tailscale { .. } => None,
+              },
+            )
+          })
+          .ok_or_else(|| invalid("A new OpenConnect connection requires a password."))?;
+        VpnSettings::Openconnect {
+          url,
+          username,
+          password,
+          auth_method,
+          target_ip,
+        }
+      }
+      VpnSettingsInput::Tailscale {
+        hostname,
+        accept_routes,
+      } => VpnSettings::Tailscale {
+        hostname,
+        accept_routes,
+      },
+    };
     let connection = VpnConnection {
       connection_id: input.connection_id,
       name: input.name,
-      url: input.url,
-      username: input.username,
-      password,
-      auth_method: input.auth_method,
-      target_ip: input.target_ip,
+      settings,
     };
     connection.validate().map_err(invalid)?;
     if let Some(index) = existing {
@@ -233,7 +266,10 @@ impl Repository {
     Ok(file)
   }
 
-  fn persist(&self, document: Document) -> CommandResult<VpnConnectionsSnapshot> {
+  fn persist(&self, mut document: Document) -> CommandResult<VpnConnectionsSnapshot> {
+    // Reading a legacy document preserves its bytes and revision. Only a saved
+    // change migrates the format, after the usual optimistic revision check.
+    document.schema_version = 2;
     document.validate()?;
     let bytes = Zeroizing::new(
       serde_json::to_vec_pretty(&document)

@@ -7,13 +7,14 @@ use std::path::PathBuf;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 
-use ctld_ipc::{VpnConnection, VpnSnapshot, VpnState, VpnStatus};
+use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState, VpnStatus};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
-use crate::openconnect::{self, Config, ManagedVpn, Metadata};
+use crate::openconnect::{self, Metadata};
+use crate::tailscale;
 
 type Reply = oneshot::Sender<Result<VpnStatus, String>>;
 const MAX_CONNECTIONS: usize = 16;
@@ -125,7 +126,52 @@ impl Drop for VpnOwner {
 }
 
 pub(super) fn spawn() -> (VpnService, VpnOwner) {
-  spawn_with(openconnect::start)
+  spawn_with(start_provider)
+}
+
+enum Config {
+  Openconnect(openconnect::Config),
+  Tailscale(tailscale::Config),
+}
+
+impl Config {
+  fn cancellation(&mut self) -> Option<oneshot::Sender<()>> {
+    match self {
+      Self::Openconnect(_) => None,
+      Self::Tailscale(config) => {
+        let (cancel, cancellation) = oneshot::channel();
+        config.cancellation = Some(cancellation);
+        Some(cancel)
+      }
+    }
+  }
+  fn metadata(&self) -> Metadata {
+    match self {
+      Self::Openconnect(config) => config.metadata.clone(),
+      Self::Tailscale(_) => Metadata::default(),
+    }
+  }
+
+  fn provider(&self) -> VpnProvider {
+    match self {
+      Self::Openconnect(_) => VpnProvider::Openconnect,
+      Self::Tailscale(_) => VpnProvider::Tailscale,
+    }
+  }
+}
+
+enum ManagedVpn {
+  Openconnect(openconnect::ManagedVpn),
+  Tailscale(tailscale::ManagedVpn),
+}
+
+async fn start_provider(config: Config) -> io::Result<ManagedVpn> {
+  match config {
+    Config::Openconnect(config) => openconnect::start(config)
+      .await
+      .map(ManagedVpn::Openconnect),
+    Config::Tailscale(config) => tailscale::start(config).await.map(ManagedVpn::Tailscale),
+  }
 }
 
 fn unavailable() -> String {
@@ -142,15 +188,24 @@ trait Lease: Send {
 
 impl Lease for ManagedVpn {
   fn status(&self) -> VpnStatus {
-    self.status()
+    match self {
+      Self::Openconnect(lease) => lease.status(),
+      Self::Tailscale(lease) => lease.status(),
+    }
   }
 
   async fn exited(&mut self) -> io::Result<()> {
-    self.exited().await.map(|_| ())
+    match self {
+      Self::Openconnect(lease) => lease.exited().await.map(|_| ()),
+      Self::Tailscale(lease) => lease.exited().await.map(|_| ()),
+    }
   }
 
   async fn shutdown(&mut self) {
-    self.shutdown().await;
+    match self {
+      Self::Openconnect(lease) => lease.shutdown().await,
+      Self::Tailscale(lease) => lease.shutdown().await,
+    }
   }
 }
 
@@ -196,6 +251,8 @@ struct Entry<L, S> {
   identity: Option<Identity>,
   env_paths: HashSet<PathBuf>,
   metadata: Metadata,
+  provider: VpnProvider,
+  cancellation: Option<oneshot::Sender<()>>,
   phase: Phase<L, S>,
   replies: Vec<Reply>,
 }
@@ -215,8 +272,11 @@ impl<L: Lease, S> Entry<L, S> {
     };
     status.vpn_id = Some(vpn_id.to_owned());
     status.connection_id = self.identity.as_ref().and_then(Identity::connection_id);
-    status.vpn_url.clone_from(&self.metadata.vpn_url);
-    status.username.clone_from(&self.metadata.username);
+    status.provider = self.provider;
+    if self.provider == VpnProvider::Openconnect {
+      status.vpn_url.clone_from(&self.metadata.vpn_url);
+      status.username.clone_from(&self.metadata.username);
+    }
     status
   }
 
@@ -251,7 +311,7 @@ impl<L, F, S> Registry<L, F, S>
 where
   L: Lease + 'static,
   F: Fn(Config) -> S,
-  S: Future<Output = io::Result<L>>,
+  S: Future<Output = io::Result<L>> + Send + 'static,
 {
   fn new(start: F) -> Self {
     Self {
@@ -268,6 +328,7 @@ where
         .map(|(id, entry)| entry.status(id))
         .collect(),
       supports_multiple: true,
+      ..VpnSnapshot::default()
     }
   }
 
@@ -302,7 +363,7 @@ where
             .map_err(|error| error.to_string())?;
           Ok(Prepared {
             identity: Identity::EnvFile(path),
-            config,
+            config: Config::Openconnect(config),
           })
         });
         self.entries.insert(
@@ -311,6 +372,8 @@ where
             identity: None,
             env_paths,
             metadata: Metadata::default(),
+            provider: VpnProvider::Openconnect,
+            cancellation: None,
             phase: Phase::Preparing(future),
             replies: vec![reply],
           },
@@ -319,7 +382,7 @@ where
     }
   }
 
-  fn start_prepared(&mut self, prepared: Prepared, reply: Reply) {
+  fn start_prepared(&mut self, mut prepared: Prepared, reply: Reply) {
     let id = prepared
       .identity
       .connection_id()
@@ -340,13 +403,17 @@ where
       ));
       return;
     }
-    let metadata = prepared.config.metadata.clone();
+    let metadata = prepared.config.metadata();
+    let provider = prepared.config.provider();
+    let cancellation = prepared.config.cancellation();
     self.entries.insert(
       id,
       Entry {
         identity: Some(prepared.identity),
         env_paths: HashSet::new(),
         metadata,
+        provider,
+        cancellation,
         phase: Phase::Starting(Box::pin((self.start)(prepared.config))),
         replies: vec![reply],
       },
@@ -387,6 +454,19 @@ where
       }
       Phase::Stopping(future) => {
         entry.phase = Phase::Stopping(future);
+        if let Some(reply) = reply {
+          push_reply(&mut entry.replies, reply);
+        }
+        self.entries.insert(id.to_owned(), entry);
+      }
+      Phase::Starting(future) if entry.cancellation.is_some() => {
+        let _ = entry.cancellation.take().unwrap().send(());
+        answer(&mut entry.replies, Err("VPN startup was cancelled".into()));
+        entry.phase = Phase::Stopping(Box::pin(async move {
+          if let Ok(mut lease) = future.await {
+            lease.shutdown().await;
+          }
+        }));
         if let Some(reply) = reply {
           push_reply(&mut entry.replies, reply);
         }
@@ -435,7 +515,8 @@ where
           entry.env_paths.insert(path.clone());
         }
         entry.identity = Some(prepared.identity);
-        entry.metadata = prepared.config.metadata.clone();
+        entry.metadata = prepared.config.metadata();
+        entry.provider = prepared.config.provider();
         entry.phase = Phase::Starting(Box::pin((self.start)(prepared.config)));
       }
       Event::Prepared(Err(error)) => {
@@ -443,6 +524,7 @@ where
         return;
       }
       Event::Started(Ok(lease)) => {
+        entry.cancellation = None;
         entry.phase = Phase::Connected(lease);
         let status = entry.status(&id);
         answer(&mut entry.replies, Ok(status));
@@ -456,7 +538,7 @@ where
       }
       Event::Exited(result) => {
         if result.is_err() {
-          eprintln!("Could not monitor OpenConnect; cleaning up its VPN connection.");
+          eprintln!("Could not monitor the container; cleaning up its VPN connection.");
         }
         self.entries.insert(id.clone(), entry);
         self.stop_entry(&id, None);
@@ -483,7 +565,15 @@ where
 }
 
 fn prepare_connection(connection: VpnConnection) -> Result<Prepared, String> {
-  let config = Config::from_connection(&connection).map_err(|error| error.to_string())?;
+  let config = match &connection.settings {
+    VpnSettings::Openconnect { .. } => {
+      openconnect::Config::from_connection(&connection).map(Config::Openconnect)
+    }
+    VpnSettings::Tailscale { .. } => {
+      tailscale::Config::from_connection(&connection).map(Config::Tailscale)
+    }
+  }
+  .map_err(|error| error.to_string())?;
   let serialized =
     Zeroizing::new(serde_json::to_vec(&connection).map_err(|_| "invalid VPN connection")?);
   let identity = Identity::Connection {

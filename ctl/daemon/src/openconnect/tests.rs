@@ -182,6 +182,18 @@ esac
     start_config(config, engine).await
   }
 
+  async fn wait_for_heartbeat_stop(heartbeat: &tokio::task::AbortHandle) {
+    // abort() requests cancellation; process exit can happen before Tokio polls
+    // and drops the heartbeat future, especially on a current-thread runtime.
+    timeout(TEST_TIMEOUT, async {
+      while !heartbeat.is_finished() {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("heartbeat task did not stop after releasing the VPN lease");
+  }
+
   #[tokio::test]
   async fn readiness_discovers_engine_assigned_port_and_shutdown_removes_container() {
     let engine = FakeEngine::new();
@@ -228,7 +240,7 @@ esac
     let heartbeat = vpn.heartbeat.abort_handle();
     vpn.shutdown().await;
     engine.wait_for_exit().await;
-    assert!(heartbeat.is_finished());
+    wait_for_heartbeat_stop(&heartbeat).await;
     assert!(!vpn.status().running);
     assert!(vpn.status().endpoint.is_none());
     let removed = fs::read_to_string(engine.root.join("remove.args")).unwrap();
@@ -268,7 +280,7 @@ esac
     let heartbeat = vpn.heartbeat.abort_handle();
     drop(vpn);
     engine.wait_for_exit().await;
-    assert!(heartbeat.is_finished());
+    wait_for_heartbeat_stop(&heartbeat).await;
   }
 
   #[tokio::test]

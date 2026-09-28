@@ -118,6 +118,13 @@ on the Mac itself.
 
 ## Inspect and lifetime
 
+Startup errors identify recognized gateway DNS, network, authentication,
+certificate, image, and container-engine failures. For authentication problems,
+check both the server address and **Advanced options → Authentication method**
+against the settings provided for the VPN. Diagnostics return fixed messages;
+ctld does not retain or return raw container output, which may contain private
+gateway details. Unrecognized failures retain a generic exit or timeout message.
+
 Use `container_name` from status with Docker to inspect logs or run the optional
 connectivity probe while the VPN is running:
 

@@ -84,6 +84,10 @@ case "$1" in
   run)
     printf '%s\n' "$@" > "$root/run.args"
     printf '%s\n' "$$" > "$root/run.pid"
+    if [ -f "$root/failure" ]; then
+      cat "$root/failure" >&2
+      exit 1
+    fi
     while IFS= read -r heartbeat; do
       printf '%s\n' "$heartbeat" >> "$root/heartbeats"
     done
@@ -282,6 +286,48 @@ esac
     assert!(!arguments.contains("test-user"));
     assert!(!arguments.contains("quoted"));
     vpn.shutdown().await;
+    engine.wait_for_exit().await;
+  }
+
+  #[tokio::test]
+  async fn startup_failure_reports_safe_actionable_cause_and_removes_container() {
+    let engine = FakeEngine::new();
+    fs::write(
+      engine.root.join("failure"),
+      "getaddrinfo failed for private.example.test, password=private-test-password\nFailed to obtain WebVPN cookie\n",
+    )
+    .unwrap();
+    let error = timeout(
+      TEST_TIMEOUT,
+      start_with_engine(engine.options(), &engine.executable),
+    )
+    .await
+    .unwrap()
+    .err()
+    .expect("failed engine must not become ready");
+    let message = error.to_string();
+    assert!(message.contains("server name could not be resolved"));
+    assert!(!message.contains("private"));
+    assert!(!message.contains("cookie"));
+    assert!(engine.root.join("remove.args").exists());
+    engine.wait_for_exit().await;
+  }
+
+  #[tokio::test]
+  async fn unknown_startup_failure_uses_generic_message_without_raw_output() {
+    let engine = FakeEngine::new();
+    fs::write(engine.root.join("failure"), "private-test-password\n").unwrap();
+    let error = timeout(
+      TEST_TIMEOUT,
+      start_with_engine(engine.options(), &engine.executable),
+    )
+    .await
+    .unwrap()
+    .err()
+    .expect("failed engine must not become ready");
+    let message = error.to_string();
+    assert!(message.contains("OpenConnect container exited"));
+    assert!(!message.contains("private"));
     engine.wait_for_exit().await;
   }
 }

@@ -16,6 +16,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 use zeroize::Zeroizing;
 
+mod diagnostics;
+
+use diagnostics::Diagnostics;
+
 const IMAGE: &str = "localhost/ctl-openconnect:local";
 const START_TIMEOUT: Duration = Duration::from_secs(75);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -33,6 +37,7 @@ pub struct ManagedVpn {
   container_name: String,
   endpoint: Option<String>,
   engine: PathBuf,
+  diagnostics: Diagnostics,
 }
 
 impl ManagedVpn {
@@ -77,8 +82,26 @@ impl ManagedVpn {
   }
 
   async fn wait_ready(&mut self) -> io::Result<()> {
+    if let Ok(result) = timeout(START_TIMEOUT, self.poll_ready()).await {
+      result
+    } else {
+      let reason = self
+        .diagnostics
+        .finish()
+        .await
+        .unwrap_or("OpenConnect VPN and SOCKS5 listener did not become ready within 75 seconds");
+      Err(io::Error::new(io::ErrorKind::TimedOut, reason))
+    }
+  }
+
+  async fn poll_ready(&mut self) -> io::Result<()> {
     loop {
       if let Some(status) = self.child.try_wait()? {
+        if let Some(reason) = self.diagnostics.finish().await {
+          return Err(io::Error::other(format!(
+            "OpenConnect container exited ({status}): {reason}"
+          )));
+        }
         return Err(io::Error::other(format!(
           "OpenConnect container exited ({status}); build the image with docker/openconnect/run.sh build and check the VPN settings"
         )));
@@ -216,8 +239,13 @@ async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
   let mut child = command
     .arg(IMAGE)
     .stdin(Stdio::piped())
-    .stdout(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .spawn()?;
+  let diagnostics = Diagnostics::new(
+    child.stdout.take().expect("container stdout was piped"),
+    child.stderr.take().expect("container stderr was piped"),
+  );
   let mut stdin = child.stdin.take().expect("container stdin was piped");
   let heartbeat = tokio::spawn(async move {
     if let Some(payload) = initial_payload {
@@ -248,16 +276,9 @@ async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
     container_name,
     endpoint: None,
     engine: engine.to_path_buf(),
+    diagnostics,
   };
-  let ready = timeout(START_TIMEOUT, vpn.wait_ready())
-    .await
-    .unwrap_or_else(|_| {
-      Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "OpenConnect VPN and SOCKS5 listener did not become ready within 75 seconds",
-      ))
-    });
-  if let Err(error) = ready {
+  if let Err(error) = vpn.wait_ready().await {
     vpn.shutdown().await;
     return Err(error);
   }

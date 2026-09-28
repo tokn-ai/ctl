@@ -156,6 +156,50 @@ describe("VPN controller", () => {
     expect(result.current.status.state).toBe("connected");
   });
 
+  it("clears a failed connection only after observing the same profile connected", async () => {
+    vi.mocked(connectVpn).mockRejectedValueOnce(new Error("Authentication failed"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.connect(connection.connection_id); });
+    await waitFor(() => expect(result.current.status_stale).toBe(false));
+    expect(result.current.status.state).toBe("stopped");
+    expect(result.current.action_error).toBe("Authentication failed");
+
+    vi.mocked(vpnStatus).mockResolvedValue({ ...connected, state: "starting", running: false });
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_error).toBe("Authentication failed");
+
+    vi.mocked(vpnStatus).mockResolvedValue({ ...connected, connection_id: "another-profile" });
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_error).toBe("Authentication failed");
+
+    vi.mocked(vpnStatus).mockResolvedValue(connected);
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_error).toBeNull();
+    expect(connectVpn).toHaveBeenCalledOnce();
+  });
+
+  it("does not clear a newer connection failure with a stale successful observation", async () => {
+    vi.mocked(connectVpn)
+      .mockRejectedValueOnce(new Error("First attempt failed"))
+      .mockRejectedValueOnce(new Error("Latest attempt failed"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.connect(connection.connection_id); });
+    await waitFor(() => expect(result.current.status_stale).toBe(false));
+    const old_status = deferred<VpnStatus>();
+    vi.mocked(vpnStatus).mockReturnValueOnce(old_status.promise);
+    let refresh!: Promise<void>;
+    act(() => { refresh = result.current.refresh(); });
+
+    await act(async () => { await result.current.connect(connection.connection_id); });
+    await waitFor(() => expect(result.current.status_stale).toBe(false));
+    expect(result.current.action_error).toBe("Latest attempt failed");
+    await act(async () => { old_status.resolve(connected); await refresh; });
+    expect(result.current.action_error).toBe("Latest attempt failed");
+    expect(result.current.status).toEqual(stopped);
+  });
+
   it("blocks active-profile edit/delete and keeps disconnect errors distinct", async () => {
     vi.mocked(vpnStatus).mockResolvedValue(connected);
     const { result } = renderHook(() => useVpn(true));
@@ -168,6 +212,25 @@ describe("VPN controller", () => {
     await act(async () => { await result.current.stop(); });
     expect(result.current.action_error).toBe("Unable to stop container");
     expect(result.current.status.state).toBe("connected");
+  });
+
+  it("clears a failed stop only after observing the VPN stopped", async () => {
+    vi.mocked(vpnStatus).mockResolvedValue(connected);
+    vi.mocked(stopVpn).mockRejectedValueOnce(new Error("Unable to stop container"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.stop(); });
+    await waitFor(() => expect(result.current.status_stale).toBe(false));
+    expect(result.current.action_error).toBe("Unable to stop container");
+
+    vi.mocked(vpnStatus).mockResolvedValue({ ...connected, state: "stopping", running: false });
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_error).toBe("Unable to stop container");
+
+    vi.mocked(vpnStatus).mockResolvedValue(stopped);
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_error).toBeNull();
+    expect(stopVpn).toHaveBeenCalledOnce();
   });
 
   it("retains a failed editor without ever adding the submitted password to its state", async () => {

@@ -99,6 +99,7 @@ export function useVpn(visible: boolean): VpnController {
   const status_request = useRef<PendingRefresh | null>(null);
   const action_ref = useRef<VpnAction | null>(null);
   const action_generation = useRef(0);
+  const failed_action_ref = useRef<(VpnAction & { generation: number }) | null>(null);
   const profile_busy_ref = useRef(false);
   const editor_ref = useRef<VpnEditor | null>(null);
   const editor_generation = useRef(0);
@@ -122,6 +123,14 @@ export function useVpn(visible: boolean): VpnController {
     setStatusStale(false);
     setStatusError(null);
     setLastCheckedAt(Date.now());
+    const failed_action = failed_action_ref.current;
+    if (failed_action?.generation === action_generation.current && (
+      (failed_action.kind === "connect" && next.state === "connected" && next.connection_id === failed_action.connection_id) ||
+      (failed_action.kind === "stop" && next.state === "stopped")
+    )) {
+      failed_action_ref.current = null;
+      setActionError(null);
+    }
   }, []);
 
   const refreshCatalog = useCallback(async () => {
@@ -214,6 +223,7 @@ export function useVpn(visible: boolean): VpnController {
     const previous = status_ref.current;
     const next_action: VpnAction = { kind: "connect", connection_id };
     action_ref.current = next_action;
+    failed_action_ref.current = null;
     setAction(next_action);
     setActionError(null);
     setStatusLoading(false);
@@ -231,6 +241,7 @@ export function useVpn(visible: boolean): VpnController {
         setStatus(previous);
         status_stale_ref.current = true;
         setStatusStale(true);
+        failed_action_ref.current = { ...next_action, generation };
         setActionError(errorMessage(failure));
       }
     } finally {
@@ -250,6 +261,7 @@ export function useVpn(visible: boolean): VpnController {
     const previous = status_ref.current;
     const next_action: VpnAction = { kind: "stop", connection_id: previous.connection_id };
     action_ref.current = next_action;
+    failed_action_ref.current = null;
     setAction(next_action);
     setActionError(null);
     setStatusLoading(false);
@@ -267,6 +279,7 @@ export function useVpn(visible: boolean): VpnController {
         setStatus(previous);
         status_stale_ref.current = true;
         setStatusStale(true);
+        failed_action_ref.current = { ...next_action, generation };
         setActionError(errorMessage(failure));
       }
     } finally {

@@ -79,6 +79,25 @@ describe("saved host catalog and SSH config projections", () => {
     });
   });
 
+  it("persists a stable VPN route across catalog reloads without endpoint details", () => {
+    const target: SshConnectionTarget = {
+      kind: "ssh", destination: "build", hostname: "build.example.test",
+      vpn_connection_id: "office-vpn", ssh_config_alias: "build", use_ssh_config_master: true,
+    };
+    const host = hostFromTarget(target, "VPN builder");
+    const view = restoreWorkspace(document(), { ...empty_catalog, hosts: [host] }, aliases);
+    const catalog = hostCatalogDocument(view);
+    expect(catalog.hosts[0].connection_methods[0].target).toEqual({
+      kind: "ssh", destination: "build", hostname: "build.example.test", vpn_connection_id: "office-vpn",
+    });
+    const reloaded = restoreWorkspace(workspaceDocument(view), catalog, aliases);
+    const restored = hostTarget(reloaded.hosts[1], []);
+    expect(restored).toMatchObject({ vpn_connection_id: "office-vpn" });
+    expect(restored).not.toHaveProperty("gateways");
+    expect(restored).not.toHaveProperty("endpoint");
+    expect(restored.kind === "ssh" && usesSshConfigMaster(restored)).toBe(false);
+  });
+
   it("infers legacy origin only for projected aliases or pure discovered aliases", () => {
     const targets: SshConnectionTarget[] = [
       { kind: "ssh", host_id: projectedHostId("build"), destination: "build", user: "deploy", identity_file: "~/.ssh/deploy" },
@@ -87,11 +106,12 @@ describe("saved host catalog and SSH config projections", () => {
       { kind: "ssh", host_id: "custom-account", destination: "build", user: "other" },
       { kind: "ssh", host_id: "tailnet", destination: "build", tailscale_node_id: "n123" },
       { kind: "ssh", host_id: "unrecognized", destination: "missing-alias" },
+      { kind: "ssh", host_id: "vpn-route", destination: "build", vpn_connection_id: "office-vpn" },
     ];
     const view = restoreWorkspace(document(), { ...empty_catalog, hosts: targets.map((target) => hostFromTarget(target)) }, aliases);
     expect(hostTarget(view.hosts[1], [])).toMatchObject({ ssh_config_alias: "build", user: "deploy" });
     expect(hostTarget(view.hosts[2], [])).toMatchObject({ ssh_config_alias: "other-account" });
-    for (const host_id of ["direct", "custom-account", "tailnet", "unrecognized"]) {
+    for (const host_id of ["direct", "custom-account", "tailnet", "unrecognized", "vpn-route"]) {
       const host = view.hosts.find((host) => host.host_id === host_id)!;
       expect(host.connection_methods[0]).not.toHaveProperty("ssh_config_alias");
       expect(hostTarget(host, [])).not.toHaveProperty("ssh_config_alias");

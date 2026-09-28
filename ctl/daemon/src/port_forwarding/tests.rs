@@ -81,6 +81,7 @@ async fn moving_a_forward_cancels_its_exact_previous_route_before_starting_the_n
   let mut next = target("preferred-route");
   next.gateways.push(ctld_ipc::SshGateway {
     kind: ctld_ipc::GatewayKind::Ssh,
+    vpn: None,
     destination: "bastion".into(),
     hostname: None,
     user: None,

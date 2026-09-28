@@ -69,7 +69,6 @@ impl ConnectionTargetDto {
         user,
         port,
         identity_file,
-        gateways,
         ..
       } => ConnectionTarget::ssh_with_options(
         destination.clone(),
@@ -79,25 +78,57 @@ impl ConnectionTargetDto {
           user: user.clone(),
           port: *port,
           identity_file: identity_file.as_ref().map(PathBuf::from),
-          gateways: gateways
-            .iter()
+          gateways: self
+            .ssh_gateways()
+            .into_iter()
             .map(|gateway| SshGateway {
               kind: gateway.kind,
-              destination: gateway.destination.clone(),
-              hostname: gateway.hostname.clone(),
-              user: gateway.user.clone(),
+              vpn: gateway.vpn,
+              destination: gateway.destination,
+              hostname: gateway.hostname,
+              user: gateway.user,
               port: gateway.port,
-              identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
+              identity_file: gateway.identity_file,
               mode: match gateway.mode {
-                crate::dto::SshGatewayModeDto::Automatic => SshGatewayMode::Automatic,
-                crate::dto::SshGatewayModeDto::NativeOnly => SshGatewayMode::NativeOnly,
-                crate::dto::SshGatewayModeDto::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
+                ctld_ipc::SshGatewayMode::Automatic => SshGatewayMode::Automatic,
+                ctld_ipc::SshGatewayMode::NativeOnly => SshGatewayMode::NativeOnly,
+                ctld_ipc::SshGatewayMode::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
               },
             })
             .collect(),
         },
       ),
     }
+  }
+
+  /// Stable transport settings shared by authentication, status, and cleanup.
+  pub(crate) fn ssh_gateways(&self) -> Vec<ctld_ipc::SshGateway> {
+    let Self::Ssh {
+      vpn_connection_id,
+      gateways,
+      ..
+    } = self
+    else {
+      return Vec::new();
+    };
+    vpn_connection_id
+      .iter()
+      .map(|connection_id| crate::vpn::gateway(connection_id))
+      .chain(gateways.iter().map(|gateway| ctld_ipc::SshGateway {
+        kind: gateway.kind,
+        vpn: None,
+        destination: gateway.destination.clone(),
+        hostname: gateway.hostname.clone(),
+        user: gateway.user.clone(),
+        port: gateway.port,
+        identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
+        mode: match gateway.mode {
+          crate::dto::SshGatewayModeDto::Automatic => ctld_ipc::SshGatewayMode::Automatic,
+          crate::dto::SshGatewayModeDto::NativeOnly => ctld_ipc::SshGatewayMode::NativeOnly,
+          crate::dto::SshGatewayModeDto::AgentRelayOnly => ctld_ipc::SshGatewayMode::AgentRelayOnly,
+        },
+      }))
+      .collect()
   }
 
   #[must_use]
@@ -130,6 +161,7 @@ mod tests {
       port: Some(2222),
       identity_file: Some("~/.ssh/local.id_rsa".into()),
       gateway_route: Vec::new(),
+      vpn_connection_id: None,
       gateways: Box::default(),
     };
 

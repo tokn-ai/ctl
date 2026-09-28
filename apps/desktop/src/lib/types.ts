@@ -67,6 +67,8 @@ export interface SshConnectionTarget {
   user?: string;
   port?: number;
   identity_file?: string;
+  /** Saved VPN profile, resolved to its current proxy before connecting. */
+  vpn_connection_id?: string;
   /** Persisted route references, resolved from workspace gateway records. */
   gateway_route?: SshGatewayRouteStep[];
   /** Runtime-only gateway definitions passed to the native SSH boundary. */

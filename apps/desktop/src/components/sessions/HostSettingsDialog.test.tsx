@@ -30,6 +30,16 @@ function setup(saved = host) {
 }
 
 describe("host settings", () => {
+  it("shows the saved VPN name for its connection method", () => {
+    render(<HostSettingsDialog host={{ ...host, connection_methods: [{ ...host.connection_methods[0],
+      target: { ...host.connection_methods[0].target, vpn_connection_id: "office-vpn" } }] }}
+      vpn_connections={[{ connection_id: "office-vpn", name: "Office VPN", url: "https://vpn.example", username: "operator",
+        has_password: true, auth_method: null, target_ip: null }]}
+      onSave={vi.fn()} onAddMethod={vi.fn()} onEditMethod={vi.fn()} onConnect={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByText(/Via VPN · Office VPN/)).toBeTruthy();
+    expect(screen.queryByText(/Direct SSH/)).toBeNull();
+  });
+
   it("explains that customizing a virtual Tailscale host saves it in the host catalog", () => {
     const { onSave } = setup({ ...host, source: "tailscale" });
     expect(screen.getByText("Discovered from Tailscale. Customizing this virtual host saves it in hosts.json.")).toBeTruthy();

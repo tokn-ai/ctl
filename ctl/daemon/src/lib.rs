@@ -1415,7 +1415,7 @@ fn append_target_arguments(command: &mut Command, target: &SshTarget) {
   if target
     .gateways
     .iter()
-    .any(|gateway| gateway.kind == GatewayKind::Socks5)
+    .any(|gateway| gateway.kind.requires_proxy_command())
   {
     let proxy = ctld_ipc::proxy_command(&target.gateways).unwrap_or_else(|_| "false".into());
     command.arg("-o").arg(format!("ProxyCommand={proxy}"));
@@ -1530,14 +1530,19 @@ fn validate_target(target: &SshTarget) -> Result<(), RequestError> {
   {
     return Err(RequestError::InvalidRequest("invalid SSH target"));
   }
-  if target.gateways.len() > 8 || target.gateways.iter().any(invalid_gateway) {
+  if target.gateways.len() > 8
+    || target.gateways.iter().enumerate().any(|(index, gateway)| {
+      invalid_gateway(gateway) || (index != 0 && gateway.kind == GatewayKind::Vpn)
+    })
+  {
     return Err(RequestError::InvalidRequest("invalid SSH gateway route"));
   }
   Ok(())
 }
 
 fn invalid_gateway(gateway: &SshGateway) -> bool {
-  gateway.destination.trim().is_empty()
+  !gateway.has_valid_vpn_configuration()
+    || gateway.destination.trim().is_empty()
     || gateway.destination.chars().any(char::is_control)
     || gateway
       .destination
@@ -1811,6 +1816,7 @@ mod tests {
         gateways: if through_gateway {
           vec![SshGateway {
             kind: ctld_ipc::GatewayKind::Ssh,
+            vpn: None,
             destination: "127.0.0.1".into(),
             hostname: None,
             user: None,
@@ -1991,6 +1997,7 @@ mod tests {
     let mut routed = target();
     routed.gateways.push(SshGateway {
       kind: ctld_ipc::GatewayKind::Ssh,
+      vpn: None,
       destination: "edge.example".into(),
       hostname: None,
       user: None,

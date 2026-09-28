@@ -499,6 +499,7 @@ mod tests {
         .map(|port| port.parse().expect("RMUX_TEST_SSH_PORT must be a u16")),
       identity_file: std::env::var("RMUX_TEST_SSH_IDENTITY_FILE").ok(),
       gateway_route: Vec::new(),
+      vpn_connection_id: None,
       gateways: Box::default(),
     };
     let created = create_session(CreateSessionRequestDto {

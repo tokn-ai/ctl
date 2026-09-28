@@ -1,7 +1,7 @@
 import type { ConnectionTarget, SshConnectionTarget } from "../../lib/types";
 import { hostTarget, type WorkspaceView } from "./workspaceModel";
 
-/** Match ctld/keychain.rs: a destination plus the effective ordered gateway chain. */
+/** Match ctld/keychain.rs: destination and route, including the stable VPN binding. */
 function credentialScope(target: SshConnectionTarget): string {
   return JSON.stringify([
     target.destination,
@@ -14,6 +14,7 @@ function credentialScope(target: SshConnectionTarget): string {
       identity_file: gateway.identity_file ?? null,
       mode: gateway.mode,
     })),
+    target.vpn_connection_id ?? null,
   ]);
 }
 

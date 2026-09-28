@@ -4,12 +4,7 @@ use std::path::PathBuf;
 
 pub(super) fn client() -> Result<ctld_ipc::vpn::Client, ctld_ipc::vpn::VpnError> {
   let signed_development = std::env::var_os("RMUX_DEV_DAEMON_SUPERVISOR").is_some();
-  let client = ctld_ipc::vpn::Client::new(socket_path(
-    std::env::var_os("CTLD_VPN_SOCKET_PATH").map(PathBuf::from),
-    signed_development,
-    ctld_ipc::socket_path(),
-    ctld_ipc::default_socket_path(),
-  ));
+  let client = ctld_ipc::vpn::Client::new(selected_socket_path());
   if signed_development {
     // The launcher's signed bundle is deleted on exit. A shared owner must use
     // the durable helper beside the app, including for its future child tasks.
@@ -17,6 +12,15 @@ pub(super) fn client() -> Result<ctld_ipc::vpn::Client, ctld_ipc::vpn::VpnError>
   } else {
     Ok(client)
   }
+}
+
+pub(super) fn selected_socket_path() -> PathBuf {
+  socket_path(
+    std::env::var_os("CTLD_VPN_SOCKET_PATH").map(PathBuf::from),
+    std::env::var_os("RMUX_DEV_DAEMON_SUPERVISOR").is_some(),
+    ctld_ipc::socket_path(),
+    ctld_ipc::default_socket_path(),
+  )
 }
 
 fn socket_path(

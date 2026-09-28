@@ -8,6 +8,59 @@ import { QuickInput } from "./QuickInput";
 afterEach(cleanup);
 
 describe("QuickInput interactions", () => {
+  it("keeps the selected gateway when asynchronous VPN choices are inserted or reordered", async () => {
+    const submit = vi.fn();
+    const cancel = vi.fn();
+    const direct = { id: "direct", label: "Direct" };
+    const gateway = { id: "gateway", label: "Office gateway", group: "Saved gateways" };
+    const vpn = { id: "vpn", label: "Office VPN", group: "Saved VPNs" };
+    const { rerender } = render(<QuickInput title="Connect through" mode={{ kind: "pick", choices: [direct, gateway] }}
+      onSubmit={submit} onCancel={cancel} />);
+    const user = userEvent.setup();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Office gateway" }));
+    rerender(<QuickInput title="Connect through" mode={{ kind: "pick", choices: [direct, vpn, gateway] }}
+      onSubmit={submit} onCancel={cancel} />);
+    expect(screen.getByRole("option", { name: "Office gateway" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("option", { name: "Office VPN" }).getAttribute("aria-selected")).toBe("false");
+    await user.keyboard("{Enter}");
+    expect(submit).toHaveBeenLastCalledWith("gateway");
+    rerender(<QuickInput title="Connect through" mode={{ kind: "pick", choices: [gateway, direct, vpn] }}
+      onSubmit={submit} onCancel={cancel} />);
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Office gateway" }));
+    await user.keyboard("{Enter}");
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(submit).toHaveBeenLastCalledWith("gateway");
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(submit).toHaveBeenLastCalledWith("direct");
+  });
+
+  it("does not substitute another choice when the selected item disappears", async () => {
+    const submit = vi.fn();
+    const cancel = vi.fn();
+    const choices = [{ id: "direct", label: "Direct" }, { id: "vpn", label: "Office VPN" }];
+    const { rerender } = render(<QuickInput title="Connect through" mode={{ kind: "pick", initial_choice_id: "vpn", choices }}
+      onSubmit={submit} onCancel={cancel} />);
+    rerender(<QuickInput title="Connect through" mode={{ kind: "pick", choices: [choices[0]] }}
+      onSubmit={submit} onCancel={cancel} />);
+    expect(screen.getByRole("option", { name: "Direct" }).getAttribute("aria-selected")).toBe("false");
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Enter" });
+    expect(submit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("option", { name: "Direct" }));
+    expect(submit).toHaveBeenCalledExactlyOnceWith("direct");
+  });
+
+  it("focuses and accepts a retained choice while preserving option order", async () => {
+    const submit = vi.fn();
+    render(<QuickInput title="Connect through" mode={{ kind: "pick", initial_choice_id: "vpn",
+      choices: [{ id: "direct", label: "Direct" }, { id: "vpn", label: "Office VPN" }] }}
+      onSubmit={submit} onCancel={vi.fn()} />);
+    expect(screen.getAllByRole("option")[0].textContent).toBe("Direct");
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Office VPN" }));
+    await userEvent.setup().keyboard("{Enter}");
+    expect(submit).toHaveBeenCalledExactlyOnceWith("vpn");
+  });
+
   it("explicitly disables all dismissal paths for a non-cancellable operation", async () => {
     const cancel = vi.fn();
     render(

@@ -1,11 +1,12 @@
 import { useState } from "react";
-import type { WorkspaceConnectionMethod, WorkspaceHost } from "../../lib/types";
+import type { VpnConnection, WorkspaceConnectionMethod, WorkspaceHost } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import { Icon } from "../ui/Icon";
 import "./hostSettings.css";
 
 interface Props {
   host: WorkspaceHost;
+  vpn_connections?: readonly VpnConnection[];
   onSave(host: WorkspaceHost): Promise<void>;
   onAddMethod(): void;
   onEditMethod(method: WorkspaceConnectionMethod): void;
@@ -13,7 +14,7 @@ interface Props {
   onClose(): void;
 }
 
-export function HostSettingsDialog({ host, onSave, onAddMethod, onEditMethod, onConnect, onClose }: Props) {
+export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMethod, onEditMethod, onConnect, onClose }: Props) {
   const [draft, setDraft] = useState<WorkspaceHost>(() => ({
     ...host,
     connection_methods: host.connection_methods.map((method) => ({ ...method })),
@@ -95,6 +96,10 @@ export function HostSettingsDialog({ host, onSave, onAddMethod, onEditMethod, on
           {draft.connection_methods.map((method) => {
             const preferred = method.method_id === draft.preferred_method_id;
             const gateways = method.target.gateway_route?.length ?? 0;
+            const vpn = vpn_connections.find((connection) => connection.connection_id === method.target.vpn_connection_id);
+            const route = method.target.vpn_connection_id
+              ? `Via VPN · ${vpn?.name ?? "Unavailable saved VPN"}`
+              : gateways ? `Via ${gateways} gateway${gateways === 1 ? "" : "s"}` : "Direct SSH";
             return (
               <section className="host-method" key={method.method_id} aria-label={method.name}>
                 <div className="host-method-heading">
@@ -115,7 +120,7 @@ export function HostSettingsDialog({ host, onSave, onAddMethod, onEditMethod, on
                   </label>
                   {preferred ? <span className="host-method-preferred"><Icon name="check" size={12} /> Preferred</span> : null}
                 </div>
-                <p className="host-method-endpoint">{endpoint(method)} · {gateways ? `Via ${gateways} gateway${gateways === 1 ? "" : "s"}` : "Direct SSH"}</p>
+                <p className="host-method-endpoint">{endpoint(method)} · {route}</p>
                 {method.target.unavailable ? <p className="quick-input-error" role="status">{method.target.unavailable}</p> : null}
                 <div className="host-method-actions">
                   <button type="button" disabled={saving || dirty || Boolean(method.target.unavailable)} onClick={() => onConnect(method)}>Connect using</button>

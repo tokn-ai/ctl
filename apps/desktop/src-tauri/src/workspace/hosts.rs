@@ -46,6 +46,7 @@ where
     "port",
     "identity_file",
     "gateway_route",
+    "vpn_connection_id",
     "gateways",
     "remote_info",
   ];
@@ -106,6 +107,7 @@ impl WorkspaceConnectionMethod {
       identity_file,
       remote_info,
       gateway_route,
+      vpn_connection_id,
       gateways,
     } = &self.target
     else {
@@ -138,7 +140,8 @@ impl WorkspaceConnectionMethod {
       && ssh_config_alias.is_none()
       && use_ssh_config_master.is_none()
       && gateways.is_empty()
-      && gateway_route.len() <= 8
+      && vpn_connection_id.as_deref().is_none_or(crate::vpn::valid_connection_id)
+      && gateway_route.len() + usize::from(vpn_connection_id.is_some()) <= 8
       && gateway_route.iter().all(|step| {
         gateway_ids.contains(step.gateway_id.as_str())
           && route_ids.insert(step.gateway_id.as_str())

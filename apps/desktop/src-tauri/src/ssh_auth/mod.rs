@@ -137,6 +137,7 @@ impl Drop for AttemptGuard {
 }
 
 pub async fn probe(
+  app: tauri::AppHandle,
   window: String,
   attempt_id: String,
   target: ConnectionTargetDto,
@@ -163,6 +164,7 @@ pub async fn probe(
   let _guard = AttemptGuard(key);
   let context = PromptContext { attempt, channel };
   let establish = async {
+    crate::vpn::ensure_for_host(&app, &target).await?;
     let (stream, identity) = connect_with(&target, Some(context)).await?;
     if restart_check {
       require_restart_support(&identity)?;
@@ -211,6 +213,7 @@ pub async fn install_agent(
     channel,
   };
   let install = async {
+    crate::vpn::ensure_for_host(&app, &target).await?;
     let control_path = broker::ensure_master(&target, &context).await?;
     let interaction = SshInteraction::Multiplexed { control_path };
     let ConnectionTarget::Ssh {
@@ -252,6 +255,7 @@ fn require_restart_support(identity: &ctl_proto::RemoteIdentity) -> CommandResul
 
 /// Called only after the UI's destructive restart confirmation.
 pub async fn restart_rmux(
+  app: tauri::AppHandle,
   window: String,
   attempt_id: String,
   target: ConnectionTargetDto,
@@ -278,6 +282,7 @@ pub async fn restart_rmux(
   let context = PromptContext { attempt, channel };
   let restart = async {
     let prepare = async {
+      crate::vpn::ensure_for_host(&app, &target).await?;
       // Identity discovery does not perform a session-protocol handshake.
       let (stream, identity) = connect_with(&target, Some(context)).await?;
       require_restart_support(&identity)?;

@@ -130,7 +130,8 @@ represents a machine, with one remote account/ctl environment per host. Addresse
 OpenSSH aliases, and gateway routes are connection methods. Each method must reach
 the pinned account-owned remote UUID; matching UUIDs never merge separate hosts.
 
-**Add host** collects the address, display name, and authentication, verifies the
+**Add host** collects the address, display name, **Connect through** choice
+(Direct by default, a saved VPN, or a reusable gateway), and authentication, verifies the
 connection, and automatically saves a named host with an `SSH` method. Additional
 methods and gateway routes use **Host settings**. New-host creation does not
 write OpenSSH config. The advanced method editor can explicitly export a new
@@ -224,6 +225,18 @@ its temporary SSH helper; `CTLD_VPN_SOCKET_PATH` explicitly selects another VPN
 owner for all native VPN operations. Status polling never starts a daemon or
 reconnects automatically; closing the panel or app does not stop the daemon-owned
 VPN.
+
+Host methods persist an optional `vpn_connection_id`, independent of the VPN's
+runtime port. Native mapping prepends a typed VPN hop containing that ID and the
+selected VPN owner's socket path. These stable values participate in broker,
+master, and credential identities. An explicit SSH probe, install, or restart
+starts the saved VPN through its existing per-ID coordinator before SSH begins.
+Cancelling the host attempt stops waiting without cancelling shared VPN startup.
+Status, disconnect, and credential cleanup only map the stable route and never
+start the VPN. The proxy helper resolves the current connected SOCKS5 endpoint
+from the specified owner when opening a new transport, requires a loopback
+endpoint, and fails closed when the selected VPN is unavailable. VPN and SOCKS5
+routes force a private master, preventing reuse of a direct SSH-config master.
 
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed ctl-agent command.

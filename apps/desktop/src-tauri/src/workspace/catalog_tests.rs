@@ -660,3 +660,60 @@ fn current_workspace_rejects_definitions_and_catalog_rejects_local_or_invalid_me
   document.hosts.push(document.hosts[0].clone());
   assert!(document.validate().is_err());
 }
+
+#[test]
+fn saved_host_vpn_references_round_trip_without_runtime_endpoints() {
+  let fixture = Fixture::new();
+  let mut document = catalog();
+  let ConnectionTargetDto::Ssh {
+    vpn_connection_id, ..
+  } = &mut document.hosts[0].connection_methods[0].target
+  else {
+    panic!("SSH method")
+  };
+  *vpn_connection_id = Some("work-vpn".into());
+  let saved = fixture
+    .repository()
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load_hosts().unwrap(), saved);
+  let value: serde_json::Value =
+    serde_json::from_slice(&fs::read(fixture.0.join("hosts.json")).unwrap()).unwrap();
+  let target = &value["document"]["hosts"][0]["connection_methods"][0]["target"];
+  assert_eq!(target["vpn_connection_id"], "work-vpn");
+  assert!(target.get("endpoint").is_none());
+  assert!(target.get("socket_path").is_none());
+}
+
+#[test]
+fn invalid_saved_vpn_references_are_rejected() {
+  for value in [
+    String::new(),
+    "has space".into(),
+    "line\nfeed".into(),
+    "x".repeat(129),
+  ] {
+    let fixture = Fixture::new();
+    let mut document = catalog();
+    let ConnectionTargetDto::Ssh {
+      vpn_connection_id, ..
+    } = &mut document.hosts[0].connection_methods[0].target
+    else {
+      panic!("SSH method")
+    };
+    *vpn_connection_id = Some(value);
+    assert!(
+      fixture
+        .repository()
+        .update_hosts(UpdateHostsRequest {
+          expected_revision: None,
+          document,
+        })
+        .is_err()
+    );
+    assert!(!fixture.0.join("hosts.json").exists());
+  }
+}

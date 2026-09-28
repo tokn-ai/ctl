@@ -77,6 +77,60 @@ async fn managed_methods_do_not_evaluate_ssh_configuration() {
 }
 
 #[tokio::test]
+async fn vpn_routes_force_a_private_master_and_use_stable_profile_identity() {
+  let mut routed = target(Some("builder"));
+  routed.use_ssh_config_master = Some(true);
+  routed.gateways.push(SshGateway {
+    kind: GatewayKind::Vpn,
+    vpn: Some(ctld_ipc::VpnGateway {
+      connection_id: "saved-vpn".into(),
+      socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
+    }),
+    destination: "saved-vpn".into(),
+    hostname: None,
+    user: None,
+    port: None,
+    identity_file: None,
+    mode: SshGatewayMode::Automatic,
+  });
+  assert!(validate_target(&routed).is_ok());
+  assert!(!routed.uses_ssh_config_master());
+  let endpoint = ssh_config_master::resolve(&routed).await.unwrap();
+  assert!(!endpoint.shared);
+  let command = master_command(&routed, &endpoint);
+  let args: Vec<_> = command
+    .as_std()
+    .get_args()
+    .map(|item| item.to_string_lossy())
+    .collect();
+  assert!(args.iter().any(|arg| arg == "ControlMaster=yes"));
+  assert!(args.iter().any(|arg| arg.starts_with("ProxyCommand=")));
+  assert!(!args.iter().any(|arg| arg.starts_with("ProxyJump=")));
+  let first_key = target_key(&routed);
+  let first_path = control_path(&routed);
+  let reconstructed: SshTarget =
+    serde_json::from_slice(&serde_json::to_vec(&routed).unwrap()).unwrap();
+  assert_eq!(target_key(&reconstructed), first_key);
+  assert_eq!(control_path(&reconstructed), first_path);
+  let mut another_owner = reconstructed.clone();
+  another_owner.gateways[0].vpn.as_mut().unwrap().socket_path =
+    std::env::temp_dir().join("another-owner.sock");
+  assert_ne!(target_key(&another_owner), first_key);
+  let mut another_profile = reconstructed;
+  another_profile.gateways[0].destination = "other-vpn".into();
+  another_profile.gateways[0]
+    .vpn
+    .as_mut()
+    .unwrap()
+    .connection_id = "other-vpn".into();
+  assert_ne!(target_key(&another_profile), first_key);
+
+  // A second/local reference cannot be interpreted as a remote VPN hop.
+  routed.gateways.push(routed.gateways[0].clone());
+  assert!(validate_target(&routed).is_err());
+}
+
+#[tokio::test]
 async fn opting_out_uses_a_private_master_and_keeps_alias_matching() {
   let mut configured = target(Some("builder"));
   configured.use_ssh_config_master = Some(false);

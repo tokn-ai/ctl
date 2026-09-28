@@ -2,8 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ctld_ipc::{
-  ClientMessage, LocalPortForward, PortForwardStatus, PromptKind, ServerMessage, SshGateway,
-  SshGatewayMode, SshTarget,
+  ClientMessage, LocalPortForward, PortForwardStatus, PromptKind, ServerMessage, SshTarget,
 };
 
 use super::{PromptContext, SshPromptKind, request_response};
@@ -369,7 +368,6 @@ pub(super) fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTa
       user,
       port,
       identity_file,
-      gateways,
       ..
     } => {
       let mut target = SshTarget {
@@ -380,23 +378,18 @@ pub(super) fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTa
         user: user.clone(),
         port: *port,
         identity_file: identity_file.as_ref().map(PathBuf::from),
-        gateways: gateways
-          .iter()
-          .map(|gateway| SshGateway {
-            kind: gateway.kind,
-            destination: gateway.destination.clone(),
-            hostname: gateway.hostname.clone(),
-            user: gateway.user.clone(),
-            port: gateway.port,
-            identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
-            mode: match gateway.mode {
-              crate::dto::SshGatewayModeDto::Automatic => SshGatewayMode::Automatic,
-              crate::dto::SshGatewayModeDto::NativeOnly => SshGatewayMode::NativeOnly,
-              crate::dto::SshGatewayModeDto::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
-            },
-          })
-          .collect(),
+        gateways: target.ssh_gateways(),
       };
+      if target
+        .gateways
+        .iter()
+        .any(|gateway| !gateway.has_valid_vpn_configuration())
+      {
+        return Err(CommandErrorDto::new(
+          "invalid_vpn_route",
+          "Choose a saved VPN connection in the host settings.",
+        ));
+      }
       target.normalize_master_policy();
       Ok(target)
     }
@@ -426,6 +419,54 @@ fn authentication_required() -> CommandErrorDto {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn vpn_routes_keep_stable_identity_in_authentication_and_core_transport() {
+    let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
+      "kind": "ssh",
+      "destination": "office",
+      "vpn_connection_id": "work-vpn",
+      "gateways": [{
+        "gateway_id": "bastion",
+        "name": "Bastion",
+        "destination": "jump",
+        "mode": "automatic"
+      }]
+    }))
+    .unwrap();
+    let broker = broker_target(&target).unwrap();
+    assert_eq!(broker.gateways.len(), 2);
+    let vpn = &broker.gateways[0];
+    assert!(vpn.has_valid_vpn_configuration());
+    assert_eq!(vpn.kind, ctld_ipc::GatewayKind::Vpn);
+    assert_eq!(vpn.destination, "work-vpn");
+    assert_eq!(vpn.port, None);
+    assert!(vpn.vpn.as_ref().unwrap().socket_path.is_absolute());
+    assert_eq!(broker.gateways[1].destination, "jump");
+    let ctl_core::ConnectionTarget::Ssh { options, .. } = target.to_core() else {
+      panic!("expected SSH target")
+    };
+    assert_eq!(options.gateways[0].vpn, vpn.vpn);
+    assert_eq!(options.gateways[1].destination, "jump");
+    assert_eq!(broker_target(&target).unwrap(), broker);
+    let serialized = serde_json::to_value(&target).unwrap();
+    assert_eq!(serialized["vpn_connection_id"], "work-vpn");
+    assert!(serialized.get("socket_path").is_none());
+  }
+
+  #[test]
+  fn malformed_vpn_references_never_become_direct_connections() {
+    for value in ["", "contains whitespace", "line\nfeed"] {
+      let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
+        "kind": "ssh", "destination": "office", "vpn_connection_id": value,
+      }))
+      .unwrap();
+      assert_eq!(
+        broker_target(&target).unwrap_err().code,
+        "invalid_vpn_route"
+      );
+    }
+  }
 
   #[test]
   fn broker_target_preserves_ssh_config_origin() {

@@ -1,11 +1,11 @@
-//! OpenSSH `ProxyCommand` helper for ordered SSH and SOCKS5 routes.
+//! OpenSSH `ProxyCommand` helper for ordered SSH, SOCKS5, and managed VPN routes.
 use std::io;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
 
-use ctld_ipc::{GatewayKind, SshGateway};
+use ctld_ipc::{GatewayKind, SshGateway, VpnGateway, VpnState};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use zeroize::Zeroizing;
@@ -13,6 +13,9 @@ use zeroize::Zeroizing;
 trait ProxyStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> ProxyStream for T {}
 type Stream = Box<dyn ProxyStream>;
+
+#[cfg(all(test, unix))]
+mod vpn_tests;
 
 struct ChildPipe {
   child: Child,
@@ -82,6 +85,9 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
       tokio::net::TcpStream::connect(host_port(host, port)).await?,
     ));
   };
+  if super::invalid_gateway(gateway) {
+    return Err(io::Error::other("invalid proxy gateway"));
+  }
   let endpoint = gateway.hostname.as_deref().unwrap_or(&gateway.destination);
   match gateway.kind {
     GatewayKind::Ssh => {
@@ -117,7 +123,52 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
       socks_connect(&mut stream, gateway, host, port).await?;
       Ok(stream)
     }
+    GatewayKind::Vpn => {
+      if !prefix.is_empty() {
+        return Err(io::Error::other("VPN must be the first, local gateway"));
+      }
+      let vpn = gateway
+        .vpn
+        .as_ref()
+        .ok_or_else(|| io::Error::other("VPN gateway reference is missing"))?;
+      let endpoint = vpn_endpoint(vpn).await?;
+      let mut stream: Stream = Box::new(tokio::net::TcpStream::connect(endpoint).await?);
+      socks_connect(&mut stream, gateway, host, port).await?;
+      Ok(stream)
+    }
   }
+}
+
+async fn vpn_endpoint(vpn: &VpnGateway) -> io::Result<SocketAddr> {
+  let snapshot = ctld_ipc::vpn::Client::new(vpn.socket_path.clone())
+    .list()
+    .await
+    .map_err(io::Error::other)?;
+  let mut matches = snapshot
+    .connections
+    .iter()
+    .filter(|status| status.connection_id.as_deref() == Some(&vpn.connection_id));
+  let status = matches
+    .next()
+    .ok_or_else(|| io::Error::other("selected VPN is not connected"))?;
+  if matches.next().is_some() || !status.running || status.state != VpnState::Connected {
+    return Err(io::Error::other("selected VPN is not connected"));
+  }
+  let endpoint = status
+    .endpoint
+    .as_deref()
+    .ok_or_else(|| io::Error::other("selected VPN has no SOCKS5 endpoint"))?;
+  parse_vpn_endpoint(endpoint)
+}
+
+fn parse_vpn_endpoint(endpoint: &str) -> io::Result<SocketAddr> {
+  // Parsing a numeric socket address also rejects DNS names, credentials,
+  // paths, queries, and fragments. The managed listener is always local.
+  endpoint
+    .strip_prefix("socks5h://")
+    .and_then(|address| address.parse::<SocketAddr>().ok())
+    .filter(|address| address.ip().is_loopback() && address.port() != 0)
+    .ok_or_else(|| io::Error::other("selected VPN has an invalid loopback SOCKS5 endpoint"))
 }
 
 async fn socks_connect(
@@ -254,7 +305,13 @@ pub async fn run(route: &str, host: &str, port: u16) -> io::Result<()> {
     })
     .collect::<io::Result<Vec<_>>>()?;
   let gateways: Vec<SshGateway> = serde_json::from_slice(&bytes)?;
-  if gateways.len() > 8 || port == 0 || host.is_empty() {
+  if gateways.len() > 8
+    || gateways.iter().enumerate().any(|(index, gateway)| {
+      super::invalid_gateway(gateway) || (index != 0 && gateway.kind == GatewayKind::Vpn)
+    })
+    || port == 0
+    || host.is_empty()
+  {
     return Err(io::Error::other("invalid proxy route"));
   }
   let mut stream = connect(&gateways, host, port).await?;
@@ -349,6 +406,7 @@ mod tests {
     });
     let gateway = SshGateway {
       kind: GatewayKind::Socks5,
+      vpn: None,
       destination: "127.0.0.1".into(),
       hostname: None,
       user: None,
@@ -396,6 +454,7 @@ mod tests {
     });
     let gateway = SshGateway {
       kind: GatewayKind::Socks5,
+      vpn: None,
       destination: "127.0.0.1".into(),
       hostname: None,
       user: None,

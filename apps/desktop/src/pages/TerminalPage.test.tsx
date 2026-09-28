@@ -1205,6 +1205,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(screen.getByRole("textbox", { name: "SSH user" }), { target: { value: "developer" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("option", { name: /Direct/ }));
     fireEvent.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     const saved = api.updateHosts.mock.calls.slice(-1)[0][1] as HostCatalogDocument;
@@ -1661,6 +1662,7 @@ describe("workspace-backed terminal page", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(screen.queryByLabelText("Method name")).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: /Direct/ }));
     fireEvent.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(screen.getByRole("button", { name: "Host settings for Build server at home" })).toBeTruthy();
@@ -1686,6 +1688,74 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.detach).not.toHaveBeenCalled();
   });
 
+  it("saves a selected VPN by ID and reuses it for the host's next connection", async () => {
+    api.loadVpnConnections.mockResolvedValue({ revision: "vpn-one", connections: [{
+      connection_id: "office-vpn", name: "Office VPN", url: "https://vpn.example.test",
+      username: "vpn-user", has_password: true, auth_method: null, target_ip: null,
+    }] });
+    api.vpnStatus.mockResolvedValue({ supports_multiple: true, connections: [{
+      vpn_id: "office-vpn", connection_id: "office-vpn", state: "connected", running: true,
+      endpoint: "socks5h://127.0.0.1:49152", container_name: "vpn-fixture",
+      vpn_url: "https://vpn.example.test", username: "vpn-user",
+    }] });
+    api.createSession.mockImplementation(async (request: { target: ConnectionTarget }) => newSession(request.target));
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.change(screen.getByLabelText("SSH host"), { target: { value: "deploy@build.example.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Office builder" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Office VPN/ }));
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const catalog = api.updateHosts.mock.calls.slice(-1)[0][1] as HostCatalogDocument;
+    const host = catalog.hosts.find((host) => host.name === "Office builder")!;
+    expect(host.connection_methods[0].target).toEqual({
+      kind: "ssh", destination: "build.example.test", hostname: "build.example.test",
+      user: "deploy", vpn_connection_id: "office-vpn",
+    });
+    expect(api.probeSshHost.mock.calls[0][0]).toMatchObject({ vpn_connection_id: "office-vpn" });
+    expect(JSON.stringify(host)).not.toContain("49152");
+    expect(JSON.stringify(host)).not.toContain("vpn-user");
+    expect(api.connectVpn).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(screen.getByRole("option", { name: /Office builder/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(api.createSession).toHaveBeenCalledOnce());
+    expect(api.createSession.mock.calls[0][0].target).toMatchObject({
+      host_id: host.host_id, vpn_connection_id: "office-vpn",
+    });
+  });
+
+  it("resolves a saved SOCKS5 gateway when adding a host and persists its reference", async () => {
+    const catalog = hostSnapshot();
+    catalog.document.ssh_gateways = [{
+      gateway_id: "office-proxy", name: "Office proxy", kind: "socks5",
+      destination: "127.0.0.1", hostname: "127.0.0.1", port: 1080,
+    }];
+    api.loadHosts.mockResolvedValue(catalog);
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add host" }));
+    fireEvent.change(screen.getByLabelText("SSH host"), { target: { value: "build.example.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("option", { name: /Office proxy/ }));
+    fireEvent.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.probeSshHost.mock.calls[0][0]).toMatchObject({
+      gateways: [{ kind: "socks5", destination: "127.0.0.1", hostname: "127.0.0.1", port: 1080 }],
+    });
+    const saved = api.updateHosts.mock.calls.slice(-1)[0][1] as HostCatalogDocument;
+    expect(saved.hosts[2].connection_methods[0].target.gateway_route).toEqual([
+      { gateway_id: "office-proxy", mode: "automatic" },
+    ]);
+    expect(saved.hosts[2].connection_methods[0].target.gateways).toBeUndefined();
+    expect(saved.hosts[2].connection_methods[0].target.vpn_connection_id).toBeUndefined();
+  });
+
   it.each([
     ["New shell", null],
     ["Add existing session", null],
@@ -1706,6 +1776,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("option", { name: "only-in-ssh-config" }));
     fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Office machine" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("option", { name: /Direct/ }));
     if (identity_file) {
       fireEvent.click(screen.getByRole("option", { name: /Identity file/ }));
       fireEvent.change(screen.getByRole("combobox", { name: "Identity file" }), { target: { value: identity_file } });
@@ -1888,6 +1959,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "Build machine" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     api.updateHosts.mockRejectedValueOnce(new Error("disk full"));
+    fireEvent.click(screen.getByRole("option", { name: /Direct/ }));
     fireEvent.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     await screen.findByRole("dialog", { name: "Could not save host" });
     expect(screen.queryByRole("button", { name: "Host settings for Build machine" })).toBeNull();

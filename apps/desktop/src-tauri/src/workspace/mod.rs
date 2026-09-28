@@ -235,6 +235,7 @@ fn validated_gateway_ids(gateways: &[WorkspaceSshGateway]) -> Option<HashSet<&st
           .chars()
           .any(|value| matches!(value, ',' | '@'))
         || gateway.port == Some(0)
+        || gateway.kind == ctld_ipc::GatewayKind::Vpn
         || (gateway.kind == ctld_ipc::GatewayKind::Socks5
           && (gateway.port.is_none()
             || gateway.hostname.is_some()

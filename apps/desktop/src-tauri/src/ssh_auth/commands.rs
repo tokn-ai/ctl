@@ -39,11 +39,13 @@ pub struct DisconnectSshHostRequest {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn probe_ssh_host(
+  app: AppHandle,
   window: WebviewWindow,
   request: ProbeRequest,
   on_prompt: Channel<SshPromptDto>,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
   super::probe(
+    app,
     window.label().into(),
     request.attempt_id,
     request.target,
@@ -74,11 +76,13 @@ pub async fn install_remote_agent(
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn restart_remote_rmux(
+  app: AppHandle,
   window: WebviewWindow,
   request: ProbeRequest,
   on_prompt: Channel<SshPromptDto>,
 ) -> CommandResult<ctl_proto::RemoteRmuxRestartResult> {
   super::restart_rmux(
+    app,
     window.label().into(),
     request.attempt_id,
     request.target,

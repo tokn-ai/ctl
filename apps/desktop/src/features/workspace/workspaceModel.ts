@@ -86,7 +86,8 @@ export function connectionMethodOptions(source: Pick<WorkspaceConnectionMethod,
 }
 
 export function usesSshConfigMaster(target: SshConnectionTarget): boolean {
-  return target.use_ssh_config_master ?? Boolean(target.ssh_config_alias);
+  return !target.vpn_connection_id && !target.gateways?.some((gateway) => gateway.kind === "socks5") &&
+    (target.use_ssh_config_master ?? Boolean(target.ssh_config_alias));
 }
 
 /** Keep transport details out of the host's stable identity. */
@@ -98,6 +99,7 @@ export function connectionSettings(target: SshConnectionTarget): SshConnectionTa
     ...(target.user ? { user: target.user } : {}),
     ...(target.port ? { port: target.port } : {}),
     ...(target.identity_file ? { identity_file: target.identity_file } : {}),
+    ...(target.vpn_connection_id ? { vpn_connection_id: target.vpn_connection_id } : {}),
     ...(target.gateway_route?.length ? { gateway_route: target.gateway_route } : {}),
   };
 }
@@ -211,7 +213,7 @@ function projectedHost(alias: string): WorkspaceHost {
 
 function isPureAliasTarget(target: SshConnectionTarget, alias: string): boolean {
   return target.destination === alias && !target.hostname && !target.user &&
-    !target.port && !target.identity_file && !target.gateway_route?.length &&
+    !target.port && !target.identity_file && !target.vpn_connection_id && !target.gateway_route?.length &&
     !target.gateways?.length;
 }
 

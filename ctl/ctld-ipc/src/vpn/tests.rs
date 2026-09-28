@@ -265,13 +265,22 @@ mod endpoints {
 
   #[tokio::test]
   async fn missing_or_stale_explicit_endpoint_does_not_start_a_daemon() {
+    // A concurrently forked child can retain this listener until exec even
+    // after the parent closes it, making a supposedly stale endpoint connect.
+    let _execution_guard = crate::tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
     let fixture = Fixture::new();
     for stale in [false, true] {
       let selected = fixture
         .0
         .join(if stale { "stale.sock" } else { "missing.sock" });
       if stale {
-        drop(UnixListener::bind(&selected).unwrap());
+        drop(std::os::unix::net::UnixListener::bind(&selected).unwrap());
+        assert_eq!(
+          std::os::unix::net::UnixStream::connect(&selected)
+            .unwrap_err()
+            .kind(),
+          std::io::ErrorKind::ConnectionRefused
+        );
       }
       let existed = selected.exists();
       let client = Client::new(selected.clone());

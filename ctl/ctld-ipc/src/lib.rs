@@ -769,7 +769,8 @@ mod tests {
   }
 
   #[cfg(unix)]
-  static PROTOCOL_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+  pub(crate) static SUBPROCESS_FIXTURE_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
   #[cfg(unix)]
   struct ProtocolFixture {
@@ -787,7 +788,7 @@ mod tests {
       static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
       // A child can briefly inherit another fixture's writable descriptor
       // before exec. Keep fixture writes and subprocess creation serialized.
-      let execution_guard = PROTOCOL_FIXTURE_LOCK.lock().await;
+      let execution_guard = SUBPROCESS_FIXTURE_LOCK.lock().await;
       let directory = env::temp_dir().join(format!(
         "ctld-protocol-{}-{}-{}",
         std::process::id(),

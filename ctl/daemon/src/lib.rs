@@ -347,6 +347,7 @@ async fn handle_connection(
       list_remote_listeners(&mut stream, &state, &target).await
     }
     request @ (ClientMessage::StartVpn { .. }
+    | ClientMessage::StartVpnConnection { .. }
     | ClientMessage::StopVpn
     | ClientMessage::VpnStatus) => handle_vpn_request(&mut stream, &state, request).await,
     ClientMessage::Askpass {
@@ -382,6 +383,7 @@ async fn handle_vpn_request(
     .ok_or_else(|| RequestError::VpnFailed("VPN service is unavailable".into()))?;
   let status = match request {
     ClientMessage::StartVpn { env_file } => service.start(env_file).await,
+    ClientMessage::StartVpnConnection { connection } => service.start_connection(connection).await,
     ClientMessage::StopVpn => service.stop().await,
     ClientMessage::VpnStatus => service.status().await,
     _ => return Err(RequestError::InvalidRequest("expected a VPN request")),
@@ -407,6 +409,7 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::Askpass { .. }
     | ClientMessage::VpnStatus
     | ClientMessage::StartVpn { .. }
+    | ClientMessage::StartVpnConnection { .. }
     | ClientMessage::StopVpn => {}
   }
 }

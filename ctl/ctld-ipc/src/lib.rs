@@ -1,5 +1,7 @@
 //! Owner-only local protocol between `ctld` and its clients.
 
+pub mod vpn;
+
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,8 +25,8 @@ const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-// Version 10 adds control and discovery of the SOCKS5 endpoint owned by the daemon's VPN.
-pub const PROTOCOL_VERSION: u16 = 10;
+// Version 11 adds saved VPN connection requests and explicit lifecycle states.
+pub const PROTOCOL_VERSION: u16 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +152,83 @@ pub struct VpnStatus {
   pub endpoint: Option<String>,
   pub container_name: Option<String>,
   pub running: bool,
+  pub connection_id: Option<String>,
+  pub state: VpnState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VpnState {
+  #[default]
+  Stopped,
+  Starting,
+  Connected,
+  Stopping,
+}
+
+/// Saved connection settings. Deliberately omits Debug to protect the password.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnConnection {
+  pub connection_id: String,
+  pub name: String,
+  pub url: String,
+  pub username: String,
+  pub password: Zeroizing<String>,
+  pub auth_method: Option<String>,
+  pub target_ip: Option<String>,
+}
+
+impl VpnConnection {
+  /// Validates settings before persistence or conversion into a literal env file.
+  ///
+  /// # Errors
+  /// Returns a field-only diagnostic without including any supplied values.
+  pub fn validate(&self) -> Result<(), String> {
+    for (name, value, maximum) in [
+      ("Connection ID", self.connection_id.as_str(), 128),
+      ("Name", self.name.as_str(), 256),
+      ("VPN URL", self.url.as_str(), 2048),
+      ("Username", self.username.as_str(), 256),
+    ] {
+      validate_vpn_field(name, value, maximum)?;
+      if value.trim().is_empty() {
+        return Err(format!("{name} is required"));
+      }
+    }
+    validate_vpn_field("Password", &self.password, 4096)?;
+    if self.password.is_empty() {
+      return Err("Password is required".into());
+    }
+    let address = self.url.strip_prefix("https://").unwrap_or(&self.url);
+    if address.contains("://")
+      || self.url.chars().any(char::is_whitespace)
+      || address
+        .split('/')
+        .next()
+        .is_none_or(|host| host.is_empty() || host.contains('@'))
+    {
+      return Err("VPN URL must be an HTTPS gateway or bare gateway address".into());
+    }
+    if let Some(value) = &self.auth_method {
+      validate_vpn_field("Authentication method", value, 256)?;
+    }
+    if let Some(value) = &self.target_ip {
+      validate_vpn_field("Connectivity target", value, 64)?;
+      if !value.is_empty() && value.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err("Connectivity target must be an IPv4 address".into());
+      }
+    }
+    Ok(())
+  }
+}
+
+fn validate_vpn_field(name: &str, value: &str, maximum: usize) -> Result<(), String> {
+  if value.len() > maximum || value.contains(['\r', '\n', '\0']) {
+    return Err(format!(
+      "{name} must be at most {maximum} bytes and cannot contain line breaks or NUL"
+    ));
+  }
+  Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +283,9 @@ pub enum ClientMessage {
   },
   StartVpn {
     env_file: PathBuf,
+  },
+  StartVpnConnection {
+    connection: VpnConnection,
   },
   VpnStatus,
   StopVpn,

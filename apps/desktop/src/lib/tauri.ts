@@ -42,6 +42,9 @@ import type {
   HostCatalogDocument,
   HostCatalogSnapshot,
   SshConnectionStatus,
+  VpnConnectionInput,
+  VpnConnectionsSnapshot,
+  VpnStatus,
 } from "./types";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -56,6 +59,36 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
 
 export async function loadHosts(): Promise<HostCatalogSnapshot> {
   return invoke("load_hosts");
+}
+
+export async function loadVpnConnections(): Promise<VpnConnectionsSnapshot> {
+  return invoke("load_vpn_connections");
+}
+
+export async function saveVpnConnection(
+  expected_revision: string | null,
+  connection: VpnConnectionInput,
+): Promise<VpnConnectionsSnapshot> {
+  return invoke("save_vpn_connection", { request: { expected_revision, connection } });
+}
+
+export async function deleteVpnConnection(
+  expected_revision: string | null,
+  connection_id: string,
+): Promise<VpnConnectionsSnapshot> {
+  return invoke("delete_vpn_connection", { request: { expected_revision, connection_id } });
+}
+
+export async function connectVpn(connection_id: string): Promise<VpnStatus> {
+  return invoke("connect_vpn", { request: { connection_id } });
+}
+
+export async function vpnStatus(): Promise<VpnStatus> {
+  return invoke("vpn_status");
+}
+
+export async function stopVpn(): Promise<VpnStatus> {
+  return invoke("stop_vpn");
 }
 
 export async function updateHosts(

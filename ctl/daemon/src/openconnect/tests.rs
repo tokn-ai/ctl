@@ -1,5 +1,53 @@
 use super::*;
 
+fn saved_connection() -> VpnConnection {
+  VpnConnection {
+    connection_id: "test".into(),
+    name: "Test VPN".into(),
+    url: "vpn.example.test".into(),
+    username: "test-user".into(),
+    password: Zeroizing::new("literal $value='quoted'\\tail#=end".into()),
+    auth_method: Some("default_method".into()),
+    target_ip: None,
+  }
+}
+
+#[test]
+fn generated_config_preserves_literal_values_without_shell_quoting() {
+  let connection = saved_connection();
+  let env = connection_env(&connection).unwrap();
+  assert!(
+    env
+      .lines()
+      .any(|line| line == format!("VPN_PASSWORD={}", connection.password.as_str()))
+  );
+  assert!(env.ends_with("TARGET_IP=\n"));
+  assert!(!env.contains("Test VPN"));
+  let mut invalid = saved_connection();
+  invalid.password.push('\n');
+  assert!(connection_env(&invalid).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn engine_search_supports_gui_paths_and_never_searches_relative_directories() {
+  let paths = engine_candidates(
+    Some(OsStr::new(".:relative:/custom/bin:/custom/bin")),
+    Some(Path::new("/home/test")),
+  );
+  assert_eq!(paths[0], Path::new("/custom/bin/docker"));
+  assert!(paths.iter().all(|path| path.is_absolute()));
+  assert!(paths.contains(&PathBuf::from("/home/test/.local/bin/docker")));
+  assert!(paths.contains(&PathBuf::from("/opt/homebrew/bin/podman")));
+  assert_eq!(
+    paths
+      .iter()
+      .filter(|path| **path == Path::new("/custom/bin/docker"))
+      .count(),
+    1
+  );
+}
+
 #[test]
 fn accepts_only_a_single_nonzero_loopback_port() {
   assert_eq!(
@@ -207,5 +255,33 @@ esac
     let result = start_with_engine(engine.options(), &engine.executable).await;
     assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
     assert!(!engine.root.join("run.args").exists());
+  }
+
+  #[tokio::test]
+  async fn inline_config_uses_only_stdin_and_tmpfs_before_heartbeats() {
+    let engine = FakeEngine::new();
+    fs::write(engine.root.join("ready"), "").unwrap();
+    let config = connection_env(&saved_connection()).unwrap();
+    let mut vpn = start_config(Config::Inline(config.clone()), &engine.executable)
+      .await
+      .unwrap();
+    engine.wait_for_file("heartbeats").await;
+    let input = fs::read_to_string(engine.root.join("heartbeats")).unwrap();
+    let mut lines = input.lines();
+    assert_eq!(
+      BASE64.decode(lines.next().unwrap()).unwrap(),
+      config.as_bytes()
+    );
+    assert!(lines.all(|line| line == "ping"));
+    let arguments = fs::read_to_string(engine.root.join("run.args")).unwrap();
+    assert!(
+      arguments.contains("--tmpfs\n/run/secrets:rw,noexec,nosuid,nodev,mode=0700,size=65536\n")
+    );
+    assert!(arguments.contains("--env\nCTLD_CONFIG_STDIN=1\n"));
+    assert!(!arguments.contains("--mount"));
+    assert!(!arguments.contains("test-user"));
+    assert!(!arguments.contains("quoted"));
+    vpn.shutdown().await;
+    engine.wait_for_exit().await;
   }
 }

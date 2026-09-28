@@ -708,9 +708,11 @@ dependencies = [
 name = "ctld"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "ctl-proto",
  "ctld-ipc",
+ "dirs",
  "rpassword",
  "rustix",
  "security-framework",
@@ -3083,6 +3085,7 @@ dependencies = [
  "rmux-client",
  "rmux-ipc",
  "rmux-proto",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

@@ -8,7 +8,9 @@ using the official Tauri IPC and window mocks. It creates no shell processes,
 SSH connections, port forwards, or files. Changes only affect memory and reset
 on reload. Terminal typing echoes input; it does not execute commands.
 
-Use `?view=tasks` or `?view=ports` to open those sidebar views directly.
+Use `?view=tasks`, `?view=ports`, or `?view=vpn` to open those sidebar views directly.
+The VPN preview uses sample connections and simulated status; it never starts a container
+or saves credentials to disk.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 

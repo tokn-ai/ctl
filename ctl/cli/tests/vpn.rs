@@ -107,6 +107,8 @@ async fn start_status_and_stop_use_daemon_ipc_and_print_json() {
   let ready = VpnStatus {
     endpoint: Some("socks5h://127.0.0.1:43210".into()),
     container_name: Some("ctld-openconnect-test".into()),
+    connection_id: None,
+    state: ctld_ipc::VpnState::Connected,
     running: true,
   };
   let (output, request) = exchange(

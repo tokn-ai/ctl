@@ -1,17 +1,20 @@
 //! A container lease owned by ctld, including when the host process crashes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use ctld_ipc::VpnStatus;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use ctld_ipc::{VpnConnection, VpnState, VpnStatus};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
+use zeroize::Zeroizing;
 
 const IMAGE: &str = "localhost/ctl-openconnect:local";
 const START_TIMEOUT: Duration = Duration::from_secs(75);
@@ -39,6 +42,12 @@ impl ManagedVpn {
       endpoint: self.endpoint.clone(),
       container_name: Some(self.container_name.clone()),
       running: self.endpoint.is_some(),
+      connection_id: None,
+      state: if self.endpoint.is_some() {
+        VpnState::Connected
+      } else {
+        VpnState::Stopped
+      },
     }
   }
 
@@ -138,41 +147,89 @@ fn engine_command(engine: &Path) -> Command {
 /// Returns an error for unsafe/missing configuration, engine failure, or a VPN
 /// that does not finish configuring its routes and SOCKS5 listener in time.
 pub async fn start(options: Options) -> io::Result<ManagedVpn> {
-  start_with_engine(options, Path::new("docker")).await
+  start_with_engine(options, &find_engine()?).await
+}
+
+/// Starts saved connection settings without creating a host-side secret file.
+///
+/// # Errors
+/// Returns sanitized validation errors, engine failures, or readiness failures.
+pub async fn start_connection(connection: VpnConnection) -> io::Result<ManagedVpn> {
+  let config = connection_env(&connection)?;
+  drop(connection);
+  start_config(Config::Inline(config), &find_engine()?).await
+}
+
+enum Config {
+  File(PathBuf),
+  Inline(Zeroizing<String>),
 }
 
 async fn start_with_engine(options: Options, engine: &Path) -> io::Result<ManagedVpn> {
-  let config = prepare_config(&options.env_file)?;
+  start_config(Config::File(options.env_file), engine).await
+}
+
+async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
   let container_name = format!("ctld-openconnect-{}", uuid::Uuid::new_v4().simple());
-  let mut child = engine_command(engine)
-    .args([
-      "run",
-      "--rm",
-      "--init",
-      "--interactive",
-      "--pull=never",
-      "--restart=no",
-      "--name",
-      &container_name,
-      "--label",
-      "io.ctl.service=openconnect",
-      "--security-opt",
-      "label=disable",
-      "--cap-add",
-      "NET_ADMIN",
-      "--device",
-      "/dev/net/tun",
-      "--publish",
-      "127.0.0.1::1080/tcp",
-      "--mount",
-      &format!("type=bind,source={config},target=/run/secrets/openconnect.env,readonly"),
-      IMAGE,
-    ])
+  let mut command = engine_command(engine);
+  command.args([
+    "run",
+    "--rm",
+    "--init",
+    "--interactive",
+    "--pull=never",
+    "--restart=no",
+    "--name",
+    &container_name,
+    "--label",
+    "io.ctl.service=openconnect",
+    "--security-opt",
+    "label=disable",
+    "--cap-add",
+    "NET_ADMIN",
+    "--device",
+    "/dev/net/tun",
+    "--publish",
+    "127.0.0.1::1080/tcp",
+  ]);
+  let initial_payload = match config {
+    Config::File(path) => {
+      let path = prepare_config(&path)?;
+      command.args([
+        "--mount",
+        &format!("type=bind,source={path},target=/run/secrets/openconnect.env,readonly"),
+      ]);
+      None
+    }
+    Config::Inline(config) => {
+      command.args([
+        "--env",
+        "CTLD_CONFIG_STDIN=1",
+        "--tmpfs",
+        "/run/secrets:rw,noexec,nosuid,nodev,mode=0700,size=65536",
+      ]);
+      let mut payload = Zeroizing::new(BASE64.encode(config.as_bytes()));
+      payload.push('\n');
+      Some(payload)
+    }
+  };
+  let mut child = command
+    .arg(IMAGE)
     .stdin(Stdio::piped())
     .stdout(Stdio::null())
     .spawn()?;
   let mut stdin = child.stdin.take().expect("container stdin was piped");
   let heartbeat = tokio::spawn(async move {
+    if let Some(payload) = initial_payload {
+      if !matches!(
+        timeout(COMMAND_TIMEOUT, stdin.write_all(payload.as_bytes())).await,
+        Ok(Ok(()))
+      ) {
+        return;
+      }
+      // Drop and zeroize the credentials before entering the heartbeat loop.
+      drop(payload);
+    }
     let mut ticks = interval(HEARTBEAT_INTERVAL);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -205,6 +262,92 @@ async fn start_with_engine(options: Options, engine: &Path) -> io::Result<Manage
     return Err(error);
   }
   Ok(vpn)
+}
+
+fn connection_env(connection: &VpnConnection) -> io::Result<Zeroizing<String>> {
+  connection
+    .validate()
+    .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+  let mut config = Zeroizing::new(String::new());
+  for (key, value) in [
+    ("VPN_URL", connection.url.as_str()),
+    ("VPN_USERNAME", connection.username.as_str()),
+    ("VPN_PASSWORD", connection.password.as_str()),
+    (
+      "VPN_AUTH_METHOD",
+      connection.auth_method.as_deref().unwrap_or_default(),
+    ),
+    (
+      "TARGET_IP",
+      connection.target_ip.as_deref().unwrap_or_default(),
+    ),
+  ] {
+    config.push_str(key);
+    config.push('=');
+    config.push_str(value);
+    config.push('\n');
+  }
+  Ok(config)
+}
+
+fn find_engine() -> io::Result<PathBuf> {
+  engine_candidates(
+    std::env::var_os("PATH").as_deref(),
+    dirs::home_dir().as_deref(),
+  )
+  .into_iter()
+  .find(|path| {
+    let Ok(metadata) = path.metadata() else {
+      return false;
+    };
+    if !metadata.is_file() {
+      return false;
+    }
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt as _;
+      metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+      true
+    }
+  })
+  .ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::NotFound,
+      "Docker or Podman was not found; install and start a container engine",
+    )
+  })
+}
+
+fn engine_candidates(search_path: Option<&OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
+  let mut directories: Vec<PathBuf> = search_path
+    .into_iter()
+    .flat_map(std::env::split_paths)
+    .filter(|path| path.is_absolute())
+    .collect();
+  if let Some(home) = home.filter(|path| path.is_absolute()) {
+    directories.push(home.join(".local/bin"));
+  }
+  directories
+    .extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+  let mut candidates: Vec<_> = ["docker", "podman"]
+    .into_iter()
+    .flat_map(|name| {
+      directories
+        .iter()
+        .map(move |directory| directory.join(name))
+    })
+    .collect();
+  #[cfg(target_os = "macos")]
+  candidates.extend([
+    PathBuf::from("/Applications/Docker.app/Contents/Resources/bin/docker"),
+    PathBuf::from("/opt/podman/bin/podman"),
+  ]);
+  let mut seen = HashSet::new();
+  candidates.retain(|path| seen.insert(path.clone()));
+  candidates
 }
 
 fn prepare_config(path: &Path) -> io::Result<String> {

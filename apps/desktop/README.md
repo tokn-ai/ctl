@@ -3,6 +3,29 @@
 The desktop client for local and SSH-connected daemon-owned `rmux` terminal
 sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
+## VPN connections
+
+Open **VPN** in the sidebar to add a named connection with a server, username,
+and password. Advanced settings include an authentication method and an optional
+SSH connectivity-check target. Save the connection, then choose **Connect**.
+The panel shows connection progress and the current SOCKS5 endpoint, which can be
+copied for use by other clients. Only one VPN can run at a time. **Disconnect**
+also cancels a connection that is still starting.
+
+Connections, including passwords, are stored in a private `vpns.json` file in
+the app's configuration directory. The webview receives metadata and a
+password-presence flag; editing with an empty password keeps the stored password.
+The Docker adapter generates its environment file internally when connecting.
+Users do not need to create or select an environment file.
+
+This requires a running Docker-compatible engine and the OpenConnect image built
+with `./docker/openconnect/run.sh build` from the repository root. On macOS and
+Linux the app and `ctl vpn` share the local `ctld` owner, including connections
+started from the CLI. Closing the app leaves the VPN running; disconnecting or
+exiting `ctld` stops the container. The SOCKS proxy follows the container's routes;
+it does not change the Mac's system routes or automatically change SSH settings.
+See [the container setup guide](../../docker/openconnect/README.md) for proxy usage.
+
 ## Develop
 
 From the repository root, install the frontend dependencies and start Tauri:

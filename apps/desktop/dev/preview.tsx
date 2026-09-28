@@ -23,6 +23,9 @@ import type {
   TaskRequest,
   WorkspaceDocument,
   WorkspaceSnapshot,
+  VpnConnectionInput,
+  VpnConnectionsSnapshot,
+  VpnStatus,
 } from "../src/lib/types";
 import {
   previewDefinitions,
@@ -41,7 +44,7 @@ import {
 if (!import.meta.env.DEV) throw new Error("The sample workspace is development-only.");
 
 const view_param = new URLSearchParams(location.search).get("view");
-const initial_view = view_param === "tasks" || view_param === "ports" ? view_param : "sessions";
+const initial_view = view_param === "tasks" || view_param === "ports" || view_param === "vpn" ? view_param : "sessions";
 let workspace: WorkspaceSnapshot = { revision: "preview-1", document: previewWorkspace(initial_view) };
 const connectedHosts = new Set(["dev-server"]);
 const pausedHosts = new Set<string>();
@@ -55,6 +58,17 @@ let definitions = structuredClone(previewDefinitions);
 let keybindings: KeybindingsDocument = { schema_version: 1, overrides: [] };
 const attachments = new Map<string, { channel: Channel<AttachmentEvent>; sequence: number; session: SessionSummary }>();
 const forwards = new Map<string, PortForwardStatus>();
+let vpn_connections: VpnConnectionsSnapshot = {
+  revision: "preview-vpn-1",
+  connections: [{
+    connection_id: "sample-vpn", name: "Office", url: "https://vpn.example.com",
+    username: "sample", has_password: true, auth_method: null, target_ip: null,
+  }],
+};
+const stopped_vpn: VpnStatus = {
+  state: "stopped", running: false, connection_id: null, endpoint: null, container_name: null,
+};
+let vpn_status: VpnStatus = { ...stopped_vpn };
 
 function request<T>(payload: InvokeArgs | undefined): T {
   return (payload as { request: T }).request;
@@ -102,6 +116,41 @@ mockIPC((command, payload) => {
       return structuredClone(workspace);
     case "load_hosts":
       return structuredClone(hosts);
+    case "load_vpn_connections":
+      return structuredClone(vpn_connections);
+    case "save_vpn_connection": {
+      const { connection } = request<{ connection: VpnConnectionInput }>(payload);
+      const { password, ...summary } = connection;
+      const prior = vpn_connections.connections.find((item) => item.connection_id === connection.connection_id);
+      vpn_connections = {
+        revision: `preview-vpn-${++revision}`,
+        connections: [
+          ...vpn_connections.connections.filter((item) => item.connection_id !== connection.connection_id),
+          { ...summary, has_password: password !== null || prior?.has_password === true },
+        ],
+      };
+      return structuredClone(vpn_connections);
+    }
+    case "delete_vpn_connection": {
+      const { connection_id } = request<{ connection_id: string }>(payload);
+      vpn_connections = {
+        revision: `preview-vpn-${++revision}`,
+        connections: vpn_connections.connections.filter((item) => item.connection_id !== connection_id),
+      };
+      return structuredClone(vpn_connections);
+    }
+    case "connect_vpn":
+      vpn_status = {
+        state: "connected", running: true,
+        connection_id: request<{ connection_id: string }>(payload).connection_id,
+        endpoint: "socks5h://127.0.0.1:49152", container_name: "preview-vpn",
+      };
+      return structuredClone(vpn_status);
+    case "vpn_status":
+      return structuredClone(vpn_status);
+    case "stop_vpn":
+      vpn_status = { ...stopped_vpn };
+      return structuredClone(vpn_status);
     case "update_hosts":
       hosts = { revision: `preview-hosts-${++revision}`, document: request<{ document: HostCatalogDocument }>(payload).document };
       return structuredClone(hosts);
@@ -120,8 +169,14 @@ mockIPC((command, payload) => {
     case "respond_ssh_prompt":
       return;
     case "plugin:window|set_title":
-      document.title = `${(payload as { title: string }).title} · Sample workspace preview`;
+      document.title = `${(payload as { value: string }).value} · Sample workspace preview`;
       return;
+    case "session_cache":
+      return request<{ action: { kind: string } }>(payload).action.kind === "load"
+        ? { kind: "loaded", cache: null }
+        : { kind: "archived" };
+    case "session_view":
+      return null;
     case "list_ssh_config_hosts":
       return { hosts: structuredClone(ssh_config_hosts), warnings: [] };
     case "list_ssh_identity_files":

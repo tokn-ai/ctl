@@ -17,6 +17,7 @@ describe("workspace sidebar", () => {
         sessions={<span>Sessions panel</span>}
         tasks={<span>Tasks panel</span>}
         ports={<span>Ports panel</span>}
+        vpn={<span>VPN panel</span>}
         error={null}
       />,
     );
@@ -25,7 +26,7 @@ describe("workspace sidebar", () => {
     expect(onSelect).toHaveBeenCalledWith("ports");
   });
 
-  it("moves through all three tabs with vertical arrow keys", async () => {
+  it("moves through all four tabs with vertical arrow keys", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(
@@ -35,6 +36,7 @@ describe("workspace sidebar", () => {
         sessions={null}
         tasks={null}
         ports={null}
+        vpn={null}
         error={null}
       />,
     );
@@ -44,6 +46,10 @@ describe("workspace sidebar", () => {
     await user.keyboard("{ArrowDown}");
     expect(onSelect).toHaveBeenCalledWith("ports");
     await user.keyboard("{ArrowDown}");
+    expect(onSelect).toHaveBeenLastCalledWith("vpn");
+    await user.keyboard("{ArrowDown}");
     expect(onSelect).toHaveBeenLastCalledWith("sessions");
+    await user.keyboard("{End}");
+    expect(onSelect).toHaveBeenLastCalledWith("vpn");
   });
 });

@@ -7,9 +7,13 @@ fail() {
 }
 
 child_pids=()
+config_file=/run/secrets/openconnect.env
 cleanup() {
   trap - EXIT INT TERM
   rm -f /run/openconnect/vpn-ready
+  if [ "${CTLD_CONFIG_STDIN:-}" = 1 ]; then
+    rm -f "$config_file"
+  fi
   if [ "${#child_pids[@]}" -eq 0 ]; then
     return
   fi
@@ -40,6 +44,19 @@ trap 'exit 143' TERM
 
 # ctld owns this stream. Preserve it before OpenConnect receives its password.
 exec 3<&0
+# Saved connections arrive as one bounded base64 line. Keep the generated env
+# only in the container's private tmpfs; the host never writes these secrets.
+if [ "${CTLD_CONFIG_STDIN:-}" = 1 ]; then
+  config_payload=
+  IFS= read -r -t 15 -n 65537 config_payload <&3 || fail 'VPN configuration was not received.'
+  [ "${#config_payload}" -le 65536 ] || fail 'VPN configuration is too large.'
+  [ -n "$config_payload" ] || fail 'VPN configuration is empty.'
+  umask 077
+  mkdir -p /run/secrets
+  printf '%s' "$config_payload" | base64 --decode > "$config_file" || fail 'VPN configuration is invalid.'
+  unset config_payload
+  chmod 600 "$config_file"
+fi
 entrypoint_pid=$$
 (
   while IFS= read -r -t 15 heartbeat <&3; do
@@ -51,7 +68,6 @@ entrypoint_pid=$$
 heartbeat_pid=$!
 child_pids+=("$heartbeat_pid")
 
-config_file=/run/secrets/openconnect.env
 [ -r "$config_file" ] || fail "Mount the VPN .env file at $config_file."
 
 # Parse literal values without sourcing shell code or exporting the password.

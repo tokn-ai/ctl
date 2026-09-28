@@ -5,16 +5,18 @@ use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use ctld_ipc::VpnStatus;
+use ctld_ipc::{VpnConnection, VpnState, VpnStatus};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
 
 use crate::openconnect::{self, ManagedVpn};
 
 type Reply = oneshot::Sender<Result<VpnStatus, String>>;
 
 enum Request {
-  Start { env_file: PathBuf, reply: Reply },
+  Start { source: Source, reply: Reply },
   Stop(Reply),
   Status(Reply),
 }
@@ -28,7 +30,29 @@ impl VpnService {
   pub(super) async fn start(&self, env_file: PathBuf) -> Result<VpnStatus, String> {
     let (reply, result) = oneshot::channel();
     self
-      .request(Request::Start { env_file, reply }, result)
+      .request(
+        Request::Start {
+          source: Source::EnvFile(env_file),
+          reply,
+        },
+        result,
+      )
+      .await
+  }
+
+  pub(super) async fn start_connection(
+    &self,
+    connection: VpnConnection,
+  ) -> Result<VpnStatus, String> {
+    let (reply, result) = oneshot::channel();
+    self
+      .request(
+        Request::Start {
+          source: Source::Connection(connection),
+          reply,
+        },
+        result,
+      )
       .await
   }
 
@@ -84,7 +108,12 @@ impl Drop for VpnOwner {
 }
 
 pub(super) fn spawn() -> (VpnService, VpnOwner) {
-  spawn_with(|env_file| openconnect::start(openconnect::Options { env_file }))
+  spawn_with(|source| async move {
+    match source {
+      Source::EnvFile(env_file) => openconnect::start(openconnect::Options { env_file }).await,
+      Source::Connection(connection) => openconnect::start_connection(connection).await,
+    }
+  })
 }
 
 fn unavailable() -> String {
@@ -113,21 +142,104 @@ impl Lease for ManagedVpn {
   }
 }
 
+enum Source {
+  EnvFile(PathBuf),
+  Connection(VpnConnection),
+}
+
+#[derive(PartialEq, Eq)]
+enum Identity {
+  EnvFile(PathBuf),
+  Connection {
+    connection_id: String,
+    fingerprint: [u8; 32],
+  },
+}
+
+impl Source {
+  fn identify(&mut self) -> Result<Identity, String> {
+    match self {
+      Self::EnvFile(path) => {
+        *path = path
+          .canonicalize()
+          .map_err(|error| format!("could not open VPN env file: {error}"))?;
+        Ok(Identity::EnvFile(path.clone()))
+      }
+      Self::Connection(connection) => {
+        connection.validate()?;
+        let serialized =
+          Zeroizing::new(serde_json::to_vec(connection).map_err(|_| "invalid VPN connection")?);
+        Ok(Identity::Connection {
+          connection_id: connection.connection_id.clone(),
+          fingerprint: Sha256::digest(serialized.as_slice()).into(),
+        })
+      }
+    }
+  }
+}
+
+impl Identity {
+  fn connection_id(&self) -> Option<String> {
+    match self {
+      Self::EnvFile(_) => None,
+      Self::Connection { connection_id, .. } => Some(connection_id.clone()),
+    }
+  }
+
+  fn status(&self, state: VpnState) -> VpnStatus {
+    VpnStatus {
+      connection_id: self.connection_id(),
+      state,
+      ..VpnStatus::default()
+    }
+  }
+}
+
 struct Active<L> {
-  env_file: PathBuf,
+  identity: Identity,
   lease: L,
 }
 
+impl<L: Lease> Active<L> {
+  fn status(&self) -> VpnStatus {
+    VpnStatus {
+      connection_id: self.identity.connection_id(),
+      state: VpnState::Connected,
+      ..self.lease.status()
+    }
+  }
+}
+
 struct Starting<F> {
-  env_file: PathBuf,
+  identity: Identity,
   future: Pin<Box<F>>,
-  reply: Reply,
+  replies: Vec<Reply>,
+}
+
+struct Stopping {
+  identity: Identity,
+  future: Pin<Box<dyn Future<Output = ()> + Send>>,
+  replies: Vec<Reply>,
+}
+
+fn begin_stop<L: Lease + 'static>(active: Active<L>, replies: Vec<Reply>) -> Stopping {
+  let Active {
+    identity,
+    mut lease,
+  } = active;
+  Stopping {
+    identity,
+    future: Box::pin(async move {
+      lease.shutdown().await;
+    }),
+    replies,
+  }
 }
 
 fn spawn_with<L, F, S>(start: F) -> (VpnService, VpnOwner)
 where
   L: Lease + 'static,
-  F: Fn(PathBuf) -> S + Send + 'static,
+  F: Fn(Source) -> S + Send + 'static,
   S: Future<Output = io::Result<L>> + Send + 'static,
 {
   let (requests, receiver) = mpsc::channel(16);
@@ -147,12 +259,13 @@ async fn serve<L, F, S>(
   mut shutdown: oneshot::Receiver<()>,
   start: F,
 ) where
-  L: Lease,
-  F: Fn(PathBuf) -> S,
+  L: Lease + 'static,
+  F: Fn(Source) -> S,
   S: Future<Output = io::Result<L>>,
 {
   let mut active: Option<Active<L>> = None;
   let mut starting: Option<Starting<S>> = None;
+  let mut stopping: Option<Stopping> = None;
   loop {
     tokio::select! {
       biased;
@@ -166,13 +279,26 @@ async fn serve<L, F, S>(
         let starting = starting.take().expect("startup completion has an owner");
         let result = match started {
           Ok(lease) => {
-            let status = lease.status();
-            active = Some(Active { env_file: starting.env_file, lease });
+            let connection = Active { identity: starting.identity, lease };
+            let status = connection.status();
+            active = Some(connection);
             Ok(status)
           }
           Err(error) => Err(format!("could not start VPN: {error}")),
         };
-        let _ = starting.reply.send(result);
+        for reply in starting.replies {
+          let _ = reply.send(result.clone());
+        }
+      }
+      () = async {
+        match &mut stopping {
+          Some(stopping) => (&mut stopping.future).await,
+          None => pending().await,
+        }
+      } => {
+        for reply in stopping.take().expect("shutdown completion has an owner").replies {
+          let _ = reply.send(Ok(VpnStatus::default()));
+        }
       }
       exited = async {
         match &mut active {
@@ -184,44 +310,31 @@ async fn serve<L, F, S>(
           Ok(()) => eprintln!("OpenConnect container exited; the VPN is stopped."),
           Err(error) => eprintln!("Could not monitor OpenConnect: {error}; the VPN is stopped."),
         }
-        stop_active(&mut active).await;
+        stopping = active.take().map(|active| begin_stop(active, Vec::new()));
       }
       request = requests.recv() => {
         match request {
-          Some(Request::Start { env_file, reply }) => {
-            if starting.is_some() {
-              let _ = reply.send(Err("VPN is already starting".to_owned()));
-              continue;
-            }
-            let env_file = match env_file.canonicalize() {
-              Ok(env_file) => env_file,
-              Err(error) => {
-                let _ = reply.send(Err(format!("could not open VPN env file: {error}")));
-                continue;
-              }
-            };
-            if let Some(active) = &active {
-              let result = if active.env_file == env_file {
-                Ok(active.lease.status())
-              } else {
-                Err("VPN is already running with another env file; stop it first".to_owned())
-              };
-              let _ = reply.send(result);
-              continue;
-            }
-            starting = Some(Starting {
-              future: Box::pin(start(env_file.clone())),
-              env_file,
-              reply,
-            });
+          Some(Request::Start { source, reply }) => {
+            schedule_start(source, reply, active.as_ref(), &mut starting, stopping.is_some(), &start);
           }
           Some(Request::Stop(reply)) => {
             cancel_start(&mut starting);
-            stop_active(&mut active).await;
-            let _ = reply.send(Ok(VpnStatus::default()));
+            if let Some(stopping) = &mut stopping {
+              stopping.replies.push(reply);
+            } else if let Some(active) = active.take() {
+              stopping = Some(begin_stop(active, vec![reply]));
+            } else {
+              let _ = reply.send(Ok(VpnStatus::default()));
+            }
           }
           Some(Request::Status(reply)) => {
-            let status = active.as_ref().map_or_else(VpnStatus::default, |active| active.lease.status());
+            let status = if let Some(starting) = &starting {
+              starting.identity.status(VpnState::Starting)
+            } else if let Some(stopping) = &stopping {
+              stopping.identity.status(VpnState::Stopping)
+            } else {
+              active.as_ref().map_or_else(VpnStatus::default, Active::status)
+            };
             let _ = reply.send(Ok(status));
           }
           None => break,
@@ -230,23 +343,73 @@ async fn serve<L, F, S>(
     }
   }
   cancel_start(&mut starting);
-  stop_active(&mut active).await;
+  if let Some(mut active) = active {
+    active.lease.shutdown().await;
+  }
+  if let Some(mut stopping) = stopping {
+    (&mut stopping.future).await;
+    for reply in stopping.replies {
+      let _ = reply.send(Ok(VpnStatus::default()));
+    }
+  }
+}
+
+fn schedule_start<L, F, S>(
+  mut source: Source,
+  reply: Reply,
+  active: Option<&Active<L>>,
+  starting: &mut Option<Starting<S>>,
+  stopping: bool,
+  start: &F,
+) where
+  L: Lease,
+  F: Fn(Source) -> S,
+{
+  if stopping {
+    let _ = reply.send(Err(
+      "VPN is stopping; wait before starting it again".to_owned(),
+    ));
+    return;
+  }
+  let identity = match source.identify() {
+    Ok(identity) => identity,
+    Err(error) => {
+      let _ = reply.send(Err(error));
+      return;
+    }
+  };
+  if let Some(starting) = starting {
+    if starting.identity == identity {
+      starting.replies.push(reply);
+    } else {
+      let _ = reply.send(Err(
+        "VPN is already starting with another configuration; stop it first".to_owned(),
+      ));
+    }
+    return;
+  }
+  if let Some(active) = active {
+    let result = if active.identity == identity {
+      Ok(active.status())
+    } else {
+      Err("VPN is already running with another configuration; stop it first".to_owned())
+    };
+    let _ = reply.send(result);
+    return;
+  }
+  *starting = Some(Starting {
+    future: Box::pin(start(source)),
+    identity,
+    replies: vec![reply],
+  });
 }
 
 fn cancel_start<F>(starting: &mut Option<Starting<F>>) {
   if let Some(starting) = starting.take() {
-    // Dropping an in-progress OpenConnect start stops its heartbeat. If Docker
-    // cannot observe stdin closing, the container's 15-second watchdog exits.
     drop(starting.future);
-    let _ = starting
-      .reply
-      .send(Err("VPN startup was cancelled".to_owned()));
-  }
-}
-
-async fn stop_active<L: Lease>(active: &mut Option<Active<L>>) {
-  if let Some(mut active) = active.take() {
-    active.lease.shutdown().await;
+    for reply in starting.replies {
+      let _ = reply.send(Err("VPN startup was cancelled".to_owned()));
+    }
   }
 }
 

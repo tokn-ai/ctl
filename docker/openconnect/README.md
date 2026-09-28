@@ -8,7 +8,24 @@ destinations use their existing routes. A full-tunnel VPN also supplies the
 default route. The proxy does not bind outgoing connections to an interface or
 limit them to a test target.
 
-## Configuration
+## Manage in the desktop app
+
+Build the image once with `./docker/openconnect/run.sh build`, then open the
+**VPN** sidebar in rmux. Add a named connection with its server, username, and
+password, save it, and choose **Connect**. Authentication method and the optional
+connectivity-check target are under advanced settings. The panel supports editing
+and deleting saved connections, disconnecting, and copying the SOCKS5 endpoint.
+Rebuild an image created before desktop VPN support so its entrypoint accepts
+the generated configuration over stdin.
+
+The app saves connections in a private JSON file. At connection time, ctld sends
+the selected configuration over attached stdin to the container, which creates
+a private environment file in tmpfs. That generated file disappears when the
+container exits; the app never asks users to manage `.env` files. Closing rmux
+leaves the connection running under ctld. Connections started by `ctl vpn` also
+appear in the panel and can be disconnected there.
+
+## CLI configuration
 
 Copy `docker/openconnect/.env.example` to `.env` at the repository root if the
 file does not exist, then edit it:
@@ -51,7 +68,9 @@ ctl vpn stop
 `ctl` talks to ctld and starts the daemon automatically if needed. Starting the
 VPN waits for its tunnel interface, routes, DNS, and SOCKS listener to become
 ready, then returns JSON with the randomly assigned endpoint. Status is JSON
-with `endpoint`, `container_name`, and `running`. The ready endpoint is a
+with `endpoint`, `container_name`, `running`, `connection_id`, and `state`.
+`state` is `stopped`, `starting`, `connected`, or `stopping`; CLI-started
+connections have a null `connection_id`. The ready endpoint is a
 `socks5h://127.0.0.1:PORT` URL.
 
 For development from this checkout, the helper builds the image and both Rust

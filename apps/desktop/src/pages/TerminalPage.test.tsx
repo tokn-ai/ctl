@@ -45,7 +45,9 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(
     async (name: string, callback: (event: { payload: string }) => void) => {
       nativeEvents.listeners.set(name, callback);
-      return () => nativeEvents.listeners.delete(name);
+      return () => {
+        if (nativeEvents.listeners.get(name) === callback) nativeEvents.listeners.delete(name);
+      };
     },
   ),
 }));
@@ -82,6 +84,12 @@ const api = vi.hoisted(() => ({
   respondSshPrompt: vi.fn(),
   configurePortForward: vi.fn(),
   listPortForwards: vi.fn(),
+  loadVpnConnections: vi.fn(),
+  saveVpnConnection: vi.fn(),
+  deleteVpnConnection: vi.fn(),
+  connectVpn: vi.fn(),
+  vpnStatus: vi.fn(),
+  stopVpn: vi.fn(),
   listRemoteListeners: vi.fn(),
   checkLocalPort: vi.fn(),
   loadKeybindings: vi.fn(),
@@ -232,6 +240,8 @@ beforeEach(() => {
   api.cancelSshProbe.mockResolvedValue(undefined);
   api.respondSshPrompt.mockReset().mockResolvedValue(undefined);
   api.listPortForwards.mockResolvedValue([]);
+  api.loadVpnConnections.mockResolvedValue({ revision: null, connections: [] });
+  api.vpnStatus.mockResolvedValue({ state: "stopped", running: false, connection_id: null, endpoint: null, container_name: null });
   api.listRemoteListeners.mockResolvedValue({ listeners: [], warnings: [] });
   api.checkLocalPort.mockImplementation(async (port: number) => ({ port, available: true, message: null }));
   api.configurePortForward.mockImplementation(async (_target: ConnectionTarget, forward: WorkspacePortForward) => ({
@@ -311,6 +321,29 @@ describe("workspace-backed terminal page", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(api.restartLocalDaemon).not.toHaveBeenCalled();
     expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
+  });
+
+  it("opens the VPN editor outside the inert workspace and remembers the VPN tab", async () => {
+    const page = render(<StrictMode><TerminalPage /></StrictMode>);
+    await screen.findByRole("button", { name: "Connect host" });
+    expect(api.loadVpnConnections).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
+    await screen.findByText("No saved VPN connections.");
+    expect(api.vpnStatus).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Add VPN connection" }));
+    const editor = screen.getByRole("dialog", { name: "Add VPN connection" });
+    expect(document.querySelector("main")?.hasAttribute("inert")).toBe(true);
+    expect(editor.closest("main")).toBeNull();
+    shortcut("KeyP");
+    nativeCommand(COMMAND_IDS.close);
+    expect(screen.getAllByRole("dialog")).toEqual([editor]);
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.querySelector("main")?.hasAttribute("inert")).toBe(false);
+    await waitFor(() => expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sidebar_view).toBe("vpn"));
+    page.unmount();
+    expect(api.connectVpn).not.toHaveBeenCalled();
+    expect(api.stopVpn).not.toHaveBeenCalled();
   });
 
   it("switches sidebar tabs and keeps an incomplete draft after dismissal and relaunch", async () => {

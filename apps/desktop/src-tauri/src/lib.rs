@@ -21,6 +21,7 @@ mod tailscale;
 mod task_definitions;
 mod tasks;
 mod transport;
+mod vpn;
 mod workspace;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -68,6 +69,12 @@ pub fn run() {
       workspace::update_hosts,
       keybindings::load_keybindings,
       keybindings::save_keybindings,
+      vpn::load_vpn_connections,
+      vpn::save_vpn_connection,
+      vpn::delete_vpn_connection,
+      vpn::connect_vpn,
+      vpn::vpn_status,
+      vpn::stop_vpn,
       command_menu::sync_command_menu,
       commands::inspection::inspect_known_sessions,
       commands::list_sessions,

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::{sleep, timeout};
@@ -13,6 +13,7 @@ struct Probe {
   startup_drops: AtomicUsize,
   shutdowns: AtomicUsize,
   lease_drops: AtomicUsize,
+  shutdown_gate: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 struct StartupGuard(Arc<Probe>);
@@ -47,6 +48,8 @@ impl Lease for FakeLease {
       running: true,
       endpoint: Some("socks5h://127.0.0.1:54321".to_owned()),
       container_name: Some("test-vpn".to_owned()),
+      connection_id: None,
+      state: VpnState::Connected,
     }
   }
 
@@ -57,6 +60,10 @@ impl Lease for FakeLease {
 
   async fn shutdown(&mut self) {
     self.probe.shutdowns.fetch_add(1, Ordering::SeqCst);
+    let waiting = self.probe.shutdown_gate.lock().unwrap().take();
+    if let Some(waiting) = waiting {
+      let _ = waiting.await;
+    }
   }
 }
 
@@ -142,11 +149,14 @@ async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
 async fn stop_cancels_startup_and_finishes_the_waiting_request() {
   let mut harness = Harness::new();
   let (request, ready) = harness.begin_start().await;
-  assert!(!harness.service.status().await.unwrap().running);
+  let status = harness.service.status().await.unwrap();
+  assert!(!status.running);
+  assert_eq!(status.state, VpnState::Starting);
+  assert_eq!(status.connection_id, None);
   assert!(
     harness
       .service
-      .start(std::env::temp_dir())
+      .start(std::env::current_exe().unwrap())
       .await
       .unwrap_err()
       .contains("already starting")
@@ -257,5 +267,66 @@ async fn closing_all_request_handles_shuts_down_the_container() {
   drop(harness.service);
   wait_for_count(&harness.probe.shutdowns, 1).await;
   wait_for_count(&harness.probe.lease_drops, 1).await;
+  harness.owner.shutdown().await;
+}
+
+fn saved_connection() -> VpnConnection {
+  VpnConnection {
+    connection_id: "profile-test".into(),
+    name: "Test VPN".into(),
+    url: "vpn.example.test".into(),
+    username: "test-user".into(),
+    password: Zeroizing::new("test-password".into()),
+    auth_method: None,
+    target_ip: None,
+  }
+}
+
+#[tokio::test]
+async fn saved_connections_report_phases_and_require_stop_before_config_changes() {
+  let mut harness = Harness::new();
+  let service = harness.service.clone();
+  let request = tokio::spawn(async move { service.start_connection(saved_connection()).await });
+  let ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  let status = harness.service.status().await.unwrap();
+  assert_eq!(status.state, VpnState::Starting);
+  assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert!(!status.running);
+
+  let service = harness.service.clone();
+  let duplicate = tokio::spawn(async move { service.start_connection(saved_connection()).await });
+  let (lease, _exit) = FakeLease::new(&harness.probe);
+  assert!(ready.send(Ok(lease)).is_ok());
+  let status = request.await.unwrap().unwrap();
+  assert_eq!(status.state, VpnState::Connected);
+  assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert_eq!(duplicate.await.unwrap().unwrap(), status);
+  assert!(harness.starts.try_recv().is_err());
+
+  let mut changed = saved_connection();
+  changed.password = Zeroizing::new("changed-password".into());
+  let error = harness.service.start_connection(changed).await.unwrap_err();
+  assert!(error.contains("stop it first"));
+  assert!(!error.contains("changed-password"));
+
+  let (release, wait) = oneshot::channel();
+  *harness.probe.shutdown_gate.lock().unwrap() = Some(wait);
+  let service = harness.service.clone();
+  let stopping = tokio::spawn(async move { service.stop().await });
+  wait_for_count(&harness.probe.shutdowns, 1).await;
+  let status = harness.service.status().await.unwrap();
+  assert_eq!(status.state, VpnState::Stopping);
+  assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert!(!status.running);
+  assert!(status.endpoint.is_none());
+  release.send(()).unwrap();
+  assert_eq!(stopping.await.unwrap().unwrap(), VpnStatus::default());
+  assert_eq!(
+    harness.service.status().await.unwrap(),
+    VpnStatus::default()
+  );
   harness.owner.shutdown().await;
 }

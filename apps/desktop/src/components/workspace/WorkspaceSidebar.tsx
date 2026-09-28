@@ -8,6 +8,7 @@ interface Props {
   sessions: ReactNode;
   tasks: ReactNode;
   ports: ReactNode;
+  vpn: ReactNode;
   error: string | null;
   on_keybindings?(): void;
 }
@@ -18,14 +19,16 @@ export function WorkspaceSidebar({
   sessions,
   tasks,
   ports,
+  vpn,
   error,
   on_keybindings,
 }: Props) {
-  const views = ["sessions", "tasks", "ports"] as const;
+  const views = ["sessions", "tasks", "ports", "vpn"] as const;
   const labels = {
     sessions: "Sessions",
     tasks: "Tasks",
     ports: "Ports",
+    vpn: "VPN",
   } as const;
   return (
     <div className="workspace-sidebar">
@@ -83,30 +86,17 @@ export function WorkspaceSidebar({
         ) : null}
       </div>
       <div className="sidebar-content">
-        <div
-          id="sidebar-panel-sessions"
-          role="tabpanel"
-          aria-labelledby="sidebar-tab-sessions"
-          hidden={selected !== "sessions"}
-        >
-          {sessions}
-        </div>
-        <div
-          id="sidebar-panel-tasks"
-          role="tabpanel"
-          aria-labelledby="sidebar-tab-tasks"
-          hidden={selected !== "tasks"}
-        >
-          {tasks}
-        </div>
-        <div
-          id="sidebar-panel-ports"
-          role="tabpanel"
-          aria-labelledby="sidebar-tab-ports"
-          hidden={selected !== "ports"}
-        >
-          {ports}
-        </div>
+        {views.map((view) => (
+          <div
+            key={view}
+            id={`sidebar-panel-${view}`}
+            role="tabpanel"
+            aria-labelledby={`sidebar-tab-${view}`}
+            hidden={selected !== view}
+          >
+            {{ sessions, tasks, ports, vpn }[view]}
+          </div>
+        ))}
         {error ? (
           <p className="task-inline-error" role="alert">
             {error}

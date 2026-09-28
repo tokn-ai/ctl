@@ -323,10 +323,28 @@ describe("workspace-backed terminal page", () => {
     expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
   });
 
+  it("discovers a CLI VPN before opening the VPN panel", async () => {
+    api.vpnStatus.mockResolvedValue({
+      state: "connected", running: true, connection_id: null,
+      vpn_url: "https://vpn.example.test", username: "cli-user",
+      endpoint: "socks5h://127.0.0.1:49152", container_name: "sample-vpn",
+    });
+    render(<TerminalPage />);
+    const vpn_tab = await screen.findByRole("tab", { name: "VPN" });
+    await waitFor(() => expect(vpn_tab.getAttribute("aria-description")).toBe("Connected"));
+    expect(screen.getByRole("tab", { name: "Sessions" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(vpn_tab);
+    expect(await screen.findByText("https://vpn.example.test")).toBeTruthy();
+    expect(screen.getByText("cli-user")).toBeTruthy();
+    expect(screen.getByText("socks5h://127.0.0.1:49152")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect VPN" })).toBeTruthy();
+    expect(api.connectVpn).not.toHaveBeenCalled();
+  });
+
   it("opens the VPN editor outside the inert workspace and remembers the VPN tab", async () => {
     const page = render(<StrictMode><TerminalPage /></StrictMode>);
     await screen.findByRole("button", { name: "Connect host" });
-    expect(api.loadVpnConnections).not.toHaveBeenCalled();
+    expect(api.loadVpnConnections).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
     await screen.findByText("No saved VPN connections.");
     expect(api.vpnStatus).toHaveBeenCalled();

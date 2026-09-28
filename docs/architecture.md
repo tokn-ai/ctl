@@ -192,7 +192,8 @@ master startup is not activated twice. The local `ctld` IPC protocol is version
 `ctl vpn start --env-file PATH` asks the local `ctld` to own an OpenConnect
 container, starting the daemon if needed. The settings path defaults to `.env`
 and is resolved relative to the caller's directory. Its SOCKS5 listener uses a
-random loopback port, returned as JSON after the VPN and proxy are ready.
+random loopback port, printed with readable connection status after the VPN and
+proxy are ready. Start, status, and stop accept `--json` for machine-readable output.
 `ctl vpn status` queries that endpoint; `ctl vpn stop` stops the container while
 keeping the broker running. Status and stop never start a daemon. The container
 also stops when its owning daemon exits. VPN commands reject `--host` and use
@@ -205,11 +206,14 @@ the saved secret only when connecting. Both desktop and CLI use the shared
 `ctld-ipc::vpn` client. Structured starts send the configuration to the container
 over its attached stdin; the container writes a mode-0600 environment file on
 private tmpfs. No generated credential file is left on the host. CLI-provided
-environment files retain the existing read-only mount flow. Status identifies the
-active saved connection and distinguishes starting, connected, stopping, and
-stopped, so either client can inspect or cancel startup. Desktop status polling
-never starts a daemon or reconnects automatically; closing the panel or app does
-not stop the daemon-owned VPN.
+environment files are read as bounded private snapshots and use the same
+stdin/tmpfs flow. Cancellable preparation keeps status and stop responsive. Status
+identifies the active saved connection, gateway origin, and username from the
+actual startup snapshot, and distinguishes starting, connected, stopping, and
+stopped. Optional metadata fields remain compatible with existing IPC 11 daemons.
+Desktop status polling continues while other panels are open and updates the VPN
+tab indicator. It never starts a daemon or reconnects automatically; closing the
+panel or app does not stop the daemon-owned VPN.
 
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed ctl-agent command.

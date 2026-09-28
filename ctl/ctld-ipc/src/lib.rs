@@ -150,6 +150,11 @@ pub struct PortForwardStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnStatus {
   pub endpoint: Option<String>,
+  /// The connected gateway origin, without credentials, path, query, or fragment.
+  #[serde(default)]
+  pub vpn_url: Option<String>,
+  #[serde(default)]
+  pub username: Option<String>,
   pub container_name: Option<String>,
   pub running: bool,
   pub connection_id: Option<String>,

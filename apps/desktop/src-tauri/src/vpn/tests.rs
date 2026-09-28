@@ -342,6 +342,8 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     assert_eq!(&**connection.password, "adapter-test-secret");
     Ok(VpnStatus {
       connection_id: Some(connection.connection_id),
+      vpn_url: Some(connection.url),
+      username: Some(connection.username),
       state: VpnState::Connected,
       running: true,
       ..VpnStatus::default()
@@ -350,6 +352,13 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
   .await
   .unwrap();
   assert_eq!(status.connection_id.as_deref(), Some("connection-one"));
+  assert!(status.vpn_url.is_some());
+  assert!(status.username.is_some());
+  assert!(
+    !serde_json::to_string(&status)
+      .unwrap()
+      .contains("adapter-test-secret")
+  );
   let error = connect_with(
     fixture.0.clone(),
     ConnectVpnRequest {

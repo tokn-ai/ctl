@@ -1,6 +1,6 @@
 import { Icon } from "../ui/Icon";
 import type { ReactNode } from "react";
-import type { WorkspaceSidebarView } from "../../lib/types";
+import type { VpnState, WorkspaceSidebarView } from "../../lib/types";
 
 interface Props {
   selected: WorkspaceSidebarView;
@@ -9,6 +9,8 @@ interface Props {
   tasks: ReactNode;
   ports: ReactNode;
   vpn: ReactNode;
+  vpn_state?: VpnState;
+  vpn_status_stale?: boolean;
   error: string | null;
   on_keybindings?(): void;
 }
@@ -20,6 +22,8 @@ export function WorkspaceSidebar({
   tasks,
   ports,
   vpn,
+  vpn_state,
+  vpn_status_stale = false,
   error,
   on_keybindings,
 }: Props) {
@@ -30,6 +34,12 @@ export function WorkspaceSidebar({
     ports: "Ports",
     vpn: "VPN",
   } as const;
+  const vpn_description = vpn_status_stale ? "Status unavailable" : vpn_state ? {
+    starting: "Connecting",
+    connected: "Connected",
+    stopping: "Disconnecting",
+    stopped: "Disconnected",
+  }[vpn_state] : undefined;
   return (
     <div className="workspace-sidebar">
       <div className="sidebar-rail">
@@ -48,7 +58,8 @@ export function WorkspaceSidebar({
               id={`sidebar-tab-${view}`}
               role="tab"
               aria-label={labels[view]}
-              title={labels[view]}
+              aria-description={view === "vpn" ? vpn_description : undefined}
+              title={view === "vpn" && vpn_description ? `VPN — ${vpn_description}` : labels[view]}
               aria-selected={selected === view}
               aria-controls={`sidebar-panel-${view}`}
               tabIndex={selected === view ? 0 : -1}
@@ -70,6 +81,12 @@ export function WorkspaceSidebar({
               }}
             >
               <Icon name={view === "sessions" ? "terminal" : view} size={23} />
+              {view === "vpn" && (vpn_status_stale || (vpn_state && vpn_state !== "stopped")) ? (
+                <span
+                  className={`vpn-activity-indicator ${vpn_status_stale ? "stale" : vpn_state}`}
+                  aria-hidden="true"
+                />
+              ) : null}
             </button>
           ))}
         </nav>

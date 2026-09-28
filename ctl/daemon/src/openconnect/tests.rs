@@ -1,3 +1,6 @@
+use ctld_ipc::VpnConnection;
+use zeroize::Zeroizing;
+
 use super::*;
 
 fn saved_connection() -> VpnConnection {
@@ -15,7 +18,7 @@ fn saved_connection() -> VpnConnection {
 #[test]
 fn generated_config_preserves_literal_values_without_shell_quoting() {
   let connection = saved_connection();
-  let env = connection_env(&connection).unwrap();
+  let env = Config::from_connection(&connection).unwrap().content;
   assert!(
     env
       .lines()
@@ -25,7 +28,7 @@ fn generated_config_preserves_literal_values_without_shell_quoting() {
   assert!(!env.contains("Test VPN"));
   let mut invalid = saved_connection();
   invalid.password.push('\n');
-  assert!(connection_env(&invalid).is_err());
+  assert!(Config::from_connection(&invalid).is_err());
 }
 
 #[test]
@@ -122,18 +125,16 @@ esac
       fs::write(&executable, FAKE_ENGINE).unwrap();
       fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
       let config = root.join("vpn.env");
-      fs::write(&config, "VPN_PASSWORD=private-test-password\n").unwrap();
+      fs::write(
+        &config,
+        "VPN_URL=vpn.example.test\nVPN_USERNAME=test-user\nVPN_PASSWORD=private-test-password\n",
+      )
+      .unwrap();
       fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
       Self {
         root,
         executable,
         config,
-      }
-    }
-
-    fn options(&self) -> Options {
-      Options {
-        env_file: self.config.clone(),
       }
     }
 
@@ -176,10 +177,18 @@ esac
     }
   }
 
+  async fn start_file_with_engine(path: PathBuf, engine: &Path) -> io::Result<ManagedVpn> {
+    let (_, config) = read_file(path).await?;
+    start_config(config, engine).await
+  }
+
   #[tokio::test]
   async fn readiness_discovers_engine_assigned_port_and_shutdown_removes_container() {
     let engine = FakeEngine::new();
-    let mut startup = Box::pin(start_with_engine(engine.options(), &engine.executable));
+    let mut startup = Box::pin(start_file_with_engine(
+      engine.config.clone(),
+      &engine.executable,
+    ));
     tokio::select! {
       result = &mut startup => panic!("startup completed before VPN readiness: {}", result.is_ok()),
       () = engine.wait_for_file("heartbeats") => {},
@@ -195,6 +204,8 @@ esac
 
     let status = vpn.status();
     assert!(status.running);
+    assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
+    assert_eq!(status.username.as_deref(), Some("test-user"));
     assert_eq!(
       status.endpoint.as_deref(),
       Some("socks5h://127.0.0.1:49152")
@@ -207,7 +218,12 @@ esac
     assert!(!arguments.contains("private-test-password"));
     let heartbeats = fs::read_to_string(engine.root.join("heartbeats")).unwrap();
     assert!(!heartbeats.is_empty());
-    assert!(heartbeats.lines().all(|heartbeat| heartbeat == "ping"));
+    let mut lines = heartbeats.lines();
+    assert_eq!(
+      BASE64.decode(lines.next().unwrap()).unwrap(),
+      fs::read(&engine.config).unwrap()
+    );
+    assert!(lines.all(|heartbeat| heartbeat == "ping"));
 
     let heartbeat = vpn.heartbeat.abort_handle();
     vpn.shutdown().await;
@@ -225,7 +241,10 @@ esac
   #[tokio::test]
   async fn cancelling_startup_stops_the_attached_engine_before_readiness() {
     let engine = FakeEngine::new();
-    let mut startup = Box::pin(start_with_engine(engine.options(), &engine.executable));
+    let mut startup = Box::pin(start_file_with_engine(
+      engine.config.clone(),
+      &engine.executable,
+    ));
     tokio::select! {
       result = &mut startup => panic!("startup completed before VPN readiness: {}", result.is_ok()),
       () = engine.wait_for_file("heartbeats") => {},
@@ -241,7 +260,7 @@ esac
     fs::write(engine.root.join("ready"), "").unwrap();
     let vpn = timeout(
       TEST_TIMEOUT,
-      start_with_engine(engine.options(), &engine.executable),
+      start_file_with_engine(engine.config.clone(), &engine.executable),
     )
     .await
     .unwrap()
@@ -256,7 +275,7 @@ esac
   async fn readable_by_group_config_is_rejected_before_engine_starts() {
     let engine = FakeEngine::new();
     fs::set_permissions(&engine.config, fs::Permissions::from_mode(0o640)).unwrap();
-    let result = start_with_engine(engine.options(), &engine.executable).await;
+    let result = start_file_with_engine(engine.config.clone(), &engine.executable).await;
     assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
     assert!(!engine.root.join("run.args").exists());
   }
@@ -265,16 +284,15 @@ esac
   async fn inline_config_uses_only_stdin_and_tmpfs_before_heartbeats() {
     let engine = FakeEngine::new();
     fs::write(engine.root.join("ready"), "").unwrap();
-    let config = connection_env(&saved_connection()).unwrap();
-    let mut vpn = start_config(Config::Inline(config.clone()), &engine.executable)
-      .await
-      .unwrap();
+    let config = Config::from_connection(&saved_connection()).unwrap();
+    let expected = config.content.clone();
+    let mut vpn = start_config(config, &engine.executable).await.unwrap();
     engine.wait_for_file("heartbeats").await;
     let input = fs::read_to_string(engine.root.join("heartbeats")).unwrap();
     let mut lines = input.lines();
     assert_eq!(
       BASE64.decode(lines.next().unwrap()).unwrap(),
-      config.as_bytes()
+      expected.as_bytes()
     );
     assert!(lines.all(|line| line == "ping"));
     let arguments = fs::read_to_string(engine.root.join("run.args")).unwrap();
@@ -299,7 +317,7 @@ esac
     .unwrap();
     let error = timeout(
       TEST_TIMEOUT,
-      start_with_engine(engine.options(), &engine.executable),
+      start_file_with_engine(engine.config.clone(), &engine.executable),
     )
     .await
     .unwrap()
@@ -319,7 +337,7 @@ esac
     fs::write(engine.root.join("failure"), "private-test-password\n").unwrap();
     let error = timeout(
       TEST_TIMEOUT,
-      start_with_engine(engine.options(), &engine.executable),
+      start_file_with_engine(engine.config.clone(), &engine.executable),
     )
     .await
     .unwrap()

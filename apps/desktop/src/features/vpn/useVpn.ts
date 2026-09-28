@@ -68,8 +68,8 @@ export interface VpnController {
   deleteConnection(connection_id: string): Promise<void>;
 }
 
-/** Observe ctld's VPN. Component lifetime never owns or stops the connection. */
-export function useVpn(visible: boolean): VpnController {
+/** Observe ctld while the workspace is ready. Component lifetime never owns or stops the VPN. */
+export function useVpn(enabled: boolean): VpnController {
   const [catalog, setCatalog] = useState<VpnConnectionsSnapshot>({ revision: null, connections: [] });
   const [catalog_loaded, setCatalogLoaded] = useState(false);
   const [catalog_loading, setCatalogLoading] = useState(false);
@@ -192,7 +192,7 @@ export function useVpn(visible: boolean): VpnController {
   }, []);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!enabled) return;
     void refresh();
     const onFocus = () => void refresh();
     const onVisibility = () => {
@@ -208,7 +208,7 @@ export function useVpn(visible: boolean): VpnController {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [visible, refresh, refreshStatus]);
+  }, [enabled, refresh, refreshStatus]);
 
   const isActive = useCallback((connection_id: string) =>
     (status_ref.current.state !== "stopped" && status_ref.current.connection_id === connection_id) ||

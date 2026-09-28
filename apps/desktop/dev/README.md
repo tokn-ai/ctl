@@ -10,7 +10,9 @@ on reload. Terminal typing echoes input; it does not execute commands.
 
 Use `?view=tasks`, `?view=ports`, or `?view=vpn` to open those sidebar views directly.
 The VPN preview uses sample connections and simulated status; it never starts a container
-or saves credentials to disk.
+or saves credentials to disk. Add `&vpn=connected` for a saved connection or
+`&vpn=external` for a CLI connection, including when previewing another sidebar
+view to check the VPN activity indicator.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 

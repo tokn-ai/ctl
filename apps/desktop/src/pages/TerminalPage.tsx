@@ -282,7 +282,7 @@ export function TerminalPage() {
     updatePortForwards,
   );
   const sidebarTargets = workspaceSidebarTargets(workspace);
-  const vpn = useVpn(workspace.ready && !workspace.closing && workspace.sidebar_view === "vpn");
+  const vpn = useVpn(workspace.ready && !workspace.closing);
   const hostConnections = useHostConnections({
     ready: workspace.ready,
     closing: workspace.closing,
@@ -1607,6 +1607,8 @@ export function TerminalPage() {
           }}
           error={workspace.error}
           vpn={<VpnSidebar model={vpn} />}
+          vpn_state={vpn.status_loaded ? vpn.status.state : undefined}
+          vpn_status_stale={vpn.status_stale}
           tasks={
             <TaskSidebar
               model={taskWorkspace}

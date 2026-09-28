@@ -77,19 +77,30 @@ mod tests {
     assert_eq!(arguments.host, None);
     assert!(matches!(
       arguments.command,
-      Command::Vpn { command: vpn::Command::Start { env_file } }
+      Command::Vpn { command: vpn::Command::Start { env_file, json: false } }
         if env_file == std::path::Path::new(".env")
     ));
     let arguments =
       Arguments::try_parse_from(["ctl", "vpn", "start", "--env-file", "work.env"]).unwrap();
     assert!(matches!(
       arguments.command,
-      Command::Vpn { command: vpn::Command::Start { env_file } }
+      Command::Vpn { command: vpn::Command::Start { env_file, json: false } }
         if env_file == std::path::Path::new("work.env")
     ));
     for action in ["status", "stop"] {
       assert!(Arguments::try_parse_from(["ctl", "vpn", action]).is_ok());
       assert!(Arguments::try_parse_from(["ctl", "vpn", action, "--env-file", ".env"]).is_err());
+    }
+    for action in ["start", "status", "stop"] {
+      let arguments = Arguments::try_parse_from(["ctl", "vpn", action, "--json"]).unwrap();
+      assert!(matches!(
+        arguments.command,
+        Command::Vpn {
+          command: vpn::Command::Start { json: true, .. }
+            | vpn::Command::Status { json: true }
+            | vpn::Command::Stop { json: true }
+        }
+      ));
     }
   }
 

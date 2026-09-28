@@ -8,8 +8,10 @@ sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 Open **VPN** in the sidebar to add a named connection with a server, username,
 and password. Advanced settings include an authentication method and an optional
 SSH connectivity-check target. Save the connection, then choose **Connect**.
-The panel shows connection progress and the current SOCKS5 endpoint, which can be
-copied for use by other clients. Only one VPN can run at a time. **Disconnect**
+The panel shows connection progress, the VPN server, username, and current SOCKS5
+endpoint, which can be copied for use by other clients. The VPN tab shows an active
+indicator even while another panel is open. Connections started from the CLI are
+also visible, including their server and username. Only one VPN can run at a time. **Disconnect**
 also cancels a connection that is still starting.
 
 Connections, including passwords, are stored in a private `vpns.json` file in

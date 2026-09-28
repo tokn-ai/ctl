@@ -23,7 +23,9 @@ the selected configuration over attached stdin to the container, which creates
 a private environment file in tmpfs. That generated file disappears when the
 container exits; the app never asks users to manage `.env` files. Closing rmux
 leaves the connection running under ctld. Connections started by `ctl vpn` also
-appear in the panel and can be disconnected there.
+appear in the panel and can be disconnected there. The current connection shows
+its VPN server, username, and local SOCKS5 endpoint. An indicator on the VPN tab
+shows connection activity while other panels are open.
 
 ## CLI configuration
 
@@ -50,7 +52,9 @@ is sent. Server certificate verification remains enabled.
 
 Use literal, single-line values without shell quotes or escaping `$`, `#`, or
 spaces. The file is parsed as data, never evaluated as shell code. It is ignored
-by Git and image builds, mounted read-only, and set to mode `0600` by the helper.
+by Git and image builds and set to mode `0600` by the helper. ctld reads a private,
+bounded snapshot and sends it over attached stdin to a mode-0600 file in container
+tmpfs, just like saved desktop connections.
 The password goes to OpenConnect through a separate stdin pipe, without being
 included in command arguments or container environment metadata.
 
@@ -67,11 +71,18 @@ ctl vpn stop
 
 `ctl` talks to ctld and starts the daemon automatically if needed. Starting the
 VPN waits for its tunnel interface, routes, DNS, and SOCKS listener to become
-ready, then returns JSON with the randomly assigned endpoint. Status is JSON
-with `endpoint`, `container_name`, `running`, `connection_id`, and `state`.
-`state` is `stopped`, `starting`, `connected`, or `stopping`; CLI-started
-connections have a null `connection_id`. The ready endpoint is a
-`socks5h://127.0.0.1:PORT` URL.
+ready, then prints readable status with the VPN server, username, and randomly
+assigned SOCKS5 endpoint. Start, status, and stop accept `--json` for scripts.
+JSON contains `vpn_url`, `username`, `endpoint`, `container_name`, `running`,
+`connection_id`, and `state`. The VPN server is its HTTPS origin; credentials,
+paths, queries, and fragments are omitted. `state` is `stopped`, `starting`,
+`connected`, or `stopping`; CLI-started connections have a null `connection_id`.
+The ready proxy endpoint is a `socks5h://127.0.0.1:PORT` URL.
+
+Connection metadata comes from the settings used to start the VPN and stays
+unchanged until it stops. An already running older ctld may return no server or
+username; the CLI displays `unavailable` until a connection is started by the
+updated daemon.
 
 For development from this checkout, the helper builds the image and both Rust
 binaries, then invokes ctl with the root `.env`:
@@ -98,7 +109,7 @@ ctl status. `socks5h` resolves names inside the container using its current DNS
 configuration, including VPN-provided DNS servers:
 
 ```sh
-endpoint=$(ctl vpn status | python3 -c \
+endpoint=$(ctl vpn status --json | python3 -c \
   'import json, sys; print(json.load(sys.stdin)["endpoint"])')
 curl --proxy "$endpoint" https://example.com
 ```
@@ -110,8 +121,8 @@ socks_address=${endpoint#socks5h://}
 ssh -o "ProxyCommand=nc -X 5 -x $socks_address %h %p" USER@HOST
 ```
 
-When using the checkout helper, replace `ctl vpn status` with
-`./docker/openconnect/run.sh status` to query through the same binaries.
+When using the checkout helper, replace `ctl vpn status --json` with
+`./docker/openconnect/run.sh status --json` to query through the same binaries.
 The proxy supports TCP, including SSH and HTTPS; it does not provide SOCKS5 UDP
 relay. Configure each application to use the proxy. It does not install routes
 on the Mac itself.
@@ -125,7 +136,7 @@ against the settings provided for the VPN. Diagnostics return fixed messages;
 ctld does not retain or return raw container output, which may contain private
 gateway details. Unrecognized failures retain a generic exit or timeout message.
 
-Use `container_name` from status with Docker to inspect logs or run the optional
+Use `container_name` from `ctl vpn status --json` with Docker to inspect logs or run the optional
 connectivity probe while the VPN is running:
 
 ```sh

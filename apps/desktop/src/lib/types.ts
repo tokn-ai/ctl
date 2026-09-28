@@ -234,6 +234,10 @@ export interface VpnStatus {
   state: VpnState;
   running: boolean;
   connection_id: string | null;
+  /** Older ctld versions may omit connection metadata. */
+  vpn_url?: string | null;
+  username?: string | null;
+  /** Local SOCKS5 proxy, distinct from the VPN server. */
   endpoint: string | null;
   container_name: string | null;
 }

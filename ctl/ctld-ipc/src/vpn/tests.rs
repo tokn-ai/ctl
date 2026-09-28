@@ -63,6 +63,8 @@ async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
     running: true,
     endpoint: Some("socks5h://127.0.0.1:49152".into()),
     container_name: Some("test-container".into()),
+    vpn_url: Some("https://vpn.example.test".into()),
+    username: Some("test-user".into()),
   };
   let response = expected.clone();
   let daemon = tokio::spawn(async move {
@@ -126,4 +128,19 @@ async fn handshake_rejects_mismatched_protocol_and_preserves_daemon_error_codes(
     ));
     daemon.await.unwrap();
   }
+}
+
+#[test]
+fn status_from_older_protocol_eleven_daemon_defaults_missing_metadata() {
+  let status: VpnStatus = serde_json::from_str(
+    r#"{
+    "state":"connected","connection_id":"test","running":true,
+    "endpoint":"socks5h://127.0.0.1:49152","container_name":"test-container"
+  }"#,
+  )
+  .unwrap();
+  assert!(status.running);
+  assert_eq!(status.vpn_url, None);
+  assert_eq!(status.username, None);
+  assert_eq!(crate::PROTOCOL_VERSION, 11);
 }

@@ -3,7 +3,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnStatus } from "../../lib/types";
 import { connectVpn, deleteVpnConnection, loadVpnConnections, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
-import { useVpn } from "./useVpn";
+import { useVpn, VPN_STATUS_INTERVAL_MS } from "./useVpn";
 
 vi.mock("../../lib/tauri", () => ({
   connectVpn: vi.fn(), deleteVpnConnection: vi.fn(), loadVpnConnections: vi.fn(),
@@ -18,7 +18,7 @@ const snapshot: VpnConnectionsSnapshot = { revision: "revision-1", connections: 
 const stopped: VpnStatus = { endpoint: null, container_name: null, connection_id: null, running: false, state: "stopped" };
 const connected: VpnStatus = {
   endpoint: "socks5h://127.0.0.1:49152", container_name: "test-vpn", connection_id: connection.connection_id,
-  running: true, state: "connected",
+  vpn_url: connection.url, username: connection.username, running: true, state: "connected",
 };
 const input: VpnConnectionInput = {
   connection_id: connection.connection_id, name: "Updated work", url: connection.url, username: connection.username,
@@ -41,27 +41,66 @@ beforeEach(() => {
   vi.mocked(saveVpnConnection).mockResolvedValue({ revision: "revision-2", connections: [{ ...connection, name: input.name }] });
   vi.mocked(deleteVpnConnection).mockResolvedValue({ revision: "revision-2", connections: [] });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 async function ready(result: { current: ReturnType<typeof useVpn> }) {
   await waitFor(() => expect(result.current.catalog_loaded && result.current.status_loaded).toBe(true));
 }
 
 describe("VPN controller", () => {
-  it("observes only while visible and never stops a VPN when the view unmounts", async () => {
-    const { result, rerender, unmount } = renderHook(({ visible }) => useVpn(visible), { initialProps: { visible: false } });
+  it("observes only while enabled and never stops a VPN when the workspace closes", async () => {
+    const { result, rerender, unmount } = renderHook(({ enabled }) => useVpn(enabled), { initialProps: { enabled: false } });
     expect(loadVpnConnections).not.toHaveBeenCalled();
     expect(vpnStatus).not.toHaveBeenCalled();
-    rerender({ visible: true });
+    rerender({ enabled: true });
     await ready(result);
     expect(connectVpn).not.toHaveBeenCalled();
     expect(stopVpn).not.toHaveBeenCalled();
     const calls = vi.mocked(vpnStatus).mock.calls.length;
-    rerender({ visible: false });
+    rerender({ enabled: false });
     act(() => window.dispatchEvent(new Event("focus")));
     expect(vpnStatus).toHaveBeenCalledTimes(calls);
     unmount();
     expect(stopVpn).not.toHaveBeenCalled();
+  });
+
+  it("discovers and updates an external VPN without mounting the VPN panel", async () => {
+    vi.useFakeTimers();
+    const external = { ...connected, connection_id: null };
+    const { result, unmount } = renderHook(() => useVpn(true));
+    await act(async () => {});
+    expect(result.current.status.state).toBe("stopped");
+    vi.mocked(vpnStatus).mockResolvedValue(external);
+    await act(async () => { await vi.advanceTimersByTimeAsync(VPN_STATUS_INTERVAL_MS); });
+    expect(result.current.status).toEqual(external);
+    expect(loadVpnConnections).toHaveBeenCalledOnce();
+
+    vi.mocked(vpnStatus).mockResolvedValue(stopped);
+    await act(async () => { await vi.advanceTimersByTimeAsync(VPN_STATUS_INTERVAL_MS); });
+    expect(result.current.status).toEqual(stopped);
+    expect(connectVpn).not.toHaveBeenCalled();
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(VPN_STATUS_INTERVAL_MS); });
+    expect(vpnStatus).toHaveBeenCalledTimes(3);
+    expect(stopVpn).not.toHaveBeenCalled();
+  });
+
+  it("can observe and disconnect a CLI VPN when the saved connections cannot load", async () => {
+    const external = { ...connected, connection_id: null };
+    vi.mocked(loadVpnConnections).mockRejectedValue(new Error("Saved connections unavailable"));
+    vi.mocked(vpnStatus).mockResolvedValueOnce(external).mockResolvedValue(stopped);
+    const { result } = renderHook(() => useVpn(true));
+    await waitFor(() => expect(result.current.status_loaded).toBe(true));
+    expect(result.current.catalog_loaded).toBe(false);
+    expect(result.current.catalog_error).toBe("Saved connections unavailable");
+    expect(result.current.status).toEqual(external);
+    await act(async () => { await result.current.stop(); });
+    expect(stopVpn).toHaveBeenCalledOnce();
+    expect(result.current.status).toEqual(stopped);
+    expect(connectVpn).not.toHaveBeenCalled();
   });
 
   it("cancels a pending connection and ignores its late success after Stop", async () => {

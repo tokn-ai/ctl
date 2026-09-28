@@ -375,8 +375,9 @@ ctl vpn status
 ctl vpn stop
 ```
 
-These commands print JSON; a ready VPN includes its randomly allocated loopback
-SOCKS5 endpoint. Start launches `ctld` if needed. Stop leaves `ctld` running, and
+These commands print readable status with the VPN server, username, and randomly
+allocated loopback SOCKS5 endpoint. Add `--json` for scripts. Start launches `ctld`
+if needed. Stop leaves `ctld` running, and
 the container also exits when `ctld` exits. See the
 [OpenConnect setup](docker/openconnect/README.md) for building the image and
 configuring the private env file.

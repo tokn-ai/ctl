@@ -67,8 +67,15 @@ let vpn_connections: VpnConnectionsSnapshot = {
 };
 const stopped_vpn: VpnStatus = {
   state: "stopped", running: false, connection_id: null, endpoint: null, container_name: null,
+  vpn_url: null, username: null,
 };
-let vpn_status: VpnStatus = { ...stopped_vpn };
+const vpn_param = new URLSearchParams(location.search).get("vpn");
+let vpn_status: VpnStatus = vpn_param === "connected" || vpn_param === "external" ? {
+  state: "connected", running: true,
+  connection_id: vpn_param === "external" ? null : "sample-vpn",
+  vpn_url: "https://vpn.example.com", username: "sample",
+  endpoint: "socks5h://127.0.0.1:49152", container_name: "preview-vpn",
+} : { ...stopped_vpn };
 
 function request<T>(payload: InvokeArgs | undefined): T {
   return (payload as { request: T }).request;
@@ -139,13 +146,17 @@ mockIPC((command, payload) => {
       };
       return structuredClone(vpn_connections);
     }
-    case "connect_vpn":
+    case "connect_vpn": {
+      const { connection_id } = request<{ connection_id: string }>(payload);
+      const connection = vpn_connections.connections.find((item) => item.connection_id === connection_id);
+      if (!connection) throw new Error("This sample VPN connection no longer exists.");
       vpn_status = {
         state: "connected", running: true,
-        connection_id: request<{ connection_id: string }>(payload).connection_id,
+        connection_id, vpn_url: connection.url, username: connection.username,
         endpoint: "socks5h://127.0.0.1:49152", container_name: "preview-vpn",
       };
       return structuredClone(vpn_status);
+    }
     case "vpn_status":
       return structuredClone(vpn_status);
     case "stop_vpn":

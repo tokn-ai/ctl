@@ -5,7 +5,7 @@ use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ctld_ipc::{ClientMessage, ServerMessage, VpnStatus};
+use ctld_ipc::{ClientMessage, ServerMessage, VpnState, VpnStatus};
 use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -91,7 +91,7 @@ async fn exchange(
   (output.unwrap(), request)
 }
 
-fn assert_status(output: &Output, expected: &VpnStatus) {
+fn assert_json_status(output: &Output, expected: &VpnStatus) {
   assert!(output.status.success(), "{output:?}");
   assert_eq!(
     serde_json::from_slice::<VpnStatus>(&output.stdout).unwrap(),
@@ -100,27 +100,39 @@ fn assert_status(output: &Output, expected: &VpnStatus) {
   assert!(output.stderr.is_empty(), "{output:?}");
 }
 
+fn assert_text_status(output: &Output, expected: &str) {
+  assert!(output.status.success(), "{output:?}");
+  assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+  assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+fn connected() -> VpnStatus {
+  VpnStatus {
+    endpoint: Some("socks5h://127.0.0.1:43210".into()),
+    vpn_url: Some("https://vpn.example.com".into()),
+    username: Some("test-user".into()),
+    container_name: Some("ctld-openconnect-test".into()),
+    connection_id: Some("test-connection".into()),
+    state: VpnState::Connected,
+    running: true,
+  }
+}
+
 #[tokio::test]
 async fn start_status_and_stop_use_daemon_ipc_and_print_json() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
-  let ready = VpnStatus {
-    endpoint: Some("socks5h://127.0.0.1:43210".into()),
-    container_name: Some("ctld-openconnect-test".into()),
-    connection_id: None,
-    state: ctld_ipc::VpnState::Connected,
-    running: true,
-  };
+  let ready = connected();
   let (output, request) = exchange(
     &fixture,
     &listener,
-    &["vpn", "start", "--env-file", "work.env"],
+    &["vpn", "start", "--env-file", "work.env", "--json"],
     ServerMessage::VpnStatus {
       status: ready.clone(),
     },
   )
   .await;
-  assert_status(&output, &ready);
+  assert_json_status(&output, &ready);
   assert!(matches!(
     request,
     ClientMessage::StartVpn { env_file } if env_file == fixture.directory.join("work.env")
@@ -129,27 +141,112 @@ async fn start_status_and_stop_use_daemon_ipc_and_print_json() {
   let (output, request) = exchange(
     &fixture,
     &listener,
-    &["vpn", "status"],
+    &["vpn", "status", "--json"],
     ServerMessage::VpnStatus {
       status: ready.clone(),
     },
   )
   .await;
-  assert_status(&output, &ready);
+  assert_json_status(&output, &ready);
   assert!(matches!(request, ClientMessage::VpnStatus));
 
   let stopped = VpnStatus::default();
   let (output, request) = exchange(
     &fixture,
     &listener,
-    &["vpn", "stop"],
+    &["vpn", "stop", "--json"],
     ServerMessage::VpnStatus {
       status: stopped.clone(),
     },
   )
   .await;
-  assert_status(&output, &stopped);
+  assert_json_status(&output, &stopped);
   assert!(matches!(request, ClientMessage::StopVpn));
+}
+
+#[tokio::test]
+async fn start_status_and_stop_print_human_readable_output_by_default() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  for action in ["start", "status"] {
+    let (output, _) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", action],
+      ServerMessage::VpnStatus {
+        status: connected(),
+      },
+    )
+    .await;
+    assert_text_status(
+      &output,
+      "VPN: connected\nServer: https://vpn.example.com\nUsername: test-user\nSOCKS5 proxy: socks5h://127.0.0.1:43210\n",
+    );
+  }
+  let (output, _) = exchange(
+    &fixture,
+    &listener,
+    &["vpn", "stop"],
+    ServerMessage::VpnStatus {
+      status: VpnStatus::default(),
+    },
+  )
+  .await;
+  assert_text_status(&output, "VPN: disconnected\n");
+}
+
+#[tokio::test]
+async fn human_status_shows_lifecycle_and_unavailable_connection_details() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  for (state, label) in [
+    (VpnState::Starting, "starting"),
+    (VpnState::Connected, "connected"),
+    (VpnState::Stopping, "stopping"),
+  ] {
+    let (output, _) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", "status"],
+      ServerMessage::VpnStatus {
+        status: VpnStatus {
+          state,
+          ..VpnStatus::default()
+        },
+      },
+    )
+    .await;
+    assert_text_status(
+      &output,
+      &format!(
+        "VPN: {label}\nServer: unavailable\nUsername: unavailable\nSOCKS5 proxy: unavailable\n"
+      ),
+    );
+  }
+}
+
+#[tokio::test]
+async fn human_status_escapes_terminal_controls_and_preserves_readable_unicode() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let (output, _) = exchange(
+    &fixture,
+    &listener,
+    &["vpn", "status"],
+    ServerMessage::VpnStatus {
+      status: VpnStatus {
+        vpn_url: Some("https://vpn.example.com\u{001b}[2J".into()),
+        username: Some("用户\nadmin\t\u{202e}\u{0085}".into()),
+        endpoint: Some("socks5h://127.0.0.1:43210\r".into()),
+        ..connected()
+      },
+    },
+  )
+  .await;
+  assert_text_status(
+    &output,
+    "VPN: connected\nServer: https://vpn.example.com\\u{1b}[2J\nUsername: 用户\\nadmin\\t\\u{202e}\\u{85}\nSOCKS5 proxy: socks5h://127.0.0.1:43210\\r\n",
+  );
 }
 
 #[tokio::test]
@@ -157,22 +254,30 @@ async fn missing_daemon_is_stopped_and_remote_commands_are_rejected() {
   let fixture = Fixture::new();
   for action in ["status", "stop"] {
     let output = fixture.command(&["vpn", action]).output().await.unwrap();
-    assert_status(&output, &VpnStatus::default());
-    assert!(!fixture.socket().exists());
-  }
-  for action in ["start", "status", "stop"] {
+    assert_text_status(&output, "VPN: disconnected\n");
     let output = fixture
-      .command(&["--host", "vpn-host", "vpn", action])
+      .command(&["vpn", action, "--json"])
       .output()
       .await
       .unwrap();
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(
-      String::from_utf8(output.stderr)
-        .unwrap()
-        .contains("omit --host")
-    );
+    assert_json_status(&output, &VpnStatus::default());
+    assert!(!fixture.socket().exists());
+  }
+  for action in ["start", "status", "stop"] {
+    for json in [false, true] {
+      let mut args = vec!["--host", "vpn-host", "vpn", action];
+      if json {
+        args.push("--json");
+      }
+      let output = fixture.command(&args).output().await.unwrap();
+      assert!(!output.status.success());
+      assert!(output.stdout.is_empty());
+      assert!(
+        String::from_utf8(output.stderr)
+          .unwrap()
+          .contains("omit --host")
+      );
+    }
   }
 }
 
@@ -215,7 +320,7 @@ async fn start_launches_ctld_when_absent() {
   })
   .await
   .unwrap();
-  assert_status(&output.unwrap(), &stopped);
+  assert_text_status(&output.unwrap(), "VPN: disconnected\n");
   assert!(matches!(
     request,
     ClientMessage::StartVpn { env_file } if env_file == fixture.directory.join(".env")
@@ -223,23 +328,25 @@ async fn start_launches_ctld_when_absent() {
 }
 
 #[tokio::test]
-async fn daemon_errors_are_reported_without_success_json() {
+async fn daemon_errors_are_reported_without_success_output() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
-  let (output, request) = exchange(
-    &fixture,
-    &listener,
-    &["vpn", "start"],
-    ServerMessage::Error {
-      code: "vpn_start_failed".into(),
-      message: "synthetic startup failure".into(),
-    },
-  )
-  .await;
-  assert!(matches!(request, ClientMessage::StartVpn { .. }));
-  assert!(!output.status.success());
-  assert!(output.stdout.is_empty());
-  let stderr = String::from_utf8(output.stderr).unwrap();
-  assert!(stderr.contains("vpn_start_failed"));
-  assert!(stderr.contains("synthetic startup failure"));
+  for args in [vec!["vpn", "start"], vec!["vpn", "start", "--json"]] {
+    let (output, request) = exchange(
+      &fixture,
+      &listener,
+      &args,
+      ServerMessage::Error {
+        code: "vpn_start_failed".into(),
+        message: "synthetic startup failure".into(),
+      },
+    )
+    .await;
+    assert!(matches!(request, ClientMessage::StartVpn { .. }));
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("vpn_start_failed"));
+    assert!(stderr.contains("synthetic startup failure"));
+  }
 }

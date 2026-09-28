@@ -50,6 +50,7 @@ impl Lease for FakeLease {
       container_name: Some("test-vpn".to_owned()),
       connection_id: None,
       state: VpnState::Connected,
+      ..VpnStatus::default()
     }
   }
 
@@ -78,10 +79,14 @@ struct Harness {
   owner: VpnOwner,
   starts: mpsc::UnboundedReceiver<oneshot::Sender<io::Result<FakeLease>>>,
   probe: Arc<Probe>,
+  env_file: TestEnvFile,
+  other_env_file: TestEnvFile,
 }
 
 impl Harness {
   fn new() -> Self {
+    let env_file = test_env_file();
+    let other_env_file = test_env_file();
     let probe = Arc::new(Probe::default());
     let factory_probe = Arc::clone(&probe);
     let (started, starts) = mpsc::unbounded_channel();
@@ -101,6 +106,8 @@ impl Harness {
       owner,
       starts,
       probe,
+      env_file,
+      other_env_file,
     }
   }
 
@@ -111,7 +118,8 @@ impl Harness {
     oneshot::Sender<io::Result<FakeLease>>,
   ) {
     let service = self.service.clone();
-    let request = tokio::spawn(async move { service.start(std::env::temp_dir()).await });
+    let env_file = self.env_file.clone();
+    let request = tokio::spawn(async move { service.start(env_file).await });
     let ready = timeout(TEST_TIMEOUT, self.starts.recv())
       .await
       .unwrap()
@@ -135,6 +143,37 @@ impl Harness {
   }
 }
 
+struct TestEnvFile(PathBuf);
+
+impl std::ops::Deref for TestEnvFile {
+  type Target = PathBuf;
+
+  fn deref(&self) -> &PathBuf {
+    &self.0
+  }
+}
+
+impl Drop for TestEnvFile {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
+  }
+}
+
+fn test_env_file() -> TestEnvFile {
+  let path = std::env::temp_dir().join(format!("ctld-vpn-config-{}", uuid::Uuid::new_v4()));
+  std::fs::write(
+    &path,
+    "VPN_URL=vpn.example.test\nVPN_USERNAME=test-user\nVPN_PASSWORD=test-password\n",
+  )
+  .unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+  }
+  TestEnvFile(path)
+}
+
 async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
   timeout(TEST_TIMEOUT, async {
     while counter.load(Ordering::SeqCst) != expected {
@@ -153,10 +192,12 @@ async fn stop_cancels_startup_and_finishes_the_waiting_request() {
   assert!(!status.running);
   assert_eq!(status.state, VpnState::Starting);
   assert_eq!(status.connection_id, None);
+  assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
+  assert_eq!(status.username.as_deref(), Some("test-user"));
   assert!(
     harness
       .service
-      .start(std::env::current_exe().unwrap())
+      .start(harness.other_env_file.clone())
       .await
       .unwrap_err()
       .contains("already starting")
@@ -173,15 +214,32 @@ async fn same_config_reuses_the_lease_and_another_config_requires_stop() {
   let mut harness = Harness::new();
   let _exit = harness.start_ready().await;
   let first = harness.service.status().await.unwrap();
+  assert_eq!(first.vpn_url.as_deref(), Some("https://vpn.example.test"));
+  assert_eq!(first.username.as_deref(), Some("test-user"));
+  std::fs::write(
+    &*harness.env_file,
+    "VPN_URL=changed.example.test\nVPN_USERNAME=changed-user\nVPN_PASSWORD=changed-password\n",
+  )
+  .unwrap();
+  // Polling and repeated start commands describe the existing lease, even if
+  // the source settings have since been edited.
+  assert_eq!(harness.service.status().await.unwrap(), first);
   let duplicate = harness
     .service
-    .start(std::env::temp_dir().join("."))
+    .start(
+      harness
+        .env_file
+        .parent()
+        .unwrap()
+        .join(".")
+        .join(harness.env_file.file_name().unwrap()),
+    )
     .await
     .unwrap();
   assert_eq!(first, duplicate);
   let error = harness
     .service
-    .start(std::env::current_exe().unwrap())
+    .start(harness.other_env_file.clone())
     .await
     .unwrap_err();
   assert!(error.contains("stop it first"));
@@ -191,6 +249,70 @@ async fn same_config_reuses_the_lease_and_another_config_requires_stop() {
   assert_eq!(harness.probe.lease_drops.load(Ordering::SeqCst), 1);
   assert!(!harness.service.status().await.unwrap().running);
   harness.owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn preparation_queue_is_bounded_and_stop_cancellation_releases_all_admitted_requests() {
+  let probe = Arc::new(Probe::default());
+  let guard = StartupGuard(Arc::clone(&probe));
+  let (reply, result) = oneshot::channel();
+  let mut preparing = Some(Preparing {
+    future: Box::pin(async move {
+      let _guard = guard;
+      pending().await
+    }),
+    reply,
+  });
+  let mut results = vec![result];
+  let mut queued = VecDeque::new();
+  for _ in 0..MAX_QUEUED_PREPARATIONS {
+    let (reply, result) = oneshot::channel();
+    enqueue_preparation(
+      Source::Connection(saved_connection()),
+      reply,
+      &mut preparing,
+      &mut queued,
+    );
+    results.push(result);
+  }
+  assert_eq!(queued.len(), MAX_QUEUED_PREPARATIONS);
+  let (reply, rejected) = oneshot::channel();
+  enqueue_preparation(
+    Source::Connection(saved_connection()),
+    reply,
+    &mut preparing,
+    &mut queued,
+  );
+  assert_eq!(
+    rejected.await.unwrap().unwrap_err(),
+    "Too many pending VPN start requests; wait or stop the VPN before trying again"
+  );
+  assert_eq!(queued.len(), MAX_QUEUED_PREPARATIONS);
+  for result in &mut results {
+    assert!(matches!(
+      result.try_recv(),
+      Err(oneshot::error::TryRecvError::Empty)
+    ));
+  }
+  cancel_preparations(&mut preparing, &mut queued);
+  assert!(preparing.is_none());
+  assert!(queued.is_empty());
+  assert_eq!(probe.startup_drops.load(Ordering::SeqCst), 1);
+  for result in results {
+    assert!(result.await.unwrap().unwrap_err().contains("cancelled"));
+  }
+  // Cancellation releases admission capacity, including the active slot.
+  let (reply, result) = oneshot::channel();
+  enqueue_preparation(
+    Source::Connection(saved_connection()),
+    reply,
+    &mut preparing,
+    &mut queued,
+  );
+  assert!(preparing.is_some());
+  assert!(queued.is_empty());
+  cancel_preparations(&mut preparing, &mut queued);
+  assert!(result.await.unwrap().unwrap_err().contains("cancelled"));
 }
 
 #[tokio::test]
@@ -294,6 +416,8 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   let status = harness.service.status().await.unwrap();
   assert_eq!(status.state, VpnState::Starting);
   assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
+  assert_eq!(status.username.as_deref(), Some("test-user"));
   assert!(!status.running);
 
   let service = harness.service.clone();
@@ -303,6 +427,8 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   let status = request.await.unwrap().unwrap();
   assert_eq!(status.state, VpnState::Connected);
   assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
+  assert_eq!(status.username.as_deref(), Some("test-user"));
   assert_eq!(duplicate.await.unwrap().unwrap(), status);
   assert!(harness.starts.try_recv().is_err());
 
@@ -320,8 +446,18 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   let status = harness.service.status().await.unwrap();
   assert_eq!(status.state, VpnState::Stopping);
   assert_eq!(status.connection_id.as_deref(), Some("profile-test"));
+  assert_eq!(status.vpn_url.as_deref(), Some("https://vpn.example.test"));
+  assert_eq!(status.username.as_deref(), Some("test-user"));
   assert!(!status.running);
   assert!(status.endpoint.is_none());
+  assert!(
+    harness
+      .service
+      .start(harness.env_file.with_extension("missing"))
+      .await
+      .unwrap_err()
+      .contains("VPN is stopping")
+  );
   release.send(()).unwrap();
   assert_eq!(stopping.await.unwrap().unwrap(), VpnStatus::default());
   assert_eq!(

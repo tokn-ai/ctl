@@ -86,14 +86,30 @@
   font-size: 11px;
 }
 
-.vpn-endpoint code {
-  display: block;
+.vpn-current-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+
+.vpn-current-details dt {
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.vpn-current-details dd {
   min-width: 0;
-  width: 100%;
+  margin: 0;
   overflow-wrap: anywhere;
   color: var(--text);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
+}
+
+.vpn-current-details code {
+  font-size: 11px;
 }
 
 .vpn-sidebar button:not(.icon-button),

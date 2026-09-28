@@ -20,6 +20,11 @@ export function VpnSidebar({ model }: Props) {
   const external = active && !current_connection;
   const refreshing = model.catalog_loading || model.status_loading;
   const label = model.status_stale && !model.action ? "Status unavailable" : statusLabel(model);
+  const vpn_url = vpnServerLabel(model.status.vpn_url ?? (active ? current_connection?.url : null));
+  const username = model.status.username ?? (active ? current_connection?.username : null);
+  const unavailable_detail = !model.status_loaded && !model.status_stale
+    ? "Checking…"
+    : active || model.status_stale ? "Unavailable" : "—";
 
   useEffect(() => {
     setCopiedEndpoint(null);
@@ -65,11 +70,20 @@ export function VpnSidebar({ model }: Props) {
             </div>
             {active ? <p>{current_connection?.name ?? (model.status.state === "connected" ? "Connected VPN" : "VPN connection")}</p> : null}
             {model.status_stale && model.status_loaded && !model.action ? <small>Last known state: {statusLabel(model)}</small> : null}
-            {model.status.endpoint ? (
-              <div className="vpn-endpoint">
-                <code>{model.status.endpoint}</code>
+            <dl className="vpn-current-details">
+              <div>
+                <dt>VPN server</dt>
+                <dd>{vpn_url ?? unavailable_detail}</dd>
               </div>
-            ) : null}
+              <div>
+                <dt>Username</dt>
+                <dd>{username ?? unavailable_detail}</dd>
+              </div>
+              <div>
+                <dt>SOCKS5 endpoint</dt>
+                <dd><code>{model.status.endpoint ?? (model.status.state === "starting" ? "Pending" : unavailable_detail)}</code></dd>
+              </div>
+            </dl>
             {(external || (model.status_stale && !active)) ? (
               <button type="button" className="vpn-disconnect" disabled={stopping} onClick={() => void model.stop()}>
                 {stopping ? "Disconnecting…" : model.status.state === "starting" ? "Cancel connection" : "Disconnect VPN"}
@@ -97,7 +111,7 @@ export function VpnSidebar({ model }: Props) {
                     <Icon name="vpn" size={16} />
                     <strong>{connection.name}</strong>
                   </div>
-                  <p className="vpn-server">{connection.url}</p>
+                  <p className="vpn-server">{vpnServerLabel(connection.url) ?? "VPN server unavailable"}</p>
                   <small>{connection.username}</small>
                   <div className="vpn-connection-actions">
                     {selected ? (
@@ -144,5 +158,15 @@ function statusLabel(model: VpnController): string {
     case "connected": return "Connected";
     case "stopping": return "Disconnecting…";
     case "stopped": return "Disconnected";
+  }
+}
+
+function vpnServerLabel(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const gateway = new URL(value.includes("://") ? value : `https://${value}`);
+    return gateway.protocol === "https:" ? gateway.origin : null;
+  } catch {
+    return null;
   }
 }

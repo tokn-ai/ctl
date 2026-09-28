@@ -8,15 +8,17 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use ctld_ipc::{VpnConnection, VpnState, VpnStatus};
+use ctld_ipc::{VpnState, VpnStatus};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
-use zeroize::Zeroizing;
 
+mod config;
 mod diagnostics;
+
+pub(super) use config::{Config, Metadata, read_file};
 
 use diagnostics::Diagnostics;
 
@@ -24,10 +26,6 @@ const IMAGE: &str = "localhost/ctl-openconnect:local";
 const START_TIMEOUT: Duration = Duration::from_secs(75);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-
-pub struct Options {
-  pub env_file: PathBuf,
-}
 
 /// Dropping the lease stops heartbeats even when startup is cancelled. The
 /// container's own watchdog also works if ctld or the attached CLI receives SIGKILL.
@@ -38,6 +36,7 @@ pub struct ManagedVpn {
   endpoint: Option<String>,
   engine: PathBuf,
   diagnostics: Diagnostics,
+  metadata: Metadata,
 }
 
 impl ManagedVpn {
@@ -45,6 +44,8 @@ impl ManagedVpn {
   pub fn status(&self) -> VpnStatus {
     VpnStatus {
       endpoint: self.endpoint.clone(),
+      vpn_url: self.endpoint.as_ref().and(self.metadata.vpn_url.clone()),
+      username: self.endpoint.as_ref().and(self.metadata.username.clone()),
       container_name: Some(self.container_name.clone()),
       running: self.endpoint.is_some(),
       connection_id: None,
@@ -164,32 +165,12 @@ fn engine_command(engine: &Path) -> Command {
   command
 }
 
-/// Starts an opt-in Array VPN using the locally built image.
+/// Starts an opt-in Array VPN from an immutable configuration snapshot.
 ///
 /// # Errors
-/// Returns an error for unsafe/missing configuration, engine failure, or a VPN
-/// that does not finish configuring its routes and SOCKS5 listener in time.
-pub async fn start(options: Options) -> io::Result<ManagedVpn> {
-  start_with_engine(options, &find_engine()?).await
-}
-
-/// Starts saved connection settings without creating a host-side secret file.
-///
-/// # Errors
-/// Returns sanitized validation errors, engine failures, or readiness failures.
-pub async fn start_connection(connection: VpnConnection) -> io::Result<ManagedVpn> {
-  let config = connection_env(&connection)?;
-  drop(connection);
-  start_config(Config::Inline(config), &find_engine()?).await
-}
-
-enum Config {
-  File(PathBuf),
-  Inline(Zeroizing<String>),
-}
-
-async fn start_with_engine(options: Options, engine: &Path) -> io::Result<ManagedVpn> {
-  start_config(Config::File(options.env_file), engine).await
+/// Returns engine failures or VPN readiness failures.
+pub(super) async fn start(config: Config) -> io::Result<ManagedVpn> {
+  start_config(config, &find_engine()?).await
 }
 
 async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
@@ -215,27 +196,16 @@ async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
     "--publish",
     "127.0.0.1::1080/tcp",
   ]);
-  let initial_payload = match config {
-    Config::File(path) => {
-      let path = prepare_config(&path)?;
-      command.args([
-        "--mount",
-        &format!("type=bind,source={path},target=/run/secrets/openconnect.env,readonly"),
-      ]);
-      None
-    }
-    Config::Inline(config) => {
-      command.args([
-        "--env",
-        "CTLD_CONFIG_STDIN=1",
-        "--tmpfs",
-        "/run/secrets:rw,noexec,nosuid,nodev,mode=0700,size=65536",
-      ]);
-      let mut payload = Zeroizing::new(BASE64.encode(config.as_bytes()));
-      payload.push('\n');
-      Some(payload)
-    }
-  };
+  command.args([
+    "--env",
+    "CTLD_CONFIG_STDIN=1",
+    "--tmpfs",
+    "/run/secrets:rw,noexec,nosuid,nodev,mode=0700,size=65536",
+  ]);
+  let mut payload = zeroize::Zeroizing::new(BASE64.encode(config.content.as_bytes()));
+  payload.push('\n');
+  let metadata = config.metadata;
+  drop(config.content);
   let mut child = command
     .arg(IMAGE)
     .stdin(Stdio::piped())
@@ -248,16 +218,14 @@ async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
   );
   let mut stdin = child.stdin.take().expect("container stdin was piped");
   let heartbeat = tokio::spawn(async move {
-    if let Some(payload) = initial_payload {
-      if !matches!(
-        timeout(COMMAND_TIMEOUT, stdin.write_all(payload.as_bytes())).await,
-        Ok(Ok(()))
-      ) {
-        return;
-      }
-      // Drop and zeroize the credentials before entering the heartbeat loop.
-      drop(payload);
+    if !matches!(
+      timeout(COMMAND_TIMEOUT, stdin.write_all(payload.as_bytes())).await,
+      Ok(Ok(()))
+    ) {
+      return;
     }
+    // Drop and zeroize the credentials before entering the heartbeat loop.
+    drop(payload);
     let mut ticks = interval(HEARTBEAT_INTERVAL);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -277,38 +245,13 @@ async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
     endpoint: None,
     engine: engine.to_path_buf(),
     diagnostics,
+    metadata,
   };
   if let Err(error) = vpn.wait_ready().await {
     vpn.shutdown().await;
     return Err(error);
   }
   Ok(vpn)
-}
-
-fn connection_env(connection: &VpnConnection) -> io::Result<Zeroizing<String>> {
-  connection
-    .validate()
-    .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-  let mut config = Zeroizing::new(String::new());
-  for (key, value) in [
-    ("VPN_URL", connection.url.as_str()),
-    ("VPN_USERNAME", connection.username.as_str()),
-    ("VPN_PASSWORD", connection.password.as_str()),
-    (
-      "VPN_AUTH_METHOD",
-      connection.auth_method.as_deref().unwrap_or_default(),
-    ),
-    (
-      "TARGET_IP",
-      connection.target_ip.as_deref().unwrap_or_default(),
-    ),
-  ] {
-    config.push_str(key);
-    config.push('=');
-    config.push_str(value);
-    config.push('\n');
-  }
-  Ok(config)
 }
 
 fn find_engine() -> io::Result<PathBuf> {
@@ -369,29 +312,6 @@ fn engine_candidates(search_path: Option<&OsStr>, home: Option<&Path>) -> Vec<Pa
   let mut seen = HashSet::new();
   candidates.retain(|path| seen.insert(path.clone()));
   candidates
-}
-
-fn prepare_config(path: &Path) -> io::Result<String> {
-  let path = path.canonicalize()?;
-  let metadata = path.metadata()?;
-  if !metadata.is_file() {
-    return Err(io::Error::other("VPN env file must be a regular file"));
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt as _;
-    if metadata.permissions().mode() & 0o077 != 0 {
-      return Err(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "VPN env file must be private; run chmod 600 on the file",
-      ));
-    }
-  }
-  let path = path
-    .to_str()
-    .filter(|path| !path.contains([',', '\n', '\r']))
-    .ok_or_else(|| io::Error::other("VPN env path must be UTF-8 without commas or newlines"))?;
-  Ok(path.to_owned())
 }
 
 #[derive(Deserialize)]

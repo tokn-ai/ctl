@@ -153,6 +153,7 @@ pub enum SidebarView {
   Sessions,
   Tasks,
   Ports,
+  Vpn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

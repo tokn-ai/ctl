@@ -10,8 +10,10 @@ ctld-ipc.workspace = true
 rmux-cli.workspace = true
 task-cli.workspace = true
 task-client.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+unicode-width.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]

@@ -23,6 +23,10 @@ import type {
   TaskRequest,
   WorkspaceDocument,
   WorkspaceSnapshot,
+  VpnConnectionInput,
+  VpnConnectionsSnapshot,
+  VpnStatus,
+  VpnSnapshot,
 } from "../src/lib/types";
 import {
   previewDefinitions,
@@ -41,7 +45,7 @@ import {
 if (!import.meta.env.DEV) throw new Error("The sample workspace is development-only.");
 
 const view_param = new URLSearchParams(location.search).get("view");
-const initial_view = view_param === "tasks" || view_param === "ports" ? view_param : "sessions";
+const initial_view = view_param === "tasks" || view_param === "ports" || view_param === "vpn" ? view_param : "sessions";
 let workspace: WorkspaceSnapshot = { revision: "preview-1", document: previewWorkspace(initial_view) };
 const connectedHosts = new Set(["dev-server"]);
 const pausedHosts = new Set<string>();
@@ -55,6 +59,38 @@ let definitions = structuredClone(previewDefinitions);
 let keybindings: KeybindingsDocument = { schema_version: 1, overrides: [] };
 const attachments = new Map<string, { channel: Channel<AttachmentEvent>; sequence: number; session: SessionSummary }>();
 const forwards = new Map<string, PortForwardStatus>();
+let vpn_connections: VpnConnectionsSnapshot = {
+  revision: "preview-vpn-1",
+  connections: [{
+    connection_id: "sample-vpn", name: "Office", url: "https://vpn.example.com",
+    username: "sample", has_password: true, auth_method: null, target_ip: null,
+  }, {
+    connection_id: "research-vpn", name: "Research", url: "https://research.example.com",
+    username: "researcher", has_password: true, auth_method: null, target_ip: null,
+  }],
+};
+const stopped_vpn: VpnStatus = {
+  state: "stopped", running: false, connection_id: null, endpoint: null, container_name: null,
+  vpn_url: null, username: null,
+};
+const vpn_param = new URLSearchParams(location.search).get("vpn");
+let vpn_snapshot: VpnSnapshot = { supports_multiple: vpn_param !== "legacy", connections: [] };
+let next_vpn_port = 49160;
+if (["connected", "external", "legacy", "multiple"].includes(vpn_param ?? "")) {
+  const external = vpn_param === "external" || vpn_param === "legacy";
+  vpn_snapshot.connections.push({
+    vpn_id: external ? "preview-external" : "sample-vpn", state: "connected", running: true,
+    connection_id: external ? null : "sample-vpn", vpn_url: "https://vpn.example.com", username: "sample",
+    endpoint: "socks5h://127.0.0.1:49152", container_name: "preview-vpn",
+  });
+}
+if (vpn_param === "multiple") {
+  vpn_snapshot.connections.push({
+    vpn_id: "research-external", state: "connected", running: true, connection_id: null,
+    vpn_url: "https://research.example.com", username: "researcher",
+    endpoint: "socks5h://127.0.0.1:49153", container_name: "preview-research-vpn",
+  });
+}
 
 function request<T>(payload: InvokeArgs | undefined): T {
   return (payload as { request: T }).request;
@@ -102,6 +138,49 @@ mockIPC((command, payload) => {
       return structuredClone(workspace);
     case "load_hosts":
       return structuredClone(hosts);
+    case "load_vpn_connections":
+      return structuredClone(vpn_connections);
+    case "save_vpn_connection": {
+      const { connection } = request<{ connection: VpnConnectionInput }>(payload);
+      const { password, ...summary } = connection;
+      const prior = vpn_connections.connections.find((item) => item.connection_id === connection.connection_id);
+      vpn_connections = {
+        revision: `preview-vpn-${++revision}`,
+        connections: [
+          ...vpn_connections.connections.filter((item) => item.connection_id !== connection.connection_id),
+          { ...summary, has_password: password !== null || prior?.has_password === true },
+        ],
+      };
+      return structuredClone(vpn_connections);
+    }
+    case "delete_vpn_connection": {
+      const { connection_id } = request<{ connection_id: string }>(payload);
+      vpn_connections = {
+        revision: `preview-vpn-${++revision}`,
+        connections: vpn_connections.connections.filter((item) => item.connection_id !== connection_id),
+      };
+      return structuredClone(vpn_connections);
+    }
+    case "connect_vpn": {
+      const { connection_id } = request<{ connection_id: string }>(payload);
+      const connection = vpn_connections.connections.find((item) => item.connection_id === connection_id);
+      if (!connection) throw new Error("This sample VPN connection no longer exists.");
+      if (!vpn_snapshot.supports_multiple && vpn_snapshot.connections.length > 0) throw new Error("Update ctld to connect multiple VPNs.");
+      const status: VpnStatus = {
+        vpn_id: connection_id, state: "connected", running: true,
+        connection_id, vpn_url: connection.url, username: connection.username,
+        endpoint: `socks5h://127.0.0.1:${next_vpn_port++}`, container_name: `preview-${connection_id}`,
+      };
+      vpn_snapshot.connections = [...vpn_snapshot.connections.filter((item) => item.vpn_id !== connection_id), status];
+      return structuredClone(status);
+    }
+    case "vpn_status":
+      return structuredClone(vpn_snapshot);
+    case "stop_vpn": {
+      const { vpn_id } = request<{ vpn_id: string }>(payload);
+      vpn_snapshot.connections = vpn_snapshot.connections.filter((item) => item.vpn_id !== vpn_id);
+      return { ...stopped_vpn, vpn_id };
+    }
     case "update_hosts":
       hosts = { revision: `preview-hosts-${++revision}`, document: request<{ document: HostCatalogDocument }>(payload).document };
       return structuredClone(hosts);
@@ -120,8 +199,14 @@ mockIPC((command, payload) => {
     case "respond_ssh_prompt":
       return;
     case "plugin:window|set_title":
-      document.title = `${(payload as { title: string }).title} · Sample workspace preview`;
+      document.title = `${(payload as { value: string }).value} · Sample workspace preview`;
       return;
+    case "session_cache":
+      return request<{ action: { kind: string } }>(payload).action.kind === "load"
+        ? { kind: "loaded", cache: null }
+        : { kind: "archived" };
+    case "session_view":
+      return null;
     case "list_ssh_config_hosts":
       return { hosts: structuredClone(ssh_config_hosts), warnings: [] };
     case "list_ssh_identity_files":

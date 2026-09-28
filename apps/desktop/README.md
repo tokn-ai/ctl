@@ -3,6 +3,40 @@
 The desktop client for local and SSH-connected daemon-owned `rmux` terminal
 sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
+## VPN connections
+
+Open **VPN** in the sidebar to add a named connection with a server, username,
+and password. Advanced settings include an authentication method and an optional
+SSH connectivity-check target. Save the connection, then choose **Connect**.
+Each saved connection has one item combining its settings and live status,
+including the VPN server, username, and copyable SOCKS5 endpoint when connected.
+An active connection without a matching saved profile appears as a temporary item. The VPN tab shows an active
+indicator even while another panel is open. Connections started from the CLI are
+also visible, including their server and username. Multiple VPNs can run at once,
+each with its own SOCKS5 endpoint. **Disconnect** targets only that item and also
+cancels its pending startup. An older daemon can still be inspected, but must be
+updated to connect multiple VPNs or disconnect a connection by ID. The CLI's
+untargeted `ctl vpn stop` remains available for its current connection.
+
+Connections, including passwords, are stored in a private `vpns.json` file in
+the app's configuration directory. The webview receives metadata and a
+password-presence flag; editing with an empty password keeps the stored password.
+The Docker adapter generates its environment file internally when connecting.
+Users do not need to create or select an environment file.
+
+Signed development keeps VPN ownership on the normal per-user daemon even though
+SSH uses a temporary signed helper. This makes VPNs started by the CLI visible
+in the app. Set `CTLD_VPN_SOCKET_PATH` to select a custom VPN owner for the app;
+use the same path as `CTLD_SOCKET_PATH` in the CLI.
+
+This requires a running Docker-compatible engine and the OpenConnect image built
+with `./docker/openconnect/run.sh build` from the repository root. On macOS and
+Linux the app and `ctl vpn` share the local `ctld` owner, including connections
+started from the CLI. Closing the app leaves the VPN running; disconnecting or
+exiting `ctld` stops the container. The SOCKS proxy follows the container's routes;
+it does not change the Mac's system routes or automatically change SSH settings.
+See [the container setup guide](../../docker/openconnect/README.md) for proxy usage.
+
 ## Develop
 
 From the repository root, install the frontend dependencies and start Tauri:

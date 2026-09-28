@@ -199,7 +199,54 @@ export interface HostCatalogSnapshot {
   document: HostCatalogDocument;
 }
 
-export type WorkspaceSidebarView = "sessions" | "tasks" | "ports";
+export type WorkspaceSidebarView = "sessions" | "tasks" | "ports" | "vpn";
+
+/** Saved connection metadata. Passwords are never returned to the webview. */
+export interface VpnConnection {
+  connection_id: string;
+  name: string;
+  url: string;
+  username: string;
+  has_password: boolean;
+  auth_method: string | null;
+  target_ip: string | null;
+}
+
+export interface VpnConnectionInput {
+  connection_id: string;
+  name: string;
+  url: string;
+  username: string;
+  /** Null preserves the stored password when editing a connection. */
+  password: string | null;
+  auth_method: string | null;
+  target_ip: string | null;
+}
+
+export interface VpnConnectionsSnapshot {
+  revision: string | null;
+  connections: VpnConnection[];
+}
+
+export type VpnState = "stopped" | "starting" | "connected" | "stopping";
+
+export interface VpnStatus {
+  vpn_id?: string | null;
+  state: VpnState;
+  running: boolean;
+  connection_id: string | null;
+  /** Older ctld versions may omit connection metadata. */
+  vpn_url?: string | null;
+  username?: string | null;
+  /** Local SOCKS5 proxy, distinct from the VPN server. */
+  endpoint: string | null;
+  container_name: string | null;
+}
+
+export interface VpnSnapshot {
+  connections: VpnStatus[];
+  supports_multiple: boolean;
+}
 
 export interface LocalPortForward {
   forward_id: string;

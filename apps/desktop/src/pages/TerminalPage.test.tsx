@@ -45,7 +45,9 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(
     async (name: string, callback: (event: { payload: string }) => void) => {
       nativeEvents.listeners.set(name, callback);
-      return () => nativeEvents.listeners.delete(name);
+      return () => {
+        if (nativeEvents.listeners.get(name) === callback) nativeEvents.listeners.delete(name);
+      };
     },
   ),
 }));
@@ -82,6 +84,12 @@ const api = vi.hoisted(() => ({
   respondSshPrompt: vi.fn(),
   configurePortForward: vi.fn(),
   listPortForwards: vi.fn(),
+  loadVpnConnections: vi.fn(),
+  saveVpnConnection: vi.fn(),
+  deleteVpnConnection: vi.fn(),
+  connectVpn: vi.fn(),
+  vpnStatus: vi.fn(),
+  stopVpn: vi.fn(),
   listRemoteListeners: vi.fn(),
   checkLocalPort: vi.fn(),
   loadKeybindings: vi.fn(),
@@ -232,6 +240,8 @@ beforeEach(() => {
   api.cancelSshProbe.mockResolvedValue(undefined);
   api.respondSshPrompt.mockReset().mockResolvedValue(undefined);
   api.listPortForwards.mockResolvedValue([]);
+  api.loadVpnConnections.mockResolvedValue({ revision: null, connections: [] });
+  api.vpnStatus.mockResolvedValue({ connections: [], supports_multiple: true });
   api.listRemoteListeners.mockResolvedValue({ listeners: [], warnings: [] });
   api.checkLocalPort.mockImplementation(async (port: number) => ({ port, available: true, message: null }));
   api.configurePortForward.mockImplementation(async (_target: ConnectionTarget, forward: WorkspacePortForward) => ({
@@ -311,6 +321,77 @@ describe("workspace-backed terminal page", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(api.restartLocalDaemon).not.toHaveBeenCalled();
     expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
+  });
+
+  it("discovers a CLI VPN before opening the VPN panel", async () => {
+    api.vpnStatus.mockResolvedValue({ connections: [{
+      vpn_id: "sample-vpn", state: "connected", running: true, connection_id: null,
+      vpn_url: "https://vpn.example.test", username: "cli-user",
+      endpoint: "socks5h://127.0.0.1:49152", container_name: "sample-vpn",
+    }], supports_multiple: true });
+    render(<TerminalPage />);
+    const vpn_tab = await screen.findByRole("tab", { name: "VPN" });
+    await waitFor(() => expect(vpn_tab.getAttribute("aria-description")).toBe("Connected"));
+    expect(screen.getByRole("tab", { name: "Sessions" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(vpn_tab);
+    expect(await screen.findByText("https://vpn.example.test")).toBeTruthy();
+    expect(screen.getByText("cli-user")).toBeTruthy();
+    expect(screen.getByText("socks5h://127.0.0.1:49152")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect VPN" })).toBeTruthy();
+    expect(api.connectVpn).not.toHaveBeenCalled();
+  });
+
+  it("shows concurrent CLI VPNs and disconnects only the selected item", async () => {
+    const first = {
+      vpn_id: "sample-alpha", state: "connected", running: true, connection_id: null,
+      vpn_url: "https://alpha.example.test", username: "alpha-user",
+      endpoint: "socks5h://127.0.0.1:49152", container_name: "sample-alpha",
+    };
+    const second = {
+      ...first, vpn_id: "sample-bravo", vpn_url: "https://bravo.example.test",
+      username: "bravo-user", endpoint: "socks5h://127.0.0.1:49153", container_name: "sample-bravo",
+    };
+    api.vpnStatus.mockResolvedValue({ connections: [first, second], supports_multiple: true });
+    api.stopVpn.mockImplementation(async () => {
+      api.vpnStatus.mockResolvedValue({ connections: [second], supports_multiple: true });
+      return { ...first, state: "stopped", running: false, endpoint: null };
+    });
+    render(<TerminalPage />);
+    const vpn_tab = await screen.findByRole("tab", { name: "VPN" });
+    await waitFor(() => expect(vpn_tab.getAttribute("aria-description")).toBe("2 active VPNs"));
+    fireEvent.click(vpn_tab);
+    const items = screen.getAllByRole("region", { name: "Connected VPN" });
+    const first_item = items.find((item) => within(item).queryByText(first.endpoint));
+    expect(first_item).toBeTruthy();
+    fireEvent.click(within(first_item!).getByRole("button", { name: "Disconnect VPN" }));
+    await waitFor(() => expect(api.stopVpn).toHaveBeenCalledWith("sample-alpha"));
+    await waitFor(() => expect(screen.queryByText(first.endpoint)).toBeNull());
+    expect(screen.getByText(second.endpoint)).toBeTruthy();
+    expect(screen.getByText("bravo-user")).toBeTruthy();
+    expect(vpn_tab.getAttribute("aria-description")).toBe("Connected");
+  });
+
+  it("opens the VPN editor outside the inert workspace and remembers the VPN tab", async () => {
+    const page = render(<StrictMode><TerminalPage /></StrictMode>);
+    await screen.findByRole("button", { name: "Connect host" });
+    expect(api.loadVpnConnections).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
+    await screen.findByText("No saved VPN connections.");
+    expect(api.vpnStatus).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Add VPN connection" }));
+    const editor = screen.getByRole("dialog", { name: "Add VPN connection" });
+    expect(document.querySelector("main")?.hasAttribute("inert")).toBe(true);
+    expect(editor.closest("main")).toBeNull();
+    shortcut("KeyP");
+    nativeCommand(COMMAND_IDS.close);
+    expect(screen.getAllByRole("dialog")).toEqual([editor]);
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.querySelector("main")?.hasAttribute("inert")).toBe(false);
+    await waitFor(() => expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sidebar_view).toBe("vpn"));
+    page.unmount();
+    expect(api.connectVpn).not.toHaveBeenCalled();
+    expect(api.stopVpn).not.toHaveBeenCalled();
   });
 
   it("switches sidebar tabs and keeps an incomplete draft after dismissal and relaunch", async () => {

@@ -187,8 +187,43 @@ post-authentication activation share a serialized registry so a late old-master
 activation cannot recreate a moved or disabled forward. Listener ownership is
 tracked separately from displayed status, and a forward configured during
 master startup is not activated twice. The local `ctld` IPC protocol is version
-5; older clients and daemons must be updated together. A running version-4
-daemon must be restarted before clients can use these ownership semantics.
+11; older clients and daemons must be updated together and the daemon restarted.
+
+`ctl vpn start --env-file PATH` asks the local `ctld` to own an OpenConnect
+container, starting the daemon if needed. The settings path defaults to `.env`
+and is resolved relative to the caller's directory. Its SOCKS5 listener uses a
+random loopback port, printed in a readable connection-status table after the VPN and
+proxy are ready. Start, status, and stop accept `--json` for machine-readable output.
+`ctl vpn status` lists every runtime ID and endpoint; `ctl vpn stop VPN_ID` stops
+only that container while
+keeping the broker running. Status and stop never start a daemon. The container
+also stops when its owning daemon exits. VPN commands reject `--host` and use
+the owner-only local IPC endpoint, selectable through `CTLD_SOCKET_PATH`.
+
+The desktop VPN panel stores named connection details in private, schema-versioned
+`vpns.json` under the app configuration directory. Native commands return metadata
+and password-presence flags, use hashed revisions for optimistic writes, and load
+the saved secret only when connecting. Both desktop and CLI use the shared
+`ctld-ipc::vpn` client. Structured starts send the configuration to the container
+over its attached stdin; the container writes a mode-0600 environment file on
+private tmpfs. No generated credential file is left on the host. CLI-provided
+environment files are read as bounded private snapshots and use the same
+stdin/tmpfs flow. Cancellable preparation keeps status and stop responsive. Status
+lists each runtime ID, saved connection ID, gateway origin, and username from
+its actual startup snapshot. Each entry independently prepares, starts, connects,
+and stops; one failure or cancellation leaves the others running. Native
+coordination is keyed by VPN ID so a delayed start cannot escape its own Stop or
+cancel another connection. An optional snapshot in IPC 11 responses carries the
+collection while preserving legacy single-connection responses. Old owners remain
+readable as singleton snapshots with `supports_multiple: false`; targeted stop
+requires an updated daemon. Explicit `ctl vpn stop` remains available for a legacy
+owner, without risking a different connection through an implicit fallback.
+Desktop status polling continues while other panels are open and updates the VPN
+tab indicator. Signed development uses the shared per-user VPN owner rather than
+its temporary SSH helper; `CTLD_VPN_SOCKET_PATH` explicitly selects another VPN
+owner for all native VPN operations. Status polling never starts a daemon or
+reconnects automatically; closing the panel or app does not stop the daemon-owned
+VPN.
 
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed ctl-agent command.

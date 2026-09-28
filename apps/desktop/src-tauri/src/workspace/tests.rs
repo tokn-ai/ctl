@@ -446,6 +446,24 @@ fn port_forwards_require_a_remote_workspace_host_and_loopback_binding() {
 }
 
 #[test]
+fn vpn_sidebar_selection_survives_a_workspace_reload() {
+  let fixture = Fixture::new();
+  let mut document = populated();
+  document.sidebar_view = SidebarView::Vpn;
+  fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(
+    fixture.repository().load().unwrap().document.sidebar_view,
+    SidebarView::Vpn
+  );
+}
+
+#[test]
 fn incomplete_task_drafts_round_trip_without_becoming_runnable_definitions() {
   let fixture = Fixture::new();
   let mut document = populated();

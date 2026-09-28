@@ -649,10 +649,12 @@ dependencies = [
  "ctld-ipc",
  "rmux",
  "rpassword",
+ "serde_json",
  "task-cli",
  "task-client",
  "thiserror 2.0.20",
  "tokio",
+ "unicode-width",
  "zeroize",
 ]
 
@@ -707,9 +709,11 @@ dependencies = [
 name = "ctld"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "ctl-proto",
  "ctld-ipc",
+ "dirs",
  "rpassword",
  "rustix",
  "security-framework",
@@ -718,6 +722,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -3082,6 +3087,7 @@ dependencies = [
  "rmux-client",
  "rmux-ipc",
  "rmux-proto",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

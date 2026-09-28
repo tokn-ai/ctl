@@ -179,6 +179,29 @@ svg {
   cursor: pointer;
 }
 
+.sidebar-activity button {
+  position: relative;
+}
+
+.vpn-activity-indicator {
+  position: absolute;
+  top: 9px;
+  right: 7px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--surface-1);
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.vpn-activity-indicator.connected {
+  background: var(--success);
+}
+
+.vpn-activity-indicator.stale {
+  background: var(--muted);
+}
+
 .sidebar-activity button[aria-selected="true"] {
   color: #ffffff;
   border-left-color: var(--accent-strong);

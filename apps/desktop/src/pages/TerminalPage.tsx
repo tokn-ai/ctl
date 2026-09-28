@@ -27,6 +27,9 @@ import { useWorkspace } from "../features/workspace/useWorkspace";
 import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConnections";
 import { useHostConnections } from "../features/workspace/useHostConnections";
 import { usePortForwarding } from "../features/portForwarding/usePortForwarding";
+import { useVpn } from "../features/vpn/useVpn";
+import { vpnAggregateState } from "../features/vpn/status";
+import { VpnSidebar } from "../components/vpn/VpnSidebar";
 import {
   recoverRemoteHost,
   remapStateKeys,
@@ -280,6 +283,7 @@ export function TerminalPage() {
     updatePortForwards,
   );
   const sidebarTargets = workspaceSidebarTargets(workspace);
+  const vpn = useVpn(workspace.ready && !workspace.closing);
   const hostConnections = useHostConnections({
     ready: workspace.ready,
     closing: workspace.closing,
@@ -1533,6 +1537,7 @@ export function TerminalPage() {
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
   const [archives_open, setArchivesOpen] = useState(false);
   const dialogOpen = archives_open ||
+    vpn.editor !== null ||
     taskWorkspace.editorId !== null ||
     portForwardTarget !== null ||
     keybindingsOpen ||
@@ -1602,6 +1607,10 @@ export function TerminalPage() {
             if (view === "ports") void portForwarding.refreshAll();
           }}
           error={workspace.error}
+          vpn={<VpnSidebar model={vpn} />}
+          vpn_state={vpn.status_loaded ? vpnAggregateState(vpn.statuses) : undefined}
+          vpn_active_count={vpn.statuses.length}
+          vpn_status_stale={vpn.status_stale}
           tasks={
             <TaskSidebar
               model={taskWorkspace}

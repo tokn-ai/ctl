@@ -1,6 +1,7 @@
 mod commands;
 #[cfg(unix)]
 mod ssh_broker;
+mod vpn;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rmux_cli::Command as RmuxCommand;
@@ -29,6 +30,11 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Manage the local VPN and its SOCKS5 proxy through ctld.
+  Vpn {
+    #[command(subcommand)]
+    command: vpn::Command,
+  },
   /// Control the local task daemon.
   Taskd {
     #[command(subcommand)]
@@ -64,6 +70,28 @@ async fn main() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn vpn_start_uses_a_local_env_file_and_exposes_status_and_stop() {
+    let arguments = Arguments::try_parse_from(["ctl", "vpn", "start"]).unwrap();
+    assert_eq!(arguments.host, None);
+    assert!(matches!(
+      arguments.command,
+      Command::Vpn { command: vpn::Command::Start { env_file } }
+        if env_file == std::path::Path::new(".env")
+    ));
+    let arguments =
+      Arguments::try_parse_from(["ctl", "vpn", "start", "--env-file", "work.env"]).unwrap();
+    assert!(matches!(
+      arguments.command,
+      Command::Vpn { command: vpn::Command::Start { env_file } }
+        if env_file == std::path::Path::new("work.env")
+    ));
+    for action in ["status", "stop"] {
+      assert!(Arguments::try_parse_from(["ctl", "vpn", action]).is_ok());
+      assert!(Arguments::try_parse_from(["ctl", "vpn", action, "--env-file", ".env"]).is_err());
+    }
+  }
 
   #[test]
   fn rmux_uses_the_local_target_by_default() {

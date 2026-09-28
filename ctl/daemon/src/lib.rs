@@ -2,11 +2,13 @@
 
 #[cfg(target_os = "macos")]
 mod keychain;
+mod openconnect;
 mod port_forwarding;
 pub mod proxy_route;
 mod shared_forwarding;
 mod ssh_config_master;
 mod target_lifecycle;
+mod vpn_service;
 
 #[cfg(test)]
 mod master_policy_tests;
@@ -57,6 +59,7 @@ struct State {
   forwards: AsyncMutex<ForwardRegistry>,
   configured_connections: Mutex<HashMap<String, ConnectionLease>>,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
+  vpn_service: Option<vpn_service::VpnService>,
 }
 
 #[derive(Clone, Debug)]
@@ -180,12 +183,16 @@ pub enum DaemonError {
   Bind { path: PathBuf, source: io::Error },
   #[error("could not accept a ctld connection: {0}")]
   Accept(#[source] io::Error),
+  #[error("could not install ctld shutdown handlers: {0}")]
+  ShutdownSignal(#[source] io::Error),
   #[error("ctld is not supported on this platform")]
   UnsupportedPlatform,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum RequestError {
+  #[error("VPN operation failed: {0}")]
+  VpnFailed(String),
   #[error(transparent)]
   Codec(#[from] ctld_ipc::CodecError),
   #[error("ctld client ended the request")]
@@ -222,25 +229,36 @@ enum RequestError {
 /// Returns an error when the owner-only endpoint cannot be prepared or served.
 #[cfg(unix)]
 pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
+  use tokio::signal::unix::{SignalKind, signal};
+
   prepare_runtime_directory(&socket_path).map_err(DaemonError::RuntimeDirectory)?;
   let listener = bind_listener(&socket_path).await?;
   let _guard = SocketGuard(socket_path);
-  let state = Arc::new(State::default());
-  loop {
+  let mut interrupt = signal(SignalKind::interrupt()).map_err(DaemonError::ShutdownSignal)?;
+  let mut terminate = signal(SignalKind::terminate()).map_err(DaemonError::ShutdownSignal)?;
+  let (vpn_service, mut vpn_owner) = vpn_service::spawn();
+  let state = Arc::new(State {
+    vpn_service: Some(vpn_service),
+    ..State::default()
+  });
+  let result = loop {
     tokio::select! {
       accepted = listener.accept() => {
-        let (stream, _) = accepted.map_err(DaemonError::Accept)?;
+        let (stream, _) = match accepted {
+          Ok(accepted) => accepted,
+          Err(error) => break Err(DaemonError::Accept(error)),
+        };
         let state = Arc::clone(&state);
         tokio::spawn(async move {
           let _ = handle_connection(stream, state).await;
         });
       }
-      result = tokio::signal::ctrl_c() => {
-        result.map_err(DaemonError::Accept)?;
-        return Ok(());
-      }
+      _ = interrupt.recv() => break Ok(()),
+      _ = terminate.recv() => break Ok(()),
     }
-  }
+  };
+  vpn_owner.shutdown().await;
+  result
 }
 
 #[cfg(not(unix))]
@@ -328,6 +346,9 @@ async fn handle_connection(
     ClientMessage::ListRemoteListeners { target } => {
       list_remote_listeners(&mut stream, &state, &target).await
     }
+    request @ (ClientMessage::StartVpn { .. }
+    | ClientMessage::StopVpn
+    | ClientMessage::VpnStatus) => handle_vpn_request(&mut stream, &state, request).await,
     ClientMessage::Askpass {
       token,
       message,
@@ -350,6 +371,27 @@ async fn handle_connection(
   result
 }
 
+async fn handle_vpn_request(
+  stream: &mut ctld_ipc::Stream,
+  state: &State,
+  request: ClientMessage,
+) -> Result<(), RequestError> {
+  let service = state
+    .vpn_service
+    .as_ref()
+    .ok_or_else(|| RequestError::VpnFailed("VPN service is unavailable".into()))?;
+  let status = match request {
+    ClientMessage::StartVpn { env_file } => service.start(env_file).await,
+    ClientMessage::StopVpn => service.stop().await,
+    ClientMessage::VpnStatus => service.status().await,
+    _ => return Err(RequestError::InvalidRequest("expected a VPN request")),
+  }
+  .map_err(RequestError::VpnFailed)?;
+  ctld_ipc::write_frame(stream, &ServerMessage::VpnStatus { status })
+    .await
+    .map_err(Into::into)
+}
+
 fn normalize_request_target(request: &mut ClientMessage) {
   match request {
     ClientMessage::EnsureMaster { target }
@@ -362,7 +404,10 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::ListRemoteListeners { target } => target.normalize_master_policy(),
     ClientMessage::Handshake { .. }
     | ClientMessage::PromptResponse { .. }
-    | ClientMessage::Askpass { .. } => {}
+    | ClientMessage::Askpass { .. }
+    | ClientMessage::VpnStatus
+    | ClientMessage::StartVpn { .. }
+    | ClientMessage::StopVpn => {}
   }
 }
 
@@ -642,6 +687,7 @@ async fn reuse_master_or_prepare(
 impl RequestError {
   fn code(&self) -> &'static str {
     match self {
+      Self::VpnFailed(_) => "vpn_failed",
       Self::Codec(_) | Self::ClientClosed => "ctld_connection_error",
       Self::InvalidRequest(_) => "ctld_protocol_error",
       Self::ProtocolVersionMismatch { .. } => "ctld_protocol_version_mismatch",
@@ -1647,6 +1693,27 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn vpn_request_failures_are_reported_over_ipc() {
+    let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+    let server = tokio::spawn(handle_connection(server, Arc::new(State::default())));
+    handshake(&mut client).await.unwrap();
+    ctld_ipc::write_frame(
+      &mut client,
+      &ClientMessage::StartVpn {
+        env_file: PathBuf::from("/missing/vpn.env"),
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      ctld_ipc::read_frame(&mut client).await.unwrap(),
+      Some(ServerMessage::Error { code, .. }) if code == "vpn_failed"
+    ));
+    assert!(server.await.unwrap().is_err());
+  }
 
   #[cfg(unix)]
   #[tokio::test]

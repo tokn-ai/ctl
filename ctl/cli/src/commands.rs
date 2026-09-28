@@ -37,6 +37,12 @@ pub async fn run(arguments: Arguments) -> Result<(), CliError> {
     Command::Task { command } => {
       task_cli::run_with_connector(command, &connector).await?;
     }
+    Command::Vpn { command } => {
+      if !connector.target.is_local() {
+        return Err(CliError::RemoteVpnUnsupported);
+      }
+      crate::vpn::run(command).await?;
+    }
   }
   Ok(())
 }
@@ -177,6 +183,10 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error("VPN management is only supported locally; omit --host")]
+  RemoteVpnUnsupported,
+  #[error(transparent)]
+  Vpn(#[from] crate::vpn::Error),
   #[error("taskd restart is only supported locally; run it on the task host")]
   RemoteTaskDaemonRestartUnsupported,
   #[error(transparent)]
@@ -190,6 +200,20 @@ pub enum CliError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn remote_vpn_commands_are_rejected_before_connecting() {
+    use clap::Parser;
+
+    for action in ["start", "status", "stop"] {
+      let arguments =
+        Arguments::try_parse_from(["ctl", "--host", "vpn-server", "vpn", action]).unwrap();
+      assert!(matches!(
+        run(arguments).await,
+        Err(CliError::RemoteVpnUnsupported)
+      ));
+    }
+  }
 
   #[tokio::test]
   async fn remote_daemon_restart_is_rejected_before_connecting() {

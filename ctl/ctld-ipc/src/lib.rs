@@ -23,9 +23,8 @@ const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
-// Version 9 adds typed gateway hops. Older brokers must not silently ignore
-// SOCKS5 hops and connect directly.
-pub const PROTOCOL_VERSION: u16 = 9;
+// Version 10 adds control and discovery of the SOCKS5 endpoint owned by the daemon's VPN.
+pub const PROTOCOL_VERSION: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -145,6 +144,14 @@ pub struct PortForwardStatus {
   pub message: Option<String>,
 }
 
+/// The endpoint is available only after the managed VPN and SOCKS5 listener are ready.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnStatus {
+  pub endpoint: Option<String>,
+  pub container_name: Option<String>,
+  pub running: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptKind {
@@ -195,6 +202,11 @@ pub enum ClientMessage {
   ListRemoteListeners {
     target: SshTarget,
   },
+  StartVpn {
+    env_file: PathBuf,
+  },
+  VpnStatus,
+  StopVpn,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +241,9 @@ pub enum ServerMessage {
   },
   RemoteListeners {
     catalog: ctl_proto::TcpListenerCatalog,
+  },
+  VpnStatus {
+    status: VpnStatus,
   },
   Error {
     code: String,
@@ -340,7 +355,15 @@ pub async fn connect_or_start_daemon() -> Result<Stream, ConnectError> {
 /// # Errors
 /// Returns an error when the endpoint cannot be reached.
 pub async fn connect_existing() -> Result<Stream, ConnectError> {
-  connect(&socket_path()).await.map_err(ConnectError::Connect)
+  connect_existing_at(&socket_path()).await
+}
+
+/// Connects to an already-running daemon at the selected endpoint.
+///
+/// # Errors
+/// Returns an error when the endpoint cannot be reached. Never starts a daemon.
+pub async fn connect_existing_at(path: &Path) -> Result<Stream, ConnectError> {
+  connect(path).await.map_err(ConnectError::Connect)
 }
 
 /// Writes one length-delimited protocol message.

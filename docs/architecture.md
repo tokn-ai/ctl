@@ -187,8 +187,16 @@ post-authentication activation share a serialized registry so a late old-master
 activation cannot recreate a moved or disabled forward. Listener ownership is
 tracked separately from displayed status, and a forward configured during
 master startup is not activated twice. The local `ctld` IPC protocol is version
-5; older clients and daemons must be updated together. A running version-4
-daemon must be restarted before clients can use these ownership semantics.
+10; older clients and daemons must be updated together and the daemon restarted.
+
+`ctl vpn start --env-file PATH` asks the local `ctld` to own an OpenConnect
+container, starting the daemon if needed. The settings path defaults to `.env`
+and is resolved relative to the caller's directory. Its SOCKS5 listener uses a
+random loopback port, returned as JSON after the VPN and proxy are ready.
+`ctl vpn status` queries that endpoint; `ctl vpn stop` stops the container while
+keeping the broker running. Status and stop never start a daemon. The container
+also stops when its owning daemon exits. VPN commands reject `--host` and use
+the owner-only local IPC endpoint, selectable through `CTLD_SOCKET_PATH`.
 
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed ctl-agent command.

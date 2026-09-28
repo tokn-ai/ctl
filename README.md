@@ -365,6 +365,22 @@ unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
 the logical attachment and its leases for 30 seconds by default. An explicit
 `Ctrl-]` detach releases them immediately.
 
+## Managed VPN
+
+Manage a local OpenConnect VPN through `ctld` using the `ctl` CLI:
+
+```sh
+ctl vpn start --env-file .env
+ctl vpn status
+ctl vpn stop
+```
+
+These commands print JSON; a ready VPN includes its randomly allocated loopback
+SOCKS5 endpoint. Start launches `ctld` if needed. Stop leaves `ctld` running, and
+the container also exits when `ctld` exits. See the
+[OpenConnect setup](docker/openconnect/README.md) for building the image and
+configuring the private env file.
+
 ## Managed tasks
 
 Tasks support local and SSH background commands and interactive terminals on

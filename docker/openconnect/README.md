@@ -23,8 +23,10 @@ the selected configuration over attached stdin to the container, which creates
 a private environment file in tmpfs. That generated file disappears when the
 container exits; the app never asks users to manage `.env` files. Closing rmux
 leaves the connection running under ctld. Connections started by `ctl vpn` also
-appear in the panel and can be disconnected there. The current connection shows
-its VPN server, username, and local SOCKS5 endpoint. An indicator on the VPN tab
+appear in the panel and can be disconnected there. Each saved connection combines
+its settings and status in one item, with its VPN server, username, and local
+SOCKS5 endpoint. Only active connections without a matching saved profile get a
+temporary item. An indicator on the VPN tab
 shows connection activity while other panels are open.
 
 ## CLI configuration

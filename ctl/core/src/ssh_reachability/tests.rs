@@ -95,17 +95,31 @@ async fn a_non_ssh_listener_is_unavailable() {
   server.await.unwrap();
 }
 
-#[tokio::test]
-async fn refusal_is_unavailable_but_failed_proxy_is_unknown() {
-  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-  let address = listener.local_addr().unwrap();
-  drop(listener);
-  let result = check(&[], &endpoint(address)).await;
+#[test]
+fn refused_service_is_unavailable_but_refused_proxy_is_unknown() {
+  let result = network_error(io::ErrorKind::ConnectionRefused.into());
   assert_eq!(result.state, SshReachabilityState::Unavailable);
   assert_eq!(
     result.reason,
     Some(SshReachabilityReason::ConnectionRefused)
   );
+  let result = proxy_error(io::ErrorKind::ConnectionRefused.into());
+  assert_eq!(result.state, SshReachabilityState::Unknown);
+}
+
+#[tokio::test]
+async fn closed_service_is_unavailable_but_closed_proxy_is_unknown() {
+  // Reserve the port without listening so another test cannot claim it.
+  let socket = tokio::net::TcpSocket::new_v4().unwrap();
+  socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+  let address = socket.local_addr().unwrap();
+  let result = check(&[], &endpoint(address)).await;
+  assert_eq!(result.state, SshReachabilityState::Unavailable);
+  // Some platforms report refusal only after our bounded check expires.
+  assert!(matches!(
+    result.reason,
+    Some(SshReachabilityReason::ConnectionRefused | SshReachabilityReason::TimedOut)
+  ));
   let result = check(&[socks_gateway(address)], &endpoint(address)).await;
   assert_eq!(result.state, SshReachabilityState::Unknown);
 }

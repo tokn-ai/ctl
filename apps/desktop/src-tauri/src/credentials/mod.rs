@@ -67,16 +67,17 @@ pub async fn forget_saved_credential(request: ForgetRequest) -> CommandResult<()
   }
 }
 
+#[cfg(target_os = "macos")]
 async fn read_keychain() -> CommandResult<Inventory> {
-  #[cfg(target_os = "macos")]
-  {
-    match helper::request(Request::List).await? {
-      Response::Inventory { inventory } => Ok(inventory),
-      _ => Err(unexpected_response()),
-    }
+  match helper::request(Request::List).await? {
+    Response::Inventory { inventory } => Ok(inventory),
+    _ => Err(unexpected_response()),
   }
-  #[cfg(not(target_os = "macos"))]
-  Err(unsupported_keychain())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_keychain() -> std::future::Ready<CommandResult<Inventory>> {
+  std::future::ready(Err(unsupported_keychain()))
 }
 
 #[cfg(target_os = "macos")]

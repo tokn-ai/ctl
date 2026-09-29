@@ -1,7 +1,7 @@
 use super::*;
 use ctld_ipc::credentials::{CredentialKind, Inventory, StoredCredential};
 
-fn run_fixture(input: &[u8], handle: impl FnOnce(Request) -> Response) -> Response {
+fn run_fixture(input: &[u8], handle: impl FnOnce(&Request) -> Response) -> Response {
   let mut output = Vec::new();
   run_with(input, &mut output, handle).unwrap();
   serde_json::from_slice(&output).unwrap()
@@ -24,7 +24,7 @@ fn invalid_and_oversized_requests_never_reach_keychain() {
 #[test]
 fn helper_dispatches_a_single_metadata_request_and_returns_json() {
   let response = run_fixture(br#"{"type":"list"}"#, |request| {
-    assert_eq!(request, Request::List);
+    assert_eq!(request, &Request::List);
     Response::Inventory {
       inventory: Inventory {
         credentials: Vec::new(),
@@ -38,7 +38,7 @@ fn helper_dispatches_a_single_metadata_request_and_returns_json() {
 
 #[test]
 fn invalid_forget_identifier_is_rejected_before_platform_storage() {
-  let response = handle(Request::Forget {
+  let response = handle(&Request::Forget {
     credential_id: "unrelated.service".into(),
   });
   assert!(matches!(response, Response::Error { code, .. } if code == "credential_request_invalid"));
@@ -94,6 +94,6 @@ fn keychain_errors_do_not_appear_as_a_successful_empty_inventory() {
 #[test]
 fn unsupported_platform_does_not_claim_to_have_an_empty_keychain() {
   assert!(
-    matches!(handle(Request::List), Response::Error { code, .. } if code == "credential_store_unsupported")
+    matches!(handle(&Request::List), Response::Error { code, .. } if code == "credential_store_unsupported")
   );
 }

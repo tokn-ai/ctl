@@ -14,7 +14,7 @@ pub fn run(reader: impl Read, writer: impl Write) -> io::Result<()> {
 fn run_with(
   reader: impl Read,
   mut writer: impl Write,
-  handle: impl FnOnce(Request) -> Response,
+  handle: impl FnOnce(&Request) -> Response,
 ) -> io::Result<()> {
   let mut bytes = Vec::new();
   reader
@@ -25,7 +25,7 @@ fn run_with(
   } else {
     serde_json::from_slice::<Request>(&bytes).ok()
   };
-  let response = request.map_or_else(
+  let response = request.as_ref().map_or_else(
     || {
       error(
         "credential_request_invalid",
@@ -72,8 +72,8 @@ fn error(code: &str, message: &str) -> Response {
   }
 }
 
-fn handle(request: Request) -> Response {
-  if let Request::Forget { credential_id } = &request
+fn handle(request: &Request) -> Response {
+  if let Request::Forget { credential_id } = request
     && crate::credential_metadata::item_identity(credential_id).is_none()
   {
     return error(
@@ -88,7 +88,7 @@ fn handle(request: Request) -> Response {
         Ok(inventory) => Response::Inventory { inventory },
         Err(failure) => keychain_error(&failure, "credential_list_failed"),
       },
-      Request::Forget { credential_id } => match crate::keychain::forget(&credential_id) {
+      Request::Forget { credential_id } => match crate::keychain::forget(credential_id) {
         Ok(()) => Response::Forgotten,
         Err(failure) => keychain_error(&failure, "credential_forget_failed"),
       },
@@ -96,7 +96,6 @@ fn handle(request: Request) -> Response {
   }
   #[cfg(not(target_os = "macos"))]
   {
-    let _ = request;
     error(
       "credential_store_unsupported",
       "Saved SSH credentials are supported on macOS only.",

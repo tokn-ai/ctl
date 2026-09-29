@@ -12,7 +12,7 @@ use crate::error::{CommandErrorDto, CommandResult};
 
 #[cfg(target_os = "macos")]
 // Leave time for a user to answer a Keychain unlock or access prompt.
-const HELPER_TIMEOUT: Duration = Duration::from_secs(60);
+const HELPER_TIMEOUT: Duration = Duration::from_mins(1);
 static HELPER_LIMIT: Semaphore = Semaphore::const_new(2);
 
 #[cfg(target_os = "macos")]

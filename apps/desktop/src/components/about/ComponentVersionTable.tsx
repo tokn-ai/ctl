@@ -28,7 +28,13 @@ function Version({ info, absent }: { info: ComponentVersionInfo | null; absent: 
     <span>{info.version ?? "Unknown version"}</span>
     {info.source_revision || info.dirty ? <small title={info.source_revision ?? undefined}>{[info.source_revision?.slice(0, 10), info.dirty ? "Modified source" : null].filter(Boolean).join(" · ")}</small> : null}
     {info.source_fingerprint ? <small title={info.source_fingerprint}>Build {info.source_fingerprint.slice(0, 10)}</small> : null}
+    {!info.source_fingerprint && !info.source_revision ? <small>Build not reported</small> : null}
   </>;
+}
+
+function statusLabel(row: ComponentVersionRow): string {
+  if (row.status !== "unknown" || !row.running) return status_labels[row.status];
+  return !row.running.source_revision && !row.running.source_fingerprint ? "Build not reported" : "Build unverified";
 }
 
 function Protocols({ row }: { row: ComponentVersionRow }) {
@@ -56,7 +62,10 @@ interface Props {
 export function ComponentVersionTable({ rows, busy_id, restarting, action_error, on_restart, reference_label = "Available" }: Props) {
   return <div className="about-table-scroll"><table className="about-version-table">
     <thead><tr><th>Component</th><th>Version</th><th>Protocol</th><th>{reference_label}</th><th>Status</th></tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.component_id}>
+    <tbody>{rows.map((row) => {
+      const action = row.action;
+      const action_label = `${action === "reconnect" ? "Reconnect" : "Restart"} ${row.component === "ctl_agent" ? "ctl-agent" : row.component}`;
+      return <tr key={row.component_id}>
       <th scope="row">
         <strong>{row.label}</strong>
         {row.observation === "last_observed" ? <small>Last observed</small> : null}
@@ -67,11 +76,12 @@ export function ComponentVersionTable({ rows, busy_id, restarting, action_error,
       <td><Version info={row.running} absent={row.status === "not_running" ? "Not running" : "Unknown"} /></td>
       <td><Protocols row={row} /></td>
       <td><Version info={row.available} absent="Unknown" /></td>
-      <td><span className={`about-version-status about-status-${row.status}`}>{status_labels[row.status]}</span>
-        {row.component === "ctld" && row.restart_supported ? <button type="button" onClick={() => on_restart(row.component_id)} disabled={busy_id !== null} aria-label={`Restart ${row.label}`}>
-          {busy_id === row.component_id ? restarting ? "Restarting…" : "Checking…" : "Restart ctld"}
+      <td><span className={`about-version-status about-status-${row.status}`}>{statusLabel(row)}</span>
+        {action ? <button type="button" onClick={() => on_restart(row.component_id)} disabled={busy_id !== null} aria-label={`${action === "reconnect" ? "Reconnect" : "Restart"} ${row.label}`}>
+          {busy_id === row.component_id ? restarting ? action === "reconnect" ? "Reconnecting…" : "Restarting…" : "Checking…" : action_label}
         </button> : null}
       </td>
-    </tr>)}</tbody>
+    </tr>;
+    })}</tbody>
   </table></div>;
 }

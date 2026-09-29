@@ -190,7 +190,7 @@ tracked separately from displayed status, and a forward configured during
 master startup is not activated twice. The local `ctld` IPC protocol is version
 11; older clients and daemons must be updated together and the daemon restarted.
 
-### Component diagnostics and ctld replacement
+### Component diagnostics and replacement
 
 The About page performs bounded, passive queries against selected local owners.
 It enumerates both SSH and VPN ctld endpoints, deduplicating identical owners.
@@ -219,6 +219,23 @@ forwards, releases its endpoint, and closes the pinned stream before replacement
 startup. The client verifies a fresh instance with matching build and protocol.
 Legacy owners are inspected where possible but never stopped by process-name or
 PID guesses. Restart does not delete saved VPN identities or profiles.
+
+About uses the same confirmation model for local rmuxd and taskd. A preparation
+retains the existing owner's stream and hashes the selected replacement executable.
+It rechecks the helper before shutdown and startup, then verifies the successor's
+build and protocols. rmuxd's control-v1 restart remains usable without build
+reporting; taskd can retain an unsent control stream for legacy idle-only restart.
+Taskd's daemon-side mutation lock rejects active runs and preserves storage and
+rmux endpoints through shutdown. No diagnostic query starts a missing daemon.
+
+Remote rmuxd preparation runs a fixed ctl-agent maintenance command through an
+existing multiplexed SSH connection, with fresh authentication disabled. It pins
+the account identity, daemon control stream, and installed companion executable
+before awaiting confirmation. Session-reset events reconcile all app windows
+belonging to the affected environment after a confirmed or possible shutdown.
+Reconnect for ctl-agent instead asks each owning window to replace exact attachment
+IDs while retaining the remote sessions. Native acknowledgement validates new
+actors against the original environment and session before reporting success.
 
 ### Managed VPNs
 

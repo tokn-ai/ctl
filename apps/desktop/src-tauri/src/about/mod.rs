@@ -1,8 +1,9 @@
-//! Read-only component diagnostics and owner-bound, confirmed ctld restarts.
+//! Read-only component diagnostics and owner-bound, confirmed maintenance.
 
 mod local;
 mod models;
 pub(crate) mod observations;
+pub(crate) mod remote_actions;
 pub(crate) mod restart;
 
 pub use models::ComponentVersionsSnapshot;

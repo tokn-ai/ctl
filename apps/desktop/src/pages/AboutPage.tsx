@@ -4,25 +4,24 @@ import { ComponentVersionTable, versionLabel } from "../components/about/Compone
 import { QuickInput } from "../components/commands/QuickInput";
 import { Icon } from "../components/ui/Icon";
 import { useComponentVersions } from "../features/about/useComponentVersions";
-import type { CtldRestartPreflight } from "../lib/types";
+import type { ComponentActionPreflight, ComponentActionResult } from "../lib/types";
 import "../components/about/about.css";
 
 interface Props {
   visible: boolean;
   on_close(): void;
-  on_restarted(): void;
+  on_restarted(preflight: ComponentActionPreflight): void;
+  execute_action?(preflight: ComponentActionPreflight): Promise<ComponentActionResult>;
   on_dialog_change(open: boolean): void;
 }
 
-function restartDescription(preflight: CtldRestartPreflight): string {
-  const vpn_count = preflight.impact.vpn_connections;
-  const vpn = vpn_count === null ? "Stops managed VPN connections" : vpn_count === 0 ? "Interrupts the connection broker" : `Stops ${vpn_count} managed VPN connection${vpn_count === 1 ? "" : "s"}`;
-  return `${vpn} and may interrupt SSH connections and port forwards. VPNs can be reconnected afterward. Running: ${versionLabel(preflight.running)}. Replacement: ${versionLabel(preflight.available)}.`;
+function actionDescription(preflight: ComponentActionPreflight): string {
+  return `${preflight.impact.description} Running: ${versionLabel(preflight.running)}. Replacement: ${versionLabel(preflight.available)}. Confirm within 20 seconds; otherwise check the component again.`;
 }
 
 /** Remains mounted when hidden so a requested restart is observed to completion. */
-export function AboutPage({ visible, on_close, on_restarted, on_dialog_change }: Props) {
-  const model = useComponentVersions(visible, on_restarted);
+export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, execute_action }: Props) {
+  const model = useComponentVersions(visible, on_restarted, execute_action);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { if (visible) heading.current?.focus(); }, [visible]);
   const has_dialog = model.preflight !== null;
@@ -50,6 +49,6 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change }:
         <p className="about-footnote">“Different build” means the source differs; it does not establish which build is newer. Unknown versions cannot be compared.</p>
       </div>
     </section>
-    {model.preflight ? createPortal(<QuickInput title={`Restart ${model.preflight.label}`} description={restartDescription(model.preflight)} mode={{ kind: "confirm", confirm_label: "Restart ctld", destructive: true }} onCancel={model.cancelRestart} onSubmit={model.confirmRestart} />, document.body) : null}
+    {model.preflight ? createPortal(<QuickInput title={`${model.preflight.action === "reconnect" ? "Reconnect" : "Restart"} ${model.preflight.label}`} description={actionDescription(model.preflight)} mode={{ kind: "confirm", confirm_label: `${model.preflight.action === "reconnect" ? "Reconnect" : "Restart"} ${model.preflight.component === "ctl_agent" ? "ctl-agent" : model.preflight.component}`, destructive: model.preflight.action === "restart" }} onCancel={model.cancelRestart} onSubmit={model.confirmRestart} />, document.body) : null}
   </>;
 }

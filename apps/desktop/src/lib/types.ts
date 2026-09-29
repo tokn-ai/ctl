@@ -14,6 +14,7 @@ export interface ComponentVersionInfo {
 }
 
 export type ComponentVersionStatus = "current" | "outdated" | "newer" | "different_build" | "incompatible" | "unknown" | "not_running" | "unavailable";
+export type ComponentActionKind = "restart" | "reconnect";
 
 export interface ComponentVersionRow {
   component_id: string;
@@ -28,6 +29,7 @@ export interface ComponentVersionRow {
   /** Protocols compiled into the app; the available executable may itself be stale. */
   required_protocols?: ComponentProtocolVersion[];
   restart_supported: boolean;
+  action: ComponentActionKind | null;
   detail: string | null;
   error: string | null;
 }
@@ -36,18 +38,52 @@ export interface ComponentVersionsSnapshot {
   components: ComponentVersionRow[];
 }
 
-export interface CtldRestartPreflight {
-  restart_token: string;
+export interface ComponentActionPreflight {
+  action_token: string;
   component_id: string;
+  component: ComponentVersionRow["component"];
+  location: ComponentVersionRow["location"];
+  host_id: string | null;
   label: string;
+  action: ComponentActionKind;
   running: ComponentVersionInfo | null;
   available: ComponentVersionInfo | null;
-  impact: { ssh_connections: number | null; port_forwards: number | null; vpn_connections: number | null };
+  impact: {
+    ssh_connections: number | null;
+    port_forwards: number | null;
+    vpn_connections: number | null;
+    terminal_sessions: number | null;
+    description: string;
+  };
 }
 
-export interface CtldRestartResult {
+export interface ComponentActionResult {
   component_id: string;
-  running: ComponentVersionInfo;
+  component: ComponentVersionRow["component"];
+  location: ComponentVersionRow["location"];
+  host_id: string | null;
+  action: ComponentActionKind;
+  running: ComponentVersionInfo | null;
+  detail: string | null;
+}
+
+export interface ComponentSessionsReset {
+  scope: "local" | "remote";
+  remote_id?: string | null;
+  host_ids: string[];
+  session_ids: string[];
+  attachment_ids: string[];
+}
+
+export interface ComponentReconnectRequest {
+  action_id: string;
+  attachment_ids: string[];
+}
+
+export interface ComponentReconnectResult {
+  attachment_id: string;
+  replacement_attachment_id: string | null;
+  error: string | null;
 }
 
 export interface CommandKeybinding {

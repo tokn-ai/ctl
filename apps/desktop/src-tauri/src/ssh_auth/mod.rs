@@ -2,6 +2,7 @@
 //! This module only forwards its attempt-scoped prompts to the Tauri UI.
 
 mod broker;
+pub(crate) use broker::existing_master;
 pub mod commands;
 mod verification;
 

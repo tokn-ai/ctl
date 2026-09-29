@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest as _, Sha256};
 
-use super::models::{ComponentVersionInfo, ComponentVersionRow, ProtocolVersion};
+use super::models::{ComponentAction, ComponentVersionInfo, ComponentVersionRow, ProtocolVersion};
 
 /// Metadata belongs to the transport whose lifetime the attachment actor owns.
 /// Persisted host identities are never treated as current process observations.
@@ -87,11 +87,18 @@ fn insert(
       status: super::models::VersionStatus::Unknown,
       running: Some(running),
       required_protocols: expected_protocols.clone(),
+      // The remote table explicitly labels this reference as "This app build".
+      // Confirmed actions inspect the installed remote replacement separately.
       available: Some(ComponentVersionInfo::from_build(
         component_info::build_info(),
         expected_protocols,
       )),
-      restart_supported: false,
+      restart_supported: component == "rmuxd" && observation.identity.rmux_restart_supported,
+      action: match component {
+        "ctl_agent" => Some(ComponentAction::Reconnect),
+        "rmuxd" if observation.identity.rmux_restart_supported => Some(ComponentAction::Restart),
+        _ => None,
+      },
       detail: Some(
         "Observed on an active terminal connection. Compared with this app's component build."
           .into(),
@@ -154,9 +161,11 @@ mod tests {
         .count(),
       1
     );
-    assert!(result.iter().all(|row| row.location == "remote"
-      && row.observation == "running"
-      && !row.restart_supported));
+    assert!(
+      result.iter().all(|row| row.location == "remote"
+        && row.observation == "running"
+        && row.action.is_some())
+    );
   }
 
   #[test]
@@ -172,5 +181,16 @@ mod tests {
         .iter()
         .all(|row| row.status == VersionStatus::Unknown)
     );
+    for row in result {
+      let reference = row
+        .available
+        .expect("the app build is known independently of remote metadata");
+      assert_eq!(
+        reference.source_fingerprint,
+        Some(component_info::build_info().source_fingerprint)
+      );
+      assert_eq!(reference.protocols, row.required_protocols);
+      assert!(row.running.unwrap().source_fingerprint.is_none());
+    }
   }
 }

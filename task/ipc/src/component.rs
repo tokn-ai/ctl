@@ -9,6 +9,8 @@ use task_proto::{ClientMessage, ServerMessage, control, read_frame, write_frame}
 pub struct ComponentStatus {
   pub build: Option<ComponentBuildInfo>,
   pub protocol_version: Option<u16>,
+  /// The control protocol accepted by a successful metadata exchange.
+  pub control_protocol_version: Option<u16>,
   /// A typed rejection establishes incompatibility without reporting a version.
   pub protocol_mismatch: bool,
 }
@@ -45,6 +47,7 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
     return Ok(Some(ComponentStatus {
       build: Some(build),
       protocol_version: Some(protocol_version),
+      control_protocol_version: Some(control::PROTOCOL_VERSION),
       protocol_mismatch: protocol_version != task_proto::PROTOCOL_VERSION,
     }));
   }
@@ -65,6 +68,7 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
     Some(ServerMessage::HandshakeAccepted { protocol_version }) => Ok(Some(ComponentStatus {
       build: None,
       protocol_version: Some(protocol_version),
+      control_protocol_version: None,
       protocol_mismatch: protocol_version != task_proto::PROTOCOL_VERSION,
     })),
     Some(ServerMessage::Error {
@@ -73,6 +77,7 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
     }) => Ok(Some(ComponentStatus {
       build: None,
       protocol_version: None,
+      control_protocol_version: None,
       protocol_mismatch: true,
     })),
     Some(ServerMessage::Error { message, .. }) => Err(io::Error::other(message)),
@@ -131,6 +136,10 @@ mod tests {
     assert_eq!(
       status.protocol_version,
       Some(task_proto::PROTOCOL_VERSION + 1)
+    );
+    assert_eq!(
+      status.control_protocol_version,
+      Some(control::PROTOCOL_VERSION)
     );
     assert!(status.protocol_mismatch);
     server.await.unwrap();
@@ -194,6 +203,7 @@ mod tests {
     .unwrap();
     assert!(status.protocol_mismatch);
     assert!(status.protocol_version.is_none());
+    assert!(status.control_protocol_version.is_none());
     assert!(status.build.is_none());
   }
 
@@ -210,6 +220,7 @@ mod tests {
     .unwrap();
     assert!(!status.protocol_mismatch);
     assert_eq!(status.protocol_version, Some(task_proto::PROTOCOL_VERSION));
+    assert!(status.control_protocol_version.is_none());
     assert!(status.build.is_none());
   }
 

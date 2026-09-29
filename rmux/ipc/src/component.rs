@@ -10,6 +10,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Default)]
 pub struct ComponentStatus {
+  pub restart_supported: bool,
   pub build: Option<ComponentBuildInfo>,
   pub version: Option<String>,
   pub protocol_version: Option<u16>,
@@ -49,10 +50,12 @@ async fn probe_control(path: &Path) -> io::Result<Option<ComponentStatus>> {
   {
     Some(LocalControlServerMessage::HandshakeAccepted {
       protocol_version,
+      restart_supported,
       build,
       data_protocol_version,
       ..
     }) => Ok(Some(ComponentStatus {
+      restart_supported,
       version: build.as_ref().map(|build| build.version.clone()),
       build,
       protocol_version: data_protocol_version,
@@ -107,6 +110,7 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
     }) => {
       let prior = control_status.unwrap_or_default();
       Ok(Some(ComponentStatus {
+        restart_supported: prior.restart_supported,
         build: build.or(prior.build),
         version: Some(server_version),
         protocol_version: Some(protocol_version),

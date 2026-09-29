@@ -7,7 +7,7 @@ import { TaskSidebar } from "../../components/tasks/TaskSidebar";
 import { emptyWorkspaceView, type WorkspaceView } from "../workspace/workspaceModel";
 import type { useWorkspace } from "../workspace/useWorkspace";
 import type { TaskDefinition, TaskDefinitionCatalog, TaskDefinitionScope, TaskRequest } from "../../lib/types";
-const api = vi.hoisted(() => ({ taskRequest: vi.fn(), loadTaskDefinitions: vi.fn(), saveTaskDefinition: vi.fn(), removeTaskDefinition: vi.fn() }));
+const api = vi.hoisted(() => ({ taskRequest: vi.fn(), loadTaskDefinitions: vi.fn(), saveTaskDefinition: vi.fn(), removeTaskDefinition: vi.fn(), restartTaskDaemon: vi.fn() }));
 vi.mock("../../lib/tauri", () => ({ ...api, inspectKnownSessions: vi.fn() }));
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); });
 
@@ -44,6 +44,40 @@ function mockTaskRegistration() {
 }
 
 describe("task background refresh", () => {
+  it("shares the task mutation guard with About actions in both directions", async () => {
+    api.loadTaskDefinitions.mockResolvedValue({ scope: { kind: "global" }, path: "/test/definitions.json", definitions: [] });
+    api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
+    let finish!: () => void;
+    api.restartTaskDaemon.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useTestWorkspace(emptyWorkspaceView()));
+    await waitFor(() => expect(result.current.model.hasLoaded).toBe(true));
+    act(() => { void result.current.model.restartDaemon(); });
+    const execute = vi.fn(async () => "restarted");
+    await act(async () => { await expect(result.current.model.performComponentAction(execute)).rejects.toThrow("A task operation is already in progress"); });
+    expect(execute).not.toHaveBeenCalled();
+    await act(async () => { finish(); });
+    let complete!: (value: string) => void;
+    execute.mockImplementationOnce(() => new Promise<string>((resolve) => { complete = resolve; }));
+    let pending!: Promise<string>;
+    act(() => { pending = result.current.model.performComponentAction(execute); });
+    await act(async () => { await result.current.model.restartDaemon(); });
+    expect(api.restartTaskDaemon).toHaveBeenCalledOnce();
+    expect(result.current.model.busy).toBe(true);
+    await act(async () => { complete("restarted"); await expect(pending).resolves.toBe("restarted"); });
+    expect(result.current.model.busy).toBe(false);
+  });
+
+  it("propagates About failures and releases the task guard for another action", async () => {
+    api.loadTaskDefinitions.mockResolvedValue({ scope: { kind: "global" }, path: "/test/definitions.json", definitions: [] });
+    api.taskRequest.mockResolvedValue({ type: "task_list", tasks: [] });
+    const { result } = renderHook(() => useTestWorkspace(emptyWorkspaceView()));
+    await waitFor(() => expect(result.current.model.hasLoaded).toBe(true));
+    await act(async () => { await expect(result.current.model.performComponentAction(async () => { throw new Error("Active task prevents restart."); })).rejects.toThrow("Active task prevents restart."); });
+    expect(result.current.model.error).toBe("Active task prevents restart.");
+    expect(result.current.model.busy).toBe(false);
+    await act(async () => { await expect(result.current.model.performComponentAction(async () => "complete")).resolves.toBe("complete"); });
+  });
+
   it("keeps the empty state and refresh control stable while a poll is pending", async () => {
     vi.useFakeTimers();
     const view = emptyWorkspaceView();

@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/errors";
-import { getComponentVersions, preflightRestartCtld, restartCtld } from "../../lib/tauri";
-import type { ComponentVersionsSnapshot, CtldRestartPreflight } from "../../lib/types";
+import { getComponentVersions, preflightComponentAction, executeComponentAction } from "../../lib/tauri";
+import type { ComponentVersionsSnapshot, ComponentActionPreflight, ComponentActionResult } from "../../lib/types";
 
 /** Observations never own connections. Closing About must not stop any work. */
-export function useComponentVersions(visible: boolean, on_restarted: () => void) {
+export function useComponentVersions(visible: boolean, on_restarted: (preflight: ComponentActionPreflight) => void, execute_action?: (preflight: ComponentActionPreflight) => Promise<ComponentActionResult>) {
   const [snapshot, setSnapshot] = useState<ComponentVersionsSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checked_at, setCheckedAt] = useState<number | null>(null);
-  const [preflight, setPreflight] = useState<CtldRestartPreflight | null>(null);
+  const [preflight, setPreflight] = useState<ComponentActionPreflight | null>(null);
   const [busy_id, setBusyId] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [action_error, setActionError] = useState<{ component_id: string; message: string } | null>(null);
@@ -63,7 +63,7 @@ export function useComponentVersions(visible: boolean, on_restarted: () => void)
     setActionError(null);
     setNotice(null);
     try {
-      const next = await preflightRestartCtld(component_id);
+      const next = await preflightComponentAction(component_id);
       if (request_generation !== action_generation.current) return;
       if (mounted.current && visible_ref.current) setPreflight(next);
       else {
@@ -87,17 +87,17 @@ export function useComponentVersions(visible: boolean, on_restarted: () => void)
 
   const confirmRestart = useCallback(async () => {
     if (!preflight || confirmed_token.current !== null) return;
-    confirmed_token.current = preflight.restart_token;
+    confirmed_token.current = preflight.action_token;
     setPreflight(null);
     setRestarting(true);
     try {
-      await restartCtld(preflight.restart_token);
-      if (mounted.current) setNotice(`${preflight.label} restarted.`);
+      const result = await (execute_action ? execute_action(preflight) : executeComponentAction(preflight.action_token));
+      if (mounted.current) setNotice(result.detail ?? `${preflight.label} ${preflight.action === "reconnect" ? "reconnected" : "restarted"}.`);
     } catch (failure) {
       if (mounted.current) setActionError({ component_id: preflight.component_id, message: errorMessage(failure) });
     } finally {
       // A restart may have taken effect even if its final health check failed.
-      restarted.current();
+      restarted.current(preflight);
       if (mounted.current) {
         setBusyId(null);
         setRestarting(false);
@@ -106,7 +106,7 @@ export function useComponentVersions(visible: boolean, on_restarted: () => void)
       confirmed_token.current = null;
       action_pending.current = false;
     }
-  }, [preflight, refresh]);
+  }, [preflight, refresh, execute_action]);
 
   return { snapshot, loading, error, checked_at, preflight, busy_id, restarting, action_error, notice, refresh, requestRestart, cancelRestart, confirmRestart };
 }

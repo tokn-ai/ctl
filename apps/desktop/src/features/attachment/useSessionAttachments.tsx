@@ -48,6 +48,7 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
   closeSession(session: SessionSummary): Promise<void>;
   retainSessions(keys: ReadonlySet<string>): void;
   disconnectHost(host_id: string): Promise<void>;
+  forgetRestartedSessions(keys: ReadonlySet<string>): void;
 } {
   // The idle attachment supplies the placeholder state and never opens a stream.
   const idle = useAttachment(null, true);
@@ -142,6 +143,14 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
       for (const [key, entry] of entries.current) {
         if (entry.session.target.kind !== "local") continue;
         entry.actions?.resetAfterDaemonRestart();
+        entries.current.delete(key);
+        if (selected.current === key) selected.current = null;
+      }
+      notify();
+    },
+    forgetRestartedSessions: (keys) => {
+      for (const key of keys) {
+        entries.current.get(key)?.actions?.resetAfterDaemonRestart();
         entries.current.delete(key);
         if (selected.current === key) selected.current = null;
       }

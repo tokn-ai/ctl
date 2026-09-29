@@ -31,6 +31,7 @@ import {
   interruptedAttachmentState,
   reconnectSequenceAfterError,
 } from "./attachmentRecovery";
+import { registerAttachmentControl } from "./componentActions";
 import { ConnectionIntentQueue } from "./ConnectionIntentQueue";
 import { InputPump } from "./InputPump";
 import {
@@ -1072,6 +1073,18 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     stateRef.current = INITIAL_STATE;
     setState(INITIAL_STATE);
   }, [resetRecovery]);
+
+  useEffect(() => registerAttachmentControl({
+    attachmentId: () => activeAttachmentRef.current,
+    session: () => stateRef.current.session,
+    reconnect: async (expected_id) => {
+      if (activeAttachmentRef.current !== expected_id) return null;
+      await reconnect();
+      const replacement = activeAttachmentRef.current;
+      return replacement !== expected_id ? replacement : null;
+    },
+    reset: resetAfterDaemonRestart,
+  }), [reconnect, resetAfterDaemonRestart]);
 
   const handleInput = useCallback((data: Uint8Array) => {
     if (!inputLeaseOwnedRef.current || !activeAttachmentRef.current) {

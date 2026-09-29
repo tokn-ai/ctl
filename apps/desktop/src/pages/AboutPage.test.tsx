@@ -1,19 +1,19 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ComponentVersionInfo, ComponentVersionsSnapshot, CtldRestartPreflight } from "../lib/types";
+import type { ComponentVersionInfo, ComponentVersionsSnapshot, ComponentActionPreflight } from "../lib/types";
 import { AboutPage } from "./AboutPage";
 
 const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightRestartCtld: api.preflight, restartCtld: api.restart }));
+vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart }));
 
 const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", version: 11 }] };
 const snapshot: ComponentVersionsSnapshot = { components: [
-  { component_id: "app", component: "rmux", label: "rmux", location: "local", host_id: null, observation: "bundled", status: "current", running: current, available: current, restart_supported: false, detail: null, error: null },
-  { component_id: "owner-1", component: "ctld", label: "ctld", location: "local", host_id: null, observation: "running", status: "different_build", running: { ...current, source_revision: "112233445566" }, available: current, restart_supported: true, detail: "SSH and VPN broker", error: null },
-  { component_id: "remote-1", component: "ctl_agent", label: "Development · ctl-agent", location: "remote", host_id: "dev", observation: "last_observed", status: "unknown", running: { ...current, source_revision: null, source_fingerprint: null }, available: current, restart_supported: false, detail: null, error: null },
+  { component_id: "app", component: "rmux", label: "rmux", location: "local", host_id: null, observation: "bundled", status: "current", running: current, available: current, restart_supported: false, action: null, detail: null, error: null },
+  { component_id: "owner-1", component: "ctld", label: "ctld", location: "local", host_id: null, observation: "running", status: "different_build", running: { ...current, source_revision: "112233445566" }, available: current, restart_supported: true, action: "restart", detail: "SSH and VPN broker", error: null },
+  { component_id: "remote-1", component: "ctl_agent", label: "Development · ctl-agent", location: "remote", host_id: "dev", observation: "last_observed", status: "unknown", running: { ...current, source_revision: null, source_fingerprint: null }, available: current, restart_supported: false, action: null, detail: null, error: null },
 ] };
-const preflight: CtldRestartPreflight = { restart_token: "native-owner-token", component_id: "owner-1", label: "ctld", running: snapshot.components[1].running, available: current, impact: { ssh_connections: null, port_forwards: null, vpn_connections: 2 } };
+const preflight: ComponentActionPreflight = { action_token: "native-owner-token", component_id: "owner-1", component: "ctld", location: "local", host_id: null, action: "restart", label: "ctld", running: snapshot.components[1].running, available: current, impact: { ssh_connections: null, port_forwards: null, vpn_connections: 2, terminal_sessions: null, description: "Stops 2 managed VPN connections and may interrupt SSH connections and port forwards." } };
 const props = () => ({ visible: true, on_close: vi.fn(), on_restarted: vi.fn(), on_dialog_change: vi.fn() });
 
 beforeEach(() => {
@@ -25,6 +25,41 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("About page", () => {
+  it("offers native-approved actions per component and uses reconnect impact without a destructive label", async () => {
+    const rows = structuredClone(snapshot);
+    rows.components[2].action = "reconnect";
+    rows.components[2].restart_supported = false;
+    rows.components.push({ ...rows.components[1], component_id: "local-taskd", component: "taskd", label: "taskd" });
+    api.versions.mockResolvedValue(rows);
+    const reconnect = { ...preflight, component_id: "remote-1", component: "ctl_agent" as const, location: "remote" as const, host_id: "dev", action: "reconnect" as const, label: "Development · ctl-agent", impact: { ...preflight.impact, description: "Reconnects these terminal transports. Remote sessions keep running." } };
+    api.preflight.mockResolvedValue(reconnect);
+    const execute_action = vi.fn().mockResolvedValue({ detail: "Two terminal transports reconnected." });
+    render(<AboutPage {...props()} execute_action={execute_action} />);
+    expect(await screen.findByRole("button", { name: "Restart taskd" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restart rmux" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect Development · ctl-agent" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reconnect Development · ctl-agent" });
+    expect(within(dialog).getByText(/Remote sessions keep running/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect ctl-agent" }));
+    await waitFor(() => expect(execute_action).toHaveBeenCalledWith(reconnect));
+    expect(api.restart).not.toHaveBeenCalled();
+    expect(await screen.findByText("Two terminal transports reconnected.")).toBeTruthy();
+  });
+
+  it("distinguishes unreported builds from incomplete verification without hiding protocol mismatch", async () => {
+    const legacy = structuredClone(snapshot);
+    legacy.components[1] = { ...legacy.components[1], component: "taskd", status: "unknown", running: { ...current, version: null, source_revision: null, source_fingerprint: null } };
+    legacy.components[2].running = { ...current, source_fingerprint: null };
+    api.versions.mockResolvedValue(legacy);
+    render(<AboutPage {...props()} />);
+    const legacy_row = (await screen.findByText("SSH and VPN broker")).closest("tr")!;
+    expect(within(legacy_row).getAllByText("Build not reported")).toHaveLength(2);
+    expect(screen.getByText("Build unverified")).toBeTruthy();
+    legacy.components[1].status = "incompatible";
+    fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
+    expect(await screen.findByText("Protocol mismatch")).toBeTruthy();
+  });
+
   it("checks only when opened, and distinguishes observed build metadata from current versions", async () => {
     const options = props();
     const page = render(<AboutPage {...options} visible={false} />);
@@ -32,7 +67,7 @@ describe("About page", () => {
     page.rerender(<AboutPage {...options} />);
     expect(await screen.findByText("Different build")).toBeTruthy();
     expect(screen.getByText("Last observed")).toBeTruthy();
-    expect(screen.getByText("Unknown")).toBeTruthy();
+    expect(screen.getAllByText("Build not reported")).toHaveLength(2);
     expect(screen.queryByText("Outdated")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(options.on_close).toHaveBeenCalledOnce();
@@ -150,7 +185,7 @@ describe("About page", () => {
   });
 
   it("does not present a late restart confirmation after leaving About", async () => {
-    let complete!: (value: CtldRestartPreflight) => void;
+    let complete!: (value: ComponentActionPreflight) => void;
     api.preflight.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
     const page = render(<AboutPage {...options} />);
@@ -163,7 +198,7 @@ describe("About page", () => {
   });
 
   it("does not let an abandoned preflight replace a new confirmation after reopening About", async () => {
-    let complete!: (value: CtldRestartPreflight) => void;
+    let complete!: (value: ComponentActionPreflight) => void;
     api.preflight.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
     const page = render(<AboutPage {...options} />);
@@ -173,7 +208,7 @@ describe("About page", () => {
     page.rerender(<AboutPage {...options} />);
     fireEvent.click(screen.getByRole("button", { name: "Restart ctld" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld" });
-    await act(async () => { complete({ ...preflight, restart_token: "abandoned-token" }); });
+    await act(async () => { complete({ ...preflight, action_token: "abandoned-token" }); });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
     await waitFor(() => expect(api.restart).toHaveBeenCalledWith("native-owner-token"));
   });

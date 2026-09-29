@@ -29,11 +29,17 @@ The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 
 Open **About rmux** from the bottom info button or command palette to inspect
-sample component versions. The page uses fictional observations and its
-**Restart ctld** action only changes memory. Add `?about=partial` to show one
+sample component versions. Each daemon has its own **Restart** action, while
+remote ctl-agent rows offer **Reconnect**. These confirmations and completion
+states only change memory. Restarting taskd is refused while sample tasks are
+running; stop the task in the Tasks view to try a successful restart.
+Add `?about=partial` to show one
 unavailable component while other versions remain visible, or
 `?about=restart-error` to exercise a failed restart and subsequent refresh.
-Use `?vpn=multiple` to include active VPNs in the restart confirmation.
+Use `?vpn=multiple` to include active VPNs in the ctld restart confirmation.
+Use `?about=legacy` to compare **Build not reported** and **Build unverified**.
+Native transport reconnection and scoped session reset events require the native
+app; the preview does not claim to validate those operations.
 
 The preview covers navigation, dialogs, task editing, lease controls, tab
 switching, and port toggles. Remote installation and real connection recovery

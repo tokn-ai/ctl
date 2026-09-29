@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+pub mod maintenance;
 mod ssh_install;
 mod ssh_startup;
 

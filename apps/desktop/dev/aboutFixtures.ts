@@ -4,7 +4,7 @@ const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcd
 const info = (protocol: string, version: number): ComponentVersionInfo => ({ ...current, protocols: [{ name: protocol, version }] });
 const row = (component_id: string, component: ComponentVersionRow["component"], label: string, running: ComponentVersionInfo, status: ComponentVersionRow["status"] = "current"): ComponentVersionRow => ({
   component_id, component, label, location: "local", host_id: null, observation: "running", status,
-  running, available: running, restart_supported: component === "ctld", detail: null, error: null,
+  running, available: running, restart_supported: component !== "rmux" && component !== "ctl_agent", action: component === "rmux" ? null : component === "ctl_agent" ? "reconnect" : "restart", detail: null, error: null,
 });
 
 /** These observations are fictional; preview never queries or restarts a daemon. */

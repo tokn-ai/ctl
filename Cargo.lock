@@ -492,7 +492,9 @@ name = "component-info"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -693,6 +695,7 @@ dependencies = [
 name = "ctl-core"
 version = "0.1.0"
 dependencies = [
+ "component-info",
  "ctl-proto",
  "ctld-ipc",
  "rmux-ipc",
@@ -3900,6 +3903,8 @@ dependencies = [
 name = "task-client"
 version = "0.1.0"
 dependencies = [
+ "component-info",
+ "serde_json",
  "task-ipc",
  "task-proto",
  "thiserror 2.0.20",

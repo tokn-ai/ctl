@@ -6,7 +6,9 @@ use ctld_ipc::lifecycle::{Client, DaemonBinaryInfo, DaemonStatus};
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt as _;
 
-use super::models::{ComponentVersionInfo, ComponentVersionRow, ProtocolVersion, VersionStatus};
+use super::models::{
+  ComponentAction, ComponentVersionInfo, ComponentVersionRow, ProtocolVersion, VersionStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Owner {
@@ -128,6 +130,7 @@ pub(super) async fn ctld(owner: Owner) -> ComponentVersionRow {
     Ok(DaemonStatus::Running { info }) => {
       row.running = Some(ctld_version(info.binary));
       row.restart_supported = replacement_supported;
+      row.action = replacement_supported.then_some(ComponentAction::Restart);
       row.compare();
     }
     Err(error) => {
@@ -136,6 +139,7 @@ pub(super) async fn ctld(owner: Owner) -> ComponentVersionRow {
     }
   }
   row.note_available_mismatch();
+  row.note_unreported_build();
   row
 }
 
@@ -158,6 +162,8 @@ pub(super) async fn rmuxd() -> ComponentVersionRow {
   set_available(&mut row, available);
   match running {
     Ok(Some(info)) => {
+      row.restart_supported = info.restart_supported && compatible_replacement(&row);
+      row.action = row.restart_supported.then_some(ComponentAction::Restart);
       let protocols = info
         .protocol_version
         .map(|version| ProtocolVersion::new("rmux", version))
@@ -189,6 +195,7 @@ pub(super) async fn rmuxd() -> ComponentVersionRow {
     }
   }
   row.note_available_mismatch();
+  row.note_unreported_build();
   row
 }
 
@@ -204,10 +211,19 @@ pub(super) async fn taskd() -> ComponentVersionRow {
   set_available(&mut row, available);
   match running {
     Ok(Some(info)) => {
+      // Older taskd versions do not implement ComponentStatus, but can still
+      // reject a cooperative restart safely when busy or unsupported.
+      row.restart_supported = compatible_replacement(&row);
+      row.action = row.restart_supported.then_some(ComponentAction::Restart);
       let protocols = info
         .protocol_version
         .map(|version| ProtocolVersion::new("task", version))
         .into_iter()
+        .chain(
+          info
+            .control_protocol_version
+            .map(|version| ProtocolVersion::new("task_control", version)),
+        )
         .collect();
       row.running = Some(match info.build {
         Some(build) => ComponentVersionInfo::from_build(build, protocols),
@@ -229,7 +245,20 @@ pub(super) async fn taskd() -> ComponentVersionRow {
     }
   }
   row.note_available_mismatch();
+  row.note_unreported_build();
   row
+}
+
+fn compatible_replacement(row: &ComponentVersionRow) -> bool {
+  row.available.as_ref().is_some_and(|available| {
+    available.source_fingerprint.is_some()
+      && row.required_protocols.iter().all(|required| {
+        available
+          .protocols
+          .iter()
+          .any(|protocol| protocol == required)
+      })
+  })
 }
 
 fn set_available(row: &mut ComponentVersionRow, available: Result<ComponentVersionInfo, String>) {
@@ -414,5 +443,25 @@ mod tests {
     info.protocols.pop();
     info.build.source_fingerprint = "malformed".into();
     assert!(parse_binary_info(&serde_json::to_vec(&info).unwrap(), "rmuxd").is_err());
+  }
+
+  #[test]
+  fn restart_actions_require_all_replacement_protocols_and_build_metadata() {
+    for component in ["rmuxd", "taskd"] {
+      let mut row = ComponentVersionRow::local(component, component);
+      let mut info = ComponentVersionInfo::from_build(
+        component_info::build_info(),
+        row.required_protocols.clone(),
+      );
+      row.available = Some(info.clone());
+      assert!(compatible_replacement(&row));
+      info.protocols.pop();
+      row.available = Some(info.clone());
+      assert!(!compatible_replacement(&row));
+      info.protocols.clone_from(&row.required_protocols);
+      info.source_fingerprint = None;
+      row.available = Some(info);
+      assert!(!compatible_replacement(&row));
+    }
   }
 }

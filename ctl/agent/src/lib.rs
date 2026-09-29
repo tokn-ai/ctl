@@ -7,6 +7,7 @@
 
 pub mod identity;
 pub mod listeners;
+pub mod maintenance;
 pub mod restart;
 
 use rmux_ipc::Stream;

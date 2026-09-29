@@ -1,6 +1,6 @@
 //! Reusable local taskd transport for CLI and desktop clients.
-mod restart;
-pub use restart::restart_daemon;
+pub mod restart;
+pub use restart::{PreparedRestart, preflight_restart, preflight_restart_at, restart_daemon};
 use std::{
   env, io,
   path::{Path, PathBuf},

@@ -61,8 +61,9 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       about::get_component_versions,
-      about::restart::preflight_restart_ctld,
-      about::restart::restart_ctld,
+      about::restart::preflight_component_action,
+      about::restart::execute_component_action,
+      about::remote_actions::reconnect::ack_component_reconnect,
       tasks::task_request,
       tasks::restart_task_daemon,
       tasks::watch_task_logs,

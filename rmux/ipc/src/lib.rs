@@ -1,4 +1,5 @@
 mod component;
+pub mod lifecycle;
 pub use component::{ComponentStatus, component_status};
 use std::env;
 use std::future::Future;
@@ -553,7 +554,11 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 
 fn start_daemon(socket_path: &Path) -> Result<(), ConnectError> {
   let executable = daemon_executable()?;
-  let mut command = std::process::Command::new(&executable);
+  start_daemon_with_executable(socket_path, &executable)
+}
+
+fn start_daemon_with_executable(socket_path: &Path, executable: &Path) -> Result<(), ConnectError> {
+  let mut command = std::process::Command::new(executable);
   #[cfg(windows)]
   {
     use std::os::windows::process::CommandExt;
@@ -567,7 +572,10 @@ fn start_daemon(socket_path: &Path) -> Result<(), ConnectError> {
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()
-    .map_err(|source| ConnectError::StartDaemon { executable, source })?;
+    .map_err(|source| ConnectError::StartDaemon {
+      executable: executable.to_owned(),
+      source,
+    })?;
   Ok(())
 }
 

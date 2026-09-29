@@ -77,6 +77,25 @@ impl PendingPresentation {
 }
 
 impl AppState {
+  pub async fn remote_actors(&self) -> Vec<Arc<AttachmentActor>> {
+    self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .values()
+      .flat_map(|slots| slots.values())
+      .filter_map(|slot| match slot {
+        AttachmentSlot::Active(actor)
+          if !actor.closed.load(Ordering::Acquire) && actor.remote_observation.is_some() =>
+        {
+          Some(Arc::clone(actor))
+        }
+        _ => None,
+      })
+      .collect()
+  }
+
   pub async fn remote_observations(&self) -> Vec<crate::about::observations::RemoteObservation> {
     self
       .registry

@@ -31,9 +31,11 @@ import { TerminalPage } from "./TerminalPage";
 import { detectShortcutPlatform } from "../features/commands/keybindings";
 import { COMMAND_IDS } from "../features/commands/terminalCommands";
 import { NATIVE_COMMAND_EVENT } from "../features/commands/useNativeCommandEvents";
+import { COMPONENT_RESET_EVENT } from "../features/about/useComponentActionEvents";
+import { sessionKey } from "../features/targets/targets";
 
 const nativeEvents = vi.hoisted(() => ({
-  listeners: new Map<string, (event: { payload: string }) => void>(),
+  listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 const nativeWindow = vi.hoisted(() => ({
   onCloseRequested: vi.fn(),
@@ -43,7 +45,7 @@ const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_ve
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(
-    async (name: string, callback: (event: { payload: string }) => void) => {
+    async (name: string, callback: (event: { payload: unknown }) => void) => {
       nativeEvents.listeners.set(name, callback);
       return () => {
         if (nativeEvents.listeners.get(name) === callback) nativeEvents.listeners.delete(name);
@@ -57,8 +59,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 const api = vi.hoisted(() => ({
   getComponentVersions: vi.fn(),
-  preflightRestartCtld: vi.fn(),
-  restartCtld: vi.fn(),
+  preflightComponentAction: vi.fn(),
+  executeComponentAction: vi.fn(),
+  acknowledgeComponentReconnect: vi.fn(),
   taskRequest: vi.fn(),
   loadTaskDefinitions: vi.fn(),
   saveTaskDefinition: vi.fn(),
@@ -123,6 +126,7 @@ const attachment = vi.hoisted(() => ({
   toggleResizeWithWindow: vi.fn(),
   cancelPendingConnection: vi.fn(),
   resetAfterDaemonRestart: vi.fn(),
+  forgetRestartedSessions: vi.fn(),
 }));
 vi.mock("../lib/tauri", async (original) => ({
   ...(await original<object>()),
@@ -301,6 +305,43 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("remembers and opens a remote shell created while another window restarts local rmuxd", async () => {
+    let finish!: (session: SessionSummary) => void;
+    api.createSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Host settings for test" });
+    fireEvent.click(screen.getByRole("button", { name: "New shell" }));
+    fireEvent.click(screen.getByRole("option", { name: "test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create shell" }));
+    await waitFor(() => expect(api.createSession).toHaveBeenCalledOnce());
+    const target = api.createSession.mock.calls[0][0].target as ConnectionTarget;
+    act(() => nativeEvents.listeners.get(COMPONENT_RESET_EVENT)!({ payload: { scope: "local", host_ids: [], session_ids: [], attachment_ids: [] } }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    const created = newSession(target);
+    await act(async () => { finish(created); });
+    await waitFor(() => expect(attachment.connect).toHaveBeenCalledWith(created, expect.anything()));
+    expect(api.updateWorkspace.mock.calls.some(([, document]) => document.sessions.some((session: { session_id: string }) => session.session_id === created.session_id))).toBe(true);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("handles committed component resets while About is closed and preserves unrelated host tabs", async () => {
+    const saved = snapshot();
+    saved.document.sessions.push({ host_id: "unused-id", session_id: "known-id", name: "other environment", last_known_cwd: null, last_known_cwd_display: null });
+    saved.document.tabs.push({ host_id: "unused-id", session_id: "known-id" });
+    api.loadWorkspace.mockResolvedValue(saved);
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    const affected = restoreWorkspace(saved.document, hostSnapshot().document).sessions.find((session) => session.target.kind === "ssh" && session.target.host_id === "test-id")!;
+    expect(api.getComponentVersions).not.toHaveBeenCalled();
+    act(() => nativeEvents.listeners.get(COMPONENT_RESET_EVENT)!({ payload: { scope: "remote", host_ids: ["test-id"], session_ids: ["known-id"], attachment_ids: [] } }));
+    expect(attachment.forgetRestartedSessions).toHaveBeenCalledWith(new Set([sessionKey(affected)]));
+    expect(attachment.resetAfterDaemonRestart).not.toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: "other environment on unused" })).toBeTruthy();
+    act(() => nativeEvents.listeners.get(COMPONENT_RESET_EVENT)!({ payload: { scope: "local", host_ids: [], session_ids: [], attachment_ids: [] } }));
+    expect(attachment.resetAfterDaemonRestart).toHaveBeenCalledOnce();
+    expect(api.executeComponentAction).not.toHaveBeenCalled();
+  });
+
   it("opens About from the rail and native menu without remounting or disconnecting the terminal", async () => {
     const page = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });

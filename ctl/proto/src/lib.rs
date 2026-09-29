@@ -1,4 +1,5 @@
 //! Versioned metadata preceding the service protocol on identified SSH streams.
+pub mod maintenance;
 use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

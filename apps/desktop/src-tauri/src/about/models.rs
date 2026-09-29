@@ -26,6 +26,20 @@ pub struct ComponentVersionInfo {
 }
 
 impl ComponentVersionInfo {
+  pub fn from_component(info: component_info::ComponentInfo) -> Self {
+    Self::from_build(
+      info.build,
+      info
+        .protocols
+        .into_iter()
+        .map(|protocol| ProtocolVersion {
+          name: protocol.name,
+          version: protocol.version,
+        })
+        .collect(),
+    )
+  }
+
   pub fn from_build(build: ComponentBuildInfo, protocols: Vec<ProtocolVersion>) -> Self {
     Self {
       version: Some(build.version),
@@ -65,6 +79,13 @@ pub enum VersionStatus {
   Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentAction {
+  Restart,
+  Reconnect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ComponentVersionRow {
   pub component_id: String,
@@ -78,6 +99,7 @@ pub struct ComponentVersionRow {
   pub available: Option<ComponentVersionInfo>,
   pub required_protocols: Vec<ProtocolVersion>,
   pub restart_supported: bool,
+  pub action: Option<ComponentAction>,
   pub detail: Option<String>,
   pub error: Option<String>,
 }
@@ -96,6 +118,7 @@ impl ComponentVersionRow {
       available: None,
       required_protocols: required_protocols(component),
       restart_supported: false,
+      action: None,
       detail: None,
       error: None,
     }
@@ -121,6 +144,16 @@ impl ComponentVersionRow {
       VersionStatus::Outdated | VersionStatus::Newer | VersionStatus::DifferentBuild
     ) {
       let explanation = "The selected helper differs from this app's component build. Restarting this helper will not align it with the app; update or rebuild the helper with the app.";
+      self.detail = Some(match self.detail.take() {
+        Some(previous) => format!("{previous} {explanation}"),
+        None => explanation.into(),
+      });
+    }
+  }
+
+  pub fn note_unreported_build(&mut self) {
+    if self.status == VersionStatus::Unknown && self.running.is_some() {
+      let explanation = "This process does not report enough build information to compare it with the app. Reported versions and protocols are shown below.";
       self.detail = Some(match self.detail.take() {
         Some(previous) => format!("{previous} {explanation}"),
         None => explanation.into(),
@@ -164,31 +197,42 @@ pub struct PreflightRestartRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RestartRequest {
-  pub restart_token: String,
+pub struct ExecuteComponentActionRequest {
+  pub action_token: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct RestartImpact {
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ComponentActionImpact {
   pub ssh_connections: Option<u32>,
   pub port_forwards: Option<u32>,
   pub vpn_connections: Option<u32>,
+  pub terminal_sessions: Option<u32>,
+  pub description: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct RestartPreflight {
-  pub restart_token: String,
+#[derive(Debug, Clone, Serialize)]
+pub struct ComponentActionPreflight {
+  pub action_token: String,
   pub component_id: String,
+  pub component: &'static str,
+  pub location: &'static str,
+  pub host_id: Option<String>,
   pub label: String,
+  pub action: ComponentAction,
   pub running: Option<ComponentVersionInfo>,
-  pub available: ComponentVersionInfo,
-  pub impact: RestartImpact,
+  pub available: Option<ComponentVersionInfo>,
+  pub impact: ComponentActionImpact,
 }
 
 #[derive(Debug, Serialize)]
-pub struct RestartResult {
+pub struct ComponentActionResult {
   pub component_id: String,
-  pub running: ComponentVersionInfo,
+  pub component: &'static str,
+  pub location: &'static str,
+  pub host_id: Option<String>,
+  pub action: ComponentAction,
+  pub running: Option<ComponentVersionInfo>,
+  pub detail: Option<String>,
 }
 
 fn compare(
@@ -363,6 +407,43 @@ mod tests {
     assert_eq!(
       compare(Some(&actual), Some(&expected)),
       VersionStatus::Current
+    );
+  }
+
+  #[test]
+  fn legacy_explanation_preserves_observed_protocols_without_inventing_a_build() {
+    let mut row = ComponentVersionRow::local("taskd", "taskd");
+    row.running = Some(ComponentVersionInfo {
+      protocols: vec![ProtocolVersion::new("task", task_proto::PROTOCOL_VERSION)],
+      ..ComponentVersionInfo::default()
+    });
+    row.compare();
+    row.note_unreported_build();
+    assert_eq!(row.status, VersionStatus::Unknown);
+    assert!(
+      row
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("does not report enough build information")
+    );
+    assert_eq!(row.running.as_ref().unwrap().protocols.len(), 1);
+    assert!(row.running.unwrap().source_fingerprint.is_none());
+  }
+
+  #[test]
+  fn maintenance_requests_cannot_supply_commands_or_endpoints() {
+    assert!(
+      serde_json::from_value::<PreflightRestartRequest>(serde_json::json!({
+        "component_id": "rmuxd", "socket": "/tmp/other.sock",
+      }))
+      .is_err()
+    );
+    assert!(
+      serde_json::from_value::<ExecuteComponentActionRequest>(serde_json::json!({
+        "action_token": "opaque", "command": "restart",
+      }))
+      .is_err()
     );
   }
 }

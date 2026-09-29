@@ -352,7 +352,11 @@ async fn open_reserved_attachment(
           identity,
           handshake: attached.handshake_info.clone(),
           label: target.label().into(),
-          host_id: request.cache_host_key.clone(),
+          host_id: request
+            .cache_host_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix("host:"))
+            .map(str::to_owned),
         }
       })
     }

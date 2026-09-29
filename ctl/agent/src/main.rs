@@ -32,8 +32,12 @@ enum Command {
   },
   /// List TCP listeners without exposing process arguments or environment.
   Listeners,
+  /// Print installed agent identity without opening or starting a service.
+  Inspect,
   /// End all rmux sessions and start the installed daemon after explicit confirmation.
   RestartRmux,
+  /// Inspect the existing rmux owner and wait for a separate confirmation frame.
+  PrepareRmuxRestart,
 }
 
 #[tokio::main]
@@ -74,6 +78,20 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       config.taskd_bin = companion_binary("taskd");
       connect_stdio(&config).await?;
     }
+    Command::PrepareRmuxRestart => {
+      let identity = tokio::task::spawn_blocking(ctl_agent::identity::inspect)
+        .await
+        .map_err(std::io::Error::other)??;
+      let mut config = ConnectConfig::new(rmux_ipc::socket_path());
+      config.rmuxd_bin = companion_binary("rmuxd");
+      ctl_agent::maintenance::prepare_rmux_restart(
+        &mut tokio::io::stdin(),
+        &mut tokio::io::stdout(),
+        &config,
+        &identity.remote_id,
+      )
+      .await?;
+    }
     Command::RestartRmux => {
       let mut input = Vec::new();
       tokio::io::stdin()
@@ -93,6 +111,12 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
         ctl_agent::restart::restart_rmux(&config, &request.expected_remote_id, &identity.remote_id)
           .await?;
       println!("{}", serde_json::to_string(&result)?);
+    }
+    Command::Inspect => {
+      let identity = tokio::task::spawn_blocking(ctl_agent::identity::inspect)
+        .await
+        .map_err(std::io::Error::other)??;
+      println!("{}", serde_json::to_string(&identity)?);
     }
     Command::Listeners => {
       let catalog = tokio::task::spawn_blocking(ctl_agent::listeners::discover)
@@ -203,10 +227,11 @@ mod tests {
         .unwrap(),
       Command::RestartRmux
     ));
-    for argument in ["--socket", "--pid", "--command", "--service"] {
-      assert!(
-        Arguments::try_parse_from(["ctl-agent", "restart-rmux", argument, "anything"]).is_err()
-      );
+    for operation in ["restart-rmux", "prepare-rmux-restart", "inspect"] {
+      assert!(Arguments::try_parse_from(["ctl-agent", operation]).is_ok());
+      for argument in ["--socket", "--pid", "--command", "--service"] {
+        assert!(Arguments::try_parse_from(["ctl-agent", operation, argument, "anything"]).is_err());
+      }
     }
   }
 

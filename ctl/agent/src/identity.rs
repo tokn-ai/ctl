@@ -13,6 +13,18 @@ pub fn discover() -> io::Result<RemoteIdentity> {
   discover_at(&data_directory()?, &std::env::current_exe()?)
 }
 
+/// Reads an existing account identity without creating files or directories.
+///
+/// # Errors
+/// Returns an error when identity storage is absent or invalid.
+pub fn inspect() -> io::Result<RemoteIdentity> {
+  inspect_at(&data_directory()?, &std::env::current_exe()?)
+}
+
+fn inspect_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity> {
+  installed_identity(read_id(&directory.join("remote-id"))?, executable)
+}
+
 fn data_directory() -> io::Result<PathBuf> {
   dirs::home_dir()
     .map(|home| home.join(".tokn/ctl"))
@@ -25,7 +37,10 @@ fn data_directory() -> io::Result<PathBuf> {
 }
 
 fn discover_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity> {
-  let remote_id = load_or_create_id(directory)?;
+  installed_identity(load_or_create_id(directory)?, executable)
+}
+
+fn installed_identity(remote_id: String, executable: &Path) -> io::Result<RemoteIdentity> {
   let manifest = executable.with_file_name("manifest.json");
   let bundle = match fs::File::open(manifest) {
     Ok(file) => {
@@ -117,6 +132,18 @@ fn load_or_create_id(directory: &Path) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn passive_inspection_does_not_create_a_missing_identity() {
+    let directory = std::env::temp_dir().join(format!("ctl-inspection-{}", uuid::Uuid::new_v4()));
+    assert_eq!(
+      inspect_at(&directory, &directory.join("ctl-agent"))
+        .unwrap_err()
+        .kind(),
+      io::ErrorKind::NotFound
+    );
+    assert!(!directory.exists());
+  }
 
   #[test]
   fn concurrent_connections_and_bundle_upgrades_keep_identity() {

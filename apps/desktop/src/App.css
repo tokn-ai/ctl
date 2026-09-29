@@ -315,6 +315,11 @@ svg {
   color: var(--danger);
 }
 
+.host-connection-status[data-availability="unknown"],
+.host-connection-status[data-completeness="partial"] .host-connection-dot {
+  color: var(--warning);
+}
+
 .host-group-actions {
   position: absolute;
   right: 6px;
@@ -369,12 +374,16 @@ svg {
   color: #75beff;
 }
 
-.session-status[data-status="running"] {
+.session-status[data-status="running"],
+.session-status[data-status="attached"] {
   color: var(--success);
 }
 
 .session-status[data-status="unreachable"],
-.session-status[data-status="missing"] {
+.session-status[data-status="missing"],
+.session-status[data-status="connecting"],
+.session-status[data-status="reconnecting"],
+.session-status[data-status="retry_wait"] {
   color: var(--warning);
 }
 
@@ -910,7 +919,8 @@ button:disabled {
 }
 
 .connection-dot.connecting,
-.connection-dot.reconnecting {
+.connection-dot.reconnecting,
+.connection-dot.retry_wait {
   background: var(--warning);
 }
 

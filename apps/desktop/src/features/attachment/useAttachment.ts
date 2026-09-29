@@ -32,6 +32,7 @@ import {
   reconnectSequenceAfterError,
 } from "./attachmentRecovery";
 import { registerAttachmentControl } from "./componentActions";
+import { initialAttachmentState, transitionAttachment, type ConnectionIntent } from "./attachmentState";
 import { ConnectionIntentQueue } from "./ConnectionIntentQueue";
 import { InputPump } from "./InputPump";
 import {
@@ -42,23 +43,7 @@ import { LatestTaskQueue } from "./LatestTaskQueue";
 import { ResizeCoordinator } from "./ResizeCoordinator";
 import { ResizePump } from "./ResizePump";
 
-const EMPTY_LEASE = { held: false, owned_by_client: false };
-
-const INITIAL_STATE: AttachmentViewState = {
-  phase: "idle",
-  error_code: null,
-  attachment_id: null,
-  session: null,
-  input_lease: EMPTY_LEASE,
-  layout_lease: EMPTY_LEASE,
-  shell_state: null,
-  applied_sequence: null,
-  reconnect_sequence: null,
-  history_gap: false,
-  terminal_size_mismatch: false,
-  resize_with_window: false,
-  message: null,
-};
+const INITIAL_STATE = initialAttachmentState();
 
 function terminalSize(columns: number, rows: number): TerminalSize {
   return {
@@ -106,8 +91,15 @@ export interface AttachmentActions {
 export function useAttachment(renderer: AttachmentRenderer | null, view_resize = false): AttachmentActions {
   const view_resize_ref = useRef(view_resize);
   view_resize_ref.current = view_resize;
-  const [state, setState] = useState(INITIAL_STATE);
+  const [state, publishState] = useState(INITIAL_STATE);
   const stateRef = useRef(state);
+  // Event channels can deliver multiple transitions before React commits.
+  // Fence every callback against the latest transition, not the last render.
+  const setState = useCallback((next: AttachmentViewState | ((current: AttachmentViewState) => AttachmentViewState)) => {
+    const updated = typeof next === "function" ? next(stateRef.current) : next;
+    stateRef.current = updated;
+    publishState(updated);
+  }, []);
   const rendererRef = useRef<AttachmentRenderer | null>(renderer);
   const activeAttachmentRef = useRef<string | null>(null);
   const openingAbortRef = useRef<AbortController | null>(null);
@@ -138,10 +130,6 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   }
   rendererRef.current = renderer;
 
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
-
   const clearRecoveryTimer = useCallback(() => {
     if (recoveryTimerRef.current !== null) {
       clearTimeout(recoveryTimerRef.current);
@@ -156,16 +144,23 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
 
   const setFailure = useCallback((error: unknown) => {
     const code = errorCode(error);
+    if (stateRef.current.phase === "ended") return;
     rendererRef.current?.invalidateResumeSequence();
-    setState((current) => ({
-      ...current,
-      phase: "error",
-      error_code: code,
-      reconnect_sequence: reconnectSequenceAfterError(
-        code,
-        current.reconnect_sequence,
-      ),
-      message: errorMessage(error),
+    // An unusable actor cannot keep input/layout authority or publish late events.
+    generationRef.current += 1;
+    const attachment_id = activeAttachmentRef.current;
+    activeAttachmentRef.current = null;
+    channelRef.current = null;
+    openingAbortRef.current?.abort();
+    inputLeaseOwnedRef.current = false;
+    layoutLeaseOwnedRef.current = false;
+    inputPumpRef.current?.clear();
+    layoutLeasePumpRef.current?.reset();
+    resizeCoordinatorRef.current?.reset();
+    if (attachment_id) void detachAttachment({ attachment_id }).catch(() => undefined);
+    setState((current) => transitionAttachment(current, {
+      type: "failed", code, message: errorMessage(error),
+      resume_from: reconnectSequenceAfterError(code, current.reconnect_sequence),
     }));
   }, []);
 
@@ -407,6 +402,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       if (!isCurrent()) {
         return;
       }
+      if (stateRef.current.phase === "ended" && event.event_type !== "attachment_exited") return;
       if (!renderer) {
         throw new Error("The terminal renderer is not available.");
       }
@@ -553,18 +549,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           resizeWithWindowRef.current = false;
           layoutLeasePumpRef.current?.reset();
           resizeCoordinatorRef.current?.stop();
-          setState((current) => ({
-            ...current,
-            phase: "ended",
-            error_code: null,
-            input_lease: EMPTY_LEASE,
-            layout_lease: EMPTY_LEASE,
-            resize_with_window: false,
-            message:
-              event.exit_code === null
-                ? "Session ended."
-                : `Session ended with exit code ${event.exit_code}.`,
-          }));
+          setState((current) => transitionAttachment(current, { type: "ended", exit_code: event.exit_code }));
           break;
         case "attachment_exited":
           if (event.next_sequence === null) renderer.invalidateResumeSequence();
@@ -581,26 +566,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           inputPumpRef.current?.clear();
           layoutLeasePumpRef.current?.reset();
           resizeCoordinatorRef.current?.reset();
-          setState((current) => ({
-            ...current,
-            attachment_id: null,
-            input_lease: EMPTY_LEASE,
-            layout_lease: EMPTY_LEASE,
-            resize_with_window: resumeResize,
-            error_code: null,
-            phase:
-              event.reason === "session_ended"
-                ? "ended"
-                : event.reason === "detached"
-                  ? "idle"
-                  : "disconnected",
-            reconnect_sequence: event.next_sequence,
-            message:
-              event.reason === "connection_closed"
-                ? "Connection interrupted. Reconnecting automatically."
-                : event.reason === "detached"
-                  ? null
-                  : current.message,
+          setState((current) => transitionAttachment(current, {
+            type: "closed", reason: event.reason, next_sequence: event.next_sequence,
           }));
           break;
         case "attachment_error":
@@ -612,15 +579,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           inputPumpRef.current?.clear();
           layoutLeasePumpRef.current?.reset();
           resizeCoordinatorRef.current?.reset();
-          setState((current) => ({
-            ...current,
-            attachment_id: null,
-            input_lease: EMPTY_LEASE,
-            layout_lease: EMPTY_LEASE,
-            phase: "error",
-            error_code: event.code,
-            reconnect_sequence: null,
-            message: event.message,
+          setState((current) => transitionAttachment(current, {
+            type: "failed", code: event.code, message: event.message, resume_from: null,
           }));
           break;
       }
@@ -682,13 +642,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         }
       } catch (error) {
         if (generation !== generationRef.current) return;
-        setState((current) => ({ ...current, phase: "error", error_code: "local_cache_failed", message: errorMessage(error) }));
+        setFailure({ code: "local_cache_failed", message: errorMessage(error) });
         return;
       }
       appliedSequenceRef.current = resumeFrom;
       setState((current) => ({
         ...current,
-        phase: resumeFrom !== null ? "reconnecting" : "connecting",
         applied_sequence: resumeFrom,
         reconnect_sequence: resumeFrom,
       }));
@@ -705,6 +664,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       let responseReady = false;
       const openingAbort = new AbortController();
       openingAbortRef.current = openingAbort;
+      let unclaimed_attachment_id: string | null = null;
       try {
         // Each renderer owns its attachment. Replacing this renderer's session
         // must release its leases without detaching sibling panes.
@@ -733,24 +693,20 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           },
           openingAbort.signal,
         );
+        unclaimed_attachment_id = result.attached.attachment_id;
 
         if (generation !== generationRef.current) {
-          await detachAttachment({
-            attachment_id: result.attached.attachment_id,
-          });
           return;
         }
         if (!resumeFrom) {
           await renderer.recreate(result.attached.session.terminal_size);
           if (generation !== generationRef.current) {
-            await detachAttachment({
-              attachment_id: result.attached.attachment_id,
-            });
             return;
           }
           appliedSequenceRef.current = null;
         }
         activeAttachmentRef.current = result.attached.attachment_id;
+        unclaimed_attachment_id = null;
         channelRef.current = result.channel;
         inputLeaseOwnedRef.current = result.attached.input_lease.owned_by_client;
         layoutLeaseOwnedRef.current = result.attached.layout_lease.owned_by_client;
@@ -765,22 +721,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           resizeCoordinatorRef.current?.setEnabled(true);
         }
         publishShellState(result.attached.shell_state);
-        setState((current) => ({
-          ...current,
-          phase: "attached",
-          error_code: null,
-          attachment_id: result.attached.attachment_id,
-          session: result.attached.session,
-          input_lease: result.attached.input_lease,
-          layout_lease: result.attached.layout_lease,
-          terminal_size_mismatch: result.attached.terminal_size_mismatch,
-          history_gap: current.history_gap || result.attached.history_gap,
-          reconnect_sequence: null,
-          resize_with_window: resizeActive,
-          message:
-            resizeWithWindow && !resizeActive
-              ? "Another client controls this session's terminal size."
-              : null,
+        setState((current) => transitionAttachment(current, {
+          type: "attached", response: result.attached, resize_with_window: resizeWithWindow,
         }));
         responseReady = true;
         for (const event of pendingEvents) {
@@ -792,6 +734,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           setFailure(error);
         }
       } finally {
+        if (unclaimed_attachment_id !== null) {
+          await detachAttachment({ attachment_id: unclaimed_attachment_id }).catch(() => undefined);
+        }
         if (openingAbortRef.current === openingAbort) {
           openingAbortRef.current = null;
         }
@@ -831,6 +776,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       resumeFrom: string | null,
       resizeWithWindow: boolean,
       use_cached_state = false,
+      intent: ConnectionIntent = "attach",
     ): Promise<void> => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
@@ -847,14 +793,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         resumeFrom = rendererRef.current?.resumeSequence() ?? null;
       }
       appliedSequenceRef.current = resumeFrom;
-      const nextState: AttachmentViewState = {
-        ...INITIAL_STATE,
-        phase: resumeFrom ? "reconnecting" : "connecting",
-        session,
-        applied_sequence: resumeFrom,
-        reconnect_sequence: resumeFrom,
-        resize_with_window: resizeWithWindow,
-      };
+      const nextState = transitionAttachment(stateRef.current, {
+        type: "begin", intent, session, resume_from: resumeFrom, resize_with_window: resizeWithWindow,
+      });
       stateRef.current = nextState;
       setState(nextState);
 
@@ -885,7 +826,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const reconnectCurrent = useCallback(
     async (resetBackoff: boolean) => {
       const current = stateRef.current;
-      if (!current.session) {
+      if (!current.session || current.phase === "ended") {
         return;
       }
       if (resetBackoff) {
@@ -916,6 +857,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         current.session,
         current.reconnect_sequence,
         current.resize_with_window,
+        false,
+        "reconnect",
       );
     },
     [connectAt, resetRecovery],
@@ -926,6 +869,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     [reconnectCurrent],
   );
 
+  const recovery_session_key = state.session ? sessionKey(state.session) : null;
   useEffect(() => {
     if (state.phase === "attached" && recoveryBackoffRef.current.isActive()) {
       recoveryTimerRef.current = setTimeout(() => {
@@ -941,55 +885,33 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       };
     }
 
-    if (
-      !state.session ||
-      !matchesRecoveryPhase(state.phase) ||
-      !canAutomaticallyRecoverAttachment(state.error_code)
-    ) {
+    if (!state.session) return;
+    if (matchesRecoveryPhase(state.phase) && canAutomaticallyRecoverAttachment(state.error_code)) {
+      const now = Date.now();
+      const delay = recoveryBackoffRef.current.nextDelay(now);
+      setState((current) => transitionAttachment(current, delay === null
+        ? { type: "retry_exhausted" }
+        : { type: "retry_scheduled", retry_at_ms: now + delay }));
       return;
     }
-
-    const delay = recoveryBackoffRef.current.nextDelay(Date.now());
-    if (delay === null) {
-      const message = "Automatic reconnect timed out. The rmux session may still be running.";
-      setState((current) =>
-        current.phase === "error" && current.message === message
-          ? current
-          : {
-              ...current,
-              phase: "error",
-              error_code: "automatic_reconnect_timeout",
-              message,
-            },
-      );
-      return;
-    }
+    if (state.phase !== "retry_wait" || state.retry_at_ms == null) return;
 
     const identity = sessionKey(state.session);
     recoveryTimerRef.current = setTimeout(() => {
       recoveryTimerRef.current = null;
       const current = stateRef.current;
-      if (
-        current.session !== null &&
-        sessionKey(current.session) === identity &&
-        matchesRecoveryPhase(current.phase)
-      ) {
-        void reconnectCurrent(false);
+      if (current.session === null || sessionKey(current.session) !== identity ||
+        current.phase !== "retry_wait" || current.retry_at_ms !== state.retry_at_ms) return;
+      if (recoveryBackoffRef.current.isExpired(Date.now())) {
+        setState((current) => transitionAttachment(current, { type: "retry_exhausted" }));
+        return;
       }
-    }, delay);
-
-    return () => {
-      if (recoveryTimerRef.current !== null) {
-        clearTimeout(recoveryTimerRef.current);
-        recoveryTimerRef.current = null;
-      }
-    };
+      void reconnectCurrent(false);
+    }, Math.max(0, state.retry_at_ms - Date.now()));
+    return clearRecoveryTimer;
   }, [
-    reconnectCurrent,
-    state.attachment_id,
-    state.error_code,
-    state.phase,
-    state.session ? sessionKey(state.session) : null,
+    reconnectCurrent, clearRecoveryTimer, state.attachment_id, state.error_code,
+    state.phase, state.retry_at_ms, recovery_session_key,
   ]);
 
   const cancelPendingConnection = useCallback((session: SessionSummary) => {
@@ -1031,17 +953,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         await detachAttachment({ attachment_id: attachmentId });
       } catch (error) {
         if (generation === generationRef.current) {
-          setState((current) => ({
-            ...current,
-            phase: "error",
-            error_code: "explicit_detach_failed",
-            attachment_id: null,
-            input_lease: EMPTY_LEASE,
-            layout_lease: EMPTY_LEASE,
-            reconnect_sequence: null,
-            resize_with_window: false,
-            message: errorMessage(error),
-          }));
+          setState((current) => ({ ...transitionAttachment(current, {
+            type: "failed", code: "explicit_detach_failed", message: errorMessage(error), resume_from: null,
+          }), resize_with_window: false }));
         }
         return;
       }

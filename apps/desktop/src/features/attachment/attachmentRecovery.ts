@@ -63,11 +63,12 @@ export function interruptedAttachmentState(
     ...state,
     phase: recoverable ? "disconnected" : state.phase,
     attachment_id: null,
+    retry_at_ms: null,
     input_lease: EMPTY_LEASE,
     layout_lease: EMPTY_LEASE,
     reconnect_sequence: recoverable ? null : state.reconnect_sequence,
     message: recoverable
-      ? "Attachment interrupted. Reconnecting automatically."
+      ? "Attachment interrupted."
       : state.message,
   };
 }
@@ -91,6 +92,10 @@ export class AttachmentRecoveryBackoff {
     );
     this.attempt += 1;
     return delay;
+  }
+
+  isExpired(now: number): boolean {
+    return this.startedAt !== null && now - this.startedAt >= ATTACHMENT_RECOVERY_WINDOW_MS;
   }
 
   isActive(): boolean {

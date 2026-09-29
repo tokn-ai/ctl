@@ -1338,7 +1338,7 @@ describe("workspace-backed terminal page", () => {
     await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
     expect(screen.getByRole("dialog", { name: "Connecting to host" })).toBeTruthy();
     await act(async () => finish(remoteInfo));
-    expect(await screen.findByRole("status", { name: "Host connection for only-in-ssh-config: Connected" })).toBeTruthy();
+    expect(await screen.findByRole("status", { name: "Host connection for only-in-ssh-config: SSH available" })).toBeTruthy();
     expect(api.probeSshHost).toHaveBeenCalledOnce();
     expect(api.updateHosts).not.toHaveBeenCalled();
     for (const [, saved] of api.updateWorkspace.mock.calls) {
@@ -2273,10 +2273,11 @@ describe("workspace-backed terminal page", () => {
     }));
     render(<TerminalPage />);
 
-    const connected = await screen.findByRole("status", { name: "Host connection for test: Connected" });
-    expect(connected.title).toBe("Connected\nConnection methods: VPN");
+    const connected = await screen.findByRole("status", { name: "Host connection for test: SSH available" });
+    expect(connected.title).toContain("Connection methods: VPN");
+    expect(connected.title).toContain("remote network and terminal health are reported separately");
     expect(screen.getByRole("button", { name: "Disconnect host test" })).toBeTruthy();
-    expect(screen.getByRole("status", { name: "Host connection for unused: Disconnected" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Host connection for unused: SSH disconnected" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Connect to unused" })).toBeTruthy();
     expect(api.probeSshHost).not.toHaveBeenCalled();
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
@@ -2327,14 +2328,14 @@ describe("workspace-backed terminal page", () => {
 
     fireEvent.click(disconnect);
     await waitFor(() => expect(api.disconnectSshHost).toHaveBeenCalledOnce());
-    expect(screen.getByRole("status", { name: "Host connection for test: Disconnecting…" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Host connection for test: SSH available · Disconnecting…" })).toBeTruthy();
     expect(disconnect).toHaveProperty("disabled", true);
     expect(attachment.detach).toHaveBeenCalledOnce();
     expect(attachment.cancelPendingConnection).toHaveBeenCalledWith(known);
     expect(api.disconnectSshHost).toHaveBeenCalledWith([known.target]);
     await act(async () => finishDisconnect());
 
-    expect(screen.getByRole("status", { name: "Host connection for test: Disconnected" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Host connection for test: Disconnected manually" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "~/work — remembered" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "~/work on test" })).toHaveProperty("ariaSelected", "true");
     expect(api.updateWorkspace).toHaveBeenCalledTimes(savedBefore);
@@ -2355,7 +2356,7 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect to test" }));
     await waitFor(() => expect(attachment.connect).toHaveBeenCalledOnce());
-    expect(await screen.findByRole("status", { name: "Host connection for test: Connected" })).toBeTruthy();
+    expect(await screen.findByRole("status", { name: "Host connection for test: SSH available" })).toBeTruthy();
     expect(api.probeSshHost).toHaveBeenCalledOnce();
     expect(api.configurePortForward).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ host_id: "test-id" }), forward, true,
@@ -2380,7 +2381,7 @@ describe("workspace-backed terminal page", () => {
     Object.assign(attachment.state, { phase: "attached", session: restored.sessions[0] } satisfies Partial<AttachmentViewState>);
     render(<TerminalPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Disconnect host unused" }));
-    await screen.findByRole("status", { name: "Host connection for unused: Disconnected" });
+    await screen.findByRole("status", { name: "Host connection for unused: Disconnected manually" });
 
     expect(api.disconnectSshHost).toHaveBeenCalledExactlyOnceWith([restored.sessions[1].target]);
     expect(attachment.detach).not.toHaveBeenCalled();

@@ -1703,6 +1703,7 @@ export function TerminalPage() {
               hosts={workspace.hosts}
               connectableHostKeys={connectableHostKeys}
               hostConnections={hostConnections.statuses}
+              attachmentStates={new Map(attachment.states.flatMap((state) => state.session ? [[sessionKey(state.session), state] as const] : []))}
               onDisconnectHost={(target) => {
                 void hostConnections.disconnect(target).catch((failure) => setListError(errorMessage(failure)));
               }}

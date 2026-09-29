@@ -1,6 +1,7 @@
 import { Icon } from "../ui/Icon";
 import type { AttachmentViewState } from "../../lib/types";
 import { targetLabel } from "../../features/targets/targets";
+import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 
 interface TerminalToolbarProps {
   state: AttachmentViewState;
@@ -37,7 +38,7 @@ export function TerminalToolbar({
           <strong>{state.session?.name ?? "No session"}</strong>
           <small>
             {state.session ? `${targetLabel(state.session.target)} · ` : ""}
-            {state.phase.replace("_", " ")}
+            {attachmentPhaseLabel(state.phase)}
           </small>
         </div>
       </div>

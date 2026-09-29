@@ -283,7 +283,7 @@ describe("SessionSidebar", () => {
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(
-      `<small title="${session.name} · running · 80×24">${session.name}<span aria-hidden="true"> · </span>`,
+      `<small title="${session.name} · Last seen running · Session last reported running">${session.name}<span aria-hidden="true"> · </span>`,
     );
     expect(markup).not.toContain(`<strong>${session.name}</strong>`);
   });

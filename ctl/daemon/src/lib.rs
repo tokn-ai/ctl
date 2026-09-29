@@ -4,6 +4,7 @@
 mod keychain;
 #[cfg(unix)]
 mod lifecycle;
+mod master_observation;
 mod openconnect;
 mod port_forwarding;
 pub mod proxy_route;
@@ -214,6 +215,8 @@ enum RequestError {
   MasterTimeout,
   #[error("OpenSSH control master exited before becoming ready: {0}")]
   MasterFailed(String),
+  #[error("could not observe the OpenSSH control master: {0}")]
+  MasterObservationFailed(String),
   #[error("could not use SSH configuration: {0}")]
   SshConfig(String),
   #[error("This SSH host was disconnected. Use Connect host to reconnect.")]
@@ -771,6 +774,7 @@ impl RequestError {
       Self::StartMaster(_) => "ssh_start_failed",
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
+      Self::MasterObservationFailed(_) => "ssh_status_unknown",
       Self::SshConfig(_) => "ssh_config_error",
       Self::HostDisconnected => "ssh_host_disconnected",
       Self::DisconnectFailed(_) => "ssh_disconnect_failed",
@@ -1026,27 +1030,25 @@ async fn disconnect_master(
   Ok(())
 }
 
+/// Observes our local control master, without contacting the remote host.
+/// A successful observation does not prove the SSH transport or remote service
+/// is healthy; an unsuccessful observation must not imply disconnection.
 async fn connection_status(
   stream: &mut ctld_ipc::Stream,
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
-  let connected = if state.target(target).is_paused() {
-    false
-  } else if let Some(endpoint) = state.endpoint(target) {
-    control_master_is_ready(target, &endpoint.control_path).await
-  } else {
-    false
-  };
-  ctld_ipc::write_frame(
-    stream,
-    &ServerMessage::ConnectionStatus {
-      connected,
-      manually_disconnected: state.target(target).is_paused(),
-    },
-  )
+  let lifecycle = state.target(target);
+  let message = master_observation::connection_status(&lifecycle, async {
+    if let Some(endpoint) = state.endpoint(target) {
+      master_observation::observe(target, &endpoint.control_path).await
+    } else {
+      Ok(false)
+    }
+  })
   .await?;
+  ctld_ipc::write_frame(stream, &message).await?;
   Ok(())
 }
 
@@ -1465,20 +1467,9 @@ fn prepare_control_path(control_path: &Path) -> Result<(), RequestError> {
 }
 
 async fn control_master_is_ready(target: &SshTarget, path: &Path) -> bool {
-  if !path.exists() {
-    return false;
-  }
-  let mut command = Command::new(SSH_PROGRAM);
-  command.arg("-S").arg(path).args(["-O", "check"]);
-  append_target_arguments(&mut command, target);
-  command
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
-  tokio::time::timeout(MASTER_CHECK_TIMEOUT, command.status())
+  master_observation::observe(target, path)
     .await
-    .is_ok_and(|result| result.is_ok_and(|status| status.success()))
+    .unwrap_or(false)
 }
 
 fn append_target_arguments(command: &mut Command, target: &SshTarget) {

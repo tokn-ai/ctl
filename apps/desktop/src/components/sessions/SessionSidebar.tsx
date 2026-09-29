@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
 import { Icon } from "../ui/Icon";
+import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 import {
   compactTerminalTitle,
   compactTerminalTitleParts,
@@ -7,6 +8,7 @@ import {
 } from "../../features/tabs/terminalTitle";
 import type {
   ConnectionTarget,
+  AttachmentViewState,
   HostConnectionStatus,
   ManagedTask,
   SessionSummary,
@@ -28,6 +30,7 @@ interface SessionSidebarProps {
   connectableHostKeys?: ReadonlySet<string>;
   targetErrors: ReadonlyMap<string, string>;
   hostConnections?: ReadonlyMap<string, HostConnectionStatus>;
+  attachmentStates?: ReadonlyMap<string, AttachmentViewState>;
   sessions: SessionSummary[];
   interactiveTasks?: ManagedTask[];
   shellStates: ReadonlyMap<string, ShellStateSummary>;
@@ -109,6 +112,7 @@ export function SessionSidebar({
   connectableHostKeys,
   targetErrors,
   hostConnections,
+  attachmentStates,
   sessions,
   interactiveTasks = [],
   shellStates,
@@ -287,8 +291,18 @@ export function SessionSidebar({
             ? hostConnections?.get(target.host_id ?? "")
             : undefined;
           const unavailable = target.kind === "ssh" ? target.unavailable : undefined;
-          const connectionState = unavailable ? "error" : connection?.state ?? "checking";
-          const connectionLabel = unavailable ? "Unavailable" : {
+          const observation = connection?.observation;
+          const operation = connection?.operation;
+          const connectionState = unavailable ? "error" : observation
+            ? observation.availability === "available" ? "connected"
+              : observation.availability === "unavailable" ? "disconnected"
+                : observation.completeness === "pending" ? "checking" : "error"
+            : connection?.state ?? "checking";
+          const connectionLabel = unavailable ? "Unavailable" : observation
+            ? observation.availability === "available" ? observation.completeness === "partial" ? "SSH available · Partial status" : "SSH available"
+              : observation.availability === "unavailable" ? connection?.manually_disconnected ? "Disconnected manually" : "SSH disconnected"
+                : observation.completeness === "pending" ? "Checking SSH…" : "SSH status unknown"
+            : {
             checking: "Checking…",
             connected: "Connected",
             connecting: "Connecting…",
@@ -296,15 +310,20 @@ export function SessionSidebar({
             disconnected: "Disconnected",
             error: "Connection error",
           }[connectionState];
+          const operationLabel = operation?.state === "pending" ? operation.kind === "connect" ? "Connecting…" : "Disconnecting…"
+            : operation?.state === "failed" ? operation.kind === "connect" ? "Connect failed" : "Disconnect failed" : null;
           const connectionTitle = [
             connectionLabel,
+            observation ? "Observes the local SSH control connection; remote network and terminal health are reported separately." : null,
+            observation?.checked_at_ms ? `Checked at ${new Date(observation.checked_at_ms).toLocaleTimeString()}` : null,
             connection?.method_names.length
               ? `Connection methods: ${connection.method_names.join(", ")}`
               : null,
             unavailable ?? connection?.message,
+            observation?.failed_method_names.length ? `Status unknown for: ${observation.failed_method_names.join(", ")}` : null,
           ].filter(Boolean).join("\n");
           const connectionBusy = connection?.state === "connecting" ||
-            connection?.state === "disconnecting";
+            connection?.state === "disconnecting" || operation?.state === "pending";
           const showDisconnect = onDisconnectHost && (
             connection?.state === "connected" ||
             connection?.state === "disconnecting" ||
@@ -345,12 +364,15 @@ export function SessionSidebar({
                   <span
                     className="host-connection-status"
                     role="status"
-                    aria-label={`Host connection for ${targetLabel(target)}: ${connectionLabel}`}
+                    aria-label={`Host connection for ${targetLabel(target)}: ${connectionLabel}${operationLabel ? ` · ${operationLabel}` : ""}`}
                     data-state={connectionState}
+                    data-availability={observation?.availability}
+                    data-completeness={observation?.completeness}
                     title={connectionTitle}
                   >
                     <span className="host-connection-dot" aria-hidden="true" />
                     <span>{connectionLabel}</span>
+                    {operationLabel ? <span title={[operation?.method_name, operation?.message].filter(Boolean).join(": ")}> · {operationLabel}</span> : null}
                   </span>
                 ) : null}
                 {target.kind === "ssh" ? (
@@ -435,10 +457,13 @@ export function SessionSidebar({
                   const closing = closingSessionKeys.has(identity);
                   const disconnecting = identity === disconnectingSessionKey;
                   const canDisconnect = openTabSessionKeys.has(identity);
-                  const status = session.status === "unknown"
+                  const attachment = attachmentStates?.get(identity);
+                  const observed_status = session.status === "unknown"
                     ? "unverified"
                     : session.status;
-                  const dimensions = session.status === "running"
+                  const status = attachment ? attachmentPhaseLabel(attachment.phase)
+                    : session.status === "running" ? "Last seen running" : observed_status;
+                  const dimensions = attachment?.phase === "attached"
                     ? ` · ${session.terminal_size.columns}×${session.terminal_size.rows}`
                     : "";
                   return (
@@ -458,10 +483,10 @@ export function SessionSidebar({
                         <Icon name="terminal" class_name="session-icon" />
                         <span className="session-copy">
                           <strong>{compactTitle}</strong>
-                          <small title={`${session.name} · ${status}${dimensions}`}>
+                          <small title={`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`}>
                             {session.name}
                             <span aria-hidden="true"> · </span>
-                            <span className="session-status" data-status={session.status}>
+                            <span className="session-status" data-status={attachment?.phase ?? (session.status === "running" ? "unknown" : session.status)}>
                               {status}
                             </span>
                           </small>

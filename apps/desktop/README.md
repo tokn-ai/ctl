@@ -3,6 +3,10 @@
 The desktop client for local and SSH-connected daemon-owned `rmux` terminal
 sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
+Connection indicators distinguish observed SSH availability, active terminal
+attachments, and last-known session activity. See the
+[state definitions and transition rules](../../docs/connection-state.md).
+
 ## About and component versions
 
 Open **About rmux** from the info button, command palette, or macOS app menu.

@@ -2,7 +2,10 @@
 
 mod client;
 mod coordinator;
+mod enrollment;
+mod models;
 mod repository;
+mod sign_in;
 
 #[cfg(test)]
 mod tests;
@@ -12,85 +15,68 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use ctld_ipc::{VpnConnection, VpnSnapshot, VpnStatus};
-use serde::{Deserialize, Serialize};
 use tauri::Manager as _;
-use zeroize::Zeroizing;
 
 use crate::error::{CommandErrorDto, CommandResult};
 use coordinator::{Cancellation, Coordinators};
+use models::VpnSettingsInput;
+pub use models::{
+  BeginVpnEnrollmentRequest, ConnectVpnRequest, DeleteVpnConnectionRequest, OpenVpnSignInRequest,
+  SaveVpnConnectionRequest, SaveVpnEnrollmentRequest, StopVpnRequest, VpnConnectionsSnapshot,
+  VpnEnrollmentRequest, VpnEnrollmentSnapshot,
+};
 use repository::Repository;
 
 // Each VPN coordinates independently across windows, including profile loading.
 static COORDINATORS: LazyLock<Coordinators> = LazyLock::new(Coordinators::default);
+static ENROLLMENTS: LazyLock<enrollment::Enrollments> =
+  LazyLock::new(enrollment::Enrollments::default);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct VpnConnectionSummary {
-  connection_id: String,
-  name: String,
-  url: String,
-  username: String,
-  has_password: bool,
-  auth_method: Option<String>,
-  target_ip: Option<String>,
+#[tauri::command]
+pub async fn begin_vpn_enrollment(
+  app: tauri::AppHandle,
+  window: tauri::WebviewWindow,
+  request: BeginVpnEnrollmentRequest,
+) -> CommandResult<VpnEnrollmentSnapshot> {
+  ENROLLMENTS.begin(directory(&app)?, window.label().into(), request)
 }
 
-impl From<&VpnConnection> for VpnConnectionSummary {
-  fn from(connection: &VpnConnection) -> Self {
-    Self {
-      connection_id: connection.connection_id.clone(),
-      name: connection.name.clone(),
-      url: connection.url.clone(),
-      username: connection.username.clone(),
-      has_password: !connection.password.is_empty(),
-      auth_method: connection.auth_method.clone(),
-      target_ip: connection.target_ip.clone(),
-    }
-  }
+#[tauri::command]
+pub async fn vpn_enrollment_status(
+  window: tauri::WebviewWindow,
+  request: VpnEnrollmentRequest,
+) -> CommandResult<VpnEnrollmentSnapshot> {
+  ENROLLMENTS
+    .status(window.label(), &request.enrollment_id)
+    .await
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
-pub struct VpnConnectionsSnapshot {
-  revision: Option<String>,
-  connections: Vec<VpnConnectionSummary>,
+#[tauri::command]
+pub async fn save_vpn_enrollment(
+  window: tauri::WebviewWindow,
+  request: SaveVpnEnrollmentRequest,
+) -> CommandResult<VpnConnectionsSnapshot> {
+  ENROLLMENTS
+    .save(
+      window.label(),
+      &request.enrollment_id,
+      request.expected_revision,
+    )
+    .await
 }
 
-// Password-bearing types deliberately do not implement Debug or Serialize.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VpnConnectionInput {
-  connection_id: String,
-  name: String,
-  url: String,
-  username: String,
-  password: Option<Zeroizing<String>>,
-  auth_method: Option<String>,
-  target_ip: Option<String>,
+#[tauri::command]
+pub async fn cancel_vpn_enrollment(
+  window: tauri::WebviewWindow,
+  request: VpnEnrollmentRequest,
+) -> CommandResult<()> {
+  ENROLLMENTS
+    .cancel(window.label(), &request.enrollment_id)
+    .await
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SaveVpnConnectionRequest {
-  expected_revision: Option<String>,
-  connection: VpnConnectionInput,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeleteVpnConnectionRequest {
-  expected_revision: Option<String>,
-  connection_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConnectVpnRequest {
-  connection_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StopVpnRequest {
-  vpn_id: String,
+pub(crate) async fn close_window(window_label: &str) {
+  ENROLLMENTS.close_window(window_label).await;
 }
 
 pub(crate) fn valid_connection_id(connection_id: &str) -> bool {
@@ -168,6 +154,12 @@ where
 fn require_connected(status: &VpnStatus) -> CommandResult<()> {
   if status.state == ctld_ipc::VpnState::Connected && status.running && status.endpoint.is_some() {
     return Ok(());
+  }
+  if status.state == ctld_ipc::VpnState::Starting && status.auth_url.is_some() {
+    return Err(CommandErrorDto::new(
+      "vpn_sign_in_required",
+      "Sign in to the selected VPN on the VPN page, then reconnect the host.",
+    ));
   }
   Err(CommandErrorDto::new(
     "vpn_not_connected",
@@ -311,6 +303,12 @@ pub async fn stop_vpn(request: StopVpnRequest) -> CommandResult<VpnStatus> {
         .map_err(runtime_error)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn open_vpn_sign_in(request: OpenVpnSignInRequest) -> CommandResult<()> {
+  let snapshot = vpn_status().await?;
+  sign_in::open(&snapshot, &request.vpn_id, sign_in::open_browser).await
 }
 
 async fn mutation_status() -> CommandResult<VpnSnapshot> {

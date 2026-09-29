@@ -50,7 +50,7 @@ pub fn run() {
         let streams = window.state::<tasks::TaskStreams>().inner().clone();
         let label = window.label().to_owned();
         tauri::async_runtime::spawn(async move {
-          streams.close_window(&label).await;
+          tokio::join!(streams.close_window(&label), vpn::close_window(&label));
         });
       }
     })
@@ -75,6 +75,11 @@ pub fn run() {
       vpn::connect_vpn,
       vpn::vpn_status,
       vpn::stop_vpn,
+      vpn::open_vpn_sign_in,
+      vpn::begin_vpn_enrollment,
+      vpn::vpn_enrollment_status,
+      vpn::save_vpn_enrollment,
+      vpn::cancel_vpn_enrollment,
       command_menu::sync_command_menu,
       commands::inspection::inspect_known_sessions,
       commands::list_sessions,

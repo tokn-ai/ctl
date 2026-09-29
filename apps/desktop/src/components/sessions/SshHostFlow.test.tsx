@@ -9,6 +9,7 @@ import {
   forgetSshCredentials,
   installRemoteAgent,
   listSshIdentityFiles,
+  openVpnSignIn,
   probeSshHost,
   respondSshPrompt,
   saveSshConfigHost,
@@ -32,6 +33,7 @@ vi.mock("../../lib/tauri", () => ({
   forgetSshCredentials: vi.fn(async () => undefined),
   installRemoteAgent: vi.fn(),
   listSshIdentityFiles: vi.fn(),
+  openVpnSignIn: vi.fn(async () => undefined),
   saveSshConfigHost: vi.fn(),
 }));
 afterEach(cleanup);
@@ -174,6 +176,24 @@ describe("SSH host quick-input flow", () => {
     expect(probeSshHost).toHaveBeenCalledOnce();
     expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining({ vpn_connection_id: vpn.connection_id }), expect.any(String), expect.any(Function));
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it("signs in to a selected Tailscale VPN and retries with the same stable route", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "vpn_sign_in_required", message: "Sign in to this VPN to continue." }).mockResolvedValueOnce(remoteInfo);
+    const tailscale: VpnConnection = { provider: "tailscale", connection_id: "tailnet", name: "Tailnet", hostname: null, accept_routes: false };
+    const save = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} vpn_connections={[tailscale]} onSaveNewHost={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await newHostDetails(user, false);
+    await user.click(screen.getByRole("option", { name: /Tailnet.*Tailscale/ }));
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(await screen.findByRole("option", { name: "Sign in to Tailscale" }));
+    expect(openVpnSignIn).toHaveBeenCalledExactlyOnceWith("tailnet");
+    expect(probeSshHost).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: "Connect" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith("Development server", expect.objectContaining({ vpn_connection_id: "tailnet" }), remoteInfo));
+    expect(vi.mocked(probeSshHost).mock.calls[1][0]).toEqual(vi.mocked(probeSshHost).mock.calls[0][0]);
   });
 
   it("edits a connection through a VPN without exporting an unusable SSH alias", async () => {

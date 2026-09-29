@@ -203,8 +203,14 @@ export interface HostCatalogSnapshot {
 
 export type WorkspaceSidebarView = "sessions" | "tasks" | "ports" | "vpn";
 
+export type VpnProvider = "openconnect" | "tailscale";
+
 /** Saved connection metadata. Passwords are never returned to the webview. */
-export interface VpnConnection {
+export type VpnConnection = OpenconnectVpnConnection | TailscaleVpnConnection;
+
+export interface OpenconnectVpnConnection {
+  /** Missing on legacy OpenConnect profiles. */
+  provider?: "openconnect";
   connection_id: string;
   name: string;
   url: string;
@@ -214,7 +220,18 @@ export interface VpnConnection {
   target_ip: string | null;
 }
 
-export interface VpnConnectionInput {
+export interface TailscaleVpnConnection {
+  provider: "tailscale";
+  connection_id: string;
+  name: string;
+  hostname: string | null;
+  accept_routes: boolean;
+}
+
+export type VpnConnectionInput = OpenconnectVpnConnectionInput | TailscaleVpnConnection;
+
+export interface OpenconnectVpnConnectionInput {
+  provider?: "openconnect";
   connection_id: string;
   name: string;
   url: string;
@@ -225,6 +242,19 @@ export interface VpnConnectionInput {
   target_ip: string | null;
 }
 
+export interface VpnEnrollmentInput {
+  name: string;
+  hostname: string | null;
+  accept_routes: boolean;
+}
+
+export interface VpnEnrollmentSnapshot {
+  enrollment_id: string;
+  connection_id: string;
+  status: VpnStatus;
+  error: { code: string; message: string } | null;
+}
+
 export interface VpnConnectionsSnapshot {
   revision: string | null;
   connections: VpnConnection[];
@@ -233,6 +263,11 @@ export interface VpnConnectionsSnapshot {
 export type VpnState = "stopped" | "starting" | "connected" | "stopping";
 
 export interface VpnStatus {
+  provider?: VpnProvider;
+  auth_url?: string | null;
+  hostname?: string | null;
+  tailnet?: string | null;
+  message?: string | null;
   vpn_id?: string | null;
   state: VpnState;
   running: boolean;
@@ -246,6 +281,9 @@ export interface VpnStatus {
 }
 
 export interface VpnSnapshot {
+  /** Missing on older daemons, which support only OpenConnect. */
+  supported_providers?: VpnProvider[];
+  supports_tailscale_enrollment?: boolean;
   connections: VpnStatus[];
   supports_multiple: boolean;
 }

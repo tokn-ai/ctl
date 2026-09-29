@@ -2,12 +2,12 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VpnConnection, VpnConnectionInput, VpnConnectionsSnapshot, VpnSnapshot, VpnStatus } from "../../lib/types";
-import { connectVpn, deleteVpnConnection, loadVpnConnections, saveVpnConnection, stopVpn, vpnStatus } from "../../lib/tauri";
+import { connectVpn, deleteVpnConnection, loadVpnConnections, openVpnSignIn, saveVpnConnection, saveVpnEnrollment, stopVpn, vpnStatus } from "../../lib/tauri";
 import { useVpn, VPN_STATUS_INTERVAL_MS } from "./useVpn";
 
 vi.mock("../../lib/tauri", () => ({
   connectVpn: vi.fn(), deleteVpnConnection: vi.fn(), loadVpnConnections: vi.fn(),
-  saveVpnConnection: vi.fn(), stopVpn: vi.fn(), vpnStatus: vi.fn(),
+  openVpnSignIn: vi.fn(), saveVpnConnection: vi.fn(), saveVpnEnrollment: vi.fn(), stopVpn: vi.fn(), vpnStatus: vi.fn(),
 }));
 
 const connection: VpnConnection = {
@@ -304,5 +304,158 @@ describe("VPN controller", () => {
     expect(result.current.editor?.connection).toEqual(connection);
     expect(JSON.stringify(result.current.editor)).not.toContain("sample-password");
     expect(result.current.editor_error).toBe("Settings changed");
+  });
+});
+
+
+describe("Tailscale VPN controller", () => {
+  const tailscale: VpnConnection = { provider: "tailscale", connection_id: "tailnet", name: "Tailnet", hostname: null, accept_routes: false };
+  const pending = runtime("tailnet", { provider: "tailscale", state: "starting", running: false, endpoint: null,
+    auth_url: "https://login.tailscale.com/a/example" });
+
+  it("treats missing provider capabilities as OpenConnect-only", async () => {
+    vi.mocked(loadVpnConnections).mockResolvedValue({ revision: "1", connections: [tailscale] });
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    expect(result.current.supported_providers).toEqual(["openconnect"]);
+    await act(async () => { await result.current.connect("tailnet"); });
+    expect(connectVpn).not.toHaveBeenCalled();
+  });
+
+  it("returns from connect while browser sign-in is pending, observes completion, and retains targeted stop", async () => {
+    vi.mocked(loadVpnConnections).mockResolvedValue({ revision: "1", connections: [tailscale] });
+    backend.supported_providers = ["openconnect", "tailscale"];
+    vi.mocked(connectVpn).mockImplementation(async () => { backend.connections = [pending]; return pending; });
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.connect("tailnet"); });
+    expect(result.current.actions.size).toBe(0);
+    expect(status(result, "tailnet")?.auth_url).toBe(pending.auth_url);
+    expect(openVpnSignIn).toHaveBeenCalledExactlyOnceWith("tailnet");
+    backend.connections = [{ ...pending, state: "connected", running: true, auth_url: null }];
+    await act(async () => { await result.current.refresh(); });
+    expect(status(result, "tailnet")?.state).toBe("connected");
+    await act(async () => { await result.current.stop("tailnet"); });
+    expect(stopVpn).toHaveBeenCalledWith("tailnet");
+    expect(result.current.statuses).toEqual([]);
+  });
+
+  it("does not undo a stop or block cancellation while browser opening is pending", async () => {
+    backend = { ...observe(pending), supported_providers: ["openconnect", "tailscale"] };
+    const opening = deferred<void>();
+    vi.mocked(openVpnSignIn).mockReturnValue(opening.promise);
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    let sign_in!: Promise<void>;
+    act(() => { sign_in = result.current.signIn("tailnet"); });
+    expect(result.current.signing_in_ids.has("tailnet")).toBe(true);
+    await act(async () => { await result.current.stop("tailnet"); });
+    await act(async () => { opening.reject(new Error("Browser unavailable")); await sign_in; });
+    expect(result.current.statuses).toEqual([]);
+    expect(result.current.action_errors.has("tailnet")).toBe(false);
+    expect(result.current.signing_in_ids.size).toBe(0);
+  });
+
+  it("reports sign-in failure without treating runtime state as uncertain", async () => {
+    backend = observe(pending);
+    vi.mocked(openVpnSignIn).mockRejectedValue(new Error("Browser unavailable"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.signIn("tailnet"); });
+    expect(result.current.action_errors.get("tailnet")).toBe("Browser unavailable");
+    expect(result.current.uncertain_ids.size).toBe(0);
+    expect(status(result, "tailnet")).toEqual(pending);
+    backend.connections = [{ ...pending, state: "connected", auth_url: null }];
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_errors.has("tailnet")).toBe(false);
+  });
+});
+
+
+describe("adopting an authenticated Tailscale enrollment", () => {
+  it("removes a discarded draft immediately and rejects status observations from before cancellation", async () => {
+    const draft = runtime("enrolled", { provider: "tailscale", state: "starting", running: false, endpoint: null,
+      auth_url: "https://login.tailscale.com/a/example" });
+    const other = runtime("external", { connection_id: null });
+    backend = observe(draft, other);
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    act(() => { result.current.addConnection(); result.current.setEnrollmentConnectionId("enrolled"); });
+    const old = deferred<VpnSnapshot>();
+    const fresh = deferred<VpnSnapshot>();
+    vi.mocked(vpnStatus).mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    let observation!: Promise<void>;
+    act(() => { observation = result.current.refresh(); });
+    // Native cancellation has completed, but the controller has not observed it yet.
+    backend = observe(other);
+    act(() => { result.current.setEnrollmentConnectionId(null); result.current.closeEditor(); });
+    expect(result.current.enrollment_connection_id).toBeNull();
+    expect(result.current.statuses).toEqual([other]);
+    await act(async () => { old.resolve(observe(draft, other)); await observation; });
+    expect(result.current.statuses).toEqual([other]);
+    await act(async () => { fresh.resolve(observe(other)); });
+    expect(result.current.statuses).toEqual([other]);
+    expect(stopVpn).not.toHaveBeenCalled();
+  });
+
+  it("removes the previous draft when a failed enrollment is replaced", async () => {
+    backend = observe(runtime("old-draft", { provider: "tailscale", state: "starting" }));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    act(() => result.current.setEnrollmentConnectionId("old-draft"));
+    backend = observe();
+    act(() => result.current.setEnrollmentConnectionId("new-draft"));
+    expect(result.current.enrollment_connection_id).toBe("new-draft");
+    expect(result.current.statuses).toEqual([]);
+    await act(async () => {});
+  });
+
+  it("uses the editor revision, publishes the saved profile, and retains the live runtime", async () => {
+    const tailnet: VpnConnection = { provider: "tailscale", connection_id: "enrolled", name: "Tailnet", hostname: null, accept_routes: false };
+    const enrolled_runtime = runtime("enrolled", { provider: "tailscale" });
+    backend = { ...observe(enrolled_runtime), supports_tailscale_enrollment: true };
+    vi.mocked(saveVpnEnrollment).mockResolvedValue({ revision: "revision-2", connections: [...catalog.connections, tailnet] });
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    act(() => { result.current.addConnection(); result.current.setEnrollmentConnectionId("enrolled"); });
+    expect(result.current.supports_tailscale_enrollment).toBe(true);
+    await act(async () => { expect(await result.current.saveEnrollment("draft-one")).toBe(true); });
+    expect(saveVpnEnrollment).toHaveBeenCalledExactlyOnceWith("draft-one", "revision-1");
+    expect(result.current.connections).toContainEqual(tailnet);
+    expect(result.current.statuses).toContainEqual(enrolled_runtime);
+    expect(result.current.editor).toBeNull();
+    expect(result.current.enrollment_connection_id).toBeNull();
+    expect(saveVpnConnection).not.toHaveBeenCalled();
+    expect(stopVpn).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a conflicted enrollment revision and retries the same authenticated draft", async () => {
+    vi.mocked(saveVpnEnrollment).mockRejectedValueOnce({ code: "vpn_connections_conflict", message: "Connections changed" })
+      .mockResolvedValueOnce({ revision: "revision-3", connections: catalog.connections });
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    act(() => { result.current.addConnection(); result.current.setEnrollmentConnectionId("enrolled"); });
+    vi.mocked(loadVpnConnections).mockResolvedValue({ ...catalog, revision: "revision-2" });
+    await act(async () => { expect(await result.current.saveEnrollment("draft-one")).toBe(false); });
+    expect(result.current.editor?.expected_revision).toBe("revision-2");
+    expect(result.current.editor_error).toBe("Connections changed. Review this connection and save again.");
+    expect(result.current.enrollment_connection_id).toBe("enrolled");
+    await act(async () => { expect(await result.current.saveEnrollment("draft-one")).toBe(true); });
+    expect(saveVpnEnrollment).toHaveBeenNthCalledWith(1, "draft-one", "revision-1");
+    expect(saveVpnEnrollment).toHaveBeenNthCalledWith(2, "draft-one", "revision-2");
+    expect(stopVpn).not.toHaveBeenCalled();
+  });
+
+  it("keeps enrollment save retryable after a catalog error", async () => {
+    vi.mocked(saveVpnEnrollment).mockRejectedValue(new Error("Settings changed"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    expect(result.current.supports_tailscale_enrollment).toBe(false);
+    act(() => { result.current.addConnection(); result.current.setEnrollmentConnectionId("enrolled"); });
+    await act(async () => { expect(await result.current.saveEnrollment("draft-one")).toBe(false); });
+    expect(result.current.editor).not.toBeNull();
+    expect(result.current.enrollment_connection_id).toBe("enrolled");
+    expect(result.current.editor_error).toBe("Settings changed");
+    expect(stopVpn).not.toHaveBeenCalled();
   });
 });

@@ -5,9 +5,21 @@ sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
 ## VPN connections
 
-Open **VPN** in the sidebar to add a named connection with a server, username,
-and password. Advanced settings include an authentication method and an optional
-SSH connectivity-check target. Save the connection, then choose **Connect**.
+Open **VPN** in the sidebar to add a named OpenConnect or Tailscale connection.
+OpenConnect uses a server, username, and password; advanced settings include an
+authentication method and an optional SSH connectivity-check target. Save an
+OpenConnect connection, then choose **Connect**. For a new Tailscale connection,
+enter a name and choose **Sign in with Tailscale**. The dialog shows startup
+progress and opens your browser when sign-in is ready. Finish authentication,
+review the connected account and tailnet, then choose **Save connection**.
+**Open browser** lets you retry opening the sign-in page. Settings are saved only
+after login succeeds; Cancel stops the unsaved connection and removes its local
+identity. A failed save keeps the authenticated setup available for retry.
+
+Tailscale's optional **Device name in Tailscale** is under Advanced options. It
+names this VPN device in the Tailscale device list; rmux assigns a name if left
+blank. Advanced options also allow access to advertised subnet routes.
+Disconnecting a saved connection retains the Tailscale device's login.
 Each saved connection has one item combining its settings and live status,
 including the VPN server, username, and copyable SOCKS5 endpoint when connected.
 An active connection without a matching saved profile appears as a temporary item. The VPN tab shows an active
@@ -18,25 +30,30 @@ cancels its pending startup. An older daemon can still be inspected, but must be
 updated to connect multiple VPNs or disconnect a connection by ID. The CLI's
 untargeted `ctl vpn stop` remains available for its current connection.
 
-Connections, including passwords, are stored in a private `vpns.json` file in
+Connection settings, including OpenConnect passwords, are stored in a private `vpns.json` file in
 the app's configuration directory. The webview receives metadata and a
 password-presence flag; editing with an empty password keeps the stored password.
-The Docker adapter generates its environment file internally when connecting.
-Users do not need to create or select an environment file.
+The OpenConnect adapter generates its environment file internally when connecting.
+Users do not need to create or select an environment file. Tailscale stores its
+device identity in a private Docker volume, separate from the JSON settings.
+Existing OpenConnect profiles remain readable and migrate on the next save.
 
 Signed development keeps VPN ownership on the normal per-user daemon even though
 SSH uses a temporary signed helper. This makes VPNs started by the CLI visible
 in the app. Set `CTLD_VPN_SOCKET_PATH` to select a custom VPN owner for the app;
 use the same path as `CTLD_SOCKET_PATH` in the CLI.
 
-This requires a running Docker-compatible engine and the OpenConnect image built
-with `./docker/openconnect/run.sh build` from the repository root. On macOS and
+This requires a running Docker-compatible engine. Build the OpenConnect image
+with `./docker/openconnect/run.sh build` from the repository root; Tailscale pulls
+its pinned official image on first use. Tailscale requires an updated `ctld`.
+On macOS and
 Linux the app and `ctl vpn` share the local `ctld` owner, including connections
 started from the CLI. Closing the app leaves the VPN running; disconnecting or
 exiting `ctld` stops the container. The SOCKS proxy follows the container's routes;
 it does not change the Mac's system routes. Choose a saved VPN in a host's
 **Connect through** step to route that host through its current SOCKS5 endpoint.
-See [the container setup guide](../../docker/openconnect/README.md) for proxy usage.
+See the [OpenConnect guide](../../docker/openconnect/README.md) or
+[Tailscale guide](../../docker/tailscale/README.md) for setup and identity retention.
 
 ## Develop
 

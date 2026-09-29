@@ -12,7 +12,19 @@ Use `?view=tasks`, `?view=ports`, or `?view=vpn` to open those sidebar views dir
 The VPN preview uses sample connections and simulated status; it never starts a container
 or saves credentials to disk. Add `&vpn=connected` for a saved connection or
 `&vpn=external` for a CLI connection, including when previewing another sidebar
-view to check the VPN activity indicator.
+view to check the VPN activity indicator. Use `&vpn=tailscale-sign-in` for browser
+sign-in pending, `&vpn=tailscale-connected` for an authenticated tailnet, or
+`&vpn=legacy` to inspect provider capability warnings. The preview's **Sign in**
+button simulates a successful login in memory without opening a browser or
+contacting Tailscale. Disconnect and reconnect keep that simulated identity.
+
+Add a new Tailscale connection to preview enrollment before saving. It starts,
+simulates browser sign-in, displays the sample account and tailnet, and only
+adds the profile to the list after **Save connection**. The optional `enrollment`
+query parameter holds useful states: `starting`, `waiting`, `browser-error`, or
+`failure`. For example, `?view=vpn&enrollment=waiting` keeps the browser sign-in
+step visible, with an **Open browser** retry. All enrollment state is in memory;
+Cancel removes the draft and never touches a real container or account.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 

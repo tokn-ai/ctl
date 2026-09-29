@@ -1,16 +1,61 @@
 use super::*;
-use crate::{VpnConnection, VpnState};
+use crate::{VpnConnection, VpnSettings, VpnState};
 use zeroize::Zeroizing;
+
+#[test]
+fn authentication_links_are_restricted_to_tailscale_login() {
+  assert!(is_tailscale_auth_url(
+    "https://login.tailscale.com/a/123abc"
+  ));
+  for value in [
+    "http://login.tailscale.com/a/123",
+    "https://login.tailscale.com.evil.test/a/123",
+    "https://user@login.tailscale.com/a/123",
+    "https://login.tailscale.com:8443/a/123",
+    "https://login.tailscale.com/a/123?next=other",
+    "https://login.tailscale.com/a/123#other",
+    "https://login.tailscale.com/a/",
+    "https://login.tailscale.com/a/123/other",
+    "https://login.tailscale.com/a/%2f",
+    "https://login.tailscale.com/a/123\n",
+    "file:///a/123",
+    "javascript:alert(1)",
+  ] {
+    assert!(!is_tailscale_auth_url(value), "{value}");
+  }
+}
+
+#[test]
+fn old_multi_vpn_daemons_do_not_claim_tailscale_support() {
+  let old: VpnSnapshot = serde_json::from_value(serde_json::json!({
+    "connections":[], "supports_multiple":true
+  }))
+  .unwrap();
+  assert_eq!(old.supported_providers, vec![VpnProvider::Openconnect]);
+  assert!(!old.supports_tailscale_enrollment);
+  let older_tailscale: VpnSnapshot = serde_json::from_value(serde_json::json!({
+    "connections":[], "supports_multiple":true, "supported_providers":["openconnect", "tailscale"]
+  }))
+  .unwrap();
+  assert!(!older_tailscale.supports_tailscale_enrollment);
+  assert!(
+    VpnSnapshot::default()
+      .supported_providers
+      .contains(&VpnProvider::Tailscale)
+  );
+}
 
 fn connection() -> VpnConnection {
   VpnConnection {
     connection_id: "test".into(),
     name: "Test VPN".into(),
-    url: "https://vpn.example.test".into(),
-    username: "test-user".into(),
-    password: Zeroizing::new("literal $password='value'\\tail".into()),
-    auth_method: None,
-    target_ip: None,
+    settings: VpnSettings::Openconnect {
+      url: "https://vpn.example.test".into(),
+      username: "test-user".into(),
+      password: Zeroizing::new("literal $password='value'\\tail".into()),
+      auth_method: None,
+      target_ip: None,
+    },
   }
 }
 
@@ -18,20 +63,32 @@ fn connection() -> VpnConnection {
 fn connection_validation_rejects_env_injection_without_echoing_values() {
   connection().validate().unwrap();
   let mut spaces = connection();
-  spaces.password = Zeroizing::new("   ".into());
+  if let VpnSettings::Openconnect { password, .. } = &mut spaces.settings {
+    *password = Zeroizing::new("   ".into());
+  }
   spaces.validate().unwrap();
   for forbidden in ["\n", "\r", "\0"] {
     for field in 0..7 {
       let mut candidate = connection();
       let value = format!("private-marker{forbidden}VPN_PASSWORD=injected");
+      let VpnSettings::Openconnect {
+        url,
+        username,
+        password,
+        auth_method,
+        target_ip,
+      } = &mut candidate.settings
+      else {
+        unreachable!()
+      };
       match field {
         0 => candidate.connection_id = value,
         1 => candidate.name = value,
-        2 => candidate.url = value,
-        3 => candidate.username = value,
-        4 => candidate.password = Zeroizing::new(value),
-        5 => candidate.auth_method = Some(value),
-        _ => candidate.target_ip = Some(value),
+        2 => *url = value,
+        3 => *username = value,
+        4 => *password = Zeroizing::new(value),
+        5 => *auth_method = Some(value),
+        _ => *target_ip = Some(value),
       }
       let message = candidate.validate().unwrap_err();
       assert!(!message.contains("private-marker"));
@@ -44,13 +101,19 @@ fn connection_validation_rejects_env_injection_without_echoing_values() {
     "https://user@vpn.example.test",
   ] {
     let mut candidate = connection();
-    candidate.url = url.into();
+    if let VpnSettings::Openconnect { url: address, .. } = &mut candidate.settings {
+      *address = url.into();
+    }
     assert!(candidate.validate().is_err());
   }
   let mut candidate = connection();
-  candidate.target_ip = Some("192.0.2.25".into());
+  if let VpnSettings::Openconnect { target_ip, .. } = &mut candidate.settings {
+    *target_ip = Some("192.0.2.25".into());
+  }
   candidate.validate().unwrap();
-  candidate.target_ip = Some("not-an-ip".into());
+  if let VpnSettings::Openconnect { target_ip, .. } = &mut candidate.settings {
+    *target_ip = Some("not-an-ip".into());
+  }
   assert!(candidate.validate().is_err());
 }
 
@@ -66,6 +129,7 @@ async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
     container_name: Some("test-container".into()),
     vpn_url: Some("https://vpn.example.test".into()),
     username: Some("test-user".into()),
+    ..VpnStatus::default()
   };
   let response = expected.clone();
   let daemon = tokio::spawn(async move {
@@ -206,6 +270,158 @@ mod endpoints {
   }
 
   #[tokio::test]
+  async fn tailscale_requires_explicit_support_before_sending_settings() {
+    for supported in [false, true] {
+      let fixture = Fixture::new();
+      let path = fixture.0.join("tailscale.sock");
+      let listener = UnixListener::bind(&path).unwrap();
+      let client = Client::new(path);
+      let daemon = tokio::spawn(async move {
+        let (mut stream, message) = read_request(&listener).await;
+        assert!(matches!(message, ClientMessage::VpnStatus));
+        crate::write_frame(
+          &mut stream,
+          &ServerMessage::VpnStatus {
+            status: VpnStatus::default(),
+            snapshot: Some(VpnSnapshot {
+              supported_providers: if supported {
+                vec![VpnProvider::Openconnect, VpnProvider::Tailscale]
+              } else {
+                vec![VpnProvider::Openconnect]
+              },
+              ..VpnSnapshot::default()
+            }),
+          },
+        )
+        .await
+        .unwrap();
+        drop(stream);
+        if supported {
+          let (mut stream, message) = read_request(&listener).await;
+          assert!(
+            matches!(message, ClientMessage::StartVpnConnection { connection } if connection.provider() == VpnProvider::Tailscale)
+          );
+          crate::write_frame(
+            &mut stream,
+            &ServerMessage::VpnStatus {
+              status: VpnStatus {
+                provider: VpnProvider::Tailscale,
+                state: VpnState::Starting,
+                auth_url: Some("https://login.tailscale.com/a/123abc".into()),
+                ..VpnStatus::default()
+              },
+              snapshot: None,
+            },
+          )
+          .await
+          .unwrap();
+        } else {
+          assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+              .await
+              .is_err()
+          );
+        }
+      });
+      let result = client
+        .start_connection(VpnConnection {
+          connection_id: "tailnet".into(),
+          name: "Tailnet".into(),
+          settings: VpnSettings::Tailscale {
+            hostname: None,
+            accept_routes: false,
+          },
+        })
+        .await;
+      if supported {
+        let status = result.unwrap();
+        assert_eq!(status.state, VpnState::Starting);
+        assert!(status.auth_url.is_some());
+      } else {
+        assert!(matches!(result, Err(VpnError::TailscaleUnsupported)));
+      }
+      daemon.await.unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn forgetting_identity_requires_capability_and_explicit_acknowledgement() {
+    for (supported, acknowledge) in [(false, false), (true, false), (true, true)] {
+      let fixture = Fixture::new();
+      let path = fixture.0.join("enrollment.sock");
+      let listener = UnixListener::bind(&path).unwrap();
+      let client = Client::new(path);
+      let daemon = tokio::spawn(async move {
+        let (mut stream, message) = read_request(&listener).await;
+        assert!(matches!(message, ClientMessage::VpnStatus));
+        crate::write_frame(
+          &mut stream,
+          &ServerMessage::VpnStatus {
+            status: VpnStatus::default(),
+            snapshot: Some(VpnSnapshot {
+              supports_tailscale_enrollment: supported,
+              ..VpnSnapshot::default()
+            }),
+          },
+        )
+        .await
+        .unwrap();
+        drop(stream);
+        if supported {
+          let (mut stream, message) = read_request(&listener).await;
+          assert!(
+            matches!(message, ClientMessage::ForgetTailscaleIdentity { connection_id } if connection_id == "draft")
+          );
+          let response = if acknowledge {
+            ServerMessage::VpnIdentityForgotten
+          } else {
+            ServerMessage::VpnStatus {
+              status: VpnStatus::default(),
+              snapshot: None,
+            }
+          };
+          crate::write_frame(&mut stream, &response).await.unwrap();
+        } else {
+          assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+              .await
+              .is_err()
+          );
+        }
+      });
+      let result = client.forget_tailscale_identity("draft").await;
+      match (supported, acknowledge) {
+        (false, _) => assert_eq!(result.unwrap_err().code(), "vpn_enrollment_unsupported"),
+        (true, false) => assert!(matches!(result, Err(VpnError::UnexpectedResponse))),
+        (true, true) => result.unwrap(),
+      }
+      daemon.await.unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn invalid_identity_cleanup_never_contacts_the_owner() {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.0.join("unused.sock")).unwrap();
+    let client = Client::new(fixture.0.join("unused.sock"));
+    for id in ["", "bad id", "bad\nidentity"] {
+      assert_eq!(
+        client
+          .forget_tailscale_identity(id)
+          .await
+          .unwrap_err()
+          .code(),
+        "vpn_invalid_connection"
+      );
+    }
+    assert!(
+      tokio::time::timeout(Duration::from_millis(50), listener.accept())
+        .await
+        .is_err()
+    );
+  }
+
+  #[tokio::test]
   async fn every_operation_uses_the_explicit_endpoint() {
     let fixture = Fixture::new();
     let selected = fixture.0.join("selected.sock");
@@ -337,6 +553,7 @@ mod endpoints {
           },
         ],
         supports_multiple: true,
+        ..VpnSnapshot::default()
       });
       crate::write_frame(&mut stream, &ServerMessage::VpnStatus { status, snapshot })
         .await
@@ -455,7 +672,9 @@ fn legacy_status_ids_are_stable_and_do_not_claim_multi_connection_support() {
     .snapshot(),
     VpnSnapshot {
       connections: vec![],
-      supports_multiple: false
+      supports_multiple: false,
+      supported_providers: vec![VpnProvider::Openconnect],
+      supports_tailscale_enrollment: false,
     }
   );
 }

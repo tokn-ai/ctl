@@ -4,6 +4,7 @@ import { remoteInstallProgressMode } from "./remoteInstallProgress";
 import { GatewayRouteDialog } from "./GatewayRouteDialog";
 import { tailscaleDeviceDetail, VIRTUAL_SSH_GROUP, VIRTUAL_TAILSCALE_GROUP } from "./hostChoices";
 import { resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
+import { vpnRouteDetail } from "../../features/vpn/status";
 import { sameSshEndpoint } from "../../features/workspace/remoteRecovery";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
@@ -16,6 +17,7 @@ import {
   cancelSshProbe,
   forgetSshCredentials,
   installRemoteAgent,
+  openVpnSignIn,
   restartRemoteRmux,
   checkRemoteRmuxRestart,
   probeSshHost,
@@ -164,6 +166,8 @@ export function SshHostFlow({
   const [vpnConnectionId, setVpnConnectionId] = useState(initialTarget?.vpn_connection_id);
   const [gatewayRoute, setGatewayRoute] = useState<SshGatewayRouteStep[]>(initialTarget?.gateway_route ?? []);
   const [error, setError] = useState<string | null>(null);
+  const [needs_vpn_sign_in, setNeedsVpnSignIn] = useState(false);
+  const [opening_vpn_sign_in, setOpeningVpnSignIn] = useState(false);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
   const [canInstallAgent, setCanInstallAgent] = useState(updateRequired);
@@ -301,6 +305,7 @@ export function SshHostFlow({
       attemptRef.current = null;
       setPrompt(null);
       setError(errorMessage(failure));
+      setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       const code = errorCode(failure);
       const update = code === "ctl_agent_identity_unsupported" || code === "protocol_version_mismatch";
@@ -346,7 +351,8 @@ export function SshHostFlow({
       attemptRef.current = null;
       setPrompt(null);
       setError(errorMessage(failure));
-      setCanInstallAgent(true);
+      setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
+      setCanInstallAgent(errorCode(failure) !== "vpn_sign_in_required");
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       setStep("retry");
     }
@@ -366,6 +372,7 @@ export function SshHostFlow({
       if (attemptRef.current !== attempt || closedRef.current) return;
       setNeedsDaemonRestart(false);
       setError(errorMessage(failure));
+      setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
       setStep("retry");
     } finally {
       if (attemptRef.current === attempt) {
@@ -397,6 +404,7 @@ export function SshHostFlow({
       attemptRef.current = null;
       setPrompt(null);
       setError(errorMessage(failure));
+      setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       setStep("retry");
     } finally {
@@ -685,8 +693,7 @@ export function SshHostFlow({
           ...(onSaveNewHost ? vpn_connections.map((connection) => ({
             id: `vpn:${connection.connection_id}`,
             label: connection.name,
-            detail: vpn_statuses.find((status) => status.connection_id === connection.connection_id)?.state === "connected"
-              ? "VPN · Connected" : "VPN · Connect automatically when needed",
+            detail: `VPN · ${vpnRouteDetail(connection, vpn_statuses)}`,
             group: "Saved VPNs",
           })) : []),
           ...(onSaveNewHost ? gateways.map((gateway) => ({
@@ -788,16 +795,19 @@ export function SshHostFlow({
         : step === "retry"
           ? "Could not connect"
           : "Connect host";
-      description = needsDaemonRestart
-        ? "The bundled components were installed, but the running rmux daemon is still incompatible. Choose Force restart to end its existing terminal sessions, or Connect to check again. The update has not stopped running sessions."
-        : (step === "retry" || step === "update") && canInstallAgent
-          ? (needsUpdate
-            ? "Update the remote components to match this app. Running sessions are preserved; an already-running daemon may still need to be restarted on the host."
-            : "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually.")
-          : "OpenSSH will ask for host verification or authentication if needed.";
-      mode = {
+      description = needs_vpn_sign_in
+        ? "Sign in to Tailscale with your browser, then choose Connect to continue. You can also manage this connection from the VPN page."
+        : needsDaemonRestart
+          ? "The bundled components were installed, but the running rmux daemon is still incompatible. Choose Force restart to end its existing terminal sessions, or Connect to check again. The update has not stopped running sessions."
+          : (step === "retry" || step === "update") && canInstallAgent
+            ? (needsUpdate
+              ? "Update the remote components to match this app. Running sessions are preserved; an already-running daemon may still need to be restarted on the host."
+              : "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually.")
+            : "OpenSSH will ask for host verification or authentication if needed.";
+      mode = opening_vpn_sign_in ? { kind: "progress", message: "Opening sign-in in your browser…" } : {
         kind: "pick",
         choices: [
+          ...(needs_vpn_sign_in ? [{ id: "vpn_sign_in", label: "Sign in to Tailscale" }] : []),
           ...((step === "retry" || step === "update") && canInstallAgent
             ? [
                 {
@@ -836,7 +846,7 @@ export function SshHostFlow({
       mode = { kind: "progress" };
   }
 
-  function submit(value: string) {
+  async function submit(value: string) {
     setError(null);
     if (step === "host") {
       const selectedDevice = availableTailscaleDevices.find((device) => value === `tailscale:${device.node_id}`);
@@ -971,7 +981,18 @@ export function SshHostFlow({
       (step === "retry" || step === "update" || step === "reconnect") &&
       candidateRef.current
     ) {
-      if (value === "restart_rmux") setStep("restart_confirm");
+      if (value === "vpn_sign_in") {
+        const candidate = candidateRef.current;
+        if (candidate.kind !== "ssh" || !candidate.vpn_connection_id || opening_vpn_sign_in) return;
+        setOpeningVpnSignIn(true);
+        try {
+          await openVpnSignIn(candidate.vpn_connection_id);
+        } catch (failure) {
+          if (!closedRef.current) setError(errorMessage(failure));
+        } finally {
+          if (!closedRef.current) setOpeningVpnSignIn(false);
+        }
+      } else if (value === "restart_rmux") setStep("restart_confirm");
       else if (value === "install_agent") void installAgent(candidateRef.current);
       else void connect(candidateRef.current);
     }

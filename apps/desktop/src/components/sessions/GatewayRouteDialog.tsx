@@ -1,3 +1,4 @@
+import { vpnRouteDetail } from "../../features/vpn/status";
 import { useMemo, useState } from "react";
 import type {
   SshConnectionTarget,
@@ -344,7 +345,7 @@ export function GatewayRouteDialog({
             {missingVpn ? <option value={`vpn:${vpnConnectionId}`}>Unavailable saved VPN</option> : null}
             {vpn_connections.length ? <optgroup label="Saved VPNs">
               {vpn_connections.map((connection) => <option key={connection.connection_id} value={`vpn:${connection.connection_id}`}>
-                {connection.name} · {vpn_statuses.find((status) => status.connection_id === connection.connection_id)?.state === "connected" ? "Connected" : "Connect when needed"}
+                {connection.name} · {vpnRouteDetail(connection, vpn_statuses)}
               </option>)}
             </optgroup> : null}
             {draftGateways.length ? <optgroup label="Saved gateways">

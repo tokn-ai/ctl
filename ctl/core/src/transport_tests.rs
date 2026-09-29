@@ -72,10 +72,12 @@ async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
       }
       output = timeout(TEST_TIMEOUT, command.output()) => output.unwrap().unwrap(),
     };
-    assert!(!output.status.success());
+    // ProxyCommand=false may report a closed connection or a broken pipe,
+    // depending on whether its exit races with OpenSSH writing its banner.
+    // The listener above checks the no-fallback guarantee directly.
     let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(255), "{diagnostics}");
     assert!(!diagnostics.contains("Cannot specify -J with ProxyCommand"));
-    assert!(diagnostics.contains("Connection closed"), "{diagnostics}");
   }
 }
 

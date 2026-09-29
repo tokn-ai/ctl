@@ -1918,10 +1918,12 @@ mod tests {
         }
         output = tokio::time::timeout(Duration::from_secs(5), command.output()) => output.unwrap().unwrap(),
       };
-      assert!(!output.status.success());
+      // ProxyCommand=false may report a closed connection or a broken pipe,
+      // depending on whether its exit races with OpenSSH writing its banner.
+      // The listener above checks the no-fallback guarantee directly.
       let diagnostics = String::from_utf8_lossy(&output.stderr);
+      assert_eq!(output.status.code(), Some(255), "{diagnostics}");
       assert!(!diagnostics.contains("Cannot specify -J with ProxyCommand"));
-      assert!(diagnostics.contains("Connection closed"), "{diagnostics}");
     }
   }
 

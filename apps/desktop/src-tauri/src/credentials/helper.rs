@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use ctld_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 
@@ -45,40 +45,26 @@ pub(super) async fn exchange(
       .kill_on_drop(true)
       .spawn()
       .map_err(|_| unavailable())?;
-    let mut stdin = child.stdin.take().ok_or_else(unavailable)?;
+    let stdin = child.stdin.take().ok_or_else(unavailable)?;
     let stdout = child.stdout.take().ok_or_else(unavailable)?;
     let exchange = async {
-      let (status, (), output) = tokio::try_join!(
+      let (status, input_result, output) = tokio::try_join!(
         child.wait(),
         async move {
-          stdin.write_all(&bytes).await?;
-          stdin.shutdown().await?;
-          drop(stdin);
-          Ok(())
+          // Older helpers can exit before reading stdin. Keep that write
+          // failure as evidence while collecting their status and output.
+          Ok::<_, std::io::Error>(write_request(stdin, &bytes).await)
         },
         read_limited(stdout)
       )?;
-      Ok::<_, std::io::Error>((status, output))
+      Ok::<_, std::io::Error>((status, input_result, output))
     }
     .await;
-    let Ok((status, output)) = exchange else {
+    let Ok((status, input_result, output)) = exchange else {
       let _ = child.kill().await;
       return Err(invalid_response());
     };
-    let response: Response = serde_json::from_slice(&output).map_err(|_| {
-      if status.success() {
-        invalid_response()
-      } else {
-        unsupported_helper()
-      }
-    })?;
-    if let Response::Error { code, .. } = response {
-      return Err(sanitized_error(&code));
-    }
-    if !status.success() {
-      return Err(invalid_response());
-    }
-    Ok(response)
+    response_from_output(status.success(), input_result, &output)
   })
   .await
   .map_err(|_| {
@@ -87,6 +73,37 @@ pub(super) async fn exchange(
       "The saved credential request timed out. Try again.",
     )
   })?
+}
+
+async fn write_request(mut stdin: impl AsyncWrite + Unpin, bytes: &[u8]) -> std::io::Result<()> {
+  stdin.write_all(bytes).await?;
+  stdin.shutdown().await?;
+  // ChildStdin must be dropped after writing so EOF-reading helpers can reply.
+  drop(stdin);
+  Ok(())
+}
+
+pub(super) fn response_from_output(
+  status_success: bool,
+  input_result: std::io::Result<()>,
+  output: &[u8],
+) -> CommandResult<Response> {
+  let response: Response = serde_json::from_slice(output).map_err(|_| {
+    if status_success {
+      invalid_response()
+    } else {
+      unsupported_helper()
+    }
+  })?;
+  if let Response::Error { code, .. } = response {
+    return Err(sanitized_error(&code));
+  }
+  if !status_success {
+    return Err(invalid_response());
+  }
+  // A response cannot confirm successful handling of an incomplete request.
+  input_result.map_err(|_| invalid_response())?;
+  Ok(response)
 }
 
 async fn read_limited(reader: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {

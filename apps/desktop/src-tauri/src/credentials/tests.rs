@@ -312,7 +312,7 @@ async fn helper_errors_and_stderr_are_sanitized() {
   assert_eq!(error.code, "credential_store_locked");
   assert!(!error.message.contains("secret"));
   let error = helper::exchange(
-    command("printf 'stderr-secret' >&2; exit 2"),
+    command("exec 0<&-; printf 'stderr-secret' >&2; exit 2"),
     Request::List,
     std::time::Duration::from_secs(2),
   )
@@ -323,11 +323,44 @@ async fn helper_errors_and_stderr_are_sanitized() {
 }
 
 #[cfg(unix)]
+#[test]
+fn a_broken_input_pipe_does_not_mask_helper_failure_or_confirm_success() {
+  let broken_pipe = || {
+    Err(std::io::Error::new(
+      std::io::ErrorKind::BrokenPipe,
+      "input-secret",
+    ))
+  };
+  let failure =
+    helper::response_from_output(false, broken_pipe(), b"legacy-helper-secret").unwrap_err();
+  assert_eq!(failure.code, "credential_helper_unsupported");
+  assert!(!failure.message.contains("secret"));
+
+  let output = serde_json::to_vec(&Response::Error {
+    code: "credential_store_locked".into(),
+    message: "helper-secret".into(),
+  })
+  .unwrap();
+  let failure = helper::response_from_output(false, broken_pipe(), &output).unwrap_err();
+  assert_eq!(failure.code, "credential_store_locked");
+  assert!(!failure.message.contains("secret"));
+
+  let output = serde_json::to_vec(&Response::Forgotten).unwrap();
+  let failure = helper::response_from_output(true, broken_pipe(), &output).unwrap_err();
+  assert_eq!(failure.code, "credential_helper_invalid_response");
+  assert!(!failure.message.contains("secret"));
+  assert_eq!(
+    helper::response_from_output(true, Ok(()), &output).unwrap(),
+    Response::Forgotten
+  );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn helper_output_and_lifetime_are_bounded() {
   let error = helper::exchange(
     command(
-      "cat >/dev/null; i=0; while [ \"$i\" -lt 1025 ]; do printf '%01024d' 0; i=$((i+1)); done",
+      "cat >/dev/null; i=0; while [ \"$i\" -lt 1025 ]; do printf '%01024d' 0; i=$((i+1)); done; exec sleep 30",
     ),
     Request::List,
     std::time::Duration::from_secs(2),

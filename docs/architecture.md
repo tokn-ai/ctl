@@ -233,7 +233,19 @@ device hostname and an `accept_routes` preference. Its node identity lives in a
 durable Docker volume keyed by the local owner and profile ID. Disconnect and
 profile deletion retain that volume. Container names reserve each identity
 exclusively, and lease labels plus immutable container IDs prevent another
-daemon's launch from being adopted or removed.
+daemon's launch from being adopted or removed. Container inspection parses typed
+JSON from Docker and Podman, including their ID spelling variants, without
+engine-specific Go template assumptions.
+
+Desktop Tailscale setup uses a provisional, window-owned enrollment. Native code
+assigns the ID, fixes the connection settings, and starts asynchronously without
+writing `vpns.json`. The editor observes startup, browser sign-in, device approval,
+and errors, and opens the browser only for a current validated login URL. Once
+connected, Save inserts the exact enrolled settings without reconnecting or
+replacing its identity. Failed writes leave the enrollment available for retry.
+Cancel stops the provisional connection and removes only its unused local
+identity volume; it does not revoke the device in the remote tailnet. A profile
+already written to disk is never removed by delayed enrollment cancellation.
 
 `ctl vpn start-tailscale --id ID` and the desktop app launch a pinned official
 image in userspace mode, with a random loopback SOCKS5 port and no host route
@@ -249,8 +261,10 @@ URL before opening the default browser. No caller-supplied URL is accepted.
 Host connection attempts that need login return an actionable sign-in-and-retry
 result, while preserving their selected VPN ID.
 
-IPC 11 snapshots add `supported_providers`, defaulting to OpenConnect when absent.
-Tailscale starts probe this capability on the selected owner before sending any
+IPC 11 snapshots add `supported_providers`, defaulting to OpenConnect when absent,
+and `supports_tailscale_enrollment`, defaulting to false for older owners.
+The enrollment capability gates both setup and the identity-cleanup request.
+Tailscale starts check provider support on the selected owner before sending any
 profile settings. Additive status fields retain compatibility with clients that
 only understand the existing stopped/starting/connected/stopping states.
 

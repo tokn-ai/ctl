@@ -98,6 +98,53 @@ impl Repository {
       .ok_or_else(not_found)
   }
 
+  pub(super) fn contains(&self, connection_id: &str) -> CommandResult<bool> {
+    let _lock = self.lock()?;
+    Ok(
+      self
+        .read()?
+        .document
+        .connections
+        .iter()
+        .any(|connection| connection.connection_id == connection_id),
+    )
+  }
+
+  /// Only enrollment may create an already-connected profile; existing profile
+  /// editing continues to require a disconnected runtime.
+  pub(super) fn save_enrollment(
+    &self,
+    expected_revision: Option<&str>,
+    connection: VpnConnection,
+  ) -> CommandResult<VpnConnectionsSnapshot> {
+    if connection.provider() != VpnProvider::Tailscale {
+      return Err(invalid("Only Tailscale supports browser enrollment."));
+    }
+    connection.validate().map_err(invalid)?;
+    let _lock = self.lock()?;
+    let mut current = self.read()?;
+    if let Some(existing) = current
+      .document
+      .connections
+      .iter()
+      .find(|existing| existing.connection_id == connection.connection_id)
+    {
+      // A retry after a successful write must not overwrite later edits, and
+      // must also work when the caller missed the original successful reply.
+      return if existing == &connection {
+        Ok(current.snapshot())
+      } else {
+        Err(error(
+          "vpn_connections_conflict",
+          "This connection changed on disk. Reload before saving.",
+        ))
+      };
+    }
+    check_revision(current.revision.as_deref(), expected_revision)?;
+    current.document.connections.push(connection);
+    self.persist(current.document)
+  }
+
   #[cfg(test)]
   pub(super) fn save(
     &self,

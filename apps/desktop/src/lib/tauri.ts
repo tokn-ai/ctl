@@ -43,6 +43,8 @@ import type {
   HostCatalogSnapshot,
   SshConnectionStatus,
   VpnConnectionInput,
+  VpnEnrollmentInput,
+  VpnEnrollmentSnapshot,
   VpnConnectionsSnapshot,
   VpnStatus,
   VpnSnapshot,
@@ -82,6 +84,22 @@ export async function deleteVpnConnection(
 
 export async function connectVpn(connection_id: string): Promise<VpnStatus> {
   return invoke("connect_vpn", { request: { connection_id } });
+}
+
+export async function beginVpnEnrollment(input: VpnEnrollmentInput): Promise<VpnEnrollmentSnapshot> {
+  return invoke("begin_vpn_enrollment", { request: input });
+}
+
+export async function vpnEnrollmentStatus(enrollment_id: string): Promise<VpnEnrollmentSnapshot> {
+  return invoke("vpn_enrollment_status", { request: { enrollment_id } });
+}
+
+export async function saveVpnEnrollment(enrollment_id: string, expected_revision: string | null): Promise<VpnConnectionsSnapshot> {
+  return invoke("save_vpn_enrollment", { request: { enrollment_id, expected_revision } });
+}
+
+export async function cancelVpnEnrollment(enrollment_id: string): Promise<void> {
+  return invoke("cancel_vpn_enrollment", { request: { enrollment_id } });
 }
 
 export async function openVpnSignIn(vpn_id: string): Promise<void> {

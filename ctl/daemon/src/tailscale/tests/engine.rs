@@ -330,3 +330,54 @@ async fn cancellation_removes_a_container_created_after_the_attached_client_exit
   assert!(!engine.root.join("container.running").exists());
   engine.wait_exit().await;
 }
+
+#[tokio::test]
+async fn forgetting_identity_requires_no_container_and_preserves_in_use_volumes() {
+  let engine = Engine::new();
+  let volume = format!("{}-state", config("cancelled-enrollment").container_name);
+  fs::write(engine.root.join("volume"), format!("{volume}\n")).unwrap();
+  fs::write(engine.root.join("container.running"), "").unwrap();
+  let result = forget_identity_with_engine("cancelled-enrollment", &engine.executable).await;
+  assert!(result.unwrap_err().to_string().contains("still owned"));
+  assert!(!engine.root.join("volume-remove.args").exists());
+  fs::remove_file(engine.root.join("container.running")).unwrap();
+  fs::write(engine.root.join("volume_in_use"), "").unwrap();
+  let result = forget_identity_with_engine("cancelled-enrollment", &engine.executable).await;
+  assert!(result.unwrap_err().to_string().contains("still be in use"));
+  assert!(engine.root.join("volume").exists());
+  let arguments = fs::read_to_string(engine.root.join("volume-remove.args")).unwrap();
+  assert_eq!(arguments, format!("volume\nrm\n{volume}\n"));
+  assert!(!arguments.contains("--force"));
+  fs::remove_file(engine.root.join("volume_in_use")).unwrap();
+  forget_identity_with_engine("cancelled-enrollment", &engine.executable)
+    .await
+    .unwrap();
+  assert!(!engine.root.join("volume").exists());
+  forget_identity_with_engine("cancelled-enrollment", &engine.executable)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn forgetting_identity_fails_closed_on_unknown_engine_state() {
+  let engine = Engine::new();
+  fs::write(engine.root.join("engine_unavailable"), "").unwrap();
+  assert!(
+    forget_identity_with_engine("cancelled-enrollment", &engine.executable)
+      .await
+      .is_err()
+  );
+  assert!(!engine.root.join("volume-remove.args").exists());
+}
+
+#[tokio::test]
+async fn forgetting_identity_never_removes_another_profiles_state() {
+  let engine = Engine::new();
+  let volume = format!("{}-state", config("saved-profile").container_name);
+  fs::write(engine.root.join("volume"), format!("{volume}\n")).unwrap();
+  forget_identity_with_engine("cancelled-enrollment", &engine.executable)
+    .await
+    .unwrap();
+  assert!(engine.root.join("volume").exists());
+  assert!(!engine.root.join("volume-remove.args").exists());
+}

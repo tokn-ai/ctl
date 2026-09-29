@@ -63,5 +63,38 @@ fn identity_names_are_stable_private_and_scoped_to_profile_and_user() {
   assert_eq!(config("first").hostname, config("first").hostname);
 }
 
+#[test]
+fn docker_and_podman_inspect_json_verify_the_lease_without_template_field_names() {
+  for id_key in ["Id", "ID"] {
+    let bytes = format!(
+      r#"[{{"{id_key}":"owned-container","Config":{{"Labels":{{"io.ctl.lease":"owner-token"}}}},"NetworkSettings":{{"Ports":{{"1080/tcp":[{{"HostIp":"127.0.0.1","HostPort":"49152"}}]}}}}}}]"#
+    );
+    let container = parse_owned_container(bytes.as_bytes(), "owner-token").unwrap();
+    assert_eq!(container.id, "owned-container");
+    assert_eq!(
+      parse_published_port(&serde_json::to_vec(&container.network.unwrap().ports).unwrap())
+        .unwrap(),
+      49152
+    );
+    assert_eq!(
+      parse_owned_container(bytes.as_bytes(), "another-owner")
+        .err()
+        .unwrap()
+        .kind(),
+      io::ErrorKind::PermissionDenied
+    );
+  }
+  let created = parse_owned_container(br#"[{"Id":"created-container","Config":{"Labels":{"io.ctl.lease":"owner-token"}},"NetworkSettings":null}]"#, "owner-token").unwrap();
+  assert_eq!(created.id, "created-container");
+  assert!(created.network.is_none());
+  for bytes in [
+    b"[]".as_slice(),
+    br#"[{"Id":"owned-container","Config":{"Labels":null},"NetworkSettings":{"Ports":null}}]"#,
+    br#"{"Id":"owned-container"}"#,
+  ] {
+    assert!(parse_owned_container(bytes, "owner-token").is_err());
+  }
+}
+
 #[cfg(unix)]
 mod engine;

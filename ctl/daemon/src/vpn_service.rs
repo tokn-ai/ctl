@@ -30,6 +30,10 @@ enum Request {
     reply: Reply,
   },
   List(oneshot::Sender<Result<VpnSnapshot, String>>),
+  ForgetTailscaleIdentity {
+    connection_id: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
 }
 
 #[derive(Clone)]
@@ -82,6 +86,22 @@ impl VpnService {
   pub(super) async fn list(&self) -> Result<VpnSnapshot, String> {
     let (reply, result) = oneshot::channel();
     self.request(Request::List(reply), result).await
+  }
+
+  pub(super) async fn forget_tailscale_identity(
+    &self,
+    connection_id: String,
+  ) -> Result<(), String> {
+    let (reply, result) = oneshot::channel();
+    self
+      .request(
+        Request::ForgetTailscaleIdentity {
+          connection_id,
+          reply,
+        },
+        result,
+      )
+      .await
   }
 
   async fn request<T>(
@@ -217,6 +237,7 @@ enum Source {
 #[derive(PartialEq, Eq)]
 enum Identity {
   EnvFile(PathBuf),
+  Cleanup(String),
   Connection {
     connection_id: String,
     fingerprint: [u8; 32],
@@ -227,7 +248,9 @@ impl Identity {
   fn connection_id(&self) -> Option<String> {
     match self {
       Self::EnvFile(_) => None,
-      Self::Connection { connection_id, .. } => Some(connection_id.clone()),
+      Self::Cleanup(connection_id) | Self::Connection { connection_id, .. } => {
+        Some(connection_id.clone())
+      }
     }
   }
 }
@@ -388,7 +411,9 @@ where
       .connection_id()
       .expect("saved connection has an ID");
     if let Some(entry) = self.entries.get_mut(&id) {
-      if entry.identity.as_ref() == Some(&prepared.identity) {
+      if matches!(entry.phase, Phase::Stopping(_))
+        || entry.identity.as_ref() == Some(&prepared.identity)
+      {
         entry.join_start(&id, vec![reply]);
       } else {
         let _ = reply.send(Err(
@@ -433,6 +458,44 @@ where
       self.entries.keys().next().cloned().unwrap_or_default()
     };
     self.stop_entry(&id, Some(reply));
+  }
+
+  fn forget_identity<C, T>(
+    &mut self,
+    connection_id: String,
+    reply: oneshot::Sender<Result<(), String>>,
+    forget: &C,
+  ) where
+    C: Fn(String) -> T,
+    T: Future<Output = Result<(), String>> + Send + 'static,
+  {
+    if self.entries.contains_key(&connection_id) {
+      let _ = reply.send(Err(
+        "Stop the Tailscale connection before forgetting its identity".into(),
+      ));
+      return;
+    }
+    if self.entries.len() >= MAX_CONNECTIONS {
+      let _ = reply.send(Err(
+        "At most 16 VPN operations can be active at once".into(),
+      ));
+      return;
+    }
+    let cleanup = (forget)(connection_id.clone());
+    self.entries.insert(
+      connection_id.clone(),
+      Entry {
+        identity: Some(Identity::Cleanup(connection_id)),
+        env_paths: HashSet::new(),
+        metadata: Metadata::default(),
+        provider: VpnProvider::Tailscale,
+        cancellation: None,
+        phase: Phase::Stopping(Box::pin(async move {
+          let _ = reply.send(cleanup.await);
+        })),
+        replies: Vec::new(),
+      },
+    );
   }
 
   fn stop_entry(&mut self, id: &str, reply: Option<Reply>) {
@@ -608,6 +671,21 @@ where
   F: Fn(Config) -> S + Send + 'static,
   S: Future<Output = io::Result<L>> + Send + 'static,
 {
+  spawn_with_forget(start, |connection_id: String| async move {
+    tailscale::forget_identity(&connection_id)
+      .await
+      .map_err(|error| error.to_string())
+  })
+}
+
+fn spawn_with_forget<L, F, S, C, T>(start: F, forget: C) -> (VpnService, VpnOwner)
+where
+  L: Lease + 'static,
+  F: Fn(Config) -> S + Send + 'static,
+  S: Future<Output = io::Result<L>> + Send + 'static,
+  C: Fn(String) -> T + Send + 'static,
+  T: Future<Output = Result<(), String>> + Send + 'static,
+{
   let (requests, mut receiver) = mpsc::channel(16);
   let (shutdown, mut shutdown_receiver) = oneshot::channel();
   let task = tokio::spawn(async move {
@@ -621,6 +699,9 @@ where
           Some(Request::Start { source, reply }) => registry.start(source, reply),
           Some(Request::Stop { vpn_id, reply }) => registry.stop(vpn_id, reply),
           Some(Request::List(reply)) => { let _ = reply.send(Ok(registry.snapshot())); }
+          Some(Request::ForgetTailscaleIdentity { connection_id, reply }) => {
+            registry.forget_identity(connection_id, reply, &forget);
+          }
           None => break,
         }
       }

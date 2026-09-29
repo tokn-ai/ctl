@@ -316,3 +316,28 @@
   color: var(--muted);
   font-size: 10px;
 }
+
+.vpn-enrollment {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.vpn-enrollment p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.vpn-enrollment p strong {
+  color: var(--text);
+}
+
+.vpn-enrollment > button {
+  align-self: flex-start;
+}

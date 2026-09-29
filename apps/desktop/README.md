@@ -7,11 +7,19 @@ sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
 Open **VPN** in the sidebar to add a named OpenConnect or Tailscale connection.
 OpenConnect uses a server, username, and password; advanced settings include an
-authentication method and an optional SSH connectivity-check target. Tailscale
-uses browser sign-in, an optional device hostname, and optional subnet routes.
-Save the connection, then choose **Connect**. For Tailscale, choose **Sign in**
-when prompted and finish authentication in your browser. The item updates when
-the connection is ready. Disconnecting retains the Tailscale device's login.
+authentication method and an optional SSH connectivity-check target. Save an
+OpenConnect connection, then choose **Connect**. For a new Tailscale connection,
+enter a name and choose **Sign in with Tailscale**. The dialog shows startup
+progress and opens your browser when sign-in is ready. Finish authentication,
+review the connected account and tailnet, then choose **Save connection**.
+**Open browser** lets you retry opening the sign-in page. Settings are saved only
+after login succeeds; Cancel stops the unsaved connection and removes its local
+identity. A failed save keeps the authenticated setup available for retry.
+
+Tailscale's optional **Device name in Tailscale** is under Advanced options. It
+names this VPN device in the Tailscale device list; rmux assigns a name if left
+blank. Advanced options also allow access to advertised subnet routes.
+Disconnecting a saved connection retains the Tailscale device's login.
 Each saved connection has one item combining its settings and live status,
 including the VPN server, username, and copyable SOCKS5 endpoint when connected.
 An active connection without a matching saved profile appears as a temporary item. The VPN tab shows an active

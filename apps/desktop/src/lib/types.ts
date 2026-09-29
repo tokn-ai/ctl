@@ -242,6 +242,19 @@ export interface OpenconnectVpnConnectionInput {
   target_ip: string | null;
 }
 
+export interface VpnEnrollmentInput {
+  name: string;
+  hostname: string | null;
+  accept_routes: boolean;
+}
+
+export interface VpnEnrollmentSnapshot {
+  enrollment_id: string;
+  connection_id: string;
+  status: VpnStatus;
+  error: { code: string; message: string } | null;
+}
+
 export interface VpnConnectionsSnapshot {
   revision: string | null;
   connections: VpnConnection[];
@@ -270,6 +283,7 @@ export interface VpnStatus {
 export interface VpnSnapshot {
   /** Missing on older daemons, which support only OpenConnect. */
   supported_providers?: VpnProvider[];
+  supports_tailscale_enrollment?: boolean;
   connections: VpnStatus[];
   supports_multiple: boolean;
 }

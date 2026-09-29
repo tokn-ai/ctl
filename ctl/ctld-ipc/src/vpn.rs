@@ -80,6 +80,57 @@ impl Client {
       .map(|response| response.status)
   }
 
+  /// Ensures the selected owner can safely clean up a cancelled Tailscale setup.
+  ///
+  /// # Errors
+  /// Returns an update hint for older owners, or connection/startup errors.
+  pub async fn ensure_tailscale_enrollment_supported(&self) -> Result<(), VpnError> {
+    let snapshot = self
+      .request(ClientMessage::VpnStatus, true, Duration::from_secs(15))
+      .await?
+      .snapshot();
+    if snapshot.supports_tailscale_enrollment
+      && snapshot
+        .supported_providers
+        .contains(&VpnProvider::Tailscale)
+    {
+      Ok(())
+    } else {
+      Err(VpnError::Daemon {
+        code: "vpn_enrollment_unsupported".into(),
+        message: "Update and restart ctld to sign in before saving a Tailscale connection".into(),
+      })
+    }
+  }
+
+  /// Removes a stopped Tailscale identity belonging to this local owner.
+  ///
+  /// # Errors
+  /// Returns an error for active/in-use identities, old owners, or engine errors.
+  pub async fn forget_tailscale_identity(&self, connection_id: &str) -> Result<(), VpnError> {
+    if connection_id.is_empty()
+      || connection_id.len() > 128
+      || connection_id
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace())
+    {
+      return Err(VpnError::InvalidConnection(
+        "Invalid Tailscale connection ID".into(),
+      ));
+    }
+    self.ensure_tailscale_enrollment_supported().await?;
+    self
+      .request(
+        ClientMessage::ForgetTailscaleIdentity {
+          connection_id: connection_id.into(),
+        },
+        true,
+        Duration::from_secs(30),
+      )
+      .await
+      .map(|_| ())
+  }
+
   /// Reads VPN status without starting a daemon or searching other endpoints.
   ///
   /// # Errors
@@ -262,6 +313,7 @@ impl Response {
         connections: if active { vec![status] } else { Vec::new() },
         supports_multiple: false,
         supported_providers: vec![VpnProvider::Openconnect],
+        supports_tailscale_enrollment: false,
       }
     })
   }
@@ -327,10 +379,22 @@ where
   }
   crate::write_frame(stream, message).await?;
   match crate::read_frame::<_, ServerMessage>(stream).await? {
-    Some(ServerMessage::VpnStatus { status, snapshot }) => Ok(Response {
-      status: normalize_status(status),
-      snapshot,
-    }),
+    Some(ServerMessage::VpnStatus { status, snapshot })
+      if !matches!(message, ClientMessage::ForgetTailscaleIdentity { .. }) =>
+    {
+      Ok(Response {
+        status: normalize_status(status),
+        snapshot,
+      })
+    }
+    Some(ServerMessage::VpnIdentityForgotten)
+      if matches!(message, ClientMessage::ForgetTailscaleIdentity { .. }) =>
+    {
+      Ok(Response {
+        status: VpnStatus::default(),
+        snapshot: None,
+      })
+    }
     Some(ServerMessage::Error { code, message }) => Err(VpnError::Daemon { code, message }),
     None => Err(VpnError::ConnectionClosed),
     Some(_) => Err(VpnError::UnexpectedResponse),

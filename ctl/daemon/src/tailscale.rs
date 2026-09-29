@@ -208,6 +208,87 @@ pub(super) async fn start(config: Config) -> io::Result<ManagedVpn> {
   start_config(config, &find_engine()?).await
 }
 
+pub(super) async fn forget_identity(connection_id: &str) -> io::Result<()> {
+  forget_identity_with_engine(connection_id, &find_engine()?).await
+}
+
+async fn forget_identity_with_engine(connection_id: &str, engine: &Path) -> io::Result<()> {
+  let config = Config::from_connection(&VpnConnection {
+    connection_id: connection_id.into(),
+    name: "Tailscale enrollment".into(),
+    settings: VpnSettings::Tailscale {
+      hostname: None,
+      accept_routes: false,
+    },
+  })?;
+  let containers = timeout(
+    COMMAND_TIMEOUT,
+    engine_command(engine)
+      .args([
+        "container",
+        "ls",
+        "--all",
+        "--quiet",
+        "--filter",
+        &format!("name={}", config.container_name),
+      ])
+      .output(),
+  )
+  .await??;
+  if !containers.status.success() {
+    return Err(io::Error::other(
+      "Could not check Tailscale identity ownership; start the container engine and try again",
+    ));
+  }
+  if !containers.stdout.iter().all(u8::is_ascii_whitespace) {
+    return Err(io::Error::other(
+      "Tailscale identity is still owned by a container; stop it before forgetting the identity",
+    ));
+  }
+  let volume = format!("{}-state", config.container_name);
+  let volumes = timeout(
+    COMMAND_TIMEOUT,
+    engine_command(engine)
+      .args([
+        "volume",
+        "ls",
+        "--quiet",
+        "--filter",
+        &format!("name={volume}"),
+      ])
+      .output(),
+  )
+  .await??;
+  if !volumes.status.success() {
+    return Err(io::Error::other(
+      "Could not check Tailscale identity storage; start the container engine and try again",
+    ));
+  }
+  if !volumes
+    .stdout
+    .split(|byte| *byte == b'\n')
+    .any(|name| name == volume.as_bytes())
+  {
+    return Ok(());
+  }
+  // No --force: another owner may mount this identity after the name check.
+  // The engine must reject removal while any container references the volume.
+  let removed = timeout(
+    COMMAND_TIMEOUT,
+    engine_command(engine)
+      .args(["volume", "rm", &volume])
+      .stdout(Stdio::null())
+      .status(),
+  )
+  .await??;
+  if !removed.success() {
+    return Err(io::Error::other(
+      "Could not forget Tailscale identity; its state may still be in use by another container",
+    ));
+  }
+  Ok(())
+}
+
 async fn cancelled(cancellation: Option<oneshot::Receiver<()>>) {
   if let Some(cancellation) = cancellation {
     let _ = cancellation.await;
@@ -305,16 +386,34 @@ async fn published_port(
   lease_id: &str,
 ) -> io::Result<(String, u16)> {
   let container = inspect_owned(engine, container_name, lease_id).await?;
+  let network = container
+    .network
+    .ok_or_else(|| io::Error::other("container network is not available yet"))?;
   Ok((
     container.id,
-    parse_published_port(&serde_json::to_vec(&container.ports)?)?,
+    parse_published_port(&serde_json::to_vec(&network.ports)?)?,
   ))
 }
 
 #[derive(Deserialize)]
 struct Container {
+  #[serde(rename = "Id", alias = "ID")]
   id: String,
-  lease: String,
+  #[serde(rename = "Config")]
+  config: ContainerConfig,
+  #[serde(rename = "NetworkSettings", default)]
+  network: Option<ContainerNetwork>,
+}
+
+#[derive(Deserialize)]
+struct ContainerConfig {
+  #[serde(rename = "Labels", default)]
+  labels: Option<HashMap<String, String>>,
+}
+
+#[derive(Deserialize)]
+struct ContainerNetwork {
+  #[serde(rename = "Ports", default)]
   ports: serde_json::Value,
 }
 
@@ -323,14 +422,33 @@ async fn inspect_owned(
   container_name: &str,
   lease_id: &str,
 ) -> io::Result<Container> {
-  let output = timeout(COMMAND_TIMEOUT, engine_command(engine)
-    .args(["inspect", "--format", r#"{"id":{{json .Id}},"lease":{{json (index .Config.Labels "io.ctl.lease")}},"ports":{{json .NetworkSettings.Ports}}}"#, container_name])
-    .output()).await??;
+  // Raw inspect JSON works across Docker and Podman. Their Go template data
+  // exposes the container ID under incompatible field names (.Id versus .ID).
+  let output = timeout(
+    COMMAND_TIMEOUT,
+    engine_command(engine)
+      .args(["container", "inspect", container_name])
+      .output(),
+  )
+  .await??;
   if !output.status.success() {
     return Err(io::Error::other("container port is not available yet"));
   }
-  let container: Container = serde_json::from_slice(&output.stdout)?;
-  if container.lease != lease_id || container.id.is_empty() {
+  parse_owned_container(&output.stdout, lease_id)
+}
+
+fn parse_owned_container(bytes: &[u8], lease_id: &str) -> io::Result<Container> {
+  let mut containers: Vec<Container> = serde_json::from_slice(bytes)?;
+  if containers.len() != 1 {
+    return Err(io::Error::other("expected one Tailscale container"));
+  }
+  let container = containers.pop().expect("exactly one inspected container");
+  let lease = container
+    .config
+    .labels
+    .as_ref()
+    .and_then(|labels| labels.get("io.ctl.lease"));
+  if lease.map(String::as_str) != Some(lease_id) || container.id.is_empty() {
     return Err(io::Error::new(
       io::ErrorKind::PermissionDenied,
       "Tailscale container belongs to another owner",

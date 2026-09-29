@@ -22,12 +22,13 @@ function runtime(vpn_id = "work", overrides: Partial<VpnStatus> = {}): VpnStatus
 function model(overrides: Partial<VpnController> = {}): VpnController {
   return {
     connections: [connection], catalog_loaded: true, catalog_loading: false, catalog_error: null,
-    statuses: [], supports_multiple: true, supported_providers: ["openconnect", "tailscale"], signing_in_ids: new Set(),
+    statuses: [], supports_multiple: true, supported_providers: ["openconnect", "tailscale"], supports_tailscale_enrollment: true, enrollment_connection_id: null, signing_in_ids: new Set(),
     status_loaded: true, status_loading: false, status_stale: false, status_error: null, last_checked_at: null,
     actions: new Map(), action_errors: new Map(), uncertain_ids: new Set(), profile_busy: false, deleting_id: null,
     editor: null, editor_error: null, editor_saving: false,
     refresh: vi.fn().mockResolvedValue(undefined), connect: vi.fn().mockResolvedValue(undefined), stop: vi.fn().mockResolvedValue(undefined),
     signIn: vi.fn().mockResolvedValue(undefined), addConnection: vi.fn(), editConnection: vi.fn(), closeEditor: vi.fn(),
+    saveEnrollment: vi.fn().mockResolvedValue(true), setEnrollmentConnectionId: vi.fn(),
     saveConnection: vi.fn().mockResolvedValue(true), deleteConnection: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -272,4 +273,13 @@ describe("Tailscale VPN items", () => {
     rerender(<VpnSidebar model={{ ...state, status_stale: true }} />);
     expect((screen.getByRole("button", { name: "Sign in to Tailscale" }) as HTMLButtonElement).disabled).toBe(true);
   });
+});
+
+
+it("hides only the current enrollment from synthetic runtime items", () => {
+  render(<VpnSidebar model={model({ connections: [], enrollment_connection_id: "draft-one", statuses: [
+    runtime("draft-one", { provider: "tailscale", state: "starting" }), runtime("external", { provider: "tailscale" }),
+  ] })} />);
+  expect(screen.getAllByRole("region")).toHaveLength(1);
+  expect(screen.getByText("Not saved in this app")).toBeTruthy();
 });

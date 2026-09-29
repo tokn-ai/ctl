@@ -436,6 +436,7 @@ async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
       }],
       supports_multiple: false,
       supported_providers: vec![ctld_ipc::VpnProvider::Openconnect],
+      supports_tailscale_enrollment: false,
     },
   );
 }

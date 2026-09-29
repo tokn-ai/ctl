@@ -226,6 +226,8 @@ pub struct VpnSnapshot {
   pub supports_multiple: bool,
   #[serde(default = "legacy_vpn_providers")]
   pub supported_providers: Vec<VpnProvider>,
+  #[serde(default)]
+  pub supports_tailscale_enrollment: bool,
 }
 
 fn legacy_vpn_providers() -> Vec<VpnProvider> {
@@ -238,6 +240,7 @@ impl Default for VpnSnapshot {
       connections: Vec::new(),
       supports_multiple: true,
       supported_providers: vec![VpnProvider::Openconnect, VpnProvider::Tailscale],
+      supports_tailscale_enrollment: true,
     }
   }
 }
@@ -313,6 +316,9 @@ pub enum ClientMessage {
   StopVpnById {
     vpn_id: String,
   },
+  ForgetTailscaleIdentity {
+    connection_id: String,
+  },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,6 +359,7 @@ pub enum ServerMessage {
     #[serde(default)]
     snapshot: Option<VpnSnapshot>,
   },
+  VpnIdentityForgotten,
   Error {
     code: String,
     message: String,

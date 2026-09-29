@@ -1,9 +1,10 @@
 # Tailscale container
 
 Tailscale is a VPN provider managed through the same `ctl` → `ctld` interface as
-OpenConnect. Create a Tailscale profile on the app's VPN page and connect it. The
-first connection provides a browser sign-in link; approval may also be required
-in your tailnet's administration console. No auth key is stored in the profile.
+OpenConnect. Add Tailscale on the app's VPN page and sign in through your browser
+before saving the profile. Approval may also be required in your tailnet's
+administration console. Saving keeps the same authenticated device identity;
+no auth key is stored in the profile.
 
 The first start downloads the pinned official image
 `docker.io/tailscale/tailscale:v1.94.2` if it is missing. Docker or Podman must be
@@ -29,7 +30,10 @@ atomic container-name reservation prevents two daemons from using the same
 profile's state concurrently. A random lease label is verified before adopting
 the container, and cleanup addresses its immutable container ID.
 
-Stopping a connection removes its container but retains the volume and login.
+Cancelling an unsaved sign-in stops its container and removes only that draft's
+identity volume. Cleanup refuses to remove state referenced by another container.
+Saved connections keep their state: stopping one removes its container but retains
+the volume and login.
 Deleting a profile also leaves its volume untouched. Do not remove that volume
 unless you intend to forget its saved device identity. Starting a newly created
 profile creates a separate Tailscale device. A container from an owner that was

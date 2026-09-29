@@ -32,6 +32,12 @@ fn old_multi_vpn_daemons_do_not_claim_tailscale_support() {
   }))
   .unwrap();
   assert_eq!(old.supported_providers, vec![VpnProvider::Openconnect]);
+  assert!(!old.supports_tailscale_enrollment);
+  let older_tailscale: VpnSnapshot = serde_json::from_value(serde_json::json!({
+    "connections":[], "supports_multiple":true, "supported_providers":["openconnect", "tailscale"]
+  }))
+  .unwrap();
+  assert!(!older_tailscale.supports_tailscale_enrollment);
   assert!(
     VpnSnapshot::default()
       .supported_providers
@@ -339,6 +345,83 @@ mod endpoints {
   }
 
   #[tokio::test]
+  async fn forgetting_identity_requires_capability_and_explicit_acknowledgement() {
+    for (supported, acknowledge) in [(false, false), (true, false), (true, true)] {
+      let fixture = Fixture::new();
+      let path = fixture.0.join("enrollment.sock");
+      let listener = UnixListener::bind(&path).unwrap();
+      let client = Client::new(path);
+      let daemon = tokio::spawn(async move {
+        let (mut stream, message) = read_request(&listener).await;
+        assert!(matches!(message, ClientMessage::VpnStatus));
+        crate::write_frame(
+          &mut stream,
+          &ServerMessage::VpnStatus {
+            status: VpnStatus::default(),
+            snapshot: Some(VpnSnapshot {
+              supports_tailscale_enrollment: supported,
+              ..VpnSnapshot::default()
+            }),
+          },
+        )
+        .await
+        .unwrap();
+        drop(stream);
+        if supported {
+          let (mut stream, message) = read_request(&listener).await;
+          assert!(
+            matches!(message, ClientMessage::ForgetTailscaleIdentity { connection_id } if connection_id == "draft")
+          );
+          let response = if acknowledge {
+            ServerMessage::VpnIdentityForgotten
+          } else {
+            ServerMessage::VpnStatus {
+              status: VpnStatus::default(),
+              snapshot: None,
+            }
+          };
+          crate::write_frame(&mut stream, &response).await.unwrap();
+        } else {
+          assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+              .await
+              .is_err()
+          );
+        }
+      });
+      let result = client.forget_tailscale_identity("draft").await;
+      match (supported, acknowledge) {
+        (false, _) => assert_eq!(result.unwrap_err().code(), "vpn_enrollment_unsupported"),
+        (true, false) => assert!(matches!(result, Err(VpnError::UnexpectedResponse))),
+        (true, true) => result.unwrap(),
+      }
+      daemon.await.unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn invalid_identity_cleanup_never_contacts_the_owner() {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.0.join("unused.sock")).unwrap();
+    let client = Client::new(fixture.0.join("unused.sock"));
+    for id in ["", "bad id", "bad\nidentity"] {
+      assert_eq!(
+        client
+          .forget_tailscale_identity(id)
+          .await
+          .unwrap_err()
+          .code(),
+        "vpn_invalid_connection"
+      );
+    }
+    assert!(
+      tokio::time::timeout(Duration::from_millis(50), listener.accept())
+        .await
+        .is_err()
+    );
+  }
+
+  #[tokio::test]
   async fn every_operation_uses_the_explicit_endpoint() {
     let fixture = Fixture::new();
     let selected = fixture.0.join("selected.sock");
@@ -591,6 +674,7 @@ fn legacy_status_ids_are_stable_and_do_not_claim_multi_connection_support() {
       connections: vec![],
       supports_multiple: false,
       supported_providers: vec![VpnProvider::Openconnect],
+      supports_tailscale_enrollment: false,
     }
   );
 }

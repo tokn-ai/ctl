@@ -73,7 +73,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
       {runtime && stale && model.status_loaded ? <small>Last known state: {statusLabel(runtime.state)}</small> : null}
       <dl className="vpn-connection-details">
         {tailscale ? <>
-          <div><dt>Device hostname</dt><dd>{hostname ?? "Assigned when connected"}</dd></div>
+          <div><dt>Device name in Tailscale</dt><dd>{hostname ?? "Assigned when connected"}</dd></div>
           {runtime?.tailnet ? <div><dt>Tailnet</dt><dd>{runtime.tailnet}</dd></div> : null}
         </> : <div>
           <dt>VPN server</dt>

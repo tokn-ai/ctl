@@ -166,3 +166,32 @@ pub struct StopVpnRequest {
 pub struct OpenVpnSignInRequest {
   pub(super) vpn_id: String,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeginVpnEnrollmentRequest {
+  pub(super) name: String,
+  pub(super) hostname: Option<String>,
+  pub(super) accept_routes: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VpnEnrollmentRequest {
+  pub(super) enrollment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveVpnEnrollmentRequest {
+  pub(super) enrollment_id: String,
+  pub(super) expected_revision: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VpnEnrollmentSnapshot {
+  pub(super) enrollment_id: String,
+  pub(super) connection_id: String,
+  pub(super) status: ctld_ipc::VpnStatus,
+  pub(super) error: Option<crate::error::CommandErrorDto>,
+}

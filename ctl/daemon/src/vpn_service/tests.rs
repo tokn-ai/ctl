@@ -680,3 +680,118 @@ async fn stopping_a_tailscale_start_waits_for_the_provider_to_release_its_contai
   assert!(service.list().await.unwrap().connections.is_empty());
   owner.shutdown().await;
 }
+
+#[tokio::test]
+async fn forgetting_a_preparing_or_connected_identity_is_rejected_before_engine_access() {
+  let mut harness = Harness::new();
+  let connection = VpnConnection {
+    connection_id: "tailnet-test".into(),
+    name: "Test tailnet".into(),
+    settings: VpnSettings::Tailscale {
+      hostname: None,
+      accept_routes: false,
+    },
+  };
+  let service = harness.service.clone();
+  let request = tokio::spawn(async move { service.start_connection(connection).await });
+  let ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(
+    harness
+      .service
+      .forget_tailscale_identity("tailnet-test".into())
+      .await
+      .unwrap_err()
+      .contains("Stop the Tailscale connection")
+  );
+  let (lease, _exit) = FakeLease::new(&harness.probe);
+  assert!(ready.send(Ok(lease)).is_ok());
+  request.await.unwrap().unwrap();
+  assert!(
+    harness
+      .service
+      .forget_tailscale_identity("tailnet-test".into())
+      .await
+      .unwrap_err()
+      .contains("Stop the Tailscale connection")
+  );
+  harness.owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn slow_identity_cleanup_reserves_only_its_profile_and_preserves_its_result() {
+  for cleanup_result in [Ok(()), Err("synthetic cleanup failure".to_owned())] {
+    let probe = Arc::new(Probe::default());
+    let start_probe = Arc::clone(&probe);
+    let exits = Arc::new(Mutex::new(Vec::new()));
+    let start_exits = Arc::clone(&exits);
+    let (started, mut cleanup_started) = mpsc::unbounded_channel();
+    let (service, mut owner) = spawn_with_forget(
+      move |_| {
+        let (lease, exit) = FakeLease::new(&start_probe);
+        start_exits.lock().unwrap().push(exit);
+        std::future::ready(Ok(lease))
+      },
+      move |_| {
+        let (release, wait) = oneshot::channel();
+        started.send(release).unwrap();
+        async move { wait.await.unwrap() }
+      },
+    );
+    service.start_connection(saved_connection()).await.unwrap();
+    let forget_service = service.clone();
+    let forgetting = tokio::spawn(async move {
+      forget_service
+        .forget_tailscale_identity("cancelled-draft".into())
+        .await
+    });
+    let release = timeout(TEST_TIMEOUT, cleanup_started.recv())
+      .await
+      .unwrap()
+      .unwrap();
+    let snapshot = timeout(TEST_TIMEOUT, service.list())
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(snapshot.connections.len(), 2);
+    assert!(snapshot.connections.iter().any(|status| {
+      status.connection_id.as_deref() == Some("cancelled-draft")
+        && status.state == VpnState::Stopping
+    }));
+    timeout(TEST_TIMEOUT, service.stop_id("profile-test".into()))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(probe.shutdowns.load(Ordering::SeqCst), 1);
+    let mut same_profile = saved_connection();
+    same_profile.connection_id = "cancelled-draft".into();
+    let error = timeout(TEST_TIMEOUT, service.start_connection(same_profile.clone()))
+      .await
+      .unwrap()
+      .unwrap_err();
+    assert!(error.contains("stopping"));
+    let stop_service = service.clone();
+    let stopping =
+      tokio::spawn(async move { stop_service.stop_id("cancelled-draft".into()).await });
+    timeout(TEST_TIMEOUT, service.list())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(!stopping.is_finished());
+    release.send(cleanup_result.clone()).unwrap();
+    assert_eq!(
+      timeout(TEST_TIMEOUT, forgetting).await.unwrap().unwrap(),
+      cleanup_result
+    );
+    timeout(TEST_TIMEOUT, stopping)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+    assert!(service.list().await.unwrap().connections.is_empty());
+    service.start_connection(same_profile).await.unwrap();
+    owner.shutdown().await;
+  }
+}

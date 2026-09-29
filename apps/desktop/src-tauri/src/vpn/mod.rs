@@ -2,6 +2,7 @@
 
 mod client;
 mod coordinator;
+mod enrollment;
 mod models;
 mod repository;
 mod sign_in;
@@ -20,13 +21,63 @@ use crate::error::{CommandErrorDto, CommandResult};
 use coordinator::{Cancellation, Coordinators};
 use models::VpnSettingsInput;
 pub use models::{
-  ConnectVpnRequest, DeleteVpnConnectionRequest, OpenVpnSignInRequest, SaveVpnConnectionRequest,
-  StopVpnRequest, VpnConnectionsSnapshot,
+  BeginVpnEnrollmentRequest, ConnectVpnRequest, DeleteVpnConnectionRequest, OpenVpnSignInRequest,
+  SaveVpnConnectionRequest, SaveVpnEnrollmentRequest, StopVpnRequest, VpnConnectionsSnapshot,
+  VpnEnrollmentRequest, VpnEnrollmentSnapshot,
 };
 use repository::Repository;
 
 // Each VPN coordinates independently across windows, including profile loading.
 static COORDINATORS: LazyLock<Coordinators> = LazyLock::new(Coordinators::default);
+static ENROLLMENTS: LazyLock<enrollment::Enrollments> =
+  LazyLock::new(enrollment::Enrollments::default);
+
+#[tauri::command]
+pub async fn begin_vpn_enrollment(
+  app: tauri::AppHandle,
+  window: tauri::WebviewWindow,
+  request: BeginVpnEnrollmentRequest,
+) -> CommandResult<VpnEnrollmentSnapshot> {
+  ENROLLMENTS.begin(directory(&app)?, window.label().into(), request)
+}
+
+#[tauri::command]
+pub async fn vpn_enrollment_status(
+  window: tauri::WebviewWindow,
+  request: VpnEnrollmentRequest,
+) -> CommandResult<VpnEnrollmentSnapshot> {
+  ENROLLMENTS
+    .status(window.label(), &request.enrollment_id)
+    .await
+}
+
+#[tauri::command]
+pub async fn save_vpn_enrollment(
+  window: tauri::WebviewWindow,
+  request: SaveVpnEnrollmentRequest,
+) -> CommandResult<VpnConnectionsSnapshot> {
+  ENROLLMENTS
+    .save(
+      window.label(),
+      &request.enrollment_id,
+      request.expected_revision,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_vpn_enrollment(
+  window: tauri::WebviewWindow,
+  request: VpnEnrollmentRequest,
+) -> CommandResult<()> {
+  ENROLLMENTS
+    .cancel(window.label(), &request.enrollment_id)
+    .await
+}
+
+pub(crate) async fn close_window(window_label: &str) {
+  ENROLLMENTS.close_window(window_label).await;
+}
 
 pub(crate) fn valid_connection_id(connection_id: &str) -> bool {
   !connection_id.is_empty()

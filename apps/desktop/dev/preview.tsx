@@ -24,6 +24,9 @@ import type {
   WorkspaceDocument,
   WorkspaceSnapshot,
   VpnConnectionInput,
+  VpnEnrollmentInput,
+  VpnEnrollmentSnapshot,
+  TailscaleVpnConnection,
   VpnConnectionsSnapshot,
   VpnStatus,
   VpnSnapshot,
@@ -76,8 +79,10 @@ const stopped_vpn: VpnStatus = {
   vpn_url: null, username: null,
 };
 const vpn_param = new URLSearchParams(location.search).get("vpn");
-let vpn_snapshot: VpnSnapshot = { supports_multiple: vpn_param !== "legacy", supported_providers: vpn_param === "legacy" ? ["openconnect"] : ["openconnect", "tailscale"], connections: [] };
+let vpn_snapshot: VpnSnapshot = { supports_multiple: vpn_param !== "legacy", supports_tailscale_enrollment: vpn_param !== "legacy", supported_providers: vpn_param === "legacy" ? ["openconnect"] : ["openconnect", "tailscale"], connections: [] };
 const signed_in_tailnets = new Set<string>();
+const vpn_enrollments = new Map<string, { connection: TailscaleVpnConnection; created_at: number; adopted: boolean }>();
+const enrollment_param = new URLSearchParams(location.search).get("enrollment");
 let next_vpn_port = 49160;
 if (["connected", "external", "legacy", "multiple"].includes(vpn_param ?? "")) {
   const external = vpn_param === "external" || vpn_param === "legacy";
@@ -102,7 +107,7 @@ if (vpn_param === "tailscale-sign-in" || vpn_param === "tailscale-connected") {
     provider: "tailscale", vpn_id: "tailnet-vpn", connection_id: "tailnet-vpn",
     state: connected ? "connected" : "starting", running: connected, hostname: "rmux-preview",
     tailnet: connected ? "example.test" : null, username: connected ? "sample@example.test" : null,
-    auth_url: connected ? null : "https://login.tailscale.com/a/example-preview",
+    auth_url: connected ? null : "https://login.tailscale.com/a/examplePreview",
     message: connected ? null : "Sign in to finish connecting.",
     endpoint: connected ? "socks5h://127.0.0.1:49154" : null, container_name: "preview-tailscale",
   });
@@ -156,6 +161,51 @@ mockIPC((command, payload) => {
       return structuredClone(hosts);
     case "load_vpn_connections":
       return structuredClone(vpn_connections);
+    case "begin_vpn_enrollment": {
+      const input = request<VpnEnrollmentInput>(payload);
+      const enrollment_id = crypto.randomUUID();
+      const connection_id = crypto.randomUUID();
+      const connection: TailscaleVpnConnection = { ...input, provider: "tailscale", connection_id };
+      vpn_enrollments.set(enrollment_id, { connection, created_at: Date.now(), adopted: false });
+      const status: VpnStatus = { ...stopped_vpn, provider: "tailscale", vpn_id: connection_id, connection_id,
+        state: "starting", hostname: input.hostname ?? "rmux-preview", message: "Starting Tailscale…" };
+      vpn_snapshot.connections.push(status);
+      return { enrollment_id, connection_id, status, error: null } satisfies VpnEnrollmentSnapshot;
+    }
+    case "vpn_enrollment_status": {
+      const { enrollment_id } = request<{ enrollment_id: string }>(payload);
+      const draft = vpn_enrollments.get(enrollment_id);
+      if (!draft) throw new Error("This sign-in was canceled.");
+      const status = vpn_snapshot.connections.find((item) => item.connection_id === draft.connection.connection_id)!;
+      if (enrollment_param === "failure") return { enrollment_id, connection_id: draft.connection.connection_id, status,
+        error: { code: "vpn_failed", message: "Could not start Tailscale. Check that your container engine is running." } };
+      if (Date.now() - draft.created_at > 1500 && status.state !== "connected" && enrollment_param !== "starting") {
+        status.auth_url = "https://login.tailscale.com/a/examplePreview";
+        status.message = "Sign in to Tailscale in your browser";
+      }
+      return structuredClone({ enrollment_id, connection_id: draft.connection.connection_id, status, error: null } satisfies VpnEnrollmentSnapshot);
+    }
+    case "save_vpn_enrollment": {
+      const { enrollment_id } = request<{ enrollment_id: string }>(payload);
+      const draft = vpn_enrollments.get(enrollment_id);
+      if (!draft) throw new Error("This sign-in was canceled.");
+      const status = vpn_snapshot.connections.find((item) => item.connection_id === draft.connection.connection_id);
+      if (status?.state !== "connected") throw new Error("Finish signing in before saving this connection.");
+      if (!draft.adopted) {
+        vpn_connections = { revision: `preview-vpn-${++revision}`, connections: [...vpn_connections.connections, draft.connection] };
+        draft.adopted = true;
+      }
+      return structuredClone(vpn_connections);
+    }
+    case "cancel_vpn_enrollment": {
+      const { enrollment_id } = request<{ enrollment_id: string }>(payload);
+      const draft = vpn_enrollments.get(enrollment_id);
+      if (draft && !draft.adopted) {
+        vpn_snapshot.connections = vpn_snapshot.connections.filter((item) => item.connection_id !== draft.connection.connection_id);
+        vpn_enrollments.delete(enrollment_id);
+      }
+      return;
+    }
     case "save_vpn_connection": {
       const { connection } = request<{ connection: VpnConnectionInput }>(payload);
       const prior = vpn_connections.connections.find((item) => item.connection_id === connection.connection_id);
@@ -190,7 +240,7 @@ mockIPC((command, payload) => {
       const status: VpnStatus = {
         provider: connection.provider ?? "openconnect",
         vpn_id: connection_id, state: connected ? "connected" : "starting", running: connected, connection_id,
-        ...(tailscale ? { hostname: connection.hostname, auth_url: connected ? null : "https://login.tailscale.com/a/example-preview" }
+        ...(tailscale ? { hostname: connection.hostname, auth_url: connected ? null : "https://login.tailscale.com/a/examplePreview" }
           : { vpn_url: connection.url, username: connection.username }),
         endpoint: connected ? `socks5h://127.0.0.1:${next_vpn_port++}` : null, container_name: `preview-${connection_id}`,
       };
@@ -199,6 +249,8 @@ mockIPC((command, payload) => {
     }
     case "open_vpn_sign_in": {
       const { vpn_id } = request<{ vpn_id: string }>(payload);
+      if (enrollment_param === "browser-error") throw new Error("Could not open the browser for VPN sign-in.");
+      if (enrollment_param === "waiting") return;
       signed_in_tailnets.add(vpn_id);
       vpn_snapshot.connections = vpn_snapshot.connections.map((status) => status.vpn_id === vpn_id ? {
         ...status, state: "connected", running: true, auth_url: null, message: null,

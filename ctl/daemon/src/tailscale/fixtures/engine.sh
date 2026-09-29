@@ -36,7 +36,13 @@ case "$1" in
       printf '%s\n' "$heartbeat" >> "$root/heartbeats"
     done
     ;;
-  inspect)
+  container)
+    if [ "$2" = ls ]; then
+      [ ! -f "$root/engine_unavailable" ] || exit 1
+      [ ! -f "$root/container.running" ] || printf '%s\n' 'test-container-id'
+      exit 0
+    fi
+    [ "$2" = inspect ] || exit 1
     if [ -f "$root/late_create" ] && [ ! -f "$root/lease" ]; then
       : > "$root/first_inspect"
       if [ -f "$root/create_after_client_exit" ]; then
@@ -46,7 +52,21 @@ case "$1" in
       exit 1
     fi
     [ -f "$root/lease" ] || exit 1
-    printf '{"id":"test-container-id","lease":"%s","ports":{"1080/tcp":[{"HostIp":"127.0.0.1","HostPort":"%s"}]}}\n' "$(cat "$root/lease")" "$(cat "$root/port")"
+    printf '[{"Id":"test-container-id","Config":{"Labels":{"io.ctl.lease":"%s"}},"NetworkSettings":{"Ports":{"1080/tcp":[{"HostIp":"127.0.0.1","HostPort":"%s"}]}}}]\n' "$(cat "$root/lease")" "$(cat "$root/port")"
+    ;;
+  volume)
+    case "$2" in
+      ls)
+        [ ! -f "$root/engine_unavailable" ] || exit 1
+        [ ! -f "$root/volume" ] || cat "$root/volume"
+        ;;
+      rm)
+        printf '%s\n' "$@" > "$root/volume-remove.args"
+        [ ! -f "$root/volume_in_use" ] || exit 1
+        rm -f "$root/volume"
+        ;;
+      *) exit 1 ;;
+    esac
     ;;
   exec)
     [ ! -f "$root/no_status" ] || exit 1

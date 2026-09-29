@@ -17,6 +17,14 @@ sign-in pending, `&vpn=tailscale-connected` for an authenticated tailnet, or
 `&vpn=legacy` to inspect provider capability warnings. The preview's **Sign in**
 button simulates a successful login in memory without opening a browser or
 contacting Tailscale. Disconnect and reconnect keep that simulated identity.
+
+Add a new Tailscale connection to preview enrollment before saving. It starts,
+simulates browser sign-in, displays the sample account and tailnet, and only
+adds the profile to the list after **Save connection**. The optional `enrollment`
+query parameter holds useful states: `starting`, `waiting`, `browser-error`, or
+`failure`. For example, `?view=vpn&enrollment=waiting` keeps the browser sign-in
+step visible, with an **Open browser** retry. All enrollment state is in memory;
+Cancel removes the draft and never touches a real container or account.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 

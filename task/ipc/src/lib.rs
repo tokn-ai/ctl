@@ -1,4 +1,6 @@
 //! Per-user transport shared by taskd and its clients.
+mod component;
+pub use component::{ComponentStatus, component_status};
 use std::path::{Path, PathBuf};
 use std::{env, io};
 

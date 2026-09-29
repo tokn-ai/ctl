@@ -50,6 +50,12 @@ impl OwnedListener {
 }
 
 impl SharedForwardRegistry {
+  pub(super) async fn shutdown(&mut self) {
+    for (_, listener) in self.listeners.drain() {
+      listener.stop().await;
+    }
+  }
+
   pub(super) async fn start(
     &mut self,
     target: &SshTarget,

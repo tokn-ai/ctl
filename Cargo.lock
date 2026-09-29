@@ -488,6 +488,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "component-info"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -663,6 +671,7 @@ name = "ctl-agent"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "component-info",
  "ctl-core",
  "ctl-proto",
  "dirs",
@@ -699,6 +708,7 @@ dependencies = [
 name = "ctl-proto"
 version = "0.1.0"
 dependencies = [
+ "component-info",
  "serde",
  "serde_json",
  "tokio",
@@ -711,6 +721,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
+ "component-info",
  "ctl-proto",
  "ctld-ipc",
  "dirs",
@@ -731,6 +742,7 @@ dependencies = [
 name = "ctld-ipc"
 version = "0.1.0"
 dependencies = [
+ "component-info",
  "ctl-proto",
  "dirs",
  "interprocess",
@@ -3078,6 +3090,7 @@ name = "rmux-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "component-info",
  "ctl-core",
  "ctl-proto",
  "ctld-ipc",
@@ -3089,10 +3102,12 @@ dependencies = [
  "rmux-ipc",
  "rmux-proto",
  "rustix",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
  "task-client",
+ "task-ipc",
  "task-proto",
  "task-store",
  "tauri",
@@ -3108,6 +3123,7 @@ name = "rmux-client"
 version = "0.1.0"
 dependencies = [
  "avt",
+ "component-info",
  "crossterm",
  "dirs",
  "rmux-proto",
@@ -3131,6 +3147,7 @@ dependencies = [
 name = "rmux-ipc"
 version = "0.1.0"
 dependencies = [
+ "component-info",
  "dirs",
  "interprocess",
  "rmux-proto",
@@ -3147,6 +3164,7 @@ dependencies = [
 name = "rmux-proto"
 version = "0.1.0"
 dependencies = [
+ "component-info",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3177,6 +3195,7 @@ version = "0.1.0"
 dependencies = [
  "avt",
  "clap",
+ "component-info",
  "nix 0.29.0",
  "portable-pty",
  "process-info",
@@ -3184,6 +3203,7 @@ dependencies = [
  "rmux-ipc",
  "rmux-proto",
  "rustix",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
@@ -3890,9 +3910,11 @@ dependencies = [
 name = "task-ipc"
 version = "0.1.0"
 dependencies = [
+ "component-info",
  "dirs",
  "interprocess",
  "rustix",
+ "task-proto",
  "tokio",
  "uuid",
  "widestring",
@@ -3902,6 +3924,7 @@ dependencies = [
 name = "task-proto"
 version = "0.1.0"
 dependencies = [
+ "component-info",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3926,6 +3949,7 @@ name = "taskd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "component-info",
  "dirs",
  "interprocess",
  "process-wrap",

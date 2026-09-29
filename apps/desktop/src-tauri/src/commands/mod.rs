@@ -345,12 +345,25 @@ async fn open_reserved_attachment(
     resize_after_layout_reacquire: None,
     ..AttachmentControllerOptions::default()
   };
+  let remote_observation = match &stream {
+    ctl_core::Transport::Ssh(stream) => {
+      stream.remote_identity.as_deref().cloned().map(|identity| {
+        crate::about::observations::RemoteObservation {
+          identity,
+          handshake: attached.handshake_info.clone(),
+          label: target.label().into(),
+          host_id: request.cache_host_key.clone(),
+        }
+      })
+    }
+    ctl_core::Transport::Local(_) => None,
+  };
   let (controller, control, events) =
     AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
   let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
   let actor = Arc::new(
-    AttachmentActor::new(attachment_id.clone(), window_label.clone(), target, control).with_cache(
-      rmux_client::cache::CacheIdentity {
+    AttachmentActor::new(attachment_id.clone(), window_label.clone(), target, control)
+      .with_cache(rmux_client::cache::CacheIdentity {
         host_key: request
           .cache_host_key
           .unwrap_or_else(|| match &request.target {
@@ -362,8 +375,8 @@ async fn open_reserved_attachment(
         name: attached.session.name.clone(),
         terminal_size: attached.session.terminal_size.clone(),
         primary: root_requested == attached.session.session_id,
-      },
-    ),
+      })
+      .with_remote_observation(remote_observation),
   );
   state
     .activate(&window_label, &attachment_id, Arc::clone(&actor))

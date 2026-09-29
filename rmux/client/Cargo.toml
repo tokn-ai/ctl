@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+component-info.workspace = true
 avt.workspace = true
 crossterm.workspace = true
 dirs.workspace = true

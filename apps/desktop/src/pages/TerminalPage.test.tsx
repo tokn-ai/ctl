@@ -56,6 +56,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 const api = vi.hoisted(() => ({
+  getComponentVersions: vi.fn(),
+  preflightRestartCtld: vi.fn(),
+  restartCtld: vi.fn(),
   taskRequest: vi.fn(),
   loadTaskDefinitions: vi.fn(),
   saveTaskDefinition: vi.fn(),
@@ -182,6 +185,7 @@ function hostSnapshot(): HostCatalogSnapshot {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.getComponentVersions.mockResolvedValue({ components: [] });
   attachment.state.phase = "idle";
   attachment.state.error_code = null;
   attachment.state.message = null;
@@ -297,6 +301,39 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("opens About from the rail and native menu without remounting or disconnecting the terminal", async () => {
+    const page = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    const terminal = page.container.querySelector(".terminal-workspace")!;
+    const updates_before = api.updateWorkspace.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "About rmux" }));
+    await screen.findByRole("heading", { name: "About rmux" });
+    await waitFor(() => expect(api.getComponentVersions).toHaveBeenCalledOnce());
+    expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
+    expect(terminal.hasAttribute("hidden")).toBe(true);
+    expect(attachment.detach).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).toHaveBeenCalledTimes(updates_before);
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
+    expect(terminal.hasAttribute("hidden")).toBe(false);
+    nativeCommand(COMMAND_IDS.about);
+    await screen.findByRole("heading", { name: "About rmux" });
+    expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
+    fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
+    expect(screen.queryByRole("heading", { name: "About rmux" })).toBeNull();
+    expect(terminal.hasAttribute("hidden")).toBe(false);
+  });
+
+  it("opens About from the command palette", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyP");
+    fireEvent.change(screen.getByRole("combobox", { name: "Search commands" }), { target: { value: "About rmux" } });
+    fireEvent.click(screen.getByRole("option", { name: /About rmux/ }));
+    await screen.findByRole("heading", { name: "About rmux" });
+    expect(api.getComponentVersions).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("combobox", { name: "Search commands" })).toBeNull();
+  });
+
   it("opens component updates from a remote protocol mismatch without probing or restarting automatically", async () => {
     const session = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
     Object.assign(attachment.state, {

@@ -48,6 +48,9 @@ import type {
   VpnConnectionsSnapshot,
   VpnStatus,
   VpnSnapshot,
+  ComponentVersionsSnapshot,
+  CtldRestartPreflight,
+  CtldRestartResult,
 } from "./types";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -58,6 +61,18 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
     return Promise.reject(new Error(target.unavailable));
   }
   return nativeInvoke<T>(command, args);
+}
+
+export async function getComponentVersions(): Promise<ComponentVersionsSnapshot> {
+  return invoke("get_component_versions");
+}
+
+export async function preflightRestartCtld(component_id: string): Promise<CtldRestartPreflight> {
+  return invoke("preflight_restart_ctld", { request: { component_id } });
+}
+
+export async function restartCtld(restart_token: string): Promise<CtldRestartResult> {
+  return invoke("restart_ctld", { request: { restart_token } });
 }
 
 export async function loadHosts(): Promise<HostCatalogSnapshot> {

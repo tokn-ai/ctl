@@ -1,5 +1,55 @@
 export type Sequence = string;
 
+export interface ComponentProtocolVersion {
+  name: string;
+  version: number;
+}
+
+export interface ComponentVersionInfo {
+  version: string | null;
+  source_revision: string | null;
+  source_fingerprint: string | null;
+  dirty: boolean | null;
+  protocols: ComponentProtocolVersion[];
+}
+
+export type ComponentVersionStatus = "current" | "outdated" | "newer" | "different_build" | "incompatible" | "unknown" | "not_running" | "unavailable";
+
+export interface ComponentVersionRow {
+  component_id: string;
+  component: "rmux" | "ctld" | "rmuxd" | "taskd" | "ctl_agent";
+  label: string;
+  location: "local" | "remote";
+  host_id: string | null;
+  observation: "running" | "bundled" | "last_observed";
+  status: ComponentVersionStatus;
+  running: ComponentVersionInfo | null;
+  available: ComponentVersionInfo | null;
+  /** Protocols compiled into the app; the available executable may itself be stale. */
+  required_protocols?: ComponentProtocolVersion[];
+  restart_supported: boolean;
+  detail: string | null;
+  error: string | null;
+}
+
+export interface ComponentVersionsSnapshot {
+  components: ComponentVersionRow[];
+}
+
+export interface CtldRestartPreflight {
+  restart_token: string;
+  component_id: string;
+  label: string;
+  running: ComponentVersionInfo | null;
+  available: ComponentVersionInfo | null;
+  impact: { ssh_connections: number | null; port_forwards: number | null; vpn_connections: number | null };
+}
+
+export interface CtldRestartResult {
+  component_id: string;
+  running: ComponentVersionInfo;
+}
+
 export interface CommandKeybinding {
   code: string;
   primary: boolean;

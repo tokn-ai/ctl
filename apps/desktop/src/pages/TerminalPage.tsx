@@ -1,4 +1,5 @@
 import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
+import { AboutPage } from "./AboutPage";
 import { useTaskWorkspace } from "../features/tasks/useTaskWorkspace";
 import { TaskSidebar } from "../components/tasks/TaskSidebar";
 import { TaskEditor } from "../components/tasks/TaskEditor";
@@ -243,6 +244,9 @@ export function TerminalPage() {
     setDaemonRestartConfirmationPending,
   ] = useState(false);
   const [restartingDaemon, setRestartingDaemon] = useState(false);
+  const [about_open, setAboutOpen] = useState(false);
+  const [about_dialog_open, setAboutDialogOpen] = useState(false);
+  useEffect(() => { setAboutOpen(false); }, [activeTabKey]);
   const [pendingCloseSessionKey, setPendingCloseSessionKey] = useState<
     string | null
   >(null);
@@ -1348,7 +1352,7 @@ export function TerminalPage() {
   }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
   useWindowTitle(
-    taskWorkspace.active
+    about_open ? "About rmux" : taskWorkspace.active
       ? (taskWorkspace.activeTask?.definition.name ??
           taskWorkspace.saved?.definition.name ??
           "Task definition")
@@ -1484,6 +1488,17 @@ export function TerminalPage() {
     else commands.push(command);
   }
   commands.push({
+    id: COMMAND_IDS.about,
+    category: "App",
+    title: "About rmux",
+    detail: "Check app, daemon, and connected host versions.",
+    keywords: ["version", "protocol", "ctld", "rmuxd", "taskd", "update", "restart"],
+    enabled: workspace.ready,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.about),
+    focusTerminalAfterRun: false,
+    run: () => setAboutOpen(true),
+  });
+  commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
     category: "Tasks",
     title: "Restart taskd",
@@ -1537,6 +1552,7 @@ export function TerminalPage() {
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
   const [archives_open, setArchivesOpen] = useState(false);
   const dialogOpen = archives_open ||
+    about_dialog_open ||
     vpn.editor !== null ||
     taskWorkspace.editorId !== null ||
     portForwardTarget !== null ||
@@ -1556,6 +1572,7 @@ export function TerminalPage() {
         run: (args) => {
           if (!command.keepPaletteOpen) setPaletteOpen(false);
           if (command.id !== COMMAND_IDS.restartDaemon) cancelDaemonRestart();
+          if (about_open && command.focusTerminalAfterRun !== false) setAboutOpen(false);
           const result = command.run(args);
           if (command.focusTerminalAfterRun !== false)
             requestAnimationFrame(() => renderer?.focus());
@@ -1575,17 +1592,17 @@ export function TerminalPage() {
 
   const handleTerminalInput = useCallback(
     (data: Uint8Array) => {
-      if (!dialogOpen && !paletteOpen && !daemonRestartBlocksInteractions()) {
+      if (!about_open && !dialogOpen && !paletteOpen && !daemonRestartBlocksInteractions()) {
         attachment.handleInput(data);
       }
     },
-    [attachment, daemonRestartBlocksInteractions, dialogOpen, paletteOpen],
+    [attachment, about_open, daemonRestartBlocksInteractions, dialogOpen, paletteOpen],
   );
 
   function dismissPalette() {
     setPaletteOpen(false);
     cancelDaemonRestart();
-    requestAnimationFrame(() => renderer?.focus());
+    if (!about_open) requestAnimationFrame(() => renderer?.focus());
   }
 
   return (
@@ -1600,9 +1617,12 @@ export function TerminalPage() {
         }
       >
         <WorkspaceSidebar
+          on_about={() => executeCommandById(COMMAND_IDS.about)}
+          about_open={about_open}
           on_keybindings={() => executeCommandById(COMMAND_IDS.configureKeybindings)}
           selected={workspace.sidebar_view}
           onSelect={(view) => {
+            setAboutOpen(false);
             workspace.update("sidebar_view", view);
             if (view === "ports") void portForwarding.refreshAll();
           }}
@@ -1712,7 +1732,7 @@ export function TerminalPage() {
             />
           }
         />
-        <section className="terminal-workspace">
+        <section className="terminal-workspace" hidden={about_open}>
           <TerminalTabs
             tabs={tabs}
             extra_tabs={workspace.task_tabs.map((tab) => {
@@ -1887,6 +1907,12 @@ export function TerminalPage() {
             <StatusBar state={attachment.state} />
           </div>
         </section>
+        <AboutPage
+          visible={about_open}
+          on_close={() => { setAboutOpen(false); requestAnimationFrame(() => renderer?.focus()); }}
+          on_dialog_change={setAboutDialogOpen}
+          on_restarted={() => { void vpn.refresh(); void hostConnections.refresh(); void portForwarding.refreshAll(); }}
+        />
       </main>
       {archives_open && <ArchiveBrowser targets={sidebarTargets} on_close={() => setArchivesOpen(false)} />}
       {taskWorkspace.editorId ? (

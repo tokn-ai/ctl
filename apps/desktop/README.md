@@ -3,6 +3,30 @@
 The desktop client for local and SSH-connected daemon-owned `rmux` terminal
 sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
+## About and component versions
+
+Open **About rmux** from the info button, command palette, or macOS app menu.
+The page shows the app version, local `ctld`, `rmuxd`, and `taskd` versions and
+protocols, and `ctl-agent`/`rmuxd` metadata observed on active remote terminal
+connections. Separate SSH and VPN ctld owners appear separately when configured.
+Running versions are compared with this app's component build. Local rows also
+show the selected helper executable and explain when it needs updating too.
+
+**Outdated** means a lower comparable release version. **Different build** marks
+different source fingerprints without claiming which is newer. **Protocol
+mismatch**, **Unknown**, and **Not running** remain distinct. Refreshing About
+does not start services, connect hosts, deploy remote components, or detach
+terminal sessions. A disconnected host's saved metadata is not presented as a
+live version.
+
+**Restart ctld** first checks the replacement executable and shows the impact.
+After confirmation it stops that owner's VPNs, cleans up owned port forwards,
+and verifies the replacement's instance, build, and protocols. SSH connections
+may be interrupted; saved VPN profiles and Tailscale identities remain available
+for reconnecting. Older ctld processes without lifecycle support need one manual
+restart after updating. An unavailable or incompatible replacement is rejected
+before the running owner is stopped.
+
 ## VPN connections
 
 Open **VPN** in the sidebar to add a named OpenConnect or Tailscale connection.

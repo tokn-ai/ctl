@@ -226,6 +226,7 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     let identity = ctl_proto::RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
+      build: None,
       rmux_restart_supported: false,
       bundle: None,
     };
@@ -234,7 +235,7 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     let mut transport = start_ssh_transport_identified(command, true, false, ready(()))
       .await
       .unwrap();
-    assert_eq!(transport.remote_identity, Some(identity));
+    assert_eq!(transport.remote_identity.as_deref(), Some(&identity));
     let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
     transport.write_all(&payload).await.unwrap();
     transport.flush().await.unwrap();

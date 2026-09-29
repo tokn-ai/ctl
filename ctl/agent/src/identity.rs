@@ -52,6 +52,7 @@ fn discover_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity
   let identity = RemoteIdentity {
     remote_id,
     agent_version: env!("CARGO_PKG_VERSION").into(),
+    build: Some(component_info::build_info()),
     rmux_restart_supported: true,
     bundle,
   };

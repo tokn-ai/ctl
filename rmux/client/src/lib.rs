@@ -53,6 +53,8 @@ pub struct AttachRequest {
 /// Session metadata and attachment-relative state returned by `rmuxd`.
 #[derive(Debug, Clone)]
 pub struct AttachedSession {
+  /// Version metadata from this exact transport handshake.
+  pub handshake_info: HandshakeInfo,
   /// Opaque credential for rebinding this logical attachment after an
   /// unexpected transport loss.
   pub attachment_token: String,
@@ -154,8 +156,11 @@ pub struct AttachmentLiveness {
 }
 
 /// Metadata returned by a successful `rmux` handshake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeInfo {
+  pub server_version: String,
+  pub protocol_version: u16,
+  pub build: Option<component_info::ComponentBuildInfo>,
   pub attachment_liveness: AttachmentLiveness,
 }
 
@@ -763,12 +768,17 @@ where
   match read_response(stream).await? {
     ServerMessage::HandshakeAccepted {
       protocol_version,
+      server_version,
+      build,
       heartbeat_interval_ms,
       attachment_liveness_timeout_ms,
       ..
     } if protocol_version == PROTOCOL_VERSION => {
       attachment_liveness(heartbeat_interval_ms, attachment_liveness_timeout_ms).map(
         |attachment_liveness| HandshakeInfo {
+          server_version,
+          protocol_version,
+          build,
           attachment_liveness,
         },
       )
@@ -940,6 +950,7 @@ where
       shell_state_cache: ShellStateCache::new(shell_state.clone()),
       shell_state,
       liveness: handshake.attachment_liveness,
+      handshake_info: handshake,
     },
   ))
 }
@@ -2327,6 +2338,7 @@ mod tests {
         &ServerMessage::HandshakeAccepted {
           protocol_version: PROTOCOL_VERSION,
           server_version: "test".into(),
+          build: None,
           heartbeat_interval_ms: 1_000,
           attachment_liveness_timeout_ms: 3_000,
         },
@@ -2393,6 +2405,9 @@ mod tests {
     .unwrap();
 
     assert_eq!(attached.session.name, "work");
+    assert_eq!(attached.handshake_info.server_version, "test");
+    assert_eq!(attached.handshake_info.protocol_version, PROTOCOL_VERSION);
+    assert!(attached.handshake_info.build.is_none());
     assert!(attached.input_lease.owned_by_client);
     assert_eq!(attached.shell_state, expected_shell_state);
     assert_eq!(
@@ -3198,6 +3213,7 @@ mod tests {
         &ServerMessage::HandshakeAccepted {
           protocol_version: PROTOCOL_VERSION,
           server_version: "test".into(),
+          build: None,
           heartbeat_interval_ms: 1_000,
           attachment_liveness_timeout_ms: 3_000,
         },
@@ -3250,6 +3266,15 @@ mod tests {
       .as_ref()
       .map(|checkpoint| terminal_history(checkpoint.sequence));
     AttachedSession {
+      handshake_info: HandshakeInfo {
+        server_version: "test".into(),
+        protocol_version: PROTOCOL_VERSION,
+        build: None,
+        attachment_liveness: AttachmentLiveness {
+          heartbeat_interval: Duration::from_mins(1),
+          peer_timeout: Duration::from_mins(3),
+        },
+      },
       attachment_token: "token".into(),
       session: session_info(),
       replay_from,

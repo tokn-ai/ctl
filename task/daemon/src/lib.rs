@@ -641,6 +641,22 @@ async fn handle_connection(
   control_tx: mpsc::Sender<control::Request>,
 ) -> Result<(), task_proto::CodecError> {
   let handshake = match read_frame::<_, control::FirstMessage>(&mut stream).await? {
+    Some(control::FirstMessage::Control(task_proto::control::ClientMessage::ComponentStatus {
+      protocol_version,
+    })) => {
+      let response = if protocol_version == task_proto::control::PROTOCOL_VERSION {
+        task_proto::control::ServerMessage::ComponentStatus {
+          build: component_info::build_info(),
+          protocol_version: PROTOCOL_VERSION,
+        }
+      } else {
+        task_proto::control::ServerMessage::Error {
+          message: "Unsupported diagnostics protocol".into(),
+        }
+      };
+      write_frame(&mut stream, &response).await?;
+      return Ok(());
+    }
     Some(control::FirstMessage::Control(request)) => {
       let _ = control_tx.send(control::Request { stream, request }).await;
       return Ok(());

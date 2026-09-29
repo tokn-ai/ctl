@@ -35,15 +35,15 @@ async fn restart() -> Result<(), ClientError> {
         .await
         .map_err(|_| unsupported())?
         .ok_or_else(unsupported)?;
-      let control::ServerMessage::RestartAccepted {
-        data_directory,
-        rmux_socket,
-      } = response
-      else {
-        let control::ServerMessage::Error { message } = response else {
-          unreachable!()
-        };
-        return Err(ClientError::Restart(message));
+      let (data_directory, rmux_socket) = match response {
+        control::ServerMessage::RestartAccepted {
+          data_directory,
+          rmux_socket,
+        } => (data_directory, rmux_socket),
+        control::ServerMessage::Error { message } => return Err(ClientError::Restart(message)),
+        control::ServerMessage::ComponentStatus { .. } => {
+          return Err(ClientError::UnexpectedResponse);
+        }
       };
       // The server closes this connection only after releasing its endpoint and
       // state lock. Acknowledgement alone is not permission to start a successor.

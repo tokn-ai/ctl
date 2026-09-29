@@ -122,7 +122,7 @@ async fn connect_with(
   .map_err(|error| CommandErrorDto::transport(&error))?;
   let identity = stream
     .remote_identity
-    .as_ref()
+    .as_deref()
     .expect("identified transport")
     .clone();
   target.verify_remote_identity(&identity)?;

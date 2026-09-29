@@ -310,7 +310,7 @@ pub async fn open_task_transport_with_interaction(
 /// and reap the SSH child. A fresh reconnect always creates a fresh SSH
 /// channel; OpenSSH may transparently reuse a configured control master.
 pub struct SshTransport {
-  pub remote_identity: Option<ctl_proto::RemoteIdentity>,
+  pub remote_identity: Option<Box<ctl_proto::RemoteIdentity>>,
   stdin: ChildStdin,
   stdout: ChildStdout,
   shutdown: watch::Sender<bool>,
@@ -691,11 +691,11 @@ where
     return Err(CoreError::InvalidSshPreface);
   }
   let remote_identity = if identified {
-    Some(
+    Some(Box::new(
       ctl_proto::read_identity(&mut stdout)
         .await
         .map_err(CoreError::RemoteIdentity)?,
-    )
+    ))
   } else {
     None
   };

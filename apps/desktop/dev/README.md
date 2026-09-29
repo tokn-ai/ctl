@@ -28,6 +28,13 @@ Cancel removes the draft and never touches a real container or account.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 
+Open **About rmux** from the bottom info button or command palette to inspect
+sample component versions. The page uses fictional observations and its
+**Restart ctld** action only changes memory. Add `?about=partial` to show one
+unavailable component while other versions remain visible, or
+`?about=restart-error` to exercise a failed restart and subsequent refresh.
+Use `?vpn=multiple` to include active VPNs in the restart confirmation.
+
 The preview covers navigation, dialogs, task editing, lease controls, tab
 switching, and port toggles. Remote installation and real connection recovery
 require the native app. Sample command output demonstrates the visual layout;

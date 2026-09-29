@@ -1,5 +1,6 @@
 //! Owner-only local protocol between `ctld` and its clients.
 
+pub mod lifecycle;
 pub mod vpn;
 mod vpn_config;
 pub use vpn_config::{VpnConnection, VpnProvider, VpnSettings};

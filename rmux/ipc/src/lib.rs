@@ -1,3 +1,5 @@
+mod component;
+pub use component::{ComponentStatus, component_status};
 use std::env;
 use std::future::Future;
 use std::io;
@@ -119,6 +121,10 @@ pub enum LocalControlServerMessage {
   HandshakeAccepted {
     protocol_version: u16,
     restart_supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build: Option<component_info::ComponentBuildInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_protocol_version: Option<u16>,
     #[serde(default)]
     managed_sessions_supported: bool,
   },
@@ -297,6 +303,7 @@ where
       protocol_version,
       restart_supported,
       managed_sessions_supported,
+      ..
     }) if protocol_version == LOCAL_CONTROL_PROTOCOL_VERSION => Ok(LocalControlCapabilities {
       restart_supported,
       managed_sessions_supported,
@@ -564,7 +571,11 @@ fn start_daemon(socket_path: &Path) -> Result<(), ConnectError> {
   Ok(())
 }
 
-fn daemon_executable() -> Result<PathBuf, ConnectError> {
+/// Resolves the executable selected for local daemon startup without launching it.
+///
+/// # Errors
+/// Returns an error if no executable can be located.
+pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
   }
@@ -753,6 +764,8 @@ mod tests {
         &LocalControlServerMessage::HandshakeAccepted {
           protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
           restart_supported: false,
+          build: None,
+          data_protocol_version: None,
           managed_sessions_supported: false,
         },
       )

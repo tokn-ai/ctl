@@ -76,6 +76,7 @@ async fn gateway_round_trip(identified: bool) {
     remote_id: Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
     rmux_restart_supported: false,
+    build: None,
     bundle: None,
   };
   config.identity = identified.then(|| identity.clone());

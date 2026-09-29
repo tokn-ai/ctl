@@ -190,6 +190,38 @@ tracked separately from displayed status, and a forward configured during
 master startup is not activated twice. The local `ctld` IPC protocol is version
 11; older clients and daemons must be updated together and the daemon restarted.
 
+### Component diagnostics and ctld replacement
+
+The About page performs bounded, passive queries against selected local owners.
+It enumerates both SSH and VPN ctld endpoints, deduplicating identical owners.
+An independent ctld lifecycle protocol reports build identity and data-protocol
+version even when the app's data protocol differs. rmuxd exposes equivalent
+metadata through its local-control handshake, with a data-handshake fallback for
+legacy owners. taskd accepts a passive control metadata query. Standalone
+`--component-info` prints JSON for helper executables without starting services.
+
+`component-info` embeds the release version, source revision, dirty flag, and a
+deterministic fingerprint of Rust component sources and dependency definitions.
+The fingerprint normalizes platform path separators and text line endings. It
+excludes credentials, runtime configuration, and build output. Equal release
+versions with unequal fingerprints are different builds, not ordered releases.
+Status comparisons use the app's compiled component build as the baseline;
+matching running and installed helpers do not hide a mismatch with the app.
+Remote diagnostics retain identity and server-handshake metadata on existing
+attachment actors; opening About never creates an SSH transport or uses persisted
+host metadata as evidence of a currently running agent.
+
+ctld restart pins a lifecycle stream to an instance and verifies the selected
+replacement before confirmation. Native confirmation tokens are window-scoped,
+expire, and can be consumed once. On confirmation, the same owner and replacement
+are rechecked. The daemon stops accepting requests, drains its VPNs and owned
+forwards, releases its endpoint, and closes the pinned stream before replacement
+startup. The client verifies a fresh instance with matching build and protocol.
+Legacy owners are inspected where possible but never stopped by process-name or
+PID guesses. Restart does not delete saved VPN identities or profiles.
+
+### Managed VPNs
+
 `ctl vpn start --env-file PATH` asks the local `ctld` to own an OpenConnect
 container, starting the daemon if needed. The settings path defaults to `.env`
 and is resolved relative to the caller's directory. Its SOCKS5 listener uses a

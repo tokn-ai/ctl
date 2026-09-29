@@ -6,10 +6,18 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt as _;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "SSH remote-command gateway for ctl services")]
+#[command(
+  version,
+  arg_required_else_help = true,
+  args_conflicts_with_subcommands = true,
+  about = "SSH remote-command gateway for ctl services"
+)]
 struct Arguments {
+  /// Print version/build/protocol metadata without connecting to a service.
+  #[arg(long, exclusive = true)]
+  component_info: bool,
   #[command(subcommand)]
-  command: Command,
+  command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -37,7 +45,21 @@ async fn main() {
 }
 
 async fn run(arguments: Arguments) -> Result<(), MainError> {
-  match arguments.command {
+  if arguments.component_info {
+    let info = component_info::ComponentInfo {
+      build: component_info::build_info(),
+      protocols: vec![component_info::ProtocolInfo {
+        name: "ctl_identity".into(),
+        version: ctl_proto::IDENTITY_PROTOCOL_VERSION,
+      }],
+    };
+    println!("{}", serde_json::to_string(&info)?);
+    return Ok(());
+  }
+  match arguments
+    .command
+    .expect("a subcommand is required unless component info was requested")
+  {
     Command::Connect { service, identity } => {
       let mut config = ConnectConfig::new(rmux_ipc::socket_path());
       config.service = service;
@@ -103,11 +125,20 @@ mod tests {
   use super::*;
 
   #[test]
+  fn component_metadata_never_requires_a_remote_service_command() {
+    let request = Arguments::try_parse_from(["ctl-agent", "--component-info"]).unwrap();
+    assert!(request.component_info);
+    assert!(request.command.is_none());
+    assert!(Arguments::try_parse_from(["ctl-agent", "--component-info", "connect"]).is_err());
+  }
+
+  #[test]
   fn connect_defaults_to_rmux_and_accepts_task_service() {
     assert!(matches!(
       Arguments::try_parse_from(["ctl-agent", "connect"])
         .unwrap()
-        .command,
+        .command
+        .unwrap(),
       Command::Connect {
         service: Service::Rmux,
         identity: false
@@ -116,7 +147,8 @@ mod tests {
     assert!(matches!(
       Arguments::try_parse_from(["ctl-agent", "connect", "--service", "task"])
         .unwrap()
-        .command,
+        .command
+        .unwrap(),
       Command::Connect {
         service: Service::Task,
         identity: false
@@ -133,7 +165,8 @@ mod tests {
         Service::Task,
       ),
     ] {
-      let Command::Connect { service, identity } = Arguments::try_parse_from(args).unwrap().command
+      let Command::Connect { service, identity } =
+        Arguments::try_parse_from(args).unwrap().command.unwrap()
       else {
         panic!("expected connect command")
       };
@@ -166,7 +199,8 @@ mod tests {
     assert!(matches!(
       Arguments::try_parse_from(["ctl-agent", "restart-rmux"])
         .unwrap()
-        .command,
+        .command
+        .unwrap(),
       Command::RestartRmux
     ));
     for argument in ["--socket", "--pid", "--command", "--service"] {
@@ -181,7 +215,8 @@ mod tests {
     assert!(matches!(
       Arguments::try_parse_from(["ctl-agent", "listeners"])
         .unwrap()
-        .command,
+        .command
+        .unwrap(),
       Command::Listeners
     ));
     assert!(Arguments::try_parse_from(["ctl-agent", "listeners", "--command", "sh"]).is_err());

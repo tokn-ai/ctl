@@ -43,6 +43,7 @@ pub struct AttachmentActor {
   pub target: ConnectionTargetDto,
   pub control: AttachmentControl,
   pub cache_identity: Option<rmux_client::cache::CacheIdentity>,
+  pub remote_observation: Option<crate::about::observations::RemoteObservation>,
   pending: Mutex<Option<PendingPresentation>>,
   pending_changed: Notify,
   closed: AtomicBool,
@@ -76,6 +77,23 @@ impl PendingPresentation {
 }
 
 impl AppState {
+  pub async fn remote_observations(&self) -> Vec<crate::about::observations::RemoteObservation> {
+    self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .values()
+      .flat_map(|slots| slots.values())
+      .filter_map(|slot| match slot {
+        AttachmentSlot::Active(actor) if !actor.closed.load(Ordering::Acquire) => {
+          actor.remote_observation.clone()
+        }
+        _ => None,
+      })
+      .collect()
+  }
+
   /// Serializes opens without replacing sibling pane attachments. A stalled
   /// open can be cancelled without waiting for the window transition lock.
   pub async fn open_attachment<T>(
@@ -353,6 +371,7 @@ impl AttachmentActor {
       target,
       control,
       cache_identity: None,
+      remote_observation: None,
       pending: Mutex::new(None),
       pending_changed: Notify::new(),
       closed: AtomicBool::new(false),
@@ -362,6 +381,14 @@ impl AttachmentActor {
 
   pub fn with_cache(mut self, identity: rmux_client::cache::CacheIdentity) -> Self {
     self.cache_identity = Some(identity);
+    self
+  }
+
+  pub fn with_remote_observation(
+    mut self,
+    observation: Option<crate::about::observations::RemoteObservation>,
+  ) -> Self {
+    self.remote_observation = observation;
     self
   }
 

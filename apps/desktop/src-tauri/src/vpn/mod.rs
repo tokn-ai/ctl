@@ -79,6 +79,14 @@ pub(crate) async fn close_window(window_label: &str) {
   ENROLLMENTS.close_window(window_label).await;
 }
 
+/// The About page observes exactly the same owner selected for VPN operations.
+pub(crate) fn owner_endpoint() -> (PathBuf, Result<Option<PathBuf>, ctld_ipc::ConnectError>) {
+  (
+    client::selected_socket_path(),
+    client::selected_daemon_executable(),
+  )
+}
+
 pub(crate) fn valid_connection_id(connection_id: &str) -> bool {
   !connection_id.is_empty()
     && connection_id.len() <= 128

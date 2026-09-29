@@ -118,7 +118,11 @@ async fn wait_for_endpoint(socket: &Path) -> Result<Stream, ClientError> {
   }
 }
 
-fn daemon_executable() -> Result<PathBuf, ClientError> {
+/// Resolves the selected task daemon executable without starting it.
+///
+/// # Errors
+/// Returns an error if no executable can be found.
+pub fn daemon_executable() -> Result<PathBuf, ClientError> {
   if let Some(executable) = env::var_os("TASKD_BIN") {
     return Ok(PathBuf::from(executable));
   }

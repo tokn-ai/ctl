@@ -41,6 +41,7 @@ import {
   previewTargets,
   previewWorkspace,
 } from "./fixtures";
+import { previewComponentVersions } from "./aboutFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
 // The official Tauri mocks intercept every IPC call; nothing reaches a daemon,
@@ -49,6 +50,14 @@ if (!import.meta.env.DEV) throw new Error("The sample workspace is development-o
 
 const view_param = new URLSearchParams(location.search).get("view");
 const initial_view = view_param === "tasks" || view_param === "ports" || view_param === "vpn" ? view_param : "sessions";
+const about_param = new URLSearchParams(location.search).get("about");
+let component_versions = previewComponentVersions();
+if (about_param === "partial") {
+  const daemon = component_versions.components.find((row) => row.component === "rmuxd")!;
+  daemon.running = null;
+  daemon.status = "unavailable";
+  daemon.error = "The running rmuxd did not respond before the check timed out.";
+}
 let workspace: WorkspaceSnapshot = { revision: "preview-1", document: previewWorkspace(initial_view) };
 const connectedHosts = new Set(["dev-server"]);
 const pausedHosts = new Set<string>();
@@ -152,6 +161,26 @@ function requireSession(session_id: string): SessionSummary {
 mockWindows("main");
 mockIPC((command, payload) => {
   switch (command) {
+    case "get_component_versions":
+      return structuredClone(component_versions);
+    case "preflight_restart_ctld": {
+      const { component_id } = request<{ component_id: string }>(payload);
+      const row = component_versions.components.find((item) => item.component_id === component_id && item.component === "ctld");
+      if (!row) throw new Error("This component is no longer available.");
+      return { restart_token: `preview-${component_id}`, component_id, label: row.label, running: row.running, available: row.available,
+        impact: { ssh_connections: null, port_forwards: null, vpn_connections: vpn_snapshot.connections.length } };
+    }
+    case "restart_ctld": {
+      const { restart_token } = request<{ restart_token: string }>(payload);
+      const row = component_versions.components.find((item) => `preview-${item.component_id}` === restart_token && item.component === "ctld");
+      if (!row) throw new Error("Check the component again before restarting.");
+      return new Promise((resolve, reject) => setTimeout(() => {
+        if (about_param === "restart-error") { reject(new Error("The replacement ctld did not become ready. Refresh versions to check its state.")); return; }
+        component_versions = { components: component_versions.components.map((item) => item.component_id === row.component_id ? { ...item, running: item.available, status: "current" } : item) };
+        vpn_snapshot.connections = [];
+        resolve({ component_id: row.component_id, running: row.available });
+      }, 1200));
+    }
     case "load_workspace":
       return structuredClone(workspace);
     case "update_workspace":

@@ -330,6 +330,8 @@ async fn unsupported_restart_does_not_touch_a_live_data_endpoint() -> TestResult
       &rmux_ipc::LocalControlServerMessage::HandshakeAccepted {
         protocol_version: rmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
         restart_supported: false,
+        build: None,
+        data_protocol_version: None,
         managed_sessions_supported: false,
       },
     )

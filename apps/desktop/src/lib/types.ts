@@ -195,6 +195,23 @@ export interface SshConnectionStatus {
   manually_disconnected: boolean;
 }
 
+/** A bounded SSH greeting check that never authenticates or starts a route. */
+export interface SshReachability {
+  state: "available" | "unavailable" | "not_checked" | "unknown";
+  reason: "vpn_disconnected" | "route_requires_connection" | "unsupported_configuration" |
+    "connection_refused" | "timed_out" | "invalid_greeting" | "check_failed" | null;
+  message: string | null;
+}
+
+export interface HostReachabilityObservation {
+  state: SshReachability["state"] | "checking";
+  reason: SshReachability["reason"];
+  /** Methods whose endpoint answered with an SSH greeting; these are not authenticated connections. */
+  method_names: string[];
+  message: string | null;
+  checked_at_ms: number | null;
+}
+
 export interface HostConnectionStatus {
   state: "checking" | "connected" | "connecting" | "disconnecting" | "disconnected" | "error";
   method_names: string[];
@@ -203,6 +220,8 @@ export interface HostConnectionStatus {
   manually_disconnected?: boolean;
   /** Runtime SSH-master evidence; this does not establish terminal/network health. */
   observation?: HostConnectionObservation;
+  /** Independent endpoint reachability; never grants connection or attachment authority. */
+  reachability?: HostReachabilityObservation;
   /** An attempt is independent of already observed SSH-master availability. */
   operation?: HostConnectionOperation;
 }

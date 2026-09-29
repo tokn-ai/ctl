@@ -107,6 +107,37 @@ function hostTitle(target: ConnectionTarget): string {
   return lines.join("\n");
 }
 
+function hostConnectionPresentation(target: ConnectionTarget, connection: HostConnectionStatus | undefined): {
+  state: string; label: string; route_unavailable?: boolean;
+} {
+  const observation = connection?.observation;
+  const reachability = connection?.reachability;
+  const connected = observation ? observation.availability === "available" : connection?.state === "connected";
+  if (connected) return { state: "connected", label: "SSH connected" };
+  if (reachability?.state === "available") return { state: "available", label: "SSH available" };
+  if (target.kind === "ssh" && target.unavailable)
+    return { state: "error", label: connectionUnavailableLabel(target), route_unavailable: true };
+  if (reachability) {
+    if (reachability.reason === "vpn_disconnected") return { state: "disconnected", label: "VPN disconnected" };
+    if (reachability.state === "unavailable") return { state: "disconnected", label: "SSH unavailable" };
+    if (reachability.state === "checking") return { state: "checking", label: "Checking SSH…" };
+    if (reachability.state === "not_checked") return { state: "disconnected", label: "SSH not checked" };
+    return { state: "unknown", label: "SSH status unknown" };
+  }
+  if (observation) {
+    if (observation.availability === "unavailable") return {
+      state: "disconnected", label: connection?.manually_disconnected ? "Disconnected manually" : "SSH disconnected",
+    };
+    if (observation.completeness === "pending") return { state: "checking", label: "Checking SSH…" };
+    return { state: "unknown", label: "SSH status unknown" };
+  }
+  const state = connection?.state ?? "checking";
+  return { state, label: {
+    checking: "Checking…", connected: "SSH connected", connecting: "Connecting…",
+    disconnecting: "Disconnecting…", disconnected: "Disconnected", error: "Connection error",
+  }[state] };
+}
+
 export function SessionSidebar({
   targets,
   hosts = [],
@@ -294,35 +325,18 @@ export function SessionSidebar({
             ? hostConnections?.get(target.host_id ?? "")
             : undefined;
           const observation = connection?.observation;
+          const reachability = connection?.reachability;
           const operation = connection?.operation;
-          const sshAvailable = observation
-            ? observation.availability === "available"
-            : connection?.state === "connected";
-          const unavailableLabel = unavailable && !sshAvailable && target.kind === "ssh"
-            ? connectionUnavailableLabel(target) : null;
-          const connectionState = unavailableLabel ? "error" : observation
-            ? observation.availability === "available" ? "connected"
-              : observation.availability === "unavailable" ? "disconnected"
-                : observation.completeness === "pending" ? "checking" : "error"
-            : connection?.state ?? "checking";
-          const connectionLabel = unavailableLabel ?? (observation
-            ? observation.availability === "available" ? "SSH connected"
-              : observation.availability === "unavailable" ? connection?.manually_disconnected ? "Disconnected manually" : "SSH disconnected"
-                : observation.completeness === "pending" ? "Checking SSH…" : "SSH status unknown"
-            : {
-            checking: "Checking…",
-            connected: "SSH connected",
-            connecting: "Connecting…",
-            disconnecting: "Disconnecting…",
-            disconnected: "Disconnected",
-            error: "Connection error",
-          }[connectionState]);
+          const { state: connectionState, label: connectionLabel, route_unavailable: unavailableRoute } = hostConnectionPresentation(target, connection);
           const operationLabel = operation?.state === "pending" ? operation.kind === "connect" ? "Connecting…" : "Disconnecting…"
             : operation?.state === "failed" ? operation.kind === "connect" ? "Connect failed" : "Disconnect failed" : null;
           const connectionTitle = [
             connectionLabel,
-            observation ? "Observes the local SSH control connection; remote network and terminal health are reported separately." : null,
-            observation?.checked_at_ms ? `Checked at ${new Date(observation.checked_at_ms).toLocaleTimeString()}` : null,
+            connectionState === "connected" ? "The local SSH control connection is open. This check does not freshly verify remote responsiveness or terminal health." : null,
+            reachability?.state === "available" ? "The endpoint answered with an SSH greeting. Authentication has not been checked." : null,
+            observation?.checked_at_ms ? `SSH connection checked at ${new Date(observation.checked_at_ms).toLocaleTimeString()}` : null,
+            reachability?.checked_at_ms ? `SSH reachability checked at ${new Date(reachability.checked_at_ms).toLocaleTimeString()}` : null,
+            reachability?.method_names.length ? `Available methods: ${reachability.method_names.join(", ")}` : null,
             connection?.method_names.length
               ? `Connection methods: ${connection.method_names.join(", ")}`
               : null,
@@ -330,6 +344,7 @@ export function SessionSidebar({
             connection?.message !== unavailable ? connection?.message : null,
             observation?.completeness === "partial" ? "Some connection methods couldn't be checked." : null,
             observation?.failed_method_names.length ? `Status unknown for: ${observation.failed_method_names.join(", ")}` : null,
+            reachability?.message,
           ].filter(Boolean).join("\n");
           const connectionBusy = connection?.state === "connecting" ||
             connection?.state === "disconnecting" || operation?.state === "pending";
@@ -344,7 +359,7 @@ export function SessionSidebar({
               key={key}
               aria-label={`${targetLabel(target)} sessions`}
             >
-              <div className={`host-group-header ${hostError || unavailableLabel ? "has-error" : ""}`}>
+              <div className={`host-group-header ${hostError || unavailableRoute ? "has-error" : ""}`}>
                 <button
                   className="host-group-toggle"
                   type="button"
@@ -376,6 +391,7 @@ export function SessionSidebar({
                     aria-label={`Host connection for ${targetLabel(target)}: ${connectionLabel}${operationLabel ? ` · ${operationLabel}` : ""}`}
                     data-state={connectionState}
                     data-availability={observation?.availability}
+                    data-reachability={reachability?.state}
                     data-completeness={observation?.completeness}
                     title={connectionTitle}
                   >
@@ -453,7 +469,7 @@ export function SessionSidebar({
                 ) : null}
                 {!loading && groupSessions.length === 0 ? (
                   <p className="host-empty-state">
-                    {hostError || unavailableLabel ? "Sessions unavailable" : "No known sessions"}
+                    {hostError || unavailableRoute ? "Sessions unavailable" : "No known sessions"}
                   </p>
                 ) : null}
                 {groupSessions.map((session) => {

@@ -9,7 +9,9 @@ import type {
   SshConnectionTarget,
   WorkspaceHost,
   WorkspaceSshGateway,
+  VpnStatus,
 } from "../../lib/types";
+import { useHostReachability } from "./useHostReachability";
 import { hostTarget } from "./workspaceModel";
 import { sameSshEndpoint } from "./remoteRecovery";
 import {
@@ -30,6 +32,8 @@ interface Options {
   hosts: readonly WorkspaceHost[];
   targets: readonly ConnectionTarget[];
   gateways: readonly WorkspaceSshGateway[];
+  vpn_statuses?: readonly VpnStatus[];
+  vpn_status_stale?: boolean;
   /** Quiesce local views and forwards before releasing the host's connection. */
   onPause(host_id: string): Promise<void>;
   onResume(host_id: string): void;
@@ -257,5 +261,12 @@ export function useHostConnections(options: Options) {
   const statuses: ReadonlyMap<string, HostConnectionStatus> = published.generation === configuration.current.generation
     ? published.statuses
     : new Map(options.hosts.filter((host) => host.host_id !== "local").map((host) => [host.host_id, hostConnectionStatus(emptyHostConnection(models.current.has(host.host_id)))]));
-  return { statuses, refresh, isPaused, connectionChanged, disconnect };
+  const reachability = useHostReachability({ ...options, statuses });
+  const observedStatuses = new Map([...statuses].map(([host_id, status]) =>
+    [host_id, { ...status, reachability: reachability.statuses.get(host_id) }]));
+  const refreshReachability = reachability.refresh;
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refresh(), refreshReachability(true)]);
+  }, [refresh, refreshReachability]);
+  return { statuses: observedStatuses, refresh: refreshAll, isPaused, connectionChanged, disconnect };
 }

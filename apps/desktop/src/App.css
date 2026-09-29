@@ -307,6 +307,10 @@ svg {
   background: currentColor;
 }
 
+.host-connection-status[data-state="available"] .host-connection-dot {
+  color: var(--success);
+}
+
 .host-connection-status:is([data-state="checking"], [data-state="connecting"], [data-state="disconnecting"]) .host-connection-dot {
   color: var(--warning);
 }
@@ -315,7 +319,8 @@ svg {
   color: var(--danger);
 }
 
-.host-connection-status[data-availability="unknown"] {
+.host-connection-status[data-state="unknown"],
+.host-connection-status[data-availability="unknown"]:not([data-state="available"]):not([data-state="connected"]) {
   color: var(--warning);
 }
 

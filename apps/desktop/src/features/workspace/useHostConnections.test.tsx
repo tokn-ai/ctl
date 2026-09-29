@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { disconnectSshHost, probeSshHost, sshConnectionStatus } from "../../lib/tauri";
+import { disconnectSshHost, probeSshHost, sshConnectionStatus, sshReachability } from "../../lib/tauri";
 import type { SshConnectionStatus, SshConnectionTarget, WorkspaceHost } from "../../lib/types";
 import { HOST_STATUS_INTERVAL_MS, HOST_STATUS_TIMEOUT_MS, useHostConnections } from "./useHostConnections";
 
@@ -9,6 +9,7 @@ vi.mock("../../lib/tauri", () => ({
   disconnectSshHost: vi.fn(),
   probeSshHost: vi.fn(),
   sshConnectionStatus: vi.fn(),
+  sshReachability: vi.fn(),
 }));
 
 const target: SshConnectionTarget = {
@@ -54,6 +55,7 @@ function setup(overrides: Partial<Parameters<typeof useHostConnections>[0]> = {}
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(sshConnectionStatus).mockResolvedValue(disconnected);
+  vi.mocked(sshReachability).mockResolvedValue({ state: "unavailable", reason: "connection_refused", message: "SSH port refused the connection." });
   vi.mocked(disconnectSshHost).mockResolvedValue(undefined);
 });
 afterEach(() => {
@@ -62,6 +64,22 @@ afterEach(() => {
 });
 
 describe("live host connections", () => {
+  it("keeps a manually disconnected host paused even when its SSH greeting is available", async () => {
+    vi.mocked(sshConnectionStatus).mockResolvedValue(manuallyDisconnected);
+    vi.mocked(sshReachability).mockResolvedValue({ state: "available", reason: null, message: null });
+    const previous = { ...target, destination: "previous.invalid" };
+    const { result, initial } = setup({ targets: [target, previous] });
+    await waitFor(() => expect(result.current.statuses.get(host.host_id)?.reachability?.state).toBe("available"));
+    expect(result.current.statuses.get(host.host_id)).toMatchObject({
+      state: "disconnected", method_names: [], manually_disconnected: true,
+      observation: { availability: "unavailable" }, reachability: { method_names: ["Direct"] },
+    });
+    expect(result.current.isPaused(target)).toBe(true);
+    expect(initial.onResume).not.toHaveBeenCalled();
+    expect(sshReachability).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ destination: "direct" }));
+    expect(probeSshHost).not.toHaveBeenCalled();
+  });
+
   it("observes startup, periodic, and focus changes without authenticating", async () => {
     vi.useFakeTimers();
     const { result, rerender, initial } = setup({ ready: false });
@@ -517,6 +535,6 @@ it("bounds a stalled broker query and ignores its late connected result", async 
   expect(result.current.statuses.get(host.host_id)?.observation?.availability).toBe("unknown");
   await act(async () => { current.resolve(disconnected); });
   expect(result.current.statuses.get(host.host_id)?.observation?.availability).toBe("unavailable");
-  // Only the periodic refresh timer remains; query deadline timers were cleared.
-  expect(vi.getTimerCount()).toBe(1);
+  // Only periodic refresh timers remain; query deadline timers were cleared.
+  expect(vi.getTimerCount()).toBe(2);
 });

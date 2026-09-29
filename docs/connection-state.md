@@ -1,11 +1,12 @@
 # Connection observations and transitions
 
 Connection state is runtime evidence, not a persisted property of a saved host
-or terminal. Three independent observations must remain separate:
+or terminal. These independent observations must remain separate:
 
 | Observation | Evidence | What it does not establish |
 | --- | --- | --- |
 | SSH connected | The local OpenSSH control master answered `-O check` | Remote reachability or terminal attachment health |
+| SSH available | The configured route returned an SSH identification greeting during a brief probe | Successful authentication, verified host identity, or an established SSH session |
 | Terminal attached | This attachment completed its protocol handshake and has not reported closure/failure | Other terminals or connection methods are healthy |
 | Session ended | An explicit session-ended event or confirmed missing-session response | A transport failure alone never proves process exit |
 
@@ -30,9 +31,29 @@ summary, not another authority.
   OpenSSH master still exists. A native observation spanning a disconnect/reconnect
   generation cannot establish the replacement's state.
 
-Status queries are passive. They do not authenticate or contact a remote host.
-Each frontend query has a bounded wait; late results cannot update the snapshot.
-The tooltip identifies the check time and the limits of this evidence.
+Master-status queries inspect the local SSH control connection. Reachability
+checks are separate: they open a brief connection to the configured SSH port,
+verify its [SSH identification greeting](https://www.rfc-editor.org/rfc/rfc4253#section-4.2),
+and close before authentication or session creation. A successful probe keeps
+the Connect action available; it never grants Disconnect controls or resumes
+manually paused sessions and forwards.
+
+Reachability checks use direct routes or existing VPN and unauthenticated SOCKS5
+routes. They never start a VPN, authenticate to an SSH gateway, request proxy
+credentials, or fall back to a direct connection when a route cannot be used.
+An inactive VPN and unsupported routes are reported as not checked, rather than
+evidence that the remote SSH service is down. SSH configuration is read without
+executing custom commands; unsupported routing or dynamic configuration also
+leaves reachability unverified.
+Static configuration inspection currently supports standard OpenSSH locations
+on macOS and Linux. Other platforms report the probe as not checked.
+
+Only current configured methods are probed. Retained previous routes are checked
+for existing masters, but cannot establish availability for a new connection.
+Reachability refreshes are throttled separately from master polling and are
+invalidated by host settings or VPN route changes. Each query has a bounded wait;
+late results cannot update the snapshot. Tooltips identify the check time and
+the limits of this evidence.
 Unavailable Tailscale routes use the compact label Tailscale unavailable, with
 the full reason in the tooltip or connection details. An unavailable preferred
 route does not hide SSH availability observed through another method.

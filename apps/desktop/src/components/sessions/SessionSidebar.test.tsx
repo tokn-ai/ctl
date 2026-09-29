@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConnectionTarget,
   HostConnectionStatus,
+  HostReachabilityObservation,
   ManagedTask,
   SessionSummary,
   ShellStateSummary,
@@ -96,6 +97,53 @@ function renderHostConnection(
 afterEach(cleanup);
 
 describe("SessionSidebar", () => {
+  it.each([
+    [{ state: "available", reason: null }, "SSH available"],
+    [{ state: "unavailable", reason: "connection_refused" }, "SSH unavailable"],
+    [{ state: "not_checked", reason: "vpn_disconnected" }, "VPN disconnected"],
+    [{ state: "not_checked", reason: "route_requires_connection" }, "SSH not checked"],
+    [{ state: "unknown", reason: "check_failed" }, "SSH status unknown"],
+  ] as const)("shows %s reachability without granting connected controls", async (evidence, label) => {
+    const user = userEvent.setup();
+    const reachability: HostReachabilityObservation = { ...evidence, method_names: evidence.state === "available" ? ["Direct"] : [], message: "Reachability details", checked_at_ms: 1 };
+    const props = renderHostConnection({ state: "disconnected", method_names: [], message: "Disconnected manually. Connect this host to resume.",
+      manually_disconnected: true, reachability });
+    const status = screen.getByRole("status", { name: `Host connection for Build machine: ${label}` });
+    expect(status.textContent).toBe(label);
+    expect(status.title).toContain("Reachability details");
+    expect(status.title).toContain("Disconnected manually");
+    if (evidence.state === "available") {
+      expect(status.title).toContain("Authentication has not been checked");
+      expect(status.getAttribute("data-state")).toBe("available");
+    }
+    expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
+  });
+
+  it("keeps a confirmed SSH connection above a failed reachability probe", () => {
+    renderHostConnection({ state: "connected", method_names: ["Direct"], message: null,
+      reachability: { state: "unavailable", reason: "timed_out", method_names: [], message: null, checked_at_ms: 1 } });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
+    expect(status.title).toContain("does not freshly verify remote responsiveness");
+    expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
+  });
+
+  it("shows an available alternate route when the preferred Tailscale device is unavailable", async () => {
+    const user = userEvent.setup();
+    const target = { ...remoteHost, tailscale_node_id: "node-1", unavailable: TAILSCALE_UNAVAILABLE };
+    const props = renderHostConnection({ state: "error", method_names: [], message: TAILSCALE_UNAVAILABLE,
+      reachability: { state: "available", reason: null, method_names: ["Direct"], message: null, checked_at_ms: 1 } }, {
+      targets: [target], connectableHostKeys: new Set([targetKey(target)]),
+    });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH available" });
+    expect(status.title).toContain("Available methods: Direct");
+    expect(status.title).toContain(TAILSCALE_UNAVAILABLE);
+    expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(target);
+  });
+
   it("marks virtual Tailscale provenance separately from SSH connection status and omits removal", () => {
     renderHostConnection({ state: "disconnected", method_names: [], message: null }, {
       hosts: [{ ...hostFromTarget(remoteHost), source: "tailscale" }],

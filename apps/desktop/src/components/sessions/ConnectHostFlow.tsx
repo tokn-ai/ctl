@@ -2,6 +2,7 @@ import { useState } from "react";
 import { QuickInput } from "../commands/QuickInput";
 import { SshHostFlow, type SshHostFlowProps } from "./SshHostFlow";
 import { hostTarget } from "../../features/workspace/workspaceModel";
+import { connectionUnavailableLabel } from "../../features/targets/targets";
 import { errorMessage } from "../../lib/errors";
 import type { ConnectionTarget, WorkspaceConnectionMethod, WorkspaceHost } from "../../lib/types";
 
@@ -76,7 +77,7 @@ export function ConnectHostFlow({
             detail: [
               method.method_id === host.preferred_method_id ? "Preferred" : null,
               methodEndpoint(method),
-              method.target.unavailable,
+              method.target.unavailable ? connectionUnavailableLabel(method) : null,
             ].filter(Boolean).join(" · "),
           })),
         }}

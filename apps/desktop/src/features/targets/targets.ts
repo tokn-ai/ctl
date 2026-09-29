@@ -41,6 +41,11 @@ export function targetLabel(target: ConnectionTarget): string {
   return target.kind === "local" ? "local" : target.host_name ?? target.destination;
 }
 
+/** Compact availability label; keep the detailed reason separate. */
+export function connectionUnavailableLabel(binding: Pick<SshConnectionTarget, "tailscale_node_id">): string {
+  return binding.tailscale_node_id ? "Tailscale unavailable" : "Unavailable";
+}
+
 export function sameTarget(
   left: ConnectionTarget,
   right: ConnectionTarget,

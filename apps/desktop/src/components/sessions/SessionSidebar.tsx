@@ -16,6 +16,7 @@ import type {
   WorkspaceHost,
 } from "../../lib/types";
 import {
+  connectionUnavailableLabel,
   sessionKey,
   targetKey,
   targetLabel,
@@ -286,30 +287,36 @@ export function SessionSidebar({
           const expanded = !collapsedHosts.has(key);
           const childrenId = `${groupId}-${encodeURIComponent(key)}`;
           const host = hosts.find((item) => item.host_id === (target.kind === "local" ? "local" : target.host_id));
-          const hostError = targetErrors.get(key) ?? (target.kind === "ssh" ? target.unavailable : undefined);
+          const unavailable = target.kind === "ssh" ? target.unavailable : undefined;
+          const targetError = targetErrors.get(key);
+          const hostError = targetError === unavailable ? undefined : targetError;
           const connection = target.kind === "ssh"
             ? hostConnections?.get(target.host_id ?? "")
             : undefined;
-          const unavailable = target.kind === "ssh" ? target.unavailable : undefined;
           const observation = connection?.observation;
           const operation = connection?.operation;
-          const connectionState = unavailable ? "error" : observation
+          const sshAvailable = observation
+            ? observation.availability === "available"
+            : connection?.state === "connected";
+          const unavailableLabel = unavailable && !sshAvailable && target.kind === "ssh"
+            ? connectionUnavailableLabel(target) : null;
+          const connectionState = unavailableLabel ? "error" : observation
             ? observation.availability === "available" ? "connected"
               : observation.availability === "unavailable" ? "disconnected"
                 : observation.completeness === "pending" ? "checking" : "error"
             : connection?.state ?? "checking";
-          const connectionLabel = unavailable ? "Unavailable" : observation
-            ? observation.availability === "available" ? observation.completeness === "partial" ? "SSH available · Partial status" : "SSH available"
+          const connectionLabel = unavailableLabel ?? (observation
+            ? observation.availability === "available" ? "SSH connected"
               : observation.availability === "unavailable" ? connection?.manually_disconnected ? "Disconnected manually" : "SSH disconnected"
                 : observation.completeness === "pending" ? "Checking SSH…" : "SSH status unknown"
             : {
             checking: "Checking…",
-            connected: "Connected",
+            connected: "SSH connected",
             connecting: "Connecting…",
             disconnecting: "Disconnecting…",
             disconnected: "Disconnected",
             error: "Connection error",
-          }[connectionState];
+          }[connectionState]);
           const operationLabel = operation?.state === "pending" ? operation.kind === "connect" ? "Connecting…" : "Disconnecting…"
             : operation?.state === "failed" ? operation.kind === "connect" ? "Connect failed" : "Disconnect failed" : null;
           const connectionTitle = [
@@ -319,7 +326,9 @@ export function SessionSidebar({
             connection?.method_names.length
               ? `Connection methods: ${connection.method_names.join(", ")}`
               : null,
-            unavailable ?? connection?.message,
+            unavailable,
+            connection?.message !== unavailable ? connection?.message : null,
+            observation?.completeness === "partial" ? "Some connection methods couldn't be checked." : null,
             observation?.failed_method_names.length ? `Status unknown for: ${observation.failed_method_names.join(", ")}` : null,
           ].filter(Boolean).join("\n");
           const connectionBusy = connection?.state === "connecting" ||
@@ -335,7 +344,7 @@ export function SessionSidebar({
               key={key}
               aria-label={`${targetLabel(target)} sessions`}
             >
-              <div className={`host-group-header ${hostError ? "has-error" : ""}`}>
+              <div className={`host-group-header ${hostError || unavailableLabel ? "has-error" : ""}`}>
                 <button
                   className="host-group-toggle"
                   type="button"
@@ -444,7 +453,7 @@ export function SessionSidebar({
                 ) : null}
                 {!loading && groupSessions.length === 0 ? (
                   <p className="host-empty-state">
-                    {hostError ? "Sessions unavailable" : "No known sessions"}
+                    {hostError || unavailableLabel ? "Sessions unavailable" : "No known sessions"}
                   </p>
                 ) : null}
                 {groupSessions.map((session) => {

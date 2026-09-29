@@ -5,7 +5,7 @@ or terminal. Three independent observations must remain separate:
 
 | Observation | Evidence | What it does not establish |
 | --- | --- | --- |
-| SSH available | The local OpenSSH control master answered `-O check` | Remote reachability or terminal attachment health |
+| SSH connected | The local OpenSSH control master answered `-O check` | Remote reachability or terminal attachment health |
 | Terminal attached | This attachment completed its protocol handshake and has not reported closure/failure | Other terminals or connection methods are healthy |
 | Session ended | An explicit session-ended event or confirmed missing-session response | A transport failure alone never proves process exit |
 
@@ -18,7 +18,8 @@ The hook publishes both; its legacy `state` field is a derived compatibility
 summary, not another authority.
 
 - A positive result from any method establishes SSH availability for that method.
-- Failed probes for other methods make the observation partial. They remain visible.
+- Failed probes for other methods make the observation partial. The row still
+  shows SSH connected; failed checks remain in its tooltip.
 - Unavailability requires successful negative observations for every method.
   Explicit manual pause is reported separately: it prevents use in this app,
   without claiming that an externally owned control master disappeared.
@@ -32,6 +33,9 @@ summary, not another authority.
 Status queries are passive. They do not authenticate or contact a remote host.
 Each frontend query has a bounded wait; late results cannot update the snapshot.
 The tooltip identifies the check time and the limits of this evidence.
+Unavailable Tailscale routes use the compact label Tailscale unavailable, with
+the full reason in the tooltip or connection details. An unavailable preferred
+route does not hide SSH availability observed through another method.
 
 ## Terminal attachments
 

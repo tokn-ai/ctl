@@ -315,8 +315,7 @@ svg {
   color: var(--danger);
 }
 
-.host-connection-status[data-availability="unknown"],
-.host-connection-status[data-completeness="partial"] .host-connection-dot {
+.host-connection-status[data-availability="unknown"] {
   color: var(--warning);
 }
 

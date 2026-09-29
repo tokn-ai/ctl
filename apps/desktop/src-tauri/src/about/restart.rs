@@ -105,7 +105,7 @@ async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prepared
         .await
         .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))?;
       response.component = "rmuxd";
-      response.label = "rmuxd — terminal sessions".into();
+      response.label = "rmuxd".into();
       response.running = Some(rmux_version(&prepared.before));
       response.available = Some(ComponentVersionInfo::from_component(
         prepared.available.clone(),

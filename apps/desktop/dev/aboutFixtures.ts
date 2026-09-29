@@ -11,10 +11,10 @@ const row = (component_id: string, component: ComponentVersionRow["component"], 
 export function previewComponentVersions(): ComponentVersionsSnapshot {
   return { components: [
     { ...row("app", "rmux", "rmux", { ...current, source_fingerprint: null, dirty: null }), observation: "bundled" },
-    { ...row("ctld-local", "ctld", "ctld", { ...info("ctld", 11), version: "0.0.9", source_revision: "123456abcdef", source_fingerprint: "older-build-preview" }, "outdated"), available: info("ctld", 11), detail: "SSH and VPN broker" },
+    { ...row("ctld-local", "ctld", "ctld (SSH, VPN)", { ...info("ctld", 11), version: "0.0.9", source_revision: "123456abcdef", source_fingerprint: "older-build-preview" }, "outdated"), available: info("ctld", 11), detail: "Connection broker for SSH, port forwards, and VPNs." },
     { ...row("rmuxd-local", "rmuxd", "rmuxd", { ...info("rmux", 12), source_fingerprint: "changed-build-preview", dirty: true }, "different_build"), available: info("rmux", 12), detail: "Terminal sessions" },
     { ...row("taskd-local", "taskd", "taskd", info("task", 3)), detail: "Task execution" },
-    { ...row("remote-agent", "ctl_agent", "Development · ctl-agent", { ...current, source_revision: "112233445566", source_fingerprint: "remote-build-preview", protocols: [{ name: "ctl_identity", version: 2 }] }, "different_build"), location: "remote", host_id: "dev-server", observation: "last_observed", available: { ...current, protocols: [{ name: "ctl_identity", version: 2 }] }, detail: "Connected SSH environment" },
-    { ...row("remote-rmux", "rmuxd", "Development · rmuxd", info("rmux", 12)), location: "remote", host_id: "dev-server", observation: "last_observed" },
+    { ...row("remote-agent", "ctl_agent", "ctl-agent — Development", { ...current, source_revision: "112233445566", source_fingerprint: "remote-build-preview", protocols: [{ name: "ctl_identity", version: 2 }] }, "different_build"), location: "remote", host_id: "dev-server", observation: "last_observed", available: { ...current, protocols: [{ name: "ctl_identity", version: 2 }] }, detail: "Connected SSH environment" },
+    { ...row("remote-rmux", "rmuxd", "rmuxd — Development", info("rmux", 12)), location: "remote", host_id: "dev-server", observation: "last_observed" },
   ] };
 }

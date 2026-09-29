@@ -27,14 +27,14 @@ impl Owner {
 pub(super) fn owners() -> Vec<Owner> {
   let ssh = Owner {
     id: String::new(),
-    label: "ctld — SSH broker".into(),
+    label: "ctld (SSH)".into(),
     socket: ctld_ipc::socket_path(),
     executable: ctld_ipc::daemon_executable().map_err(|error| error.to_string()),
   };
   let (socket, executable) = crate::vpn::owner_endpoint();
   let vpn = Owner {
     id: String::new(),
-    label: "ctld — VPN broker".into(),
+    label: "ctld (VPN)".into(),
     socket,
     executable: executable
       .and_then(|value| value.map_or_else(ctld_ipc::daemon_executable, Ok))
@@ -65,7 +65,7 @@ fn deduplicate_owners(mut ssh: Owner, mut vpn: Owner) -> Vec<Owner> {
     );
   }
   if ssh.socket == vpn.socket {
-    ssh.label = "ctld — SSH and VPN broker".into();
+    ssh.label = "ctld (SSH, VPN)".into();
     vec![ssh]
   } else {
     vec![ssh, vpn]
@@ -140,6 +140,14 @@ pub(super) async fn ctld(owner: Owner) -> ComponentVersionRow {
   }
   row.note_available_mismatch();
   row.note_unreported_build();
+  with_purpose(row, "Connection broker for SSH, port forwards, and VPNs.")
+}
+
+fn with_purpose(mut row: ComponentVersionRow, purpose: &str) -> ComponentVersionRow {
+  row.detail = Some(match row.detail.take() {
+    Some(detail) => format!("{purpose} {detail}"),
+    None => purpose.into(),
+  });
   row
 }
 
@@ -151,7 +159,7 @@ fn append_error(row: &mut ComponentVersionRow, error: String) {
 }
 
 pub(super) async fn rmuxd() -> ComponentVersionRow {
-  let mut row = ComponentVersionRow::local("rmuxd", "rmuxd — terminal sessions");
+  let mut row = ComponentVersionRow::local("rmuxd", "rmuxd");
   let (running, available) = tokio::join!(rmux_ipc::component_status(), async {
     read_binary(
       rmux_ipc::daemon_executable().map_err(|error| error.to_string())?,
@@ -196,11 +204,11 @@ pub(super) async fn rmuxd() -> ComponentVersionRow {
   }
   row.note_available_mismatch();
   row.note_unreported_build();
-  row
+  with_purpose(row, "Terminal sessions.")
 }
 
 pub(super) async fn taskd() -> ComponentVersionRow {
-  let mut row = ComponentVersionRow::local("taskd", "taskd — task execution");
+  let mut row = ComponentVersionRow::local("taskd", "taskd");
   let (running, available) = tokio::join!(task_ipc::component_status(), async {
     read_binary(
       task_client::daemon_executable().map_err(|error| error.to_string())?,
@@ -246,7 +254,7 @@ pub(super) async fn taskd() -> ComponentVersionRow {
   }
   row.note_available_mismatch();
   row.note_unreported_build();
-  row
+  with_purpose(row, "Task execution.")
 }
 
 fn compatible_replacement(row: &ComponentVersionRow) -> bool {
@@ -379,17 +387,19 @@ mod tests {
   #[test]
   fn selected_ssh_and_vpn_owners_share_one_row_only_for_the_same_endpoint() {
     let shared = deduplicate_owners(
-      owner("/tmp/about-shared.sock", "SSH"),
-      owner("/tmp/about-shared.sock", "VPN"),
+      owner("/tmp/about-shared.sock", "ctld (SSH)"),
+      owner("/tmp/about-shared.sock", "ctld (VPN)"),
     );
     assert_eq!(shared.len(), 1);
-    assert!(shared[0].label.contains("SSH and VPN"));
+    assert_eq!(shared[0].label, "ctld (SSH, VPN)");
     assert!(!shared[0].id.contains("about-shared"));
     let split = deduplicate_owners(
-      owner("/tmp/about-ssh.sock", "SSH"),
-      owner("/tmp/about-vpn.sock", "VPN"),
+      owner("/tmp/about-ssh.sock", "ctld (SSH)"),
+      owner("/tmp/about-vpn.sock", "ctld (VPN)"),
     );
     assert_eq!(split.len(), 2);
+    assert_eq!(split[0].label, "ctld (SSH)");
+    assert_eq!(split[1].label, "ctld (VPN)");
     assert_ne!(split[0].id, split[1].id);
   }
 

@@ -19,27 +19,32 @@
 .about-section h2 { margin: 0 0 6px; color: #e5e5e5; font-size: 15px; font-weight: 600; }
 .about-section > p { margin-bottom: 14px; }
 .about-table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 5px; }
-.about-version-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
-.about-version-table th, .about-version-table td { padding: 14px 16px; vertical-align: top; border-bottom: 1px solid var(--border); }
+.about-version-table { width: 100%; min-width: 780px; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
+.about-component-column { width: 24%; }
+.about-version-column { width: 10%; }
+.about-protocol-column { width: 22%; }
+.about-status-column { width: 34%; }
+.about-version-table th, .about-version-table td { padding: 6px 12px; vertical-align: middle; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .about-version-table thead { color: var(--muted); background: var(--surface-1); }
-.about-version-table thead th { font-weight: 500; }
-.about-version-table tbody th { min-width: 170px; font-weight: 400; }
-.about-version-table tbody td { min-width: 100px; }
+.about-version-table thead th { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.about-version-table tbody th { font-weight: 400; }
 .about-version-table tbody tr:last-child > * { border-bottom: 0; }
 .about-version-table strong { color: #dedede; font-weight: 600; }
-.about-version-table small { display: block; margin-top: 5px; color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
-.about-version-table td:last-child button { display: flex; margin-top: 10px; }
-.about-protocol + .about-protocol { margin-top: 7px; }
+.about-version-table td > span, .about-component-name strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+.about-component-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.about-component-name strong { min-width: 0; }
+.about-row-actions { display: flex; align-items: center; gap: 12px; }
+.about-row-actions button { margin-left: auto; padding: 4px 8px; }
 .about-version-status { display: inline-block; padding: 3px 7px; border-radius: 3px; color: var(--muted); background: #2d2d2d; white-space: nowrap; }
 .about-status-current { color: #addda9; background: #213323; }
 .about-status-outdated, .about-status-different_build { color: var(--warning); background: #3a3020; }
 .about-status-incompatible { color: #ffa1a1; background: #44282a; }
 .about-status-newer { color: #94c6f5; background: #213244; }
-.about-row-error { margin-top: 8px !important; color: var(--danger); max-width: 340px; overflow-wrap: anywhere; }
+.about-row-error { min-width: 0; max-width: 14ch; color: var(--danger); overflow: hidden; text-overflow: ellipsis; }
 .about-error, .about-notice { padding: 12px 14px; margin: 16px 0 !important; border-radius: 4px; }
 .about-error { color: var(--danger); background: #321f23; }
 .about-notice { color: var(--success); background: #202e22; }
 .about-empty { padding: 18px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); }
 .about-footnote { margin-top: 28px !important; font-size: 11px; }
 .rail-settings[aria-pressed="true"] { color: white; border-left-color: var(--accent-strong); }
-@media (max-width: 1000px) { .about-page-header, .about-content { padding-left: 22px; padding-right: 22px; } .about-version-table th, .about-version-table td { padding: 12px; } }
+@media (max-width: 1000px) { .about-page-header, .about-content { padding-left: 22px; padding-right: 22px; } }

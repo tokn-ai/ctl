@@ -52,8 +52,8 @@ describe("About page", () => {
     legacy.components[2].running = { ...current, source_fingerprint: null };
     api.versions.mockResolvedValue(legacy);
     render(<AboutPage {...props()} />);
-    const legacy_row = (await screen.findByText("SSH and VPN broker")).closest("tr")!;
-    expect(within(legacy_row).getAllByText("Build not reported")).toHaveLength(2);
+    const legacy_row = (await screen.findByText("ctld")).closest("tr")!;
+    expect(within(legacy_row).getByText("Build not reported")).toBeTruthy();
     expect(screen.getByText("Build unverified")).toBeTruthy();
     legacy.components[1].status = "incompatible";
     fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
@@ -66,8 +66,8 @@ describe("About page", () => {
     expect(api.versions).not.toHaveBeenCalled();
     page.rerender(<AboutPage {...options} />);
     expect(await screen.findByText("Different build")).toBeTruthy();
-    expect(screen.getByText("Last observed")).toBeTruthy();
-    expect(screen.getAllByText("Build not reported")).toHaveLength(2);
+    expect(screen.getByTitle(/Last observed/).textContent).toBe("Development · ctl-agent");
+    expect(screen.getByText("Build not reported")).toBeTruthy();
     expect(screen.queryByText("Outdated")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(options.on_close).toHaveBeenCalledOnce();
@@ -146,10 +146,11 @@ describe("About page", () => {
     partial.components[1].running = { ...current, protocols: [], source_fingerprint: "running-build" };
     api.versions.mockResolvedValue(partial);
     render(<AboutPage {...props()} />);
-    const row = (await screen.findByText("SSH and VPN broker")).closest("tr")!;
-    expect(within(row).getByText("Requires ctld IPC 11")).toBeTruthy();
-    expect(within(row).getByText("Build running-bu")).toBeTruthy();
-    expect(within(row).getByText("Build current")).toBeTruthy();
+    const row = (await screen.findByText("ctld")).closest("tr")!;
+    expect(within(row).getByTitle(/SSH and VPN broker/)).toBeTruthy();
+    expect(within(row).getByTitle("ctld IPC: not reported (requires 11)").textContent).toBe("IPC ?");
+    expect(within(row).getByTitle(/Build: running-build/).textContent).toBe("0.1.0");
+    expect(within(row).getByTitle(/Build: current/).textContent).toBe("0.1.0");
   });
 
   it("compares running protocols with app requirements even when the available binary is also stale", async () => {
@@ -160,11 +161,10 @@ describe("About page", () => {
     stale.components[1].status = "incompatible";
     api.versions.mockResolvedValue(stale);
     render(<AboutPage {...props()} />);
-    const row = (await screen.findByText("SSH and VPN broker")).closest("tr")!;
-    expect(within(row).getByText("ctld IPC 10")).toBeTruthy();
-    expect(within(row).getByText("Requires 11")).toBeTruthy();
-    expect(within(row).getByText("Lifecycle unknown")).toBeTruthy();
-    expect(within(row).getByText("Requires 1")).toBeTruthy();
+    const row = (await screen.findByText("ctld")).closest("tr")!;
+    const protocols = within(row).getByText("IPC 10 · Lifecycle ?");
+    expect(protocols.title).toContain("ctld IPC 10 (requires 11)");
+    expect(protocols.title).toContain("Lifecycle: not reported (requires 1)");
     expect(within(row).getByText("Protocol mismatch")).toBeTruthy();
   });
 

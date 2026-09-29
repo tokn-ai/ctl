@@ -22,14 +22,18 @@ export function versionLabel(info: ComponentVersionInfo | null): string {
   return [info.version ?? "Unknown version", revision, info.source_fingerprint ? `build ${info.source_fingerprint.slice(0, 10)}` : null, info.dirty ? "modified" : null].filter(Boolean).join(" · ");
 }
 
+function versionDetails(info: ComponentVersionInfo | null, absent: string): string {
+  if (!info) return absent;
+  return [
+    `Version: ${info.version ?? "Not reported"}`,
+    `Revision: ${info.source_revision ?? "Not reported"}`,
+    `Build: ${info.source_fingerprint ?? "Not reported"}`,
+    info.dirty === null ? null : info.dirty ? "Modified source" : "Clean source",
+  ].filter(Boolean).join("\n");
+}
+
 function Version({ info, absent }: { info: ComponentVersionInfo | null; absent: string }) {
-  if (!info) return <span className="about-muted">{absent}</span>;
-  return <>
-    <span>{info.version ?? "Unknown version"}</span>
-    {info.source_revision || info.dirty ? <small title={info.source_revision ?? undefined}>{[info.source_revision?.slice(0, 10), info.dirty ? "Modified source" : null].filter(Boolean).join(" · ")}</small> : null}
-    {info.source_fingerprint ? <small title={info.source_fingerprint}>Build {info.source_fingerprint.slice(0, 10)}</small> : null}
-    {!info.source_fingerprint && !info.source_revision ? <small>Build not reported</small> : null}
-  </>;
+  return <span title={versionDetails(info, absent)}>{info?.version ?? absent}</span>;
 }
 
 function statusLabel(row: ComponentVersionRow): string {
@@ -37,17 +41,25 @@ function statusLabel(row: ComponentVersionRow): string {
   return !row.running.source_revision && !row.running.source_fingerprint ? "Build not reported" : "Build unverified";
 }
 
+const compact_protocol_labels: Record<string, string> = {
+  rmux: "Session", rmux_control: "Control", task: "Task", task_control: "Control",
+  ctld: "IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Identity",
+};
+
 function Protocols({ row }: { row: ComponentVersionRow }) {
   const actual = row.running?.protocols ?? [];
   const required = row.required_protocols ?? row.available?.protocols ?? [];
-  if (!actual.length) return <><span className="about-muted">Unknown</span>{required.map((protocol) => <small key={protocol.name}>Requires {protocol_labels[protocol.name] ?? protocol.name} {protocol.version}</small>)}</>;
-  return <>
-    {actual.map((protocol) => {
-      const expected = required.find((candidate) => candidate.name === protocol.name)?.version;
-      return <div key={protocol.name} className="about-protocol"><span>{protocol_labels[protocol.name] ?? protocol.name} {protocol.version}</span>{expected !== undefined && expected !== protocol.version ? <small>Requires {expected}</small> : null}</div>;
-    })}
-    {required.filter((protocol) => !actual.some((candidate) => candidate.name === protocol.name)).map((protocol) => <div key={protocol.name} className="about-protocol"><span className="about-muted">{protocol_labels[protocol.name] ?? protocol.name} unknown</span><small>Requires {protocol.version}</small></div>)}
-  </>;
+  const observed = actual.map((protocol) => {
+    const expected = required.find((candidate) => candidate.name === protocol.name)?.version;
+    return `${protocol_labels[protocol.name] ?? protocol.name} ${protocol.version}${expected !== undefined ? ` (requires ${expected})` : ""}`;
+  });
+  const missing = required.filter((protocol) => !actual.some((candidate) => candidate.name === protocol.name));
+  const detail = [...observed, ...missing.map((protocol) => `${protocol_labels[protocol.name] ?? protocol.name}: not reported (requires ${protocol.version})`)];
+  const summary = [
+    ...actual.map((protocol) => `${compact_protocol_labels[protocol.name] ?? protocol.name} ${protocol.version}`),
+    ...missing.map((protocol) => `${compact_protocol_labels[protocol.name] ?? protocol.name} ?`),
+  ].join(" · ");
+  return <span className="about-protocols" title={detail.join("\n") || "Protocols not reported"}>{summary || "Unknown"}</span>;
 }
 
 interface Props {
@@ -61,27 +73,30 @@ interface Props {
 
 export function ComponentVersionTable({ rows, busy_id, restarting, action_error, on_restart, reference_label = "Available" }: Props) {
   return <div className="about-table-scroll"><table className="about-version-table">
-    <thead><tr><th>Component</th><th>Version</th><th>Protocol</th><th>{reference_label}</th><th>Status</th></tr></thead>
+    <colgroup><col className="about-component-column" /><col className="about-version-column" /><col className="about-protocol-column" /><col className="about-version-column" /><col className="about-status-column" /></colgroup>
+    <thead><tr><th>Component</th><th>Version</th><th>Protocol</th><th title={reference_label}>{reference_label === "This app build" ? "App build" : reference_label}</th><th>Status</th></tr></thead>
     <tbody>{rows.map((row) => {
       const action = row.action;
-      const action_label = `${action === "reconnect" ? "Reconnect" : "Restart"} ${row.component === "ctl_agent" ? "ctl-agent" : row.component}`;
+      const action_label = action === "reconnect" ? "Reconnect" : "Restart";
+      const details = [row.label, row.observation === "last_observed" ? "Last observed" : null, row.detail].filter(Boolean).join("\n");
+      const errors = [row.error, action_error?.component_id === row.component_id ? action_error.message : null].filter(Boolean).join("\n");
       return <tr key={row.component_id}>
-      <th scope="row">
-        <strong>{row.label}</strong>
-        {row.observation === "last_observed" ? <small>Last observed</small> : null}
-        {row.detail ? <small>{row.detail}</small> : null}
-        {row.error ? <p className="about-row-error" role="alert">{row.error}</p> : null}
-        {action_error?.component_id === row.component_id ? <p className="about-row-error" role="alert">{action_error.message}</p> : null}
-      </th>
-      <td><Version info={row.running} absent={row.status === "not_running" ? "Not running" : "Unknown"} /></td>
-      <td><Protocols row={row} /></td>
-      <td><Version info={row.available} absent="Unknown" /></td>
-      <td><span className={`about-version-status about-status-${row.status}`}>{statusLabel(row)}</span>
-        {action ? <button type="button" onClick={() => on_restart(row.component_id)} disabled={busy_id !== null} aria-label={`${action === "reconnect" ? "Reconnect" : "Restart"} ${row.label}`}>
-          {busy_id === row.component_id ? restarting ? action === "reconnect" ? "Reconnecting…" : "Restarting…" : "Checking…" : action_label}
-        </button> : null}
-      </td>
-    </tr>;
+        <th scope="row">
+          <div className="about-component-name">
+            <strong title={details}>{row.label}</strong>
+            {errors ? <span className="about-row-error" role="alert" title={errors}>{errors}</span> : null}
+          </div>
+        </th>
+        <td><Version info={row.running} absent={row.status === "not_running" ? "Not running" : "Unknown"} /></td>
+        <td><Protocols row={row} /></td>
+        <td><Version info={row.available} absent="Unknown" /></td>
+        <td><div className="about-row-actions">
+          <span className={`about-version-status about-status-${row.status}`}>{statusLabel(row)}</span>
+          {action ? <button type="button" onClick={() => on_restart(row.component_id)} disabled={busy_id !== null} aria-label={`${action_label} ${row.label}`}>
+            {busy_id === row.component_id ? restarting ? action === "reconnect" ? "Reconnecting…" : "Restarting…" : "Checking…" : action_label}
+          </button> : null}
+        </div></td>
+      </tr>;
     })}</tbody>
   </table></div>;
 }

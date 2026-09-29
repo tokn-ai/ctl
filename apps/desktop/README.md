@@ -9,8 +9,10 @@ Open **About rmux** from the info button, command palette, or macOS app menu.
 The page shows the app version, local `ctld`, `rmuxd`, and `taskd` versions and
 protocols, and `ctl-agent`/`rmuxd` metadata observed on active remote terminal
 connections. Separate SSH and VPN ctld owners appear separately when configured.
-Running versions are compared with this app's component build. Local rows also
-show the selected helper executable and explain when it needs updating too.
+Running versions are compared with this app's component build. Each component
+uses one compact row with its version, protocol, status, and action. Hover over
+the component, version, or protocol for explanations and full build metadata.
+Local rows also show the selected helper version.
 
 **Outdated** means a lower comparable release version. **Different build** marks
 different source fingerprints without claiming which is newer. **Protocol

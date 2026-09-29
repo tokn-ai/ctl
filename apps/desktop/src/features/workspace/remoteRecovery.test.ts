@@ -212,6 +212,15 @@ describe("Tailscale account recovery", () => {
 });
 
 describe("SSH endpoint comparison", () => {
+  it("distinguishes VPN routes while keeping their enforced private master policy", () => {
+    const direct: SshConnectionTarget = { kind: "ssh", destination: "build", ssh_config_alias: "build" };
+    const vpn = { ...direct, vpn_connection_id: "office-vpn" };
+    expect(sameSshEndpoint(direct, vpn)).toBe(false);
+    expect(sameSshEndpoint(vpn, { ...vpn, vpn_connection_id: "other-vpn" })).toBe(false);
+    expect(sameSshEndpoint(vpn, { ...vpn, use_ssh_config_master: false })).toBe(true);
+    expect(sameSshEndpoint(vpn, { ...vpn, use_ssh_config_master: true })).toBe(true);
+  });
+
   it.each([undefined, "build"])("compares the effective master policy for source %s", (ssh_config_alias) => {
     const target: SshConnectionTarget = { kind: "ssh", destination: "build", ssh_config_alias };
     const default_policy = Boolean(ssh_config_alias);

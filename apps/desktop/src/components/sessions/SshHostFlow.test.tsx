@@ -13,9 +13,13 @@ import {
   respondSshPrompt,
   saveSshConfigHost,
 } from "../../lib/tauri";
-import type { RemoteAgentInstallProgress, SshConnectionTarget, SshPrompt, TailscaleDevice } from "../../lib/types";
+import type { RemoteAgentInstallProgress, SshConnectionTarget, SshPrompt, TailscaleDevice, VpnConnection } from "../../lib/types";
 
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
+const vpn: VpnConnection = {
+  connection_id: "office-vpn", name: "Office VPN", url: "https://vpn.example", username: "operator",
+  has_password: true, auth_method: null, target_ip: null,
+};
 const tailscaleDevice: TailscaleDevice = {
   node_id: "n123", name: "Builder", dns_name: "builder.tailnet.ts.net",
   addresses: ["100.64.0.2"], online: true, os: "linux",
@@ -68,6 +72,7 @@ async function details(user: ReturnType<typeof userEvent.setup>) {
     screen.getByLabelText("Name / SSH alias"),
     "rmux-test{Enter}",
   );
+  await user.click(screen.getByRole("option", { name: /^Direct/ }));
 }
 
 function setupNewHost(suggestions: string[] = [], tailscaleDevices: TailscaleDevice[] = []) {
@@ -83,13 +88,127 @@ function setupNewHost(suggestions: string[] = [], tailscaleDevices: TailscaleDev
   return { save, close, recover, user: userEvent.setup() };
 }
 
-async function newHostDetails(user: ReturnType<typeof userEvent.setup>) {
+async function newHostDetails(user: ReturnType<typeof userEvent.setup>, selectDirect = true) {
   await user.type(screen.getByLabelText("SSH host"), "rmux@127.0.0.1:2222{Enter}");
   await user.clear(screen.getByLabelText("Host name"));
   await user.type(screen.getByLabelText("Host name"), "Development server{Enter}");
+  if (selectDirect) await user.click(screen.getByRole("option", { name: /^Direct/ }));
 }
 
 describe("SSH host quick-input flow", () => {
+  it("defaults Connect through to Direct and preserves that choice when going back", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const { user, save } = setupNewHost();
+    await newHostDetails(user, false);
+    expect(screen.getByRole("dialog", { name: "Connect through · 3/4" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^Direct/ }).getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: /^Direct/ }));
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    expect(screen.getByRole("dialog", { name: "Connect through · 3/4" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    expect(screen.getByLabelText("Host name")).toHaveProperty("value", "Development server");
+    await user.keyboard("{Enter}");
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0][1]).not.toHaveProperty("vpn_connection_id");
+    expect(save.mock.calls[0][1]).not.toHaveProperty("gateway_route");
+  });
+
+  it("retains a selected VPN through backtracking and saves its stable profile ID", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const save = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={[]} warning={null} vpn_connections={[vpn]}
+      vpn_statuses={[{ vpn_id: vpn.connection_id, connection_id: vpn.connection_id, state: "connected", running: true,
+        endpoint: "socks5h://127.0.0.1:49152", container_name: "sample" }]}
+      onSaveNewHost={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await newHostDetails(user, false);
+    await user.click(screen.getByRole("option", { name: /Office VPN.*VPN · Connected/ }));
+    expect(probeSshHost).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    const selected = screen.getByRole("option", { name: /Office VPN.*VPN · Connected/ });
+    expect(selected.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(selected);
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith("Development server", expect.objectContaining({
+      vpn_connection_id: vpn.connection_id, use_ssh_config_master: false,
+    }), remoteInfo));
+    const candidate = vi.mocked(probeSshHost).mock.calls[0][0];
+    expect(candidate).not.toHaveProperty("gateways");
+    expect(JSON.stringify(candidate)).not.toContain("49152");
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("replaces a VPN selection with a saved gateway and resolves it for verification", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const gateway = { gateway_id: "edge", name: "Office edge", destination: "edge.example" };
+    const save = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={[]} warning={null} vpn_connections={[vpn]} gateways={[gateway]}
+      onSaveNewHost={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await newHostDetails(user, false);
+    await user.click(screen.getByRole("option", { name: /Office VPN/ }));
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    await user.click(screen.getByRole("option", { name: /Office edge.*SSH gateway/ }));
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith("Development server", expect.objectContaining({
+      gateway_route: [{ gateway_id: "edge", mode: "automatic" }],
+      gateways: [{ ...gateway, mode: "automatic" }],
+    }), remoteInfo));
+    expect(vi.mocked(probeSshHost).mock.calls[0][0]).not.toHaveProperty("vpn_connection_id");
+  });
+
+  it("shows VPN failures without attempting a direct connection", async () => {
+    vi.mocked(probeSshHost).mockRejectedValue({ code: "vpn_failed", message: "Could not connect Office VPN" });
+    const save = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} vpn_connections={[vpn]} onSaveNewHost={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await newHostDetails(user, false);
+    await user.click(screen.getByRole("option", { name: /Office VPN/ }));
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Could not connect Office VPN");
+    expect(probeSshHost).toHaveBeenCalledOnce();
+    expect(probeSshHost).toHaveBeenCalledWith(expect.objectContaining({ vpn_connection_id: vpn.connection_id }), expect.any(String), expect.any(Function));
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("edits a connection through a VPN without exporting an unusable SSH alias", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const save = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={[]} warning={null} vpn_connections={[vpn]} onSaveConnection={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("SSH host or config alias"), "build.example");
+    await user.click(screen.getByLabelText("Use SSH-config master"));
+    await user.click(screen.getByLabelText("Also save to OpenSSH config"));
+    await user.selectOptions(screen.getByLabelText("Connect through"), `vpn:${vpn.connection_id}`);
+    expect(screen.getByLabelText("Use SSH-config master")).toHaveProperty("disabled", true);
+    expect(screen.getByLabelText("Use SSH-config master")).toHaveProperty("checked", false);
+    expect(screen.getByLabelText("Also save to OpenSSH config")).toHaveProperty("disabled", true);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ vpn_connection_id: vpn.connection_id, use_ssh_config_master: false }), [], remoteInfo));
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("removes a saved VPN when editing its method back to Direct", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const save = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={["build"]} warning={null} vpn_connections={[vpn]}
+      initialTarget={{ kind: "ssh", destination: "build", ssh_config_alias: "build", vpn_connection_id: vpn.connection_id }}
+      onSaveConnection={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    expect(screen.getByLabelText("Connect through")).toHaveProperty("value", `vpn:${vpn.connection_id}`);
+    await user.selectOptions(screen.getByLabelText("Connect through"), "direct");
+    expect(screen.getByLabelText("Use SSH-config master")).toHaveProperty("disabled", false);
+    expect(screen.getByLabelText("Use SSH-config master")).toHaveProperty("checked", true);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(vi.mocked(probeSshHost).mock.calls[0][0]).not.toHaveProperty("vpn_connection_id");
+  });
+
   it.each([false, true])("chooses the SSH account before verifying a new Tailscale target (autoConnect=%s)", async (autoConnect) => {
     const target = {
       kind: "ssh" as const, host_id: "tailscale:n123", host_name: "Builder", method_id: "tailscale", tailscale_node_id: "n123",
@@ -262,6 +381,7 @@ describe("SSH host quick-input flow", () => {
     expect(probeSshHost).not.toHaveBeenCalled();
     await user.clear(screen.getByLabelText("Host name"));
     await user.type(screen.getByLabelText("Host name"), "Office build machine{Enter}");
+    await user.click(screen.getByRole("option", { name: /^Direct/ }));
     await user.click(screen.getByRole("option", { name: /Identity file/ }));
     await user.type(screen.getByRole("combobox", { name: "Identity file" }), "~/.ssh/office{Enter}");
     await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Office build machine", {
@@ -283,6 +403,7 @@ describe("SSH host quick-input flow", () => {
     expect(probeSshHost).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox", { name: "SSH user" })).toHaveProperty("value", "");
     await user.type(screen.getByRole("textbox", { name: "SSH user" }), "deploy{Enter}");
+    await user.click(screen.getByRole("option", { name: /^Direct/ }));
     expect(probeSshHost).not.toHaveBeenCalled();
     await user.click(screen.getByRole("option", { name: /Identity file/ }));
     await user.type(screen.getByRole("combobox", { name: "Identity file" }), "~/.ssh/home{Enter}");
@@ -309,6 +430,7 @@ describe("SSH host quick-input flow", () => {
     await user.clear(screen.getByLabelText("SSH host"));
     await user.type(screen.getByLabelText("SSH host"), "deploy@10.0.0.8{Enter}");
     await user.type(screen.getByLabelText("Host name"), "{Enter}");
+    await user.click(screen.getByRole("option", { name: /^Direct/ }));
     await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save.mock.calls[0][1]).toEqual({ kind: "ssh", destination: "10.0.0.8", hostname: "10.0.0.8", user: "deploy" });
@@ -1201,7 +1323,7 @@ describe("SSH host quick-input flow", () => {
     );
     await user.click(screen.getByRole("button", { name: "Previous step" }));
     expect(
-      screen.getByRole("dialog", { name: "Authentication · 3/3" }),
+      screen.getByRole("dialog", { name: "Authentication · 4/4" }),
     ).toBeTruthy();
     expect(save).not.toHaveBeenCalled();
   });

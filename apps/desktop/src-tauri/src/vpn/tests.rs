@@ -427,3 +427,55 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
   .unwrap_err();
   assert_eq!(missing.code, "vpn_connection_not_found");
 }
+
+#[tokio::test]
+async fn cancelling_a_host_wait_keeps_the_shared_vpn_start_owned() {
+  let (started, ready) = tokio::sync::oneshot::channel();
+  let (release, finish) = tokio::sync::oneshot::channel();
+  let (completed, done) = tokio::sync::oneshot::channel();
+  let waiter = tokio::spawn(await_shared_start(async move {
+    started.send(()).unwrap();
+    finish.await.unwrap();
+    completed.send(()).unwrap();
+    Ok(VpnStatus::default())
+  }));
+  ready.await.unwrap();
+  waiter.abort();
+  assert!(waiter.await.unwrap_err().is_cancelled());
+  release.send(()).unwrap();
+  tokio::time::timeout(std::time::Duration::from_secs(2), done)
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[test]
+fn host_connections_require_a_ready_vpn_proxy() {
+  let connected = VpnStatus {
+    state: VpnState::Connected,
+    running: true,
+    endpoint: Some("socks5h://127.0.0.1:49152".into()),
+    ..VpnStatus::default()
+  };
+  assert!(require_connected(&connected).is_ok());
+  for status in [
+    VpnStatus::default(),
+    VpnStatus {
+      state: VpnState::Starting,
+      ..connected.clone()
+    },
+    VpnStatus {
+      endpoint: None,
+      ..connected.clone()
+    },
+    VpnStatus {
+      running: false,
+      ..connected
+    },
+  ] {
+    assert_eq!(
+      require_connected(&status).unwrap_err().code,
+      "vpn_not_connected"
+    );
+  }
+}

@@ -101,12 +101,32 @@ pub enum SshGatewayMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshGateway {
   pub kind: ctld_ipc::GatewayKind,
+  pub vpn: Option<ctld_ipc::VpnGateway>,
   pub destination: String,
   pub hostname: Option<String>,
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
   pub mode: SshGatewayMode,
+}
+
+impl SshGateway {
+  fn to_ipc(&self) -> ctld_ipc::SshGateway {
+    ctld_ipc::SshGateway {
+      kind: self.kind,
+      vpn: self.vpn.clone(),
+      destination: self.destination.clone(),
+      hostname: self.hostname.clone(),
+      user: self.user.clone(),
+      port: self.port,
+      identity_file: self.identity_file.clone(),
+      mode: match self.mode {
+        SshGatewayMode::Automatic => ctld_ipc::SshGatewayMode::Automatic,
+        SshGatewayMode::NativeOnly => ctld_ipc::SshGatewayMode::NativeOnly,
+        SshGatewayMode::AgentRelayOnly => ctld_ipc::SshGatewayMode::AgentRelayOnly,
+      },
+    }
+  }
 }
 
 /// Local prompt handling only; this cannot alter the remote command.
@@ -754,7 +774,12 @@ fn validate_destination(destination: &str) -> Result<(), CoreError> {
 
 fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Result<(), CoreError> {
   validate_destination(destination)?;
-  for gateway in &options.gateways {
+  for (index, gateway) in options.gateways.iter().enumerate() {
+    if !gateway.to_ipc().has_valid_vpn_configuration()
+      || (index != 0 && gateway.kind == ctld_ipc::GatewayKind::Vpn)
+    {
+      return Err(CoreError::InvalidSshOption("VPN gateway".into()));
+    }
     validate_destination(&gateway.destination)?;
     if gateway.mode == SshGatewayMode::AgentRelayOnly {
       return Err(CoreError::InvalidSshOption(
@@ -887,24 +912,12 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
   if options
     .gateways
     .iter()
-    .any(|gateway| gateway.kind == ctld_ipc::GatewayKind::Socks5)
+    .any(|gateway| gateway.kind.requires_proxy_command())
   {
     let gateways = options
       .gateways
       .iter()
-      .map(|gateway| ctld_ipc::SshGateway {
-        kind: gateway.kind,
-        destination: gateway.destination.clone(),
-        hostname: gateway.hostname.clone(),
-        user: gateway.user.clone(),
-        port: gateway.port,
-        identity_file: gateway.identity_file.clone(),
-        mode: match gateway.mode {
-          SshGatewayMode::Automatic => ctld_ipc::SshGatewayMode::Automatic,
-          SshGatewayMode::NativeOnly => ctld_ipc::SshGatewayMode::NativeOnly,
-          SshGatewayMode::AgentRelayOnly => ctld_ipc::SshGatewayMode::AgentRelayOnly,
-        },
-      })
+      .map(SshGateway::to_ipc)
       .collect::<Vec<_>>();
     let proxy = ctld_ipc::proxy_command(&gateways).unwrap_or_else(|_| "false".into());
     arguments.extend([
@@ -1061,6 +1074,7 @@ mod tests {
       gateways: vec![
         SshGateway {
           kind: ctld_ipc::GatewayKind::Socks5,
+          vpn: None,
           destination: "proxy.internal".into(),
           hostname: None,
           user: None,
@@ -1070,6 +1084,7 @@ mod tests {
         },
         SshGateway {
           kind: ctld_ipc::GatewayKind::Ssh,
+          vpn: None,
           destination: "bastion.internal".into(),
           hostname: None,
           user: None,
@@ -1111,11 +1126,50 @@ mod tests {
   }
 
   #[test]
+  fn managed_vpn_routes_use_a_private_proxy_and_reject_stale_endpoints() {
+    let gateway = SshGateway {
+      kind: ctld_ipc::GatewayKind::Vpn,
+      vpn: Some(ctld_ipc::VpnGateway {
+        connection_id: "saved-vpn".into(),
+        socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
+      }),
+      destination: "saved-vpn".into(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      mode: SshGatewayMode::Automatic,
+    };
+    let mut options = SshConnectionOptions {
+      gateways: vec![gateway.clone()],
+      ..SshConnectionOptions::default()
+    };
+    assert!(validate_ssh_target("target", &options).is_ok());
+    let args = ssh_base_arguments("target", &options);
+    assert!(args.iter().any(|arg| arg == "ControlPath=none"));
+    assert!(
+      args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("ProxyCommand="))
+    );
+    assert!(
+      !args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("ProxyJump="))
+    );
+    options.gateways[0].port = Some(1080);
+    assert!(validate_ssh_target("target", &options).is_err());
+    options.gateways = vec![gateway.clone(), gateway];
+    assert!(validate_ssh_target("target", &options).is_err());
+  }
+
+  #[test]
   fn ssh_command_preserves_the_order_and_endpoint_fields_of_native_gateways() {
     let options = SshConnectionOptions {
       gateways: vec![
         SshGateway {
           kind: ctld_ipc::GatewayKind::Ssh,
+          vpn: None,
           destination: "edge-alias".into(),
           hostname: None,
           user: None,
@@ -1125,6 +1179,7 @@ mod tests {
         },
         SshGateway {
           kind: ctld_ipc::GatewayKind::Ssh,
+          vpn: None,
           destination: "internal-alias".into(),
           hostname: Some("2001:db8::2".into()),
           user: Some("operator".into()),

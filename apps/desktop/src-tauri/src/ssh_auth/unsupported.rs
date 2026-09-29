@@ -68,10 +68,12 @@ async fn connect_identified(
 }
 
 pub async fn probe(
+  _app: tauri::AppHandle,
   _window: String,
   _attempt_id: String,
   target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
+  _restart_check: bool,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
   tokio::time::timeout(std::time::Duration::from_secs(10), async {
     let (stream, identity) = connect_identified(&target).await?;

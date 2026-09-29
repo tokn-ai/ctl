@@ -47,7 +47,8 @@
   color: var(--muted);
 }
 
-.gateway-host-form input {
+.gateway-host-form input,
+.gateway-host-form select {
   width: 100%;
   padding: 7px 8px;
   color: var(--text);

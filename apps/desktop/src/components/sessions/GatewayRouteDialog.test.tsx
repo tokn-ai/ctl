@@ -16,6 +16,43 @@ const gateway: WorkspaceSshGateway = {
 };
 
 describe("GatewayRouteDialog", () => {
+  it("preserves existing gateways behind a VPN when the route is saved unchanged", async () => {
+    const vpn = { connection_id: "office-vpn", name: "Office VPN", url: "https://vpn.example", username: "operator",
+      has_password: true, auth_method: null, target_ip: null };
+    const route = [{ gateway_id: gateway.gateway_id, mode: "native_only" as const }];
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<GatewayRouteDialog target={{ kind: "ssh", destination: "build", vpn_connection_id: vpn.connection_id, gateway_route: route }}
+      vpn_connections={[vpn]} gateways={[gateway]} targets={[]} onSave={onSave} onClose={vi.fn()} />);
+    expect(screen.getByText("1. Office edge")).toBeTruthy();
+    expect(screen.getByLabelText("Connect through")).toHaveProperty("value", `vpn:${vpn.connection_id}`);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Done" }));
+    expect(onSave).toHaveBeenCalledExactlyOnceWith([gateway], route, vpn.connection_id);
+  });
+
+  it("requires an explicit replacement when the saved VPN is missing", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<GatewayRouteDialog target={{ kind: "ssh", destination: "build", vpn_connection_id: "removed-vpn" }}
+      gateways={[gateway]} targets={[]} onSave={onSave} onClose={vi.fn()} />);
+    expect(screen.getByLabelText("Connect through")).toHaveProperty("value", "vpn:removed-vpn");
+    expect(screen.getByRole("button", { name: "Done" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("alert").textContent).toContain("saved VPN is unavailable");
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText("Connect through"), "direct");
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    expect(onSave).toHaveBeenCalledExactlyOnceWith([gateway], []);
+  });
+
+  it("preserves the order and modes of an existing multi-hop route", async () => {
+    const second = { ...gateway, gateway_id: "second", name: "Second edge" };
+    const route = [{ gateway_id: gateway.gateway_id, mode: "native_only" as const }, { gateway_id: second.gateway_id, mode: "automatic" as const }];
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<GatewayRouteDialog target={{ kind: "ssh", destination: "build", gateway_route: route }}
+      gateways={[gateway, second]} targets={[]} onSave={onSave} onClose={vi.fn()} />);
+    expect(screen.getByLabelText("Connect through")).toHaveProperty("value", "gateway_route");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Done" }));
+    expect(onSave).toHaveBeenCalledExactlyOnceWith([gateway, second], route);
+  });
+
   it("keeps gateway mode controls in keyboard navigation and cancels with Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

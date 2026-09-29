@@ -58,4 +58,15 @@ describe("host credential cleanup", () => {
     view.targets.push({ kind: "ssh", host_id: "kept", destination: "build", gateways: [gateway] });
     expect(removableHostCredentials(view, "removed")).toEqual([]);
   });
+
+  it("separates VPN credentials from direct routes and retains a shared VPN scope", () => {
+    const view = emptyWorkspaceView();
+    const target: SshConnectionTarget = { kind: "ssh", destination: "build", vpn_connection_id: "office-vpn" };
+    view.hosts.push(host("removed", target), host("direct", { kind: "ssh", destination: "build" }));
+    expect(removableHostCredentials(view, "removed")).toEqual([hostTarget(view.hosts[1], [])]);
+    view.hosts.push(host("shared", { ...target }));
+    expect(removableHostCredentials(view, "removed")).toEqual([]);
+    view.hosts[3].connection_methods[0].target.vpn_connection_id = "other-vpn";
+    expect(removableHostCredentials(view, "removed")).toHaveLength(1);
+  });
 });

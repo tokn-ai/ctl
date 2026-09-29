@@ -34,7 +34,8 @@ with `./docker/openconnect/run.sh build` from the repository root. On macOS and
 Linux the app and `ctl vpn` share the local `ctld` owner, including connections
 started from the CLI. Closing the app leaves the VPN running; disconnecting or
 exiting `ctld` stops the container. The SOCKS proxy follows the container's routes;
-it does not change the Mac's system routes or automatically change SSH settings.
+it does not change the Mac's system routes. Choose a saved VPN in a host's
+**Connect through** step to route that host through its current SOCKS5 endpoint.
 See [the container setup guide](../../docker/openconnect/README.md) for proxy usage.
 
 ## Develop
@@ -72,8 +73,14 @@ shortcut for using the latest successful main-branch set.
 The app may also use the path in `RMUXD_BIN`. A saved host represents a named
 machine with one remote account/environment. Addresses and gateway routes are
 named connection methods on that host. **Add host** guides you through
-`[user@]hostname[:port]` (or an SSH config alias), a display name, and
-authentication. After verification, it automatically saves the named host and
+`[user@]hostname[:port]` (or an SSH config alias), a display name, **Connect through**,
+and authentication. **Direct** is selected by default and uses the host's SSH
+settings. You can instead select a saved VPN or an existing SSH/SOCKS5 gateway.
+A selected VPN starts automatically when you connect the host; its saved ID
+keeps the route valid when its randomly assigned port changes. If that VPN is
+missing or cannot connect, the host connection fails without a direct fallback.
+Cancelling a host connection leaves the VPN available to other hosts; use the
+VPN page to disconnect it. After verification, the app saves the named host and
 its first `SSH` method in `~/.tokn/rmux/hosts.json`. Display names may contain
 spaces; they are independent of SSH aliases. No storage-choice step or implicit
 OpenSSH config write is involved.
@@ -89,12 +96,12 @@ method suppresses an otherwise-unused duplicate projection. Missing aliases
 with workspace references remain visible as unavailable; restoring the alias
 restores access without losing session or task references.
 
-The connection-method editor supports direct SSH, optional identity-file paths,
-and ordered routes through reusable gateways. **Verify and save** verifies the
+The connection-method editor supports direct SSH, saved VPNs, optional
+identity-file paths, and ordered routes through reusable gateways. **Verify and save** verifies the
 remote environment and saves the method in the host catalog. For a new direct
 method, **Also save to OpenSSH config** optionally exports a managed `Host`
 block after verification. This option is off by default and unavailable for
-existing config aliases or gateway routes; the saved method remains in the
+existing config aliases, VPNs, or gateway routes; the saved method remains in the
 host catalog. OpenSSH requests host-key confirmation, passwords,
 passphrases, or interactive responses through the quick-input overlay. If
 `ctl-agent` is missing, packaged builds can install the matching
@@ -112,7 +119,9 @@ prompts.
 
 On macOS and Linux, connection methods have a **Use SSH-config master** checkbox
 in **Host settings → Edit connection method**. It defaults on for **SSH config · Virtual** methods and
-off for direct and Tailscale methods. Checked methods honor the destination's effective
+off for direct and Tailscale methods. VPN and SOCKS5 routes always use a private
+master so an existing direct connection cannot bypass the selected route.
+Checked methods honor the destination's effective
 `ControlMaster`, `ControlPath`, and `ControlPersist` settings, including `Include`
 and `Match` rules. Unchecked methods use rmux's private master while retaining
 their alias and other SSH settings. The choice and alias origin are retained per

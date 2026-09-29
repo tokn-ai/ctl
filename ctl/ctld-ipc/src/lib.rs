@@ -42,6 +42,22 @@ pub enum GatewayKind {
   #[default]
   Ssh,
   Socks5,
+  Vpn,
+}
+
+impl GatewayKind {
+  #[must_use]
+  pub fn requires_proxy_command(self) -> bool {
+    matches!(self, Self::Socks5 | Self::Vpn)
+  }
+}
+
+/// A stable reference to a saved VPN owned by a specific local daemon.
+/// The current SOCKS5 endpoint is deliberately resolved only when connecting.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VpnGateway {
+  pub connection_id: String,
+  pub socket_path: PathBuf,
 }
 
 // serde's skip_serializing_if callback must take a reference.
@@ -54,12 +70,40 @@ fn gateway_kind_is_ssh(kind: &GatewayKind) -> bool {
 pub struct SshGateway {
   #[serde(default, skip_serializing_if = "gateway_kind_is_ssh")]
   pub kind: GatewayKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub vpn: Option<VpnGateway>,
   pub destination: String,
   pub hostname: Option<String>,
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
   pub mode: SshGatewayMode,
+}
+
+impl SshGateway {
+  /// VPN references cannot also contain a stale endpoint or SSH credentials.
+  #[must_use]
+  pub fn has_valid_vpn_configuration(&self) -> bool {
+    match (&self.kind, &self.vpn) {
+      (GatewayKind::Vpn, Some(vpn)) => {
+        !vpn.connection_id.is_empty()
+          && vpn.connection_id.len() <= 128
+          && !vpn
+            .connection_id
+            .chars()
+            .any(|value| value.is_control() || value.is_whitespace())
+          && vpn.socket_path.is_absolute()
+          && self.destination == vpn.connection_id
+          && self.hostname.is_none()
+          && self.user.is_none()
+          && self.port.is_none()
+          && self.identity_file.is_none()
+          && self.mode == SshGatewayMode::Automatic
+      }
+      (GatewayKind::Vpn, None) => false,
+      (_, vpn) => vpn.is_none(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,7 +151,7 @@ impl SshTarget {
     !self
       .gateways
       .iter()
-      .any(|gateway| gateway.kind == GatewayKind::Socks5)
+      .any(|gateway| gateway.kind.requires_proxy_command())
       && self
         .use_ssh_config_master
         .unwrap_or(self.ssh_config_alias.is_some())
@@ -696,6 +740,53 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn existing_gateway_json_remains_unchanged_and_vpn_references_are_strict() {
+    let legacy = serde_json::json!({
+      "destination": "bastion",
+      "hostname": null,
+      "user": null,
+      "port": null,
+      "identity_file": null,
+      "mode": "automatic"
+    });
+    let gateway: SshGateway = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(gateway.has_valid_vpn_configuration());
+    assert_eq!(serde_json::to_value(&gateway).unwrap(), legacy);
+    let vpn = SshGateway {
+      kind: GatewayKind::Vpn,
+      vpn: Some(VpnGateway {
+        connection_id: "saved-vpn".into(),
+        socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
+      }),
+      destination: "saved-vpn".into(),
+      ..gateway
+    };
+    assert!(vpn.has_valid_vpn_configuration());
+    let json = serde_json::to_value(&vpn).unwrap();
+    assert_eq!(json["kind"], "vpn");
+    assert_eq!(serde_json::from_value::<SshGateway>(json).unwrap(), vpn);
+    for field in 0..10 {
+      let mut invalid = vpn.clone();
+      match field {
+        0 => invalid.kind = GatewayKind::Ssh,
+        1 => invalid.vpn = None,
+        2 => invalid.hostname = Some("localhost".into()),
+        3 => invalid.user = Some("alice".into()),
+        4 => invalid.port = Some(1080),
+        5 => invalid.identity_file = Some("key".into()),
+        6 => invalid.mode = SshGatewayMode::NativeOnly,
+        7 => invalid.destination = "another-vpn".into(),
+        8 => invalid.vpn.as_mut().unwrap().socket_path = "relative.sock".into(),
+        _ => {
+          invalid.destination.clear();
+          invalid.vpn.as_mut().unwrap().connection_id.clear();
+        }
+      }
+      assert!(!invalid.has_valid_vpn_configuration(), "field {field}");
+    }
+  }
 
   #[test]
   fn ssh_config_origin_is_optional_and_does_not_change_managed_target_json() {

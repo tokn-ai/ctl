@@ -37,6 +37,7 @@ async fn docker_workspace_survives_client_restart() -> Result<(), String> {
     port: Some(2222),
     identity_file: Some(identity_file),
     gateway_route: Vec::new(),
+    vpn_connection_id: None,
     gateways: Box::default(),
   };
   if let Ok(phase) = std::env::var("RMUX_WORKSPACE_TEST_PHASE") {

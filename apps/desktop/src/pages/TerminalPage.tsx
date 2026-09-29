@@ -2000,6 +2000,11 @@ export function TerminalPage() {
           tailscaleDevices={tailscaleDevices}
           discoveryLoading={workspace.discoveryLoading}
           warning={discoveryWarning}
+          gateways={workspace.ssh_gateways}
+          vpn_connections={vpn.connections}
+          vpn_statuses={vpn.statuses}
+          vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
+          vpn_error={vpn.catalog_error ?? vpn.status_error}
           onSaveNewHost={saveNewHost}
           onClose={() => setAddHostOpen(false)}
         />
@@ -2022,6 +2027,10 @@ export function TerminalPage() {
           suggestions={hostSuggestions}
           warning={discoveryWarning}
           gateways={workspace.ssh_gateways}
+          vpn_connections={vpn.connections}
+          vpn_statuses={vpn.statuses}
+          vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
+          vpn_error={vpn.catalog_error ?? vpn.status_error}
           initialTarget={methodDraft.initial_target}
           expectedIdentity={methodHost ? expectedHostIdentity(methodHost) : undefined}
           onSaveConnection={saveConnection}
@@ -2036,6 +2045,7 @@ export function TerminalPage() {
         <HostSettingsDialog
           key={settingsHost.host_id}
           host={settingsHost}
+          vpn_connections={vpn.connections}
           onSave={saveHostSettings}
           onAddMethod={() => editMethod(settingsHost)}
           onEditMethod={(method) => editMethod(settingsHost, method)}

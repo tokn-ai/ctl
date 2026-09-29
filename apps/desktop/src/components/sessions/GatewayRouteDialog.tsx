@@ -5,6 +5,8 @@ import type {
   SshGatewayRouteStep,
   WorkspaceSshGateway,
   SshIdentityFile,
+  VpnConnection,
+  VpnStatus,
 } from "../../lib/types";
 import { QuickInputFrame } from "../commands/QuickInputFrame";
 import "./gatewayRoute.css";
@@ -15,6 +17,10 @@ interface Props {
   target: SshConnectionTarget;
   gateways: readonly WorkspaceSshGateway[];
   targets: readonly SshConnectionTarget[];
+  vpn_connections?: readonly VpnConnection[];
+  vpn_statuses?: readonly VpnStatus[];
+  vpn_loading?: boolean;
+  vpn_error?: string | null;
   hostSetup?: {
     address: string;
     alias: string;
@@ -44,6 +50,7 @@ interface Props {
   onSave(
     gateways: WorkspaceSshGateway[],
     route: SshGatewayRouteStep[],
+    vpn_connection_id?: string,
   ): Promise<void>;
   onClose(): void;
 }
@@ -65,6 +72,10 @@ export function GatewayRouteDialog({
   target,
   gateways,
   targets,
+  vpn_connections = [],
+  vpn_statuses = [],
+  vpn_loading = false,
+  vpn_error,
   hostSetup,
   readonlyExisting = false,
   readonlyGatewayIds,
@@ -79,6 +90,10 @@ export function GatewayRouteDialog({
   const [route, setRoute] = useState<SshGatewayRouteStep[]>(() => [
     ...(target.gateway_route ?? []),
   ]);
+  const [vpnConnectionId, setVpnConnectionId] = useState(target.vpn_connection_id);
+  const selectedVpn = vpn_connections.find((connection) => connection.connection_id === vpnConnectionId);
+  const missingVpn = Boolean(vpnConnectionId && !selectedVpn);
+  const privateMaster = Boolean(vpnConnectionId) || route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5");
   const [editing, setEditing] = useState<GatewayDraft | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,6 +109,7 @@ export function GatewayRouteDialog({
 
   function addExisting(gateway: WorkspaceSshGateway) {
     if (routeIds.has(gateway.gateway_id) || route.length >= 8) return;
+    setVpnConnectionId(undefined);
     setRoute((current) => [
       ...current,
       { gateway_id: gateway.gateway_id, mode: "automatic" },
@@ -161,14 +177,19 @@ export function GatewayRouteDialog({
   }
 
   async function save() {
-    if (requireGateway && route.length === 0) {
+    if (missingVpn) {
+      setError("The saved VPN is unavailable. Choose another connection before saving.");
+      return;
+    }
+    if (requireGateway && route.length === 0 && !vpnConnectionId) {
       setError("Add at least one gateway to this route.");
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      await onSave(draftGateways, route);
+      if (vpnConnectionId) await onSave(draftGateways, route, vpnConnectionId);
+      else await onSave(draftGateways, route);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
       setSaving(false);
@@ -272,14 +293,14 @@ export function GatewayRouteDialog({
                 type="checkbox"
                 aria-label="Use SSH-config master"
                 aria-describedby="ssh-config-master-description"
-                checked={hostSetup.ssh_config_master.checked && !route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5")}
-                disabled={route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5")}
+                checked={hostSetup.ssh_config_master.checked && !privateMaster}
+                disabled={privateMaster}
                 onChange={(event) => hostSetup.ssh_config_master?.onChange(event.target.checked)}
               />
               Use SSH-config master
               <small id="ssh-config-master-description">
-                {route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5")
-                  ? "SOCKS5 routes use a private SSH master to preserve the selected route."
+                {privateMaster
+                  ? "VPN and SOCKS5 routes use a private SSH master to preserve the selected route."
                   : hostSetup.ssh_config_master.checked
                     ? "Use OpenSSH sharing settings, with an rmux private master when sharing is not configured."
                     : "Use an rmux private master for this connection."}
@@ -291,12 +312,12 @@ export function GatewayRouteDialog({
               <input
                 type="checkbox"
                 aria-label="Also save to OpenSSH config"
-                checked={hostSetup.export_to_ssh_config.checked && route.length === 0 && hostSetup.export_to_ssh_config.allowed}
-                disabled={route.length > 0 || !hostSetup.export_to_ssh_config.allowed}
+                checked={hostSetup.export_to_ssh_config.checked && route.length === 0 && !vpnConnectionId && hostSetup.export_to_ssh_config.allowed}
+                disabled={route.length > 0 || Boolean(vpnConnectionId) || !hostSetup.export_to_ssh_config.allowed}
                 onChange={(event) => hostSetup.export_to_ssh_config?.onChange(event.target.checked)}
               />
               Also save to OpenSSH config
-              {route.length > 0 || !hostSetup.export_to_ssh_config.allowed
+              {route.length > 0 || vpnConnectionId || !hostSetup.export_to_ssh_config.allowed
                 ? <small>Available for a new direct SSH alias.</small>
                 : null}
             </label>
@@ -304,12 +325,51 @@ export function GatewayRouteDialog({
           {hostSetup.warning ? <p role="status">{hostSetup.warning}</p> : null}
         </section>
       ) : null}
+      <div className="gateway-host-form">
+        <label>
+          Connect through
+          <select
+            aria-label="Connect through"
+            value={vpnConnectionId ? `vpn:${vpnConnectionId}` : route.length ? "gateway_route" : "direct"}
+            onChange={(event) => {
+              const value = event.target.value;
+              setError(null);
+              if (value === "gateway_route") return;
+              setVpnConnectionId(value.startsWith("vpn:") ? value.slice(4) : undefined);
+              setRoute(value.startsWith("gateway:") ? [{ gateway_id: value.slice(8), mode: "automatic" }] : []);
+            }}
+          >
+            <option value="direct">Direct</option>
+            {route.length ? <option value="gateway_route">Gateway route · {route.length} hop{route.length === 1 ? "" : "s"}</option> : null}
+            {missingVpn ? <option value={`vpn:${vpnConnectionId}`}>Unavailable saved VPN</option> : null}
+            {vpn_connections.length ? <optgroup label="Saved VPNs">
+              {vpn_connections.map((connection) => <option key={connection.connection_id} value={`vpn:${connection.connection_id}`}>
+                {connection.name} · {vpn_statuses.find((status) => status.connection_id === connection.connection_id)?.state === "connected" ? "Connected" : "Connect when needed"}
+              </option>)}
+            </optgroup> : null}
+            {draftGateways.length ? <optgroup label="Saved gateways">
+              {draftGateways.map((gateway) => <option key={gateway.gateway_id} value={`gateway:${gateway.gateway_id}`}>
+                {gateway.name} · {gateway.kind === "socks5" ? "SOCKS5" : "SSH"}
+              </option>)}
+            </optgroup> : null}
+          </select>
+        </label>
+        {vpn_loading ? <p role="status">Loading VPN connections…</p> : null}
+        {vpn_error ? <p role="status">Could not load VPN connections: {vpn_error}</p> : null}
+        {missingVpn ? <p className="quick-input-error" role="alert">The saved VPN is unavailable. Choose another connection before saving.</p> : null}
+      </div>
       <p className="quick-input-description">
-        Connect directly, or add gateways in the order used to reach the destination.
+        {vpnConnectionId
+          ? "This VPN starts when needed. Disconnect it later from the VPN page."
+          : "Use existing SSH settings directly, or add gateways in the order used to reach the destination."}
       </p>
 
       <div className="gateway-route-path">
         <RouteNode label="This Mac" detail="Start of route" />
+        {vpnConnectionId ? <>
+          <div className="gateway-route-connector" aria-hidden="true">↓</div>
+          <RouteNode label={selectedVpn?.name ?? "Unavailable saved VPN"} detail="VPN" />
+        </> : null}
         {route.map((step, index) => {
           const gateway = draftGateways.find(
             (item) => item.gateway_id === step.gateway_id,
@@ -363,7 +423,7 @@ export function GatewayRouteDialog({
         <RouteNode label={hostSetup?.address.trim() || target.destination} detail="Destination" />
       </div>
 
-      <section className="gateway-library" aria-labelledby="gateway-library-heading">
+      {!vpnConnectionId ? <section className="gateway-library" aria-labelledby="gateway-library-heading">
         <header>
           <strong id="gateway-library-heading">Saved gateways</strong>
           <button type="button" onClick={() => setEditing(emptyDraft())} disabled={route.length >= 8}>
@@ -400,12 +460,12 @@ export function GatewayRouteDialog({
             ))}
           </div>
         )}
-      </section>
+      </section> : null}
 
       {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
       <footer className="gateway-dialog-actions">
         <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
-        <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || (requireGateway && route.length === 0)}>
+        <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || missingVpn || (requireGateway && route.length === 0 && !vpnConnectionId)}>
           {saving ? (hostSetup ? "Connecting…" : "Saving…") : (submitLabel ?? (hostSetup ? "Connect" : "Done"))}
         </button>
       </footer>

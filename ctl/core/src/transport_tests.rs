@@ -11,6 +11,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 fn loopback_gateway(port: u16) -> SshGateway {
   SshGateway {
     kind: ctld_ipc::GatewayKind::Ssh,
+    vpn: None,
     destination: "127.0.0.1".into(),
     hostname: None,
     user: None,

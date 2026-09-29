@@ -78,6 +78,8 @@ pub enum ConnectionTargetDto {
     identity_file: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     gateway_route: Vec<SshGatewayRouteStepDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vpn_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "ssh_gateways_empty")]
     gateways: Box<[SshGatewayDto]>,
   },
@@ -112,6 +114,7 @@ impl ConnectionTargetDto {
       port: None,
       identity_file: None,
       gateway_route: Vec::new(),
+      vpn_connection_id: None,
       gateways: Box::default(),
     }
   }

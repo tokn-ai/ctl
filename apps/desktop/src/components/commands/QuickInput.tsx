@@ -16,6 +16,7 @@ export type QuickInputMode =
   | QuickInputFieldMode
   | {
       kind: "pick";
+      initial_choice_id?: string;
       choices: readonly { id: string; label: string; detail?: string; group?: string }[];
     }
   | { kind: "confirm"; confirm_label: string; destructive?: boolean }
@@ -55,7 +56,13 @@ export function QuickInput({
   cancel_label = "Cancel",
   confirm_command_id,
 }: QuickInputProps) {
-  const [selected, setSelected] = useState(0);
+  const [selectedId, setSelectedId] = useState(() => mode.kind === "pick"
+    ? mode.initial_choice_id ?? mode.choices[0]?.id
+    : undefined);
+  const selectedIndex = mode.kind === "pick"
+    ? mode.choices.findIndex((choice) => choice.id === (selectedId ?? mode.choices[0]?.id))
+    : -1;
+  const selectedChoice = mode.kind === "pick" ? mode.choices[selectedIndex] : undefined;
   const inputValue = useRef<() => string>(() => "");
   const environment = useCommandEnvironment();
   const dispatcher = useCommandScope({
@@ -87,7 +94,7 @@ export function QuickInput({
             (mode.kind === "input"
               ? inputValue.current()
               : mode.kind === "pick"
-                ? mode.choices[selected]?.id
+                ? selectedChoice?.id
                 : "confirm");
           if (value !== undefined) return onSubmit(value);
         },
@@ -121,14 +128,15 @@ export function QuickInput({
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
           const direction = event.key === "ArrowDown" ? 1 : -1;
-          const next =
-            (selected + direction + mode.choices.length) % mode.choices.length;
+          const next = selectedIndex < 0
+            ? direction > 0 ? 0 : mode.choices.length - 1
+            : (selectedIndex + direction + mode.choices.length) % mode.choices.length;
           event.currentTarget
             .querySelectorAll<HTMLElement>('[role="option"]')
             [next]?.focus();
         } else if (event.key === "Enter") {
           event.preventDefault();
-          submit(mode.choices[selected].id);
+          if (selectedChoice) submit(selectedChoice.id);
         }
       }}
     >
@@ -169,15 +177,15 @@ export function QuickInput({
           role="listbox"
           aria-label={title}
         >
-          <QuickInputOptionGroups items={mode.choices} renderOption={(choice, index) => (
+          <QuickInputOptionGroups items={mode.choices} renderOption={(choice) => (
             <button
               type="button"
               key={choice.id}
               role="option"
-              aria-selected={index === selected}
-              className={`command-palette-option ${index === selected ? "selected" : ""}`}
-              autoFocus={index === 0}
-              onFocus={() => setSelected(index)}
+              aria-selected={choice.id === selectedChoice?.id}
+              className={`command-palette-option ${choice.id === selectedChoice?.id ? "selected" : ""}`}
+              autoFocus={choice.id === selectedChoice?.id}
+              onFocus={() => setSelectedId(choice.id)}
               onClick={() => submit(choice.id)}
             >
               <span>

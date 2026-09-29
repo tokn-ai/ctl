@@ -27,6 +27,7 @@ impl Drop for StartupGuard {
 struct FakeLease {
   probe: Arc<Probe>,
   exit: oneshot::Receiver<()>,
+  status: VpnStatus,
 }
 
 impl FakeLease {
@@ -36,6 +37,13 @@ impl FakeLease {
       Self {
         probe: Arc::clone(probe),
         exit: receiver,
+        status: VpnStatus {
+          running: true,
+          endpoint: Some("socks5h://127.0.0.1:54321".to_owned()),
+          container_name: Some("test-vpn".to_owned()),
+          state: VpnState::Connected,
+          ..VpnStatus::default()
+        },
       },
       exit,
     )
@@ -44,14 +52,7 @@ impl FakeLease {
 
 impl Lease for FakeLease {
   fn status(&self) -> VpnStatus {
-    VpnStatus {
-      running: true,
-      endpoint: Some("socks5h://127.0.0.1:54321".to_owned()),
-      container_name: Some("test-vpn".to_owned()),
-      connection_id: None,
-      state: VpnState::Connected,
-      ..VpnStatus::default()
-    }
+    self.status.clone()
   }
 
   async fn exited(&mut self) -> io::Result<()> {
@@ -357,11 +358,13 @@ fn saved_connection() -> VpnConnection {
   VpnConnection {
     connection_id: "profile-test".into(),
     name: "Test VPN".into(),
-    url: "vpn.example.test".into(),
-    username: "test-user".into(),
-    password: Zeroizing::new("test-password".into()),
-    auth_method: None,
-    target_ip: None,
+    settings: VpnSettings::Openconnect {
+      url: "vpn.example.test".into(),
+      username: "test-user".into(),
+      password: Zeroizing::new("test-password".into()),
+      auth_method: None,
+      target_ip: None,
+    },
   }
 }
 
@@ -526,7 +529,10 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   assert!(harness.starts.try_recv().is_err());
 
   let mut changed = saved_connection();
-  changed.password = Zeroizing::new("changed-password".into());
+  let VpnSettings::Openconnect { password, .. } = &mut changed.settings else {
+    unreachable!()
+  };
+  *password = Zeroizing::new("changed-password".into());
   let error = harness.service.start_connection(changed).await.unwrap_err();
   assert!(error.contains("stop this connection"));
   assert!(!error.contains("changed-password"));
@@ -559,4 +565,233 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
     VpnStatus::default()
   );
   harness.owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn browser_login_remains_owned_and_idempotent_until_stop_or_daemon_shutdown() {
+  for explicit_stop in [false, true] {
+    let mut harness = Harness::new();
+    let connection = VpnConnection {
+      connection_id: "tailnet-test".into(),
+      name: "Test tailnet".into(),
+      settings: VpnSettings::Tailscale {
+        hostname: None,
+        accept_routes: false,
+      },
+    };
+    let service = harness.service.clone();
+    let requested = connection.clone();
+    let starting = tokio::spawn(async move { service.start_connection(requested).await });
+    let ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+      .await
+      .unwrap()
+      .unwrap();
+    let preparing = harness.service.status().await.unwrap();
+    assert_eq!(preparing.provider, VpnProvider::Tailscale);
+    assert_eq!(preparing.state, VpnState::Starting);
+    let (mut lease, _exit) = FakeLease::new(&harness.probe);
+    lease.status = VpnStatus {
+      provider: VpnProvider::Tailscale,
+      state: VpnState::Starting,
+      auth_url: Some("https://login.tailscale.com/a/example".into()),
+      ..VpnStatus::default()
+    };
+    assert!(ready.send(Ok(lease)).is_ok());
+    let status = starting.await.unwrap().unwrap();
+    assert_eq!(status.state, VpnState::Starting);
+    assert_eq!(status.provider, VpnProvider::Tailscale);
+    assert!(!status.running);
+    assert!(status.auth_url.is_some());
+    assert_eq!(
+      harness.service.start_connection(connection).await.unwrap(),
+      status
+    );
+    assert!(harness.starts.try_recv().is_err());
+    assert_eq!(
+      harness.service.list().await.unwrap().supported_providers,
+      vec![VpnProvider::Openconnect, VpnProvider::Tailscale]
+    );
+    if explicit_stop {
+      harness
+        .service
+        .stop_id("tailnet-test".into())
+        .await
+        .unwrap();
+    }
+    harness.owner.shutdown().await;
+    assert_eq!(harness.probe.shutdowns.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.probe.lease_drops.load(Ordering::SeqCst), 1);
+  }
+}
+
+#[tokio::test]
+async fn stopping_a_tailscale_start_waits_for_the_provider_to_release_its_container() {
+  let (cleanup_ready, mut cleanup_started) = mpsc::unbounded_channel();
+  let (cleanup_done, mut cleanup_finish) = mpsc::unbounded_channel();
+  let cleanup_gate = Arc::new(Mutex::new(Some(oneshot::channel::<()>())));
+  let gate = Arc::clone(&cleanup_gate);
+  let (service, mut owner) = spawn_with(move |config| {
+    let Config::Tailscale(mut config) = config else {
+      unreachable!()
+    };
+    let cancellation = config.cancellation.take().unwrap();
+    let (done, wait) = gate.lock().unwrap().take().unwrap();
+    cleanup_done.send(done).unwrap();
+    let started = cleanup_ready.clone();
+    async move {
+      let _ = cancellation.await;
+      started.send(()).unwrap();
+      let _ = wait.await;
+      Err::<FakeLease, _>(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+    }
+  });
+  let request_service = service.clone();
+  let request = tokio::spawn(async move {
+    request_service
+      .start_connection(VpnConnection {
+        connection_id: "tailnet-test".into(),
+        name: "Test tailnet".into(),
+        settings: VpnSettings::Tailscale {
+          hostname: None,
+          accept_routes: false,
+        },
+      })
+      .await
+  });
+  let done = timeout(TEST_TIMEOUT, cleanup_finish.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  let stop_service = service.clone();
+  let stopping = tokio::spawn(async move { stop_service.stop_id("tailnet-test".into()).await });
+  timeout(TEST_TIMEOUT, cleanup_started.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(!stopping.is_finished());
+  assert_eq!(service.status().await.unwrap().state, VpnState::Stopping);
+  assert!(request.await.unwrap().unwrap_err().contains("cancelled"));
+  done.send(()).unwrap();
+  timeout(TEST_TIMEOUT, stopping)
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+  assert!(service.list().await.unwrap().connections.is_empty());
+  owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn forgetting_a_preparing_or_connected_identity_is_rejected_before_engine_access() {
+  let mut harness = Harness::new();
+  let connection = VpnConnection {
+    connection_id: "tailnet-test".into(),
+    name: "Test tailnet".into(),
+    settings: VpnSettings::Tailscale {
+      hostname: None,
+      accept_routes: false,
+    },
+  };
+  let service = harness.service.clone();
+  let request = tokio::spawn(async move { service.start_connection(connection).await });
+  let ready = timeout(TEST_TIMEOUT, harness.starts.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(
+    harness
+      .service
+      .forget_tailscale_identity("tailnet-test".into())
+      .await
+      .unwrap_err()
+      .contains("Stop the Tailscale connection")
+  );
+  let (lease, _exit) = FakeLease::new(&harness.probe);
+  assert!(ready.send(Ok(lease)).is_ok());
+  request.await.unwrap().unwrap();
+  assert!(
+    harness
+      .service
+      .forget_tailscale_identity("tailnet-test".into())
+      .await
+      .unwrap_err()
+      .contains("Stop the Tailscale connection")
+  );
+  harness.owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn slow_identity_cleanup_reserves_only_its_profile_and_preserves_its_result() {
+  for cleanup_result in [Ok(()), Err("synthetic cleanup failure".to_owned())] {
+    let probe = Arc::new(Probe::default());
+    let start_probe = Arc::clone(&probe);
+    let exits = Arc::new(Mutex::new(Vec::new()));
+    let start_exits = Arc::clone(&exits);
+    let (started, mut cleanup_started) = mpsc::unbounded_channel();
+    let (service, mut owner) = spawn_with_forget(
+      move |_| {
+        let (lease, exit) = FakeLease::new(&start_probe);
+        start_exits.lock().unwrap().push(exit);
+        std::future::ready(Ok(lease))
+      },
+      move |_| {
+        let (release, wait) = oneshot::channel();
+        started.send(release).unwrap();
+        async move { wait.await.unwrap() }
+      },
+    );
+    service.start_connection(saved_connection()).await.unwrap();
+    let forget_service = service.clone();
+    let forgetting = tokio::spawn(async move {
+      forget_service
+        .forget_tailscale_identity("cancelled-draft".into())
+        .await
+    });
+    let release = timeout(TEST_TIMEOUT, cleanup_started.recv())
+      .await
+      .unwrap()
+      .unwrap();
+    let snapshot = timeout(TEST_TIMEOUT, service.list())
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(snapshot.connections.len(), 2);
+    assert!(snapshot.connections.iter().any(|status| {
+      status.connection_id.as_deref() == Some("cancelled-draft")
+        && status.state == VpnState::Stopping
+    }));
+    timeout(TEST_TIMEOUT, service.stop_id("profile-test".into()))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(probe.shutdowns.load(Ordering::SeqCst), 1);
+    let mut same_profile = saved_connection();
+    same_profile.connection_id = "cancelled-draft".into();
+    let error = timeout(TEST_TIMEOUT, service.start_connection(same_profile.clone()))
+      .await
+      .unwrap()
+      .unwrap_err();
+    assert!(error.contains("stopping"));
+    let stop_service = service.clone();
+    let stopping =
+      tokio::spawn(async move { stop_service.stop_id("cancelled-draft".into()).await });
+    timeout(TEST_TIMEOUT, service.list())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(!stopping.is_finished());
+    release.send(cleanup_result.clone()).unwrap();
+    assert_eq!(
+      timeout(TEST_TIMEOUT, forgetting).await.unwrap().unwrap(),
+      cleanup_result
+    );
+    timeout(TEST_TIMEOUT, stopping)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+    assert!(service.list().await.unwrap().connections.is_empty());
+    service.start_connection(same_profile).await.unwrap();
+    owner.shutdown().await;
+  }
 }

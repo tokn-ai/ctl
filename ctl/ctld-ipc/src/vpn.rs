@@ -7,7 +7,8 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
-  ClientMessage, ConnectError, ServerMessage, VpnConnection, VpnSnapshot, VpnState, VpnStatus,
+  ClientMessage, ConnectError, ServerMessage, VpnConnection, VpnProvider, VpnSnapshot, VpnState,
+  VpnStatus,
 };
 
 /// A VPN client pinned to one daemon endpoint for every operation.
@@ -56,14 +57,78 @@ impl Client {
   /// Returns connection, protocol, configuration, or daemon startup failures.
   pub async fn start_connection(&self, connection: VpnConnection) -> Result<VpnStatus, VpnError> {
     connection.validate().map_err(VpnError::InvalidConnection)?;
+    let tailscale = connection.provider() == VpnProvider::Tailscale;
+    if tailscale {
+      let capabilities = self
+        .request(ClientMessage::VpnStatus, true, Duration::from_secs(15))
+        .await?
+        .snapshot();
+      if !capabilities
+        .supported_providers
+        .contains(&VpnProvider::Tailscale)
+      {
+        return Err(VpnError::TailscaleUnsupported);
+      }
+    }
     self
       .request(
         ClientMessage::StartVpnConnection { connection },
         true,
-        Duration::from_secs(100),
+        Duration::from_secs(if tailscale { 150 } else { 100 }),
       )
       .await
       .map(|response| response.status)
+  }
+
+  /// Ensures the selected owner can safely clean up a cancelled Tailscale setup.
+  ///
+  /// # Errors
+  /// Returns an update hint for older owners, or connection/startup errors.
+  pub async fn ensure_tailscale_enrollment_supported(&self) -> Result<(), VpnError> {
+    let snapshot = self
+      .request(ClientMessage::VpnStatus, true, Duration::from_secs(15))
+      .await?
+      .snapshot();
+    if snapshot.supports_tailscale_enrollment
+      && snapshot
+        .supported_providers
+        .contains(&VpnProvider::Tailscale)
+    {
+      Ok(())
+    } else {
+      Err(VpnError::Daemon {
+        code: "vpn_enrollment_unsupported".into(),
+        message: "Update and restart ctld to sign in before saving a Tailscale connection".into(),
+      })
+    }
+  }
+
+  /// Removes a stopped Tailscale identity belonging to this local owner.
+  ///
+  /// # Errors
+  /// Returns an error for active/in-use identities, old owners, or engine errors.
+  pub async fn forget_tailscale_identity(&self, connection_id: &str) -> Result<(), VpnError> {
+    if connection_id.is_empty()
+      || connection_id.len() > 128
+      || connection_id
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace())
+    {
+      return Err(VpnError::InvalidConnection(
+        "Invalid Tailscale connection ID".into(),
+      ));
+    }
+    self.ensure_tailscale_enrollment_supported().await?;
+    self
+      .request(
+        ClientMessage::ForgetTailscaleIdentity {
+          connection_id: connection_id.into(),
+        },
+        true,
+        Duration::from_secs(30),
+      )
+      .await
+      .map(|_| ())
   }
 
   /// Reads VPN status without starting a daemon or searching other endpoints.
@@ -247,9 +312,32 @@ impl Response {
       VpnSnapshot {
         connections: if active { vec![status] } else { Vec::new() },
         supports_multiple: false,
+        supported_providers: vec![VpnProvider::Openconnect],
+        supports_tailscale_enrollment: false,
       }
     })
   }
+}
+
+/// Only browser sign-in links issued by the supported Tailscale control plane.
+#[must_use]
+pub fn is_tailscale_auth_url(value: &str) -> bool {
+  if value.len() > 2048 || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    return false;
+  }
+  let Ok(url) = url::Url::parse(value) else {
+    return false;
+  };
+  url.scheme() == "https"
+    && url.host_str() == Some("login.tailscale.com")
+    && url.username().is_empty()
+    && url.password().is_none()
+    && url.port().is_none()
+    && url.query().is_none()
+    && url.fragment().is_none()
+    && url.path().strip_prefix("/a/").is_some_and(|token| {
+      !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
 }
 
 fn normalize_status(mut status: VpnStatus) -> VpnStatus {
@@ -291,10 +379,22 @@ where
   }
   crate::write_frame(stream, message).await?;
   match crate::read_frame::<_, ServerMessage>(stream).await? {
-    Some(ServerMessage::VpnStatus { status, snapshot }) => Ok(Response {
-      status: normalize_status(status),
-      snapshot,
-    }),
+    Some(ServerMessage::VpnStatus { status, snapshot })
+      if !matches!(message, ClientMessage::ForgetTailscaleIdentity { .. }) =>
+    {
+      Ok(Response {
+        status: normalize_status(status),
+        snapshot,
+      })
+    }
+    Some(ServerMessage::VpnIdentityForgotten)
+      if matches!(message, ClientMessage::ForgetTailscaleIdentity { .. }) =>
+    {
+      Ok(Response {
+        status: VpnStatus::default(),
+        snapshot: None,
+      })
+    }
     Some(ServerMessage::Error { code, message }) => Err(VpnError::Daemon { code, message }),
     None => Err(VpnError::ConnectionClosed),
     Some(_) => Err(VpnError::UnexpectedResponse),
@@ -303,6 +403,8 @@ where
 
 #[derive(Debug, thiserror::Error)]
 pub enum VpnError {
+  #[error("This ctld does not support Tailscale; update and restart ctld")]
+  TailscaleUnsupported,
   #[error("could not resolve the VPN settings file: {0}")]
   EnvFile(#[source] io::Error),
   #[error("{0}")]
@@ -331,6 +433,7 @@ impl VpnError {
   #[must_use]
   pub fn code(&self) -> &str {
     match self {
+      Self::TailscaleUnsupported => "vpn_provider_unsupported",
       Self::EnvFile(_) | Self::InvalidConnection(_) => "vpn_invalid_connection",
       Self::Connect(_) => "ctld_connection_failed",
       Self::Codec(_) | Self::UnexpectedResponse => "ctld_protocol_error",

@@ -7,6 +7,7 @@ mod port_forwarding;
 pub mod proxy_route;
 mod shared_forwarding;
 mod ssh_config_master;
+mod tailscale;
 mod target_lifecycle;
 mod vpn_service;
 
@@ -349,6 +350,7 @@ async fn handle_connection(
     request @ (ClientMessage::StartVpn { .. }
     | ClientMessage::StartVpnConnection { .. }
     | ClientMessage::StopVpnById { .. }
+    | ClientMessage::ForgetTailscaleIdentity { .. }
     | ClientMessage::StopVpn
     | ClientMessage::VpnStatus) => handle_vpn_request(&mut stream, &state, request).await,
     ClientMessage::Askpass {
@@ -388,6 +390,15 @@ async fn handle_vpn_request(
     ClientMessage::StopVpn => service.stop().await,
     ClientMessage::StopVpnById { vpn_id } => service.stop_id(vpn_id).await,
     ClientMessage::VpnStatus => service.status().await,
+    ClientMessage::ForgetTailscaleIdentity { connection_id } => {
+      service
+        .forget_tailscale_identity(connection_id)
+        .await
+        .map_err(RequestError::VpnFailed)?;
+      return ctld_ipc::write_frame(stream, &ServerMessage::VpnIdentityForgotten)
+        .await
+        .map_err(Into::into);
+    }
     _ => return Err(RequestError::InvalidRequest("expected a VPN request")),
   }
   .map_err(RequestError::VpnFailed)?;
@@ -414,6 +425,7 @@ fn normalize_request_target(request: &mut ClientMessage) {
     | ClientMessage::StartVpn { .. }
     | ClientMessage::StartVpnConnection { .. }
     | ClientMessage::StopVpnById { .. }
+    | ClientMessage::ForgetTailscaleIdentity { .. }
     | ClientMessage::StopVpn => {}
   }
 }

@@ -1,4 +1,4 @@
-use ctld_ipc::VpnConnection;
+use ctld_ipc::{VpnConnection, VpnSettings};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -7,11 +7,13 @@ fn saved_connection() -> VpnConnection {
   VpnConnection {
     connection_id: "test".into(),
     name: "Test VPN".into(),
-    url: "vpn.example.test".into(),
-    username: "test-user".into(),
-    password: Zeroizing::new("literal $value='quoted'\\tail#=end".into()),
-    auth_method: Some("default_method".into()),
-    target_ip: None,
+    settings: VpnSettings::Openconnect {
+      url: "vpn.example.test".into(),
+      username: "test-user".into(),
+      password: Zeroizing::new("literal $value='quoted'\\tail#=end".into()),
+      auth_method: Some("default_method".into()),
+      target_ip: None,
+    },
   }
 }
 
@@ -19,15 +21,21 @@ fn saved_connection() -> VpnConnection {
 fn generated_config_preserves_literal_values_without_shell_quoting() {
   let connection = saved_connection();
   let env = Config::from_connection(&connection).unwrap().content;
+  let VpnSettings::Openconnect { password, .. } = &connection.settings else {
+    unreachable!()
+  };
   assert!(
     env
       .lines()
-      .any(|line| line == format!("VPN_PASSWORD={}", connection.password.as_str()))
+      .any(|line| line == format!("VPN_PASSWORD={}", password.as_str()))
   );
   assert!(env.ends_with("TARGET_IP=\n"));
   assert!(!env.contains("Test VPN"));
   let mut invalid = saved_connection();
-  invalid.password.push('\n');
+  let VpnSettings::Openconnect { password, .. } = &mut invalid.settings else {
+    unreachable!()
+  };
+  password.push('\n');
   assert!(Config::from_connection(&invalid).is_err());
 }
 

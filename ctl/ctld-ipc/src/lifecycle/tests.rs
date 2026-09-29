@@ -13,10 +13,14 @@ mod unix {
     directory: PathBuf,
     socket: PathBuf,
     executable: PathBuf,
+    _execution_guard: tokio::sync::MutexGuard<'static, ()>,
   }
 
   impl Fixture {
-    fn new() -> Self {
+    async fn new() -> Self {
+      // Share the protocol fixtures' lock: concurrent child creation can inherit
+      // a writable script descriptor before exec and cause ETXTBSY on Linux.
+      let execution_guard = crate::tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
       let directory = std::env::temp_dir().join(format!(
         "ctld-lifecycle-{}-{}",
         std::process::id(),
@@ -27,6 +31,7 @@ mod unix {
         socket: directory.join("ctld.sock"),
         executable: directory.join("ctld"),
         directory,
+        _execution_guard: execution_guard,
       };
       fixture.binary(&DaemonBinaryInfo::current());
       fixture
@@ -92,7 +97,7 @@ mod unix {
 
   #[tokio::test]
   async fn passive_probe_never_starts_an_absent_owner() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     assert_eq!(
       fixture.client().probe().await.unwrap(),
       DaemonStatus::Absent
@@ -106,7 +111,7 @@ mod unix {
 
   #[tokio::test]
   async fn legacy_owner_retains_its_known_protocol_and_cannot_be_restarted() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let listener = UnixListener::bind(&fixture.socket).unwrap();
     let server = tokio::spawn(async move {
       let (mut stream, _) = listener.accept().await.unwrap();
@@ -143,7 +148,7 @@ mod unix {
 
   #[tokio::test]
   async fn incompatible_replacement_fails_before_contacting_the_owner() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let mut binary = DaemonBinaryInfo::current();
     binary.protocol_version += 1;
     fixture.binary(&binary);
@@ -161,7 +166,7 @@ mod unix {
 
   #[tokio::test]
   async fn changed_binary_does_not_stop_the_pinned_owner() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let listener = UnixListener::bind(&fixture.socket).unwrap();
     let server = tokio::spawn(async move {
       let mut stream = inspect_peer(&listener, info("old")).await;
@@ -176,16 +181,17 @@ mod unix {
     let mut changed = DaemonBinaryInfo::current();
     changed.build.source_fingerprint = "a".repeat(64);
     fixture.binary(&changed);
-    assert!(matches!(
-      prepared.restart().await,
-      Err(LifecycleError::BinaryChanged)
-    ));
+    let result = prepared.restart().await;
+    assert!(
+      matches!(result, Err(LifecycleError::BinaryChanged)),
+      "expected changed-binary rejection, got {result:?}"
+    );
     server.await.unwrap();
   }
 
   #[tokio::test]
   async fn changed_owner_is_not_restarted() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let listener = UnixListener::bind(&fixture.socket).unwrap();
     let server = tokio::spawn(async move {
       let mut pinned = inspect_peer(&listener, info("old")).await;
@@ -207,7 +213,7 @@ mod unix {
 
   #[tokio::test]
   async fn replacement_is_verified_only_after_graceful_owner_release() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let listener = UnixListener::bind(&fixture.socket).unwrap();
     let socket = fixture.socket.clone();
     let (accepted, accepted_rx) = tokio::sync::oneshot::channel();

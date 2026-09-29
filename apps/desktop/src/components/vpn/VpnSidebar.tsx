@@ -11,7 +11,7 @@ interface Props {
 }
 
 export function VpnSidebar({ model }: Props) {
-  const external = model.statuses.filter((status) => !model.connections.some((connection) => connection.connection_id === status.connection_id));
+  const external = model.statuses.filter((status) => (model.enrollment_connection_id === null || status.connection_id !== model.enrollment_connection_id) && !model.connections.some((connection) => connection.connection_id === status.connection_id));
   const item_count = model.connections.length + external.length;
   const assigned_ids = new Set([...model.connections.map((connection) => connection.connection_id), ...model.statuses.map(vpnRuntimeId)]);
   const detached_errors = [...model.action_errors].filter(([vpn_id]) => !assigned_ids.has(vpn_id));
@@ -73,6 +73,9 @@ export function VpnSidebar({ model }: Props) {
           saving={model.editor_saving}
           error={model.editor_error}
           on_save={model.saveConnection}
+          enrollment_supported={model.supports_tailscale_enrollment}
+          on_enrollment_change={model.setEnrollmentConnectionId}
+          on_save_enrollment={model.saveEnrollment}
           on_close={model.closeEditor}
         />,
         document.body,

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { connectVpn, deleteVpnConnection, loadVpnConnections, saveVpnConnection, stopVpn, vpnStatus } from "./tauri";
+import { beginVpnEnrollment, cancelVpnEnrollment, saveVpnEnrollment, vpnEnrollmentStatus, connectVpn, deleteVpnConnection, loadVpnConnections, openVpnSignIn, saveVpnConnection, stopVpn, vpnStatus } from "./tauri";
 import type { VpnConnectionInput } from "./types";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -33,7 +33,21 @@ describe("VPN native boundary", () => {
     expect(ipc.invoke).toHaveBeenLastCalledWith("connect_vpn", { request: { connection_id: "work" } });
     await vpnStatus();
     expect(ipc.invoke).toHaveBeenLastCalledWith("vpn_status", undefined);
+    await openVpnSignIn("work");
+    expect(ipc.invoke).toHaveBeenLastCalledWith("open_vpn_sign_in", { request: { vpn_id: "work" } });
     await stopVpn("work");
     expect(ipc.invoke).toHaveBeenLastCalledWith("stop_vpn", { request: { vpn_id: "work" } });
   });
+});
+
+
+it("enrolls, observes, saves, and cancels through scoped native IDs", async () => {
+  await beginVpnEnrollment({ name: "Tailnet", hostname: null, accept_routes: false });
+  expect(ipc.invoke).toHaveBeenLastCalledWith("begin_vpn_enrollment", { request: { name: "Tailnet", hostname: null, accept_routes: false } });
+  await vpnEnrollmentStatus("draft-one");
+  expect(ipc.invoke).toHaveBeenLastCalledWith("vpn_enrollment_status", { request: { enrollment_id: "draft-one" } });
+  await saveVpnEnrollment("draft-one", "revision");
+  expect(ipc.invoke).toHaveBeenLastCalledWith("save_vpn_enrollment", { request: { enrollment_id: "draft-one", expected_revision: "revision" } });
+  await cancelVpnEnrollment("draft-one");
+  expect(ipc.invoke).toHaveBeenLastCalledWith("cancel_vpn_enrollment", { request: { enrollment_id: "draft-one" } });
 });

@@ -11,7 +11,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use unicode_width::UnicodeWidthStr as _;
 
-const DISCONNECTED_TABLE: &str = "VPN ID  STATE         SERVER  USERNAME  SOCKS5 ENDPOINT\n-       disconnected  -       -         -\n";
+const DISCONNECTED_TABLE: &str = "VPN ID  PROVIDER  STATE         SERVER  USERNAME  SOCKS5 ENDPOINT\n-       -         disconnected  -       -         -\n";
 
 struct Fixture {
   directory: PathBuf,
@@ -121,6 +121,7 @@ fn response(status: VpnStatus) -> ServerMessage {
         vec![status.clone()]
       },
       supports_multiple: true,
+      ..VpnSnapshot::default()
     }),
     status,
   }
@@ -142,6 +143,7 @@ fn connected() -> VpnStatus {
     connection_id: Some("test-connection".into()),
     state: VpnState::Connected,
     running: true,
+    ..VpnStatus::default()
   }
 }
 
@@ -175,6 +177,7 @@ async fn start_status_and_stop_use_daemon_ipc_and_print_json() {
     &VpnSnapshot {
       connections: vec![ready],
       supports_multiple: true,
+      ..VpnSnapshot::default()
     },
   );
   assert!(matches!(request, ClientMessage::VpnStatus));
@@ -199,7 +202,7 @@ async fn start_status_and_stop_print_a_human_readable_table_by_default() {
     let (output, _) = exchange(&fixture, &listener, &["vpn", action], response(connected())).await;
     assert_text_status(
       &output,
-      "VPN ID    STATE      SERVER                   USERNAME   SOCKS5 ENDPOINT\ntest-vpn  connected  https://vpn.example.com  test-user  socks5h://127.0.0.1:43210\n",
+      "VPN ID    PROVIDER     STATE      SERVER                   USERNAME   SOCKS5 ENDPOINT\ntest-vpn  OpenConnect  connected  https://vpn.example.com  test-user  socks5h://127.0.0.1:43210\n",
     );
   }
   let (output, _) = exchange(
@@ -213,21 +216,83 @@ async fn start_status_and_stop_print_a_human_readable_table_by_default() {
 }
 
 #[tokio::test]
+async fn tailscale_start_reports_pending_login_and_sends_provider_settings() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let pending = VpnStatus {
+    provider: ctld_ipc::VpnProvider::Tailscale,
+    vpn_id: Some("team".into()),
+    connection_id: Some("team".into()),
+    state: VpnState::Starting,
+    auth_url: Some("https://login.tailscale.com/a/123abc".into()),
+    ..VpnStatus::default()
+  };
+  let mut command = fixture.command(&[
+    "vpn",
+    "start-tailscale",
+    "--id",
+    "team",
+    "--hostname",
+    "rmux-test",
+    "--accept-routes",
+  ]);
+  let server = async {
+    assert!(matches!(
+      reply(&listener, response(VpnStatus::default())).await,
+      ClientMessage::VpnStatus
+    ));
+    reply(&listener, response(pending)).await
+  };
+  let (output, request) = timeout(Duration::from_secs(5), async {
+    tokio::join!(command.output(), server)
+  })
+  .await
+  .unwrap();
+  let output = output.unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let text = String::from_utf8(output.stdout).unwrap();
+  assert!(text.contains("Tailscale"));
+  assert!(text.contains("sign-in required"));
+  assert!(text.contains("Sign in for team: https://login.tailscale.com/a/123abc"));
+  assert!(
+    matches!(request, ClientMessage::StartVpnConnection { connection } if connection.connection_id == "team"
+    && matches!(&connection.settings, ctld_ipc::VpnSettings::Tailscale { hostname: Some(hostname), accept_routes: true } if hostname == "rmux-test"))
+  );
+}
+
+#[tokio::test]
+async fn tailscale_status_explains_required_device_approval() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let pending = VpnStatus {
+    provider: ctld_ipc::VpnProvider::Tailscale,
+    vpn_id: Some("team".into()),
+    state: VpnState::Starting,
+    message: Some("Approve this device in the Tailscale admin console".into()),
+    ..VpnStatus::default()
+  };
+  let (output, _) = exchange(&fixture, &listener, &["vpn", "status"], response(pending)).await;
+  assert!(output.status.success());
+  let text = String::from_utf8(output.stdout).unwrap();
+  assert!(text.contains("team: Approve this device in the Tailscale admin console"));
+}
+
+#[tokio::test]
 async fn human_status_shows_lifecycle_and_unavailable_connection_details() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   for (state, expected) in [
     (
       VpnState::Starting,
-      "VPN ID  STATE     SERVER       USERNAME     SOCKS5 ENDPOINT\n-       starting  unavailable  unavailable  unavailable\n",
+      "VPN ID  PROVIDER     STATE     SERVER       USERNAME     SOCKS5 ENDPOINT\n-       OpenConnect  starting  unavailable  unavailable  unavailable\n",
     ),
     (
       VpnState::Connected,
-      "VPN ID  STATE      SERVER       USERNAME     SOCKS5 ENDPOINT\n-       connected  unavailable  unavailable  unavailable\n",
+      "VPN ID  PROVIDER     STATE      SERVER       USERNAME     SOCKS5 ENDPOINT\n-       OpenConnect  connected  unavailable  unavailable  unavailable\n",
     ),
     (
       VpnState::Stopping,
-      "VPN ID  STATE     SERVER       USERNAME     SOCKS5 ENDPOINT\n-       stopping  unavailable  unavailable  unavailable\n",
+      "VPN ID  PROVIDER     STATE     SERVER       USERNAME     SOCKS5 ENDPOINT\n-       OpenConnect  stopping  unavailable  unavailable  unavailable\n",
     ),
   ] {
     let (output, _) = exchange(
@@ -298,6 +363,7 @@ async fn status_lists_multiple_connections_and_aligns_every_column() {
   let snapshot = VpnSnapshot {
     connections: vec![first.clone(), second],
     supports_multiple: true,
+    ..VpnSnapshot::default()
   };
   let (output, request) = exchange(
     &fixture,
@@ -369,6 +435,8 @@ async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
         ..legacy
       }],
       supports_multiple: false,
+      supported_providers: vec![ctld_ipc::VpnProvider::Openconnect],
+      supports_tailscale_enrollment: false,
     },
   );
 }
@@ -404,6 +472,7 @@ async fn targeted_stop_selects_one_vpn_and_rejects_unsafe_legacy_fallback() {
               },
             ],
             supports_multiple,
+            ..VpnSnapshot::default()
           }),
         }
       } else {

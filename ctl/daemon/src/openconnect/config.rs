@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
-use ctld_ipc::VpnConnection;
+use ctld_ipc::{VpnConnection, VpnSettings};
 use zeroize::Zeroizing;
 
 // One base64 line must fit the entrypoint's 65,536-byte input limit.
@@ -26,19 +26,26 @@ impl Config {
     connection
       .validate()
       .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    let VpnSettings::Openconnect {
+      url,
+      username,
+      password,
+      auth_method,
+      target_ip,
+    } = &connection.settings
+    else {
+      return Err(invalid("expected an OpenConnect profile"));
+    };
     let mut content = Zeroizing::new(String::new());
     for (key, value) in [
-      ("VPN_URL", connection.url.as_str()),
-      ("VPN_USERNAME", connection.username.as_str()),
-      ("VPN_PASSWORD", connection.password.as_str()),
+      ("VPN_URL", url.as_str()),
+      ("VPN_USERNAME", username.as_str()),
+      ("VPN_PASSWORD", password.as_str()),
       (
         "VPN_AUTH_METHOD",
-        connection.auth_method.as_deref().unwrap_or_default(),
+        auth_method.as_deref().unwrap_or_default(),
       ),
-      (
-        "TARGET_IP",
-        connection.target_ip.as_deref().unwrap_or_default(),
-      ),
+      ("TARGET_IP", target_ip.as_deref().unwrap_or_default()),
     ] {
       content.push_str(key);
       content.push('=');
@@ -47,7 +54,7 @@ impl Config {
     }
     Ok(Self {
       content,
-      metadata: Metadata::new(&connection.url, &connection.username)?,
+      metadata: Metadata::new(url, username)?,
     })
   }
 }

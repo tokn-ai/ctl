@@ -367,22 +367,29 @@ the logical attachment and its leases for 30 seconds by default. An explicit
 
 ## Managed VPN
 
-Manage a local OpenConnect VPN through `ctld` using the `ctl` CLI:
+Manage local OpenConnect and Tailscale containers through `ctld` using the `ctl` CLI:
 
 ```sh
 ctl vpn start --env-file .env
+ctl vpn start-tailscale --id my-tailnet
 ctl vpn status
 ctl vpn stop VPN_ID
 ```
 
-Status prints a table of VPN IDs, states, servers, usernames, and randomly
+Tailscale prints a browser sign-in link when needed. Reuse the same `--id` to
+retain its device identity and login. Add `--hostname NAME` to name the device or
+`--accept-routes` to use advertised subnet routes.
+
+Status prints a table of VPN IDs, providers, states, servers, usernames, and randomly
 allocated loopback SOCKS5 endpoints. Multiple VPNs can run independently. Use the
 ID from the table to stop one; an untargeted stop requires at most one active VPN.
 Add `--json` for scripts. Start launches `ctld`
 if needed. Stop leaves `ctld` running, and
 the container also exits when `ctld` exits. See the
 [OpenConnect setup](docker/openconnect/README.md) for building the image and
-configuring the private env file.
+configuring the private env file, or the [Tailscale guide](docker/tailscale/README.md)
+for browser sign-in and persistent container state. The desktop VPN page manages
+both providers through saved JSON profiles.
 
 ## Managed tasks
 

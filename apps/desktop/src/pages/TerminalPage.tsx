@@ -305,6 +305,8 @@ export function TerminalPage() {
       (target.kind === "local" ? "local" : target.host_id) === host.host_id)),
     targets: [...targets, ...sessions.map((session) => session.target), ...tabs.map((session) => session.target)],
     gateways: workspace.ssh_gateways,
+    vpn_statuses: vpn.statuses,
+    vpn_status_stale: vpn.status_stale,
     onPause: async (host_id) => {
       refreshGuardRef.current.recordMutation();
       for (const session of sessionsRef.current) {
@@ -1459,7 +1461,8 @@ export function TerminalPage() {
           );
         }
       },
-      refreshSessions: () => void workspace.refreshHostDiscovery().then(() => refresh()),
+      refreshSessions: () => void workspace.refreshHostDiscovery().then(() =>
+        Promise.all([refresh(), hostConnections.refresh()])),
       selectSession: activateTab,
       disconnectSession: disconnect,
       requestCloseSession: requestClose,
@@ -1703,6 +1706,7 @@ export function TerminalPage() {
               hosts={workspace.hosts}
               connectableHostKeys={connectableHostKeys}
               hostConnections={hostConnections.statuses}
+              attachmentStates={new Map(attachment.states.flatMap((state) => state.session ? [[sessionKey(state.session), state] as const] : []))}
               onDisconnectHost={(target) => {
                 void hostConnections.disconnect(target).catch((failure) => setListError(errorMessage(failure)));
               }}

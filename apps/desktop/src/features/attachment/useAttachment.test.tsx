@@ -173,10 +173,84 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
+  vi.useRealTimers();
   for (const pane_renderer of pane_renderers.splice(0)) pane_renderer.dispose();
   renderer.dispose();
   container.remove();
   await Promise.resolve();
+});
+
+describe("connection evidence and transitions", () => {
+  it("keeps confirmed exit sticky against events already queued by the same actor", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    await act(async () => {
+      const send = channels.get(attachment_id)!;
+      send({ event_type: "session_ended", attachment_id, session_id: first.session_id, exit_code: 7 });
+      send({ event_type: "attachment_error", attachment_id, code: "backend_error", message: "Pipe closed" });
+      send({ event_type: "attachment_exited", attachment_id, reason: "connection_closed", exit_code: null, next_sequence: null, received_sequence: "0" });
+    });
+    expect(result.current.state).toMatchObject({ phase: "ended", message: "Session ended with exit code 7.", attachment_id: null });
+    expect(api.openAttachment).toHaveBeenCalledOnce();
+    expect(result.current.state.retry_at_ms).toBeNull();
+  });
+
+  it("revokes input and fences late events when a live attachment command fails", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const attachment_id = result.current.state.attachment_id!;
+    api.releaseAttachmentLease.mockRejectedValueOnce({ code: "protocol_version_mismatch", message: "Update required" });
+    await act(async () => { await result.current.toggleInputLease(); });
+    expect(result.current.state).toMatchObject({ phase: "error", attachment_id: null, input_lease: { owned_by_client: false } });
+    expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id });
+    act(() => result.current.handleInput(new Uint8Array([65])));
+    expect(api.sendInput).not.toHaveBeenCalled();
+    await act(async () => channels.get(attachment_id)!({ event_type: "session_ended", attachment_id, session_id: first.session_id, exit_code: 0 }));
+    expect(result.current.state.phase).toBe("error");
+  });
+
+  it("records retry wait separately and reconnects even when there is no replay cursor", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    vi.useFakeTimers();
+    const attachment_id = result.current.state.attachment_id!;
+    api.openAttachment.mockImplementationOnce(() => new Promise(() => {}));
+    await act(async () => channels.get(attachment_id)!({ event_type: "attachment_exited", attachment_id, reason: "connection_closed", exit_code: null, next_sequence: null, received_sequence: "0" }));
+    expect(result.current.state).toMatchObject({ phase: "retry_wait", attachment_id: null, retry_at_ms: Date.now() + 250 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(api.openAttachment).toHaveBeenCalledTimes(2);
+    expect(result.current.state).toMatchObject({ phase: "reconnecting", retry_at_ms: null });
+  });
+
+  it("releases a successful native open if the renderer cannot adopt it", async () => {
+    vi.spyOn(renderer, "recreate").mockRejectedValueOnce({ code: "local_cache_failed", message: "Renderer unavailable" });
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    expect(result.current.state).toMatchObject({ phase: "error", attachment_id: null });
+    expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id: "attachment-0" });
+  });
+
+  it("counts healthy time across resizes before resetting the retry budget", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    vi.spyOn(renderer, "recreate").mockResolvedValue(undefined);
+    vi.spyOn(renderer, "resize").mockResolvedValue(undefined);
+    vi.useFakeTimers();
+    const close = async () => {
+      const attachment_id = result.current.state.attachment_id!;
+      await act(async () => channels.get(attachment_id)!({ event_type: "attachment_exited", attachment_id, reason: "connection_closed", exit_code: null, next_sequence: null, received_sequence: "0" }));
+    };
+    await close();
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(result.current.state.phase).toBe("attached");
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    const attachment_id = result.current.state.attachment_id!;
+    await act(async () => channels.get(attachment_id)!({ event_type: "pty_geometry_changed", attachment_id, event_id: "resize", observed_sequence: "0", terminal_size: { ...size, columns: 100 } }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    await close();
+    expect(result.current.state).toMatchObject({ phase: "retry_wait", retry_at_ms: Date.now() + 250 });
+  });
 });
 
 function renderPaneAttachment() {
@@ -375,7 +449,7 @@ describe("opened session cache", () => {
     // The cached view is already visible while the transport is still opening.
     expect(visibleTerminal()).toBe(saved);
     expect(line(saved.terminal)).toBe("first");
-    expect(result.current.state.phase).toBe("reconnecting");
+    expect(result.current.state.phase).toBe("connecting");
     expect(result.current.state.applied_sequence).toBe("0");
     await act(async () => {
       finish_open();

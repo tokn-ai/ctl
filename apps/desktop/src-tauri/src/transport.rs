@@ -59,6 +59,48 @@ pub async fn connect_existing(target: &ConnectionTargetDto) -> CommandResult<Tra
 }
 
 impl ConnectionTargetDto {
+  /// Shared route identity for broker operations and non-authenticating probes.
+  pub(crate) fn to_ssh_target(&self) -> CommandResult<ctld_ipc::SshTarget> {
+    let Self::Ssh {
+      destination,
+      ssh_config_alias,
+      use_ssh_config_master,
+      hostname,
+      user,
+      port,
+      identity_file,
+      ..
+    } = self
+    else {
+      return Err(CommandErrorDto::new(
+        "invalid_ssh_target",
+        "Select a remote SSH host.",
+      ));
+    };
+    let mut target = ctld_ipc::SshTarget {
+      destination: destination.clone(),
+      ssh_config_alias: ssh_config_alias.clone(),
+      use_ssh_config_master: *use_ssh_config_master,
+      hostname: hostname.clone(),
+      user: user.clone(),
+      port: *port,
+      identity_file: identity_file.as_ref().map(PathBuf::from),
+      gateways: self.ssh_gateways(),
+    };
+    if target
+      .gateways
+      .iter()
+      .any(|gateway| !gateway.has_valid_vpn_configuration())
+    {
+      return Err(CommandErrorDto::new(
+        "invalid_vpn_route",
+        "Choose a saved VPN connection in the host settings.",
+      ));
+    }
+    target.normalize_master_policy();
+    Ok(target)
+  }
+
   #[must_use]
   pub fn to_core(&self) -> ConnectionTarget {
     match self {

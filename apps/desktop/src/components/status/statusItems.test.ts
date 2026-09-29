@@ -106,7 +106,7 @@ describe("createStatusGroups", () => {
 
     expect(labels(createStatusGroups(current))).toEqual({
       context: ["bash", "/work/rmux"],
-      indicators: ["RUNNING", "107×24", "RECONNECTING", "HISTORY GAP"],
+      indicators: ["LAST KNOWN", "107×24", "RECONNECTING", "HISTORY GAP"],
     });
   });
 

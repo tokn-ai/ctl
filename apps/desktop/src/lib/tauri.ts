@@ -42,6 +42,7 @@ import type {
   HostCatalogDocument,
   HostCatalogSnapshot,
   SshConnectionStatus,
+  SshReachability,
   VpnConnectionInput,
   VpnEnrollmentInput,
   VpnEnrollmentSnapshot,
@@ -214,6 +215,10 @@ export async function probeSshHost(
 
 export async function sshConnectionStatus(target: ConnectionTarget): Promise<SshConnectionStatus> {
   return invoke("ssh_connection_status", { request: { target } });
+}
+
+export async function sshReachability(target: ConnectionTarget): Promise<SshReachability> {
+  return invoke("ssh_reachability", { request: { target } });
 }
 
 export async function disconnectSshHost(targets: readonly ConnectionTarget[]): Promise<void> {

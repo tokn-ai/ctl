@@ -73,10 +73,10 @@ export function TerminalSurface({
           <p>Select a remembered session to connect, or create a new shell.</p>
         </div>
       ) : null}
-      {!has_cached_content && (phase === "connecting" || phase === "reconnecting") ? (
+      {!has_cached_content && (phase === "connecting" || phase === "reconnecting" || phase === "retry_wait") ? (
         <div className="terminal-overlay">
           <span className="spinner" aria-hidden="true" />
-          {phase === "reconnecting" ? "Reconnecting…" : "Attaching…"}
+          {phase === "retry_wait" ? "Waiting to retry…" : phase === "reconnecting" ? "Reconnecting…" : "Attaching…"}
         </div>
       ) : null}
     </div>

@@ -48,6 +48,8 @@ function connectionStatus(phase: ConnectionPhase): StatusItem | null {
       return item("connection", "RECONNECTING", "Restoring the rmux attachment.", {
         tone: "warning",
       });
+    case "retry_wait":
+      return item("connection", "WAITING TO RETRY", "The terminal is disconnected; a reconnect attempt is scheduled.", { tone: "warning" });
     case "disconnected":
       return item("connection", "DISCONNECTED", "The rmux attachment is disconnected.", {
         tone: "warning",
@@ -164,7 +166,7 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
     ));
   }
 
-  if (shell) {
+  if (shell && state.phase === "attached") {
     const activity = promptStatus(shell.prompt_phase);
     if (activity) {
       indicators.push(activity);
@@ -177,6 +179,8 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
         { priority: "medium" },
       ));
     }
+  } else if (shell) {
+    indicators.push(item("activity", "LAST KNOWN", "Shell activity and working directory were observed before this attachment stopped being live.", { tone: "warning", priority: "medium" }));
   }
 
   const input = inputStatus(state);

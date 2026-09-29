@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { configurePortForward, createSession, listSessions, probeSshHost } from "./tauri";
+import { configurePortForward, createSession, listSessions, probeSshHost, sshReachability } from "./tauri";
 import type { LocalPortForward, SshConnectionTarget } from "./types";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -22,6 +22,7 @@ beforeEach(() => vi.resetAllMocks());
 describe("unavailable host transport boundary", () => {
   it("does not send a vanished SSH alias to native connection or discovery commands", async () => {
     await expect(probeSshHost(target, "attempt", vi.fn())).rejects.toThrow(target.unavailable);
+    await expect(sshReachability(target)).rejects.toThrow(target.unavailable);
     await expect(listSessions(target)).rejects.toThrow(target.unavailable);
     await expect(createSession({
       target, working_directory: null,

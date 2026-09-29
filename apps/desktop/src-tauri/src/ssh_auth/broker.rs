@@ -359,45 +359,7 @@ where
 }
 
 pub(super) fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTarget> {
-  match target {
-    ConnectionTargetDto::Ssh {
-      destination,
-      ssh_config_alias,
-      use_ssh_config_master,
-      hostname,
-      user,
-      port,
-      identity_file,
-      ..
-    } => {
-      let mut target = SshTarget {
-        destination: destination.clone(),
-        ssh_config_alias: ssh_config_alias.clone(),
-        use_ssh_config_master: *use_ssh_config_master,
-        hostname: hostname.clone(),
-        user: user.clone(),
-        port: *port,
-        identity_file: identity_file.as_ref().map(PathBuf::from),
-        gateways: target.ssh_gateways(),
-      };
-      if target
-        .gateways
-        .iter()
-        .any(|gateway| !gateway.has_valid_vpn_configuration())
-      {
-        return Err(CommandErrorDto::new(
-          "invalid_vpn_route",
-          "Choose a saved VPN connection in the host settings.",
-        ));
-      }
-      target.normalize_master_policy();
-      Ok(target)
-    }
-    ConnectionTargetDto::Local => Err(CommandErrorDto::new(
-      "invalid_ssh_target",
-      "Select a remote SSH host.",
-    )),
-  }
+  target.to_ssh_target()
 }
 
 fn prompt_kind(kind: PromptKind) -> SshPromptKind {

@@ -18,6 +18,7 @@ use tokio::sync::watch;
 
 pub mod maintenance;
 mod ssh_install;
+pub mod ssh_reachability;
 mod ssh_startup;
 
 pub use ssh_install::{

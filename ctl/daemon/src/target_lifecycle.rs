@@ -81,7 +81,26 @@ pub(super) struct TargetAttempt {
   generation: u64,
 }
 
+pub(super) enum AttemptStatus {
+  Current,
+  Paused,
+  Superseded,
+}
+
 impl TargetAttempt {
+  /// Reads pause and generation together so an observation cannot mix the
+  /// result of an old attempt with the policy of a newer connection.
+  pub(super) fn status(&self) -> AttemptStatus {
+    let revision = *self.changes.borrow();
+    if revision.paused {
+      AttemptStatus::Paused
+    } else if revision.generation != self.generation {
+      AttemptStatus::Superseded
+    } else {
+      AttemptStatus::Current
+    }
+  }
+
   /// This also checks the generation before polling `work`: a completed old
   /// future must never take precedence over a pending disconnect notification.
   pub(super) async fn run<F: Future>(&mut self, work: F) -> Result<F::Output, RequestError> {

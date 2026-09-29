@@ -6,12 +6,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConnectionTarget,
   HostConnectionStatus,
+  HostReachabilityObservation,
   ManagedTask,
   SessionSummary,
   ShellStateSummary,
 } from "../../lib/types";
 import { sessionKey, targetKey } from "../../features/targets/targets";
 import { hostFromTarget } from "../../features/workspace/workspaceModel";
+import { TAILSCALE_UNAVAILABLE } from "../../features/workspace/tailscaleProjection";
 import { SessionSidebar } from "./SessionSidebar";
 
 const session: SessionSummary = {
@@ -95,6 +97,53 @@ function renderHostConnection(
 afterEach(cleanup);
 
 describe("SessionSidebar", () => {
+  it.each([
+    [{ state: "available", reason: null }, "SSH available"],
+    [{ state: "unavailable", reason: "connection_refused" }, "SSH unavailable"],
+    [{ state: "not_checked", reason: "vpn_disconnected" }, "VPN disconnected"],
+    [{ state: "not_checked", reason: "route_requires_connection" }, "SSH not checked"],
+    [{ state: "unknown", reason: "check_failed" }, "SSH status unknown"],
+  ] as const)("shows %s reachability without granting connected controls", async (evidence, label) => {
+    const user = userEvent.setup();
+    const reachability: HostReachabilityObservation = { ...evidence, method_names: evidence.state === "available" ? ["Direct"] : [], message: "Reachability details", checked_at_ms: 1 };
+    const props = renderHostConnection({ state: "disconnected", method_names: [], message: "Disconnected manually. Connect this host to resume.",
+      manually_disconnected: true, reachability });
+    const status = screen.getByRole("status", { name: `Host connection for Build machine: ${label}` });
+    expect(status.textContent).toBe(label);
+    expect(status.title).toContain("Reachability details");
+    expect(status.title).toContain("Disconnected manually");
+    if (evidence.state === "available") {
+      expect(status.title).toContain("Authentication has not been checked");
+      expect(status.getAttribute("data-state")).toBe("available");
+    }
+    expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
+  });
+
+  it("keeps a confirmed SSH connection above a failed reachability probe", () => {
+    renderHostConnection({ state: "connected", method_names: ["Direct"], message: null,
+      reachability: { state: "unavailable", reason: "timed_out", method_names: [], message: null, checked_at_ms: 1 } });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
+    expect(status.title).toContain("does not freshly verify remote responsiveness");
+    expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
+  });
+
+  it("shows an available alternate route when the preferred Tailscale device is unavailable", async () => {
+    const user = userEvent.setup();
+    const target = { ...remoteHost, tailscale_node_id: "node-1", unavailable: TAILSCALE_UNAVAILABLE };
+    const props = renderHostConnection({ state: "error", method_names: [], message: TAILSCALE_UNAVAILABLE,
+      reachability: { state: "available", reason: null, method_names: ["Direct"], message: null, checked_at_ms: 1 } }, {
+      targets: [target], connectableHostKeys: new Set([targetKey(target)]),
+    });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH available" });
+    expect(status.title).toContain("Available methods: Direct");
+    expect(status.title).toContain(TAILSCALE_UNAVAILABLE);
+    expect(screen.queryByRole("button", { name: "Disconnect host Build machine" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Connect to Build machine" }));
+    expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(target);
+  });
+
   it("marks virtual Tailscale provenance separately from SSH connection status and omits removal", () => {
     renderHostConnection({ state: "disconnected", method_names: [], message: null }, {
       hosts: [{ ...hostFromTarget(remoteHost), source: "tailscale" }],
@@ -112,9 +161,9 @@ describe("SessionSidebar", () => {
       message: null,
     });
     const status = screen.getByRole("status", {
-      name: "Host connection for Build machine: Connected",
+      name: "Host connection for Build machine: SSH connected",
     });
-    expect(status.textContent).toBe("Connected");
+    expect(status.textContent).toBe("SSH connected");
     expect(status.title).toContain("Connection methods: Office network, VPN");
     expect(status.querySelector(".host-connection-dot")?.getAttribute("aria-hidden")).toBe("true");
     expect(status.closest("button")).toBeNull();
@@ -178,6 +227,34 @@ describe("SessionSidebar", () => {
     expect(props.onDisconnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
   });
 
+  it("retains connected SSH and its controls when the preferred Tailscale route is unavailable", async () => {
+    const user = userEvent.setup();
+    const target = { ...remoteHost, tailscale_node_id: "node-1", unavailable: TAILSCALE_UNAVAILABLE };
+    const props = renderHostConnection({
+      state: "connected",
+      method_names: ["Office network"],
+      message: TAILSCALE_UNAVAILABLE,
+      observation: {
+        availability: "available", completeness: "partial", method_names: ["Office network"],
+        failed_method_names: ["Tailscale"], message: TAILSCALE_UNAVAILABLE,
+        checked_at_ms: 1, stale: false,
+      },
+    }, {
+      targets: [target],
+      targetErrors: new Map([[targetKey(target), TAILSCALE_UNAVAILABLE]]),
+    });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
+    expect(status.textContent).toBe("SSH connected");
+    expect(status.getAttribute("data-state")).toBe("connected");
+    expect(status.title).toContain("Office network");
+    expect(status.title).toContain("Some connection methods couldn't be checked.");
+    expect(status.title).toContain("Status unknown for: Tailscale");
+    expect(status.title).toContain(TAILSCALE_UNAVAILABLE);
+    expect(screen.queryByText(TAILSCALE_UNAVAILABLE)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Disconnect host Build machine" }));
+    expect(props.onDisconnectHost).toHaveBeenCalledExactlyOnceWith(target);
+  });
+
   it("offers reconnect after a connection error without an active method", async () => {
     const user = userEvent.setup();
     const props = renderHostConnection({ state: "error", method_names: [], message: "SSH connection lost" });
@@ -186,13 +263,21 @@ describe("SessionSidebar", () => {
     expect(props.onConnectHost).toHaveBeenCalledExactlyOnceWith(remoteHost);
   });
 
-  it("marks a missing SSH config entry unavailable and prevents connecting", async () => {
+  it.each([
+    { binding: {}, reason: "SSH config alias build-host is missing", label: "Unavailable" },
+    { binding: { tailscale_node_id: "node-1" }, reason: TAILSCALE_UNAVAILABLE, label: "Tailscale unavailable" },
+  ])("keeps an unavailable route disabled with its reason in the $label tooltip", async ({ binding, reason, label }) => {
     const user = userEvent.setup();
-    const unavailable = { ...remoteHost, unavailable: "SSH config alias build-host is missing" };
-    const props = renderHostConnection(undefined, { targets: [unavailable] });
-    const status = screen.getByRole("status", { name: "Host connection for Build machine: Unavailable" });
-    expect(status.textContent).toBe("Unavailable");
-    expect(status.title).toContain("SSH config alias build-host is missing");
+    const unavailable = { ...remoteHost, ...binding, unavailable: reason };
+    const props = renderHostConnection(undefined, {
+      targets: [unavailable],
+      targetErrors: new Map([[targetKey(unavailable), "Session listing failed"]]),
+    });
+    const status = screen.getByRole("status", { name: `Host connection for Build machine: ${label}` });
+    expect(status.textContent).toBe(label);
+    expect(status.title).toContain(reason);
+    expect(screen.queryByText(reason)).toBeNull();
+    expect(screen.getByText("Session listing failed")).toBeTruthy();
     const connect = screen.getByRole("button", { name: "Connect to Build machine" }) as HTMLButtonElement;
     expect(connect.disabled).toBe(true);
     await user.click(connect);
@@ -283,7 +368,7 @@ describe("SessionSidebar", () => {
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(
-      `<small title="${session.name} · running · 80×24">${session.name}<span aria-hidden="true"> · </span>`,
+      `<small title="${session.name} · Last seen running · Session last reported running">${session.name}<span aria-hidden="true"> · </span>`,
     );
     expect(markup).not.toContain(`<strong>${session.name}</strong>`);
   });

@@ -2,6 +2,7 @@
 //! This module only forwards its attempt-scoped prompts to the Tauri UI.
 
 mod broker;
+pub(crate) use broker::existing_master;
 pub mod commands;
 mod verification;
 
@@ -122,7 +123,7 @@ async fn connect_with(
   .map_err(|error| CommandErrorDto::transport(&error))?;
   let identity = stream
     .remote_identity
-    .as_ref()
+    .as_deref()
     .expect("identified transport")
     .clone();
   target.verify_remote_identity(&identity)?;

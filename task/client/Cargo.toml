@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+component-info = { workspace = true, features = ["executable"] }
 task-ipc.workspace = true
 task-proto.workspace = true
 thiserror.workspace = true
@@ -11,3 +12,6 @@ tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

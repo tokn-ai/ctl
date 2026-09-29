@@ -41,6 +41,7 @@ import {
   previewTargets,
   previewWorkspace,
 } from "./fixtures";
+import { previewComponentVersions } from "./aboutFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
 // The official Tauri mocks intercept every IPC call; nothing reaches a daemon,
@@ -49,6 +50,24 @@ if (!import.meta.env.DEV) throw new Error("The sample workspace is development-o
 
 const view_param = new URLSearchParams(location.search).get("view");
 const initial_view = view_param === "tasks" || view_param === "ports" || view_param === "vpn" ? view_param : "sessions";
+const about_param = new URLSearchParams(location.search).get("about");
+let component_versions = previewComponentVersions();
+if (about_param === "partial") {
+  const daemon = component_versions.components.find((row) => row.component === "rmuxd")!;
+  daemon.running = null;
+  daemon.status = "unavailable";
+  daemon.error = "The running rmuxd did not respond before the check timed out.";
+}
+if (about_param === "legacy") {
+  const daemon = component_versions.components.find((row) => row.component === "taskd")!;
+  daemon.running = { version: null, source_revision: null, source_fingerprint: null, dirty: null, protocols: [{ name: "task", version: 3 }] };
+  daemon.status = "unknown";
+  daemon.detail = "The running daemon reports its protocol but no build identity.";
+  const agent = component_versions.components.find((row) => row.component === "ctl_agent")!;
+  agent.running = { ...agent.running!, source_fingerprint: null };
+  agent.status = "unknown";
+  agent.detail = "The observed revision does not provide enough evidence to verify this build.";
+}
 let workspace: WorkspaceSnapshot = { revision: "preview-1", document: previewWorkspace(initial_view) };
 const connectedHosts = new Set(["dev-server"]);
 const pausedHosts = new Set<string>();
@@ -152,6 +171,35 @@ function requireSession(session_id: string): SessionSummary {
 mockWindows("main");
 mockIPC((command, payload) => {
   switch (command) {
+    case "get_component_versions":
+      return structuredClone(component_versions);
+    case "preflight_component_action": {
+      const { component_id } = request<{ component_id: string }>(payload);
+      const row = component_versions.components.find((item) => item.component_id === component_id);
+      if (!row?.action) throw new Error("This component does not support a managed action.");
+      if (row.component === "taskd" && tasks.some((task) => task.active_run)) throw new Error("Stop active tasks before restarting taskd.");
+      const terminal_sessions = row.component === "rmuxd" ? sessions.filter((session) => (session.target.kind === "local") === (row.location === "local")).length : null;
+      const description = row.component === "ctld" ? `Stops ${vpn_snapshot.connections.length} managed VPN connections and may interrupt SSH connections and port forwards.`
+        : row.component === "ctl_agent" ? "Reconnects this app’s terminal connections to this remote environment. Remote sessions keep running."
+        : row.component === "taskd" ? "Restarts taskd. Saved task definitions and drafts are retained."
+        : row.location === "local" ? "Terminates every local rmux session, including sessions opened by other apps. This cannot be undone."
+        : "Terminates every rmux session for this remote environment, including sessions opened by other clients. This cannot be undone.";
+      return { action_token: `preview-action-${component_id}`, component_id, component: row.component, location: row.location, host_id: row.host_id, label: row.label, action: row.action, running: row.running, available: row.available,
+        impact: { ssh_connections: null, port_forwards: null, vpn_connections: row.component === "ctld" ? vpn_snapshot.connections.length : null, terminal_sessions, description } };
+    }
+    case "execute_component_action": {
+      const { action_token } = request<{ action_token: string }>(payload);
+      const row = component_versions.components.find((item) => `preview-action-${item.component_id}` === action_token);
+      if (!row?.action) throw new Error("Check the component again before continuing.");
+      return new Promise((resolve, reject) => setTimeout(() => {
+        if (about_param === "restart-error") { reject(new Error("The replacement did not become ready. Refresh versions to check its state.")); return; }
+        component_versions = { components: component_versions.components.map((item) => item.component_id === row.component_id ? { ...item, running: item.available, status: "current" } : item) };
+        if (row.component === "ctld") vpn_snapshot.connections = [];
+        resolve({ component_id: row.component_id, component: row.component, location: row.location, host_id: row.host_id, action: row.action, running: row.available, detail: null });
+      }, 1200));
+    }
+    case "ack_component_reconnect":
+      return;
     case "load_workspace":
       return structuredClone(workspace);
     case "update_workspace":

@@ -3,6 +3,47 @@
 The desktop client for local and SSH-connected daemon-owned `rmux` terminal
 sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
+## About and component versions
+
+Open **About rmux** from the info button, command palette, or macOS app menu.
+The page shows the app version, local `ctld`, `rmuxd`, and `taskd` versions and
+protocols, and `ctl-agent`/`rmuxd` metadata observed on active remote terminal
+connections. Separate SSH and VPN ctld owners appear separately when configured.
+Running versions are compared with this app's component build. Each component
+uses one compact row with its version, protocol, status, and action. Hover over
+the component, version, or protocol for explanations and full build metadata.
+Local rows also show the selected helper version.
+
+**Outdated** means a lower comparable release version. **Different build** marks
+different source fingerprints without claiming which is newer. **Protocol
+mismatch**, **Build not reported**, **Build unverified**, and **Not running**
+remain distinct. Legacy processes keep their known versions and protocols visible;
+a missing build is never inferred from the installed executable. Refreshing About
+does not start services, connect hosts, deploy remote components, or detach
+terminal sessions. A disconnected host's saved metadata is not presented as a
+live version.
+
+Each supported daemon row offers **Restart**, with a replacement check and an
+impact confirmation. The replacement's build and protocols are verified afterward.
+
+- `ctld` disconnects its SSH connections, owned port forwards, and VPN containers.
+  Saved VPN profiles and Tailscale identities remain available for reconnecting.
+- Local and remote `rmuxd` restarts end all of that daemon's terminal sessions,
+  including other clients and interactive tasks. Runtime options return to the
+  replacement's defaults.
+- `taskd` refuses while tasks are running and preserves its storage, definitions,
+  history, and terminal-daemon endpoint.
+- `ctl-agent` offers **Reconnect** for the matching app transports across windows.
+  Remote terminal processes remain running; the new connections verify identity
+  and report the actual agent build.
+
+Preparations expire without changing the daemon. Remote preparation uses an
+existing authenticated SSH connection. An older remote agent must be updated
+before it supports prepared daemon restarts; older ctld owners without lifecycle
+support require a manual restart once. Unavailable or incompatible replacement
+helpers are rejected before shutdown. Restarting uses the selected installed
+helper and does not install a newer build.
+
 ## VPN connections
 
 Open **VPN** in the sidebar to add a named OpenConnect or Tailscale connection.

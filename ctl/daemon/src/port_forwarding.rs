@@ -94,6 +94,26 @@ impl ForwardControl for SshForwardControl<'_> {
 }
 
 impl ForwardRegistry {
+  /// Cancel exact listeners before forgetting their ownership. Shared SSH
+  /// masters and unrelated forwarding definitions remain outside our scope.
+  pub(super) async fn shutdown(&mut self, control: &impl ForwardControl) -> bool {
+    let mut complete = true;
+    for record in self.records.values_mut() {
+      if record.listener_present {
+        if control
+          .change(&record.target, &record.status.forward, true)
+          .await
+          .is_ok()
+        {
+          record.listener_present = false;
+        } else {
+          complete = false;
+        }
+      }
+    }
+    complete
+  }
+
   pub(super) async fn configure(
     &mut self,
     control: &impl ForwardControl,

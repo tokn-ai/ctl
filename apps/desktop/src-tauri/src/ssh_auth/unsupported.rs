@@ -15,6 +15,15 @@ use tauri::ipc::Channel;
 #[derive(Clone, Serialize)]
 pub struct SshPromptDto {}
 
+pub(crate) async fn existing_master(
+  _target: &ConnectionTargetDto,
+) -> CommandResult<std::path::PathBuf> {
+  Err(CommandErrorDto::new(
+    "ssh_maintenance_unsupported",
+    "Remote component actions require an existing SSH master on macOS or Linux.",
+  ))
+}
+
 /// This platform does not use the Unix askpass helper.
 #[must_use]
 pub fn helper_exit_code() -> Option<i32> {
@@ -60,7 +69,7 @@ async fn connect_identified(
   .map_err(|error| CommandErrorDto::transport(&error))?;
   let identity = stream
     .remote_identity
-    .as_ref()
+    .as_deref()
     .expect("identified transport")
     .clone();
   target.verify_remote_identity(&identity)?;

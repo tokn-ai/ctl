@@ -1,4 +1,5 @@
 export const COMMAND_IDS = {
+  about: "app.about",
   showPalette: "view.show_command_palette",
   addHost: "host.add",
   addRoutedHost: "host.add_with_gateways",

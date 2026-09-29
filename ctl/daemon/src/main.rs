@@ -4,6 +4,9 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(version, about = "Per-user SSH connection and credential broker")]
 struct Arguments {
+  /// Print embedded build and protocol metadata without starting ctld.
+  #[arg(long)]
+  component_info: bool,
   /// Print the local IPC protocol version and exit.
   #[arg(long)]
   protocol_version: bool,
@@ -27,6 +30,26 @@ fn main() {
     std::process::exit(code);
   }
   let arguments = Arguments::parse();
+  if arguments.component_info {
+    let metadata = component_info::ComponentInfo {
+      build: component_info::build_info(),
+      protocols: vec![
+        component_info::ProtocolInfo {
+          name: "ctld".into(),
+          version: ctld_ipc::PROTOCOL_VERSION,
+        },
+        component_info::ProtocolInfo {
+          name: "ctld_lifecycle".into(),
+          version: ctld_ipc::lifecycle::PROTOCOL_VERSION,
+        },
+      ],
+    };
+    println!(
+      "{}",
+      serde_json::to_string(&metadata).expect("component metadata")
+    );
+    return;
+  }
   if let Some(route) = arguments.proxy_route.as_deref() {
     let (Some(host), Some(port)) = (arguments.proxy_host.as_deref(), arguments.proxy_port) else {
       eprintln!("ctld: missing proxy destination");

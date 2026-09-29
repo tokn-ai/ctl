@@ -54,7 +54,9 @@ pub async fn task_request(request: ClientMessage) -> CommandResult<ServerMessage
 }
 
 #[tauri::command]
-pub async fn restart_task_daemon() -> CommandResult<()> {
+pub async fn restart_task_daemon(state: State<'_, crate::state::AppState>) -> CommandResult<()> {
+  let transition = state.daemon_restart_transition();
+  let _transition = transition.lock().await;
   task_client::restart_daemon().await.map_err(client_error)
 }
 

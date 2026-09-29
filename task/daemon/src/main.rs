@@ -5,6 +5,9 @@ use taskd::{DaemonConfig, default_data_directory, socket_path};
 #[derive(Debug, Parser)]
 #[command(version, about = "Per-user managed task daemon")]
 struct Arguments {
+  /// Print component version/build/protocol metadata without starting the daemon.
+  #[arg(long)]
+  component_info: bool,
   #[arg(long)]
   socket: Option<PathBuf>,
 
@@ -20,6 +23,26 @@ struct Arguments {
 
 fn main() {
   let arguments = Arguments::parse();
+  if arguments.component_info {
+    let info = component_info::ComponentInfo {
+      build: component_info::build_info(),
+      protocols: vec![
+        component_info::ProtocolInfo {
+          name: "task".into(),
+          version: task_proto::PROTOCOL_VERSION,
+        },
+        component_info::ProtocolInfo {
+          name: "task_control".into(),
+          version: task_proto::control::PROTOCOL_VERSION,
+        },
+      ],
+    };
+    println!(
+      "{}",
+      serde_json::to_string(&info).expect("component metadata serializes")
+    );
+    return;
+  }
   #[cfg(unix)]
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()

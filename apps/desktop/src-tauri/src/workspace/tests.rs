@@ -665,6 +665,7 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
   let identity = ctl_proto::RemoteIdentity {
     remote_id: uuid::Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
+    build: None,
     rmux_restart_supported: false,
     bundle: Some(Box::new(ctl_proto::BundleVersion {
       app_version: "0.1.0".into(),
@@ -794,6 +795,7 @@ fn test_remote_identity() -> ctl_proto::RemoteIdentity {
   ctl_proto::RemoteIdentity {
     remote_id: uuid::Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
+    build: None,
     rmux_restart_supported: false,
     bundle: None,
   }

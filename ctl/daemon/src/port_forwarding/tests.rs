@@ -76,6 +76,35 @@ fn forward() -> LocalPortForward {
 }
 
 #[tokio::test]
+async fn shutdown_cancels_only_owned_listeners_and_reports_unreleased_records() {
+  let target = target("test-shutdown");
+  let control = Control::ready(std::slice::from_ref(&target));
+  let mut registry = ForwardRegistry::default();
+  registry
+    .configure(&control, target.clone(), forward(), true)
+    .await
+    .unwrap();
+  control.changes.lock().unwrap().clear();
+  control.fail_cancel.store(true, Ordering::SeqCst);
+  assert!(!registry.shutdown(&control).await);
+  assert!(registry.records[&forward().forward_id].listener_present);
+  control.fail_cancel.store(false, Ordering::SeqCst);
+  assert!(registry.shutdown(&control).await);
+  assert!(!registry.records[&forward().forward_id].listener_present);
+  assert_eq!(control.changes.lock().unwrap().len(), 2);
+  assert!(
+    control
+      .changes
+      .lock()
+      .unwrap()
+      .iter()
+      .all(|change| change.cancel && change.target == target && change.forward == forward())
+  );
+  assert!(registry.shutdown(&control).await);
+  assert_eq!(control.changes.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn moving_a_forward_cancels_its_exact_previous_route_before_starting_the_new_one() {
   let old = target("office-network");
   let mut next = target("preferred-route");

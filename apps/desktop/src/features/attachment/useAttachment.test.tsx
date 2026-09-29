@@ -12,6 +12,7 @@ import { sessionKey } from "../targets/targets";
 import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
+import { reconnectComponentAttachments, resetComponentAttachments } from "./componentActions";
 
 const xterm = vi.hoisted(() => ({
   instances: [] as {
@@ -79,6 +80,7 @@ const first: SessionSummary = {
 const second: SessionSummary = { ...first, session_id: "second", terminal_id: "second-terminal", view_id: "second-view", name: "second" };
 const sessions = [first, second];
 let renderer: XtermRenderer;
+const pane_renderers: XtermRenderer[] = [];
 let container: HTMLElement;
 let channels: Map<string, (event: AttachmentEvent) => void>;
 
@@ -171,12 +173,45 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
+  for (const pane_renderer of pane_renderers.splice(0)) pane_renderer.dispose();
   renderer.dispose();
   container.remove();
   await Promise.resolve();
 });
 
+function renderPaneAttachment() {
+  const pane_renderer = new XtermRenderer(document.createElement("div"), () => undefined, size);
+  pane_renderers.push(pane_renderer);
+  return renderHook(() => useAttachment(pane_renderer));
+}
+
 describe("pending remote attachments", () => {
+  it("reconnects a native-selected attachment with a real replacement ID while preserving other panes", async () => {
+    const root = renderHook(() => useAttachment(renderer));
+    const pane = renderPaneAttachment();
+    await act(async () => { await root.result.current.connect(first); await pane.result.current.connect(second); });
+    const selected = root.result.current.state.attachment_id!;
+    const other = pane.result.current.state.attachment_id;
+    let results!: Awaited<ReturnType<typeof reconnectComponentAttachments>>;
+    await act(async () => { results = await reconnectComponentAttachments([selected]); });
+    expect(results).toEqual([{ attachment_id: selected, replacement_attachment_id: root.result.current.state.attachment_id, error: null }]);
+    expect(root.result.current.state.attachment_id).not.toBe(selected);
+    expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id: selected });
+    expect(pane.result.current.state.attachment_id).toBe(other);
+    expect(api.detachAttachment).not.toHaveBeenCalledWith({ attachment_id: other });
+  });
+
+  it("invalidates mounted root and pane owners after a committed daemon reset", async () => {
+    const root = renderHook(() => useAttachment(renderer));
+    const pane = renderPaneAttachment();
+    await act(async () => { await root.result.current.connect(first); await pane.result.current.connect(second); });
+    act(() => { resetComponentAttachments({ scope: "local", host_ids: [], session_ids: [], attachment_ids: [] }); });
+    expect(root.result.current.state.phase).toBe("idle");
+    expect(pane.result.current.state.phase).toBe("idle");
+    expect(root.result.current.state.session).toBeNull();
+    expect(pane.result.current.state.session).toBeNull();
+  });
+
   it("sizes the view without treating an individual pane geometry event as a canvas resize", async () => {
     const open = api.openAttachment.getMockImplementation()!;
     api.openAttachment.mockImplementation(async (...args) => {

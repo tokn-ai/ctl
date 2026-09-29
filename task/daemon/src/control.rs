@@ -17,7 +17,9 @@ pub struct Request {
 
 // The caller holds the mutation lock through acceptance and connection drain.
 pub async fn accept_restart(mut request: Request, state: &State) -> Option<Stream> {
-  let control::ClientMessage::RestartDaemon { protocol_version } = request.request;
+  let control::ClientMessage::RestartDaemon { protocol_version } = request.request else {
+    return None;
+  };
   let response = if protocol_version != control::PROTOCOL_VERSION {
     control::ServerMessage::Error {
       message: format!(

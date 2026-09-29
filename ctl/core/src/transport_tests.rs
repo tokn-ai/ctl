@@ -72,10 +72,12 @@ async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
       }
       output = timeout(TEST_TIMEOUT, command.output()) => output.unwrap().unwrap(),
     };
-    assert!(!output.status.success());
+    // ProxyCommand=false may report a closed connection or a broken pipe,
+    // depending on whether its exit races with OpenSSH writing its banner.
+    // The listener above checks the no-fallback guarantee directly.
     let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(255), "{diagnostics}");
     assert!(!diagnostics.contains("Cannot specify -J with ProxyCommand"));
-    assert!(diagnostics.contains("Connection closed"), "{diagnostics}");
   }
 }
 
@@ -226,6 +228,7 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     let identity = ctl_proto::RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
+      build: None,
       rmux_restart_supported: false,
       bundle: None,
     };
@@ -234,7 +237,7 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     let mut transport = start_ssh_transport_identified(command, true, false, ready(()))
       .await
       .unwrap();
-    assert_eq!(transport.remote_identity, Some(identity));
+    assert_eq!(transport.remote_identity.as_deref(), Some(&identity));
     let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
     transport.write_all(&payload).await.unwrap();
     transport.flush().await.unwrap();

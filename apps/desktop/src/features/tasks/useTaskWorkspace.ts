@@ -122,17 +122,18 @@ export function useTaskWorkspace(
     };
   }, [workspace.ready, refresh]);
 
-  const perform = async (operation: () => Promise<void>) => {
-    if (mutation.current) return;
+  const performExclusive = async <T,>(operation: () => Promise<T>): Promise<T> => {
+    if (mutation.current) throw new Error("A task operation is already in progress. Wait for it to finish.");
     mutation.current = true;
     epoch.current += 1;
     setBusy(true);
     setError(null);
     setDaemonStatus(null);
     try {
-      await operation();
+      return await operation();
     } catch (failure) {
       setError(errorMessage(failure));
+      throw failure;
     } finally {
       mutation.current = false;
       epoch.current += 1;
@@ -141,6 +142,11 @@ export function useTaskWorkspace(
         void refresh(true);
       }
     }
+  };
+  const perform = async (operation: () => Promise<void>) => {
+    if (mutation.current) return;
+    try { await performExclusive(operation); }
+    catch { /* Existing task controls show the retained task error. */ }
   };
   const open = (tab: TaskTab) => {
     const view = workspaceRef.current;
@@ -361,6 +367,7 @@ export function useTaskWorkspace(
     tasks,
     daemonStatus,
     restartDaemon,
+    performComponentAction: performExclusive,
     connection_error: refreshError,
     error: error ?? refreshError,
     setError,

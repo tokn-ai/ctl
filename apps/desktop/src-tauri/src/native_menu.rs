@@ -1,8 +1,7 @@
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSEventType};
 use tauri::menu::{
-  AboutMetadata, HELP_SUBMENU_ID, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu,
-  WINDOW_SUBMENU_ID,
+  HELP_SUBMENU_ID, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu, WINDOW_SUBMENU_ID,
 };
 use tauri::{AppHandle, Emitter as _, Manager as _};
 
@@ -11,25 +10,18 @@ const COMMAND_MENU_ID: &str = "rmux.commands";
 
 pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
   let package = app_handle.package_info();
-  let config = app_handle.config();
-  let about = AboutMetadata {
-    name: Some(package.name.clone()),
-    version: Some(package.version.to_string()),
-    copyright: config.bundle.copyright.clone(),
-    authors: config
-      .bundle
-      .publisher
-      .clone()
-      .map(|publisher| vec![publisher]),
-    ..Default::default()
-  };
-
   let app_menu = Submenu::with_items(
     app_handle,
     package.name.clone(),
     true,
     &[
-      &PredefinedMenuItem::about(app_handle, None, Some(about))?,
+      &MenuItem::with_id(
+        app_handle,
+        "rmux.command.app.about",
+        "About rmux",
+        true,
+        None::<&str>,
+      )?,
       &PredefinedMenuItem::separator(app_handle)?,
       &PredefinedMenuItem::services(app_handle, None)?,
       &PredefinedMenuItem::separator(app_handle)?,
@@ -191,6 +183,10 @@ mod tests {
 
   #[test]
   fn maps_only_rmux_session_menu_items_to_frontend_commands() {
+    assert_eq!(
+      frontend_command(&MenuId::new("rmux.command.app.about")),
+      Some("app.about")
+    );
     assert_eq!(
       frontend_command(&MenuId::new("rmux.command.session.close")),
       Some("session.close")

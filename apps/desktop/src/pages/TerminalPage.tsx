@@ -1,4 +1,7 @@
 import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
+import { AboutPage } from "./AboutPage";
+import { useComponentActionEvents } from "../features/about/useComponentActionEvents";
+import { componentResetMatches } from "../features/attachment/componentActions";
 import { useTaskWorkspace } from "../features/tasks/useTaskWorkspace";
 import { TaskSidebar } from "../components/tasks/TaskSidebar";
 import { TaskEditor } from "../components/tasks/TaskEditor";
@@ -72,7 +75,7 @@ import {
   removeSession,
   syncSessionTerminalSize,
 } from "../features/sessions/sessionListState";
-import type { XtermRenderer } from "../features/terminal/XtermRenderer";
+import { XtermRenderer } from "../features/terminal/XtermRenderer";
 import {
   closeTerminalTab,
   openTerminalTab,
@@ -88,6 +91,7 @@ import {
   sameTarget,
   sessionKey,
   targetKey,
+  targetKeyFromSessionKey,
 } from "../features/targets/targets";
 import { useWindowTitle } from "../features/window/useWindowTitle";
 import { errorCode, errorMessage } from "../lib/errors";
@@ -102,6 +106,7 @@ import {
   restartLocalDaemon,
   forgetSshCredentials,
   sshConnectionStatus,
+  executeComponentAction,
 } from "../lib/tauri";
 import type {
   ConnectionTarget,
@@ -114,6 +119,7 @@ import type {
   WorkspacePortForward,
   WorkspaceHost,
   WorkspaceConnectionMethod,
+  ComponentActionPreflight,
 } from "../lib/types";
 
 interface MethodDraft {
@@ -243,6 +249,9 @@ export function TerminalPage() {
     setDaemonRestartConfirmationPending,
   ] = useState(false);
   const [restartingDaemon, setRestartingDaemon] = useState(false);
+  const [about_open, setAboutOpen] = useState(false);
+  const [about_dialog_open, setAboutDialogOpen] = useState(false);
+  useEffect(() => { setAboutOpen(false); }, [activeTabKey]);
   const [pendingCloseSessionKey, setPendingCloseSessionKey] = useState<
     string | null
   >(null);
@@ -262,9 +271,14 @@ export function TerminalPage() {
   tabsRef.current = tabs;
   activeTabKeyRef.current = activeTabKey;
   const creatingRef = useRef(false);
+  const creatingTargetRef = useRef<ConnectionTarget | null>(null);
   const daemonRestartConfirmationRef = useRef(false);
   const restartingDaemonRef = useRef(false);
   const daemonEpochRef = useRef(0);
+  const captureDaemonOperation = useCallback((target: ConnectionTarget) => {
+    const epoch = daemonEpochRef.current;
+    return () => target.kind !== "local" || epoch === daemonEpochRef.current;
+  }, []);
   workspace.closeBlockedRef.current = () =>
     creatingRef.current || restartingDaemonRef.current || taskWorkspace.busy;
 
@@ -552,7 +566,7 @@ export function TerminalPage() {
 
   const activateTab = useCallback(
     async (requestedSession: SessionSummary, resizeWithWindow = false) => {
-      const daemonEpoch = daemonEpochRef.current;
+      const isCurrent = captureDaemonOperation(requestedSession.target);
       if (daemonRestartBlocksInteractions()) {
         return;
       }
@@ -600,7 +614,7 @@ export function TerminalPage() {
           attachment.state.phase === "error"
         ) {
           if (
-            daemonEpoch !== daemonEpochRef.current ||
+            !isCurrent() ||
             daemonRestartBlocksInteractions()
           ) {
             return;
@@ -610,7 +624,7 @@ export function TerminalPage() {
         }
       }
       if (
-        daemonEpoch !== daemonEpochRef.current ||
+        !isCurrent() ||
         daemonRestartBlocksInteractions()
       ) {
         return;
@@ -619,7 +633,7 @@ export function TerminalPage() {
         resize_with_window: resizeWithWindow,
       });
     },
-    [attachment, daemonRestartBlocksInteractions, renderer, hostConnections.isPaused],
+    [captureDaemonOperation, attachment, daemonRestartBlocksInteractions, renderer, hostConnections.isPaused],
   );
 
   const recoverHost = async (
@@ -737,7 +751,7 @@ export function TerminalPage() {
       await attachment.closeSession(session);
       await sessionCache({ kind: "archive", host_key: targetKey(session.target), session_id: session.session_id, reason: "Tab closed" });
       const wasActive = activeTabKeyRef.current === identity;
-      const closed = closeTerminalTab(currentTabs, identity);
+      const closed = closeTerminalTab(tabsRef.current, identity);
       tabsRef.current = closed.tabs;
       setTabs(closed.tabs);
       setTabShellStates((current) => forgetShellState(current, identity));
@@ -749,7 +763,7 @@ export function TerminalPage() {
       activeTabKeyRef.current = nextTab ? sessionKey(nextTab) : null;
       setActiveTabKey(nextTab ? sessionKey(nextTab) : null);
       if (
-        daemonEpoch !== daemonEpochRef.current ||
+        (nextTab?.target.kind === "local" && daemonEpoch !== daemonEpochRef.current) ||
         daemonRestartBlocksInteractions()
       ) {
         return;
@@ -883,8 +897,9 @@ export function TerminalPage() {
           "Shell creation is currently unavailable. Try again when the workspace is ready.",
         );
       }
-      const daemonEpoch = daemonEpochRef.current;
+      const isCurrent = captureDaemonOperation(target);
       creatingRef.current = true;
+      creatingTargetRef.current = target;
       setCreating(true);
       setListError(null);
       try {
@@ -893,7 +908,7 @@ export function TerminalPage() {
           working_directory: workingDirectory,
           terminal_size: measuredSize(renderer),
         });
-        if (daemonEpoch !== daemonEpochRef.current) {
+        if (!isCurrent()) {
           return;
         }
         refreshGuardRef.current.recordMutation();
@@ -915,25 +930,26 @@ export function TerminalPage() {
         } catch (failure) {
           // Creation already succeeded: close the input flow rather than offer
           // a retry that would create a second persistent shell.
-          if (daemonEpoch === daemonEpochRef.current) {
+          if (isCurrent()) {
             setListError(
               `Shell ${session.name} was created, but opening its tab failed. Select the existing session to retry. ${errorMessage(failure)}`,
             );
           }
         }
       } finally {
-        if (daemonEpoch === daemonEpochRef.current) {
+        if (isCurrent()) {
           creatingRef.current = false;
+          creatingTargetRef.current = null;
           setCreating(false);
         }
       }
     },
-    [activateTab, renderer, workspace.ready, workspace.isClosing, setSessions, persistWorkspace],
+    [captureDaemonOperation, activateTab, renderer, workspace.ready, workspace.isClosing, setSessions, persistWorkspace],
   );
 
   const disconnect = useCallback(
     async (session: SessionSummary) => {
-      const daemonEpoch = daemonEpochRef.current;
+      const isCurrent = captureDaemonOperation(session.target);
       const identity = sessionKey(session);
       if (
         daemonRestartBlocksInteractions() ||
@@ -946,14 +962,14 @@ export function TerminalPage() {
       try {
         await closeTab(session);
       } finally {
-        if (daemonEpoch === daemonEpochRef.current) {
+        if (isCurrent()) {
           setDisconnectingSessionKey((current) =>
             current === identity ? null : current,
           );
         }
       }
     },
-    [closeTab, daemonRestartBlocksInteractions],
+    [captureDaemonOperation, closeTab, daemonRestartBlocksInteractions],
   );
 
   const importSession = useCallback(
@@ -1003,7 +1019,7 @@ export function TerminalPage() {
 
   const close = useCallback(
     async (session: SessionSummary) => {
-      const daemonEpoch = daemonEpochRef.current;
+      const isCurrent = captureDaemonOperation(session.target);
       const identity = sessionKey(session);
       if (
         daemonRestartBlocksInteractions() ||
@@ -1026,7 +1042,7 @@ export function TerminalPage() {
             session_id: session.session_id,
           });
         } catch (error) {
-          if (daemonEpoch !== daemonEpochRef.current) {
+          if (!isCurrent()) {
             return;
           }
           if (errorCode(error) !== "session_not_found") {
@@ -1034,7 +1050,7 @@ export function TerminalPage() {
             return;
           }
         }
-        if (daemonEpoch !== daemonEpochRef.current) {
+        if (!isCurrent()) {
           return;
         }
         await archiveSession(session, "Session terminated");
@@ -1053,7 +1069,7 @@ export function TerminalPage() {
         setListError(errorMessage(failure));
       } finally {
         closingSessionKeysRef.current.delete(identity);
-        if (daemonEpoch === daemonEpochRef.current) {
+        if (isCurrent()) {
           setClosingSessionKeys((current) => {
             const next = new Set(current);
             next.delete(identity);
@@ -1062,7 +1078,7 @@ export function TerminalPage() {
         }
       }
     },
-    [attachment, archiveSession, closeTab, daemonRestartBlocksInteractions],
+    [captureDaemonOperation, attachment, archiveSession, closeTab, daemonRestartBlocksInteractions],
   );
 
   const requestClose = useCallback(
@@ -1112,8 +1128,14 @@ export function TerminalPage() {
   const clearLocalDaemonState = useCallback(() => {
     daemonEpochRef.current += 1;
     refreshGuardRef.current.recordMutation();
-    closingSessionKeysRef.current.clear();
-    creatingRef.current = false;
+    const isLocalKey = (key: string | null) => key !== null && targetKeyFromSessionKey(key) === "local";
+    closingSessionKeysRef.current = new Set([...closingSessionKeysRef.current].filter((key) => !isLocalKey(key)));
+    if (creatingTargetRef.current?.kind === "local") {
+      creatingRef.current = false;
+      creatingTargetRef.current = null;
+      setCreating(false);
+      setNewShellOpen(false);
+    }
     renderer?.forgetLocalSessions();
     attachment.resetAfterDaemonRestart();
     const markLocalMissing = (current: SessionSummary[]): SessionSummary[] =>
@@ -1124,12 +1146,12 @@ export function TerminalPage() {
       );
     setSessions(markLocalMissing);
     setTabs(markLocalMissing);
-    setCreating(false);
-    setNewShellOpen(false);
-    pendingCloseSessionKeyRef.current = null;
-    setPendingCloseSessionKey(null);
-    setClosingSessionKeys(new Set());
-    setDisconnectingSessionKey(null);
+    if (isLocalKey(pendingCloseSessionKeyRef.current)) {
+      pendingCloseSessionKeyRef.current = null;
+      setPendingCloseSessionKey(null);
+    }
+    setClosingSessionKeys(new Set(closingSessionKeysRef.current));
+    setDisconnectingSessionKey((current) => isLocalKey(current) ? null : current);
     setLoading(false);
     setListError(null);
     setTargetErrors((current) => {
@@ -1138,6 +1160,46 @@ export function TerminalPage() {
       return next;
     });
   }, [attachment, renderer, setSessions, setTabs]);
+
+  const component_event_error = useComponentActionEvents((event, affected) => {
+    const affected_keys = new Set(affected.map(sessionKey));
+    for (const session of [...sessionsRef.current, ...tabsRef.current]) {
+      if (componentResetMatches(event, session, null)) affected_keys.add(sessionKey(session));
+    }
+    XtermRenderer.forgetRestartedSessions(affected_keys);
+    if (event.scope === "local") {
+      clearLocalDaemonState();
+      return;
+    }
+    refreshGuardRef.current.recordMutation();
+    attachment.forgetRestartedSessions(affected_keys);
+    const markMissing = (current: SessionSummary[]) => current.map((session) => affected_keys.has(sessionKey(session)) ? { ...session, status: "missing" as const } : session);
+    setSessions(markMissing);
+    setTabs(markMissing);
+    setTabShellStates((current) => new Map([...current].filter(([key]) => !affected_keys.has(key))));
+    setSessionShellStates((current) => new Map([...current].filter(([key]) => !affected_keys.has(key))));
+  });
+  useEffect(() => { if (component_event_error) setListError(component_event_error); }, [component_event_error]);
+
+  const executeAboutAction = async (preflight: ComponentActionPreflight) => {
+    const execute = () => executeComponentAction(preflight.action_token);
+    if (preflight.component === "taskd" && preflight.location === "local") return taskWorkspace.performComponentAction(execute);
+    if (preflight.component !== "rmuxd" || preflight.location !== "local") return execute();
+    if (restartingDaemonRef.current || creatingRef.current) throw new Error("Wait for the current local session operation to finish.");
+    restartingDaemonRef.current = true;
+    setRestartingDaemon(true);
+    const before = daemonEpochRef.current;
+    try {
+      const result = await execute();
+      // Native events also update other windows. A successful result is a
+      // fallback if this window did not receive the committed reset event.
+      if (daemonEpochRef.current === before) clearLocalDaemonState();
+      return result;
+    } finally {
+      restartingDaemonRef.current = false;
+      setRestartingDaemon(false);
+    }
+  };
 
   const restartDaemon = useCallback(async () => {
     if (restartingDaemonRef.current) {
@@ -1348,7 +1410,7 @@ export function TerminalPage() {
   }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
   useWindowTitle(
-    taskWorkspace.active
+    about_open ? "About rmux" : taskWorkspace.active
       ? (taskWorkspace.activeTask?.definition.name ??
           taskWorkspace.saved?.definition.name ??
           "Task definition")
@@ -1484,6 +1546,17 @@ export function TerminalPage() {
     else commands.push(command);
   }
   commands.push({
+    id: COMMAND_IDS.about,
+    category: "App",
+    title: "About rmux",
+    detail: "Check app, daemon, and connected host versions.",
+    keywords: ["version", "protocol", "ctld", "rmuxd", "taskd", "update", "restart"],
+    enabled: workspace.ready,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.about),
+    focusTerminalAfterRun: false,
+    run: () => setAboutOpen(true),
+  });
+  commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
     category: "Tasks",
     title: "Restart taskd",
@@ -1537,6 +1610,7 @@ export function TerminalPage() {
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
   const [archives_open, setArchivesOpen] = useState(false);
   const dialogOpen = archives_open ||
+    about_dialog_open ||
     vpn.editor !== null ||
     taskWorkspace.editorId !== null ||
     portForwardTarget !== null ||
@@ -1556,6 +1630,7 @@ export function TerminalPage() {
         run: (args) => {
           if (!command.keepPaletteOpen) setPaletteOpen(false);
           if (command.id !== COMMAND_IDS.restartDaemon) cancelDaemonRestart();
+          if (about_open && command.focusTerminalAfterRun !== false) setAboutOpen(false);
           const result = command.run(args);
           if (command.focusTerminalAfterRun !== false)
             requestAnimationFrame(() => renderer?.focus());
@@ -1575,17 +1650,17 @@ export function TerminalPage() {
 
   const handleTerminalInput = useCallback(
     (data: Uint8Array) => {
-      if (!dialogOpen && !paletteOpen && !daemonRestartBlocksInteractions()) {
+      if (!about_open && !dialogOpen && !paletteOpen && !daemonRestartBlocksInteractions()) {
         attachment.handleInput(data);
       }
     },
-    [attachment, daemonRestartBlocksInteractions, dialogOpen, paletteOpen],
+    [attachment, about_open, daemonRestartBlocksInteractions, dialogOpen, paletteOpen],
   );
 
   function dismissPalette() {
     setPaletteOpen(false);
     cancelDaemonRestart();
-    requestAnimationFrame(() => renderer?.focus());
+    if (!about_open) requestAnimationFrame(() => renderer?.focus());
   }
 
   return (
@@ -1600,9 +1675,12 @@ export function TerminalPage() {
         }
       >
         <WorkspaceSidebar
+          on_about={() => executeCommandById(COMMAND_IDS.about)}
+          about_open={about_open}
           on_keybindings={() => executeCommandById(COMMAND_IDS.configureKeybindings)}
           selected={workspace.sidebar_view}
           onSelect={(view) => {
+            setAboutOpen(false);
             workspace.update("sidebar_view", view);
             if (view === "ports") void portForwarding.refreshAll();
           }}
@@ -1712,7 +1790,7 @@ export function TerminalPage() {
             />
           }
         />
-        <section className="terminal-workspace">
+        <section className="terminal-workspace" hidden={about_open}>
           <TerminalTabs
             tabs={tabs}
             extra_tabs={workspace.task_tabs.map((tab) => {
@@ -1887,6 +1965,16 @@ export function TerminalPage() {
             <StatusBar state={attachment.state} />
           </div>
         </section>
+        <AboutPage
+          visible={about_open}
+          on_close={() => { setAboutOpen(false); requestAnimationFrame(() => renderer?.focus()); }}
+          on_dialog_change={setAboutDialogOpen}
+          execute_action={executeAboutAction}
+          on_restarted={(preflight) => {
+            if (preflight.component === "taskd") void taskWorkspace.refresh();
+            else { void vpn.refresh(); void hostConnections.refresh(); void portForwarding.refreshAll(); }
+          }}
+        />
       </main>
       {archives_open && <ArchiveBrowser targets={sidebarTargets} on_close={() => setArchivesOpen(false)} />}
       {taskWorkspace.editorId ? (

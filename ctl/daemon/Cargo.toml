@@ -6,6 +6,7 @@ description = "Per-user SSH connection and credential broker for ctl"
 publish = false
 
 [dependencies]
+component-info.workspace = true
 clap.workspace = true
 base64.workspace = true
 dirs.workspace = true

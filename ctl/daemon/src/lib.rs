@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "macos")]
 mod keychain;
+#[cfg(unix)]
+mod lifecycle;
 mod openconnect;
 mod port_forwarding;
 pub mod proxy_route;
@@ -55,6 +57,8 @@ const REMOTE_LISTENERS_COMMAND: &str = concat!(
 
 #[derive(Default)]
 struct State {
+  #[cfg(unix)]
+  lifecycle: Option<lifecycle::Control>,
   attempts: Mutex<HashMap<String, Attempt>>,
   targets: Mutex<HashMap<String, Arc<TargetLifecycle>>>,
   forwards: AsyncMutex<ForwardRegistry>,
@@ -234,31 +238,67 @@ pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
 
   prepare_runtime_directory(&socket_path).map_err(DaemonError::RuntimeDirectory)?;
   let listener = bind_listener(&socket_path).await?;
-  let _guard = SocketGuard(socket_path);
+  let guard = SocketGuard(socket_path);
   let mut interrupt = signal(SignalKind::interrupt()).map_err(DaemonError::ShutdownSignal)?;
   let mut terminate = signal(SignalKind::terminate()).map_err(DaemonError::ShutdownSignal)?;
   let (vpn_service, mut vpn_owner) = vpn_service::spawn();
+  let (lifecycle, mut restarts) = lifecycle::Control::new();
+  let instance_id = lifecycle.instance_id.clone();
   let state = Arc::new(State {
     vpn_service: Some(vpn_service),
+    lifecycle: Some(lifecycle),
     ..State::default()
   });
+  let mut connections = tokio::task::JoinSet::new();
+  let mut restarting = None;
   let result = loop {
     tokio::select! {
+      biased;
+      Some(mut stream) = restarts.recv() => {
+        let _ = ctld_ipc::write_frame(&mut stream, &ctld_ipc::lifecycle::Response::CtldRestartAccepted {
+          instance_id: instance_id.clone(),
+        }).await;
+        restarting = Some(stream);
+        break Ok(());
+      }
+      _ = interrupt.recv() => break Ok(()),
+      _ = terminate.recv() => break Ok(()),
       accepted = listener.accept() => {
         let (stream, _) = match accepted {
           Ok(accepted) => accepted,
           Err(error) => break Err(DaemonError::Accept(error)),
         };
         let state = Arc::clone(&state);
-        tokio::spawn(async move {
+        connections.spawn(async move {
           let _ = handle_connection(stream, state).await;
         });
       }
-      _ = interrupt.recv() => break Ok(()),
-      _ = terminate.recv() => break Ok(()),
+      _ = connections.join_next(), if !connections.is_empty() => {},
     }
   };
+  // First cancel all requests so no new VPN or forwarding lease can be
+  // created while their owners drain. Keep the endpoint occupied until the
+  // entire old owner has released its resources.
+  connections.shutdown().await;
+  let forwards_released = state
+    .forwards
+    .lock()
+    .await
+    .shutdown(&SshForwardControl { state: &state })
+    .await;
   vpn_owner.shutdown().await;
+  state.shared_forwards.lock().await.shutdown().await;
+  drop(state);
+  drop(listener);
+  drop(guard);
+  if !forwards_released && let Some(stream) = &mut restarting {
+    let _ = ctld_ipc::write_frame(stream, &ctld_ipc::lifecycle::Response::CtldError {
+      code: "ctld_forward_cleanup_failed".into(),
+      message: "ctld stopped, but some SSH forwarding listeners could not be released. No replacement was started. Check those forwards before restarting again.".into(),
+    }).await;
+  }
+  // EOF is the replacement client's permission to start another owner.
+  drop(restarting);
   result
 }
 
@@ -321,7 +361,16 @@ async fn handle_connection(
   mut stream: tokio::net::UnixStream,
   state: Arc<State>,
 ) -> Result<(), RequestError> {
-  handshake_server(&mut stream).await?;
+  let first = ctld_ipc::read_frame::<_, lifecycle::FirstMessage>(&mut stream)
+    .await?
+    .ok_or(RequestError::ClientClosed)?;
+  let lifecycle::FirstMessage::Client(handshake) = first else {
+    let lifecycle::FirstMessage::Lifecycle(request) = first else {
+      unreachable!()
+    };
+    return lifecycle::handle(stream, &state, request).await;
+  };
+  accept_handshake(&mut stream, Some(*handshake)).await?;
   let mut request = ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
     .await?
     .ok_or(RequestError::ClientClosed)?;
@@ -448,8 +497,17 @@ async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), ctld_ipc::CodecE
   }
 }
 
+#[cfg(test)]
 async fn handshake_server(stream: &mut ctld_ipc::Stream) -> Result<(), RequestError> {
-  match ctld_ipc::read_frame::<_, ClientMessage>(stream).await? {
+  let request = ctld_ipc::read_frame::<_, ClientMessage>(stream).await?;
+  accept_handshake(stream, request).await
+}
+
+async fn accept_handshake(
+  stream: &mut ctld_ipc::Stream,
+  request: Option<ClientMessage>,
+) -> Result<(), RequestError> {
+  match request {
     Some(ClientMessage::Handshake { protocol_version })
       if protocol_version == ctld_ipc::PROTOCOL_VERSION =>
     {
@@ -1860,10 +1918,12 @@ mod tests {
         }
         output = tokio::time::timeout(Duration::from_secs(5), command.output()) => output.unwrap().unwrap(),
       };
-      assert!(!output.status.success());
+      // ProxyCommand=false may report a closed connection or a broken pipe,
+      // depending on whether its exit races with OpenSSH writing its banner.
+      // The listener above checks the no-fallback guarantee directly.
       let diagnostics = String::from_utf8_lossy(&output.stderr);
+      assert_eq!(output.status.code(), Some(255), "{diagnostics}");
       assert!(!diagnostics.contains("Cannot specify -J with ProxyCommand"));
-      assert!(diagnostics.contains("Connection closed"), "{diagnostics}");
     }
   }
 

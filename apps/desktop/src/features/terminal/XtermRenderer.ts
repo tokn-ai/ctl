@@ -39,6 +39,14 @@ function validDimensions(
 export class XtermRenderer {
   private static readonly renderers = new Set<XtermRenderer>();
 
+  static forgetRestartedSessions(session_keys: ReadonlySet<string>): void {
+    for (const renderer of XtermRenderer.renderers) {
+      const active_affected = [...renderer.sessions].some(([key, terminal]) => session_keys.has(key) && terminal === renderer.active);
+      renderer.retainSessions(new Set([...renderer.sessions.keys()].filter((key) => !session_keys.has(key))));
+      if (active_affected) renderer.invalidateResumeSequence();
+    }
+  }
+
   async archivePanes(session: SessionSummary, reason: string) {
     const panes = new Map<string, { terminal_id: string; reason: string; lines: string[] }>();
     for (const renderer of XtermRenderer.renderers) {

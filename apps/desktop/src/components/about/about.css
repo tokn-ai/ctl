@@ -1,0 +1,50 @@
+.about-page { min-width: 0; overflow: auto; background: var(--surface-0); }
+.about-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 32px 36px 24px; border-bottom: 1px solid var(--border); }
+.about-page h1 { margin: 4px 0 8px; color: #eee; font-size: 25px; font-weight: 600; }
+.about-page h1:focus { outline: none; }
+.about-page p { margin: 0; line-height: 1.5; }
+.about-eyebrow { color: var(--accent-strong); font-size: 10px; font-weight: 600; letter-spacing: .16em; }
+.about-muted, .about-footnote { color: var(--muted); }
+.about-page button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 10px; border: 1px solid #454545; border-radius: 4px; background: var(--surface-2); cursor: pointer; white-space: nowrap; }
+.about-page button:hover:not(:disabled) { background: var(--surface-3); border-color: #666; }
+.about-page button:disabled { opacity: .5; cursor: default; }
+.about-content { padding: 28px 36px 40px; max-width: 1400px; }
+.about-app-card { display: flex; align-items: center; gap: 18px; padding: 20px 24px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1); }
+.about-app-card > svg { color: var(--accent-strong); }
+.about-app-card strong { color: #eee; font-size: 19px; }
+.about-app-card p { margin: 5px 0 3px; }
+.about-app-card small { color: var(--muted); }
+.about-refresh-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 20px 0; color: var(--muted); font-size: 12px; }
+.about-section { margin-top: 28px; }
+.about-section h2 { margin: 0 0 6px; color: #e5e5e5; font-size: 15px; font-weight: 600; }
+.about-section > p { margin-bottom: 14px; }
+.about-table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 5px; }
+.about-version-table { width: 100%; min-width: 780px; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
+.about-component-column { width: 24%; }
+.about-version-column { width: 10%; }
+.about-protocol-column { width: 22%; }
+.about-status-column { width: 34%; }
+.about-version-table th, .about-version-table td { padding: 6px 12px; vertical-align: middle; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.about-version-table thead { color: var(--muted); background: var(--surface-1); }
+.about-version-table thead th { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.about-version-table tbody th { font-weight: 400; }
+.about-version-table tbody tr:last-child > * { border-bottom: 0; }
+.about-version-table strong { color: #dedede; font-weight: 600; }
+.about-version-table td > span, .about-component-name strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+.about-component-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.about-component-name strong { min-width: 0; }
+.about-row-actions { display: flex; align-items: center; gap: 12px; }
+.about-row-actions button { margin-left: auto; padding: 4px 8px; }
+.about-version-status { display: inline-block; padding: 3px 7px; border-radius: 3px; color: var(--muted); background: #2d2d2d; white-space: nowrap; }
+.about-status-current { color: #addda9; background: #213323; }
+.about-status-outdated, .about-status-different_build { color: var(--warning); background: #3a3020; }
+.about-status-incompatible { color: #ffa1a1; background: #44282a; }
+.about-status-newer { color: #94c6f5; background: #213244; }
+.about-row-error { min-width: 0; max-width: 14ch; color: var(--danger); overflow: hidden; text-overflow: ellipsis; }
+.about-error, .about-notice { padding: 12px 14px; margin: 16px 0 !important; border-radius: 4px; }
+.about-error { color: var(--danger); background: #321f23; }
+.about-notice { color: var(--success); background: #202e22; }
+.about-empty { padding: 18px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); }
+.about-footnote { margin-top: 28px !important; font-size: 11px; }
+.rail-settings[aria-pressed="true"] { color: white; border-left-color: var(--accent-strong); }
+@media (max-width: 1000px) { .about-page-header, .about-content { padding-left: 22px; padding-right: 22px; } }

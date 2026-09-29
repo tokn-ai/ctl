@@ -14,6 +14,8 @@ interface Props {
   vpn_status_stale?: boolean;
   error: string | null;
   on_keybindings?(): void;
+  on_about?(): void;
+  about_open?: boolean;
 }
 
 export function WorkspaceSidebar({
@@ -28,6 +30,8 @@ export function WorkspaceSidebar({
   vpn_status_stale = false,
   error,
   on_keybindings,
+  on_about,
+  about_open = false,
 }: Props) {
   const views = ["sessions", "tasks", "ports", "vpn"] as const;
   const labels = {
@@ -102,6 +106,11 @@ export function WorkspaceSidebar({
             title="Keyboard Shortcuts"
           >
             <Icon name="keyboard" size={21} />
+          </button>
+        ) : null}
+        {on_about ? (
+          <button className="rail-settings" type="button" onClick={on_about} aria-label="About rmux" title="About rmux" aria-pressed={about_open}>
+            <Icon name="info" size={21} />
           </button>
         ) : null}
       </div>

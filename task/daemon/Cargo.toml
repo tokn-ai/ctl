@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+component-info.workspace = true
 rmux-ipc.workspace = true
 rmux-proto.workspace = true
 clap.workspace = true

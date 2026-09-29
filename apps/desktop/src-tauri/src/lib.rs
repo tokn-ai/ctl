@@ -1,3 +1,4 @@
+mod about;
 mod command_menu;
 mod commands;
 mod dto;
@@ -50,11 +51,19 @@ pub fn run() {
         let streams = window.state::<tasks::TaskStreams>().inner().clone();
         let label = window.label().to_owned();
         tauri::async_runtime::spawn(async move {
-          tokio::join!(streams.close_window(&label), vpn::close_window(&label));
+          tokio::join!(
+            streams.close_window(&label),
+            vpn::close_window(&label),
+            about::close_window(&label)
+          );
         });
       }
     })
     .invoke_handler(tauri::generate_handler![
+      about::get_component_versions,
+      about::restart::preflight_component_action,
+      about::restart::execute_component_action,
+      about::remote_actions::reconnect::ack_component_reconnect,
       tasks::task_request,
       tasks::restart_task_daemon,
       tasks::watch_task_logs,

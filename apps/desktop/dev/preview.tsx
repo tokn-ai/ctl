@@ -42,6 +42,7 @@ import {
   previewWorkspace,
 } from "./fixtures";
 import { previewComponentVersions } from "./aboutFixtures";
+import { previewCredentials } from "./credentialsFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
 // The official Tauri mocks intercept every IPC call; nothing reaches a daemon,
@@ -51,6 +52,13 @@ if (!import.meta.env.DEV) throw new Error("The sample workspace is development-o
 const view_param = new URLSearchParams(location.search).get("view");
 const initial_view = view_param === "tasks" || view_param === "ports" || view_param === "vpn" ? view_param : "sessions";
 const about_param = new URLSearchParams(location.search).get("about");
+const credentials_param = new URLSearchParams(location.search).get("credentials");
+let credentials = previewCredentials();
+if (credentials_param === "empty") credentials.credentials = [];
+if (credentials_param === "partial") {
+  credentials.credentials = credentials.credentials.filter((credential) => credential.storage !== "keychain");
+  credentials.sources[0] = { source: "keychain", state: "unavailable", message: "Keychain is locked. Unlock it, then refresh." };
+}
 let component_versions = previewComponentVersions();
 if (about_param === "partial") {
   const daemon = component_versions.components.find((row) => row.component === "rmuxd")!;
@@ -171,6 +179,16 @@ function requireSession(session_id: string): SessionSummary {
 mockWindows("main");
 mockIPC((command, payload) => {
   switch (command) {
+    case "list_saved_credentials":
+      if (credentials_param === "error") throw new Error("The credential inventory could not be refreshed.");
+      return structuredClone({ ...credentials, checked_at_ms: Date.now() });
+    case "forget_saved_credential": {
+      const { credential_id } = request<{ credential_id: string }>(payload);
+      const credential = credentials.credentials.find((item) => item.credential_id === credential_id);
+      if (!credential || credential.storage !== "keychain") throw new Error("This saved credential is no longer available.");
+      credentials = { ...credentials, credentials: credentials.credentials.filter((item) => item.credential_id !== credential_id) };
+      return;
+    }
     case "get_component_versions":
       return structuredClone(component_versions);
     case "preflight_component_action": {

@@ -1,5 +1,36 @@
 export type Sequence = string;
 
+export interface CredentialTarget {
+  name: string;
+  target: SshConnectionTarget;
+}
+
+export interface CredentialRecord {
+  credential_id: string;
+  name: string;
+  kind: "ssh_password" | "ssh_key_passphrase" | "ssh_credential" | "vpn_password" | "tailscale_sign_in";
+  storage: "keychain" | "vpn_settings" | "container_volume";
+  target: string | null;
+  account: string | null;
+  created_at_ms: number | null;
+  updated_at_ms: number | null;
+  detail: string | null;
+  action: "forget" | "manage_vpn";
+  vpn_connection_id: string | null;
+}
+
+export interface CredentialSourceStatus {
+  source: "keychain" | "vpn";
+  state: "ready" | "partial" | "unavailable" | "unsupported";
+  message: string | null;
+}
+
+export interface CredentialsSnapshot {
+  credentials: CredentialRecord[];
+  sources: CredentialSourceStatus[];
+  checked_at_ms: number;
+}
+
 export interface ComponentProtocolVersion {
   name: string;
   version: number;

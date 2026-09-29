@@ -1,6 +1,7 @@
 mod about;
 mod command_menu;
 mod commands;
+mod credentials;
 mod dto;
 mod error;
 mod keybindings;
@@ -65,6 +66,8 @@ pub fn run() {
       about::restart::preflight_component_action,
       about::restart::execute_component_action,
       about::remote_actions::reconnect::ack_component_reconnect,
+      credentials::list_saved_credentials,
+      credentials::forget_saved_credential,
       tasks::task_request,
       tasks::restart_task_daemon,
       tasks::watch_task_logs,

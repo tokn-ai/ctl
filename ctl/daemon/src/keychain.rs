@@ -1,4 +1,5 @@
 use ctld_ipc::SshTarget;
+use ctld_ipc::credentials::{Inventory, scope_id};
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::item::{ItemClass, ItemSearchOptions};
 use security_framework::passwords::{
@@ -9,6 +10,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use zeroize::Zeroizing;
+
+use crate::credential_metadata::{self, MAX_SEARCH_ITEMS, Metadata, SERVICE_PREFIX};
+
+mod attributes;
 
 const KEYCHAIN_SERVICE_PREFIX: &str = "io.rmux.desktop.ctld.ssh";
 const SAVE_POLICY_SERVICE_PREFIX: &str = "io.rmux.desktop.ctld.ssh-save-policy";
@@ -67,6 +72,11 @@ pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) ->
     )
     .map_err(Error)?;
     options.set_access_control(access_control);
+    let metadata = Metadata::from_prompt(target, prompt);
+    options.set_label(&metadata.name());
+    options.set_description("rmux saved SSH credential");
+    options
+      .set_comment(&serde_json::to_string(&metadata).expect("credential metadata is serializable"));
     set_generic_password_options(secret.as_bytes(), options).map_err(Error)?;
   }
   Ok(())
@@ -115,6 +125,46 @@ pub fn delete(target: &SshTarget) -> Result<(), Error> {
   }
 }
 
+/// Return attributes from the protected Keychain without requesting secret data.
+pub fn list() -> Result<Inventory, Error> {
+  let mut options = ItemSearchOptions::new();
+  options
+    .class(ItemClass::generic_password())
+    .ignore_legacy_keychains()
+    .load_attributes(true)
+    .load_data(false)
+    .load_refs(false)
+    .limit(i64::try_from(MAX_SEARCH_ITEMS + 1).expect("bounded Keychain search limit"));
+  // Do not use authenticationUISkip: it can silently omit protected entries.
+  // Attribute-only retrieval does not ask for the biometric-protected secret.
+  // If macOS denies access, report an error rather than presenting an empty list.
+  let results = match options.search() {
+    Ok(results) => results,
+    Err(error) if error.code() == ITEM_NOT_FOUND => Vec::new(),
+    Err(error) => return Err(Error(error)),
+  };
+  Ok(credential_metadata::inventory_from_attributes(
+    results.iter().map(attributes::read),
+  ))
+}
+
+/// Delete exactly one owned item. Host save preferences and live masters remain.
+pub fn forget(credential_id: &str) -> Result<(), Error> {
+  let (scope_id, account_id) = credential_metadata::item_identity(credential_id)
+    .ok_or_else(|| Error(security_framework::base::Error::from_code(-50)))?;
+  let mut options = ItemSearchOptions::new();
+  options
+    .class(ItemClass::generic_password())
+    .service(&format!("{SERVICE_PREFIX}{scope_id}"))
+    .account(account_id)
+    .ignore_legacy_keychains();
+  match options.delete() {
+    Ok(()) => Ok(()),
+    Err(error) if error.code() == ITEM_NOT_FOUND => Ok(()),
+    Err(error) => Err(Error(error)),
+  }
+}
+
 fn password_options(target: &SshTarget, prompt: &str) -> PasswordOptions {
   PasswordOptions::new_generic_password(&service(target), &digest(prompt.as_bytes()))
 }
@@ -124,22 +174,11 @@ fn save_policy_options(target: &SshTarget) -> PasswordOptions {
 }
 
 fn service(target: &SshTarget) -> String {
-  format!("{KEYCHAIN_SERVICE_PREFIX}.{}", digest(&target_key(target)))
+  format!("{KEYCHAIN_SERVICE_PREFIX}.{}", scope_id(target))
 }
 
 fn save_policy_service(target: &SshTarget) -> String {
-  format!(
-    "{SAVE_POLICY_SERVICE_PREFIX}.{}",
-    digest(&target_key(target))
-  )
-}
-
-fn target_key(target: &SshTarget) -> Vec<u8> {
-  // Preserve direct-connection credentials when app-local settings later
-  // move into OpenSSH config, while isolating credentials by gateway chain.
-  // The exact prompt remains the per-item account key.
-  serde_json::to_vec(&(&target.destination, &target.gateways))
-    .expect("SSH credential scopes are always serializable")
+  format!("{SAVE_POLICY_SERVICE_PREFIX}.{}", scope_id(target))
 }
 
 fn digest(value: &[u8]) -> String {

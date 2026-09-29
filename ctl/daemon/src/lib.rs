@@ -1,5 +1,8 @@
 //! Per-user owner of authenticated OpenSSH control masters and SSH credentials.
 
+mod credential_metadata;
+pub mod credentials;
+
 #[cfg(target_os = "macos")]
 mod keychain;
 #[cfg(unix)]

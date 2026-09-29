@@ -8,7 +8,7 @@ import type { AppCommand } from "../../features/commands/types";
 import { searchCommands } from "../../features/commands/commandSearch";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn() }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn(), mounted_inputs: [] as ((data: Uint8Array) => void)[] }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
 vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () => ({
   state: { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
@@ -17,9 +17,10 @@ vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () =>
 vi.mock("./TerminalSurface", async () => {
   const { useEffect } = await import("react");
   const renderer = {};
-  return { TerminalSurface: ({ onReady, ended_message, on_dismiss }: { onReady(renderer: unknown): void; ended_message?: string | null; on_dismiss?(): void }) => {
+  return { TerminalSurface: ({ onReady, onInput, ended_message, on_dismiss }: { onReady(renderer: unknown): void; onInput(data: Uint8Array): void; ended_message?: string | null; on_dismiss?(): void }) => {
     useEffect(() => {
       mocks.mount();
+      mocks.mounted_inputs.push(onInput);
       onReady(renderer);
       return () => { mocks.unmount(); onReady(null); };
     }, []);
@@ -33,9 +34,84 @@ const initial: SessionView = { session_id: "root", session_name: "Root", view_id
 const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "a", left: 0, top: 0, columns: 40, rows: 24 }, { terminal_id: "b", left: 41, top: 0, columns: 39, rows: 24 }], layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] }, terminals: [terminal("a"), terminal("b")] };
 const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); mocks.mounted_inputs = []; vi.useRealTimers(); });
 
 describe("session compositor", () => {
+  it("blocks all pane input and prefix actions while disabled, then resumes without reconnecting", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = props();
+    const prefix_settings = { document: { schema_version: 1 as const, overrides: [] }, bindings: new Map(), platform: "other" as const };
+    const mounted = render(<SessionViewSurface {...actions} prefix_settings={prefix_settings} />);
+    await waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+    const [primary_input, secondary_input] = mocks.mounted_inputs;
+    const bytes = new Uint8Array([97]);
+    primary_input(bytes);
+    secondary_input(bytes);
+    expect(actions.onInput).toHaveBeenCalledExactlyOnceWith(bytes);
+    expect(mocks.input).toHaveBeenCalledExactlyOnceWith(bytes);
+    actions.onInput.mockClear();
+    mocks.input.mockClear();
+
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    act(() => second.focus());
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    expect(screen.getByText("Ctrl+B", { selector: "strong" })).toBeTruthy();
+    mounted.rerender(<SessionViewSurface {...actions} prefix_settings={prefix_settings} input_enabled={false} />);
+    primary_input(bytes);
+    secondary_input(bytes);
+    const requests = mocks.request.mock.calls.length;
+    for (const input of [first, second]) {
+      fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true });
+      fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true });
+      fireEvent.keyDown(input, { key: "v", code: "KeyV" });
+    }
+    expect(screen.queryByText("Ctrl+B", { selector: "strong" })).toBeNull();
+    expect(actions.onInput).not.toHaveBeenCalled();
+    expect(mocks.input).not.toHaveBeenCalled();
+    expect(mocks.request).toHaveBeenCalledTimes(requests);
+
+    mounted.rerender(<SessionViewSurface {...actions} prefix_settings={prefix_settings} />);
+    primary_input(bytes);
+    secondary_input(bytes);
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    expect(actions.onInput).toHaveBeenCalledExactlyOnceWith(bytes);
+    expect(mocks.input).toHaveBeenNthCalledWith(1, bytes);
+    expect(mocks.input).toHaveBeenNthCalledWith(2, new Uint8Array([2]));
+    expect(mocks.mount).toHaveBeenCalledTimes(2);
+    expect(mocks.unmount).not.toHaveBeenCalled();
+    expect(mocks.connect).toHaveBeenCalledOnce();
+    expect(mocks.detach).not.toHaveBeenCalled();
+  });
+
+  it("blocks renderer-held input and prefix events from cached secondary panes while hidden", async () => {
+    const other = { ...session, session_id: "other", terminal_id: "other-a", view_id: "other-view" };
+    const other_view = { ...initial, session_id: "other", view_id: "other-view", panes: [{ ...initial.panes[0], terminal_id: "other-a" }], terminals: [terminal("other-a")] };
+    mocks.request.mockImplementation((_target, action) => Promise.resolve(action.session_id === "other" ? other_view : split));
+    const open_session_keys = new Set([sessionKey(session), sessionKey(other)]);
+    const prefix_settings = { document: { schema_version: 1 as const, overrides: [] }, bindings: new Map(), platform: "other" as const };
+    const actions = props();
+    const mounted = render(<SessionViewSurface {...actions} open_session_keys={open_session_keys} prefix_settings={prefix_settings} />);
+    await waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+    const secondary_input = mocks.mounted_inputs[1];
+    const secondary = screen.getAllByLabelText("Terminal input")[1];
+    mounted.rerender(<SessionViewSurface {...actions} session={other} open_session_keys={open_session_keys} prefix_settings={prefix_settings} />);
+    await waitFor(() => expect(secondary.closest<HTMLElement>(".view-pane")?.hidden).toBe(true));
+    secondary_input(new Uint8Array([97]));
+    fireEvent.keyDown(secondary, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(secondary, { key: "b", code: "KeyB", ctrlKey: true });
+    expect(mocks.input).not.toHaveBeenCalled();
+    expect(actions.onInput).not.toHaveBeenCalled();
+    expect(screen.queryByText("Ctrl+B", { selector: "strong" })).toBeNull();
+    mounted.rerender(<SessionViewSurface {...actions} open_session_keys={open_session_keys} prefix_settings={prefix_settings} />);
+    await waitFor(() => expect(secondary.closest<HTMLElement>(".view-pane")?.hidden).toBe(false));
+    secondary_input(new Uint8Array([98]));
+    expect(mocks.input).toHaveBeenCalledExactlyOnceWith(new Uint8Array([98]));
+    expect(mocks.connect).toHaveBeenCalledOnce();
+    expect(mocks.unmount).not.toHaveBeenCalled();
+    expect(mocks.detach).not.toHaveBeenCalled();
+  });
+
   it("updates a single pane's active outline when rendered cell dimensions change", async () => {
     mocks.request.mockResolvedValue(initial);
     let measure!: (cell: { width: number; height: number }) => void;

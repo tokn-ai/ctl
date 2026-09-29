@@ -46,5 +46,4 @@
 .about-notice { color: var(--success); background: #202e22; }
 .about-empty { padding: 18px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); }
 .about-footnote { margin-top: 28px !important; font-size: 11px; }
-.rail-settings[aria-pressed="true"] { color: white; border-left-color: var(--accent-strong); }
 @media (max-width: 1000px) { .about-page-header, .about-content { padding-left: 22px; padding-right: 22px; } }

@@ -53,6 +53,8 @@ import type {
   ComponentActionPreflight,
   ComponentActionResult,
   ComponentReconnectResult,
+  CredentialTarget,
+  CredentialsSnapshot,
 } from "./types";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -67,6 +69,14 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
 
 export async function getComponentVersions(): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions");
+}
+
+export async function listSavedCredentials(targets: CredentialTarget[]): Promise<CredentialsSnapshot> {
+  return invoke("list_saved_credentials", { request: { targets } });
+}
+
+export async function forgetSavedCredential(credential_id: string): Promise<void> {
+  await invoke("forget_saved_credential", { request: { credential_id } });
 }
 
 export async function preflightComponentAction(component_id: string): Promise<ComponentActionPreflight> {

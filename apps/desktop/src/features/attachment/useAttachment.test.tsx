@@ -388,6 +388,116 @@ describe("pending remote attachments", () => {
 });
 
 describe("opened session cache", () => {
+  it.each(["0", "5"])("preserves a root attachment's screen and history across network reconnect at sequence %s", async (sequence) => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = checkpoint(result.current.state.attachment_id!, "\u001b[2J\u001b[Hold screen", sequence);
+    initial.history.lines = ["previous history"];
+    await emit(initial);
+    const saved = visibleTerminal();
+    expect(line(saved.terminal, 0)).toBe("previous history");
+    expect(line(saved.terminal, saved.terminal.buffer.active.baseY)).toBe("old screen");
+
+    await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "connection_closed", exit_code: null, next_sequence: sequence, received_sequence: sequence });
+    await waitFor(() => expect(api.openAttachment).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.state.phase).toBe("attached"));
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: first.terminal_id, resume_from: sequence });
+    expect(visibleTerminal() === saved).toBe(true);
+    expect(saved.dispose).not.toHaveBeenCalled();
+    await emit({ event_type: "output", attachment_id: result.current.state.attachment_id!, event_id: "resumed-output", sequence_start: sequence, sequence_end: "10", data_base64: btoa(" and new output") });
+    expect(line(saved.terminal, 0)).toBe("previous history");
+    expect(line(saved.terminal, saved.terminal.buffer.active.baseY)).toBe("old screen and new output");
+  });
+
+  it("preserves an alternate screen and its cursor-positioned updates on network reconnect", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = checkpoint(result.current.state.attachment_id!, "\u001b[2J\u001b[Hshell screen\u001b[?1049h\u001b[Hscreen header\u001b[10;20Hold", "5");
+    initial.history.lines = ["previous history"];
+    await emit(initial);
+    const saved = visibleTerminal();
+    expect(saved.terminal.buffer.active.type).toBe("alternate");
+    await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "connection_closed", exit_code: null, next_sequence: "5", received_sequence: "5" });
+    await waitFor(() => expect(api.openAttachment).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.state.phase).toBe("attached"));
+    await emit({ event_type: "output", attachment_id: result.current.state.attachment_id!, event_id: "tui-resumed", sequence_start: "5", sequence_end: "10", data_base64: btoa("\u001b[10;20Hnew") });
+    expect(visibleTerminal() === saved).toBe(true);
+    expect(saved.terminal.buffer.active.type).toBe("alternate");
+    expect(line(saved.terminal)).toBe("screen header");
+    expect(line(saved.terminal, 9)).toBe(`${" ".repeat(19)}new`);
+    expect(saved.terminal.buffer.normal.getLine(0)?.translateToString(true)).toBe("previous history");
+    expect(saved.dispose).not.toHaveBeenCalled();
+  });
+
+  it.each(["invalidated", "replaced", "ahead"])("requests a checkpoint when the retained renderer cursor was %s", async (change) => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    const attachment_id = result.current.state.attachment_id!;
+    await emit(checkpoint(attachment_id, "old screen", "5"));
+    await emit({ event_type: "attachment_exited", attachment_id, reason: "connection_closed", exit_code: null, next_sequence: "5", received_sequence: "5" });
+    if (change === "invalidated") renderer.invalidateResumeSequence();
+    else if (change === "replaced") renderer.retainSessions(new Set());
+    else await renderer.write(new TextEncoder().encode(" unacknowledged"), "7");
+
+    await act(async () => { await result.current.reconnect(); });
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: first.terminal_id, resume_from: null });
+    await emit(checkpoint(result.current.state.attachment_id!, "authoritative screen", "9"));
+    expect(line(visibleTerminal().terminal)).toBe("authoritative screen");
+  });
+
+  it.each(["moved pane", "lost cache"])("retries once with a checkpoint after adopting a response with a %s", async (change) => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    await emit(checkpoint("attachment-0", "old screen", "5"));
+    await emit({ event_type: "attachment_exited", attachment_id: "attachment-0", reason: "connection_closed", exit_code: null, next_sequence: "5", received_sequence: "5" });
+    const authoritative = change === "moved pane" ? { ...first, session_id: "promoted", view_id: "promoted-view" } : first;
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementation(async (...args) => {
+      const response = await open(...args);
+      response.attached.session = authoritative;
+      const attachment_id = response.attached.attachment_id;
+      if (args[0].resume_from !== null) {
+        if (change === "lost cache") renderer.retainSessions(new Set());
+        args[1]({ event_type: "output", attachment_id, event_id: "rejected-delta", sequence_start: "5", sequence_end: "8", data_base64: btoa("wrong delta") });
+      } else args[1](checkpoint(attachment_id, "authoritative screen", "9"));
+      return response;
+    });
+
+    await act(async () => { await result.current.reconnect(); });
+    await waitFor(() => expect(result.current.state.applied_sequence).toBe("9"));
+    expect(api.openAttachment.mock.calls.slice(1).map(([request]) => ({ session: request.session, resume_from: request.resume_from }))).toEqual([
+      { session: first.terminal_id, resume_from: "5" },
+      { session: first.terminal_id, resume_from: null },
+    ]);
+    expect(api.detachAttachment).toHaveBeenCalledExactlyOnceWith({ attachment_id: "attachment-1" });
+    expect(result.current.state.session?.session_id).toBe(authoritative.session_id);
+    expect(line(visibleTerminal().terminal)).toBe("authoritative screen");
+    await act(async () => { channels.get("attachment-1")!(checkpoint("attachment-1", "late rejected screen", "10")); });
+    expect(line(visibleTerminal().terminal)).toBe("authoritative screen");
+    expect(api.acknowledgeAttachmentEvent.mock.calls.map(([request]) => request.attachment_id)).not.toContain("attachment-1");
+  });
+
+  it("cancels the checkpoint fallback while detaching its rejected stream", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    await emit(checkpoint("attachment-0", "old screen", "5"));
+    await emit({ event_type: "attachment_exited", attachment_id: "attachment-0", reason: "connection_closed", exit_code: null, next_sequence: "5", received_sequence: "5" });
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementationOnce(async (...args) => {
+      const response = await open(...args);
+      renderer.retainSessions(new Set());
+      return response;
+    });
+    let finishDetach!: () => void;
+    api.detachAttachment.mockImplementationOnce(() => new Promise<void>((resolve) => { finishDetach = resolve; }));
+    let reconnecting!: Promise<void>;
+    await act(async () => { reconnecting = result.current.reconnect(); });
+    await waitFor(() => expect(api.detachAttachment).toHaveBeenCalledWith({ attachment_id: "attachment-1" }));
+    await act(async () => { await result.current.detach(); finishDetach(); await reconnecting; });
+    expect(api.openAttachment).toHaveBeenCalledTimes(2);
+    expect(result.current.state.phase).toBe("idle");
+  });
+
   it("resolves root opens afresh instead of reusing a stale terminal ID or sequence", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
@@ -592,6 +702,19 @@ describe("opened session cache", () => {
 
 
 describe("durable terminal previews", () => {
+  it("retains a root preview while adopting its resolved terminal before the live checkpoint", async () => {
+    api.sessionCache.mockResolvedValue({ kind: "loaded", cache: {
+      terminal_id: first.terminal_id, checkpoint: checkpoint("saved", "saved preview", "7").checkpoint,
+      history: [], history_gap: false,
+    } });
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    expect(line(visibleTerminal().terminal)).toBe("saved preview");
+    expect(api.openAttachment.mock.lastCall?.[0].resume_from).toBeNull();
+    await emit(checkpoint(result.current.state.attachment_id!, "authoritative screen", "9"));
+    expect(line(visibleTerminal().terminal)).toBe("authoritative screen");
+  });
+
   it("shows the saved screen when the daemon is offline without using it as an unsafe replay cursor", async () => {
     api.sessionCache.mockResolvedValue({ kind: "loaded", cache: {
       terminal_id: first.terminal_id, checkpoint: checkpoint("saved", "saved current", "7").checkpoint,
@@ -617,6 +740,105 @@ describe("durable terminal previews", () => {
 });
 
 describe("opened session channels", () => {
+  it("keeps the selected scoped tab visible when its cache disappears during reconnect", async () => {
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<Harness />);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await emit(checkpoint("attachment-0", "old screen", "5"));
+    const previous = visibleTerminal();
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementationOnce(async (...args) => {
+      const response = await open(...args);
+      renderer.retainSessions(new Set());
+      return response;
+    });
+    await emit({ event_type: "attachment_exited", attachment_id: "attachment-0", reason: "connection_closed", exit_code: null, next_sequence: "5", received_sequence: "5" });
+    await waitFor(() => expect(api.openAttachment).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    expect(api.openAttachment.mock.lastCall?.[0].resume_from).toBeNull();
+    await emit(checkpoint("attachment-2", "restored selected screen", "9"));
+    expect(line(visibleTerminal().terminal)).toBe("restored selected screen");
+    expect(previous.dispose).toHaveBeenCalledOnce();
+    expect(renderer.resumeSequence()).toBe("9");
+  });
+
+  it("keeps a moved background pane's live cache in its opened tab across tab switches and retention", async () => {
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<Harness />);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await emit(checkpoint("attachment-0", "first screen", "5"));
+    const original = visibleTerminal();
+    act(() => { void attachments.connect(second); });
+    await waitFor(() => expect(attachments.state.session?.session_id).toBe(second.session_id));
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await emit(checkpoint("attachment-1", "second screen", "8"));
+    const foreground = visibleTerminal();
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementation(async (...args) => {
+      const response = await open(...args);
+      if (args[0].session === first.terminal_id) response.attached.session = { ...first, session_id: "promoted", view_id: "promoted-view" };
+      return response;
+    });
+
+    await emit({ event_type: "attachment_exited", attachment_id: "attachment-0", reason: "connection_closed", exit_code: null, next_sequence: "5", received_sequence: "5" });
+    await waitFor(() => expect(attachments.states.find((state) => state.session?.session_id === "promoted")?.phase).toBe("attached"));
+    expect(api.openAttachment.mock.lastCall?.[0].resume_from).toBe("5");
+    expect(visibleTerminal() === foreground).toBe(true);
+    await emit({ event_type: "output", attachment_id: "attachment-2", event_id: "moved-background", sequence_start: "5", sequence_end: "10", data_base64: btoa(" moved") });
+    const open_keys = new Set([sessionKey(first), sessionKey(second)]);
+    act(() => { attachments.retainSessions(open_keys); renderer.retainSessions(open_keys); });
+    await act(async () => { await attachments.connect(first); });
+    expect(visibleTerminal() === original).toBe(true);
+    expect(line(original.terminal)).toBe("first screen moved");
+    await act(async () => { await attachments.connect(second); await attachments.connect(first); });
+    await emit({ event_type: "output", attachment_id: "attachment-2", event_id: "moved-visible", sequence_start: "10", sequence_end: "15", data_base64: btoa(" live") });
+    expect(line(visibleTerminal().terminal)).toBe("first screen moved live");
+    expect(renderer.resumeSequence()).toBe("15");
+    expect(original.dispose).not.toHaveBeenCalled();
+    expect(line(foreground.terminal)).toBe("second screen");
+    expect(api.openAttachment).toHaveBeenCalledTimes(3);
+  });
+
+  it("reconnects a background root stream without clearing its screen or changing the visible tab", async () => {
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<Harness />);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await emit(checkpoint("attachment-0", "first screen", "5"));
+    const background = visibleTerminal();
+    act(() => { void attachments.connect(second); });
+    await waitFor(() => expect(attachments.state.session?.session_id).toBe(second.session_id));
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    await emit(checkpoint("attachment-1", "visible second", "8"));
+    const foreground = visibleTerminal();
+
+    await emit({ event_type: "attachment_exited", attachment_id: "attachment-0", reason: "connection_closed", exit_code: null, next_sequence: "5", received_sequence: "5" });
+    await waitFor(() => expect(api.openAttachment).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(attachments.states.find((state) => state.session?.session_id === first.session_id)?.phase).toBe("attached"));
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({ session: first.terminal_id, resume_from: "5" });
+    expect(visibleTerminal()).toBe(foreground);
+    await emit({ event_type: "output", attachment_id: "attachment-2", event_id: "background-resumed", sequence_start: "5", sequence_end: "10", data_base64: btoa(" new output") });
+    expect(line(foreground.terminal)).toBe("visible second");
+    await act(async () => { await attachments.connect(first); });
+    expect(visibleTerminal() === background).toBe(true);
+    expect(line(background.terminal)).toBe("first screen new output");
+    expect(background.dispose).not.toHaveBeenCalled();
+  });
+
   it("keeps receiving background output and switches without reopening either channel", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
     function Harness() {

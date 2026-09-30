@@ -622,9 +622,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       await eventTailRef.current;
       if (generation !== generationRef.current) return;
       renderer.activateSession(session);
+      // A server cursor is safe only with its fully applied local screen. A
+      // replaced cache or an unacknowledged write requires a fresh checkpoint.
+      const retainedSequence = renderer.resumeSequence();
       let resumeFrom = request.use_cached_state
-        ? renderer.resumeSequence()
-        : request.resume_from;
+        ? retainedSequence
+        : request.resume_from === retainedSequence ? request.resume_from : null;
       let restored_local_cache = false;
       try {
         if (resumeFrom === null && renderer.resumeSequence() === null) {
@@ -660,8 +663,9 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       const requestedTerminalSize = proposed
         ? terminalSize(proposed.columns, proposed.rows)
         : terminalSize(80, 24);
-      const pendingEvents: AttachmentEvent[] = [];
+      let pendingEvents: AttachmentEvent[] = [];
       let responseReady = false;
+      let openingAttempt = 0;
       const openingAbort = new AbortController();
       openingAbortRef.current = openingAbort;
       let unclaimed_attachment_id: string | null = null;
@@ -672,33 +676,49 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           await detachAttachment({ attachment_id: previous_attachment_id });
           if (generation !== generationRef.current) return;
         }
-        const result = await openAttachment(
-          {
-            target: session.target,
-            session: session.terminal_id ?? session.session_id,
-            // Disk content is a preview. Ask for an authoritative checkpoint
-            // before resuming a session whose root pane may have changed.
-            resume_from: restored_local_cache ? null : resumeFrom,
-            terminal_size: requestedTerminalSize,
-            request_input_lease: true,
-            request_layout_lease: resizeWithWindow,
-          },
-          (event) => {
-            if (generation !== generationRef.current) return;
-            if (responseReady) {
-              queueEvent(event, generation);
-            } else {
-              pendingEvents.push(event);
-            }
-          },
-          openingAbort.signal,
-        );
-        unclaimed_attachment_id = result.attached.attachment_id;
+        let openingSession = session;
+        // Disk content is a preview. A root pane may have changed since it was
+        // saved, so it always requires an authoritative checkpoint.
+        let requestedResume = restored_local_cache ? null : resumeFrom;
+        let result!: Awaited<ReturnType<typeof openAttachment>>;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          openingAttempt = attempt;
+          result = await openAttachment(
+            {
+              target: openingSession.target,
+              session: openingSession.terminal_id ?? openingSession.session_id,
+              resume_from: requestedResume,
+              terminal_size: requestedTerminalSize,
+              request_input_lease: true,
+              request_layout_lease: resizeWithWindow,
+            },
+            (event) => {
+              if (generation !== generationRef.current || attempt !== openingAttempt) return;
+              if (responseReady) queueEvent(event, generation);
+              else pendingEvents.push(event);
+            },
+            openingAbort.signal,
+          );
+          unclaimed_attachment_id = result.attached.attachment_id;
+          if (generation !== generationRef.current) return;
+          renderer.adoptSession(result.attached.session);
+          if (requestedResume === null || renderer.resumeSequence() === requestedResume) break;
 
-        if (generation !== generationRef.current) {
-          return;
+          // The pane may have moved to another session, or its cache may have
+          // disappeared during open. Discard this delta-only stream and retry
+          // once against the resolved terminal with a fresh checkpoint.
+          openingAttempt += 1;
+          pendingEvents = [];
+          await detachAttachment({ attachment_id: unclaimed_attachment_id });
+          unclaimed_attachment_id = null;
+          if (generation !== generationRef.current) return;
+          openingSession = result.attached.session;
+          requestedResume = null;
+          resumeFrom = null;
+          appliedSequenceRef.current = null;
+          setState((current) => ({ ...current, session: openingSession, applied_sequence: null, reconnect_sequence: null }));
         }
-        if (!resumeFrom) {
+        if (resumeFrom === null) {
           await renderer.recreate(result.attached.session.terminal_size);
           if (generation !== generationRef.current) {
             return;

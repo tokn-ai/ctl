@@ -16,6 +16,7 @@ const MAX_TERMINAL_DIMENSION = 65_535;
 interface CachedTerminal {
   container: HTMLElement;
   presenter: TerminalPresenter;
+  owner_key: string | null;
   resume_from: string | null;
   presentation_version: number;
   is_local: boolean;
@@ -105,15 +106,20 @@ export class XtermRenderer {
 
   /** A stream writes only to its own terminal, independently of the visible tab. */
   sessionRenderer(session: SessionSummary): AttachmentRenderer {
+    // A pane can move to another server session while this opened tab still
+    // owns its stream. Keep its cache in the tab's slot until the tab closes.
+    const cache_key = sessionKey(session);
     let selected = session;
-    const terminal = () => this.ensureSession(selected);
+    const terminal = () => this.ensureSession(selected, { cache_key });
+    const activate = (next: SessionSummary, resolve_root = false) => {
+      const visible = this.active.owner_key === cache_key;
+      selected = next;
+      const cached = this.ensureSession(next, { cache_key, resolve_root });
+      if (visible) this.showTerminal(cached);
+    };
     return {
-      activateSession: (next) => {
-        const visible = this.sessions.get(sessionKey(selected)) === this.active;
-        selected = next;
-        if (visible) this.activateSession(next);
-        else this.ensureSession(next);
-      },
+      activateSession: (next) => activate(next),
+      adoptSession: (next) => activate(next, true),
       resumeSequence: () => terminal().resume_from,
       invalidateResumeSequence: () => {
         const cached = terminal();
@@ -136,9 +142,14 @@ export class XtermRenderer {
     };
   }
 
-  private ensureSession(session: SessionSummary): CachedTerminal {
-    const key = sessionKey(session);
+  private ensureSession(session: SessionSummary, options: { cache_key?: string; resolve_root?: boolean } = {}): CachedTerminal {
+    const key = options.cache_key ?? sessionKey(session);
     let terminal = this.sessions.get(key);
+    // A root open resolves its pane on the server. Bind that authoritative ID
+    // before replay so reconnects retain this screen instead of replacing it.
+    if (options.resolve_root && terminal && terminal.terminal_id === undefined) {
+      terminal.terminal_id = session.terminal_id;
+    }
     if (terminal && terminal.terminal_id !== session.terminal_id) {
       this.sessions.delete(key);
       if (terminal !== this.active) this.disposeTerminal(terminal);
@@ -146,6 +157,7 @@ export class XtermRenderer {
     }
     if (!terminal) {
       terminal = this.createTerminal(session.terminal_size);
+      terminal.owner_key = key;
       terminal.is_local = session.target.kind === "local";
       terminal.terminal_id = session.terminal_id;
       terminal.container.hidden = true;
@@ -161,6 +173,11 @@ export class XtermRenderer {
 
   activateSession(session: SessionSummary): void {
     this.showTerminal(this.ensureSession(session));
+  }
+
+  /** Adopt an open response while preserving an unresolved root's preview. */
+  adoptSession(session: SessionSummary): void {
+    this.showTerminal(this.ensureSession(session, { resolve_root: true }));
   }
 
   private showTerminal(terminal: CachedTerminal): void {
@@ -200,8 +217,10 @@ export class XtermRenderer {
       const terminal = this.sessions.get(old_key);
       if (!terminal) continue;
       this.sessions.delete(old_key);
-      if (!this.sessions.has(new_key)) this.sessions.set(new_key, terminal);
-      else if (terminal !== this.active) this.disposeTerminal(terminal);
+      if (!this.sessions.has(new_key)) {
+        terminal.owner_key = new_key;
+        this.sessions.set(new_key, terminal);
+      } else if (terminal !== this.active) this.disposeTerminal(terminal);
     }
   }
 
@@ -315,6 +334,7 @@ export class XtermRenderer {
         (size) => this.createAdapter(container, size),
         terminalSize,
       ),
+      owner_key: null,
       resume_from: null,
       presentation_version: 0,
       is_local: false,
@@ -429,7 +449,7 @@ export class XtermRenderer {
 }
 
 export type AttachmentRenderer = Pick<XtermRenderer,
-  "activateSession" | "resumeSequence" | "invalidateResumeSequence" |
+  "activateSession" | "adoptSession" | "resumeSequence" | "invalidateResumeSequence" |
   "write" | "restoreCheckpoint" | "recreate" | "resize" |
   "proposeDimensions" | "observeDimensions" | "focus"
 >;

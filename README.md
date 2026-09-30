@@ -366,6 +366,58 @@ unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
 the logical attachment and its leases for 30 seconds by default. An explicit
 `Ctrl-]` detach releases them immediately.
 
+### Saved hosts and connection status
+
+```sh
+ctl host add work 10.0.0.20 --user alice
+ctl host list
+ctl host show work --json
+ctl host status work
+ctl host update work --name office --port 2222
+ctl host update office --clear port
+
+ctl host method add office VPN 10.0.0.20 --user alice --vpn company
+ctl host method prefer office VPN
+ctl host method update office VPN --destination 10.0.0.21
+ctl host method remove office SSH
+
+ctl host connect office
+ctl host status office --method VPN
+ctl host disconnect office
+ctl host remove office
+```
+
+`host` manages the same saved definitions as the desktop in
+`~/.tokn/rmux/hosts.json` (`CTL_HOSTS_PATH` overrides it). Select hosts and methods
+by name or stable ID. These management commands require saved hosts; to save an
+SSH config alias, use `ctl host add work my-ssh-alias --ssh-config`. `host list`
+shows saved definitions only, not unsaved SSH config or Tailscale discoveries.
+
+`list`, `show`, and `status` observe existing ctld connections without starting
+a daemon, connecting, or starting a VPN. Status is per method: `connected`
+means an existing SSH control endpoint responds; `disconnected` means no
+connection is observed; `paused` means an explicit disconnect; `unknown` includes
+the observation error. This is not a remote reachability check. `show` also
+includes any previously learned remote identity/version. All three accept
+`--json`. On Windows, catalog management is supported and connection status is
+reported as `unsupported`; connect/disconnect currently require Unix.
+
+`connect` authenticates the preferred method (or `--method NAME_OR_ID`) and
+starts its saved VPN if needed. It opens no shell and installs no remote
+component. `disconnect` pauses all saved methods, or just `--method`, using
+ctld's existing disconnect policy; active channels may close. It does not stop
+the VPN itself. `remove` only deletes the saved definition: remote sessions,
+active connections, credentials, and workspace references are retained.
+
+Updates preserve host/method IDs and any pinned remote identity. Omitted
+settings stay unchanged; `--clear` accepts a comma-separated list of optional
+settings (see `ctl host update --help`). Use `--gateway ID` repeatedly to set an
+ordered route through existing saved gateways, or `--vpn ID` to select a saved
+VPN. Use `host method` to manage alternate routes. The preferred method cannot
+be removed until another is selected. Catalog edits use the desktop's lock,
+atomic writes, and content revisions; a concurrent edit fails without
+replacing it. Reload an already-open desktop to see CLI changes.
+
 ### Shells, commands, and file copies
 
 The native shell command creates a new persistent rmux session by default.

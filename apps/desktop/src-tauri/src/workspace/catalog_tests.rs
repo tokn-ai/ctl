@@ -718,3 +718,78 @@ fn invalid_saved_vpn_references_are_rejected() {
     assert!(!fixture.0.join("hosts.json").exists());
   }
 }
+
+#[test]
+fn desktop_and_cli_catalog_writers_share_revisions_and_locking() {
+  let fixture = Fixture::new();
+  let saved = fixture
+    .repository()
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: None,
+      document: catalog(),
+    })
+    .unwrap();
+  let gate = Arc::new(Barrier::new(3));
+  let threads: Vec<_> = (0..2)
+    .map(|index| {
+      let repository = fixture.repository();
+      let gate = Arc::clone(&gate);
+      let mut request = saved.clone();
+      request.document.hosts[0].name = format!("Writer {index}");
+      std::thread::spawn(move || {
+        gate.wait();
+        if index == 0 {
+          repository.update_hosts(UpdateHostsRequest {
+            expected_revision: request.revision,
+            document: request.document,
+          })
+        } else {
+          ctl_core::hosts::storage::update(
+            &repository.directory.join("hosts.json"),
+            request.revision.as_deref(),
+            request.document,
+          )
+          .map_err(CommandErrorDto::from)
+        }
+      })
+    })
+    .collect();
+  gate.wait();
+  let results: Vec<_> = threads
+    .into_iter()
+    .map(|thread| thread.join().unwrap())
+    .collect();
+  assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+  assert_eq!(
+    results
+      .iter()
+      .find_map(|result| result.as_ref().err())
+      .unwrap()
+      .code,
+    "hosts_conflict"
+  );
+  let current = fixture.repository().load_hosts().unwrap();
+  assert_eq!(
+    current.document.hosts[0].remote_info,
+    saved.document.hosts[0].remote_info
+  );
+  assert_eq!(
+    current,
+    ctl_core::hosts::storage::load(&fixture.0.join("hosts.json")).unwrap()
+  );
+  let mut edited = current.clone();
+  edited.document.hosts[0].name = "External editor".into();
+  let bytes = serde_json::to_vec(&edited).unwrap();
+  fs::write(fixture.0.join("hosts.json"), &bytes).unwrap();
+  assert_eq!(
+    ctl_core::hosts::storage::update(
+      &fixture.0.join("hosts.json"),
+      current.revision.as_deref(),
+      current.document
+    )
+    .unwrap_err()
+    .code,
+    "hosts_conflict"
+  );
+  assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), bytes);
+}

@@ -151,6 +151,14 @@ projected/unavailable hosts and runtime fields. Missing definitions retain
 unavailable placeholders for workspace references; unavailable targets fail before
 transport creation instead of treating a vanished alias as a DNS name.
 
+`ctl host` edits this same catalog using shared Rust storage, the same
+`workspace.lock`, atomic replacement, and content revisions. CLI changes retain
+stable IDs and pinned remote identity; stale writers fail with `hosts_conflict`.
+The CLI does not edit workspace references or promote discovered aliases unless
+explicitly added. Passive host status observes each method through ctld without
+starting it; explicit connect/disconnect reuse its authentication and pause
+policy. An already-open desktop must reload to observe external catalog edits.
+
 Workspace identity observations are separate from catalog identities and take
 precedence when reconnecting remembered entries. They cannot overwrite catalog
 metadata merely because the workspace autosaves. Host settings renames hosts and

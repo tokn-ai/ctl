@@ -278,26 +278,7 @@ impl Repository {
   }
 
   fn lock(&self) -> CommandResult<File> {
-    let mut directory = fs::DirBuilder::new();
-    directory.recursive(true);
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::DirBuilderExt as _;
-      directory.mode(0o700);
-    }
-    directory.create(&self.directory).map_err(io_error)?;
-    let path = self.directory.join("workspace.lock");
-    regular_file_or_absent(&path).map_err(io_error)?;
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::OpenOptionsExt as _;
-      options.mode(0o600);
-    }
-    let file = options.open(path).map_err(io_error)?;
-    file.lock().map_err(io_error)?;
-    Ok(file)
+    ctl_core::hosts::storage::lock_directory(&self.directory).map_err(Into::into)
   }
 
   fn write(&self, bytes: &[u8]) -> io::Result<()> {

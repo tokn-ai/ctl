@@ -1,10 +1,6 @@
-use std::fs::File;
-use std::io::{self, Read};
 use std::path::Path;
 
-use super::{
-  ConnectionTargetDto, HostCatalogDocument, HostCatalogSnapshot, HostError, SshGatewayDto,
-};
+use super::{ConnectionTargetDto, HostCatalogDocument, HostError, SshGatewayDto};
 
 pub struct ResolvedHost {
   pub host_id: Option<String>,
@@ -18,47 +14,7 @@ pub struct ResolvedHost {
 /// # Errors
 /// Returns an error for unreadable, oversized, or invalid catalog snapshots.
 pub fn load_catalog(path: &Path) -> Result<HostCatalogDocument, HostError> {
-  let access = |error: io::Error| {
-    HostError::new(
-      "hosts_io",
-      format!("Could not read {}: {error}", path.display()),
-    )
-  };
-  match std::fs::symlink_metadata(path) {
-    Ok(metadata) if !metadata.is_file() => {
-      return Err(HostError::new(
-        "hosts_invalid",
-        "The host catalog must be a regular file.",
-      ));
-    }
-    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-      return Ok(HostCatalogDocument::default());
-    }
-    Err(error) => return Err(access(error)),
-    _ => {}
-  }
-  let mut bytes = Vec::new();
-  File::open(path)
-    .map_err(access)?
-    .take(4 * 1024 * 1024 + 1)
-    .read_to_end(&mut bytes)
-    .map_err(access)?;
-  if bytes.len() > 4 * 1024 * 1024 {
-    return Err(HostError::new(
-      "hosts_invalid",
-      "The host catalog exceeds the size limit.",
-    ));
-  }
-  let snapshot: HostCatalogSnapshot = serde_json::from_slice(&bytes)
-    .map_err(|error| HostError::new("hosts_invalid", format!("Invalid host catalog: {error}")))?;
-  snapshot.document.validate()?;
-  if snapshot.revision.as_ref().is_none_or(String::is_empty) {
-    return Err(HostError::new(
-      "hosts_invalid",
-      "The host catalog has no revision.",
-    ));
-  }
-  Ok(snapshot.document)
+  Ok(super::storage::load(path)?.document)
 }
 
 /// Saved names and stable IDs take precedence over OpenSSH destinations.

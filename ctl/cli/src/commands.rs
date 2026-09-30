@@ -20,6 +20,13 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     }
   }
   match arguments.command {
+    Command::Host { command } => {
+      if arguments.host.is_some() || arguments.remote_platform.is_some() {
+        return Err(CliError::HostManagementTarget);
+      }
+      crate::host::run(command, arguments.method.as_deref()).await?;
+      return Ok(0);
+    }
     Command::Ssh {
       arguments: ssh_arguments,
     } => return Ok(crate::openssh::run_ssh(ssh_arguments, arguments.method.as_deref()).await?),
@@ -58,7 +65,7 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     }
     #[cfg(unix)]
     Command::Port { command } => crate::port::run(&connector.settings, command).await?,
-    Command::Ssh { .. } | Command::Scp { .. } => {
+    Command::Host { .. } | Command::Ssh { .. } | Command::Scp { .. } => {
       unreachable!("compatibility commands dispatched above")
     }
     Command::Rmux { command } => {
@@ -282,6 +289,12 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error(transparent)]
+  HostCommand(#[from] crate::host::Error),
+  #[error(
+    "Host management edits the local catalog; select a host with its positional name or ID, not --host."
+  )]
+  HostManagementTarget,
   #[error(transparent)]
   Host(#[from] ctl_core::hosts::HostError),
   #[error(transparent)]

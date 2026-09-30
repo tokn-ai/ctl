@@ -74,6 +74,8 @@ interface ConnectionRequest {
 
 export interface AttachmentActions {
   state: AttachmentViewState;
+  /** Advances for explicit opens/retries, never for automatic recovery. */
+  connection_attempt: number;
   connect(session: SessionSummary, options?: ConnectOptions): Promise<void>;
   reconnect(): Promise<void>;
   cancelPendingConnection(session: SessionSummary): void;
@@ -92,6 +94,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const view_resize_ref = useRef(view_resize);
   view_resize_ref.current = view_resize;
   const [state, publishState] = useState(INITIAL_STATE);
+  const connection_attempt = useRef(0);
   const stateRef = useRef(state);
   // Event channels can deliver multiple transitions before React commits.
   // Fence every callback against the latest transition, not the last render.
@@ -836,6 +839,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
 
   const connect = useCallback(
     async (session: SessionSummary, options: ConnectOptions = {}) => {
+      connection_attempt.current += 1;
       resetRecovery();
       const selected = { ...session, terminal_id: options.terminal_id };
       return connectAt(selected, null, options.resize_with_window ?? view_resize_ref.current, Boolean(options.terminal_id));
@@ -850,6 +854,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         return;
       }
       if (resetBackoff) {
+        connection_attempt.current += 1;
         resetRecovery();
       }
 
@@ -1113,6 +1118,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
 
   return {
     state,
+    connection_attempt: connection_attempt.current,
     connect,
     reconnect,
     cancelPendingConnection,

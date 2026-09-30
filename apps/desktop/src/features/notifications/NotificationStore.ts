@@ -1,4 +1,4 @@
-import type { AppNotification, NotificationInput } from "../../lib/types";
+import type { AppNotification, NotificationAction, NotificationInput } from "../../lib/types";
 
 export const MAX_NOTIFICATIONS = 100;
 export const MAX_NOTIFICATION_TOASTS = 3;
@@ -27,6 +27,7 @@ export class NotificationStore {
   report(source_key: string, input: NotificationInput | null): void {
     if (input === null) {
       this.reported.delete(source_key);
+      this.setActions(source_key, []);
       return;
     }
     const signature = JSON.stringify([input.severity, input.title, input.message, input.source]);
@@ -69,6 +70,14 @@ export class NotificationStore {
   hide(id: string): void {
     this.update({ ...this.state, entries: this.state.entries.map((entry) =>
       entry.id === id ? { ...entry, toast_visible: false } : entry) });
+  }
+
+  /** Retain history while disabling actions for resolved or temporarily busy sources. */
+  setActions(source_key: string, actions: readonly NotificationAction[]): void {
+    const previous = this.state.entries.find((entry) => entry.source_key === source_key);
+    if (!previous || JSON.stringify(previous.actions ?? []) === JSON.stringify(actions)) return;
+    this.update({ ...this.state, entries: this.state.entries.map((entry) =>
+      entry === previous ? { ...entry, actions } : entry) });
   }
 
   dismiss(id: string): void {

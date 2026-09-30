@@ -51,10 +51,20 @@ fn paused_status() -> ServerMessage {
 /// start a connection, authenticate, or verify the remote transport's health.
 /// A missing endpoint proves absence; command failure alone does not.
 pub(super) async fn observe(target: &SshTarget, path: &Path) -> Result<bool, RequestError> {
+  observe_with_command(path, check_command(target, path), MASTER_CHECK_TIMEOUT).await
+}
+
+fn check_command(target: &SshTarget, path: &Path) -> Command {
   let mut command = Command::new(SSH_PROGRAM);
-  command.arg("-S").arg(path).args(["-O", "check"]);
+  // The selected socket is sufficient for mux control. Reading user config
+  // here would execute Match exec during passive status polls.
+  command
+    .args(["-F", "none"])
+    .arg("-S")
+    .arg(path)
+    .args(["-O", "check"]);
   append_target_arguments(&mut command, target);
-  observe_with_command(path, command, MASTER_CHECK_TIMEOUT).await
+  command
 }
 
 fn endpoint_exists(path: &Path) -> Result<bool, RequestError> {
@@ -112,6 +122,27 @@ mod tests {
     let mut command = Command::new("/bin/sh");
     command.args(["-c", script]);
     command
+  }
+
+  #[test]
+  fn exact_control_checks_skip_user_configuration() {
+    let target = SshTarget {
+      destination: "fixture.invalid".into(),
+      ssh_config_alias: Some("fixture.invalid".into()),
+      use_ssh_config_master: None,
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      gateways: vec![],
+    };
+    let command = check_command(&target, Path::new("/tmp/fixture-master"));
+    let args: Vec<_> = command.as_std().get_args().collect();
+    assert_eq!(
+      &args[..6],
+      ["-F", "none", "-S", "/tmp/fixture-master", "-O", "check"]
+    );
+    assert!(!args.contains(&std::ffi::OsStr::new("-G")));
   }
 
   #[tokio::test]
@@ -307,15 +338,17 @@ mod tests {
     let path = fixture_path();
     std::fs::write(&path.0, "invalid socket").unwrap();
     let state = Arc::new(State::default());
-    state.adopt(
-      &target,
-      &crate::MasterEndpoint {
-        control_path: path.0.clone(),
-        shared: true,
-        startup: crate::SharedMasterStartup::ExternalOnly,
-      },
-      None,
-    );
+    state
+      .adopt(
+        &target,
+        &crate::MasterEndpoint {
+          control_path: path.0.clone(),
+          shared: true,
+          startup: crate::SharedMasterStartup::ExternalOnly,
+        },
+        None,
+      )
+      .unwrap();
     let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(handle_connection(server, state));
     handshake(&mut client).await.unwrap();

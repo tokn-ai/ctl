@@ -2,6 +2,7 @@
 
 mod credential_metadata;
 pub mod credentials;
+mod endpoint_registry;
 pub mod identities;
 #[cfg(target_os = "macos")]
 mod identity_connection;
@@ -70,6 +71,7 @@ struct State {
   targets: Mutex<HashMap<String, Arc<TargetLifecycle>>>,
   forwards: AsyncMutex<ForwardRegistry>,
   configured_connections: Mutex<HashMap<String, ConnectionLease>>,
+  endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
   vpn_service: Option<vpn_service::VpnService>,
 }
@@ -131,7 +133,36 @@ impl State {
       .map(|lease| lease.endpoint.clone())
   }
 
-  fn adopt(&self, target: &SshTarget, endpoint: &MasterEndpoint, anchor: Option<ChildStdin>) {
+  fn existing_endpoint(&self, target: &SshTarget) -> Result<Option<MasterEndpoint>, RequestError> {
+    match self.endpoint(target) {
+      Some(endpoint) => Ok(Some(endpoint)),
+      None => self.endpoint_registry.load(&control_path(target)),
+    }
+  }
+
+  fn adopt(
+    &self,
+    target: &SshTarget,
+    endpoint: &MasterEndpoint,
+    anchor: Option<ChildStdin>,
+  ) -> Result<(), RequestError> {
+    self.remember_endpoint(target, endpoint, anchor);
+    if target.uses_ssh_config_master() {
+      // Keep the observed endpoint in memory if persistence fails, and report
+      // the failure to Connect rather than silently promise restart recovery.
+      self
+        .endpoint_registry
+        .save(&control_path(target), endpoint)?;
+    }
+    Ok(())
+  }
+
+  fn remember_endpoint(
+    &self,
+    target: &SshTarget,
+    endpoint: &MasterEndpoint,
+    anchor: Option<ChildStdin>,
+  ) {
     if target.uses_ssh_config_master() {
       let mut connections = self.configured_connections.lock().unwrap();
       // Repeated Connect must not drop an existing nonpersistent anchor.
@@ -256,6 +287,7 @@ pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
   let state = Arc::new(State {
     vpn_service: Some(vpn_service),
     lifecycle: Some(lifecycle),
+    endpoint_registry: endpoint_registry::Registry::for_socket(&guard.0),
     ..State::default()
   });
   let mut connections = tokio::task::JoinSet::new();
@@ -573,7 +605,7 @@ async fn ensure_master(
   }
   let control_path = endpoint.control_path.clone();
   if reused {
-    state.adopt(&target, &endpoint, None);
+    state.adopt(&target, &endpoint, None)?;
     attempt
       .run(async {
         state
@@ -628,7 +660,7 @@ async fn ensure_master(
     .await;
   if endpoint.shared {
     if matches!(result, Ok(Ok(()))) {
-      state.adopt(&target, &endpoint, child.stdin.take());
+      state.remember_endpoint(&target, &endpoint, child.stdin.take());
     }
     // A configured master can already serve other applications. End only our
     // anchor session; killing this process could terminate their channels.
@@ -674,7 +706,7 @@ async fn wait_for_master(
       handle_save_offer(stream, target, &mut captured, identities).await?;
       #[cfg(not(target_os = "macos"))]
       captured.clear();
-      state.adopt(target, endpoint, None);
+      state.adopt(target, endpoint, None)?;
       let mut forwards = state.forwards.lock().await;
       forwards
         .activate(&SshForwardControl { state }, target)
@@ -752,7 +784,7 @@ async fn reuse_master_or_prepare(
   // is ready but before the credential save offer finishes.
   let mut forwards = state.forwards.lock().await;
   let ready = control_master_is_ready(target, control_path).await;
-  if let Some(previous) = state.endpoint(target) {
+  if let Some(previous) = state.existing_endpoint(target)? {
     let changed = previous.control_path != *control_path || previous.shared != endpoint.shared;
     if changed || !ready {
       // Our shared listeners remain under ctld's control even when the master
@@ -760,11 +792,15 @@ async fn reuse_master_or_prepare(
       // that socket to cancel a forward would prevent reconnection forever.
       if previous.shared || changed && control_master_is_ready(target, &previous.control_path).await
       {
+        state.remember_endpoint(target, &previous, None);
         forwards
           .disconnect(&SshForwardControl { state }, target)
           .await?;
         forwards.resume(target);
       }
+      state
+        .endpoint_registry
+        .remove(&crate::control_path(target))?;
       state
         .configured_connections
         .lock()
@@ -1022,10 +1058,10 @@ async fn master_status(
   let lifecycle = state.target(target);
   let mut attempt = lifecycle.attempt();
   lifecycle.require_connected()?;
-  let message = if let Some(endpoint) = state.endpoint(target) {
+  let message = if let Some(endpoint) = state.existing_endpoint(target)? {
     if attempt
-      .run(control_master_is_ready(target, &endpoint.control_path))
-      .await?
+      .run(master_observation::observe(target, &endpoint.control_path))
+      .await??
     {
       ServerMessage::MasterReady {
         control_path: endpoint.control_path,
@@ -1053,7 +1089,14 @@ async fn disconnect_master(
   let _target_guard = lifecycle.lock.lock().await;
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
-  if let Some(endpoint) = state.endpoint(target) {
+  let endpoint = state.existing_endpoint(target)?;
+  if let Some(endpoint) = &endpoint {
+    // Pin the recovered endpoint while listener cleanup runs after its durable
+    // record is removed. A failed disconnect must not restore discovery.
+    state.remember_endpoint(target, endpoint, None);
+  }
+  state.endpoint_registry.remove(&control_path(target))?;
+  if let Some(endpoint) = endpoint {
     if endpoint.shared {
       forwards
         .disconnect(&SshForwardControl { state }, target)
@@ -1083,7 +1126,7 @@ async fn connection_status(
   validate_target(target)?;
   let lifecycle = state.target(target);
   let message = master_observation::connection_status(&lifecycle, async {
-    if let Some(endpoint) = state.endpoint(target) {
+    if let Some(endpoint) = state.existing_endpoint(target)? {
       master_observation::observe(target, &endpoint.control_path).await
     } else {
       Ok(false)
@@ -1096,7 +1139,11 @@ async fn connection_status(
 
 fn exit_master_command(target: &SshTarget, control_path: &Path) -> Command {
   let mut command = Command::new(SSH_PROGRAM);
-  command.arg("-S").arg(control_path).args(["-O", "exit"]);
+  command
+    .args(["-F", "none"])
+    .arg("-S")
+    .arg(control_path)
+    .args(["-O", "exit"]);
   append_target_arguments(&mut command, target);
   command
     .stdin(Stdio::null())
@@ -1194,7 +1241,7 @@ async fn list_remote_listeners(
   lifecycle.require_connected()?;
   let _target_guard = attempt.run(lifecycle.lock.lock()).await?;
   lifecycle.require_connected()?;
-  let Some(endpoint) = state.endpoint(target) else {
+  let Some(endpoint) = state.existing_endpoint(target)? else {
     ctld_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
     return Ok(());
   };
@@ -1366,6 +1413,7 @@ async fn run_forward_command(
   );
   let mut command = Command::new(SSH_PROGRAM);
   command
+    .args(["-F", "none"])
     .arg("-S")
     .arg(control_path)
     .args(["-O", if cancel { "cancel" } else { "forward" }])
@@ -1619,13 +1667,16 @@ fn control_path_for_socket(target: &SshTarget, daemon_socket: &Path) -> PathBuf 
   for byte in &digest[..16] {
     write!(name, "{byte:02x}").expect("writing to a String cannot fail");
   }
+  control_directory().join(name)
+}
+
+fn control_directory() -> PathBuf {
   #[cfg(unix)]
-  let directory = PathBuf::from("/tmp")
+  return PathBuf::from("/tmp")
     .join(format!("ctld-{}", rustix::process::getuid().as_raw()))
     .join("masters");
   #[cfg(not(unix))]
-  let directory = std::env::temp_dir().join("ctld-masters");
-  directory.join(name)
+  std::env::temp_dir().join("ctld-masters")
 }
 
 fn validate_target(target: &SshTarget) -> Result<(), RequestError> {
@@ -1925,7 +1976,10 @@ mod tests {
     let path = Path::new("/private/tmp/ctld-test/master.sock");
     let command = exit_master_command(&target(), path);
     let args: Vec<_> = command.as_std().get_args().collect();
-    assert_eq!(&args[..4], ["-S", path.to_str().unwrap(), "-O", "exit"]);
+    assert_eq!(
+      &args[..6],
+      ["-F", "none", "-S", path.to_str().unwrap(), "-O", "exit"]
+    );
     assert_eq!(*args.last().unwrap(), "example.test");
     assert_eq!(command.as_std().get_program(), "ssh");
   }

@@ -1,6 +1,8 @@
 import { useId, useState } from "react";
 import { Icon } from "../ui/Icon";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
+import { isObservationTime, lastSeenAge, useLastSeenClock } from "../../features/sessions/lastSeen";
+import { hasKnownTerminalSize } from "../../features/sessions/sessionObservation";
 import type { ErrorDetails } from "../../lib/errors";
 import {
   compactTerminalTitle,
@@ -189,6 +191,9 @@ export function SessionSidebar({
     (session) =>
       session.target.kind !== "local" || !taskSessionIds.has(session.session_id),
   );
+  const now_ms = useLastSeenClock(ordinarySessions.some((session) =>
+    isObservationTime(session.last_seen_at_ms) && attachmentStates?.get(sessionKey(session))?.phase !== "attached",
+  ));
   const sessionGroups = targets.map((target) => ({
     target,
     sessions: ordinarySessions.filter(
@@ -485,7 +490,11 @@ export function SessionSidebar({
                     : session.status;
                   const status = attachment ? attachmentPhaseLabel(attachment.phase)
                     : session.status === "running" ? "Last seen running" : observed_status;
-                  const dimensions = attachment?.phase === "attached"
+                  const age = attachment?.phase === "attached" ? null : lastSeenAge(session.last_seen_at_ms, now_ms);
+                  const observed_at = age !== null && isObservationTime(session.last_seen_at_ms)
+                    ? new Date(session.last_seen_at_ms).toISOString() : null;
+                  const observation_title = observed_at ? `Last observed by this app: ${observed_at}` : undefined;
+                  const dimensions = attachment?.phase === "attached" || hasKnownTerminalSize(session)
                     ? ` · ${session.terminal_size.columns}×${session.terminal_size.rows}`
                     : "";
                   return (
@@ -500,17 +509,24 @@ export function SessionSidebar({
                         disabled={closing}
                         aria-current={selected ? "true" : undefined}
                         aria-label={`${fullTitle} — ${session.name}`}
+                        aria-description={observation_title}
                         title={fullTitle}
                       >
                         <Icon name="terminal" class_name="session-icon" />
                         <span className="session-copy">
                           <strong>{compactTitle}</strong>
-                          <small title={`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`}>
-                            {session.name}
-                            <span aria-hidden="true"> · </span>
-                            <span className="session-status" data-status={attachment?.phase ?? (session.status === "running" ? "unknown" : session.status)}>
-                              {status}
+                          <small className="session-details" title={[`${session.name} · ${status}${dimensions} · Session last reported ${observed_status}`, observation_title].filter(Boolean).join("\n")}>
+                            <span className="session-detail-label">
+                              {session.name}
+                              <span aria-hidden="true"> · </span>
+                              <span className="session-status" data-status={attachment?.phase ?? (session.status === "running" ? "unknown" : session.status)}>
+                                {status}
+                              </span>
                             </span>
+                            {age !== null ? <span className="session-age">
+                              <span aria-hidden="true"> · </span>
+                              <time dateTime={observed_at ?? undefined} title={observation_title}>{age}</time>
+                            </span> : null}
                           </small>
                         </span>
                       </button>

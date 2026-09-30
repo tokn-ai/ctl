@@ -8,7 +8,9 @@ import {
   removeSession,
   replaceSessionList,
   syncSessionTerminalSize,
+  syncSessionObservation,
 } from "./sessionListState";
+import { hasKnownTerminalSize, mergeSessionObservation } from "./sessionObservation";
 
 function terminalSize(columns: number, rows: number): TerminalSize {
   return {
@@ -35,6 +37,56 @@ function session(
 }
 
 describe("session list state", () => {
+  it("synchronizes size and observed time without changing runtime status or other rows", () => {
+    const original = session("observed", { status: "unknown", last_seen_at_ms: 100 });
+    const other = session("other");
+    const incoming = { ...original, status: "running" as const, name: "different", terminal_size: terminalSize(120, 42), last_seen_at_ms: 200 };
+    const result = syncSessionObservation([original, other], sessionKey(original), incoming);
+    expect(result[0]).toMatchObject({ status: "unknown", name: "observed", terminal_size: terminalSize(120, 42), last_seen_at_ms: 200 });
+    expect(result[1]).toBe(other);
+    expect(syncSessionObservation(result, sessionKey(original), incoming)).toBe(result);
+    expect(syncSessionObservation(result, sessionKey(original), { ...incoming, last_seen_at_ms: 50 })).toBe(result);
+    expect(syncSessionObservation(result, sessionKey(other), incoming)).toBe(result);
+  });
+
+  it("preserves fresh observations across list replacements and older inspections", () => {
+    const known = session("known", { last_seen_at_ms: 200, terminal_size: terminalSize(120, 42) });
+    const stale = session("known", { last_seen_at_ms: 100, status: "exited" });
+    const expected = { ...stale, last_seen_at_ms: 200, terminal_size: known.terminal_size };
+    expect(replaceSessionList([stale], [known])[0]).toMatchObject(expected);
+    expect(prependSession([known], stale)[0]).toMatchObject(expected);
+    expect(mergeTargetSessionLists([known], [known.target], new Map([["local", [stale]]]))[0]).toMatchObject(expected);
+    expect(mergeSessionObservation(known, { ...stale, last_seen_at_ms: undefined })).toMatchObject({ last_seen_at_ms: 200, terminal_size: known.terminal_size });
+  });
+
+  it("allows geometry changes at equal observation time and never promotes a restored placeholder", () => {
+    const unknown = session("known", { terminal_size_known: false, last_seen_at_ms: 200 });
+    const timeOnly = { ...unknown, last_seen_at_ms: 300 };
+    const updated = syncSessionObservation([unknown], sessionKey(unknown), timeOnly);
+    expect(hasKnownTerminalSize(updated[0])).toBe(false);
+    const observed = { ...timeOnly, terminal_size_known: true, terminal_size: terminalSize(120, 42) };
+    const known = syncSessionObservation(updated, sessionKey(unknown), observed);
+    expect(known[0].terminal_size).toEqual(observed.terminal_size);
+    expect(hasKnownTerminalSize(known[0])).toBe(true);
+    expect(syncSessionObservation(known, sessionKey(unknown), { ...timeOnly, last_seen_at_ms: 400 })[0]).toMatchObject({ terminal_size: observed.terminal_size, last_seen_at_ms: 400 });
+  });
+
+  it("does not create evidence from invalid or missing timestamps on legacy placeholders", () => {
+    const unknown = session("known", { terminal_size_known: false });
+    const current = [unknown];
+    for (const last_seen_at_ms of [undefined, null, 0, -1, NaN, 8_640_000_000_000_001]) {
+      expect(syncSessionObservation(current, sessionKey(unknown), { ...unknown, last_seen_at_ms })).toBe(current);
+    }
+  });
+
+  it("fills unknown geometry from an older real observation without regressing known time", () => {
+    const timeOnly = session("known", { terminal_size_known: false, last_seen_at_ms: 200 });
+    const observed = session("known", { terminal_size_known: true, terminal_size: terminalSize(120, 40), last_seen_at_ms: 100 });
+    const current = syncSessionObservation([timeOnly], sessionKey(timeOnly), observed);
+    expect(current[0]).toMatchObject({ terminal_size: observed.terminal_size, terminal_size_known: true, last_seen_at_ms: 200 });
+    expect(syncSessionObservation(current, sessionKey(timeOnly), { ...timeOnly, last_seen_at_ms: 150 })).toBe(current);
+  });
+
   it("accepts only the latest overlapping refresh", () => {
     const guard = new SessionListRefreshGuard();
     const first = guard.begin();

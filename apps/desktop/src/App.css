@@ -631,6 +631,22 @@ button:disabled {
   white-space: nowrap;
 }
 
+.session-details {
+  display: flex;
+}
+
+.session-detail-label {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-age {
+  flex: 0 0 auto;
+}
+
 .sidebar-state {
   margin: 12px 0;
   padding: 12px 18px;

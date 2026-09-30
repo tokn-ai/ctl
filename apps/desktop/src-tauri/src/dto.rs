@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -10,6 +11,23 @@ use rmux_proto::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CommandErrorDto, CommandResult, protocol_error_code};
+
+/// JavaScript Date's range is narrower than Number's exact integer range.
+pub(crate) const MAX_OBSERVATION_TIMESTAMP_MS: u64 = 8_640_000_000_000_000;
+
+pub(crate) fn valid_observation_timestamp(value: u64) -> bool {
+  (1..=MAX_OBSERVATION_TIMESTAMP_MS).contains(&value)
+}
+
+pub(crate) fn observation_timestamp_ms() -> Option<u64> {
+  let milliseconds = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .ok()?
+    .as_millis();
+  u64::try_from(milliseconds)
+    .ok()
+    .filter(|value| valid_observation_timestamp(*value))
+}
 
 /// Explicit endpoint identity carried by every operation that opens a stream.
 ///
@@ -260,11 +278,20 @@ pub struct SessionDto {
   pub status: SessionStatusDto,
   pub next_sequence: String,
   pub terminal_size: TerminalSizeDto,
+  pub last_seen_at_ms: Option<u64>,
 }
 
 impl SessionDto {
   #[must_use]
   pub fn new(value: SessionInfo, target: ConnectionTargetDto) -> Self {
+    Self::observed_at(value, target, observation_timestamp_ms())
+  }
+
+  pub fn observed_at(
+    value: SessionInfo,
+    target: ConnectionTargetDto,
+    last_seen_at_ms: Option<u64>,
+  ) -> Self {
     Self {
       target,
       session_id: value.session_id,
@@ -274,6 +301,7 @@ impl SessionDto {
       status: value.status.into(),
       next_sequence: value.next_sequence.to_string(),
       terminal_size: value.terminal_size.into(),
+      last_seen_at_ms: last_seen_at_ms.filter(|value| valid_observation_timestamp(*value)),
     }
   }
 }
@@ -601,6 +629,10 @@ pub enum AttachmentExitReasonDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum AttachmentEventDto {
+  SessionObserved {
+    attachment_id: String,
+    last_seen_at_ms: u64,
+  },
   Checkpoint {
     attachment_id: String,
     event_id: String,
@@ -848,6 +880,27 @@ mod tests {
     let json = serde_json::to_value(dto).unwrap();
     assert_eq!(json["target"]["kind"], "local");
     assert_eq!(json["next_sequence"], u64::MAX.to_string());
+    assert!(
+      json["last_seen_at_ms"]
+        .as_u64()
+        .is_some_and(valid_observation_timestamp)
+    );
+    assert_ne!(json["last_seen_at_ms"], u64::MAX);
+  }
+
+  #[test]
+  fn session_observation_events_have_a_scoped_snake_case_contract() {
+    let value = serde_json::to_value(AttachmentEventDto::SessionObserved {
+      attachment_id: "attachment".into(),
+      last_seen_at_ms: 1_759_300_000_000,
+    })
+    .unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "event_type": "session_observed", "attachment_id": "attachment", "last_seen_at_ms": 1_759_300_000_000_u64,
+      })
+    );
   }
 
   #[test]

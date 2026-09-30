@@ -118,6 +118,7 @@ const api = vi.hoisted(() => ({
   syncCommandMenu: vi.fn(),
 }));
 const attachment = vi.hoisted(() => ({
+  states: [] as AttachmentViewState[],
   state: {
     phase: "idle",
     error_code: null,
@@ -155,7 +156,7 @@ vi.mock("../features/attachment/useSessionAttachments", () => ({
       ...attachment,
       storage_error: null,
       controllers: null,
-      states: [],
+      states: attachment.states,
       session_keys: new Set(),
       closeSession: vi.fn(),
       retainSessions: vi.fn(),
@@ -218,6 +219,7 @@ beforeEach(() => {
   attachment.state.message = null;
   attachment.state.session = null;
   attachment.state.shell_state = null;
+  attachment.states = [];
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   nativeWindow.onCloseRequested.mockResolvedValue(() => {});
   nativeWindow.destroy.mockResolvedValue(undefined);
@@ -2709,6 +2711,103 @@ describe("workspace-backed terminal page", () => {
     await screen.findByText("Local disk is full");
     expect(screen.getByRole("button", { name: "~/work — remembered" })).toBeTruthy();
     expect(attachment.detach).not.toHaveBeenCalled();
+  });
+
+  it("persists observed size and time, retaining both through disconnect and failed inspection", async () => {
+    const { rerender } = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    const last_seen_at_ms = Date.now() - 120_000;
+    const terminal_size = { columns: 132, rows: 43, pixel_width: 1056, pixel_height: 688 };
+    const observed: SessionSummary = {
+      ...restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0],
+      status: "running",
+      terminal_size,
+      terminal_size_known: true,
+      last_seen_at_ms,
+    };
+    Object.assign(attachment.state, { phase: "attached", session: observed });
+    rerender(<TerminalPage />);
+    const latest = () => api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sessions[0];
+    await waitFor(() => expect(latest()).toMatchObject({
+      last_known_terminal_size: terminal_size, last_seen_at_ms,
+    }));
+
+    Object.assign(attachment.state, { phase: "disconnected", session: observed });
+    rerender(<TerminalPage />);
+    api.inspectKnownSessions.mockRejectedValueOnce(new Error("Remote connection unavailable"));
+    const refresh = screen.getByRole("button", { name: "Refresh sessions" });
+    fireEvent.click(refresh);
+    await screen.findByText("Remote connection unavailable");
+    expect(latest()).toMatchObject({ last_known_terminal_size: terminal_size, last_seen_at_ms });
+
+    const earlier = { ...observed, terminal_size: { ...terminal_size, columns: 80 }, last_seen_at_ms: last_seen_at_ms - 60_000 };
+    api.inspectKnownSessions.mockResolvedValueOnce([{ session_id: observed.session_id, session: earlier, shell_state: null, error: null }]);
+    fireEvent.click(refresh);
+    await waitFor(() => expect(api.inspectKnownSessions).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("Remote connection unavailable")).toBeNull());
+    await waitFor(() => expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sessions[0]).toMatchObject({
+      last_known_terminal_size: terminal_size, last_seen_at_ms,
+    }));
+  });
+
+  it.each(["active", "background"])("applies a manual inspection during %s heartbeat updates without regressing observations", async (position) => {
+    const { rerender } = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    const last_seen_at_ms = Date.now() - 60_000;
+    const observed: SessionSummary = {
+      ...restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0],
+      status: "running", terminal_size_known: true, last_seen_at_ms,
+    };
+    const publish = (session: SessionSummary) => {
+      if (position === "active") Object.assign(attachment.state, { phase: "attached", session });
+      else attachment.states = [{ ...attachment.state, phase: "attached", session } as AttachmentViewState];
+    };
+    publish(observed);
+    rerender(<TerminalPage />);
+    await waitFor(() => expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sessions[0].last_seen_at_ms).toBe(last_seen_at_ms));
+    let finish!: (response: unknown) => void;
+    api.inspectKnownSessions.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
+    await waitFor(() => expect(api.inspectKnownSessions).toHaveBeenCalledTimes(1));
+
+    publish({ ...observed, last_seen_at_ms: last_seen_at_ms + 20_000 });
+    rerender(<TerminalPage />);
+    await act(async () => finish([{
+      session_id: observed.session_id,
+      session: { ...observed, name: "inspected", last_seen_at_ms: last_seen_at_ms + 10_000 },
+      shell_state: null, error: null,
+    }]));
+    await screen.findByRole("button", { name: "~/work — inspected" });
+    await waitFor(() => expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sessions[0]).toMatchObject({
+      name: "inspected", last_seen_at_ms: last_seen_at_ms + 20_000,
+    }));
+  });
+
+  it("persists background attachment observations without selecting their tab", async () => {
+    const saved = snapshot();
+    saved.document.sessions.push({
+      host_id: "test-id", session_id: "background-id", name: "background",
+      last_known_cwd: null, last_known_cwd_display: null,
+    });
+    saved.document.tabs.push({ host_id: "test-id", session_id: "background-id" });
+    api.loadWorkspace.mockResolvedValueOnce(saved);
+    const { rerender } = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    const last_seen_at_ms = Date.now() - 5_000;
+    const terminal_size = { columns: 111, rows: 37, pixel_width: null, pixel_height: null };
+    const session: SessionSummary = {
+      ...restoreWorkspace(saved.document, hostSnapshot().document).sessions[1],
+      terminal_size, terminal_size_known: true, last_seen_at_ms, status: "running",
+    };
+    attachment.states = [{
+      ...attachment.state, phase: "attached", session,
+    } as AttachmentViewState];
+    rerender(<TerminalPage />);
+    await waitFor(() => expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].sessions[1]).toMatchObject({
+      last_known_terminal_size: terminal_size, last_seen_at_ms,
+    }));
+    expect(api.updateWorkspace.mock.calls.slice(-1)[0]?.[1].active_tab).toMatchObject({ session_id: "known-id" });
+    expect(attachment.connect).not.toHaveBeenCalled();
   });
 
   it("refreshes only remembered IDs and keeps missing sessions in the workspace", async () => {

@@ -24,6 +24,7 @@ import type {
 import type { ProposedDimensions } from "../terminal/TerminalPresenter";
 import type { AttachmentRenderer } from "../terminal/XtermRenderer";
 import { sameSession, sessionKey, targetKey } from "../targets/targets";
+import { mergeSessionObservation, observedAt } from "../sessions/sessionObservation";
 import { sameSshEndpoint } from "../workspace/remoteRecovery";
 import {
   ATTACHMENT_RECOVERY_STABILITY_MS,
@@ -430,6 +431,13 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       }
 
       switch (event.event_type) {
+        case "session_observed":
+          setState((current) => {
+            if (!current.session || observedAt(event) === null ||
+              event.last_seen_at_ms <= (observedAt(current.session) ?? 0)) return current;
+            return { ...current, session: { ...current.session, last_seen_at_ms: event.last_seen_at_ms } };
+          });
+          break;
         case "checkpoint":
           await renderer.restoreCheckpoint(
             event.checkpoint.terminal_size,
@@ -456,6 +464,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
               ? {
                   ...current.session,
                   terminal_size: event.checkpoint.terminal_size,
+                  terminal_size_known: true,
                 }
               : current.session,
           }));
@@ -484,7 +493,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           setState((current) => ({
             ...current,
             session: current.session
-              ? { ...current.session, terminal_size: event.terminal_size }
+              ? { ...current.session, terminal_size: event.terminal_size, terminal_size_known: true }
               : current.session,
           }));
           break;
@@ -764,7 +773,10 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         }
         publishShellState(result.attached.shell_state);
         setState((current) => transitionAttachment(current, {
-          type: "attached", response: result.attached, resize_with_window: resizeWithWindow,
+          type: "attached", response: {
+            ...result.attached,
+            session: mergeSessionObservation(current.session ?? undefined, { ...result.attached.session, terminal_size_known: true }),
+          }, resize_with_window: resizeWithWindow,
         }));
         responseReady = true;
         for (const event of pendingEvents) {

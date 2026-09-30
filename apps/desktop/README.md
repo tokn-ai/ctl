@@ -260,7 +260,9 @@ original remains available for recovery. Schema 8 moves existing hosts and
 gateways into the catalog before removing them from the workspace. Schema 7 is
 backed up as `workspace-v7.backup.json`; earlier schemas retain their corresponding
 backups. Host IDs and all session/task/port references remain unchanged.
-It remembers known sessions, cached paths, tab order, and selection. Startup
+It remembers known sessions, cached paths, last observed terminal sizes and times,
+tab order, and selection. Unattached sessions show a compact age such as `2h ago`;
+hover shows the exact observation time. Startup
 restores those entries as unverified and automatically connects the selected
 local tab. Remote terminal tabs stay disconnected until explicitly opened; **Connect
 host** resumes that host's selected tab, or its first open tab if another host

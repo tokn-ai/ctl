@@ -164,6 +164,8 @@ async fn create_phase(directory: &Path, target: &ConnectionTargetDto) -> Result<
     name: session.name,
     last_known_cwd: None,
     last_known_cwd_display: None,
+    last_known_terminal_size: None,
+    last_seen_at_ms: None,
   });
   document.tabs.push(reference.clone().into());
   document.active_tab = Some(reference.into());

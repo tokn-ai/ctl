@@ -23,6 +23,7 @@ import type {
   RemoteIdentity,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
+import { hasKnownTerminalSize, knownTerminalSize, observedAt } from "../sessions/sessionObservation";
 import {
   projectedTailscaleHost,
   resolveTailscaleMethod,
@@ -479,12 +480,15 @@ export function restoreWorkspace(
       name: saved.name,
       status: "unknown",
       next_sequence: "0",
-      terminal_size: {
+      terminal_size: knownTerminalSize(saved.last_known_terminal_size)
+        ? saved.last_known_terminal_size : {
         columns: 80,
         rows: 24,
         pixel_width: null,
         pixel_height: null,
       },
+      terminal_size_known: knownTerminalSize(saved.last_known_terminal_size),
+      ...(observedAt(saved) !== null ? { last_seen_at_ms: observedAt(saved) } : {}),
     };
     if (saved.last_known_cwd) {
       shell_states.set(sessionKey(session), {
@@ -590,6 +594,10 @@ export function workspaceDocument(
         name: session.name,
         last_known_cwd: shell?.cwd ?? null,
         last_known_cwd_display: shell?.cwd_display ?? null,
+        ...(observedAt(session) !== null ? {
+          last_seen_at_ms: observedAt(session),
+        } : {}),
+        ...(hasKnownTerminalSize(session) ? { last_known_terminal_size: session.terminal_size } : {}),
       };
     }),
     tabs: allTabs,

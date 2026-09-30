@@ -121,7 +121,8 @@ session continues.
 
 The app persists session/workspace state separately from saved host definitions.
 Schema 8 of `~/.tokn/rmux/workspace.json` contains session references, cached cwd
-labels, task references, forwards, tab order, selection, and observed remote
+labels, last observed terminal dimensions and times, task references, forwards,
+tab order, selection, and observed remote
 identities for referenced hosts. Schema 1 of `~/.tokn/rmux/hosts.json` contains
 remote hosts with stable IDs, named connection methods and preferred method IDs,
 and reusable gateways. The local host is synthesized. Runtime status, output,

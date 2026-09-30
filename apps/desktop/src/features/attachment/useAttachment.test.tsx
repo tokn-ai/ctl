@@ -288,7 +288,7 @@ describe("explicit SSH reconnect preparation", () => {
       expect(signal.aborted).toBe(true);
       await act(async () => { finish(true); await reconnecting; });
       expect(api.openAttachment).toHaveBeenCalledTimes(operation === "new connection" ? 2 : 1);
-      if (operation === "new connection") expect(result.current.state.session).toEqual(second);
+      if (operation === "new connection") expect(result.current.state.session).toEqual({ ...second, terminal_size_known: true });
     },
   );
 
@@ -331,7 +331,7 @@ describe("explicit SSH reconnect preparation", () => {
     await act(async () => { reconnecting = result.current.reconnect(); });
     expect(api.openAttachment).toHaveBeenCalledTimes(2);
     await act(async () => { await result.current.connect(second); await reconnecting; });
-    expect(result.current.state.session).toEqual(second);
+    expect(result.current.state.session).toEqual({ ...second, terminal_size_known: true });
     expect(result.current.state.phase).toBe("attached");
     expect(prepare).toHaveBeenCalledOnce();
   });
@@ -566,7 +566,7 @@ describe("pending remote attachments", () => {
     });
     expect(aborted).toHaveBeenCalledOnce();
     expect(result.current.state.phase).toBe("attached");
-    expect(result.current.state.session).toEqual(second);
+    expect(result.current.state.session).toEqual({ ...second, terminal_size_known: true });
     expect(result.current.state.error_code).toBeNull();
     await act(async () => { result.current.handleInput(new TextEncoder().encode("pwd\r")); });
     await waitFor(() => expect(api.sendInput).toHaveBeenCalled());

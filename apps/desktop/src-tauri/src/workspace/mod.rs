@@ -49,6 +49,7 @@ pub struct WorkspaceSshGateway {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub remote_info: Option<ctl_proto::RemoteIdentity>,
 }
+use crate::dto::{TerminalSizeDto, valid_observation_timestamp};
 use crate::error::{CommandErrorDto, CommandResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,9 +80,30 @@ pub struct WorkspaceSession {
   pub name: String,
   pub last_known_cwd: Option<String>,
   pub last_known_cwd_display: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_known_terminal_size: Option<TerminalSizeDto>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_seen_at_ms: Option<u64>,
 }
 
 impl WorkspaceSession {
+  fn valid_metadata(&self) -> bool {
+    valid_workspace_text(&self.session_id)
+      && valid_workspace_text(&self.name)
+      && [
+        self.last_known_cwd.as_ref(),
+        self.last_known_cwd_display.as_ref(),
+      ]
+      .into_iter()
+      .flatten()
+      .all(|value| valid_workspace_text(value))
+      && self
+        .last_known_terminal_size
+        .as_ref()
+        .is_none_or(|size| size.columns > 0 && size.rows > 0)
+      && self.last_seen_at_ms.is_none_or(valid_observation_timestamp)
+  }
+
   fn reference(&self) -> SessionReference {
     SessionReference {
       host_id: self.host_id.clone(),
@@ -351,15 +373,7 @@ impl WorkspaceDocument {
     let mut sessions = HashSet::new();
     for session in &self.sessions {
       if !hosts.contains(session.host_id.as_str())
-        || !valid_workspace_text(&session.session_id)
-        || !valid_workspace_text(&session.name)
-        || [
-          session.last_known_cwd.as_ref(),
-          session.last_known_cwd_display.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| !valid_workspace_text(value))
+        || !session.valid_metadata()
         || !sessions.insert(session.reference())
       {
         return Err(invalid());

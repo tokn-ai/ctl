@@ -29,7 +29,8 @@ The host catalog contains:
 The workspace contains:
 
 - `workspace_id`, `schema_version`;
-- `sessions`: `(host_id, session_id)`, name, and last-known cwd/display cwd;
+- `sessions`: `(host_id, session_id)`, name, last-known cwd/display cwd, and optional
+  `last_known_terminal_size` and `last_seen_at_ms` observations;
 - ordered `tabs` and optional `active_tab`, referencing sessions or managed tasks;
 - task references, sidebar selection, and task drafts with source scopes and
   original saved-definition revisions;
@@ -72,6 +73,20 @@ An outer opaque `revision` fences stale writers. Runtime status, process names,
 runtime command lines, terminal output, output sequences, passwords, and attachment
 tokens are excluded. Cached cwd is presentation only: it is not treated as live
 shell awareness or used to create a shell automatically.
+
+Remembered terminal dimensions describe the observed pane grid and its pixel
+dimensions when available, not the outer application window. Restoring them
+does not resize the remote session or claim that it is still running. Older
+entries without dimensions retain an unverified display fallback; that fallback
+is not saved as an observed size.
+
+Unattached rows show a compact age such as `2h ago`, with the exact timestamp on
+hover. Last seen means this app positively observed the session through a
+successful create, list, inspection, attachment, or incoming attachment event.
+Heartbeats cover quiet terminals. Live observations are coalesced before
+publication, and failures retain the latest observed time. Cache restoration,
+tab selection, connection attempts, and local disconnects do not refresh it.
+Entries without a recorded timestamp omit the age until observed again.
 
 Native commands `load_workspace`, `update_workspace`, `load_hosts`, and
 `update_hosts` run filesystem I/O off the UI thread. Writes use an interprocess

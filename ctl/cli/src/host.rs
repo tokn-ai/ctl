@@ -150,7 +150,10 @@ pub async fn run(command: Command, method: Option<&str>) -> Result<(), Error> {
       if json {
         println!("{}", serde_json::to_string_pretty(&host)?);
       } else {
-        println!("{}\t{}", host.host_id, host.name);
+        println!(
+          "{}",
+          crate::table::format(["ID", "HOST"], [[host.host_id, host.name]])
+        );
       }
       Ok(())
     }

@@ -128,26 +128,40 @@ fn print_rows(views: &[HostView<'_>]) {
     println!("No saved hosts. Add one with: ctl host add NAME DESTINATION");
     return;
   }
-  println!("HOST\tID\tMETHOD\tSTATUS\tDESTINATION");
-  for view in views {
-    for status in &view.statuses {
+  let rows = views.iter().flat_map(|view| {
+    view.statuses.iter().map(|status| {
       let method = view
         .host
         .connection_methods
         .iter()
         .find(|method| method.method_id == status.method_id)
         .unwrap();
-      println!(
-        "{}\t{}\t{}{}\t{}\t{}",
-        view.host.name,
-        view.host.host_id,
-        status.method_name,
-        if status.preferred { "*" } else { "" },
-        status.state,
-        method.target.label()
-      );
+      [
+        view.host.name.clone(),
+        view.host.host_id.clone(),
+        format!(
+          "{}{}",
+          status.method_name,
+          if status.preferred { "*" } else { "" }
+        ),
+        status.state.to_owned(),
+        method.target.label().to_owned(),
+      ]
+    })
+  });
+  println!(
+    "{}",
+    crate::table::format(["HOST", "ID", "METHOD", "STATUS", "DESTINATION"], rows)
+  );
+  for view in views {
+    for status in &view.statuses {
       if let Some(message) = &status.message {
-        println!("  {message}");
+        println!(
+          "{} / {}: {}",
+          crate::table::text(&view.host.name),
+          crate::table::text(&status.method_name),
+          crate::table::text(message)
+        );
       }
     }
   }

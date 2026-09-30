@@ -6,6 +6,7 @@ mod openssh;
 mod port;
 #[cfg(unix)]
 mod ssh_broker;
+mod table;
 mod target;
 mod vpn;
 

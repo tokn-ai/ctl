@@ -190,6 +190,45 @@ mod unix {
   }
 
   #[tokio::test]
+  async fn retargeting_the_staged_helper_rejects_restart_even_with_identical_metadata() {
+    let fixture = Fixture::new().await;
+    let next_executable = fixture.directory.join("ctld-next");
+    std::fs::copy(&fixture.executable, &next_executable).unwrap();
+    let staged_executable = fixture.directory.join("current-ctld");
+    std::os::unix::fs::symlink(&fixture.executable, &staged_executable).unwrap();
+    let client =
+      Client::new(fixture.socket.clone()).with_daemon_executable(staged_executable.clone());
+    let listener = UnixListener::bind(&fixture.socket).unwrap();
+    let server = tokio::spawn(async move {
+      let mut pinned = inspect_peer(&listener, info("old")).await;
+      assert!(
+        crate::read_frame::<_, Request>(&mut pinned)
+          .await
+          .unwrap()
+          .is_none(),
+        "changing the staged helper must not submit a restart request"
+      );
+    });
+    let prepared = client.preflight_restart().await.unwrap();
+    assert_eq!(
+      prepared.available.executable,
+      fixture.executable.canonicalize().unwrap()
+    );
+    let next_link = fixture.directory.join("next-ctld");
+    std::os::unix::fs::symlink(next_executable, &next_link).unwrap();
+    std::fs::rename(next_link, staged_executable).unwrap();
+    assert_eq!(
+      client.available().await.unwrap().info,
+      prepared.available.info
+    );
+    assert!(matches!(
+      prepared.restart().await,
+      Err(LifecycleError::BinaryChanged)
+    ));
+    server.await.unwrap();
+  }
+
+  #[tokio::test]
   async fn changed_owner_is_not_restarted() {
     let fixture = Fixture::new().await;
     let listener = UnixListener::bind(&fixture.socket).unwrap();
@@ -213,14 +252,28 @@ mod unix {
 
   #[tokio::test]
   async fn replacement_is_verified_only_after_graceful_owner_release() {
+    replace_after_owner_release(info("old")).await;
+  }
+
+  #[tokio::test]
+  async fn an_older_data_protocol_and_source_build_can_be_explicitly_restarted() {
+    let mut before = info("old");
+    before.binary.protocol_version -= 1;
+    before.binary.build.source_fingerprint = "a".repeat(64);
+    assert_ne!(before.binary, DaemonBinaryInfo::current());
+    replace_after_owner_release(before).await;
+  }
+
+  async fn replace_after_owner_release(before: DaemonInfo) {
     let fixture = Fixture::new().await;
     let listener = UnixListener::bind(&fixture.socket).unwrap();
     let socket = fixture.socket.clone();
+    let observed_before = before.clone();
     let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
     let (release, release_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-      let mut pinned = inspect_peer(&listener, info("old")).await;
-      drop(inspect_peer(&listener, info("old")).await);
+      let mut pinned = inspect_peer(&listener, observed_before.clone()).await;
+      drop(inspect_peer(&listener, observed_before).await);
       assert!(
         matches!(crate::read_frame::<_, Request>(&mut pinned).await.unwrap(), Some(Request::CtldRestart { expected_instance_id }) if expected_instance_id == "old")
       );
@@ -248,8 +301,9 @@ mod unix {
     assert!(!replacement.is_finished());
     release.send(()).unwrap();
     let result = replacement.await.unwrap().unwrap();
-    assert_eq!(result.before.unwrap().instance_id, "old");
+    assert_eq!(result.before.unwrap(), before);
     assert_eq!(result.after.instance_id, "new");
+    assert_eq!(result.after.binary, DaemonBinaryInfo::current());
     server.await.unwrap();
   }
 }

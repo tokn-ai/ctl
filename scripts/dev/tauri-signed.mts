@@ -15,8 +15,9 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
-import { servePreparation } from "./daemon-preparation.mts";
+import { serveAppSupervisor } from "./signed-app-supervisor.mts";
 import { SignedDaemon } from "./signed-daemon.mts";
+import { createSignedSupervisorDirectory, prepareSignedRuntime } from "./signed-runtime.mts";
 
 const execFile = promisify(execFileCallback);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -49,10 +50,11 @@ async function main(): Promise<void> {
   }
 
   const inspectionDirectory = await mkdtemp(path.join(tmpdir(), "rmux-profile-"));
-  let runtimeDirectory: string | undefined;
+  let supervisorDirectory: string | undefined;
   let daemon: SignedDaemon | undefined;
-  let supervisor: Awaited<ReturnType<typeof servePreparation>> | undefined;
+  let supervisor: Awaited<ReturnType<typeof serveAppSupervisor>> | undefined;
   let tauri: ChildProcess | undefined;
+  let appExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   const stopTauri = () => {
     if (tauri?.pid) {
       try {
@@ -84,7 +86,7 @@ async function main(): Promise<void> {
       throw new Error("rmux has no version in src-tauri/tauri.conf.json");
     }
 
-    runtimeDirectory = await mkdtemp(path.join(tmpdir(), "rmux-ctld-dev-"));
+    const runtimeDirectory = await prepareSignedRuntime(repositoryRoot);
     daemon = new SignedDaemon({
       runtime_directory: runtimeDirectory,
       profile_path: profile.path,
@@ -92,14 +94,24 @@ async function main(): Promise<void> {
       repository_root: repositoryRoot,
     });
     const ownedDaemon = daemon;
-    const supervisorSocket = path.join(runtimeDirectory, "prepare.sock");
-    supervisor = await servePreparation(supervisorSocket, (executable) => ownedDaemon.prepare(executable));
+    // The app supervisor belongs to this launcher; the daemon endpoint is
+    // shared by every launch of this worktree and survives launcher shutdown.
+    supervisorDirectory = await createSignedSupervisorDirectory(runtimeDirectory);
+    const supervisorSocket = path.join(supervisorDirectory, "app.sock");
+    supervisor = await serveAppSupervisor(supervisorSocket, {
+      prepare: (executable) => ownedDaemon.prepare(executable),
+      on_error: (error) => console.error(error instanceof Error ? error.message : "Signed daemon preparation failed"),
+      on_exit: (result) => {
+        appExit = result;
+        stopTauri();
+      },
+    });
     const environment = {
       ...process.env,
       CTLD_BIN: daemon.executable,
       CTLD_RUNTIME_DIR: runtimeDirectory,
       CTLD_SOCKET_PATH: daemon.socket_path,
-      RMUX_DEV_DAEMON_SUPERVISOR: supervisorSocket,
+      RMUX_DEV_APP_SUPERVISOR: supervisorSocket,
     };
     tauri = spawn("pnpm", ["tauri", "dev", ...process.argv.slice(2)], {
       cwd: appDirectory,
@@ -110,7 +122,11 @@ async function main(): Promise<void> {
     process.on("SIGINT", stopTauri);
     process.on("SIGTERM", stopTauri);
     const { code, signal } = await waitForExit(tauri);
-    if (code !== 0 && signal === null) {
+    if (appExit) {
+      if (appExit.code !== 0) {
+        throw new Error(`rmux exited with ${appExit.signal ? `signal ${appExit.signal}` : `status ${appExit.code ?? "unknown"}`}`);
+      }
+    } else if (code !== 0 && signal === null) {
       throw new Error(`tauri dev exited with status ${code ?? "unknown"}`);
     }
   } finally {
@@ -119,10 +135,8 @@ async function main(): Promise<void> {
     process.off("SIGTERM", stopTauri);
     await supervisor?.close();
     await daemon?.close();
+    if (supervisorDirectory) await rm(supervisorDirectory, { recursive: true, force: true });
     await rm(inspectionDirectory, { recursive: true, force: true });
-    if (runtimeDirectory) {
-      await rm(runtimeDirectory, { recursive: true, force: true });
-    }
   }
 }
 

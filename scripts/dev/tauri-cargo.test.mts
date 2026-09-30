@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { requestPreparation, servePreparation } from "./daemon-preparation.mts";
 
 const runner = fileURLToPath(new URL("./tauri-cargo.sh", import.meta.url));
 
@@ -33,6 +32,7 @@ if (args[0] === "build") {
     artifacts,
     env: {
       ...process.env,
+      RMUX_DEV_APP_SUPERVISOR: undefined,
       PATH: `${directory}${path.delimiter}${process.env.PATH}`,
       FIXTURE_LOG: log,
       FIXTURE_ARTIFACTS: JSON.stringify(artifacts),
@@ -54,47 +54,20 @@ async function launch(args: string[], env: NodeJS.ProcessEnv) {
   return { pid: child.pid, code, stderr };
 }
 
-test("each native launch prepares current helpers before handing its PID to Cargo", { skip: process.platform === "win32" }, async () => {
+test("unsigned native launch builds current helpers before handing its PID to Cargo", { skip: process.platform === "win32" }, async () => {
   const context = await fixture();
-  const socket = path.join(context.directory, "prepare.sock");
-  let preparations = 0;
-  const server = await servePreparation(socket, async (executable) => {
-    assert.equal(executable, context.artifacts.ctld);
-    // Cargo run must not start while signing/readiness is pending.
-    const calls = await context.calls();
-    assert.equal(calls.at(-1)?.args[0], "build");
-    preparations += 1;
-  });
   try {
     const args = ["run", "--target-dir", "custom output", "--", "app argument"];
-    const env = { ...context.env, RMUX_DEV_DAEMON_SUPERVISOR: socket };
-    const first = await launch(args, env);
-    const second = await launch(args, env);
+    const first = await launch(args, context.env);
+    const second = await launch(args, context.env);
     assert.equal(first.code, 0, first.stderr);
     assert.equal(second.code, 0, second.stderr);
-    assert.equal(preparations, 2);
     const calls = await context.calls();
     assert.deepEqual(calls.map((call) => call.args[0]), ["build", "run", "build", "run"]);
     assert.equal(calls[1].pid, first.pid);
     assert.equal(calls[3].pid, second.pid);
     assert.deepEqual(calls[1].args, args);
   } finally {
-    await server.close();
-    await context.close();
-  }
-});
-
-test("a signing failure prevents the new client from launching", { skip: process.platform === "win32" }, async () => {
-  const context = await fixture();
-  const socket = path.join(context.directory, "prepare.sock");
-  const server = await servePreparation(socket, async () => { throw new Error("signing failed"); });
-  try {
-    const result = await launch(["run"], { ...context.env, RMUX_DEV_DAEMON_SUPERVISOR: socket });
-    assert.equal(result.code, 1);
-    assert.match(result.stderr, /signing failed/);
-    assert.deepEqual((await context.calls()).map((call) => call.args[0]), ["build"]);
-  } finally {
-    await server.close();
     await context.close();
   }
 });
@@ -142,8 +115,4 @@ test("release builds pass directly through the runner", { skip: process.platform
   } finally {
     await context.close();
   }
-});
-
-test("a missing signed supervisor fails instead of launching an unprepared client", async () => {
-  await assert.rejects(requestPreparation(path.join(tmpdir(), "rmux-no-such-supervisor", "prepare.sock"), "ctld"), /ENOENT/);
 });

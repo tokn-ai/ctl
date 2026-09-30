@@ -30,7 +30,8 @@ live version.
 Each supported daemon row offers **Restart**, with a replacement check and an
 impact confirmation. The replacement's build and protocols are verified afterward.
 
-- `ctld` disconnects its SSH connections, owned port forwards, and VPN containers.
+- `ctld` stops its owned port forwards and VPN containers, and can interrupt SSH
+  connections. Surviving SSH masters can be reused after restart.
   Saved VPN profiles and Tailscale identities remain available for reconnecting.
 - Local and remote `rmuxd` restarts end all of that daemon's terminal sessions,
   including other clients and interactive tasks. Runtime options return to the
@@ -84,9 +85,9 @@ device identity in a private Docker volume, separate from the JSON settings.
 Existing OpenConnect profiles remain readable and migrate on the next save.
 
 Signed development keeps VPN ownership on the normal per-user daemon even though
-SSH uses a temporary signed helper. This makes VPNs started by the CLI visible
-in the app. Set `CTLD_VPN_SOCKET_PATH` to select a custom VPN owner for the app;
-use the same path as `CTLD_SOCKET_PATH` in the CLI.
+SSH uses its persistent, per-worktree signed daemon. This makes VPNs started by
+the CLI visible in the app. Set `CTLD_VPN_SOCKET_PATH` to select a custom VPN
+owner for the app; use the same path as `CTLD_SOCKET_PATH` in the CLI.
 
 This requires a running Docker-compatible engine. Build the OpenConnect image
 with `./docker/openconnect/run.sh build` from the repository root; Tailscale pulls
@@ -348,14 +349,33 @@ launcher asks Xcode to refresh an expired profile automatically.
 Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
 profiles and `~/Library/Application Support/rmux/signing/ctld.provisionprofile`,
 selects the newest unexpired profile for `io.rmux.desktop.ctld`, discovers its
-matching signing certificate in the login Keychain, and supervises an isolated
-signed `ctld` for the lifetime of `tauri dev`. Before each native launch, it
-uses Cargo's reported helper artifact, signs it when changed, and verifies the
-running helper's protocol handshake. A changed helper replaces only this
-launcher's daemon; an unchanged helper retains its live connections. Build or
-signing failures prevent the new client from starting. The launcher stops its
-helper on exit and needs no signing environment variables. Tauri arguments,
+matching signing certificate in the login Keychain, and selects a private,
+stable `ctld` endpoint for this worktree under the system temporary directory.
+The signed daemon runs independently of `tauri dev`, so quitting or relaunching
+the app retains its SSH connections and daemon-owned state. Other worktrees and
+the ordinary per-user daemon remain separate.
+
+During a native rebuild, the current app stays open. Only after compilation and
+signed-helper preparation succeed does the launcher replace it with the new
+build. A failed build or signing attempt leaves the current app running and
+Tauri watching for the next edit. If the first build fails, the watcher stays
+active until a build succeeds. Frontend hot reload continues to use Vite.
+Quitting the launcher closes its app and build processes.
+
+Before each native launch, the launcher uses Cargo's reported helper artifact
+and stages a signed bundle when it changes. It starts ctld only if no daemon is
+running. A rebuild leaves an existing daemon in place; use **About → Restart**
+on the SSH ctld row to apply the staged build explicitly. The app can open About
+even when the running daemon uses an older SSH protocol. Build or signing
+failures prevent the new client from starting without stopping the existing
+daemon. Signed bundles remain available for running helpers and pending restart
+operations after the launcher exits. Private SSH masters still expire after
+five idle minutes; surviving the app's exit does not disable that timeout.
+
+The launcher needs no signing environment variables. Tauri arguments,
 such as `--release`, can be passed through `pnpm tauri:dev:signed --release`.
+Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
+failed build, following Tauri's behavior.
 Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch ID-protected
 credentials. Run the launcher regression tests with `pnpm test:dev`.
 

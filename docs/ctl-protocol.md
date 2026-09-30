@@ -57,6 +57,18 @@ and off for direct and Tailscale methods. `ctl` never disables host-key
 verification, enables agent forwarding, creates a forwarding, or accepts a
 user-controlled remote command.
 
+After an explicit Connect, ctld saves the selected configured control socket in
+bounded, owner-only endpoint metadata scoped to its daemon socket and target.
+When ctld restarts on the same socket, status and existing-session requests can
+check that exact endpoint without evaluating SSH configuration, authenticating,
+or starting a VPN. A saved endpoint is only a discovery hint: it must still pass
+the local OpenSSH control check. Shared endpoints remain externally owned, and
+Disconnect removes the hint before releasing ctld's listeners. Explicit Connect
+reevaluates configuration; passive checks keep using the previous selection.
+Connections established before this metadata support need one explicit Connect
+to register their endpoint. Private masters still expire after five idle minutes;
+configured masters retain their OpenSSH `ControlPersist` policy.
+
 Without `--host`, transport-requiring `ctl rmux` commands connect directly to
 the current user's owner-only local `rmuxd` endpoint and do not start SSH or
 `ctl-agent`. The `rmux-proto` request, attachment, detach, and reconnect behavior

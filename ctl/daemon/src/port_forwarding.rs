@@ -43,7 +43,7 @@ pub(super) struct SshForwardControl<'a> {
 
 impl ForwardControl for SshForwardControl<'_> {
   async fn is_ready(&self, target: &SshTarget) -> bool {
-    let Some(endpoint) = self.state.endpoint(target) else {
+    let Ok(Some(endpoint)) = self.state.existing_endpoint(target) else {
       return false;
     };
     control_master_is_ready(target, &endpoint.control_path).await
@@ -66,13 +66,16 @@ impl ForwardControl for SshForwardControl<'_> {
     {
       return Ok(());
     }
-    let Some(endpoint) = self.state.endpoint(target) else {
+    let Some(endpoint) = self.state.existing_endpoint(target)? else {
       return if cancel {
         Ok(())
       } else {
         Err(RequestError::HostDisconnected)
       };
     };
+    // Listener ownership must stay tied to this endpoint until cleanup, even
+    // if the on-disk hint is later removed by an explicit disconnect.
+    self.state.remember_endpoint(target, &endpoint, None);
     if endpoint.shared {
       return if cancel {
         Ok(())

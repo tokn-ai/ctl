@@ -14,10 +14,11 @@ use crate::identities::{self, IdentitySnapshot, LocalAgent, VerifiedIdentity};
 mod agent_proxy;
 mod config;
 mod labels;
+mod lazy;
 use agent_proxy::AgentProxy;
 #[cfg(test)]
 use config::parse_configuration;
-use config::{expand_home, resolve_configurations};
+use config::{PublicKeyAuthentication, expand_home, resolve_configurations};
 pub(super) use labels::{connection_context, save_offer_message};
 
 const MAX_IDENTITIES: usize = 32;
@@ -69,10 +70,19 @@ impl PreparedIdentities {
     let mut candidates: Vec<_> = configuration
       .paths
       .into_iter()
-      .map(|path| (path, true, !configuration.agent_disabled))
+      .map(|path| {
+        (
+          path,
+          true,
+          !configuration.agent_disabled
+            && configuration.publickey_authentication == PublicKeyAuthentication::Enabled,
+        )
+      })
       .collect();
     for gateway in configurations.gateways {
-      let reusable = gateway.inherits_agent && !gateway.agent_disabled;
+      let reusable = gateway.inherits_agent
+        && !gateway.agent_disabled
+        && gateway.publickey_authentication == PublicKeyAuthentication::Enabled;
       candidates.extend(
         gateway
           .paths
@@ -108,50 +118,58 @@ impl PreparedIdentities {
     if overlay_disabled || reusable_ids.is_empty() {
       return prepared;
     }
-    let unlocked = if let Some(path) = configuration.agent.as_deref() {
-      agent_proxy::public_fingerprints(path).await
-    } else {
-      HashSet::new()
-    };
-    for snapshot in prepared.snapshots.clone() {
-      if !snapshot.encrypted
-        || !reusable_ids.contains(&snapshot.identity_id)
-        || snapshot
-          .fingerprint
-          .as_ref()
-          .is_some_and(|fingerprint| unlocked.contains(fingerprint))
-      {
-        continue;
-      }
-      let selected = Arc::clone(&snapshot);
-      let context = connection_context(target);
-      let Some(secret) = saved_passphrase(selected, context).await else {
-        continue;
-      };
-      if prepared.agent.is_none() {
-        prepared.agent = LocalAgent::start().await.ok();
-      }
-      let Some(agent) = &mut prepared.agent else {
-        break;
-      };
-      let Ok(verified) = agent.add_identity(&snapshot, secret).await else {
-        // A stale or unavailable saved item must never prevent ordinary SSH
-        // authentication, and must never be returned to an SSH askpass caller.
-        continue;
-      };
-      if prepared.proxy.is_none() {
-        prepared.proxy =
-          AgentProxy::start(agent.socket_path(), configuration.agent.as_deref()).ok();
-      }
-      if destination_ids.contains(&snapshot.identity_id) {
-        prepared.add_public_hint(
-          &snapshot,
-          &verified.public_key,
-          &configuration.resolved_identity_files,
-        );
-      }
+    let candidates = prepared.saved_candidates(&reusable_ids).await;
+    if candidates.is_empty() {
+      return prepared;
+    }
+    let hints: Vec<_> = candidates
+      .iter()
+      .filter(|candidate| destination_ids.contains(&candidate.snapshot.identity_id))
+      .map(|candidate| {
+        (
+          Arc::clone(&candidate.snapshot),
+          candidate.public_key.clone(),
+        )
+      })
+      .collect();
+    prepared.proxy = AgentProxy::with_identities(
+      lazy::LazyIdentities::new(candidates, connection_context(target)),
+      configuration.agent.as_deref(),
+    )
+    .ok();
+    for (snapshot, public_key) in hints {
+      prepared.add_public_hint(
+        &snapshot,
+        &public_key,
+        &configuration.resolved_identity_files,
+      );
     }
     prepared
+  }
+
+  async fn saved_candidates(&self, reusable_ids: &HashSet<String>) -> Vec<lazy::Candidate> {
+    let mut candidates = Vec::new();
+    let mut public_keys = HashSet::new();
+    for snapshot in &self.snapshots {
+      if !snapshot.encrypted || !reusable_ids.contains(&snapshot.identity_id) {
+        continue;
+      }
+      let selected = Arc::clone(snapshot);
+      // This exact metadata/presence check cannot display authentication UI or
+      // read a secret. Unsaved/unknown keys keep OpenSSH's native file flow.
+      let Ok(Some(public_key)) =
+        tokio::task::spawn_blocking(move || identities::saved_public_key_hint(&selected)).await
+      else {
+        continue;
+      };
+      let Some(candidate) = lazy::Candidate::new(Arc::clone(snapshot), public_key) else {
+        continue;
+      };
+      if public_keys.insert(candidate.blob.clone()) {
+        candidates.push(candidate);
+      }
+    }
+    candidates
   }
 
   fn add_public_hint(
@@ -265,17 +283,6 @@ impl PreparedIdentities {
     }
     verified
   }
-}
-
-async fn saved_passphrase(
-  snapshot: Arc<IdentitySnapshot>,
-  context: String,
-) -> Option<Zeroizing<String>> {
-  tokio::task::spawn_blocking(move || identities::saved_passphrase(&snapshot, Some(&context)))
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .flatten()
 }
 
 fn candidate_order(prompt_path: Option<&str>, paths: &[&str]) -> Vec<usize> {

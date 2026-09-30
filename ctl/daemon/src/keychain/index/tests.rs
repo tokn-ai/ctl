@@ -33,6 +33,65 @@ fn marker() -> Record {
   record(SERVICE, MARKER, "1")
 }
 
+#[test]
+fn reimport_preserves_public_hint_only_for_the_same_protected_binding() {
+  use base64::Engine as _;
+
+  let path = "/fixture/private-key";
+  let identity_id = super::super::digest(path.as_bytes());
+  let mut blob = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+  blob.extend_from_slice(&[7; 32]);
+  let prior = SavedIdentity {
+    version: 1,
+    path: path.into(),
+    file_version: "a".repeat(64),
+    key_type: "ssh-ed25519".into(),
+    fingerprint: format!(
+      "SHA256:{}",
+      base64::engine::general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&blob))
+    ),
+    public_key: Some(format!(
+      "ssh-ed25519 {}",
+      base64::engine::general_purpose::STANDARD.encode(&blob)
+    )),
+  };
+  let previous = HashMap::from([(identity_id.clone(), prior.clone())]);
+  let mut source = prior.clone();
+  source.public_key = None;
+  let imported = imported_records(vec![
+    record(
+      super::super::identity::SERVICE,
+      &identity_id,
+      &serde_json::to_string(&source).unwrap(),
+    ),
+    record(
+      SERVICE,
+      &identity_account(&identity_id),
+      &serde_json::to_string(&Entry::Identity {
+        identity_id: identity_id.clone(),
+        metadata: prior.clone(),
+      })
+      .unwrap(),
+    ),
+  ]);
+  assert!(imported.complete);
+  assert_eq!(
+    imported.identities[&identity_id].public_key,
+    prior.public_key
+  );
+  for field in ["file_version", "fingerprint", "key_type"] {
+    let mut changed = source.clone();
+    match field {
+      "file_version" => changed.file_version = "b".repeat(64),
+      "fingerprint" => changed.fingerprint = "SHA256:changed".into(),
+      _ => changed.key_type = "ssh-rsa".into(),
+    }
+    let mut imported = HashMap::from([(identity_id.clone(), changed)]);
+    preserve_public_hints(&mut imported, &previous);
+    assert!(imported[&identity_id].public_key.is_none(), "{field}");
+  }
+}
+
 fn indexed_credential() -> Record {
   let credential = credential();
   record(
@@ -154,6 +213,7 @@ fn identity_sidecar_requires_canonical_path_digest_and_exact_file_binding() {
     file_version: "b".repeat(64),
     key_type: "ssh-ed25519".into(),
     fingerprint: "SHA256:synthetic".into(),
+    public_key: None,
   };
   let comment = serde_json::to_string(&Entry::Identity {
     identity_id: identity_id.clone(),

@@ -195,12 +195,12 @@ async fn cancellation_drops_the_temporary_agent_view_before_returning() {
 
 #[test]
 fn disabled_public_key_authentication_and_unresolved_agent_paths_remain_under_openssh_control() {
-  for config in [
-    "identityfile /keys/id\npubkeyauthentication no\n",
-    "identityagent /agents/%x\nidentityfile /keys/id\n",
-  ] {
-    assert!(parse_configuration(config).agent_disabled);
-  }
+  assert_eq!(
+    parse_configuration("identityfile /keys/id\npubkeyauthentication no\n")
+      .publickey_authentication,
+    PublicKeyAuthentication::Disabled,
+  );
+  assert!(parse_configuration("identityagent /agents/%x\nidentityfile /keys/id\n").agent_disabled);
 }
 
 #[test]

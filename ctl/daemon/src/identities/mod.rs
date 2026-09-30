@@ -4,15 +4,18 @@
 mod agent;
 mod files;
 mod inventory;
+mod public_hint;
 mod request;
 
 #[cfg(unix)]
 pub use agent::{LocalAgent, askpass_exit_code, run_lifetime};
 pub use files::{IdentitySnapshot, inspect_path};
+pub use public_hint::{public_key_hint, saved_public_key_hint};
 pub use request::run;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
 
 #[derive(Clone)]
@@ -112,10 +115,11 @@ pub(crate) struct SavedIdentity {
   pub file_version: String,
   pub key_type: String,
   pub fingerprint: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub public_key: Option<String>,
 }
 
 impl SavedIdentity {
-  #[cfg(any(target_os = "macos", test))]
   pub(crate) fn valid(&self, identity_id: &str) -> bool {
     self.version == 1
       && files::valid_id(identity_id)
@@ -126,6 +130,19 @@ impl SavedIdentity {
       && self.fingerprint.len() <= 128
       && !self.key_type.chars().any(char::is_control)
       && !self.fingerprint.chars().any(char::is_control)
+      && self.public_key.as_deref().is_none_or(|key| {
+        public_hint::parse(key).is_some_and(|public| {
+          public.canonical == key
+            && public.key_type == self.key_type
+            && public.fingerprint == self.fingerprint
+        })
+      })
+  }
+
+  pub(crate) fn matches(&self, snapshot: &IdentitySnapshot) -> bool {
+    self.valid(&snapshot.identity_id)
+      && self.path == snapshot.path
+      && self.file_version == snapshot.file_version
   }
 }
 
@@ -139,9 +156,34 @@ pub fn saved_passphrase(
   snapshot: &IdentitySnapshot,
   context: Option<&str>,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
+  saved_passphrase_inner(snapshot, context, None)
+}
+
+/// Read for a live unlock attempt, skipping authentication if it is canceled
+/// before acquiring the cross-process Keychain operation lock. This does not
+/// dismiss a system authentication prompt that has already started.
+///
+/// # Errors
+/// Returns a sanitized Keychain, changed-file, or canceled-unlock error.
+pub fn saved_passphrase_cancellable(
+  snapshot: &IdentitySnapshot,
+  context: Option<&str>,
+  canceled: &AtomicBool,
+) -> Result<Option<Zeroizing<String>>, IdentityError> {
+  saved_passphrase_inner(snapshot, context, Some(canceled))
+}
+
+fn saved_passphrase_inner(
+  snapshot: &IdentitySnapshot,
+  context: Option<&str>,
+  canceled: Option<&AtomicBool>,
+) -> Result<Option<Zeroizing<String>>, IdentityError> {
+  if canceled.is_some_and(|canceled| canceled.load(Ordering::Acquire)) {
+    return Err(IdentityError::UnlockFailed);
+  }
   ensure_current(snapshot)?;
   #[cfg(target_os = "macos")]
-  return crate::keychain::identity::load(snapshot, context);
+  return crate::keychain::identity::load(snapshot, context, canceled);
   #[cfg(not(target_os = "macos"))]
   {
     let _ = context;

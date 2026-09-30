@@ -99,6 +99,113 @@ fn agent_mutation_preferences_keep_the_existing_agent_behavior() {
 }
 
 #[test]
+fn preferred_authentication_without_publickey_disables_local_identity_candidates() {
+  for methods in [
+    "password",
+    "keyboard-interactive",
+    "keyboard-interactive,password",
+    "hostbased,gssapi-with-mic",
+    "not-publickey",
+  ] {
+    for configuration in [
+      format!("identityagent /agents/fixture\npreferredauthentications {methods}\n"),
+      format!("preferredauthentications {methods}\nidentityagent /agents/fixture\n"),
+    ] {
+      let config = parse_configuration(&format!("identityfile /keys/fixture\n{configuration}"));
+      assert_eq!(
+        config.publickey_authentication,
+        PublicKeyAuthentication::Disabled,
+        "{methods}"
+      );
+      assert!(!config.agent_disabled, "{methods}");
+      assert_eq!(config.paths, ["/keys/fixture"]);
+      assert_eq!(config.agent, Some(PathBuf::from("/agents/fixture")));
+      assert!(!config.inherits_agent);
+    }
+  }
+}
+
+#[test]
+fn preferred_authentication_with_publickey_preserves_ordered_fallback_and_default_policy() {
+  for preference in [
+    "",
+    "preferredauthentications publickey\n",
+    "preferredauthentications password,publickey\n",
+    "preferredauthentications publickey,password\n",
+    "preferredauthentications keyboard-interactive,publickey,password\n",
+    "preferredauthentications gssapi-with-mic,hostbased,publickey,keyboard-interactive,password\n",
+  ] {
+    let config = parse_configuration(&format!("identityfile /keys/fixture\n{preference}"));
+    assert!(!config.agent_disabled, "{preference}");
+    assert_eq!(
+      config.publickey_authentication,
+      PublicKeyAuthentication::Enabled,
+      "{preference}"
+    );
+    assert!(config.inherits_agent);
+  }
+  for restriction in ["pubkeyauthentication no", "pubkeyauthentication false"] {
+    let config = parse_configuration(&format!(
+      "{restriction}\npreferredauthentications password,publickey\n"
+    ));
+    assert_eq!(
+      config.publickey_authentication,
+      PublicKeyAuthentication::Disabled,
+      "{restriction}"
+    );
+    assert!(!config.agent_disabled, "{restriction}");
+  }
+  let config = parse_configuration("identityagent none\npreferredauthentications publickey\n");
+  assert!(config.agent_disabled);
+  assert_eq!(
+    config.publickey_authentication,
+    PublicKeyAuthentication::Enabled
+  );
+}
+
+#[tokio::test]
+async fn preferred_authentication_policy_remains_scoped_to_each_gateway() {
+  let target = jump_target("destination.test").unwrap();
+  let resolved = resolve_with(&target, |target| {
+    let configuration = match target.destination.as_str() {
+      "destination.test" => "preferredauthentications password\nproxyjump inherited.test,disabled.test,explicit.test\n",
+      "inherited.test" => "preferredauthentications password,publickey\nidentityfile /keys/inherited\n",
+      "disabled.test" => "preferredauthentications keyboard-interactive\nidentityfile /keys/disabled\n",
+      "explicit.test" => "preferredauthentications publickey\nidentityagent /agents/gateway\nidentityfile /keys/explicit\n",
+      _ => panic!("unexpected configuration lookup"),
+    };
+    std::future::ready(Ok(parse_configuration(configuration)))
+  })
+  .await
+  .unwrap();
+  assert_eq!(
+    resolved.destination.publickey_authentication,
+    PublicKeyAuthentication::Disabled
+  );
+  assert!(!resolved.destination.agent_disabled);
+  assert!(resolved.destination.inherits_agent);
+  assert_eq!(resolved.gateways.len(), 3);
+  assert!(!resolved.gateways[0].agent_disabled);
+  assert_eq!(
+    resolved.gateways[0].publickey_authentication,
+    PublicKeyAuthentication::Enabled
+  );
+  assert!(resolved.gateways[0].inherits_agent);
+  assert_eq!(
+    resolved.gateways[1].publickey_authentication,
+    PublicKeyAuthentication::Disabled
+  );
+  assert!(!resolved.gateways[1].agent_disabled);
+  assert!(resolved.gateways[1].inherits_agent);
+  assert!(!resolved.gateways[2].agent_disabled);
+  assert_eq!(
+    resolved.gateways[2].publickey_authentication,
+    PublicKeyAuthentication::Enabled
+  );
+  assert!(!resolved.gateways[2].inherits_agent);
+}
+
+#[test]
 fn explicit_gateway_configuration_matches_the_actual_effective_destination() {
   let gateway = SshGateway {
     kind: GatewayKind::Ssh,

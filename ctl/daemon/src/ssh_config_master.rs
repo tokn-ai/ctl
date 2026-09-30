@@ -237,6 +237,34 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
+  async fn openssh_relative_control_path_is_saved_as_an_absolute_endpoint() {
+    let mut command = Command::new(SSH_PROGRAM);
+    command
+      .args([
+        "-G",
+        "-F",
+        "none",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=relative/%h-%p",
+        "fixture.invalid",
+      ])
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped());
+    let policy = read_policy(command).await.unwrap();
+    assert_eq!(
+      policy.path,
+      Some(
+        std::env::current_dir()
+          .unwrap()
+          .join("relative/fixture.invalid-22")
+      )
+    );
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
   async fn openssh_resolves_includes_and_tokens_without_connecting() {
     let root = std::env::temp_dir().join(format!("ctld-config-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();

@@ -580,10 +580,16 @@ async fn connect(path: &Path) -> io::Result<Stream> {
 }
 
 async fn start_daemon(path: &Path, executable: Option<&Path>) -> Result<(), ConnectError> {
-  let executable = match executable {
+  let selected = match executable {
     Some(executable) => executable.to_path_buf(),
     None => daemon_executable()?,
   };
+  // A staged symlink may change between the protocol query and startup. Pin
+  // both launches, and the helper's future children, to the same build.
+  let executable = resolve_executable(&selected).map_err(|source| ConnectError::StartDaemon {
+    executable: selected,
+    source,
+  })?;
   check_daemon_protocol(&executable, PROTOCOL_QUERY_TIMEOUT).await?;
   let mut command = std::process::Command::new(&executable);
   #[cfg(windows)]
@@ -605,6 +611,48 @@ async fn start_daemon(path: &Path, executable: Option<&Path>) -> Result<(), Conn
     .spawn()
     .map_err(|source| ConnectError::StartDaemon { executable, source })?;
   Ok(())
+}
+
+fn resolve_executable(selected: &Path) -> io::Result<PathBuf> {
+  let path = if selected.components().count() == 1 {
+    let mut inaccessible = false;
+    env::var_os("PATH")
+      .into_iter()
+      .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
+      .map(|directory| directory.join(selected))
+      .find(|path| {
+        if !path.is_file() {
+          return false;
+        }
+        let executable = {
+          #[cfg(unix)]
+          {
+            rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
+          }
+          #[cfg(not(unix))]
+          {
+            true
+          }
+        };
+        if !executable {
+          inaccessible = true;
+        }
+        executable
+      })
+      .ok_or_else(|| {
+        io::Error::new(
+          if inaccessible {
+            io::ErrorKind::PermissionDenied
+          } else {
+            io::ErrorKind::NotFound
+          },
+          "ctld was not found as an executable on PATH",
+        )
+      })?
+  } else {
+    selected.to_owned()
+  };
+  path.canonicalize()
 }
 
 async fn check_daemon_protocol(
@@ -957,34 +1005,50 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn pinned_daemon_bootstrap_ignores_environment_and_preserves_existing_owners() {
-    for mode in ["bootstrap", "existing"] {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for mode in ["bootstrap", "symlink", "path", "existing"] {
       let fixture = ProtocolFixture::new("exit 1").await;
       // Existence signals readiness; publish only after the whole invocation
       // is recorded so the child cannot observe a partially written line.
       std::fs::write(
         &fixture.executable,
         format!(
-          "#!/bin/sh\nset -eu\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {PROTOCOL_VERSION}\n  exit 0\nfi\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$CTLD_SOCKET_PATH\" \"$CTLD_BIN\" > \"$CTLD_PINNED_TEST_MARKER.tmp\"\nmv \"$CTLD_PINNED_TEST_MARKER.tmp\" \"$CTLD_PINNED_TEST_MARKER\"\n"
+          "#!/bin/sh\nset -eu\nif [ \"$1\" = --protocol-version ]; then\n  if [ -n \"${{CTLD_PINNED_TEST_LINK:-}}\" ]; then\n    /bin/ln -s \"$CTLD_PINNED_TEST_NEXT\" \"$CTLD_PINNED_TEST_LINK.next\"\n    /bin/mv \"$CTLD_PINNED_TEST_LINK.next\" \"$CTLD_PINNED_TEST_LINK\"\n  fi\n  printf '%s\\n' {PROTOCOL_VERSION}\n  exit 0\nfi\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$CTLD_SOCKET_PATH\" \"$CTLD_BIN\" > \"$CTLD_PINNED_TEST_MARKER.tmp\"\n/bin/mv \"$CTLD_PINNED_TEST_MARKER.tmp\" \"$CTLD_PINNED_TEST_MARKER\"\n"
         ),
       )
       .unwrap();
-      let output = timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(env::current_exe().unwrap())
-          .args(["--exact", "tests::pinned_daemon_child", "--nocapture"])
-          .env("CTLD_PINNED_TEST_MODE", mode)
-          .env("CTLD_PINNED_TEST_EXECUTABLE", &fixture.executable)
-          .env("CTLD_PINNED_TEST_MARKER", fixture.directory.join("started"))
-          .env(
-            DAEMON_EXECUTABLE_ENV,
-            fixture.directory.join("missing-override"),
-          )
-          .kill_on_drop(true)
-          .output(),
-      )
-      .await
-      .unwrap()
-      .unwrap();
+      let staged = fixture.directory.join("staged-ctld");
+      std::os::unix::fs::symlink(&fixture.executable, &staged).unwrap();
+      let next = fixture.directory.join("next-ctld");
+      std::fs::copy(&fixture.executable, &next).unwrap();
+      let blocked = fixture.directory.join("non-executable");
+      std::fs::create_dir(&blocked).unwrap();
+      std::fs::write(blocked.join("ctld"), "not executable").unwrap();
+      std::fs::set_permissions(blocked.join("ctld"), std::fs::Permissions::from_mode(0o600))
+        .unwrap();
+      let search_path = env::join_paths([&blocked, &fixture.directory]).unwrap();
+      let mut child = tokio::process::Command::new(env::current_exe().unwrap());
+      child
+        .args(["--exact", "tests::pinned_daemon_child", "--nocapture"])
+        .env("CTLD_PINNED_TEST_MODE", mode)
+        .env("CTLD_PINNED_TEST_EXECUTABLE", &fixture.executable)
+        .env("CTLD_PINNED_TEST_MARKER", fixture.directory.join("started"))
+        .env(
+          DAEMON_EXECUTABLE_ENV,
+          fixture.directory.join("missing-override"),
+        );
+      if mode == "symlink" {
+        child
+          .env("CTLD_PINNED_TEST_LINK", &staged)
+          .env("CTLD_PINNED_TEST_NEXT", &next);
+      } else if mode == "path" {
+        child.env("PATH", search_path);
+      }
+      let output = timeout(Duration::from_secs(5), child.kill_on_drop(true).output())
+        .await
+        .unwrap()
+        .unwrap();
       assert!(output.status.success(), "{mode}: {output:?}");
     }
   }
@@ -1018,6 +1082,11 @@ mod tests {
       assert!(!marker.exists());
       return;
     }
+    let selected = match mode.as_str() {
+      "symlink" => PathBuf::from(env::var_os("CTLD_PINNED_TEST_LINK").unwrap()),
+      "path" => PathBuf::from("ctld"),
+      _ => executable.clone(),
+    };
     let server = async {
       while !marker.exists() {
         sleep(Duration::from_millis(5)).await;
@@ -1026,7 +1095,7 @@ mod tests {
       owner.accept().await.unwrap();
     };
     let (connection, ()) = tokio::join!(
-      connect_or_start_daemon_at_with_executable(&endpoint.0, Some(&executable)),
+      connect_or_start_daemon_at_with_executable(&endpoint.0, Some(&selected)),
       server
     );
     connection.unwrap();
@@ -1038,9 +1107,15 @@ mod tests {
         endpoint.0.to_str().unwrap(),
         "--detach-from-terminal",
         endpoint.0.to_str().unwrap(),
-        executable.to_str().unwrap(),
+        executable.canonicalize().unwrap().to_str().unwrap(),
       ]
     );
+    if mode == "symlink" {
+      assert_ne!(
+        selected.canonicalize().unwrap(),
+        executable.canonicalize().unwrap()
+      );
+    }
   }
 
   #[cfg(target_os = "macos")]

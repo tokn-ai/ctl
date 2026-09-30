@@ -1,15 +1,21 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rename, rm, symlink } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { inspectDaemon } from "./signed-daemon-probe.mts";
+import { withPreparationLock } from "./signed-preparation-lock.mts";
+import { ensurePrivateDirectory } from "./signed-runtime.mts";
 
 const execFile = promisify(execFileCallback);
-const maxFrameSize = 64 * 1024;
+const recipeFiles = [
+  "scripts/ci/package-ctld-app.sh",
+  "apps/desktop/src-tauri/macos/ctld/Info.plist",
+  "apps/desktop/src-tauri/macos/ctld/Entitlements.plist",
+];
 
-interface SignedDaemonConfig {
+export interface SignedDaemonConfig {
   runtime_directory: string;
   profile_path: string;
   app_version: string;
@@ -20,6 +26,8 @@ interface SignedDaemonOperations {
   package_bundle?: (executable: string, bundle: string) => Promise<void>;
   startup_timeout_ms?: number;
   shutdown_timeout_ms?: number;
+  preparation_timeout_ms?: number;
+  on_diagnostic?: (message: string) => void;
 }
 
 interface OwnedDaemon {
@@ -29,7 +37,13 @@ interface OwnedDaemon {
   spawn_error?: Error;
 }
 
-/** Keeps the signed development helper in step with each native app build. */
+interface PreparedHelper {
+  bundle: string;
+  executable: string;
+  protocol_version: number;
+}
+
+/** Stages signed helpers while preserving the independently owned development daemon. */
 export class SignedDaemon {
   readonly executable: string;
   readonly socket_path: string;
@@ -37,10 +51,7 @@ export class SignedDaemon {
   private readonly operations: SignedDaemonOperations;
   private pending: Promise<void> = Promise.resolve();
   private closing = false;
-  private closed?: Promise<void>;
-  private daemon?: OwnedDaemon;
-  private fingerprint?: string;
-  private readonly bundle_directories: string[] = [];
+  private last_diagnostic?: string;
 
   constructor(config: SignedDaemonConfig, operations: SignedDaemonOperations = {}) {
     this.config = config;
@@ -50,231 +61,210 @@ export class SignedDaemon {
   }
 
   prepare(executable: string): Promise<void> {
-    if (this.closing) {
-      return Promise.reject(new Error("signed ctld supervisor is closing"));
-    }
-    const preparation = this.pending.then(() => this.prepareDaemon(executable));
-    // One failed signing attempt must not prevent a later rebuild from succeeding.
+    if (this.closing) return Promise.reject(new Error("signed ctld supervisor is closing"));
+    const preparation = this.pending.then(async () => {
+      await ensurePrivateDirectory(this.config.runtime_directory);
+      await withPreparationLock(this.config.runtime_directory, () => this.prepareDaemon(executable), this.operations.preparation_timeout_ms);
+    });
     this.pending = preparation.catch(() => {});
     return preparation;
   }
 
+  /** Stop accepting preparations. The daemon and its immutable bundles survive. */
   close(): Promise<void> {
     this.closing = true;
-    this.closed ??= this.pending.then(async () => {
-      await this.stopDaemon();
-      await rm(this.socket_path, { force: true });
-      await rm(path.join(this.config.runtime_directory, "ctld.app"), { force: true });
-      for (const directory of this.bundle_directories) {
-        await rm(directory, { recursive: true, force: true });
-      }
-    });
-    return this.closed;
+    return this.pending;
   }
 
   private async prepareDaemon(executable: string): Promise<void> {
-    const hash = createHash("sha256");
-    for await (const chunk of createReadStream(executable)) {
-      hash.update(chunk);
-    }
-    hash.update(await readFile(this.config.profile_path));
-    hash.update(this.config.app_version);
-    const fingerprint = hash.digest("hex");
-    if (fingerprint === this.fingerprint && this.daemon && isRunning(this.daemon)) {
+    const helper = await this.stageHelper(executable);
+    const selectionChanged = await this.selectHelper(helper.bundle);
+    const runningProtocol = await inspectDaemon(this.socket_path, this.operations.startup_timeout_ms ?? 5_000);
+    if (runningProtocol !== undefined) {
+      let diagnostic: string | undefined;
+      if (runningProtocol !== helper.protocol_version) {
+        diagnostic = `Signed development ctld is still using protocol ${runningProtocol}; the selected helper uses ${helper.protocol_version}. Existing connections were preserved. Open About rmux and explicitly restart ctld to use the new helper.`;
+      } else if (selectionChanged) {
+        diagnostic = "New signed helper staged; use About → Restart ctld to apply it. Existing connections preserved.";
+      }
+      if (diagnostic && (selectionChanged || diagnostic !== this.last_diagnostic)) {
+        (this.operations.on_diagnostic ?? console.warn)(diagnostic);
+      }
+      this.last_diagnostic = diagnostic;
       return;
     }
+    this.last_diagnostic = undefined;
 
-    await mkdir(this.config.runtime_directory, { recursive: true });
-    const directory = await mkdtemp(
-      path.join(this.config.runtime_directory, `build-${fingerprint.slice(0, 12)}-`),
-    );
-    this.bundle_directories.push(directory);
-    const bundle = path.join(directory, "ctld.app");
-    const packagedExecutable = path.join(bundle, "Contents/MacOS/ctld");
+    // detached creates a new session. Do not also pass --detach-from-terminal:
+    // its second setsid would fail after Node made this child a session leader.
+    const daemon = ownDaemon(spawn(helper.executable, ["--socket", this.socket_path], {
+      cwd: "/",
+      env: {
+        ...helperEnvironment(),
+        // A retained daemon's proxy children must use its matching helper;
+        // only the app follows the selected symlink for an explicit restart.
+        CTLD_BIN: helper.executable,
+        CTLD_RUNTIME_DIR: this.config.runtime_directory,
+        CTLD_SOCKET_PATH: this.socket_path,
+      },
+      detached: true,
+      stdio: "ignore",
+    }));
     try {
-      if (this.operations.package_bundle) {
-        await this.operations.package_bundle(executable, bundle);
-      } else {
-        await packageBundle(executable, bundle, this.config);
-      }
-      const { stdout } = await execFile(packagedExecutable, ["--protocol-version"], {
-        cwd: this.config.repository_root,
-        timeout: 5_000,
-      });
-      const protocolVersion = Number(stdout.trim());
-      if (!/^\d+$/.test(stdout.trim()) || !Number.isSafeInteger(protocolVersion) || protocolVersion > 65_535) {
-        throw new Error("signed ctld returned an invalid local protocol version");
-      }
-
-      // Do not replace a live helper until its replacement has been signed successfully.
-      const nextLink = path.join(directory, "current.app");
-      await symlink(bundle, nextLink);
-      await rename(nextLink, path.join(this.config.runtime_directory, "ctld.app"));
-      await this.stopDaemon();
-      await rm(this.socket_path, { force: true });
-      const daemon = ownDaemon(spawn(packagedExecutable, ["--socket", this.socket_path], {
-        cwd: this.config.repository_root,
-        env: {
-          ...process.env,
-          CTLD_BIN: this.executable,
-          CTLD_RUNTIME_DIR: this.config.runtime_directory,
-          CTLD_SOCKET_PATH: this.socket_path,
-        },
-        stdio: ["ignore", "inherit", "inherit"],
-      }));
-      this.daemon = daemon;
-      try {
-        await waitForHandshake(
-          this.socket_path,
-          daemon,
-          protocolVersion,
-          this.operations.startup_timeout_ms ?? 5_000,
-        );
-      } catch (error) {
-        await this.stopDaemon();
-        await rm(this.socket_path, { force: true });
-        throw error;
-      }
-      this.fingerprint = fingerprint;
+      await this.waitForDaemon(daemon, helper.protocol_version);
+      daemon.child.unref();
     } catch (error) {
-      // Failed bundles are never reused. Other successful builds remain available
-      // for SSH askpass children until the development session finishes.
-      await rm(directory, { recursive: true, force: true });
+      // Never unlink the endpoint: an explicit external restart might have won
+      // the bind. ctld's own shutdown guard removes only its endpoint.
+      await stopOwnedDaemon(daemon, this.operations.shutdown_timeout_ms ?? 2_000);
       throw error;
     }
   }
 
-  private async stopDaemon(): Promise<void> {
-    const daemon = this.daemon;
-    if (!daemon) {
-      return;
-    }
-    if (isRunning(daemon)) {
-      daemon.child.kill("SIGTERM");
-      await waitUntilExit(daemon, this.operations.shutdown_timeout_ms ?? 2_000);
-      if (isRunning(daemon)) {
-        daemon.child.kill("SIGKILL");
-        await waitUntilExit(daemon, this.operations.shutdown_timeout_ms ?? 2_000);
-        if (isRunning(daemon)) {
-          throw new Error("owned signed ctld did not stop after SIGKILL");
+  private async stageHelper(executable: string): Promise<PreparedHelper> {
+    const staging = await mkdtemp(path.join(this.config.runtime_directory, ".prepare-"));
+    try {
+      // Snapshot inputs before hashing/signing, since another Cargo invocation
+      // can replace its output or a refreshed profile while preparation runs.
+      const artifact = path.join(staging, "artifact");
+      const profile = path.join(staging, "profile");
+      const recipe = path.join(staging, "recipe");
+      await copyFile(executable, artifact);
+      await copyFile(this.config.profile_path, profile);
+      const hash = createHash("sha256");
+      for await (const chunk of createReadStream(artifact)) hash.update(chunk);
+      hash.update(await readFile(profile));
+      hash.update(this.config.app_version);
+      // A persistent bundle cache must also track the signing recipe. Execute
+      // these same snapshots so a concurrent edit cannot change what is signed
+      // after its cache fingerprint has been calculated.
+      for (const relative of recipeFiles) {
+        const snapshot = path.join(recipe, relative);
+        await mkdir(path.dirname(snapshot), { recursive: true });
+        await copyFile(path.join(this.config.repository_root, relative), snapshot);
+        hash.update(JSON.stringify([relative, createHash("sha256").update(await readFile(snapshot)).digest("hex")]));
+      }
+      const fingerprint = hash.digest("hex");
+      const directory = path.join(this.config.runtime_directory, `build-${fingerprint}`);
+      const bundle = path.join(directory, "ctld.app");
+      const packagedExecutable = path.join(bundle, "Contents/MacOS/ctld");
+      try {
+        await lstat(directory);
+        await ensurePrivateDirectory(directory);
+        const marker = await readFile(path.join(directory, "fingerprint"), "utf8");
+        if (marker !== fingerprint) throw new Error("cached signed ctld bundle metadata is invalid");
+        return { bundle, executable: packagedExecutable, protocol_version: await protocolVersion(packagedExecutable) };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        // An incomplete published directory is never overwritten: it might be
+        // used by a live process, and a missing marker is not proof otherwise.
+        try {
+          await lstat(directory);
+          throw new Error("cached signed ctld bundle is incomplete; no running daemon was changed");
+        } catch (check) {
+          if ((check as NodeJS.ErrnoException).code !== "ENOENT") throw check;
         }
       }
+      const stagedBundle = path.join(staging, "ctld.app");
+      if (this.operations.package_bundle) {
+        await this.operations.package_bundle(artifact, stagedBundle);
+      } else {
+        await packageBundle(artifact, stagedBundle, { ...this.config, profile_path: profile, repository_root: recipe });
+      }
+      const version = await protocolVersion(path.join(stagedBundle, "Contents/MacOS/ctld"));
+      await rm(artifact);
+      await rm(profile);
+      await rm(recipe, { recursive: true });
+      await writeFile(path.join(staging, "fingerprint"), fingerprint, { mode: 0o600 });
+      await rename(staging, directory);
+      return { bundle, executable: packagedExecutable, protocol_version: version };
+    } finally {
+      // Only unpublished snapshots are removed. Published builds can still be
+      // executable paths of ctld, SSH askpass, and proxy children across launches.
+      await rm(staging, { recursive: true, force: true });
     }
-    this.daemon = undefined;
+  }
+
+  private async selectHelper(bundle: string): Promise<boolean> {
+    const selected = path.join(this.config.runtime_directory, "ctld.app");
+    try {
+      if (!(await lstat(selected)).isSymbolicLink()) throw new Error("selected signed ctld path is not a symbolic link");
+      if (await readlink(selected) === bundle) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const link = path.join(this.config.runtime_directory, `.selected-${randomUUID()}`);
+    try {
+      await symlink(bundle, link);
+      await rename(link, selected);
+      return true;
+    } finally {
+      await rm(link, { force: true });
+    }
+  }
+
+  private async waitForDaemon(daemon: OwnedDaemon, expectedProtocol: number): Promise<void> {
+    const deadline = Date.now() + (this.operations.startup_timeout_ms ?? 5_000);
+    while (Date.now() < deadline) {
+      if (!isRunning(daemon)) throw daemon.spawn_error ?? new Error("new signed ctld stopped during startup");
+      const version = await inspectDaemon(this.socket_path, Math.max(1, deadline - Date.now()));
+      if (version !== undefined) {
+        if (version !== expectedProtocol) throw new Error("new signed ctld returned an unexpected protocol version");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error("new signed ctld did not become ready before startup timed out");
   }
 }
 
+function helperEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const name of ["CTLD_ASKPASS", "CTLD_ASKPASS_TOKEN", "CTLD_IDENTITY_ASKPASS", "CTLD_IDENTITY_ASKPASS_SOCKET", "CTLD_IDENTITY_ASKPASS_TOKEN"]) delete environment[name];
+  return environment;
+}
+
+async function protocolVersion(executable: string): Promise<number> {
+  const { stdout } = await execFile(executable, ["--protocol-version"], { env: helperEnvironment(), timeout: 5_000, maxBuffer: 1024 });
+  const version = Number(stdout.trim());
+  if (!/^\d+$/.test(stdout.trim()) || !Number.isInteger(version) || version > 65_535) throw new Error("signed ctld returned an invalid local protocol version");
+  return version;
+}
+
 async function packageBundle(executable: string, bundle: string, config: SignedDaemonConfig): Promise<void> {
-  const child = ownDaemon(spawn(
-    path.join(config.repository_root, "scripts/ci/package-ctld-app.sh"),
-    [executable, bundle, config.app_version],
-    {
-      cwd: config.repository_root,
-      env: { ...process.env, CTLD_PROVISIONING_PROFILE: config.profile_path },
-      stdio: "inherit",
-    },
-  ));
+  const child = ownDaemon(spawn(path.join(config.repository_root, "scripts/ci/package-ctld-app.sh"), [executable, bundle, config.app_version], {
+    cwd: config.repository_root,
+    env: { ...helperEnvironment(), CTLD_PROVISIONING_PROFILE: config.profile_path },
+    stdio: "inherit",
+  }));
   await child.exited;
-  if (child.spawn_error) {
-    throw child.spawn_error;
-  }
-  if (child.child.exitCode !== 0) {
-    throw new Error(`ctld signing failed with ${child.child.signalCode ?? `status ${child.child.exitCode}`}`);
-  }
+  if (child.spawn_error) throw child.spawn_error;
+  if (child.child.exitCode !== 0) throw new Error(`ctld signing failed with ${child.child.signalCode ?? `status ${child.child.exitCode}`}`);
 }
 
 function ownDaemon(child: ChildProcess): OwnedDaemon {
   const daemon: OwnedDaemon = { child, finished: false, exited: Promise.resolve() };
   daemon.exited = new Promise((resolve) => {
     child.once("error", (error) => { daemon.spawn_error = error; });
-    child.once("close", () => {
-      daemon.finished = true;
-      resolve();
-    });
+    child.once("close", () => { daemon.finished = true; resolve(); });
   });
   return daemon;
 }
 
 function isRunning(daemon: OwnedDaemon): boolean {
-  return !daemon.finished && !daemon.spawn_error &&
-    daemon.child.exitCode === null && daemon.child.signalCode === null;
+  return !daemon.finished && !daemon.spawn_error && daemon.child.exitCode === null && daemon.child.signalCode === null;
 }
 
-async function waitUntilExit(daemon: OwnedDaemon, timeout: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      daemon.exited,
-      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeout); }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function waitForHandshake(socket: string, daemon: OwnedDaemon, protocolVersion: number, timeout: number): Promise<void> {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    if (!isRunning(daemon)) {
-      throw daemon.spawn_error ?? new Error("signed ctld stopped during startup");
-    }
+async function stopOwnedDaemon(daemon: OwnedDaemon, timeout: number): Promise<void> {
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    if (!isRunning(daemon)) return;
+    daemon.child.kill(signal);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await handshake(socket, protocolVersion, Math.max(1, deadline - Date.now()));
-      return;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ECONNREFUSED") {
-        throw error;
-      }
+      await Promise.race([daemon.exited, new Promise<void>((resolve) => { timer = setTimeout(resolve, timeout); })]);
+    } finally {
+      clearTimeout(timer);
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("signed ctld did not accept a local protocol handshake before startup timed out");
-}
-
-function handshake(socket: string, protocolVersion: number, timeout: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const connection = createConnection(socket);
-    let received = Buffer.alloc(0);
-    const finish = (error?: Error): void => {
-      connection.destroy();
-      if (error) { reject(error); } else { resolve(); }
-    };
-    connection.setTimeout(timeout, () => {
-      finish(new Error("signed ctld local protocol handshake timed out"));
-    });
-    connection.once("error", finish);
-    connection.once("end", () => {
-      finish(new Error("signed ctld closed its local protocol handshake"));
-    });
-    connection.once("connect", () => {
-      const payload = Buffer.from(JSON.stringify({ type: "handshake", protocol_version: protocolVersion }));
-      const header = Buffer.alloc(4);
-      header.writeUInt32BE(payload.length);
-      connection.write(Buffer.concat([header, payload]));
-    });
-    connection.on("data", (chunk) => {
-      received = Buffer.concat([received, chunk]);
-      if (received.length < 4) { return; }
-      const length = received.readUInt32BE();
-      if (length > maxFrameSize) {
-        finish(new Error("signed ctld returned an oversized handshake frame"));
-        return;
-      }
-      if (received.length < length + 4) { return; }
-      try {
-        const response = JSON.parse(received.subarray(4, length + 4).toString("utf8")) as {
-          type?: string;
-          protocol_version?: number;
-          message?: string;
-        };
-        if (response.type !== "handshake_accepted" || response.protocol_version !== protocolVersion) {
-          throw new Error(response.message ?? `signed ctld did not accept local protocol ${protocolVersion}`);
-        }
-        finish();
-      } catch (error) {
-        finish(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  });
+  if (isRunning(daemon)) throw new Error("new signed ctld did not stop after failed startup");
 }

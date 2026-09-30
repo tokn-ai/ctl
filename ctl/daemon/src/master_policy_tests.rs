@@ -163,7 +163,7 @@ async fn a_direct_method_can_adopt_and_release_a_configured_master() {
   };
   let state = State::default();
   assert!(state.endpoint(&direct).is_none());
-  state.adopt(&direct, &endpoint, None);
+  state.adopt(&direct, &endpoint, None).unwrap();
   assert_eq!(
     state.endpoint(&direct).unwrap().control_path,
     endpoint.control_path
@@ -239,8 +239,10 @@ async fn shared_disconnect_closes_only_our_anchor_and_preserves_external_socket(
     shared: true,
     startup: SharedMasterStartup::Create,
   };
-  state.adopt(&configured, &endpoint, anchor.stdin.take());
-  state.adopt(&configured, &endpoint, None);
+  state
+    .adopt(&configured, &endpoint, anchor.stdin.take())
+    .unwrap();
+  state.adopt(&configured, &endpoint, None).unwrap();
   assert!(
     state.configured_connections.lock().unwrap()[&target_key(&configured)]
       .anchor
@@ -332,7 +334,7 @@ async fn a_stale_private_fallback_socket_does_not_block_reconnection_with_forwar
   std::fs::write(&endpoint.control_path, "stale socket").unwrap();
   let state = State::default();
   let configured = target(Some("builder"));
-  state.adopt(&configured, &endpoint, None);
+  state.adopt(&configured, &endpoint, None).unwrap();
   state
     .forwards
     .lock()

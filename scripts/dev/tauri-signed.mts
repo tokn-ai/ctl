@@ -17,6 +17,7 @@ import {
 import path from "node:path";
 import { servePreparation } from "./daemon-preparation.mts";
 import { SignedDaemon } from "./signed-daemon.mts";
+import { createSignedSupervisorDirectory, prepareSignedRuntime } from "./signed-runtime.mts";
 
 const execFile = promisify(execFileCallback);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -49,7 +50,7 @@ async function main(): Promise<void> {
   }
 
   const inspectionDirectory = await mkdtemp(path.join(tmpdir(), "rmux-profile-"));
-  let runtimeDirectory: string | undefined;
+  let supervisorDirectory: string | undefined;
   let daemon: SignedDaemon | undefined;
   let supervisor: Awaited<ReturnType<typeof servePreparation>> | undefined;
   let tauri: ChildProcess | undefined;
@@ -84,7 +85,7 @@ async function main(): Promise<void> {
       throw new Error("rmux has no version in src-tauri/tauri.conf.json");
     }
 
-    runtimeDirectory = await mkdtemp(path.join(tmpdir(), "rmux-ctld-dev-"));
+    const runtimeDirectory = await prepareSignedRuntime(repositoryRoot);
     daemon = new SignedDaemon({
       runtime_directory: runtimeDirectory,
       profile_path: profile.path,
@@ -92,7 +93,10 @@ async function main(): Promise<void> {
       repository_root: repositoryRoot,
     });
     const ownedDaemon = daemon;
-    const supervisorSocket = path.join(runtimeDirectory, "prepare.sock");
+    // The build supervisor belongs to this launcher; the daemon endpoint is
+    // shared by every launch of this worktree and survives launcher shutdown.
+    supervisorDirectory = await createSignedSupervisorDirectory(runtimeDirectory);
+    const supervisorSocket = path.join(supervisorDirectory, "prepare.sock");
     supervisor = await servePreparation(supervisorSocket, (executable) => ownedDaemon.prepare(executable));
     const environment = {
       ...process.env,
@@ -119,10 +123,8 @@ async function main(): Promise<void> {
     process.off("SIGTERM", stopTauri);
     await supervisor?.close();
     await daemon?.close();
+    if (supervisorDirectory) await rm(supervisorDirectory, { recursive: true, force: true });
     await rm(inspectionDirectory, { recursive: true, force: true });
-    if (runtimeDirectory) {
-      await rm(runtimeDirectory, { recursive: true, force: true });
-    }
   }
 }
 

@@ -167,7 +167,13 @@ impl Client {
       Some(path) => path.clone(),
       None => crate::daemon_executable()?,
     };
-    let executable = resolve_executable(&selected)?;
+    let executable = crate::resolve_executable(&selected).map_err(|error| {
+      if selected.components().count() == 1 && error.kind() == io::ErrorKind::NotFound {
+        LifecycleError::Unavailable(error.to_string())
+      } else {
+        LifecycleError::Io(error)
+      }
+    })?;
     let output = timeout(
       QUERY_TIMEOUT,
       tokio::process::Command::new(&executable)
@@ -361,20 +367,6 @@ impl PreparedRestart {
       sleep(Duration::from_millis(25)).await;
     }
   }
-}
-
-fn resolve_executable(selected: &std::path::Path) -> Result<PathBuf, LifecycleError> {
-  let path = if selected.components().count() == 1 {
-    std::env::var_os("PATH")
-      .into_iter()
-      .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-      .map(|directory| directory.join(selected))
-      .find(|path| path.is_file())
-      .ok_or_else(|| LifecycleError::Unavailable("ctld was not found on PATH".into()))?
-  } else {
-    selected.to_owned()
-  };
-  path.canonicalize().map_err(Into::into)
 }
 
 async fn inspect(stream: &mut crate::Stream) -> Result<DaemonInfo, LifecycleError> {

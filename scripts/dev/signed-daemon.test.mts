@@ -1,197 +1,219 @@
 import assert from "node:assert/strict";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { execFile as execFileCallback } from "node:child_process";
+import { copyFile, lstat, mkdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { test, type TestContext } from "node:test";
-import { SignedDaemon } from "./signed-daemon.mts";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { fixture, packages, running, startExternal, starts, stopFixture, supervisor, unixOnly, waitReady, writeHelper } from "./signed-daemon.fixtures.mts";
 
-interface Fixture {
-  root: string;
-  executable: string;
-  log: string;
-  supervisor: SignedDaemon;
-  packages: number;
-  fail_signing: boolean;
-}
+const execFile = promisify(execFileCallback);
 
-const unixOnly = { skip: process.platform === "win32" };
-
-async function fixture(context: TestContext): Promise<Fixture> {
-  const root = await mkdtemp(path.join(tmpdir(), "ctld-supervisor-"));
-  const profile = path.join(root, "profile");
-  await writeFile(profile, "test provisioning profile");
-  const result: Fixture = {
-    root,
-    executable: path.join(root, "ctld"),
-    log: path.join(root, "processes.jsonl"),
-    packages: 0,
-    fail_signing: false,
-    supervisor: undefined as unknown as SignedDaemon,
-  };
-  result.supervisor = new SignedDaemon({
-    runtime_directory: path.join(root, "runtime"),
-    profile_path: profile,
-    app_version: "0.1.0",
-    repository_root: root,
-  }, {
-    startup_timeout_ms: 2_000,
-    shutdown_timeout_ms: 300,
-    package_bundle: async (executable, bundle) => {
-      result.packages += 1;
-      if (result.fail_signing) {
-        throw new Error("test signing failed");
-      }
-      const output = path.join(bundle, "Contents/MacOS/ctld");
-      await mkdir(path.dirname(output), { recursive: true });
-      await copyFile(executable, output);
-    },
-  });
-  context.after(async () => {
-    await result.supervisor.close();
-    await rm(root, { recursive: true, force: true });
-  });
-  await writeHelper(result, 5);
-  return result;
-}
-
-async function writeHelper(fixture: Fixture, protocolVersion: number, mode = "ready"): Promise<void> {
-  await writeFile(fixture.executable, `#!${process.execPath}
-const fs = require("node:fs");
-const net = require("node:net");
-const protocol_version = ${protocolVersion};
-const mode = ${JSON.stringify(mode)};
-if (process.argv.includes("--protocol-version")) {
-  console.log(protocol_version);
-  process.exit(0);
-}
-const socket = process.argv[process.argv.indexOf("--socket") + 1];
-fs.appendFileSync(${JSON.stringify(fixture.log)}, JSON.stringify({ pid: process.pid, protocol_version }) + "\\n");
-if (mode === "exit") { process.exit(1); }
-process.on("SIGTERM", () => {
-  if (mode !== "ignore_term") { process.exit(0); }
-});
-net.createServer((connection) => {
-  connection.on("error", () => {});
-  if (mode === "hang") { return; }
-  let received = Buffer.alloc(0);
-  connection.on("data", (chunk) => {
-    received = Buffer.concat([received, chunk]);
-    if (received.length < 4 || received.length < received.readUInt32BE() + 4) { return; }
-    const request = JSON.parse(received.subarray(4).toString());
-    const accepted = mode !== "mismatch" && request.protocol_version === protocol_version;
-    const payload = Buffer.from(JSON.stringify(accepted
-      ? { type: "handshake_accepted", protocol_version }
-      : { type: "error", message: "test protocol mismatch" }));
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(payload.length);
-    connection.write(header.subarray(0, 2));
-    setTimeout(() => connection.end(Buffer.concat([header.subarray(2), payload])), 5);
-  });
-}).listen(socket);
-`);
-  await chmod(fixture.executable, 0o700);
-}
-
-async function starts(fixture: Fixture): Promise<Array<{ pid: number; protocol_version: number }>> {
-  return (await readFile(fixture.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-}
-
-function running(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") { return false; }
-    throw error;
-  }
-}
-
-test("reuses an unchanged signed daemon across serialized native reloads", unixOnly, async (context) => {
-  const fixtureData = await fixture(context);
-  await Promise.all([
-    fixtureData.supervisor.prepare(fixtureData.executable),
-    fixtureData.supervisor.prepare(fixtureData.executable),
-    fixtureData.supervisor.prepare(fixtureData.executable),
-  ]);
-  assert.equal(fixtureData.packages, 1);
-  const processes = await starts(fixtureData);
+test("reuses a signed daemon across reloads and fresh supervisors", unixOnly, async (context) => {
+  const data = await fixture(context);
+  await Promise.all(Array.from({ length: 3 }, () => data.supervisor.prepare(data.executable)));
+  await data.supervisor.close();
+  const reopened = supervisor(data);
+  await reopened.prepare(data.executable);
+  await reopened.close();
+  assert.equal(await packages(data), 1);
+  const processes = await starts(data);
   assert.equal(processes.length, 1);
   assert.equal(running(processes[0].pid), true);
-  assert.equal((await stat(fixtureData.supervisor.socket_path)).isSocket(), true);
+  assert.equal((await stat(data.supervisor.socket_path)).isSocket(), true);
+  assert.deepEqual(data.diagnostics, []);
 });
 
-test("replaces protocol 5 with protocol 6 before returning from prepare", unixOnly, async (context) => {
-  const fixtureData = await fixture(context);
-  await fixtureData.supervisor.prepare(fixtureData.executable);
-  const originalLink = await readlink(path.join(fixtureData.root, "runtime/ctld.app"));
-  const [original] = await starts(fixtureData);
-  await writeHelper(fixtureData, 6);
-  await fixtureData.supervisor.prepare(fixtureData.executable);
-  const processes = await starts(fixtureData);
-  assert.deepEqual(processes.map((item) => item.protocol_version), [5, 6]);
-  assert.equal(running(original.pid), false);
-  assert.equal(running(processes[1].pid), true);
-  assert.equal(fixtureData.packages, 2);
-  assert.notEqual(await readlink(path.join(fixtureData.root, "runtime/ctld.app")), originalLink);
+for (const version of [5, 6]) {
+  test(`stages a changed helper without replacing live protocol 5 (new protocol ${version})`, unixOnly, async (context) => {
+    const data = await fixture(context);
+    await data.supervisor.prepare(data.executable);
+    const originalLink = await readlink(path.join(data.root, "runtime/ctld.app"));
+    const [original] = await starts(data);
+    const originalExecutable = path.join(originalLink, "Contents/MacOS/ctld");
+    assert.equal(original.ctld_bin, originalExecutable);
+    await writeHelper(data, version, "changed_build");
+    await data.supervisor.prepare(data.executable);
+    assert.equal((await starts(data)).length, 1);
+    assert.equal(running(original.pid), true);
+    assert.equal(await packages(data), 2);
+    assert.notEqual(await readlink(path.join(data.root, "runtime/ctld.app")), originalLink);
+    assert.equal((await stat(path.join(originalLink, "Contents/MacOS/ctld"))).isFile(), true);
+    const { stdout } = await execFile(original.ctld_bin!, ["--protocol-version"]);
+    assert.equal(stdout.trim(), "5", "retained daemon's child helper must remain on its original protocol");
+    assert.equal(data.diagnostics.length, 1);
+    assert.match(data.diagnostics[0], version === 5 ? /New signed helper staged/ : /still using protocol 5/);
+    await data.supervisor.prepare(data.executable);
+    assert.equal(data.diagnostics.length, 1, "unchanged reload must not repeat the diagnostic");
+    await waitReady(data, 5);
+  });
+}
+
+test("failed startup preserves a different daemon that won the endpoint", unixOnly, async (context) => {
+  const data = await fixture(context);
+  await writeHelper(data, 6);
+  await copyFile(data.executable, data.executable + ".replacement");
+  await writeHelper(data, 5, "replacement_race");
+  await assert.rejects(data.supervisor.prepare(data.executable), /unexpected protocol version/);
+  const [attempt, replacement] = await starts(data);
+  assert.equal(running(attempt.pid), false);
+  assert.equal(running(replacement.pid), true);
+  await waitReady(data, 6);
 });
 
-test("a signing failure preserves the live daemon and its executable", unixOnly, async (context) => {
-  const fixtureData = await fixture(context);
-  await fixtureData.supervisor.prepare(fixtureData.executable);
-  const originalLink = await readlink(path.join(fixtureData.root, "runtime/ctld.app"));
-  const [original] = await starts(fixtureData);
-  await writeHelper(fixtureData, 6);
-  fixtureData.fail_signing = true;
-  await assert.rejects(fixtureData.supervisor.prepare(fixtureData.executable), /test signing failed/);
+test("a signing failure preserves the live daemon and selected helper", unixOnly, async (context) => {
+  const data = await fixture(context);
+  await data.supervisor.prepare(data.executable);
+  const originalLink = await readlink(path.join(data.root, "runtime/ctld.app"));
+  const [original] = await starts(data);
+  await writeHelper(data, 6);
+  data.fail_signing = true;
+  await assert.rejects(data.supervisor.prepare(data.executable), /test signing failed/);
   assert.equal(running(original.pid), true);
-  assert.equal(await readlink(path.join(fixtureData.root, "runtime/ctld.app")), originalLink);
-  fixtureData.fail_signing = false;
-  await fixtureData.supervisor.prepare(fixtureData.executable);
-  assert.equal(running(original.pid), false);
-  assert.deepEqual((await starts(fixtureData)).map((item) => item.protocol_version), [5, 6]);
+  assert.equal(await readlink(path.join(data.root, "runtime/ctld.app")), originalLink);
+  data.fail_signing = false;
+  await data.supervisor.prepare(data.executable);
+  assert.equal(running(original.pid), true);
+  assert.equal((await starts(data)).length, 1);
+});
+
+test("invalidates the persistent cache when the signing recipe changes", unixOnly, async (context) => {
+  const data = await fixture(context);
+  await data.supervisor.prepare(data.executable);
+  const originalLink = await readlink(path.join(data.root, "runtime/ctld.app"));
+  const [original] = await starts(data);
+  await data.supervisor.close();
+  await writeFile(path.join(data.root, "apps/desktop/src-tauri/macos/ctld/Entitlements.plist"), "updated test signing recipe");
+  const reopened = supervisor(data);
+  await reopened.prepare(data.executable);
+  await reopened.prepare(data.executable);
+  await reopened.close();
+  assert.equal(await packages(data), 2);
+  assert.notEqual(await readlink(path.join(data.root, "runtime/ctld.app")), originalLink);
+  assert.equal((await starts(data)).length, 1);
+  assert.equal(running(original.pid), true);
 });
 
 for (const mode of ["mismatch", "hang", "exit"]) {
-  test(`cleans up a daemon that fails readiness (${mode})`, unixOnly, async (context) => {
-    const fixtureData = await fixture(context);
-    await writeHelper(fixtureData, 6, mode);
-    await assert.rejects(
-      fixtureData.supervisor.prepare(fixtureData.executable),
-      /protocol mismatch|handshake timed out|stopped during startup/,
-    );
-    const [process] = await starts(fixtureData);
-    assert.equal(running(process.pid), false);
-    await assert.rejects(stat(fixtureData.supervisor.socket_path), { code: "ENOENT" });
-    await writeHelper(fixtureData, 6);
-    await fixtureData.supervisor.prepare(fixtureData.executable);
-    assert.equal((await starts(fixtureData)).length, 2);
+  test(`terminates only the newly spawned daemon after readiness failure (${mode})`, unixOnly, async (context) => {
+    const data = await fixture(context);
+    await writeHelper(data, 6, mode);
+    await assert.rejects(data.supervisor.prepare(data.executable), /invalid lifecycle response|query in time|stopped during startup/);
+    const [child] = await starts(data);
+    assert.equal(running(child.pid), false);
+    await assert.rejects(stat(data.supervisor.socket_path), { code: "ENOENT" });
+    await writeHelper(data, 6);
+    await data.supervisor.prepare(data.executable);
+    assert.equal((await starts(data)).length, 2);
   });
 }
 
-test("close waits for preparation and terminates only its owned daemon", unixOnly, async (context) => {
-  const fixtureData = await fixture(context);
-  await writeHelper(fixtureData, 6, "ignore_term");
-  const preparation = fixtureData.supervisor.prepare(fixtureData.executable);
-  const closing = fixtureData.supervisor.close();
+test("close drains pending preparation and preserves the daemon and bundle", unixOnly, async (context) => {
+  const data = await fixture(context);
+  const preparation = data.supervisor.prepare(data.executable);
+  const closing = data.supervisor.close();
   await preparation;
   await closing;
-  const [process] = await starts(fixtureData);
-  assert.equal(running(process.pid), false);
-  await assert.rejects(stat(fixtureData.supervisor.socket_path), { code: "ENOENT" });
-  await assert.rejects(stat(fixtureData.supervisor.executable), { code: "ENOENT" });
-  await assert.rejects(fixtureData.supervisor.prepare(fixtureData.executable), /supervisor is closing/);
-  await fixtureData.supervisor.close();
+  const [child] = await starts(data);
+  assert.equal(running(child.pid), true);
+  assert.equal((await stat(data.supervisor.socket_path)).isSocket(), true);
+  assert.equal((await stat(data.supervisor.executable)).isFile(), true);
+  await waitReady(data, 5);
+  await assert.rejects(data.supervisor.prepare(data.executable), /supervisor is closing/);
 });
 
-test("restarts an unchanged binary if its previous process has exited", unixOnly, async (context) => {
-  const fixtureData = await fixture(context);
-  await fixtureData.supervisor.prepare(fixtureData.executable);
-  const [original] = await starts(fixtureData);
-  process.kill(original.pid, "SIGTERM");
-  for (let attempt = 0; attempt < 100 && running(original.pid); attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
+test("reuses the replacement after an explicit external restart", unixOnly, async (context) => {
+  const data = await fixture(context);
+  await data.supervisor.prepare(data.executable);
+  const [original] = await starts(data);
+  await writeHelper(data, 6);
+  await data.supervisor.prepare(data.executable);
+  await stopFixture(original.pid);
+  const replacement = await startExternal(data, data.supervisor.executable);
+  await waitReady(data, 6);
+  const reopened = supervisor(data);
+  await reopened.prepare(data.executable);
+  await reopened.close();
+  assert.deepEqual((await starts(data)).map((item) => item.pid), [original.pid, replacement]);
+  assert.equal(await packages(data), 2);
+  assert.equal(running(replacement), true);
+});
+
+test("allows ctld to recover its own stale endpoint after a crash", unixOnly, async (context) => {
+  const data = await fixture(context);
+  await data.supervisor.prepare(data.executable);
+  const [original] = await starts(data);
+  await stopFixture(original.pid, "SIGKILL");
+  assert.equal((await stat(data.supervisor.socket_path)).isSocket(), true);
+  await data.supervisor.prepare(data.executable);
+  await waitReady(data, 5);
+  assert.equal((await starts(data)).length, 2);
+  assert.equal(await packages(data), 1);
+});
+
+for (const mode of ["mismatch", "hang"]) {
+  test(`leaves an existing ${mode} owner untouched`, unixOnly, async (context) => {
+    const data = await fixture(context);
+    await mkdir(data.config.runtime_directory, { mode: 0o700 });
+    await writeHelper(data, 5, mode);
+    const existing = await startExternal(data);
+    // This owner intentionally never returns a valid lifecycle response.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (await lstat(data.supervisor.socket_path).then(() => true, () => false)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const before = await lstat(data.supervisor.socket_path);
+    await writeHelper(data, 6);
+    await assert.rejects(data.supervisor.prepare(data.executable), /invalid lifecycle response|query in time/);
+    assert.equal((await starts(data)).length, 1);
+    assert.equal(running(existing), true);
+    assert.equal((await lstat(data.supervisor.socket_path)).ino, before.ino);
+  });
+}
+
+for (const kind of ["file", "symlink"]) {
+  test(`rejects an unexpected endpoint ${kind} without deleting it`, unixOnly, async (context) => {
+    const data = await fixture(context);
+    await mkdir(data.config.runtime_directory, { mode: 0o700 });
+    if (kind === "file") await writeFile(data.supervisor.socket_path, "keep");
+    else await symlink(data.executable, data.supervisor.socket_path);
+    const before = await lstat(data.supervisor.socket_path);
+    await assert.rejects(data.supervisor.prepare(data.executable), /not an owned Unix socket/);
+    assert.equal((await lstat(data.supervisor.socket_path)).ino, before.ino);
+    assert.deepEqual(await starts(data), []);
+  });
+}
+
+test("concurrent independent launchers serialize preparation and exit while ctld survives", unixOnly, async (context) => {
+  const data = await fixture(context);
+  const worker = path.join(data.root, "launcher.mts");
+  const manager = fileURLToPath(new URL("./signed-daemon.mts", import.meta.url));
+  await writeFile(worker, `
+import { appendFile, copyFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { SignedDaemon } from ${JSON.stringify(manager)};
+const daemon = new SignedDaemon(${JSON.stringify(data.config)}, {
+  package_bundle: async (input, bundle) => {
+    await appendFile(${JSON.stringify(data.package_log)}, "package\\n");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const output = path.join(bundle, "Contents/MacOS/ctld");
+    await mkdir(path.dirname(output), {recursive: true});
+    await copyFile(input, output);
   }
-  assert.equal(running(original.pid), false);
-  await fixtureData.supervisor.prepare(fixtureData.executable);
-  assert.equal((await starts(fixtureData)).length, 2);
+});
+await daemon.prepare(${JSON.stringify(data.executable)});
+await daemon.close();
+`);
+  const launch = () => execFile(process.execPath, ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", worker], { timeout: 8_000 });
+  await Promise.all([launch(), launch(), launch()]);
+  const [original] = await starts(data);
+  assert.equal(await packages(data), 1);
+  assert.equal((await starts(data)).length, 1);
+  assert.equal(running(original.pid), true);
+  await waitReady(data, 5);
+  await launch();
+  assert.equal((await starts(data)).length, 1);
+  assert.equal(await packages(data), 1);
+  assert.equal(running(original.pid), true);
+  assert.equal((await readFile(data.package_log, "utf8")).trim(), "package");
 });

@@ -24,6 +24,7 @@ import type {
 import type { ProposedDimensions } from "../terminal/TerminalPresenter";
 import type { AttachmentRenderer } from "../terminal/XtermRenderer";
 import { sameSession, sessionKey, targetKey } from "../targets/targets";
+import { sameSshEndpoint } from "../workspace/remoteRecovery";
 import {
   ATTACHMENT_RECOVERY_STABILITY_MS,
   AttachmentRecoveryBackoff,
@@ -40,6 +41,7 @@ import {
   shouldStopResizeAfterLeaseStatus,
 } from "./LayoutLeasePump";
 import { LatestTaskQueue } from "./LatestTaskQueue";
+import { useManualReconnect } from "./ManualReconnect";
 import { ResizeCoordinator } from "./ResizeCoordinator";
 import { ResizePump } from "./ResizePump";
 
@@ -70,6 +72,12 @@ interface ConnectionRequest {
   resume_from: string | null;
   resize_with_window: boolean;
   use_cached_state: boolean;
+  on_complete?: (outcome: ConnectionOutcome) => void;
+}
+
+interface ConnectionOutcome {
+  generation: number;
+  error_code: string | null;
 }
 
 export interface AttachmentActions {
@@ -91,9 +99,11 @@ export interface AttachmentActions {
 }
 
 export function useAttachment(renderer: AttachmentRenderer | null, view_resize = false): AttachmentActions {
+  const prepareManualReconnect = useManualReconnect();
   const view_resize_ref = useRef(view_resize);
   view_resize_ref.current = view_resize;
   const [state, publishState] = useState(INITIAL_STATE);
+  const [manualReconnectPending, setManualReconnectPending] = useState(false);
   const connection_attempt = useRef(0);
   const stateRef = useRef(state);
   // Event channels can deliver multiple transitions before React commits.
@@ -106,6 +116,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const rendererRef = useRef<AttachmentRenderer | null>(renderer);
   const activeAttachmentRef = useRef<string | null>(null);
   const openingAbortRef = useRef<AbortController | null>(null);
+  const manualReconnectRef = useRef<{ abort: AbortController; promise: Promise<void> } | null>(null);
   const channelRef = useRef<Channel<AttachmentEvent> | null>(null);
   const generationRef = useRef(0);
   const eventTailRef = useRef(Promise.resolve());
@@ -132,6 +143,13 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     deferredConnectionRef.current = new ConnectionIntentQueue<ConnectionRequest>();
   }
   rendererRef.current = renderer;
+
+  const abortManualReconnect = useCallback(() => {
+    if (!manualReconnectRef.current) return;
+    manualReconnectRef.current?.abort.abort();
+    manualReconnectRef.current = null;
+    setManualReconnectPending(false);
+  }, []);
 
   const clearRecoveryTimer = useCallback(() => {
     if (recoveryTimerRef.current !== null) {
@@ -344,6 +362,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       setState(recoveryState);
     }
     return () => {
+      abortManualReconnect();
       lifecycleRecoveryStateRef.current =
         interruptedAttachmentState(stateRef.current) ?? INITIAL_STATE;
       clearRecoveryTimer();
@@ -366,7 +385,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         void detachAttachment({ attachment_id: attachmentId });
       }
     };
-  }, [clearRecoveryTimer]);
+  }, [abortManualReconnect, clearRecoveryTimer]);
 
   const publishAppliedSequence = useCallback((sequence: string) => {
     appliedSequenceRef.current = sequence;
@@ -751,10 +770,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         for (const event of pendingEvents) {
           queueEvent(event, generation);
         }
+        request.on_complete?.({ generation, error_code: null });
         renderer.focus();
       } catch (error) {
         if (generation === generationRef.current) {
           setFailure(error);
+          request.on_complete?.({ generation: generationRef.current, error_code: errorCode(error) });
         }
       } finally {
         if (unclaimed_attachment_id !== null) {
@@ -800,6 +821,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       resizeWithWindow: boolean,
       use_cached_state = false,
       intent: ConnectionIntent = "attach",
+      on_complete?: (outcome: ConnectionOutcome) => void,
     ): Promise<void> => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
@@ -828,6 +850,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         resume_from: resumeFrom,
         resize_with_window: resizeWithWindow,
         use_cached_state,
+        on_complete,
       };
       deferredConnectionRef.current!.begin(request);
       const completion = deferredConnectionRef.current!.defer(request);
@@ -839,19 +862,20 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
 
   const connect = useCallback(
     async (session: SessionSummary, options: ConnectOptions = {}) => {
+      abortManualReconnect();
       connection_attempt.current += 1;
       resetRecovery();
       const selected = { ...session, terminal_id: options.terminal_id };
       return connectAt(selected, null, options.resize_with_window ?? view_resize_ref.current, Boolean(options.terminal_id));
     },
-    [connectAt, resetRecovery],
+    [abortManualReconnect, connectAt, resetRecovery],
   );
 
   const reconnectCurrent = useCallback(
-    async (resetBackoff: boolean) => {
+    async (resetBackoff: boolean): Promise<ConnectionOutcome | null> => {
       const current = stateRef.current;
-      if (!current.session || current.phase === "ended") {
-        return;
+      if (!current.session || current.phase === "ended" || (!resetBackoff && manualReconnectRef.current)) {
+        return null;
       }
       if (resetBackoff) {
         connection_attempt.current += 1;
@@ -876,26 +900,84 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
         transitionGeneration !== generationRef.current ||
         !sameSession(stateRef.current.session, current.session)
       ) {
-        return;
+        return null;
       }
+      const completion: { outcome: ConnectionOutcome | null } = { outcome: null };
       await connectAt(
         current.session,
         current.reconnect_sequence,
         current.resize_with_window,
         false,
         "reconnect",
+        (outcome) => { completion.outcome = outcome; },
       );
+      return completion.outcome?.generation === generationRef.current ? completion.outcome : null;
     },
     [connectAt, resetRecovery],
   );
 
   const reconnect = useCallback(
-    async () => reconnectCurrent(true),
-    [reconnectCurrent],
+    (): Promise<void> => {
+      if (manualReconnectRef.current) return manualReconnectRef.current.promise;
+      const session = stateRef.current.session;
+      if (!session || stateRef.current.phase === "ended") return Promise.resolve();
+      if (session.target.kind !== "ssh" || !prepareManualReconnect) {
+        return reconnectCurrent(true).then(() => undefined);
+      }
+      resetRecovery();
+      let generation = generationRef.current;
+      const pending = { abort: new AbortController(), promise: Promise.resolve() };
+      manualReconnectRef.current = pending;
+      setManualReconnectPending(true);
+      const isCurrent = () => {
+        const current = stateRef.current.session;
+        return manualReconnectRef.current === pending && !pending.abort.signal.aborted &&
+          generationRef.current === generation && current !== null && sameSession(current, session) &&
+          current.terminal_id === session.terminal_id && sameSshEndpoint(current.target, session.target);
+      };
+      const prepared = (connected: boolean) => {
+        if (!isCurrent()) return false;
+        if (!connected) setState((current) => activeAttachmentRef.current
+          ? { ...current, message: "Reconnect cancelled." }
+          : transitionAttachment(current, {
+            type: "failed", code: "attachment_cancelled", message: "Reconnect cancelled.",
+            resume_from: current.reconnect_sequence,
+          }));
+        return connected;
+      };
+      pending.promise = (async () => {
+        try {
+          if (!prepared(await prepareManualReconnect(session.target, pending.abort.signal))) return;
+          const outcome = await reconnectCurrent(true);
+          if (!outcome || manualReconnectRef.current !== pending || pending.abort.signal.aborted) return;
+          generation = outcome.generation;
+          if (!isCurrent() || !["ssh_authentication_required", "ssh_host_disconnected"].includes(outcome.error_code ?? "")) return;
+          // The master may disappear after preflight. One explicit retry can
+          // authenticate again; ordinary transport failures never prompt here.
+          if (!prepared(await prepareManualReconnect(session.target, pending.abort.signal, true))) return;
+          await reconnectCurrent(true);
+        } catch (error) {
+          if (isCurrent()) setState((current) => activeAttachmentRef.current
+            ? { ...current, message: errorMessage(error) }
+            : transitionAttachment(current, {
+              type: "failed", code: errorCode(error), message: errorMessage(error),
+              resume_from: current.reconnect_sequence,
+            }));
+        } finally {
+          if (manualReconnectRef.current === pending) {
+            manualReconnectRef.current = null;
+            setManualReconnectPending(false);
+          }
+        }
+      })();
+      return pending.promise;
+    },
+    [prepareManualReconnect, reconnectCurrent, resetRecovery, setState],
   );
 
   const recovery_session_key = state.session ? sessionKey(state.session) : null;
   useEffect(() => {
+    if (manualReconnectRef.current) return;
     if (state.phase === "attached" && recoveryBackoffRef.current.isActive()) {
       recoveryTimerRef.current = setTimeout(() => {
         recoveryTimerRef.current = null;
@@ -936,11 +1018,12 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     return clearRecoveryTimer;
   }, [
     reconnectCurrent, clearRecoveryTimer, state.attachment_id, state.error_code,
-    state.phase, state.retry_at_ms, recovery_session_key,
+    state.phase, state.retry_at_ms, recovery_session_key, manualReconnectPending,
   ]);
 
   const cancelPendingConnection = useCallback((session: SessionSummary) => {
     const identity = sessionKey(session);
+    if (sameSession(stateRef.current.session, session)) abortManualReconnect();
     const cancelled = deferredConnectionRef.current?.cancelIf(
       (request) => sessionKey(request.session) === identity,
     );
@@ -955,9 +1038,10 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
-  }, [resetRecovery]);
+  }, [abortManualReconnect, resetRecovery]);
 
   const detach = useCallback(async () => {
+    abortManualReconnect();
     resetRecovery();
     const generation = generationRef.current + 1;
     generationRef.current = generation;
@@ -991,9 +1075,10 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     appliedSequenceRef.current = null;
     pendingShellStateRef.current = null;
     setState(INITIAL_STATE);
-  }, [resetRecovery]);
+  }, [abortManualReconnect, resetRecovery]);
 
   const resetAfterDaemonRestart = useCallback(() => {
+    abortManualReconnect();
     resetRecovery();
     generationRef.current += 1;
     openingAbortRef.current?.abort();
@@ -1011,19 +1096,20 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     channelRef.current = null;
     stateRef.current = INITIAL_STATE;
     setState(INITIAL_STATE);
-  }, [resetRecovery]);
+  }, [abortManualReconnect, resetRecovery]);
 
   useEffect(() => registerAttachmentControl({
     attachmentId: () => activeAttachmentRef.current,
     session: () => stateRef.current.session,
     reconnect: async (expected_id) => {
       if (activeAttachmentRef.current !== expected_id) return null;
-      await reconnect();
+      abortManualReconnect();
+      await reconnectCurrent(true);
       const replacement = activeAttachmentRef.current;
       return replacement !== expected_id ? replacement : null;
     },
     reset: resetAfterDaemonRestart,
-  }), [reconnect, resetAfterDaemonRestart]);
+  }), [abortManualReconnect, reconnectCurrent, resetAfterDaemonRestart]);
 
   const handleInput = useCallback((data: Uint8Array) => {
     if (!inputLeaseOwnedRef.current || !activeAttachmentRef.current) {

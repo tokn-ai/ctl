@@ -97,6 +97,17 @@ the old actor immediately and releases its attachment. An open that succeeds
 after supersession, or cannot be adopted by the renderer, is detached by its
 exact ID. No connection-state transition kills a remote shell.
 
+Manual Reconnect first checks the attachment's exact SSH route. If its master
+is absent or manually disconnected, the existing Connect host flow authenticates
+that route before retrying the original terminal. A connected master is reused;
+an unknown status is reported without assuming authentication is needed. Closing
+the flow or the original attachment cancels the pending retry. Background tabs
+and split panes keep their own reconnect intent without selecting another tab.
+Automatic recovery and component-restart recovery do not open authentication
+dialogs. If the master disappears between a successful status check and opening
+the terminal, a concrete authentication-required result permits one host-connection
+attempt before the manual retry finishes.
+
 Cached output, shell activity, and session-list observations remain available
 while offline, with last-known wording and neutral status. An unreachable
 transport does not rewrite the last observed remote process as exited.

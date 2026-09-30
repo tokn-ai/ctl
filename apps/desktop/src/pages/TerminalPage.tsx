@@ -54,6 +54,7 @@ import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
 import { useSessionAttachments } from "../features/attachment/useSessionAttachments";
+import { ManualReconnectProvider, useManualReconnectHandler } from "../features/attachment/ManualReconnect";
 import { restartFailurePreservesLocalState } from "../features/daemon/restartFailurePolicy";
 import {
   detectShortcutPlatform,
@@ -136,6 +137,13 @@ interface MethodDraft {
   initial_target?: SshConnectionTarget;
 }
 
+interface HostFlow {
+  target: SshConnectionTarget;
+  selected_method_id?: string;
+  update_required?: boolean;
+  manual_reconnect_id?: number;
+}
+
 function measuredSize(renderer: XtermRenderer | null): TerminalSize {
   const proposed = renderer?.proposeDimensions();
   return {
@@ -165,7 +173,7 @@ async function verifyHostConnectionStatus(target: SshConnectionTarget): Promise<
 
 export function TerminalPage() {
   const [notifications] = useState(() => new NotificationStore());
-  return <NotificationProvider store={notifications}><TerminalWorkbench /></NotificationProvider>;
+  return <NotificationProvider store={notifications}><ManualReconnectProvider><TerminalWorkbench /></ManualReconnectProvider></NotificationProvider>;
 }
 
 function TerminalWorkbench() {
@@ -239,10 +247,17 @@ function TerminalWorkbench() {
   const [pendingForget, setPendingForget] = useState<SessionSummary | null>(
     null,
   );
-  const [hostFlow, setHostFlow] = useState<{
-    target: SshConnectionTarget;
-    selected_method_id?: string;
-    update_required?: boolean;
+  const [hostFlow, publishHostFlow] = useState<HostFlow | null>(null);
+  const hostFlowRef = useRef<HostFlow | null>(null);
+  const setHostFlow = useCallback((flow: HostFlow | null) => {
+    hostFlowRef.current = flow;
+    publishHostFlow(flow);
+  }, []);
+  const nextManualReconnectId = useRef(0);
+  const manualReconnectFlow = useRef<{
+    id: number;
+    signal: AbortSignal;
+    finish(connected: boolean): void;
   } | null>(null);
   const [addHostOpen, setAddHostOpen] = useState(false);
   const openAddHost = () => {
@@ -1727,6 +1742,30 @@ function TerminalWorkbench() {
     pendingCloseSessionKey !== null ||
     daemonRestartConfirmationPending;
 
+  useManualReconnectHandler((target, signal) => {
+    if (signal.aborted || workspace.isClosing() || !workspace.ready) return Promise.resolve(false);
+    if (dialogOpen || hostFlowRef.current || manualReconnectFlow.current || daemonRestartBlocksInteractions()) {
+      return Promise.reject({ code: "manual_reconnect_busy", message: "Finish the current dialog before reconnecting this session." });
+    }
+    return new Promise<boolean>((resolve) => {
+      const id = ++nextManualReconnectId.current;
+      let settled = false;
+      const finish = (connected: boolean) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        if (manualReconnectFlow.current?.id === id) manualReconnectFlow.current = null;
+        if (hostFlowRef.current?.manual_reconnect_id === id) setHostFlow(null);
+        resolve(connected && !signal.aborted);
+      };
+      const abort = () => finish(false);
+      manualReconnectFlow.current = { id, signal, finish };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) finish(false);
+      else setHostFlow({ target, manual_reconnect_id: id });
+    });
+  });
+
   useLayoutEffect(() => {
     dispatcher.update(
       commands.map((command) => ({
@@ -2220,16 +2259,37 @@ function TerminalWorkbench() {
           />
         ) : hostFlow !== null ? (
           <ConnectHostFlow
+            key={hostFlow.manual_reconnect_id ?? "connect-host"}
             suggestions={hostSuggestions}
             warning={discoveryWarning}
             target={hostFlow.target}
-            host={workspace.hosts.find((host) => host.host_id === hostFlow.target.host_id)}
+            host={hostFlow.manual_reconnect_id === undefined
+              ? workspace.hosts.find((host) => host.host_id === hostFlow.target.host_id)
+              : undefined}
             selected_method_id={hostFlow.selected_method_id}
             gateways={workspace.ssh_gateways}
             updateRequired={portForwardUpdateTarget !== null || hostFlow.update_required === true}
-            onVerified={recoverHost}
+            onVerified={async (target, remote_info) => {
+              const id = hostFlow.manual_reconnect_id;
+              const isCurrent = () => id === undefined ||
+                (manualReconnectFlow.current?.id === id && !manualReconnectFlow.current.signal.aborted);
+              if (!isCurrent()) throw { code: "attachment_cancelled", message: "Reconnect cancelled." };
+              if (id !== undefined && !sameSshEndpoint(target, hostFlow.target)) {
+                throw new Error("The connection route changed while reconnecting this session.");
+              }
+              const recovered = await recoverHost(target, remote_info);
+              if (!isCurrent()) throw { code: "attachment_cancelled", message: "Reconnect cancelled." };
+              return recovered;
+            }}
             onConnectionChange={hostConnections.connectionChanged}
             onConnected={(target) => {
+              if (hostFlow.manual_reconnect_id !== undefined) {
+                const pending = manualReconnectFlow.current;
+                if (pending?.id === hostFlow.manual_reconnect_id) {
+                  pending.finish(sameSshEndpoint(target, hostFlow.target));
+                }
+                return;
+              }
               void resumeHost(target).catch((failure) =>
                 setListError(errorMessage(failure)),
               );
@@ -2238,6 +2298,12 @@ function TerminalWorkbench() {
               }
             }}
             onClose={() => {
+              if (hostFlow.manual_reconnect_id !== undefined) {
+                const pending = manualReconnectFlow.current;
+                if (pending?.id === hostFlow.manual_reconnect_id) pending.finish(false);
+                return;
+              }
+              if (hostFlowRef.current !== hostFlow) return;
               setHostFlow(null);
               setPortForwardUpdateTarget(null);
               requestAnimationFrame(() => renderer?.focus());

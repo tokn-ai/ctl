@@ -473,6 +473,10 @@ Background sessions and split panes report independently; reconnect actions targ
 the attachment that failed. Hiding or dismissing a failure survives automatic
 retries, while a new explicit connection attempt can report it again. Session
 cache/archive errors are reported separately, even when no session is selected.
+**Reconnect** reuses the terminal's SSH connection when available. If that
+connection has ended, it opens **Connect host** first and then retries the same
+terminal. Canceling authentication cancels that retry; automatic background
+retries never open an authentication dialog.
 
 These are the defaults. **Configure Keyboard Shortcuts** in the palette opens
 quick input: select a command and enter a combination such as

@@ -822,7 +822,7 @@ describe("workspace-backed terminal page", () => {
     expect(api.restartLocalDaemon).not.toHaveBeenCalled();
   });
 
-  it("shows taskd restart errors in the task sidebar", async () => {
+  it("shows taskd restart errors as notifications without stale progress cards", async () => {
     api.restartTaskDaemon.mockRejectedValueOnce(
       new Error("Stop active tasks before restarting taskd."),
     );
@@ -832,6 +832,43 @@ describe("workspace-backed terminal page", () => {
     await screen.findByText("Stop active tasks before restarting taskd.");
     expect(screen.queryByText("taskd restarted.")).toBeNull();
     expect(screen.queryByText("Restarting taskd…")).toBeNull();
+  });
+
+  it("reviews hidden cards from Tasks, keeps dismissed errors dismissed, and resets history on remount", async () => {
+    api.restartTaskDaemon.mockRejectedValueOnce(new Error("Stop active tasks before restarting taskd."));
+    const page = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    nativeCommand(COMMAND_IDS.restartTaskDaemon);
+    await screen.findByText("Stop active tasks before restarting taskd.");
+    fireEvent.click(screen.getByRole("button", { name: "Hide Tasks notification" }));
+    expect(screen.queryByText("Stop active tasks before restarting taskd.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Notifications, 1 unread" }));
+    const center = screen.getByRole("region", { name: "Notification center" });
+    expect(within(center).getByText("Stop active tasks before restarting taskd.")).toBeTruthy();
+    fireEvent.click(within(center).getByRole("button", { name: "Dismiss Tasks notification" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide notification center" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+    expect(screen.queryByText("Stop active tasks before restarting taskd.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    expect(screen.getByText("No notifications")).toBeTruthy();
+    page.unmount();
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    expect(screen.getByText("No notifications")).toBeTruthy();
+  });
+
+  it("opens the notification center through the command palette and restores focus on Escape", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyP");
+    fireEvent.change(screen.getByRole("combobox", { name: "Search commands" }), { target: { value: "Show Notifications" } });
+    fireEvent.click(screen.getByRole("option", { name: /Show Notifications/ }));
+    const center = await screen.findByRole("region", { name: "Notification center" });
+    expect(document.activeElement).toBe(center);
+    fireEvent.keyDown(window, { code: "Escape" });
+    expect(screen.queryByRole("region", { name: "Notification center" })).toBeNull();
   });
 
   it("saves a remapped shortcut through quick input, updates labels, and restores it on restart", async () => {
@@ -2658,6 +2695,59 @@ describe("workspace-backed terminal page", () => {
     );
     await act(async () => { finish_open(); });
   });
+
+  it.each(["tab", "sidebar", "shortcut"])(
+    "closes an attaching tab through %s after closing the preceding tab",
+    async (control) => {
+      const saved = snapshot();
+      saved.document.sessions.push({
+        host_id: "test-id",
+        session_id: "next-id",
+        name: "next-remote",
+        last_known_cwd: null,
+        last_known_cwd_display: null,
+      });
+      saved.document.tabs.push({ host_id: "test-id", session_id: "next-id" });
+      api.loadWorkspace.mockResolvedValue(saved);
+      const restored = restoreWorkspace(saved.document, hostSnapshot().document);
+      Object.assign(attachment.state, {
+        phase: "attached",
+        session: restored.tabs[0],
+      });
+      let finish_open!: () => void;
+      const pending = new Promise<void>((resolve) => { finish_open = resolve; });
+      attachment.connect.mockImplementationOnce((session: SessionSummary) => {
+        Object.assign(attachment.state, { phase: "connecting", session });
+        return pending;
+      });
+      attachment.detach.mockImplementationOnce(async () => {
+        Object.assign(attachment.state, { phase: "idle", session: null });
+        finish_open();
+      });
+      render(<TerminalPage />);
+      await screen.findByRole("button", { name: "Close remembered tab" });
+      fireEvent.click(screen.getByRole("button", { name: "Close remembered tab" }));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Close remembered tab" })).toBeNull());
+      expect(attachment.connect).toHaveBeenCalledOnce();
+
+      if (control === "shortcut") nativeCommand(COMMAND_IDS.disconnect);
+      else fireEvent.click(screen.getByRole("button", {
+        name: control === "tab" ? "Close next-remote tab" : "Disconnect from next-remote",
+      }));
+      try {
+        await waitFor(() => expect(screen.queryByRole("button", { name: "Close next-remote tab" })).toBeNull());
+        expect(attachment.detach).toHaveBeenCalledOnce();
+        expect(api.killSession).not.toHaveBeenCalled();
+        await waitFor(() => {
+          const document = api.updateWorkspace.mock.lastCall![1];
+          expect(document.tabs).toEqual([]);
+          expect(document.sessions).toHaveLength(2);
+        });
+      } finally {
+        await act(async () => { finish_open(); });
+      }
+    },
+  );
 
   it("removes workspace membership without terminating the daemon session", async () => {
     render(<TerminalPage />);

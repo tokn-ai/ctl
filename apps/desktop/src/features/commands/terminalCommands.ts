@@ -279,6 +279,9 @@ export function buildTerminalCommands(
     },
     {
       id: COMMAND_IDS.disconnect,
+      // Closing may connect a neighboring tab after cleanup.
+      // That connection must not block closing another tab.
+      allow_concurrent: true,
       category: "Session",
       title: "Detach Active Tab",
       detail: activeSession?.name,

@@ -46,6 +46,10 @@ import { CommandPalette } from "../components/commands/CommandPalette";
 import { ArchiveBrowser } from "../components/sessions/ArchiveBrowser";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
+import { NotificationBell, Notifications } from "../components/notifications/Notifications";
+import { NotificationStore } from "../features/notifications/NotificationStore";
+import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { useWorkbenchNotifications } from "../features/notifications/useWorkbenchNotifications";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
@@ -161,6 +165,7 @@ async function verifyHostConnectionStatus(target: SshConnectionTarget): Promise<
 
 export function TerminalPage() {
   const workspace = useWorkspace();
+  const [notifications] = useState(() => new NotificationStore());
   const {
     targets,
     setTargets,
@@ -278,6 +283,21 @@ export function TerminalPage() {
   const daemonRestartConfirmationRef = useRef(false);
   const restartingDaemonRef = useRef(false);
   const daemonEpochRef = useRef(0);
+  useWorkbenchNotifications(notifications, {
+    workspace_error: workspace.error,
+    workspace_ready: workspace.ready,
+    keybindings_error: keybindings.error,
+    session_error: listError,
+    targets,
+    target_errors: targetErrors,
+    attachment: attachment.state,
+    attachments: attachment.states,
+    task_error: taskWorkspace.error,
+    definitions_error: taskWorkspace.definitions_error,
+    task_status: taskWorkspace.daemonStatus,
+    tasks: taskWorkspace.tasks,
+    tasks_loaded: taskWorkspace.hasLoaded,
+  });
   const captureDaemonOperation = useCallback((target: ConnectionTarget) => {
     const epoch = daemonEpochRef.current;
     return () => target.kind !== "local" || epoch === daemonEpochRef.current;
@@ -1578,6 +1598,51 @@ export function TerminalPage() {
     run: () => setUtilityPage("credentials"),
   });
   commands.push({
+    id: COMMAND_IDS.showNotifications,
+    category: "View",
+    title: "Show Notifications",
+    enabled: true,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.showNotifications),
+    focusTerminalAfterRun: false,
+    run: () => notifications.setCenterOpen(true),
+  }, {
+    id: COMMAND_IDS.recoverSessionComponents,
+    category: "Session",
+    title: "Recover Session Components",
+    enabled: false,
+    visibleInPalette: false,
+    focusTerminalAfterRun: false,
+    isEnabled: (args) => !daemonRestartBlocksInteractions() && [attachment.state, ...attachment.states].some((state) =>
+      state.session && sessionKey(state.session) === args.session_key && state.error_code === "protocol_version_mismatch"),
+    run: (args) => {
+      const session = [attachment.state, ...attachment.states].find((state) =>
+        state.session && sessionKey(state.session) === args?.session_key && state.error_code === "protocol_version_mismatch")?.session;
+      if (!session) return;
+      if (session.target.kind === "ssh") setHostFlow({ target: session.target, update_required: true });
+      else requestDaemonRestart();
+    },
+  }, {
+    id: COMMAND_IDS.refreshTasks,
+    category: "Tasks",
+    title: "Refresh Tasks and Definitions",
+    enabled: workspace.ready && !taskWorkspace.busy && !taskWorkspace.loading,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.refreshTasks),
+    focusTerminalAfterRun: false,
+    run: taskWorkspace.refresh,
+  }, {
+    id: COMMAND_IDS.openTask,
+    category: "Tasks",
+    title: "View Task",
+    enabled: false,
+    visibleInPalette: false,
+    focusTerminalAfterRun: false,
+    isEnabled: (args) => workspace.ready && taskWorkspace.tasks.some((task) => task.task_id === args.value),
+    run: (args) => {
+      const task = taskWorkspace.tasks.find((task) => task.task_id === args?.value);
+      if (task) { setUtilityPage(null); taskWorkspace.openTask(task); }
+    },
+  });
+  commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
     category: "Tasks",
     title: "Restart taskd",
@@ -1685,563 +1750,522 @@ export function TerminalPage() {
   }
 
   return (
-    <CommandProvider
-      value={{ dispatcher, keybinding: (id) => keybindings.bindings.get(id) }}
-    >
-      <CommandBindings platform={shortcutPlatform} />
-      <main
-        className="app-shell"
-        inert={
-          !workspace.ready || workspace.closing || dialogOpen || paletteOpen
-        }
+    <NotificationProvider store={notifications}>
+      <CommandProvider
+        value={{ dispatcher, keybinding: (id) => keybindings.bindings.get(id) }}
       >
-        <WorkspaceSidebar
-          on_about={() => executeCommandById(COMMAND_IDS.about)}
-          about_open={utility_page === "about"}
-          on_credentials={() => executeCommandById(COMMAND_IDS.credentials)}
-          credentials_open={utility_page === "credentials"}
-          on_keybindings={() => executeCommandById(COMMAND_IDS.configureKeybindings)}
-          selected={workspace.sidebar_view}
-          onSelect={(view) => {
-            setUtilityPage(null);
-            workspace.update("sidebar_view", view);
-            if (view === "ports") void portForwarding.refreshAll();
-          }}
-          error={workspace.error}
-          vpn={<VpnSidebar model={vpn} />}
-          vpn_state={vpn.status_loaded ? vpnAggregateState(vpn.statuses) : undefined}
-          vpn_active_count={vpn.statuses.length}
-          vpn_status_stale={vpn.status_stale}
-          tasks={
-            <TaskSidebar
-              model={taskWorkspace}
-              definitions={taskWorkspace.definitions}
-              references={workspace.task_references}
-            />
-          }
-          sessions={
-            <SessionSidebar
-              on_archives={() => setArchivesOpen(true)}
-              targets={sidebarTargets}
-              hosts={workspace.hosts}
-              connectableHostKeys={connectableHostKeys}
-              hostConnections={hostConnections.statuses}
-              attachmentStates={new Map(attachment.states.flatMap((state) => state.session ? [[sessionKey(state.session), state] as const] : []))}
-              onDisconnectHost={(target) => {
-                void hostConnections.disconnect(target).catch((failure) => setListError(errorMessage(failure)));
-              }}
-              targetErrors={targetErrors}
-              sessions={sessions}
-              interactiveTasks={taskWorkspace.tasks}
-              shellStates={displayedSessionShellStates}
-              selectedSessionKey={activeTabKey}
-              openTabSessionKeys={openTabSessionKeys}
-              loading={loading || !workspace.ready}
-              error={listError}
-              creating={creating}
-              closingSessionKeys={closingSessionKeys}
-              disconnectingSessionKey={disconnectingSessionKey}
-              onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
-              onSelect={(session) =>
-                executeCommandById(COMMAND_IDS.selectSession, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
-              onDisconnect={(session) =>
-                executeCommandById(COMMAND_IDS.disconnect, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onRequestClose={(session) =>
-                executeCommandById(COMMAND_IDS.close, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onForget={(session) =>
-                executeCommandById(COMMAND_IDS.forgetSession, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onSelectTask={taskWorkspace.openTask}
-              onStopTask={(task) =>
-                void taskWorkspace.action(task, "stop_task")
-              }
-              onAddExisting={() =>
-                executeCommandById(COMMAND_IDS.addExistingSession)
-              }
-              onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
-              onChooseHost={connectableTargets.length > 0
-                ? () => executeCommandById(COMMAND_IDS.connectHost)
-                : undefined}
-              onHostSettings={(target) => {
-                executeCommandById(COMMAND_IDS.configureHost, { target_key: targetKey(target) });
-              }}
-              onConnectHost={(target) =>
-                executeCommandById(COMMAND_IDS.connectHost, {
-                  target_key: targetKey(target),
-                })
-              }
-              onRemoveHost={(target) =>
-                executeCommandById(COMMAND_IDS.removeHost, {
-                  target_key: targetKey(target),
-                })
-              }
-              onPortForward={(target) =>
-                executeCommandById(COMMAND_IDS.managePortForwards, {
-                  target_key: targetKey(target),
-                })
-              }
-            />
-          }
-          ports={
-            <PortForwardingSidebar
-              targets={targets.filter(
-                (target): target is SshConnectionTarget =>
-                  target.kind === "ssh",
-              )}
-              forwards={workspace.port_forwards}
-              statuses={portForwarding.statuses}
-              busy={portForwarding.busy}
-              hostErrors={portForwarding.hostErrors}
-              refreshing={portForwarding.refreshing}
-              lastRefreshedAt={portForwarding.lastRefreshedAt}
-              onRefresh={() => void portForwarding.refreshAll()}
-              onSetEnabled={(target, forward, enabled) => {
-                void setPortForwardEnabled(target, forward, enabled).catch((failure) => setListError(errorMessage(failure)));
-              }}
-              onManage={(target) => { void managePortForwards(target); }}
-            />
-          }
-        />
-        <section className="terminal-workspace" hidden={utility_page !== null}>
-          <TerminalTabs
-            tabs={tabs}
-            extra_tabs={workspace.task_tabs.map((tab) => {
-              const task = taskWorkspace.tasks.find(
-                (item) => item.task_id === tab.task_id,
-              );
-              return {
-                tab_key: workspaceTabKey(tab),
-                title: task?.definition.name ?? "Saved task",
-                host: tab.host_id === "local" ? "Local" : tab.host_id,
-                status: task ? taskState(task) : "unknown",
-              };
-            })}
-            tab_order={workspace.tab_order}
-            on_select_extra={(key) => {
-              const tab = workspace.task_tabs.find(
-                (item) => workspaceTabKey(item) === key,
-              );
-              if (tab) taskWorkspace.open(tab);
-            }}
-            on_close_extra={taskWorkspace.close}
-            shellStates={displayedTabShellStates}
-            activeSessionKey={activeTabKey}
-            canCreate={
-              currentWorkingDirectory !== null &&
-              !creating &&
-              !daemonRestartConfirmationPending &&
-              !restartingDaemon
-            }
-            onSelect={(session) =>
-              executeCommandById(COMMAND_IDS.selectSession, {
-                session_key: sessionKey(session),
-              })
-            }
-            onClose={(session) =>
-              executeCommandById(COMMAND_IDS.disconnect, {
-                session_key: sessionKey(session),
-              })
-            }
-            onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
-          />
-          {taskWorkspace.active?.kind === "task" ? (
-            <TaskDetail
-              key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`}
-              model={taskWorkspace}
-              saved={taskWorkspace.activeSaved}
-            />
-          ) : null}
-          <div
-            className="terminal-pane"
-            hidden={
-              !!taskWorkspace.active &&
-              !(
-                taskWorkspace.activeTask?.definition.execution_mode ===
-                  "interactive" && taskWorkspace.activeTask.active_run
-              )
+        <CommandBindings platform={shortcutPlatform} />
+        <div className="workbench">
+          <main
+            className="app-shell"
+            inert={
+              !workspace.ready || workspace.closing || dialogOpen || paletteOpen
             }
           >
-            <TerminalToolbar
-              showInputControl={false}
-              state={attachment.state}
-              onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
-              onToggleResizeWithWindow={() =>
-                executeCommandById(COMMAND_IDS.toggleResize)
+            <WorkspaceSidebar
+              on_about={() => executeCommandById(COMMAND_IDS.about)}
+              about_open={utility_page === "about"}
+              on_credentials={() => executeCommandById(COMMAND_IDS.credentials)}
+              credentials_open={utility_page === "credentials"}
+              on_keybindings={() => executeCommandById(COMMAND_IDS.configureKeybindings)}
+              selected={workspace.sidebar_view}
+              onSelect={(view) => {
+                setUtilityPage(null);
+                workspace.update("sidebar_view", view);
+                if (view === "ports") void portForwarding.refreshAll();
+              }}
+              vpn={<VpnSidebar model={vpn} />}
+              vpn_state={vpn.status_loaded ? vpnAggregateState(vpn.statuses) : undefined}
+              vpn_active_count={vpn.statuses.length}
+              vpn_status_stale={vpn.status_stale}
+              tasks={
+                <TaskSidebar
+                  model={taskWorkspace}
+                  definitions={taskWorkspace.definitions}
+                  references={workspace.task_references}
+                />
               }
-              onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
-              onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
-              commandShortcutLabel={paletteShortcutLabel}
+              sessions={
+                <SessionSidebar
+                  on_archives={() => setArchivesOpen(true)}
+                  targets={sidebarTargets}
+                  hosts={workspace.hosts}
+                  connectableHostKeys={connectableHostKeys}
+                  hostConnections={hostConnections.statuses}
+                  attachmentStates={new Map(attachment.states.flatMap((state) => state.session ? [[sessionKey(state.session), state] as const] : []))}
+                  onDisconnectHost={(target) => {
+                    void hostConnections.disconnect(target).catch((failure) => setListError(errorMessage(failure)));
+                  }}
+                  targetErrors={targetErrors}
+                  sessions={sessions}
+                  interactiveTasks={taskWorkspace.tasks}
+                  shellStates={displayedSessionShellStates}
+                  selectedSessionKey={activeTabKey}
+                  openTabSessionKeys={openTabSessionKeys}
+                  loading={loading || !workspace.ready}
+                  creating={creating}
+                  closingSessionKeys={closingSessionKeys}
+                  disconnectingSessionKey={disconnectingSessionKey}
+                  onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
+                  onSelect={(session) =>
+                    executeCommandById(COMMAND_IDS.selectSession, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
+                  onDisconnect={(session) =>
+                    executeCommandById(COMMAND_IDS.disconnect, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onRequestClose={(session) =>
+                    executeCommandById(COMMAND_IDS.close, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onForget={(session) =>
+                    executeCommandById(COMMAND_IDS.forgetSession, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onSelectTask={taskWorkspace.openTask}
+                  onStopTask={(task) =>
+                    void taskWorkspace.action(task, "stop_task")
+                  }
+                  onAddExisting={() =>
+                    executeCommandById(COMMAND_IDS.addExistingSession)
+                  }
+                  onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
+                  onChooseHost={connectableTargets.length > 0
+                    ? () => executeCommandById(COMMAND_IDS.connectHost)
+                    : undefined}
+                  onHostSettings={(target) => {
+                    executeCommandById(COMMAND_IDS.configureHost, { target_key: targetKey(target) });
+                  }}
+                  onConnectHost={(target) =>
+                    executeCommandById(COMMAND_IDS.connectHost, {
+                      target_key: targetKey(target),
+                    })
+                  }
+                  onRemoveHost={(target) =>
+                    executeCommandById(COMMAND_IDS.removeHost, {
+                      target_key: targetKey(target),
+                    })
+                  }
+                  onPortForward={(target) =>
+                    executeCommandById(COMMAND_IDS.managePortForwards, {
+                      target_key: targetKey(target),
+                    })
+                  }
+                />
+              }
+              ports={
+                <PortForwardingSidebar
+                  targets={targets.filter(
+                    (target): target is SshConnectionTarget =>
+                      target.kind === "ssh",
+                  )}
+                  forwards={workspace.port_forwards}
+                  statuses={portForwarding.statuses}
+                  busy={portForwarding.busy}
+                  hostErrors={portForwarding.hostErrors}
+                  refreshing={portForwarding.refreshing}
+                  lastRefreshedAt={portForwarding.lastRefreshedAt}
+                  onRefresh={() => void portForwarding.refreshAll()}
+                  onSetEnabled={(target, forward, enabled) => {
+                    void setPortForwardEnabled(target, forward, enabled).catch((failure) => setListError(errorMessage(failure)));
+                  }}
+                  onManage={(target) => { void managePortForwards(target); }}
+                />
+              }
             />
-            <div className="terminal-notices">
-              {keybindings.error ? (
-                <div className="message-banner" role="alert">
-                  Keyboard shortcuts: {keybindings.error} Last valid bindings
-                  remain active.
-                  <button
-                    type="button"
-                    onClick={() =>
-                      executeCommandById(COMMAND_IDS.reloadKeybindings)
-                    }
-                  >
-                    Reload shortcuts
-                  </button>
-                </div>
+            <section className="terminal-workspace" hidden={utility_page !== null}>
+              <TerminalTabs
+                tabs={tabs}
+                extra_tabs={workspace.task_tabs.map((tab) => {
+                  const task = taskWorkspace.tasks.find(
+                    (item) => item.task_id === tab.task_id,
+                  );
+                  return {
+                    tab_key: workspaceTabKey(tab),
+                    title: task?.definition.name ?? "Saved task",
+                    host: tab.host_id === "local" ? "Local" : tab.host_id,
+                    status: task ? taskState(task) : "unknown",
+                  };
+                })}
+                tab_order={workspace.tab_order}
+                on_select_extra={(key) => {
+                  const tab = workspace.task_tabs.find(
+                    (item) => workspaceTabKey(item) === key,
+                  );
+                  if (tab) taskWorkspace.open(tab);
+                }}
+                on_close_extra={taskWorkspace.close}
+                shellStates={displayedTabShellStates}
+                activeSessionKey={activeTabKey}
+                canCreate={
+                  currentWorkingDirectory !== null &&
+                  !creating &&
+                  !daemonRestartConfirmationPending &&
+                  !restartingDaemon
+                }
+                onSelect={(session) =>
+                  executeCommandById(COMMAND_IDS.selectSession, {
+                    session_key: sessionKey(session),
+                  })
+                }
+                onClose={(session) =>
+                  executeCommandById(COMMAND_IDS.disconnect, {
+                    session_key: sessionKey(session),
+                  })
+                }
+                onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
+              />
+              {taskWorkspace.active?.kind === "task" ? (
+                <TaskDetail
+                  key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`}
+                  model={taskWorkspace}
+                  saved={taskWorkspace.activeSaved}
+                />
               ) : null}
-              {workspace.error ? (
-                <div className="message-banner" role="alert">
-                  Workspace: {workspace.error}
-                  {workspace.ready ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        executeCommandById(COMMAND_IDS.saveWorkspace)
-                      }
-                    >
-                      Retry saving
-                    </button>
+              <div
+                className="terminal-pane"
+                hidden={
+                  !!taskWorkspace.active &&
+                  !(
+                    taskWorkspace.activeTask?.definition.execution_mode ===
+                      "interactive" && taskWorkspace.activeTask.active_run
+                  )
+                }
+              >
+                <TerminalToolbar
+                  showInputControl={false}
+                  state={attachment.state}
+                  onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
+                  onToggleResizeWithWindow={() =>
+                    executeCommandById(COMMAND_IDS.toggleResize)
+                  }
+                  onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
+                  onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
+                  commandShortcutLabel={paletteShortcutLabel}
+                />
+                <div className="terminal-notices">
+                  {activeTab && attachment.state.session === null ? (
+                    <div className="message-banner" role="status">
+                      {activeTab.target.kind === "ssh"
+                        ? "Connect this host to resume its saved tab. Cached paths are last-known."
+                        : "Local session is not connected. Cached paths are last-known."}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (activeTab.target.kind === "ssh") {
+                            executeCommandById(COMMAND_IDS.connectHost, {
+                              target_key: targetKey(activeTab.target),
+                            });
+                          } else {
+                            executeCommandById(COMMAND_IDS.selectSession, {
+                              session_key: sessionKey(activeTab),
+                            });
+                          }
+                        }}
+                      >
+                        {activeTab.target.kind === "ssh"
+                          ? "Connect host"
+                          : "Connect session"}
+                      </button>
+                    </div>
                   ) : null}
                 </div>
-              ) : null}
-              {activeTab && attachment.state.session === null ? (
-                <div className="message-banner" role="status">
-                  {activeTab.target.kind === "ssh"
-                    ? "Connect this host to resume its saved tab. Cached paths are last-known."
-                    : "Local session is not connected. Cached paths are last-known."}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (activeTab.target.kind === "ssh") {
-                        executeCommandById(COMMAND_IDS.connectHost, {
-                          target_key: targetKey(activeTab.target),
-                        });
-                      } else {
-                        executeCommandById(COMMAND_IDS.selectSession, {
-                          session_key: sessionKey(activeTab),
-                        });
-                      }
-                    }}
-                  >
-                    {activeTab.target.kind === "ssh"
-                      ? "Connect host"
-                      : "Connect session"}
-                  </button>
-                </div>
-              ) : null}
-              {attachment.state.history_gap ? (
-                <div className="history-gap-banner" role="status">
-                  Earlier remote output is no longer contiguous. The live screen
-                  was restored from a checkpoint.
-                </div>
-              ) : null}
-              {attachment.state.message ? (
-                <div className="message-banner" role="status">
-                  {attachment.state.message}
-                  {attachment.state.error_code === "protocol_version_mismatch" && attachment.state.session ? (
-                    <button type="button" onClick={() => {
-                      const target = attachment.state.session?.target;
-                      if (!target) return;
-                      if (target.kind === "ssh") {
-                        setHostFlow({ target, update_required: true });
-                      } else {
-                        executeCommandById(COMMAND_IDS.restartDaemon);
-                      }
-                    }}>
-                      {attachment.state.session.target.kind === "ssh" ? "Update remote components" : "Restart local daemon"}
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <SessionViewSurface
-              prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
-              shortcuts_enabled={!utility_page && !dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
-              input_enabled={!utility_page && !dialogOpen && !paletteOpen && !workspace.closing && !daemonRestartBlocksInteractions()}
-              on_command={executeCommandById}
-              on_pane_commands={setPaneCommands}
-              open_session_keys={attachment.session_keys}
-              session={attachment.state.session}
-              shell_state={attachment.state.shell_state}
-              renderer={renderer}
-              input_owned={attachment.state.input_lease.owned_by_client}
-              on_toggle_input={attachment.toggleInputLease}
-              on_promoted={(session) => importSession(session, null)}
-              on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
-              ended_message={attachment.state.phase === "ended" ? attachment.state.message ?? "Session exited" : attachment.state.error_code === "session_not_found" ? "Session no longer exists" : null}
-              on_dismiss={() => { if (attachment.state.session) void dismissSession(attachment.state.session); }}
-              phase={attachment.state.phase}
-              hasSession={attachment.state.session !== null}
-              has_cached_content={attachment.state.applied_sequence !== null}
-              onInput={handleTerminalInput}
-              onReady={setRenderer}
+                <SessionViewSurface
+                  prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
+                  shortcuts_enabled={!utility_page && !dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
+                  input_enabled={!utility_page && !dialogOpen && !paletteOpen && !workspace.closing && !daemonRestartBlocksInteractions()}
+                  on_command={executeCommandById}
+                  on_pane_commands={setPaneCommands}
+                  open_session_keys={attachment.session_keys}
+                  session={attachment.state.session}
+                  shell_state={attachment.state.shell_state}
+                  renderer={renderer}
+                  input_owned={attachment.state.input_lease.owned_by_client}
+                  on_toggle_input={attachment.toggleInputLease}
+                  on_promoted={(session) => importSession(session, null)}
+                  on_select_terminal={(session) => attachment.connect(session, { resize_with_window: true, terminal_id: session.terminal_id })}
+                  ended_message={attachment.state.phase === "ended" ? attachment.state.message ?? "Session exited" : attachment.state.error_code === "session_not_found" ? "Session no longer exists" : null}
+                  on_dismiss={() => { if (attachment.state.session) void dismissSession(attachment.state.session); }}
+                  phase={attachment.state.phase}
+                  hasSession={attachment.state.session !== null}
+                  has_cached_content={attachment.state.applied_sequence !== null}
+                  onInput={handleTerminalInput}
+                  onReady={setRenderer}
+                />
+                {attachment.controllers}
+              </div>
+            </section>
+            <CredentialsPage
+              visible={utility_page === "credentials"}
+              targets={credential_targets}
+              on_close={() => { setUtilityPage(null); requestAnimationFrame(() => renderer?.focus()); }}
+              on_dialog_change={setCredentialsDialogOpen}
+              on_manage_vpn={(connection_id) => {
+                setUtilityPage(null);
+                workspace.update("sidebar_view", "vpn");
+                const connection = vpn.connections.find((item) => item.connection_id === connection_id);
+                if (connection && connection.provider !== "tailscale") vpn.editConnection(connection);
+                else void vpn.refresh();
+              }}
             />
-            {attachment.controllers}
-            <StatusBar state={attachment.state} />
-          </div>
-        </section>
-        <CredentialsPage
-          visible={utility_page === "credentials"}
-          targets={credential_targets}
-          on_close={() => { setUtilityPage(null); requestAnimationFrame(() => renderer?.focus()); }}
-          on_dialog_change={setCredentialsDialogOpen}
-          on_manage_vpn={(connection_id) => {
-            setUtilityPage(null);
-            workspace.update("sidebar_view", "vpn");
-            const connection = vpn.connections.find((item) => item.connection_id === connection_id);
-            if (connection && connection.provider !== "tailscale") vpn.editConnection(connection);
-            else void vpn.refresh();
-          }}
-        />
-        <AboutPage
-          visible={utility_page === "about"}
-          on_close={() => { setUtilityPage(null); requestAnimationFrame(() => renderer?.focus()); }}
-          on_dialog_change={setAboutDialogOpen}
-          execute_action={executeAboutAction}
-          on_restarted={(preflight) => {
-            if (preflight.component === "taskd") void taskWorkspace.refresh();
-            else { void vpn.refresh(); void hostConnections.refresh(); void portForwarding.refreshAll(); }
-          }}
-        />
-      </main>
-      {archives_open && <ArchiveBrowser targets={sidebarTargets} on_close={() => setArchivesOpen(false)} />}
-      {taskWorkspace.editorId ? (
-        <TaskEditor
-          key={taskWorkspace.editorKey}
-          model={taskWorkspace}
-          saved={taskWorkspace.saved}
-        />
-      ) : null}
-      {portForwardTarget ? (
-        <PortForwardingDialog
-          target={portForwardTarget}
-          forwards={workspace.port_forwards.filter(
-            (forward) => forward.host_id === portForwardTarget.host_id,
-          )}
-          statuses={portForwarding.statuses}
-          busy={portForwarding.busy}
-          onSetEnabled={(forward, enabled) =>
-            setPortForwardEnabled(portForwardTarget, forward, enabled)
-          }
-          onChange={(forwards) => {
-            workspace.update("port_forwards", (current) => [
-              ...current.filter(
-                (forward) => forward.host_id !== portForwardTarget.host_id,
-              ),
-              ...forwards,
-            ]);
-          }}
-          onUpdateAgent={() => {
-            setPortForwardUpdateTarget(portForwardTarget);
-            setPortForwardTarget(null);
-            connectHostMethod(portForwardTarget);
-          }}
-          onClose={() => {
-            setPortForwardTarget(null);
-            requestAnimationFrame(() => renderer?.focus());
-          }}
-        />
-      ) : keybindingsOpen ? (
-        <KeybindingsFlow
-          commands={commands}
-          document={keybindings.document}
-          path={keybindings.path}
-          error={keybindings.error}
-          platform={shortcutPlatform}
-          onSave={keybindings.save}
-          onClose={() => {
-            setKeybindingsOpen(false);
-            requestAnimationFrame(() => renderer?.focus());
-          }}
-        />
-      ) : newShellOpen ? (
-        <NewShellFlow
-          targets={connectionTargets}
-          hosts={workspace.hosts}
-          gateways={workspace.ssh_gateways}
-          discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
-          onVerifyHost={recoverHost}
-          onConnectionChange={hostConnections.connectionChanged}
-          onCreate={create}
-          onClose={() => {
-            setNewShellOpen(false);
-            requestAnimationFrame(() => renderer?.focus());
-          }}
-        />
-      ) : importOpen ? (
-        <AddExistingSessionFlow
-          targets={connectionTargets}
-          hosts={workspace.hosts}
-          gateways={workspace.ssh_gateways}
-          discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
-          known={sessions}
-          onVerifyHost={recoverHost}
-          onConnectionChange={hostConnections.connectionChanged}
-          onAdd={importSession}
-          onClose={() => setImportOpen(false)}
-        />
-      ) : pendingForget ? (
-        <QuickInput
-          title="Remove from workspace"
-          description={`Forget ${pendingForget.name} and close its tab? Its shell will keep running. You can add it again through discovery.`}
-          mode={{ kind: "confirm", confirm_label: "Remove from workspace" }}
-          onCancel={() => setPendingForget(null)}
-          onSubmit={() => {
-            const session = pendingForget;
-            setPendingForget(null);
-            return forgetSession(session).catch((failure) =>
-              setListError(errorMessage(failure)),
-            );
-          }}
-        />
-      ) : connectHostOpen ? (
-        <QuickInput
-          title="Connect host"
-          description={`Choose a saved host or a discovered SSH/Tailscale device.${discoveryWarning ? `\n${discoveryWarning}` : workspace.discoveryLoading ? "\nDiscovering Tailscale devices…" : ""}`}
-          mode={{
-            kind: "pick",
-            choices: hostSelectorChoices(connectableTargets, workspace.hosts),
-          }}
-          onCancel={() => setConnectHostOpen(false)}
-          onSubmit={(key) => {
-            const target = connectableTargets.find((candidate) => targetKey(candidate) === key);
-            if (!target) return;
-            setConnectHostOpen(false);
-            connectHostMethod(target);
-          }}
-        />
-      ) : addHostOpen ? (
-        <SshHostFlow
-          suggestions={hostSuggestions}
-          tailscaleDevices={tailscaleDevices}
-          discoveryLoading={workspace.discoveryLoading}
-          warning={discoveryWarning}
-          gateways={workspace.ssh_gateways}
-          vpn_connections={vpn.connections}
-          vpn_statuses={vpn.statuses}
-          vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
-          vpn_error={vpn.catalog_error ?? vpn.status_error}
-          onSaveNewHost={saveNewHost}
-          onClose={() => setAddHostOpen(false)}
-        />
-      ) : methodDraft && methodNameOpen ? (
-        <QuickInput
-          key="method-name"
-          title={`Connection method · ${methodDraft.host_name}`}
-          description="Give this method a name, such as Office network or Via gateway."
-          mode={{ kind: "input", label: "Method name", initial_value: methodDraft.method_name }}
-          onCancel={() => { setMethodDraft(null); setMethodNameOpen(false); }}
-          onSubmit={(value) => {
-            const name = value.trim();
-            if (!name || name.length > 4096 || /[\x00-\x1f\x7f]/u.test(name)) return;
-            setMethodDraft({ ...methodDraft, method_name: name });
-            setMethodNameOpen(false);
-          }}
-        />
-      ) : methodDraft ? (
-        <SshHostFlow
-          suggestions={hostSuggestions}
-          warning={discoveryWarning}
-          gateways={workspace.ssh_gateways}
-          vpn_connections={vpn.connections}
-          vpn_statuses={vpn.statuses}
-          vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
-          vpn_error={vpn.catalog_error ?? vpn.status_error}
-          initialTarget={methodDraft.initial_target}
-          expectedIdentity={methodHost ? expectedHostIdentity(methodHost) : undefined}
-          onSaveConnection={saveConnection}
-          onConnectionChange={(target, state, message) => {
-            if (target.kind === "ssh" && methodDraft.host_id) {
-              hostConnections.connectionChanged({ ...target, host_id: methodDraft.host_id }, state, message);
+            <AboutPage
+              visible={utility_page === "about"}
+              on_close={() => { setUtilityPage(null); requestAnimationFrame(() => renderer?.focus()); }}
+              on_dialog_change={setAboutDialogOpen}
+              execute_action={executeAboutAction}
+              on_restarted={(preflight) => {
+                if (preflight.component === "taskd") void taskWorkspace.refresh();
+                else { void vpn.refresh(); void hostConnections.refresh(); void portForwarding.refreshAll(); }
+              }}
+            />
+          </main>
+          <StatusBar
+            state={attachment.state}
+            show_terminal={!utility_page && (!taskWorkspace.active || (
+              taskWorkspace.activeTask?.definition.execution_mode === "interactive" && !!taskWorkspace.activeTask.active_run
+            ))}
+            context_label={utility_page === "about" ? "About rmux" : utility_page === "credentials" ? "Credentials" : "Tasks"}
+            inert={dialogOpen || paletteOpen || workspace.closing}
+          >
+            <NotificationBell store={notifications} />
+          </StatusBar>
+        </div>
+        <Notifications store={notifications} blocked={dialogOpen || paletteOpen || workspace.closing} />
+        {archives_open && <ArchiveBrowser targets={sidebarTargets} on_close={() => setArchivesOpen(false)} />}
+        {taskWorkspace.editorId ? (
+          <TaskEditor
+            key={taskWorkspace.editorKey}
+            model={taskWorkspace}
+            saved={taskWorkspace.saved}
+          />
+        ) : null}
+        {portForwardTarget ? (
+          <PortForwardingDialog
+            target={portForwardTarget}
+            forwards={workspace.port_forwards.filter(
+              (forward) => forward.host_id === portForwardTarget.host_id,
+            )}
+            statuses={portForwarding.statuses}
+            busy={portForwarding.busy}
+            onSetEnabled={(forward, enabled) =>
+              setPortForwardEnabled(portForwardTarget, forward, enabled)
             }
-          }}
-          onClose={() => { setMethodDraft(null); setMethodNameOpen(false); }}
-        />
-      ) : settingsHost ? (
-        <HostSettingsDialog
-          key={settingsHost.host_id}
-          host={settingsHost}
-          vpn_connections={vpn.connections}
-          onSave={saveHostSettings}
-          onAddMethod={() => editMethod(settingsHost)}
-          onEditMethod={(method) => editMethod(settingsHost, method)}
-          onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id), method.method_id)}
-          onClose={() => setHostSettingsId(null)}
-        />
-      ) : hostFlow !== null ? (
-        <ConnectHostFlow
-          suggestions={hostSuggestions}
-          warning={discoveryWarning}
-          target={hostFlow.target}
-          host={workspace.hosts.find((host) => host.host_id === hostFlow.target.host_id)}
-          selected_method_id={hostFlow.selected_method_id}
-          gateways={workspace.ssh_gateways}
-          updateRequired={portForwardUpdateTarget !== null || hostFlow.update_required === true}
-          onVerified={recoverHost}
-          onConnectionChange={hostConnections.connectionChanged}
-          onConnected={(target) => {
-            void resumeHost(target).catch((failure) =>
-              setListError(errorMessage(failure)),
-            );
-            if (portForwardUpdateTarget && target.kind === "ssh") {
-              setPortForwardTarget(target);
-            }
-          }}
-          onClose={() => {
-            setHostFlow(null);
-            setPortForwardUpdateTarget(null);
-            requestAnimationFrame(() => renderer?.focus());
-          }}
-        />
-      ) : pendingCloseSessionKey ? (
-        <QuickInput
-          title="Terminate session"
-          description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.${closeShortcutLabel ? ` Press ${closeShortcutLabel} to confirm.` : ""}`}
-          confirm_command_id={COMMAND_IDS.close}
-          mode={{
-            kind: "confirm",
-            confirm_label: "Terminate session",
-            destructive: true,
-          }}
-          onCancel={cancelClose}
-          onSubmit={() => {
-            const session = sessions.find(
-              (session) => sessionKey(session) === pendingCloseSessionKey,
-            );
-            if (session) return confirmClose(session);
-            else cancelClose();
-          }}
-        />
-      ) : daemonRestartConfirmationPending ? (
-        <QuickInput
-          title="Restart rmuxd"
-          description="Terminate every local rmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
-          mode={{
-            kind: "confirm",
-            confirm_label: "Restart rmuxd",
-            destructive: true,
-          }}
-          onCancel={cancelDaemonRestart}
-          onSubmit={confirmDaemonRestart}
-        />
-      ) : paletteOpen ? (
-        <CommandPalette
-          commands={commands}
-          platform={shortcutPlatform}
-          onDismiss={dismissPalette}
-          onExecute={executeCommand}
-        />
-      ) : null}
-    </CommandProvider>
+            onChange={(forwards) => {
+              workspace.update("port_forwards", (current) => [
+                ...current.filter(
+                  (forward) => forward.host_id !== portForwardTarget.host_id,
+                ),
+                ...forwards,
+              ]);
+            }}
+            onUpdateAgent={() => {
+              setPortForwardUpdateTarget(portForwardTarget);
+              setPortForwardTarget(null);
+              connectHostMethod(portForwardTarget);
+            }}
+            onClose={() => {
+              setPortForwardTarget(null);
+              requestAnimationFrame(() => renderer?.focus());
+            }}
+          />
+        ) : keybindingsOpen ? (
+          <KeybindingsFlow
+            commands={commands}
+            document={keybindings.document}
+            path={keybindings.path}
+            error={keybindings.error}
+            platform={shortcutPlatform}
+            onSave={keybindings.save}
+            onClose={() => {
+              setKeybindingsOpen(false);
+              requestAnimationFrame(() => renderer?.focus());
+            }}
+          />
+        ) : newShellOpen ? (
+          <NewShellFlow
+            targets={connectionTargets}
+            hosts={workspace.hosts}
+            gateways={workspace.ssh_gateways}
+            discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
+            onVerifyHost={recoverHost}
+            onConnectionChange={hostConnections.connectionChanged}
+            onCreate={create}
+            onClose={() => {
+              setNewShellOpen(false);
+              requestAnimationFrame(() => renderer?.focus());
+            }}
+          />
+        ) : importOpen ? (
+          <AddExistingSessionFlow
+            targets={connectionTargets}
+            hosts={workspace.hosts}
+            gateways={workspace.ssh_gateways}
+            discoveryMessage={discoveryWarning ?? (workspace.discoveryLoading ? "Discovering Tailscale devices…" : null)}
+            known={sessions}
+            onVerifyHost={recoverHost}
+            onConnectionChange={hostConnections.connectionChanged}
+            onAdd={importSession}
+            onClose={() => setImportOpen(false)}
+          />
+        ) : pendingForget ? (
+          <QuickInput
+            title="Remove from workspace"
+            description={`Forget ${pendingForget.name} and close its tab? Its shell will keep running. You can add it again through discovery.`}
+            mode={{ kind: "confirm", confirm_label: "Remove from workspace" }}
+            onCancel={() => setPendingForget(null)}
+            onSubmit={() => {
+              const session = pendingForget;
+              setPendingForget(null);
+              return forgetSession(session).catch((failure) =>
+                setListError(errorMessage(failure)),
+              );
+            }}
+          />
+        ) : connectHostOpen ? (
+          <QuickInput
+            title="Connect host"
+            description={`Choose a saved host or a discovered SSH/Tailscale device.${discoveryWarning ? `\n${discoveryWarning}` : workspace.discoveryLoading ? "\nDiscovering Tailscale devices…" : ""}`}
+            mode={{
+              kind: "pick",
+              choices: hostSelectorChoices(connectableTargets, workspace.hosts),
+            }}
+            onCancel={() => setConnectHostOpen(false)}
+            onSubmit={(key) => {
+              const target = connectableTargets.find((candidate) => targetKey(candidate) === key);
+              if (!target) return;
+              setConnectHostOpen(false);
+              connectHostMethod(target);
+            }}
+          />
+        ) : addHostOpen ? (
+          <SshHostFlow
+            suggestions={hostSuggestions}
+            tailscaleDevices={tailscaleDevices}
+            discoveryLoading={workspace.discoveryLoading}
+            warning={discoveryWarning}
+            gateways={workspace.ssh_gateways}
+            vpn_connections={vpn.connections}
+            vpn_statuses={vpn.statuses}
+            vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
+            vpn_error={vpn.catalog_error ?? vpn.status_error}
+            onSaveNewHost={saveNewHost}
+            onClose={() => setAddHostOpen(false)}
+          />
+        ) : methodDraft && methodNameOpen ? (
+          <QuickInput
+            key="method-name"
+            title={`Connection method · ${methodDraft.host_name}`}
+            description="Give this method a name, such as Office network or Via gateway."
+            mode={{ kind: "input", label: "Method name", initial_value: methodDraft.method_name }}
+            onCancel={() => { setMethodDraft(null); setMethodNameOpen(false); }}
+            onSubmit={(value) => {
+              const name = value.trim();
+              if (!name || name.length > 4096 || /[\x00-\x1f\x7f]/u.test(name)) return;
+              setMethodDraft({ ...methodDraft, method_name: name });
+              setMethodNameOpen(false);
+            }}
+          />
+        ) : methodDraft ? (
+          <SshHostFlow
+            suggestions={hostSuggestions}
+            warning={discoveryWarning}
+            gateways={workspace.ssh_gateways}
+            vpn_connections={vpn.connections}
+            vpn_statuses={vpn.statuses}
+            vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
+            vpn_error={vpn.catalog_error ?? vpn.status_error}
+            initialTarget={methodDraft.initial_target}
+            expectedIdentity={methodHost ? expectedHostIdentity(methodHost) : undefined}
+            onSaveConnection={saveConnection}
+            onConnectionChange={(target, state, message) => {
+              if (target.kind === "ssh" && methodDraft.host_id) {
+                hostConnections.connectionChanged({ ...target, host_id: methodDraft.host_id }, state, message);
+              }
+            }}
+            onClose={() => { setMethodDraft(null); setMethodNameOpen(false); }}
+          />
+        ) : settingsHost ? (
+          <HostSettingsDialog
+            key={settingsHost.host_id}
+            host={settingsHost}
+            vpn_connections={vpn.connections}
+            onSave={saveHostSettings}
+            onAddMethod={() => editMethod(settingsHost)}
+            onEditMethod={(method) => editMethod(settingsHost, method)}
+            onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id), method.method_id)}
+            onClose={() => setHostSettingsId(null)}
+          />
+        ) : hostFlow !== null ? (
+          <ConnectHostFlow
+            suggestions={hostSuggestions}
+            warning={discoveryWarning}
+            target={hostFlow.target}
+            host={workspace.hosts.find((host) => host.host_id === hostFlow.target.host_id)}
+            selected_method_id={hostFlow.selected_method_id}
+            gateways={workspace.ssh_gateways}
+            updateRequired={portForwardUpdateTarget !== null || hostFlow.update_required === true}
+            onVerified={recoverHost}
+            onConnectionChange={hostConnections.connectionChanged}
+            onConnected={(target) => {
+              void resumeHost(target).catch((failure) =>
+                setListError(errorMessage(failure)),
+              );
+              if (portForwardUpdateTarget && target.kind === "ssh") {
+                setPortForwardTarget(target);
+              }
+            }}
+            onClose={() => {
+              setHostFlow(null);
+              setPortForwardUpdateTarget(null);
+              requestAnimationFrame(() => renderer?.focus());
+            }}
+          />
+        ) : pendingCloseSessionKey ? (
+          <QuickInput
+            title="Terminate session"
+            description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.${closeShortcutLabel ? ` Press ${closeShortcutLabel} to confirm.` : ""}`}
+            confirm_command_id={COMMAND_IDS.close}
+            mode={{
+              kind: "confirm",
+              confirm_label: "Terminate session",
+              destructive: true,
+            }}
+            onCancel={cancelClose}
+            onSubmit={() => {
+              const session = sessions.find(
+                (session) => sessionKey(session) === pendingCloseSessionKey,
+              );
+              if (session) return confirmClose(session);
+              else cancelClose();
+            }}
+          />
+        ) : daemonRestartConfirmationPending ? (
+          <QuickInput
+            title="Restart rmuxd"
+            description="Terminate every local rmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
+            mode={{
+              kind: "confirm",
+              confirm_label: "Restart rmuxd",
+              destructive: true,
+            }}
+            onCancel={cancelDaemonRestart}
+            onSubmit={confirmDaemonRestart}
+          />
+        ) : paletteOpen ? (
+          <CommandPalette
+            commands={commands}
+            platform={shortcutPlatform}
+            onDismiss={dismissPalette}
+            onExecute={executeCommand}
+          />
+        ) : null}
+      </CommandProvider>
+    </NotificationProvider>
   );
 }

@@ -7,6 +7,7 @@ import { useCommandShortcuts } from "./useCommandShortcuts";
 import { useNativeCommandEvents } from "./useNativeCommandEvents";
 import type { ShortcutPlatform } from "./types";
 import { formatKeybinding } from "./keybindings";
+import { useNotificationSource } from "../notifications/NotificationContext";
 
 /** Keyboard/menu adapters consume the same resolved commands and keymap. */
 export function CommandBindings({ platform }: { platform: ShortcutPlatform }) {
@@ -25,6 +26,9 @@ export function CommandBindings({ platform }: { platform: ShortcutPlatform }) {
     }),
   );
   const [error, setError] = useState<string | null>(null);
+  useNotificationSource("native_shortcuts", error ? {
+    severity: "error", title: "Native shortcuts", message: error, source: "Keyboard shortcuts",
+  } : null);
   const payload = JSON.stringify(
     commands
       .filter((command) => CONFIGURABLE_COMMAND_IDS.includes(command.id))
@@ -68,9 +72,5 @@ export function CommandBindings({ platform }: { platform: ShortcutPlatform }) {
   };
   useCommandShortcuts(commands, platform, execute);
   useNativeCommandEvents(commands, execute);
-  return error ? (
-    <div className="message-banner" role="alert">
-      {error}
-    </div>
-  ) : null;
+  return null;
 }

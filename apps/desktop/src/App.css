@@ -120,6 +120,25 @@ button {
   background: #43272c;
 }
 
+.workbench {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.workbench > .app-shell {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.workbench > .status-bar {
+  flex: 0 0 26px;
+  height: 26px;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 304px minmax(0, 1fr);

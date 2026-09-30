@@ -38,7 +38,6 @@ interface SessionSidebarProps {
   selectedSessionKey: string | null;
   openTabSessionKeys: ReadonlySet<string>;
   loading: boolean;
-  error: string | null;
   creating: boolean;
   closingSessionKeys: ReadonlySet<string>;
   disconnectingSessionKey: string | null;
@@ -151,7 +150,6 @@ export function SessionSidebar({
   selectedSessionKey,
   openTabSessionKeys,
   loading,
-  error,
   creating,
   closingSessionKeys,
   disconnectingSessionKey,
@@ -196,9 +194,6 @@ export function SessionSidebar({
       (session) => targetKey(session.target) === targetKey(target),
     ),
   }));
-  const orphanedErrors = [...targetErrors.entries()].filter(
-    ([key]) => !targets.some((target) => targetKey(target) === key),
-  );
 
   function toggleHost(key: string) {
     setCollapsedHosts((current) => {
@@ -258,17 +253,7 @@ export function SessionSidebar({
         {loading && sessions.length === 0 ? (
           <p className="sidebar-state">Loading workspace…</p>
         ) : null}
-        {error ? (
-          <div className="sidebar-state error-state" role="status">
-            <p>{error}</p>
-          </div>
-        ) : null}
-        {orphanedErrors.map(([key, message]) => (
-          <div className="host-error" key={key} role="status">
-            <strong>Host</strong>
-            <span>{message}</span>
-          </div>
-        ))}
+
         {taskSessions.length > 0 ? (
           <section className="session-group" aria-labelledby="session-group-tasks">
             <h3 id="session-group-tasks">
@@ -332,6 +317,7 @@ export function SessionSidebar({
             : operation?.state === "failed" ? operation.kind === "connect" ? "Connect failed" : "Disconnect failed" : null;
           const connectionTitle = [
             connectionLabel,
+            hostError,
             connectionState === "connected" ? "The local SSH control connection is open. This check does not freshly verify remote responsiveness or terminal health." : null,
             reachability?.state === "available" ? "The endpoint answered with an SSH greeting. Authentication has not been checked." : null,
             observation?.checked_at_ms ? `SSH connection checked at ${new Date(observation.checked_at_ms).toLocaleTimeString()}` : null,
@@ -462,11 +448,6 @@ export function SessionSidebar({
                 ) : null}
               </div>
               <div className="host-group-children" id={childrenId} hidden={!expanded}>
-                {hostError ? (
-                  <div className="host-error" role="status">
-                    <span>{hostError}</span>
-                  </div>
-                ) : null}
                 {!loading && groupSessions.length === 0 ? (
                   <p className="host-empty-state">
                     {hostError || unavailableRoute ? "Sessions unavailable" : "No known sessions"}

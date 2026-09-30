@@ -12,7 +12,6 @@ interface Props {
   vpn_state?: VpnState;
   vpn_active_count?: number;
   vpn_status_stale?: boolean;
-  error: string | null;
   on_keybindings?(): void;
   on_about?(): void;
   about_open?: boolean;
@@ -30,7 +29,6 @@ export function WorkspaceSidebar({
   vpn_state,
   vpn_active_count = 0,
   vpn_status_stale = false,
-  error,
   on_keybindings,
   on_about,
   about_open = false,
@@ -135,11 +133,7 @@ export function WorkspaceSidebar({
             {{ sessions, tasks, ports, vpn }[view]}
           </div>
         ))}
-        {error ? (
-          <p className="task-inline-error" role="alert">
-            {error}
-          </p>
-        ) : null}
+
       </div>
     </div>
   );

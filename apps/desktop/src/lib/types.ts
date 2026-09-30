@@ -696,6 +696,32 @@ export interface RestartLocalDaemonResponse {
   terminated_sessions: number;
 }
 
+export type NotificationSeverity = "info" | "success" | "warning" | "error";
+
+export interface NotificationAction {
+  label: string;
+  command_id: string;
+  args?: { session_key?: string; target_key?: string; value?: string };
+}
+
+export interface NotificationInput {
+  severity: NotificationSeverity;
+  title: string;
+  message: string;
+  source: string;
+  actions?: readonly NotificationAction[];
+}
+
+export interface AppNotification extends NotificationInput {
+  id: string;
+  source_key: string;
+  created_at: number;
+  updated_at: number;
+  occurrence_count: number;
+  read: boolean;
+  toast_visible: boolean;
+}
+
 export interface OpenAttachmentRequest {
   target: ConnectionTarget;
   session: string;

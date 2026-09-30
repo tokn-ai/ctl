@@ -73,7 +73,6 @@ function renderHostConnection(
     selectedSessionKey: null,
     openTabSessionKeys: new Set<string>(),
     loading: false,
-    error: null,
     creating: false,
     closingSessionKeys: new Set<string>(),
     disconnectingSessionKey: null,
@@ -277,7 +276,8 @@ describe("SessionSidebar", () => {
     expect(status.textContent).toBe(label);
     expect(status.title).toContain(reason);
     expect(screen.queryByText(reason)).toBeNull();
-    expect(screen.getByText("Session listing failed")).toBeTruthy();
+    expect(status.title).toContain("Session listing failed");
+    expect(screen.queryByText("Session listing failed")).toBeNull();
     const connect = screen.getByRole("button", { name: "Connect to Build machine" }) as HTMLButtonElement;
     expect(connect.disabled).toBe(true);
     await user.click(connect);
@@ -310,7 +310,6 @@ describe("SessionSidebar", () => {
         selectedSessionKey={sessionKey(session)}
         openTabSessionKeys={new Set([sessionKey(session)])}
         loading={false}
-        error={null}
         creating={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
@@ -346,7 +345,6 @@ describe("SessionSidebar", () => {
         selectedSessionKey={null}
         openTabSessionKeys={new Set()}
         loading={false}
-        error={null}
         creating={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
@@ -383,7 +381,6 @@ describe("SessionSidebar", () => {
         selectedSessionKey={null}
         openTabSessionKeys={new Set()}
         loading={false}
-        error={null}
         creating={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
@@ -416,7 +413,6 @@ describe("SessionSidebar", () => {
           new Set([sessionKey(session), sessionKey(secondSession)])
         }
         loading={false}
-        error={null}
         creating={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
@@ -460,7 +456,6 @@ describe("SessionSidebar", () => {
         selectedSessionKey={sessionKey(session)}
         openTabSessionKeys={new Set([sessionKey(session)])}
         loading={false}
-        error={null}
         creating={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}
@@ -545,7 +540,6 @@ describe("SessionSidebar", () => {
         selectedSessionKey="task:local:task-1"
         openTabSessionKeys={new Set()}
         loading={false}
-        error={null}
         creating={false}
         closingSessionKeys={new Set()}
         disconnectingSessionKey={null}

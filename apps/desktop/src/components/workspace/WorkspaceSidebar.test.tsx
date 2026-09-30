@@ -11,7 +11,7 @@ describe("workspace sidebar", () => {
     const panel = render(
       <WorkspaceSidebar
         selected="sessions" onSelect={vi.fn()}
-        sessions={null} tasks={null} ports={null} vpn={null} error={null}
+        sessions={null} tasks={null} ports={null} vpn={null}
         vpn_state="connected"
       />,
     );
@@ -22,7 +22,7 @@ describe("workspace sidebar", () => {
     panel.rerender(
       <WorkspaceSidebar
         selected="sessions" onSelect={vi.fn()}
-        sessions={null} tasks={null} ports={null} vpn={null} error={null}
+        sessions={null} tasks={null} ports={null} vpn={null}
         vpn_state="connected" vpn_status_stale
       />,
     );
@@ -31,7 +31,7 @@ describe("workspace sidebar", () => {
     panel.rerender(
       <WorkspaceSidebar
         selected="sessions" onSelect={vi.fn()}
-        sessions={null} tasks={null} ports={null} vpn={null} error={null}
+        sessions={null} tasks={null} ports={null} vpn={null}
         vpn_state="stopped"
       />,
     );
@@ -63,7 +63,6 @@ describe("workspace sidebar", () => {
         tasks={<span>Tasks panel</span>}
         ports={<span>Ports panel</span>}
         vpn={<span>VPN panel</span>}
-        error={null}
       />,
     );
 
@@ -82,7 +81,6 @@ describe("workspace sidebar", () => {
         tasks={null}
         ports={null}
         vpn={null}
-        error={null}
       />,
     );
 

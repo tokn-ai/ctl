@@ -1,0 +1,107 @@
+import type { TerminalSize } from "../../lib/types";
+
+export interface ProposedDimensions {
+  columns: number;
+  rows: number;
+}
+
+export interface TerminalAdapter {
+  copyLines?(): string[];
+  write(data: Uint8Array, callback: () => void): void;
+  resize(columns: number, rows: number): void;
+  dispose(): void;
+  focus?(): void;
+  proposeDimensions?(): ProposedDimensions | null;
+  cellDimensions?(): { width: number; height: number } | null;
+}
+
+export type TerminalAdapterFactory = (terminalSize: TerminalSize) => TerminalAdapter;
+
+export class TerminalPresenter {
+  copyLines(): Promise<string[]> { return this.operationTail.then(() => this.adapter.copyLines?.() ?? []); }
+  cellDimensions() { return this.adapter.cellDimensions?.() ?? null; }
+  private adapter: TerminalAdapter;
+  private operationTail = Promise.resolve();
+  private disposed = false;
+
+  constructor(
+    private readonly factory: TerminalAdapterFactory,
+    initialSize: TerminalSize,
+  ) {
+    this.adapter = factory(initialSize);
+  }
+
+  write(data: Uint8Array): Promise<void> {
+    return this.enqueue(() => this.writeBytes(data));
+  }
+
+  restoreCheckpoint(
+    terminalSize: TerminalSize,
+    historyLines: string[],
+    payload: Uint8Array,
+    inputPrefix: Uint8Array,
+  ): Promise<void> {
+    return this.enqueue(async () => {
+      this.adapter.dispose();
+      this.adapter = this.factory(terminalSize);
+      await this.writeHistory(historyLines, terminalSize.rows);
+      await this.writeBytes(payload);
+      await this.writeBytes(inputPrefix);
+    });
+  }
+
+  recreate(terminalSize: TerminalSize): Promise<void> {
+    return this.enqueue(() => {
+      this.adapter.dispose();
+      this.adapter = this.factory(terminalSize);
+    });
+  }
+
+  resize(terminalSize: TerminalSize): Promise<void> {
+    return this.enqueue(() => {
+      this.adapter.resize(terminalSize.columns, terminalSize.rows);
+    });
+  }
+
+  proposeDimensions(): ProposedDimensions | null {
+    return this.adapter.proposeDimensions?.() ?? null;
+  }
+
+  focus(): void {
+    this.adapter.focus?.();
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    // Let an in-flight write finish before disposing its parser; otherwise its
+    // callback may never run and attachment transitions can remain blocked.
+    void this.operationTail.then(() => this.adapter.dispose());
+  }
+
+  private enqueue(operation: () => void | Promise<void>): Promise<void> {
+    const result = this.operationTail.then(() => {
+      if (!this.disposed) return operation();
+    });
+    this.operationTail = result.catch(() => undefined);
+    return result;
+  }
+
+  private writeBytes(data: Uint8Array): Promise<void> {
+    if (data.length === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.adapter.write(data, resolve);
+    });
+  }
+
+  private writeHistory(lines: string[], rows: number): Promise<void> {
+    if (lines.length === 0) {
+      return Promise.resolve();
+    }
+    const scrollIntoHistory = "\r\n".repeat(Math.max(0, rows - 1));
+    const text = `${lines.join("\r\n")}\r\n${scrollIntoHistory}`;
+    return this.writeBytes(new TextEncoder().encode(text));
+  }
+}

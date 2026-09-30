@@ -1,0 +1,435 @@
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
+import { encodeTerminalBinary, encodeTerminalText } from "../../lib/bytes";
+import type { SessionSummary, TerminalSize } from "../../lib/types";
+import { sessionKey } from "../targets/targets";
+import {
+  TerminalPresenter,
+  type ProposedDimensions,
+  type TerminalAdapter,
+} from "./TerminalPresenter";
+
+const DEFAULT_SCROLLBACK_LINES = 10_000;
+const MAX_TERMINAL_DIMENSION = 65_535;
+
+interface CachedTerminal {
+  container: HTMLElement;
+  presenter: TerminalPresenter;
+  resume_from: string | null;
+  presentation_version: number;
+  is_local: boolean;
+  terminal_id?: string;
+}
+
+function validDimensions(
+  dimensions: ProposedDimensions | null,
+): dimensions is ProposedDimensions {
+  return (
+    dimensions !== null &&
+    Number.isInteger(dimensions.columns) &&
+    Number.isInteger(dimensions.rows) &&
+    dimensions.columns >= 2 &&
+    dimensions.rows >= 1 &&
+    dimensions.columns <= MAX_TERMINAL_DIMENSION &&
+    dimensions.rows <= MAX_TERMINAL_DIMENSION
+  );
+}
+
+export class XtermRenderer {
+  private static readonly renderers = new Set<XtermRenderer>();
+
+  static forgetRestartedSessions(session_keys: ReadonlySet<string>): void {
+    for (const renderer of XtermRenderer.renderers) {
+      const active_affected = [...renderer.sessions].some(([key, terminal]) => session_keys.has(key) && terminal === renderer.active);
+      renderer.retainSessions(new Set([...renderer.sessions.keys()].filter((key) => !session_keys.has(key))));
+      if (active_affected) renderer.invalidateResumeSequence();
+    }
+  }
+
+  async archivePanes(session: SessionSummary, reason: string) {
+    const panes = new Map<string, { terminal_id: string; reason: string; lines: string[] }>();
+    for (const renderer of XtermRenderer.renderers) {
+      const terminal = renderer.sessions.get(sessionKey(session));
+      if (!terminal) continue;
+      const terminal_id = terminal.terminal_id ?? session.session_id;
+      panes.set(terminal_id, { terminal_id, reason, lines: await terminal.presenter.copyLines() });
+    }
+    return [...panes.values()];
+  }
+
+  private cellObserver: ResizeObserver | null = null;
+  private cellFrame: number | null = null;
+  private readonly cellListeners = new Set<(cell: { width: number; height: number }) => void>();
+
+  observeCellDimensions(listener: (cell: { width: number; height: number }) => void): () => void {
+    this.cellListeners.add(listener);
+    if (!this.cellObserver) {
+      this.cellObserver = new ResizeObserver(() => this.scheduleCellMeasurement());
+      this.container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver!.observe(screen));
+    }
+    this.scheduleCellMeasurement();
+    return () => {
+      this.cellListeners.delete(listener);
+      if (!this.cellListeners.size) {
+        this.cellObserver?.disconnect();
+        this.cellObserver = null;
+        if (this.cellFrame !== null) cancelAnimationFrame(this.cellFrame);
+        this.cellFrame = null;
+      }
+    };
+  }
+
+  private scheduleCellMeasurement(): void {
+    if (this.cellFrame !== null) return;
+    this.cellFrame = requestAnimationFrame(() => {
+      this.cellFrame = null;
+      const cell = this.cellDimensions();
+      if (cell) this.cellListeners.forEach((listener) => listener(cell));
+    });
+  }
+  private viewport: HTMLElement | null = null;
+  setViewport(viewport: HTMLElement | null): void { this.viewport = viewport; }
+  cellDimensions() { return this.active.presenter.cellDimensions(); }
+  private readonly sessions = new Map<string, CachedTerminal>();
+  private active: CachedTerminal;
+
+  constructor(
+    private readonly container: HTMLElement,
+    private readonly onInput: (data: Uint8Array) => void,
+    initialSize: TerminalSize,
+  ) {
+    this.active = this.createTerminal(initialSize);
+    XtermRenderer.renderers.add(this);
+  }
+
+  /** A stream writes only to its own terminal, independently of the visible tab. */
+  sessionRenderer(session: SessionSummary): AttachmentRenderer {
+    let selected = session;
+    const terminal = () => this.ensureSession(selected);
+    return {
+      activateSession: (next) => {
+        const visible = this.sessions.get(sessionKey(selected)) === this.active;
+        selected = next;
+        if (visible) this.activateSession(next);
+        else this.ensureSession(next);
+      },
+      resumeSequence: () => terminal().resume_from,
+      invalidateResumeSequence: () => {
+        const cached = terminal();
+        cached.resume_from = null;
+        cached.presentation_version += 1;
+      },
+      write: (data, sequence) => this.applyToTerminal(terminal(), sequence, (presenter) => presenter.write(data)),
+      restoreCheckpoint: (size, history, payload, prefix, sequence) =>
+        this.applyToTerminal(terminal(), sequence, (presenter) => presenter.restoreCheckpoint(size, history, payload, prefix)),
+      recreate: (size) => this.applyToTerminal(terminal(), null, (presenter) => presenter.recreate(size)),
+      resize: (size) => {
+        const cached = terminal();
+        return this.applyToTerminal(cached, cached.resume_from, (presenter) => presenter.resize(size));
+      },
+      proposeDimensions: () => terminal() === this.active ? this.proposeDimensions() : null,
+      observeDimensions: (listener) => this.observeDimensions((dimensions) => {
+        if (terminal() === this.active) listener(dimensions);
+      }),
+      focus: () => { if (terminal() === this.active) this.focus(); },
+    };
+  }
+
+  private ensureSession(session: SessionSummary): CachedTerminal {
+    const key = sessionKey(session);
+    let terminal = this.sessions.get(key);
+    if (terminal && terminal.terminal_id !== session.terminal_id) {
+      this.sessions.delete(key);
+      if (terminal !== this.active) this.disposeTerminal(terminal);
+      terminal = undefined;
+    }
+    if (!terminal) {
+      terminal = this.createTerminal(session.terminal_size);
+      terminal.is_local = session.target.kind === "local";
+      terminal.terminal_id = session.terminal_id;
+      terminal.container.hidden = true;
+      this.sessions.set(key, terminal);
+    }
+    return terminal;
+  }
+
+  /** Display an opened session without replacing its selected terminal or cache. */
+  selectSession(session: SessionSummary): void {
+    this.showTerminal(this.sessions.get(sessionKey(session)) ?? this.ensureSession(session));
+  }
+
+  activateSession(session: SessionSummary): void {
+    this.showTerminal(this.ensureSession(session));
+  }
+
+  private showTerminal(terminal: CachedTerminal): void {
+    if (terminal === this.active) return;
+    this.active.container.hidden = true;
+    if (![...this.sessions.values()].includes(this.active)) {
+      this.disposeTerminal(this.active);
+    }
+    this.active = terminal;
+    terminal.container.hidden = false;
+    this.scheduleCellMeasurement();
+  }
+
+  resumeSequence(): string | null {
+    return this.active.resume_from;
+  }
+
+  invalidateResumeSequence(): void {
+    this.active.resume_from = null;
+    this.active.presentation_version += 1;
+  }
+
+  retainSessions(session_keys: ReadonlySet<string>): void {
+    for (const [key, terminal] of this.sessions) {
+      if (!session_keys.has(key)) {
+        this.sessions.delete(key);
+        // The current view remains visible until the next activation. Removing
+        // it from the cache prevents a closed tab from reusing its cursor.
+        if (terminal !== this.active) this.disposeTerminal(terminal);
+      }
+    }
+  }
+
+  remapSessions(key_changes: ReadonlyMap<string, string>): void {
+    for (const [old_key, new_key] of key_changes) {
+      if (old_key === new_key) continue;
+      const terminal = this.sessions.get(old_key);
+      if (!terminal) continue;
+      this.sessions.delete(old_key);
+      if (!this.sessions.has(new_key)) this.sessions.set(new_key, terminal);
+      else if (terminal !== this.active) this.disposeTerminal(terminal);
+    }
+  }
+
+  forgetLocalSessions(): void {
+    this.retainSessions(
+      new Set(
+        [...this.sessions]
+          .filter(([, terminal]) => !terminal.is_local)
+          .map(([key]) => key),
+      ),
+    );
+    if (this.active.is_local) this.invalidateResumeSequence();
+  }
+
+  write(data: Uint8Array, sequence_end: string): Promise<void> {
+    return this.applyPresentation(sequence_end, (presenter) =>
+      presenter.write(data),
+    );
+  }
+
+  restoreCheckpoint(
+    terminalSize: TerminalSize,
+    historyLines: string[],
+    payload: Uint8Array,
+    inputPrefix: Uint8Array,
+    sequence: string,
+  ): Promise<void> {
+    return this.applyPresentation(sequence, (presenter) =>
+      presenter.restoreCheckpoint(terminalSize, historyLines, payload, inputPrefix),
+    );
+  }
+
+  recreate(terminalSize: TerminalSize): Promise<void> {
+    return this.applyPresentation(null, (presenter) =>
+      presenter.recreate(terminalSize),
+    );
+  }
+
+  resize(terminalSize: TerminalSize): Promise<void> {
+    return this.applyPresentation(this.active.resume_from, (presenter) =>
+      presenter.resize(terminalSize),
+    );
+  }
+
+  proposeDimensions(): ProposedDimensions | null {
+    if (this.viewport) {
+      const cell = this.cellDimensions();
+      if (!cell) return null;
+      const dimensions = { columns: Math.floor(this.viewport.clientWidth / cell.width), rows: Math.floor(this.viewport.clientHeight / cell.height) };
+      return validDimensions(dimensions) ? dimensions : null;
+    }
+    const dimensions = this.active.presenter.proposeDimensions();
+    return validDimensions(dimensions) ? dimensions : null;
+  }
+
+  observeDimensions(
+    onDimensions: (dimensions: ProposedDimensions) => void,
+  ): () => void {
+    let animationFrame: number | null = null;
+    const publish = () => {
+      animationFrame = null;
+      const dimensions = this.proposeDimensions();
+      if (dimensions) {
+        onDimensions(dimensions);
+      }
+    };
+    const schedule = () => {
+      if (animationFrame !== null) {
+        cancelAnimationFrame(animationFrame);
+      }
+      animationFrame = requestAnimationFrame(publish);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(this.viewport ?? this.container);
+    const stopCellObservation = this.observeCellDimensions(schedule);
+    schedule();
+
+    return () => {
+      observer.disconnect();
+      stopCellObservation();
+      if (animationFrame !== null) {
+        cancelAnimationFrame(animationFrame);
+      }
+    };
+  }
+
+  focus(): void {
+    this.active.presenter.focus();
+  }
+
+  dispose(): void {
+    XtermRenderer.renderers.delete(this);
+    this.cellObserver?.disconnect();
+    this.cellObserver = null;
+    this.cellListeners.clear();
+    if (this.cellFrame !== null) cancelAnimationFrame(this.cellFrame);
+    this.cellFrame = null;
+    for (const terminal of new Set([...this.sessions.values(), this.active])) {
+      this.disposeTerminal(terminal);
+    }
+    this.sessions.clear();
+  }
+
+  private createTerminal(terminalSize: TerminalSize): CachedTerminal {
+    const container = document.createElement("div");
+    container.className = "terminal-session";
+    this.container.append(container);
+    return {
+      container,
+      presenter: new TerminalPresenter(
+        (size) => this.createAdapter(container, size),
+        terminalSize,
+      ),
+      resume_from: null,
+      presentation_version: 0,
+      is_local: false,
+    };
+  }
+
+  private disposeTerminal(terminal: CachedTerminal): void {
+    terminal.container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
+    terminal.presenter.dispose();
+    terminal.container.remove();
+  }
+
+  private async applyPresentation(
+    sequence: string | null,
+    operation: (presenter: TerminalPresenter) => Promise<void>,
+  ): Promise<void> {
+    // Capture the view before awaiting: activation may change while xterm is
+    // parsing bytes. Only a fully applied presentation is safe to resume.
+    return this.applyToTerminal(this.active, sequence, operation);
+  }
+
+  private async applyToTerminal(
+    terminal: CachedTerminal,
+    sequence: string | null,
+    operation: (presenter: TerminalPresenter) => Promise<void>,
+  ): Promise<void> {
+    const version = ++terminal.presentation_version;
+    terminal.resume_from = null;
+    await operation(terminal.presenter);
+    if (terminal.presentation_version === version) terminal.resume_from = sequence;
+  }
+
+  private createAdapter(
+    container: HTMLElement,
+    terminalSize: TerminalSize,
+  ): TerminalAdapter {
+    container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
+    container.replaceChildren();
+    const terminal = new Terminal({
+      cols: terminalSize.columns,
+      rows: terminalSize.rows,
+      allowTransparency: false,
+      convertEol: false,
+      cursorBlink: true,
+      cursorStyle: "bar",
+      fontFamily: '"Berkeley Mono", "SFMono-Regular", Consolas, monospace',
+      fontSize: 13,
+      lineHeight: 1.18,
+      scrollback: DEFAULT_SCROLLBACK_LINES,
+      theme: {
+        background: "#1f1f1f",
+        foreground: "#cccccc",
+        cursor: "#aeafad",
+        cursorAccent: "#1f1f1f",
+        selectionBackground: "#264f78",
+        black: "#20242b",
+        red: "#ff6b6b",
+        green: "#8ee39d",
+        yellow: "#f3c969",
+        blue: "#7aa2f7",
+        magenta: "#c099ff",
+        cyan: "#72d6d0",
+        white: "#e4e7ec",
+        brightBlack: "#6c7380",
+        brightRed: "#ff8787",
+        brightGreen: "#a5efb2",
+        brightYellow: "#ffe08a",
+        brightBlue: "#9ab7ff",
+        brightMagenta: "#d1b2ff",
+        brightCyan: "#92e8e3",
+        brightWhite: "#ffffff",
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(container);
+    const screen = container.querySelector(".xterm-screen");
+    if (screen) this.cellObserver?.observe(screen);
+    this.scheduleCellMeasurement();
+    terminal.onData((data) => {
+      if (this.active.container === container) this.onInput(encodeTerminalText(data));
+    });
+    terminal.onBinary((data) => {
+      if (this.active.container === container) this.onInput(encodeTerminalBinary(data));
+    });
+
+    return {
+      copyLines: () => {
+        const buffer = terminal.buffer.active;
+        return Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)?.translateToString(true) ?? "");
+      },
+      write: (data, callback) => terminal.write(data, callback),
+      resize: (columns, rows) => terminal.resize(columns, rows),
+      dispose: () => terminal.dispose(),
+      focus: () => terminal.focus(),
+      cellDimensions: () => {
+        const screen = container.querySelector(".xterm-screen")?.getBoundingClientRect();
+        return screen && screen.width > 0 && screen.height > 0 ? { width: screen.width / terminal.cols, height: screen.height / terminal.rows } : null;
+      },
+      proposeDimensions: () => {
+        const proposed = fitAddon.proposeDimensions();
+        if (!proposed) {
+          return null;
+        }
+        return {
+          columns: proposed.cols,
+          rows: proposed.rows,
+        };
+      },
+    };
+  }
+}
+
+export type AttachmentRenderer = Pick<XtermRenderer,
+  "activateSession" | "resumeSequence" | "invalidateResumeSequence" |
+  "write" | "restoreCheckpoint" | "recreate" | "resize" |
+  "proposeDimensions" | "observeDimensions" | "focus"
+>;

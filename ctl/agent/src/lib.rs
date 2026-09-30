@@ -6,6 +6,9 @@
 //! connections read an account-owned ID that survives component upgrades.
 
 pub mod identity;
+pub mod listeners;
+pub mod maintenance;
+pub mod restart;
 
 use rmux_ipc::Stream;
 use std::io;

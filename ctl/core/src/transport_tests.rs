@@ -1,9 +1,126 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::time::timeout;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[cfg(unix)]
+fn loopback_gateway(port: u16) -> SshGateway {
+  SshGateway {
+    kind: ctld_ipc::GatewayKind::Ssh,
+    vpn: None,
+    destination: "127.0.0.1".into(),
+    hostname: None,
+    user: None,
+    port: Some(port),
+    identity_file: None,
+    mode: SshGatewayMode::Automatic,
+  }
+}
+
+#[cfg(unix)]
+fn multiplexed_ssh_command(options: &SshConnectionOptions, control_path: PathBuf) -> Command {
+  let mut command = Command::new(SSH_PROGRAM);
+  // Isolate the real OpenSSH client from personal configuration and credentials.
+  command.args(["-F", "/dev/null", "-o", "ConnectTimeout=1"]);
+  let interaction = SshInteraction::Multiplexed { control_path };
+  let extra = configure_ssh_interaction(&mut command, &interaction);
+  command
+    .args(extra)
+    .args(ssh_base_arguments("fixture", options))
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  command
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
+  for gateway_kind in [
+    None,
+    Some(ctld_ipc::GatewayKind::Ssh),
+    Some(ctld_ipc::GatewayKind::Socks5),
+  ] {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let options = SshConnectionOptions {
+      hostname: Some("127.0.0.1".into()),
+      port: Some(port),
+      gateways: gateway_kind
+        .map(|kind| {
+          let mut gateway = loopback_gateway(port);
+          gateway.kind = kind;
+          vec![gateway]
+        })
+        .unwrap_or_default(),
+      ..SshConnectionOptions::default()
+    };
+    let path = PathBuf::from(format!("/tmp/ctl-mux-{}", uuid::Uuid::new_v4().simple()));
+    assert!(!path.exists());
+    let mut command = multiplexed_ssh_command(&options, path);
+    command.arg("true");
+    let output = tokio::select! {
+      biased;
+      accepted = listener.accept() => {
+        drop(accepted);
+        panic!("missing master attempted a fresh SSH connection (gateway={gateway_kind:?})");
+      }
+      output = timeout(TEST_TIMEOUT, command.output()) => output.unwrap().unwrap(),
+    };
+    // ProxyCommand=false may report a closed connection or a broken pipe,
+    // depending on whether its exit races with OpenSSH writing its banner.
+    // The listener above checks the no-fallback guarantee directly.
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(255), "{diagnostics}");
+    assert!(!diagnostics.contains("Cannot specify -J with ProxyCommand"));
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openssh_gateway_options_preserve_master_only_precedence() {
+  let options = SshConnectionOptions {
+    hostname: Some("127.0.0.1".into()),
+    gateways: vec![loopback_gateway(2222)],
+    ..SshConnectionOptions::default()
+  };
+  for multiplexed in [false, true] {
+    let mut command = Command::new(SSH_PROGRAM);
+    command.args(["-F", "/dev/null", "-G"]);
+    if multiplexed {
+      let extra = configure_ssh_interaction(
+        &mut command,
+        &SshInteraction::Multiplexed {
+          control_path: PathBuf::from("/tmp/ctl-mux-config-test"),
+        },
+      );
+      command.args(extra);
+    }
+    command.args(ssh_base_arguments("fixture", &options));
+    let output = command.output().await.unwrap();
+    assert!(
+      output.status.success(),
+      "{}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    let config = String::from_utf8(output.stdout).unwrap();
+    if multiplexed {
+      assert!(config.lines().any(|line| line == "proxycommand false"));
+      assert!(!config.lines().any(|line| line.starts_with("proxyjump ")));
+    } else {
+      assert!(config.lines().any(|line| matches!(
+        line,
+        "proxyjump 127.0.0.1:2222" | "proxyjump [127.0.0.1]:2222"
+      )));
+      assert!(!config.lines().any(|line| line.starts_with("proxycommand ")));
+    }
+  }
+}
 
 // Exercise real OS process pipes, including Windows binary stdio. These
 // fixtures model the SSH child's stream boundary, not SSH authentication.
@@ -111,12 +228,16 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
     let identity = ctl_proto::RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
+      build: None,
+      rmux_restart_supported: false,
       bundle: None,
     };
     let json = serde_json::to_string(&identity).unwrap();
     let command = identified_fixture(&json);
-    let mut transport = start_ssh_transport_identified(command, true).await.unwrap();
-    assert_eq!(transport.remote_identity, Some(identity));
+    let mut transport = start_ssh_transport_identified(command, true, false, ready(()))
+      .await
+      .unwrap();
+    assert_eq!(transport.remote_identity.as_deref(), Some(&identity));
     let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
     transport.write_all(&payload).await.unwrap();
     transport.flush().await.unwrap();
@@ -153,15 +274,70 @@ async fn identified_transport_rejects_old_agents_and_invalid_metadata() {
   timeout(TEST_TIMEOUT, async {
     let legacy = fixture("printf 'ctl-ssh-v1\n'; cat", "echo-transport.ps1");
     assert!(matches!(
-      start_ssh_transport_identified(legacy, true).await,
+      start_ssh_transport_identified(legacy, true, false, ready(())).await,
       Err(CoreError::IdentityUnsupported)
     ));
     let malformed = identified_fixture("{}");
     assert!(matches!(
-      start_ssh_transport_identified(malformed, true).await,
+      start_ssh_transport_identified(malformed, true, false, ready(())).await,
       Err(CoreError::RemoteIdentity(_))
     ));
   })
   .await
   .unwrap();
+}
+
+#[tokio::test]
+async fn authentication_hook_runs_when_the_remote_agent_is_missing() {
+  timeout(TEST_TIMEOUT, async {
+    let command = fixture(
+      "printf 'ctl-ssh-auth-v1\nctl-ssh-nf\n'; printf 'bash: ctl-agent: 未找到\n' >&2; exit 127",
+      "authenticated-missing-agent.ps1",
+    );
+    let authenticated = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&authenticated);
+    let result = start_ssh_transport_identified(command, true, true, async move {
+      observed.store(true, Ordering::SeqCst);
+    })
+    .await;
+
+    assert!(authenticated.load(Ordering::SeqCst));
+    assert!(matches!(result, Err(CoreError::AgentNotFound)));
+  })
+  .await
+  .expect("authenticated missing-agent handling timed out");
+}
+
+#[tokio::test]
+async fn transport_recognizes_the_missing_agent_protocol_marker() {
+  timeout(TEST_TIMEOUT, async {
+    let command = fixture(
+      "printf 'ctl-ssh-nf\n'; printf 'bash: ctl-agent: 未找到\n' >&2; exit 127",
+      "missing-agent.ps1",
+    );
+
+    assert!(matches!(
+      start_ssh_transport(command).await,
+      Err(CoreError::AgentNotFound)
+    ));
+  })
+  .await
+  .expect("missing-agent handling timed out");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixed_command_closes_stdin_before_waiting_for_response() {
+  for input in [
+    b"".as_slice(),
+    b"{\"expected_remote_id\":\"test\"}".as_slice(),
+  ] {
+    let mut command = Command::new("sh");
+    command.args(["-c", "cat; printf '\nrequest-complete'"]);
+    let output = timeout(Duration::from_secs(2), run_fixed_command(command, input))
+      .await
+      .expect("command must receive EOF before the caller waits for output")
+      .expect("command should succeed");
+    assert_eq!(output, [input, b"\nrequest-complete"].concat());
+  }
 }

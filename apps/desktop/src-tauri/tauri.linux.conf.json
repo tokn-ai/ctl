@@ -1,0 +1,6 @@
+{
+  "build": {
+    "runner": "../../../scripts/dev/tauri-cargo.sh",
+    "beforeDevCommand": "pnpm dev"
+  }
+}

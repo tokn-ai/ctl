@@ -1,8 +1,35 @@
 //! Versioned metadata preceding the service protocol on identified SSH streams.
+pub mod maintenance;
 use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TcpListener {
+  pub bind_address: String,
+  pub port: u16,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpListenerCatalog {
+  pub listeners: Vec<TcpListener>,
+  pub warnings: Vec<String>,
+}
+
+/// Confirmation-bound maintenance request, sent on stdin rather than through a shell.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteRmuxRestartRequest {
+  pub expected_remote_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteRmuxRestartResult {
+  pub terminated_sessions: u32,
+}
+
+pub const IDENTITY_PROTOCOL_VERSION: u16 = 2;
 pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-v2\n";
 const MAX_IDENTITY_BYTES: usize = 8192;
 
@@ -11,6 +38,10 @@ const MAX_IDENTITY_BYTES: usize = 8192;
 pub struct RemoteIdentity {
   pub remote_id: String,
   pub agent_version: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub build: Option<component_info::ComponentBuildInfo>,
+  #[serde(default)]
+  pub rmux_restart_supported: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub bundle: Option<Box<BundleVersion>>,
 }
@@ -31,6 +62,10 @@ impl RemoteIdentity {
     uuid::Uuid::parse_str(&self.remote_id)
       .is_ok_and(|id| !id.is_nil() && id.to_string() == self.remote_id)
       && text(&self.agent_version)
+      && self
+        .build
+        .as_ref()
+        .is_none_or(|build| build.is_valid() && build.version == self.agent_version)
       && self.bundle.as_ref().is_none_or(|bundle| {
         [
           &bundle.app_version,
@@ -94,11 +129,41 @@ fn invalid_identity() -> io::Error {
 mod tests {
   use super::*;
 
+  #[test]
+  fn older_agent_identity_has_unknown_build_metadata() {
+    let identity: RemoteIdentity = serde_json::from_value(serde_json::json!({
+      "remote_id": uuid::Uuid::new_v4().to_string(),
+      "agent_version": "0.1.0"
+    }))
+    .unwrap();
+    assert!(identity.is_valid());
+    assert!(identity.build.is_none());
+  }
+
+  #[test]
+  fn rejects_malformed_or_inconsistent_agent_build() {
+    let mut identity = RemoteIdentity {
+      remote_id: uuid::Uuid::new_v4().to_string(),
+      agent_version: env!("CARGO_PKG_VERSION").into(),
+      build: Some(component_info::build_info()),
+      rmux_restart_supported: false,
+      bundle: None,
+    };
+    assert!(identity.is_valid());
+    identity.build.as_mut().unwrap().source_fingerprint = "invalid".into();
+    assert!(!identity.is_valid());
+    identity.build = Some(component_info::build_info());
+    identity.build.as_mut().unwrap().version = "0.0.0".into();
+    assert!(!identity.is_valid());
+  }
+
   #[tokio::test]
   async fn metadata_round_trip_preserves_service_bytes() {
     let identity = RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
+      build: None,
+      rmux_restart_supported: false,
       bundle: None,
     };
     let mut bytes = Vec::new();

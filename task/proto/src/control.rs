@@ -8,11 +8,16 @@ pub const PROTOCOL_VERSION: u16 = 1;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
   RestartDaemon { protocol_version: u16 },
+  ComponentStatus { protocol_version: u16 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+  ComponentStatus {
+    build: component_info::ComponentBuildInfo,
+    protocol_version: u16,
+  },
   RestartAccepted {
     data_directory: PathBuf,
     rmux_socket: PathBuf,

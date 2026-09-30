@@ -1,7 +1,7 @@
-# rmux protocol version 9
+# rmux protocol version 12
 
 The protocol is independent of local IPC and future remote transport. Version
-9 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+11 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -16,6 +16,92 @@ and layout leases. Protocol versions still match exactly during handshake.
 Version 8 adds renderer-applied presentation flow control. Version 9 pairs
 every terminal checkpoint with a bounded normalized-history snapshot captured
 at the same raw sequence.
+
+## Sessions, views, and terminals
+
+Version 10 separates three identities:
+
+- A **session** is the named root returned by `list_sessions`.
+- Each session binds to one distinct, server-owned **view**.
+- Each **terminal** owns its PTY, process, history, attachments, and input
+  lease. The view owns the layout (resize) lease. It belongs to exactly one view.
+
+Creation allocates a session, view, and initial terminal with distinct IDs.
+`SessionInfo` includes `session_id`, `view_id`, and `terminal_id`. Its size and
+output sequence describe the selected terminal, not an aggregate across a view.
+Listing selects the first leaf in each view; attachment and shell inspection
+select the requested terminal. The root name and creation time remain stable
+when terminals move or the first terminal exits.
+
+`attach_session`, `resume_attachment`, and `get_shell_state` accept a root name,
+root ID, or terminal ID. A root selector opens the first terminal in layout order.
+Clients must pin subsequent reconnects to the returned `terminal_id`, because
+layout order and ownership may change. Output and input ownership remain scoped to that
+terminal; layout ownership spans its entire view. The historical `session_ended` stream event indicates the attached
+terminal's exit; other terminals in the root may still be running.
+
+Version 11 makes `resize` and the layout lease view-wide. An attachment to any
+member terminal may acquire the one layout lease; input leases remain independent.
+The resize owner supplies the full canvas size. The daemon allocates integer cell
+rectangles and resizes every member PTY, including hidden tab groups. Horizontal
+splits divide columns, vertical splits divide rows; dividers consume one cell.
+Remainder cells go to earlier children. The minimum is two columns and one row
+per terminal. Resize requests smaller than the layout minimum use the minimum
+canvas, which smaller clients can scroll. Splits that cannot fit are rejected.
+
+`panes` entries contain `terminal_id`, `left`, `top`, `columns`, and `rows`.
+Their coordinates are relative to `canvas_size`. Tab children share bounds;
+clients retain their own selected tab and active pane. Observers display the
+shared grid through a viewport and must not resize individual PTYs to fit.
+Desktop and TUI clients can render the same coordinates without pixel-dependent
+layout calculations. Geometry stream events continue to describe each PTY's own
+allocated size, while `get_view` supplies the complete canvas geometry.
+
+One-shot topology requests are:
+
+| Request | Effect |
+| --- | --- |
+| `get_view { session }` | Return the root's complete `view_snapshot` |
+| `split_terminal { terminal_id, axis, command, working_directory, terminal_size }` | Create a terminal beside the target in the same view |
+| `update_view { session, expected_revision, layout }` | Replace arrangement with exactly the same terminal membership; reject stale revisions |
+| `promote_terminal { terminal_id, name }` | Move one of a root's multiple terminals to a new session/view |
+| `merge_sessions { source, destination }` | Join destination and source layouts in a horizontal split; remove source root/view |
+| `kill_terminal { terminal_id }` | Terminate only that terminal |
+| `kill_session { session }` | Terminate every terminal owned by the root; prevent new splits or moves into it |
+
+Successful view operations return `view_snapshot { view }`; terminal termination
+returns `success`. A snapshot includes `session_id`, `session_name`, `view_id`,
+`revision`, `layout`, `canvas_size`, cell-coordinate `panes`, and terminal metadata. Revisions increase on changes to
+layout, canvas size, or membership, including exit. Layout nodes use `kind`:
+
+```json
+{
+  "kind": "split",
+  "axis": "horizontal",
+  "children": [
+    { "kind": "terminal", "terminal_id": "terminal-a" },
+    { "kind": "terminal", "terminal_id": "terminal-b" }
+  ]
+}
+```
+
+`horizontal` places children side by side and `vertical` stacks them.
+Splits divide space equally. Sessions provide tab-like navigation; views contain
+only terminals and splits. Legacy `tabs` input decodes recursively into horizontal
+splits, preserving terminal IDs and child order. The server
+validates unique and complete membership, at most 64 terminals, and at most 16
+levels of nesting. Pane focus is client-local; layout and membership are
+server-owned. Membership transfers are atomic under the registry lock and keep
+terminal IDs, processes, history, and existing attachments intact.
+
+Exiting terminals are removed from their view; redundant one-child groups
+collapse. The last exit removes the session and view, retaining the existing
+daemon idle-exit behavior. Layouts survive client disconnects, but like PTYs,
+do not survive daemon restart. Task-managed roots retain one terminal and reject
+splits and transfers so task lifecycle ownership remains unambiguous.
+
+Protocol versions still match exactly. Version 12 removes tabbed views; app and
+daemon must be updated together. This does not migrate a running older daemon.
 
 ## Connection lifecycle
 
@@ -55,8 +141,8 @@ them until resume or grace expiry.
 and layout leases, plus independent `request_command_line` and
 `request_running_command` privacy requests.
 Requesting an unheld layout lease is an explicit resize: the daemon applies
-that terminal size before sending `attached`. Without that request, an attach
-never resizes the PTY; the size only lets the daemon report when a checkpoint
+that size to the shared canvas before sending `attached`. Without that request, an attach
+never resizes the view; the size only lets the daemon report when a checkpoint
 was made for another layout. Requesting command-line state never grants access
 by itself; daemon policy may redact it.
 
@@ -110,6 +196,13 @@ it proves only that the presentation event finished. A client that could not
 adopt a checkpoint or geometry may replenish delivery credit while keeping its
 own reconnect cursor unset. Heartbeats, detach, input, and lease control remain
 independent of presentation credit.
+
+When the child exits, the daemon continues accepting presentation acknowledgements
+until all final output has been sent. It then sends the final shell state and
+`session_ended`; the last output frame need not be acknowledged before closure.
+This drain keeps the attachment's existing liveness deadline fixed, so a renderer
+that stops applying output cannot retain an ended session indefinitely by sending
+heartbeats. A stalled attachment closes when that deadline expires.
 
 ## Attachment leases
 
@@ -364,6 +457,13 @@ have been interpreted. Soft-wrapped physical rows are merged into logical
 lines. Alternate-screen output is excluded. The snapshot is bounded by bytes,
 physical rows, and emulator cells; it is a full replacement, not an incremental
 patch. Version 1 does not preserve style runs in historical lines.
+
+The emulator strips trailing whitespace from each complete logical line before
+history storage; hard line breaks do not pad stored lines to the terminal width.
+This also strips explicitly written trailing whitespace, which the normalized
+text does not distinguish from unused cells. Leading and interior spaces remain,
+including the column offset preserved by a bare LF (without CR). Soft-wrapped
+rows are joined before trailing whitespace is stripped.
 
 `terminal_size` in a checkpoint is authoritative for its restored parser
 state. A graphical client must reset or recreate its terminal model at those

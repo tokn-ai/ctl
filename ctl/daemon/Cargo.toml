@@ -1,0 +1,33 @@
+[package]
+name = "ctld"
+version.workspace = true
+edition.workspace = true
+description = "Per-user SSH connection and credential broker for ctl"
+publish = false
+
+[dependencies]
+component-info.workspace = true
+clap.workspace = true
+base64.workspace = true
+dirs.workspace = true
+serde.workspace = true
+rpassword.workspace = true
+ctld-ipc.workspace = true
+ctl-proto.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+url = "2.5.8"
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ctl-keychain-client = { path = "../keychain-client" }
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
+
+[lints]
+workspace = true

@@ -1,2 +1,5 @@
 /target/
 *.sock
+.env
+.env.*
+!.env.example

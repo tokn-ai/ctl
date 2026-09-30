@@ -1,0 +1,225 @@
+use ctl_core::{
+  ConnectionTarget, SshConnectionOptions, SshGateway, SshGatewayMode, Transport, open_transport,
+};
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::time::timeout;
+
+use crate::dto::ConnectionTargetDto;
+use crate::error::{CommandErrorDto, CommandResult};
+use crate::local_transport;
+
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
+  if !target.is_local() {
+    return timeout(CONNECTION_TIMEOUT, crate::ssh_auth::connect(target))
+      .await
+      .map_err(|_| {
+        CommandErrorDto::new(
+          "connection_timeout",
+          "SSH connection timed out. Use Connect host to authenticate.",
+        )
+      })?;
+  }
+  timeout(CONNECTION_TIMEOUT, open_transport(&target.to_core()))
+    .await
+    .map_err(|_elapsed| {
+      CommandErrorDto::new(
+        "connection_timeout",
+        format!(
+          "{} did not establish an rmux connection within ten seconds",
+          target.label()
+        ),
+      )
+    })?
+    .map_err(|error| CommandErrorDto::transport(&error))
+}
+
+/// Opens a supplemental connection without replacing a vanished local daemon.
+///
+/// Session-list metadata inspection is best effort. If the local daemon exits
+/// after the authoritative list response, starting a new daemon here would
+/// return metadata from a different session owner. Remote SSH channels cannot
+/// distinguish that race and therefore use the ordinary fixed transport.
+pub async fn connect_existing(target: &ConnectionTargetDto) -> CommandResult<Transport> {
+  match target {
+    ConnectionTargetDto::Local => {
+      #[cfg(unix)]
+      {
+        Ok(Transport::Local(local_transport::connect_existing().await?))
+      }
+      #[cfg(not(unix))]
+      {
+        connect(target).await
+      }
+    }
+    ConnectionTargetDto::Ssh { .. } => connect(target).await,
+  }
+}
+
+impl ConnectionTargetDto {
+  /// Shared route identity for broker operations and non-authenticating probes.
+  pub(crate) fn to_ssh_target(&self) -> CommandResult<ctld_ipc::SshTarget> {
+    let Self::Ssh {
+      destination,
+      ssh_config_alias,
+      use_ssh_config_master,
+      hostname,
+      user,
+      port,
+      identity_file,
+      ..
+    } = self
+    else {
+      return Err(CommandErrorDto::new(
+        "invalid_ssh_target",
+        "Select a remote SSH host.",
+      ));
+    };
+    let mut target = ctld_ipc::SshTarget {
+      destination: destination.clone(),
+      ssh_config_alias: ssh_config_alias.clone(),
+      use_ssh_config_master: *use_ssh_config_master,
+      hostname: hostname.clone(),
+      user: user.clone(),
+      port: *port,
+      identity_file: identity_file.as_ref().map(PathBuf::from),
+      gateways: self.ssh_gateways(),
+    };
+    if target
+      .gateways
+      .iter()
+      .any(|gateway| !gateway.has_valid_vpn_configuration())
+    {
+      return Err(CommandErrorDto::new(
+        "invalid_vpn_route",
+        "Choose a saved VPN connection in the host settings.",
+      ));
+    }
+    target.normalize_master_policy();
+    Ok(target)
+  }
+
+  #[must_use]
+  pub fn to_core(&self) -> ConnectionTarget {
+    match self {
+      Self::Local => ConnectionTarget::local(),
+      Self::Ssh {
+        destination,
+        hostname,
+        user,
+        port,
+        identity_file,
+        ..
+      } => ConnectionTarget::ssh_with_options(
+        destination.clone(),
+        SshConnectionOptions {
+          remote_platform: ctl_core::RemotePlatform::Unix,
+          hostname: hostname.clone(),
+          user: user.clone(),
+          port: *port,
+          identity_file: identity_file.as_ref().map(PathBuf::from),
+          gateways: self
+            .ssh_gateways()
+            .into_iter()
+            .map(|gateway| SshGateway {
+              kind: gateway.kind,
+              vpn: gateway.vpn,
+              destination: gateway.destination,
+              hostname: gateway.hostname,
+              user: gateway.user,
+              port: gateway.port,
+              identity_file: gateway.identity_file,
+              mode: match gateway.mode {
+                ctld_ipc::SshGatewayMode::Automatic => SshGatewayMode::Automatic,
+                ctld_ipc::SshGatewayMode::NativeOnly => SshGatewayMode::NativeOnly,
+                ctld_ipc::SshGatewayMode::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
+              },
+            })
+            .collect(),
+        },
+      ),
+    }
+  }
+
+  /// Stable transport settings shared by authentication, status, and cleanup.
+  pub(crate) fn ssh_gateways(&self) -> Vec<ctld_ipc::SshGateway> {
+    let Self::Ssh {
+      vpn_connection_id,
+      gateways,
+      ..
+    } = self
+    else {
+      return Vec::new();
+    };
+    vpn_connection_id
+      .iter()
+      .map(|connection_id| crate::vpn::gateway(connection_id))
+      .chain(gateways.iter().map(|gateway| ctld_ipc::SshGateway {
+        kind: gateway.kind,
+        vpn: None,
+        destination: gateway.destination.clone(),
+        hostname: gateway.hostname.clone(),
+        user: gateway.user.clone(),
+        port: gateway.port,
+        identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
+        mode: match gateway.mode {
+          crate::dto::SshGatewayModeDto::Automatic => ctld_ipc::SshGatewayMode::Automatic,
+          crate::dto::SshGatewayModeDto::NativeOnly => ctld_ipc::SshGatewayMode::NativeOnly,
+          crate::dto::SshGatewayModeDto::AgentRelayOnly => ctld_ipc::SshGatewayMode::AgentRelayOnly,
+        },
+      }))
+      .collect()
+  }
+
+  #[must_use]
+  pub fn is_local(&self) -> bool {
+    matches!(self, Self::Local)
+  }
+
+  #[must_use]
+  pub fn label(&self) -> &str {
+    match self {
+      Self::Local => "local",
+      Self::Ssh { destination, .. } => destination,
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn app_local_settings_map_to_structured_core_options() {
+    let target = ConnectionTargetDto::Ssh {
+      ssh_config_alias: None,
+      use_ssh_config_master: None,
+      remote_info: None,
+      destination: "rmux-remote-test".into(),
+      hostname: Some("127.0.0.1".into()),
+      user: Some("rmux".into()),
+      port: Some(2222),
+      identity_file: Some("~/.ssh/local.id_rsa".into()),
+      gateway_route: Vec::new(),
+      vpn_connection_id: None,
+      gateways: Box::default(),
+    };
+
+    assert_eq!(
+      target.to_core(),
+      ConnectionTarget::Ssh {
+        destination: "rmux-remote-test".into(),
+        options: SshConnectionOptions {
+          remote_platform: ctl_core::RemotePlatform::Unix,
+          hostname: Some("127.0.0.1".into()),
+          user: Some("rmux".into()),
+          port: Some(2222),
+          identity_file: Some(PathBuf::from("~/.ssh/local.id_rsa")),
+          gateways: Vec::new(),
+        },
+      }
+    );
+  }
+}

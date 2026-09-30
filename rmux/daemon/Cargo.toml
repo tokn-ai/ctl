@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+serde_json.workspace = true
+component-info.workspace = true
 clap.workspace = true
 avt.workspace = true
 portable-pty.workspace = true

@@ -1,0 +1,528 @@
+import { Channel, invoke as nativeInvoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import type {
+  AttachmentAckRequest,
+  AttachmentEvent,
+  AttachmentIdRequest,
+  AttachmentInputRequest,
+  AttachmentLeaseRequest,
+  AttachmentResizeRequest,
+  CreateSessionRequest,
+  ConnectionTarget,
+  KillSessionRequest,
+  OpenAttachmentRequest,
+  OpenAttachmentResponse,
+  RestartLocalDaemonResponse,
+  SaveSshConfigHostResponse,
+  SessionListResponse,
+  SessionSummary,
+  SshConfigHostCatalog,
+  TailscaleDeviceCatalog,
+  SshHostDefinition,
+  SshIdentityFileCatalog,
+  SshPrompt,
+  RemoteAgentInstallResult,
+  RemoteRmuxRestartResult,
+  RemoteIdentity,
+  RemoteAgentInstallProgress,
+  WorkspaceDocument,
+  WorkspaceSnapshot,
+  SessionInspection,
+  KeybindingsSnapshot,
+  KeybindingsDocument,
+  NativeCommandBinding,
+  TaskDefinition,
+  TaskDefinitionScope,
+  TaskDefinitionCatalog,
+  SavedTaskDefinition,
+  LocalPortForward,
+  PortForwardStatus,
+  TcpListenerCatalog,
+  LocalPortAvailability,
+  HostCatalogDocument,
+  HostCatalogSnapshot,
+  SshConnectionStatus,
+  SshReachability,
+  VpnConnectionInput,
+  VpnEnrollmentInput,
+  VpnEnrollmentSnapshot,
+  VpnConnectionsSnapshot,
+  VpnStatus,
+  VpnSnapshot,
+  ComponentVersionsSnapshot,
+  ComponentActionPreflight,
+  ComponentActionResult,
+  ComponentReconnectResult,
+  CredentialTarget,
+  CredentialsSnapshot,
+  IdentitySnapshot,
+  SaveIdentityPassphraseRequest,
+} from "./types";
+
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const target = (args?.request as { target?: ConnectionTarget } | undefined)?.target;
+  const stopsForward = command === "configure_port_forward" &&
+    (args?.request as { enabled?: boolean } | undefined)?.enabled === false;
+  if (target?.kind === "ssh" && target.unavailable && !stopsForward) {
+    return Promise.reject(new Error(target.unavailable));
+  }
+  return nativeInvoke<T>(command, args);
+}
+
+export async function getComponentVersions(): Promise<ComponentVersionsSnapshot> {
+  return invoke("get_component_versions");
+}
+
+export async function listSavedCredentials(targets: CredentialTarget[]): Promise<CredentialsSnapshot> {
+  return invoke("list_saved_credentials", { request: { targets } });
+}
+
+export async function importCredentialMetadata(): Promise<void> {
+  await invoke("import_credential_metadata");
+}
+
+export async function forgetSavedCredential(credential_id: string): Promise<void> {
+  await invoke("forget_saved_credential", { request: { credential_id } });
+}
+
+export async function listIdentityFiles(targets: CredentialTarget[]): Promise<IdentitySnapshot> {
+  return invoke("list_credential_identity_files", { request: { targets } });
+}
+
+export async function saveIdentityPassphrase(request: SaveIdentityPassphraseRequest): Promise<void> {
+  await invoke("save_identity_passphrase", { request });
+}
+
+export async function forgetIdentityPassphrase(identity_id: string): Promise<void> {
+  await invoke("forget_identity_passphrase", { request: { identity_id } });
+}
+
+export async function preflightComponentAction(component_id: string): Promise<ComponentActionPreflight> {
+  return invoke("preflight_component_action", { request: { component_id } });
+}
+
+export async function executeComponentAction(action_token: string): Promise<ComponentActionResult> {
+  return invoke("execute_component_action", { request: { action_token } });
+}
+
+export async function acknowledgeComponentReconnect(action_id: string, results: ComponentReconnectResult[]): Promise<void> {
+  await invoke("ack_component_reconnect", { request: { action_id, results } });
+}
+
+export async function loadHosts(): Promise<HostCatalogSnapshot> {
+  return invoke("load_hosts");
+}
+
+export async function loadVpnConnections(): Promise<VpnConnectionsSnapshot> {
+  return invoke("load_vpn_connections");
+}
+
+export async function saveVpnConnection(
+  expected_revision: string | null,
+  connection: VpnConnectionInput,
+): Promise<VpnConnectionsSnapshot> {
+  return invoke("save_vpn_connection", { request: { expected_revision, connection } });
+}
+
+export async function deleteVpnConnection(
+  expected_revision: string | null,
+  connection_id: string,
+): Promise<VpnConnectionsSnapshot> {
+  return invoke("delete_vpn_connection", { request: { expected_revision, connection_id } });
+}
+
+export async function connectVpn(connection_id: string): Promise<VpnStatus> {
+  return invoke("connect_vpn", { request: { connection_id } });
+}
+
+export async function beginVpnEnrollment(input: VpnEnrollmentInput): Promise<VpnEnrollmentSnapshot> {
+  return invoke("begin_vpn_enrollment", { request: input });
+}
+
+export async function vpnEnrollmentStatus(enrollment_id: string): Promise<VpnEnrollmentSnapshot> {
+  return invoke("vpn_enrollment_status", { request: { enrollment_id } });
+}
+
+export async function saveVpnEnrollment(enrollment_id: string, expected_revision: string | null): Promise<VpnConnectionsSnapshot> {
+  return invoke("save_vpn_enrollment", { request: { enrollment_id, expected_revision } });
+}
+
+export async function cancelVpnEnrollment(enrollment_id: string): Promise<void> {
+  return invoke("cancel_vpn_enrollment", { request: { enrollment_id } });
+}
+
+export async function openVpnSignIn(vpn_id: string): Promise<void> {
+  return invoke("open_vpn_sign_in", { request: { vpn_id } });
+}
+
+export async function vpnStatus(): Promise<VpnSnapshot> {
+  return invoke("vpn_status");
+}
+
+export async function stopVpn(vpn_id: string): Promise<VpnStatus> {
+  return invoke("stop_vpn", { request: { vpn_id } });
+}
+
+export async function updateHosts(
+  expected_revision: string | null,
+  document: HostCatalogDocument,
+): Promise<HostCatalogSnapshot> {
+  return invoke("update_hosts", { request: { expected_revision, document } });
+}
+
+export async function loadTaskDefinitions(scope: TaskDefinitionScope): Promise<TaskDefinitionCatalog> {
+  return invoke("load_task_definitions", { request: { scope } });
+}
+
+export async function saveTaskDefinition(
+  scope: TaskDefinitionScope,
+  definition_id: string,
+  expected_revision: string | null,
+  definition: TaskDefinition,
+): Promise<SavedTaskDefinition> {
+  return invoke("save_task_definition", {
+    request: { scope, definition_id, expected_revision, definition },
+  });
+}
+
+export async function removeTaskDefinition(
+  scope: TaskDefinitionScope,
+  definition_id: string,
+  expected_revision: string,
+): Promise<void> {
+  return invoke("remove_task_definition", {
+    request: { scope, definition_id, expected_revision },
+  });
+}
+
+export async function loadKeybindings(): Promise<KeybindingsSnapshot> {
+  return invoke<KeybindingsSnapshot>("load_keybindings");
+}
+
+export async function saveKeybindings(
+  expected_revision: string | null,
+  document: KeybindingsDocument,
+): Promise<KeybindingsSnapshot> {
+  return invoke<KeybindingsSnapshot>("save_keybindings", {
+    request: { expected_revision, document },
+  });
+}
+
+export async function syncCommandMenu(
+  bindings: NativeCommandBinding[],
+): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  await invoke("sync_command_menu", { bindings });
+}
+
+export async function loadWorkspace(): Promise<WorkspaceSnapshot> {
+  return invoke<WorkspaceSnapshot>("load_workspace");
+}
+
+export async function updateWorkspace(
+  expected_revision: string | null,
+  document: WorkspaceDocument,
+): Promise<WorkspaceSnapshot> {
+  return invoke<WorkspaceSnapshot>("update_workspace", {
+    request: { expected_revision, document },
+  });
+}
+
+export async function probeSshHost(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+): Promise<RemoteIdentity> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  return invoke<RemoteIdentity>("probe_ssh_host", {
+    request: { target, attempt_id },
+    on_prompt: channel,
+  });
+}
+
+export async function sshConnectionStatus(target: ConnectionTarget): Promise<SshConnectionStatus> {
+  return invoke("ssh_connection_status", { request: { target } });
+}
+
+export async function sshReachability(target: ConnectionTarget): Promise<SshReachability> {
+  return invoke("ssh_reachability", { request: { target } });
+}
+
+export async function disconnectSshHost(targets: readonly ConnectionTarget[]): Promise<void> {
+  return invoke("disconnect_ssh_host", { request: { targets } });
+}
+
+export async function installRemoteAgent(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+  onProgress: (progress: RemoteAgentInstallProgress) => void,
+): Promise<RemoteAgentInstallResult> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  const progress_channel = new Channel<RemoteAgentInstallProgress>();
+  progress_channel.onmessage = onProgress;
+  return invoke<RemoteAgentInstallResult>("install_remote_agent", {
+    request: { target, attempt_id },
+    on_prompt: channel,
+    on_progress: progress_channel,
+  });
+}
+
+export async function checkRemoteRmuxRestart(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+): Promise<RemoteIdentity> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  return invoke<RemoteIdentity>("probe_ssh_host", {
+    request: { target, attempt_id, restart_check: true },
+    on_prompt: channel,
+  });
+}
+
+export async function restartRemoteRmux(
+  target: ConnectionTarget,
+  attempt_id: string,
+  onPrompt: (prompt: SshPrompt) => void,
+): Promise<RemoteRmuxRestartResult> {
+  const channel = new Channel<SshPrompt>();
+  channel.onmessage = onPrompt;
+  return invoke<RemoteRmuxRestartResult>("restart_remote_rmux", {
+    request: { target, attempt_id },
+    on_prompt: channel,
+  });
+}
+
+export async function respondSshPrompt(
+  attempt_id: string,
+  prompt_id: string,
+  response: string | null,
+): Promise<void> {
+  await invoke("respond_ssh_prompt", {
+    request: { attempt_id, prompt_id, response },
+  });
+}
+
+export async function cancelSshProbe(attempt_id: string): Promise<void> {
+  await invoke("cancel_ssh_probe", { request: { attempt_id } });
+}
+
+export async function forgetSshCredentials(
+  target: ConnectionTarget,
+): Promise<void> {
+  await invoke("forget_ssh_credentials", { request: { target } });
+}
+
+export async function configurePortForward(
+  target: ConnectionTarget,
+  forward: LocalPortForward,
+  enabled: boolean,
+): Promise<PortForwardStatus> {
+  return invoke("configure_port_forward", {
+    request: { target, forward, enabled },
+  });
+}
+
+export async function listPortForwards(
+  target: ConnectionTarget,
+): Promise<PortForwardStatus[]> {
+  return invoke("list_port_forwards", { request: { target } });
+}
+
+export async function listRemoteListeners(
+  target: ConnectionTarget,
+): Promise<TcpListenerCatalog> {
+  return invoke("list_remote_listeners", { request: { target } });
+}
+
+export async function checkLocalPort(
+  port: number,
+): Promise<LocalPortAvailability> {
+  return invoke("check_local_port", { request: { port } });
+}
+
+export interface OpenAttachmentResult {
+  attached: OpenAttachmentResponse;
+  channel: Channel<AttachmentEvent>;
+}
+
+export async function listSessions(
+  target: ConnectionTarget,
+): Promise<SessionListResponse> {
+  const response = await invoke<SessionListResponse>("list_sessions", {
+    request: { target },
+  });
+  return {
+    ...response,
+    sessions: response.sessions.map((session) => ({ ...session, target })),
+  };
+}
+
+export async function inspectKnownSessions(
+  target: ConnectionTarget,
+  session_ids: string[],
+): Promise<SessionInspection[]> {
+  const results = await invoke<SessionInspection[]>("inspect_known_sessions", {
+    request: { target, session_ids },
+  });
+  return results.map((result) => ({
+    ...result,
+    session: result.session ? { ...result.session, target } : null,
+  }));
+}
+
+export async function listSshConfigHosts(): Promise<SshConfigHostCatalog> {
+  return invoke<SshConfigHostCatalog>("list_ssh_config_hosts");
+}
+
+export async function listTailscaleDevices(): Promise<TailscaleDeviceCatalog> {
+  return invoke<TailscaleDeviceCatalog>("list_tailscale_devices");
+}
+
+export async function listSshIdentityFiles(): Promise<SshIdentityFileCatalog> {
+  return invoke<SshIdentityFileCatalog>("list_ssh_identity_files");
+}
+
+export async function saveSshConfigHost(
+  request: SshHostDefinition,
+): Promise<SaveSshConfigHostResponse> {
+  return invoke<SaveSshConfigHostResponse>("save_ssh_config_host", { request });
+}
+
+export async function createSession(
+  request: CreateSessionRequest,
+): Promise<SessionSummary> {
+  const session = await invoke<SessionSummary>("create_session", { request });
+  return { ...session, target: request.target };
+}
+
+export async function killSession(request: KillSessionRequest): Promise<void> {
+  await invoke("kill_session", { request });
+}
+
+export async function restartLocalDaemon(): Promise<RestartLocalDaemonResponse> {
+  return invoke<RestartLocalDaemonResponse>("restart_local_daemon");
+}
+
+export async function openAttachment(
+  request: OpenAttachmentRequest,
+  onEvent: (event: AttachmentEvent) => void,
+  signal?: AbortSignal,
+): Promise<OpenAttachmentResult> {
+  signal?.throwIfAborted();
+  const channel = new Channel<AttachmentEvent>();
+  channel.onmessage = onEvent;
+  const opening = new Channel<string>();
+  let opening_id: string | null = null;
+  let cancellation_sent = false;
+  const cancel = () => {
+    if (!signal?.aborted || opening_id === null || cancellation_sent) return;
+    cancellation_sent = true;
+    // The open's response remains authoritative, including a connection that
+    // completed just before cancellation. Its caller discards stale results.
+    void invoke("cancel_attachment_open", {
+      request: { attachment_id: opening_id },
+    }).catch(() => undefined);
+  };
+  opening.onmessage = (attachment_id) => {
+    opening_id = attachment_id;
+    cancel();
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    const attached = await invoke<OpenAttachmentResponse>("open_attachment", {
+      request: { ...request, cache_host_key: request.target.kind === "local" ? "local" : request.target.host_id ? `host:${request.target.host_id}` : `ssh:${request.target.destination}` },
+      on_event: channel,
+      on_opening: opening,
+    });
+    return {
+      attached: {
+        ...attached,
+        session: { ...attached.session, target: request.target },
+      },
+      channel,
+    };
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+
+export async function sendInput(
+  request: AttachmentInputRequest,
+): Promise<void> {
+  await invoke("send_input", { request });
+}
+
+export async function resizeAttachment(
+  request: AttachmentResizeRequest,
+): Promise<void> {
+  await invoke("resize_attachment", { request });
+}
+
+export async function acquireAttachmentLease(
+  request: AttachmentLeaseRequest,
+): Promise<void> {
+  await invoke("acquire_attachment_lease", { request });
+}
+
+export async function releaseAttachmentLease(
+  request: AttachmentLeaseRequest,
+): Promise<void> {
+  await invoke("release_attachment_lease", { request });
+}
+
+export async function acknowledgeAttachmentEvent(
+  request: AttachmentAckRequest,
+): Promise<void> {
+  await invoke("acknowledge_attachment_event", { request });
+}
+
+export async function detachAttachment(
+  request: AttachmentIdRequest,
+): Promise<void> {
+  await invoke("detach_attachment", { request });
+}
+
+export async function setNativeWindowTitle(title: string): Promise<void> {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    return;
+  }
+  await getCurrentWindow().setTitle(title);
+}
+
+export async function taskRequest(request: import("./types").TaskRequest): Promise<import("./types").TaskResponse> {
+  return invoke("task_request", { request });
+}
+
+export async function watchTaskLogs(task_id: string, after_sequence: string | null, onEvent: (event: import("./types").TaskLogEvent) => void): Promise<string> {
+  const channel = new Channel<import("./types").TaskLogEvent>();
+  channel.onmessage = (event) => {
+    try { onEvent(event); }
+    finally { if (event.event_type === "log") void invoke("acknowledge_task_log", { subscriptionId: event.subscription_id, sequence: event.sequence }).catch(() => undefined); }
+  };
+  return invoke("watch_task_logs", { request: { task_id, after_sequence }, onEvent: channel });
+}
+
+export async function cancelTaskLogs(subscription_id: string): Promise<void> {
+  return invoke("cancel_task_logs", { subscriptionId: subscription_id });
+}
+
+export async function restartTaskDaemon(): Promise<void> {
+  await invoke("restart_task_daemon");
+}
+
+export async function sessionView(target: ConnectionTarget, action: import("./types").ViewAction): Promise<import("./types").SessionView | null> {
+  return invoke("session_view", { request: { target, action } });
+}
+
+export function sessionArchive(action: import("./types").ArchiveAction): Promise<import("./types").ArchiveResponse> {
+  return invoke("session_archive", { request: { action } });
+}
+
+
+export function sessionCache(action: import("./types").SessionCacheAction): Promise<import("./types").SessionCacheResponse> {
+  return invoke("session_cache", { request: { action } });
+}

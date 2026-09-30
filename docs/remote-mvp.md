@@ -111,9 +111,16 @@ new bytes arrive for a speed-dependent interval of 30 seconds to five minutes.
 Platform detection and the upload connection each allow one minute of inactivity;
 extraction allows two minutes, and other installation stages allow 30 seconds.
 Time spent answering authentication prompts does not consume these intervals.
-Password/passphrase and host-verification prompts use the same overlay on
-macOS/Linux. Secrets are process-memory-only; after relaunch, click the host
-chip to authenticate again if SSH config/agent alone is insufficient.
+Password/passphrase and host-verification prompts originate in the per-user
+`ctld` broker on macOS/Linux and use the initiating client's prompt UI. After
+its OpenSSH control master authenticates on macOS, a newly entered reusable
+secret gets an explicit Yes, No, or Never save choice before any remote
+environment identity comparison. This also works when remote components are
+not installed because authentication belongs to the master rather than the
+`ctl-agent` channel. Yes stores the secret device-locally in Keychain and
+requires Touch ID when OpenSSH requests it again; Never suppresses future save
+offers for that destination without retaining the secret. Only `ctld` accesses
+Keychain, and Linux discards newly entered reusable secrets after authentication.
 
 The desktop discovers a stable ctl environment ID and installed version during
 connection verification. A different address with the same ID automatically recovers
@@ -204,8 +211,11 @@ to detach and release the attachment immediately without terminating the
 shell.
 
 After an unexpected SSH interruption, `ctl` reconnects with exponential
-backoff. OpenSSH may reuse a configured control master; otherwise it creates a
-new SSH connection. `rmuxd` preserves the logical attachment and both leases
+backoff. On Unix clients, it reopens channels through the private master managed
+by `ctld`; an expired master requires authentication through `ctld` before another
+channel can open. Desktop methods can enable **Use SSH-config master** to honor
+configured connection sharing, with a private master fallback when sharing is
+unconfigured; SSH-config aliases enable this by default. `rmuxd` preserves the logical attachment and both leases
 for 30 seconds by default, while output resumes from the last renderer-applied
 raw sequence.
 

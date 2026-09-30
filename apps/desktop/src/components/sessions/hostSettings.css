@@ -1,0 +1,109 @@
+.host-settings-dialog {
+  width: min(640px, calc(100vw - 40px));
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+}
+
+.host-settings-content {
+  padding: 8px 18px;
+}
+
+.host-settings-name,
+.host-method-heading label {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.host-settings-dialog input {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.host-settings-description,
+.host-method-endpoint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.host-settings-section-heading,
+.host-method-heading,
+.host-method-actions,
+.host-settings-actions,
+.host-method-preferred {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.host-settings-section-heading {
+  justify-content: space-between;
+  margin-top: 24px;
+}
+
+.host-settings-dialog button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.host-method-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.host-method {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.host-method-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.host-method-preferred {
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.host-method-endpoint {
+  margin: 9px 0;
+  overflow-wrap: anywhere;
+}
+
+.host-method-actions {
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.host-method-remove {
+  margin-left: auto;
+}
+
+.host-settings-actions {
+  justify-content: flex-end;
+  padding: 12px 18px 18px;
+}

@@ -1,0 +1,860 @@
+use rmux_client::{
+  AttachmentAcknowledgementError, AttachmentControl, AttachmentEvent, AttachmentEvents,
+};
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::Manager as _;
+use tauri::ipc::Channel;
+use tokio::sync::{Mutex, Notify, watch};
+use tokio::time::{sleep, timeout};
+
+use crate::dto::{AttachmentEventDto, ConnectionTargetDto, PresentationAcknowledgement};
+use crate::error::{CommandErrorDto, CommandResult};
+
+const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(30);
+const ATTACHMENT_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Clone, Default)]
+pub struct AppState {
+  registry: Arc<Mutex<AttachmentRegistry>>,
+  daemon_restart_transition: Arc<Mutex<()>>,
+}
+
+#[derive(Default)]
+struct AttachmentRegistry {
+  by_window: HashMap<String, HashMap<String, AttachmentSlot>>,
+  window_transitions: HashMap<String, Arc<Mutex<()>>>,
+}
+
+enum AttachmentSlot {
+  Opening {
+    attachment_id: String,
+    cancel: watch::Sender<bool>,
+  },
+  Active(Arc<AttachmentActor>),
+}
+
+pub struct AttachmentActor {
+  pub attachment_id: String,
+  pub window_label: String,
+  pub target: ConnectionTargetDto,
+  pub control: AttachmentControl,
+  pub cache_identity: Option<rmux_client::cache::CacheIdentity>,
+  pub remote_observation: Option<crate::about::observations::RemoteObservation>,
+  pending: Mutex<Option<PendingPresentation>>,
+  pending_changed: Notify,
+  closed: AtomicBool,
+  closed_changed: Notify,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPresentation {
+  event_id: String,
+  acknowledgement: PresentationAcknowledgement,
+  acknowledging: bool,
+}
+
+impl PendingPresentation {
+  fn claim(&mut self, event_id: &str) -> CommandResult<PresentationAcknowledgement> {
+    if self.event_id != event_id {
+      return Err(CommandErrorDto::new(
+        "stale_presentation_event",
+        "the renderer event is no longer current",
+      ));
+    }
+    if self.acknowledging {
+      return Err(CommandErrorDto::new(
+        "presentation_acknowledgement_in_progress",
+        "the renderer event acknowledgement is already in progress",
+      ));
+    }
+    self.acknowledging = true;
+    Ok(self.acknowledgement)
+  }
+}
+
+impl AppState {
+  pub async fn remote_actors(&self) -> Vec<Arc<AttachmentActor>> {
+    self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .values()
+      .flat_map(|slots| slots.values())
+      .filter_map(|slot| match slot {
+        AttachmentSlot::Active(actor)
+          if !actor.closed.load(Ordering::Acquire) && actor.remote_observation.is_some() =>
+        {
+          Some(Arc::clone(actor))
+        }
+        _ => None,
+      })
+      .collect()
+  }
+
+  pub async fn remote_observations(&self) -> Vec<crate::about::observations::RemoteObservation> {
+    self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .values()
+      .flat_map(|slots| slots.values())
+      .filter_map(|slot| match slot {
+        AttachmentSlot::Active(actor) if !actor.closed.load(Ordering::Acquire) => {
+          actor.remote_observation.clone()
+        }
+        _ => None,
+      })
+      .collect()
+  }
+
+  /// Serializes opens without replacing sibling pane attachments. A stalled
+  /// open can be cancelled without waiting for the window transition lock.
+  pub async fn open_attachment<T>(
+    &self,
+    window_label: &str,
+    attachment_id: &str,
+    on_opening: impl FnOnce() -> CommandResult<()>,
+    open: impl Future<Output = CommandResult<T>>,
+  ) -> CommandResult<T> {
+    let transition = self.window_transition(window_label).await;
+    let _transition_guard = transition.lock().await;
+    let mut cancelled = self.reserve_window(window_label, attachment_id).await?;
+
+    let result = async {
+      // Publish the ID only after cancellation is registered. A frontend
+      // cancellation that precedes this notification can then be replayed.
+      on_opening()?;
+      tokio::select! {
+        biased;
+        _ = cancelled.wait_for(|cancelled| *cancelled) => Err(CommandErrorDto::new(
+          "attachment_cancelled",
+          "Session attachment cancelled.",
+        )),
+        result = open => result,
+      }
+    }
+    .await;
+    if result.is_err() {
+      self.release(window_label, attachment_id).await;
+    }
+    result
+  }
+
+  pub async fn cancel_opening(&self, window_label: &str, attachment_id: &str) {
+    let registry = self.registry.lock().await;
+    if let Some(AttachmentSlot::Opening {
+      attachment_id: current,
+      cancel,
+    }) = registry
+      .by_window
+      .get(window_label)
+      .and_then(|slots| slots.get(attachment_id))
+      && current == attachment_id
+    {
+      let _ = cancel.send(true);
+    }
+  }
+
+  /// Returns the process-wide lock which serializes destructive daemon
+  /// restart attempts across every GUI window.
+  #[must_use]
+  pub fn daemon_restart_transition(&self) -> Arc<Mutex<()>> {
+    Arc::clone(&self.daemon_restart_transition)
+  }
+
+  pub async fn window_transition(&self, window_label: &str) -> Arc<Mutex<()>> {
+    let mut registry = self.registry.lock().await;
+    Arc::clone(
+      registry
+        .window_transitions
+        .entry(window_label.into())
+        .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+  }
+
+  /// Detaches every local pane in the window before restarting its daemon.
+  /// Remote panes remain attached.
+  pub async fn detach_active_local_window(&self, window_label: &str) -> CommandResult<()> {
+    let actors = {
+      let registry = self.registry.lock().await;
+      let mut actors = Vec::new();
+      for slot in registry
+        .by_window
+        .get(window_label)
+        .into_iter()
+        .flat_map(|slots| slots.values())
+      {
+        match slot {
+          AttachmentSlot::Opening { .. } => {
+            return Err(CommandErrorDto::new(
+              "window_attachment_transition_in_progress",
+              "another attachment transition is already in progress for this window",
+            ));
+          }
+          AttachmentSlot::Active(actor) if actor.target.is_local() => {
+            actors.push(Arc::clone(actor));
+          }
+          AttachmentSlot::Active(_) => {}
+        }
+      }
+      actors
+    };
+    for actor in actors {
+      actor.detach_and_wait().await?;
+    }
+    Ok(())
+  }
+
+  pub async fn detach_session(
+    &self,
+    window_label: &str,
+    host_key: &str,
+    session_id: &str,
+  ) -> CommandResult<()> {
+    let actors: Vec<_> = self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .get(window_label)
+      .into_iter()
+      .flat_map(|slots| slots.values())
+      .filter_map(|slot| match slot {
+        AttachmentSlot::Active(actor)
+          if actor.cache_identity.as_ref().is_some_and(|identity| {
+            identity.host_key == host_key && identity.session_id == session_id
+          }) =>
+        {
+          Some(Arc::clone(actor))
+        }
+        _ => None,
+      })
+      .collect();
+    for actor in actors {
+      actor.detach_and_wait().await?;
+    }
+    Ok(())
+  }
+
+  async fn reserve_window(
+    &self,
+    window_label: &str,
+    attachment_id: &str,
+  ) -> CommandResult<watch::Receiver<bool>> {
+    let mut registry = self.registry.lock().await;
+    let slots = registry.by_window.entry(window_label.into()).or_default();
+    if slots.contains_key(attachment_id) {
+      return Err(CommandErrorDto::new(
+        "attachment_already_registered",
+        "this attachment ID is already registered in the window",
+      ));
+    }
+    let (cancel, cancelled) = watch::channel(false);
+    slots.insert(
+      attachment_id.into(),
+      AttachmentSlot::Opening {
+        attachment_id: attachment_id.into(),
+        cancel,
+      },
+    );
+    Ok(cancelled)
+  }
+
+  pub async fn activate(
+    &self,
+    window_label: &str,
+    attachment_id: &str,
+    actor: Arc<AttachmentActor>,
+  ) -> CommandResult<()> {
+    let mut registry = self.registry.lock().await;
+    let reservation_matches = matches!(
+      registry.by_window.get(window_label).and_then(|slots| slots.get(attachment_id)),
+      Some(AttachmentSlot::Opening { attachment_id: reserved, .. }) if reserved == attachment_id
+    );
+    if !reservation_matches {
+      return Err(CommandErrorDto::new(
+        "attachment_reservation_lost",
+        "the attachment window reservation is no longer active",
+      ));
+    }
+    registry
+      .by_window
+      .get_mut(window_label)
+      .expect("reservation exists")
+      .insert(attachment_id.into(), AttachmentSlot::Active(actor));
+    Ok(())
+  }
+
+  pub async fn release(&self, window_label: &str, attachment_id: &str) {
+    let mut registry = self.registry.lock().await;
+    let should_remove = match registry
+      .by_window
+      .get(window_label)
+      .and_then(|slots| slots.get(attachment_id))
+    {
+      Some(AttachmentSlot::Opening {
+        attachment_id: current,
+        ..
+      }) => current == attachment_id,
+      Some(AttachmentSlot::Active(actor)) => actor.attachment_id == attachment_id,
+      None => false,
+    };
+    if should_remove && let Some(slots) = registry.by_window.get_mut(window_label) {
+      slots.remove(attachment_id);
+      if slots.is_empty() {
+        registry.by_window.remove(window_label);
+      }
+    }
+  }
+
+  pub async fn actor(
+    &self,
+    window_label: &str,
+    attachment_id: &str,
+  ) -> CommandResult<Arc<AttachmentActor>> {
+    let registry = self.registry.lock().await;
+    let Some(AttachmentSlot::Active(actor)) = registry
+      .by_window
+      .get(window_label)
+      .and_then(|slots| slots.get(attachment_id))
+    else {
+      return Err(CommandErrorDto::new(
+        "attachment_not_found",
+        "this window has no active attachment with the requested ID",
+      ));
+    };
+    if actor.attachment_id != attachment_id || actor.window_label != window_label {
+      return Err(CommandErrorDto::new(
+        "attachment_not_owned",
+        "the attachment does not belong to this window",
+      ));
+    }
+    Ok(Arc::clone(actor))
+  }
+
+  async fn detach_window(&self, window_label: &str) {
+    let slots = self
+      .registry
+      .lock()
+      .await
+      .by_window
+      .remove(window_label)
+      .unwrap_or_default();
+    for slot in slots.into_values() {
+      match slot {
+        AttachmentSlot::Opening { cancel, .. } => {
+          let _ = cancel.send(true);
+        }
+        AttachmentSlot::Active(actor) => {
+          let _ignored = actor.control.detach().await;
+        }
+      }
+    }
+  }
+}
+
+pub fn register_main_window_cleanup(app: &tauri::App) {
+  let Some(window) = app.get_webview_window("main") else {
+    return;
+  };
+  let state = app.state::<AppState>().inner().clone();
+  let window_label = window.label().to_owned();
+  window.on_window_event(move |event| {
+    if matches!(event, tauri::WindowEvent::Destroyed) {
+      crate::ssh_auth::cancel_window(&window_label);
+      let state = state.clone();
+      let window_label = window_label.clone();
+      tauri::async_runtime::spawn(async move {
+        state.detach_window(&window_label).await;
+      });
+    }
+  });
+}
+
+impl AttachmentActor {
+  pub fn new(
+    attachment_id: String,
+    window_label: String,
+    target: ConnectionTargetDto,
+    control: AttachmentControl,
+  ) -> Self {
+    Self {
+      attachment_id,
+      window_label,
+      target,
+      control,
+      cache_identity: None,
+      remote_observation: None,
+      pending: Mutex::new(None),
+      pending_changed: Notify::new(),
+      closed: AtomicBool::new(false),
+      closed_changed: Notify::new(),
+    }
+  }
+
+  pub fn with_cache(mut self, identity: rmux_client::cache::CacheIdentity) -> Self {
+    self.cache_identity = Some(identity);
+    self
+  }
+
+  pub fn with_remote_observation(
+    mut self,
+    observation: Option<crate::about::observations::RemoteObservation>,
+  ) -> Self {
+    self.remote_observation = observation;
+    self
+  }
+
+  pub async fn set_pending(
+    &self,
+    acknowledgement: PresentationAcknowledgement,
+  ) -> CommandResult<String> {
+    let mut pending = self.pending.lock().await;
+    if pending.is_some() {
+      return Err(CommandErrorDto::new(
+        "presentation_already_pending",
+        "a renderer event is already awaiting acknowledgement",
+      ));
+    }
+    let event_id = uuid::Uuid::new_v4().to_string();
+    *pending = Some(PendingPresentation {
+      event_id: event_id.clone(),
+      acknowledgement,
+      acknowledging: false,
+    });
+    Ok(event_id)
+  }
+
+  pub async fn acknowledge(&self, event_id: &str) -> CommandResult<()> {
+    let acknowledgement = {
+      let mut pending = self.pending.lock().await;
+      let Some(pending) = pending.as_mut() else {
+        return Err(CommandErrorDto::new(
+          "presentation_not_pending",
+          "there is no renderer event awaiting acknowledgement",
+        ));
+      };
+      pending.claim(event_id)?
+    };
+
+    let result = acknowledgement.apply(&self.control).await;
+    let mut pending = self.pending.lock().await;
+    let still_current = pending
+      .as_ref()
+      .is_some_and(|pending| pending.event_id == event_id);
+    if still_current {
+      if result.is_ok() {
+        *pending = None;
+        self.pending_changed.notify_waiters();
+      } else if let Some(pending) = pending.as_mut() {
+        pending.acknowledging = false;
+      }
+    }
+    result.map_err(|error| acknowledgement_error(&error))
+  }
+
+  pub async fn clear_pending(&self) {
+    let mut pending = self.pending.lock().await;
+    *pending = None;
+    self.pending_changed.notify_waiters();
+  }
+
+  pub async fn wait_until_presentation_applied(&self) {
+    loop {
+      let notified = self.pending_changed.notified();
+      if self.pending.lock().await.is_none() {
+        return;
+      }
+      notified.await;
+    }
+  }
+
+  pub async fn has_pending_presentation(&self) -> bool {
+    self.pending.lock().await.is_some()
+  }
+
+  pub async fn wait_until_closed(&self) {
+    loop {
+      let notified = self.closed_changed.notified();
+      if self.closed.load(Ordering::Acquire) {
+        return;
+      }
+      notified.await;
+    }
+  }
+
+  pub async fn detach_and_wait(&self) -> CommandResult<()> {
+    if self.closed.load(Ordering::Acquire) {
+      return Ok(());
+    }
+
+    let detach_error = self
+      .control
+      .detach()
+      .await
+      .err()
+      .map(CommandErrorDto::backend);
+    if timeout(ATTACHMENT_CLOSE_TIMEOUT, self.wait_until_closed())
+      .await
+      .is_ok()
+    {
+      return Ok(());
+    }
+    if let Some(error) = detach_error {
+      return Err(error);
+    }
+    Err(CommandErrorDto::new(
+      "attachment_detach_timeout",
+      "the attachment did not close within five seconds",
+    ))
+  }
+
+  fn mark_closed(&self) {
+    self.closed.store(true, Ordering::Release);
+    self.closed_changed.notify_waiters();
+  }
+}
+
+fn acknowledgement_error(error: &AttachmentAcknowledgementError) -> CommandErrorDto {
+  CommandErrorDto::new("presentation_acknowledgement_failed", error.to_string())
+}
+
+pub async fn forward_attachment_events(
+  state: AppState,
+  actor: Arc<AttachmentActor>,
+  mut events: AttachmentEvents,
+  channel: Channel<AttachmentEventDto>,
+  controller: impl std::future::Future<
+    Output = Result<rmux_client::AttachExit, rmux_client::ClientError>,
+  >,
+) {
+  tokio::pin!(controller);
+
+  let mut bridge_error = None;
+  let outcome = loop {
+    if actor.has_pending_presentation().await {
+      tokio::select! {
+        result = &mut controller => break result,
+        () = actor.wait_until_presentation_applied() => {}
+        () = sleep(PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT) => {
+          bridge_error = Some(CommandErrorDto::new(
+            "presentation_acknowledgement_timeout",
+            "the terminal renderer did not acknowledge its event within 30 seconds",
+          ));
+          let _ignored = actor.control.detach().await;
+          break controller.await;
+        }
+      }
+      continue;
+    }
+
+    tokio::select! {
+      biased;
+      event = events.recv() => {
+        let Some(event) = event else {
+          break controller.await;
+        };
+        let forwarding = forward_event(&actor, &channel, event);
+        tokio::pin!(forwarding);
+        let forwarded = tokio::select! {
+          result = &mut forwarding => result,
+          outcome = &mut controller => {
+            // Keep transport heartbeats running during filesystem work, and
+            // finish a pending disk write before publishing actor closure.
+            let _ignored = forwarding.await;
+            break outcome;
+          }
+        };
+        if let Err(error) = forwarded {
+          bridge_error = Some(error);
+          let _ignored = actor.control.detach().await;
+          break controller.await;
+        }
+      }
+      result = &mut controller => break result,
+    }
+  };
+
+  let require_checkpoint = actor.has_pending_presentation().await;
+  actor.clear_pending().await;
+  if let Some(error) = bridge_error {
+    let _ignored = channel.send(AttachmentEventDto::attachment_error(
+      &actor.attachment_id,
+      error.code,
+      error.message,
+    ));
+  } else {
+    match outcome {
+      Ok(exit) => {
+        let _ignored = channel.send(AttachmentEventDto::attachment_exited(
+          &actor.attachment_id,
+          &exit,
+          require_checkpoint,
+        ));
+      }
+      Err(error) => {
+        let _ignored = channel.send(AttachmentEventDto::attachment_error(
+          &actor.attachment_id,
+          "attachment_failed",
+          error.to_string(),
+        ));
+      }
+    }
+  }
+  state
+    .release(&actor.window_label, &actor.attachment_id)
+    .await;
+  actor.mark_closed();
+}
+
+async fn forward_event(
+  actor: &AttachmentActor,
+  channel: &Channel<AttachmentEventDto>,
+  event: AttachmentEvent,
+) -> CommandResult<()> {
+  let event = if let Some(identity) = &actor.cache_identity {
+    crate::commands::cache::persist_event(identity.clone(), event).await?
+  } else {
+    event
+  };
+  let event = match event {
+    AttachmentEvent::Checkpoint {
+      checkpoint,
+      history,
+      history_gap,
+    } => {
+      let acknowledgement = PresentationAcknowledgement::Checkpoint {
+        sequence: checkpoint.sequence,
+      };
+      let event_id = actor.set_pending(acknowledgement).await?;
+      AttachmentEventDto::checkpoint(
+        &actor.attachment_id,
+        event_id,
+        checkpoint,
+        history,
+        history_gap,
+      )
+    }
+    AttachmentEvent::Output {
+      sequence_start,
+      sequence_end,
+      data,
+    } => {
+      let acknowledgement = PresentationAcknowledgement::Output { sequence_end };
+      let event_id = actor.set_pending(acknowledgement).await?;
+      AttachmentEventDto::output(
+        &actor.attachment_id,
+        event_id,
+        sequence_start,
+        sequence_end,
+        &data,
+      )
+    }
+    AttachmentEvent::PtyGeometryChanged {
+      terminal_size,
+      observed_sequence,
+    } => {
+      let acknowledgement = PresentationAcknowledgement::Geometry { observed_sequence };
+      let event_id = actor.set_pending(acknowledgement).await?;
+      AttachmentEventDto::pty_geometry_changed(
+        &actor.attachment_id,
+        event_id,
+        terminal_size,
+        observed_sequence,
+      )
+    }
+    AttachmentEvent::LeaseStatus { lease, status } => {
+      AttachmentEventDto::lease_status(&actor.attachment_id, lease, status)
+    }
+    AttachmentEvent::ShellStateChanged { state } => {
+      AttachmentEventDto::shell_state_changed(&actor.attachment_id, state)
+    }
+    AttachmentEvent::ServerError { code, message } => {
+      AttachmentEventDto::server_error(&actor.attachment_id, &code, message)
+    }
+    AttachmentEvent::SessionEnded {
+      session_id,
+      exit_code,
+    } => AttachmentEventDto::session_ended(&actor.attachment_id, session_id, exit_code),
+    AttachmentEvent::HeartbeatAck { .. } | AttachmentEvent::Exited { .. } => return Ok(()),
+  };
+
+  channel
+    .send(event)
+    .map_err(|error| CommandErrorDto::new("attachment_channel_closed", error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn opening_and_releasing_a_pane_preserves_sibling_reservations() {
+    let state = AppState::default();
+    let first = state.reserve_window("main", "first").await.unwrap();
+    state
+      .open_attachment("main", "second", || Ok(()), async { Ok(()) })
+      .await
+      .unwrap();
+    assert!(!*first.borrow());
+    assert_eq!(state.registry.lock().await.by_window["main"].len(), 2);
+    state.release("main", "second").await;
+    assert!(!*first.borrow());
+    assert_eq!(state.registry.lock().await.by_window["main"].len(), 1);
+    state.cancel_opening("main", "first").await;
+    assert!(*first.borrow());
+  }
+
+  #[tokio::test]
+  async fn closing_a_window_cancels_all_its_panes_only() {
+    let state = AppState::default();
+    let first = state.reserve_window("main", "first").await.unwrap();
+    let second = state.reserve_window("main", "second").await.unwrap();
+    let other = state.reserve_window("other", "first").await.unwrap();
+    state.detach_window("main").await;
+    assert!(*first.borrow());
+    assert!(*second.borrow());
+    assert!(!*other.borrow());
+    assert!(!state.registry.lock().await.by_window.contains_key("main"));
+  }
+
+  #[tokio::test]
+  async fn cancelling_a_stalled_open_drops_its_work_and_releases_the_window() {
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+      fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+      }
+    }
+
+    let state = AppState::default();
+    let opening_state = state.clone();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let drop_flag = DropFlag(Arc::clone(&dropped));
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let opening = tokio::spawn(async move {
+      opening_state
+        .open_attachment(
+          "main",
+          "stalled",
+          || {
+            let _ = started.send(());
+            Ok(())
+          },
+          async move {
+            let _drop_flag = drop_flag;
+            std::future::pending::<CommandResult<()>>().await
+          },
+        )
+        .await
+    });
+    ready.await.unwrap();
+    state.cancel_opening("main", "stalled").await;
+    let error = timeout(std::time::Duration::from_secs(1), opening)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap_err();
+    assert_eq!(error.code, "attachment_cancelled");
+    assert!(dropped.load(Ordering::SeqCst));
+
+    let next = state.open_attachment("main", "next", || Ok(()), async {
+      Err::<(), _>(CommandErrorDto::new("next_open_ran", "next open ran"))
+    });
+    assert_eq!(
+      timeout(std::time::Duration::from_secs(1), next)
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+      "next_open_ran",
+    );
+  }
+
+  #[tokio::test]
+  async fn opening_cancellation_is_scoped_to_the_window_and_current_id() {
+    let state = AppState::default();
+    let cancelled = state.reserve_window("main", "current").await.unwrap();
+    state.cancel_opening("secondary", "current").await;
+    state.cancel_opening("main", "old").await;
+    assert!(!*cancelled.borrow());
+    state.cancel_opening("main", "current").await;
+    assert!(*cancelled.borrow());
+    state.release("main", "current").await;
+    let replacement = state.reserve_window("main", "replacement").await.unwrap();
+    state.cancel_opening("main", "current").await;
+    assert!(!*replacement.borrow());
+  }
+
+  #[tokio::test]
+  async fn window_cleanup_cancels_its_pending_open() {
+    let state = AppState::default();
+    let cancelled = state.reserve_window("main", "opening").await.unwrap();
+    state.detach_window("main").await;
+    assert!(*cancelled.borrow());
+    assert!(state.reserve_window("main", "next").await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn window_transitions_are_stable_and_window_scoped() {
+    let state = AppState::default();
+    let first = state.window_transition("main").await;
+    let same_window = state.window_transition("main").await;
+    let other_window = state.window_transition("secondary").await;
+
+    assert!(Arc::ptr_eq(&first, &same_window));
+    assert!(!Arc::ptr_eq(&first, &other_window));
+
+    let _first_guard = first.lock().await;
+    assert!(same_window.try_lock().is_err());
+    assert!(other_window.try_lock().is_ok());
+  }
+
+  #[tokio::test]
+  async fn daemon_restart_transition_is_shared_by_state_clones() {
+    let state = AppState::default();
+    let state_clone = state.clone();
+    let first = state.daemon_restart_transition();
+    let second = state_clone.daemon_restart_transition();
+
+    assert!(Arc::ptr_eq(&first, &second));
+    let _first_guard = first.lock().await;
+    assert!(second.try_lock().is_err());
+  }
+
+  #[test]
+  fn attachment_slot_tracks_the_reserved_id() {
+    let slot = AttachmentSlot::Opening {
+      attachment_id: "expected".into(),
+      cancel: watch::channel(false).0,
+    };
+    assert!(matches!(
+      slot,
+      AttachmentSlot::Opening { attachment_id, .. } if attachment_id == "expected"
+    ));
+  }
+
+  #[test]
+  fn pending_presentation_rejects_a_stale_or_duplicate_event_id() {
+    let mut pending = PendingPresentation {
+      event_id: "current".into(),
+      acknowledgement: PresentationAcknowledgement::Output { sequence_end: 9 },
+      acknowledging: false,
+    };
+
+    let stale = pending.claim("old").unwrap_err();
+    assert_eq!(stale.code, "stale_presentation_event");
+    assert_eq!(
+      pending.claim("current").unwrap(),
+      PresentationAcknowledgement::Output { sequence_end: 9 }
+    );
+    let duplicate = pending.claim("current").unwrap_err();
+    assert_eq!(duplicate.code, "presentation_acknowledgement_in_progress");
+  }
+}

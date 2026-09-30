@@ -2,7 +2,7 @@
 //! registry, or PTY lock across a process-inspection syscall. A stalled kernel
 //! cwd query can delay metadata but cannot stall PTY traffic or daemon shutdown.
 
-use crate::session::Session;
+use crate::session::Terminal;
 use process_info::Inspector;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
@@ -13,7 +13,7 @@ const INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Clone)]
 struct Watched {
   inspector: Inspector,
-  session: Weak<Session>,
+  session: Weak<Terminal>,
 }
 
 #[derive(Default)]
@@ -41,7 +41,7 @@ impl ProcessMonitor {
     Some(Self(shared))
   }
 
-  pub(crate) fn register(&self, inspector: Inspector, session: &Arc<Session>) {
+  pub(crate) fn register(&self, inspector: Inspector, session: &Arc<Terminal>) {
     let mut registry = self
       .0
       .registry

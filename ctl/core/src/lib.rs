@@ -5,6 +5,7 @@
 //! belong to the user's OpenSSH installation and configuration.
 
 use std::ffi::OsString;
+use std::future::{Future, ready};
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -15,7 +16,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+pub mod maintenance;
 mod ssh_install;
+pub mod ssh_reachability;
 mod ssh_startup;
 
 pub use ssh_install::{
@@ -25,7 +28,16 @@ pub use ssh_install::{
 
 const SSH_PROGRAM: &str = "ssh";
 const MAX_SSH_COMMAND_OUTPUT: usize = 8192;
-const UNIX_GATEWAY_COMMAND: &str = r#"PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#;
+const UNIX_GATEWAY_COMMAND: &str = concat!(
+  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
+  "exec ctl-agent connect",
+);
+const UNIX_AUTHENTICATED_GATEWAY_COMMAND: &str = concat!(
+  r#"printf 'ctl-ssh-auth-v1\n'; PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
+  "exec ctl-agent connect",
+);
 const UNIX_PLATFORM_PROBE_COMMAND: &str = "printf 'ctl-platform-v1\\n'; uname -s; uname -m";
 /// Remote command-shell convention, independent of the client platform.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,6 +57,8 @@ impl RemotePlatform {
   }
 }
 const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
+const SSH_AUTHENTICATED_PREFACE: &[u8] = b"ctl-ssh-auth-v1\n";
+const SSH_AGENT_NOT_FOUND_PREFACE: &[u8] = b"ctl-ssh-nf\n";
 
 /// The fixed per-user service exposed through an SSH gateway.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -76,12 +90,56 @@ pub struct SshConnectionOptions {
   pub user: Option<String>,
   pub port: Option<u16>,
   pub identity_file: Option<PathBuf>,
+  pub gateways: Vec<SshGateway>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshGatewayMode {
+  Automatic,
+  NativeOnly,
+  AgentRelayOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshGateway {
+  pub kind: ctld_ipc::GatewayKind,
+  pub vpn: Option<ctld_ipc::VpnGateway>,
+  pub destination: String,
+  pub hostname: Option<String>,
+  pub user: Option<String>,
+  pub port: Option<u16>,
+  pub identity_file: Option<PathBuf>,
+  pub mode: SshGatewayMode,
+}
+
+impl SshGateway {
+  fn to_ipc(&self) -> ctld_ipc::SshGateway {
+    ctld_ipc::SshGateway {
+      kind: self.kind,
+      vpn: self.vpn.clone(),
+      destination: self.destination.clone(),
+      hostname: self.hostname.clone(),
+      user: self.user.clone(),
+      port: self.port,
+      identity_file: self.identity_file.clone(),
+      mode: match self.mode {
+        SshGatewayMode::Automatic => ctld_ipc::SshGatewayMode::Automatic,
+        SshGatewayMode::NativeOnly => ctld_ipc::SshGatewayMode::NativeOnly,
+        SshGatewayMode::AgentRelayOnly => ctld_ipc::SshGatewayMode::AgentRelayOnly,
+      },
+    }
+  }
 }
 
 /// Local prompt handling only; this cannot alter the remote command.
 pub enum SshInteraction {
   Inherit,
   Batch,
+  /// Reuses this exact master and fails if it is unavailable; never starts a
+  /// separate SSH connection, even when noninteractive credentials are usable.
+  Multiplexed {
+    control_path: PathBuf,
+  },
   Askpass {
     program: PathBuf,
     socket: PathBuf,
@@ -189,6 +247,20 @@ impl<LocalStream: AsyncWrite + Unpin> AsyncWrite for Transport<LocalStream> {
 /// Returns an error when the local daemon cannot be connected or started, or
 /// when the OpenSSH remote-command channel cannot be established.
 pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, CoreError> {
+  open_transport_with_interaction(target, &SshInteraction::Inherit).await
+}
+
+/// Opens a raw protocol stream with an explicit local SSH interaction policy.
+///
+/// Local targets ignore the interaction. SSH targets use it only for local
+/// authentication and multiplex selection; the remote command remains fixed.
+///
+/// # Errors
+/// Returns local daemon startup, SSH startup, or transport-marker failures.
+pub async fn open_transport_with_interaction(
+  target: &ConnectionTarget,
+  interaction: &SshInteraction,
+) -> Result<Transport, CoreError> {
   match target {
     ConnectionTarget::Local { socket_path } => Ok(Transport::Local(
       rmux_ipc::connect_or_start_daemon(socket_path).await?,
@@ -197,7 +269,7 @@ pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, Core
       destination,
       options,
     } => Ok(Transport::Ssh(
-      open_ssh_tunnel_with_options(destination, options).await?,
+      open_ssh_tunnel_interactive(destination, options, interaction).await?,
     )),
   }
 }
@@ -210,6 +282,17 @@ pub async fn open_transport(target: &ConnectionTarget) -> Result<Transport, Core
 /// # Errors
 /// Returns task daemon startup, SSH startup, or transport-marker failures.
 pub async fn open_task_transport(target: &ConnectionTarget) -> Result<TaskTransport, CoreError> {
+  open_task_transport_with_interaction(target, &SshInteraction::Inherit).await
+}
+
+/// Opens the selected task service with an explicit local SSH interaction policy.
+///
+/// # Errors
+/// Returns task daemon startup, SSH startup, or transport-marker failures.
+pub async fn open_task_transport_with_interaction(
+  target: &ConnectionTarget,
+  interaction: &SshInteraction,
+) -> Result<TaskTransport, CoreError> {
   match target {
     ConnectionTarget::Local { .. } => Ok(Transport::Local(
       task_client::connect_or_start(&task_ipc::socket_path()).await?,
@@ -218,13 +301,7 @@ pub async fn open_task_transport(target: &ConnectionTarget) -> Result<TaskTransp
       destination,
       options,
     } => Ok(Transport::Ssh(
-      open_ssh_service_interactive(
-        destination,
-        options,
-        &SshInteraction::Inherit,
-        RemoteService::Task,
-      )
-      .await?,
+      open_ssh_service_interactive(destination, options, interaction, RemoteService::Task).await?,
     )),
   }
 }
@@ -235,7 +312,7 @@ pub async fn open_task_transport(target: &ConnectionTarget) -> Result<TaskTransp
 /// and reap the SSH child. A fresh reconnect always creates a fresh SSH
 /// channel; OpenSSH may transparently reuse a configured control master.
 pub struct SshTransport {
-  pub remote_identity: Option<ctl_proto::RemoteIdentity>,
+  pub remote_identity: Option<Box<ctl_proto::RemoteIdentity>>,
   stdin: ChildStdin,
   stdout: ChildStdout,
   shutdown: watch::Sender<bool>,
@@ -355,13 +432,65 @@ pub async fn open_identified_ssh_service(
     .args(extra)
     .args(ssh_service_arguments(destination, options, service))
     .arg("--identity");
-  start_ssh_transport_identified(command, true).await
+  start_ssh_transport_identified(command, true, false, ready(())).await
+}
+
+/// Opens an identified Unix service and pauses after SSH authentication.
+///
+/// The fixed remote command emits an authentication marker before attempting
+/// to execute `ctl-agent`. The callback therefore runs after OpenSSH accepts
+/// the connection even when the agent is absent, but before identity metadata
+/// is read or verified.
+///
+/// # Errors
+/// Returns validation, startup, or identity protocol errors.
+pub async fn open_identified_ssh_service_after_authentication(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  service: RemoteService,
+  on_authenticated: impl Future<Output = ()>,
+) -> Result<SshTransport, CoreError> {
+  validate_ssh_target(destination, options)?;
+  if options.remote_platform != RemotePlatform::Unix {
+    return Err(CoreError::InvalidSshOption("remote_platform".into()));
+  }
+  let mut command = Command::new(SSH_PROGRAM);
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command
+    .args(extra)
+    .args(ssh_authenticated_service_arguments(
+      destination,
+      options,
+      service,
+    ))
+    .arg("--identity");
+  start_ssh_transport_identified(command, true, true, on_authenticated).await
 }
 
 fn configure_ssh_interaction(command: &mut Command, interaction: &SshInteraction) -> Vec<OsString> {
   match interaction {
     SshInteraction::Inherit => Vec::new(),
     SshInteraction::Batch => vec!["-o".into(), "BatchMode=yes".into()],
+    SshInteraction::Multiplexed { control_path } => vec![
+      "-S".into(),
+      control_path.as_os_str().to_owned(),
+      "-o".into(),
+      "ControlMaster=no".into(),
+      "-o".into(),
+      "BatchMode=yes".into(),
+      // ControlMaster=no alone falls back to a fresh SSH connection when the
+      // socket disappears. An existing master bypasses ProxyCommand entirely.
+      // Keep this before route options so no proxy can restore that fallback.
+      "-o".into(),
+      "ProxyCommand=false".into(),
+      // These are owned, piped channel processes even when the master belongs
+      // to another application. Never detach or discard their input via config.
+      "-o".into(),
+      "ForkAfterAuthentication=no".into(),
+      "-o".into(),
+      "StdinNull=no".into(),
+    ],
     SshInteraction::Askpass {
       program,
       socket,
@@ -408,6 +537,30 @@ pub async fn probe_ssh_unix_platform_interactive(
   String::from_utf8(output).map_err(|_| CoreError::InvalidSshCommandOutput)
 }
 
+/// Restarts only the account's rmux daemon, after the caller confirms session loss.
+/// The agent verifies the expected identity before accessing the control endpoint.
+///
+/// # Errors
+/// Returns validation, SSH, remote restart, or invalid-response errors.
+pub async fn restart_ssh_rmux_interactive(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  expected_remote_id: &str,
+) -> Result<ctl_proto::RemoteRmuxRestartResult, CoreError> {
+  const COMMAND: &str = concat!(
+    r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+    "exec ctl-agent restart-rmux",
+  );
+  let input = serde_json::to_vec(&ctl_proto::RemoteRmuxRestartRequest {
+    expected_remote_id: expected_remote_id.into(),
+  })
+  .map_err(|_| CoreError::InvalidSshCommandOutput)?;
+  let output =
+    run_ssh_command_interactive(destination, options, interaction, COMMAND, &input).await?;
+  serde_json::from_slice(&output).map_err(|_| CoreError::InvalidSshCommandOutput)
+}
+
 async fn run_ssh_command_interactive(
   destination: &str,
   options: &SshConnectionOptions,
@@ -424,7 +577,12 @@ async fn run_ssh_command_interactive(
   command
     .args(extra)
     .args(ssh_base_arguments(destination, options))
-    .arg(remote_command)
+    .arg(remote_command);
+  run_fixed_command(command, input).await
+}
+
+async fn run_fixed_command(mut command: Command, input: &[u8]) -> Result<Vec<u8>, CoreError> {
+  command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -434,9 +592,12 @@ async fn run_ssh_command_interactive(
   let mut stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
   let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
-  let write = async {
-    stdin.write_all(input).await?;
-    stdin.shutdown().await
+  let write = async move {
+    let result = stdin.write_all(input).await;
+    // ChildStdin::shutdown is a no-op on Unix. Close the owned pipe so the
+    // remote command can observe EOF before we wait for its response/exit.
+    drop(stdin);
+    result
   };
   let read_stdout = read_bounded_output(&mut stdout);
   let read_stderr = read_bounded_output(&mut stderr);
@@ -475,13 +636,18 @@ async fn read_bounded_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Resul
 }
 
 async fn start_ssh_transport(command: Command) -> Result<SshTransport, CoreError> {
-  start_ssh_transport_identified(command, false).await
+  start_ssh_transport_identified(command, false, false, ready(())).await
 }
 
-async fn start_ssh_transport_identified(
+async fn start_ssh_transport_identified<F>(
   mut command: Command,
   identified: bool,
-) -> Result<SshTransport, CoreError> {
+  authentication_marker: bool,
+  on_authenticated: F,
+) -> Result<SshTransport, CoreError>
+where
+  F: Future<Output = ()>,
+{
   command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -492,6 +658,18 @@ async fn start_ssh_transport_identified(
   let stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
   let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let diagnostics = ssh_startup::Diagnostics::start(child.stderr.take());
+  if authentication_marker {
+    let mut preface = vec![0_u8; SSH_AUTHENTICATED_PREFACE.len()];
+    if let Err(error) = stdout.read_exact(&mut preface).await {
+      return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+    }
+    if preface != SSH_AUTHENTICATED_PREFACE {
+      let _ = child.kill().await;
+      drop(diagnostics);
+      return Err(CoreError::InvalidSshPreface);
+    }
+    on_authenticated.await;
+  }
   let mut preface = vec![0_u8; SSH_TRANSPORT_PREFACE.len()];
   if let Err(error) = stdout.read_exact(&mut preface).await {
     return Err(ssh_startup::startup_error(child, diagnostics, error).await);
@@ -501,6 +679,11 @@ async fn start_ssh_transport_identified(
   } else {
     SSH_TRANSPORT_PREFACE
   };
+  if preface == SSH_AGENT_NOT_FOUND_PREFACE {
+    let _ = child.kill().await;
+    drop(diagnostics);
+    return Err(CoreError::AgentNotFound);
+  }
   if identified && preface == SSH_TRANSPORT_PREFACE {
     return Err(CoreError::IdentityUnsupported);
   }
@@ -510,11 +693,11 @@ async fn start_ssh_transport_identified(
     return Err(CoreError::InvalidSshPreface);
   }
   let remote_identity = if identified {
-    Some(
+    Some(Box::new(
       ctl_proto::read_identity(&mut stdout)
         .await
         .map_err(CoreError::RemoteIdentity)?,
-    )
+    ))
   } else {
     None
   };
@@ -578,6 +761,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::InvalidSshCommandOutput
     | CoreError::InvalidAgentBundleId(_)
     | CoreError::InvalidSshPreface
+    | CoreError::AgentNotFound
     | CoreError::IdentityUnsupported
     | CoreError::RemoteIdentity(_) => false,
   }
@@ -592,6 +776,50 @@ fn validate_destination(destination: &str) -> Result<(), CoreError> {
 
 fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Result<(), CoreError> {
   validate_destination(destination)?;
+  for (index, gateway) in options.gateways.iter().enumerate() {
+    if !gateway.to_ipc().has_valid_vpn_configuration()
+      || (index != 0 && gateway.kind == ctld_ipc::GatewayKind::Vpn)
+    {
+      return Err(CoreError::InvalidSshOption("VPN gateway".into()));
+    }
+    validate_destination(&gateway.destination)?;
+    if gateway.mode == SshGatewayMode::AgentRelayOnly {
+      return Err(CoreError::InvalidSshOption(
+        "agent_relay_only requires managed relay support".into(),
+      ));
+    }
+    if gateway
+      .destination
+      .chars()
+      .any(|value| matches!(value, ',' | '@'))
+      || gateway.hostname.as_ref().is_some_and(|value| {
+        value.trim().is_empty()
+          || value.chars().any(|value| matches!(value, ',' | '@'))
+          || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+      })
+      || gateway.user.as_ref().is_some_and(|value| {
+        value.trim().is_empty()
+          || value.chars().any(|value| matches!(value, ',' | '@'))
+          || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+      })
+      || gateway.port == Some(0)
+    {
+      return Err(CoreError::InvalidSshOption("gateway".into()));
+    }
+    if gateway.kind == ctld_ipc::GatewayKind::Socks5 && gateway.port.is_none() {
+      return Err(CoreError::InvalidSshOption("SOCKS5 gateway port".into()));
+    }
+    if gateway.identity_file.is_some() {
+      return Err(CoreError::InvalidSshOption(
+        "gateway identity_file requires managed relay support; configure it in OpenSSH for native jumping"
+          .into(),
+      ));
+    }
+  }
   if let Some(hostname) = &options.hostname
     && (hostname.trim().is_empty()
       || hostname
@@ -631,8 +859,35 @@ fn ssh_service_arguments(
   options: &SshConnectionOptions,
   service: RemoteService,
 ) -> Vec<OsString> {
+  ssh_service_arguments_with_command(
+    destination,
+    options,
+    options.remote_platform.command(),
+    service,
+  )
+}
+
+fn ssh_authenticated_service_arguments(
+  destination: &str,
+  options: &SshConnectionOptions,
+  service: RemoteService,
+) -> Vec<OsString> {
+  ssh_service_arguments_with_command(
+    destination,
+    options,
+    &[UNIX_AUTHENTICATED_GATEWAY_COMMAND],
+    service,
+  )
+}
+
+fn ssh_service_arguments_with_command(
+  destination: &str,
+  options: &SshConnectionOptions,
+  command: &[&str],
+  service: RemoteService,
+) -> Vec<OsString> {
   let mut arguments = ssh_base_arguments(destination, options);
-  arguments.extend(options.remote_platform.command().iter().map(OsString::from));
+  arguments.extend(command.iter().map(OsString::from));
   if service == RemoteService::Task {
     arguments.extend([OsString::from("--service"), OsString::from("task")]);
   }
@@ -656,6 +911,39 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
   .into_iter()
   .map(OsString::from)
   .collect::<Vec<_>>();
+  if options
+    .gateways
+    .iter()
+    .any(|gateway| gateway.kind.requires_proxy_command())
+  {
+    let gateways = options
+      .gateways
+      .iter()
+      .map(SshGateway::to_ipc)
+      .collect::<Vec<_>>();
+    let proxy = ctld_ipc::proxy_command(&gateways).unwrap_or_else(|_| "false".into());
+    arguments.extend([
+      OsString::from("-o"),
+      OsString::from(format!("ProxyCommand={proxy}")),
+      OsString::from("-o"),
+      OsString::from("ControlPath=none"),
+    ]);
+  } else if !options.gateways.is_empty() {
+    arguments.extend([
+      // Unlike -J, this form respects an earlier ProxyCommand without treating
+      // it as a conflicting argument. Multiplexed mode disables fresh routes.
+      OsString::from("-o"),
+      OsString::from(format!(
+        "ProxyJump={}",
+        options
+          .gateways
+          .iter()
+          .map(gateway_jump_specification)
+          .collect::<Vec<_>>()
+          .join(","),
+      )),
+    ]);
+  }
   if let Some(port) = options.port {
     arguments.extend([OsString::from("-p"), OsString::from(port.to_string())]);
   }
@@ -672,8 +960,32 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
   arguments
 }
 
+fn gateway_jump_specification(gateway: &SshGateway) -> String {
+  let host = gateway.hostname.as_deref().unwrap_or(&gateway.destination);
+  let host = if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+    format!("[{host}]")
+  } else {
+    host.to_owned()
+  };
+  format!(
+    "{}{}{}",
+    gateway
+      .user
+      .as_ref()
+      .map(|user| format!("{user}@"))
+      .unwrap_or_default(),
+    host,
+    gateway
+      .port
+      .map(|port| format!(":{port}"))
+      .unwrap_or_default(),
+  )
+}
+
 #[derive(Debug, Error)]
 pub enum CoreError {
+  #[error("ctl-agent is not installed on the remote host")]
+  AgentNotFound,
   #[error("remote components do not support environment identity; update the remote components")]
   IdentityUnsupported,
   #[error("could not read remote identity: {0}")]
@@ -759,6 +1071,137 @@ mod tests {
   }
 
   #[test]
+  fn mixed_gateway_route_uses_the_ordered_proxy_helper() {
+    let options = SshConnectionOptions {
+      gateways: vec![
+        SshGateway {
+          kind: ctld_ipc::GatewayKind::Socks5,
+          vpn: None,
+          destination: "proxy.internal".into(),
+          hostname: None,
+          user: None,
+          port: Some(1080),
+          identity_file: None,
+          mode: SshGatewayMode::Automatic,
+        },
+        SshGateway {
+          kind: ctld_ipc::GatewayKind::Ssh,
+          vpn: None,
+          destination: "bastion.internal".into(),
+          hostname: None,
+          user: None,
+          port: None,
+          identity_file: None,
+          mode: SshGatewayMode::Automatic,
+        },
+      ],
+      ..SshConnectionOptions::default()
+    };
+    let args = ssh_base_arguments("target.internal", &options);
+    let proxy = args
+      .iter()
+      .find(|arg| arg.to_string_lossy().starts_with("ProxyCommand="))
+      .unwrap();
+    let proxy = proxy.to_string_lossy();
+    assert!(proxy.contains("--proxy-route"));
+    assert!(
+      !args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("ProxyJump="))
+    );
+    let encoded = proxy
+      .split("--proxy-route ")
+      .nth(1)
+      .unwrap()
+      .split(' ')
+      .next()
+      .unwrap();
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty());
+    let bytes = pairs
+      .iter()
+      .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+      .collect::<Vec<_>>();
+    let route: Vec<ctld_ipc::SshGateway> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(route[0].kind, ctld_ipc::GatewayKind::Socks5);
+    assert_eq!(route[1].destination, "bastion.internal");
+  }
+
+  #[test]
+  fn managed_vpn_routes_use_a_private_proxy_and_reject_stale_endpoints() {
+    let gateway = SshGateway {
+      kind: ctld_ipc::GatewayKind::Vpn,
+      vpn: Some(ctld_ipc::VpnGateway {
+        connection_id: "saved-vpn".into(),
+        socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
+      }),
+      destination: "saved-vpn".into(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      mode: SshGatewayMode::Automatic,
+    };
+    let mut options = SshConnectionOptions {
+      gateways: vec![gateway.clone()],
+      ..SshConnectionOptions::default()
+    };
+    assert!(validate_ssh_target("target", &options).is_ok());
+    let args = ssh_base_arguments("target", &options);
+    assert!(args.iter().any(|arg| arg == "ControlPath=none"));
+    assert!(
+      args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("ProxyCommand="))
+    );
+    assert!(
+      !args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("ProxyJump="))
+    );
+    options.gateways[0].port = Some(1080);
+    assert!(validate_ssh_target("target", &options).is_err());
+    options.gateways = vec![gateway.clone(), gateway];
+    assert!(validate_ssh_target("target", &options).is_err());
+  }
+
+  #[test]
+  fn ssh_command_preserves_the_order_and_endpoint_fields_of_native_gateways() {
+    let options = SshConnectionOptions {
+      gateways: vec![
+        SshGateway {
+          kind: ctld_ipc::GatewayKind::Ssh,
+          vpn: None,
+          destination: "edge-alias".into(),
+          hostname: None,
+          user: None,
+          port: None,
+          identity_file: None,
+          mode: SshGatewayMode::Automatic,
+        },
+        SshGateway {
+          kind: ctld_ipc::GatewayKind::Ssh,
+          vpn: None,
+          destination: "internal-alias".into(),
+          hostname: Some("2001:db8::2".into()),
+          user: Some("operator".into()),
+          port: Some(2222),
+          identity_file: None,
+          mode: SshGatewayMode::NativeOnly,
+        },
+      ],
+      ..SshConnectionOptions::default()
+    };
+
+    let arguments = ssh_arguments("server", &options);
+    let jump = arguments
+      .windows(2)
+      .find(|pair| pair[0] == "-o" && pair[1].to_string_lossy().starts_with("ProxyJump="))
+      .expect("native jump arguments");
+    assert_eq!(jump[1], "ProxyJump=edge-alias,operator@[2001:db8::2]:2222");
+  }
+
+  #[test]
   fn task_service_only_appends_fixed_arguments_on_either_remote_platform() {
     for remote_platform in [RemotePlatform::Unix, RemotePlatform::Windows] {
       let options = SshConnectionOptions {
@@ -777,6 +1220,16 @@ mod tests {
   }
 
   #[test]
+  fn authenticated_service_uses_a_fixed_marker_before_the_unix_gateway() {
+    let options = SshConnectionOptions::default();
+    let arguments = ssh_authenticated_service_arguments("host", &options, RemoteService::Rmux);
+    assert_eq!(
+      &arguments[arguments.len() - 3..],
+      ["--", "host", UNIX_AUTHENTICATED_GATEWAY_COMMAND].map(OsString::from)
+    );
+  }
+
+  #[test]
   fn unsafe_destinations_are_rejected_before_starting_ssh() {
     assert!(validate_destination("").is_err());
     assert!(validate_destination("host\ncommand").is_err());
@@ -791,6 +1244,7 @@ mod tests {
       user: Some("rmux".into()),
       port: Some(2222),
       identity_file: Some(PathBuf::from("/tmp/key with spaces")),
+      gateways: Vec::new(),
     };
     let arguments = ssh_arguments("rmux-remote-test", &options);
 
@@ -813,10 +1267,44 @@ mod tests {
   }
 
   #[test]
+  fn multiplexed_connections_require_the_selected_master_without_prompting() {
+    let mut command = Command::new("ssh");
+    let arguments = configure_ssh_interaction(
+      &mut command,
+      &SshInteraction::Multiplexed {
+        control_path: PathBuf::from("/tmp/ctld/master"),
+      },
+    );
+
+    assert_eq!(
+      arguments,
+      [
+        "-S",
+        "/tmp/ctld/master",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ProxyCommand=false",
+        "-o",
+        "ForkAfterAuthentication=no",
+        "-o",
+        "StdinNull=no",
+      ]
+      .map(OsString::from)
+    );
+  }
+
+  #[test]
   fn managed_unix_gateway_precedes_the_legacy_path_without_user_input() {
     assert_eq!(
       UNIX_GATEWAY_COMMAND,
-      r#"PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect"#
+      concat!(
+        r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+        r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
+        "exec ctl-agent connect",
+      )
     );
     assert!(!UNIX_GATEWAY_COMMAND.contains("workstation"));
   }
@@ -841,6 +1329,7 @@ mod tests {
       user: None,
       port: Some(0),
       identity_file: None,
+      gateways: Vec::new(),
     };
 
     assert!(validate_ssh_target("label", &options).is_err());

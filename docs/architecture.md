@@ -51,13 +51,13 @@ processes; its interactive tasks use rmuxd's PTYs and normal rmux attachments.
 - `rmux-ipc`: per-user local endpoint selection and transport setup.
 - `rmuxd`: local IPC, PTY/process ownership, and session coordination.
 - `rmux`: canonical local CLI and reusable rmux command implementation.
-- `rmux-app`: local/SSH Tauri/React terminal client in `apps/rmux`. Its Rust
+- `rmux-app`: local/SSH Tauri/React terminal client in `apps/desktop`. Its Rust
   adapter composes `ctl-core` transport with `rmux-client`; its webview owns
   xterm rendering, viewport, and local scrollback.
 - `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctl-agent connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
-- `ctl-agent`: stateless SSH remote-command adapter for the fixed local rmux
+- `ctl-agent`: per-connection SSH remote-command adapter for the fixed local rmux
   data and task endpoints.
 - `ctl`: control router. `ctl rmux` redirects the canonical rmux command
   surface locally by default or through an explicit OpenSSH destination.
@@ -119,24 +119,56 @@ checkpoint-production, or session-lifetime logic into the app process.
 Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
-The app persists workspace metadata through its native backend and always
-includes the local target. The versioned app-data `workspace.json` contains
-host definitions and stable IDs, known session references, cached cwd labels,
-tab order, and the selected tab. Runtime status, output, credentials, and
-attachment tokens are never written to the workspace. `ctl-agent` remains stateless.
-A read-only backend command discovers concrete
-aliases from the user's OpenSSH config and recursive `Include` files for the
-**+ Host** picker; wildcard and negated patterns are omitted, and discovery
-never opens a connection. Selecting a suggestion promotes it to a configured
-target. A new hostname can instead be saved as a managed, conflict-checked
-block in `~/.ssh/config`, or as structured app-local hostname, user, port, and
-identity-file-path fields. Config replacement uses a same-directory temporary
-file, preserves existing file permissions, and refuses to write when alias
-discovery is incomplete or the original changes during the operation.
+The app persists session/workspace state separately from saved host definitions.
+Schema 8 of `~/.tokn/rmux/workspace.json` contains session references, cached cwd
+labels, task references, forwards, tab order, selection, and observed remote
+identities for referenced hosts. Schema 1 of `~/.tokn/rmux/hosts.json` contains
+remote hosts with stable IDs, named connection methods and preferred method IDs,
+and reusable gateways. The local host is synthesized. Runtime status, output,
+credentials, and attachment tokens are never written to either file. A host
+represents a machine, with one remote account/ctl environment per host. Addresses,
+OpenSSH aliases, and gateway routes are connection methods. Each method must reach
+the pinned account-owned remote UUID; matching UUIDs never merge separate hosts.
+
+**Add host** collects the address, display name, **Connect through** choice
+(Direct by default, a saved VPN, or a reusable gateway), and authentication, verifies the
+connection, and automatically saves a named host with an `SSH` method. Additional
+methods and gateway routes use **Host settings**. New-host creation does not
+write OpenSSH config. The advanced method editor can explicitly export a new
+direct method with **Also save to OpenSSH config**, off by default.
+
+A read-only native command discovers concrete aliases from OpenSSH config and
+recursive `Include` files; wildcard and negated patterns are omitted. Discovery
+never opens a connection. The frontend projects aliases into runtime hosts with
+deterministic `ssh-config:<encoded alias>` IDs. A saved record with the same ID
+wins; otherwise an unreferenced projection is hidden when a saved method already
+uses exactly that alias without overrides. Referenced projections remain distinct.
+Unconnected projections stay in connection and session pickers. The sidebar
+shows them after successful verification or when they have workspace references.
+Connecting does not persist their definitions. Saving a customization promotes
+the projection without changing its ID. Catalog serialization explicitly excludes
+projected/unavailable hosts and runtime fields. Missing definitions retain
+unavailable placeholders for workspace references; unavailable targets fail before
+transport creation instead of treating a vanished alias as a DNS name.
+
+Workspace identity observations are separate from catalog identities and take
+precedence when reconnecting remembered entries. They cannot overwrite catalog
+metadata merely because the workspace autosaves. Host settings renames hosts and
+methods and selects the preferred method. **Connect host** uses that preference;
+**Connect using** explicitly chooses another method. Failure never triggers an
+automatic fallback.
+
+The frontend derives transport targets from a saved method, resolved gateway
+definitions, and host-level expected identity. The selected runtime route is
+separate from saved preferences. Saving changes leaves existing session
+transport snapshots intact; verifying an edited method does not attach existing
+sessions. An explicit connection replaces the selected route while preserving
+session keys and invalidating older in-flight inspection results.
 
 Startup restores entries and tabs with unverified runtime status, then
-automatically attaches the selected tab if it is local. It does not open SSH
-connections or enumerate sessions. **Connect host** authenticates that host,
+automatically attaches the selected tab if it is local. Remote terminal tabs
+remain disconnected and session inventory is not enumerated; enabled port
+forwards restore separately. **Connect host** authenticates that host,
 inspects its known sessions, and resumes its selected tab (or first open tab
 if another host was selected). Hosts without open tabs are only inspected.
 The sidebar is workspace membership, not a mirror of
@@ -146,30 +178,226 @@ without attaching. Explicit refresh inspects only remembered IDs; connection
 failures retain entries as unreachable, while not-found responses mark them
 missing rather than removing them. Opening a session connects on demand.
 
+`ctld` owns each port forward globally by `forward_id` and retains its exact
+SSH target and listener definition. Moving a forward to another connection
+method cancels the previous listener before starting the new one; disabling it
+also uses the retained owner rather than the caller's current route. This works
+across desktop reloads and edits or removal of the previously selected method.
+Cancellation failure preserves the old ownership for retry. Configuration and
+post-authentication activation share a serialized registry so a late old-master
+activation cannot recreate a moved or disabled forward. Listener ownership is
+tracked separately from displayed status, and a forward configured during
+master startup is not activated twice. The local `ctld` IPC protocol is version
+11; older clients and daemons must be updated together and the daemon restarted.
+
+### Component diagnostics and replacement
+
+The About page performs bounded, passive queries against selected local owners.
+It enumerates both SSH and VPN ctld endpoints, deduplicating identical owners.
+An independent ctld lifecycle protocol reports build identity and data-protocol
+version even when the app's data protocol differs. rmuxd exposes equivalent
+metadata through its local-control handshake, with a data-handshake fallback for
+legacy owners. taskd accepts a passive control metadata query. Standalone
+`--component-info` prints JSON for helper executables without starting services.
+
+`component-info` embeds the release version, source revision, dirty flag, and a
+deterministic fingerprint of Rust component sources and dependency definitions.
+The fingerprint normalizes platform path separators and text line endings. It
+excludes credentials, runtime configuration, and build output. Equal release
+versions with unequal fingerprints are different builds, not ordered releases.
+Status comparisons use the app's compiled component build as the baseline;
+matching running and installed helpers do not hide a mismatch with the app.
+Remote diagnostics retain identity and server-handshake metadata on existing
+attachment actors; opening About never creates an SSH transport or uses persisted
+host metadata as evidence of a currently running agent.
+
+ctld restart pins a lifecycle stream to an instance and verifies the selected
+replacement before confirmation. Native confirmation tokens are window-scoped,
+expire, and can be consumed once. On confirmation, the same owner and replacement
+are rechecked. The daemon stops accepting requests, drains its VPNs and owned
+forwards, releases its endpoint, and closes the pinned stream before replacement
+startup. The client verifies a fresh instance with matching build and protocol.
+Legacy owners are inspected where possible but never stopped by process-name or
+PID guesses. Restart does not delete saved VPN identities or profiles.
+
+About uses the same confirmation model for local rmuxd and taskd. A preparation
+retains the existing owner's stream and hashes the selected replacement executable.
+It rechecks the helper before shutdown and startup, then verifies the successor's
+build and protocols. rmuxd's control-v1 restart remains usable without build
+reporting; taskd can retain an unsent control stream for legacy idle-only restart.
+Taskd's daemon-side mutation lock rejects active runs and preserves storage and
+rmux endpoints through shutdown. No diagnostic query starts a missing daemon.
+
+Remote rmuxd preparation runs a fixed ctl-agent maintenance command through an
+existing multiplexed SSH connection, with fresh authentication disabled. It pins
+the account identity, daemon control stream, and installed companion executable
+before awaiting confirmation. Session-reset events reconcile all app windows
+belonging to the affected environment after a confirmed or possible shutdown.
+Reconnect for ctl-agent instead asks each owning window to replace exact attachment
+IDs while retaining the remote sessions. Native acknowledgement validates new
+actors against the original environment and session before reporting success.
+
+### Managed VPNs
+
+`ctl vpn start --env-file PATH` asks the local `ctld` to own an OpenConnect
+container, starting the daemon if needed. The settings path defaults to `.env`
+and is resolved relative to the caller's directory. Its SOCKS5 listener uses a
+random loopback port, printed in a readable connection-status table after the VPN and
+proxy are ready. Start, status, and stop accept `--json` for machine-readable output.
+`ctl vpn status` lists every runtime ID and endpoint; `ctl vpn stop VPN_ID` stops
+only that container while
+keeping the broker running. Status and stop never start a daemon. The container
+also stops when its owning daemon exits. VPN commands reject `--host` and use
+the owner-only local IPC endpoint, selectable through `CTLD_SOCKET_PATH`.
+
+The desktop VPN panel stores named connection details in private, schema-versioned
+`vpns.json` under the app configuration directory. Native commands return metadata
+and password-presence flags, use hashed revisions for optimistic writes, and load
+the saved secret only when connecting. Both desktop and CLI use the shared
+`ctld-ipc::vpn` client. OpenConnect structured starts send the configuration to the container
+over its attached stdin; the container writes a mode-0600 environment file on
+private tmpfs. No generated credential file is left on the host. CLI-provided
+environment files are read as bounded private snapshots and use the same
+stdin/tmpfs flow. Cancellable preparation keeps status and stop responsive. Status
+lists each runtime ID, saved connection ID, gateway origin, and username from
+its actual startup snapshot. Each entry independently prepares, starts, connects,
+and stops; one failure or cancellation leaves the others running. Native
+coordination is keyed by VPN ID so a delayed start cannot escape its own Stop or
+cancel another connection. An optional snapshot in IPC 11 responses carries the
+collection while preserving legacy single-connection responses. Old owners remain
+readable as singleton snapshots with `supports_multiple: false`; targeted stop
+requires an updated daemon. Explicit `ctl vpn stop` remains available for a legacy
+owner, without risking a different connection through an implicit fallback.
+Desktop status polling continues while other panels are open and updates the VPN
+tab indicator. Signed development uses the shared per-user VPN owner rather than
+its temporary SSH helper; `CTLD_VPN_SOCKET_PATH` explicitly selects another VPN
+owner for all native VPN operations. Status polling never starts a daemon or
+reconnects automatically; closing the panel or app does not stop the daemon-owned
+VPN.
+
+Tailscale uses the same per-profile owner and stable route IDs. Profiles carry a
+provider tag; schema 1 OpenConnect files are read without rewriting and migrate
+to schema 2 on a successful mutation. Tailscale settings contain only an optional
+device hostname and an `accept_routes` preference. Its node identity lives in a
+durable Docker volume keyed by the local owner and profile ID. Disconnect and
+profile deletion retain that volume. Container names reserve each identity
+exclusively, and lease labels plus immutable container IDs prevent another
+daemon's launch from being adopted or removed. Container inspection parses typed
+JSON from Docker and Podman, including their ID spelling variants, without
+engine-specific Go template assumptions.
+
+Desktop Tailscale setup uses a provisional, window-owned enrollment. Native code
+assigns the ID, fixes the connection settings, and starts asynchronously without
+writing `vpns.json`. The editor observes startup, browser sign-in, device approval,
+and errors, and opens the browser only for a current validated login URL. Once
+connected, Save inserts the exact enrolled settings without reconnecting or
+replacing its identity. Failed writes leave the enrollment available for retry.
+Cancel stops the provisional connection and removes only its unused local
+identity volume; it does not revoke the device in the remote tailnet. A profile
+already written to disk is never removed by delayed enrollment cancellation.
+
+`ctl vpn start-tailscale --id ID` and the desktop app launch a pinned official
+image in userspace mode, with a random loopback SOCKS5 port and no host route
+changes. The attached stdin heartbeat controls the container lifetime, including
+when `ctld` is killed. Startup waits for the local service and SOCKS5 listener,
+then returns when connected or when browser sign-in or device approval is needed.
+Browser authentication can remain pending without a deadline.
+Status reports `starting` plus an optional `auth_url` until Tailscale is running,
+then exposes the endpoint only while the backend and proxy are ready. Stop also
+cancels pending sign-in. The app asks native code to open sign-in by runtime ID;
+native code fetches fresh owner status and validates the HTTPS Tailscale login
+URL before opening the default browser. No caller-supplied URL is accepted.
+Host connection attempts that need login return an actionable sign-in-and-retry
+result, while preserving their selected VPN ID.
+
+IPC 11 snapshots add `supported_providers`, defaulting to OpenConnect when absent,
+and `supports_tailscale_enrollment`, defaulting to false for older owners.
+The enrollment capability gates both setup and the identity-cleanup request.
+Tailscale starts check provider support on the selected owner before sending any
+profile settings. Additive status fields retain compatibility with clients that
+only understand the existing stopped/starting/connected/stopping states.
+
+Host methods persist an optional `vpn_connection_id`, independent of the VPN's
+runtime port. Native mapping prepends a typed VPN hop containing that ID and the
+selected VPN owner's socket path. These stable values participate in broker,
+master, and credential identities. An explicit SSH probe, install, or restart
+starts the saved VPN through its existing per-ID coordinator before SSH begins.
+Cancelling the host attempt stops waiting without cancelling shared VPN startup.
+Status, disconnect, and credential cleanup only map the stable route and never
+start the VPN. The proxy helper resolves the current connected SOCKS5 endpoint
+from the specified owner when opening a new transport, requires a loopback
+endpoint, and fails closed when the selected VPN is unavailable. VPN and SOCKS5
+routes force a private master, preventing reuse of a direct SSH-config master.
+
 App-local settings become separate, validated OpenSSH arguments and cannot
 introduce arbitrary options or change the fixed ctl-agent command.
 Rows, tabs, shell-state caches, mutations, and reconnect intent use
-`(stable host ID, session ID)`, independent of an SSH alias's display spelling.
+`(stable host ID, session ID)`, independent of the host's name or selected
+connection method. Task references and port forwards also retain host ownership.
 A failed target reports its own error without hiding successful targets.
-OpenSSH remains responsible for passwords,
-key contents, proxies, host verification, and connection multiplexing. The app
-brokers OpenSSH askpass prompts through its shared quick-input overlay on
-macOS/Linux. A random capability and ephemeral owner-only Unix socket connect
-the same app binary (in helper mode, before Tauri starts) to one connection
-attempt. Prompt replies are window/attempt-scoped and single-use; cancellation
-or window destruction terminates the SSH attempt and removes the socket.
+OpenSSH remains responsible for key contents, proxies, host verification, and
+the encrypted transport. On macOS/Linux, the per-user `ctld` owns explicit
+OpenSSH control masters shared by the desktop and `ctl`; each master persists
+for five idle minutes. All logical service channels require the selected master
+with batch mode enabled, so they cannot race by independently prompting or
+using incidental user `ControlMaster` configuration. The daemon's owner-only
+Unix socket carries a random-capability askpass request to the initiating
+client. Desktop prompt replies remain window/attempt-scoped and single-use;
+cancellation or window destruction terminates the authentication attempt.
 Host trust is confirmed explicitly and remains in OpenSSH's known-hosts files.
-Passwords/passphrases are retained only in native process memory for later
-connections to the same target; other interactive responses are not cached.
-Background connections use cached credentials or batch mode, never unsolicited
-dialogs. SSH startup diagnostics are bounded and returned to the frontend
-instead of being lost behind a generic missing-transport-marker error.
+For interactive identified connections, the fixed remote command emits an
+authentication preface before attempting to execute `ctl-agent`. This lets the
+credential choice complete on the same SSH channel even when the agent is not
+installed, without mistaking password submission for successful authentication.
+After the control master authenticates on macOS, but before any remote identity
+command, `ctld` asks the initiating client to present Yes, No, and Never choices
+for a newly entered reusable credential. Identity-file passphrases are eligible
+only after a trusted local unlock verifies the configured key snapshot; success
+of the SSH connection alone is not sufficient. Yes stores eligible credentials
+in the device-local Data Protection Keychain under `biometryCurrentSet`;
+retrieval requires Touch ID and changing the enrolled fingerprints invalidates
+the item. No discards the candidate, while Never stores only a device-local
+suppression marker for the connection scope.
 
-Native workspace writes are serialized, revision-checked across app processes,
-and atomically replaced with owner-only files. Invalid/future files are
-preserved and block writes. Legacy WebView host settings migrate only when no
-native workspace exists; the legacy copy is removed only after a successful
-disk write. Previous sessions were never persisted and require explicit import.
+Only `ctld` links Keychain code. Password entries retain their host-route/prompt
+scope and are answered directly to the matching OpenSSH askpass process. New
+identity passphrases use a separate namespace bound to the canonical key path,
+file-content digest, and locally verified public identity. Before reuse, `ctld`
+checks the file version and unlocks it through a temporary local agent; that
+passphrase is never returned to an SSH password prompt or client. Replacing or
+re-encrypting the file invalidates reuse. Legacy prompt-scoped key entries are
+not silently promoted to verified identity entries. Host removal cleans up
+host-scoped credentials; identity passphrases have independent, explicit Forget
+actions so removing one host cannot remove a key shared by others. Native
+plaintext buffers are zeroized after use. On Linux, newly entered reusable
+secrets are discarded after authentication. Other interactive responses are
+not stored.
+
+The desktop **Credentials** page lists identity-file metadata and saved rmux
+credential attributes. Its bounded one-shot `ctld --credential-request` and
+`ctld --identity-request` helpers provide metadata, verified identity-passphrase
+writes, and exact-item deletion without restarting the running daemon.
+Inventory reads separate, non-biometric metadata records with authentication UI
+explicitly forbidden. Older protected attributes are imported only through an
+explicit user action; interrupted imports remain retryable. Every interactive
+Keychain query carries a reason identifying its credential and purpose. Identity
+reuse retrieves the exact secret and binding together rather than listing every
+saved identity before each read. See [credential management](credentials.md)
+for discovery, state meanings, verification, and the storage boundary.
+
+SSH startup diagnostics are bounded and returned to the client instead of being lost behind a generic
+missing-transport-marker error.
+
+Native workspace and host-catalog writes are serialized, content-revision checked
+across app processes, and atomically replaced with owner-only files. Invalid or
+future files are preserved and block writes. Schema 8 imports saved hosts and
+gateways into the separate catalog before committing the smaller workspace;
+the import is idempotent so a crash between commits is recoverable. Schema 7 is
+preserved in `workspace-v7.backup.json`; earlier versions receive their own
+backups and target-to-method migration. IDs and references never change.
+Legacy WebView host settings migrate only when no native workspace exists;
+the legacy copy is removed only after successful catalog and workspace writes.
+Previous sessions were never persisted and require explicit import.
 See `docs/rmux-workspace.md` for the lifecycle and migration contract.
 
 The GUI omits a name when it creates a shell, so `rmuxd` applies the same
@@ -178,7 +406,7 @@ list merges authoritative geometry changes from the active attachment into the
 matching row. **Disconnect** removes a selected open tab and preserves the
 PTY; for the active tab it detaches the attachment, while an inactive tab is
 already detached and is removed only from this window. **Remove from workspace**
-also forgets membership without terminating the shell. **Close** is the
+also forgets membership without terminating the shell. **Terminate session** is the
 explicit one-shot kill operation and terminates the session for all attachments.
 
 `Restart rmuxd` is a command-palette-only, destructive maintenance action. It
@@ -316,13 +544,15 @@ by the user, and a fixed managed-directory `PATH` prefix followed by
 for tasks. The desktop may additionally run closed, fixed platform-probe and
 per-user installation commands after explicit user action; callers cannot
 supply a command, version path, or archive destination. OpenSSH
-configuration owns host verification, user authentication, proxying, and
-healthy-connection multiplexing. `ctl` never disables host-key checking,
-enables agent forwarding, or accepts an arbitrary remote command.
+configuration owns host verification, user authentication, and proxying. On
+Unix clients, `ctld` owns the explicit authenticated control master used by
+both `ctl` and the desktop. `ctl` never disables host-key checking, enables
+agent forwarding, or accepts an arbitrary remote command.
 
-`ctl-agent connect` has no network listener, persistent state, or identity
-registry. Its service enum chooses rmux or task. It writes one fixed readiness
-marker, after which SSH stdin/stdout carries that service's raw protocol;
+`ctl-agent connect` has no network listener or session registry. Its persistent
+account-owned UUID lives in `~/.tokn/ctl/remote-id`; it is an environment identity,
+not a machine ID. Its service enum chooses rmux or task. It writes one fixed
+readiness marker, after which SSH stdin/stdout carries that service's raw protocol;
 diagnostics use stderr. The helper connects only to the current user's fixed
 data endpoint and cannot reach rmux's owner-only maintenance endpoint. Taskd
 may use maintenance locally to manage interactive runs. Its authority is exactly

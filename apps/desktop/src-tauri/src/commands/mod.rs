@@ -1,0 +1,576 @@
+pub mod archives;
+pub mod cache;
+pub mod inspection;
+pub mod views;
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rmux_client::{
+  AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity,
+  DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach, get_shell_state, request as rmux_request,
+};
+use rmux_proto::{ClientMessage, ServerMessage};
+use tauri::ipc::Channel;
+use tauri::{State, WebviewWindow};
+use tokio::task::JoinSet;
+use tokio::time::timeout;
+
+use crate::dto::{
+  AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
+  AttachmentRequestDto, ConnectionTargetDto, CreateSessionRequestDto, KillSessionRequestDto,
+  OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentRequestDto,
+  RestartLocalDaemonResponseDto, SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto,
+  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, SshConfigHostCatalogDto,
+  SshConfigHostDto, TargetRequestDto, decode_input, parse_sequence,
+};
+use crate::error::{CommandErrorDto, CommandResult};
+use crate::local_transport;
+use crate::ssh_config;
+use crate::state::{AppState, AttachmentActor, forward_attachment_events};
+use crate::transport;
+
+const CLIENT_NAME: &str = "rmux-app";
+const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const LOCAL_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(250);
+const REMOTE_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS: usize = 4;
+
+#[tauri::command]
+pub async fn list_ssh_identity_files() -> CommandResult<crate::dto::SshIdentityFileCatalogDto> {
+  tauri::async_runtime::spawn_blocking(crate::ssh_identity::discover_identity_files)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn list_ssh_config_hosts() -> CommandResult<SshConfigHostCatalogDto> {
+  let discovery = tauri::async_runtime::spawn_blocking(ssh_config::discover_hosts)
+    .await
+    .map_err(CommandErrorDto::backend)?
+    .map_err(|error| CommandErrorDto::new("ssh_config_discovery_failed", error.to_string()))?;
+
+  Ok(SshConfigHostCatalogDto {
+    hosts: discovery
+      .hosts
+      .into_iter()
+      .map(|destination| SshConfigHostDto { destination })
+      .collect(),
+    warnings: discovery.warnings,
+  })
+}
+
+#[tauri::command]
+pub async fn save_ssh_config_host(
+  request: SaveSshConfigHostRequestDto,
+) -> CommandResult<SaveSshConfigHostResponseDto> {
+  let definition = ssh_config::SshHostDefinition {
+    alias: request.alias,
+    hostname: request.hostname,
+    user: request.user,
+    port: request.port,
+    identity_file: request.identity_file,
+  };
+  let destination = tauri::async_runtime::spawn_blocking(move || {
+    let destination = ssh_config::save_host(&definition)?;
+    Ok::<_, ssh_config::SaveSshConfigError>(destination)
+  })
+  .await
+  .map_err(CommandErrorDto::backend)?
+  .map_err(|error| ssh_config_write_error(&error))?;
+  Ok(SaveSshConfigHostResponseDto { destination })
+}
+
+fn ssh_config_write_error(error: &ssh_config::SaveSshConfigError) -> CommandErrorDto {
+  let code = match error {
+    ssh_config::SaveSshConfigError::InvalidField(_) => "invalid_ssh_host",
+    ssh_config::SaveSshConfigError::AliasConflict(_) => "ssh_alias_conflict",
+    ssh_config::SaveSshConfigError::IncompleteDiscovery(_) => "ssh_config_discovery_incomplete",
+    ssh_config::SaveSshConfigError::ConcurrentModification => "ssh_config_changed",
+    ssh_config::SaveSshConfigError::MalformedManagedBlock(_)
+    | ssh_config::SaveSshConfigError::Io { .. }
+    | ssh_config::SaveSshConfigError::HomeDirectoryUnavailable(_) => "ssh_config_write_failed",
+  };
+  CommandErrorDto::new(code, error.to_string())
+}
+
+#[tauri::command]
+pub async fn list_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {
+  timeout(Duration::from_secs(30), discover_sessions(request))
+    .await
+    .map_err(|_| {
+      CommandErrorDto::new("session_discovery_timeout", "Session discovery timed out.")
+    })?
+}
+
+async fn discover_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {
+  let stream = transport::connect(&request.target).await?;
+  let response = rmux_request(stream, &client_identity(), ClientMessage::ListSessions)
+    .await
+    .map_err(CommandErrorDto::client)?;
+  match response {
+    ServerMessage::SessionList { sessions } => Ok(SessionListDto {
+      // A large inventory or stalled metadata lookup must not prevent import.
+      shell_states: timeout(
+        Duration::from_secs(5),
+        inspect_session_shell_states(&request.target, &sessions),
+      )
+      .await
+      .unwrap_or_default(),
+      sessions: sessions
+        .into_iter()
+        .map(|session| SessionDto::new(session, request.target.clone()))
+        .collect(),
+    }),
+    response => Err(unexpected_response("session_list", &response)),
+  }
+}
+
+/// Retrieves presentation metadata without making the session list fragile.
+///
+/// Listing is authoritative. Individual sessions can naturally exit after it
+/// returns, so an unavailable endpoint, a failed handshake, or a missing
+/// session merely omits that shell snapshot. The frontend then falls back to a
+/// neutral title while keeping the list usable.
+async fn inspect_session_shell_states(
+  target: &crate::dto::ConnectionTargetDto,
+  sessions: &[rmux_proto::SessionInfo],
+) -> BTreeMap<String, ShellStateDto> {
+  let mut shell_states = BTreeMap::new();
+  let mut session_ids = sessions.iter().map(|session| session.session_id.clone());
+  let mut inspections = JoinSet::new();
+
+  // A stale lookup must not turn a refresh into one timeout per listed row.
+  for _ in 0..MAX_CONCURRENT_SESSION_SHELL_STATE_INSPECTIONS {
+    let Some(session_id) = session_ids.next() else {
+      break;
+    };
+    inspections.spawn(inspect_session_shell_state(target.clone(), session_id));
+  }
+
+  while let Some(result) = inspections.join_next().await {
+    if let Ok(Some((session_id, shell_state))) = result {
+      shell_states.insert(session_id, shell_state);
+    }
+
+    if let Some(session_id) = session_ids.next() {
+      inspections.spawn(inspect_session_shell_state(target.clone(), session_id));
+    }
+  }
+
+  shell_states
+}
+
+async fn inspect_session_shell_state(
+  target: crate::dto::ConnectionTargetDto,
+  session_id: String,
+) -> Option<(String, ShellStateDto)> {
+  let identity = client_identity();
+  let inspection_timeout = if target.is_local() {
+    LOCAL_SESSION_SHELL_STATE_INSPECTION_TIMEOUT
+  } else {
+    REMOTE_SESSION_SHELL_STATE_INSPECTION_TIMEOUT
+  };
+  let snapshot = timeout(inspection_timeout, async {
+    let stream = transport::connect_existing(&target).await?;
+    get_shell_state(stream, &identity, &session_id)
+      .await
+      .map_err(CommandErrorDto::client)
+  })
+  .await
+  .ok()?
+  .ok()?;
+
+  (snapshot.session.session_id == session_id).then(|| (session_id, snapshot.shell_state.into()))
+}
+
+#[tauri::command]
+pub async fn create_session(request: CreateSessionRequestDto) -> CommandResult<SessionDto> {
+  let terminal_size = request.terminal_size.into_proto()?;
+  let working_directory = match (request.working_directory, request.target.is_local()) {
+    (Some(directory), _) => Some(directory),
+    (None, true) => Some(local_transport::default_working_directory()?),
+    (None, false) => None,
+  };
+  let stream = transport::connect(&request.target).await?;
+  let response = rmux_request(
+    stream,
+    &client_identity(),
+    ClientMessage::CreateSession {
+      name: None,
+      command: None,
+      working_directory,
+      terminal_size,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::client)?;
+  match response {
+    ServerMessage::SessionCreated { session } => Ok(SessionDto::new(session, request.target)),
+    response => Err(unexpected_response("session_created", &response)),
+  }
+}
+
+#[tauri::command]
+pub async fn kill_session(request: KillSessionRequestDto) -> CommandResult<()> {
+  let stream = transport::connect(&request.target).await?;
+  let response = rmux_request(
+    stream,
+    &client_identity(),
+    ClientMessage::KillSession {
+      session: request.session_id,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::client)?;
+  match response {
+    ServerMessage::Success => Ok(()),
+    response => Err(unexpected_response("success", &response)),
+  }
+}
+
+/// Gracefully replaces the local `rmuxd` process after terminating all of its
+/// sessions through its owner-only local-control endpoint.
+///
+/// It first probes the endpoint without touching the active attachment. A
+/// legacy daemon therefore returns a typed unsupported error without being
+/// detached. Only a daemon that advertises cooperative restart is detached
+/// before the destructive request, which clears any pending presentation ACK
+/// and lets the daemon drain naturally without PID signals or live-socket
+/// removal.
+#[tauri::command]
+pub async fn restart_local_daemon(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+) -> CommandResult<RestartLocalDaemonResponseDto> {
+  let daemon_restart_transition = state.daemon_restart_transition();
+  let _daemon_restart_guard = daemon_restart_transition.lock().await;
+
+  let preflight = local_transport::preflight_restart_daemon().await?;
+  if preflight.requires_attachment_detach() {
+    let window_label = window.label().to_owned();
+    let window_transition = state.window_transition(&window_label).await;
+    let _window_transition_guard = window_transition.lock().await;
+    state.detach_active_local_window(&window_label).await?;
+  }
+
+  let outcome = local_transport::restart_daemon(preflight).await?;
+  Ok(RestartLocalDaemonResponseDto {
+    terminated_sessions: outcome.terminated_sessions,
+  })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn open_attachment(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: OpenAttachmentRequestDto,
+  on_event: Channel<AttachmentEventDto>,
+  on_opening: Channel<String>,
+) -> CommandResult<OpenAttachmentResponseDto> {
+  let attachment_id = uuid::Uuid::new_v4().to_string();
+  let window_label = window.label().to_owned();
+  state
+    .open_attachment(
+      &window_label,
+      &attachment_id,
+      || {
+        on_opening
+          .send(attachment_id.clone())
+          .map_err(CommandErrorDto::backend)
+      },
+      open_reserved_attachment(
+        state.inner().clone(),
+        window_label.clone(),
+        attachment_id.clone(),
+        request,
+        on_event,
+      ),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_attachment_open(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: AttachmentRequestDto,
+) -> CommandResult<()> {
+  state
+    .cancel_opening(window.label(), &request.attachment_id)
+    .await;
+  Ok(())
+}
+
+async fn open_reserved_attachment(
+  state: AppState,
+  window_label: String,
+  attachment_id: String,
+  request: OpenAttachmentRequestDto,
+  on_event: Channel<AttachmentEventDto>,
+) -> CommandResult<OpenAttachmentResponseDto> {
+  let target = request.target.clone();
+  let root_requested = request.session.clone();
+  let terminal_size = request.terminal_size.into_proto()?;
+  let resume_from = parse_sequence(request.resume_from)?;
+  let stream = transport::connect(&target).await?;
+  let (stream, attached) = begin_attach(
+    stream,
+    &client_identity(),
+    AttachRequest {
+      session: request.session,
+      resume_from,
+      terminal_size,
+      request_input_lease: request.request_input_lease,
+      request_layout_lease: request.request_layout_lease,
+      request_command_line: false,
+      request_running_command: true,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+    },
+  )
+  .await
+  .map_err(CommandErrorDto::client)?;
+
+  let options = AttachmentControllerOptions {
+    // This bridge is paired with the GUI's xterm presenter, which always
+    // creates a renderer at the authoritative attached grid before draining
+    // queued events. An initial checkpoint still invalidates the cursor until
+    // the frontend applies and acknowledges that checkpoint.
+    renderer_starts_compatible: true,
+    // Lease buttons express the user's current intent. Automatic reacquire
+    // would immediately undo an explicit release on the next heartbeat.
+    reacquire_input_lease: false,
+    reacquire_layout_lease: false,
+    resize_after_layout_reacquire: None,
+    ..AttachmentControllerOptions::default()
+  };
+  let remote_observation = match &stream {
+    ctl_core::Transport::Ssh(stream) => {
+      stream.remote_identity.as_deref().cloned().map(|identity| {
+        crate::about::observations::RemoteObservation {
+          identity,
+          handshake: attached.handshake_info.clone(),
+          label: target.label().into(),
+          host_id: request
+            .cache_host_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix("host:"))
+            .map(str::to_owned),
+        }
+      })
+    }
+    ctl_core::Transport::Local(_) => None,
+  };
+  let (controller, control, events) =
+    AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
+  let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
+  let actor = Arc::new(
+    AttachmentActor::new(attachment_id.clone(), window_label.clone(), target, control)
+      .with_cache(rmux_client::cache::CacheIdentity {
+        host_key: request
+          .cache_host_key
+          .unwrap_or_else(|| match &request.target {
+            ConnectionTargetDto::Local => "local".into(),
+            ConnectionTargetDto::Ssh { destination, .. } => format!("ssh:{destination}"),
+          }),
+        session_id: attached.session.session_id.clone(),
+        terminal_id: attached.session.terminal_id.clone(),
+        name: attached.session.name.clone(),
+        terminal_size: attached.session.terminal_size.clone(),
+        primary: root_requested == attached.session.session_id,
+      })
+      .with_remote_observation(remote_observation),
+  );
+  state
+    .activate(&window_label, &attachment_id, Arc::clone(&actor))
+    .await?;
+
+  tauri::async_runtime::spawn(forward_attachment_events(
+    state,
+    actor,
+    events,
+    on_event,
+    controller.run(),
+  ));
+  Ok(response)
+}
+
+#[tauri::command]
+pub async fn send_input(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: SendInputRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let data = decode_input(&request.data_base64)?;
+  actor
+    .control
+    .input(data)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn resize_attachment(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: ResizeAttachmentRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  let terminal_size = request.terminal_size.into_proto()?;
+  actor
+    .control
+    .resize(terminal_size)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn acquire_attachment_lease(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: AttachmentLeaseRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  actor
+    .control
+    .acquire_lease(request.lease.into())
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn release_attachment_lease(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: AttachmentLeaseRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  actor
+    .control
+    .release_lease(request.lease.into())
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn acknowledge_attachment_event(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: AcknowledgeAttachmentEventRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  actor.acknowledge(&request.event_id).await
+}
+
+#[tauri::command]
+pub async fn detach_attachment(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: AttachmentRequestDto,
+) -> CommandResult<()> {
+  let transition = state.window_transition(window.label()).await;
+  let _transition_guard = transition.lock().await;
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  actor.detach_and_wait().await
+}
+
+fn client_identity() -> ClientIdentity {
+  ClientIdentity {
+    name: CLIENT_NAME.into(),
+    version: CLIENT_VERSION.into(),
+  }
+}
+
+fn unexpected_response(expected: &str, _actual: &ServerMessage) -> CommandErrorDto {
+  CommandErrorDto::new(
+    "unexpected_rmux_response",
+    format!("expected {expected}, received another response type"),
+  )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::dto::{ConnectionTargetDto, TerminalSizeDto};
+
+  /// Exercises the public command functions invoked by Tauri without a
+  /// `WebView`. The caller supplies an OpenSSH destination and may supply the
+  /// structured settings used by app-local hosts. Authentication and host
+  /// verification remain owned by OpenSSH.
+  #[tokio::test]
+  #[ignore = "requires RMUX_TEST_SSH_TARGET and a live ctl-agent SSH endpoint"]
+  async fn creates_lists_attaches_and_kills_a_session_over_ssh() {
+    let destination = std::env::var("RMUX_TEST_SSH_TARGET")
+      .expect("set RMUX_TEST_SSH_TARGET to an OpenSSH destination");
+    let target = ConnectionTargetDto::Ssh {
+      ssh_config_alias: None,
+      use_ssh_config_master: None,
+      remote_info: None,
+      destination,
+      hostname: std::env::var("RMUX_TEST_SSH_HOSTNAME").ok(),
+      user: std::env::var("RMUX_TEST_SSH_USER").ok(),
+      port: std::env::var("RMUX_TEST_SSH_PORT")
+        .ok()
+        .map(|port| port.parse().expect("RMUX_TEST_SSH_PORT must be a u16")),
+      identity_file: std::env::var("RMUX_TEST_SSH_IDENTITY_FILE").ok(),
+      gateway_route: Vec::new(),
+      vpn_connection_id: None,
+      gateways: Box::default(),
+    };
+    let created = create_session(CreateSessionRequestDto {
+      target: target.clone(),
+      working_directory: None,
+      terminal_size: TerminalSizeDto {
+        columns: 80,
+        rows: 24,
+        pixel_width: None,
+        pixel_height: None,
+      },
+    })
+    .await
+    .expect("create remote session");
+
+    assert_eq!(created.target, target);
+    let listed = list_sessions(TargetRequestDto {
+      target: target.clone(),
+    })
+    .await
+    .expect("list remote sessions");
+    assert!(
+      listed
+        .sessions
+        .iter()
+        .any(|session| session.session_id == created.session_id)
+    );
+
+    let stream = transport::connect(&target)
+      .await
+      .expect("open remote attachment transport");
+    let (_stream, attached) = begin_attach(
+      stream,
+      &client_identity(),
+      AttachRequest {
+        session: created.session_id.clone(),
+        resume_from: None,
+        terminal_size: rmux_proto::TerminalSize::default(),
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line: false,
+        request_running_command: true,
+        presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+      },
+    )
+    .await
+    .expect("attach to remote session");
+    assert_eq!(attached.session.session_id, created.session_id);
+
+    kill_session(KillSessionRequestDto {
+      target,
+      session_id: created.session_id,
+    })
+    .await
+    .expect("kill remote session");
+  }
+}

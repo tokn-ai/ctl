@@ -6,8 +6,7 @@ use rmux_client::{
 };
 use rmux_ipc::Stream;
 use rmux_proto::{
-  ClientMessage, CodecError, CommandSpec, ErrorCode, PromptPhase, ServerMessage, SessionInfo,
-  ShellType, TuiHint,
+  ClientMessage, CodecError, ErrorCode, PromptPhase, ServerMessage, SessionInfo, ShellType, TuiHint,
 };
 use std::error::Error;
 use std::future::Future;
@@ -36,6 +35,9 @@ pub trait Connector {
   fn is_retryable(&self, error: &Self::Error) -> bool;
   fn is_local(&self) -> bool;
   fn label(&self) -> &str;
+  fn archive_key(&self) -> String {
+    self.label().to_owned()
+  }
   fn connection_kind(&self) -> &'static str;
   fn client_name(&self) -> &'static str;
   fn status_prefix(&self) -> &'static str;
@@ -74,6 +76,10 @@ impl Connector for LocalConnector {
     "local"
   }
 
+  fn archive_key(&self) -> String {
+    self.socket_path.to_string_lossy().into_owned()
+  }
+
   fn connection_kind(&self) -> &'static str {
     "local"
   }
@@ -98,18 +104,85 @@ where
   C: Connector,
 {
   match command {
-    Command::New { name, cwd, command } => {
-      create_session(connector, name, command_spec(command), cwd).await
+    Command::New {
+      name,
+      cwd,
+      command,
+      attach_if_exists,
+      ..
+    } => {
+      let session = new_session(connector, name, command, cwd, attach_if_exists).await?;
+      println!("{}\t{}", session.session_id, session.name);
+      Ok(())
+    }
+    Command::View { session } => show_view(connector, ClientMessage::GetView { session }).await,
+    Command::Split {
+      terminal_id,
+      vertical,
+      cwd,
+      command,
+    } => {
+      show_view(
+        connector,
+        ClientMessage::SplitTerminal {
+          terminal_id,
+          axis: if vertical {
+            rmux_proto::SplitAxis::Vertical
+          } else {
+            rmux_proto::SplitAxis::Horizontal
+          },
+          command: command_spec(command),
+          working_directory: cwd,
+          terminal_size: current_terminal_size(),
+        },
+      )
+      .await
+    }
+    Command::Promote { terminal_id, name } => {
+      show_view(
+        connector,
+        ClientMessage::PromoteTerminal { terminal_id, name },
+      )
+      .await
+    }
+    Command::Merge {
+      source,
+      destination,
+    } => {
+      show_view(
+        connector,
+        ClientMessage::MergeSessions {
+          source,
+          destination,
+        },
+      )
+      .await
+    }
+    Command::KillTerminal { terminal_id } => {
+      match target_request(connector, ClientMessage::KillTerminal { terminal_id }).await? {
+        ServerMessage::Success => Ok(()),
+        response => Err(unexpected("success", &response)),
+      }
     }
     Command::List => list_sessions(connector).await,
+    Command::Archives => show_archives(None),
+    Command::Archive { session_id } => show_archives(Some(&session_id)),
     Command::State { session } => show_shell_state(connector, &session).await,
     Command::Attach {
       session,
       resume_from,
       read_only,
       resize,
-    } => attach_session(connector, &session, resume_from, !read_only, resize).await,
-    Command::Kill { session } => kill_session(connector, &session).await,
+      target,
+      ..
+    } => {
+      let session = resolve_session(connector, target.or(session)).await?;
+      attach_session(connector, &session, resume_from, !read_only, resize).await
+    }
+    Command::Kill { session, target } => {
+      let session = target.or(session).ok_or(CommandError::MissingSession)?;
+      kill_session(connector, &session).await
+    }
     Command::Shell {
       command: ShellCommand::Init { shell: shell_kind },
     } => {
@@ -119,31 +192,104 @@ where
   }
 }
 
-async fn create_session<C: Connector>(
+async fn show_view<C: Connector>(
+  connector: &C,
+  message: ClientMessage,
+) -> Result<(), CommandError> {
+  match target_request(connector, message).await? {
+    ServerMessage::ViewSnapshot { view } => {
+      println!(
+        "{}",
+        serde_json::to_string_pretty(&view).expect("view serialization")
+      );
+      Ok(())
+    }
+    response => Err(unexpected("view_snapshot", &response)),
+  }
+}
+
+/// Create a session, or reuse an exact name when requested.
+///
+/// # Errors
+/// Returns transport, protocol, or working-directory errors.
+pub async fn new_session<C: Connector>(
   connector: &C,
   name: Option<String>,
-  command: Option<CommandSpec>,
+  command: Vec<String>,
   working_directory: Option<String>,
-) -> Result<(), CommandError> {
+  attach_if_exists: bool,
+) -> Result<SessionInfo, CommandError> {
   let working_directory = target_working_directory(connector, working_directory)?;
   let response = target_request(
     connector,
     ClientMessage::CreateSession {
-      name,
-      command,
+      name: name.clone(),
+      command: command_spec(command),
       working_directory,
       terminal_size: current_terminal_size(),
     },
   )
-  .await?;
-
+  .await;
   match response {
-    ServerMessage::SessionCreated { session } => {
-      println!("{}\t{}", session.session_id, session.name);
-      Ok(())
+    Ok(ServerMessage::SessionCreated { session }) => Ok(session),
+    Err(
+      error @ CommandError::Protocol(ProtocolError::Server {
+        code: ErrorCode::SessionAlreadyExists,
+        ..
+      }),
+    ) if attach_if_exists => {
+      let ServerMessage::SessionList { sessions } =
+        target_request(connector, ClientMessage::ListSessions).await?
+      else {
+        return Err(error);
+      };
+      sessions
+        .into_iter()
+        .find(|session| Some(&session.name) == name.as_ref())
+        .ok_or(error)
     }
-    response => Err(unexpected("session_created", &response)),
+    Ok(response) => Err(unexpected("session_created", &response)),
+    Err(error) => Err(error),
   }
+}
+
+/// Resolve an explicit selector or choose the newest running session.
+///
+/// # Errors
+/// Returns an error when discovery fails or there are no running sessions.
+pub async fn resolve_session<C: Connector>(
+  connector: &C,
+  selected: Option<String>,
+) -> Result<String, CommandError> {
+  if let Some(selected) = selected {
+    return Ok(selected);
+  }
+  let ServerMessage::SessionList { sessions } =
+    target_request(connector, ClientMessage::ListSessions).await?
+  else {
+    return Err(CommandError::MissingSession);
+  };
+  sessions
+    .into_iter()
+    .filter(|session| session.status == rmux_proto::SessionStatus::Running)
+    .max_by_key(|session| session.created_at_ms)
+    .map(|session| session.session_id)
+    .ok_or(CommandError::MissingSession)
+}
+
+fn show_archives(id: Option<&str>) -> Result<(), CommandError> {
+  let archives = rmux_client::archive::ArchiveStore::for_client("tui")?.list()?;
+  println!("ID\tNAME\tARCHIVED_AT_MS\tEXPIRES_AT_MS");
+  for archive in archives
+    .into_iter()
+    .filter(|archive| id.is_none_or(|id| id == archive.session_id))
+  {
+    println!(
+      "{}\t{}\t{}\t{}",
+      archive.session_id, archive.name, archive.archived_at_ms, archive.expires_at_ms
+    );
+  }
+  Ok(())
 }
 
 async fn list_sessions<C: Connector>(connector: &C) -> Result<(), CommandError> {
@@ -209,6 +355,17 @@ async fn show_shell_state<C: Connector>(connector: &C, session: &str) -> Result<
 }
 
 async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), CommandError> {
+  let view = match target_request(
+    connector,
+    ClientMessage::GetView {
+      session: session.into(),
+    },
+  )
+  .await
+  {
+    Ok(ServerMessage::ViewSnapshot { view }) => Some(view),
+    _ => None,
+  };
   match target_request(
     connector,
     ClientMessage::KillSession {
@@ -217,7 +374,33 @@ async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), 
   )
   .await?
   {
-    ServerMessage::Success => Ok(()),
+    ServerMessage::Success => {
+      rmux_client::archive::ArchiveStore::for_client("tui")?.save(
+        rmux_client::archive::SessionArchive {
+          session_id: view
+            .as_ref()
+            .map_or_else(|| session.to_owned(), |view| view.session_id.clone()),
+          name: view
+            .as_ref()
+            .map_or_else(|| session.to_owned(), |view| view.session_name.clone()),
+          host_key: connector.archive_key(),
+          archived_at_ms: 0,
+          expires_at_ms: 0,
+          terminals: view.map_or_else(Vec::new, |view| {
+            view
+              .terminals
+              .into_iter()
+              .map(|terminal| rmux_client::archive::ArchivedPane {
+                terminal_id: terminal.terminal_id,
+                reason: "Session terminated".into(),
+                lines: Vec::new(),
+              })
+              .collect()
+          }),
+        },
+      )?;
+      Ok(())
+    }
     response => Err(unexpected("success", &response)),
   }
 }
@@ -230,6 +413,7 @@ async fn attach_session<C: Connector>(
   request_layout_lease: bool,
 ) -> Result<(), CommandError> {
   let identity = client_identity(connector);
+  let mut terminal_selector = session.to_owned();
   let mut resume_from = initial_resume_from;
   let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
   let mut recover_leases_after_connection_loss = false;
@@ -245,7 +429,7 @@ async fn attach_session<C: Connector>(
       Err(error) => return Err(connection_error(error)),
     };
     let request = AttachRequest {
-      session: session.into(),
+      session: terminal_selector.clone(),
       resume_from,
       terminal_size: current_terminal_size(),
       request_input_lease,
@@ -275,6 +459,7 @@ async fn attach_session<C: Connector>(
       }
       Err(error) => return Err(error.into()),
     };
+    terminal_selector = attached.session.terminal_id.clone();
     attachment_token = Some(attached.attachment_token.clone());
 
     let interactive_options = if recover_leases_after_connection_loss {
@@ -442,6 +627,10 @@ fn connection_error(error: impl Error + Send + Sync + 'static) -> CommandError {
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error("local archive failed: {0}")]
+  Archive(#[from] io::Error),
+  #[error("no running session; create one with rmux new")]
+  MissingSession,
   #[error("transport connection failed: {0}")]
   Connection(#[source] Box<dyn Error + Send + Sync>),
   #[error("could not determine the current working directory: {0}")]

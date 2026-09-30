@@ -26,7 +26,7 @@ ssh -T \
   -o PermitLocalCommand=no \
   -o RemoteCommand=none \
   -- <destination> \
-  'PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect'
+  'PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; command -v ctl-agent >/dev/null 2>&1 || { printf "ctl-ssh-nf\n"; exit 127; }; exec ctl-agent connect'
 ```
 
 With `--remote-platform windows`, the suffix is `ctl-agent.exe connect` instead
@@ -40,15 +40,20 @@ fixed service suffix:
 
 | Domain | Unix remote command | Windows remote command |
 | --- | --- | --- |
-| rmux | `PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect` | `ctl-agent.exe connect` |
-| task | `PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
+| rmux | fixed PATH setup and presence check, then `exec ctl-agent connect` | `ctl-agent.exe connect` |
+| task | fixed PATH setup and presence check, then `exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
 
 The service is an enum selected by the command domain. Neither a socket path nor
 an arbitrary service or shell command is accepted from the client.
 
 `<destination>` is an OpenSSH destination or `Host` alias. Host-key checking,
-user authentication, certificates, agents, proxy jumps, ports, and connection
-multiplexing remain OpenSSH configuration. `ctl` never disables host-key
+user authentication, certificates, agents, proxy jumps, and ports remain
+OpenSSH configuration. On Unix clients, `ctl` uses an explicit private OpenSSH
+control master owned by `ctld`. Desktop methods with **Use SSH-config master**
+enabled can instead reuse a configured master, preserving
+`ControlMaster`, `ControlPath`, and `ControlPersist`; unconfigured sharing falls
+back to a private master. This preference defaults on for SSH-config aliases
+and off for direct and Tailscale methods. `ctl` never disables host-key
 verification, enables agent forwarding, creates a forwarding, or accepts a
 user-controlled remote command.
 
@@ -63,7 +68,8 @@ same target. `task attach` first obtains the interactive session ID from taskd,
 then opens the rmux transport on that target. A remote daemon's socket path is
 metadata, never a client-side endpoint.
 
-OpenSSH may reuse a healthy configured control master. A broken SSH transport
+Background channels require the exact master selected by `ctld` and cannot
+silently open a fresh SSH connection if it disappears. A broken SSH transport
 cannot resume an existing channel. For rmux attachments, `ctl` starts a
 replacement channel and uses the `rmux-proto` attachment token described below.
 
@@ -89,6 +95,11 @@ no arbitrary local socket, forwarded address, or service outside the rmux/task
 enum. The sibling owner-only `rmuxd` maintenance endpoint is never exposed.
 Taskd accesses that endpoint locally for managed interactive-session lifecycle;
 the gateway itself cannot route to it.
+
+Before execution, the Unix wrapper checks the managed and legacy PATH. If
+`ctl-agent` is absent, it writes the fixed `ctl-ssh-nf\n` control marker to
+stdout and exits. Clients map that marker to the install flow without parsing
+localized shell diagnostics.
 
 The endpoint is a Unix socket or an owner-restricted Windows named pipe.
 Windows discovers `rmuxd.exe` or `taskd.exe` beside `ctl-agent.exe`. Auto-start

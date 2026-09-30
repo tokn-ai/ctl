@@ -21,6 +21,16 @@ Windows desktop support remains pending.
 cargo build --workspace
 ```
 
+For the tmux-style terminal UI (local sessions, including when run inside SSH):
+
+```sh
+cargo build -p rmux -p rmuxd
+cargo run -p rmux
+```
+
+Use Ctrl+B then `?` for help, `%` to split right, and `d` to detach.
+See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
+
 For the Windows local CLI and daemon slice:
 
 ```sh
@@ -38,12 +48,13 @@ cargo install --path rmux/cli
 ```
 
 For remote access, install `rmuxd`, `taskd`, and `ctl-agent` together on the
-controlled device and `ctl` on the client:
+controlled device and `ctl` with `ctld` on each Unix client:
 
 ```sh
 cargo install --path rmux/daemon
 cargo install --path task/daemon
 cargo install --path ctl/agent
+cargo install --path ctl/daemon
 cargo install --path ctl/cli
 ```
 
@@ -55,13 +66,13 @@ cargo install --path task/daemon
 cargo install --path ctl/cli
 ```
 
-The desktop app uses pnpm and Tauri 2. Build `rmuxd` into the shared Cargo
-target directory before starting it so the app can auto-start its sibling
-daemon:
+The desktop app uses pnpm and Tauri 2. Build its local daemons into the shared
+Cargo target directory before starting it so the app can auto-start the
+sibling executables:
 
 ```sh
-cargo build -p rmuxd
-cd apps/rmux
+cargo build -p ctld -p rmuxd -p taskd
+cd apps/desktop
 pnpm install
 pnpm tauri dev
 ```
@@ -79,22 +90,39 @@ pnpm agents:sync
 bundle set when exact source parity is not required.
 
 The `Desktop and remote-agent bundles` workflow builds static Linux and native
-macOS remote bundles for x86-64 and ARM64. Main-branch pushes refresh
-development bundles automatically; manual runs build remote bundles by default
-and can opt into desktop packages. Version tags build both, download all four
-remote targets into each desktop package, and stage the matching local `rmuxd`
-and `taskd` as Tauri sidecars. Release bundle IDs are semantic versions; other
-runs include the source revision so different development builds never share a
-remote install directory. Tag names must match the app version as `v<version>`.
+macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
+pushes and manual runs build both; `build_desktop=false` keeps a manual run
+remote-only, as used by `pnpm agents:sync`. Each desktop package contains all
+four remote targets and matching local `ctld`, `rmuxd`, and `taskd` helpers.
+Release bundle IDs are semantic versions; other runs include the source
+revision so different development builds never share a remote install
+directory. Tag names must match the app version as `v<version>`.
+
+Successful full builds on main or a version tag create or refresh the
+`v<version>` draft release with installers, macOS app archives, remote bundles,
+manifests, and SHA-256 checksums. Branch builds remain Actions artifacts.
+The workflow never publishes a release, preserves manually added assets and
+notes, and leaves already-published versions unchanged. Bump the app version
+to start the next draft after publishing.
+
+When Apple signing credentials are incomplete, macOS packages still build
+without signing or notarization and the draft notes identify them as unsigned.
+These builds cannot store Touch ID-protected credentials. Configured signing
+errors still fail the build rather than silently producing unsigned packages.
 
 ## Use
 
-Create a detached persistent shell in the current directory:
+Open a new persistent session in the TUI, or create one detached for scripts:
 
 ```sh
-rmux new
-rmux new --name work
+rmux
+rmux new -s work
+rmux new -As work       # attach if it exists, otherwise create
+rmux new -ds background # detached
 ```
+
+The standalone `rmux new` now attaches by default; existing scripts should add
+`-d`. The optional `rmux-tui` launcher remains available.
 
 Without `--name`, `rmuxd` assigns a short name such as `session-1`, increasing
 monotonically for that daemon lifetime. Explicit names remain available for
@@ -103,9 +131,34 @@ scripts and stable workflows.
 List and attach to sessions:
 
 ```sh
-rmux list
-rmux attach work
+rmux ls
+rmux attach -t work
 ```
+
+A session is a listed root bound to a server-owned view. Each view owns one or
+more terminals with independent PTYs and histories. Inspect its layout and use
+the returned terminal IDs to split, promote, attach, or terminate a pane:
+
+```sh
+rmux view work
+rmux split <terminal-id>            # side by side
+rmux split <terminal-id> --vertical # stacked
+rmux attach <terminal-id>
+rmux promote <terminal-id> --name scratch
+rmux merge scratch work
+rmux kill-terminal <terminal-id>
+```
+
+Splitting inherits the source terminal's known cwd unless `--cwd` is supplied.
+Promotion and merging preserve terminal IDs, processes, history, and existing
+attachments. `rmux list` shows roots only; `rmux kill work` terminates every
+terminal in that root. These commands also work through `ctl rmux`.
+
+The desktop renders the server layout with **Split right**, **Split below**,
+**Move to new session**, and **Terminate pane** controls. Its merge selector
+combines remembered sessions on the same host. Protocol version 10 requires
+updating both the client and daemon; existing version 9 daemons are not migrated
+while running.
 
 On macOS and Linux, `rmuxd` observes the managed shell's physical cwd and
 foreground job on a background worker, including while detached. The reusable
@@ -138,11 +191,11 @@ deliberately leaves it redacted.
 That redaction applies to shell metadata; normal terminal echo remains part of
 the raw terminal stream seen by attached viewers.
 
-Press `Ctrl-]` to detach without terminating the shell. End the session
-explicitly with:
+Press `Ctrl+B`, then `d` to detach without terminating the shell. Use
+`Ctrl+B`, then `?` for TUI shortcuts. End the session explicitly with:
 
 ```sh
-rmux kill work
+rmux kill-session -t work
 ```
 
 The first normal attachment claims an unheld input lease, so another normal
@@ -153,11 +206,15 @@ explicitly with:
 rmux attach work --read-only
 ```
 
-Attaching never changes the existing PTY size. To deliberately claim layout
-ownership and resize it once to the current terminal, use:
+The TUI requests the shared view resize lease and fits the canvas when available.
+Use uppercase `I` and `R` after the prefix to take or release input and resize
+ownership. Read-only attachment requests neither lease.
+
+For the original single-terminal presenter, use `--raw`. It detaches with
+Ctrl+] and resizes only with an explicit `--resize` request:
 
 ```sh
-rmux attach work --resize
+rmux attach --raw work --resize
 ```
 
 The client starts a per-user `rmuxd` on demand. The daemon owns the PTY and
@@ -174,20 +231,60 @@ remote sessions, automatically reconnecting the selected local tab on startup.
 Remote hosts stay disconnected until explicitly opened; **Connect host** resumes
 that host's selected tab, or its first open tab. **Add existing session**
 explicitly discovers one host's inventory and remembers only chosen entries;
-opening a session connects on demand. Its **+ Host** picker discovers concrete
-aliases from the user's OpenSSH config without connecting to them; selecting
-one makes it an active target. A new hostname can be saved as a reusable,
-managed OpenSSH `Host` block or as structured app-local connection settings.
-The app records the remote environment ID and installed agent/bundle version.
+opening a session connects on demand. A host is a named machine, independent
+of its IP address, hostname, or gateway route. Each host supports one remote
+account/environment and multiple named connection methods. **Add host** asks
+for the SSH address, a display name, and authentication, then verifies the
+connection and automatically saves the named host to `~/.tokn/rmux/hosts.json`.
+New addresses start with a method named `SSH`; saved aliases retain their `SSH config` method.
+Additional methods and gateway routes are
+available in **Host settings**. New-host creation does not modify OpenSSH config.
+
+Concrete aliases from `~/.ssh/config` and its `Include` files are available in
+**Connect host** and session pickers. They appear in the sidebar after connecting;
+aliases with remembered work remain visible after restart. Connecting to an
+alias does not import its definition. Saving a
+customization in **Host settings** creates a saved host with the same identity.
+Aliases already represented by a saved method are hidden unless their projected
+identity still has workspace references. **Host settings** lets you rename the
+machine or methods, add or edit methods, choose the preferred method, and
+explicitly **Connect using** another method. New direct methods can optionally
+export a managed OpenSSH config entry with **Also save to OpenSSH config**.
+**Connect host**, **New shell**, and **Add existing session** start connecting immediately
+when the host has one method. Hosts with several methods show a picker with the
+preferred method selected by default. Choosing another method connects through
+it without changing the preference; **Connect using** starts its named method
+directly. Failures never select another method automatically.
+Saving settings leaves existing session transports unchanged
+until an explicit connection. Session, tab, and port references retain the same
+host ID through these changes. Workspace schema 8 moves existing saved hosts and
+gateways into `hosts.json`, preserving their IDs and a backup of the workspace.
+
+Online devices from the installed Tailscale client appear separately as **Tailscale · Virtual**
+in Add host, Connect host, New shell, and Add existing session. Discovery runs in
+the background and leaves definitions in memory until customized or explicitly
+saved. Unused devices stay out of the main sidebar. Device Online/Offline is a
+Tailscale observation; the host's Connected status still means authenticated SSH.
+Opening Add host refreshes discovery, hiding stale device suggestions until it
+finishes; Refresh sessions also refreshes discovery. Saved hosts and remembered
+work remain available when devices go offline. Saved Tailscale methods retain
+a stable device binding across name/address changes and preserve the host's account
+identity. Connections use the existing SSH authentication flow.
+
+The client can be installed as a macOS app without adding it to `PATH`: rmux checks
+`/Applications/Tailscale.app` and `~/Applications/Tailscale.app`, as well as CLI
+locations, and forces CLI mode when invoking the app executable. Discovery does
+not install, sign in to, or reconfigure Tailscale.
+
+The app records the host's remote environment ID and installed agent/bundle version.
 The remote stores its ID in `~/.tokn/ctl/remote-id`; installed bundles live under
 `~/.tokn/ctl/versions`, with `~/.tokn/ctl/current` selecting the active bundle.
-Connecting through another IP, hostname, or SSH alias with the same ID
-automatically updates the saved address and recovers its existing sessions and
-tabs. Hover over a host chip to see its last observed version and remote ID.
+Every method on a host must reach that same environment. Hosts are never merged
+automatically because their remote IDs match. Hover over a host heading to see
+its last observed version and remote ID.
 An older agent offers **Update remote components** before identity discovery.
-Add Host uses the command-palette overlay for host, name, authentication, and
-storage prompts, with connection verification before saving. The same overlay
-handles destructive close/restart confirmations and **New Shell** input.
+Authentication uses the command-palette overlay, which also handles destructive
+close/restart confirmations and **New Shell** input.
 **New Shell** asks for a host (Local first) and an optional working directory;
 blank uses that host's home directory. Escape cancels before creation starts,
 and progress/errors stay in the overlay. If `ctl-agent` is absent, the app can
@@ -198,7 +295,8 @@ time limit while bytes continue advancing; a speed-aware stall watchdog replaces
 the old three-minute installation deadline. Authentication prompts pause that
 watchdog, and Escape cancels the installation.
 Each row and tab carries its host; create, attach, reconnect, and kill
-operations always use that session's original target.
+operations use that host's selected connection method without changing session
+identity.
 It renders one terminal pane and exposes input and layout ownership separately.
 Selecting a session does not resize its PTY. **Resize with window** explicitly
 acquires layout ownership and continuously matches the PTY to the window;
@@ -206,7 +304,7 @@ turning it off releases layout ownership. A session created in the GUI starts
 with this mode enabled because that window establishes its initial layout.
 GUI-created shells receive a daemon-assigned name. **Disconnect** closes the
 active tab and detaches its view while leaving the daemon-owned shell running;
-**Close** explicitly terminates the session for every attached client. Closing
+**Terminate session** explicitly terminates the session for every attached client. Closing
 the app itself detaches its active view and does not terminate any sessions.
 **Remove from workspace** forgets an entry without killing its shell. See
 [workspace persistence](docs/rmux-workspace.md) for disk storage and migration.
@@ -235,11 +333,12 @@ retains its standard meaning and quits the app without terminating sessions.
 
 ```sh
 rmux list
-rmux new --name development
-rmux attach development
+rmux new -ds development
+rmux attach -t development
 ```
 
-`ctl rmux` reuses that exact command surface through ctl's selected target.
+`ctl rmux` shares command parsing through ctl's selected target, retaining
+detached creation and the single-terminal presenter for local and SSH transports.
 The target is local by default; no SSH process or `ctl-agent` helper is involved:
 
 ```sh
@@ -249,9 +348,10 @@ ctl rmux attach development
 
 Pass global `--host`/`-H` to redirect the same rmux command through SSH. The
 value is an ordinary OpenSSH destination or `~/.ssh/config` host alias. Unix
-clients first add the app-managed per-user installation to the fixed remote
-command's `PATH`, then fall back to the remote account's ordinary non-interactive
-`PATH`:
+clients ask the per-user `ctld` to establish or reuse an authenticated OpenSSH
+control master, then add the app-managed per-user installation to the fixed
+remote command's `PATH` before falling back to the remote account's ordinary
+non-interactive `PATH`:
 
 ```sh
 ctl --host workstation rmux list
@@ -264,6 +364,32 @@ the SSH channel to the same user's fixed local `rmuxd` endpoint. After an
 unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
 the logical attachment and its leases for 30 seconds by default. An explicit
 `Ctrl-]` detach releases them immediately.
+
+## Managed VPN
+
+Manage local OpenConnect and Tailscale containers through `ctld` using the `ctl` CLI:
+
+```sh
+ctl vpn start --env-file .env
+ctl vpn start-tailscale --id my-tailnet
+ctl vpn status
+ctl vpn stop VPN_ID
+```
+
+Tailscale prints a browser sign-in link when needed. Reuse the same `--id` to
+retain its device identity and login. Add `--hostname NAME` to name the device or
+`--accept-routes` to use advertised subnet routes.
+
+Status prints a table of VPN IDs, providers, states, servers, usernames, and randomly
+allocated loopback SOCKS5 endpoints. Multiple VPNs can run independently. Use the
+ID from the table to stop one; an untargeted stop requires at most one active VPN.
+Add `--json` for scripts. Start launches `ctld`
+if needed. Stop leaves `ctld` running, and
+the container also exits when `ctld` exits. See the
+[OpenConnect setup](docker/openconnect/README.md) for building the image and
+configuring the private env file, or the [Tailscale guide](docker/tailscale/README.md)
+for browser sign-in and persistent container state. The desktop VPN page manages
+both providers through saved JSON profiles.
 
 ## Managed tasks
 
@@ -389,3 +515,16 @@ The SSH gateway is named `ctl-agent` (`ctl-agent.exe` on Windows), reflecting
 its per-connection lifetime. When upgrading from the former gateway name,
 update the client, remote executable, and any SSH forced-command configuration
 together. The `ctl-ssh-v1` transport marker and rmux wire protocol are unchanged.
+
+### Exited sessions
+
+The desktop and TUI retain final terminal output after an exit or confirmed
+missing-session response. Press a key to dismiss the ended pane or session;
+transport outages continue to reconnect.
+
+Dismissed and deleted sessions are stored on the client device for seven days.
+Archives contain locally retained text; they remain available when the host is
+offline, and do not revive a process. Open **Archived** in the desktop Sessions
+sidebar, use **Ctrl+B A** in the TUI, or run `rmux archives` followed by
+`rmux archive SESSION_ID`. Desktop and TUI maintain separate local archives.
+No archive protocol or daemon upgrade is required.

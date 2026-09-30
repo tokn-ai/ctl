@@ -85,7 +85,9 @@ pub async fn attach_session<C: rmux_cli::Connector>(
 ) -> Result<(), CommandError> {
   rmux_cli::run(
     rmux_cli::Command::Attach {
-      session,
+      session: Some(session),
+      target: None,
+      raw: true,
       resume_from: None,
       read_only: false,
       resize: true,

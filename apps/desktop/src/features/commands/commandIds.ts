@@ -1,0 +1,45 @@
+export const COMMAND_IDS = {
+  about: "app.about",
+  credentials: "app.credentials",
+  showPalette: "view.show_command_palette",
+  showNotifications: "view.show_notifications",
+  recoverSessionComponents: "session.recover_components",
+  refreshTasks: "task.refresh",
+  openTask: "task.open",
+  addHost: "host.add",
+  addRoutedHost: "host.add_with_gateways",
+  addExistingSession: "session.add_existing",
+  forgetSession: "session.forget",
+  newShell: "session.new_shell",
+  newTab: "tab.new_shell_here",
+  refreshSessions: "session.refresh",
+  nextTab: "tab.next",
+  previousTab: "tab.previous",
+  disconnect: "session.disconnect",
+  close: "session.close",
+  toggleInput: "terminal.toggle_input",
+  toggleResize: "terminal.toggle_resize_with_window",
+  reconnect: "terminal.reconnect",
+  focus: "terminal.focus",
+  restartDaemon: "daemon.restart",
+  restartTaskDaemon: "taskd.restart",
+  selectSession: "session.select",
+  connectHost: "host.connect",
+  configureHost: "host.settings",
+  removeHost: "host.remove",
+  managePortForwards: "host.port_forwarding",
+  saveWorkspace: "workspace.save",
+  configureKeybindings: "settings.configure_keybindings",
+  reloadKeybindings: "settings.reload_keybindings",
+} as const;
+
+export const QUICK_INPUT_IDS = {
+  accept: "quick_input.accept",
+  cancel: "quick_input.cancel",
+  back: "quick_input.back",
+} as const;
+
+export const CONFIGURABLE_COMMAND_IDS: readonly string[] = [
+  ...Object.values(COMMAND_IDS),
+  ...Object.values(QUICK_INPUT_IDS),
+];

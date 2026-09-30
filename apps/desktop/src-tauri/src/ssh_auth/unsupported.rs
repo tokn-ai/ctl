@@ -1,0 +1,155 @@
+//! Keep non-Unix builds usable with preconfigured, noninteractive OpenSSH.
+#[path = "unsupported_broker.rs"]
+mod broker;
+#[path = "commands.rs"]
+pub mod commands;
+#[path = "verification.rs"]
+mod verification;
+
+use crate::dto::ConnectionTargetDto;
+use crate::error::{CommandErrorDto, CommandResult};
+use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
+use serde::Serialize;
+use tauri::ipc::Channel;
+
+#[derive(Clone, Serialize)]
+pub struct SshPromptDto {}
+
+pub(crate) async fn existing_master(
+  _target: &ConnectionTargetDto,
+) -> CommandResult<std::path::PathBuf> {
+  Err(CommandErrorDto::new(
+    "ssh_maintenance_unsupported",
+    "Remote component actions require an existing SSH master on macOS or Linux.",
+  ))
+}
+
+/// This platform does not use the Unix askpass helper.
+#[must_use]
+pub fn helper_exit_code() -> Option<i32> {
+  None
+}
+
+pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
+  connect_identified(target).await.map(|(stream, _)| stream)
+}
+
+async fn connect_identified(
+  target: &ConnectionTargetDto,
+) -> CommandResult<(Transport, ctl_proto::RemoteIdentity)> {
+  if matches!(
+    target,
+    ConnectionTargetDto::Ssh {
+      use_ssh_config_master: Some(_),
+      ..
+    }
+  ) {
+    return Err(CommandErrorDto::new(
+      "ssh_master_selection_unsupported",
+      "SSH master selection currently requires macOS or Linux.",
+    ));
+  }
+  let ConnectionTarget::Ssh {
+    destination,
+    options,
+  } = target.to_core()
+  else {
+    return Err(CommandErrorDto::new(
+      "invalid_ssh_target",
+      "Select a remote SSH host.",
+    ));
+  };
+  let stream = open_identified_ssh_service(
+    &destination,
+    &options,
+    &SshInteraction::Batch,
+    ctl_core::RemoteService::Rmux,
+  )
+  .await
+  .map_err(|error| CommandErrorDto::transport(&error))?;
+  let identity = stream
+    .remote_identity
+    .as_deref()
+    .expect("identified transport")
+    .clone();
+  target.verify_remote_identity(&identity)?;
+  Ok((Transport::Ssh(stream), identity))
+}
+
+pub async fn probe(
+  _app: tauri::AppHandle,
+  _window: String,
+  _attempt_id: String,
+  target: ConnectionTargetDto,
+  _channel: Channel<SshPromptDto>,
+  _restart_check: bool,
+) -> CommandResult<ctl_proto::RemoteIdentity> {
+  tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let (stream, identity) = connect_identified(&target).await?;
+    verification::verify(stream).await?;
+    Ok(identity)
+  })
+  .await
+  .map_err(|_| CommandErrorDto::new("ssh_timeout", "SSH connection timed out."))?
+}
+
+pub async fn install_agent(
+  _app: tauri::AppHandle,
+  _window: String,
+  _attempt_id: String,
+  _target: ConnectionTargetDto,
+  _channel: Channel<SshPromptDto>,
+  _on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
+) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
+  Err(CommandErrorDto::new(
+    "remote_agent_install_unsupported",
+    "Remote component installation currently requires macOS or Linux.",
+  ))
+}
+
+pub fn respond(
+  _window: &str,
+  _attempt_id: &str,
+  _prompt_id: &str,
+  _response: Option<String>,
+) -> CommandResult<()> {
+  Err(CommandErrorDto::new(
+    "ssh_prompt_unsupported",
+    "Interactive SSH prompts currently require macOS or Linux.",
+  ))
+}
+
+pub fn cancel(_window: &str, _attempt_id: &str) {}
+pub fn cancel_window(_window: &str) {}
+pub async fn forget(_target: &ConnectionTargetDto) -> CommandResult<()> {
+  Ok(())
+}
+
+pub fn disconnect(_targets: &[ConnectionTargetDto]) -> std::future::Ready<CommandResult<()>> {
+  broker::unsupported()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn explicit_master_selections_are_rejected_before_opening_ssh() {
+    for policy in [false, true] {
+      let target = serde_json::from_value(serde_json::json!({
+        "kind": "ssh",
+        "destination": "office",
+        "use_ssh_config_master": policy,
+      }))
+      .unwrap();
+      let Err(error) = connect_identified(&target).await else {
+        panic!("unsupported master selection opened a connection")
+      };
+      assert_eq!(error.code, "ssh_master_selection_unsupported");
+      assert_eq!(
+        error.message,
+        "SSH master selection currently requires macOS or Linux.",
+      );
+    }
+  }
+}

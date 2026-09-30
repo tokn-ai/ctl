@@ -106,8 +106,9 @@ async fn run_install_command(
   let stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
   let write = async move {
-    stdin.write_all(archive).await?;
-    stdin.shutdown().await
+    let result = stdin.write_all(archive).await;
+    drop(stdin);
+    result
   };
   let (write, progress, stderr, status) = tokio::join!(
     write,

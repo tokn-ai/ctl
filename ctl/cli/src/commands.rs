@@ -1,7 +1,7 @@
 use super::{Arguments, Command, RemotePlatform};
 use ctl_core::{
   ConnectionTarget, CoreError, TaskTransport, Transport, is_retryable_connection_error,
-  open_task_transport, open_transport,
+  open_task_transport_with_interaction, open_transport_with_interaction,
 };
 use rmux_cli::{CommandError, ConnectFuture, Connector};
 use std::path::PathBuf;
@@ -37,6 +37,12 @@ pub async fn run(arguments: Arguments) -> Result<(), CliError> {
     Command::Task { command } => {
       task_cli::run_with_connector(command, &connector).await?;
     }
+    Command::Vpn { command } => {
+      if !connector.target.is_local() {
+        return Err(CliError::RemoteVpnUnsupported);
+      }
+      crate::vpn::run(command).await?;
+    }
   }
   Ok(())
 }
@@ -60,10 +66,15 @@ impl CtlConnector {
 
 impl task_cli::Connector for CtlConnector {
   type Stream = TaskTransport;
-  type Error = CoreError;
+  type Error = CtlConnectError;
 
-  fn connect_task(&self) -> task_cli::ConnectFuture<'_, TaskTransport, CoreError> {
-    Box::pin(open_task_transport(&self.target))
+  fn connect_task(&self) -> task_cli::ConnectFuture<'_, TaskTransport, CtlConnectError> {
+    Box::pin(async {
+      let interaction = ssh_interaction(&self.target).await?;
+      open_task_transport_with_interaction(&self.target, &interaction)
+        .await
+        .map_err(Into::into)
+    })
   }
 
   fn is_local_task_target(&self) -> bool {
@@ -82,14 +93,19 @@ impl task_cli::Connector for CtlConnector {
 
 impl Connector for CtlConnector {
   type Stream = Transport;
-  type Error = CoreError;
+  type Error = CtlConnectError;
 
-  fn connect(&self) -> ConnectFuture<'_, Transport, CoreError> {
-    Box::pin(open_transport(&self.target))
+  fn connect(&self) -> ConnectFuture<'_, Transport, CtlConnectError> {
+    Box::pin(async {
+      let interaction = ssh_interaction(&self.target).await?;
+      open_transport_with_interaction(&self.target, &interaction)
+        .await
+        .map_err(Into::into)
+    })
   }
 
-  fn is_retryable(&self, error: &CoreError) -> bool {
-    is_retryable_connection_error(error)
+  fn is_retryable(&self, error: &CtlConnectError) -> bool {
+    matches!(error, CtlConnectError::Core(error) if is_retryable_connection_error(error))
   }
 
   fn is_local(&self) -> bool {
@@ -117,8 +133,60 @@ impl Connector for CtlConnector {
   }
 }
 
+#[cfg(unix)]
+async fn ssh_interaction(
+  target: &ConnectionTarget,
+) -> Result<ctl_core::SshInteraction, CtlConnectError> {
+  let ConnectionTarget::Ssh {
+    destination,
+    options,
+  } = target
+  else {
+    return Ok(ctl_core::SshInteraction::Inherit);
+  };
+  let control_path = crate::ssh_broker::ensure_master(daemon_target(destination, options)).await?;
+  Ok(ctl_core::SshInteraction::Multiplexed { control_path })
+}
+
+#[cfg(unix)]
+fn daemon_target(
+  destination: &str,
+  options: &ctl_core::SshConnectionOptions,
+) -> ctld_ipc::SshTarget {
+  ctld_ipc::SshTarget {
+    destination: destination.to_owned(),
+    ssh_config_alias: None,
+    use_ssh_config_master: None,
+    hostname: options.hostname.clone(),
+    user: options.user.clone(),
+    port: options.port,
+    identity_file: options.identity_file.clone(),
+    gateways: Vec::new(),
+  }
+}
+
+#[cfg(not(unix))]
+async fn ssh_interaction(
+  _target: &ConnectionTarget,
+) -> Result<ctl_core::SshInteraction, CtlConnectError> {
+  Ok(ctl_core::SshInteraction::Inherit)
+}
+
+#[derive(Debug, Error)]
+enum CtlConnectError {
+  #[error(transparent)]
+  Core(#[from] CoreError),
+  #[cfg(unix)]
+  #[error(transparent)]
+  Broker(#[from] crate::ssh_broker::Error),
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error("VPN management is only supported locally; omit --host")]
+  RemoteVpnUnsupported,
+  #[error(transparent)]
+  Vpn(#[from] crate::vpn::Error),
   #[error("taskd restart is only supported locally; run it on the task host")]
   RemoteTaskDaemonRestartUnsupported,
   #[error(transparent)]
@@ -134,6 +202,20 @@ mod tests {
   use super::*;
 
   #[tokio::test]
+  async fn remote_vpn_commands_are_rejected_before_connecting() {
+    use clap::Parser;
+
+    for action in ["start", "status", "stop"] {
+      let arguments =
+        Arguments::try_parse_from(["ctl", "--host", "vpn-server", "vpn", action]).unwrap();
+      assert!(matches!(
+        run(arguments).await,
+        Err(CliError::RemoteVpnUnsupported)
+      ));
+    }
+  }
+
+  #[tokio::test]
   async fn remote_daemon_restart_is_rejected_before_connecting() {
     use clap::Parser;
     let arguments =
@@ -142,6 +224,37 @@ mod tests {
       run(arguments).await,
       Err(CliError::RemoteTaskDaemonRestartUnsupported)
     ));
+  }
+
+  #[test]
+  #[cfg(unix)]
+  fn unix_broker_target_preserves_fixed_connection_options() {
+    let target = ConnectionTarget::ssh_with_options(
+      "work",
+      ctl_core::SshConnectionOptions {
+        remote_platform: ctl_core::RemotePlatform::Unix,
+        hostname: Some("example.test".into()),
+        user: Some("alice".into()),
+        port: Some(2222),
+        identity_file: Some(PathBuf::from("/keys/work")),
+        gateways: Vec::new(),
+      },
+    );
+    let ConnectionTarget::Ssh {
+      destination,
+      options,
+    } = &target
+    else {
+      unreachable!();
+    };
+    let broker = daemon_target(destination, options);
+
+    assert_eq!(broker.destination, "work");
+    assert_eq!(broker.ssh_config_alias, None);
+    assert_eq!(broker.hostname.as_deref(), Some("example.test"));
+    assert_eq!(broker.user.as_deref(), Some("alice"));
+    assert_eq!(broker.port, Some(2222));
+    assert_eq!(broker.identity_file, Some(PathBuf::from("/keys/work")));
   }
 
   #[test]
@@ -154,6 +267,7 @@ mod tests {
         user: Some("task-user".into()),
         port: Some(2222),
         identity_file: Some(PathBuf::from("task-key")),
+        gateways: Vec::new(),
       },
     );
     let connector = CtlConnector {

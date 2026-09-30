@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+mod layout;
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 12;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
 ///
@@ -54,7 +55,7 @@ pub enum LeaseKind {
 /// Lease state as observed by one attached client.
 ///
 /// The daemon deliberately does not expose another attachment's identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseStatus {
   pub held: bool,
   pub owned_by_client: bool,
@@ -397,12 +398,96 @@ pub enum SessionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
+  /// Server-owned view bound exclusively to this root session.
+  pub view_id: String,
+  /// Terminal represented by the size and sequence fields below.
+  pub terminal_id: String,
   pub session_id: String,
   pub name: String,
   pub status: SessionStatus,
   pub created_at_ms: u64,
   pub next_sequence: u64,
   pub terminal_size: TerminalSize,
+}
+
+/// A server-owned composition. Every terminal occurs exactly once in its layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewInfo {
+  pub session_name: String,
+  pub view_id: String,
+  pub session_id: String,
+  pub revision: u64,
+  pub canvas_size: TerminalSize,
+  pub panes: Vec<PaneGeometry>,
+  pub layout: ViewLayout,
+  pub terminals: Vec<TerminalInfo>,
+}
+
+/// Cell coordinates within a view. Split dividers occupy one unallocated cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneGeometry {
+  pub terminal_id: String,
+  pub left: u16,
+  pub top: u16,
+  pub columns: u16,
+  pub rows: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInfo {
+  pub terminal_id: String,
+  pub name: String,
+  pub created_at_ms: u64,
+  pub next_sequence: u64,
+  pub terminal_size: TerminalSize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitAxis {
+  Horizontal,
+  Vertical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", from = "LegacyViewLayout")]
+pub enum ViewLayout {
+  Terminal {
+    terminal_id: String,
+  },
+  Split {
+    axis: SplitAxis,
+    children: Vec<ViewLayout>,
+  },
+}
+
+// Decode old tab groups as splits, preserving every terminal and child order.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LegacyViewLayout {
+  Terminal {
+    terminal_id: String,
+  },
+  Split {
+    axis: SplitAxis,
+    children: Vec<ViewLayout>,
+  },
+  Tabs {
+    children: Vec<ViewLayout>,
+  },
+}
+
+impl From<LegacyViewLayout> for ViewLayout {
+  fn from(layout: LegacyViewLayout) -> Self {
+    match layout {
+      LegacyViewLayout::Terminal { terminal_id } => Self::Terminal { terminal_id },
+      LegacyViewLayout::Split { axis, children } => Self::Split { axis, children },
+      LegacyViewLayout::Tabs { children } => Self::Split {
+        axis: SplitAxis::Horizontal,
+        children,
+      },
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +505,34 @@ pub enum ClientMessage {
     terminal_size: TerminalSize,
   },
   ListSessions,
+  GetView {
+    session: String,
+  },
+  /// Create a new terminal beside an existing terminal in its view.
+  SplitTerminal {
+    terminal_id: String,
+    axis: SplitAxis,
+    command: Option<CommandSpec>,
+    working_directory: Option<String>,
+    terminal_size: TerminalSize,
+  },
+  /// Replace layout only; membership must remain unchanged.
+  UpdateView {
+    session: String,
+    expected_revision: u64,
+    layout: ViewLayout,
+  },
+  PromoteTerminal {
+    terminal_id: String,
+    name: Option<String>,
+  },
+  MergeSessions {
+    source: String,
+    destination: String,
+  },
+  KillTerminal {
+    terminal_id: String,
+  },
   /// Retrieves the latest shell-awareness state without creating an
   /// attachment. Command-line visibility is subject to daemon policy.
   GetShellState {
@@ -515,10 +628,15 @@ pub enum ServerMessage {
   HandshakeAccepted {
     protocol_version: u16,
     server_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build: Option<component_info::ComponentBuildInfo>,
     /// Suggested cadence for attached-client heartbeats.
     heartbeat_interval_ms: u64,
     /// Maximum interval without client activity before an attachment expires.
     attachment_liveness_timeout_ms: u64,
+  },
+  ViewSnapshot {
+    view: ViewInfo,
   },
   SessionCreated {
     session: SessionInfo,
@@ -1002,8 +1120,8 @@ mod tests {
   }
 
   #[test]
-  fn terminal_history_snapshots_use_protocol_version_nine() {
-    assert_eq!(PROTOCOL_VERSION, 9);
+  fn terminal_history_snapshots_use_current_protocol_version() {
+    assert_eq!(PROTOCOL_VERSION, 12);
   }
 
   #[test]

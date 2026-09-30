@@ -1,8 +1,49 @@
 # Saved credentials
 
 Open **Credentials** from the sidebar or command palette to inspect credentials
-managed by rmux. The page displays names, credential types, accounts or targets,
-storage locations, and recorded dates. It has no reveal or copy-secret action.
+managed by rmux and local SSH identity files. The page displays names, credential
+types, accounts or targets, storage locations, and recorded dates. It has no reveal or copy-secret action.
+
+## Identity files
+
+Each identity file has one row with its name and path, verified key type and
+fingerprint when available, recorded host references, and passphrase status.
+The inventory includes paths configured by saved hosts and their gateways (including
+unavailable hosts), literal `IdentityFile` paths from SSH config and included
+files, keys discovered directly in `~/.ssh`, and paths attached to saved rmux
+identity passphrases. Symlinks to the same existing file share a row. Discovery
+does not connect to hosts or execute SSH config `Match exec` commands. Paths
+requiring connection-specific expansion and bounded discovery omissions produce
+an incomplete-inventory warning. **Used by** lists known saved-host references;
+**Not recorded** does not mean a file is unused.
+
+- **Save passphrase** verifies that the entered passphrase unlocks the current
+  file locally, then stores it in macOS Keychain. The private key stays in its
+  file. **Replace** performs the same verification before updating a saved item.
+- **Saved** means a Keychain item matches this path and file version. It does not
+  indicate an active SSH connection. **Not saved** means no matching saved item
+  was found; **Not required** means the file is unencrypted.
+- **File changed · saved for older file** prevents reuse after replacement or
+  re-encryption. Verify and replace the saved passphrase, or forget the old item.
+  Missing or unreadable files remain visible when configured or saved.
+- **Not checked** means saved status could not be determined. Inaccessible
+  Keychain storage does not become a false **Not saved** result.
+- **Forget** removes only the selected saved passphrase after confirmation. It
+  never deletes or edits the identity file and does not terminate connections.
+
+Passphrase fields are masked and cleared on submission, cancellation, leaving
+Credentials, and unmount. A submitted native operation continues if the page is
+closed; leaving the page does not claim to cancel a Keychain write. Refresh
+checks both identity metadata and the other saved credentials independently.
+Unsupported key formats and unavailable Keychain access are shown explicitly.
+Key type and fingerprint remain unverified until local unlock has established
+them for that exact file version; a neighbouring `.pub` file is not proof.
+
+When connecting with an identity file, a newly entered key passphrase is saved
+only after local verification, even if SSH successfully authenticated by another
+method. Previously saved identity passphrases can be reused across hosts that
+use the same file. Older prompt-scoped key passphrases remain visible as legacy
+credential rows; they are not silently treated as verified identity entries.
 
 ## Storage and metadata
 
@@ -40,8 +81,13 @@ They do not remove a saved connection as a side effect of credential inspection.
 ## Native boundary
 
 The app invokes the selected signed `ctld` executable as a short-lived helper
-with `--credential-request`. Its bounded JSON request supports metadata listing
-and exact-item deletion only. This works independently of the running daemon,
+with `--credential-request` for existing SSH credential metadata and exact-item
+deletion, or `--identity-request` for identity listing, verified saving, and
+exact identity-passphrase deletion. Both use bounded JSON over private process
+pipes. Passphrases are never command-line arguments, environment variables,
+logs, response fields, or frontend inventory data. Secret-bearing native
+buffers are zeroized; helper diagnostics are converted to fixed error codes
+and messages. This works independently of the running daemon,
 without changing the SSH/VPN wire protocol or restarting active connections.
 An older helper must be updated or rebuilt to support this page.
 
@@ -50,3 +96,29 @@ save" preferences and credentials owned by other applications are excluded.
 Malformed requests, inaccessible storage, and oversized inventories are
 reported explicitly. Tests use synthetic metadata and helper processes, without
 reading or deleting the user's Keychain entries.
+
+Identity passphrases use a separate Keychain namespace. The account identifies
+the canonical key path; nonsecret metadata binds the saved item to a digest of
+the file bytes and a locally verified public fingerprint. Replacement or
+re-encryption invalidates reuse, even if the public key is unchanged. Inventory
+reads Keychain attributes only and never fetches saved secret values.
+
+Local verification uses an isolated temporary OpenSSH agent and a private
+askpass channel. The key snapshot is provided through stdin, and the saved
+passphrase is never returned to an SSH password prompt. Connection reuse loads
+verified identities into a temporary agent while preserving the configured
+agent and fallback identities; the temporary agent follows the connection
+attempt's lifetime. An existing authenticated SSH master is reused before this
+preparation. Explicit `IdentityAgent=none` continues to disable agent reuse.
+OpenSSH-format keys already unlocked in the original agent do not trigger
+another Keychain read; opaque PEM files may still need local unlock. Configured
+SSH gateways and bounded `ProxyJump` chains participate when
+they inherit that agent; gateway-specific `IdentityAgent` settings retain native
+authentication. Gateway PEM keys without a readable public identity may still
+prompt when `IdentitiesOnly=yes`; no gateway command or SSH configuration is
+rewritten. Configurations that enable `AddKeysToAgent` also keep native
+authentication so their existing agent behavior is preserved. These cases can
+still save passphrases after local verification. Agent forwarding remains
+disabled for ctld-created masters, as before.
+The running ctld must include this support for reuse during new connections;
+the Credentials page's one-shot helper does not restart it automatically.

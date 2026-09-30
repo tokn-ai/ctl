@@ -42,7 +42,7 @@ import {
   previewWorkspace,
 } from "./fixtures";
 import { previewComponentVersions } from "./aboutFixtures";
-import { previewCredentials } from "./credentialsFixtures";
+import { previewCredentials, previewIdentityFiles } from "./credentialsFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
 // The official Tauri mocks intercept every IPC call; nothing reaches a daemon,
@@ -54,8 +54,15 @@ const initial_view = view_param === "tasks" || view_param === "ports" || view_pa
 const about_param = new URLSearchParams(location.search).get("about");
 const credentials_param = new URLSearchParams(location.search).get("credentials");
 let credentials = previewCredentials();
-if (credentials_param === "empty") credentials.credentials = [];
+const identity_files = previewIdentityFiles();
+if (credentials_param === "empty") {
+  credentials.credentials = [];
+  identity_files.identity_files = [];
+}
 if (credentials_param === "partial") {
+  identity_files.keychain_available = false;
+  identity_files.warning = "Keychain is locked. Passphrase status could not be checked.";
+  identity_files.identity_files.forEach((file) => { file.passphrase_state = file.encrypted === false ? "not_required" : "unknown"; });
   credentials.credentials = credentials.credentials.filter((credential) => credential.storage !== "keychain");
   credentials.sources[0] = { source: "keychain", state: "unavailable", message: "Keychain is locked. Unlock it, then refresh." };
 }
@@ -187,6 +194,22 @@ mockIPC((command, payload) => {
       const credential = credentials.credentials.find((item) => item.credential_id === credential_id);
       if (!credential || credential.storage !== "keychain") throw new Error("This saved credential is no longer available.");
       credentials = { ...credentials, credentials: credentials.credentials.filter((item) => item.credential_id !== credential_id) };
+      return;
+    }
+    case "list_credential_identity_files":
+      if (credentials_param === "error") throw new Error("Identity files could not be refreshed.");
+      return structuredClone({ ...identity_files, checked_at_ms: Date.now() });
+    case "save_identity_passphrase": {
+      const { path } = request<{ path: string }>(payload);
+      const file = identity_files.identity_files.find((item) => item.path === path);
+      if (!file) throw new Error("Identity file is no longer available.");
+      file.passphrase_state = "saved";
+      return;
+    }
+    case "forget_identity_passphrase": {
+      const { identity_id } = request<{ identity_id: string }>(payload);
+      const file = identity_files.identity_files.find((item) => item.identity_id === identity_id);
+      if (file) file.passphrase_state = file.encrypted ? "not_saved" : "not_required";
       return;
     }
     case "get_component_versions":

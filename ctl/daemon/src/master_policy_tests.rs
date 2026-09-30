@@ -425,7 +425,13 @@ fn disappearing_reuse_only_masters_do_not_authorize_shared_startup() {
     SharedMasterStartup::ExternalOnly,
   ] {
     assert!(matches!(
-      start_master(&configured, &endpoint(startup), "unused-token"),
+      start_master(
+        &configured,
+        &endpoint(startup),
+        "unused-token",
+        #[cfg(target_os = "macos")]
+        None,
+      ),
       Err(RequestError::SshConfig(_))
     ));
   }

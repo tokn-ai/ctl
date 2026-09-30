@@ -4,7 +4,10 @@
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod helper;
+pub(super) mod identities;
 mod models;
+#[cfg(unix)]
+mod process;
 
 #[cfg(test)]
 mod tests;

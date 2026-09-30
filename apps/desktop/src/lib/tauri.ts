@@ -55,6 +55,8 @@ import type {
   ComponentReconnectResult,
   CredentialTarget,
   CredentialsSnapshot,
+  IdentitySnapshot,
+  SaveIdentityPassphraseRequest,
 } from "./types";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -77,6 +79,18 @@ export async function listSavedCredentials(targets: CredentialTarget[]): Promise
 
 export async function forgetSavedCredential(credential_id: string): Promise<void> {
   await invoke("forget_saved_credential", { request: { credential_id } });
+}
+
+export async function listIdentityFiles(targets: CredentialTarget[]): Promise<IdentitySnapshot> {
+  return invoke("list_credential_identity_files", { request: { targets } });
+}
+
+export async function saveIdentityPassphrase(request: SaveIdentityPassphraseRequest): Promise<void> {
+  await invoke("save_identity_passphrase", { request });
+}
+
+export async function forgetIdentityPassphrase(identity_id: string): Promise<void> {
+  await invoke("forget_identity_passphrase", { request: { identity_id } });
 }
 
 export async function preflightComponentAction(component_id: string): Promise<ComponentActionPreflight> {

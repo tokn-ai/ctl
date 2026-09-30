@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CredentialRecord, CredentialsSnapshot, CredentialTarget } from "../lib/types";
 import { CredentialsPage } from "./CredentialsPage";
 
-const api = vi.hoisted(() => ({ list: vi.fn(), forget: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ listSavedCredentials: api.list, forgetSavedCredential: api.forget }));
+const api = vi.hoisted(() => ({ list: vi.fn(), forget: vi.fn(), identities: vi.fn(), save_identity: vi.fn(), forget_identity: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ listSavedCredentials: api.list, forgetSavedCredential: api.forget, listIdentityFiles: api.identities, saveIdentityPassphrase: api.save_identity, forgetIdentityPassphrase: api.forget_identity }));
 
 const credential: CredentialRecord = { credential_id: "opaque-keychain-id", name: "Development", kind: "ssh_password", storage: "keychain", target: "dev.example.test", account: "developer", created_at_ms: 1000, updated_at_ms: 2000, detail: "Requires Touch ID when used.", action: "forget", vpn_connection_id: null };
 const vpn: CredentialRecord = { ...credential, credential_id: "vpn-id", name: "Work VPN", kind: "vpn_password", storage: "vpn_settings", target: "vpn.example.test", created_at_ms: null, updated_at_ms: null, detail: "Saved in private VPN settings.", action: "manage_vpn", vpn_connection_id: "work-vpn" };
@@ -17,6 +17,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.list.mockResolvedValue(structuredClone(snapshot));
   api.forget.mockResolvedValue(undefined);
+  api.identities.mockResolvedValue({ identity_files: [], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 });
 });
 afterEach(cleanup);
 

@@ -31,6 +31,34 @@ export interface CredentialsSnapshot {
   checked_at_ms: number;
 }
 
+export interface IdentityFile {
+  identity_id: string;
+  path: string;
+  display_path: string;
+  file_version: string | null;
+  key_type: string | null;
+  fingerprint: string | null;
+  encrypted: boolean | null;
+  file_state: "ready" | "missing" | "unreadable" | "unsupported";
+  passphrase_state: "saved" | "not_saved" | "not_required" | "file_changed" | "unknown";
+  detail: string | null;
+  used_by: string[];
+}
+
+export interface IdentitySnapshot {
+  identity_files: IdentityFile[];
+  complete: boolean;
+  warning: string | null;
+  keychain_available: boolean;
+  checked_at_ms: number;
+}
+
+export interface SaveIdentityPassphraseRequest {
+  path: string;
+  file_version: string;
+  passphrase: string;
+}
+
 export interface ComponentProtocolVersion {
   name: string;
   version: number;

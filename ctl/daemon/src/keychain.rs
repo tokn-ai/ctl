@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::credential_metadata::{self, MAX_SEARCH_ITEMS, Metadata, SERVICE_PREFIX};
 
 mod attributes;
+pub(crate) mod identity;
 
 const KEYCHAIN_SERVICE_PREFIX: &str = "io.rmux.desktop.ctld.ssh";
 const SAVE_POLICY_SERVICE_PREFIX: &str = "io.rmux.desktop.ctld.ssh-save-policy";

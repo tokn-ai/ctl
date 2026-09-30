@@ -172,12 +172,16 @@ command paths are not supported. Each development commit has a distinct bundle
 ID, so a remote host cannot silently retain an older build with the same app
 version. App-local connection settings are supplied to OpenSSH as fixed
 arguments; methods based on an existing SSH config alias retain that alias.
-On macOS, verified passwords and private-key passphrases are stored separately in the device-local,
-Touch ID-protected Keychain. Private-key contents, arbitrary options,
-forwarding, and remote commands are never stored. A per-user `ctld` process
-coordinates authenticated OpenSSH connections and is the only local component
-that accesses Keychain; the desktop client only forwards attempt-scoped
-prompts.
+On macOS, SSH passwords and verified identity-file passphrases use separate
+entries in the device-local, Touch ID-protected Keychain. Password entries are
+scoped to the host route and prompt; passphrases are bound to the canonical key
+path and verified file version, so multiple hosts can reuse the same key. The
+private key stays in its file. `ctld` is the only component that accesses
+Keychain, either as the running connection daemon or as the signed one-shot
+helper used by **Credentials**. That page lists identity files and saved metadata
+and supports verified Save/Replace and individual Forget actions. It never
+reveals saved secrets or deletes identity files. See
+[credential management](../../docs/credentials.md).
 
 On macOS and Linux, connection methods have a **Use SSH-config master** checkbox
 in **Host settings → Edit connection method**. It defaults on for **SSH config · Virtual** methods and
@@ -292,9 +296,10 @@ last-known sessions from other targets remain usable.
 
 SSH uses `ctl-core` and the system `ssh` executable with a fixed remote command
 that prepends the app-managed directory before running `ctl-agent connect`;
-forwarding, agent access, X11, local commands, and PTY allocation remain
-disabled. On macOS/Linux, the per-user `ctld` selects a configured OpenSSH master
-when **Use SSH-config master** is enabled or owns a private master for other
+SSH agent forwarding, X11, local commands, and PTY allocation remain disabled.
+Local agent identities can be used for authentication without forwarding that
+agent to the remote host. On macOS/Linux, the per-user `ctld` selects a configured
+OpenSSH master when **Use SSH-config master** is enabled or owns a private master for other
 methods and the fallback described above. Its owner-only Unix socket carries
 askpass requests to the quick-input UI for an active connection attempt. Host-key trust
 requires explicit confirmation and is managed by OpenSSH. Private masters remain
@@ -302,16 +307,25 @@ available for five idle minutes; configured masters retain their configured
 lifetime. All background channels require the selected master and cannot
 independently prompt or fall back to another connection.
 
-On macOS, only `ctld` links the Keychain implementation. Verified passwords and
-key passphrases are stored device-locally under a Touch ID-only policy tied to
-the currently enrolled fingerprints. They are loaded only inside `ctld` to
-satisfy one OpenSSH prompt and never return to the desktop client. Native
-plaintext buffers are zeroized after use; secrets never appear in command
-arguments, environment variables, or logs, and one-time responses are not
-stored. Removing a host asks `ctld` to delete credentials for its saved and active methods, retaining any credential scope still used by another host.
-On Linux, `ctld` keeps a newly entered reusable secret only through authentication and
-then discards it. An explicit interactive attempt allows up to three minutes
-and Escape cancels it. On non-Unix platforms, preconfigured noninteractive SSH
+On macOS, only `ctld` links the Keychain implementation. Saved SSH passwords and
+identity passphrases use a device-local, Touch ID-only policy tied to the
+currently enrolled fingerprints. Retrieved passwords satisfy the matching
+OpenSSH prompt inside `ctld`; saved identity passphrases instead unlock their
+verified key locally in a temporary agent and are never supplied as answers to
+SSH password prompts. Successful SSH authentication alone does not establish
+that an entered passphrase unlocked a key: a new passphrase must pass local
+verification before it can be saved. Changed or re-encrypted key files require
+verification and replacement of the saved passphrase.
+
+Saved secrets never return to the desktop client. Native plaintext buffers are
+zeroized after use; secrets never appear in command arguments, environment
+variables, or logs, and one-time responses are not stored. Removing a host asks
+`ctld` to delete host-scoped credentials for its saved and active methods,
+retaining any scope still used by another host. Identity-bound passphrases are
+managed separately in **Credentials** and remain available to other hosts using
+the same file. On Linux, `ctld` keeps a newly entered reusable secret only through
+authentication and then discards it. An explicit interactive attempt allows up
+to three minutes and Escape cancels it. On non-Unix platforms, preconfigured noninteractive SSH
 remains available.
 
 On macOS, `ctld` is packaged as the app-like helper

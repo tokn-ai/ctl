@@ -355,6 +355,13 @@ The signed daemon runs independently of `tauri dev`, so quitting or relaunching
 the app retains its SSH connections and daemon-owned state. Other worktrees and
 the ordinary per-user daemon remain separate.
 
+During a native rebuild, the current app stays open. Only after compilation and
+signed-helper preparation succeed does the launcher replace it with the new
+build. A failed build or signing attempt leaves the current app running and
+Tauri watching for the next edit. If the first build fails, the watcher stays
+active until a build succeeds. Frontend hot reload continues to use Vite.
+Quitting the launcher closes its app and build processes.
+
 Before each native launch, the launcher uses Cargo's reported helper artifact
 and stages a signed bundle when it changes. It starts ctld only if no daemon is
 running. A rebuild leaves an existing daemon in place; use **About → Restart**
@@ -367,6 +374,8 @@ five idle minutes; surviving the app's exit does not disable that timeout.
 
 The launcher needs no signing environment variables. Tauri arguments,
 such as `--release`, can be passed through `pnpm tauri:dev:signed --release`.
+Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
+failed build, following Tauri's behavior.
 Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch ID-protected
 credentials. Run the launcher regression tests with `pnpm test:dev`.
 

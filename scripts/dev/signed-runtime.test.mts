@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { createSignedSupervisorDirectory, prepareSignedRuntime } from "./signed-runtime.mts";
-import { requestPreparation, servePreparation } from "./daemon-preparation.mts";
 
 async function fixture(context: TestContext) {
   const root = await mkdtemp(path.join(tmpdir(), "signed-runtime-test-"));
@@ -53,23 +52,30 @@ test("a symlinked worktree keeps its original endpoint", { skip: process.platfor
   assert.equal(await prepareSignedRuntime(repository, root), await prepareSignedRuntime(alias, root));
 });
 
-test("concurrent launchers have independent preparation sockets on one runtime", { skip: process.platform === "win32" }, async (context) => {
+test("concurrent launchers have independent app supervisor sockets on one runtime", { skip: process.platform === "win32" }, async (context) => {
   const { repository } = await fixture(context);
   const runtime = await prepareSignedRuntime(repository);
   context.after(() => rm(runtime, { recursive: true, force: true }));
   const first = await createSignedSupervisorDirectory(runtime);
   const second = await createSignedSupervisorDirectory(runtime);
   assert.notEqual(first, second);
-  const seen: string[] = [];
-  const first_socket = path.join(first, "prepare.sock");
-  const second_socket = path.join(second, "prepare.sock");
-  const first_server = await servePreparation(first_socket, async () => { seen.push("first"); });
-  context.after(() => first_server.close());
-  const second_server = await servePreparation(second_socket, async () => { seen.push("second"); });
-  context.after(() => second_server.close());
-  await requestPreparation(first_socket, "fixture");
-  await requestPreparation(second_socket, "fixture");
-  assert.deepEqual(seen, ["first", "second"]);
+  for (const [directory, label] of [[first, "first"], [second, "second"]]) {
+    const socketPath = path.join(directory, "app.sock");
+    const server = createServer((socket) => socket.end(label));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    context.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = createConnection(socketPath);
+      let contents = "";
+      socket.on("data", (chunk) => { contents += chunk.toString(); });
+      socket.once("error", reject);
+      socket.once("end", () => resolve(contents));
+    });
+    assert.equal(response, label);
+  }
 });
 
 test("rejects a replaced runtime symlink without modifying its target", { skip: process.platform === "win32" }, async (context) => {

@@ -4,6 +4,7 @@ export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
   showNotifications: "view.show_notifications",
   recoverSessionComponents: "session.recover_components",
+  reconnectNotificationAttachment: "session.reconnect_notification_attachment",
   refreshTasks: "task.refresh",
   openTask: "task.open",
   addHost: "host.add",

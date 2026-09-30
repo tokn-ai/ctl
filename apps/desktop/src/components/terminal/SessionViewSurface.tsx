@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
+import { useAttachmentNotifications } from "../../features/notifications/useAttachmentNotifications";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 import { adjacentPane, swapPanes, viewDividers } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
@@ -343,6 +344,7 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
 }) {
   const [renderer, setRenderer] = useState<XtermRenderer | null>(null);
   const attachment = useAttachment(renderer);
+  useAttachmentNotifications(attachment);
   const on_ended_ref = useRef(on_ended);
   on_ended_ref.current = on_ended;
   const ended_message = attachment.state.phase === "ended" ? attachment.state.message ?? "Terminal exited"
@@ -376,7 +378,6 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
   return <>
     {render_controls(attachment.state.shell_state, <button disabled={attachment.state.phase !== "attached"} onClick={() => void attachment.toggleInputLease()}>{attachment.state.input_lease.owned_by_client ? "Release input" : "Take input"}</button>)}
     {attachment.state.phase !== "attached" && !ended_message && <div role="status" className="pane-message">{attachmentPhaseLabel(attachment.state.phase)} · Last known terminal content</div>}
-    {attachment.state.message && <div role="status" className="pane-message">{attachment.state.message}</div>}
     <TerminalSurface ended_message={ended_message} on_dismiss={on_dismiss} phase={attachment.state.phase} hasSession={true} has_cached_content={attachment.state.applied_sequence !== null} onInput={handleInput} onReady={setRenderer} />
   </>;
 }

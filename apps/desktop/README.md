@@ -445,6 +445,10 @@ Info and success cards hide automatically after eight seconds, paused while
 hovered or focused; warnings and errors stay visible until hidden or dismissed.
 The app shows up to three cards and retains the latest 100 notifications in
 this window's memory. History resets when the window is reloaded or closed.
+Background sessions and split panes report independently; reconnect actions target
+the attachment that failed. Hiding or dismissing a failure survives automatic
+retries, while a new explicit connection attempt can report it again. Session
+cache/archive errors are reported separately, even when no session is selected.
 
 These are the defaults. **Configure Keyboard Shortcuts** in the palette opens
 quick input: select a command and enter a combination such as

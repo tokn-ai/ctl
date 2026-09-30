@@ -143,6 +143,15 @@ async fn our_master_launch_passes_its_prepared_agent_to_openssh_proxy_children()
     ..super::super::PreparedIdentities::default()
   };
   let output = directory.join("observed-agent");
+  let script = directory.join("proxy.sh");
+  // Keep the SSH stdout pipe open until the observation is written. Redirecting
+  // the top-level `exec printf` closes that pipe before printf runs, allowing
+  // SSH to see EOF and terminate the child while its output file is still empty.
+  std::fs::write(
+    &script,
+    "printf '%s' \"$SSH_AUTH_SOCK\" > \"$CTLD_TEST_AGENT_OUTPUT\"\nexit 0\n",
+  )
+  .unwrap();
   let mut command = Command::new("/usr/bin/ssh");
   command
     .args([
@@ -160,11 +169,12 @@ async fn our_master_launch_passes_its_prepared_agent_to_openssh_proxy_children()
     command
       .args([
         "-o",
-        "ProxyCommand=printf %%s \"$SSH_AUTH_SOCK\" > \"$CTLD_TEST_AGENT_OUTPUT\"",
+        "ProxyCommand=/bin/sh \"$CTLD_TEST_AGENT_SCRIPT\"",
         "--",
         "example.test",
       ])
       .env("CTLD_TEST_AGENT_OUTPUT", &output)
+      .env("CTLD_TEST_AGENT_SCRIPT", &script)
       .stdin(Stdio::null())
       .stdout(Stdio::null())
       .stderr(Stdio::null())

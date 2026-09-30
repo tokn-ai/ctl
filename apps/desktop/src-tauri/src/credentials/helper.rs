@@ -6,7 +6,9 @@ use ctld_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Resp
 use tokio::process::Command;
 use zeroize::Zeroizing;
 
-use super::process::{self, invalid_response, unavailable, unsupported as unsupported_helper};
+#[cfg(target_os = "macos")]
+use super::process::unavailable;
+use super::process::{self, invalid_response, unsupported as unsupported_helper};
 
 use crate::error::{CommandErrorDto, CommandResult};
 

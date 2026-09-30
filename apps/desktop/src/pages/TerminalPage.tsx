@@ -100,7 +100,7 @@ import {
   targetKeyFromSessionKey,
 } from "../features/targets/targets";
 import { useWindowTitle } from "../features/window/useWindowTitle";
-import { errorCode, errorMessage } from "../lib/errors";
+import { errorCode, errorDetails, errorMessage, type ErrorDetails } from "../lib/errors";
 import { displayWorkingDirectory } from "../lib/shellState";
 import {
   sessionCache,
@@ -224,7 +224,7 @@ function TerminalWorkbench() {
     : null;
   const { sshConfigHosts, sshConfigWarning, tailscaleDevices, tailscaleWarning } = workspace;
   const discoveryWarning = [sshConfigWarning, tailscaleWarning].filter(Boolean).join("\n") || null;
-  const [targetErrors, setTargetErrors] = useState<ReadonlyMap<string, string>>(
+  const [targetErrors, setTargetErrors] = useState<ReadonlyMap<string, ErrorDetails>>(
     () => new Map(),
   );
   const [tabShellStates, setTabShellStates] = useState<
@@ -399,11 +399,11 @@ function TerminalWorkbench() {
         }
         const refreshed = new Map<string, SessionSummary>();
         const inspections = new Map<string, ShellStateSummary>();
-        const errors = new Map<string, string>();
+        const errors = new Map<string, ErrorDetails>();
         for (const result of results) {
           const key = targetKey(result.target);
           if ("error" in result) {
-            errors.set(key, errorMessage(result.error));
+            errors.set(key, errorDetails(result.error));
             for (const session of sessionsRef.current.filter((session) =>
               sameTarget(session.target, result.target),
             )) {
@@ -437,7 +437,7 @@ function TerminalWorkbench() {
             } else if (inspection.error?.code !== "session_not_found") {
               errors.set(
                 key,
-                inspection.error?.message ?? "Could not inspect session.",
+                inspection.error ?? errorDetails("Could not inspect session."),
               );
             }
           }
@@ -448,6 +448,10 @@ function TerminalWorkbench() {
         const visibleIds = new Set(visible.map(sessionKey));
         sessionsRef.current = visible;
         setSessions(visible);
+        for (const { target } of results) {
+          const key = targetKey(target);
+          if (!errors.has(key)) notifications.resolve(`host:${key}`);
+        }
         setTargetErrors((current) => {
           const next = new Map(current);
           for (const { target } of results) next.delete(targetKey(target));
@@ -484,6 +488,7 @@ function TerminalWorkbench() {
       setTabs,
       setSessionShellStates,
       hostConnections.isPaused,
+      notifications,
     ],
   );
 
@@ -687,6 +692,7 @@ function TerminalWorkbench() {
     renderer?.remapSessions(recovered.key_changes);
     setTabShellStates((current) => remapStateKeys(current, recovered.key_changes));
     const host_keys = new Set(recovered.view.targets.map(targetKey));
+    notifications.resolve(`host:${targetKey(recovered.target)}`);
     setTargetErrors((current) => new Map(
       [...current].filter(([key]) => host_keys.has(key) && key !== targetKey(recovered.target)),
     ));

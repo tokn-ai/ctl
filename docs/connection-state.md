@@ -6,6 +6,7 @@ or terminal. These independent observations must remain separate:
 | Observation | Evidence | What it does not establish |
 | --- | --- | --- |
 | SSH connected | The local OpenSSH control master answered `-O check` | Remote reachability or terminal attachment health |
+| Remote connection timed out | Opening the remote rmux service timed out while a local SSH master remains available | Authentication failure, confirmed SSH disconnection, or remote process exit |
 | SSH available | The configured route returned an SSH identification greeting during a brief probe | Successful authentication, verified host identity, or an established SSH session |
 | Terminal attached | This attachment completed its protocol handshake and has not reported closure/failure | Other terminals or connection methods are healthy |
 | Session ended | An explicit session-ended event or confirmed missing-session response | A transport failure alone never proves process exit |
@@ -54,6 +55,12 @@ Reachability refreshes are throttled separately from master polling and are
 invalidated by host settings or VPN route changes. Each query has a bounded wait;
 late results cannot update the snapshot. Tooltips identify the check time and
 the limits of this evidence.
+An active remote-service timeout takes precedence over the connected label;
+the underlying master observation and Disconnect action remain available.
+Existing-master lookup and remote-service startup have separate ten-second
+deadlines. Neither timeout requests authentication; only explicit authentication
+errors offer Connect host. A successful session inspection or attachment retires
+its error card and marks the retained notification as resolved.
 Unavailable Tailscale routes use the compact label Tailscale unavailable, with
 the full reason in the tooltip or connection details. An unavailable preferred
 route does not hide SSH availability observed through another method.
@@ -93,6 +100,12 @@ exact ID. No connection-state transition kills a remote shell.
 Cached output, shell activity, and session-list observations remain available
 while offline, with last-known wording and neutral status. An unreachable
 transport does not rewrite the last observed remote process as exited.
+
+The attachment peer-silence deadline runs independently of outbound writes, so
+a blocked SSH pipe cannot suppress failure detection. Private SSH masters started
+by ctld also use a ten-second server-alive interval with three unanswered probes.
+Configured shared masters retain their owner's keepalive policy. New settings
+apply to newly started masters; existing ones are not restarted automatically.
 
 This foundation precedes new retry/cancel controls. Those controls must consume
 these transitions, preserve the session/cache, and keep cancellation separate

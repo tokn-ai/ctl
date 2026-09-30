@@ -13,14 +13,7 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
   if !target.is_local() {
-    return timeout(CONNECTION_TIMEOUT, crate::ssh_auth::connect(target))
-      .await
-      .map_err(|_| {
-        CommandErrorDto::new(
-          "connection_timeout",
-          "SSH connection timed out. Use Connect host to authenticate.",
-        )
-      })?;
+    return crate::ssh_auth::connect(target).await;
   }
   timeout(CONNECTION_TIMEOUT, open_transport(&target.to_core()))
     .await

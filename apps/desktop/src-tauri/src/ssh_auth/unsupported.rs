@@ -3,6 +3,8 @@
 mod broker;
 #[path = "commands.rs"]
 pub mod commands;
+#[path = "connection.rs"]
+mod connection;
 #[path = "verification.rs"]
 mod verification;
 
@@ -31,7 +33,9 @@ pub fn helper_exit_code() -> Option<i32> {
 }
 
 pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
-  connect_identified(target).await.map(|(stream, _)| stream)
+  connection::remote_service(connect_identified(target))
+    .await
+    .map(|(stream, _)| stream)
 }
 
 async fn connect_identified(
@@ -84,13 +88,12 @@ pub async fn probe(
   _channel: Channel<SshPromptDto>,
   _restart_check: bool,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
-  tokio::time::timeout(std::time::Duration::from_secs(10), async {
+  connection::remote_service(async {
     let (stream, identity) = connect_identified(&target).await?;
     verification::verify(stream).await?;
     Ok(identity)
   })
   .await
-  .map_err(|_| CommandErrorDto::new("ssh_timeout", "SSH connection timed out."))?
 }
 
 pub async fn install_agent(

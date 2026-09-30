@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ManagedTask } from "../../lib/types";
 import { NotificationStore } from "./NotificationStore";
 import { useWorkbenchNotifications } from "./useWorkbenchNotifications";
+import { COMMAND_IDS } from "../commands/commandIds";
+import { targetKey } from "../targets/targets";
 
 afterEach(cleanup);
 
@@ -28,6 +30,35 @@ describe("workbench notification sources", () => {
     const store = new NotificationStore();
     renderHook(() => useWorkbenchNotifications(store, { ...sources, storage_error: "Archive failed: disk full" }));
     expect(store.snapshot().entries).toMatchObject([{ severity: "error", title: "Session history", message: "Archive failed: disk full" }]);
+  });
+
+  it.each(["ssh_authentication_required", "ssh_authentication_failed", "connection_timeout", "rmux_connection_timeout", null])(
+    "offers authentication only when the host inspection error requires it (%s)", (code) => {
+      const store = new NotificationStore();
+      const target = { kind: "ssh" as const, host_id: "fixture", destination: "workstation" };
+      const key = targetKey(target);
+      renderHook(() => useWorkbenchNotifications(store, {
+        ...sources, targets: [target], target_errors: new Map([[key, { code, message: "Synthetic inspection failure" }]]),
+      }));
+      const authentication_required = code === "ssh_authentication_required" || code === "ssh_authentication_failed";
+      expect(store.snapshot().entries).toMatchObject([{
+        message: "Synthetic inspection failure",
+        actions: [authentication_required
+          ? { label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: key } }
+          : { label: "Refresh sessions", command_id: COMMAND_IDS.refreshSessions }],
+      }]);
+    },
+  );
+
+  it("does not claim recovery when a host error source disappears", () => {
+    const store = new NotificationStore();
+    const target = { kind: "ssh" as const, host_id: "fixture", destination: "workstation" };
+    const key = targetKey(target);
+    const hook = renderHook((props) => useWorkbenchNotifications(store, props), {
+      initialProps: { ...sources, targets: [target], target_errors: new Map([[key, { code: "connection_timeout", message: "Synthetic timeout" }]]) } as typeof sources,
+    });
+    hook.rerender(sources);
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true, actions: [] }]);
   });
 
   it("does not replay an old taskd success after a later background error recovers", () => {

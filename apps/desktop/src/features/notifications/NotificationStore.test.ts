@@ -56,6 +56,42 @@ describe("window notification history", () => {
     expect(store.snapshot().entries).toMatchObject([{ occurrence_count: 1, toast_visible: false, actions: [{ label: "Retry" }] }]);
   });
 
+  it("resolves an error into history and treats a later identical failure as active", () => {
+    let time = 1;
+    const store = new NotificationStore(() => time++);
+    store.report("host", { ...failure, actions: [{ label: "Retry", command_id: "host.connect" }] });
+    store.resolve("host");
+    expect(store.snapshot().entries).toMatchObject([{
+      ...failure, created_at: 1, updated_at: 1, resolved_at: 2,
+      occurrence_count: 1, toast_visible: false, actions: [],
+    }]);
+    const snapshot = store.snapshot();
+    store.resolve("host");
+    expect(store.snapshot()).toBe(snapshot);
+    store.report("host", failure);
+    expect(store.snapshot().entries).toMatchObject([{
+      ...failure, created_at: 1, updated_at: 3, resolved_at: null,
+      occurrence_count: 2, toast_visible: true,
+    }]);
+  });
+
+  it("does not mistake source removal or a new attempt for proven recovery", () => {
+    const store = new NotificationStore();
+    store.report("host", failure);
+    store.report("host", null);
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true }]);
+  });
+
+  it("does not restore a dismissed occurrence when it resolves", () => {
+    const store = new NotificationStore();
+    store.report("host", failure);
+    store.dismiss(store.snapshot().entries[0].id);
+    store.resolve("host");
+    expect(store.snapshot().entries).toEqual([]);
+    store.report("host", failure);
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true }]);
+  });
+
   it("bounds visible cards and history, and starts empty in a new window", () => {
     const store = new NotificationStore();
     for (let index = 0; index < MAX_NOTIFICATIONS + 10; index++) store.report(`host:${index}`, failure);

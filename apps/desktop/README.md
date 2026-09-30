@@ -197,7 +197,9 @@ keep their defaults. Verification uses the selected mode, and an explicit
 connection applies it to remembered sessions. An existing configured master can be reused even
 with `ControlMaster no`. If no usable control path is configured, or sharing is
 disabled and no master is running, rmux uses its private master with a five-minute
-idle lifetime. For
+idle lifetime and protocol keepalives that detect an unresponsive server after
+roughly thirty seconds. Existing and configured shared masters keep their current
+policy. For
 `ControlMaster ask` or `autoask`, start the alias in a terminal first so its
 master retains a working helper for sharing confirmations; rmux can then reuse it.
 
@@ -462,7 +464,9 @@ center from either Sessions or Tasks; **Show Notifications** is also available
 in the command palette. The center supports dismissing individual entries or
 clearing all, and Escape hides it. Retry actions use the current workspace state.
 Info and success cards hide automatically after eight seconds, paused while
-hovered or focused; warnings and errors stay visible until hidden or dismissed.
+hovered or focused; warnings and errors stay visible until hidden, dismissed,
+or their attachment/session inspection confirms recovery. Recovered connection
+errors stay in the notification center with a **Resolved** label.
 The app shows up to three cards and retains the latest 100 notifications in
 this window's memory. History resets when the window is reloaded or closed.
 Background sessions and split panes report independently; reconnect actions target

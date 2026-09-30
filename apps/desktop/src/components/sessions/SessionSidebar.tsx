@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { Icon } from "../ui/Icon";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
+import type { ErrorDetails } from "../../lib/errors";
 import {
   compactTerminalTitle,
   compactTerminalTitleParts,
@@ -29,7 +30,7 @@ interface SessionSidebarProps {
   hosts?: readonly WorkspaceHost[];
   /** Hosts with at least one available saved connection method. */
   connectableHostKeys?: ReadonlySet<string>;
-  targetErrors: ReadonlyMap<string, string>;
+  targetErrors: ReadonlyMap<string, ErrorDetails>;
   hostConnections?: ReadonlyMap<string, HostConnectionStatus>;
   attachmentStates?: ReadonlyMap<string, AttachmentViewState>;
   sessions: SessionSummary[];
@@ -304,7 +305,8 @@ export function SessionSidebar({
           const childrenId = `${groupId}-${encodeURIComponent(key)}`;
           const host = hosts.find((item) => item.host_id === (target.kind === "local" ? "local" : target.host_id));
           const unavailable = target.kind === "ssh" ? target.unavailable : undefined;
-          const targetError = targetErrors.get(key);
+          const targetFailure = targetErrors.get(key);
+          const targetError = targetFailure?.message;
           const hostError = targetError === unavailable ? undefined : targetError;
           const connection = target.kind === "ssh"
             ? hostConnections?.get(target.host_id ?? "")
@@ -312,13 +314,27 @@ export function SessionSidebar({
           const observation = connection?.observation;
           const reachability = connection?.reachability;
           const operation = connection?.operation;
-          const { state: connectionState, label: connectionLabel, route_unavailable: unavailableRoute } = hostConnectionPresentation(target, connection);
+          const presentation = hostConnectionPresentation(target, connection);
+          const remoteAttachments = [...(attachmentStates?.values() ?? [])].filter((state) =>
+            state.session && targetKey(state.session.target) === key);
+          const timedOutAttachment = remoteAttachments.find((state) => state.error_code === "remote_connection_timeout");
+          // A local mux process can outlive a stalled transport. Preserve that
+          // evidence for disconnect controls without claiming remote health.
+          const remoteTimeout = targetFailure?.code === "remote_connection_timeout" || !!timedOutAttachment;
+          const sessionIssue = remoteTimeout ? "Remote connection timed out"
+            : remoteAttachments.some((state) => ["reconnecting", "retry_wait"].includes(state.phase)) ? "Session reconnecting…"
+            : remoteAttachments.some((state) => state.error_code === "automatic_reconnect_timeout") ? "Session reconnect failed" : null;
+          const { state: connectionState, label: connectionLabel, route_unavailable: unavailableRoute } =
+            presentation.state === "connected" && sessionIssue
+              ? { ...presentation, state: "error", label: sessionIssue }
+              : presentation;
           const operationLabel = operation?.state === "pending" ? operation.kind === "connect" ? "Connecting…" : "Disconnecting…"
             : operation?.state === "failed" ? operation.kind === "connect" ? "Connect failed" : "Disconnect failed" : null;
           const connectionTitle = [
             connectionLabel,
             hostError,
-            connectionState === "connected" ? "The local SSH control connection is open. This check does not freshly verify remote responsiveness or terminal health." : null,
+            presentation.state === "connected" ? "The local SSH control connection is open. This check does not freshly verify remote responsiveness or terminal health." : null,
+            timedOutAttachment?.message,
             reachability?.state === "available" ? "The endpoint answered with an SSH greeting. Authentication has not been checked." : null,
             observation?.checked_at_ms ? `SSH connection checked at ${new Date(observation.checked_at_ms).toLocaleTimeString()}` : null,
             reachability?.checked_at_ms ? `SSH reachability checked at ${new Date(reachability.checked_at_ms).toLocaleTimeString()}` : null,

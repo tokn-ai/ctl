@@ -2674,6 +2674,36 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.connect).not.toHaveBeenCalled();
   });
 
+  it("retires a remote timeout only after session inspection recovers, despite a live SSH master", async () => {
+    const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote rmux service over SSH. Try again." };
+    api.sshConnectionStatus.mockResolvedValue({ connected: true, manually_disconnected: false });
+    api.inspectKnownSessions.mockRejectedValueOnce(failure);
+    render(<TerminalPage />);
+    await screen.findByRole("status", { name: "Host connection for test: SSH connected" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
+    await screen.findByRole("status", { name: "Host connection for test: Remote connection timed out" });
+    const log = screen.getByRole("log", { name: "Notifications" });
+    expect(within(log).getByText(failure.message)).toBeTruthy();
+    expect(within(log).queryByRole("button", { name: "Connect host" })).toBeNull();
+
+    const known = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
+    api.inspectKnownSessions.mockResolvedValueOnce([{
+      session_id: known.session_id, session: { ...known, status: "running" },
+      shell_state: { shell_type: "zsh", cwd: "/work", running_command: null, prompt_phase: "idle", tui_hint: null, revision: "1", observed_sequence: "1" },
+      error: null,
+    }]);
+    fireEvent.click(within(log).getByRole("button", { name: "Refresh sessions" }));
+    await waitFor(() => expect(within(log).queryByText(failure.message)).toBeNull());
+    expect(screen.getByRole("status", { name: "Host connection for test: SSH connected" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Notifications, .* unread/ }));
+    const history = screen.getByRole("region", { name: "Notification center" });
+    expect(within(history).getByText(failure.message)).toBeTruthy();
+    expect(within(history).getByText("Resolved")).toBeTruthy();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.disconnectSshHost).not.toHaveBeenCalled();
+    expect(api.killSession).not.toHaveBeenCalled();
+  });
+
   it("keeps unreachable sessions distinct from confirmed missing ones", async () => {
     api.inspectKnownSessions.mockRejectedValue({
       code: "ssh_authentication_required",

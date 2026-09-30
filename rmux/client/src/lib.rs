@@ -1073,32 +1073,47 @@ impl<S> AttachmentController<S> {
     let (presentation_progress_sender, presentation_progress_receiver) = watch::channel(None);
     let peer_activity = Arc::new(Mutex::new(Instant::now()));
     let reader = read_server_messages(reader, incoming_sender, Arc::clone(&peer_activity));
+    let peer_silence = wait_for_peer_silence(peer_activity, self.liveness.peer_timeout);
     let writer = drive_attachment_writer(
       writer,
       self.state.clone(),
       self.liveness,
       self.options.clone(),
-      peer_activity,
       AttachmentWriterChannels {
         commands,
         presentation_progress: presentation_progress_receiver,
         statuses: writer_status_sender,
       },
     );
-    let driver = self.drive(
-      incoming_receiver,
-      acknowledgements,
-      presentation_progress_sender,
-      writer_status_receiver,
-    );
-    tokio::pin!(reader);
-    tokio::pin!(writer);
-    tokio::pin!(driver);
-
-    tokio::select! {
-      result = &mut driver => result,
-      () = &mut reader => driver.await,
-      () = &mut writer => driver.await,
+    // Keep liveness outside all I/O and presentation waits. A blackholed SSH
+    // pipe may block a write forever, including the heartbeat meant to detect
+    // that failure. Canceling these futures closes only this attachment.
+    let result = {
+      let driver = self.drive(
+        incoming_receiver,
+        acknowledgements,
+        presentation_progress_sender,
+        writer_status_receiver,
+      );
+      let tasks = async {
+        tokio::pin!(reader);
+        tokio::pin!(writer);
+        tokio::pin!(driver);
+        tokio::select! {
+          result = &mut driver => result,
+          () = &mut reader => driver.await,
+          () = &mut writer => driver.await,
+        }
+      };
+      tokio::select! {
+        biased;
+        result = tasks => Some(result),
+        () = peer_silence => None,
+      }
+    };
+    match result {
+      Some(result) => result,
+      None => Ok(self.finish(AttachExitReason::ConnectionClosed)),
     }
   }
 
@@ -1648,7 +1663,6 @@ async fn drive_attachment_writer<W>(
   state: AttachmentState,
   liveness: AttachmentLiveness,
   options: AttachmentControllerOptions,
-  peer_activity: Arc<Mutex<Instant>>,
   mut channels: AttachmentWriterChannels,
 ) where
   W: AsyncWrite + Unpin,
@@ -1672,9 +1686,6 @@ async fn drive_attachment_writer<W>(
       // queued command; between ticks, commands remain responsive.
       biased;
       _ = heartbeats.tick() => {
-        if peer_is_silent(&peer_activity, liveness.peer_timeout) {
-          break WriterStatus::ConnectionClosed;
-        }
         match send_writer_heartbeat(
           &mut writer,
           &state,
@@ -1738,12 +1749,21 @@ async fn drive_attachment_writer<W>(
   }
 }
 
-fn peer_is_silent(peer_activity: &Arc<Mutex<Instant>>, peer_timeout: Duration) -> bool {
-  let last_activity = match peer_activity.lock() {
+fn last_peer_activity(peer_activity: &Mutex<Instant>) -> Instant {
+  match peer_activity.lock() {
     Ok(activity) => *activity,
     Err(poisoned) => *poisoned.into_inner(),
-  };
-  Instant::now().saturating_duration_since(last_activity) >= peer_timeout
+  }
+}
+
+async fn wait_for_peer_silence(peer_activity: Arc<Mutex<Instant>>, peer_timeout: Duration) {
+  loop {
+    tokio::time::sleep_until(last_peer_activity(&peer_activity) + peer_timeout).await;
+    if Instant::now().saturating_duration_since(last_peer_activity(&peer_activity)) >= peer_timeout
+    {
+      return;
+    }
+  }
 }
 
 async fn send_attachment_command<W>(
@@ -3134,6 +3154,79 @@ mod tests {
     assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
     assert_eq!(exit.next_sequence, Some(6));
     assert_eq!(exit.received_sequence, 6);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn silent_peer_disconnects_even_when_input_or_heartbeat_writes_are_blocked() {
+    for send_input in [true, false] {
+      // One byte of capacity guarantees every protocol frame backpressures
+      // until the peer reads it. Keep the peer alive, but stop reading after
+      // confirming that the writer entered either its input or heartbeat path.
+      let (client, mut daemon) = tokio::io::duplex(1);
+      let mut attached = attached_session(5, None, ShellState::default());
+      attached.input_lease = LeaseStatus {
+        held: true,
+        owned_by_client: true,
+      };
+      attached.liveness = AttachmentLiveness {
+        heartbeat_interval: Duration::from_millis(10),
+        peer_timeout: Duration::from_millis(30),
+      };
+      let (controller, control, _events) =
+        AttachmentController::new(client, &attached, controller_options()).unwrap();
+      let mut runner = tokio::spawn(controller.run());
+      if send_input {
+        control.input(b"blocked input".to_vec()).await.unwrap();
+      }
+      daemon.read_u8().await.unwrap();
+
+      let result = tokio::time::timeout(Duration::from_millis(100), &mut runner).await;
+      if result.is_err() {
+        runner.abort();
+      }
+      let exit = result
+        .expect("a blocked write prevented peer-silence detection")
+        .unwrap()
+        .unwrap();
+      assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
+      assert_eq!(exit.next_sequence, Some(5));
+      assert_eq!(exit.received_sequence, 5);
+    }
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn incoming_activity_keeps_a_backpressured_connection_alive() {
+    let (client, mut daemon) = tokio::io::duplex(1);
+    let mut attached = attached_session(5, None, ShellState::default());
+    attached.input_lease = LeaseStatus {
+      held: true,
+      owned_by_client: true,
+    };
+    attached.liveness = AttachmentLiveness {
+      heartbeat_interval: Duration::from_millis(10),
+      peer_timeout: Duration::from_millis(30),
+    };
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(controller.run());
+    control.input(b"blocked input".to_vec()).await.unwrap();
+    daemon.read_u8().await.unwrap();
+
+    for nonce in 0..10 {
+      tokio::time::advance(Duration::from_millis(15)).await;
+      write_frame(&mut daemon, &ServerMessage::HeartbeatAck { nonce })
+        .await
+        .unwrap();
+      assert_eq!(
+        events.recv().await,
+        Some(AttachmentEvent::HeartbeatAck { nonce })
+      );
+      assert!(!runner.is_finished());
+    }
+    drop(daemon);
+    let exit = runner.await.unwrap().unwrap();
+    assert_eq!(exit.reason, AttachExitReason::ConnectionClosed);
+    assert_eq!(exit.next_sequence, Some(5));
   }
 
   #[tokio::test]

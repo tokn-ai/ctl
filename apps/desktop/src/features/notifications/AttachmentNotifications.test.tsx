@@ -56,6 +56,57 @@ describe("attachment notification lifecycle", () => {
     expect(registry.canReconnect(owner)).toBe(false);
   });
 
+  it("resolves an error only after attachment succeeds, then reports a later recurrence", () => {
+    const { store, report } = setup();
+    report(failed);
+    report(transitionAttachment(failed, { type: "retry_scheduled", retry_at_ms: 1000 }));
+    report({ ...connecting, phase: "reconnecting" });
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true, occurrence_count: 1 }]);
+    report({ ...failed, phase: "attached", error_code: null, message: null });
+    expect(store.snapshot().entries).toMatchObject([{
+      resolved_at: expect.any(Number), toast_visible: false, actions: [], occurrence_count: 1,
+    }]);
+    report(failed);
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true, occurrence_count: 2 }]);
+  });
+
+  it("resolves a root open's earlier failure when the response supplies its pane identity", () => {
+    const { store, report } = setup();
+    report({ ...failed, session: { ...session, terminal_id: undefined } });
+    report({ ...connecting, phase: "reconnecting", session: { ...session, terminal_id: undefined } });
+    report({ ...failed, phase: "attached", error_code: null, message: null });
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: expect.any(Number), toast_visible: false }]);
+  });
+
+  it.each([
+    { name: "session", previous_session: { ...session, terminal_id: undefined }, next_session: { ...session, session_id: "another-session" } },
+    { name: "host", previous_session: { ...session, terminal_id: undefined }, next_session: { ...session, target: { kind: "ssh" as const, host_id: "another-host", destination: "workstation" } } },
+    { name: "pane", previous_session: session, next_session: { ...session, terminal_id: "secondary" } },
+  ])("does not resolve an earlier failure when its owner switches $name", ({ previous_session, next_session }) => {
+    const { store, report } = setup();
+    report({ ...failed, session: previous_session });
+    report({ ...failed, session: next_session, phase: "attached", error_code: null, message: null });
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true, actions: [] }]);
+  });
+
+  it("does not resolve errors on explicit retry or source removal", async () => {
+    const { store, registry, owner, report } = setup();
+    report(failed);
+    await registry.reconnect(owner);
+    report({ ...connecting, phase: "reconnecting" });
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true }]);
+    registry.remove(owner);
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true, actions: [] }]);
+  });
+
+  it("keeps attached warnings deduplicated instead of resolving them on every report", () => {
+    const { store, report } = setup();
+    const warning = { ...failed, phase: "attached" as const, error_code: null, message: "Another client controls this session's terminal size." };
+    report(warning);
+    report(warning);
+    expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, occurrence_count: 1 }]);
+  });
+
   it("resets deduplication when an attachment is closed and reopened", () => {
     const { store, report, registry, owner, reconnect } = setup();
     const authentication_failure = { ...failed, error_code: "ssh_authentication_required" };
@@ -138,6 +189,19 @@ describe("attachment notification lifecycle", () => {
     registry.remove(owner);
     expect(registry.canReconnect(replacement)).toBe(true);
     expect(store.snapshot().entries[0].actions).toMatchObject([{ args: { value: replacement } }]);
+    expect(store.snapshot().entries[0].resolved_at).toBeNull();
+  });
+
+  it("does not let a stale attached owner resolve a replacement pane's failure", () => {
+    const { store, report, registry, reconnect } = setup();
+    report(failed);
+    const replacement = registry.createOwner();
+    registry.report(replacement, failed, reconnect);
+    report({ ...failed, phase: "attached", error_code: null, message: null });
+    expect(registry.canReconnect(replacement)).toBe(true);
+    expect(store.snapshot().entries).toMatchObject([{
+      resolved_at: null, toast_visible: true, actions: [{ args: { value: replacement } }],
+    }]);
   });
 
   it("survives StrictMode effect replay and releases actions on real unmount", async () => {

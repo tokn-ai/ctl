@@ -1475,6 +1475,11 @@ fn master_command_with_identities(
       .args(["-f", "-M", "-N", "-T"])
       .args(["-o", "ControlMaster=yes"])
       .args(["-o", &format!("ControlPersist={MASTER_IDLE_SECONDS}")])
+      // A responsive local mux socket does not prove a live remote transport.
+      // Bound silent network failures so existing channels can disconnect and
+      // reconnect instead of indefinitely reusing a blackholed master.
+      .args(["-o", "ServerAliveInterval=10"])
+      .args(["-o", "ServerAliveCountMax=3"])
       .arg("-S")
       .arg(&endpoint.control_path)
       .args(["-o", "ClearAllForwardings=yes"])

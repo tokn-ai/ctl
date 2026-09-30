@@ -720,6 +720,7 @@ export interface AppNotification extends NotificationInput {
   occurrence_count: number;
   read: boolean;
   toast_visible: boolean;
+  resolved_at: number | null;
 }
 
 export interface OpenAttachmentRequest {

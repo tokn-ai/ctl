@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
@@ -27,39 +25,37 @@ const SIGN_REQUEST: u8 = 13;
 const SIGN_RESPONSE: u8 = 14;
 const EXTENSION: u8 = 27;
 const EXTENSION_FAILURE: u8 = 28;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const MAX_BINDINGS: usize = 16;
+const MAX_BINDING_BYTES: usize = 128 * 1024;
 
-pub(super) async fn public_fingerprints(path: &Path) -> HashSet<String> {
-  tokio::time::timeout(Duration::from_secs(2), async {
-    let mut peer = connect(path).await?;
-    let response = peer.request(&[REQUEST_IDENTITIES]).await.ok()?;
-    let keys = parse_identities(&response)?;
-    Some(
-      keys
-        .into_iter()
-        .map(|(key, _)| {
-          format!(
-            "SHA256:{}",
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(key))
-          )
-        })
-        .collect(),
-    )
-  })
-  .await
-  .ok()
-  .flatten()
-  .unwrap_or_default()
-}
+use super::lazy::LazyIdentities;
 
 pub(super) struct AgentProxy {
   directory: PathBuf,
   socket: PathBuf,
   worker: JoinHandle<()>,
+  identities: Option<Arc<LazyIdentities>>,
 }
 
 impl AgentProxy {
+  #[cfg(test)]
   pub(super) fn start(local: &Path, existing: Option<&Path>) -> io::Result<Self> {
+    Self::start_with(Some(local.to_owned()), None, existing)
+  }
+
+  pub(super) fn with_identities(
+    identities: LazyIdentities,
+    existing: Option<&Path>,
+  ) -> io::Result<Self> {
+    Self::start_with(None, Some(Arc::new(identities)), existing)
+  }
+
+  fn start_with(
+    local: Option<PathBuf>,
+    identities: Option<Arc<LazyIdentities>>,
+    existing: Option<&Path>,
+  ) -> io::Result<Self> {
     let directory =
       PathBuf::from("/tmp").join(format!("ctld-agent-{}", uuid::Uuid::new_v4().simple()));
     std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
@@ -71,8 +67,8 @@ impl AgentProxy {
         return Err(error);
       }
     };
-    let local = local.to_owned();
     let existing = existing.map(Path::to_owned);
+    let owned_identities = identities.clone();
     let worker = tokio::spawn(async move {
       let slots = Arc::new(Semaphore::new(16));
       let mut clients = JoinSet::new();
@@ -82,10 +78,11 @@ impl AgentProxy {
             let Ok((stream, _)) = result else { break };
             let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else { continue };
             let local = local.clone();
+            let identities = identities.clone();
             let existing = existing.clone();
             clients.spawn(async move {
               let _permit = permit;
-              let _ = serve_client(stream, &local, existing.as_deref()).await;
+              let _ = serve_client(stream, local.as_deref(), identities, existing.as_deref()).await;
             });
           }
           _ = clients.join_next(), if !clients.is_empty() => {}
@@ -96,6 +93,7 @@ impl AgentProxy {
       directory,
       socket,
       worker,
+      identities: owned_identities,
     })
   }
 
@@ -121,6 +119,9 @@ impl AgentProxy {
 
 impl Drop for AgentProxy {
   fn drop(&mut self) {
+    if let Some(identities) = &self.identities {
+      identities.cancel();
+    }
     self.worker.abort();
     let _ = std::fs::remove_dir_all(&self.directory);
   }
@@ -161,7 +162,8 @@ async fn connect(path: &Path) -> Option<Peer> {
 
 async fn serve_client(
   mut client: UnixStream,
-  local: &Path,
+  local: Option<&Path>,
+  identities: Option<Arc<LazyIdentities>>,
   existing: Option<&Path>,
 ) -> io::Result<()> {
   let mut peers = Vec::new();
@@ -172,14 +174,19 @@ async fn serve_client(
   {
     peers.push(peer);
   }
-  if let Some(peer) = connect(local).await {
+  if let Some(local) = local
+    && let Some(peer) = connect(local).await
+  {
     peers.push(peer);
   }
+  let mut lazy = ClientIdentities::new(identities);
   loop {
     let request = read_message(&mut client).await?;
     let response = match request.first().copied() {
-      Some(REQUEST_IDENTITIES) if request.len() == 1 => list_identities(&mut peers, &request).await,
-      Some(SIGN_REQUEST) => sign(&mut peers, &request).await,
+      Some(REQUEST_IDENTITIES) if request.len() == 1 => {
+        list_identities(&mut peers, &mut lazy, &request).await
+      }
+      Some(SIGN_REQUEST) => sign(&mut peers, &mut lazy, &request).await,
       Some(EXTENSION) if extension_name(&request) == Some(b"session-bind@openssh.com") => {
         let mut accepted = false;
         for peer in &mut peers {
@@ -187,6 +194,7 @@ async fn serve_client(
             accepted |= response == [SUCCESS];
           }
         }
+        accepted |= lazy.bind(&request).await;
         vec![if accepted { SUCCESS } else { FAILURE }]
       }
       Some(EXTENSION) => vec![EXTENSION_FAILURE],
@@ -197,7 +205,11 @@ async fn serve_client(
   }
 }
 
-async fn list_identities(peers: &mut [Peer], request: &[u8]) -> Vec<u8> {
+async fn list_identities(
+  peers: &mut [Peer],
+  lazy: &mut ClientIdentities,
+  request: &[u8],
+) -> Vec<u8> {
   let mut identities = Vec::new();
   let mut seen = HashSet::new();
   for peer in peers {
@@ -209,9 +221,17 @@ async fn list_identities(peers: &mut [Peer], request: &[u8]) -> Vec<u8> {
       continue;
     };
     for (key, comment) in keys {
+      lazy.record_upstream(&key);
       peer.keys.insert(key.clone());
-      if seen.insert(key.clone()) && identities.len() < MAX_KEYS {
+      if identities.len() < MAX_KEYS && seen.insert(key.clone()) {
         identities.push((key, comment));
+      }
+    }
+  }
+  if let Some(registry) = &lazy.registry {
+    for (key, comment) in registry.public_identities() {
+      if identities.len() < MAX_KEYS && seen.insert(key.to_vec()) {
+        identities.push((key.to_vec(), comment.to_vec()));
       }
     }
   }
@@ -223,31 +243,144 @@ async fn list_identities(peers: &mut [Peer], request: &[u8]) -> Vec<u8> {
     push_string(&mut response, &comment);
   }
   if response.len() > MAX_MESSAGE {
+    lazy.advertised.clear();
     vec![FAILURE]
   } else {
+    lazy.advertised = seen;
     response
   }
 }
 
-async fn sign(peers: &mut [Peer], request: &[u8]) -> Vec<u8> {
+async fn sign(peers: &mut [Peer], lazy: &mut ClientIdentities, request: &[u8]) -> Vec<u8> {
   let mut cursor = &request[1..];
   let Some(key) = take_string(&mut cursor) else {
     return vec![FAILURE];
   };
-  if take_string(&mut cursor).is_none() || cursor.len() != 4 {
+  if take_string(&mut cursor).is_none() || cursor.len() != 4 || !lazy.advertised.contains(key) {
     return vec![FAILURE];
   }
   for peer in peers {
     if !peer.keys.contains(key) {
       continue;
     }
-    if let Ok(response) = peer.request(request).await
+    return if let Ok(response) = peer.request(request).await
       && response.first() == Some(&SIGN_RESPONSE)
     {
-      return response;
+      response
+    } else {
+      // The user's agent is authoritative for its own keys. Falling through
+      // could bypass its confirmation, destination, or lifetime restrictions.
+      vec![FAILURE]
+    };
+  }
+  if lazy.upstream_owned.contains(key) {
+    // An upstream transport failure clears its live identity set, but does not
+    // authorize a second request to bypass that agent through a saved key.
+    return vec![FAILURE];
+  }
+  lazy
+    .sign(key, request)
+    .await
+    .unwrap_or_else(|| vec![FAILURE])
+}
+
+struct ClientIdentities {
+  registry: Option<Arc<LazyIdentities>>,
+  advertised: HashSet<Vec<u8>>,
+  upstream_owned: HashSet<Vec<u8>>,
+  peers: std::collections::HashMap<Vec<u8>, Peer>,
+  bindings: Vec<Vec<u8>>,
+  binding_bytes: usize,
+}
+
+impl ClientIdentities {
+  fn new(registry: Option<Arc<LazyIdentities>>) -> Self {
+    Self {
+      registry,
+      advertised: HashSet::new(),
+      upstream_owned: HashSet::new(),
+      peers: std::collections::HashMap::new(),
+      bindings: Vec::new(),
+      binding_bytes: 0,
     }
   }
-  vec![FAILURE]
+
+  fn record_upstream(&mut self, key: &[u8]) {
+    if self.registry.is_none() || self.upstream_owned.contains(key) {
+      return;
+    }
+    if self.upstream_owned.len() >= MAX_KEYS {
+      // Do not accumulate an unbounded ownership history from a changing
+      // upstream. Keeping only its native agent remains a safe fallback.
+      self.registry = None;
+      self.peers.clear();
+      return;
+    }
+    self.upstream_owned.insert(key.to_vec());
+  }
+
+  async fn bind(&mut self, request: &[u8]) -> bool {
+    if self.registry.is_none() {
+      return false;
+    }
+    if !valid_binding(request)
+      || self.bindings.len() >= MAX_BINDINGS
+      || self.binding_bytes.saturating_add(request.len()) > MAX_BINDING_BYTES
+    {
+      // No later signature may omit a binding the caller attempted to add.
+      self.registry = None;
+      self.peers.clear();
+      return false;
+    }
+    // An isolated agent validates the complete binding before signing. Until
+    // unlocked, retain the exact bounded request without reading any secret.
+    self.bindings.push(request.to_vec());
+    self.binding_bytes += request.len();
+    for peer in self.peers.values_mut() {
+      if peer.request(request).await.ok().as_deref() != Some(&[SUCCESS]) {
+        peer.stream = None;
+      }
+    }
+    true
+  }
+
+  async fn sign(&mut self, key: &[u8], request: &[u8]) -> Option<Vec<u8>> {
+    let registry = self.registry.as_ref()?;
+    if registry.is_canceled() {
+      return None;
+    }
+    if !self.peers.contains_key(key) {
+      let socket = registry.agent_for(key).await?;
+      let mut peer = connect(&socket).await?;
+      for binding in &self.bindings {
+        if peer.request(binding).await.ok()?.as_slice() != [SUCCESS] {
+          return None;
+        }
+      }
+      let listed = peer.request(&[REQUEST_IDENTITIES]).await.ok()?;
+      if !parse_identities(&listed)?
+        .iter()
+        .any(|(public, _)| public == key)
+      {
+        return None;
+      }
+      self.peers.insert(key.to_vec(), peer);
+    }
+    if registry.is_canceled() {
+      return None;
+    }
+    let response = self.peers.get_mut(key)?.request(request).await.ok()?;
+    (!registry.is_canceled() && response.first() == Some(&SIGN_RESPONSE)).then_some(response)
+  }
+}
+
+fn valid_binding(request: &[u8]) -> bool {
+  let mut cursor = &request[1..];
+  take_string(&mut cursor) == Some(b"session-bind@openssh.com")
+    && take_string(&mut cursor).is_some_and(|value| !value.is_empty())
+    && take_string(&mut cursor).is_some_and(|value| !value.is_empty())
+    && take_string(&mut cursor).is_some_and(|value| !value.is_empty())
+    && matches!(cursor, [0 | 1])
 }
 
 fn extension_name(request: &[u8]) -> Option<&[u8]> {
@@ -281,7 +414,7 @@ fn take_u32(cursor: &mut &[u8]) -> Option<u32> {
   Some(u32::from_be_bytes(bytes))
 }
 
-fn take_string<'a>(cursor: &mut &'a [u8]) -> Option<&'a [u8]> {
+pub(super) fn take_string<'a>(cursor: &mut &'a [u8]) -> Option<&'a [u8]> {
   let count = usize::try_from(take_u32(cursor)?).ok()?;
   let value = cursor.get(..count)?;
   *cursor = &cursor[count..];

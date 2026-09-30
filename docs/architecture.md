@@ -362,9 +362,17 @@ suppression marker for the connection scope.
 Only `ctld` links Keychain code. Password entries retain their host-route/prompt
 scope and are answered directly to the matching OpenSSH askpass process. New
 identity passphrases use a separate namespace bound to the canonical key path,
-file-content digest, and locally verified public identity. Before reuse, `ctld`
-checks the file version and unlocks it through a temporary local agent; that
-passphrase is never returned to an SSH password prompt or client. Replacing or
+file-content digest, and locally verified public identity. Preparation lists
+public identities without reading passphrases. Only a signature request for an
+eligible configured key triggers an exact protected-item read, current-file
+check, and local unlock. The resulting public key must match the requested key
+before the temporary agent signs. Existing agent connections retain their
+session bindings, and lazy local connections replay their own binding history;
+the temporary agent and unlock state live only for that connection attempt.
+Cancellation and unlock timeouts mark pending blocking reads before they can
+start authenticated Keychain access after acquiring the operation lock; they do
+not dismiss an already-open OS authentication dialog. The passphrase is never
+returned to an SSH password prompt or client. Replacing or
 re-encrypting the file invalidates reuse. Legacy prompt-scoped key entries are
 not silently promoted to verified identity entries. Host removal cleans up
 host-scoped credentials; identity passphrases have independent, explicit Forget

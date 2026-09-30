@@ -239,6 +239,21 @@ pub(super) fn save_identity(identity_id: &str, metadata: &SavedIdentity) -> Resu
   write(&identity_account(identity_id), &comment)
 }
 
+pub(super) fn identity_metadata(identity_id: &str) -> Result<Option<SavedIdentity>, Error> {
+  if !valid_identity_id(identity_id) {
+    return Err(invalid());
+  }
+  let account = identity_account(identity_id);
+  let records = ctl_keychain_client::search(&Query {
+    service: Some(SERVICE),
+    account: Some(&account),
+    limit: 1,
+    secret: false,
+    authentication: Authentication::Forbid,
+  })?;
+  Ok(project(records).identities.remove(identity_id))
+}
+
 pub(super) fn forget_credential(credential_id: &str) -> Result<(), Error> {
   if credential_metadata::item_identity(credential_id).is_none() {
     return Err(invalid());
@@ -318,9 +333,25 @@ pub(super) fn import() -> Result<(), Error> {
   finish_mutation(&token)
 }
 
+fn preserve_public_hints(imported: &mut SavedIdentities, previous: &SavedIdentities) {
+  for (identity_id, metadata) in imported {
+    if metadata.public_key.is_none()
+      && let Some(prior) = previous.get(identity_id)
+      && prior.valid(identity_id)
+      && metadata.path == prior.path
+      && metadata.file_version == prior.file_version
+      && metadata.key_type == prior.key_type
+      && metadata.fingerprint == prior.fingerprint
+    {
+      metadata.public_key.clone_from(&prior.public_key);
+    }
+  }
+}
+
 fn imported_records(records: Vec<Record>) -> Imported {
   let mut credentials = Vec::new();
   let mut identities = HashMap::new();
+  let mut sidecars = Vec::new();
   let mut complete = records.len() <= MAX_ITEMS;
   for record in records.into_iter().take(MAX_ITEMS) {
     match record.attributes.get("svce").map(String::as_str) {
@@ -336,10 +367,15 @@ fn imported_records(records: Vec<Record>) -> Imported {
           complete = false;
         }
       }
+      Some(SERVICE) => sidecars.push(record),
       None => complete = false,
       _ => {}
     }
   }
+  // The successful source scan includes our metadata service. Preserve only
+  // hints whose old binding still matches, without a second index read that
+  // could prevent repairing an unreadable or malformed metadata index.
+  preserve_public_hints(&mut identities, &project(sidecars).identities);
   let inventory = credential_metadata::inventory_from_attributes(credentials);
   Imported {
     credentials: inventory.credentials,

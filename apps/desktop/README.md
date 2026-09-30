@@ -315,7 +315,9 @@ identity passphrases use a device-local, Touch ID-only policy tied to the
 currently enrolled fingerprints. Retrieved passwords satisfy the matching
 OpenSSH prompt inside `ctld`; saved identity passphrases instead unlock their
 verified key locally in a temporary agent and are never supplied as answers to
-SSH password prompts. Successful SSH authentication alone does not establish
+SSH password prompts. Key preparation uses public metadata and reads a saved
+passphrase only when SSH requests that key's signature. Password-only connections
+do not unlock unrelated keys. Successful SSH authentication alone does not establish
 that an entered passphrase unlocked a key: a new passphrase must pass local
 verification before it can be saved. Changed or re-encrypted key files require
 verification and replacement of the saved passphrase.

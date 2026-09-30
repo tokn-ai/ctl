@@ -16,12 +16,20 @@ const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_GATEWAYS: usize = 8;
 
 #[derive(Debug, Default, PartialEq, Eq)]
+pub(super) enum PublicKeyAuthentication {
+  #[default]
+  Enabled,
+  Disabled,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Configuration {
   pub(super) paths: Vec<String>,
   pub(super) identity_files: Vec<String>,
   pub(super) resolved_identity_files: Vec<(String, String)>,
   pub(super) agent: Option<PathBuf>,
   pub(super) agent_disabled: bool,
+  pub(super) publickey_authentication: PublicKeyAuthentication,
   pub(super) mutates_agent: bool,
   pub(super) inherits_agent: bool,
   pub(super) jumps: Vec<SshTarget>,
@@ -184,6 +192,7 @@ async fn read_configuration(target: &SshTarget) -> std::io::Result<Configuration
 pub(super) fn parse_configuration(text: &str) -> Configuration {
   let mut configuration = Configuration::default();
   let mut explicit_agent = false;
+  let mut preferred_authentication_allows_publickey = true;
   let fields: Vec<_> = text
     .lines()
     .filter_map(|line| line.split_once(' '))
@@ -237,16 +246,26 @@ pub(super) fn parse_configuration(text: &str) -> Configuration {
           .filter_map(jump_target)
           .collect();
       }
+      "preferredauthentications" => {
+        preferred_authentication_allows_publickey =
+          value.split(',').any(|method| method == "publickey");
+      }
       "addkeystoagent" => configuration.mutates_agent = !matches!(value, "no" | "false"),
       _ => {}
     }
   }
-  configuration.agent_disabled |= text.lines().any(|line| {
-    matches!(
-      line,
-      "pubkeyauthentication no" | "pubkeyauthentication false"
-    )
-  });
+  // Authentication eligibility belongs to each destination. A password-only
+  // destination can still inherit an agent needed by a public-key jump host.
+  if !preferred_authentication_allows_publickey
+    || text.lines().any(|line| {
+      matches!(
+        line,
+        "pubkeyauthentication no" | "pubkeyauthentication false"
+      )
+    })
+  {
+    configuration.publickey_authentication = PublicKeyAuthentication::Disabled;
+  }
   configuration.agent_disabled |= configuration.identity_files.len() > MAX_IDENTITIES;
   configuration.agent_disabled |= configuration.mutates_agent;
   configuration.inherits_agent = !explicit_agent

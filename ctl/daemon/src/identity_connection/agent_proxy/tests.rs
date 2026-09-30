@@ -11,7 +11,7 @@ struct FakeAgent {
 }
 
 impl FakeAgent {
-  fn new(key: &'static [u8], signature: &'static [u8]) -> Self {
+  fn new(key: &[u8], signature: &[u8]) -> Self {
     let directory =
       PathBuf::from("/tmp").join(format!("ctld-fake-agent-{}", uuid::Uuid::new_v4().simple()));
     std::fs::DirBuilder::new()
@@ -22,6 +22,8 @@ impl FakeAgent {
     let listener = UnixListener::bind(&socket).unwrap();
     let log = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&log);
+    let key = key.to_vec();
+    let signature = signature.to_vec();
     let worker = tokio::spawn(async move {
       let mut clients = JoinSet::new();
       loop {
@@ -29,6 +31,8 @@ impl FakeAgent {
           connection = listener.accept() => {
             let Ok((mut stream, _)) = connection else { break };
             let recorded = Arc::clone(&recorded);
+            let key = key.clone();
+            let signature = signature.clone();
             clients.spawn(async move {
               let mut bound = false;
               while let Ok(request) = read_message(&mut stream).await {
@@ -38,13 +42,13 @@ impl FakeAgent {
                   REQUEST_IDENTITIES => {
                     let mut response = vec![IDENTITIES_ANSWER];
                     response.extend(1_u32.to_be_bytes());
-                    push_string(&mut response, key);
+                    push_string(&mut response, &key);
                     push_string(&mut response, b"synthetic public identity");
                     response
                   }
-                  SIGN_REQUEST if bound => {
+                  SIGN_REQUEST if bound && !signature.is_empty() => {
                     let mut response = vec![SIGN_RESPONSE];
-                    push_string(&mut response, signature);
+                    push_string(&mut response, &signature);
                     response
                   }
                   _ => vec![FAILURE],
@@ -230,15 +234,4 @@ async fn a_failed_upstream_exchange_closes_that_stream_before_any_later_request(
   worker.await.unwrap();
 }
 
-#[tokio::test]
-async fn enumerating_unlocked_keys_only_requests_public_identities() {
-  let agent = FakeAgent::new(b"already unlocked public key", b"unused signature");
-  let fingerprints = public_fingerprints(&agent.socket).await;
-  let expected = format!(
-    "SHA256:{}",
-    base64::engine::general_purpose::STANDARD_NO_PAD
-      .encode(Sha256::digest(b"already unlocked public key"))
-  );
-  assert_eq!(fingerprints, HashSet::from([expected]));
-  assert_eq!(*agent.log.lock().unwrap(), [vec![REQUEST_IDENTITIES]]);
-}
+mod lazy;

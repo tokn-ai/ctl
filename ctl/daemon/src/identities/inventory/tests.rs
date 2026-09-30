@@ -48,6 +48,7 @@ fn changed_and_missing_keys_do_not_reuse_saved_state() {
     file_version: snapshot.file_version.clone(),
     key_type: "ssh-ed25519".into(),
     fingerprint: "SHA256:fixture".into(),
+    public_key: None,
   };
   let saved = HashMap::from([(snapshot.identity_id.clone(), metadata)]);
   let mut complete = true;
@@ -148,6 +149,7 @@ fn saved_metadata_cannot_redirect_an_identity_to_another_path() {
     file_version: "a".repeat(64),
     key_type: "ssh-rsa".into(),
     fingerprint: "SHA256:fixture".into(),
+    public_key: None,
   };
   assert!(metadata.valid(&files::digest(metadata.path.as_bytes())));
   assert!(!metadata.valid(&"b".repeat(64)));

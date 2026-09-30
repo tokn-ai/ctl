@@ -79,8 +79,11 @@ the page does not restart active SSH connections automatically.
 Authentication requests describe their purpose: the key file whose passphrase
 is being read or replaced, the SSH account and destination whose password is
 needed, or the explicit import of previously saved rmux credential metadata.
-Connection setup reads each selected identity and its binding together; it does
-not enumerate all saved passphrases before each lookup.
+Connection setup discovers public identities without unlocking saved keys. Only
+an SSH signature request for a configured key can read its saved passphrase and
+protected binding together. Password-only connections therefore do not request
+identity-passphrase access; a gateway or server that actually requires both
+credentials can still need separate authorizations.
 
 Creation and modification dates are Keychain metadata, not a record of the last
 login. Missing dates are shown as not recorded. Source errors do not hide rows
@@ -129,16 +132,27 @@ authorizes secret reuse.
 
 Local verification uses an isolated temporary OpenSSH agent and a private
 askpass channel. The key snapshot is provided through stdin, and the saved
-passphrase is never returned to an SSH password prompt. Connection reuse loads
-verified identities into a temporary agent while preserving the configured
-agent and fallback identities; the temporary agent follows the connection
-attempt's lifetime. An existing authenticated SSH master is reused before this
-preparation. Explicit `IdentityAgent=none` continues to disable agent reuse.
-OpenSSH-format keys already unlocked in the original agent do not trigger
-another Keychain read; opaque PEM files may still need local unlock. Configured
-SSH gateways and bounded `ProxyJump` chains participate when
-they inherit that agent; gateway-specific `IdentityAgent` settings retain native
-authentication. Gateway PEM keys without a readable public identity may still
+passphrase is never returned to an SSH password prompt. Preparation advertises
+public identities for saved keys while preserving the configured agent and
+native fallback for unsaved keys. It reads no passphrase. When SSH requests a
+signature, the requested key is unlocked in a temporary local agent and its
+verified public identity must match the advertised key before signing. Repeated
+requests share that unlock within the connection attempt; cancellation disposes
+of the temporary agent and prevents queued credential reads from starting.
+An authentication dialog already displayed by macOS remains under OS control.
+An existing authenticated SSH master is reused before this preparation, and
+keys already available from the original agent do not need another Keychain read.
+
+OpenSSH-format files provide their public identity without decryption. Opaque
+PEM files can use a companion `.pub` file or public metadata recorded when their
+passphrase was saved. These are only discovery hints, never authority to use a
+secret or sign with a different key. Older PEM files without either source keep
+native passphrase entry; saving the verified passphrase again records the public
+metadata for future connections. Explicit `IdentityAgent=none` and authentication
+preferences that exclude public keys retain native behavior. Configured SSH
+gateways and bounded `ProxyJump` chains participate when they inherit that agent;
+gateway-specific `IdentityAgent` settings retain native authentication. Gateway
+PEM keys without a readable public identity may still
 prompt when `IdentitiesOnly=yes`; no gateway command or SSH configuration is
 rewritten. Configurations that enable `AddKeysToAgent` also keep native
 authentication so their existing agent behavior is preserved. These cases can

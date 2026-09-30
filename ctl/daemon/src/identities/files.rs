@@ -18,6 +18,7 @@ pub struct IdentitySnapshot {
   pub file_version: String,
   pub key_type: Option<String>,
   pub fingerprint: Option<String>,
+  pub public_key: Option<String>,
   pub encrypted: bool,
   pub(super) bytes: Zeroizing<Vec<u8>>,
 }
@@ -88,14 +89,15 @@ pub fn inspect_path(path: &str) -> Result<IdentitySnapshot, IdentityError> {
   if bytes.len() > MAX_KEY_BYTES {
     return Err(IdentityError::UnsupportedFile);
   }
-  let (encrypted, key_type, fingerprint) = envelope(&bytes)?;
+  let envelope = envelope(&bytes)?;
   Ok(IdentitySnapshot {
     identity_id: digest(path.as_bytes()),
     path,
     file_version: digest(&bytes),
-    key_type,
-    fingerprint,
-    encrypted,
+    key_type: envelope.key_type,
+    fingerprint: envelope.fingerprint,
+    public_key: envelope.public_key,
+    encrypted: envelope.encrypted,
     bytes,
   })
 }
@@ -148,7 +150,14 @@ pub(super) fn valid_id(value: &str) -> bool {
       .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn envelope(bytes: &[u8]) -> Result<(bool, Option<String>, Option<String>), IdentityError> {
+struct Envelope {
+  encrypted: bool,
+  key_type: Option<String>,
+  fingerprint: Option<String>,
+  public_key: Option<String>,
+}
+
+fn envelope(bytes: &[u8]) -> Result<Envelope, IdentityError> {
   let text = std::str::from_utf8(bytes).map_err(|_| IdentityError::UnsupportedFile)?;
   if let Some(encoded) = text.strip_prefix("-----BEGIN OPENSSH PRIVATE KEY-----") {
     let (encoded, remainder) = encoded
@@ -183,7 +192,15 @@ fn envelope(bytes: &[u8]) -> Result<(bool, Option<String>, Option<String>), Iden
     if private.is_empty() || !remaining.is_empty() {
       return Err(IdentityError::UnsupportedFile);
     }
-    return Ok((cipher != b"none", Some(key_type), Some(fingerprint)));
+    return Ok(Envelope {
+      encrypted: cipher != b"none",
+      public_key: Some(format!(
+        "{key_type} {}",
+        base64::engine::general_purpose::STANDARD.encode(public_key)
+      )),
+      key_type: Some(key_type),
+      fingerprint: Some(fingerprint),
+    });
   }
   for (header, key_type) in [
     ("RSA PRIVATE KEY", Some("ssh-rsa")),
@@ -195,11 +212,12 @@ fn envelope(bytes: &[u8]) -> Result<(bool, Option<String>, Option<String>), Iden
     if text.starts_with(&format!("-----BEGIN {header}-----"))
       && text.contains(&format!("-----END {header}-----"))
     {
-      return Ok((
-        pem::encrypted(text, header)?,
-        key_type.map(str::to_owned),
-        None,
-      ));
+      return Ok(Envelope {
+        encrypted: pem::encrypted(text, header)?,
+        key_type: key_type.map(str::to_owned),
+        fingerprint: None,
+        public_key: None,
+      });
     }
   }
   Err(IdentityError::UnsupportedFile)

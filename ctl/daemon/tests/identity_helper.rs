@@ -62,6 +62,10 @@ async fn unlock_verifies_real_synthetic_key_and_rejects_wrong_passphrase() {
     )
     .await
     .unwrap();
+  assert_eq!(
+    snapshot.public_key.as_deref(),
+    Some(verified.public_key.as_str())
+  );
   assert_eq!(verified.fingerprint, snapshot.fingerprint.unwrap());
   assert_eq!(verified.key_type, "ssh-ed25519");
   assert!(verified.public_key.starts_with("ssh-ed25519 "));

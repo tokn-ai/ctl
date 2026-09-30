@@ -42,6 +42,7 @@ import {
   previewWorkspace,
 } from "./fixtures";
 import { previewComponentVersions } from "./aboutFixtures";
+import { previewCredentials, previewIdentityFiles } from "./credentialsFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
 // The official Tauri mocks intercept every IPC call; nothing reaches a daemon,
@@ -51,6 +52,30 @@ if (!import.meta.env.DEV) throw new Error("The sample workspace is development-o
 const view_param = new URLSearchParams(location.search).get("view");
 const initial_view = view_param === "tasks" || view_param === "ports" || view_param === "vpn" ? view_param : "sessions";
 const about_param = new URLSearchParams(location.search).get("about");
+const credentials_param = new URLSearchParams(location.search).get("credentials");
+let credentials = previewCredentials();
+const identity_files = previewIdentityFiles();
+if (credentials_param === "empty") {
+  credentials.credentials = [];
+  identity_files.identity_files = [];
+}
+if (credentials_param === "partial") {
+  identity_files.keychain_available = false;
+  identity_files.keychain_message = "Keychain is locked. Unlock it, then refresh.";
+  identity_files.identity_files.forEach((file) => { file.passphrase_state = file.encrypted === false ? "not_required" : "unknown"; });
+  credentials.credentials = credentials.credentials.filter((credential) => credential.storage !== "keychain");
+  credentials.sources[0] = { source: "keychain", state: "unavailable", message: "Keychain is locked. Unlock it, then refresh." };
+}
+if (credentials_param === "import") {
+  credentials.metadata_import_required = true;
+  identity_files.metadata_import_required = true;
+  credentials.credentials = credentials.credentials.filter((credential) => credential.storage !== "keychain");
+  identity_files.identity_files.forEach((file) => {
+    file.passphrase_state = file.encrypted === false ? "not_required" : "unknown";
+    file.key_type = null;
+    file.fingerprint = null;
+  });
+}
 let component_versions = previewComponentVersions();
 if (about_param === "partial") {
   const daemon = component_versions.components.find((row) => row.component === "rmuxd")!;
@@ -171,6 +196,36 @@ function requireSession(session_id: string): SessionSummary {
 mockWindows("main");
 mockIPC((command, payload) => {
   switch (command) {
+    case "list_saved_credentials":
+      if (credentials_param === "error") throw new Error("The credential inventory could not be refreshed.");
+      return structuredClone({ ...credentials, checked_at_ms: Date.now() });
+    case "import_credential_metadata":
+      credentials = previewCredentials();
+      Object.assign(identity_files, previewIdentityFiles());
+      return;
+    case "forget_saved_credential": {
+      const { credential_id } = request<{ credential_id: string }>(payload);
+      const credential = credentials.credentials.find((item) => item.credential_id === credential_id);
+      if (!credential || credential.storage !== "keychain") throw new Error("This saved credential is no longer available.");
+      credentials = { ...credentials, credentials: credentials.credentials.filter((item) => item.credential_id !== credential_id) };
+      return;
+    }
+    case "list_credential_identity_files":
+      if (credentials_param === "error") throw new Error("Identity files could not be refreshed.");
+      return structuredClone({ ...identity_files, checked_at_ms: Date.now() });
+    case "save_identity_passphrase": {
+      const { path } = request<{ path: string }>(payload);
+      const file = identity_files.identity_files.find((item) => item.path === path);
+      if (!file) throw new Error("Identity file is no longer available.");
+      file.passphrase_state = "saved";
+      return;
+    }
+    case "forget_identity_passphrase": {
+      const { identity_id } = request<{ identity_id: string }>(payload);
+      const file = identity_files.identity_files.find((item) => item.identity_id === identity_id);
+      if (file) file.passphrase_state = file.encrypted ? "not_saved" : "not_required";
+      return;
+    }
     case "get_component_versions":
       return structuredClone(component_versions);
     case "preflight_component_action": {

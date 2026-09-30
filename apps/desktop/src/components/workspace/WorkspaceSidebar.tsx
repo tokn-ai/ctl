@@ -16,6 +16,8 @@ interface Props {
   on_keybindings?(): void;
   on_about?(): void;
   about_open?: boolean;
+  on_credentials?(): void;
+  credentials_open?: boolean;
 }
 
 export function WorkspaceSidebar({
@@ -32,6 +34,8 @@ export function WorkspaceSidebar({
   on_keybindings,
   on_about,
   about_open = false,
+  on_credentials,
+  credentials_open = false,
 }: Props) {
   const views = ["sessions", "tasks", "ports", "vpn"] as const;
   const labels = {
@@ -97,6 +101,11 @@ export function WorkspaceSidebar({
             </button>
           ))}
         </nav>
+        {on_credentials ? (
+          <button className="rail-settings" type="button" onClick={on_credentials} aria-label="Credentials" title="Credentials" aria-pressed={credentials_open}>
+            <Icon name="key" size={21} />
+          </button>
+        ) : null}
         {on_keybindings ? (
           <button
             className="rail-settings"

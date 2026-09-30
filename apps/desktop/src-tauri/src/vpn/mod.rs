@@ -27,6 +27,54 @@ pub use models::{
 };
 use repository::Repository;
 
+/// Metadata-only saved settings for the Credentials page. The existing loader
+/// removes passwords before returning this snapshot.
+pub(crate) fn credential_metadata(snapshot: &VpnConnectionsSnapshot) -> Vec<CredentialMetadata> {
+  snapshot
+    .connections
+    .iter()
+    .map(|connection| {
+      let settings = match &connection.settings {
+        models::VpnSettingsSummary::Openconnect {
+          url,
+          username,
+          has_password,
+          ..
+        } => CredentialSettings::Openconnect {
+          url: url.clone(),
+          username: username.clone(),
+          has_password: *has_password,
+        },
+        models::VpnSettingsSummary::Tailscale { hostname, .. } => CredentialSettings::Tailscale {
+          hostname: hostname.clone(),
+        },
+      };
+      CredentialMetadata {
+        connection_id: connection.connection_id.clone(),
+        name: connection.name.clone(),
+        settings,
+      }
+    })
+    .collect()
+}
+
+pub(crate) struct CredentialMetadata {
+  pub connection_id: String,
+  pub name: String,
+  pub settings: CredentialSettings,
+}
+
+pub(crate) enum CredentialSettings {
+  Openconnect {
+    url: String,
+    username: String,
+    has_password: bool,
+  },
+  Tailscale {
+    hostname: Option<String>,
+  },
+}
+
 // Each VPN coordinates independently across windows, including profile loading.
 static COORDINATORS: LazyLock<Coordinators> = LazyLock::new(Coordinators::default);
 static ENROLLMENTS: LazyLock<enrollment::Enrollments> =

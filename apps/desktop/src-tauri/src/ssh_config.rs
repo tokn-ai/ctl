@@ -13,6 +13,8 @@ const MAX_INCLUDE_DEPTH: usize = 32;
 pub struct SshHostDiscovery {
   pub hosts: Vec<String>,
   pub warnings: Vec<String>,
+  pub identity_paths: Vec<String>,
+  pub identity_warnings: Vec<String>,
   occurrences: HashMap<String, usize>,
 }
 
@@ -108,6 +110,25 @@ impl<'a> HostCollector<'a> {
           *self.discovery.occurrences.entry(host.clone()).or_default() += 1;
           if self.seen_hosts.insert(host.clone()) {
             self.discovery.hosts.push(host);
+          }
+        }
+      } else if keyword.eq_ignore_ascii_case("identityfile") {
+        for path in arguments {
+          if path.eq_ignore_ascii_case("none") {
+            continue;
+          }
+          match expand_include_tokens(&path, self.home) {
+            Ok(path)
+              if !path.contains("${") && (!path.starts_with('~') || path.starts_with("~/")) =>
+            {
+              if !self.discovery.identity_paths.contains(&path) {
+                self.discovery.identity_paths.push(path);
+              }
+            }
+            _ => self
+              .discovery
+              .identity_warnings
+              .push("Some IdentityFile paths require connection-specific expansion.".into()),
           }
         }
       } else if keyword.eq_ignore_ascii_case("include") {
@@ -377,6 +398,37 @@ mod tests {
     assert_eq!(discovery.hosts, ["before", "after"]);
     assert_eq!(discovery.warnings.len(), 1);
     assert!(discovery.warnings[0].contains("context-dependent token %h"));
+  }
+
+  #[test]
+  fn discovers_literal_identity_paths_without_running_match_commands() {
+    let temporary = TemporaryDirectory::new();
+    let ssh = temporary.path().join(".ssh");
+    fs::create_dir(&ssh).unwrap();
+    fs::write(
+      ssh.join("config"),
+      concat!(
+        "IdentityFile none\nIdentityFile %d/keys/work\nInclude extra.conf\n",
+        "Match exec \"exit 99\"\nIdentityFile ~/keys/conditional\n",
+        "IdentityFile ~/keys/%h\nIdentityFile ~/${KEY_DIR}/private\n"
+      ),
+    )
+    .unwrap();
+    fs::write(ssh.join("extra.conf"), "IdentityFile '/keys/with spaces'\n").unwrap();
+    let discovery = discover_hosts_from_home(temporary.path());
+    assert_eq!(
+      discovery.identity_paths,
+      vec![
+        temporary
+          .path()
+          .join("keys/work")
+          .to_string_lossy()
+          .into_owned(),
+        "/keys/with spaces".into(),
+        "~/keys/conditional".into(),
+      ]
+    );
+    assert_eq!(discovery.identity_warnings.len(), 2);
   }
 
   struct TemporaryDirectory(PathBuf);

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Per-user SSH connection and credential broker")]
+// These are independent command-line switches, not mutable application state.
+#[allow(clippy::struct_excessive_bools)]
 struct Arguments {
   /// Print embedded build and protocol metadata without starting ctld.
   #[arg(long)]
@@ -10,6 +12,17 @@ struct Arguments {
   /// Print the local IPC protocol version and exit.
   #[arg(long)]
   protocol_version: bool,
+
+  /// Manage saved credential metadata without starting or contacting ctld.
+  #[arg(long, hide = true)]
+  credential_request: bool,
+
+  /// Inspect local SSH identities or verify and manage their saved passphrases.
+  #[arg(long, hide = true)]
+  identity_request: bool,
+
+  #[arg(long, hide = true)]
+  identity_agent_lifetime: bool,
 
   #[arg(long)]
   socket: Option<PathBuf>,
@@ -26,10 +39,33 @@ struct Arguments {
 }
 
 fn main() {
+  if let Some(code) = ctld::identities::askpass_exit_code() {
+    std::process::exit(code);
+  }
   if let Some(code) = ctld::askpass_exit_code() {
     std::process::exit(code);
   }
   let arguments = Arguments::parse();
+  if arguments.identity_agent_lifetime {
+    if ctld::identities::run_lifetime().is_err() {
+      std::process::exit(1);
+    }
+    return;
+  }
+  if arguments.identity_request {
+    if ctld::identities::run(std::io::stdin().lock(), std::io::stdout().lock()).is_err() {
+      eprintln!("ctld: identity helper I/O failed");
+      std::process::exit(1);
+    }
+    return;
+  }
+  if arguments.credential_request {
+    if let Err(error) = ctld::credentials::run(std::io::stdin().lock(), std::io::stdout().lock()) {
+      eprintln!("ctld: credential helper I/O failed: {error}");
+      std::process::exit(1);
+    }
+    return;
+  }
   if arguments.component_info {
     let metadata = component_info::ComponentInfo {
       build: component_info::build_info(),

@@ -1,5 +1,11 @@
 //! Per-user owner of authenticated OpenSSH control masters and SSH credentials.
 
+mod credential_metadata;
+pub mod credentials;
+pub mod identities;
+#[cfg(target_os = "macos")]
+mod identity_connection;
+
 #[cfg(target_os = "macos")]
 mod keychain;
 #[cfg(unix)]
@@ -597,7 +603,17 @@ async fn ensure_master(
     token: token.clone(),
     state: Arc::clone(&state),
   };
-  let mut child = start_master(&target, &endpoint, &token)?;
+  #[cfg(target_os = "macos")]
+  let mut identities = attempt
+    .run(identity_connection::PreparedIdentities::prepare(&target))
+    .await?;
+  let mut child = start_master(
+    &target,
+    &endpoint,
+    &token,
+    #[cfg(target_os = "macos")]
+    Some(&identities),
+  )?;
   let result = attempt
     .run(wait_for_master(
       stream,
@@ -606,6 +622,8 @@ async fn ensure_master(
       &endpoint,
       &mut child,
       &mut prompt_rx,
+      #[cfg(target_os = "macos")]
+      &mut identities,
     ))
     .await;
   if endpoint.shared {
@@ -628,6 +646,7 @@ async fn wait_for_master(
   endpoint: &MasterEndpoint,
   child: &mut Child,
   prompt_rx: &mut mpsc::Receiver<PromptRequest>,
+  #[cfg(target_os = "macos")] identities: &mut identity_connection::PreparedIdentities,
 ) -> Result<(), RequestError> {
   let control_path = &endpoint.control_path;
   let mut authenticated = shared_session_ready(child, endpoint.shared);
@@ -652,7 +671,7 @@ async fn wait_for_master(
   loop {
     if control_master_is_ready(target, control_path).await {
       #[cfg(target_os = "macos")]
-      handle_save_offer(stream, target, &mut captured).await?;
+      handle_save_offer(stream, target, &mut captured, identities).await?;
       #[cfg(not(target_os = "macos"))]
       captured.clear();
       state.adopt(target, endpoint, None);
@@ -794,7 +813,10 @@ async fn answer_prompt(
 ) -> Result<(), RequestError> {
   let cacheable = !prompt.confirm && cacheable_prompt(&prompt.message);
   #[cfg(target_os = "macos")]
-  if cacheable && attempted_stored.insert(prompt.message.clone()) {
+  if cacheable
+    && !identity_connection::is_key_prompt(&prompt.message)
+    && attempted_stored.insert(prompt.message.clone())
+  {
     let target = target.clone();
     let message = prompt.message.clone();
     match tokio::task::spawn_blocking(move || keychain::load(&target, &message)).await {
@@ -845,6 +867,7 @@ async fn handle_save_offer(
   stream: &mut ctld_ipc::Stream,
   target: &SshTarget,
   captured: &mut HashMap<String, Zeroizing<String>>,
+  identities: &mut identity_connection::PreparedIdentities,
 ) -> Result<(), RequestError> {
   if captured.is_empty() {
     return Ok(());
@@ -867,12 +890,23 @@ async fn handle_save_offer(
     captured.clear();
     return Ok(());
   }
-  let response = request_ui(
-    stream,
-    PromptKind::CredentialSave,
-    "Save this SSH password or key passphrase for future connections? It will be stored device-locally in Keychain and require Touch ID.",
-  )
-  .await?;
+  let verified = identities.verify_captured(captured).await;
+  if captured.is_empty() && verified.is_empty() {
+    return Ok(());
+  }
+  let names = captured
+    .keys()
+    .map(|prompt| keychain::credential_name(target, prompt))
+    .chain(
+      verified
+        .iter()
+        .map(identity_connection::VerifiedPassphrase::name),
+    );
+  let message = identity_connection::save_offer_message(
+    &identity_connection::connection_context(target),
+    names,
+  );
+  let response = request_ui(stream, PromptKind::CredentialSave, &message).await?;
   match response.as_deref().map(String::as_str) {
     Some("yes") => {
       let target = target.clone();
@@ -882,6 +916,14 @@ async fn handle_save_offer(
         .map_err(|_| RequestError::InvalidRequest("keychain worker stopped"))?
       {
         report_save_error(stream, &error.to_string()).await?;
+      }
+      for identity in verified {
+        if let Err(error) = tokio::task::spawn_blocking(move || identity.save())
+          .await
+          .map_err(|_| RequestError::InvalidRequest("keychain worker stopped"))?
+        {
+          report_save_error(stream, &error.to_string()).await?;
+        }
       }
     }
     Some("never") => {
@@ -1358,8 +1400,26 @@ fn remote_forward_host(host: &str) -> String {
   }
 }
 
+#[cfg(test)]
 fn master_command(target: &SshTarget, endpoint: &MasterEndpoint) -> Command {
+  master_command_with_identities(
+    target,
+    endpoint,
+    #[cfg(target_os = "macos")]
+    None,
+  )
+}
+
+fn master_command_with_identities(
+  target: &SshTarget,
+  endpoint: &MasterEndpoint,
+  #[cfg(target_os = "macos")] identities: Option<&identity_connection::PreparedIdentities>,
+) -> Command {
   let mut command = Command::new(SSH_PROGRAM);
+  #[cfg(target_os = "macos")]
+  if let Some(identities) = identities {
+    identities.append_options(&mut command);
+  }
   if endpoint.shared {
     ssh_config_master::append_session_options(&mut command);
   } else {
@@ -1388,6 +1448,7 @@ fn start_master(
   target: &SshTarget,
   endpoint: &MasterEndpoint,
   token: &str,
+  #[cfg(target_os = "macos")] identities: Option<&identity_connection::PreparedIdentities>,
 ) -> Result<Child, RequestError> {
   if endpoint.shared && endpoint.startup != SharedMasterStartup::Create {
     return Err(RequestError::SshConfig(
@@ -1395,7 +1456,12 @@ fn start_master(
     ));
   }
   let current_executable = std::env::current_exe().map_err(RequestError::StartMaster)?;
-  let mut command = master_command(target, endpoint);
+  let mut command = master_command_with_identities(
+    target,
+    endpoint,
+    #[cfg(target_os = "macos")]
+    identities,
+  );
   command
     .env("SSH_ASKPASS", current_executable)
     .env("SSH_ASKPASS_REQUIRE", "force")

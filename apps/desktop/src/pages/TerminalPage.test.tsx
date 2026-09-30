@@ -41,6 +41,9 @@ const nativeWindow = vi.hoisted(() => ({
   onCloseRequested: vi.fn(),
   destroy: vi.fn(),
 }));
+const terminalSurface = vi.hoisted(() => ({
+  on_input: null as ((data: Uint8Array) => void) | null,
+}));
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -58,6 +61,12 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 const api = vi.hoisted(() => ({
+  listSavedCredentials: vi.fn(),
+  listIdentityFiles: vi.fn(),
+  importCredentialMetadata: vi.fn(),
+  saveIdentityPassphrase: vi.fn(),
+  forgetIdentityPassphrase: vi.fn(),
+  forgetSavedCredential: vi.fn(),
   getComponentVersions: vi.fn(),
   preflightComponentAction: vi.fn(),
   executeComponentAction: vi.fn(),
@@ -148,7 +157,10 @@ vi.mock("../features/attachment/useSessionAttachments", () => ({
   }),
 }));
 vi.mock("../components/terminal/TerminalSurface", () => ({
-  TerminalSurface: ({ ended_message, on_dismiss }: { ended_message?: string; on_dismiss?(): void }) => <div>Terminal renderer{ended_message && <button onClick={on_dismiss}>Dismiss ended session</button>}</div>,
+  TerminalSurface: ({ ended_message, on_dismiss, onInput }: { ended_message?: string; on_dismiss?(): void; onInput(data: Uint8Array): void }) => {
+    terminalSurface.on_input = onInput;
+    return <div>Terminal renderer{ended_message && <button onClick={on_dismiss}>Dismiss ended session</button>}</div>;
+  },
 }));
 
 function snapshot(): WorkspaceSnapshot {
@@ -241,6 +253,12 @@ beforeEach(() => {
   api.listSshIdentityFiles.mockResolvedValue({ identity_files: [], warnings: [] });
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
+  api.listIdentityFiles.mockResolvedValue({ metadata_import_required: false, keychain_message: null, identity_files: [], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 });
+  api.listSavedCredentials.mockResolvedValue({ metadata_import_required: false, credentials: [], sources: [
+    { source: "keychain", state: "ready", message: null },
+    { source: "vpn", state: "ready", message: null },
+  ], checked_at_ms: 1 });
+  api.forgetSavedCredential.mockResolvedValue(undefined);
   api.sessionArchive.mockResolvedValue({ kind: "saved" });
   api.sessionCache.mockResolvedValue({ kind: "archived" });
   api.probeSshHost.mockReset().mockResolvedValue(remoteInfo);
@@ -364,6 +382,47 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
     expect(screen.queryByRole("heading", { name: "About rmux" })).toBeNull();
     expect(terminal.hasAttribute("hidden")).toBe(false);
+  });
+
+  it("opens Credentials from the rail and native menu while preserving the workspace", async () => {
+    const page = render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    const terminal = page.container.querySelector(".terminal-workspace")!;
+    expect(api.listSavedCredentials).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Credentials" }));
+    await screen.findByRole("heading", { name: "Credentials" });
+    await waitFor(() => expect(api.listSavedCredentials).toHaveBeenCalled());
+    expect(api.listSavedCredentials.mock.calls[api.listSavedCredentials.mock.calls.length - 1][0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "test", target: expect.objectContaining({ kind: "ssh", host_id: "test-id" }) }),
+    ]));
+    expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
+    expect(terminal.hasAttribute("hidden")).toBe(true);
+    expect(attachment.detach).not.toHaveBeenCalled();
+    expect(api.forgetSshCredentials).not.toHaveBeenCalled();
+    expect(api.forgetSavedCredential).not.toHaveBeenCalled();
+    act(() => terminalSurface.on_input?.(new Uint8Array([65])));
+    expect(attachment.handleInput).not.toHaveBeenCalled();
+    nativeCommand(COMMAND_IDS.about);
+    await screen.findByRole("heading", { name: "About rmux" });
+    expect(screen.queryByRole("heading", { name: "Credentials" })).toBeNull();
+    nativeCommand(COMMAND_IDS.credentials);
+    await screen.findByRole("heading", { name: "Credentials" });
+    expect(screen.queryByRole("heading", { name: "About rmux" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
+    expect(terminal.hasAttribute("hidden")).toBe(false);
+    expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
+    act(() => terminalSurface.on_input?.(new Uint8Array([65])));
+    expect(attachment.handleInput).toHaveBeenCalledWith(new Uint8Array([65]));
+  });
+
+  it("opens Credentials from the command palette", async () => {
+    render(<TerminalPage />);
+    await screen.findByRole("button", { name: "Connect host" });
+    shortcut("KeyP");
+    fireEvent.change(screen.getByRole("combobox", { name: "Search commands" }), { target: { value: "Credentials" } });
+    fireEvent.click(screen.getByRole("option", { name: /Credentials/ }));
+    await screen.findByRole("heading", { name: "Credentials" });
+    expect(screen.queryByRole("combobox", { name: "Search commands" })).toBeNull();
   });
 
   it("opens About from the command palette", async () => {

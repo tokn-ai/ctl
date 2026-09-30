@@ -1,5 +1,7 @@
 import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
 import { AboutPage } from "./AboutPage";
+import { CredentialsPage } from "./CredentialsPage";
+import { credentialTargets } from "../features/credentials/credentialTargets";
 import { useComponentActionEvents } from "../features/about/useComponentActionEvents";
 import { componentResetMatches } from "../features/attachment/componentActions";
 import { useTaskWorkspace } from "../features/tasks/useTaskWorkspace";
@@ -249,9 +251,10 @@ export function TerminalPage() {
     setDaemonRestartConfirmationPending,
   ] = useState(false);
   const [restartingDaemon, setRestartingDaemon] = useState(false);
-  const [about_open, setAboutOpen] = useState(false);
+  const [utility_page, setUtilityPage] = useState<"about" | "credentials" | null>(null);
   const [about_dialog_open, setAboutDialogOpen] = useState(false);
-  useEffect(() => { setAboutOpen(false); }, [activeTabKey]);
+  const [credentials_dialog_open, setCredentialsDialogOpen] = useState(false);
+  useEffect(() => { setUtilityPage(null); }, [activeTabKey]);
   const [pendingCloseSessionKey, setPendingCloseSessionKey] = useState<
     string | null
   >(null);
@@ -298,6 +301,10 @@ export function TerminalPage() {
   );
   const sidebarTargets = workspaceSidebarTargets(workspace);
   const vpn = useVpn(workspace.ready && !workspace.closing);
+  const credential_targets = useMemo(
+    () => credentialTargets(workspace.hosts, workspace.ssh_gateways),
+    [workspace.hosts, workspace.ssh_gateways],
+  );
   const hostConnections = useHostConnections({
     ready: workspace.ready,
     closing: workspace.closing,
@@ -1412,7 +1419,7 @@ export function TerminalPage() {
   }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
   useWindowTitle(
-    about_open ? "About rmux" : taskWorkspace.active
+    utility_page ? (utility_page === "about" ? "About rmux" : "Credentials") : taskWorkspace.active
       ? (taskWorkspace.activeTask?.definition.name ??
           taskWorkspace.saved?.definition.name ??
           "Task definition")
@@ -1557,7 +1564,18 @@ export function TerminalPage() {
     enabled: workspace.ready,
     keybinding: keybindings.bindings.get(COMMAND_IDS.about),
     focusTerminalAfterRun: false,
-    run: () => setAboutOpen(true),
+    run: () => setUtilityPage("about"),
+  });
+  commands.push({
+    id: COMMAND_IDS.credentials,
+    category: "App",
+    title: "Credentials",
+    detail: "Manage saved credential names and metadata.",
+    keywords: ["keychain", "password", "passphrase", "ssh", "vpn", "forget"],
+    enabled: workspace.ready,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.credentials),
+    focusTerminalAfterRun: false,
+    run: () => setUtilityPage("credentials"),
   });
   commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
@@ -1613,7 +1631,7 @@ export function TerminalPage() {
   const closeShortcutLabel = shortcutLabel(COMMAND_IDS.close);
   const [archives_open, setArchivesOpen] = useState(false);
   const dialogOpen = archives_open ||
-    about_dialog_open ||
+    about_dialog_open || credentials_dialog_open ||
     vpn.editor !== null ||
     taskWorkspace.editorId !== null ||
     portForwardTarget !== null ||
@@ -1633,7 +1651,7 @@ export function TerminalPage() {
         run: (args) => {
           if (!command.keepPaletteOpen) setPaletteOpen(false);
           if (command.id !== COMMAND_IDS.restartDaemon) cancelDaemonRestart();
-          if (about_open && command.focusTerminalAfterRun !== false) setAboutOpen(false);
+          if (utility_page && command.focusTerminalAfterRun !== false) setUtilityPage(null);
           const result = command.run(args);
           if (command.focusTerminalAfterRun !== false)
             requestAnimationFrame(() => renderer?.focus());
@@ -1653,17 +1671,17 @@ export function TerminalPage() {
 
   const handleTerminalInput = useCallback(
     (data: Uint8Array) => {
-      if (!about_open && !dialogOpen && !paletteOpen && !daemonRestartBlocksInteractions()) {
+      if (!utility_page && !dialogOpen && !paletteOpen && !daemonRestartBlocksInteractions()) {
         attachment.handleInput(data);
       }
     },
-    [attachment, about_open, daemonRestartBlocksInteractions, dialogOpen, paletteOpen],
+    [attachment, utility_page, daemonRestartBlocksInteractions, dialogOpen, paletteOpen],
   );
 
   function dismissPalette() {
     setPaletteOpen(false);
     cancelDaemonRestart();
-    if (!about_open) requestAnimationFrame(() => renderer?.focus());
+    if (!utility_page) requestAnimationFrame(() => renderer?.focus());
   }
 
   return (
@@ -1679,11 +1697,13 @@ export function TerminalPage() {
       >
         <WorkspaceSidebar
           on_about={() => executeCommandById(COMMAND_IDS.about)}
-          about_open={about_open}
+          about_open={utility_page === "about"}
+          on_credentials={() => executeCommandById(COMMAND_IDS.credentials)}
+          credentials_open={utility_page === "credentials"}
           on_keybindings={() => executeCommandById(COMMAND_IDS.configureKeybindings)}
           selected={workspace.sidebar_view}
           onSelect={(view) => {
-            setAboutOpen(false);
+            setUtilityPage(null);
             workspace.update("sidebar_view", view);
             if (view === "ports") void portForwarding.refreshAll();
           }}
@@ -1794,7 +1814,7 @@ export function TerminalPage() {
             />
           }
         />
-        <section className="terminal-workspace" hidden={about_open}>
+        <section className="terminal-workspace" hidden={utility_page !== null}>
           <TerminalTabs
             tabs={tabs}
             extra_tabs={workspace.task_tabs.map((tab) => {
@@ -1946,7 +1966,8 @@ export function TerminalPage() {
             </div>
             <SessionViewSurface
               prefix_settings={{ document: keybindings.document, bindings: keybindings.bindings, platform: shortcutPlatform }}
-              shortcuts_enabled={!dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
+              shortcuts_enabled={!utility_page && !dialogOpen && !paletteOpen && keybindings.ready && !workspace.closing}
+              input_enabled={!utility_page && !dialogOpen && !paletteOpen && !workspace.closing && !daemonRestartBlocksInteractions()}
               on_command={executeCommandById}
               on_pane_commands={setPaneCommands}
               open_session_keys={attachment.session_keys}
@@ -1969,9 +1990,22 @@ export function TerminalPage() {
             <StatusBar state={attachment.state} />
           </div>
         </section>
+        <CredentialsPage
+          visible={utility_page === "credentials"}
+          targets={credential_targets}
+          on_close={() => { setUtilityPage(null); requestAnimationFrame(() => renderer?.focus()); }}
+          on_dialog_change={setCredentialsDialogOpen}
+          on_manage_vpn={(connection_id) => {
+            setUtilityPage(null);
+            workspace.update("sidebar_view", "vpn");
+            const connection = vpn.connections.find((item) => item.connection_id === connection_id);
+            if (connection && connection.provider !== "tailscale") vpn.editConnection(connection);
+            else void vpn.refresh();
+          }}
+        />
         <AboutPage
-          visible={about_open}
-          on_close={() => { setAboutOpen(false); requestAnimationFrame(() => renderer?.focus()); }}
+          visible={utility_page === "about"}
+          on_close={() => { setUtilityPage(null); requestAnimationFrame(() => renderer?.focus()); }}
           on_dialog_change={setAboutDialogOpen}
           execute_action={executeAboutAction}
           on_restarted={(preflight) => {

@@ -351,16 +351,41 @@ credential choice complete on the same SSH channel even when the agent is not
 installed, without mistaking password submission for successful authentication.
 After the control master authenticates on macOS, but before any remote identity
 command, `ctld` asks the initiating client to present Yes, No, and Never choices
-for a newly entered password/passphrase. Yes stores it in the device-local Data
-Protection Keychain under `biometryCurrentSet`; retrieval requires Touch ID and
-changing the enrolled fingerprints invalidates the item. No discards it, while
-Never stores only a device-local per-destination suppression marker. Only
-`ctld` links Keychain code, and a retrieved secret is answered directly to its
-OpenSSH askpass process rather than returned to a client. Plaintext remains in
-zeroizing native buffers and is discarded as soon as the choice is handled. On
-Linux, newly entered reusable secrets are discarded after authentication.
-Other interactive responses are not stored. SSH startup diagnostics are
-bounded and returned to the client instead of being lost behind a generic
+for a newly entered reusable credential. Identity-file passphrases are eligible
+only after a trusted local unlock verifies the configured key snapshot; success
+of the SSH connection alone is not sufficient. Yes stores eligible credentials
+in the device-local Data Protection Keychain under `biometryCurrentSet`;
+retrieval requires Touch ID and changing the enrolled fingerprints invalidates
+the item. No discards the candidate, while Never stores only a device-local
+suppression marker for the connection scope.
+
+Only `ctld` links Keychain code. Password entries retain their host-route/prompt
+scope and are answered directly to the matching OpenSSH askpass process. New
+identity passphrases use a separate namespace bound to the canonical key path,
+file-content digest, and locally verified public identity. Before reuse, `ctld`
+checks the file version and unlocks it through a temporary local agent; that
+passphrase is never returned to an SSH password prompt or client. Replacing or
+re-encrypting the file invalidates reuse. Legacy prompt-scoped key entries are
+not silently promoted to verified identity entries. Host removal cleans up
+host-scoped credentials; identity passphrases have independent, explicit Forget
+actions so removing one host cannot remove a key shared by others. Native
+plaintext buffers are zeroized after use. On Linux, newly entered reusable
+secrets are discarded after authentication. Other interactive responses are
+not stored.
+
+The desktop **Credentials** page lists identity-file metadata and saved rmux
+credential attributes. Its bounded one-shot `ctld --credential-request` and
+`ctld --identity-request` helpers provide metadata, verified identity-passphrase
+writes, and exact-item deletion without restarting the running daemon.
+Inventory reads separate, non-biometric metadata records with authentication UI
+explicitly forbidden. Older protected attributes are imported only through an
+explicit user action; interrupted imports remain retryable. Every interactive
+Keychain query carries a reason identifying its credential and purpose. Identity
+reuse retrieves the exact secret and binding together rather than listing every
+saved identity before each read. See [credential management](credentials.md)
+for discovery, state meanings, verification, and the storage boundary.
+
+SSH startup diagnostics are bounded and returned to the client instead of being lost behind a generic
 missing-transport-marker error.
 
 Native workspace and host-catalog writes are serialized, content-revision checked

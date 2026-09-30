@@ -78,12 +78,13 @@ export function QuickInputField({
       mode.secret
         ? (inputRef.current?.value ?? "")
         : (selected?.id ?? value);
-  useEffect(
-    () => () => {
-      if (mode.secret && inputRef.current) inputRef.current.value = "";
-    },
-    [mode.secret],
-  );
+  useEffect(() => {
+    // React clears refs before effect cleanup; retain the node to clear detached inputs too.
+    const input = inputRef.current;
+    return () => {
+      if (mode.secret && input) input.value = "";
+    };
+  }, [mode.secret]);
   const status = suggestions?.loading
     ? (suggestions.loading_message ?? "Loading suggestions…")
     : items.length === 0 && suggestions

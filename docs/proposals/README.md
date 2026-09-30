@@ -39,3 +39,4 @@ clarifications and links may update the existing document.
 | [0005](0005-desktop-tasks.md) | Tasks in the desktop workspace | Accepted |
 | [0006](0006-remote-tasks.md) | Explicit task routing over SSH | Implemented |
 | [0007](0007-local-task-workflows.md) | Local task definitions, runs, and schedules | Proposed |
+| [0008](0008-connection-cli.md) | Native connection commands and OpenSSH compatibility | Implemented |

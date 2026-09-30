@@ -36,6 +36,17 @@ pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
   }
 }
 
+pub async fn request(message: ClientMessage) -> Result<ServerMessage, Error> {
+  let mut stream = ctld_ipc::connect_or_start_daemon().await?;
+  handshake(&mut stream).await?;
+  ctld_ipc::write_frame(&mut stream, &message).await?;
+  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
+    Some(ServerMessage::Error { code, message }) => Err(Error::Daemon { code, message }),
+    Some(message) => Ok(message),
+    None => Err(Error::ConnectionClosed),
+  }
+}
+
 async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), Error> {
   ctld_ipc::write_frame(
     stream,
@@ -78,9 +89,13 @@ fn prompt(kind: PromptKind, message: &str) -> Result<Option<Zeroizing<String>>, 
 }
 
 fn read_response() -> Result<String, Error> {
+  use std::io::BufRead as _;
   io::stderr().flush().map_err(Error::Prompt)?;
+  // stdin may be an scp protocol stream or the input to ctl exec. Prompts must
+  // never consume those bytes or wait forever for binary input to end.
+  let terminal = std::fs::File::open("/dev/tty").map_err(Error::Prompt)?;
   let mut response = Zeroizing::new(String::new());
-  io::stdin()
+  io::BufReader::new(terminal)
     .read_line(&mut response)
     .map_err(Error::Prompt)?;
   while response.ends_with(['\n', '\r']) {

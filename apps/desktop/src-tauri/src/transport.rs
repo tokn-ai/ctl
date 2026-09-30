@@ -1,6 +1,7 @@
-use ctl_core::{
-  ConnectionTarget, SshConnectionOptions, SshGateway, SshGatewayMode, Transport, open_transport,
-};
+#[cfg(test)]
+use ctl_core::{ConnectionTarget, SshConnectionOptions};
+use ctl_core::{Transport, open_transport};
+#[cfg(test)]
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -55,135 +56,6 @@ pub async fn connect_existing(target: &ConnectionTargetDto) -> CommandResult<Tra
       }
     }
     ConnectionTargetDto::Ssh { .. } => connect(target).await,
-  }
-}
-
-impl ConnectionTargetDto {
-  /// Shared route identity for broker operations and non-authenticating probes.
-  pub(crate) fn to_ssh_target(&self) -> CommandResult<ctld_ipc::SshTarget> {
-    let Self::Ssh {
-      destination,
-      ssh_config_alias,
-      use_ssh_config_master,
-      hostname,
-      user,
-      port,
-      identity_file,
-      ..
-    } = self
-    else {
-      return Err(CommandErrorDto::new(
-        "invalid_ssh_target",
-        "Select a remote SSH host.",
-      ));
-    };
-    let mut target = ctld_ipc::SshTarget {
-      destination: destination.clone(),
-      ssh_config_alias: ssh_config_alias.clone(),
-      use_ssh_config_master: *use_ssh_config_master,
-      hostname: hostname.clone(),
-      user: user.clone(),
-      port: *port,
-      identity_file: identity_file.as_ref().map(PathBuf::from),
-      gateways: self.ssh_gateways(),
-    };
-    if target
-      .gateways
-      .iter()
-      .any(|gateway| !gateway.has_valid_vpn_configuration())
-    {
-      return Err(CommandErrorDto::new(
-        "invalid_vpn_route",
-        "Choose a saved VPN connection in the host settings.",
-      ));
-    }
-    target.normalize_master_policy();
-    Ok(target)
-  }
-
-  #[must_use]
-  pub fn to_core(&self) -> ConnectionTarget {
-    match self {
-      Self::Local => ConnectionTarget::local(),
-      Self::Ssh {
-        destination,
-        hostname,
-        user,
-        port,
-        identity_file,
-        ..
-      } => ConnectionTarget::ssh_with_options(
-        destination.clone(),
-        SshConnectionOptions {
-          remote_platform: ctl_core::RemotePlatform::Unix,
-          hostname: hostname.clone(),
-          user: user.clone(),
-          port: *port,
-          identity_file: identity_file.as_ref().map(PathBuf::from),
-          gateways: self
-            .ssh_gateways()
-            .into_iter()
-            .map(|gateway| SshGateway {
-              kind: gateway.kind,
-              vpn: gateway.vpn,
-              destination: gateway.destination,
-              hostname: gateway.hostname,
-              user: gateway.user,
-              port: gateway.port,
-              identity_file: gateway.identity_file,
-              mode: match gateway.mode {
-                ctld_ipc::SshGatewayMode::Automatic => SshGatewayMode::Automatic,
-                ctld_ipc::SshGatewayMode::NativeOnly => SshGatewayMode::NativeOnly,
-                ctld_ipc::SshGatewayMode::AgentRelayOnly => SshGatewayMode::AgentRelayOnly,
-              },
-            })
-            .collect(),
-        },
-      ),
-    }
-  }
-
-  /// Stable transport settings shared by authentication, status, and cleanup.
-  pub(crate) fn ssh_gateways(&self) -> Vec<ctld_ipc::SshGateway> {
-    let Self::Ssh {
-      vpn_connection_id,
-      gateways,
-      ..
-    } = self
-    else {
-      return Vec::new();
-    };
-    vpn_connection_id
-      .iter()
-      .map(|connection_id| crate::vpn::gateway(connection_id))
-      .chain(gateways.iter().map(|gateway| ctld_ipc::SshGateway {
-        kind: gateway.kind,
-        vpn: None,
-        destination: gateway.destination.clone(),
-        hostname: gateway.hostname.clone(),
-        user: gateway.user.clone(),
-        port: gateway.port,
-        identity_file: gateway.identity_file.as_ref().map(PathBuf::from),
-        mode: match gateway.mode {
-          crate::dto::SshGatewayModeDto::Automatic => ctld_ipc::SshGatewayMode::Automatic,
-          crate::dto::SshGatewayModeDto::NativeOnly => ctld_ipc::SshGatewayMode::NativeOnly,
-          crate::dto::SshGatewayModeDto::AgentRelayOnly => ctld_ipc::SshGatewayMode::AgentRelayOnly,
-        },
-      }))
-      .collect()
-  }
-
-  #[must_use]
-  pub fn is_local(&self) -> bool {
-    matches!(self, Self::Local)
-  }
-
-  #[must_use]
-  pub fn label(&self) -> &str {
-    match self {
-      Self::Local => "local",
-      Self::Ssh { destination, .. } => destination,
-    }
   }
 }
 

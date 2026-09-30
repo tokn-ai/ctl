@@ -347,7 +347,8 @@ ctl rmux attach development
 ```
 
 Pass global `--host`/`-H` to redirect the same rmux command through SSH. The
-value is an ordinary OpenSSH destination or `~/.ssh/config` host alias. Unix
+value first selects a saved ctl host by name or ID, then falls back to an
+ordinary OpenSSH destination or `~/.ssh/config` host alias. Unix
 clients ask the per-user `ctld` to establish or reuse an authenticated OpenSSH
 control master, then add the app-managed per-user installation to the fixed
 remote command's `PATH` before falling back to the remote account's ordinary
@@ -364,6 +365,79 @@ the SSH channel to the same user's fixed local `rmuxd` endpoint. After an
 unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
 the logical attachment and its leases for 30 seconds by default. An explicit
 `Ctrl-]` detach releases them immediately.
+
+### Shells, commands, and file copies
+
+The native shell command creates a new persistent rmux session by default.
+A named session attaches if it already exists, or is created if absent:
+
+```sh
+ctl shell
+ctl -H work shell
+ctl -H work shell --session development
+ctl -H work shell --plain
+ctl -H work exec -- uname -a
+ctl -H work exec -- sh -c 'printf "%s\n" "$HOME"'
+```
+
+`--plain` opens an ordinary shell. `exec` runs once without allocating a PTY,
+streams stdin/stdout/stderr, and returns the command's exit status. Unix exec
+arguments are quoted individually; explicitly invoke `sh -c` for shell syntax.
+The default target is local. Persistent remote shells require `ctl-agent` and
+`rmuxd` on the destination, as with `ctl rmux`; plain SSH operations need only
+the remote SSH service.
+
+`ssh` and `scp` accept the system OpenSSH command syntax. A destination such as
+`work` selects the same saved ctl host used by `-H work`:
+
+```sh
+ctl ssh work
+ctl ssh work 'uname -a'
+ctl scp ./file.txt work:/tmp/
+ctl scp work:/tmp/file.txt ./
+ctl --method vpn ssh work
+ctl -H work --method vpn shell --session development
+```
+
+Saved hosts use their preferred connection method unless `--method` selects a
+method name or ID. Duplicate names are rejected; use a stable host ID instead.
+`user@work` overrides the saved account. Saved names take precedence over
+matching SSH-config aliases. Unknown destinations retain normal OpenSSH lookup.
+Ctl-specific flags go before `ssh`/`scp`; everything after those subcommands
+belongs to OpenSSH, including the remote command's flags.
+
+On Unix, ordinary saved-host SSH/SCP sessions reuse the exact ctld master,
+including VPN/SOCKS routes. The saved VPN is started when needed; Tailscale
+device bindings resolve their current address. Explicit connection/configuration
+options such as `-i`, `-p`, `-F`, `-J`, `-S`, or transport-related `-o` options
+use OpenSSH directly with saved defaults instead of silently borrowing an
+incompatible master. Explicit proxy options override the saved route.
+`ssh -G` resolves settings without opening SSH or starting a VPN. SCP uses ctl
+as its SSH subprocess, retaining OpenSSH's paths, progress display, and transfer
+protocol; an explicit `scp -S` selects the user's own transport instead.
+
+Host settings are shared with the desktop in `~/.tokn/rmux/hosts.json`. CLI
+overrides `CTL_HOSTS_PATH` and `CTL_VPNS_PATH` select alternate catalog files;
+the default VPN file is the desktop's `io.rmux.desktop/vpns.json` under the
+platform configuration directory. These commands do not edit SSH config.
+
+### Managed port forwards
+
+```sh
+ctl -H work port add 8080:127.0.0.1:80 --id web
+ctl -H work port list
+ctl -H work port remove web
+```
+
+`port add` connects as needed and returns after ctld starts the listener.
+Forwards outlive the CLI process and remain in ctld's runtime registry until
+removed or the daemon exits; they are not saved across daemon restarts. Bind
+addresses are loopback-only, defaulting to `127.0.0.1`. Bracket IPv6 addresses,
+for example `[::1]:8080:[2001:db8::2]:80`. Add/list support `--json`.
+List/remove select the chosen connection method; use the same `--method` when
+managing a forward created on a nonpreferred route. The desktop Ports refresh
+also discovers these runtime forwards and can stop them without making them
+persistent workspace entries.
 
 ## Managed VPN
 

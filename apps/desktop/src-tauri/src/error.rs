@@ -95,6 +95,12 @@ pub fn protocol_error_code(code: &ErrorCode) -> &'static str {
   }
 }
 
+impl From<ctl_core::hosts::HostError> for CommandErrorDto {
+  fn from(error: ctl_core::hosts::HostError) -> Self {
+    Self::new(error.code, error.message)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

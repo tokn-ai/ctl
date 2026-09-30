@@ -2,6 +2,21 @@
 
 use std::io;
 use std::path::PathBuf;
+
+/// VPNs keep the shared owner when the desktop isolates its development SSH helper.
+#[must_use]
+pub fn socket_path() -> PathBuf {
+  std::env::var_os("CTLD_VPN_SOCKET_PATH").map_or_else(
+    || {
+      if std::env::var_os("RMUX_DEV_DAEMON_SUPERVISOR").is_some() {
+        crate::default_socket_path()
+      } else {
+        crate::socket_path()
+      }
+    },
+    PathBuf::from,
+  )
+}
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};

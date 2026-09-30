@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
-import type { AttachmentViewState, ConnectionTarget, ManagedTask, NotificationAction, NotificationInput } from "../../lib/types";
-import { sessionKey, targetKey, targetLabel } from "../targets/targets";
+import type { ConnectionTarget, ManagedTask, NotificationAction } from "../../lib/types";
+import { targetKey, targetLabel } from "../targets/targets";
 import { COMMAND_IDS } from "../commands/commandIds";
 import type { NotificationStore } from "./NotificationStore";
 
@@ -11,8 +11,7 @@ interface Sources {
   session_error: string | null;
   targets: readonly ConnectionTarget[];
   target_errors: ReadonlyMap<string, string>;
-  attachment: AttachmentViewState;
-  attachments?: readonly AttachmentViewState[];
+  storage_error: string | null;
   task_error: string | null;
   definitions_error: string | null;
   task_status: string | null;
@@ -34,6 +33,7 @@ export function useWorkbenchNotifications(store: NotificationStore, sources: Sou
       ? `Keyboard shortcuts: ${sources.keybindings_error} Last valid bindings remain active.` : null,
     [{ label: "Reload shortcuts", command_id: COMMAND_IDS.reloadKeybindings }]);
     reportError("sessions", "Sessions", sources.session_error);
+    reportError("session_storage", "Session history", sources.storage_error);
     const task_status_changed = sources.task_status !== previous_task_status.current;
     previous_task_status.current = sources.task_status;
     store.report("tasks", sources.task_error ? {
@@ -55,35 +55,6 @@ export function useWorkbenchNotifications(store: NotificationStore, sources: Sou
       const target = sources.targets.find((target) => targetKey(target) === key);
       reportError(`host:${key}`, target ? `Host · ${targetLabel(target)}` : "Host", message,
         target?.kind === "ssh" ? [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: key } }] : []);
-    }
-
-    const attachments = new Map((sources.attachments ?? []).filter((state) => state.session)
-      .map((state) => [sessionKey(state.session!), state]));
-    if (sources.attachment.session) attachments.set(sessionKey(sources.attachment.session), sources.attachment);
-    for (const attachment of attachments.values()) {
-      if (!attachment.session) continue;
-      const key = sessionKey(attachment.session);
-      const source = `${targetLabel(attachment.session.target)} · ${attachment.session.name}`;
-      // Preserve the last failure during automatic retries instead of creating
-      // a fresh card each time the phase cycles through connecting.
-      if (attachment.phase !== "connecting" && attachment.phase !== "reconnecting") {
-        const failure = attachment.phase === "error" || attachment.phase === "disconnected";
-        const input: NotificationInput | null = attachment.message ? {
-          severity: failure ? "error" : attachment.phase === "ended" ? "info" : "warning",
-          title: failure ? "Session connection failed" : "Session update",
-          message: attachment.message,
-          source,
-          actions: failure ? attachment.error_code === "protocol_version_mismatch"
-            ? [{ label: attachment.session.target.kind === "ssh" ? "Update remote components" : "Restart local daemon",
-              command_id: COMMAND_IDS.recoverSessionComponents, args: { session_key: key } }]
-            : [{ label: "Reconnect", command_id: COMMAND_IDS.selectSession, args: { session_key: key } }] : [],
-        } : null;
-        store.report(`attachment:${key}`, input);
-      }
-      store.report(`history:${key}`, attachment.history_gap ? {
-        severity: "warning", title: "Earlier output unavailable", source,
-        message: "Earlier remote output is no longer contiguous. The live screen was restored from a checkpoint.",
-      } : null);
     }
 
     if (sources.tasks_loaded) {

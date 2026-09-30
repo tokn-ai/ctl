@@ -32,6 +32,7 @@ import { detectShortcutPlatform } from "../features/commands/keybindings";
 import { COMMAND_IDS } from "../features/commands/terminalCommands";
 import { NATIVE_COMMAND_EVENT } from "../features/commands/useNativeCommandEvents";
 import { COMPONENT_RESET_EVENT } from "../features/about/useComponentActionEvents";
+import { useAttachmentNotifications } from "../features/notifications/useAttachmentNotifications";
 import { sessionKey } from "../features/targets/targets";
 
 const nativeEvents = vi.hoisted(() => ({
@@ -143,18 +144,22 @@ vi.mock("../lib/tauri", async (original) => ({
   ...api,
 }));
 vi.mock("../features/attachment/useSessionAttachments", () => ({
-  useSessionAttachments: () => ({
-    ...attachment,
-    controllers: null,
-    states: [],
-    session_keys: new Set(),
-    closeSession: vi.fn(),
-    retainSessions: vi.fn(),
-    disconnectHost: async (host_id: string) => {
-      const session = attachment.state.session as SessionSummary | null;
-      if (session?.target.kind === "ssh" && session.target.host_id === host_id) await attachment.detach();
-    },
-  }),
+  useSessionAttachments: () => {
+    useAttachmentNotifications(attachment as unknown as Parameters<typeof useAttachmentNotifications>[0]);
+    return {
+      ...attachment,
+      storage_error: null,
+      controllers: null,
+      states: [],
+      session_keys: new Set(),
+      closeSession: vi.fn(),
+      retainSessions: vi.fn(),
+      disconnectHost: async (host_id: string) => {
+        const session = attachment.state.session as SessionSummary | null;
+        if (session?.target.kind === "ssh" && session.target.host_id === host_id) await attachment.detach();
+      },
+    };
+  },
 }));
 vi.mock("../components/terminal/TerminalSurface", () => ({
   TerminalSurface: ({ ended_message, on_dismiss, onInput }: { ended_message?: string; on_dismiss?(): void; onInput(data: Uint8Array): void }) => {
@@ -460,6 +465,23 @@ describe("workspace-backed terminal page", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(api.restartLocalDaemon).not.toHaveBeenCalled();
     expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
+  });
+
+  it("dispatches a notification retry to its attachment without selecting a session", async () => {
+    const session = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
+    Object.assign(attachment.state, {
+      phase: "error", session, error_code: "ssh_authentication_required", message: "Authentication expired",
+    });
+    attachment.reconnect.mockResolvedValue(undefined);
+    render(<TerminalPage />);
+    const card = await screen.findByRole("article", { name: "Session connection failed" });
+    const retry = within(card).getByRole("button", { name: "Reconnect" });
+    await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+    const previous_connects = attachment.connect.mock.calls.length;
+    fireEvent.click(retry);
+    expect(attachment.reconnect).toHaveBeenCalledOnce();
+    expect(attachment.connect).toHaveBeenCalledTimes(previous_connects);
+    expect(screen.queryByRole("article", { name: "Session connection failed" })).toBeNull();
   });
 
   it("discovers a CLI VPN before opening the VPN panel", async () => {

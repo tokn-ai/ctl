@@ -1,18 +1,22 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionSummary, SessionView } from "../../lib/types";
+import type { AttachmentViewState, SessionSummary, SessionView } from "../../lib/types";
 import { sessionKey } from "../../features/targets/targets";
 import { SessionViewSurface } from "./SessionViewSurface";
 import type { AppCommand } from "../../features/commands/types";
 import { searchCommands } from "../../features/commands/commandSearch";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
+import { initialAttachmentState } from "../../features/attachment/attachmentState";
+import { NotificationProvider, useNotificationEnvironment } from "../../features/notifications/NotificationContext";
+import { NotificationStore } from "../../features/notifications/NotificationStore";
+import type { AttachmentNotifications } from "../../features/notifications/AttachmentNotifications";
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), detach: vi.fn(), input: vi.fn(), mounted_inputs: [] as ((data: Uint8Array) => void)[] }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), detach: vi.fn(), input: vi.fn(), attachment_state: null as AttachmentViewState | null, mounted_inputs: [] as ((data: Uint8Array) => void)[] }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
 vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () => ({
-  state: { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
-  connect: mocks.connect, detach: mocks.detach, handleInput: mocks.input, toggleInputLease: vi.fn(), toggleResizeWithWindow: vi.fn(),
+  state: mocks.attachment_state ?? { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
+  connect: mocks.connect, reconnect: mocks.reconnect, detach: mocks.detach, handleInput: mocks.input, toggleInputLease: vi.fn(), toggleResizeWithWindow: vi.fn(),
 }) }));
 vi.mock("./TerminalSurface", async () => {
   const { useEffect } = await import("react");
@@ -34,9 +38,41 @@ const initial: SessionView = { session_id: "root", session_name: "Root", view_id
 const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "a", left: 0, top: 0, columns: 40, rows: 24 }, { terminal_id: "b", left: 41, top: 0, columns: 39, rows: 24 }], layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] }, terminals: [terminal("a"), terminal("b")] };
 const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); mocks.mounted_inputs = []; vi.useRealTimers(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers(); });
 
 describe("session compositor", () => {
+  it("reports hidden split-pane failures with a targeted retry and keeps them in history after close", async () => {
+    const store = new NotificationStore();
+    let registry!: AttachmentNotifications;
+    function Registry() { registry = useNotificationEnvironment()!.attachments; return null; }
+    const other = { ...session, session_id: "other", terminal_id: "other-a", view_id: "other-view" };
+    const other_view = { ...initial, session_id: "other", view_id: "other-view", panes: [{ ...initial.panes[0], terminal_id: "other-a" }], terminals: [terminal("other-a")] };
+    mocks.request.mockImplementation((_target, action) => Promise.resolve(action.session_id === "other" ? other_view : split));
+    const open_keys = new Set([sessionKey(session), sessionKey(other)]);
+    const actions = props();
+    const view = (active: SessionSummary, keys = open_keys) => <NotificationProvider store={store}>
+      <Registry /><SessionViewSurface {...actions} session={active} open_session_keys={keys} />
+    </NotificationProvider>;
+    const mounted = render(view(session));
+    await waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+    const secondary = screen.getAllByLabelText("Terminal input")[1];
+    mounted.rerender(view(other));
+    await waitFor(() => expect(secondary.closest<HTMLElement>(".view-pane")?.hidden).toBe(true));
+    mocks.attachment_state = { ...initialAttachmentState(), session: { ...session, terminal_id: "b" }, phase: "error", error_code: "ssh_authentication_required", message: "Secondary authentication failed" };
+    mounted.rerender(view(other));
+    await waitFor(() => expect(store.snapshot().entries).toHaveLength(1));
+    expect(screen.queryByText("Secondary authentication failed")).toBeNull();
+    expect(store.snapshot().entries[0]).toMatchObject({ title: "Session connection failed", source: "local · Root · b" });
+    const owner = store.snapshot().entries[0].actions![0].args!.value;
+    await act(async () => registry.reconnect(owner));
+    expect(mocks.reconnect).toHaveBeenCalledOnce();
+    expect(actions.on_select_terminal).not.toHaveBeenCalled();
+    mounted.rerender(view(other, new Set([sessionKey(other)])));
+    await waitFor(() => expect(registry.canReconnect(owner)).toBe(false));
+    expect(store.snapshot().entries).toHaveLength(1);
+    expect(store.snapshot().entries[0].actions).toEqual([]);
+  });
+
   it("blocks all pane input and prefix actions while disabled, then resumes without reconnecting", async () => {
     mocks.request.mockResolvedValue(split);
     const actions = props();

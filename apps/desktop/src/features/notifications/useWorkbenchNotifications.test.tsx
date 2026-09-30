@@ -1,26 +1,15 @@
 // @vitest-environment jsdom
 import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AttachmentViewState, ManagedTask, SessionSummary } from "../../lib/types";
+import type { ManagedTask } from "../../lib/types";
 import { NotificationStore } from "./NotificationStore";
 import { useWorkbenchNotifications } from "./useWorkbenchNotifications";
 
 afterEach(cleanup);
 
-const session: SessionSummary = {
-  target: { kind: "local" }, session_id: "shell", name: "shell", status: "running",
-  terminal_size: { columns: 80, rows: 24, pixel_width: null, pixel_height: null },
-  next_sequence: "0",
-};
-const attachment: AttachmentViewState = {
-  phase: "idle", session: null, attachment_id: null, error_code: null, message: null,
-  input_lease: { held: false, owned_by_client: false }, layout_lease: { held: false, owned_by_client: false },
-  shell_state: null, applied_sequence: null, reconnect_sequence: null,
-  history_gap: false, terminal_size_mismatch: false, resize_with_window: false,
-};
 const sources: Parameters<typeof useWorkbenchNotifications>[1] = {
   workspace_error: null, workspace_ready: true, keybindings_error: null, session_error: null,
-  targets: [], target_errors: new Map(), attachment,
+  targets: [], target_errors: new Map(), storage_error: null,
   task_error: null, definitions_error: null, task_status: null, tasks: [], tasks_loaded: false,
 };
 
@@ -35,32 +24,10 @@ describe("workbench notification sources", () => {
     expect(store.snapshot().entries).toHaveLength(1);
   });
 
-  it("does not flood history during repeated attachment retries", () => {
+  it("reports storage failures even when no session is selected", () => {
     const store = new NotificationStore();
-    const failed = { ...sources, attachment: { ...attachment, session, phase: "error" as const, message: "Connection lost" } };
-    const hook = renderHook((props) => useWorkbenchNotifications(store, props), { initialProps: failed as typeof sources });
-    store.dismiss(store.snapshot().entries[0].id);
-    hook.rerender({ ...sources, attachment: { ...attachment, session, phase: "reconnecting" } });
-    hook.rerender(failed);
-    expect(store.snapshot().entries).toEqual([]);
-    hook.rerender({ ...sources, attachment: { ...attachment, session, phase: "attached" } });
-    hook.rerender(failed);
-    expect(store.snapshot().entries).toMatchObject([{ title: "Session connection failed", toast_visible: true }]);
-  });
-
-  it("reports inactive session failures and retains component recovery actions", () => {
-    const store = new NotificationStore();
-    const remote: SessionSummary = { ...session, target: { kind: "ssh", host_id: "remote", destination: "workstation" } };
-    const hook = renderHook((props) => useWorkbenchNotifications(store, props), {
-      initialProps: { ...sources, attachments: [
-        { ...attachment, session: remote, phase: "error", error_code: "protocol_version_mismatch", message: "Remote protocol needs an update" },
-      ] } as typeof sources,
-    });
-    expect(store.snapshot().entries).toMatchObject([{ actions: [{ label: "Update remote components", command_id: "session.recover_components" }] }]);
-    hook.rerender({ ...sources, attachments: [
-      { ...attachment, session, phase: "error", error_code: "protocol_version_mismatch", message: "Local protocol needs an update" },
-    ] });
-    expect(store.snapshot().entries[0].actions).toMatchObject([{ label: "Restart local daemon", command_id: "session.recover_components" }]);
+    renderHook(() => useWorkbenchNotifications(store, { ...sources, storage_error: "Archive failed: disk full" }));
+    expect(store.snapshot().entries).toMatchObject([{ severity: "error", title: "Session history", message: "Archive failed: disk full" }]);
   });
 
   it("does not replay an old taskd success after a later background error recovers", () => {

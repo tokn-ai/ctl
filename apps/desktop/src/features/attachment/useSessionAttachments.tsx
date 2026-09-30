@@ -7,6 +7,7 @@ import { sessionKey, targetKey } from "../targets/targets";
 import { sameSshEndpoint } from "../workspace/remoteRecovery";
 import type { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment, type AttachmentActions, type ConnectOptions } from "./useAttachment";
+import { useAttachmentNotifications } from "../notifications/useAttachmentNotifications";
 
 interface Entry {
   session: SessionSummary;
@@ -29,6 +30,7 @@ function SessionAttachment({ entry, renderer, onChange }: {
 }) {
   const scoped = useMemo(() => renderer?.sessionRenderer(entry.session) ?? null, [renderer, entry]);
   const actions = useAttachment(scoped, true);
+  useAttachmentNotifications(actions);
   const actions_ref = useRef(actions);
   actions_ref.current = actions;
   entry.actions = actions;
@@ -44,6 +46,7 @@ function SessionAttachment({ entry, renderer, onChange }: {
 export function useSessionAttachments(renderer: XtermRenderer | null): AttachmentActions & {
   controllers: ReactNode;
   states: readonly AttachmentViewState[];
+  storage_error: string | null;
   session_keys: ReadonlySet<string>;
   closeSession(session: SessionSummary): Promise<void>;
   retainSessions(keys: ReadonlySet<string>): void;
@@ -125,7 +128,9 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
   const active = () => entries.current.get(selected.current ?? "")?.actions;
   const actions = active() ?? idle;
   return {
-    state: storage_error ? { ...actions.state, message: storage_error } : actions.state,
+    state: actions.state,
+    connection_attempt: actions.connection_attempt,
+    storage_error,
     states,
     session_keys,
     connect,

@@ -48,7 +48,7 @@ import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
 import { NotificationBell, Notifications } from "../components/notifications/Notifications";
 import { NotificationStore } from "../features/notifications/NotificationStore";
-import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { NotificationProvider, useNotificationEnvironment } from "../features/notifications/NotificationContext";
 import { useWorkbenchNotifications } from "../features/notifications/useWorkbenchNotifications";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { SessionViewSurface } from "../components/terminal/SessionViewSurface";
@@ -164,8 +164,13 @@ async function verifyHostConnectionStatus(target: SshConnectionTarget): Promise<
 }
 
 export function TerminalPage() {
-  const workspace = useWorkspace();
   const [notifications] = useState(() => new NotificationStore());
+  return <NotificationProvider store={notifications}><TerminalWorkbench /></NotificationProvider>;
+}
+
+function TerminalWorkbench() {
+  const { store: notifications, attachments: attachmentNotifications } = useNotificationEnvironment()!;
+  const workspace = useWorkspace();
   const {
     targets,
     setTargets,
@@ -290,8 +295,7 @@ export function TerminalPage() {
     session_error: listError,
     targets,
     target_errors: targetErrors,
-    attachment: attachment.state,
-    attachments: attachment.states,
+    storage_error: attachment.storage_error,
     task_error: taskWorkspace.error,
     definitions_error: taskWorkspace.definitions_error,
     task_status: taskWorkspace.daemonStatus,
@@ -1612,15 +1616,23 @@ export function TerminalPage() {
     enabled: false,
     visibleInPalette: false,
     focusTerminalAfterRun: false,
-    isEnabled: (args) => !daemonRestartBlocksInteractions() && [attachment.state, ...attachment.states].some((state) =>
-      state.session && sessionKey(state.session) === args.session_key && state.error_code === "protocol_version_mismatch"),
+    isEnabled: (args) => !daemonRestartBlocksInteractions() && !!attachmentNotifications.recoverySession(args.value),
     run: (args) => {
-      const session = [attachment.state, ...attachment.states].find((state) =>
-        state.session && sessionKey(state.session) === args?.session_key && state.error_code === "protocol_version_mismatch")?.session;
+      const session = attachmentNotifications.recoverySession(args?.value);
       if (!session) return;
       if (session.target.kind === "ssh") setHostFlow({ target: session.target, update_required: true });
       else requestDaemonRestart();
     },
+  }, {
+    id: COMMAND_IDS.reconnectNotificationAttachment,
+    allow_concurrent: true,
+    category: "Session",
+    title: "Reconnect Notification Attachment",
+    enabled: false,
+    visibleInPalette: false,
+    focusTerminalAfterRun: false,
+    isEnabled: (args) => !daemonRestartBlocksInteractions() && attachmentNotifications.canReconnect(args.value),
+    run: (args) => attachmentNotifications.reconnect(args?.value),
   }, {
     id: COMMAND_IDS.refreshTasks,
     category: "Tasks",
@@ -1750,7 +1762,6 @@ export function TerminalPage() {
   }
 
   return (
-    <NotificationProvider store={notifications}>
       <CommandProvider
         value={{ dispatcher, keybinding: (id) => keybindings.bindings.get(id) }}
       >
@@ -2266,6 +2277,5 @@ export function TerminalPage() {
           />
         ) : null}
       </CommandProvider>
-    </NotificationProvider>
   );
 }

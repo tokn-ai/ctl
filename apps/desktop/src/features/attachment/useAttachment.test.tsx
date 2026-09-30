@@ -13,6 +13,9 @@ import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
 import { reconnectComponentAttachments, resetComponentAttachments } from "./componentActions";
+import { NotificationProvider } from "../notifications/NotificationContext";
+import { NotificationStore } from "../notifications/NotificationStore";
+import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
 
 const xterm = vi.hoisted(() => ({
   instances: [] as {
@@ -688,6 +691,72 @@ describe("opened session channels", () => {
     act(() => attachments.retainSessions(new Set()));
     await waitFor(() => expect(api.sessionCache).toHaveBeenCalledWith({ kind: "archive", host_key: "local", session_id: "first", reason: "Tab closed" }));
     expect(attachments.session_keys.size).toBe(0);
+  });
+
+  it("reports an archive failure after the final attachment is removed", async () => {
+    const store = new NotificationStore();
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      useWorkbenchNotifications(store, {
+        workspace_error: null, workspace_ready: true, keybindings_error: null, session_error: null,
+        targets: [], target_errors: new Map(), storage_error: attachments.storage_error,
+        task_error: null, definitions_error: null, task_status: null, tasks: [], tasks_loaded: false,
+      });
+      return <>{attachments.controllers}</>;
+    }
+    render(<NotificationProvider store={store}><Harness /></NotificationProvider>);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    api.sessionCache.mockImplementation(async (action) => {
+      if (action.kind === "archive") throw new Error("Archive failed: disk full");
+      return { kind: "recorded" };
+    });
+    act(() => attachments.retainSessions(new Set()));
+    await waitFor(() => expect(attachments.storage_error).toBe("Archive failed: disk full"));
+    expect(attachments.state.session).toBeNull();
+    expect(attachments.state.message).toBeNull();
+    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ title: "Session history", severity: "error", message: "Archive failed: disk full" }));
+  });
+
+  it("reports failures from a background session's real attachment controller", async () => {
+    const store = new NotificationStore();
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<NotificationProvider store={store}><Harness /></NotificationProvider>);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    const background_id = attachments.state.attachment_id!;
+    act(() => { void attachments.connect(second); });
+    await waitFor(() => expect(attachments.state.session?.session_id).toBe("second"));
+    await act(async () => channels.get(background_id)!({
+      event_type: "attachment_error", attachment_id: background_id,
+      code: "ssh_authentication_required", message: "Background authentication expired",
+    }));
+    expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ severity: "error", message: "Background authentication expired" }));
+    expect(attachments.state.session?.session_id).toBe("second");
+  });
+
+  it("reports identical failures from explicit retries outside the notification card", async () => {
+    const store = new NotificationStore();
+    let attachments!: ReturnType<typeof useSessionAttachments>;
+    function Harness() {
+      attachments = useSessionAttachments(renderer);
+      return <>{attachments.controllers}</>;
+    }
+    render(<NotificationProvider store={store}><Harness /></NotificationProvider>);
+    act(() => { void attachments.connect(first); });
+    await waitFor(() => expect(attachments.state.phase).toBe("attached"));
+    const attachment_id = attachments.state.attachment_id!;
+    const failure = { code: "ssh_authentication_required", message: "Authentication expired" };
+    await act(async () => channels.get(attachment_id)!({ event_type: "attachment_error", attachment_id, ...failure }));
+    act(() => store.dismiss(store.snapshot().entries[0].id));
+    api.openAttachment.mockRejectedValueOnce(failure);
+    await act(async () => { await attachments.reconnect(); });
+    await waitFor(() => expect(store.snapshot().entries).toContainEqual(expect.objectContaining({ message: failure.message, toast_visible: true })));
   });
 
   it("disconnects background streams only for the requested host", async () => {

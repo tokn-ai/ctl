@@ -113,8 +113,12 @@ while offline, with last-known wording and neutral status. An unreachable
 transport does not rewrite the last observed remote process as exited.
 
 The attachment peer-silence deadline runs independently of outbound writes, so
-a blocked SSH pipe cannot suppress failure detection. Private SSH masters started
-by ctld also use a ten-second server-alive interval with three unanswered probes.
+a blocked SSH pipe cannot suppress failure detection. A failed write closes the
+input path but still allows buffered output and a confirmed terminal-exit message
+to arrive. This read drain is bounded by one negotiated peer timeout even if the
+peer keeps sending data; a write failure alone never proves the shell exited.
+Private SSH masters started by ctld also use a ten-second server-alive interval
+with three unanswered probes.
 Configured shared masters retain their owner's keepalive policy. New settings
 apply to newly started masters; existing ones are not restarted automatically.
 

@@ -65,6 +65,8 @@ pub enum IdentityError {
   KeychainUnavailable,
   #[error("Keychain access is locked or was not allowed.")]
   KeychainLocked,
+  #[error("Another Keychain request is still active. Complete or cancel it, then try again.")]
+  KeychainBusy,
   #[error("The identity passphrase could not be saved.")]
   SaveFailed,
   #[error("The saved identity passphrase could not be forgotten.")]
@@ -94,6 +96,7 @@ impl IdentityError {
       Self::UnlockFailed => "identity_unlock_failed",
       Self::KeychainUnavailable => "identity_keychain_unavailable",
       Self::KeychainLocked => "identity_keychain_locked",
+      Self::KeychainBusy => "identity_keychain_busy",
       Self::SaveFailed => "identity_save_failed",
       Self::ForgetFailed => "identity_forget_failed",
       Self::ListFailed => "identity_list_failed",
@@ -127,17 +130,23 @@ impl SavedIdentity {
 }
 
 /// Read a saved passphrase only when the exact key file is still present.
+/// `context` names the locally configured connection in the authentication
+/// request. It must not come from an SSH server's prompt or diagnostic output.
 ///
 /// # Errors
 /// Returns a sanitized Keychain error or a changed-file error.
 pub fn saved_passphrase(
   snapshot: &IdentitySnapshot,
+  context: Option<&str>,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
   ensure_current(snapshot)?;
   #[cfg(target_os = "macos")]
-  return crate::keychain::identity::load(snapshot);
+  return crate::keychain::identity::load(snapshot, context);
   #[cfg(not(target_os = "macos"))]
-  Ok(None)
+  {
+    let _ = context;
+    Ok(None)
+  }
 }
 
 /// Persist a passphrase after local verification, bound to the exact file bytes.

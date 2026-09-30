@@ -26,6 +26,7 @@ fn inventory(credentials: Vec<StoredCredential>) -> Inventory {
     credentials,
     complete: true,
     warning: None,
+    metadata_import_required: false,
   }
 }
 
@@ -52,6 +53,39 @@ fn forget_accepts_only_exact_keychain_item_identifiers() {
       "invalid_credential_id"
     );
   }
+}
+
+#[test]
+fn metadata_import_state_is_preserved_alongside_available_credentials() {
+  let mut source = inventory(vec![stored(&"a".repeat(64))]);
+  source.metadata_import_required = true;
+  let result = snapshot(&BTreeMap::new(), Ok(source), Ok(vec![]), 123);
+  assert!(result.metadata_import_required);
+  assert_eq!(result.credentials.len(), 1);
+  let result = snapshot(
+    &BTreeMap::new(),
+    Err(CommandErrorDto::new("credential_store_locked", "Locked")),
+    Ok(vec![]),
+    124,
+  );
+  assert!(!result.metadata_import_required);
+  assert_eq!(result.sources[0].state, SourceState::Unavailable);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn old_helpers_are_reported_as_unsupported_for_noninteractive_inventory() {
+  let mut command = tokio::process::Command::new("/bin/sh");
+  command.args(["-c", "cat >/dev/null; printf '%s' '{\"type\":\"error\",\"code\":\"credential_request_invalid\",\"message\":\"private-fixture-canary\"}'", "legacy-helper"]);
+  let error = helper::exchange(
+    command,
+    Request::ListMetadata,
+    std::time::Duration::from_secs(2),
+  )
+  .await
+  .unwrap_err();
+  assert_eq!(error.code, "credential_helper_unsupported");
+  assert!(!error.message.contains("canary"));
 }
 
 #[test]

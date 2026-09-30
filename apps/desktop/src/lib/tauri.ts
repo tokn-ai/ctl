@@ -77,6 +77,10 @@ export async function listSavedCredentials(targets: CredentialTarget[]): Promise
   return invoke("list_saved_credentials", { request: { targets } });
 }
 
+export async function importCredentialMetadata(): Promise<void> {
+  await invoke("import_credential_metadata");
+}
+
 export async function forgetSavedCredential(credential_id: string): Promise<void> {
   await invoke("forget_saved_credential", { request: { credential_id } });
 }

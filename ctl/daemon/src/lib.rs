@@ -894,12 +894,19 @@ async fn handle_save_offer(
   if captured.is_empty() && verified.is_empty() {
     return Ok(());
   }
-  let response = request_ui(
-    stream,
-    PromptKind::CredentialSave,
-    "Save this SSH password or key passphrase for future connections? It will be stored device-locally in Keychain and require Touch ID.",
-  )
-  .await?;
+  let names = captured
+    .keys()
+    .map(|prompt| keychain::credential_name(target, prompt))
+    .chain(
+      verified
+        .iter()
+        .map(identity_connection::VerifiedPassphrase::name),
+    );
+  let message = identity_connection::save_offer_message(
+    &identity_connection::connection_context(target),
+    names,
+  );
+  let response = request_ui(stream, PromptKind::CredentialSave, &message).await?;
   match response.as_deref().map(String::as_str) {
     Some("yes") => {
       let target = target.clone();

@@ -377,7 +377,12 @@ The desktop **Credentials** page lists identity-file metadata and saved rmux
 credential attributes. Its bounded one-shot `ctld --credential-request` and
 `ctld --identity-request` helpers provide metadata, verified identity-passphrase
 writes, and exact-item deletion without restarting the running daemon.
-Inventory never retrieves secret values. See [credential management](credentials.md)
+Inventory reads separate, non-biometric metadata records with authentication UI
+explicitly forbidden. Older protected attributes are imported only through an
+explicit user action; interrupted imports remain retryable. Every interactive
+Keychain query carries a reason identifying its credential and purpose. Identity
+reuse retrieves the exact secret and binding together rather than listing every
+saved identity before each read. See [credential management](credentials.md)
 for discovery, state meanings, verification, and the storage boundary.
 
 SSH startup diagnostics are bounded and returned to the client instead of being lost behind a generic

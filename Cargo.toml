@@ -8,6 +8,7 @@ members = [
   "ctl/agent",
   "ctl/ctld-ipc",
   "ctl/daemon",
+  "ctl/keychain-client",
   "rmux/client",
   "rmux/cli",
   "rmux/core",

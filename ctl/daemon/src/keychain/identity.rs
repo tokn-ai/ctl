@@ -1,84 +1,80 @@
-//! A separate, exact identity-file namespace. List reads attributes only.
+//! Exact identity-file secrets and their separately readable metadata index.
 
-use super::{Error, ITEM_NOT_FOUND};
+use super::{Error, index, purpose};
 use crate::identities::{IdentityError, IdentitySnapshot, SavedIdentity, VerifiedIdentity};
-use core_foundation::data::CFData;
-use security_framework::access_control::{ProtectionMode, SecAccessControl};
-use security_framework::item::{
-  ItemClass, ItemSearchOptions, ItemUpdateOptions, ItemUpdateValue, update_item,
-};
-use security_framework::passwords::{
-  AccessControlOptions, PasswordOptions, generic_password, set_generic_password_options,
-};
+use ctl_keychain_client::{Authentication, Query, Write};
 use std::collections::HashMap;
 use zeroize::Zeroizing;
 
-const SERVICE: &str = "io.rmux.desktop.ctld.ssh-identity";
-const MAX_ITEMS: usize = 512;
+pub(super) const SERVICE: &str = "io.rmux.desktop.ctld.ssh-identity";
 
 pub(crate) fn list() -> Result<(HashMap<String, SavedIdentity>, bool), IdentityError> {
-  let mut options = ItemSearchOptions::new();
-  options
-    .class(ItemClass::generic_password())
-    .service(SERVICE)
-    .ignore_legacy_keychains()
-    .load_attributes(true)
-    .load_data(false)
-    .load_refs(false)
-    .limit(513);
-  let results = match options.search() {
-    Ok(results) => results,
-    Err(error) if error.code() == ITEM_NOT_FOUND => Vec::new(),
-    Err(error) => return Err(map_error(error, IdentityError::ListFailed)),
-  };
-  let mut complete = results.len() <= MAX_ITEMS;
-  let mut entries = HashMap::new();
-  for result in results.iter().take(MAX_ITEMS) {
-    let Some(attributes) = result.simplify_dict() else {
-      complete = false;
-      continue;
-    };
-    let (Some(account), Some(comment)) = (attributes.get("acct"), attributes.get("icmt")) else {
-      complete = false;
-      continue;
-    };
-    let Ok(metadata) = serde_json::from_str::<SavedIdentity>(comment) else {
-      complete = false;
-      continue;
-    };
-    if metadata.valid(account) {
-      entries.insert(account.clone(), metadata);
-    } else {
-      complete = false;
-    }
-  }
+  let (_, entries, complete) =
+    index::list().map_err(|error| map_error(error, IdentityError::ListFailed))?;
   Ok((entries, complete))
 }
 
 pub(crate) fn load(
   snapshot: &IdentitySnapshot,
+  context: Option<&str>,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
-  let (entries, _) = list()?;
-  let Some(metadata) = entries.get(&snapshot.identity_id) else {
+  let _operation = super::operation::acquire()
+    .map_err(|error| map_error(error, IdentityError::KeychainUnavailable))?;
+  let reason = purpose::identity("Read", &snapshot.path, context);
+  let records = ctl_keychain_client::search(&Query {
+    service: Some(SERVICE),
+    account: Some(&snapshot.identity_id),
+    limit: 1,
+    secret: true,
+    authentication: Authentication::Allow { reason: &reason },
+  })
+  .map_err(|error| map_error(error.into(), IdentityError::KeychainUnavailable))?;
+  let Some(record) = records.into_iter().next() else {
     return Ok(None);
   };
-  if metadata.file_version != snapshot.file_version {
+  // Both the protected binding and secret come from this exact same query.
+  // A sidecar is display metadata and never authorizes reuse of a secret.
+  if !binding_matches(&record.attributes, snapshot) {
     return Ok(None);
   }
-  let mut options = PasswordOptions::new_generic_password(SERVICE, &snapshot.identity_id);
-  options.use_protected_keychain();
-  let mut bytes = Zeroizing::new(match generic_password(options) {
-    Ok(bytes) => bytes,
-    Err(error) if error.code() == ITEM_NOT_FOUND => return Ok(None),
-    Err(error) => return Err(map_error(error, IdentityError::KeychainUnavailable)),
-  });
-  match String::from_utf8(std::mem::take(&mut *bytes)) {
-    Ok(secret) => Ok(Some(Zeroizing::new(secret))),
-    Err(error) => {
-      let _bytes = Zeroizing::new(error.into_bytes());
-      Err(IdentityError::KeychainUnavailable)
-    }
-  }
+  super::secret_string(record)
+    .map(Some)
+    .map_err(|error| map_error(error, IdentityError::KeychainUnavailable))
+}
+
+fn binding_matches(attributes: &HashMap<String, String>, snapshot: &IdentitySnapshot) -> bool {
+  protected_binding_matches(
+    attributes,
+    &snapshot.identity_id,
+    &snapshot.path,
+    &snapshot.file_version,
+  )
+}
+
+fn protected_binding_matches(
+  attributes: &HashMap<String, String>,
+  identity_id: &str,
+  path: &str,
+  file_version: &str,
+) -> bool {
+  let Some(comment) = attributes
+    .get("icmt")
+    .filter(|value| value.len() <= 16 * 1024)
+  else {
+    return false;
+  };
+  let Ok(metadata) = serde_json::from_str::<SavedIdentity>(comment) else {
+    return false;
+  };
+  metadata.valid(identity_id)
+    && metadata.path == path
+    && metadata.file_version == file_version
+    && attributes
+      .get("acct")
+      .is_some_and(|account| account == identity_id)
+    && attributes
+      .get("svce")
+      .is_some_and(|service| service == SERVICE)
 }
 
 pub(crate) fn save(
@@ -86,6 +82,8 @@ pub(crate) fn save(
   verified: &VerifiedIdentity,
   passphrase: &str,
 ) -> Result<(), IdentityError> {
+  let _operation =
+    super::operation::acquire().map_err(|error| map_error(error, IdentityError::SaveFailed))?;
   let metadata = SavedIdentity {
     version: 1,
     path: snapshot.path.clone(),
@@ -101,68 +99,132 @@ pub(crate) fn save(
       .unwrap_or_default()
       .to_string_lossy()
   );
-  let mut query = ItemSearchOptions::new();
-  query
-    .class(ItemClass::generic_password())
-    .service(SERVICE)
-    .account(&snapshot.identity_id)
-    .ignore_legacy_keychains();
-  let mut update = ItemUpdateOptions::new();
-  update
-    .set_value(ItemUpdateValue::Data(CFData::from_buffer(
-      passphrase.as_bytes(),
-    )))
-    .set_comment(&comment)
-    .set_label(&label);
-  // Replace the secret and binding together, preserving existing protection.
-  // A denied update leaves the previous credential intact.
-  match update_item(&query, &update) {
-    Ok(()) => return Ok(()),
-    Err(error) if error.code() == ITEM_NOT_FOUND => {}
-    Err(error) => return Err(map_error(error, IdentityError::SaveFailed)),
-  }
-  let mut options = PasswordOptions::new_generic_password(SERVICE, &snapshot.identity_id);
-  options.use_protected_keychain();
-  let control = SecAccessControl::create_with_protection(
-    Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-    AccessControlOptions::BIOMETRY_CURRENT_SET.bits(),
-  )
-  .map_err(|error| map_error(error, IdentityError::SaveFailed))?;
-  options.set_access_control(control);
-  options.set_label(&label);
-  options.set_description("rmux SSH identity passphrase");
-  options.set_comment(&comment);
-  set_generic_password_options(passphrase.as_bytes(), options)
-    .map_err(|error| map_error(error, IdentityError::SaveFailed))
+  let reason = purpose::identity("Save", &snapshot.path, None);
+  let pending =
+    index::begin_mutation().map_err(|error| map_error(error, IdentityError::SaveFailed))?;
+  ctl_keychain_client::upsert(&Write {
+    service: SERVICE,
+    account: &snapshot.identity_id,
+    label: &label,
+    comment: &comment,
+    data: passphrase.as_bytes(),
+    biometric: true,
+    authentication: Authentication::Allow { reason: &reason },
+  })
+  .map_err(|error| map_error(error.into(), IdentityError::SaveFailed))?;
+  index::save_identity(&snapshot.identity_id, &metadata)
+    .map_err(|error| map_error(error, IdentityError::SaveFailed))?;
+  index::finish_mutation(&pending).map_err(|error| map_error(error, IdentityError::SaveFailed))
 }
 
 pub(crate) fn forget(identity_id: &str) -> Result<(), IdentityError> {
+  let _operation =
+    super::operation::acquire().map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
   if identity_id.len() != 64
     || !identity_id
       .bytes()
-      .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
   {
     return Err(IdentityError::InvalidRequest);
   }
-  let mut options = ItemSearchOptions::new();
-  options
-    .class(ItemClass::generic_password())
-    .service(SERVICE)
-    .account(identity_id)
-    .ignore_legacy_keychains();
-  match options.delete() {
-    Ok(()) => Ok(()),
-    Err(error) if error.code() == ITEM_NOT_FOUND => Ok(()),
-    Err(error) => Err(map_error(error, IdentityError::ForgetFailed)),
-  }
+  let (_, entries, _) =
+    index::list().map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
+  let metadata = entries
+    .get(identity_id)
+    .ok_or(IdentityError::InvalidRequest)?;
+  let reason = purpose::identity("Remove the saved", &metadata.path, None);
+  let pending =
+    index::begin_mutation().map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
+  ctl_keychain_client::delete(
+    SERVICE,
+    Some(identity_id),
+    Authentication::Allow { reason: &reason },
+  )
+  .map_err(|error| map_error(error.into(), IdentityError::ForgetFailed))?;
+  index::forget_identity(identity_id)
+    .map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
+  index::finish_mutation(&pending).map_err(|error| map_error(error, IdentityError::ForgetFailed))
 }
 
-fn map_error(error: security_framework::base::Error, fallback: IdentityError) -> IdentityError {
-  if Error(error).is_missing_entitlement() {
+pub(crate) fn map_error(error: Error, fallback: IdentityError) -> IdentityError {
+  if error.is_busy() {
+    IdentityError::KeychainBusy
+  } else if error.is_missing_entitlement() {
     IdentityError::KeychainUnavailable
-  } else if matches!(error.code(), -25_308 | -25_315 | -25_293 | -128 | -25_291) {
+  } else if matches!(error.0.code(), -25_308 | -25_315 | -25_293 | -128 | -25_291) {
     IdentityError::KeychainLocked
   } else {
     fallback
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn attributes() -> (String, SavedIdentity, HashMap<String, String>) {
+    let metadata = SavedIdentity {
+      version: 1,
+      path: "/fixture/private-key".into(),
+      file_version: "a".repeat(64),
+      key_type: "ssh-ed25519".into(),
+      fingerprint: "SHA256:fixture".into(),
+    };
+    let id = super::super::digest(metadata.path.as_bytes());
+    let values = HashMap::from([
+      ("svce".into(), SERVICE.into()),
+      ("acct".into(), id.clone()),
+      ("icmt".into(), serde_json::to_string(&metadata).unwrap()),
+    ]);
+    (id, metadata, values)
+  }
+
+  #[test]
+  fn only_exact_protected_binding_authorizes_using_returned_secret() {
+    let (id, metadata, values) = attributes();
+    assert!(protected_binding_matches(
+      &values,
+      &id,
+      &metadata.path,
+      &metadata.file_version
+    ));
+    assert!(!protected_binding_matches(
+      &values,
+      &id,
+      &metadata.path,
+      &"b".repeat(64)
+    ));
+    assert!(!protected_binding_matches(
+      &values,
+      &id,
+      "/fixture/replaced-key",
+      &metadata.file_version
+    ));
+    assert!(!protected_binding_matches(
+      &values,
+      &"b".repeat(64),
+      &metadata.path,
+      &metadata.file_version
+    ));
+  }
+
+  #[test]
+  fn wrong_namespace_or_malformed_metadata_is_not_reused() {
+    let (id, metadata, mut values) = attributes();
+    values.insert("svce".into(), "another-service".into());
+    assert!(!protected_binding_matches(
+      &values,
+      &id,
+      &metadata.path,
+      &metadata.file_version
+    ));
+    values.insert("svce".into(), SERVICE.into());
+    values.insert("icmt".into(), "not metadata".into());
+    assert!(!protected_binding_matches(
+      &values,
+      &id,
+      &metadata.path,
+      &metadata.file_version
+    ));
   }
 }

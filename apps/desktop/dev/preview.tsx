@@ -61,10 +61,20 @@ if (credentials_param === "empty") {
 }
 if (credentials_param === "partial") {
   identity_files.keychain_available = false;
-  identity_files.warning = "Keychain is locked. Passphrase status could not be checked.";
+  identity_files.keychain_message = "Keychain is locked. Unlock it, then refresh.";
   identity_files.identity_files.forEach((file) => { file.passphrase_state = file.encrypted === false ? "not_required" : "unknown"; });
   credentials.credentials = credentials.credentials.filter((credential) => credential.storage !== "keychain");
   credentials.sources[0] = { source: "keychain", state: "unavailable", message: "Keychain is locked. Unlock it, then refresh." };
+}
+if (credentials_param === "import") {
+  credentials.metadata_import_required = true;
+  identity_files.metadata_import_required = true;
+  credentials.credentials = credentials.credentials.filter((credential) => credential.storage !== "keychain");
+  identity_files.identity_files.forEach((file) => {
+    file.passphrase_state = file.encrypted === false ? "not_required" : "unknown";
+    file.key_type = null;
+    file.fingerprint = null;
+  });
 }
 let component_versions = previewComponentVersions();
 if (about_param === "partial") {
@@ -189,6 +199,10 @@ mockIPC((command, payload) => {
     case "list_saved_credentials":
       if (credentials_param === "error") throw new Error("The credential inventory could not be refreshed.");
       return structuredClone({ ...credentials, checked_at_ms: Date.now() });
+    case "import_credential_metadata":
+      credentials = previewCredentials();
+      Object.assign(identity_files, previewIdentityFiles());
+      return;
     case "forget_saved_credential": {
       const { credential_id } = request<{ credential_id: string }>(payload);
       const credential = credentials.credentials.find((item) => item.credential_id === credential_id);

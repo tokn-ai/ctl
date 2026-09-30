@@ -136,6 +136,7 @@ pub(crate) fn inventory_from_attributes(
     credentials: Vec::new(),
     complete: true,
     warning: None,
+    metadata_import_required: false,
   };
   let mut count = 0;
   for attributes in attributes {

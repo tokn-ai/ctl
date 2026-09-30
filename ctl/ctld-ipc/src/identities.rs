@@ -41,11 +41,23 @@ pub struct IdentityFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// File discovery, storage access, and legacy import are independent observations.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Inventory {
   pub identity_files: Vec<IdentityFile>,
   pub complete: bool,
+  #[serde(default)]
+  pub file_discovery_complete: bool,
   pub warning: Option<String>,
   pub keychain_available: bool,
+  #[serde(default)]
+  pub keychain_error: Option<String>,
+  #[serde(default = "metadata_import_needed")]
+  pub metadata_import_required: bool,
+}
+
+fn metadata_import_needed() -> bool {
+  true
 }
 
 // Deliberately no Debug: Save contains a secret supplied through a private pipe.
@@ -53,6 +65,10 @@ pub struct Inventory {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
   List {
+    paths: Vec<String>,
+  },
+  /// Explicitly noninteractive; older helpers reject this operation.
+  ListMetadata {
     paths: Vec<String>,
   },
   Save {

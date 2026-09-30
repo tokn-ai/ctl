@@ -26,6 +26,7 @@ export interface CredentialSourceStatus {
 }
 
 export interface CredentialsSnapshot {
+  metadata_import_required: boolean;
   credentials: CredentialRecord[];
   sources: CredentialSourceStatus[];
   checked_at_ms: number;
@@ -46,6 +47,8 @@ export interface IdentityFile {
 }
 
 export interface IdentitySnapshot {
+  metadata_import_required: boolean;
+  keychain_message: string | null;
   identity_files: IdentityFile[];
   complete: boolean;
   warning: string | null;

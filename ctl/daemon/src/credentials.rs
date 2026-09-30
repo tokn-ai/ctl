@@ -84,13 +84,17 @@ fn handle(request: &Request) -> Response {
   #[cfg(target_os = "macos")]
   {
     match request {
-      Request::List => match crate::keychain::list() {
+      Request::List | Request::ListMetadata => match crate::keychain::list() {
         Ok(inventory) => Response::Inventory { inventory },
-        Err(failure) => keychain_error(&failure, "credential_list_failed"),
+        Err(failure) => keychain_error(failure, "credential_list_failed"),
+      },
+      Request::ImportMetadata => match crate::keychain::import_metadata() {
+        Ok(()) => Response::Imported,
+        Err(failure) => keychain_error(failure, "credential_import_failed"),
       },
       Request::Forget { credential_id } => match crate::keychain::forget(credential_id) {
         Ok(()) => Response::Forgotten,
-        Err(failure) => keychain_error(&failure, "credential_forget_failed"),
+        Err(failure) => keychain_error(failure, "credential_forget_failed"),
       },
     }
   }
@@ -104,8 +108,13 @@ fn handle(request: &Request) -> Response {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_error(failure: &crate::keychain::Error, fallback: &str) -> Response {
-  if failure.is_missing_entitlement() {
+fn keychain_error(failure: crate::keychain::Error, fallback: &str) -> Response {
+  if failure.is_busy() {
+    error(
+      "credential_store_busy",
+      "Another Keychain request is still active. Complete or cancel it, then try again.",
+    )
+  } else if failure.is_missing_entitlement() {
     error(
       "credential_store_unavailable",
       "The selected ctld needs its signed Keychain entitlement to manage saved credentials.",

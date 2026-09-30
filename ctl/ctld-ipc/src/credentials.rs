@@ -36,13 +36,24 @@ pub struct Inventory {
   pub credentials: Vec<StoredCredential>,
   pub complete: bool,
   pub warning: Option<String>,
+  #[serde(default = "metadata_import_needed")]
+  pub metadata_import_required: bool,
+}
+
+fn metadata_import_needed() -> bool {
+  true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
   List,
-  Forget { credential_id: String },
+  /// Rejectable by older helpers before their interactive inventory can run.
+  ListMetadata,
+  ImportMetadata,
+  Forget {
+    credential_id: String,
+  },
 }
 
 impl<'de> Deserialize<'de> for Request {
@@ -53,10 +64,14 @@ impl<'de> Deserialize<'de> for Request {
     #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
     enum Wire {
       List {},
+      ListMetadata {},
+      ImportMetadata {},
       Forget { credential_id: String },
     }
     Ok(match Wire::deserialize(deserializer)? {
       Wire::List {} => Self::List,
+      Wire::ListMetadata {} => Self::ListMetadata,
+      Wire::ImportMetadata {} => Self::ImportMetadata,
       Wire::Forget { credential_id } => Self::Forget { credential_id },
     })
   }
@@ -66,6 +81,7 @@ impl<'de> Deserialize<'de> for Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
   Inventory { inventory: Inventory },
+  Imported,
   Forgotten,
   Error { code: String, message: String },
 }
@@ -101,6 +117,33 @@ mod tests {
     assert!(
       serde_json::from_str::<Request>(r#"{"type":"reveal","credential_id":"fixture"}"#).is_err()
     );
+    assert_eq!(
+      serde_json::from_str::<Request>(r#"{"type":"import_metadata"}"#).unwrap(),
+      Request::ImportMetadata,
+    );
+    assert!(
+      serde_json::from_str::<Request>(r#"{"type":"import_metadata","password":"fixture"}"#)
+        .is_err()
+    );
+  }
+
+  #[test]
+  fn older_inventory_does_not_claim_metadata_has_been_imported() {
+    let inventory: Inventory =
+      serde_json::from_str(r#"{"credentials":[],"complete":true,"warning":null}"#).unwrap();
+    assert!(inventory.metadata_import_required);
+  }
+
+  #[test]
+  fn noninteractive_inventory_is_rejected_by_the_old_request_contract() {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+    enum OldRequest {
+      List {},
+    }
+    let request = serde_json::to_string(&Request::ListMetadata).unwrap();
+    assert_eq!(request, r#"{"type":"list_metadata"}"#);
+    assert!(serde_json::from_str::<OldRequest>(&request).is_err());
   }
 
   #[test]
@@ -120,6 +163,7 @@ mod tests {
         }],
         complete: true,
         warning: None,
+        metadata_import_required: false,
       },
     })
     .unwrap();

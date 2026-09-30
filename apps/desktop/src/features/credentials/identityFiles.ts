@@ -32,6 +32,8 @@ export function identityMutationError(failure: unknown, action: "save" | "forget
     identity_file_missing: "The identity file is missing. Check its path, then refresh.",
     identity_file_unreadable: "The identity file could not be read. Check its permissions, then refresh.",
     identity_unlock_failed: "The passphrase does not unlock this identity file. Try again.",
+    credential_store_busy: "Another Keychain request is still active. Complete or cancel it, then try again.",
+    identity_keychain_busy: "Another Keychain request is still active. Complete or cancel it, then try again.",
     identity_keychain_unavailable: "Keychain is unavailable. Check access and try again.",
     identity_keychain_locked: "Keychain access was denied or locked. Unlock it and try again.",
     identity_unsupported: "This identity file or platform does not support saved passphrases.",

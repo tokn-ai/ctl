@@ -30,10 +30,24 @@ fn helper_dispatches_a_single_metadata_request_and_returns_json() {
         credentials: Vec::new(),
         complete: true,
         warning: None,
+        metadata_import_required: false,
       },
     }
   });
   assert!(matches!(response, Response::Inventory { inventory } if inventory.complete));
+}
+
+#[test]
+fn importing_metadata_is_a_separate_explicit_operation() {
+  let response = run_fixture(br#"{"type":"import_metadata"}"#, |request| {
+    assert_eq!(request, &Request::ImportMetadata);
+    Response::Imported
+  });
+  assert_eq!(response, Response::Imported);
+  let response = run_fixture(br#"{"type":"import_metadata","authenticate":true}"#, |_| {
+    panic!("unexpected fields reached storage")
+  });
+  assert!(matches!(response, Response::Error { code, .. } if code == "credential_request_invalid"));
 }
 
 #[test]
@@ -62,6 +76,7 @@ fn response_limit_preserves_valid_json_and_reports_truncation() {
       credentials: vec![credential; 1024],
       complete: true,
       warning: None,
+      metadata_import_required: false,
     },
   })
   .unwrap();
@@ -85,7 +100,7 @@ fn keychain_errors_do_not_appear_as_a_successful_empty_inventory() {
     (-50, "credential_list_failed"),
   ] {
     let failure = crate::keychain::Error(security_framework::base::Error::from_code(status));
-    let response = keychain_error(&failure, "credential_list_failed");
+    let response = keychain_error(failure, "credential_list_failed");
     assert!(matches!(response, Response::Error { code, .. } if code == expected));
   }
 }

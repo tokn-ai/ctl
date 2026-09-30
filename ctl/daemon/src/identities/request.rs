@@ -39,6 +39,7 @@ pub fn run(reader: impl Read, mut writer: impl Write) -> io::Result<()> {
         .identity_files
         .truncate(inventory.identity_files.len() / 2);
       inventory.complete = false;
+      inventory.file_discovery_complete = false;
       inventory.warning = Some("The identity inventory exceeded its size limit.".into());
     } else {
       return Err(io::Error::other(
@@ -60,7 +61,7 @@ fn error_response(error: IdentityError) -> Response {
 
 async fn handle(request: Request) -> Result<Response, IdentityError> {
   match request {
-    Request::List { paths } => Ok(Response::Inventory {
+    Request::List { paths } | Request::ListMetadata { paths } => Ok(Response::Inventory {
       inventory: inventory::list(&paths)?,
     }),
     Request::Save {

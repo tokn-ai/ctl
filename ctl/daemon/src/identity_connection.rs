@@ -13,10 +13,12 @@ use crate::identities::{self, IdentitySnapshot, LocalAgent, VerifiedIdentity};
 
 mod agent_proxy;
 mod config;
+mod labels;
 use agent_proxy::AgentProxy;
 #[cfg(test)]
 use config::parse_configuration;
 use config::{expand_home, resolve_configurations};
+pub(super) use labels::{connection_context, save_offer_message};
 
 const MAX_IDENTITIES: usize = 32;
 
@@ -38,6 +40,10 @@ pub(super) struct VerifiedPassphrase {
 }
 
 impl VerifiedPassphrase {
+  pub(super) fn name(&self) -> String {
+    format!("SSH identity passphrase: {}", self.snapshot.path)
+  }
+
   pub(super) fn save(self) -> Result<(), identities::IdentityError> {
     identities::save_verified(&self.snapshot, &self.verified, &self.secret)
   }
@@ -118,9 +124,8 @@ impl PreparedIdentities {
         continue;
       }
       let selected = Arc::clone(&snapshot);
-      let Ok(Ok(Some(secret))) =
-        tokio::task::spawn_blocking(move || identities::saved_passphrase(&selected)).await
-      else {
+      let context = connection_context(target);
+      let Some(secret) = saved_passphrase(selected, context).await else {
         continue;
       };
       if prepared.agent.is_none() {
@@ -260,6 +265,17 @@ impl PreparedIdentities {
     }
     verified
   }
+}
+
+async fn saved_passphrase(
+  snapshot: Arc<IdentitySnapshot>,
+  context: String,
+) -> Option<Zeroizing<String>> {
+  tokio::task::spawn_blocking(move || identities::saved_passphrase(&snapshot, Some(&context)))
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten()
 }
 
 fn candidate_order(prompt_path: Option<&str>, paths: &[&str]) -> Vec<usize> {

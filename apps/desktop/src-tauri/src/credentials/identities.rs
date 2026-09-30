@@ -28,6 +28,8 @@ pub struct IdentitySnapshot {
   complete: bool,
   warning: Option<String>,
   keychain_available: bool,
+  keychain_message: Option<String>,
+  metadata_import_required: bool,
   checked_at_ms: i64,
 }
 
@@ -73,7 +75,7 @@ pub async fn list_credential_identity_files(
   .map_err(|_| sanitized_error("identity_list_failed"))?;
   let paths = bounded_paths(&hints.names);
   let hints_complete = hints.complete && paths.len() == hints.names.len();
-  let Response::Inventory { inventory } = exchange(Request::List { paths }).await? else {
+  let Response::Inventory { inventory } = exchange(Request::ListMetadata { paths }).await? else {
     return Err(sanitized_error("identity_list_failed"));
   };
   Ok(snapshot(inventory, &hints.names, hints_complete))
@@ -134,6 +136,7 @@ async fn exchange_with(
 ) -> CommandResult<Response> {
   use ctld_ipc::identities::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 
+  let requires_metadata_support = matches!(request, Request::ListMetadata { .. });
   let bytes = Zeroizing::new(
     serde_json::to_vec(&request).map_err(|_| sanitized_error("identity_invalid_request"))?,
   );
@@ -157,6 +160,9 @@ async fn exchange_with(
     }
   })?;
   if let Response::Error { code, .. } = response {
+    if requires_metadata_support && code == "identity_invalid_request" {
+      return Err(super::process::unsupported());
+    }
     return Err(sanitized_error(&code));
   }
   if !output.success || output.input_result.is_err() {
@@ -369,14 +375,14 @@ fn snapshot(
   names: &BTreeMap<String, BTreeSet<String>>,
   hints_complete: bool,
 ) -> IdentitySnapshot {
-  let mut complete = inventory.complete && hints_complete;
+  let mut files_complete = hints_complete && inventory.file_discovery_complete;
   let mut seen = BTreeSet::new();
   let identity_files = inventory
     .identity_files
     .into_iter()
     .filter_map(|file| {
       if !valid_digest(&file.identity_id) || !seen.insert(file.identity_id.clone()) {
-        complete = false;
+        files_complete = false;
         return None;
       }
       let used_by = names
@@ -388,10 +394,19 @@ fn snapshot(
     .collect();
   IdentitySnapshot {
     identity_files,
-    complete,
+    complete: inventory.complete && files_complete,
     // Never forward free-form helper diagnostics or config contents to the UI.
-    warning: (!complete).then(|| "Some identity files or host associations could not be inspected. The available files are shown.".into()),
+    // Missing legacy metadata is explained by the import action, and Keychain
+    // failures have their own categorized message rather than a file warning.
+    warning: (!files_complete
+      || (!inventory.complete && inventory.keychain_available && !inventory.metadata_import_required))
+      .then(|| "Some identity files or host associations could not be inspected. The available files are shown.".into()),
     keychain_available: inventory.keychain_available,
+    keychain_message: inventory
+      .keychain_error
+      .as_deref()
+      .map(|code| sanitized_error(code).message),
+    metadata_import_required: inventory.metadata_import_required,
     checked_at_ms: super::current_time_ms(),
   }
 }
@@ -432,6 +447,14 @@ fn sanitized_error(code: &str) -> CommandErrorDto {
     "identity_keychain_locked" => (
       "identity_keychain_locked",
       "Keychain access was locked, denied, or cancelled. Unlock Keychain and try again.",
+    ),
+    "identity_keychain_busy" => (
+      "identity_keychain_busy",
+      "Another Keychain request is still active. Complete or cancel it, then try again.",
+    ),
+    "identity_list_failed" => (
+      "identity_list_failed",
+      "Saved passphrase metadata could not be read. Check Keychain access and try again.",
     ),
     "identity_unsupported" => (
       "identity_unsupported",

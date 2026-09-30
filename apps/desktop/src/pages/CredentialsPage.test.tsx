@@ -4,12 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CredentialRecord, CredentialsSnapshot, CredentialTarget } from "../lib/types";
 import { CredentialsPage } from "./CredentialsPage";
 
-const api = vi.hoisted(() => ({ list: vi.fn(), forget: vi.fn(), identities: vi.fn(), save_identity: vi.fn(), forget_identity: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ listSavedCredentials: api.list, forgetSavedCredential: api.forget, listIdentityFiles: api.identities, saveIdentityPassphrase: api.save_identity, forgetIdentityPassphrase: api.forget_identity }));
+const api = vi.hoisted(() => ({ list: vi.fn(), forget: vi.fn(), identities: vi.fn(), save_identity: vi.fn(), forget_identity: vi.fn(), import_metadata: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ listSavedCredentials: api.list, forgetSavedCredential: api.forget, listIdentityFiles: api.identities, saveIdentityPassphrase: api.save_identity, forgetIdentityPassphrase: api.forget_identity, importCredentialMetadata: api.import_metadata }));
 
 const credential: CredentialRecord = { credential_id: "opaque-keychain-id", name: "Development", kind: "ssh_password", storage: "keychain", target: "dev.example.test", account: "developer", created_at_ms: 1000, updated_at_ms: 2000, detail: "Requires Touch ID when used.", action: "forget", vpn_connection_id: null };
 const vpn: CredentialRecord = { ...credential, credential_id: "vpn-id", name: "Work VPN", kind: "vpn_password", storage: "vpn_settings", target: "vpn.example.test", created_at_ms: null, updated_at_ms: null, detail: "Saved in private VPN settings.", action: "manage_vpn", vpn_connection_id: "work-vpn" };
-const snapshot: CredentialsSnapshot = { credentials: [credential, vpn], sources: [{ source: "keychain", state: "ready", message: null }, { source: "vpn", state: "ready", message: null }], checked_at_ms: 3000 };
+const snapshot: CredentialsSnapshot = { metadata_import_required: false, credentials: [credential, vpn], sources: [{ source: "keychain", state: "ready", message: null }, { source: "vpn", state: "ready", message: null }], checked_at_ms: 3000 };
 const targets: CredentialTarget[] = [{ name: "Development", target: { kind: "ssh", host_id: "development", destination: "dev.example.test" } }];
 const props = () => ({ visible: true, targets, on_close: vi.fn(), on_dialog_change: vi.fn(), on_manage_vpn: vi.fn() });
 
@@ -17,7 +17,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.list.mockResolvedValue(structuredClone(snapshot));
   api.forget.mockResolvedValue(undefined);
-  api.identities.mockResolvedValue({ identity_files: [], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 });
+  api.import_metadata.mockResolvedValue(undefined);
+  api.identities.mockResolvedValue({ metadata_import_required: false, keychain_message: null, identity_files: [], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 });
 });
 afterEach(cleanup);
 

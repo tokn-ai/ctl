@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/errors";
-import { forgetIdentityPassphrase, forgetSavedCredential, listIdentityFiles, listSavedCredentials, saveIdentityPassphrase } from "../../lib/tauri";
+import { forgetIdentityPassphrase, forgetSavedCredential, importCredentialMetadata, listIdentityFiles, listSavedCredentials, saveIdentityPassphrase } from "../../lib/tauri";
 import type { CredentialRecord, CredentialTarget, CredentialsSnapshot, IdentityFile, IdentitySnapshot } from "../../lib/types";
+import { credentialImportError, metadataImportRequired } from "./metadataImport";
 import { canForgetIdentity, canSaveIdentity, identityMutationError, identityName } from "./identityFiles";
 
 interface IdentityDialog {
@@ -35,15 +36,15 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
     return () => { mounted.current = false; generation.current += 1; };
   }, []);
 
-  const refresh = useCallback(async () => {
-    if (!visible_ref.current) return;
+  const refresh = useCallback(async (): Promise<boolean | null> => {
+    if (!visible_ref.current) return null;
     const request_generation = ++generation.current;
     setLoading(true);
     const [credentials_result, identities_result] = await Promise.allSettled([
       listSavedCredentials(targets_ref.current.filter(({ target }) => !target.unavailable)),
       listIdentityFiles(targets_ref.current),
     ]);
-    if (!mounted.current || request_generation !== generation.current) return;
+    if (!mounted.current || request_generation !== generation.current) return null;
     if (credentials_result.status === "fulfilled") {
       setSnapshot(credentials_result.value);
       setError(null);
@@ -53,6 +54,11 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
       setIdentityError(null);
     } else setIdentityError(errorMessage(identities_result.reason));
     setLoading(false);
+    const import_flags = [
+      credentials_result.status === "fulfilled" ? metadataImportRequired(credentials_result.value) : null,
+      identities_result.status === "fulfilled" ? metadataImportRequired(identities_result.value) : null,
+    ];
+    return import_flags.includes(true) ? true : import_flags.includes(null) ? null : false;
   }, []);
 
   useEffect(() => {
@@ -102,6 +108,26 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
       setIdentityDialog(null);
     }
   }, []);
+
+  const importMetadata = useCallback(async () => {
+    if (!openDialog() || !beginMutation("credential-metadata-import")) return;
+    let imported = false;
+    try {
+      try {
+        await importCredentialMetadata();
+        imported = true;
+      } catch (failure) {
+        if (mounted.current) setActionError(credentialImportError(failure));
+      }
+      // A cancelled or failed import may still have indexed some entries.
+      // Never claim completion before observing both updated inventories.
+      const still_required = await refresh();
+      if (!mounted.current || !imported || !visible_ref.current) return;
+      setNotice(still_required === false ? "Saved credential metadata imported."
+        : still_required === true ? "Imported available metadata. Some saved entries still need metadata import."
+          : "Metadata import finished. Refresh to check whether all saved entries were imported.");
+    } finally { finishMutation(); }
+  }, [openDialog, beginMutation, finishMutation, refresh]);
 
   const confirmForget = useCallback(async () => {
     if (!pending || !beginMutation(pending.credential_id)) return;
@@ -173,6 +199,8 @@ export function useCredentials(visible: boolean, targets: CredentialTarget[]) {
 
   return {
     snapshot, identities, loading, error, identity_error, pending, identity_dialog, busy_id, action_error, notice,
+    metadata_import_required: metadataImportRequired(snapshot) || metadataImportRequired(identities),
+    metadata_importing: busy_id === "credential-metadata-import", importMetadata,
     refresh, requestForget, cancelForget: cancelDialog, confirmForget, cancelDialog,
     requestIdentitySave, requestIdentityForget, confirmIdentitySave, confirmIdentityForget,
   };

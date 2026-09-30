@@ -8,15 +8,20 @@ pub(super) fn list(paths: &[String]) -> Result<Inventory, IdentityError> {
     return Err(IdentityError::InvalidRequest);
   }
   #[cfg(target_os = "macos")]
-  let stored = crate::keychain::identity::list();
+  let stored = crate::keychain::identity::list().and_then(|(saved, complete)| {
+    crate::keychain::metadata_import_required()
+      .map(|required| (saved, complete, required))
+      .map_err(|error| crate::keychain::identity::map_error(error, IdentityError::ListFailed))
+  });
   #[cfg(not(target_os = "macos"))]
-  let stored: Result<(HashMap<String, SavedIdentity>, bool), IdentityError> =
+  let stored: Result<(HashMap<String, SavedIdentity>, bool, bool), IdentityError> =
     Err(IdentityError::KeychainUnavailable);
-  let (saved, mut complete, warning, available) = match stored {
-    Ok((saved, complete)) => (saved, complete, None, true),
-    Err(error) => (HashMap::new(), false, Some(error.to_string()), false),
+  let (saved, complete, keychain_error, available, metadata_import_required) = match stored {
+    Ok((saved, complete, required)) => (saved, complete, None, true, required),
+    Err(error) => (HashMap::new(), false, Some(error), false, false),
   };
-  let saved_metadata_complete = available && complete;
+  let saved_metadata_complete = available && complete && !metadata_import_required;
+  let mut file_discovery_complete = true;
   let mut candidates = paths.to_vec();
   candidates.extend(saved.values().map(|metadata| metadata.path.clone()));
   if let Some(home) = dirs::home_dir() {
@@ -24,11 +29,11 @@ pub(super) fn list(paths: &[String]) -> Result<Inventory, IdentityError> {
       Ok(entries) => {
         for (index, entry) in entries.take(MAX_PATHS + 1).enumerate() {
           if index == MAX_PATHS {
-            complete = false;
+            file_discovery_complete = false;
             break;
           }
           let Ok(entry) = entry else {
-            complete = false;
+            file_discovery_complete = false;
             continue;
           };
           let path = entry.path();
@@ -43,20 +48,28 @@ pub(super) fn list(paths: &[String]) -> Result<Inventory, IdentityError> {
         }
       }
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-      Err(_) => complete = false,
+      Err(_) => file_discovery_complete = false,
     }
   }
-  let identity_files = project(&candidates, &saved, saved_metadata_complete, &mut complete);
+  let identity_files = project(
+    &candidates,
+    &saved,
+    saved_metadata_complete,
+    &mut file_discovery_complete,
+  );
   Ok(Inventory {
     identity_files,
-    complete,
-    warning: warning.or_else(|| {
-      (!complete).then(|| {
+    complete: complete && file_discovery_complete && !metadata_import_required,
+    file_discovery_complete,
+    warning: keychain_error.map(|error| error.to_string()).or_else(|| {
+      (!file_discovery_complete).then(|| {
         "Some identity files could not be listed. The identity inventory is limited to 512 files."
           .into()
       })
     }),
     keychain_available: available,
+    keychain_error: keychain_error.map(|error| error.code().into()),
+    metadata_import_required,
   })
 }
 

@@ -27,6 +27,8 @@ pub(super) async fn exchange(
   request: Request,
   deadline: Duration,
 ) -> CommandResult<Response> {
+  let requires_metadata_support =
+    matches!(request, Request::ListMetadata | Request::ImportMetadata);
   let bytes = Zeroizing::new(serde_json::to_vec(&request).map_err(|_| invalid_response())?);
   if bytes.len() > MAX_REQUEST_BYTES {
     return Err(CommandErrorDto::new(
@@ -42,7 +44,13 @@ pub(super) async fn exchange(
     deadline,
   )
   .await?;
-  response_from_output(output.success, output.input_result, &output.bytes)
+  response_from_output(output.success, output.input_result, &output.bytes).map_err(|error| {
+    if requires_metadata_support && error.code == "invalid_credential_id" {
+      unsupported_helper()
+    } else {
+      error
+    }
+  })
 }
 
 pub(super) fn response_from_output(
@@ -70,6 +78,10 @@ pub(super) fn response_from_output(
 
 pub(super) fn sanitized_error(code: &str) -> CommandErrorDto {
   match code {
+    "credential_store_busy" => CommandErrorDto::new(
+      "credential_store_busy",
+      "Another Keychain request is still active. Complete or cancel it, then try again.",
+    ),
     "credential_store_unsupported" => CommandErrorDto::new(
       "credentials_unsupported",
       "Saved SSH credentials require macOS Keychain.",
@@ -88,6 +100,10 @@ pub(super) fn sanitized_error(code: &str) -> CommandErrorDto {
     "credential_forget_failed" => CommandErrorDto::new(
       "credential_forget_failed",
       "The credential could not be removed from Keychain. Check access and try again.",
+    ),
+    "credential_import_failed" => CommandErrorDto::new(
+      "credential_import_failed",
+      "Saved credential metadata could not be fully imported. Existing credentials are unchanged; try importing again.",
     ),
     "credential_not_found" => CommandErrorDto::new(
       "credential_not_found",

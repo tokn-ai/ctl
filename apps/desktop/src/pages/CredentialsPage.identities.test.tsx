@@ -4,17 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CredentialTarget, IdentityFile, IdentitySnapshot } from "../lib/types";
 import { CredentialsPage } from "./CredentialsPage";
 
-const api = vi.hoisted(() => ({ list: vi.fn(), forget: vi.fn(), identities: vi.fn(), save_identity: vi.fn(), forget_identity: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ listSavedCredentials: api.list, forgetSavedCredential: api.forget, listIdentityFiles: api.identities, saveIdentityPassphrase: api.save_identity, forgetIdentityPassphrase: api.forget_identity }));
+const api = vi.hoisted(() => ({ list: vi.fn(), forget: vi.fn(), identities: vi.fn(), save_identity: vi.fn(), forget_identity: vi.fn(), import_metadata: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ listSavedCredentials: api.list, forgetSavedCredential: api.forget, listIdentityFiles: api.identities, saveIdentityPassphrase: api.save_identity, forgetIdentityPassphrase: api.forget_identity, importCredentialMetadata: api.import_metadata }));
 const file: IdentityFile = { identity_id: "identity-fixture", path: "/Users/sample/.ssh/id_ed25519", display_path: "~/.ssh/id_ed25519", file_version: "fixture-version", key_type: "Ed25519", fingerprint: "SHA256:fixture-fingerprint", encrypted: true, file_state: "ready", passphrase_state: "not_saved", detail: null, used_by: ["Development", "Staging"] };
-const inventory: IdentitySnapshot = { identity_files: [file], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 };
+const inventory: IdentitySnapshot = { metadata_import_required: false, keychain_message: null, identity_files: [file], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 };
 const targets: CredentialTarget[] = [{ name: "Development", target: { kind: "ssh", host_id: "development", destination: "dev.example.test", identity_file: "~/.ssh/id_ed25519" } }];
 const props = () => ({ visible: true, targets, on_close: vi.fn(), on_dialog_change: vi.fn(), on_manage_vpn: vi.fn() });
 const makeInventory = (rows: IdentityFile[]): IdentitySnapshot => ({ ...inventory, identity_files: rows });
 
 beforeEach(() => {
   vi.resetAllMocks();
-  api.list.mockResolvedValue({ credentials: [], sources: [{ source: "keychain", state: "ready", message: null }, { source: "vpn", state: "ready", message: null }], checked_at_ms: 3000 });
+  api.list.mockResolvedValue({ metadata_import_required: false, credentials: [], sources: [{ source: "keychain", state: "ready", message: null }, { source: "vpn", state: "ready", message: null }], checked_at_ms: 3000 });
+  api.import_metadata.mockResolvedValue(undefined);
   api.identities.mockResolvedValue(structuredClone(inventory));
   api.save_identity.mockResolvedValue(undefined);
   api.forget_identity.mockResolvedValue(undefined);
@@ -150,10 +151,10 @@ describe("Identity file credentials", () => {
   });
 
   it("isolates identity discovery errors and disables unavailable Keychain actions", async () => {
-    api.identities.mockResolvedValue({ ...inventory, complete: false, keychain_available: false, warning: "One configured file could not be inspected." });
+    api.identities.mockResolvedValue({ ...inventory, complete: false, keychain_available: false, keychain_message: "Keychain access is locked. Unlock it, then refresh.", warning: "One configured file could not be inspected." });
     render(<CredentialsPage {...props()} />);
     expect(await screen.findByText("One configured file could not be inspected.")).toBeTruthy();
-    expect(screen.getByText(/Keychain passphrase storage could not be checked/)).toBeTruthy();
+    expect(screen.getByText("Keychain access is locked. Unlock it, then refresh.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Save passphrase|Forget passphrase/ })).toBeNull();
     expect(screen.getByText("Not checked")).toBeTruthy();
     expect(screen.getByText("No saved credentials found.")).toBeTruthy();

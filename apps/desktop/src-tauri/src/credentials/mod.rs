@@ -70,9 +70,23 @@ pub async fn forget_saved_credential(request: ForgetRequest) -> CommandResult<()
   }
 }
 
+/// User-initiated import; ordinary inventory refreshes never authenticate.
+#[tauri::command]
+pub async fn import_credential_metadata() -> CommandResult<()> {
+  #[cfg(target_os = "macos")]
+  {
+    match helper::request(Request::ImportMetadata).await? {
+      Response::Imported => Ok(()),
+      _ => Err(unexpected_response()),
+    }
+  }
+  #[cfg(not(target_os = "macos"))]
+  Err(unsupported_keychain())
+}
+
 #[cfg(target_os = "macos")]
 async fn read_keychain() -> CommandResult<Inventory> {
-  match helper::request(Request::List).await? {
+  match helper::request(Request::ListMetadata).await? {
     Response::Inventory { inventory } => Ok(inventory),
     _ => Err(unexpected_response()),
   }
@@ -220,6 +234,9 @@ fn snapshot(
   checked_at_ms: i64,
 ) -> CredentialsSnapshot {
   let mut credentials = Vec::new();
+  let metadata_import_required = keychain
+    .as_ref()
+    .is_ok_and(|inventory| inventory.metadata_import_required);
   let keychain_source = match keychain {
     Ok(inventory) => {
       let mut complete = inventory.complete;
@@ -281,6 +298,7 @@ fn snapshot(
   CredentialsSnapshot {
     credentials,
     sources: vec![keychain_source, vpn_source],
+    metadata_import_required,
     checked_at_ms,
   }
 }

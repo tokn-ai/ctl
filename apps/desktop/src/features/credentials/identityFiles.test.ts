@@ -10,4 +10,11 @@ describe("Identity mutation errors", () => {
     expect(identityMutationError("identity_unlock_failed")).toBe("The passphrase does not unlock this identity file. Try again.");
     expect(identityMutationError(new Error("sample-secret-fixture"), "forget")).toBe("The saved passphrase could not be forgotten. Check Keychain access and try again.");
   });
+
+  it.each(["credential_store_busy", "identity_keychain_busy"])("explains %s without rendering native details", (code) => {
+    for (const action of ["save", "forget"] as const) {
+      expect(identityMutationError({ code, message: "sample-secret-fixture" }, action))
+        .toBe("Another Keychain request is still active. Complete or cancel it, then try again.");
+    }
+  });
 });

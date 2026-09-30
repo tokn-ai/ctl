@@ -88,5 +88,6 @@ pub struct SourceStatus {
 pub struct CredentialsSnapshot {
   pub credentials: Vec<CredentialRecord>,
   pub sources: Vec<SourceStatus>,
+  pub metadata_import_required: bool,
   pub checked_at_ms: i64,
 }

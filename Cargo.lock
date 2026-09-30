@@ -711,6 +711,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctl-keychain-client"
+version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "security-framework",
+ "security-framework-sys",
+ "zeroize",
+]
+
+[[package]]
 name = "ctl-proto"
 version = "0.1.0"
 dependencies = [
@@ -728,11 +738,10 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "component-info",
- "core-foundation",
+ "ctl-keychain-client",
  "ctl-proto",
  "ctld-ipc",
  "dirs",
- "plist",
  "rpassword",
  "rustix",
  "security-framework",

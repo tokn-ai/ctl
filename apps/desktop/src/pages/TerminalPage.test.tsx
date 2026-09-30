@@ -63,6 +63,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 const api = vi.hoisted(() => ({
   listSavedCredentials: vi.fn(),
   listIdentityFiles: vi.fn(),
+  importCredentialMetadata: vi.fn(),
   saveIdentityPassphrase: vi.fn(),
   forgetIdentityPassphrase: vi.fn(),
   forgetSavedCredential: vi.fn(),
@@ -252,8 +253,8 @@ beforeEach(() => {
   api.listSshIdentityFiles.mockResolvedValue({ identity_files: [], warnings: [] });
   api.setNativeWindowTitle.mockResolvedValue(undefined);
   api.forgetSshCredentials.mockResolvedValue(undefined);
-  api.listIdentityFiles.mockResolvedValue({ identity_files: [], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 });
-  api.listSavedCredentials.mockResolvedValue({ credentials: [], sources: [
+  api.listIdentityFiles.mockResolvedValue({ metadata_import_required: false, keychain_message: null, identity_files: [], complete: true, warning: null, keychain_available: true, checked_at_ms: 3000 });
+  api.listSavedCredentials.mockResolvedValue({ metadata_import_required: false, credentials: [], sources: [
     { source: "keychain", state: "ready", message: null },
     { source: "vpn", state: "ready", message: null },
   ], checked_at_ms: 1 });

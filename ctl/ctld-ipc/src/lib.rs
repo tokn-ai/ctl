@@ -959,10 +959,12 @@ mod tests {
   async fn pinned_daemon_bootstrap_ignores_environment_and_preserves_existing_owners() {
     for mode in ["bootstrap", "existing"] {
       let fixture = ProtocolFixture::new("exit 1").await;
+      // Existence signals readiness; publish only after the whole invocation
+      // is recorded so the child cannot observe a partially written line.
       std::fs::write(
         &fixture.executable,
         format!(
-          "#!/bin/sh\nset -eu\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {PROTOCOL_VERSION}\n  exit 0\nfi\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$CTLD_SOCKET_PATH\" \"$CTLD_BIN\" > \"$CTLD_PINNED_TEST_MARKER\"\n"
+          "#!/bin/sh\nset -eu\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {PROTOCOL_VERSION}\n  exit 0\nfi\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$CTLD_SOCKET_PATH\" \"$CTLD_BIN\" > \"$CTLD_PINNED_TEST_MARKER.tmp\"\nmv \"$CTLD_PINNED_TEST_MARKER.tmp\" \"$CTLD_PINNED_TEST_MARKER\"\n"
         ),
       )
       .unwrap();

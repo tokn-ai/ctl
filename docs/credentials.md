@@ -48,8 +48,10 @@ credential rows; they are not silently treated as verified identity entries.
 ## Storage and metadata
 
 - SSH passwords and SSH key passphrases are stored in the macOS protected
-  Keychain. Inventory requests ask for item attributes only, never password
-  data. An inaccessible Keychain is reported as unavailable rather than empty.
+  Keychain. Display metadata lives in separate, non-biometric Keychain records
+  in the same app access group. Inventory queries explicitly forbid authentication
+  UI and never request password data. An inaccessible Keychain is reported as
+  unavailable rather than empty.
 - Older SSH entries contain hashed identifiers without readable metadata. The
   app associates them with currently configured host routes when possible;
   otherwise they remain **Saved SSH credential** entries with a short identifier.
@@ -62,6 +64,23 @@ credential rows; they are not silently treated as verified identity entries.
 - Tailscale rows identify saved connections whose sign-in is managed in a
   container volume. A saved connection alone does not prove that sign-in state
   still exists; these rows explicitly leave that state unverified.
+
+**Import saved credential metadata** is an explicit action for entries saved
+before this metadata index existed. It requests Touch ID to read their names and
+attributes, then writes metadata records without changing the protected secrets.
+An interrupted or incomplete import remains available to retry. Until import
+completes, missing metadata means **Not checked**, not **Not saved**. Opening the
+page and pressing Refresh never start this import or display authentication UI.
+**Reimport saved credential metadata** remains available afterward, for example
+if an older ctld saved additional credentials without updating this index. Update
+or restart that daemon to use named prompts and keep new metadata synchronized;
+the page does not restart active SSH connections automatically.
+
+Authentication requests describe their purpose: the key file whose passphrase
+is being read or replaced, the SSH account and destination whose password is
+needed, or the explicit import of previously saved rmux credential metadata.
+Connection setup reads each selected identity and its binding together; it does
+not enumerate all saved passphrases before each lookup.
 
 Creation and modification dates are Keychain metadata, not a record of the last
 login. Missing dates are shown as not recorded. Source errors do not hide rows
@@ -89,6 +108,8 @@ logs, response fields, or frontend inventory data. Secret-bearing native
 buffers are zeroized; helper diagnostics are converted to fixed error codes
 and messages. This works independently of the running daemon,
 without changing the SSH/VPN wire protocol or restarting active connections.
+The noninteractive list request has its own operation name, so an older helper
+rejects it before performing an authenticated legacy inventory.
 An older helper must be updated or rebuilt to support this page.
 
 Keychain results are restricted to rmux's credential namespace; saved "never
@@ -101,7 +122,10 @@ Identity passphrases use a separate Keychain namespace. The account identifies
 the canonical key path; nonsecret metadata binds the saved item to a digest of
 the file bytes and a locally verified public fingerprint. Replacement or
 re-encryption invalidates reuse, even if the public key is unchanged. Inventory
-reads Keychain attributes only and never fetches saved secret values.
+reads the separate metadata records without authentication. Before using a
+passphrase, the connection reads its protected binding and secret together and
+validates the binding against the current file; cached display metadata never
+authorizes secret reuse.
 
 Local verification uses an isolated temporary OpenSSH agent and a private
 askpass channel. The key snapshot is provided through stdin, and the saved

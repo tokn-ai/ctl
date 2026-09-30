@@ -68,6 +68,7 @@ pub fn run() {
       about::remote_actions::reconnect::ack_component_reconnect,
       credentials::list_saved_credentials,
       credentials::forget_saved_credential,
+      credentials::import_credential_metadata,
       credentials::identities::list_credential_identity_files,
       credentials::identities::save_identity_passphrase,
       credentials::identities::forget_identity_passphrase,

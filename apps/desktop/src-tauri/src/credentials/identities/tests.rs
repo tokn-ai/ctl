@@ -50,7 +50,10 @@ fn duplicate_or_invalid_metadata_cannot_create_ambiguous_actions() {
     identity_files: vec![file(), file(), invalid],
     complete: true,
     warning: Some("raw-helper-message".into()),
+    file_discovery_complete: true,
     keychain_available: true,
+    keychain_error: None,
+    metadata_import_required: false,
   };
   let names = BTreeMap::from([(
     "/fixture/keys/work".into(),
@@ -64,6 +67,68 @@ fn duplicate_or_invalid_metadata_cannot_create_ambiguous_actions() {
   assert!(!json.contains("raw-helper-message"));
   assert!(!json.contains("\"passphrase\":"));
   assert!(!json.contains("private_key"));
+}
+
+#[test]
+fn keychain_failures_keep_their_category_without_forwarding_helper_text() {
+  for (code, expected) in [
+    ("identity_keychain_locked", "locked, denied, or cancelled"),
+    ("identity_keychain_unavailable", "properly signed"),
+    ("private-fixture-canary", "could not be inspected"),
+  ] {
+    let inventory = Inventory {
+      identity_files: vec![file()],
+      complete: false,
+      warning: Some("private-fixture-canary".into()),
+      file_discovery_complete: true,
+      keychain_available: false,
+      keychain_error: Some(code.into()),
+      metadata_import_required: true,
+    };
+    let result = snapshot(inventory, &BTreeMap::new(), true);
+    assert!(!result.keychain_available);
+    assert!(result.metadata_import_required);
+    assert!(
+      result
+        .keychain_message
+        .as_deref()
+        .unwrap()
+        .contains(expected)
+    );
+    assert!(!serde_json::to_string(&result).unwrap().contains("canary"));
+  }
+}
+
+#[test]
+fn pending_import_does_not_hide_an_independent_file_discovery_failure() {
+  for files_complete in [true, false] {
+    let inventory = Inventory {
+      identity_files: vec![file()],
+      complete: false,
+      file_discovery_complete: files_complete,
+      warning: None,
+      keychain_available: true,
+      keychain_error: None,
+      metadata_import_required: true,
+    };
+    let result = snapshot(inventory, &BTreeMap::new(), true);
+    assert!(!result.complete);
+    assert!(result.metadata_import_required);
+    assert_eq!(result.warning.is_some(), !files_complete);
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn old_identity_helpers_cannot_silently_run_interactive_inventory() {
+  let mut command = tokio::process::Command::new("/bin/sh");
+  command.args(["-c", "cat >/dev/null; printf '%s' '{\"type\":\"error\",\"code\":\"identity_invalid_request\",\"message\":\"private-fixture-canary\"}'", "legacy-identity-helper"]);
+  let error = exchange_with(command, Request::ListMetadata { paths: Vec::new() })
+    .await
+    .err()
+    .unwrap();
+  assert_eq!(error.code, "credential_helper_unsupported");
+  assert!(!error.message.contains("canary"));
 }
 
 #[tokio::test]
@@ -155,7 +220,10 @@ fn missing_identity_leaf_keeps_canonical_parent_and_host_association() {
     identity_files: vec![missing],
     complete: true,
     warning: None,
+    file_discovery_complete: true,
     keychain_available: true,
+    keychain_error: None,
+    metadata_import_required: false,
   };
   let names = BTreeMap::from([(normalized, BTreeSet::from(["Build".into()]))]);
   let snapshot = snapshot(inventory, &names, true);

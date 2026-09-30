@@ -33,6 +33,7 @@ import { COMMAND_IDS } from "../features/commands/terminalCommands";
 import { NATIVE_COMMAND_EVENT } from "../features/commands/useNativeCommandEvents";
 import { COMPONENT_RESET_EVENT } from "../features/about/useComponentActionEvents";
 import { useAttachmentNotifications } from "../features/notifications/useAttachmentNotifications";
+import { useManualReconnect } from "../features/attachment/ManualReconnect";
 import { sessionKey } from "../features/targets/targets";
 
 const nativeEvents = vi.hoisted(() => ({
@@ -44,6 +45,9 @@ const nativeWindow = vi.hoisted(() => ({
 }));
 const terminalSurface = vi.hoisted(() => ({
   on_input: null as ((data: Uint8Array) => void) | null,
+}));
+const manualReconnect = vi.hoisted(() => ({
+  request: null as ReturnType<typeof useManualReconnect>,
 }));
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
 
@@ -145,6 +149,7 @@ vi.mock("../lib/tauri", async (original) => ({
 }));
 vi.mock("../features/attachment/useSessionAttachments", () => ({
   useSessionAttachments: () => {
+    manualReconnect.request = useManualReconnect();
     useAttachmentNotifications(attachment as unknown as Parameters<typeof useAttachmentNotifications>[0]);
     return {
       ...attachment,
@@ -482,6 +487,65 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.reconnect).toHaveBeenCalledOnce();
     expect(attachment.connect).toHaveBeenCalledTimes(previous_connects);
     expect(screen.queryByRole("article", { name: "Session connection failed" })).toBeNull();
+  });
+
+  it.each(["toolbar", "notification"])("connects the exact runtime host before a %s reconnect, without opening another tab", async (source) => {
+    const catalog = hostSnapshot();
+    catalog.document.hosts[0].connection_methods.push({
+      method_id: "preferred", name: "Preferred route", target: { kind: "ssh", destination: "preferred.example" },
+    });
+    catalog.document.hosts[0].preferred_method_id = "preferred";
+    api.loadHosts.mockResolvedValue(catalog);
+    const session = { ...restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0], terminal_id: "side-pane" };
+    Object.assign(attachment.state, { phase: "error", session, error_code: "ssh_authentication_required", message: "Authentication expired" });
+    let connected = false;
+    api.sshConnectionStatus.mockImplementation(async () => ({ connected, manually_disconnected: false }));
+    let finish!: () => void;
+    api.probeSshHost.mockImplementationOnce(() => new Promise((resolve) => {
+      finish = () => { connected = true; resolve(remoteInfo); };
+    }));
+    const resumed = vi.fn();
+    attachment.reconnect.mockImplementationOnce(async () => {
+      if (await manualReconnect.request!(session.target, new AbortController().signal)) resumed(session.terminal_id);
+    });
+    render(<TerminalPage />);
+    const card = await screen.findByRole("article", { name: "Session connection failed" });
+    const retry = source === "notification" ? within(card).getByRole("button", { name: "Reconnect" })
+      : screen.getAllByRole("button", { name: "Reconnect" }).find((button) => !card.contains(button))!;
+    fireEvent.click(retry);
+    await screen.findByRole("dialog", { name: "Connecting to host" });
+    expect(api.probeSshHost).toHaveBeenCalledExactlyOnceWith(session.target, expect.any(String), expect.any(Function));
+    expect(resumed).not.toHaveBeenCalled();
+    await act(async () => finish());
+    await waitFor(() => expect(resumed).toHaveBeenCalledExactlyOnceWith("side-pane"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(api.inspectKnownSessions).not.toHaveBeenCalled();
+    expect(api.disconnectSshHost).not.toHaveBeenCalled();
+  });
+
+  it("cancels the host step of Reconnect and ignores late authentication success", async () => {
+    const session = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
+    Object.assign(attachment.state, { phase: "error", session, error_code: "ssh_authentication_required", message: "Authentication expired" });
+    api.sshConnectionStatus.mockResolvedValue({ connected: false, manually_disconnected: false });
+    let finish!: () => void;
+    api.probeSshHost.mockImplementationOnce(() => new Promise((resolve) => { finish = () => resolve(remoteInfo); }));
+    const resumed = vi.fn();
+    attachment.reconnect.mockImplementationOnce(async () => {
+      if (await manualReconnect.request!(session.target, new AbortController().signal)) resumed();
+    });
+    render(<TerminalPage />);
+    const card = await screen.findByRole("article", { name: "Session connection failed" });
+    fireEvent.click(within(card).getByRole("button", { name: "Reconnect" }));
+    const dialog = await screen.findByRole("dialog", { name: "Connecting to host" });
+    await waitFor(() => expect(api.probeSshHost).toHaveBeenCalledOnce());
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () => finish());
+    expect(api.cancelSshProbe).toHaveBeenCalled();
+    expect(resumed).not.toHaveBeenCalled();
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(api.disconnectSshHost).not.toHaveBeenCalled();
   });
 
   it("discovers a CLI VPN before opening the VPN panel", async () => {
@@ -2674,6 +2738,36 @@ describe("workspace-backed terminal page", () => {
     ).toBeTruthy();
     expect(api.listSessions).not.toHaveBeenCalled();
     expect(attachment.connect).not.toHaveBeenCalled();
+  });
+
+  it("retires a remote timeout only after session inspection recovers, despite a live SSH master", async () => {
+    const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote rmux service over SSH. Try again." };
+    api.sshConnectionStatus.mockResolvedValue({ connected: true, manually_disconnected: false });
+    api.inspectKnownSessions.mockRejectedValueOnce(failure);
+    render(<TerminalPage />);
+    await screen.findByRole("status", { name: "Host connection for test: SSH connected" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh sessions" }));
+    await screen.findByRole("status", { name: "Host connection for test: Remote connection timed out" });
+    const log = screen.getByRole("log", { name: "Notifications" });
+    expect(within(log).getByText(failure.message)).toBeTruthy();
+    expect(within(log).queryByRole("button", { name: "Connect host" })).toBeNull();
+
+    const known = restoreWorkspace(snapshot().document, hostSnapshot().document).sessions[0];
+    api.inspectKnownSessions.mockResolvedValueOnce([{
+      session_id: known.session_id, session: { ...known, status: "running" },
+      shell_state: { shell_type: "zsh", cwd: "/work", running_command: null, prompt_phase: "idle", tui_hint: null, revision: "1", observed_sequence: "1" },
+      error: null,
+    }]);
+    fireEvent.click(within(log).getByRole("button", { name: "Refresh sessions" }));
+    await waitFor(() => expect(within(log).queryByText(failure.message)).toBeNull());
+    expect(screen.getByRole("status", { name: "Host connection for test: SSH connected" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Notifications, .* unread/ }));
+    const history = screen.getByRole("region", { name: "Notification center" });
+    expect(within(history).getByText(failure.message)).toBeTruthy();
+    expect(within(history).getByText("Resolved")).toBeTruthy();
+    expect(api.probeSshHost).not.toHaveBeenCalled();
+    expect(api.disconnectSshHost).not.toHaveBeenCalled();
+    expect(api.killSession).not.toHaveBeenCalled();
   });
 
   it("keeps unreachable sessions distinct from confirmed missing ones", async () => {

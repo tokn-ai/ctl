@@ -87,7 +87,7 @@ function NotificationCard({ entry, store, toast, execute, canExecute }: {
       </div>
     </div>
     <p className="notification-message">{entry.message}</p>
-    <div className="notification-meta"><span title={entry.source}>{entry.source}</span><time dateTime={new Date(entry.updated_at).toISOString()} title={new Date(entry.updated_at).toLocaleString()}>{new Date(entry.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{entry.occurrence_count > 1 ? <span title="Occurrences">×{entry.occurrence_count}</span> : null}</div>
+    <div className="notification-meta"><span title={entry.source}>{entry.source}</span>{entry.resolved_at !== null ? <span title={`Resolved at ${new Date(entry.resolved_at).toLocaleString()}`}>Resolved</span> : null}<time dateTime={new Date(entry.updated_at).toISOString()} title={new Date(entry.updated_at).toLocaleString()}>{new Date(entry.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{entry.occurrence_count > 1 ? <span title="Occurrences">×{entry.occurrence_count}</span> : null}</div>
     {entry.actions?.length ? <div className="notification-actions">{entry.actions.map((action) => <button type="button" key={`${action.command_id}:${action.label}`} disabled={!canExecute(action)} onClick={() => execute(action, entry.id)}>{action.label}</button>)}</div> : null}
   </article>;
 }

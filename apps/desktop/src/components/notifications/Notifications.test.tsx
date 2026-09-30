@@ -96,6 +96,17 @@ describe("notifications", () => {
     expect(store.snapshot().entries).toHaveLength(0);
   });
 
+  it("hides a recovered error card and labels its retained history as resolved", () => {
+    const { store } = setup();
+    act(() => store.resolve("host"));
+    expect(screen.queryByRole("article")).toBeNull();
+    act(() => store.setCenterOpen(true));
+    const history = screen.getByRole("region", { name: "Notification center" });
+    expect(within(history).getByText("Host status")).toBeTruthy();
+    expect(within(history).getByText("Resolved")).toBeTruthy();
+    expect(within(history).queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("uses current command availability and hides accepted actions without deleting history", () => {
     const { store, dispatcher } = setup();
     expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(true);

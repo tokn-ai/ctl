@@ -14,6 +14,8 @@ import type {
 import { sessionKey, targetKey } from "../../features/targets/targets";
 import { hostFromTarget } from "../../features/workspace/workspaceModel";
 import { TAILSCALE_UNAVAILABLE } from "../../features/workspace/tailscaleProjection";
+import { errorDetails } from "../../lib/errors";
+import { initialAttachmentState } from "../../features/attachment/attachmentState";
 import { SessionSidebar } from "./SessionSidebar";
 
 const session: SessionSummary = {
@@ -128,6 +130,37 @@ describe("SessionSidebar", () => {
     expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
   });
 
+  it.each(["inspection", "attachment"])("shows a timed-out %s despite an open SSH master", (source) => {
+    const remoteSession = { ...session, target: remoteHost };
+    const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote rmux service over SSH. Try again." };
+    renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
+      targetErrors: source === "inspection" ? new Map([[targetKey(remoteHost), failure]]) : new Map(),
+      attachmentStates: source === "attachment" ? new Map([[sessionKey(remoteSession), {
+        ...initialAttachmentState(), session: remoteSession, phase: "retry_wait",
+        error_code: failure.code, message: failure.message,
+      }]]) : new Map(),
+    });
+    const status = screen.getByRole("status", { name: "Host connection for Build machine: Remote connection timed out" });
+    expect(status.title).toContain(failure.message);
+    expect(status.title).toContain("local SSH control connection is open");
+    expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeDefined();
+    expect(screen.queryByRole("status", { name: "Host connection for Build machine: SSH connected" })).toBeNull();
+  });
+
+  it.each([
+    ["reconnecting", null, "Session reconnecting…"],
+    ["error", "automatic_reconnect_timeout", "Session reconnect failed"],
+  ] as const)("does not turn a %s attachment into a healthy host badge", (phase, error_code, label) => {
+    const remoteSession = { ...session, target: remoteHost };
+    renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
+      attachmentStates: new Map([[sessionKey(remoteSession), {
+        ...initialAttachmentState(), session: remoteSession, phase, error_code,
+      }]]),
+    });
+    expect(screen.getByRole("status", { name: `Host connection for Build machine: ${label}` })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect host Build machine" })).toBeTruthy();
+  });
+
   it("shows an available alternate route when the preferred Tailscale device is unavailable", async () => {
     const user = userEvent.setup();
     const target = { ...remoteHost, tailscale_node_id: "node-1", unavailable: TAILSCALE_UNAVAILABLE };
@@ -240,7 +273,7 @@ describe("SessionSidebar", () => {
       },
     }, {
       targets: [target],
-      targetErrors: new Map([[targetKey(target), TAILSCALE_UNAVAILABLE]]),
+      targetErrors: new Map([[targetKey(target), errorDetails(TAILSCALE_UNAVAILABLE)]]),
     });
     const status = screen.getByRole("status", { name: "Host connection for Build machine: SSH connected" });
     expect(status.textContent).toBe("SSH connected");
@@ -270,7 +303,7 @@ describe("SessionSidebar", () => {
     const unavailable = { ...remoteHost, ...binding, unavailable: reason };
     const props = renderHostConnection(undefined, {
       targets: [unavailable],
-      targetErrors: new Map([[targetKey(unavailable), "Session listing failed"]]),
+      targetErrors: new Map([[targetKey(unavailable), errorDetails("Session listing failed")]]),
     });
     const status = screen.getByRole("status", { name: `Host connection for Build machine: ${label}` });
     expect(status.textContent).toBe(label);

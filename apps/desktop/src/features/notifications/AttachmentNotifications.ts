@@ -13,19 +13,39 @@ interface AttachmentSource {
 /** Window-local attachment owners, including background tabs and split panes. */
 export class AttachmentNotifications {
   private owners = new Map<string, AttachmentSource>();
+  private owner_order = new Map<string, number>();
   private sources = new Map<string, string>();
   private next_owner = 0;
 
   constructor(private readonly store: NotificationStore) {}
 
   createOwner(): string {
-    return `attachment-owner-${++this.next_owner}`;
+    const order = ++this.next_owner;
+    const owner = `attachment-owner-${order}`;
+    this.owner_order.set(owner, order);
+    return owner;
   }
 
   report(owner: string, state: AttachmentViewState, reconnect: () => Promise<void>, connection_attempt = 0): void {
     const session = state.session;
     const key = session ? JSON.stringify([sessionKey(session), session.terminal_id ?? null]) : null;
-    if (this.owners.get(owner)?.key !== key) this.remove(owner);
+    const order = this.owner_order.get(owner);
+    if (order === undefined) return;
+    const current_owner = key ? this.sources.get(key) : undefined;
+    if (current_owner && (this.owner_order.get(current_owner) ?? 0) > order) return;
+    const previous = this.owners.get(owner);
+    if (previous?.key !== key) {
+      // An open response can resolve the root pane's identity for the first
+      // time. Its earlier error still belongs to this owner's successful open.
+      const previous_session = previous?.state.session;
+      const root_refined = previous_session && session &&
+        sessionKey(previous_session) === sessionKey(session) &&
+        previous_session.terminal_id == null && session.terminal_id != null;
+      if (previous && root_refined && state.phase === "attached" && this.sources.get(previous.key) === owner) {
+        this.store.resolve(`attachment:${previous.key}`);
+      }
+      this.release(owner);
+    }
     if (!session || !key) return;
     if (this.owners.get(owner)?.connection_attempt !== connection_attempt) {
       this.store.report(`attachment:${key}`, null);
@@ -49,6 +69,7 @@ export class AttachmentNotifications {
         : this.canReconnect(owner)
           ? [{ label: "Reconnect", command_id: COMMAND_IDS.reconnectNotificationAttachment, args: { value: owner } }]
           : [];
+      if (state.phase === "attached" && !state.message) this.store.resolve(`attachment:${key}`);
       this.store.report(`attachment:${key}`, state.message ? {
         severity: failure ? "error" : state.phase === "ended" ? "info" : "warning",
         title: failure ? "Session connection failed" : "Session update",
@@ -65,6 +86,11 @@ export class AttachmentNotifications {
   }
 
   remove(owner: string): void {
+    this.owner_order.delete(owner);
+    this.release(owner);
+  }
+
+  private release(owner: string): void {
     const entry = this.owners.get(owner);
     this.owners.delete(owner);
     if (!entry || this.sources.get(entry.key) !== owner) return;

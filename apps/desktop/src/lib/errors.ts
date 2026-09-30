@@ -1,3 +1,12 @@
+export interface ErrorDetails {
+  code: string | null;
+  message: string;
+}
+
+export function errorDetails(error: unknown): ErrorDetails {
+  return { code: errorCode(error), message: errorMessage(error) };
+}
+
 export function errorCode(error: unknown): string | null {
   if (
     typeof error === "object" &&

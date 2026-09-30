@@ -4,6 +4,7 @@
 mod broker;
 pub(crate) use broker::existing_master;
 pub mod commands;
+mod connection;
 mod verification;
 
 use std::collections::HashMap;
@@ -107,27 +108,40 @@ async fn connect_with(
       "Select a remote SSH host.",
     ));
   };
-  let control_path = if let Some(context) = prompts.as_ref() {
-    broker::ensure_master(target, context).await?
+  let lookup = if prompts.is_some() {
+    connection::MasterLookup::Authenticate
   } else {
-    broker::existing_master(target).await?
+    connection::MasterLookup::Existing
   };
-  let interaction = SshInteraction::Multiplexed { control_path };
-  let stream = open_identified_ssh_service(
-    &destination,
-    &options,
-    &interaction,
-    ctl_core::RemoteService::Rmux,
-  )
+  Box::pin(connection::connect(
+    lookup,
+    async {
+      if let Some(context) = prompts.as_ref() {
+        broker::ensure_master(target, context).await
+      } else {
+        broker::existing_master(target).await
+      }
+    },
+    |control_path| async move {
+      let interaction = SshInteraction::Multiplexed { control_path };
+      let stream = open_identified_ssh_service(
+        &destination,
+        &options,
+        &interaction,
+        ctl_core::RemoteService::Rmux,
+      )
+      .await
+      .map_err(|error| CommandErrorDto::transport(&error))?;
+      let identity = stream
+        .remote_identity
+        .as_deref()
+        .expect("identified transport")
+        .clone();
+      target.verify_remote_identity(&identity)?;
+      Ok((Transport::Ssh(stream), identity))
+    },
+  ))
   .await
-  .map_err(|error| CommandErrorDto::transport(&error))?;
-  let identity = stream
-    .remote_identity
-    .as_deref()
-    .expect("identified transport")
-    .clone();
-  target.verify_remote_identity(&identity)?;
-  Ok((Transport::Ssh(stream), identity))
 }
 
 struct AttemptGuard((String, String));

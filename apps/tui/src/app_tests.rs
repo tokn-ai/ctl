@@ -326,6 +326,40 @@ async fn assert_copy_mode(app: &mut App, primary: &str) -> Result<()> {
   Ok(())
 }
 
+async fn split_exit_shell(app: &mut App) -> Result<String> {
+  // This fixture tests dismissal, not the runner's login shell startup. Wait
+  // for a known program to be ready before asking it to produce final output.
+  let ServerMessage::ViewSnapshot { view } = app
+    .request(ClientMessage::SplitTerminal {
+      terminal_id: app.focused.clone(),
+      axis: SplitAxis::Horizontal,
+      command: Some(CommandSpec {
+        program: "/bin/sh".into(),
+        arguments: vec![
+          "-c".into(),
+          "printf 'CHILD_READY\\n'; IFS= read -r line; printf 'FINAL_CHILD\\n'; exit 7".into(),
+        ],
+      }),
+      working_directory: None,
+      terminal_size: app.canvas_size(),
+    })
+    .await?
+  else {
+    return Err("expected split view".into());
+  };
+  let child = view
+    .panes
+    .iter()
+    .find(|pane| !app.panes.contains_key(&pane.terminal_id))
+    .ok_or("split did not create a pane")?
+    .terminal_id
+    .clone();
+  app.refresh_view().await?;
+  app.focused.clone_from(&child);
+  wait_for_text(app, &child, "CHILD_READY").await?;
+  Ok(child)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Result<()> {
   let daemon = Daemon::start().await?;
@@ -333,11 +367,10 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
   let session = create_shell(&app).await?;
   app.start(Some(session.clone())).await?;
   let primary = app.focused.clone();
-  app.split(SplitAxis::Horizontal).await?;
-  let child = app.focused.clone();
+  let child = split_exit_shell(&mut app).await?;
   app.panes[&child]
     .control
-    .input(b"printf 'FINAL_CHILD\\n'; exit 7\n".to_vec())
+    .input(b"finish\n".to_vec())
     .await?;
   timeout(Duration::from_secs(5), async {
     while app.panes[&child].ended.is_none() {
@@ -345,7 +378,13 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
       tokio::time::sleep(Duration::from_millis(10)).await;
     }
   })
-  .await?;
+  .await
+  .map_err(|_| {
+    format!(
+      "child did not end: connected={}, notice={}",
+      app.panes[&child].connected, app.message
+    )
+  })?;
   app.refresh().await?;
   assert_eq!(app.panes.len(), 2);
   assert!(
@@ -393,7 +432,13 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
       tokio::time::sleep(Duration::from_millis(10)).await;
     }
   })
-  .await?;
+  .await
+  .map_err(|_| {
+    format!(
+      "killed primary did not end: connected={}, notice={}",
+      app.panes[&primary].connected, app.message
+    )
+  })?;
   app.refresh().await?;
   assert!(app.ended.is_some());
   assert_eq!(app.panes.len(), 1);

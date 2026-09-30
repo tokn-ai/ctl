@@ -163,6 +163,10 @@ timeout. A standard interactive client sends `heartbeat { nonce }` at the
 advertised cadence; `rmuxd` replies with `heartbeat_ack { nonce }`. Any valid
 post-attach client message also demonstrates client liveness.
 
+The client's peer-silence deadline is independent of outbound writes. A blocked
+input or heartbeat write cannot postpone detecting a silent daemon. Incoming
+activity renews that deadline even while an outgoing write remains blocked.
+
 If no client activity reaches `rmuxd` before the timeout, it closes that
 transport generation. The logical attachment remains resumable only for its
 bounded grace; expiry releases its leases. It does not kill the PTY, shell,

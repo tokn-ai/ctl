@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ConnectionTarget, ManagedTask, NotificationAction } from "../../lib/types";
+import type { ErrorDetails } from "../../lib/errors";
 import { targetKey, targetLabel } from "../targets/targets";
 import { COMMAND_IDS } from "../commands/commandIds";
 import type { NotificationStore } from "./NotificationStore";
@@ -10,7 +11,7 @@ interface Sources {
   keybindings_error: string | null;
   session_error: string | null;
   targets: readonly ConnectionTarget[];
-  target_errors: ReadonlyMap<string, string>;
+  target_errors: ReadonlyMap<string, ErrorDetails>;
   storage_error: string | null;
   task_error: string | null;
   definitions_error: string | null;
@@ -51,10 +52,13 @@ export function useWorkbenchNotifications(store: NotificationStore, sources: Sou
       if (!host_keys.has(key)) store.report(`host:${key}`, null);
     }
     previous_hosts.current = host_keys;
-    for (const [key, message] of sources.target_errors) {
+    for (const [key, error] of sources.target_errors) {
       const target = sources.targets.find((target) => targetKey(target) === key);
-      reportError(`host:${key}`, target ? `Host · ${targetLabel(target)}` : "Host", message,
-        target?.kind === "ssh" ? [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: key } }] : []);
+      const authentication_required = error.code === "ssh_authentication_required" || error.code === "ssh_authentication_failed";
+      reportError(`host:${key}`, target ? `Host · ${targetLabel(target)}` : "Host", error.message,
+        target?.kind === "ssh" && authentication_required
+          ? [{ label: "Connect host", command_id: COMMAND_IDS.connectHost, args: { target_key: key } }]
+          : [{ label: "Refresh sessions", command_id: COMMAND_IDS.refreshSessions }]);
     }
 
     if (sources.tasks_loaded) {

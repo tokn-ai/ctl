@@ -35,10 +35,12 @@ async function fixture(context: TestContext): Promise<Fixture> {
   await writeFile(executable, `#!${process.execPath}
 const fs = require("node:fs");
 const report = (type) => fs.appendFileSync(process.env.FIXTURE_LOG, JSON.stringify({type, pid:process.pid, snapshot:process.argv[1],args:process.argv.slice(2),cwd:process.cwd(),value:process.env.FIXTURE_VALUE}) + "\\n");
-report("start");
 process.on("SIGTERM", () => { report("stop"); setTimeout(() => process.exit(0), Number(process.env.FIXTURE_STOP_DELAY || "0")); });
 process.on("SIGUSR1", () => process.exit(7));
 setInterval(() => {}, 1000);
+// The parent may signal us as soon as it observes this readiness record.
+// Install handlers first; Node's default SIGUSR1 action starts its debugger.
+report("start");
 `);
   await chmod(executable, 0o700);
   const result: Fixture = {

@@ -57,6 +57,7 @@ export class NotificationStore {
       occurrence_count: repeated ? previous.occurrence_count + 1 : 1,
       read: this.state.center_open,
       toast_visible: !this.state.center_open,
+      resolved_at: null,
     };
     let visible = 0;
     const entries = [notification, ...this.state.entries.filter((entry) => entry !== previous)]
@@ -70,6 +71,16 @@ export class NotificationStore {
   hide(id: string): void {
     this.update({ ...this.state, entries: this.state.entries.map((entry) =>
       entry.id === id ? { ...entry, toast_visible: false } : entry) });
+  }
+
+  /** Confirm recovery without removing the original occurrence from history. */
+  resolve(source_key: string): void {
+    this.reported.delete(source_key);
+    const previous = this.state.entries.find((entry) => entry.source_key === source_key);
+    if (!previous || previous.resolved_at !== null) return;
+    this.update({ ...this.state, entries: this.state.entries.map((entry) => entry === previous
+      ? { ...entry, actions: [], toast_visible: false, resolved_at: this.now() }
+      : entry) });
   }
 
   /** Retain history while disabling actions for resolved or temporarily busy sources. */

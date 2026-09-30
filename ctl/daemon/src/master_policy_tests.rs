@@ -36,6 +36,8 @@ fn only_configured_methods_preserve_alias_matching_and_inherit_master_options() 
     "-N",
     "ControlMaster=yes",
     "ControlPersist=300",
+    "ServerAliveInterval=10",
+    "ServerAliveCountMax=3",
   ] {
     assert!(
       !args.iter().any(|arg| arg == overridden),
@@ -57,7 +59,36 @@ fn only_configured_methods_preserve_alias_matching_and_inherit_master_options() 
     .collect();
   assert!(args.iter().any(|arg| arg == "ControlMaster=yes"));
   assert!(args.iter().any(|arg| arg == "ControlPersist=300"));
+  assert!(args.iter().any(|arg| arg == "ServerAliveInterval=10"));
+  assert!(args.iter().any(|arg| arg == "ServerAliveCountMax=3"));
   assert_eq!(args.last().unwrap(), "example.test");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn private_master_keepalives_override_disabled_user_policy_without_connecting() {
+  let path = std::env::temp_dir().join(format!("ctld-keepalives-{}", uuid::Uuid::new_v4()));
+  let guard = SocketGuard(path);
+  std::fs::write(
+    &guard.0,
+    "Host *\n  ServerAliveInterval 0\n  ServerAliveCountMax 0\n",
+  )
+  .unwrap();
+  let managed = target(None);
+  let master = master_command(&managed, &MasterEndpoint::managed(&managed));
+  let output = Command::new(SSH_PROGRAM)
+    .args(["-G", "-F"])
+    .arg(&guard.0)
+    .args(master.as_std().get_args())
+    .stdin(Stdio::null())
+    .kill_on_drop(true)
+    .output()
+    .await
+    .unwrap();
+  assert!(output.status.success());
+  let config = String::from_utf8(output.stdout).unwrap();
+  assert!(config.lines().any(|line| line == "serveraliveinterval 10"));
+  assert!(config.lines().any(|line| line == "serveralivecountmax 3"));
 }
 
 #[test]

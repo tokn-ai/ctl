@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import type { Terminal as HeadlessTerminal } from "@xterm/headless";
 import type {
   AttachmentEvent,
@@ -16,6 +17,7 @@ import { reconnectComponentAttachments, resetComponentAttachments } from "./comp
 import { NotificationProvider } from "../notifications/NotificationContext";
 import { NotificationStore } from "../notifications/NotificationStore";
 import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
+import { ManualReconnectProvider, type ManualReconnectRequest } from "./ManualReconnect";
 
 const xterm = vi.hoisted(() => ({
   instances: [] as {
@@ -66,6 +68,7 @@ const api = vi.hoisted(() => ({
   resizeAttachment: vi.fn(),
   sendInput: vi.fn(),
   sessionCache: vi.fn(),
+  sshConnectionStatus: vi.fn(),
 }));
 vi.mock("../../lib/tauri", () => api);
 
@@ -181,6 +184,213 @@ afterEach(async () => {
   renderer.dispose();
   container.remove();
   await Promise.resolve();
+});
+
+describe("explicit SSH reconnect preparation", () => {
+  const remote: SessionSummary = {
+    ...first,
+    target: { kind: "ssh", host_id: "fixture", method_id: "runtime", destination: "runtime-route" },
+  };
+  const authentication_required = { code: "ssh_authentication_required", message: "Authentication required" };
+
+  function setup(request: ManualReconnectRequest) {
+    return renderHook(() => useAttachment(renderer), {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        <ManualReconnectProvider request={request}>{children}</ManualReconnectProvider>,
+    });
+  }
+
+  beforeEach(() => {
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementation(async (request: OpenAttachmentRequest, ...args: unknown[]) => {
+      const response = await open(request, ...args);
+      return { ...response, attached: { ...response.attached, session: { ...response.attached.session, target: request.target } } };
+    });
+  });
+
+  it("coalesces clicks and preserves the exact pane, screen and cursor through host preparation", async () => {
+    let finish!: (connected: boolean) => void;
+    const prepare = vi.fn<ManualReconnectRequest>(() => new Promise((resolve) => { finish = resolve; }));
+    const { result } = setup(prepare);
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    await emit(checkpoint(result.current.state.attachment_id!, "retained screen", "15"));
+    const visible = visibleTerminal();
+    vi.useFakeTimers();
+    const attachment_id = result.current.state.attachment_id!;
+    await act(async () => channels.get(attachment_id)!({
+      event_type: "attachment_exited", attachment_id, reason: "connection_closed",
+      exit_code: null, next_sequence: "15", received_sequence: "15",
+    }));
+    let reconnecting!: Promise<void>;
+    await act(async () => {
+      reconnecting = result.current.reconnect();
+      expect(result.current.reconnect()).toBe(reconnecting);
+    });
+    expect(prepare).toHaveBeenCalledExactlyOnceWith(remote.target, expect.any(AbortSignal));
+    expect(api.openAttachment).toHaveBeenCalledOnce();
+    expect(api.detachAttachment).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(api.openAttachment).toHaveBeenCalledOnce();
+    await act(async () => { finish(true); await reconnecting; });
+    expect(api.openAttachment.mock.lastCall?.[0]).toMatchObject({
+      target: remote.target, session: remote.terminal_id, resume_from: "15", request_layout_lease: false,
+    });
+    expect(visibleTerminal()).toBe(visible);
+    expect(line(visible.terminal)).toBe("retained screen");
+    expect(result.current.state.phase).toBe("attached");
+  });
+
+  it("retains the failed session and cursor when host authentication is cancelled", async () => {
+    const prepare = vi.fn<ManualReconnectRequest>().mockResolvedValue(false);
+    const { result } = setup(prepare);
+    api.openAttachment.mockRejectedValueOnce(authentication_required);
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    const before = result.current.state;
+    await act(async () => { await result.current.reconnect(); });
+    expect(result.current.state).toMatchObject({
+      phase: "error", error_code: "attachment_cancelled", session: before.session,
+      reconnect_sequence: before.reconnect_sequence,
+    });
+    expect(api.openAttachment).toHaveBeenCalledOnce();
+  });
+
+  it("does not restart automatic recovery after the user cancels host preparation", async () => {
+    const prepare = vi.fn<ManualReconnectRequest>().mockResolvedValue(false);
+    const { result } = setup(prepare);
+    vi.useFakeTimers();
+    api.openAttachment.mockRejectedValueOnce({ code: "remote_connection_timeout", message: "Service timed out" });
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    expect(result.current.state.phase).toBe("retry_wait");
+    await act(async () => { await result.current.reconnect(); });
+    expect(result.current.state).toMatchObject({ phase: "error", error_code: "attachment_cancelled", session: remote });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(api.openAttachment).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+
+  it.each(["new connection", "detach", "cancel", "restart", "unmount"])(
+    "aborts preparation on %s and rejects its late success", async (operation) => {
+      let finish!: (connected: boolean) => void;
+      const prepare = vi.fn<ManualReconnectRequest>(() => new Promise((resolve) => { finish = resolve; }));
+      const { result, unmount } = setup(prepare);
+      api.openAttachment.mockRejectedValueOnce(authentication_required);
+      await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+      let reconnecting!: Promise<void>;
+      await act(async () => { reconnecting = result.current.reconnect(); });
+      const signal = prepare.mock.calls[0][1];
+      await act(async () => {
+        if (operation === "new connection") await result.current.connect(second);
+        else if (operation === "detach") await result.current.detach();
+        else if (operation === "cancel") result.current.cancelPendingConnection(remote);
+        else if (operation === "restart") result.current.resetAfterDaemonRestart();
+        else unmount();
+      });
+      expect(signal.aborted).toBe(true);
+      await act(async () => { finish(true); await reconnecting; });
+      expect(api.openAttachment).toHaveBeenCalledTimes(operation === "new connection" ? 2 : 1);
+      if (operation === "new connection") expect(result.current.state.session).toEqual(second);
+    },
+  );
+
+  it.each(["ssh_authentication_required", "ssh_host_disconnected"])(
+    "retries host preparation once when the checked master changes (%s)", async (code) => {
+      const prepare = vi.fn<ManualReconnectRequest>().mockResolvedValue(true);
+      const { result } = setup(prepare);
+      api.openAttachment.mockRejectedValueOnce(authentication_required);
+      await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+      api.openAttachment.mockRejectedValueOnce({ code, message: "Master changed after status check" });
+      await act(async () => { await result.current.reconnect(); });
+      expect(prepare.mock.calls.map(([, , force]) => force)).toEqual([undefined, true]);
+      expect(api.openAttachment).toHaveBeenCalledTimes(3);
+      expect(result.current.state.phase).toBe("attached");
+      expect(result.current.state.session?.target).toEqual(remote.target);
+    },
+  );
+
+  it("stops after one forced host retry if authentication still cannot be used", async () => {
+    const prepare = vi.fn<ManualReconnectRequest>().mockResolvedValue(true);
+    const { result } = setup(prepare);
+    api.openAttachment.mockRejectedValue(authentication_required);
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    await act(async () => { await result.current.reconnect(); });
+    expect(prepare.mock.calls.map(([, , force]) => force)).toEqual([undefined, true]);
+    expect(api.openAttachment).toHaveBeenCalledTimes(3);
+    expect(result.current.state).toMatchObject({ phase: "error", error_code: authentication_required.code });
+  });
+
+  it("does not authenticate for an old native failure after a different session is selected", async () => {
+    const prepare = vi.fn<ManualReconnectRequest>().mockResolvedValue(true);
+    const { result } = setup(prepare);
+    api.openAttachment.mockRejectedValueOnce(authentication_required);
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    api.openAttachment.mockImplementationOnce((_request, _on_event, signal: AbortSignal) =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(authentication_required), { once: true });
+      }));
+    let reconnecting!: Promise<void>;
+    await act(async () => { reconnecting = result.current.reconnect(); });
+    expect(api.openAttachment).toHaveBeenCalledTimes(2);
+    await act(async () => { await result.current.connect(second); await reconnecting; });
+    expect(result.current.state.session).toEqual(second);
+    expect(result.current.state.phase).toBe("attached");
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a live actor and renderer when its preflight status check fails", async () => {
+    const prepare = vi.fn<ManualReconnectRequest>().mockRejectedValue({ code: "ssh_status_timeout", message: "Status unknown" });
+    const { result } = setup(prepare);
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    await emit(checkpoint(result.current.state.attachment_id!, "live screen", "11"));
+    const actor = result.current.state.attachment_id;
+    await act(async () => { await result.current.reconnect(); });
+    expect(result.current.state).toMatchObject({ phase: "attached", attachment_id: actor, message: "Status unknown" });
+    expect(renderer.resumeSequence()).toBe("11");
+    expect(line(visibleTerminal().terminal)).toBe("live screen");
+    expect(api.detachAttachment).not.toHaveBeenCalled();
+    act(() => result.current.handleInput(new Uint8Array([65])));
+    await waitFor(() => expect(api.sendInput).toHaveBeenCalledWith({ attachment_id: actor, data_base64: "QQ==" }));
+  });
+
+  it("resumes automatic backoff after deferred cleanup without forcing host authentication", async () => {
+    const prepare = vi.fn<ManualReconnectRequest>().mockResolvedValue(true);
+    const { result } = setup(prepare);
+    api.openAttachment.mockRejectedValueOnce(authentication_required);
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    vi.useFakeTimers();
+    let finish_cleanup!: () => void;
+    api.detachAttachment.mockImplementationOnce(() => new Promise<void>((resolve) => { finish_cleanup = resolve; }));
+    vi.spyOn(renderer, "recreate").mockRejectedValueOnce({ code: "remote_connection_timeout", message: "Synthetic service timeout" });
+    let reconnecting!: Promise<void>;
+    await act(async () => { reconnecting = result.current.reconnect(); });
+    expect(result.current.state).toMatchObject({ phase: "error", error_code: "remote_connection_timeout" });
+    expect(api.detachAttachment).toHaveBeenCalledOnce();
+    await act(async () => { finish_cleanup(); await reconnecting; });
+    expect(result.current.state.phase).toBe("retry_wait");
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(api.openAttachment).toHaveBeenCalledTimes(3);
+    expect(result.current.state.phase).toBe("attached");
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+
+  it("keeps automatic and component reconnects outside interactive host preparation", async () => {
+    const prepare = vi.fn<ManualReconnectRequest>().mockResolvedValue(true);
+    const { result } = setup(prepare);
+    await act(async () => { await result.current.connect(remote, { terminal_id: remote.terminal_id }); });
+    vi.useFakeTimers();
+    const first_actor = result.current.state.attachment_id!;
+    await act(async () => channels.get(first_actor)!({
+      event_type: "attachment_exited", attachment_id: first_actor, reason: "connection_closed",
+      exit_code: null, next_sequence: null, received_sequence: "0",
+    }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    const second_actor = result.current.state.attachment_id!;
+    await act(async () => {
+      const [reconnected] = await reconnectComponentAttachments([second_actor]);
+      expect(reconnected.replacement_attachment_id).not.toBeNull();
+    });
+    expect(api.openAttachment).toHaveBeenCalledTimes(3);
+    expect(prepare).not.toHaveBeenCalled();
+  });
 });
 
 describe("connection evidence and transitions", () => {

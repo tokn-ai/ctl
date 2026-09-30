@@ -53,6 +53,39 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("port forwarding controller", () => {
+  it("discovers CLI forwards on refresh without saving or recreating them", async () => {
+    const update = vi.fn();
+    const { result } = renderHook(() => usePortForwarding(true, [target], [], update));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(listPortForwards).not.toHaveBeenCalled();
+
+    await act(async () => result.current.refreshAll());
+    expect(result.current.runtime_forwards).toEqual([
+      { ...forward, name: "CLI · 5432" },
+    ]);
+    expect(result.current.statuses.get("database")?.state).toBe("active");
+    expect(update).not.toHaveBeenCalled();
+    expect(configurePortForward).not.toHaveBeenCalled();
+
+    vi.mocked(listPortForwards).mockResolvedValue([]);
+    await act(async () => result.current.refreshAll());
+    expect(result.current.runtime_forwards).toEqual([]);
+    expect(result.current.statuses.has("database")).toBe(false);
+    expect(configurePortForward).not.toHaveBeenCalled();
+  });
+
+  it("can stop a CLI forward without adding it to workspace persistence", async () => {
+    const update = vi.fn();
+    const { result } = renderHook(() => usePortForwarding(false, [target], [], update));
+    await act(async () => result.current.refreshAll());
+    const observed = result.current.runtime_forwards[0];
+    await act(async () => result.current.setEnabled(target, observed, false));
+    expect(configurePortForward).toHaveBeenCalledExactlyOnceWith(target, observed, false);
+    expect(result.current.runtime_forwards).toEqual([]);
+    expect(result.current.statuses.has("database")).toBe(false);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("restores enabled forwards and publishes their runtime status", async () => {
     const { result } = renderHook(() =>
       usePortForwarding(true, [target], [forward], vi.fn()),

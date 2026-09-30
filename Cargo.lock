@@ -657,14 +657,18 @@ dependencies = [
  "clap",
  "ctl-core",
  "ctld-ipc",
+ "dirs",
  "rmux",
  "rpassword",
+ "rustix",
+ "serde",
  "serde_json",
  "task-cli",
  "task-client",
  "thiserror 2.0.20",
  "tokio",
  "unicode-width",
+ "uuid",
  "zeroize",
 ]
 

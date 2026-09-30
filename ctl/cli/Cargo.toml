@@ -7,6 +7,9 @@ edition.workspace = true
 clap.workspace = true
 ctl-core.workspace = true
 ctld-ipc.workspace = true
+dirs.workspace = true
+serde.workspace = true
+uuid.workspace = true
 rmux-cli.workspace = true
 task-cli.workspace = true
 task-client.workspace = true
@@ -18,6 +21,7 @@ zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rpassword.workspace = true
+rustix.workspace = true
 
 [lints]
 workspace = true

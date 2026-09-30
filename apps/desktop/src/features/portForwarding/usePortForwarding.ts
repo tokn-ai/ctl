@@ -20,6 +20,7 @@ interface HostOperation {
 }
 
 export interface PortForwardingController {
+  runtime_forwards: readonly WorkspacePortForward[];
   statuses: ReadonlyMap<string, PortForwardStatus>;
   busy: ReadonlySet<string>;
   hostErrors: ReadonlyMap<string, string>;
@@ -42,6 +43,10 @@ export function usePortForwarding(
   forwards: readonly WorkspacePortForward[],
   updateForwards: UpdateForwards,
 ): PortForwardingController {
+  const [runtime_forwards, setRuntimeForwards] = useState<ReadonlyMap<string, {
+    target: SshConnectionTarget;
+    statuses: readonly PortForwardStatus[];
+  }>>(new Map());
   const [statuses, setStatuses] = useState<ReadonlyMap<string, PortForwardStatus>>(
     new Map(),
   );
@@ -148,6 +153,10 @@ export function usePortForwarding(
             .filter((forward) => forward.host_id === hostId)
             .map((forward) => forward.forward_id),
         );
+        setRuntimeForwards((current) => isCurrent() ? new Map(current).set(hostId, {
+          target,
+          statuses: next.filter((status) => !hostForwardIds.has(status.forward.forward_id)),
+        }) : current);
         setStatuses((current) => {
           if (!isCurrent()) return current;
           const merged = new Map(current);
@@ -161,6 +170,7 @@ export function usePortForwarding(
         });
       } catch (failure) {
         if (!isCurrent()) return;
+        setRuntimeForwards((current) => withoutKey(current, hostId));
         setHostErrors((current) => isCurrent() ? new Map(current).set(hostId, errorMessage(failure)) : current);
         const hostForwardIds = new Set(
           forwardsRef.current
@@ -179,7 +189,7 @@ export function usePortForwarding(
     });
   }, [runHostOperation]);
 
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async (include_runtime = true) => {
     const generation = ++refreshGenerationRef.current;
     refreshCountRef.current += 1;
     setRefreshing(true);
@@ -188,7 +198,7 @@ export function usePortForwarding(
     );
     const sshTargets = targetsRef.current.filter(
       (target): target is SshConnectionTarget =>
-        target.kind === "ssh" && hostIds.has(target.host_id!),
+        target.kind === "ssh" && (include_runtime || hostIds.has(target.host_id!)),
     );
     try {
       await Promise.all(sshTargets.map((target) => refreshTarget(selectedTarget(target))));
@@ -228,6 +238,20 @@ export function usePortForwarding(
               else next.delete(forward.forward_id);
               return next;
             });
+            if (!forwardsRef.current.some((item) => item.forward_id === forward.forward_id)) {
+              setRuntimeForwards((current) => {
+                if (!isCurrent()) return current;
+                const observed = current.get(hostId);
+                if (!observed) return current;
+                return new Map(current).set(hostId, {
+                  ...observed,
+                  statuses: enabled
+                    ? observed.statuses.map((item) => item.forward.forward_id === forward.forward_id ? status : item)
+                    : observed.statuses.filter((item) => item.forward.forward_id !== forward.forward_id),
+                });
+              });
+              return;
+            }
             updateForwards((current) =>
               isCurrent() ? current.map((item) =>
                 item.forward_id === forward.forward_id
@@ -260,7 +284,7 @@ export function usePortForwarding(
   useEffect(() => {
     if (!ready || restoredRef.current) return;
     restoredRef.current = true;
-    void refreshAll();
+    void refreshAll(false);
   }, [ready, refreshAll]);
 
   useEffect(() => {
@@ -289,8 +313,25 @@ export function usePortForwarding(
     });
   }, [targets]);
 
+  const observed_forwards: WorkspacePortForward[] = [];
+  const observed_statuses = new Map(statuses);
+  const saved_ids = new Set(forwards.map((forward) => forward.forward_id));
+  for (const [host_id, observed] of runtime_forwards) {
+    const current_target = runtimeTargetsRef.current.get(host_id);
+    const selected_target = operationsRef.current.get(host_id)?.target ?? current_target;
+    if (!current_target || !selected_target || !sameSshEndpoint(selected_target, observed.target)) continue;
+    for (const status of observed.statuses) {
+      if (saved_ids.has(status.forward.forward_id)) continue;
+      observed_forwards.push({
+        ...status.forward, host_id, name: `CLI · ${status.forward.local_port}`, enabled: true,
+      });
+      observed_statuses.set(status.forward.forward_id, status);
+    }
+  }
+
   return {
-    statuses,
+    runtime_forwards: observed_forwards,
+    statuses: pausedStatuses(observed_statuses, [...forwards, ...observed_forwards], pausedHostsRef.current),
     busy,
     hostErrors,
     refreshing,

@@ -2546,7 +2546,9 @@ describe("workspace-backed terminal page", () => {
     expect(attachment.connect).not.toHaveBeenCalled();
     expect(attachment.reconnect).not.toHaveBeenCalled();
     expect(api.configurePortForward).not.toHaveBeenCalled();
-    expect(api.listPortForwards).not.toHaveBeenCalled();
+    expect(api.listPortForwards).not.toHaveBeenCalledWith(
+      expect.objectContaining({ host_id: "test-id" }),
+    );
 
     fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect to test" }));

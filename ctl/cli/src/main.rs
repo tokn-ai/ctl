@@ -1,6 +1,11 @@
 mod commands;
+mod connection;
+mod openssh;
+#[cfg(unix)]
+mod port;
 #[cfg(unix)]
 mod ssh_broker;
+mod target;
 mod vpn;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -10,9 +15,13 @@ use task_cli::Command as TaskCommand;
 #[derive(Debug, Parser)]
 #[command(version, about = "Route control commands locally or over OpenSSH")]
 struct Arguments {
-  /// Use an OpenSSH destination or Host alias instead of the local target.
+  /// Select a saved ctl host, OpenSSH alias, or destination instead of local.
   #[arg(long, short = 'H', global = true, value_name = "DESTINATION")]
   host: Option<String>,
+
+  /// Select a saved host's connection method by name or ID.
+  #[arg(long, global = true)]
+  method: Option<String>,
 
   /// Remote server platform (Windows currently requires the cmd.exe SSH shell).
   #[arg(long, global = true, requires = "host", value_enum)]
@@ -30,6 +39,41 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Open a persistent rmux shell (or an ordinary shell with --plain).
+  Shell {
+    /// Attach to this named session, creating it if absent.
+    #[arg(long, short = 's', conflicts_with = "plain")]
+    session: Option<String>,
+    /// Open an ordinary shell without rmux.
+    #[arg(long)]
+    plain: bool,
+    /// Working directory for a new rmux session.
+    #[arg(long, short = 'c', conflicts_with = "plain")]
+    cwd: Option<String>,
+  },
+  /// Run a command once, streaming input/output and preserving its exit status.
+  Exec {
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
+  },
+  /// OpenSSH-compatible login using saved ctl hosts and managed connections.
+  #[command(disable_help_flag = true, trailing_var_arg = true)]
+  Ssh {
+    #[arg(allow_hyphen_values = true)]
+    arguments: Vec<std::ffi::OsString>,
+  },
+  /// OpenSSH-compatible file copy using the same host lookup as ctl ssh.
+  #[command(disable_help_flag = true, trailing_var_arg = true)]
+  Scp {
+    #[arg(allow_hyphen_values = true)]
+    arguments: Vec<std::ffi::OsString>,
+  },
+  /// Manage ctld-owned local port forwards.
+  #[cfg(unix)]
+  Port {
+    #[command(subcommand)]
+    command: port::Command,
+  },
   /// Manage the local VPN and its SOCKS5 proxy through ctld.
   Vpn {
     #[command(subcommand)]
@@ -60,10 +104,22 @@ enum TaskdCommand {
 
 #[tokio::main]
 async fn main() {
-  let arguments = Arguments::parse();
-  if let Err(error) = commands::run(arguments).await {
-    eprintln!("ctl: {error}");
-    std::process::exit(1);
+  let result = if std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some() {
+    openssh::run_ssh(
+      std::env::args_os().skip(1).collect(),
+      std::env::var("CTL_SCP_METHOD").ok().as_deref(),
+    )
+    .await
+    .map_err(commands::CliError::from)
+  } else {
+    commands::run(Arguments::parse()).await
+  };
+  match result {
+    Ok(code) => std::process::exit(code),
+    Err(error) => {
+      eprintln!("ctl: {error}");
+      std::process::exit(1);
+    }
   }
 }
 

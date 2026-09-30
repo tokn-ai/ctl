@@ -143,23 +143,6 @@ pub(crate) fn valid_connection_id(connection_id: &str) -> bool {
       .any(|value| value.is_control() || value.is_whitespace())
 }
 
-/// Construct a durable route without requiring an active VPN or reading secrets.
-pub(crate) fn gateway(connection_id: &str) -> ctld_ipc::SshGateway {
-  ctld_ipc::SshGateway {
-    kind: ctld_ipc::GatewayKind::Vpn,
-    vpn: Some(ctld_ipc::VpnGateway {
-      connection_id: connection_id.to_owned(),
-      socket_path: client::selected_socket_path(),
-    }),
-    destination: connection_id.to_owned(),
-    hostname: None,
-    user: None,
-    port: None,
-    identity_file: None,
-    mode: ctld_ipc::SshGatewayMode::Automatic,
-  }
-}
-
 /// Explicit host operations may start their saved VPN before authenticating SSH.
 /// Dropping a host attempt stops waiting but never stops a shared VPN startup.
 pub(crate) async fn ensure_for_host(

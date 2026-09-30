@@ -1923,7 +1923,7 @@ function TerminalWorkbench() {
                     (target): target is SshConnectionTarget =>
                       target.kind === "ssh",
                   )}
-                  forwards={workspace.port_forwards}
+                  forwards={[...workspace.port_forwards, ...portForwarding.runtime_forwards]}
                   statuses={portForwarding.statuses}
                   busy={portForwarding.busy}
                   hostErrors={portForwarding.hostErrors}

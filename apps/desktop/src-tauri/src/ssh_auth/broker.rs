@@ -359,7 +359,7 @@ where
 }
 
 pub(super) fn broker_target(target: &ConnectionTargetDto) -> CommandResult<SshTarget> {
-  target.to_ssh_target()
+  target.to_ssh_target().map_err(Into::into)
 }
 
 fn prompt_kind(kind: PromptKind) -> SshPromptKind {

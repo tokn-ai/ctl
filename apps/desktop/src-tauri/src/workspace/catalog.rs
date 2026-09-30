@@ -1,70 +1,17 @@
 //! Reusable saved connections. SSH config projections never enter this store.
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::repository::{
   MAX_WORKSPACE_BYTES, Repository, content_revision, regular_file_or_absent,
 };
-use super::{WorkspaceHost, WorkspaceSshGateway, validated_gateway_ids};
+use super::{WorkspaceHost, WorkspaceSshGateway};
 use crate::error::{CommandErrorDto, CommandResult};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostCatalogDocument {
-  pub schema_version: u32,
-  pub hosts: Vec<WorkspaceHost>,
-  pub ssh_gateways: Vec<WorkspaceSshGateway>,
-}
-
-impl Default for HostCatalogDocument {
-  fn default() -> Self {
-    Self {
-      schema_version: 1,
-      hosts: Vec::new(),
-      ssh_gateways: Vec::new(),
-    }
-  }
-}
-
-impl HostCatalogDocument {
-  pub(super) fn validate(&self) -> CommandResult<()> {
-    if self.schema_version != 1 {
-      return Err(CommandErrorDto::new(
-        "hosts_version_unsupported",
-        "This host catalog was written by another app version. Its file has not been changed.",
-      ));
-    }
-    let invalid = || {
-      CommandErrorDto::new(
-        "hosts_invalid",
-        "The host catalog contains invalid or duplicate connections.",
-      )
-    };
-    let gateway_ids = validated_gateway_ids(&self.ssh_gateways).ok_or_else(invalid)?;
-    let mut host_ids = HashSet::new();
-    if self.hosts.len() > 1024
-      || self.hosts.iter().any(|host| {
-        host.host_id == "local"
-          || !host_ids.insert(host.host_id.as_str())
-          || !host.is_valid(&gateway_ids)
-      })
-    {
-      return Err(invalid());
-    }
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostCatalogSnapshot {
-  pub revision: Option<String>,
-  pub document: HostCatalogDocument,
-}
+pub use ctl_core::hosts::{HostCatalogDocument, HostCatalogSnapshot};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

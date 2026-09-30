@@ -1,6 +1,7 @@
 # ctl SSH transport
 
-`ctl` carries a versioned `rmux-proto` or `task-proto` stream through an OpenSSH
+The `ctl rmux`, persistent `ctl shell`, and `ctl task` commands carry a versioned
+`rmux-proto` or `task-proto` stream through an OpenSSH
 remote command. There is no separate network listener, TLS identity, pairing format,
 or outer application-authentication protocol. A fixed `ctl-ssh-v1` readiness
 marker precedes the raw stream so startup output cannot be mistaken for a
@@ -54,8 +55,10 @@ enabled can instead reuse a configured master, preserving
 `ControlMaster`, `ControlPath`, and `ControlPersist`; unconfigured sharing falls
 back to a private master. This preference defaults on for SSH-config aliases
 and off for direct and Tailscale methods. `ctl` never disables host-key
-verification, enables agent forwarding, creates a forwarding, or accepts a
-user-controlled remote command.
+verification. These service transports disable agent forwarding and additional
+forwards, and use only their fixed remote service command. The separate
+`shell --plain`, `exec`, `ssh`, `scp`, and `port` entry points provide ordinary
+shell/command/copy/forward operations without extending `ctl-agent`'s protocol.
 
 After an explicit Connect, ctld saves the selected configured control socket in
 bounded, owner-only endpoint metadata scoped to its daemon socket and target.

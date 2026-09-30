@@ -545,8 +545,10 @@ and checkpoint state remain intact.
 
 ## Remote control boundary
 
-`ctl` connects directly to the current user's owner-only endpoint for the chosen
-command domain by default. Global `--host`/`-H` invokes the system OpenSSH client with
+`ctl rmux`, persistent `ctl shell`, and `ctl task` connect directly to the current
+user's owner-only endpoint for the chosen command domain by default. Global
+`--host`/`-H` resolves saved ctl hosts before OpenSSH aliases/destinations and
+invokes the system OpenSSH client with
 PTY allocation and all forwarding disabled, an OpenSSH destination supplied
 by the user, and a fixed managed-directory `PATH` prefix followed by
 `exec ctl-agent connect` for rmux or `exec ctl-agent connect --service task`
@@ -555,8 +557,17 @@ per-user installation commands after explicit user action; callers cannot
 supply a command, version path, or archive destination. OpenSSH
 configuration owns host verification, user authentication, and proxying. On
 Unix clients, `ctld` owns the explicit authenticated control master used by
-both `ctl` and the desktop. `ctl` never disables host-key checking, enables
-agent forwarding, or accepts an arbitrary remote command.
+both `ctl` and the desktop. These service transports never disable host-key
+checking, enable agent forwarding, or accept an arbitrary remote command.
+
+The ordinary `shell --plain`, `exec`, `ssh`, and `scp` commands operate through
+OpenSSH directly, preserving its authorization boundary without adding an
+arbitrary-command RPC to `ctl-agent`. `ssh`/`scp` use saved ctl host names as host
+aliases; compatible Unix sessions reuse ctld's master. Explicit transport
+options bypass managed reuse and retain OpenSSH behavior. `port` manages the
+existing ctld forwarding registry. Host/catalog models and read-only Tailscale
+discovery live in `ctl-core` for both desktop and CLI use; saved files retain
+their existing schema and location. See [Proposal 0008](proposals/0008-connection-cli.md).
 
 `ctl-agent connect` has no network listener or session registry. Its persistent
 account-owned UUID lives in `~/.tokn/ctl/remote-id`; it is an environment identity,

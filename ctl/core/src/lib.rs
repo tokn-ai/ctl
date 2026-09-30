@@ -16,10 +16,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
+pub mod hosts;
 pub mod maintenance;
 mod ssh_install;
 pub mod ssh_reachability;
 mod ssh_startup;
+pub mod tailscale;
 
 pub use ssh_install::{
   RemoteInstallEvent, install_ssh_unix_agent_interactive,

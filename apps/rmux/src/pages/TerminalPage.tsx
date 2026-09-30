@@ -28,6 +28,10 @@ import { withHostId } from "../features/workspace/workspaceModel";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
 import { StatusBar } from "../components/status/StatusBar";
+import { NotificationBell, Notifications } from "../components/notifications/Notifications";
+import { NotificationStore } from "../features/notifications/NotificationStore";
+import { NotificationProvider } from "../features/notifications/NotificationContext";
+import { useWorkbenchNotifications } from "../features/notifications/useWorkbenchNotifications";
 import { TerminalTabs } from "../components/tabs/TerminalTabs";
 import { TerminalSurface } from "../components/terminal/TerminalSurface";
 import { TerminalToolbar } from "../components/terminal/TerminalToolbar";
@@ -115,6 +119,7 @@ function measuredSize(renderer: XtermRenderer | null): TerminalSize {
 
 export function TerminalPage() {
   const workspace = useWorkspace();
+  const [notifications] = useState(() => new NotificationStore());
   const {
     targets,
     setTargets,
@@ -208,6 +213,20 @@ export function TerminalPage() {
   const daemonRestartConfirmationRef = useRef(false);
   const restartingDaemonRef = useRef(false);
   const daemonEpochRef = useRef(0);
+  useWorkbenchNotifications(notifications, {
+    workspace_error: workspace.error,
+    workspace_ready: workspace.ready,
+    keybindings_error: keybindings.error,
+    session_error: listError,
+    targets,
+    target_errors: targetErrors,
+    attachment: attachment.state,
+    task_error: taskWorkspace.error,
+    definitions_error: taskWorkspace.definitions_error,
+    task_status: taskWorkspace.daemonStatus,
+    tasks: taskWorkspace.tasks,
+    tasks_loaded: taskWorkspace.hasLoaded,
+  });
   workspace.closeBlockedRef.current = () =>
     creatingRef.current || restartingDaemonRef.current || taskWorkspace.busy;
 
@@ -1209,6 +1228,35 @@ export function TerminalPage() {
     return base;
   });
   commands.push({
+    id: COMMAND_IDS.showNotifications,
+    category: "View",
+    title: "Show Notifications",
+    enabled: true,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.showNotifications),
+    focusTerminalAfterRun: false,
+    run: () => notifications.setCenterOpen(true),
+  }, {
+    id: COMMAND_IDS.refreshTasks,
+    category: "Tasks",
+    title: "Refresh Tasks and Definitions",
+    enabled: workspace.ready && !taskWorkspace.busy && !taskWorkspace.loading,
+    keybinding: keybindings.bindings.get(COMMAND_IDS.refreshTasks),
+    focusTerminalAfterRun: false,
+    run: taskWorkspace.refresh,
+  }, {
+    id: COMMAND_IDS.openTask,
+    category: "Tasks",
+    title: "View Task",
+    enabled: false,
+    visibleInPalette: false,
+    focusTerminalAfterRun: false,
+    isEnabled: (args) => workspace.ready && taskWorkspace.tasks.some((task) => task.task_id === args.value),
+    run: (args) => {
+      const task = taskWorkspace.tasks.find((task) => task.task_id === args?.value);
+      if (task) taskWorkspace.openTask(task);
+    },
+  });
+  commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
     category: "Tasks",
     title: "Restart taskd",
@@ -1310,338 +1358,310 @@ export function TerminalPage() {
   }
 
   return (
-    <CommandProvider
-      value={{ dispatcher, keybinding: (id) => keybindings.bindings.get(id) }}
-    >
-      <CommandBindings platform={shortcutPlatform} />
-      <main
-        className="app-shell"
-        inert={
-          !workspace.ready || workspace.closing || dialogOpen || paletteOpen
-        }
+    <NotificationProvider store={notifications}>
+      <CommandProvider
+        value={{ dispatcher, keybinding: (id) => keybindings.bindings.get(id) }}
       >
-        <WorkspaceSidebar
-          selected={workspace.sidebar_view}
-          onSelect={(view) => workspace.update("sidebar_view", view)}
-          error={workspace.error}
-          tasks={
-            <TaskSidebar
-              model={taskWorkspace}
-              definitions={taskWorkspace.definitions}
-              references={workspace.task_references}
-            />
-          }
-          sessions={
-            <SessionSidebar
-              targets={targets}
-              targetErrors={targetErrors}
-              sessions={sessions}
-              interactiveTasks={taskWorkspace.tasks}
-              shellStates={displayedSessionShellStates}
-              selectedSessionKey={activeTabKey}
-              openTabSessionKeys={openTabSessionKeys}
-              loading={loading || !workspace.ready}
-              error={listError}
-              creating={creating}
-              closingSessionKeys={closingSessionKeys}
-              disconnectingSessionKey={disconnectingSessionKey}
-              onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
-              onSelect={(session) =>
-                executeCommandById(COMMAND_IDS.selectSession, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
-              onDisconnect={(session) =>
-                executeCommandById(COMMAND_IDS.disconnect, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onRequestClose={(session) =>
-                executeCommandById(COMMAND_IDS.close, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onForget={(session) =>
-                executeCommandById(COMMAND_IDS.forgetSession, {
-                  session_key: sessionKey(session),
-                })
-              }
-              onSelectTask={taskWorkspace.openTask}
-              onStopTask={(task) =>
-                void taskWorkspace.action(task, "stop_task")
-              }
-              onAddExisting={() =>
-                executeCommandById(COMMAND_IDS.addExistingSession)
-              }
-              onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
-              onConnectHost={(target) =>
-                executeCommandById(COMMAND_IDS.connectHost, {
-                  target_key: targetKey(target),
-                })
-              }
-              onRemoveHost={(target) =>
-                executeCommandById(COMMAND_IDS.removeHost, {
-                  target_key: targetKey(target),
-                })
-              }
-            />
-          }
-        />
-        <section className="terminal-workspace">
-          <TerminalTabs
-            tabs={tabs}
-            extra_tabs={workspace.task_tabs.map((tab) => {
-              const task = taskWorkspace.tasks.find(
-                (item) => item.task_id === tab.task_id,
-              );
-              return {
-                tab_key: workspaceTabKey(tab),
-                title: task?.definition.name ?? "Saved task",
-                host: tab.host_id === "local" ? "Local" : tab.host_id,
-                status: task ? taskState(task) : "unknown",
-              };
-            })}
-            tab_order={workspace.tab_order}
-            on_select_extra={(key) => {
-              const tab = workspace.task_tabs.find(
-                (item) => workspaceTabKey(item) === key,
-              );
-              if (tab) taskWorkspace.open(tab);
-            }}
-            on_close_extra={taskWorkspace.close}
-            shellStates={displayedTabShellStates}
-            activeSessionKey={activeTabKey}
-            canCreate={
-              currentWorkingDirectory !== null &&
-              !creating &&
-              !daemonRestartConfirmationPending &&
-              !restartingDaemon
-            }
-            onSelect={(session) =>
-              executeCommandById(COMMAND_IDS.selectSession, {
-                session_key: sessionKey(session),
-              })
-            }
-            onClose={(session) =>
-              executeCommandById(COMMAND_IDS.disconnect, {
-                session_key: sessionKey(session),
-              })
-            }
-            onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
-          />
-          {taskWorkspace.active?.kind === "task" ? (
-            <TaskDetail
-              key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`}
-              model={taskWorkspace}
-              saved={taskWorkspace.activeSaved}
-            />
-          ) : null}
-          <div
-            className="terminal-pane"
-            hidden={
-              !!taskWorkspace.active &&
-              !(
-                taskWorkspace.activeTask?.definition.execution_mode ===
-                  "interactive" && taskWorkspace.activeTask.active_run
-              )
+        <CommandBindings platform={shortcutPlatform} />
+        <div className="workbench">
+          <main
+            className="app-shell"
+            inert={
+              !workspace.ready || workspace.closing || dialogOpen || paletteOpen
             }
           >
-            <TerminalToolbar
-              state={attachment.state}
-              onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
-              onToggleResizeWithWindow={() =>
-                executeCommandById(COMMAND_IDS.toggleResize)
+            <WorkspaceSidebar
+              selected={workspace.sidebar_view}
+              onSelect={(view) => workspace.update("sidebar_view", view)}
+              tasks={
+                <TaskSidebar
+                  model={taskWorkspace}
+                  definitions={taskWorkspace.definitions}
+                  references={workspace.task_references}
+                />
               }
-              onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
-              onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
-              commandShortcutLabel={paletteShortcutLabel}
+              sessions={
+                <SessionSidebar
+                  targets={targets}
+                  targetErrors={targetErrors}
+                  sessions={sessions}
+                  interactiveTasks={taskWorkspace.tasks}
+                  shellStates={displayedSessionShellStates}
+                  selectedSessionKey={activeTabKey}
+                  openTabSessionKeys={openTabSessionKeys}
+                  loading={loading || !workspace.ready}
+                  error={listError}
+                  creating={creating}
+                  closingSessionKeys={closingSessionKeys}
+                  disconnectingSessionKey={disconnectingSessionKey}
+                  onRefresh={() => executeCommandById(COMMAND_IDS.refreshSessions)}
+                  onSelect={(session) =>
+                    executeCommandById(COMMAND_IDS.selectSession, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onNewShell={() => executeCommandById(COMMAND_IDS.newShell)}
+                  onDisconnect={(session) =>
+                    executeCommandById(COMMAND_IDS.disconnect, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onRequestClose={(session) =>
+                    executeCommandById(COMMAND_IDS.close, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onForget={(session) =>
+                    executeCommandById(COMMAND_IDS.forgetSession, {
+                      session_key: sessionKey(session),
+                    })
+                  }
+                  onSelectTask={taskWorkspace.openTask}
+                  onStopTask={(task) =>
+                    void taskWorkspace.action(task, "stop_task")
+                  }
+                  onAddExisting={() =>
+                    executeCommandById(COMMAND_IDS.addExistingSession)
+                  }
+                  onAddHost={() => executeCommandById(COMMAND_IDS.addHost)}
+                  onConnectHost={(target) =>
+                    executeCommandById(COMMAND_IDS.connectHost, {
+                      target_key: targetKey(target),
+                    })
+                  }
+                  onRemoveHost={(target) =>
+                    executeCommandById(COMMAND_IDS.removeHost, {
+                      target_key: targetKey(target),
+                    })
+                  }
+                />
+              }
             />
-            <div className="terminal-notices">
-              {keybindings.error ? (
-                <div className="message-banner" role="alert">
-                  Keyboard shortcuts: {keybindings.error} Last valid bindings
-                  remain active.
-                  <button
-                    type="button"
-                    onClick={() =>
-                      executeCommandById(COMMAND_IDS.reloadKeybindings)
-                    }
-                  >
-                    Reload shortcuts
-                  </button>
-                </div>
+            <section className="terminal-workspace">
+              <TerminalTabs
+                tabs={tabs}
+                extra_tabs={workspace.task_tabs.map((tab) => {
+                  const task = taskWorkspace.tasks.find(
+                    (item) => item.task_id === tab.task_id,
+                  );
+                  return {
+                    tab_key: workspaceTabKey(tab),
+                    title: task?.definition.name ?? "Saved task",
+                    host: tab.host_id === "local" ? "Local" : tab.host_id,
+                    status: task ? taskState(task) : "unknown",
+                  };
+                })}
+                tab_order={workspace.tab_order}
+                on_select_extra={(key) => {
+                  const tab = workspace.task_tabs.find(
+                    (item) => workspaceTabKey(item) === key,
+                  );
+                  if (tab) taskWorkspace.open(tab);
+                }}
+                on_close_extra={taskWorkspace.close}
+                shellStates={displayedTabShellStates}
+                activeSessionKey={activeTabKey}
+                canCreate={
+                  currentWorkingDirectory !== null &&
+                  !creating &&
+                  !daemonRestartConfirmationPending &&
+                  !restartingDaemon
+                }
+                onSelect={(session) =>
+                  executeCommandById(COMMAND_IDS.selectSession, {
+                    session_key: sessionKey(session),
+                  })
+                }
+                onClose={(session) =>
+                  executeCommandById(COMMAND_IDS.disconnect, {
+                    session_key: sessionKey(session),
+                  })
+                }
+                onCreate={() => executeCommandById(COMMAND_IDS.newTab)}
+              />
+              {taskWorkspace.active?.kind === "task" ? (
+                <TaskDetail
+                  key={`${taskWorkspace.active.host_id}:${taskWorkspace.active.task_id}`}
+                  model={taskWorkspace}
+                  saved={taskWorkspace.activeSaved}
+                />
               ) : null}
-              {workspace.error ? (
-                <div className="message-banner" role="alert">
-                  Workspace: {workspace.error}
-                  {workspace.ready ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        executeCommandById(COMMAND_IDS.saveWorkspace)
-                      }
-                    >
-                      Retry saving
-                    </button>
+              <div
+                className="terminal-pane"
+                hidden={
+                  !!taskWorkspace.active &&
+                  !(
+                    taskWorkspace.activeTask?.definition.execution_mode ===
+                      "interactive" && taskWorkspace.activeTask.active_run
+                  )
+                }
+              >
+                <TerminalToolbar
+                  state={attachment.state}
+                  onToggleInput={() => executeCommandById(COMMAND_IDS.toggleInput)}
+                  onToggleResizeWithWindow={() =>
+                    executeCommandById(COMMAND_IDS.toggleResize)
+                  }
+                  onReconnect={() => executeCommandById(COMMAND_IDS.reconnect)}
+                  onShowCommands={() => executeCommandById(COMMAND_IDS.showPalette)}
+                  commandShortcutLabel={paletteShortcutLabel}
+                />
+                <div className="terminal-notices">
+                  {activeTab && attachment.state.session === null ? (
+                    <div className="message-banner" role="status">
+                      {activeTab.target.kind === "ssh"
+                        ? "Connect this host to resume its saved tab. Cached paths are last-known."
+                        : "Local session is not connected. Cached paths are last-known."}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (activeTab.target.kind === "ssh") {
+                            executeCommandById(COMMAND_IDS.connectHost, {
+                              target_key: targetKey(activeTab.target),
+                            });
+                          } else {
+                            executeCommandById(COMMAND_IDS.selectSession, {
+                              session_key: sessionKey(activeTab),
+                            });
+                          }
+                        }}
+                      >
+                        {activeTab.target.kind === "ssh"
+                          ? "Connect host"
+                          : "Connect session"}
+                      </button>
+                    </div>
                   ) : null}
                 </div>
-              ) : null}
-              {activeTab && attachment.state.session === null ? (
-                <div className="message-banner" role="status">
-                  {activeTab.target.kind === "ssh"
-                    ? "Connect this host to resume its saved tab. Cached paths are last-known."
-                    : "Local session is not connected. Cached paths are last-known."}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (activeTab.target.kind === "ssh") {
-                        executeCommandById(COMMAND_IDS.connectHost, {
-                          target_key: targetKey(activeTab.target),
-                        });
-                      } else {
-                        executeCommandById(COMMAND_IDS.selectSession, {
-                          session_key: sessionKey(activeTab),
-                        });
-                      }
-                    }}
-                  >
-                    {activeTab.target.kind === "ssh"
-                      ? "Connect host"
-                      : "Connect session"}
-                  </button>
-                </div>
-              ) : null}
-              {attachment.state.history_gap ? (
-                <div className="history-gap-banner" role="status">
-                  Earlier remote output is no longer contiguous. The live screen
-                  was restored from a checkpoint.
-                </div>
-              ) : null}
-              {attachment.state.message ? (
-                <div className="message-banner" role="status">
-                  {attachment.state.message}
-                </div>
-              ) : null}
-            </div>
-            <TerminalSurface
-              phase={attachment.state.phase}
-              hasSession={attachment.state.session !== null}
-              has_cached_content={attachment.state.applied_sequence !== null}
-              onInput={handleTerminalInput}
-              onReady={setRenderer}
-            />
-            <StatusBar state={attachment.state} />
-          </div>
-        </section>
-      </main>
-      {taskWorkspace.editorId ? (
-        <TaskEditor
-          key={taskWorkspace.editorKey}
-          model={taskWorkspace}
-          saved={taskWorkspace.saved}
-        />
-      ) : null}
-      {keybindingsOpen ? (
-        <KeybindingsFlow
-          commands={commands}
-          document={keybindings.document}
-          path={keybindings.path}
-          error={keybindings.error}
-          platform={shortcutPlatform}
-          onSave={keybindings.save}
-          onClose={() => {
-            setKeybindingsOpen(false);
-            requestAnimationFrame(() => renderer?.focus());
-          }}
-        />
-      ) : newShellOpen ? (
-        <NewShellFlow
-          targets={targets}
-          onCreate={create}
-          onClose={() => {
-            setNewShellOpen(false);
-            requestAnimationFrame(() => renderer?.focus());
-          }}
-        />
-      ) : importOpen ? (
-        <AddExistingSessionFlow
-          targets={targets}
-          known={sessions}
-          onAdd={importSession}
-          onClose={() => setImportOpen(false)}
-        />
-      ) : pendingForget ? (
-        <QuickInput
-          title="Remove from workspace"
-          description={`Forget ${pendingForget.name} and close its tab? Its shell will keep running. You can add it again through discovery.`}
-          mode={{ kind: "confirm", confirm_label: "Remove from workspace" }}
-          onCancel={() => setPendingForget(null)}
-          onSubmit={() => {
-            const session = pendingForget;
-            setPendingForget(null);
-            return forgetSession(session).catch((failure) =>
-              setListError(errorMessage(failure)),
-            );
-          }}
-        />
-      ) : hostFlow !== undefined ? (
-        <SshHostFlow
-          suggestions={hostSuggestions}
-          warning={sshConfigWarning}
-          target={hostFlow ?? undefined}
-          onVerified={recoverHost}
-          onActivateHost={activateConfiguredHost}
-          onSaveHost={saveHost}
-          onConnected={(target) => {
-            void resumeHost(target).catch((failure) =>
-              setListError(errorMessage(failure)),
-            );
-          }}
-          onClose={() => {
-            setHostFlow(undefined);
-            requestAnimationFrame(() => renderer?.focus());
-          }}
-        />
-      ) : pendingCloseSessionKey ? (
-        <QuickInput
-          title="Close session"
-          description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.${closeShortcutLabel ? ` Press ${closeShortcutLabel} to confirm.` : ""}`}
-          confirm_command_id={COMMAND_IDS.close}
-          mode={{
-            kind: "confirm",
-            confirm_label: "Close session",
-            destructive: true,
-          }}
-          onCancel={cancelClose}
-          onSubmit={() => {
-            const session = sessions.find(
-              (session) => sessionKey(session) === pendingCloseSessionKey,
-            );
-            if (session) return confirmClose(session);
-            else cancelClose();
-          }}
-        />
-      ) : daemonRestartConfirmationPending ? (
-        <QuickInput
-          title="Restart rmuxd"
-          description="Terminate every local rmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
-          mode={{
-            kind: "confirm",
-            confirm_label: "Restart rmuxd",
-            destructive: true,
-          }}
-          onCancel={cancelDaemonRestart}
-          onSubmit={confirmDaemonRestart}
-        />
-      ) : paletteOpen ? (
-        <CommandPalette
-          commands={commands}
-          platform={shortcutPlatform}
-          onDismiss={dismissPalette}
-          onExecute={executeCommand}
-        />
-      ) : null}
-    </CommandProvider>
+                <TerminalSurface
+                  phase={attachment.state.phase}
+                  hasSession={attachment.state.session !== null}
+                  has_cached_content={attachment.state.applied_sequence !== null}
+                  onInput={handleTerminalInput}
+                  onReady={setRenderer}
+                />
+              </div>
+            </section>
+          </main>
+          <StatusBar
+            state={attachment.state}
+            show_terminal={!taskWorkspace.active || (
+              taskWorkspace.activeTask?.definition.execution_mode === "interactive" && !!taskWorkspace.activeTask.active_run
+            )}
+            inert={dialogOpen || paletteOpen || workspace.closing}
+          >
+            <NotificationBell store={notifications} />
+          </StatusBar>
+        </div>
+        <Notifications store={notifications} blocked={dialogOpen || paletteOpen || workspace.closing} />
+        {taskWorkspace.editorId ? (
+          <TaskEditor
+            key={taskWorkspace.editorKey}
+            model={taskWorkspace}
+            saved={taskWorkspace.saved}
+          />
+        ) : null}
+        {keybindingsOpen ? (
+          <KeybindingsFlow
+            commands={commands}
+            document={keybindings.document}
+            path={keybindings.path}
+            error={keybindings.error}
+            platform={shortcutPlatform}
+            onSave={keybindings.save}
+            onClose={() => {
+              setKeybindingsOpen(false);
+              requestAnimationFrame(() => renderer?.focus());
+            }}
+          />
+        ) : newShellOpen ? (
+          <NewShellFlow
+            targets={targets}
+            onCreate={create}
+            onClose={() => {
+              setNewShellOpen(false);
+              requestAnimationFrame(() => renderer?.focus());
+            }}
+          />
+        ) : importOpen ? (
+          <AddExistingSessionFlow
+            targets={targets}
+            known={sessions}
+            onAdd={importSession}
+            onClose={() => setImportOpen(false)}
+          />
+        ) : pendingForget ? (
+          <QuickInput
+            title="Remove from workspace"
+            description={`Forget ${pendingForget.name} and close its tab? Its shell will keep running. You can add it again through discovery.`}
+            mode={{ kind: "confirm", confirm_label: "Remove from workspace" }}
+            onCancel={() => setPendingForget(null)}
+            onSubmit={() => {
+              const session = pendingForget;
+              setPendingForget(null);
+              return forgetSession(session).catch((failure) =>
+                setListError(errorMessage(failure)),
+              );
+            }}
+          />
+        ) : hostFlow !== undefined ? (
+          <SshHostFlow
+            suggestions={hostSuggestions}
+            warning={sshConfigWarning}
+            target={hostFlow ?? undefined}
+            onVerified={recoverHost}
+            onActivateHost={activateConfiguredHost}
+            onSaveHost={saveHost}
+            onConnected={(target) => {
+              void resumeHost(target).catch((failure) =>
+                setListError(errorMessage(failure)),
+              );
+            }}
+            onClose={() => {
+              setHostFlow(undefined);
+              requestAnimationFrame(() => renderer?.focus());
+            }}
+          />
+        ) : pendingCloseSessionKey ? (
+          <QuickInput
+            title="Close session"
+            description={`Terminate ${sessions.find((session) => sessionKey(session) === pendingCloseSessionKey)?.name ?? "this session"} for all clients? This cannot be undone.${closeShortcutLabel ? ` Press ${closeShortcutLabel} to confirm.` : ""}`}
+            confirm_command_id={COMMAND_IDS.close}
+            mode={{
+              kind: "confirm",
+              confirm_label: "Close session",
+              destructive: true,
+            }}
+            onCancel={cancelClose}
+            onSubmit={() => {
+              const session = sessions.find(
+                (session) => sessionKey(session) === pendingCloseSessionKey,
+              );
+              if (session) return confirmClose(session);
+              else cancelClose();
+            }}
+          />
+        ) : daemonRestartConfirmationPending ? (
+          <QuickInput
+            title="Restart rmuxd"
+            description="Terminate every local rmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
+            mode={{
+              kind: "confirm",
+              confirm_label: "Restart rmuxd",
+              destructive: true,
+            }}
+            onCancel={cancelDaemonRestart}
+            onSubmit={confirmDaemonRestart}
+          />
+        ) : paletteOpen ? (
+          <CommandPalette
+            commands={commands}
+            platform={shortcutPlatform}
+            onDismiss={dismissPalette}
+            onExecute={executeCommand}
+          />
+        ) : null}
+      </CommandProvider>
+    </NotificationProvider>
   );
 }

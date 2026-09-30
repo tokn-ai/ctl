@@ -1,5 +1,8 @@
 export const COMMAND_IDS = {
   showPalette: "view.show_command_palette",
+  showNotifications: "view.show_notifications",
+  refreshTasks: "task.refresh",
+  openTask: "task.open",
   addHost: "host.add",
   addExistingSession: "session.add_existing",
   forgetSession: "session.forget",

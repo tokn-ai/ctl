@@ -107,6 +107,25 @@ button {
   background: #43272c;
 }
 
+.workbench {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.workbench > .app-shell {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.workbench > .status-bar {
+  flex: 0 0 26px;
+  height: 26px;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 304px minmax(0, 1fr);
@@ -175,6 +194,11 @@ button {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: #12151a;
+}
+
+.host-chip.has-error {
+  border-color: #825e3a;
+  color: var(--warning);
 }
 
 .host-chip > span {

@@ -6,7 +6,6 @@ interface Props {
   onSelect(view: SidebarView): void;
   sessions: ReactNode;
   tasks: ReactNode;
-  error: string | null;
 }
 
 export function WorkspaceSidebar({
@@ -14,7 +13,6 @@ export function WorkspaceSidebar({
   onSelect,
   sessions,
   tasks,
-  error,
 }: Props) {
   const views = ["sessions", "tasks"] as const;
   return (
@@ -91,11 +89,6 @@ export function WorkspaceSidebar({
         >
           {tasks}
         </div>
-        {error ? (
-          <p className="task-inline-error" role="alert">
-            {error}
-          </p>
-        ) : null}
       </div>
     </div>
   );

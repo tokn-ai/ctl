@@ -118,12 +118,6 @@ export function TaskSidebar({
           </div>
         ))
       )}
-      {model.definitions_error ? (
-        <div className="task-inline-error" role="alert">
-          Could not load definitions: {model.definitions_error}
-          <button disabled={model.definitions_loading} onClick={() => void model.refreshDefinitions()}>Retry definitions</button>
-        </div>
-      ) : null}
       <h3>
         Managed tasks <span>Local</span>
       </h3>
@@ -178,17 +172,6 @@ export function TaskSidebar({
             </span>
           </button>
         ))}
-      {model.daemonStatus ? (
-        <p className="task-sidebar-note" role="status">
-          {model.daemonStatus}
-        </p>
-      ) : null}
-      {model.error ? (
-        <div className="task-inline-error" role="alert">
-          {model.error}
-          <button onClick={() => void model.refresh()}>Retry</button>
-        </div>
-      ) : null}
     </section>
   );
 }

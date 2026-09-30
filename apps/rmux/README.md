@@ -152,6 +152,17 @@ for correction/retry; a successful creation is saved and opened as before.
 Post-creation save or attachment failures preserve the existing shell and use
 workspace/session recovery rather than inviting duplicate creation.
 
+Workspace, connection, shortcut, and task notifications appear as cards at the
+bottom right. Use the down chevron to hide a card and keep it for review, or
+the × to dismiss it. The bell in the bottom status bar opens the notification
+center from either Sessions or Tasks; **Show Notifications** is also available
+in the command palette. The center supports dismissing individual entries or
+clearing all, and Escape hides it. Retry actions use the current workspace state.
+Info and success cards hide automatically after eight seconds, paused while
+hovered or focused; warnings and errors stay visible until hidden or dismissed.
+The app shows up to three cards and retains the latest 100 notifications in
+this window's memory. History resets when the window is reloaded or closed.
+
 These are the defaults. **Configure Keyboard Shortcuts** in the palette opens
 quick input: select a command and enter a combination such as
 `Primary+Shift+Y` (`Primary` means Cmd on macOS and Ctrl elsewhere). Blank removes

@@ -148,7 +148,7 @@ export function SessionSidebar({
           {targets.map((target) => {
             const key = targetKey(target);
             return (
-              <span className="host-chip" key={key} title={targetLabel(target)}>
+              <span className={`host-chip${targetErrors.has(key) ? " has-error" : ""}`} key={key} title={targetErrors.get(key) ?? targetLabel(target)}>
                 <button
                   className="host-connect"
                   type="button"
@@ -180,23 +180,6 @@ export function SessionSidebar({
         {loading && sessions.length === 0 ? (
           <p className="sidebar-state">Loading workspace…</p>
         ) : null}
-        {error ? (
-          <div className="sidebar-state error-state">
-            <p>{error}</p>
-          </div>
-        ) : null}
-        {[...targetErrors.entries()].map(([key, message]) => (
-          <div className="host-error" key={key} role="status">
-            <strong>
-              {targets.find((target) => targetKey(target) === key)
-                ? targetLabel(
-                    targets.find((target) => targetKey(target) === key)!,
-                  )
-                : "Host"}
-            </strong>
-            <span>{message}</span>
-          </div>
-        ))}
         {!loading &&
         !error &&
         targetErrors.size === 0 &&

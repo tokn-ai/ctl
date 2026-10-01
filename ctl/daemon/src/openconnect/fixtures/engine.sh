@@ -7,7 +7,23 @@ root=pathlib.Path(sys.argv[1])
 args=sys.argv[2:]
 path=root/'container.json'
 command=args[0]
-if command=='run':
+if command=='image' and args[1]=='inspect':
+  (root/'image.args').write_text('\n'.join(args)+'\n')
+  with (root/'image.calls').open('a') as stream: stream.write('inspect\n')
+  if (root/'image_missing').exists():
+    sys.stderr.write('Error: No such image: private-test-password\n'); sys.exit(1)
+  if (root/'image_error').exists():
+    sys.stderr.write('Cannot connect to the engine at private-test-password\n'); sys.exit(1)
+  identity=root/'image.id'
+  image_id=identity.read_text() if identity.exists() else 'sha256:'+'b'*64
+  key=root/'image.id_key'
+  image_id_key=key.read_text() if key.exists() else 'Id'
+  labels=root/'image.labels'
+  image_labels=labels.read_text() if labels.exists() else json.dumps({'io.ctl.vpn.protocol':'1'})
+  inspection=root/'image.inspection'
+  print(inspection.read_text() if inspection.exists() else
+    '[{'+json.dumps(image_id_key)+':'+json.dumps(image_id)+',"Config":{"Labels":'+image_labels+',"Env":["password=private-test-password"]}}]')
+elif command=='run':
   (root/'run.args').write_text('\n'.join(args)+'\n')
   (root/'run.pid').write_text(str(os.getpid()))
   if (root/'failure').exists():

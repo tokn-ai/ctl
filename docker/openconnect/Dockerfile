@@ -1,5 +1,7 @@
 FROM debian:trixie-slim
 
+LABEL io.ctl.vpn.protocol="1"
+
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
     ca-certificates \

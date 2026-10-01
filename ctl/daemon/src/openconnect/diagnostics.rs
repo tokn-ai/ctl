@@ -18,6 +18,7 @@ enum Failure {
   Authentication,
   Certificate,
   Configuration,
+  HeartbeatExpired,
   MissingImage,
   EngineUnavailable,
 }
@@ -39,6 +40,9 @@ impl Failure {
       }
       Self::Configuration => {
         "The VPN container could not load its configuration. Rebuild the image with docker/openconnect/run.sh build and try again."
+      }
+      Self::HeartbeatExpired => {
+        "The VPN container stopped because ctld heartbeats expired. Check ctld and the container engine, then reconnect."
       }
       Self::MissingImage => {
         "The OpenConnect container image is missing. Build it with docker/openconnect/run.sh build."
@@ -77,6 +81,10 @@ const SIGNATURES: &[(&[u8], Failure)] = &[
   (b"vpn configuration is empty", Failure::Configuration),
   (b"vpn configuration is invalid", Failure::Configuration),
   (b"mount the vpn .env file", Failure::Configuration),
+  (
+    b"no ctld heartbeat remains; stopping the vpn and socks5.",
+    Failure::HeartbeatExpired,
+  ),
   (b"no such image", Failure::MissingImage),
   (b"image not known", Failure::MissingImage),
   (b"unable to find image", Failure::MissingImage),
@@ -289,6 +297,38 @@ mod tests {
     let message = diagnostics.finish().await.unwrap();
     assert_eq!(message, Failure::Certificate.message());
     assert!(!message.contains("private"));
+  }
+
+  #[tokio::test]
+  async fn heartbeat_expiry_is_recognized_across_chunks_without_returning_private_output() {
+    let (mut stderr, error_reader) = tokio::io::duplex(16);
+    let mut diagnostics = Diagnostics::new(
+      b"Failed to connect to https://private.example.test\n".as_slice(),
+      error_reader,
+    );
+    let error = tokio::spawn(async move {
+      for chunk in [
+        "user=private-user password=private-test-password\n",
+        "No ctld heartbeat re",
+        "mains; stopping the VPN ",
+        "and SOCKS5.\n",
+        "server=private.example.test\n",
+      ] {
+        stderr.write_all(chunk.as_bytes()).await.unwrap();
+      }
+    });
+    error.await.unwrap();
+    let message = diagnostics.finish().await.unwrap();
+    assert_eq!(message, Failure::HeartbeatExpired.message());
+    assert!(!message.contains("private"));
+  }
+
+  #[test]
+  fn engine_failure_takes_precedence_over_heartbeat_expiry() {
+    let mut classifier = Classifier::new();
+    let mut failure = classifier.push(b"No ctld heartbeat remains; stopping the VPN and SOCKS5.");
+    failure = failure.max(classifier.push(b"Cannot connect to the Docker daemon"));
+    assert!(failure == Some(Failure::EngineUnavailable));
   }
 
   #[tokio::test]

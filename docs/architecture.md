@@ -288,6 +288,11 @@ engine. `locally_connected` distinguishes local interest from passive discovery.
 Containers without the current protocol and ownership labels are unsupported
 and excluded from inventory. Each status request observes shared inventory once
 and derives its singleton response from that same snapshot.
+OpenConnect creation verifies the local image's protocol label before sending
+credentials and uses its immutable image ID, so a mutable tag cannot replace the
+verified image. Adopting a compatible running container does not require that
+image tag to remain installed. Tailscale installs the shared scripts from the
+daemon's embedded entrypoint rather than relying on its upstream image.
 Connect takes interest even when a compatible container is already running;
 Disconnect releases it and keeps globally running status visible. Status never
 renews interest. Profile mutations require complete inventory. Closing the app

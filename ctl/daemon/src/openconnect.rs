@@ -28,6 +28,10 @@ const IMAGE: &str = "localhost/ctl-openconnect:local";
 const START_TIMEOUT: Duration = Duration::from_secs(75);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const CREATOR_ADOPTION_TIMEOUT: Duration = Duration::from_secs(3);
+const IMAGE_MISSING: &str =
+  "The OpenConnect container image is missing. Build it with docker/openconnect/run.sh build.";
+const IMAGE_OUTDATED: &str = "The OpenConnect container image does not support shared VPN heartbeats. Rebuild it with docker/openconnect/run.sh build.";
+const IMAGE_INSPECTION_FAILED: &str = "Could not verify the OpenConnect container image. Start Docker or the Podman machine and try again.";
 
 /// Each daemon owns only its renewal task. Container lifetime is decided by
 /// the in-container watchdog after every interested daemon stops renewing.
@@ -259,6 +263,7 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
     .await?
     .is_none()
   {
+    let image_id = verify_shared_image(engine).await?;
     let mut command = engine_command(engine);
     command.args([
       "run",
@@ -296,7 +301,7 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
     let mut payload = zeroize::Zeroizing::new(BASE64.encode(config.content.as_bytes()));
     payload.push('\n');
     let mut created = command
-      .arg(IMAGE)
+      .arg(image_id)
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
@@ -341,6 +346,77 @@ async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVp
     return Err(error);
   }
   Ok(vpn)
+}
+
+#[derive(Deserialize)]
+struct ImageCapability {
+  #[serde(rename = "Id", alias = "ID")]
+  id: String,
+  #[serde(rename = "Config")]
+  config: ImageConfiguration,
+}
+
+#[derive(Deserialize)]
+struct ImageConfiguration {
+  #[serde(rename = "Labels")]
+  labels: Option<HashMap<String, String>>,
+}
+
+async fn verify_shared_image(engine: &Path) -> io::Result<String> {
+  // Runtime labels are supplied by ctld, so they cannot prove that an old local
+  // image contains the shared heartbeat entrypoint. Check the image itself
+  // before creating a container or handing its process any credentials.
+  let output = timeout(
+    COMMAND_TIMEOUT,
+    engine_command(engine)
+      .args(["image", "inspect", IMAGE])
+      .stderr(Stdio::piped())
+      .output(),
+  )
+  .await
+  .map_err(|_| io::Error::other(IMAGE_INSPECTION_FAILED))?
+  .map_err(|_| io::Error::other(IMAGE_INSPECTION_FAILED))?;
+  if !output.status.success() {
+    // Inspect errors can include engine addresses or supplied text. Match only
+    // fixed missing-image signatures and never return raw output to the client.
+    let message = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    return Err(
+      if message.contains("no such image")
+        || message.contains("image not known")
+        || message.contains("no such object")
+      {
+        io::Error::new(io::ErrorKind::NotFound, IMAGE_MISSING)
+      } else {
+        io::Error::other(IMAGE_INSPECTION_FAILED)
+      },
+    );
+  }
+  let images: Vec<ImageCapability> = serde_json::from_slice(&output.stdout)
+    .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, IMAGE_OUTDATED))?;
+  if images.len() != 1 {
+    return Err(io::Error::other(IMAGE_INSPECTION_FAILED));
+  }
+  let image = images.into_iter().next().expect("one inspected image");
+  if image
+    .config
+    .labels
+    .as_ref()
+    .and_then(|labels| labels.get(vpn_container::LABEL_PROTOCOL))
+    .map(String::as_str)
+    != Some(vpn_container::PROTOCOL)
+  {
+    return Err(io::Error::new(io::ErrorKind::Unsupported, IMAGE_OUTDATED));
+  }
+  // Freeze the verified image contents across any concurrent tag replacement.
+  let id = image.id.strip_prefix("sha256:").unwrap_or(&image.id);
+  if id.len() != 64
+    || !id
+      .bytes()
+      .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+  {
+    return Err(io::Error::other(IMAGE_INSPECTION_FAILED));
+  }
+  Ok(id.into())
 }
 
 pub(super) fn find_engine() -> io::Result<PathBuf> {

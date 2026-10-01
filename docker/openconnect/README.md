@@ -16,8 +16,11 @@ password, save it, and choose **Connect**. Authentication method and the optiona
 connectivity-check target are under advanced settings. The panel supports editing
 and deleting saved connections, disconnecting, and copying the SOCKS5 endpoint.
 Rebuild existing images for the shared heartbeat watchdog with
-`./docker/openconnect/run.sh build`. Legacy containers must be disconnected and
-recreated before they can be shared.
+`./docker/openconnect/run.sh build`. ctld verifies the image's heartbeat protocol
+before creating a container or sending credentials, then starts that inspected
+image by its immutable ID. An incompatible image returns a rebuild instruction
+instead of failing during authentication. Containers using the old lifetime
+protocol must be recreated.
 
 The app saves connections in a private JSON file. At connection time, ctld sends
 the selected configuration over attached stdin to the container, which creates

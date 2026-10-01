@@ -202,10 +202,17 @@ mod engine {
       .await
       .unwrap()
       .unwrap();
+    let image_checks = fs::read_to_string(engine.root.join("image.calls")).unwrap();
+    // Existing compatible containers do not depend on the creator's image tag.
+    fs::write(engine.root.join("image_missing"), "").unwrap();
     let mut second = timeout(TEST_TIMEOUT, engine.start())
       .await
       .unwrap()
       .unwrap();
+    assert_eq!(
+      fs::read_to_string(engine.root.join("image.calls")).unwrap(),
+      image_checks
+    );
     assert_eq!(first.status().container_id, second.status().container_id);
     assert_eq!(
       first.status().endpoint.as_deref(),
@@ -337,6 +344,141 @@ mod engine {
     assert!(error.to_string().contains("could not be resolved"));
     assert!(!error.to_string().contains("private-test-password"));
     assert!(!engine.root.join("remove.args").exists());
+  }
+
+  #[tokio::test]
+  async fn unsupported_image_capabilities_are_rejected_before_run_or_credentials() {
+    for labels in [
+      "null",
+      "{}",
+      r#"{"io.ctl.vpn.protocol":"0"}"#,
+      r#"{"io.ctl.vpn.protocol":"2"}"#,
+      r#"{"io.ctl.vpn.protocol":true}"#,
+      "invalid private-test-password",
+    ] {
+      let engine = FakeEngine::new();
+      fs::write(engine.root.join("image.labels"), labels).unwrap();
+      let Err(error) = timeout(TEST_TIMEOUT, engine.start()).await.unwrap() else {
+        panic!("unsupported image must be rejected");
+      };
+      assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+      assert_eq!(error.to_string(), IMAGE_OUTDATED);
+      assert_eq!(
+        fs::read_to_string(engine.root.join("image.args")).unwrap(),
+        format!("image\ninspect\n{IMAGE}\n")
+      );
+      for forbidden in [
+        "run.args",
+        "input",
+        "reservation",
+        "heartbeats",
+        "remove.args",
+      ] {
+        assert!(!engine.root.join(forbidden).exists());
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn missing_image_and_engine_failures_return_static_messages_without_starting() {
+    for (marker, message, kind) in [
+      ("image_missing", IMAGE_MISSING, io::ErrorKind::NotFound),
+      ("image_error", IMAGE_INSPECTION_FAILED, io::ErrorKind::Other),
+    ] {
+      let engine = FakeEngine::new();
+      fs::write(engine.root.join(marker), "").unwrap();
+      let Err(error) = timeout(TEST_TIMEOUT, engine.start()).await.unwrap() else {
+        panic!("image inspection must fail");
+      };
+      assert_eq!(error.kind(), kind);
+      assert_eq!(error.to_string(), message);
+      for forbidden in [
+        "run.args",
+        "input",
+        "reservation",
+        "heartbeats",
+        "remove.args",
+      ] {
+        assert!(!engine.root.join(forbidden).exists());
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn creators_run_the_verified_immutable_image_for_docker_and_podman_ids() {
+    let id = "b".repeat(64);
+    for (inspected, field) in [(format!("sha256:{id}"), "Id"), (id.clone(), "ID")] {
+      let engine = FakeEngine::new();
+      fs::write(engine.root.join("image.id"), inspected).unwrap();
+      fs::write(engine.root.join("image.id_key"), field).unwrap();
+      fs::write(engine.root.join("ready"), "").unwrap();
+      let mut vpn = timeout(TEST_TIMEOUT, engine.start())
+        .await
+        .unwrap()
+        .unwrap();
+      let arguments = fs::read_to_string(engine.root.join("run.args")).unwrap();
+      assert_eq!(arguments.lines().last(), Some(id.as_str()));
+      assert!(!arguments.lines().any(|argument| argument == IMAGE));
+      vpn.shutdown().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn invalid_inspected_image_ids_cannot_start_or_receive_credentials() {
+    for id in [
+      String::new(),
+      "b".repeat(63),
+      "B".repeat(64),
+      "g".repeat(64),
+      format!("sha256:{}", "b".repeat(63)),
+      format!("sha512:{}", "b".repeat(64)),
+      format!("sha256:sha256:{}", "b".repeat(64)),
+      format!("{}\n", "b".repeat(64)),
+    ] {
+      let engine = FakeEngine::new();
+      fs::write(engine.root.join("image.id"), id).unwrap();
+      let Err(error) = timeout(TEST_TIMEOUT, engine.start()).await.unwrap() else {
+        panic!("invalid image identity must be rejected");
+      };
+      assert_eq!(error.to_string(), IMAGE_INSPECTION_FAILED);
+      for forbidden in [
+        "run.args",
+        "input",
+        "reservation",
+        "heartbeats",
+        "remove.args",
+      ] {
+        assert!(!engine.root.join(forbidden).exists());
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn image_inspection_must_return_exactly_one_image() {
+    let image = serde_json::json!({
+      "Id": format!("sha256:{}", "b".repeat(64)),
+      "Config": {"Labels": {(vpn_container::LABEL_PROTOCOL): vpn_container::PROTOCOL}},
+    });
+    for images in [
+      serde_json::json!([]),
+      serde_json::json!([image.clone(), image]),
+    ] {
+      let engine = FakeEngine::new();
+      fs::write(engine.root.join("image.inspection"), images.to_string()).unwrap();
+      let Err(error) = timeout(TEST_TIMEOUT, engine.start()).await.unwrap() else {
+        panic!("ambiguous image inspection must be rejected");
+      };
+      assert_eq!(error.to_string(), IMAGE_INSPECTION_FAILED);
+      for forbidden in [
+        "run.args",
+        "input",
+        "reservation",
+        "heartbeats",
+        "remove.args",
+      ] {
+        assert!(!engine.root.join(forbidden).exists());
+      }
+    }
   }
 
   #[tokio::test]

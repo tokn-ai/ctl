@@ -1,0 +1,3 @@
+interface:
+  display_name: "ctl Ports"
+  short_description: "Manage local SSH port forwards owned by ctld"

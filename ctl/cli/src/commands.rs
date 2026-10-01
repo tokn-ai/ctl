@@ -20,6 +20,16 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     }
   }
   match arguments.command {
+    Command::Skill(skill_arguments) => {
+      if arguments.host.is_some()
+        || arguments.method.is_some()
+        || arguments.remote_platform.is_some()
+      {
+        return Err(CliError::SkillTarget);
+      }
+      crate::skill::run(skill_arguments)?;
+      return Ok(0);
+    }
     Command::Host { command } => {
       if arguments.host.is_some() || arguments.remote_platform.is_some() {
         return Err(CliError::HostManagementTarget);
@@ -65,8 +75,8 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     }
     #[cfg(unix)]
     Command::Port { command } => crate::port::run(&connector.settings, command).await?,
-    Command::Host { .. } | Command::Ssh { .. } | Command::Scp { .. } => {
-      unreachable!("compatibility commands dispatched above")
+    Command::Skill(_) | Command::Host { .. } | Command::Ssh { .. } | Command::Scp { .. } => {
+      unreachable!("commands dispatched before target resolution")
     }
     Command::Rmux { command } => {
       rmux_cli::run(command, &connector).await?;
@@ -289,6 +299,10 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error(transparent)]
+  Skill(#[from] crate::skill::Error),
+  #[error("Skill documentation is bundled locally; omit --host, --method, and --remote-platform.")]
+  SkillTarget,
   #[error(transparent)]
   HostCommand(#[from] crate::host::Error),
   #[error(

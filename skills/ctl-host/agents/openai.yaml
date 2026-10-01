@@ -1,0 +1,3 @@
+interface:
+  display_name: "ctl Hosts"
+  short_description: "Manage saved ctl hosts and connection methods"

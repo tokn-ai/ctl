@@ -1,11 +1,11 @@
 //! Prepared restart of an idle task owner, including older control-v1 owners.
 
 use super::{ClientError, daemon_executable, retryable, spawn_daemon, wait_for_endpoint};
-use component_info::{ComponentInfo, ProtocolInfo, executable::PreparedExecutable};
+use ctl_component_info::{ComponentInfo, ProtocolInfo, executable::PreparedExecutable};
+use ctl_task_ipc::{Stream, connect};
+use ctl_task_proto::{control, read_frame, write_frame};
 use std::path::PathBuf;
 use std::time::Duration;
-use task_ipc::{Stream, connect};
-use task_proto::{control, read_frame, write_frame};
 use tokio::io::AsyncReadExt as _;
 use tokio::time::{Instant, timeout};
 
@@ -74,7 +74,7 @@ impl Client {
     PreparedExecutable::prepare(
       selected,
       &[
-        ("task", task_proto::PROTOCOL_VERSION),
+        ("task", ctl_task_proto::PROTOCOL_VERSION),
         ("task_control", control::PROTOCOL_VERSION),
       ],
     )
@@ -123,7 +123,7 @@ pub struct RestartOutcome {
 /// # Errors
 /// Rejects absent owners and unavailable replacement helpers.
 pub async fn preflight_restart() -> Result<PreparedRestart, LifecycleError> {
-  Client::new(task_ipc::socket_path())
+  Client::new(ctl_task_ipc::socket_path())
     .preflight_restart()
     .await
 }
@@ -143,7 +143,7 @@ pub async fn preflight_restart_at(
 }
 
 impl PreparedRestart {
-  /// Requests cooperative idle-only shutdown, preserving the owner's storage and rmux endpoint.
+  /// Requests cooperative idle-only shutdown, preserving the owner's storage and ctmux endpoint.
   ///
   /// # Errors
   /// Busy and unsupported owners remain untouched. Reports shutdown, startup and verification errors.
@@ -165,7 +165,7 @@ impl PreparedRestart {
     {
       return Err(LifecycleError::new(
         "taskd_owner_changed",
-        "The prepared taskd connection closed or changed; prepare the restart again",
+        "The prepared ctl-taskd connection closed or changed; prepare the restart again",
       ));
     }
     if Instant::now() >= self.expires_at {
@@ -179,18 +179,18 @@ impl PreparedRestart {
         protocol_version: control::PROTOCOL_VERSION,
       }).await.map_err(|error| LifecycleError::new("taskd_restart_failed", error).destructive())?;
       match read_frame::<_, control::ServerMessage>(&mut self.stream).await {
-        Ok(Some(control::ServerMessage::RestartAccepted { data_directory, rmux_socket })) => Ok((data_directory, rmux_socket)),
+        Ok(Some(control::ServerMessage::RestartAccepted { data_directory, ctmux_socket })) => Ok((data_directory, ctmux_socket)),
         Ok(Some(control::ServerMessage::Error { message })) => Err(LifecycleError::new("taskd_restart_rejected", message)),
         _ => Err(LifecycleError::new("taskd_restart_unsupported", "The task owner did not acknowledge cooperative restart; it may require a one-time manual stop").destructive()),
       }
-    }).await.map_err(|_| LifecycleError::new("taskd_restart_timeout", "taskd did not acknowledge restart").destructive())??;
+    }).await.map_err(|_| LifecycleError::new("taskd_restart_timeout", "ctl-taskd did not acknowledge restart").destructive())??;
     // EOF is sent only after the listener and persisted-state lock are released.
     let end = timeout(Duration::from_secs(15), self.stream.read(&mut [0_u8; 1]))
       .await
       .map_err(|_| {
         LifecycleError::new(
           "taskd_restart_drain_failed",
-          "taskd did not finish stopping; no replacement was started",
+          "ctl-taskd did not finish stopping; no replacement was started",
         )
         .destructive()
       })?
@@ -199,7 +199,7 @@ impl PreparedRestart {
       return Err(
         LifecycleError::new(
           "taskd_restart_drain_failed",
-          "Unexpected data while waiting for taskd shutdown",
+          "Unexpected data while waiting for ctl-taskd shutdown",
         )
         .destructive(),
       );
@@ -265,14 +265,14 @@ async fn verify_successor(
     }
     Err(LifecycleError::new(
       "taskd_restart_verification_failed",
-      "The replacement taskd does not match the verified build and protocols",
+      "The replacement ctl-taskd does not match the verified build and protocols",
     ))
   })
   .await
   .map_err(|_| {
     LifecycleError::new(
       "taskd_restart_verification_failed",
-      "The replacement taskd did not answer its version query",
+      "The replacement ctl-taskd did not answer its version query",
     )
   })?
 }
@@ -282,7 +282,7 @@ async fn verify_successor(
 /// # Errors
 /// Returns an error for busy/unsupported owners or an unverified replacement.
 pub async fn restart_daemon() -> Result<(), ClientError> {
-  let client = Client::new(task_ipc::socket_path());
+  let client = Client::new(ctl_task_ipc::socket_path());
   match connect(&client.socket).await {
     Ok(stream) => {
       drop(stream);

@@ -1,7 +1,7 @@
 use super::{IdentityError, files, inspect_path, inventory};
 #[cfg(unix)]
 use super::{LocalAgent, save_verified};
-use ctld_ipc::identities::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response};
+use ctl_ipc::identities::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response};
 use std::io::{self, Read, Write};
 use zeroize::Zeroizing;
 

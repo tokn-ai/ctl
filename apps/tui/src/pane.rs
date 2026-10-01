@@ -1,9 +1,9 @@
 use crate::{Result, model::Model};
-use rmux_client::{
+use ctmux_client::{
   AttachRequest, AttachmentControl, AttachmentController, AttachmentControllerOptions,
   AttachmentEvent, AttachmentEvents, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES,
 };
-use rmux_proto::TerminalSize;
+use ctmux_proto::TerminalSize;
 use std::path::Path;
 use tokio::task::JoinHandle;
 
@@ -19,7 +19,7 @@ pub struct Pane {
 
 pub fn identity() -> ClientIdentity {
   ClientIdentity {
-    name: "rmux-tui".into(),
+    name: "ctmux-tui".into(),
     version: env!("CARGO_PKG_VERSION").into(),
   }
 }
@@ -33,7 +33,7 @@ impl Pane {
     layout: bool,
     token: Option<String>,
   ) -> Result<Self> {
-    let stream = rmux_ipc::connect_or_start_daemon(socket).await?;
+    let stream = ctmux_ipc::connect_or_start_daemon(socket).await?;
     let request = AttachRequest {
       session: terminal_id.into(),
       resume_from: None,
@@ -45,15 +45,15 @@ impl Pane {
       presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     };
     let attached = if let Some(token) = token {
-      rmux_client::resume_attach(stream, &identity(), token, request.clone()).await
+      ctmux_client::resume_attach(stream, &identity(), token, request.clone()).await
     } else {
-      rmux_client::begin_attach(stream, &identity(), request.clone()).await
+      ctmux_client::begin_attach(stream, &identity(), request.clone()).await
     };
     let (stream, attached) = match attached {
       Ok(attached) => attached,
-      Err(rmux_client::ClientError::Server { .. }) => {
-        let stream = rmux_ipc::connect_or_start_daemon(socket).await?;
-        rmux_client::begin_attach(stream, &identity(), request).await?
+      Err(ctmux_client::ClientError::Server { .. }) => {
+        let stream = ctmux_ipc::connect_or_start_daemon(socket).await?;
+        ctmux_client::begin_attach(stream, &identity(), request).await?
       }
       Err(error) => return Err(error.into()),
     };

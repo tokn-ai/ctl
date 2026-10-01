@@ -42,7 +42,7 @@ case "$action" in
     chmod 0600 "$config_file"
     build_image
     cargo build --manifest-path "$repo_dir/Cargo.toml" \
-      --target-dir "$repo_dir/target" -p ctl -p ctld
+      --target-dir "$repo_dir/target" -p ctl-cli -p ctld
     exec "$ctl_binary" vpn start --env-file "$config_file" "$@"
     ;;
   status|stop)

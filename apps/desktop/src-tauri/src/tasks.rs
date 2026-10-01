@@ -1,8 +1,8 @@
 //! Local task lifecycle and cancellable background output. No PTY ownership.
 use crate::error::{CommandErrorDto, CommandResult};
+use ctl_task_proto::{ClientMessage, ServerMessage};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
-use task_proto::{ClientMessage, ServerMessage};
 use tauri::{State, ipc::Channel};
 use tokio::sync::{Mutex, watch};
 
@@ -27,8 +27,8 @@ impl TaskStreams {
   }
 }
 
-fn client_error(error: task_client::ClientError) -> CommandErrorDto {
-  if let task_client::ClientError::Server { code, message } = error {
+fn client_error(error: ctl_task_client::ClientError) -> CommandErrorDto {
+  if let ctl_task_client::ClientError::Server { code, message } = error {
     let code = serde_json::to_value(code)
       .ok()
       .and_then(|value| value.as_str().map(str::to_owned))
@@ -50,14 +50,18 @@ pub async fn task_request(request: ClientMessage) -> CommandResult<ServerMessage
       "Use the log subscription command for task output.",
     ));
   }
-  task_client::request(&request).await.map_err(client_error)
+  ctl_task_client::request(&request)
+    .await
+    .map_err(client_error)
 }
 
 #[tauri::command]
 pub async fn restart_task_daemon(state: State<'_, crate::state::AppState>) -> CommandResult<()> {
   let transition = state.daemon_restart_transition();
   let _transition = transition.lock().await;
-  task_client::restart_daemon().await.map_err(client_error)
+  ctl_task_client::restart_daemon()
+    .await
+    .map_err(client_error)
 }
 
 #[derive(Deserialize)]
@@ -73,7 +77,7 @@ pub enum TaskLogEvent {
     subscription_id: String,
     run_id: String,
     sequence: String,
-    stream: task_proto::LogStream,
+    stream: ctl_task_proto::LogStream,
     data: Vec<u8>,
   },
   Finished,
@@ -109,7 +113,7 @@ pub async fn watch_task_logs(
   let subscription_id = id.clone();
   tauri::async_runtime::spawn(async move {
     let operation = async {
-      let mut stream = task_client::open(&ClientMessage::ReadLogs {
+      let mut stream = ctl_task_client::open(&ClientMessage::ReadLogs {
         task: request.task_id,
         after_sequence,
         follow: true,
@@ -117,7 +121,7 @@ pub async fn watch_task_logs(
       .await
       .map_err(client_error)?;
       loop {
-        let message = task_proto::read_frame(&mut stream)
+        let message = ctl_task_proto::read_frame(&mut stream)
           .await
           .map_err(CommandErrorDto::backend)?;
         let event = match message {

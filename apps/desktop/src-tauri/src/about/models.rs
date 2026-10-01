@@ -1,4 +1,4 @@
-use component_info::ComponentBuildInfo;
+use ctl_component_info::ComponentBuildInfo;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,7 +26,7 @@ pub struct ComponentVersionInfo {
 }
 
 impl ComponentVersionInfo {
-  pub fn from_component(info: component_info::ComponentInfo) -> Self {
+  pub fn from_component(info: ctl_component_info::ComponentInfo) -> Self {
     Self::from_build(
       info.build,
       info
@@ -163,22 +163,22 @@ impl ComponentVersionRow {
 }
 
 fn expected_component_version() -> ComponentVersionInfo {
-  ComponentVersionInfo::from_build(component_info::build_info(), Vec::new())
+  ComponentVersionInfo::from_build(ctl_component_info::build_info(), Vec::new())
 }
 
 fn required_protocols(component: &str) -> Vec<ProtocolVersion> {
   match component {
     "ctld" => vec![
-      ProtocolVersion::new("ctld", ctld_ipc::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctld_lifecycle", ctld_ipc::lifecycle::PROTOCOL_VERSION),
+      ProtocolVersion::new("ctld", ctl_ipc::PROTOCOL_VERSION),
+      ProtocolVersion::new("ctld_lifecycle", ctl_ipc::lifecycle::PROTOCOL_VERSION),
     ],
-    "rmuxd" => vec![
-      ProtocolVersion::new("rmux", rmux_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("rmux_control", rmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
+    "ctmuxd" => vec![
+      ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION),
+      ProtocolVersion::new("ctmux_control", ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
     ],
-    "taskd" => vec![
-      ProtocolVersion::new("task", task_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("task_control", task_proto::control::PROTOCOL_VERSION),
+    "ctl-taskd" => vec![
+      ProtocolVersion::new("task", ctl_task_proto::PROTOCOL_VERSION),
+      ProtocolVersion::new("task_control", ctl_task_proto::control::PROTOCOL_VERSION),
     ],
     _ => Vec::new(),
   }
@@ -320,10 +320,10 @@ mod tests {
     let mut expected = info("0.2.0", Some("same"));
     expected
       .protocols
-      .push(ProtocolVersion::new("rmux", rmux_proto::PROTOCOL_VERSION));
+      .push(ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION));
     let mut actual = expected.clone();
     actual.protocols[0].version -= 1;
-    let mut row = ComponentVersionRow::local("rmuxd", "rmuxd");
+    let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
     row.running = Some(actual);
     row.available = Some(expected);
     row.compare();
@@ -335,13 +335,13 @@ mod tests {
     let mut running = expected_component_version();
     running
       .protocols
-      .push(ProtocolVersion::new("rmux", rmux_proto::PROTOCOL_VERSION));
+      .push(ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION));
     let mut available = info("0.2.0", Some("next"));
     available.protocols.push(ProtocolVersion::new(
-      "rmux",
-      rmux_proto::PROTOCOL_VERSION + 1,
+      "ctmux",
+      ctmux_proto::PROTOCOL_VERSION + 1,
     ));
-    let mut row = ComponentVersionRow::local("rmuxd", "rmuxd");
+    let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
     row.running = Some(running);
     row.available = Some(available);
     row.compare();
@@ -350,7 +350,7 @@ mod tests {
 
   #[test]
   fn matching_stale_running_and_available_builds_are_not_current_with_this_app() {
-    for component in ["ctld", "rmuxd", "taskd"] {
+    for component in ["ctld", "ctmuxd", "ctl-taskd"] {
       let mut row = ComponentVersionRow::local(component, component);
       let mut stale = expected_component_version();
       stale.source_fingerprint = Some("another-component-build".into());
@@ -377,7 +377,7 @@ mod tests {
     let mut old = info("0.1.0", Some("same-old-build"));
     old
       .protocols
-      .push(ProtocolVersion::new("ctld", ctld_ipc::PROTOCOL_VERSION - 1));
+      .push(ProtocolVersion::new("ctld", ctl_ipc::PROTOCOL_VERSION - 1));
     row.running = Some(old.clone());
     row.available = Some(old);
     row.compare();
@@ -385,11 +385,11 @@ mod tests {
     let value = serde_json::to_value(&row).unwrap();
     assert_eq!(
       value["required_protocols"][0]["version"],
-      ctld_ipc::PROTOCOL_VERSION
+      ctl_ipc::PROTOCOL_VERSION
     );
     assert_eq!(
       value["available"]["protocols"][0]["version"],
-      ctld_ipc::PROTOCOL_VERSION - 1
+      ctl_ipc::PROTOCOL_VERSION - 1
     );
   }
 
@@ -412,9 +412,12 @@ mod tests {
 
   #[test]
   fn legacy_explanation_preserves_observed_protocols_without_inventing_a_build() {
-    let mut row = ComponentVersionRow::local("taskd", "taskd");
+    let mut row = ComponentVersionRow::local("ctl-taskd", "ctl-taskd");
     row.running = Some(ComponentVersionInfo {
-      protocols: vec![ProtocolVersion::new("task", task_proto::PROTOCOL_VERSION)],
+      protocols: vec![ProtocolVersion::new(
+        "task",
+        ctl_task_proto::PROTOCOL_VERSION,
+      )],
       ..ComponentVersionInfo::default()
     });
     row.compare();
@@ -435,7 +438,7 @@ mod tests {
   fn maintenance_requests_cannot_supply_commands_or_endpoints() {
     assert!(
       serde_json::from_value::<PreflightRestartRequest>(serde_json::json!({
-        "component_id": "rmuxd", "socket": "/tmp/other.sock",
+        "component_id": "ctmuxd", "socket": "/tmp/other.sock",
       }))
       .is_err()
     );

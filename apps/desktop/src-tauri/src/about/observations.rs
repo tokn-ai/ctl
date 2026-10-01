@@ -9,7 +9,7 @@ use super::models::{ComponentAction, ComponentVersionInfo, ComponentVersionRow, 
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteObservation {
   pub identity: ctl_proto::RemoteIdentity,
-  pub handshake: rmux_client::HandshakeInfo,
+  pub handshake: ctmux_client::HandshakeInfo,
   pub label: String,
   pub host_id: Option<String>,
 }
@@ -41,21 +41,21 @@ pub(super) fn rows(observations: Vec<RemoteObservation>) -> Vec<ComponentVersion
       agent_info,
       agent_protocols,
     );
-    let rmux_info = ComponentVersionInfo::observed(
+    let ctmux_info = ComponentVersionInfo::observed(
       observation.handshake.server_version.clone(),
       observation.handshake.build.clone(),
       vec![ProtocolVersion::new(
-        "rmux",
+        "ctmux",
         observation.handshake.protocol_version,
       )],
     );
     insert(
       &mut rows,
-      "rmuxd",
-      "rmuxd",
+      "ctmuxd",
+      "ctmuxd",
       &observation,
-      rmux_info,
-      vec![ProtocolVersion::new("rmux", rmux_proto::PROTOCOL_VERSION)],
+      ctmux_info,
+      vec![ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION)],
     );
   }
   rows.into_values().collect()
@@ -90,13 +90,13 @@ fn insert(
       // The remote table explicitly labels this reference as "This app build".
       // Confirmed actions inspect the installed remote replacement separately.
       available: Some(ComponentVersionInfo::from_build(
-        component_info::build_info(),
+        ctl_component_info::build_info(),
         expected_protocols,
       )),
-      restart_supported: component == "rmuxd" && observation.identity.rmux_restart_supported,
+      restart_supported: component == "ctmuxd" && observation.identity.ctmux_restart_supported,
       action: match component {
         "ctl_agent" => Some(ComponentAction::Reconnect),
-        "rmuxd" if observation.identity.rmux_restart_supported => Some(ComponentAction::Restart),
+        "ctmuxd" if observation.identity.ctmux_restart_supported => Some(ComponentAction::Restart),
         _ => None,
       },
       detail: Some(
@@ -117,20 +117,20 @@ mod tests {
   use std::time::Duration;
 
   fn observation() -> RemoteObservation {
-    let build = component_info::build_info();
+    let build = ctl_component_info::build_info();
     RemoteObservation {
       identity: ctl_proto::RemoteIdentity {
         remote_id: "4db8b2dd-f953-458a-9124-97449c22a71f".into(),
         agent_version: build.version.clone(),
         build: Some(build.clone()),
-        rmux_restart_supported: true,
+        ctmux_restart_supported: true,
         bundle: None,
       },
-      handshake: rmux_client::HandshakeInfo {
+      handshake: ctmux_client::HandshakeInfo {
         server_version: build.version.clone(),
-        protocol_version: rmux_proto::PROTOCOL_VERSION,
+        protocol_version: ctmux_proto::PROTOCOL_VERSION,
         build: Some(build),
-        attachment_liveness: rmux_client::AttachmentLiveness {
+        attachment_liveness: ctmux_client::AttachmentLiveness {
           heartbeat_interval: Duration::from_secs(1),
           peer_timeout: Duration::from_secs(3),
         },
@@ -187,7 +187,7 @@ mod tests {
         .expect("the app build is known independently of remote metadata");
       assert_eq!(
         reference.source_fingerprint,
-        Some(component_info::build_info().source_fingerprint)
+        Some(ctl_component_info::build_info().source_fingerprint)
       );
       assert_eq!(reference.protocols, row.required_protocols);
       assert!(row.running.unwrap().source_fingerprint.is_none());

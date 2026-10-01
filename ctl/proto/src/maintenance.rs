@@ -1,16 +1,16 @@
 //! Fixed, confirmation-bound maintenance over an already authenticated SSH channel.
-use component_info::{ComponentBuildInfo, ComponentInfo};
+use ctl_component_info::{ComponentBuildInfo, ComponentInfo};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 const MAX_FRAME_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
-  PrepareRmuxRestart {
+  PrepareCtmuxRestart {
     protocol_version: u16,
     expected_remote_id: String,
   },
@@ -18,21 +18,21 @@ pub enum ClientMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunningRmux {
+pub struct RunningCtmux {
   pub build: Option<ComponentBuildInfo>,
   pub protocol_version: Option<u16>,
   pub control_protocol_version: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RmuxPreparation {
+pub struct CtmuxPreparation {
   pub remote_id: String,
-  pub running: RunningRmux,
+  pub running: RunningCtmux,
   pub available: ComponentInfo,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RmuxRestartCompleted {
+pub struct CtmuxRestartCompleted {
   pub after: ComponentInfo,
   pub terminated_sessions: u32,
 }
@@ -41,10 +41,10 @@ pub struct RmuxRestartCompleted {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
   Prepared {
-    info: RmuxPreparation,
+    info: CtmuxPreparation,
   },
   Completed {
-    result: RmuxRestartCompleted,
+    result: CtmuxRestartCompleted,
   },
   Error {
     code: String,
@@ -112,7 +112,7 @@ mod tests {
     let mut bytes = Vec::new();
     write(
       &mut bytes,
-      &ClientMessage::PrepareRmuxRestart {
+      &ClientMessage::PrepareCtmuxRestart {
         protocol_version: PROTOCOL_VERSION,
         expected_remote_id: "test-identity".into(),
       },
@@ -123,7 +123,7 @@ mod tests {
     let mut reader = bytes.as_slice();
     assert!(matches!(
       read::<_, ClientMessage>(&mut reader).await.unwrap(),
-      ClientMessage::PrepareRmuxRestart { .. }
+      ClientMessage::PrepareCtmuxRestart { .. }
     ));
     assert_ne!(reader, &[] as &[u8]);
     assert!(matches!(

@@ -1,5 +1,5 @@
 [package]
-name = "rmux-tui"
+name = "ctmux-tui"
 version.workspace = true
 edition.workspace = true
 
@@ -8,9 +8,9 @@ avt.workspace = true
 base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
-rmux-client.workspace = true
-rmux-ipc.workspace = true
-rmux-proto.workspace = true
+ctmux-client.workspace = true
+ctmux-ipc.workspace = true
+ctmux-proto.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
 
@@ -21,7 +21,7 @@ crossterm = { workspace = true, features = ["use-dev-tty"] }
 
 [dev-dependencies]
 portable-pty.workspace = true
-rmuxd.workspace = true
+ctmuxd.workspace = true
 uuid.workspace = true
 
 [lints]

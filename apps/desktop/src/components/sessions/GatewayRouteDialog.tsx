@@ -303,8 +303,8 @@ export function GatewayRouteDialog({
                 {privateMaster
                   ? "VPN and SOCKS5 routes use a private SSH master to preserve the selected route."
                   : hostSetup.ssh_config_master.checked
-                    ? "Use OpenSSH sharing settings, with an rmux private master when sharing is not configured."
-                    : "Use an rmux private master for this connection."}
+                    ? "Use OpenSSH sharing settings, with an ctmux private master when sharing is not configured."
+                    : "Use an ctmux private master for this connection."}
               </small>
             </label>
           ) : null}

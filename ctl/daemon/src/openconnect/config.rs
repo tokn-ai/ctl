@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
-use ctld_ipc::{VpnConnection, VpnSettings};
+use ctl_ipc::{VpnConnection, VpnSettings};
 use zeroize::Zeroizing;
 
 // One base64 line must fit the entrypoint's 65,536-byte input limit.

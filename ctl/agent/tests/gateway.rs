@@ -1,5 +1,5 @@
 #[cfg(windows)]
-use rmux_ipc::windows::Listener;
+use ctmux_ipc::windows::Listener;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,7 +12,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct TestPaths {
   root: PathBuf,
-  rmux_socket: PathBuf,
+  ctmux_socket: PathBuf,
 }
 
 impl TestPaths {
@@ -21,10 +21,10 @@ impl TestPaths {
     let root = std::env::temp_dir().join(format!("ctl-agent-gateway-{}", &token[..12]));
     std::fs::create_dir(&root).expect("create test directory");
     #[cfg(unix)]
-    let rmux_socket = root.join("rmux.sock");
+    let ctmux_socket = root.join("ctmux.sock");
     #[cfg(windows)]
-    let rmux_socket = PathBuf::from(format!(r"\\.\pipe\ctl-agent-gateway-{token}"));
-    Self { root, rmux_socket }
+    let ctmux_socket = PathBuf::from(format!(r"\\.\pipe\ctl-agent-gateway-{token}"));
+    Self { root, ctmux_socket }
   }
 }
 
@@ -48,11 +48,12 @@ async fn identified_gateway_emits_metadata_before_service_bytes() {
 }
 
 async fn gateway_round_trip(identified: bool) {
+  const PAYLOAD: &[u8] = b"\0raw ctmux payload\xff\n";
   let paths = TestPaths::new();
-  let listener = Listener::bind(&paths.rmux_socket).expect("bind fake rmux endpoint");
+  let listener = Listener::bind(&paths.ctmux_socket).expect("bind fake ctmux endpoint");
   let endpoint = tokio::spawn(async move {
     let mut relay = listener.accept().await.expect("accept relay").0;
-    let mut payload = [0_u8; 19];
+    let mut payload = [0_u8; PAYLOAD.len()];
     relay.read_exact(&mut payload).await.expect("read payload");
     relay.write_all(&payload).await.expect("echo payload");
     relay.flush().await.expect("flush payload");
@@ -71,11 +72,11 @@ async fn gateway_round_trip(identified: bool) {
     direct.write_all(b"pong").await.expect("write probe");
   });
 
-  let mut config = ctl_agent::ConnectConfig::new(paths.rmux_socket.clone());
+  let mut config = ctl_agent::ConnectConfig::new(paths.ctmux_socket.clone());
   let identity = ctl_proto::RemoteIdentity {
     remote_id: Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
-    rmux_restart_supported: false,
+    ctmux_restart_supported: false,
     build: None,
     bundle: None,
   };
@@ -100,7 +101,7 @@ async fn gateway_round_trip(identified: bool) {
     assert_eq!(preface, ctl_agent::SSH_TRANSPORT_PREFACE);
   }
 
-  let payload = b"\0raw rmux payload\xff\n";
+  let payload = PAYLOAD;
   client.write_all(payload).await.expect("write raw payload");
   client.flush().await.expect("flush raw payload");
   let mut echoed = vec![0; payload.len()];
@@ -114,7 +115,7 @@ async fn gateway_round_trip(identified: bool) {
     .expect("join relay")
     .expect("relay closes cleanly");
 
-  let mut direct = rmux_ipc::connect_existing_daemon(&paths.rmux_socket)
+  let mut direct = ctmux_ipc::connect_existing_daemon(&paths.ctmux_socket)
     .await
     .expect("local endpoint survives relay");
   direct.write_all(b"ping").await.expect("write direct probe");
@@ -131,13 +132,13 @@ async fn gateway_round_trip(identified: bool) {
 #[tokio::test]
 async fn missing_local_endpoint_is_reported_without_starting_an_unconfigured_daemon() {
   let paths = TestPaths::new();
-  let config = ctl_agent::ConnectConfig::new(paths.rmux_socket.clone());
+  let config = ctl_agent::ConnectConfig::new(paths.ctmux_socket.clone());
   let (client, gateway) = tokio::io::duplex(64);
   let (gateway_reader, gateway_writer) = tokio::io::split(gateway);
 
   let error = ctl_agent::connect(gateway_reader, gateway_writer, &config)
     .await
     .expect_err("missing endpoint must fail");
-  assert!(matches!(error, ctl_agent::AgentError::RmuxUnavailable(_)));
+  assert!(matches!(error, ctl_agent::AgentError::CtmuxUnavailable(_)));
   drop(client);
 }

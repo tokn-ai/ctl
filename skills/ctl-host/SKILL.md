@@ -69,4 +69,4 @@ For requested deletion, use `ctl host method remove HOST METHOD --json` or `ctl 
 
 ## Catalog conflicts
 
-The catalog is `~/.tokn/rmux/hosts.json`, or the path selected by `CTL_HOSTS_PATH`. Use the CLI's shared validation and atomic catalog updates instead of rewriting this file. On a concurrent-edit conflict, reread the current host and reapply only the intended changes; do not force an old snapshot over the newer catalog. Reload an already-open desktop to see CLI edits.
+The catalog is `~/.tokn/ctmux/hosts.json`, or the path selected by `CTL_HOSTS_PATH`. Use the CLI's shared validation and atomic catalog updates instead of rewriting this file. On a concurrent-edit conflict, reread the current host and reapply only the intended changes; do not force an old snapshot over the newer catalog. Reload an already-open desktop to see CLI edits.

@@ -97,7 +97,7 @@ async fn a_remote_key_prompt_always_requests_user_input_instead_of_keychain_auto
     identity_file: Some(PathBuf::from("/keys/work key")),
     gateways: Vec::new(),
   };
-  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   let (response, response_rx) = tokio::sync::oneshot::channel();
   let worker = tokio::spawn(async move {
     let mut attempted = HashSet::new();
@@ -118,17 +118,17 @@ async fn a_remote_key_prompt_always_requests_user_input_instead_of_keychain_auto
     assert_eq!(attempted, HashSet::<String>::new());
     assert_eq!(captured.len(), 1);
   });
-  let Some(ctld_ipc::ServerMessage::Prompt {
+  let Some(ctl_ipc::ServerMessage::Prompt {
     prompt_id,
-    kind: ctld_ipc::PromptKind::Secret,
+    kind: ctl_ipc::PromptKind::Secret,
     ..
-  }) = ctld_ipc::read_frame(&mut client).await.unwrap()
+  }) = ctl_ipc::read_frame(&mut client).await.unwrap()
   else {
     panic!("key prompts must ask the user");
   };
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut client,
-    &ctld_ipc::ClientMessage::PromptResponse {
+    &ctl_ipc::ClientMessage::PromptResponse {
       prompt_id,
       response: Some(Zeroizing::new("user supplied".into())),
     },

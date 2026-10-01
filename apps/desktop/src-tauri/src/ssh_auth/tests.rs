@@ -12,7 +12,7 @@ fn prompt_context() -> (PromptContext, mpsc::UnboundedReceiver<serde_json::Value
   (
     PromptContext {
       attempt: Arc::new(Attempt {
-        target: ctld_ipc::SshTarget {
+        target: ctl_ipc::SshTarget {
           destination: "test".into(),
           ssh_config_alias: None,
           use_ssh_config_master: None,
@@ -113,6 +113,6 @@ fn restart_support_is_opt_in_for_older_agents() {
     require_restart_support(&identity).unwrap_err().code,
     "remote_restart_unsupported"
   );
-  identity.rmux_restart_supported = true;
+  identity.ctmux_restart_supported = true;
   assert!(require_restart_support(&identity).is_ok());
 }

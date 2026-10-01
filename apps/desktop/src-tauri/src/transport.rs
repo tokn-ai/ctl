@@ -1,6 +1,6 @@
 #[cfg(test)]
-use ctl_core::{ConnectionTarget, SshConnectionOptions};
-use ctl_core::{Transport, open_transport};
+use ctl_client::{ConnectionTarget, SshConnectionOptions};
+use ctl_client::{Transport, open_transport};
 #[cfg(test)]
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,7 +22,7 @@ pub async fn connect(target: &ConnectionTargetDto) -> CommandResult<Transport> {
       CommandErrorDto::new(
         "connection_timeout",
         format!(
-          "{} did not establish an rmux connection within ten seconds",
+          "{} did not establish an ctmux connection within ten seconds",
           target.label()
         ),
       )
@@ -62,9 +62,9 @@ mod tests {
       ssh_config_alias: None,
       use_ssh_config_master: None,
       remote_info: None,
-      destination: "rmux-remote-test".into(),
+      destination: "ctmux-remote-test".into(),
       hostname: Some("127.0.0.1".into()),
-      user: Some("rmux".into()),
+      user: Some("ctmux".into()),
       port: Some(2222),
       identity_file: Some("~/.ssh/local.id_rsa".into()),
       gateway_route: Vec::new(),
@@ -75,11 +75,11 @@ mod tests {
     assert_eq!(
       target.to_core(),
       ConnectionTarget::Ssh {
-        destination: "rmux-remote-test".into(),
+        destination: "ctmux-remote-test".into(),
         options: SshConnectionOptions {
-          remote_platform: ctl_core::RemotePlatform::Unix,
+          remote_platform: ctl_client::RemotePlatform::Unix,
           hostname: Some("127.0.0.1".into()),
-          user: Some("rmux".into()),
+          user: Some("ctmux".into()),
           port: Some(2222),
           identity_file: Some(PathBuf::from("~/.ssh/local.id_rsa")),
           gateways: Vec::new(),

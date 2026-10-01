@@ -284,7 +284,7 @@ describe("workspace lifecycle", () => {
       schema_version: 1,
       ssh_destinations: ["legacy"],
     });
-    window.localStorage.setItem("rmux.remote_hosts", legacy);
+    window.localStorage.setItem("ctmux.remote_hosts", legacy);
     api.loadWorkspace.mockResolvedValue({
       revision: null,
       document: workspaceDocument(emptyWorkspaceView()),
@@ -301,7 +301,7 @@ describe("workspace lifecycle", () => {
       wrapper: StrictMode,
     });
     await waitFor(() => expect(api.updateHosts).toHaveBeenCalledTimes(1));
-    expect(window.localStorage.getItem("rmux.remote_hosts")).toBe(legacy);
+    expect(window.localStorage.getItem("ctmux.remote_hosts")).toBe(legacy);
     expect(result.current.ready).toBe(false);
     const document = api.updateHosts.mock.calls[0][1];
     await act(async () => complete({ revision: "migrated", document }));
@@ -310,12 +310,12 @@ describe("workspace lifecycle", () => {
     expect(document.hosts).toHaveLength(1);
     expect(document.hosts[0].connection_methods[0].target.destination).toBe("legacy");
     expect(api.updateWorkspace.mock.calls[0][1].hosts).toBeUndefined();
-    expect(window.localStorage.getItem("rmux.remote_hosts")).toBeNull();
+    expect(window.localStorage.getItem("ctmux.remote_hosts")).toBeNull();
   });
 
   it("preserves the legacy copy when migration fails and never replaces an unreadable workspace", async () => {
     window.localStorage.setItem(
-      "rmux.remote_hosts",
+      "ctmux.remote_hosts",
       JSON.stringify({ schema_version: 1, ssh_destinations: ["legacy"] }),
     );
     api.loadWorkspace.mockResolvedValue({
@@ -332,7 +332,7 @@ describe("workspace lifecycle", () => {
       expect(first.result.current.error).toContain("disk full"),
     );
     expect(first.result.current.ready).toBe(false);
-    expect(window.localStorage.getItem("rmux.remote_hosts")).not.toBeNull();
+    expect(window.localStorage.getItem("ctmux.remote_hosts")).not.toBeNull();
     first.unmount();
     api.updateWorkspace.mockClear();
     api.updateHosts.mockClear();
@@ -348,7 +348,7 @@ describe("workspace lifecycle", () => {
 
   it("reuses migrated hosts after a workspace failure instead of importing duplicates on reload", async () => {
     const legacy = JSON.stringify({ schema_version: 1, ssh_destinations: ["legacy"] });
-    window.localStorage.setItem("rmux.remote_hosts", legacy);
+    window.localStorage.setItem("ctmux.remote_hosts", legacy);
     api.loadWorkspace.mockResolvedValue({ revision: null, document: workspaceDocument(emptyWorkspaceView()) });
     let catalog = emptyHosts;
     api.loadHosts.mockImplementation(async () => catalog);
@@ -361,7 +361,7 @@ describe("workspace lifecycle", () => {
     await waitFor(() => expect(first.result.current.error).toBe("workspace disk full"));
     expect(first.result.current.ready).toBe(false);
     expect(catalog.document.hosts).toHaveLength(1);
-    expect(window.localStorage.getItem("rmux.remote_hosts")).toBe(legacy);
+    expect(window.localStorage.getItem("ctmux.remote_hosts")).toBe(legacy);
     const migrated_id = catalog.document.hosts[0].host_id;
     first.unmount();
     const second = renderHook(() => useWorkspace());
@@ -369,7 +369,7 @@ describe("workspace lifecycle", () => {
     expect(second.result.current.hosts).toHaveLength(2);
     expect(second.result.current.hosts[1].host_id).toBe(migrated_id);
     expect(api.updateHosts).toHaveBeenCalledOnce();
-    expect(window.localStorage.getItem("rmux.remote_hosts")).toBeNull();
+    expect(window.localStorage.getItem("ctmux.remote_hosts")).toBeNull();
   });
 
   it("persists membership independently of tabs, and exposes save failures", async () => {
@@ -554,12 +554,12 @@ describe("workspace lifecycle", () => {
       schema_version: 2,
       ssh_hosts: [{ destination: "invalid", port: 0 }],
     });
-    window.localStorage.setItem("rmux.remote_hosts", legacy);
+    window.localStorage.setItem("ctmux.remote_hosts", legacy);
     const { result } = renderHook(() => useWorkspace());
     await waitFor(() => expect(result.current.error).toContain("preserved"));
     expect(api.updateWorkspace).not.toHaveBeenCalled();
     expect(api.updateHosts).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem("rmux.remote_hosts")).toBe(legacy);
+    expect(window.localStorage.getItem("ctmux.remote_hosts")).toBe(legacy);
   });
 });
 

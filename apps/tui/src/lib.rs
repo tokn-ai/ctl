@@ -1,4 +1,4 @@
-//! Reusable local terminal UI, shared by rmux and the legacy rmux-tui launcher.
+//! Reusable local terminal UI, shared by ctmux and the legacy ctmux-tui launcher.
 mod app;
 mod copy;
 mod input;

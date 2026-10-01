@@ -1,12 +1,12 @@
 [package]
-name = "task-ipc"
+name = "ctl-task-ipc"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-component-info.workspace = true
+ctl-component-info.workspace = true
 tokio.workspace = true
-task-proto.workspace = true
+ctl-task-proto.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

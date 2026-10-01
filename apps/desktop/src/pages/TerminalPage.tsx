@@ -1238,8 +1238,8 @@ function TerminalWorkbench() {
 
   const executeAboutAction = async (preflight: ComponentActionPreflight) => {
     const execute = () => executeComponentAction(preflight.action_token);
-    if (preflight.component === "taskd" && preflight.location === "local") return taskWorkspace.performComponentAction(execute);
-    if (preflight.component !== "rmuxd" || preflight.location !== "local") return execute();
+    if (preflight.component === "ctl-taskd" && preflight.location === "local") return taskWorkspace.performComponentAction(execute);
+    if (preflight.component !== "ctmuxd" || preflight.location !== "local") return execute();
     if (restartingDaemonRef.current || creatingRef.current) throw new Error("Wait for the current local session operation to finish.");
     restartingDaemonRef.current = true;
     setRestartingDaemon(true);
@@ -1270,7 +1270,7 @@ function TerminalWorkbench() {
       if (!restartFailurePreservesLocalState(errorCode(error))) {
         clearLocalDaemonState();
       }
-      setListError(`Could not restart rmuxd: ${errorMessage(error)}`);
+      setListError(`Could not restart ctmuxd: ${errorMessage(error)}`);
     } finally {
       restartingDaemonRef.current = false;
       setRestartingDaemon(false);
@@ -1467,7 +1467,7 @@ function TerminalWorkbench() {
   }
   const activeTitle = formatTerminalTitle(activeTab, activeShellState);
   useWindowTitle(
-    utility_page ? (utility_page === "about" ? "About rmux" : "Credentials") : taskWorkspace.active
+    utility_page ? (utility_page === "about" ? "About ctmux" : "Credentials") : taskWorkspace.active
       ? (taskWorkspace.activeTask?.definition.name ??
           taskWorkspace.saved?.definition.name ??
           "Task definition")
@@ -1606,9 +1606,9 @@ function TerminalWorkbench() {
   commands.push({
     id: COMMAND_IDS.about,
     category: "App",
-    title: "About rmux",
+    title: "About ctmux",
     detail: "Check app, daemon, and connected host versions.",
-    keywords: ["version", "protocol", "ctld", "rmuxd", "taskd", "update", "restart"],
+    keywords: ["version", "protocol", "ctld", "ctmuxd", "ctl-taskd", "update", "restart"],
     enabled: workspace.ready,
     keybinding: keybindings.bindings.get(COMMAND_IDS.about),
     focusTerminalAfterRun: false,
@@ -1681,7 +1681,7 @@ function TerminalWorkbench() {
   commands.push({
     id: COMMAND_IDS.restartTaskDaemon,
     category: "Tasks",
-    title: "Restart taskd",
+    title: "Restart ctl-taskd",
     detail: "Restart the local task daemon. Stop active tasks first.",
     enabled: workspace.ready && !taskWorkspace.busy,
     keybinding: keybindings.bindings.get(COMMAND_IDS.restartTaskDaemon),
@@ -2080,7 +2080,7 @@ function TerminalWorkbench() {
               on_dialog_change={setAboutDialogOpen}
               execute_action={executeAboutAction}
               on_restarted={(preflight) => {
-                if (preflight.component === "taskd") void taskWorkspace.refresh();
+                if (preflight.component === "ctl-taskd") void taskWorkspace.refresh();
                 else { void vpn.refresh(); void hostConnections.refresh(); void portForwarding.refreshAll(); }
               }}
             />
@@ -2090,7 +2090,7 @@ function TerminalWorkbench() {
             show_terminal={!utility_page && (!taskWorkspace.active || (
               taskWorkspace.activeTask?.definition.execution_mode === "interactive" && !!taskWorkspace.activeTask.active_run
             ))}
-            context_label={utility_page === "about" ? "About rmux" : utility_page === "credentials" ? "Credentials" : "Tasks"}
+            context_label={utility_page === "about" ? "About ctmux" : utility_page === "credentials" ? "Credentials" : "Tasks"}
             inert={dialogOpen || paletteOpen || workspace.closing}
           >
             <NotificationBell store={notifications} />
@@ -2334,11 +2334,11 @@ function TerminalWorkbench() {
           />
         ) : daemonRestartConfirmationPending ? (
           <QuickInput
-            title="Restart rmuxd"
-            description="Terminate every local rmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
+            title="Restart ctmuxd"
+            description="Terminate every local ctmux session, including sessions opened by other apps, and start a new daemon? This cannot be undone."
             mode={{
               kind: "confirm",
-              confirm_label: "Restart rmuxd",
+              confirm_label: "Restart ctmuxd",
               destructive: true,
             }}
             onCancel={cancelDaemonRestart}

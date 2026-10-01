@@ -25,11 +25,11 @@ impl Fixture {
     std::fs::create_dir_all(&root).unwrap();
     let executable = root.join("helper");
     let info = ComponentInfo {
-      build: component_info::build_info(),
+      build: ctl_component_info::build_info(),
       protocols: vec![
         ProtocolInfo {
           name: "task".into(),
-          version: task_proto::PROTOCOL_VERSION,
+          version: ctl_task_proto::PROTOCOL_VERSION,
         },
         ProtocolInfo {
           name: "task_control".into(),
@@ -123,7 +123,7 @@ async fn busy_refusal_does_not_start_replacement_or_report_destructive_transitio
     write_frame(
       &mut stream,
       &control::ServerMessage::Error {
-        message: "taskd has active tasks".into(),
+        message: "ctl-taskd has active tasks".into(),
       },
     )
     .await
@@ -163,7 +163,7 @@ async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, L
       &mut stream,
       &control::ServerMessage::RestartAccepted {
         data_directory: root.join("original-data"),
-        rmux_socket: root.join("original-rmux.sock"),
+        ctmux_socket: root.join("original-ctmux.sock"),
       },
     )
     .await
@@ -190,7 +190,7 @@ async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, L
       &mut stream,
       &control::ServerMessage::ComponentStatus {
         build: info.build,
-        protocol_version: task_proto::PROTOCOL_VERSION,
+        protocol_version: ctl_task_proto::PROTOCOL_VERSION,
       },
     )
     .await
@@ -206,7 +206,7 @@ async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, L
   server.await.unwrap();
   let args = std::fs::read_to_string(fixture.root.join("spawned")).unwrap();
   assert!(args.contains(fixture.root.join("original-data").to_str().unwrap()));
-  assert!(args.contains(fixture.root.join("original-rmux.sock").to_str().unwrap()));
+  assert!(args.contains(fixture.root.join("original-ctmux.sock").to_str().unwrap()));
   assert!(args.contains(fixture.client.socket.to_str().unwrap()));
   result
 }

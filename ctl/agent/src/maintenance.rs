@@ -1,8 +1,8 @@
-//! Two-phase remote rmux maintenance. Dropping the channel never confirms restart.
+//! Two-phase remote ctmux maintenance. Dropping the channel never confirms restart.
 use std::{io, time::Duration};
 
 use ctl_proto::maintenance::{
-  self, ClientMessage, RmuxPreparation, RmuxRestartCompleted, RunningRmux, ServerMessage,
+  self, ClientMessage, CtmuxPreparation, CtmuxRestartCompleted, RunningCtmux, ServerMessage,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -12,7 +12,7 @@ use crate::ConnectConfig;
 ///
 /// # Errors
 /// Returns transport errors. Operation errors are sent as structured responses.
-pub async fn prepare_rmux_restart<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+pub async fn prepare_ctmux_restart<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   reader: &mut R,
   writer: &mut W,
   config: &ConnectConfig,
@@ -36,9 +36,9 @@ pub async fn prepare_rmux_restart<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   maintenance::write(
     writer,
     &ServerMessage::Prepared {
-      info: RmuxPreparation {
+      info: CtmuxPreparation {
         remote_id: actual_remote_id.into(),
-        running: RunningRmux {
+        running: RunningCtmux {
           build: prepared.before.build.clone(),
           protocol_version: prepared.before.protocol_version,
           control_protocol_version: prepared.before.control_protocol_version,
@@ -62,7 +62,7 @@ pub async fn prepare_rmux_restart<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   }
   let response = match prepared.restart().await {
     Ok(outcome) => ServerMessage::Completed {
-      result: RmuxRestartCompleted {
+      result: CtmuxRestartCompleted {
         after: outcome.after,
         terminated_sessions: outcome.terminated_sessions,
       },
@@ -80,12 +80,12 @@ async fn prepare<R: AsyncRead + Unpin>(
   reader: &mut R,
   config: &ConnectConfig,
   actual_remote_id: &str,
-) -> io::Result<rmux_ipc::lifecycle::PreparedRestart> {
+) -> io::Result<ctmux_ipc::lifecycle::PreparedRestart> {
   let request = tokio::time::timeout(Duration::from_secs(5), maintenance::read(reader))
     .await
     .map_err(|_| io::Error::other("Maintenance request timed out."))??;
   match request {
-    ClientMessage::PrepareRmuxRestart {
+    ClientMessage::PrepareCtmuxRestart {
       protocol_version,
       expected_remote_id,
     } if protocol_version == maintenance::PROTOCOL_VERSION
@@ -97,17 +97,17 @@ async fn prepare<R: AsyncRead + Unpin>(
       ));
     }
   }
-  if config.service != crate::Service::Rmux {
+  if config.service != crate::Service::Ctmux {
     return Err(io::Error::other(
-      "Only the account's rmux owner can be restarted.",
+      "Only the account's ctmux owner can be restarted.",
     ));
   }
   let executable = config
-    .rmuxd_bin
+    .ctmuxd_bin
     .clone()
     .filter(|path| path.is_absolute())
-    .ok_or_else(|| io::Error::other("Install rmuxd beside ctl-agent before restarting."))?;
-  rmux_ipc::lifecycle::Client::new(config.rmux_socket.clone())
+    .ok_or_else(|| io::Error::other("Install ctmuxd beside ctl-agent before restarting."))?;
+  ctmux_ipc::lifecycle::Client::new(config.ctmux_socket.clone())
     .with_daemon_executable(executable)
     .preflight_restart()
     .await
@@ -133,7 +133,7 @@ mod tests {
     let mut bytes = Vec::new();
     maintenance::write(
       &mut bytes,
-      &ClientMessage::PrepareRmuxRestart {
+      &ClientMessage::PrepareCtmuxRestart {
         protocol_version: maintenance::PROTOCOL_VERSION,
         expected_remote_id: "identity".into(),
       },
@@ -148,7 +148,7 @@ mod tests {
     let mut bytes = Vec::new();
     maintenance::write(
       &mut bytes,
-      &ClientMessage::PrepareRmuxRestart {
+      &ClientMessage::PrepareCtmuxRestart {
         protocol_version: maintenance::PROTOCOL_VERSION,
         expected_remote_id: "wrong".into(),
       },
@@ -157,7 +157,7 @@ mod tests {
     .unwrap();
     let config = ConnectConfig::new("/unused/maintenance-test.sock".into());
     let mut response = Vec::new();
-    prepare_rmux_restart(&mut bytes.as_slice(), &mut response, &config, "actual")
+    prepare_ctmux_restart(&mut bytes.as_slice(), &mut response, &config, "actual")
       .await
       .unwrap();
     assert!(matches!(

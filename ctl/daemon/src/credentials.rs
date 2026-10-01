@@ -1,6 +1,6 @@
 //! One-shot, metadata-only access through ctld's signed Keychain identity.
 
-use ctld_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response};
+use ctl_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response};
 use std::io::{self, Read, Write};
 
 /// Read one request and write one JSON response, without starting a daemon.

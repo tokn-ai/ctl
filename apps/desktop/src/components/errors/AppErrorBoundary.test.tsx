@@ -15,8 +15,8 @@ describe("AppErrorBoundary", () => {
     );
 
     expect(markup).toContain('role="alert"');
-    expect(markup).toContain("Your rmux sessions are still running.");
+    expect(markup).toContain("Your ctmux sessions are still running.");
     expect(markup).toContain("input update failed");
-    expect(markup).toContain("Reload rmux");
+    expect(markup).toContain("Reload ctmux");
   });
 });

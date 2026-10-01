@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use ctld_ipc::{
+use ctl_ipc::{
   ClientMessage, LocalPortForward, PortForwardStatus, PromptKind, ServerMessage, SshTarget,
 };
 
@@ -14,7 +14,7 @@ pub async fn ensure_master(
   context: &PromptContext,
 ) -> CommandResult<PathBuf> {
   let mut stream = connect().await?;
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::EnsureMaster {
       target: broker_target(target)?,
@@ -23,7 +23,7 @@ pub async fn ensure_master(
   .await
   .map_err(CommandErrorDto::backend)?;
   loop {
-    match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+    match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
       .await
       .map_err(CommandErrorDto::backend)?
     {
@@ -33,7 +33,7 @@ pub async fn ensure_master(
         message,
       }) => {
         let response = request_response(Some(context), prompt_kind(kind), message).await;
-        ctld_ipc::write_frame(
+        ctl_ipc::write_frame(
           &mut stream,
           &ClientMessage::PromptResponse {
             prompt_id,
@@ -68,7 +68,7 @@ pub async fn existing_master(target: &ConnectionTargetDto) -> CommandResult<Path
   let mut stream = connect_existing()
     .await?
     .ok_or_else(authentication_required)?;
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::MasterStatus {
       target: broker_target(target)?,
@@ -76,7 +76,7 @@ pub async fn existing_master(target: &ConnectionTargetDto) -> CommandResult<Path
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
@@ -97,10 +97,10 @@ pub async fn connection_status(
   let Some(mut stream) = connect_existing().await? else {
     return Ok(SshConnectionStatusDto::default());
   };
-  ctld_ipc::write_frame(&mut stream, &ClientMessage::ConnectionStatus { target })
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::ConnectionStatus { target })
     .await
     .map_err(CommandErrorDto::backend)?;
-  let response = ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  let response = ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?;
   connection_status_response(response)
@@ -169,10 +169,10 @@ async fn disconnect_targets<F: std::future::Future<Output = CommandResult<()>>>(
 
 async fn disconnect_master(target: SshTarget) -> CommandResult<()> {
   let mut stream = connect().await?;
-  ctld_ipc::write_frame(&mut stream, &ClientMessage::DisconnectMaster { target })
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::DisconnectMaster { target })
     .await
     .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
@@ -187,7 +187,7 @@ async fn disconnect_master(target: SshTarget) -> CommandResult<()> {
 
 pub async fn delete_credentials(target: &ConnectionTargetDto) -> CommandResult<()> {
   let mut stream = connect().await?;
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::DeleteCredentials {
       target: broker_target(target)?,
@@ -195,7 +195,7 @@ pub async fn delete_credentials(target: &ConnectionTargetDto) -> CommandResult<(
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
@@ -214,7 +214,7 @@ pub async fn configure_port_forward(
   enabled: bool,
 ) -> CommandResult<PortForwardStatus> {
   let mut stream = connect().await?;
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::ConfigurePortForward {
       target: broker_target(target)?,
@@ -224,7 +224,7 @@ pub async fn configure_port_forward(
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
@@ -241,7 +241,7 @@ pub async fn list_port_forwards(
   target: &ConnectionTargetDto,
 ) -> CommandResult<Vec<PortForwardStatus>> {
   let mut stream = connect().await?;
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::ListPortForwards {
       target: broker_target(target)?,
@@ -249,7 +249,7 @@ pub async fn list_port_forwards(
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
@@ -268,7 +268,7 @@ pub async fn list_remote_listeners(
   let mut stream = connect_existing()
     .await?
     .ok_or_else(authentication_required)?;
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::ListRemoteListeners {
       target: broker_target(target)?,
@@ -276,7 +276,7 @@ pub async fn list_remote_listeners(
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
@@ -290,18 +290,18 @@ pub async fn list_remote_listeners(
   }
 }
 
-async fn connect() -> CommandResult<ctld_ipc::Stream> {
-  let mut stream = ctld_ipc::connect_or_start_daemon()
+async fn connect() -> CommandResult<ctl_ipc::Stream> {
+  let mut stream = ctl_ipc::connect_or_start_daemon()
     .await
     .map_err(CommandErrorDto::backend)?;
   handshake(&mut stream).await?;
   Ok(stream)
 }
 
-async fn connect_existing() -> CommandResult<Option<ctld_ipc::Stream>> {
-  let mut stream = match ctld_ipc::connect_existing().await {
+async fn connect_existing() -> CommandResult<Option<ctl_ipc::Stream>> {
+  let mut stream = match ctl_ipc::connect_existing().await {
     Ok(stream) => stream,
-    Err(ctld_ipc::ConnectError::Connect(error))
+    Err(ctl_ipc::ConnectError::Connect(error))
       if matches!(
         error.kind(),
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
@@ -319,20 +319,20 @@ async fn handshake<S>(stream: &mut S) -> CommandResult<()>
 where
   S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: ctld_ipc::PROTOCOL_VERSION,
+      protocol_version: ctl_ipc::PROTOCOL_VERSION,
     },
   )
   .await
   .map_err(CommandErrorDto::backend)?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(stream)
+  match ctl_ipc::read_frame::<_, ServerMessage>(stream)
     .await
     .map_err(CommandErrorDto::backend)?
   {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
-      if protocol_version == ctld_ipc::PROTOCOL_VERSION =>
+      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
     {
       Ok(())
     }
@@ -340,7 +340,7 @@ where
       "ctld_protocol_version_mismatch",
       format!(
         "The app requires local protocol {}, but ctld accepted protocol {protocol_version}. Rebuild or update ctld to match the app, then restart ctld.",
-        ctld_ipc::PROTOCOL_VERSION,
+        ctl_ipc::PROTOCOL_VERSION,
       ),
     )),
     Some(ServerMessage::Error { code, message }) => Err(CommandErrorDto::new(code, message)),
@@ -348,7 +348,7 @@ where
       "ctld_connection_closed",
       format!(
         "ctld closed the local handshake before replying to app protocol {}. A stale local ctld may be running. Rebuild or update ctld to match the app, then restart ctld.",
-        ctld_ipc::PROTOCOL_VERSION,
+        ctl_ipc::PROTOCOL_VERSION,
       ),
     )),
     _ => Err(CommandErrorDto::new(
@@ -400,12 +400,12 @@ mod tests {
     assert_eq!(broker.gateways.len(), 2);
     let vpn = &broker.gateways[0];
     assert!(vpn.has_valid_vpn_configuration());
-    assert_eq!(vpn.kind, ctld_ipc::GatewayKind::Vpn);
+    assert_eq!(vpn.kind, ctl_ipc::GatewayKind::Vpn);
     assert_eq!(vpn.destination, "work-vpn");
     assert_eq!(vpn.port, None);
     assert!(vpn.vpn.as_ref().unwrap().socket_path.is_absolute());
     assert_eq!(broker.gateways[1].destination, "jump");
-    let ctl_core::ConnectionTarget::Ssh { options, .. } = target.to_core() else {
+    let ctl_client::ConnectionTarget::Ssh { options, .. } = target.to_core() else {
       panic!("expected SSH target")
     };
     assert_eq!(options.gateways[0].vpn, vpn.vpn);
@@ -543,12 +543,12 @@ mod tests {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let daemon = tokio::spawn(async move {
       assert!(matches!(
-        ctld_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
         Some(ClientMessage::Handshake { protocol_version })
-          if protocol_version == ctld_ipc::PROTOCOL_VERSION
+          if protocol_version == ctl_ipc::PROTOCOL_VERSION
       ));
       if let Some(reply) = reply {
-        ctld_ipc::write_frame(&mut server, &reply).await.unwrap();
+        ctl_ipc::write_frame(&mut server, &reply).await.unwrap();
       }
     });
     let result = handshake(&mut client).await;
@@ -559,7 +559,7 @@ mod tests {
   #[tokio::test]
   async fn handshake_accepts_the_matching_protocol() {
     handshake_reply(Some(ServerMessage::HandshakeAccepted {
-      protocol_version: ctld_ipc::PROTOCOL_VERSION,
+      protocol_version: ctl_ipc::PROTOCOL_VERSION,
     }))
     .await
     .unwrap();
@@ -582,7 +582,7 @@ mod tests {
 
   #[tokio::test]
   async fn handshake_rejects_a_different_accepted_version() {
-    let old_version = ctld_ipc::PROTOCOL_VERSION - 1;
+    let old_version = ctl_ipc::PROTOCOL_VERSION - 1;
     let error = handshake_reply(Some(ServerMessage::HandshakeAccepted {
       protocol_version: old_version,
     }))
@@ -591,7 +591,7 @@ mod tests {
     assert_eq!(error.code, "ctld_protocol_version_mismatch");
     assert!(error.message.contains(&format!(
       "requires local protocol {}",
-      ctld_ipc::PROTOCOL_VERSION
+      ctl_ipc::PROTOCOL_VERSION
     )));
     assert!(
       error

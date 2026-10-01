@@ -1,5 +1,5 @@
-use ctl_core::hosts::ConnectionTargetDto;
-use ctld_ipc::{ClientMessage, LocalPortForward, PortForwardStatus, ServerMessage};
+use ctl_client::hosts::ConnectionTargetDto;
+use ctl_ipc::{ClientMessage, LocalPortForward, PortForwardStatus, ServerMessage};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -45,7 +45,7 @@ pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), E
       else {
         return Err(Error::UnexpectedResponse);
       };
-      if status.state != ctld_ipc::PortForwardState::Active {
+      if status.state != ctl_ipc::PortForwardState::Active {
         return Err(Error::Forward(status.message.unwrap_or_else(|| {
           "Port forward is waiting for authentication.".into()
         })));
@@ -77,7 +77,7 @@ pub async fn run(target: &ConnectionTargetDto, command: Command) -> Result<(), E
   Ok(())
 }
 
-async fn list(target: ctld_ipc::SshTarget) -> Result<Vec<PortForwardStatus>, Error> {
+async fn list(target: ctl_ipc::SshTarget) -> Result<Vec<PortForwardStatus>, Error> {
   match crate::ssh_broker::request(ClientMessage::ListPortForwards { target }).await? {
     ServerMessage::PortForwards { statuses } => Ok(statuses),
     _ => Err(Error::UnexpectedResponse),
@@ -172,7 +172,7 @@ fn parse_forward(value: &str, forward_id: String) -> Result<LocalPortForward, Er
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   #[error(transparent)]
-  Host(#[from] ctl_core::hosts::HostError),
+  Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
   Target(#[from] crate::target::Error),
   #[error(transparent)]

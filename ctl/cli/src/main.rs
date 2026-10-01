@@ -12,11 +12,15 @@ mod target;
 mod vpn;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use rmux_cli::Command as RmuxCommand;
-use task_cli::Command as TaskCommand;
+use ctl_task_cli::Command as TaskCommand;
+use ctmux_cli::Command as CtmuxCommand;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Route control commands locally or over OpenSSH")]
+#[command(
+  name = "ctl",
+  version,
+  about = "Route control commands locally or over OpenSSH"
+)]
 struct Arguments {
   /// Select a saved ctl host, OpenSSH alias, or destination instead of local.
   #[arg(long, short = 'H', global = true, value_name = "DESTINATION")]
@@ -49,15 +53,15 @@ enum Command {
     #[command(subcommand)]
     command: host::Command,
   },
-  /// Open a persistent rmux shell (or an ordinary shell with --plain).
+  /// Open a persistent ctmux shell (or an ordinary shell with --plain).
   Shell {
     /// Attach to this named session, creating it if absent.
     #[arg(long, short = 's', conflicts_with = "plain")]
     session: Option<String>,
-    /// Open an ordinary shell without rmux.
+    /// Open an ordinary shell without ctmux.
     #[arg(long)]
     plain: bool,
-    /// Working directory for a new rmux session.
+    /// Working directory for a new ctmux session.
     #[arg(long, short = 'c', conflicts_with = "plain")]
     cwd: Option<String>,
   },
@@ -94,10 +98,10 @@ enum Command {
     #[command(subcommand)]
     command: TaskdCommand,
   },
-  /// Run the canonical rmux command surface through the selected target.
-  Rmux {
+  /// Run the canonical ctmux command surface through the selected target.
+  Ctmux {
     #[command(subcommand)]
-    command: RmuxCommand,
+    command: CtmuxCommand,
   },
   /// Manage reusable background and interactive tasks.
   Task {
@@ -108,7 +112,7 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum TaskdCommand {
-  /// Restart an idle taskd, retaining saved task state. Starts it if absent.
+  /// Restart an idle ctl-taskd, retaining saved task state. Starts it if absent.
   Restart,
 }
 
@@ -186,14 +190,14 @@ mod tests {
       "--id",
       "team",
       "--hostname",
-      "rmux-test",
+      "ctmux-test",
       "--accept-routes",
       "--json",
     ])
     .unwrap();
     assert!(matches!(arguments.command, Command::Vpn {
       command: vpn::Command::StartTailscale { connection_id, hostname: Some(hostname), accept_routes: true, json: true, .. }
-    } if connection_id == "team" && hostname == "rmux-test"));
+    } if connection_id == "team" && hostname == "ctmux-test"));
     assert!(
       Arguments::try_parse_from([
         "ctl",
@@ -209,24 +213,24 @@ mod tests {
   }
 
   #[test]
-  fn rmux_uses_the_local_target_by_default() {
-    let arguments = Arguments::try_parse_from(["ctl", "rmux", "list"]).unwrap();
+  fn ctmux_uses_the_local_target_by_default() {
+    let arguments = Arguments::try_parse_from(["ctl", "ctmux", "list"]).unwrap();
     assert_eq!(arguments.host, None);
     assert!(matches!(
       arguments.command,
-      Command::Rmux {
-        command: RmuxCommand::List
+      Command::Ctmux {
+        command: CtmuxCommand::List
       }
     ));
   }
 
   #[test]
-  fn host_flag_routes_the_same_rmux_command_over_ssh() {
+  fn host_flag_routes_the_same_ctmux_command_over_ssh() {
     let arguments = Arguments::try_parse_from([
       "ctl",
       "--host",
       "workstation",
-      "rmux",
+      "ctmux",
       "attach",
       "development",
     ])
@@ -234,8 +238,8 @@ mod tests {
     assert_eq!(arguments.host.as_deref(), Some("workstation"));
     assert!(matches!(
       arguments.command,
-      Command::Rmux {
-        command: RmuxCommand::Attach { session, .. }
+      Command::Ctmux {
+        command: CtmuxCommand::Attach { session, .. }
       } if session.as_deref() == Some("development")
     ));
   }
@@ -243,7 +247,7 @@ mod tests {
   #[test]
   fn remote_platform_requires_host_and_rejects_arbitrary_commands() {
     assert!(
-      Arguments::try_parse_from(["ctl", "--remote-platform", "windows", "rmux", "list"]).is_err()
+      Arguments::try_parse_from(["ctl", "--remote-platform", "windows", "ctmux", "list"]).is_err()
     );
     assert!(
       Arguments::try_parse_from([
@@ -252,7 +256,7 @@ mod tests {
         "server",
         "--remote-platform",
         "windows",
-        "rmux",
+        "ctmux",
         "list"
       ])
       .is_ok()
@@ -264,7 +268,7 @@ mod tests {
         "server",
         "--remote-platform",
         "custom command",
-        "rmux",
+        "ctmux",
         "list"
       ])
       .is_err()

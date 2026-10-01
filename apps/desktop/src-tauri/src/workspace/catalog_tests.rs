@@ -10,7 +10,7 @@ struct Fixture(PathBuf);
 
 impl Fixture {
   fn new() -> Self {
-    Self(std::env::temp_dir().join(format!("rmux-host-catalog-test-{}", uuid::Uuid::new_v4())))
+    Self(std::env::temp_dir().join(format!("ctmux-host-catalog-test-{}", uuid::Uuid::new_v4())))
   }
 
   fn repository(&self) -> Repository {
@@ -58,7 +58,7 @@ fn identity() -> ctl_proto::RemoteIdentity {
     remote_id: "9dcefd7e-2b35-43d8-97d9-7508186dbac0".into(),
     agent_version: "0.1.0".into(),
     build: None,
-    rmux_restart_supported: false,
+    ctmux_restart_supported: false,
     bundle: None,
   }
 }
@@ -408,7 +408,7 @@ fn content_revisions_detect_external_edits_without_revision_updates() {
     })
     .unwrap();
   let mut changed = saved.clone();
-  changed.document.hosts[0].name = "Edited outside rmux".into();
+  changed.document.hosts[0].name = "Edited outside ctmux".into();
   let bytes = serde_json::to_vec(&changed).unwrap();
   fs::write(fixture.0.join("hosts.json"), &bytes).unwrap();
   assert_eq!(
@@ -525,7 +525,7 @@ fn host_and_gateway_import_is_one_validated_batch() {
   let fixture = Fixture::new();
   let mut old = legacy();
   let gateway = WorkspaceSshGateway {
-    kind: ctld_ipc::GatewayKind::Ssh,
+    kind: ctl_ipc::GatewayKind::Ssh,
     gateway_id: "edge".into(),
     name: "Office gateway".into(),
     destination: "edge".into(),
@@ -741,7 +741,7 @@ fn desktop_and_cli_catalog_writers_share_revisions_and_locking() {
             document: request.document,
           })
         } else {
-          ctl_core::hosts::storage::update(
+          ctl_client::hosts::storage::update(
             &repository.directory.join("hosts.json"),
             request.revision.as_deref(),
             request.document,
@@ -772,14 +772,14 @@ fn desktop_and_cli_catalog_writers_share_revisions_and_locking() {
   );
   assert_eq!(
     current,
-    ctl_core::hosts::storage::load(&fixture.0.join("hosts.json")).unwrap()
+    ctl_client::hosts::storage::load(&fixture.0.join("hosts.json")).unwrap()
   );
   let mut edited = current.clone();
   edited.document.hosts[0].name = "External editor".into();
   let bytes = serde_json::to_vec(&edited).unwrap();
   fs::write(fixture.0.join("hosts.json"), &bytes).unwrap();
   assert_eq!(
-    ctl_core::hosts::storage::update(
+    ctl_client::hosts::storage::update(
       &fixture.0.join("hosts.json"),
       current.revision.as_deref(),
       current.document

@@ -28,7 +28,7 @@ pub struct CancelRequest {
 #[derive(Deserialize)]
 pub struct ConfigurePortForwardRequest {
   target: ConnectionTargetDto,
-  forward: ctld_ipc::LocalPortForward,
+  forward: ctl_ipc::LocalPortForward,
   enabled: bool,
 }
 
@@ -75,13 +75,13 @@ pub async fn install_remote_agent(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn restart_remote_rmux(
+pub async fn restart_remote_ctmux(
   app: AppHandle,
   window: WebviewWindow,
   request: ProbeRequest,
   on_prompt: Channel<SshPromptDto>,
-) -> CommandResult<ctl_proto::RemoteRmuxRestartResult> {
-  super::restart_rmux(
+) -> CommandResult<ctl_proto::RemoteCtmuxRestartResult> {
+  super::restart_ctmux(
     app,
     window.label().into(),
     request.attempt_id,
@@ -126,14 +126,14 @@ pub async fn disconnect_ssh_host(request: DisconnectSshHostRequest) -> CommandRe
 #[tauri::command]
 pub async fn configure_port_forward(
   request: ConfigurePortForwardRequest,
-) -> CommandResult<ctld_ipc::PortForwardStatus> {
+) -> CommandResult<ctl_ipc::PortForwardStatus> {
   super::broker::configure_port_forward(&request.target, request.forward, request.enabled).await
 }
 
 #[tauri::command]
 pub async fn list_port_forwards(
   request: crate::dto::TargetRequestDto,
-) -> CommandResult<Vec<ctld_ipc::PortForwardStatus>> {
+) -> CommandResult<Vec<ctl_ipc::PortForwardStatus>> {
   super::broker::list_port_forwards(&request.target).await
 }
 

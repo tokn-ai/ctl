@@ -1,6 +1,6 @@
-pub use ctl_core::tailscale::TailscaleDiscovery;
+pub use ctl_client::tailscale::TailscaleDiscovery;
 
 #[tauri::command]
 pub async fn list_tailscale_devices() -> TailscaleDiscovery {
-  ctl_core::tailscale::discover_devices().await
+  ctl_client::tailscale::discover_devices().await
 }

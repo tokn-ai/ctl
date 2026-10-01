@@ -32,7 +32,7 @@ async function worker(cargo_args: string[]): Promise<number> {
   process.stdin.resume();
   let directory: string | undefined;
   try {
-    const supervisor = process.env.RMUX_DEV_APP_SUPERVISOR;
+    const supervisor = process.env.CTMUX_DEV_APP_SUPERVISOR;
     if (!supervisor) throw new Error("Signed app supervisor is unavailable");
     directory = await mkdtemp(path.join(path.dirname(supervisor), "cargo-"));
     const marker = path.join(directory, "launch-state");
@@ -40,7 +40,7 @@ async function worker(cargo_args: string[]): Promise<number> {
     const target = await resolveRunnerTarget(cargo_args, artifacts, process.cwd(), process.env);
     const cargo = spawn("cargo", withAppRunner(cargo_args, target), {
       cwd: process.cwd(),
-      env: { ...process.env, RMUX_DEV_CTLD_EXECUTABLE: artifacts.ctld, RMUX_DEV_APP_FAILURE_MARKER: marker },
+      env: { ...process.env, CTMUX_DEV_CTLD_EXECUTABLE: artifacts.ctld, CTMUX_DEV_APP_FAILURE_MARKER: marker },
       stdio: ["ignore", "inherit", "inherit"],
     });
     const code = await status(cargo);

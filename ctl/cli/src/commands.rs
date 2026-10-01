@@ -1,9 +1,9 @@
 use super::{Arguments, Command, RemotePlatform};
-use ctl_core::{
+use ctl_client::{
   ConnectionTarget, CoreError, TaskTransport, Transport, is_retryable_connection_error,
   open_task_transport_with_interaction, open_transport_with_interaction,
 };
-use rmux_cli::{CommandError, ConnectFuture, Connector};
+use ctmux_cli::{CommandError, ConnectFuture, Connector};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -53,8 +53,8 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   let resolved =
     crate::target::resolve(arguments.host.as_deref(), arguments.method.as_deref()).await?;
   let platform = match arguments.remote_platform {
-    Some(RemotePlatform::Windows) => ctl_core::RemotePlatform::Windows,
-    _ => ctl_core::RemotePlatform::Unix,
+    Some(RemotePlatform::Windows) => ctl_client::RemotePlatform::Windows,
+    _ => ctl_client::RemotePlatform::Unix,
   };
   let mut target = resolved.target.to_core();
   if let ConnectionTarget::Ssh { options, .. } = &mut target {
@@ -78,8 +78,8 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     Command::Skill(_) | Command::Host { .. } | Command::Ssh { .. } | Command::Scp { .. } => {
       unreachable!("commands dispatched before target resolution")
     }
-    Command::Rmux { command } => {
-      rmux_cli::run(command, &connector).await?;
+    Command::Ctmux { command } => {
+      ctmux_cli::run(command, &connector).await?;
     }
     Command::Taskd {
       command: super::TaskdCommand::Restart,
@@ -87,11 +87,11 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
       if !connector.target.is_local() {
         return Err(CliError::RemoteTaskDaemonRestartUnsupported);
       }
-      task_client::restart_daemon().await?;
-      println!("taskd is ready");
+      ctl_task_client::restart_daemon().await?;
+      println!("ctl-taskd is ready");
     }
     Command::Task { command } => {
-      task_cli::run_with_connector(command, &connector).await?;
+      ctl_task_cli::run_with_connector(command, &connector).await?;
     }
     Command::Vpn { command } => {
       if !connector.target.is_local() {
@@ -118,9 +118,9 @@ async fn run_shell(
   }
   let attach_if_exists = session.is_some();
   let session =
-    rmux_cli::new_session(connector, session, Vec::new(), cwd, attach_if_exists).await?;
-  rmux_cli::run(
-    rmux_cli::Command::Attach {
+    ctmux_cli::new_session(connector, session, Vec::new(), cwd, attach_if_exists).await?;
+  ctmux_cli::run(
+    ctmux_cli::Command::Attach {
       session: Some(session.session_id),
       target: None,
       raw: true,
@@ -136,16 +136,16 @@ async fn run_shell(
 
 struct CtlConnector {
   target: ConnectionTarget,
-  settings: ctl_core::hosts::ConnectionTargetDto,
+  settings: ctl_client::hosts::ConnectionTargetDto,
 }
 
 impl CtlConnector {
   async fn identified_remote(
     &self,
-    interaction: &ctl_core::SshInteraction,
-    service: ctl_core::RemoteService,
-  ) -> Result<Option<ctl_core::SshTransport>, CtlConnectError> {
-    let ctl_core::hosts::ConnectionTargetDto::Ssh {
+    interaction: &ctl_client::SshInteraction,
+    service: ctl_client::RemoteService,
+  ) -> Result<Option<ctl_client::SshTransport>, CtlConnectError> {
+    let ctl_client::hosts::ConnectionTargetDto::Ssh {
       remote_info: Some(_),
       ..
     } = &self.settings
@@ -160,9 +160,9 @@ impl CtlConnector {
       return Ok(None);
     };
     let stream =
-      ctl_core::open_identified_ssh_service(destination, options, interaction, service).await?;
+      ctl_client::open_identified_ssh_service(destination, options, interaction, service).await?;
     let identity = stream.remote_identity.as_ref().ok_or_else(|| {
-      ctl_core::hosts::HostError::new(
+      ctl_client::hosts::HostError::new(
         "identity_missing",
         "The remote host did not provide its saved identity.",
       )
@@ -171,12 +171,12 @@ impl CtlConnector {
     Ok(Some(stream))
   }
 
-  fn for_interactive_session(&self, rmux_socket: PathBuf) -> Self {
+  fn for_interactive_session(&self, ctmux_socket: PathBuf) -> Self {
     Self {
       settings: self.settings.clone(),
       target: match &self.target {
         ConnectionTarget::Local { .. } => ConnectionTarget::Local {
-          socket_path: rmux_socket,
+          socket_path: ctmux_socket,
         },
         ConnectionTarget::Ssh { .. } => self.target.clone(),
       },
@@ -184,15 +184,15 @@ impl CtlConnector {
   }
 }
 
-impl task_cli::Connector for CtlConnector {
+impl ctl_task_cli::Connector for CtlConnector {
   type Stream = TaskTransport;
   type Error = CtlConnectError;
 
-  fn connect_task(&self) -> task_cli::ConnectFuture<'_, TaskTransport, CtlConnectError> {
+  fn connect_task(&self) -> ctl_task_cli::ConnectFuture<'_, TaskTransport, CtlConnectError> {
     Box::pin(async {
       let interaction = ssh_interaction(&self.settings).await?;
       if let Some(stream) = self
-        .identified_remote(&interaction, ctl_core::RemoteService::Task)
+        .identified_remote(&interaction, ctl_client::RemoteService::Task)
         .await?
       {
         return Ok(Transport::Ssh(stream));
@@ -210,10 +210,10 @@ impl task_cli::Connector for CtlConnector {
   fn attach_interactive(
     &self,
     session: String,
-    rmux_socket: PathBuf,
-  ) -> task_cli::AttachFuture<'_> {
-    let connector = self.for_interactive_session(rmux_socket);
-    Box::pin(async move { task_cli::attach_session(session, &connector).await })
+    ctmux_socket: PathBuf,
+  ) -> ctl_task_cli::AttachFuture<'_> {
+    let connector = self.for_interactive_session(ctmux_socket);
+    Box::pin(async move { ctl_task_cli::attach_session(session, &connector).await })
   }
 }
 
@@ -225,7 +225,7 @@ impl Connector for CtlConnector {
     Box::pin(async {
       let interaction = ssh_interaction(&self.settings).await?;
       if let Some(stream) = self
-        .identified_remote(&interaction, ctl_core::RemoteService::Rmux)
+        .identified_remote(&interaction, ctl_client::RemoteService::Ctmux)
         .await?
       {
         return Ok(Transport::Ssh(stream));
@@ -267,27 +267,27 @@ impl Connector for CtlConnector {
 
 #[cfg(unix)]
 async fn ssh_interaction(
-  target: &ctl_core::hosts::ConnectionTargetDto,
-) -> Result<ctl_core::SshInteraction, CtlConnectError> {
+  target: &ctl_client::hosts::ConnectionTargetDto,
+) -> Result<ctl_client::SshInteraction, CtlConnectError> {
   if target.is_local() {
-    return Ok(ctl_core::SshInteraction::Inherit);
+    return Ok(ctl_client::SshInteraction::Inherit);
   }
   crate::target::ensure_vpn(target).await?;
   let control_path = crate::ssh_broker::ensure_master(target.to_ssh_target()?).await?;
-  Ok(ctl_core::SshInteraction::Multiplexed { control_path })
+  Ok(ctl_client::SshInteraction::Multiplexed { control_path })
 }
 
 #[cfg(not(unix))]
 async fn ssh_interaction(
-  _target: &ctl_core::hosts::ConnectionTargetDto,
-) -> Result<ctl_core::SshInteraction, CtlConnectError> {
-  Ok(ctl_core::SshInteraction::Inherit)
+  _target: &ctl_client::hosts::ConnectionTargetDto,
+) -> Result<ctl_client::SshInteraction, CtlConnectError> {
+  Ok(ctl_client::SshInteraction::Inherit)
 }
 
 #[derive(Debug, Error)]
 enum CtlConnectError {
   #[error(transparent)]
-  Host(#[from] ctl_core::hosts::HostError),
+  Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
   Target(#[from] crate::target::Error),
   #[error(transparent)]
@@ -310,7 +310,7 @@ pub enum CliError {
   )]
   HostManagementTarget,
   #[error(transparent)]
-  Host(#[from] ctl_core::hosts::HostError),
+  Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
   Connection(#[from] crate::connection::Error),
   #[cfg(unix)]
@@ -318,20 +318,20 @@ pub enum CliError {
   Port(#[from] crate::port::Error),
   #[error("Use the destination argument with ssh/scp, rather than --host.")]
   CompatibilityHost,
-  #[error("ctl shell requires a terminal; use ctl exec for commands or ctl rmux new --detached.")]
+  #[error("ctl shell requires a terminal; use ctl exec for commands or ctl ctmux new --detached.")]
   TerminalRequired,
   #[error("VPN management is only supported locally; omit --host")]
   RemoteVpnUnsupported,
   #[error(transparent)]
   Vpn(#[from] crate::vpn::Error),
-  #[error("taskd restart is only supported locally; run it on the task host")]
+  #[error("ctl-taskd restart is only supported locally; run it on the task host")]
   RemoteTaskDaemonRestartUnsupported,
   #[error(transparent)]
-  Rmux(#[from] CommandError),
+  Ctmux(#[from] CommandError),
   #[error(transparent)]
-  TaskDaemon(#[from] task_client::ClientError),
+  TaskDaemon(#[from] ctl_task_client::ClientError),
   #[error(transparent)]
-  Task(#[from] task_cli::CommandError),
+  Task(#[from] ctl_task_cli::CommandError),
 }
 
 #[cfg(test)]
@@ -367,8 +367,8 @@ mod tests {
   fn remote_interactive_sessions_keep_the_task_host_and_connection_options() {
     let target = ConnectionTarget::ssh_with_options(
       "task-server",
-      ctl_core::SshConnectionOptions {
-        remote_platform: ctl_core::RemotePlatform::Windows,
+      ctl_client::SshConnectionOptions {
+        remote_platform: ctl_client::RemotePlatform::Windows,
         hostname: Some("server.example".into()),
         user: Some("task-user".into()),
         port: Some(2222),
@@ -378,25 +378,25 @@ mod tests {
     );
     let connector = CtlConnector {
       target: target.clone(),
-      settings: ctl_core::hosts::ConnectionTargetDto::ssh("task-server"),
+      settings: ctl_client::hosts::ConnectionTargetDto::ssh("task-server"),
     };
-    let attachment = connector.for_interactive_session(PathBuf::from("/remote/rmux.sock"));
+    let attachment = connector.for_interactive_session(PathBuf::from("/remote/ctmux.sock"));
     assert_eq!(attachment.target, target);
   }
 
   #[test]
   fn local_interactive_sessions_use_the_backend_socket() {
     let connector = CtlConnector {
-      settings: ctl_core::hosts::ConnectionTargetDto::Local,
+      settings: ctl_client::hosts::ConnectionTargetDto::Local,
       target: ConnectionTarget::Local {
-        socket_path: PathBuf::from("/default/rmux.sock"),
+        socket_path: PathBuf::from("/default/ctmux.sock"),
       },
     };
-    let attachment = connector.for_interactive_session(PathBuf::from("/backend/rmux.sock"));
+    let attachment = connector.for_interactive_session(PathBuf::from("/backend/ctmux.sock"));
     assert_eq!(
       attachment.target,
       ConnectionTarget::Local {
-        socket_path: PathBuf::from("/backend/rmux.sock"),
+        socket_path: PathBuf::from("/backend/ctmux.sock"),
       }
     );
   }

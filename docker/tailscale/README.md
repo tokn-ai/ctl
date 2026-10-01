@@ -13,7 +13,7 @@ running. There is no local image build step.
 The container uses Tailscale's userspace networking and SOCKS5 listener. It does
 not need a TUN device, elevated networking capabilities, or host routes. A random
 host port is published on loopback only. Select the saved profile in a host's
-**Connect through** step; rmux retains the profile ID and resolves the current
+**Connect through** step; ctmux retains the profile ID and resolves the current
 SOCKS5 port whenever it opens a transport. Subnet routes are optional; an exit node
 is not selected. Authentication in the container is separate from any Tailscale
 installation on the Mac.

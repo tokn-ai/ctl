@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use ctld_ipc::{GatewayKind, SshGateway, SshTarget};
+use ctl_ipc::{GatewayKind, SshGateway, SshTarget};
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 

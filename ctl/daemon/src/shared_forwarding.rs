@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 use std::process::Stdio;
 
-use ctld_ipc::{LocalPortForward, SshTarget};
+use ctl_ipc::{LocalPortForward, SshTarget};
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;

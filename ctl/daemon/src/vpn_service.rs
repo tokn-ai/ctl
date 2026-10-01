@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 
-use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState, VpnStatus};
+use ctl_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState, VpnStatus};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 

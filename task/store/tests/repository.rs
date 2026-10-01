@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 
-use task_proto::{ExecutionMode, TaskDefinition};
-use task_store::{Repository, SavedTaskDefinition, StoreError};
+use ctl_task_proto::{ExecutionMode, TaskDefinition};
+use ctl_task_store::{Repository, SavedTaskDefinition, StoreError};
 
 struct Fixture {
   root: PathBuf,

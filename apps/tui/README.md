@@ -1,4 +1,4 @@
-# rmux TUI
+# ctmux TUI
 
 A terminal client for the same sessions and server-owned split views used by
 the desktop app. Sessions are the navigation layer; there are no nested windows
@@ -6,18 +6,18 @@ or tab groups.
 
 ## Run
 
-The main entry point is `rmux`; it embeds this TUI as a library.
+The main entry point is `ctmux`; it embeds this TUI as a library.
 
 ```sh
-cargo build -p rmux -p rmuxd
-cargo run -p rmux                         # create a session and open the TUI
-cargo run -p rmux -- new -s work
-cargo run -p rmux -- new -As work         # attach if it exists, otherwise create
-cargo run -p rmux -- new -ds background   # create detached, including in scripts
-cargo run -p rmux -- attach -t work
-cargo run -p rmux -- attach -rt work      # read-only
-cargo run -p rmux -- ls
-cargo run -p rmux -- kill-session -t work
+cargo build -p ctmux-cli -p ctmuxd
+cargo run -p ctmux-cli                         # create a session and open the TUI
+cargo run -p ctmux-cli -- new -s work
+cargo run -p ctmux-cli -- new -As work         # attach if it exists, otherwise create
+cargo run -p ctmux-cli -- new -ds background   # create detached, including in scripts
+cargo run -p ctmux-cli -- attach -t work
+cargo run -p ctmux-cli -- attach -rt work      # read-only
+cargo run -p ctmux-cli -- ls
+cargo run -p ctmux-cli -- kill-session -t work
 ```
 
 `new-session`, `attach-session`, and `list-sessions` accept the short aliases
@@ -29,22 +29,22 @@ Use `-c DIRECTORY` with `new` to set its initial directory, and
 `-- PROGRAM ARGS...` to run a specific program. Global `-S PATH`/`--socket PATH`
 selects the local endpoint; `--prefix Ctrl+a` changes the TUI prefix.
 
-Install `rmuxd` beside `rmux`, or set `RMUXD_BIN`. They must use matching
+Install `ctmuxd` beside `ctmux`, or set `CTMUXD_BIN`. They must use matching
 protocol versions; the client does not restart or upgrade an existing daemon.
 
 ```sh
-cargo install --path rmux/daemon
-cargo install --path rmux/cli
+cargo install --path ctmux/daemon
+cargo install --path ctmux/cli
 ```
 
-The standalone `rmux-tui [SESSION]` launcher remains available. It retains its
+The standalone `ctmux-tui [SESSION]` launcher remains available. It retains its
 original behavior: open the first session, or create one when none exist.
-`rmux attach --raw NAME` (and `attach --from SEQUENCE`) uses the original
-single-terminal presenter with Ctrl+] detach. `ctl rmux` also retains its
+`ctmux attach --raw NAME` (and `attach --from SEQUENCE`) uses the original
+single-terminal presenter with Ctrl+] detach. `ctl ctmux` also retains its
 transport-based presenter and detached creation behavior, including over SSH.
-For the local TUI on a remote machine, SSH there and run `rmux`.
+For the local TUI on a remote machine, SSH there and run `ctmux`.
 
-Migration: standalone `rmux new` now attaches by default. Scripts that used it
+Migration: standalone `ctmux new` now attaches by default. Scripts that used it
 to create background sessions must add `-d`.
 
 ## Keys
@@ -72,8 +72,8 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `?` | Help |
 | Esc | Cancel prefix |
 
-Sessions take the place of tmux windows for `c`, `n`, `p`, and `w`; rmux
-has no extra window layer. Uppercase `I` and `R` are rmux-specific lease controls.
+Sessions take the place of tmux windows for `c`, `n`, `p`, and `w`; ctmux
+has no extra window layer. Uppercase `I` and `R` are ctmux-specific lease controls.
 
 Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm
@@ -136,7 +136,7 @@ daemon's `avt` terminal emulation capabilities; it is not full tmux feature pari
 ## Validate
 
 ```sh
-cargo test -p rmux-tui
+cargo test -p ctmux-tui
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -157,14 +157,14 @@ for seven days. Archives retain the session identity, per-pane end message,
 and text available in this client's buffers. Output the client never received
 cannot be recovered. Transport failures alone do not archive a session.
 
-Use `rmux archives` to list local TUI archives and `rmux archive SESSION_ID` to
+Use `ctmux archives` to list local TUI archives and `ctmux archive SESSION_ID` to
 browse one read-only. **Ctrl+B A** opens the archive list; select a session and
 pane, then press Enter to inspect/search/copy its output. No daemon connection
 is needed for archives. The desktop **Archived** browser uses its own local store.
 
-Set `RMUX_ARCHIVE_DIRECTORY` to override the client storage directory.
+Set `CTMUX_ARCHIVE_DIRECTORY` to override the client storage directory.
 
-Archives live below the user's local data directory in `rmux/tui/archives/`
-(or `rmux/desktop/archives/` for the desktop). They expire after seven days and
+Archives live below the user's local data directory in `ctmux/tui/archives/`
+(or `ctmux/desktop/archives/` for the desktop). They expire after seven days and
 are removed when listing the store. No daemon flags or protocol changes are
-needed. `ctl rmux archives` also lists this client's TUI archive metadata.
+needed. `ctl ctmux archives` also lists this client's TUI archive metadata.

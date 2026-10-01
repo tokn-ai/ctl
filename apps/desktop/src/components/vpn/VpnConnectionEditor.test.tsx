@@ -110,11 +110,11 @@ describe("Tailscale connection editor", () => {
     await user.type(screen.getByLabelText("Name"), "Tailnet");
     await user.click(screen.getByRole("button", { name: "Advanced options" }));
     expect((screen.getByLabelText("Device name in Tailscale") as HTMLInputElement).placeholder).toBe("Assigned automatically");
-    await user.type(screen.getByLabelText("Device name in Tailscale"), "rmux-work");
+    await user.type(screen.getByLabelText("Device name in Tailscale"), "ctmux-work");
     expect((screen.getByRole("checkbox", { name: /Accept subnet routes/ }) as HTMLInputElement).checked).toBe(false);
     await user.click(screen.getByRole("checkbox", { name: /Accept subnet routes/ }));
     await user.click(screen.getByRole("button", { name: "Sign in with Tailscale" }));
-    expect(beginVpnEnrollment).toHaveBeenCalledExactlyOnceWith({ name: "Tailnet", hostname: "rmux-work", accept_routes: true });
+    expect(beginVpnEnrollment).toHaveBeenCalledExactlyOnceWith({ name: "Tailnet", hostname: "ctmux-work", accept_routes: true });
     expect(openVpnSignIn).toHaveBeenCalledExactlyOnceWith("native-generated-id");
     expect(on_save).not.toHaveBeenCalled();
     expect(on_save_enrollment).not.toHaveBeenCalled();
@@ -122,7 +122,7 @@ describe("Tailscale connection editor", () => {
     expect((screen.getByLabelText("Device name in Tailscale") as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByRole("button", { name: "Open browser" })).toBeTruthy();
     vi.mocked(vpnEnrollmentStatus).mockResolvedValue({ ...enrollment, status: { ...enrollment.status, state: "connected", running: true,
-      auth_url: null, endpoint: "socks5h://127.0.0.1:49152", username: "sample@example.test", tailnet: "example.test", hostname: "rmux-work" } });
+      auth_url: null, endpoint: "socks5h://127.0.0.1:49152", username: "sample@example.test", tailnet: "example.test", hostname: "ctmux-work" } });
     fireEvent(window, new Event("focus"));
     expect(await screen.findByText("Signed in to Tailscale")).toBeTruthy();
     expect(screen.getByText("sample@example.test")).toBeTruthy();
@@ -149,7 +149,7 @@ describe("Tailscale connection editor", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "tailscale");
     await user.type(screen.getByLabelText("Name"), "Tailnet");
     await user.click(screen.getByRole("button", { name: "Advanced options" }));
-    expect(screen.getByText(/Leave blank for rmux to choose one/)).toBeTruthy();
+    expect(screen.getByText(/Leave blank for ctmux to choose one/)).toBeTruthy();
     await user.type(screen.getByLabelText("Device name in Tailscale"), "invalid host");
     await user.click(screen.getByRole("button", { name: "Sign in with Tailscale" }));
     expect(screen.getByRole("alert").textContent).toContain("device name");

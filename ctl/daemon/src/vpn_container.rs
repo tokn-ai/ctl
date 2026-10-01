@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnState, VpnStatus};
+use ctl_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnState, VpnStatus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::task::{JoinHandle, JoinSet};

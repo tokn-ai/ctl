@@ -16,7 +16,7 @@ use super::remote_actions::PreparedRemoteAction;
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::state::AppState;
 
-// Legacy rmux control streams accept a request for thirty seconds after handshake.
+// Legacy ctmux control streams accept a request for thirty seconds after handshake.
 const CONFIRMATION_LIFETIME: Duration = Duration::from_secs(20);
 static PREPARED: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Mutex::default);
 static TRANSITION: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
@@ -35,17 +35,17 @@ struct PreparedAction {
 enum Operation {
   Ctld {
     owner: Owner,
-    prepared: ctld_ipc::lifecycle::PreparedRestart,
+    prepared: ctl_ipc::lifecycle::PreparedRestart,
   },
-  Rmuxd {
+  Ctmuxd {
     socket: PathBuf,
     executable: PathBuf,
-    prepared: rmux_ipc::lifecycle::PreparedRestart,
+    prepared: ctmux_ipc::lifecycle::PreparedRestart,
   },
   Taskd {
     socket: PathBuf,
     executable: PathBuf,
-    prepared: task_client::PreparedRestart,
+    prepared: ctl_task_client::PreparedRestart,
   },
   Remote(PreparedRemoteAction),
 }
@@ -96,35 +96,35 @@ async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prepared
     impact: ComponentActionImpact::default(),
   };
   let operation = match component_id {
-    "rmuxd" => {
-      let socket = rmux_ipc::socket_path();
-      let executable = rmux_ipc::daemon_executable().map_err(CommandErrorDto::backend)?;
-      let prepared = rmux_ipc::lifecycle::Client::new(socket.clone())
+    "ctmuxd" => {
+      let socket = ctmux_ipc::socket_path();
+      let executable = ctmux_ipc::daemon_executable().map_err(CommandErrorDto::backend)?;
+      let prepared = ctmux_ipc::lifecycle::Client::new(socket.clone())
         .with_daemon_executable(executable.clone())
         .preflight_restart()
         .await
         .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))?;
-      response.component = "rmuxd";
-      response.label = "rmuxd".into();
-      response.running = Some(rmux_version(&prepared.before));
+      response.component = "ctmuxd";
+      response.label = "ctmuxd".into();
+      response.running = Some(ctmux_version(&prepared.before));
       response.available = Some(ComponentVersionInfo::from_component(
         prepared.available.clone(),
       ));
       response.impact.description = "Ends all local terminal sessions, including sessions in other windows or apps and interactive tasks. The replacement daemon starts with its default runtime options.".into();
-      Operation::Rmuxd {
+      Operation::Ctmuxd {
         socket,
         executable,
         prepared,
       }
     }
-    "taskd" => {
+    "ctl-taskd" => {
       let row = super::local::taskd().await;
-      let socket = task_ipc::socket_path();
-      let executable = task_client::daemon_executable().map_err(CommandErrorDto::backend)?;
-      let prepared = task_client::preflight_restart_at(socket.clone(), executable.clone())
+      let socket = ctl_task_ipc::socket_path();
+      let executable = ctl_task_client::daemon_executable().map_err(CommandErrorDto::backend)?;
+      let prepared = ctl_task_client::preflight_restart_at(socket.clone(), executable.clone())
         .await
         .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))?;
-      response.component = "taskd";
+      response.component = "ctl-taskd";
       response.label = row.label;
       response.running = row.running;
       response.available = Some(ComponentVersionInfo::from_component(
@@ -220,7 +220,7 @@ async fn execute(
         .map_err(|error| CommandErrorDto::new(error.code(), error.to_string()))?;
       (Some(ctld_version(outcome.after.binary)), None)
     }
-    Operation::Rmuxd {
+    Operation::Ctmuxd {
       socket,
       executable,
       prepared,
@@ -229,14 +229,14 @@ async fn execute(
       let _transition = transition
         .try_lock()
         .map_err(|_| transition_in_progress())?;
-      if socket != rmux_ipc::socket_path()
-        || executable != rmux_ipc::daemon_executable().map_err(CommandErrorDto::backend)?
+      if socket != ctmux_ipc::socket_path()
+        || executable != ctmux_ipc::daemon_executable().map_err(CommandErrorDto::backend)?
       {
         return Err(selection_changed());
       }
       let outcome = prepared.restart().await;
       if outcome.as_ref().map_or_else(
-        rmux_ipc::lifecycle::LifecycleError::may_have_stopped,
+        ctmux_ipc::lifecycle::LifecycleError::may_have_stopped,
         |_| true,
       ) {
         emit_local_reset(app);
@@ -246,7 +246,7 @@ async fn execute(
       (
         Some(ComponentVersionInfo::from_component(outcome.after)),
         Some(format!(
-          "Restarted rmuxd; {} terminal sessions ended.",
+          "Restarted ctmuxd; {} terminal sessions ended.",
           outcome.terminated_sessions
         )),
       )
@@ -260,8 +260,8 @@ async fn execute(
       let _transition = transition
         .try_lock()
         .map_err(|_| transition_in_progress())?;
-      if socket != task_ipc::socket_path()
-        || executable != task_client::daemon_executable().map_err(CommandErrorDto::backend)?
+      if socket != ctl_task_ipc::socket_path()
+        || executable != ctl_task_client::daemon_executable().map_err(CommandErrorDto::backend)?
       {
         return Err(selection_changed());
       }
@@ -299,13 +299,13 @@ fn emit_local_reset(app: &tauri::AppHandle) {
   );
 }
 
-fn rmux_version(info: &rmux_ipc::lifecycle::RunningDaemon) -> ComponentVersionInfo {
+fn ctmux_version(info: &ctmux_ipc::lifecycle::RunningDaemon) -> ComponentVersionInfo {
   let protocols = info
     .protocol_version
-    .map(|version| ProtocolVersion::new("rmux", version))
+    .map(|version| ProtocolVersion::new("ctmux", version))
     .into_iter()
     .chain([ProtocolVersion::new(
-      "rmux_control",
+      "ctmux_control",
       info.control_protocol_version,
     )])
     .collect();

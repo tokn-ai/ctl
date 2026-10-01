@@ -1,17 +1,17 @@
 # Remote terminals and tasks over SSH
 
-An SSH-authorized user can access persistent `rmux` sessions and managed tasks
+An SSH-authorized user can access persistent `ctmux` sessions and managed tasks
 without exposing a separate network service. OpenSSH provides reachability,
 host verification, encryption, and user authentication.
 
 ## On the controlled device
 
-Build or install `rmuxd`, `taskd`, and `ctl-agent` for the same OS user. They may
+Build or install `ctmuxd`, `ctl-taskd`, and `ctl-agent` for the same OS user. They may
 be installed together in the app-managed data directory or made available in
 the non-interactive SSH command environment. `ctl-agent` starts a
 sibling daemon on demand when the binaries are installed together; either daemon
-may instead be started independently. Task control selects `taskd` explicitly,
-and interactive tasks also require `rmuxd` with managed-session support.
+may instead be started independently. Task control selects `ctl-taskd` explicitly,
+and interactive tasks also require `ctmuxd` with managed-session support.
 
 Verify that the fixed remote command works and that non-interactive startup
 files produce no stdout:
@@ -25,7 +25,7 @@ exec ctl-agent connect --service task --identity
 
 For a Windows host using the default cmd.exe SSH shell, the corresponding
 probes use `ctl-agent.exe connect` or `ctl-agent.exe connect --service task`. Use
-`ctl --host <host> --remote-platform windows rmux ...` for normal commands.
+`ctl --host <host> --remote-platform windows ctmux ...` for normal commands.
 
 Each command waits for its service's protocol input, so terminate the manual
 probe after confirming it starts without diagnostics.
@@ -33,7 +33,7 @@ probe after confirming it starts without diagnostics.
 ### Docker development target
 
 The repository includes a development image that builds `ctl-agent`, `ctl`,
-`rmuxd`, and `taskd` and exposes the daemons through OpenSSH. It accepts only
+`ctmuxd`, and `ctl-taskd` and exposes the daemons through OpenSSH. It accepts only
 public-key authentication and these exact remote commands:
 
 ```text
@@ -49,19 +49,19 @@ Set an absolute path to the public-key file that may access the container, then
 start the target:
 
 ```sh
-export RMUX_AUTHORIZED_KEYS_FILE=/absolute/path/to/id_ed25519.pub
-docker compose up --build --detach rmux-remote
+export CTMUX_AUTHORIZED_KEYS_FILE=/absolute/path/to/id_ed25519.pub
+docker compose up --build --detach ctmux-remote
 ```
 
-The default host port is `2222`. Set `RMUX_SSH_PORT` before starting the
+The default host port is `2222`. Set `CTMUX_SSH_PORT` before starting the
 container to choose another port. Add a local OpenSSH alias so `ctl` can use
 the port and matching private key through normal SSH configuration:
 
 ```sshconfig
-Host rmux-docker
+Host ctmux-docker
   HostName 127.0.0.1
   Port 2222
-  User rmux
+  User ctmux
   IdentityFile /absolute/path/to/id_ed25519
   IdentitiesOnly yes
 ```
@@ -70,34 +70,34 @@ Inspect and trust the container host-key fingerprint before the first
 connection:
 
 ```sh
-docker compose exec rmux-remote \
+docker compose exec ctmux-remote \
   ssh-keygen -lf /etc/ssh/host_keys/ssh_host_ed25519_key.pub
 ```
 
 Then exercise the real remote path:
 
 ```sh
-ctl --host rmux-docker rmux list
-ctl --host rmux-docker rmux new --name docker-test
-ctl --host rmux-docker rmux attach docker-test
-ctl --host rmux-docker task create hello --start -- sh -c 'printf "hello from taskd\n"'
-ctl --host rmux-docker task logs hello
+ctl --host ctmux-docker ctmux list
+ctl --host ctmux-docker ctmux new --name docker-test
+ctl --host ctmux-docker ctmux attach docker-test
+ctl --host ctmux-docker task create hello --start -- sh -c 'printf "hello from ctl-taskd\n"'
+ctl --host ctmux-docker task logs hello
 ```
 
 The desktop app uses the same OpenSSH transport. If the alias above already
-exists, start `rmux-app`, choose **+ Host**, and activate the discovered
-`rmux-docker` alias. Concrete aliases from `~/.ssh/config` and its `Include`
+exists, start `ctmux-app`, choose **+ Host**, and activate the discovered
+`ctmux-docker` alias. Concrete aliases from `~/.ssh/config` and its `Include`
 files are suggestions only; opening the picker does not contact them.
 
 The app can also define the container without a pre-existing alias. In **+
-Host**, enter `rmux@127.0.0.1:2222`, use a name such as `rmux-remote-test`, then
+Host**, enter `ctmux@127.0.0.1:2222`, use a name such as `ctmux-remote-test`, then
 choose **Identity file** and enter the matching private-key path. These steps
 open at the command palette location. Verify any SSH host-key prompt against
 the fingerprint above. Once `ctl-agent connect --identity` succeeds, choose **OpenSSH config** to create a
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
 not store the key contents. An app with a synchronized bundle set can install a
-missing `ctl-agent`, `rmuxd`, and `taskd` bundle under the remote user's
+missing `ctl-agent`, `ctmuxd`, and `ctl-taskd` bundle under the remote user's
 `~/.tokn/ctl/versions` directory and retry. `~/.tokn/ctl/current` selects the active
 bundle, and `~/.tokn/ctl/remote-id` stores the stable environment ID. Release
 bundles use the app version as their immutable
@@ -127,7 +127,7 @@ connection verification. A different address with the same ID automatically reco
 the saved host and tabs; older agents offer a component update first. The Docker
 fixture persists this ID in its `ctl_data` volume across container replacement.
 The fixed-command allowlist includes the identity flag without accepting arbitrary
-remote commands. See `docs/rmux-workspace.md` for identity storage and migration.
+remote commands. See `docs/ctmux-workspace.md` for identity storage and migration.
 
 The app restores known sessions from disk and automatically attaches the last
 selected tab if it is local. Remote hosts stay disconnected on startup.
@@ -135,7 +135,7 @@ selected tab if it is local. Remote hosts stay disconnected on startup.
 its first open tab if another host was selected. Use **Add existing session** to
 discover and remember sessions already running in the container; simply adding
 a host does not import its daemon's inventory. Opening a session connects to
-its host on demand. See `docs/rmux-workspace.md` for persistence and migration.
+its host on demand. See `docs/ctmux-workspace.md` for persistence and migration.
 
 Known local and container sessions appear in one sidebar with host labels. New
 shells default to local; **New Shell** uses the command-palette overlay to
@@ -146,17 +146,17 @@ Current Folder** always inherits the active session's host.
 The image also includes `ctl` for local debugging against the same services:
 
 ```sh
-docker compose exec --user rmux rmux-remote ctl task list
-docker compose exec --user rmux rmux-remote ctl rmux list
+docker compose exec --user ctmux ctmux-remote ctl task list
+docker compose exec --user ctmux ctmux-remote ctl ctmux list
 ```
 
-The gateway starts `taskd` on demand, sharing `/run/rmux` with `rmuxd` for
-interactive sessions. `TASKD_RUNTIME_DIR=/run/taskd` and
-`TASKD_DATA_DIR=/var/lib/taskd` select its private endpoint and metadata. Both
-directories are owned by the `rmux` account (UID 1000) with mode `0700`.
+The gateway starts `ctl-taskd` on demand, sharing `/run/ctmux` with `ctmuxd` for
+interactive sessions. `CTL_TASKD_RUNTIME_DIR=/run/ctl-taskd` and
+`CTL_TASKD_DATA_DIR=/var/lib/ctl-taskd` select its private endpoint and metadata. Both
+directories are owned by the `ctmux` account (UID 1000) with mode `0700`.
 
-The `rmux_ssh_host_keys` volume preserves the SSH host identity across container
-replacement. The `taskd_data` volume preserves task definitions and active/latest
+The `ctmux_ssh_host_keys` volume preserves the SSH host identity across container
+replacement. The `ctl_taskd_data` volume preserves task definitions and active/latest
 run metadata. Background logs and terminal journals remain in memory. Stopping
 the container ends its processes and terminals; saved task definitions remain,
 and interrupted runs are reconciled as failed without automatic restart.
@@ -169,43 +169,43 @@ After updating the checkout, use the same Compose project name, public-key file,
 and SSH port as the existing target:
 
 ```sh
-docker compose up --build --detach rmux-remote
+docker compose up --build --detach ctmux-remote
 ```
 
 This rebuilds and replaces a changed container. Finish or stop active sessions
 and tasks before replacement; their processes cannot be migrated into the new
 container. Keep the named volumes and avoid `docker compose down --volumes` when
-retaining SSH identity and task definitions. If taskd was previously run in a
+retaining SSH identity and task definitions. If ctl-taskd was previously run in a
 custom image without the metadata volume, stop it and copy its data directory
 into the new volume with UID 1000 ownership before starting the replacement.
 
 An error mentioning `only 'exec ctld connect' is permitted` identifies a container
 from before the gateway rename. Update its image and forced-command script
-together. An older rmuxd can still serve ordinary protocol-9 terminals but must
+together. An older ctmuxd can still serve ordinary protocol-9 terminals but must
 also be upgraded to support interactive tasks; renaming the gateway alone does
 not add that daemon capability.
 
 ## On the client device
 
-`rmux` defines the canonical command surface. `ctl rmux` redirects those same
+`ctmux` defines the canonical command surface. `ctl ctmux` redirects those same
 commands through ctl's selected target. Select an ordinary OpenSSH destination
 or `~/.ssh/config` alias with global `--host`/`-H`:
 
 ```text
-ctl --host <host> rmux list
-ctl --host <host> rmux attach <session>
+ctl --host <host> ctmux list
+ctl --host <host> ctmux attach <session>
 ```
 
 Useful session commands:
 
 ```text
-ctl --host <host> rmux new --name <session>
-ctl --host <host> rmux state <session>
-ctl --host <host> rmux kill <session>
+ctl --host <host> ctmux new --name <session>
+ctl --host <host> ctmux state <session>
+ctl --host <host> ctmux kill <session>
 ```
 
 An ordinary attachment requests input but does not resize the remote PTY. Use
-`ctl --host <host> rmux attach <session> --read-only` for a viewer, or add
+`ctl --host <host> ctmux attach <session> --read-only` for a viewer, or add
 `--resize` only when deliberately claiming layout ownership. Press `Ctrl-]`
 to detach and release the attachment immediately without terminating the
 shell.
@@ -215,26 +215,26 @@ backoff. On Unix clients, it reopens channels through the private master managed
 by `ctld`; an expired master requires authentication through `ctld` before another
 channel can open. Desktop methods can enable **Use SSH-config master** to honor
 configured connection sharing, with a private master fallback when sharing is
-unconfigured; SSH-config aliases enable this by default. `rmuxd` preserves the logical attachment and both leases
+unconfigured; SSH-config aliases enable this by default. `ctmuxd` preserves the logical attachment and both leases
 for 30 seconds by default, while output resumes from the last renderer-applied
 raw sequence.
 
 ## Managed tasks on the selected host
 
 Use the same `--host` on every operation. Names and IDs are scoped to that host's
-taskd; local tasks and tasks on another host are separate inventories.
+ctl-taskd; local tasks and tasks on another host are separate inventories.
 
 ```sh
-ctl --host rmux-docker task create worker --cwd /home/rmux -- sh -c 'printf "ready\n"'
-ctl --host rmux-docker task list
-ctl --host rmux-docker task show worker
-ctl --host rmux-docker task start worker
-ctl --host rmux-docker task logs worker --follow
-ctl --host rmux-docker task restart worker
-ctl --host rmux-docker task stop worker
-ctl --host rmux-docker task remove worker
-ctl --host rmux-docker task create shell --mode interactive --start -- sh
-ctl --host rmux-docker task attach shell
+ctl --host ctmux-docker task create worker --cwd /home/ctmux -- sh -c 'printf "ready\n"'
+ctl --host ctmux-docker task list
+ctl --host ctmux-docker task show worker
+ctl --host ctmux-docker task start worker
+ctl --host ctmux-docker task logs worker --follow
+ctl --host ctmux-docker task restart worker
+ctl --host ctmux-docker task stop worker
+ctl --host ctmux-docker task remove worker
+ctl --host ctmux-docker task create shell --mode interactive --start -- sh
+ctl --host ctmux-docker task attach shell
 ```
 
 When `--cwd` is omitted, a remote task starts in the remote user's home directory.
@@ -243,9 +243,9 @@ not the client's checkout. The selected host must contain the command, files,
 and dependencies the task uses.
 
 `task attach` resolves the task through the task gateway, then attaches through
-the ordinary rmux gateway on the same SSH target. It never opens a remote socket
+the ordinary ctmux gateway on the same SSH target. It never opens a remote socket
 path on the client. Interactive input, geometry, output, and reconnect retain
-rmux behavior; background logs use the task protocol. The desktop task UI
+ctmux behavior; background logs use the task protocol. The desktop task UI
 currently manages local tasks, while remote tasks are available through the CLI.
 
 ## Operational limits
@@ -254,10 +254,10 @@ currently manages local tasks, while remote tasks are available through the CLI.
   and host-key prompts remain OpenSSH behavior, but key, agent, or certificate
   authentication is preferable for unattended reconnects.
 - Windows hosts use `--remote-platform windows` with the server's default
-  cmd.exe shell. Install `ctl-agent.exe`, `taskd.exe`, and `rmuxd.exe` together
+  cmd.exe shell. Install `ctl-agent.exe`, `ctl-taskd.exe`, and `ctmuxd.exe` together
   on the remote PATH. Their data endpoints are owner-restricted named pipes. PowerShell/custom
   server shells and desktop remote-platform selection remain unverified or
   unimplemented.
 - Journals, checkpoints, shell awareness, and reconnect tokens are memory-only.
 - Arbitrary gateway commands, files, port forwarding, desktop streaming, and
-  `rmuxd` maintenance control are not exposed by `ctl-agent`.
+  `ctmuxd` maintenance control are not exposed by `ctl-agent`.

@@ -1,9 +1,9 @@
 //! Passive task owner inspection, independent of task execution.
-use component_info::ComponentBuildInfo;
+use ctl_component_info::ComponentBuildInfo;
+use ctl_task_proto::{ClientMessage, ServerMessage, control, read_frame, write_frame};
 use std::io;
 use std::path::Path;
 use std::time::Duration;
-use task_proto::{ClientMessage, ServerMessage, control, read_frame, write_frame};
 
 #[derive(Debug, Clone)]
 pub struct ComponentStatus {
@@ -22,7 +22,7 @@ pub struct ComponentStatus {
 pub async fn component_status() -> io::Result<Option<ComponentStatus>> {
   tokio::time::timeout(Duration::from_secs(3), probe(&super::socket_path()))
     .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "taskd version check timed out"))?
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ctl-taskd version check timed out"))?
 }
 
 async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
@@ -48,7 +48,7 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
       build: Some(build),
       protocol_version: Some(protocol_version),
       control_protocol_version: Some(control::PROTOCOL_VERSION),
-      protocol_mismatch: protocol_version != task_proto::PROTOCOL_VERSION,
+      protocol_mismatch: protocol_version != ctl_task_proto::PROTOCOL_VERSION,
     }));
   }
   // Older task owners close unknown control requests. A fresh data handshake
@@ -58,8 +58,8 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
   write_frame(
     &mut stream,
     &ClientMessage::Handshake {
-      protocol_version: task_proto::PROTOCOL_VERSION,
-      client_name: "rmux-about".into(),
+      protocol_version: ctl_task_proto::PROTOCOL_VERSION,
+      client_name: "ctmux-about".into(),
     },
   )
   .await
@@ -69,10 +69,10 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
       build: None,
       protocol_version: Some(protocol_version),
       control_protocol_version: None,
-      protocol_mismatch: protocol_version != task_proto::PROTOCOL_VERSION,
+      protocol_mismatch: protocol_version != ctl_task_proto::PROTOCOL_VERSION,
     })),
     Some(ServerMessage::Error {
-      code: task_proto::ErrorCode::ProtocolVersionMismatch,
+      code: ctl_task_proto::ErrorCode::ProtocolVersionMismatch,
       ..
     }) => Ok(Some(ComponentStatus {
       build: None,
@@ -81,7 +81,9 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
       protocol_mismatch: true,
     })),
     Some(ServerMessage::Error { message, .. }) => Err(io::Error::other(message)),
-    _ => Err(io::Error::other("taskd returned invalid version metadata")),
+    _ => Err(io::Error::other(
+      "ctl-taskd returned invalid version metadata",
+    )),
   }
 }
 
@@ -119,8 +121,8 @@ mod tests {
       write_frame(
         &mut stream,
         &control::ServerMessage::ComponentStatus {
-          build: component_info::build_info(),
-          protocol_version: task_proto::PROTOCOL_VERSION + 1,
+          build: ctl_component_info::build_info(),
+          protocol_version: ctl_task_proto::PROTOCOL_VERSION + 1,
         },
       )
       .await
@@ -135,7 +137,7 @@ mod tests {
     let status = probe(&path).await.unwrap().unwrap();
     assert_eq!(
       status.protocol_version,
-      Some(task_proto::PROTOCOL_VERSION + 1)
+      Some(ctl_task_proto::PROTOCOL_VERSION + 1)
     );
     assert_eq!(
       status.control_protocol_version,
@@ -194,7 +196,7 @@ mod tests {
     let status = probe_legacy_reply(
       "rejected",
       ServerMessage::Error {
-        code: task_proto::ErrorCode::ProtocolVersionMismatch,
+        code: ctl_task_proto::ErrorCode::ProtocolVersionMismatch,
         message: "The version 999 in this message is not structured metadata".into(),
       },
     )
@@ -212,14 +214,17 @@ mod tests {
     let status = probe_legacy_reply(
       "accepted",
       ServerMessage::HandshakeAccepted {
-        protocol_version: task_proto::PROTOCOL_VERSION,
+        protocol_version: ctl_task_proto::PROTOCOL_VERSION,
       },
     )
     .await
     .unwrap()
     .unwrap();
     assert!(!status.protocol_mismatch);
-    assert_eq!(status.protocol_version, Some(task_proto::PROTOCOL_VERSION));
+    assert_eq!(
+      status.protocol_version,
+      Some(ctl_task_proto::PROTOCOL_VERSION)
+    );
     assert!(status.control_protocol_version.is_none());
     assert!(status.build.is_none());
   }
@@ -229,7 +234,7 @@ mod tests {
     let error = probe_legacy_reply(
       "internal",
       ServerMessage::Error {
-        code: task_proto::ErrorCode::Internal,
+        code: ctl_task_proto::ErrorCode::Internal,
         message: "protocol version mismatch 999".into(),
       },
     )

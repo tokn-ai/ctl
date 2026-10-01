@@ -4,13 +4,13 @@
 
 This repository will contain two independently useful products:
 
-- `rmux`: persistent local terminal sessions;
+- `ctmux`: persistent local terminal sessions;
 - `ctl`: local and SSH-authorized access to terminal sessions and managed tasks.
 
-The current MVP supports local `rmux` sessions plus mixed local/SSH sessions
+The current MVP supports local `ctmux` sessions plus mixed local/SSH sessions
 in both the desktop app and `ctl` on macOS and other Unix platforms. Windows
-supports local ConPTY sessions through `rmux` and `ctl rmux`, plus background
-tasks through `ctl task`. Windows `ctl --host HOST rmux ...` also routes through
+supports local ConPTY sessions through `ctmux` and `ctl ctmux`, plus background
+tasks through `ctl task`. Windows `ctl --host HOST ctmux ...` also routes through
 the system OpenSSH client. Unix hosts use the default remote command; Windows
 hosts use `--remote-platform windows` and the default cmd.exe SSH shell.
 Windows desktop support remains pending.
@@ -44,6 +44,38 @@ It routes to separate skills that can also be used independently:
 - [ctl-port](skills/ctl-port/SKILL.md) (`ctl skill ctl-port`): daemon-owned local SSH forwards.
 - [ctl-vpn](skills/ctl-vpn/SKILL.md) (`ctl skill ctl-vpn`): local OpenConnect and Tailscale containers.
 
+## Package names
+
+The control packages use the `ctl-*` family and terminal packages use `ctmux-*`.
+Cargo package names and installed command names are intentionally separate:
+
+| Cargo package | Installed command |
+| --- | --- |
+| `ctl-cli` | `ctl` |
+| `ctld` | `ctld` |
+| `ctl-agent` | `ctl-agent` |
+| `ctl-taskd` | `ctl-taskd` |
+| `ctmux-cli` | `ctmux` |
+| `ctmuxd` | `ctmuxd` |
+| `ctmux-tui` | `ctmux-tui` |
+| `ctmux-app` | desktop app `ctmux` |
+
+For example, `cargo build -p ctl-cli -p ctmux-cli` builds `ctl` and `ctmux`.
+The terminal subcommand is `ctl ctmux`; task-daemon maintenance remains
+`ctl taskd restart`. Library crates use names such as `ctl-client`, `ctl-ipc`,
+`ctl-task-client`, and `ctmux-client`.
+
+This is a clean break from the development names. No old-name aliases or data
+migration are provided. Default configuration, archives, runtime endpoints,
+desktop identifiers, and Keychain services use the new names; existing data is
+left untouched. Set `CTMUXD_BIN` / `CTMUX_RUNTIME_DIR` for terminal overrides and
+`CTL_TASKD_BIN` / `CTL_TASKD_RUNTIME_DIR` / `CTL_TASKD_DATA_DIR` for task overrides.
+The desktop bundle identifier is `io.ctmux.desktop`, and its signed connection
+helper uses `io.ctmux.desktop.ctld`; signing requires profiles for these identifiers.
+Update clients, daemons, and remote agent bundles together. The renamed build
+uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protocol
+12, remote identity protocol 3, and remote maintenance protocol 2.
+
 ## Build
 
 ```sh
@@ -53,8 +85,8 @@ cargo build --workspace
 For the tmux-style terminal UI (local sessions, including when run inside SSH):
 
 ```sh
-cargo build -p rmux -p rmuxd
-cargo run -p rmux
+cargo build -p ctmux-cli -p ctmuxd
+cargo run -p ctmux-cli
 ```
 
 Use Ctrl+B then `?` for help, `%` to split right, and `d` to detach.
@@ -63,31 +95,31 @@ See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
 For the Windows local CLI and daemon slice:
 
 ```sh
-cargo build -p ctl -p ctl-agent -p taskd -p rmux -p rmuxd
+cargo build -p ctl-cli -p ctl-agent -p ctl-taskd -p ctmux-cli -p ctmuxd
 ```
 
-The `rmux` and `rmuxd` binaries must be installed beside one another, or
-`RMUXD_BIN` must name the daemon executable.
+The `ctmux` and `ctmuxd` binaries must be installed beside one another, or
+`CTMUXD_BIN` must name the daemon executable.
 
 For local use, install both packages into your Cargo binary directory:
 
 ```sh
-cargo install --path rmux/daemon
-cargo install --path rmux/cli
+cargo install --path ctmux/daemon
+cargo install --path ctmux/cli
 ```
 
-For remote access, install `rmuxd`, `taskd`, and `ctl-agent` together on the
+For remote access, install `ctmuxd`, `ctl-taskd`, and `ctl-agent` together on the
 controlled device and `ctl` with `ctld` on each Unix client:
 
 ```sh
-cargo install --path rmux/daemon
+cargo install --path ctmux/daemon
 cargo install --path task/daemon
 cargo install --path ctl/agent
 cargo install --path ctl/daemon
 cargo install --path ctl/cli
 ```
 
-The local task runner also requires `taskd` beside `ctl`, or `TASKD_BIN` set to
+The local task runner also requires `ctl-taskd` beside `ctl`, or `CTL_TASKD_BIN` set to
 the daemon executable:
 
 ```sh
@@ -100,7 +132,7 @@ Cargo target directory before starting it so the app can auto-start the
 sibling executables:
 
 ```sh
-cargo build -p ctld -p rmuxd -p taskd
+cargo build -p ctld -p ctmuxd -p ctl-taskd
 cd apps/desktop
 pnpm install
 pnpm tauri dev
@@ -122,7 +154,7 @@ The `Desktop and remote-agent bundles` workflow builds static Linux and native
 macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
 pushes and manual runs build both; `build_desktop=false` keeps a manual run
 remote-only, as used by `pnpm agents:sync`. Each desktop package contains all
-four remote targets and matching local `ctld`, `rmuxd`, and `taskd` helpers.
+four remote targets and matching local `ctld`, `ctmuxd`, and `ctl-taskd` helpers.
 Release bundle IDs are semantic versions; other runs include the source
 revision so different development builds never share a remote install
 directory. Tag names must match the app version as `v<version>`.
@@ -144,24 +176,24 @@ errors still fail the build rather than silently producing unsigned packages.
 Open a new persistent session in the TUI, or create one detached for scripts:
 
 ```sh
-rmux
-rmux new -s work
-rmux new -As work       # attach if it exists, otherwise create
-rmux new -ds background # detached
+ctmux
+ctmux new -s work
+ctmux new -As work       # attach if it exists, otherwise create
+ctmux new -ds background # detached
 ```
 
-The standalone `rmux new` now attaches by default; existing scripts should add
-`-d`. The optional `rmux-tui` launcher remains available.
+The standalone `ctmux new` now attaches by default; existing scripts should add
+`-d`. The optional `ctmux-tui` launcher remains available.
 
-Without `--name`, `rmuxd` assigns a short name such as `session-1`, increasing
+Without `--name`, `ctmuxd` assigns a short name such as `session-1`, increasing
 monotonically for that daemon lifetime. Explicit names remain available for
 scripts and stable workflows.
 
 List and attach to sessions:
 
 ```sh
-rmux ls
-rmux attach -t work
+ctmux ls
+ctmux attach -t work
 ```
 
 A session is a listed root bound to a server-owned view. Each view owns one or
@@ -169,19 +201,19 @@ more terminals with independent PTYs and histories. Inspect its layout and use
 the returned terminal IDs to split, promote, attach, or terminate a pane:
 
 ```sh
-rmux view work
-rmux split <terminal-id>            # side by side
-rmux split <terminal-id> --vertical # stacked
-rmux attach <terminal-id>
-rmux promote <terminal-id> --name scratch
-rmux merge scratch work
-rmux kill-terminal <terminal-id>
+ctmux view work
+ctmux split <terminal-id>            # side by side
+ctmux split <terminal-id> --vertical # stacked
+ctmux attach <terminal-id>
+ctmux promote <terminal-id> --name scratch
+ctmux merge scratch work
+ctmux kill-terminal <terminal-id>
 ```
 
 Splitting inherits the source terminal's known cwd unless `--cwd` is supplied.
 Promotion and merging preserve terminal IDs, processes, history, and existing
-attachments. `rmux list` shows roots only; `rmux kill work` terminates every
-terminal in that root. These commands also work through `ctl rmux`.
+attachments. `ctmux list` shows roots only; `ctmux kill work` terminates every
+terminal in that root. These commands also work through `ctl ctmux`.
 
 The desktop renders the server layout with **Split right**, **Split below**,
 **Move to new session**, and **Terminate pane** controls. Its merge selector
@@ -189,19 +221,19 @@ combines remembered sessions on the same host. Protocol version 10 requires
 updating both the client and daemon; existing version 9 daemons are not migrated
 while running.
 
-On macOS and Linux, `rmuxd` observes the managed shell's physical cwd and
+On macOS and Linux, `ctmuxd` observes the managed shell's physical cwd and
 foreground job on a background worker, including while detached. The reusable
-[`process-info`](process-info/README.md) crate reads OS process metadata without
+[`ctmux-process-info`](ctmux-process-info/README.md) crate reads OS process metadata without
 shell hooks, arguments, environment, or dotfile changes. Unavailable information
 stays unknown; a process name is not a command line or prompt-state report.
 
 Optionally enable richer shell awareness in an interactive shell startup file.
-The snippet is inert outside an rmux-managed session; automatic integration
+The snippet is inert outside an ctmux-managed session; automatic integration
 without startup-file edits is a later step:
 
 ```sh
 # ~/.zshrc
-eval "$(rmux shell init zsh)"
+eval "$(ctmux shell init zsh)"
 ```
 
 `zsh` reports its cwd, prompt phase, and live editable command buffer. `bash`
@@ -211,10 +243,10 @@ over OS observations, preserving logical paths through symlinks. Inspect the
 non-sensitive state of a session with:
 
 ```sh
-rmux state work
+ctmux state work
 ```
 
-`rmux state` never prints an editable command buffer. The protocol lets an
+`ctmux state` never prints an editable command buffer. The protocol lets an
 input-owning GUI request it explicitly, but the initial desktop client
 deliberately leaves it redacted.
 That redaction applies to shell metadata; normal terminal echo remains part of
@@ -224,7 +256,7 @@ Press `Ctrl+B`, then `d` to detach without terminating the shell. Use
 `Ctrl+B`, then `?` for TUI shortcuts. End the session explicitly with:
 
 ```sh
-rmux kill-session -t work
+ctmux kill-session -t work
 ```
 
 The first normal attachment claims an unheld input lease, so another normal
@@ -232,7 +264,7 @@ attachment becomes view-only instead of stealing keystrokes. Request a viewer
 explicitly with:
 
 ```sh
-rmux attach work --read-only
+ctmux attach work --read-only
 ```
 
 The TUI requests the shared view resize lease and fits the canvas when available.
@@ -243,19 +275,19 @@ For the original single-terminal presenter, use `--raw`. It detaches with
 Ctrl+] and resizes only with an explicit `--resize` request:
 
 ```sh
-rmux attach --raw work --resize
+ctmux attach --raw work --resize
 ```
 
-The client starts a per-user `rmuxd` on demand. The daemon owns the PTY and
+The client starts a per-user `ctmuxd` on demand. The daemon owns the PTY and
 continues running after clients disconnect. It exits after its final session
 ends. Raw output replay and normalized logical history are bounded and
-memory-backed. `rmuxd` creates paired versioned history/live checkpoints so a
+memory-backed. `ctmuxd` creates paired versioned history/live checkpoints so a
 new or reconnecting GUI can reconstruct scrollback and the current screen
 without replaying an arbitrarily large journal.
 Optional shell-awareness state is memory-only and separate from the raw output
 journal. Disk-backed history and restart policies are later milestones.
 
-The `rmux` desktop app restores a disk-backed workspace of known local and
+The `ctmux` desktop app restores a disk-backed workspace of known local and
 remote sessions, automatically reconnecting the selected local tab on startup.
 Remote hosts stay disconnected until explicitly opened; **Connect host** resumes
 that host's selected tab, or its first open tab. **Add existing session**
@@ -264,7 +296,7 @@ opening a session connects on demand. A host is a named machine, independent
 of its IP address, hostname, or gateway route. Each host supports one remote
 account/environment and multiple named connection methods. **Add host** asks
 for the SSH address, a display name, and authentication, then verifies the
-connection and automatically saves the named host to `~/.tokn/rmux/hosts.json`.
+connection and automatically saves the named host to `~/.tokn/ctmux/hosts.json`.
 New addresses start with a method named `SSH`; saved aliases retain their `SSH config` method.
 Additional methods and gateway routes are
 available in **Host settings**. New-host creation does not modify OpenSSH config.
@@ -300,7 +332,7 @@ work remain available when devices go offline. Saved Tailscale methods retain
 a stable device binding across name/address changes and preserve the host's account
 identity. Connections use the existing SSH authentication flow.
 
-The client can be installed as a macOS app without adding it to `PATH`: rmux checks
+The client can be installed as a macOS app without adding it to `PATH`: ctmux checks
 `/Applications/Tailscale.app` and `~/Applications/Tailscale.app`, as well as CLI
 locations, and forces CLI mode when invoking the app executable. Discovery does
 not install, sign in to, or reconfigure Tailscale.
@@ -336,7 +368,7 @@ active tab and detaches its view while leaving the daemon-owned shell running;
 **Terminate session** explicitly terminates the session for every attached client. Closing
 the app itself detaches its active view and does not terminate any sessions.
 **Remove from workspace** forgets an entry without killing its shell. See
-[workspace persistence](docs/rmux-workspace.md) for disk storage and migration.
+[workspace persistence](docs/ctmux-workspace.md) for disk storage and migration.
 
 The desktop command palette opens with `Cmd-Shift-P` on macOS and
 `Ctrl-Shift-P` on Windows/Linux. The same command registry supplies app-local
@@ -358,24 +390,24 @@ retains its standard meaning and quits the app without terminating sessions.
 
 ## Local and remote control
 
-`rmux` remains the canonical local session CLI:
+`ctmux` remains the canonical local session CLI:
 
 ```sh
-rmux list
-rmux new -ds development
-rmux attach -t development
+ctmux list
+ctmux new -ds development
+ctmux attach -t development
 ```
 
-`ctl rmux` shares command parsing through ctl's selected target, retaining
+`ctl ctmux` shares command parsing through ctl's selected target, retaining
 detached creation and the single-terminal presenter for local and SSH transports.
 The target is local by default; no SSH process or `ctl-agent` helper is involved:
 
 ```sh
-ctl rmux list
-ctl rmux attach development
+ctl ctmux list
+ctl ctmux attach development
 ```
 
-Pass global `--host`/`-H` to redirect the same rmux command through SSH. The
+Pass global `--host`/`-H` to redirect the same ctmux command through SSH. The
 value first selects a saved ctl host by name or ID, then falls back to an
 ordinary OpenSSH destination or `~/.ssh/config` host alias. Unix
 clients ask the per-user `ctld` to establish or reuse an authenticated OpenSSH
@@ -384,14 +416,14 @@ remote command's `PATH` before falling back to the remote account's ordinary
 non-interactive `PATH`:
 
 ```sh
-ctl --host workstation rmux list
-ctl --host workstation rmux new --name development
-ctl -H workstation rmux attach development
+ctl --host workstation ctmux list
+ctl --host workstation ctmux new --name development
+ctl -H workstation ctmux attach development
 ```
 
 `ctl-agent` has no network listener or application-level pairing state. It relays
-the SSH channel to the same user's fixed local `rmuxd` endpoint. After an
-unexpected SSH loss, `ctl` creates a replacement channel and `rmuxd` preserves
+the SSH channel to the same user's fixed local `ctmuxd` endpoint. After an
+unexpected SSH loss, `ctl` creates a replacement channel and `ctmuxd` preserves
 the logical attachment and its leases for 30 seconds by default. An explicit
 `Ctrl-]` detach releases them immediately.
 
@@ -417,7 +449,7 @@ ctl host remove office
 ```
 
 `host` manages the same saved definitions as the desktop in
-`~/.tokn/rmux/hosts.json` (`CTL_HOSTS_PATH` overrides it). Select hosts and methods
+`~/.tokn/ctmux/hosts.json` (`CTL_HOSTS_PATH` overrides it). Select hosts and methods
 by name or stable ID. These management commands require saved hosts; to save an
 SSH config alias, use `ctl host add work my-ssh-alias --ssh-config`. `host list`
 shows saved definitions only, not unsaved SSH config or Tailscale discoveries.
@@ -449,7 +481,7 @@ replacing it. Reload an already-open desktop to see CLI changes.
 
 ### Shells, commands, and file copies
 
-The native shell command creates a new persistent rmux session by default.
+The native shell command creates a new persistent ctmux session by default.
 A named session attaches if it already exists, or is created if absent:
 
 ```sh
@@ -465,7 +497,7 @@ ctl -H work exec -- sh -c 'printf "%s\n" "$HOME"'
 streams stdin/stdout/stderr, and returns the command's exit status. Unix exec
 arguments are quoted individually; explicitly invoke `sh -c` for shell syntax.
 The default target is local. Persistent remote shells require `ctl-agent` and
-`rmuxd` on the destination, as with `ctl rmux`; plain SSH operations need only
+`ctmuxd` on the destination, as with `ctl ctmux`; plain SSH operations need only
 the remote SSH service.
 
 `ssh` and `scp` accept the system OpenSSH command syntax. A destination such as
@@ -497,9 +529,9 @@ incompatible master. Explicit proxy options override the saved route.
 as its SSH subprocess, retaining OpenSSH's paths, progress display, and transfer
 protocol; an explicit `scp -S` selects the user's own transport instead.
 
-Host settings are shared with the desktop in `~/.tokn/rmux/hosts.json`. CLI
+Host settings are shared with the desktop in `~/.tokn/ctmux/hosts.json`. CLI
 overrides `CTL_HOSTS_PATH` and `CTL_VPNS_PATH` select alternate catalog files;
-the default VPN file is the desktop's `io.rmux.desktop/vpns.json` under the
+the default VPN file is the desktop's `io.ctmux.desktop/vpns.json` under the
 platform configuration directory. These commands do not edit SSH config.
 
 ### Managed port forwards
@@ -550,9 +582,9 @@ both providers through saved JSON profiles.
 ## Managed tasks
 
 Tasks support local and SSH background commands and interactive terminals on
-Unix and Windows. Registered-task definitions and the latest run metadata persist in taskd.
+Unix and Windows. Registered-task definitions and the latest run metadata persist in ctl-taskd.
 Background stdout and stderr use a bounded in-memory log; interactive input and
-output stay in rmuxd.
+output stay in ctmuxd.
 
 Reusable local definitions are shared by the CLI and desktop, separately from
 registered tasks. Save to the current project or explicitly use the global catalog:
@@ -582,7 +614,7 @@ ctl task restart api
 ctl task remove api
 ```
 
-Interactive tasks use `--mode interactive` and attach through rmux:
+Interactive tasks use `--mode interactive` and attach through ctmux:
 
 ```sh
 ctl task create shell --mode interactive --start -- bash
@@ -592,8 +624,8 @@ ctl task restart shell
 ```
 
 Use `cmd.exe /D /Q` instead of `bash` for a Windows command shell. Taskd manages
-the run; rmuxd owns its process and PTY (ConPTY on Windows). `ctl task show`
-also reports the session ID for `ctl rmux attach`. `ctl task logs` applies only
+the run; ctmuxd owns its process and PTY (ConPTY on Windows). `ctl task show`
+also reports the session ID for `ctl ctmux attach`. `ctl task logs` applies only
 to background tasks.
 
 Global `--host` selects the same remote target for task registration, lifecycle,
@@ -610,23 +642,21 @@ ctl --host workstation task remove shell
 ```
 
 Task requests use the same fixed managed-directory `PATH` prefix and
-`ctl-agent connect --service task` command as rmux connections.
-Interactive attachment opens a separate rmux channel to that same host; remote
+`ctl-agent connect --service task` command as ctmux connections.
+Interactive attachment opens a separate ctmux channel to that same host; remote
 socket paths in task metadata are never opened on the client. A local create
 defaults to the caller's working directory. A remote create defaults to the
 remote user's home; `--cwd` names a remote path, with relative paths resolved
 against that home.
 
-Interactive runs survive taskd restart and are reconciled with the same rmuxd
-instance. Rmuxd retains exit results until taskd records them. Replacing or
-losing rmuxd fails the affected runs; taskd does not automatically recreate
+Interactive runs survive ctl-taskd restart and are reconciled with the same ctmuxd
+instance. Ctmuxd retains exit results until ctl-taskd records them. Replacing or
+losing ctmuxd fails the affected runs; ctl-taskd does not automatically recreate
 them. Starting and restarting remain explicit operations.
 
-Build and install `ctl`, `taskd`, and `rmuxd` together. This task protocol is
-version 3; restart an older taskd before using it. Restart an older rmuxd to
-enable managed sessions (this terminates its existing terminals). Existing
-background task records remain readable. SSH task routing additionally requires
-the updated gateway and any SSH forced-command allowlist; rebuilding the Docker
+Build and install `ctl`, `ctl-taskd`, and `ctmuxd` together. Task protocol version 4
+requires matching clients and daemons. SSH task routing additionally requires
+the matching gateway and SSH forced-command allowlist; rebuilding the Docker
 target updates all four binaries. Automatic restart policies remain pending.
 The desktop task interface currently manages local tasks.
 
@@ -634,13 +664,13 @@ On Unix, background tasks run in their own process group. Stop first sends a
 termination signal to the group and escalates if it does not exit.
 
 Windows background tasks use owner-restricted local named pipes and Job Objects.
-Stop terminates the entire process tree; taskd exit also terminates its jobs.
+Stop terminates the entire process tree; ctl-taskd exit also terminates its jobs.
 Task completion follows the root process and cleans up remaining descendants.
-Windows state defaults to `%LOCALAPPDATA%\ctl\taskd` and inherits filesystem ACLs;
+Windows state defaults to `%LOCALAPPDATA%\ctl-taskd` and inherits filesystem ACLs;
 custom data directories should be private to the user.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
-and [`docs/rmux-protocol.md`](docs/rmux-protocol.md). Numbered
+and [`docs/ctmux-protocol.md`](docs/ctmux-protocol.md). Numbered
 [`design proposals`](docs/proposals/README.md) record feature intent and major
 ownership boundaries. The remote setup is in
 [`docs/remote-mvp.md`](docs/remote-mvp.md).
@@ -650,17 +680,17 @@ Windows desktop backend and native shell metadata remain separate work.
 
 ### Windows SSH hosts
 
-Install `ctl-agent.exe`, `taskd.exe`, and `rmuxd.exe` together in a directory on the
+Install `ctl-agent.exe`, `ctl-taskd.exe`, and `ctmuxd.exe` together in a directory on the
 remote user's PATH. Enable Windows OpenSSH Server with its default `cmd.exe`
 shell, then select the server platform explicitly from either client platform:
 
 ```sh
-ctl --host windows-host --remote-platform windows rmux new --name development -- cmd.exe /D /Q
-ctl --host windows-host --remote-platform windows rmux attach development
+ctl --host windows-host --remote-platform windows ctmux new --name development -- cmd.exe /D /Q
+ctl --host windows-host --remote-platform windows ctmux attach development
 ctl --host windows-host --remote-platform windows task list
 ```
 
-The fixed Windows commands are `ctl-agent.exe connect` for rmux and
+The fixed Windows commands are `ctl-agent.exe connect` for ctmux and
 `ctl-agent.exe connect --service task` for tasks. The gateway relays the selected
 user-owned data pipe and starts its companion daemon when absent. The daemon
 breaks away from the SSH job so its sessions or tasks survive disconnects.
@@ -668,9 +698,9 @@ PowerShell and custom SSH shells are not covered by this implementation.
 Desktop remote-platform selection remains pending.
 
 The SSH gateway is named `ctl-agent` (`ctl-agent.exe` on Windows), reflecting
-its per-connection lifetime. When upgrading from the former gateway name,
-update the client, remote executable, and any SSH forced-command configuration
-together. The `ctl-ssh-v1` transport marker and rmux wire protocol are unchanged.
+its per-connection lifetime. Ordinary connections use the `ctl-ssh-v1` transport
+marker, then negotiate the selected service's protocol version. Update the
+client, remote executables, and any SSH forced-command configuration together.
 
 ### Exited sessions
 
@@ -681,6 +711,6 @@ transport outages continue to reconnect.
 Dismissed and deleted sessions are stored on the client device for seven days.
 Archives contain locally retained text; they remain available when the host is
 offline, and do not revive a process. Open **Archived** in the desktop Sessions
-sidebar, use **Ctrl+B A** in the TUI, or run `rmux archives` followed by
-`rmux archive SESSION_ID`. Desktop and TUI maintain separate local archives.
+sidebar, use **Ctrl+B A** in the TUI, or run `ctmux archives` followed by
+`ctmux archive SESSION_ID`. Desktop and TUI maintain separate local archives.
 No archive protocol or daemon upgrade is required.

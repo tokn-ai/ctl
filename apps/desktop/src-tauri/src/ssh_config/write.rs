@@ -22,11 +22,11 @@ pub enum SaveSshConfigError {
   InvalidField(&'static str),
   #[error("cannot safely check SSH host conflicts because discovery was incomplete: {0}")]
   IncompleteDiscovery(String),
-  #[error("SSH alias '{0}' is already defined outside rmux-app's managed block")]
+  #[error("SSH alias '{0}' is already defined outside ctmux-app's managed block")]
   AliasConflict(String),
-  #[error("rmux-app's managed SSH block for '{0}' is malformed")]
+  #[error("ctmux-app's managed SSH block for '{0}' is malformed")]
   MalformedManagedBlock(String),
-  #[error("SSH config changed while rmux-app was saving it; no changes were written")]
+  #[error("SSH config changed while ctmux-app was saving it; no changes were written")]
   ConcurrentModification,
   #[error("could not {action} SSH config at {}: {source}", path.display())]
   Io {
@@ -39,7 +39,7 @@ pub enum SaveSshConfigError {
   HomeDirectoryUnavailable(#[from] HomeDirectoryUnavailable),
 }
 
-/// Writes or updates one rmux-app-managed `Host` block in the user's OpenSSH
+/// Writes or updates one ctmux-app-managed `Host` block in the user's OpenSSH
 /// config. Existing unmanaged aliases are never overwritten.
 pub fn save_host(definition: &SshHostDefinition) -> Result<String, SaveSshConfigError> {
   let home = dirs::home_dir().ok_or(HomeDirectoryUnavailable)?;
@@ -162,7 +162,7 @@ fn is_safe_config_token(value: &str) -> bool {
 
 fn render_managed_block(definition: &SshHostDefinition) -> String {
   let mut block = format!(
-    "# >>> rmux-app host {}\nHost {}\n  HostName {}\n",
+    "# >>> ctmux-app host {}\nHost {}\n  HostName {}\n",
     definition.alias, definition.alias, definition.hostname
   );
   if let Some(user) = &definition.user {
@@ -180,7 +180,7 @@ fn render_managed_block(definition: &SshHostDefinition) -> String {
     .expect("writing to a String cannot fail");
     block.push_str("  IdentitiesOnly yes\n");
   }
-  writeln!(block, "# <<< rmux-app host {}", definition.alias)
+  writeln!(block, "# <<< ctmux-app host {}", definition.alias)
     .expect("writing to a String cannot fail");
   block
 }
@@ -193,8 +193,8 @@ fn managed_block_range(
   contents: &str,
   alias: &str,
 ) -> Result<Option<std::ops::Range<usize>>, SaveSshConfigError> {
-  let begin_marker = format!("# >>> rmux-app host {alias}");
-  let end_marker = format!("# <<< rmux-app host {alias}");
+  let begin_marker = format!("# >>> ctmux-app host {alias}");
+  let end_marker = format!("# <<< ctmux-app host {alias}");
   let mut start = None;
   let mut offset = 0;
   for segment in contents.split_inclusive('\n') {
@@ -228,7 +228,7 @@ fn write_config_atomically(
     path: path.to_path_buf(),
     source: std::io::Error::other("SSH config path has no parent directory"),
   })?;
-  let temporary_path = parent.join(format!(".config.rmux-app-{}.tmp", uuid::Uuid::new_v4()));
+  let temporary_path = parent.join(format!(".config.ctmux-app-{}.tmp", uuid::Uuid::new_v4()));
   let mut temporary = OpenOptions::new()
     .write(true)
     .create_new(true)
@@ -319,14 +319,14 @@ mod tests {
 
     assert_eq!(
       save_host_to_home(temporary.path(), &definition).unwrap(),
-      "rmux-remote-test"
+      "ctmux-remote-test"
     );
     let first = fs::read_to_string(ssh_directory.join("config")).unwrap();
-    assert!(first.starts_with("# >>> rmux-app host rmux-remote-test\n"));
+    assert!(first.starts_with("# >>> ctmux-app host ctmux-remote-test\n"));
     assert!(first.contains("  HostName 127.0.0.1\n"));
     assert!(first.contains("  Port 2222\n"));
     assert!(first.contains("  IdentityFile \"~/.ssh/local.id_rsa\"\n"));
-    assert!(first.contains("# <<< rmux-app host rmux-remote-test\n\nHost *\n\n"));
+    assert!(first.contains("# <<< ctmux-app host ctmux-remote-test\n\nHost *\n\n"));
     assert!(first.ends_with("  HostName existing.example\n"));
 
     definition.port = Some(2200);
@@ -335,7 +335,7 @@ mod tests {
     let updated = fs::read_to_string(ssh_directory.join("config")).unwrap();
     assert_eq!(
       updated
-        .matches("# >>> rmux-app host rmux-remote-test")
+        .matches("# >>> ctmux-app host ctmux-remote-test")
         .count(),
       1
     );
@@ -351,7 +351,7 @@ mod tests {
     let ssh_directory = temporary.path().join(".ssh");
     fs::create_dir_all(&ssh_directory).unwrap();
     let config_path = ssh_directory.join("config");
-    let original = "Host rmux-remote-test\n  HostName elsewhere\n";
+    let original = "Host ctmux-remote-test\n  HostName elsewhere\n";
     fs::write(&config_path, original).unwrap();
 
     let error = save_host_to_home(temporary.path(), &test_definition()).unwrap_err();
@@ -371,7 +371,7 @@ mod tests {
     fs::write(&config_path, original).unwrap();
     fs::write(
       include_directory.join("remote.conf"),
-      "Host rmux-remote-test\n  HostName elsewhere\n",
+      "Host ctmux-remote-test\n  HostName elsewhere\n",
     )
     .unwrap();
 
@@ -434,9 +434,9 @@ mod tests {
 
   fn test_definition() -> SshHostDefinition {
     SshHostDefinition {
-      alias: "rmux-remote-test".into(),
+      alias: "ctmux-remote-test".into(),
       hostname: "127.0.0.1".into(),
-      user: Some("rmux".into()),
+      user: Some("ctmux".into()),
       port: Some(2222),
       identity_file: Some("~/.ssh/local.id_rsa".into()),
     }
@@ -446,7 +446,7 @@ mod tests {
 
   impl TemporaryDirectory {
     fn new() -> Self {
-      let path = std::env::temp_dir().join(format!("rmux-ssh-config-{}", uuid::Uuid::new_v4()));
+      let path = std::env::temp_dir().join(format!("ctmux-ssh-config-{}", uuid::Uuid::new_v4()));
       fs::create_dir(&path).unwrap();
       Self(path)
     }

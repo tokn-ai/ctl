@@ -34,7 +34,7 @@ pub struct PreparedRemoteAction {
 }
 
 enum Operation {
-  Restart(Box<ctl_core::maintenance::PreparedRemoteRmuxRestart>),
+  Restart(Box<ctl_client::maintenance::PreparedRemoteCtmuxRestart>),
   Reconnect,
 }
 
@@ -64,7 +64,7 @@ pub async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prep
       "The existing SSH connection did not respond. Nothing was restarted.",
     )
   })??;
-  let ctl_core::ConnectionTarget::Ssh {
+  let ctl_client::ConnectionTarget::Ssh {
     destination,
     options,
   } = actor.target.to_core()
@@ -82,8 +82,8 @@ pub async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prep
     attachment_count: u32::try_from(actors.len()).unwrap_or(u32::MAX),
     detail: String::new(),
   };
-  let operation = if preview.component == "rmuxd" {
-    let prepared = ctl_core::maintenance::prepare_rmux_restart(
+  let operation = if preview.component == "ctmuxd" {
+    let prepared = ctl_client::maintenance::prepare_ctmux_restart(
       &destination,
       &options,
       &control_path,
@@ -105,7 +105,7 @@ pub async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prep
     Operation::Restart(Box::new(prepared))
   } else {
     if let Ok(identity) =
-      ctl_core::maintenance::inspect_agent(&destination, &options, &control_path).await
+      ctl_client::maintenance::inspect_agent(&destination, &options, &control_path).await
     {
       if identity.remote_id != remote_id {
         return Err(unavailable());
@@ -188,26 +188,26 @@ fn unavailable() -> CommandErrorDto {
   )
 }
 
-fn running_protocols(info: &ctl_proto::maintenance::RunningRmux) -> Vec<ProtocolVersion> {
+fn running_protocols(info: &ctl_proto::maintenance::RunningCtmux) -> Vec<ProtocolVersion> {
   info
     .protocol_version
-    .map(|version| ProtocolVersion::new("rmux", version))
+    .map(|version| ProtocolVersion::new("ctmux", version))
     .into_iter()
     .chain(std::iter::once(ProtocolVersion::new(
-      "rmux_control",
+      "ctmux_control",
       info.control_protocol_version,
     )))
     .collect()
 }
 
-fn version(info: component_info::ComponentInfo) -> ComponentVersionInfo {
+fn version(info: ctl_component_info::ComponentInfo) -> ComponentVersionInfo {
   ComponentVersionInfo::from_component(info)
 }
 
-fn require_compatible_replacement(info: &component_info::ComponentInfo) -> CommandResult<()> {
+fn require_compatible_replacement(info: &ctl_component_info::ComponentInfo) -> CommandResult<()> {
   for (name, version) in [
-    ("rmux", rmux_proto::PROTOCOL_VERSION),
-    ("rmux_control", rmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
+    ("ctmux", ctmux_proto::PROTOCOL_VERSION),
+    ("ctmux_control", ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
   ] {
     if !info
       .protocols
@@ -284,7 +284,7 @@ mod tests {
 
   #[tokio::test]
   async fn absent_rows_cannot_choose_an_arbitrary_host_or_command() {
-    for id in ["remote:rmuxd:invented", "ssh:anything", "/tmp/owner.sock"] {
+    for id in ["remote:ctmuxd:invented", "ssh:anything", "/tmp/owner.sock"] {
       let result = prepare(&AppState::default(), id).await;
       assert_eq!(result.err().unwrap().code, "remote_component_changed");
     }
@@ -292,16 +292,16 @@ mod tests {
 
   #[test]
   fn incompatible_remote_replacements_are_rejected_before_confirmation() {
-    let mut info = component_info::ComponentInfo {
-      build: component_info::build_info(),
+    let mut info = ctl_component_info::ComponentInfo {
+      build: ctl_component_info::build_info(),
       protocols: vec![
-        component_info::ProtocolInfo {
-          name: "rmux".into(),
-          version: rmux_proto::PROTOCOL_VERSION,
+        ctl_component_info::ProtocolInfo {
+          name: "ctmux".into(),
+          version: ctmux_proto::PROTOCOL_VERSION,
         },
-        component_info::ProtocolInfo {
-          name: "rmux_control".into(),
-          version: rmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
+        ctl_component_info::ProtocolInfo {
+          name: "ctmux_control".into(),
+          version: ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
         },
       ],
     };

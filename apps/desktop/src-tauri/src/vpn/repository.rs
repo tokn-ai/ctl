@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState};
+use ctl_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
@@ -13,7 +13,7 @@ use crate::error::{CommandErrorDto, CommandResult};
 
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-use ctl_core::hosts::SavedVpnDocument as Document;
+use ctl_client::hosts::SavedVpnDocument as Document;
 
 struct Loaded {
   revision: Option<String>,

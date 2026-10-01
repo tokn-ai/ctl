@@ -1,4 +1,4 @@
-use rmux_client::{
+use ctmux_client::{
   AttachmentAcknowledgementError, AttachmentControl, AttachmentEvent, AttachmentEvents,
 };
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ pub struct AttachmentActor {
   pub window_label: String,
   pub target: ConnectionTargetDto,
   pub control: AttachmentControl,
-  pub cache_identity: Option<rmux_client::cache::CacheIdentity>,
+  pub cache_identity: Option<ctmux_client::cache::CacheIdentity>,
   pub remote_observation: Option<crate::about::observations::RemoteObservation>,
   pending: Mutex<Option<PendingPresentation>>,
   pending_changed: Notify,
@@ -402,7 +402,7 @@ impl AttachmentActor {
     }
   }
 
-  pub fn with_cache(mut self, identity: rmux_client::cache::CacheIdentity) -> Self {
+  pub fn with_cache(mut self, identity: ctmux_client::cache::CacheIdentity) -> Self {
     self.cache_identity = Some(identity);
     self
   }
@@ -535,7 +535,7 @@ pub async fn forward_attachment_events(
   mut events: AttachmentEvents,
   channel: Channel<AttachmentEventDto>,
   controller: impl std::future::Future<
-    Output = Result<rmux_client::AttachExit, rmux_client::ClientError>,
+    Output = Result<ctmux_client::AttachExit, ctmux_client::ClientError>,
   >,
 ) {
   tokio::pin!(controller);

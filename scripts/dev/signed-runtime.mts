@@ -13,7 +13,7 @@ export async function prepareSignedRuntime(
   const identity = createHash("sha256").update(repository).digest("hex").slice(0, 20);
   // macOS's per-user TMPDIR is too long for sockaddr_un after appending a
   // stable worktree identity. Use the short system temp directory instead.
-  const directory = path.join(temporary, `rmux-ctld-dev-${process.getuid?.() ?? "user"}-${identity}`);
+  const directory = path.join(temporary, `ctmux-ctld-dev-${process.getuid?.() ?? "user"}-${identity}`);
   await ensurePrivateDirectory(directory);
   return directory;
 }

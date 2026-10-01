@@ -499,16 +499,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "component-info"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -662,21 +652,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctl"
+name = "ctl-agent"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctl-client",
+ "ctl-component-info",
+ "ctl-proto",
+ "ctl-task-ipc",
+ "ctl-task-proto",
+ "ctl-taskd",
+ "ctmux-client",
+ "ctmux-ipc",
+ "ctmux-proto",
+ "ctmuxd",
+ "dirs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ctl-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
  "comfy-table",
- "ctl-core",
- "ctld-ipc",
+ "ctl-client",
+ "ctl-ipc",
+ "ctl-task-cli",
+ "ctl-task-client",
+ "ctmux-cli",
  "dirs",
- "rmux",
  "rpassword",
  "rustix",
  "serde",
  "serde_json",
- "task-cli",
- "task-client",
  "thiserror 2.0.20",
  "tokio",
  "unicode-width 0.1.14",
@@ -685,46 +698,53 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctl-agent"
+name = "ctl-client"
 version = "0.1.0"
 dependencies = [
- "clap",
- "component-info",
- "ctl-core",
+ "ctl-component-info",
+ "ctl-ipc",
  "ctl-proto",
+ "ctl-task-client",
+ "ctl-task-ipc",
+ "ctmux-ipc",
  "dirs",
- "rmux-client",
- "rmux-ipc",
- "rmux-proto",
- "rmuxd",
+ "glob",
  "serde",
  "serde_json",
- "task-ipc",
- "task-proto",
- "taskd",
+ "sha2",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
 ]
 
 [[package]]
-name = "ctl-core"
+name = "ctl-component-info"
 version = "0.1.0"
 dependencies = [
- "component-info",
- "ctl-proto",
- "ctld-ipc",
- "dirs",
- "glob",
- "rmux-ipc",
  "serde",
  "serde_json",
  "sha2",
- "task-client",
- "task-ipc",
+ "tokio",
+]
+
+[[package]]
+name = "ctl-ipc"
+version = "0.1.0"
+dependencies = [
+ "ctl-component-info",
+ "ctl-proto",
+ "dirs",
+ "interprocess",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "url",
  "uuid",
+ "widestring",
+ "zeroize",
 ]
 
 [[package]]
@@ -741,11 +761,101 @@ dependencies = [
 name = "ctl-proto"
 version = "0.1.0"
 dependencies = [
- "component-info",
+ "ctl-component-info",
  "serde",
  "serde_json",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "ctl-task-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctl-task-client",
+ "ctl-task-ipc",
+ "ctl-task-proto",
+ "ctl-task-store",
+ "ctmux-cli",
+ "rustix",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ctl-task-client"
+version = "0.1.0"
+dependencies = [
+ "ctl-component-info",
+ "ctl-task-ipc",
+ "ctl-task-proto",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "ctl-task-ipc"
+version = "0.1.0"
+dependencies = [
+ "ctl-component-info",
+ "ctl-task-proto",
+ "dirs",
+ "interprocess",
+ "rustix",
+ "tokio",
+ "uuid",
+ "widestring",
+]
+
+[[package]]
+name = "ctl-task-proto"
+version = "0.1.0"
+dependencies = [
+ "ctl-component-info",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "ctl-task-store"
+version = "0.1.0"
+dependencies = [
+ "ctl-task-proto",
+ "dirs",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "ctl-taskd"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctl-component-info",
+ "ctl-task-ipc",
+ "ctl-task-proto",
+ "ctmux-ipc",
+ "ctmux-proto",
+ "ctmuxd",
+ "dirs",
+ "interprocess",
+ "process-wrap",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -754,10 +864,10 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
- "component-info",
+ "ctl-component-info",
+ "ctl-ipc",
  "ctl-keychain-client",
  "ctl-proto",
- "ctld-ipc",
  "dirs",
  "rpassword",
  "rustix",
@@ -773,23 +883,152 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctld-ipc"
+name = "ctmux-app"
 version = "0.1.0"
 dependencies = [
- "component-info",
+ "base64 0.22.1",
+ "ctl-client",
+ "ctl-component-info",
+ "ctl-ipc",
  "ctl-proto",
+ "ctl-task-client",
+ "ctl-task-ipc",
+ "ctl-task-proto",
+ "ctl-task-store",
+ "ctmux-client",
+ "ctmux-ipc",
+ "ctmux-proto",
  "dirs",
- "interprocess",
+ "glob",
+ "objc2",
+ "objc2-app-kit",
  "rustix",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "ctmux-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctmux-client",
+ "ctmux-ipc",
+ "ctmux-proto",
+ "ctmux-tui",
+ "ctmuxd",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ctmux-client"
+version = "0.1.0"
+dependencies = [
+ "avt",
+ "crossterm",
+ "ctl-component-info",
+ "ctmux-proto",
+ "dirs",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
  "tokio",
- "url",
+ "uuid",
+]
+
+[[package]]
+name = "ctmux-core"
+version = "0.1.0"
+dependencies = [
+ "ctmux-proto",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "ctmux-ipc"
+version = "0.1.0"
+dependencies = [
+ "ctl-component-info",
+ "ctmux-proto",
+ "dirs",
+ "interprocess",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
  "uuid",
  "widestring",
- "zeroize",
+]
+
+[[package]]
+name = "ctmux-process-info"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "libproc",
+ "portable-pty",
+]
+
+[[package]]
+name = "ctmux-proto"
+version = "0.1.0"
+dependencies = [
+ "ctl-component-info",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "ctmux-tui"
+version = "0.1.0"
+dependencies = [
+ "avt",
+ "base64 0.22.1",
+ "clap",
+ "crossterm",
+ "ctmux-client",
+ "ctmux-ipc",
+ "ctmux-proto",
+ "ctmuxd",
+ "portable-pty",
+ "tokio",
+ "unicode-width 0.1.14",
+ "uuid",
+]
+
+[[package]]
+name = "ctmuxd"
+version = "0.1.0"
+dependencies = [
+ "avt",
+ "clap",
+ "ctl-component-info",
+ "ctmux-core",
+ "ctmux-ipc",
+ "ctmux-process-info",
+ "ctmux-proto",
+ "nix 0.29.0",
+ "portable-pty",
+ "rustix",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2929,15 +3168,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "process-info"
-version = "0.1.0"
-dependencies = [
- "libc",
- "libproc",
- "portable-pty",
-]
-
-[[package]]
 name = "process-wrap"
 version = "10.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3102,146 +3332,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "rmux"
-version = "0.1.0"
-dependencies = [
- "clap",
- "rmux-client",
- "rmux-ipc",
- "rmux-proto",
- "rmux-tui",
- "rmuxd",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "rmux-app"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "component-info",
- "ctl-core",
- "ctl-proto",
- "ctld-ipc",
- "dirs",
- "glob",
- "objc2",
- "objc2-app-kit",
- "rmux-client",
- "rmux-ipc",
- "rmux-proto",
- "rustix",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "task-client",
- "task-ipc",
- "task-proto",
- "task-store",
- "tauri",
- "tauri-build",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "rmux-client"
-version = "0.1.0"
-dependencies = [
- "avt",
- "component-info",
- "crossterm",
- "dirs",
- "rmux-proto",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "rmux-core"
-version = "0.1.0"
-dependencies = [
- "rmux-proto",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "rmux-ipc"
-version = "0.1.0"
-dependencies = [
- "component-info",
- "dirs",
- "interprocess",
- "rmux-proto",
- "rustix",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
- "widestring",
-]
-
-[[package]]
-name = "rmux-proto"
-version = "0.1.0"
-dependencies = [
- "component-info",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "rmux-tui"
-version = "0.1.0"
-dependencies = [
- "avt",
- "base64 0.22.1",
- "clap",
- "crossterm",
- "portable-pty",
- "rmux-client",
- "rmux-ipc",
- "rmux-proto",
- "rmuxd",
- "tokio",
- "unicode-width 0.1.14",
- "uuid",
-]
-
-[[package]]
-name = "rmuxd"
-version = "0.1.0"
-dependencies = [
- "avt",
- "clap",
- "component-info",
- "nix 0.29.0",
- "portable-pty",
- "process-info",
- "rmux-core",
- "rmux-ipc",
- "rmux-proto",
- "rustix",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -3913,96 +4003,6 @@ name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
-
-[[package]]
-name = "task-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "rmux",
- "rustix",
- "serde_json",
- "task-client",
- "task-ipc",
- "task-proto",
- "task-store",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "task-client"
-version = "0.1.0"
-dependencies = [
- "component-info",
- "serde_json",
- "task-ipc",
- "task-proto",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "task-ipc"
-version = "0.1.0"
-dependencies = [
- "component-info",
- "dirs",
- "interprocess",
- "rustix",
- "task-proto",
- "tokio",
- "uuid",
- "widestring",
-]
-
-[[package]]
-name = "task-proto"
-version = "0.1.0"
-dependencies = [
- "component-info",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "task-store"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "serde",
- "serde_json",
- "sha2",
- "task-proto",
- "thiserror 2.0.20",
- "uuid",
-]
-
-[[package]]
-name = "taskd"
-version = "0.1.0"
-dependencies = [
- "clap",
- "component-info",
- "dirs",
- "interprocess",
- "process-wrap",
- "rmux-ipc",
- "rmux-proto",
- "rmuxd",
- "rustix",
- "serde",
- "serde_json",
- "task-ipc",
- "task-proto",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
- "windows 0.62.2",
-]
 
 [[package]]
 name = "tauri"

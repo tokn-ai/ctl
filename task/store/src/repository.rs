@@ -4,9 +4,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use ctl_task_proto::TaskDefinition;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use task_proto::TaskDefinition;
 
 use crate::{SavedTaskDefinition, Snapshot, StoreError, io_error};
 

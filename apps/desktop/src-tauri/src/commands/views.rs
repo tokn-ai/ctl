@@ -2,7 +2,7 @@ use super::{client_identity, unexpected_response};
 use crate::dto::{ConnectionTargetDto, TerminalSizeDto};
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::transport;
-use rmux_proto::{ClientMessage, ServerMessage, SplitAxis, ViewLayout};
+use ctmux_proto::{ClientMessage, ServerMessage, SplitAxis, ViewLayout};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -48,7 +48,7 @@ pub struct ViewDto {
   session_id: String,
   revision: String,
   canvas_size: TerminalSizeDto,
-  panes: Vec<rmux_proto::PaneGeometry>,
+  panes: Vec<ctmux_proto::PaneGeometry>,
   layout: ViewLayout,
   terminals: Vec<TerminalDto>,
 }
@@ -103,7 +103,7 @@ pub async fn session_view(request: ViewRequest) -> CommandResult<Option<ViewDto>
     ViewAction::KillTerminal { terminal_id } => ClientMessage::KillTerminal { terminal_id },
   };
   let stream = transport::connect(&request.target).await?;
-  match rmux_client::request(stream, &client_identity(), message)
+  match ctmux_client::request(stream, &client_identity(), message)
     .await
     .map_err(CommandErrorDto::client)?
   {

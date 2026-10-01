@@ -28,10 +28,10 @@ Cancel removes the draft and never touches a real container or account.
 The Tasks variant also selects the sample web-development task and its output.
 The normal `index.html` entry and production build do not import these fixtures.
 
-Open **About rmux** from the bottom info button or command palette to inspect
+Open **About ctmux** from the bottom info button or command palette to inspect
 sample component versions. Each daemon has its own **Restart** action, while
 remote ctl-agent rows offer **Reconnect**. These confirmations and completion
-states only change memory. Restarting taskd is refused while sample tasks are
+states only change memory. Restarting ctl-taskd is refused while sample tasks are
 running; stop the task in the Tasks view to try a successful restart.
 Add `?about=partial` to show one
 unavailable component while other versions remain visible, or

@@ -8,7 +8,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 
 struct Harness {
   directory: PathBuf,
-  daemon: tokio::task::JoinHandle<std::result::Result<(), rmuxd::DaemonError>>,
+  daemon: tokio::task::JoinHandle<std::result::Result<(), ctmuxd::DaemonError>>,
   child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
 }
 
@@ -65,8 +65,8 @@ async fn check_shutdown(disconnect: bool) -> Result<()> {
   ));
   std::fs::create_dir(&directory)?;
   std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
-  let socket = directory.join("rmux.sock");
-  let daemon = tokio::spawn(rmuxd::run(rmuxd::DaemonConfig {
+  let socket = directory.join("ctmux.sock");
+  let daemon = tokio::spawn(ctmuxd::run(ctmuxd::DaemonConfig {
     socket_path: socket.clone(),
     ..Default::default()
   }));
@@ -89,7 +89,7 @@ async fn check_shutdown(disconnect: bool) -> Result<()> {
     pixel_width: 0,
     pixel_height: 0,
   })?;
-  let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_rmux-tui"));
+  let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ctmux-tui"));
   command.arg("--socket");
   command.arg(&socket);
   command.env("TERM", "xterm-256color");
@@ -132,28 +132,28 @@ async fn check_shutdown(disconnect: bool) -> Result<()> {
   harness.child = None;
   drop(master);
   // Losing the client terminal must not terminate the daemon's persistent PTY.
-  let stream = rmux_ipc::connect_or_start_daemon(&socket).await?;
-  let response = rmux_client::request(
+  let stream = ctmux_ipc::connect_or_start_daemon(&socket).await?;
+  let response = ctmux_client::request(
     stream,
-    &rmux_client::ClientIdentity {
+    &ctmux_client::ClientIdentity {
       name: "terminal-shutdown-test".into(),
       version: "test".into(),
     },
-    rmux_proto::ClientMessage::ListSessions,
+    ctmux_proto::ClientMessage::ListSessions,
   )
   .await?;
-  let rmux_proto::ServerMessage::SessionList { sessions } = response else {
+  let ctmux_proto::ServerMessage::SessionList { sessions } = response else {
     panic!("expected session list")
   };
   assert_eq!(sessions.len(), 1);
-  let stream = rmux_ipc::connect_or_start_daemon(&socket).await?;
-  rmux_client::request(
+  let stream = ctmux_ipc::connect_or_start_daemon(&socket).await?;
+  ctmux_client::request(
     stream,
-    &rmux_client::ClientIdentity {
+    &ctmux_client::ClientIdentity {
       name: "terminal-shutdown-test".into(),
       version: "test".into(),
     },
-    rmux_proto::ClientMessage::KillSession {
+    ctmux_proto::ClientMessage::KillSession {
       session: sessions[0].session_id.clone(),
     },
   )

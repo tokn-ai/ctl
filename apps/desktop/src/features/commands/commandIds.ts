@@ -23,7 +23,7 @@ export const COMMAND_IDS = {
   reconnect: "terminal.reconnect",
   focus: "terminal.focus",
   restartDaemon: "daemon.restart",
-  restartTaskDaemon: "taskd.restart",
+  restartTaskDaemon: "ctl-taskd.restart",
   selectSession: "session.select",
   connectHost: "host.connect",
   configureHost: "host.settings",

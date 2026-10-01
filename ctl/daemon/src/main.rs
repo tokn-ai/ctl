@@ -67,16 +67,16 @@ fn main() {
     return;
   }
   if arguments.component_info {
-    let metadata = component_info::ComponentInfo {
-      build: component_info::build_info(),
+    let metadata = ctl_component_info::ComponentInfo {
+      build: ctl_component_info::build_info(),
       protocols: vec![
-        component_info::ProtocolInfo {
+        ctl_component_info::ProtocolInfo {
           name: "ctld".into(),
-          version: ctld_ipc::PROTOCOL_VERSION,
+          version: ctl_ipc::PROTOCOL_VERSION,
         },
-        component_info::ProtocolInfo {
+        ctl_component_info::ProtocolInfo {
           name: "ctld_lifecycle".into(),
-          version: ctld_ipc::lifecycle::PROTOCOL_VERSION,
+          version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
         },
       ],
     };
@@ -102,7 +102,7 @@ fn main() {
     return;
   }
   if arguments.protocol_version {
-    println!("{}", ctld_ipc::PROTOCOL_VERSION);
+    println!("{}", ctl_ipc::PROTOCOL_VERSION);
     return;
   }
   #[cfg(unix)]
@@ -123,7 +123,7 @@ fn main() {
     }
   };
   if let Err(error) = runtime.block_on(ctld::run(
-    arguments.socket.unwrap_or_else(ctld_ipc::socket_path),
+    arguments.socket.unwrap_or_else(ctl_ipc::socket_path),
   )) {
     eprintln!("ctld: {error}");
     std::process::exit(1);

@@ -16,13 +16,13 @@ async function fixture(context: TestContext, target = "fixture-target", profile 
   const target_directory = path.join(directory, "target");
   const output = path.join(target_directory, target, profile);
   await mkdir(output, { recursive: true });
-  const artifacts = Object.fromEntries(["ctld", "rmuxd", "taskd"].map((name) => [name, path.join(output, name)]));
+  const artifacts = Object.fromEntries(["ctld", "ctmuxd", "ctl-taskd"].map((name) => [name, path.join(output, name)]));
   for (const executable of Object.values(artifacts)) await writeFile(executable, "synthetic helper");
-  const executable = path.join(output, "rmux-app");
+  const executable = path.join(output, "ctmux-app");
   const app_marker = path.join(directory, "app.json");
   await writeFile(executable, `#!${process.execPath}
 const fs = require("node:fs");
-fs.writeFileSync(process.env.TEST_APP_MARKER + ".tmp", JSON.stringify({pid:process.pid,args:process.argv.slice(2),cwd:process.cwd(),dyld:process.env.DYLD_FALLBACK_LIBRARY_PATH,rmuxd:process.env.RMUXD_BIN,taskd:process.env.TASKD_BIN}));
+fs.writeFileSync(process.env.TEST_APP_MARKER + ".tmp", JSON.stringify({pid:process.pid,args:process.argv.slice(2),cwd:process.cwd(),dyld:process.env.DYLD_FALLBACK_LIBRARY_PATH,ctmuxd:process.env.CTMUXD_BIN,ctl_taskd:process.env.CTL_TASKD_BIN}));
 fs.renameSync(process.env.TEST_APP_MARKER + ".tmp", process.env.TEST_APP_MARKER);
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
@@ -63,9 +63,9 @@ else if(args[0] === "run") {
   const env = {
     // Deliberately isolated: no live daemon/credential/runtime environment.
     PATH: [directory, path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
-    RMUX_DEV_APP_SUPERVISOR: socket,
-    RMUXD_BIN: "/synthetic/user-rmuxd",
-    TASKD_BIN: "/synthetic/user-taskd",
+    CTMUX_DEV_APP_SUPERVISOR: socket,
+    CTMUXD_BIN: "/synthetic/user-ctmuxd",
+    CTL_TASKD_BIN: "/synthetic/user-taskd",
     TEST_TARGET_DIRECTORY: target_directory,
     TEST_ARTIFACTS: JSON.stringify(artifacts),
     TEST_CARGO_CALLS: path.join(directory, "calls.jsonl"),
@@ -130,8 +130,8 @@ test("failed first build and signing recover; relay preserves Cargo runtime envi
   const server = await responder(data.socket, (request, peer) => {
     requests += 1;
     assert.equal(request.env.DYLD_FALLBACK_LIBRARY_PATH, "/synthetic/cargo/runtime");
-    assert.equal(request.env.RMUXD_BIN, "/synthetic/user-rmuxd");
-    assert.equal(request.env.TASKD_BIN, "/synthetic/user-taskd");
+    assert.equal(request.env.CTMUXD_BIN, "/synthetic/user-ctmuxd");
+    assert.equal(request.env.CTL_TASKD_BIN, "/synthetic/user-taskd");
     assert.equal(request.ctld_executable, data.artifacts.ctld);
     assert.equal(request.cwd, data.directory);
     assert.deepEqual(request.args, ["with spaces", "--target=app-only"]);

@@ -168,7 +168,7 @@ async function snapshotExecutable(executable: string): Promise<string> {
   if (!metadata.isFile() || (process.getuid && metadata.uid !== process.getuid()) || (metadata.mode & 0o100) === 0) {
     throw new Error("Built app is not an owned executable file");
   }
-  const snapshot = path.join(path.dirname(executable), `.rmux-app-dev-${randomUUID()}${path.extname(executable)}`);
+  const snapshot = path.join(path.dirname(executable), `.ctmux-app-dev-${randomUUID()}${path.extname(executable)}`);
   try {
     await copyFile(executable, snapshot, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
     await chmod(snapshot, 0o700);

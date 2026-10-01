@@ -1,5 +1,7 @@
-//! Reusable local taskd transport for CLI and desktop clients.
+//! Reusable local ctl-taskd transport for CLI and desktop clients.
 pub mod restart;
+use ctl_task_ipc::{Stream, connect};
+use ctl_task_proto::{ClientMessage, PROTOCOL_VERSION, ServerMessage, read_frame, write_frame};
 pub use restart::{PreparedRestart, preflight_restart, preflight_restart_at, restart_daemon};
 use std::{
   env, io,
@@ -7,8 +9,6 @@ use std::{
   process::Stdio,
   time::Duration,
 };
-use task_ipc::{Stream, connect};
-use task_proto::{ClientMessage, PROTOCOL_VERSION, ServerMessage, read_frame, write_frame};
 use thiserror::Error;
 use tokio::time::{Instant, sleep, timeout};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -18,12 +18,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Returns startup, transport, or handshake errors.
 pub async fn open(request: &ClientMessage) -> Result<Stream, ClientError> {
   timeout(Duration::from_secs(10), async {
-    let mut stream = connect_or_start(&task_ipc::socket_path()).await?;
+    let mut stream = connect_or_start(&ctl_task_ipc::socket_path()).await?;
     write_frame(
       &mut stream,
       &ClientMessage::Handshake {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "task-client".into(),
+        client_name: "ctl-task-client".into(),
       },
     )
     .await?;
@@ -44,7 +44,7 @@ pub async fn open(request: &ClientMessage) -> Result<Stream, ClientError> {
 
 /// Exchanges one request and response.
 /// # Errors
-/// Returns startup, protocol, timeout, or taskd errors.
+/// Returns startup, protocol, timeout, or ctl-taskd errors.
 pub async fn request(request: &ClientMessage) -> Result<ServerMessage, ClientError> {
   let mut stream = open(request).await?;
   match timeout(Duration::from_secs(30), read_frame(&mut stream))
@@ -57,7 +57,7 @@ pub async fn request(request: &ClientMessage) -> Result<ServerMessage, ClientErr
   }
 }
 
-/// Opens the local endpoint, starting a sibling taskd when necessary.
+/// Opens the local endpoint, starting a sibling ctl-taskd when necessary.
 /// # Errors
 /// Returns startup or connection errors.
 pub async fn connect_or_start(socket: &Path) -> Result<Stream, ClientError> {
@@ -80,15 +80,15 @@ fn spawn_daemon(
   #[cfg(windows)]
   {
     use std::os::windows::process::CommandExt;
-    // DETACHED_PROCESS: taskd survives the invoking console.
+    // DETACHED_PROCESS: ctl-taskd survives the invoking console.
     daemon.creation_flags(0x0000_0008);
   }
-  if let Some((data_directory, rmux_socket)) = configuration {
+  if let Some((data_directory, ctmux_socket)) = configuration {
     daemon
       .arg("--data-directory")
       .arg(data_directory)
-      .arg("--rmux-socket")
-      .arg(rmux_socket);
+      .arg("--ctmux-socket")
+      .arg(ctmux_socket);
   }
   daemon
     .arg("--socket")
@@ -123,15 +123,18 @@ async fn wait_for_endpoint(socket: &Path) -> Result<Stream, ClientError> {
 /// # Errors
 /// Returns an error if no executable can be found.
 pub fn daemon_executable() -> Result<PathBuf, ClientError> {
-  if let Some(executable) = env::var_os("TASKD_BIN") {
+  if let Some(executable) = env::var_os("CTL_TASKD_BIN") {
     return Ok(PathBuf::from(executable));
   }
   let current = env::current_exe().map_err(ClientError::CurrentExecutable)?;
-  let sibling = current.with_file_name(format!("taskd{}", env::consts::EXE_SUFFIX));
+  let sibling = current.with_file_name(format!("ctl-taskd{}", env::consts::EXE_SUFFIX));
   if sibling.is_file() {
     return Ok(sibling);
   }
-  Ok(PathBuf::from(format!("taskd{}", env::consts::EXE_SUFFIX)))
+  Ok(PathBuf::from(format!(
+    "ctl-taskd{}",
+    env::consts::EXE_SUFFIX
+  )))
 }
 
 fn retryable(error: &io::Error) -> bool {
@@ -144,25 +147,25 @@ fn retryable(error: &io::Error) -> bool {
 #[derive(Debug, Error)]
 pub enum ClientError {
   #[error(transparent)]
-  Codec(#[from] task_proto::CodecError),
-  #[error("could not connect to taskd: {0}")]
+  Codec(#[from] ctl_task_proto::CodecError),
+  #[error("could not connect to ctl-taskd: {0}")]
   Connect(io::Error),
   #[error("could not determine current executable: {0}")]
   CurrentExecutable(io::Error),
-  #[error("could not start taskd at {}: {source}", executable.display())]
+  #[error("could not start ctl-taskd at {}: {source}", executable.display())]
   StartDaemon {
     executable: PathBuf,
     source: io::Error,
   },
   #[error("{0}")]
   Restart(String),
-  #[error("unexpected taskd response")]
+  #[error("unexpected ctl-taskd response")]
   UnexpectedResponse,
-  #[error("taskd request timed out")]
+  #[error("ctl-taskd request timed out")]
   Timeout,
   #[error("{message}")]
   Server {
-    code: task_proto::ErrorCode,
+    code: ctl_task_proto::ErrorCode,
     message: String,
   },
 }

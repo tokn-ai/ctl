@@ -1,21 +1,21 @@
 services:
-  rmux-remote:
+  ctmux-remote:
     build:
       context: .
-      dockerfile: docker/rmux/Dockerfile
+      dockerfile: docker/ctmux/Dockerfile
     ports:
-      - "127.0.0.1:${RMUX_SSH_PORT:-2222}:22"
+      - "127.0.0.1:${CTMUX_SSH_PORT:-2222}:22"
     volumes:
       - type: bind
-        source: ${RMUX_AUTHORIZED_KEYS_FILE:?set RMUX_AUTHORIZED_KEYS_FILE to an authorized public-key file}
-        target: /run/secrets/rmux_authorized_keys
+        source: ${CTMUX_AUTHORIZED_KEYS_FILE:?set CTMUX_AUTHORIZED_KEYS_FILE to an authorized public-key file}
+        target: /run/secrets/ctmux_authorized_keys
         read_only: true
-      - rmux_ssh_host_keys:/etc/ssh/host_keys
-      - taskd_data:/var/lib/taskd
-      - ctl_data:/home/rmux/.tokn/ctl
+      - ctmux_ssh_host_keys:/etc/ssh/host_keys
+      - ctl_taskd_data:/var/lib/ctl-taskd
+      - ctl_data:/home/ctmux/.tokn/ctl
     restart: unless-stopped
 
 volumes:
-  rmux_ssh_host_keys:
-  taskd_data:
+  ctmux_ssh_host_keys:
+  ctl_taskd_data:
   ctl_data:

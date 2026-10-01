@@ -435,7 +435,7 @@ mod tests {
 
   impl TemporaryDirectory {
     fn new() -> Self {
-      let path = std::env::temp_dir().join(format!("rmux-ssh-config-{}", uuid::Uuid::new_v4()));
+      let path = std::env::temp_dir().join(format!("ctmux-ssh-config-{}", uuid::Uuid::new_v4()));
       fs::create_dir(&path).unwrap();
       Self(path)
     }

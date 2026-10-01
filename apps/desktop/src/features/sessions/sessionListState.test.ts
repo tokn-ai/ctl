@@ -133,7 +133,7 @@ describe("session list state", () => {
   it("keeps equal daemon session ids distinct across targets", () => {
     const local = session("same");
     const remote = session("same", {
-      target: { kind: "ssh", destination: "rmux-docker" },
+      target: { kind: "ssh", destination: "ctmux-docker" },
     });
 
     expect(prependSession([local], remote)).toEqual([remote, local]);
@@ -143,7 +143,7 @@ describe("session list state", () => {
     const localOld = session("local-old");
     const localNew = session("local-new");
     const remote = session("remote", {
-      target: { kind: "ssh", destination: "rmux-docker" },
+      target: { kind: "ssh", destination: "ctmux-docker" },
     });
     const targets = [localOld.target, remote.target];
 

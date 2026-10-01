@@ -1,6 +1,6 @@
+use ctl_ipc::SshTarget;
+use ctl_ipc::credentials::{Inventory, scope_id};
 use ctl_keychain_client::{Authentication, Query, Write};
-use ctld_ipc::SshTarget;
-use ctld_ipc::credentials::{Inventory, scope_id};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -14,8 +14,8 @@ mod index;
 mod operation;
 mod purpose;
 
-const KEYCHAIN_SERVICE_PREFIX: &str = "io.rmux.desktop.ctld.ssh";
-const SAVE_POLICY_SERVICE_PREFIX: &str = "io.rmux.desktop.ctld.ssh-save-policy";
+const KEYCHAIN_SERVICE_PREFIX: &str = "io.ctmux.desktop.ctld.ssh";
+const SAVE_POLICY_SERVICE_PREFIX: &str = "io.ctmux.desktop.ctld.ssh-save-policy";
 const SAVE_POLICY_ACCOUNT: &str = "policy";
 const NEVER_SAVE: &[u8] = b"never";
 pub const MISSING_ENTITLEMENT: i32 = -34_018;
@@ -140,7 +140,7 @@ pub fn never_save(target: &SshTarget) -> Result<(), Error> {
   ctl_keychain_client::upsert(&Write {
     service: &policy_service(target),
     account: SAVE_POLICY_ACCOUNT,
-    label: "rmux credential save preference",
+    label: "ctmux credential save preference",
     comment: "",
     data: NEVER_SAVE,
     biometric: false,

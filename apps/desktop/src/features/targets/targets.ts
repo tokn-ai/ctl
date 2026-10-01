@@ -8,7 +8,7 @@ import type {
 
 export const LOCAL_TARGET: ConnectionTarget = Object.freeze({ kind: "local" });
 
-const STORAGE_KEY = "rmux.remote_hosts";
+const STORAGE_KEY = "ctmux.remote_hosts";
 const STORAGE_SCHEMA_VERSION = 2;
 
 interface StoredRemoteHostsV1 {

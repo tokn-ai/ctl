@@ -1,6 +1,6 @@
 use std::fs;
 
-use ctld_ipc::{VpnProvider, VpnSettings, VpnState};
+use ctl_ipc::{VpnProvider, VpnSettings, VpnState};
 use serde_json::json;
 use zeroize::Zeroizing;
 
@@ -11,7 +11,7 @@ struct Fixture(PathBuf);
 
 impl Fixture {
   fn new() -> Self {
-    Self(std::env::temp_dir().join(format!("rmux-vpns-{}", uuid::Uuid::new_v4())))
+    Self(std::env::temp_dir().join(format!("ctmux-vpns-{}", uuid::Uuid::new_v4())))
   }
 
   fn repository(&self) -> Repository {
@@ -442,7 +442,7 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
       connection_id: "connection-one".into(),
     },
     |_| async {
-      Err(ctld_ipc::vpn::VpnError::Daemon {
+      Err(ctl_ipc::vpn::VpnError::Daemon {
         code: "vpn_start_failed".into(),
         message: "The test gateway did not connect.".into(),
       })
@@ -563,7 +563,7 @@ fn tailscale_profiles_store_settings_without_openconnect_credentials() {
         connection_id: "tailscale-one".into(),
         name: "Tailnet".into(),
         settings: VpnSettingsInput::Tailscale {
-          hostname: Some("rmux-test".into()),
+          hostname: Some("ctmux-test".into()),
           accept_routes: true,
         },
       },
@@ -573,7 +573,7 @@ fn tailscale_profiles_store_settings_without_openconnect_credentials() {
   let stored: serde_json::Value = serde_json::from_slice(&fixture.bytes()).unwrap();
   for value in [&summary, &stored["connections"][0]] {
     assert_eq!(value["provider"], "tailscale");
-    assert_eq!(value["hostname"], "rmux-test");
+    assert_eq!(value["hostname"], "ctmux-test");
     assert_eq!(value["accept_routes"], true);
     for field in [
       "url",

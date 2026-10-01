@@ -20,7 +20,7 @@ pub(super) struct Guard {
 pub(super) fn acquire() -> Result<Guard, Error> {
   let directory = dirs::cache_dir()
     .ok_or_else(io_error)?
-    .join("io.rmux.desktop.ctld")
+    .join("io.ctmux.desktop.ctld")
     .join("keychain-operations");
   acquire_at(&directory, Duration::from_secs(30))
 }

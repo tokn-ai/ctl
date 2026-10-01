@@ -19,7 +19,7 @@ describe("workbench notification sources", () => {
   it("updates a progress card with failure instead of leaving a stale operation running", () => {
     const store = new NotificationStore();
     const hook = renderHook((props) => useWorkbenchNotifications(store, props), {
-      initialProps: { ...sources, task_status: "Restarting taskd…" } as typeof sources,
+      initialProps: { ...sources, task_status: "Restarting ctl-taskd…" } as typeof sources,
     });
     hook.rerender({ ...sources, task_error: "Stop active tasks first." });
     expect(store.snapshot().entries).toMatchObject([{ severity: "error", message: "Stop active tasks first." }]);
@@ -32,7 +32,7 @@ describe("workbench notification sources", () => {
     expect(store.snapshot().entries).toMatchObject([{ severity: "error", title: "Session history", message: "Archive failed: disk full" }]);
   });
 
-  it.each(["ssh_authentication_required", "ssh_authentication_failed", "connection_timeout", "rmux_connection_timeout", null])(
+  it.each(["ssh_authentication_required", "ssh_authentication_failed", "connection_timeout", "ctmux_connection_timeout", null])(
     "offers authentication only when the host inspection error requires it (%s)", (code) => {
       const store = new NotificationStore();
       const target = { kind: "ssh" as const, host_id: "fixture", destination: "workstation" };
@@ -61,9 +61,9 @@ describe("workbench notification sources", () => {
     expect(store.snapshot().entries).toMatchObject([{ resolved_at: null, toast_visible: true, actions: [] }]);
   });
 
-  it("does not replay an old taskd success after a later background error recovers", () => {
+  it("does not replay an old ctl-taskd success after a later background error recovers", () => {
     const store = new NotificationStore();
-    const initial = { ...sources, task_status: "taskd restarted." };
+    const initial = { ...sources, task_status: "ctl-taskd restarted." };
     const hook = renderHook((props) => useWorkbenchNotifications(store, props), { initialProps: initial as typeof sources });
     hook.rerender({ ...initial, task_error: "Task status unavailable" });
     store.clear();

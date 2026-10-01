@@ -1,1 +1,1 @@
-pub use ctl_core::hosts::{WorkspaceConnectionMethod, WorkspaceHost};
+pub use ctl_client::hosts::{WorkspaceConnectionMethod, WorkspaceHost};

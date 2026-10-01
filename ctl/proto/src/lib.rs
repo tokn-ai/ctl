@@ -19,18 +19,18 @@ pub struct TcpListenerCatalog {
 /// Confirmation-bound maintenance request, sent on stdin rather than through a shell.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RemoteRmuxRestartRequest {
+pub struct RemoteCtmuxRestartRequest {
   pub expected_remote_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RemoteRmuxRestartResult {
+pub struct RemoteCtmuxRestartResult {
   pub terminated_sessions: u32,
 }
 
-pub const IDENTITY_PROTOCOL_VERSION: u16 = 2;
-pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-v2\n";
+pub const IDENTITY_PROTOCOL_VERSION: u16 = 3;
+pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-v3\n";
 const MAX_IDENTITY_BYTES: usize = 8192;
 
 /// Stable identity of a remote user's ctl environment, independent of its address.
@@ -39,9 +39,9 @@ pub struct RemoteIdentity {
   pub remote_id: String,
   pub agent_version: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub build: Option<component_info::ComponentBuildInfo>,
+  pub build: Option<ctl_component_info::ComponentBuildInfo>,
   #[serde(default)]
-  pub rmux_restart_supported: bool,
+  pub ctmux_restart_supported: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub bundle: Option<Box<BundleVersion>>,
 }
@@ -97,7 +97,7 @@ pub async fn read_identity(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<
   Ok(identity)
 }
 
-/// Writes a bounded identity frame after the v2 preface.
+/// Writes a bounded identity frame after the v3 preface.
 ///
 /// # Errors
 /// Returns I/O or invalid-data errors for invalid metadata.
@@ -145,14 +145,14 @@ mod tests {
     let mut identity = RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: env!("CARGO_PKG_VERSION").into(),
-      build: Some(component_info::build_info()),
-      rmux_restart_supported: false,
+      build: Some(ctl_component_info::build_info()),
+      ctmux_restart_supported: false,
       bundle: None,
     };
     assert!(identity.is_valid());
     identity.build.as_mut().unwrap().source_fingerprint = "invalid".into();
     assert!(!identity.is_valid());
-    identity.build = Some(component_info::build_info());
+    identity.build = Some(ctl_component_info::build_info());
     identity.build.as_mut().unwrap().version = "0.0.0".into();
     assert!(!identity.is_valid());
   }
@@ -163,7 +163,7 @@ mod tests {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
       build: None,
-      rmux_restart_supported: false,
+      ctmux_restart_supported: false,
       bundle: None,
     };
     let mut bytes = Vec::new();

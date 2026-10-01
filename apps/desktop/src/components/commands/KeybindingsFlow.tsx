@@ -45,7 +45,7 @@ export function KeybindingsFlow({
   const bindings = resolveKeymap(document, platform);
   const prefix = resolvePrefix(document, bindings, platform);
   const choices = [
-    { id: "preset.rmux", title: "Use rmux prefix preset" },
+    { id: "preset.ctmux", title: "Use ctmux prefix preset" },
     { id: "preset.tmux", title: "Use tmux-style prefix preset" },
     { id: "prefix.key", title: "Terminal prefix" },
     ...PREFIX_ACTIONS.map((action) => ({ id: `prefix.${action.id}`, title: `Prefix · ${action.title}` })),
@@ -145,7 +145,7 @@ export function KeybindingsFlow({
       }
       onChange={setDraft}
       onSubmit={(value) => {
-        if (value === "preset.rmux" && !selected) void applyPreset(false);
+        if (value === "preset.ctmux" && !selected) void applyPreset(false);
         else if (value === "preset.tmux" && !selected) void applyPreset(true);
         else if (selected) void save(value);
         else {

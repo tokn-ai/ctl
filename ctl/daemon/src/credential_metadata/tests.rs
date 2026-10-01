@@ -54,7 +54,7 @@ fn inventory_excludes_other_services_and_save_preferences() {
   let mut policy = attributes();
   policy.insert(
     "svce".into(),
-    format!("io.rmux.desktop.ctld.ssh-save-policy.{}", "a".repeat(64)),
+    format!("io.ctmux.desktop.ctld.ssh-save-policy.{}", "a".repeat(64)),
   );
   policy.insert("acct".into(), "policy".into());
   let inventory = inventory_from_attributes([Some(other), Some(policy), Some(attributes())]);
@@ -191,9 +191,9 @@ fn saved_scope_identity_remains_compatible_with_the_original_layout() {
       write!(output, "{byte:02x}").unwrap();
       output
     });
-  assert_eq!(ctld_ipc::credentials::scope_id(&target), original);
+  assert_eq!(ctl_ipc::credentials::scope_id(&target), original);
   let mut changed = target;
   changed.port = Some(2222);
   changed.user = Some("alternate".into());
-  assert_eq!(ctld_ipc::credentials::scope_id(&changed), original);
+  assert_eq!(ctl_ipc::credentials::scope_id(&changed), original);
 }

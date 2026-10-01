@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ctld_ipc::SshTarget;
+use ctl_ipc::SshTarget;
 use tokio::process::Command;
 use zeroize::Zeroizing;
 

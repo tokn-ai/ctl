@@ -8,7 +8,7 @@ use crate::error::CommandResult;
 #[tauri::command]
 pub async fn ssh_reachability(
   request: TargetRequestDto,
-) -> CommandResult<ctl_core::ssh_reachability::SshReachability> {
+) -> CommandResult<ctl_client::ssh_reachability::SshReachability> {
   let target = request.target.to_ssh_target()?;
-  Ok(ctl_core::ssh_reachability::probe(&target).await)
+  Ok(ctl_client::ssh_reachability::probe(&target).await)
 }

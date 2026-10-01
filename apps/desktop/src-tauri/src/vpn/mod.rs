@@ -14,7 +14,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use ctld_ipc::{VpnConnection, VpnSnapshot, VpnStatus};
+use ctl_ipc::{VpnConnection, VpnSnapshot, VpnStatus};
 use tauri::Manager as _;
 
 use crate::error::{CommandErrorDto, CommandResult};
@@ -128,7 +128,7 @@ pub(crate) async fn close_window(window_label: &str) {
 }
 
 /// The About page observes exactly the same owner selected for VPN operations.
-pub(crate) fn owner_endpoint() -> (PathBuf, Result<Option<PathBuf>, ctld_ipc::ConnectError>) {
+pub(crate) fn owner_endpoint() -> (PathBuf, Result<Option<PathBuf>, ctl_ipc::ConnectError>) {
   (
     client::selected_socket_path(),
     client::selected_daemon_executable(),
@@ -191,10 +191,10 @@ where
 }
 
 fn require_connected(status: &VpnStatus) -> CommandResult<()> {
-  if status.state == ctld_ipc::VpnState::Connected && status.running && status.endpoint.is_some() {
+  if status.state == ctl_ipc::VpnState::Connected && status.running && status.endpoint.is_some() {
     return Ok(());
   }
-  if status.state == ctld_ipc::VpnState::Starting && status.auth_url.is_some() {
+  if status.state == ctl_ipc::VpnState::Starting && status.auth_url.is_some() {
     return Err(CommandErrorDto::new(
       "vpn_sign_in_required",
       "Sign in to the selected VPN on the VPN page, then reconnect the host.",
@@ -261,7 +261,7 @@ pub async fn connect_vpn(
 
 async fn connect_saved(directory: PathBuf, request: ConnectVpnRequest) -> CommandResult<VpnStatus> {
   if !cfg!(unix) {
-    return Err(runtime_error(ctld_ipc::vpn::VpnError::UnsupportedPlatform));
+    return Err(runtime_error(ctl_ipc::vpn::VpnError::UnsupportedPlatform));
   }
   let coordinator = COORDINATORS.get(&request.connection_id);
   coordinator
@@ -285,7 +285,7 @@ async fn connect_with<F, S>(
 ) -> CommandResult<VpnStatus>
 where
   F: FnOnce(VpnConnection) -> S,
-  S: Future<Output = Result<VpnStatus, ctld_ipc::vpn::VpnError>>,
+  S: Future<Output = Result<VpnStatus, ctl_ipc::vpn::VpnError>>,
 {
   connect_with_cancellation(directory, request, start, None).await
 }
@@ -298,7 +298,7 @@ async fn connect_with_cancellation<F, S>(
 ) -> CommandResult<VpnStatus>
 where
   F: FnOnce(VpnConnection) -> S,
-  S: Future<Output = Result<VpnStatus, ctld_ipc::vpn::VpnError>>,
+  S: Future<Output = Result<VpnStatus, ctl_ipc::vpn::VpnError>>,
 {
   let load = tauri::async_runtime::spawn_blocking(move || {
     Repository::new(directory).connection(&request.connection_id)
@@ -359,7 +359,7 @@ async fn mutation_status() -> CommandResult<VpnSnapshot> {
 
 // Owned adapter for Result::map_err.
 #[allow(clippy::needless_pass_by_value)]
-fn runtime_error(error: ctld_ipc::vpn::VpnError) -> CommandErrorDto {
+fn runtime_error(error: ctl_ipc::vpn::VpnError) -> CommandErrorDto {
   CommandErrorDto::new(error.code(), error.to_string())
 }
 

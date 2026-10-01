@@ -1,9 +1,9 @@
 use super::{RequestError, State, execution_definition, now_ms};
-use rmux_ipc::{
+use ctl_task_proto::{DesiredState, InteractiveRun, RunInfo, RunState, TaskDefinition, TaskInfo};
+use ctmux_ipc::{
   LocalControlClientMessage, LocalControlServerMessage, ManagedOperation, ManagedSessionInfo,
 };
 use std::{collections::HashMap, time::Duration};
-use task_proto::{DesiredState, InteractiveRun, RunInfo, RunState, TaskDefinition, TaskInfo};
 use tokio::time::{Instant, timeout};
 use uuid::Uuid;
 
@@ -25,9 +25,9 @@ async fn exchange(
     .expect("run exists");
   let backend = run.interactive.as_ref().expect("interactive run");
   let result = timeout(Duration::from_secs(10), async {
-    let path = rmux_ipc::control_socket_path(&backend.rmux_socket)
+    let path = ctmux_ipc::control_socket_path(&backend.ctmux_socket)
       .map_err(|error| BackendError::Uncertain(error.to_string()))?;
-    let mut stream = rmux_ipc::connect_existing_daemon(&path)
+    let mut stream = ctmux_ipc::connect_existing_daemon(&path)
       .await
       .map_err(|error| {
         if error.is_endpoint_unavailable() {
@@ -36,12 +36,12 @@ async fn exchange(
           BackendError::Uncertain(error.to_string())
         }
       })?;
-    let capabilities = rmux_ipc::local_control_handshake(&mut stream)
+    let capabilities = ctmux_ipc::local_control_handshake(&mut stream)
       .await
       .map_err(|error| BackendError::Uncertain(error.to_string()))?;
     if !capabilities.managed_sessions_supported {
       return Err(BackendError::Refused(
-        "rmuxd does not support managed sessions; restart it with the current binary".into(),
+        "ctmuxd does not support managed sessions; restart it with the current binary".into(),
       ));
     }
     let expected_instance = if matches!(operation, ManagedOperation::Status) {
@@ -49,7 +49,7 @@ async fn exchange(
     } else {
       Some(backend.instance_id.clone())
     };
-    rmux_ipc::write_local_control_frame(
+    ctmux_ipc::write_local_control_frame(
       &mut stream,
       &LocalControlClientMessage::ManageSession {
         expected_instance,
@@ -60,7 +60,7 @@ async fn exchange(
     )
     .await
     .map_err(|error| BackendError::Uncertain(error.to_string()))?;
-    match rmux_ipc::read_local_control_frame(&mut stream)
+    match ctmux_ipc::read_local_control_frame(&mut stream)
       .await
       .map_err(|error| BackendError::Uncertain(error.to_string()))?
     {
@@ -70,45 +70,45 @@ async fn exchange(
       }) => Ok((instance_id, session)),
       Some(LocalControlServerMessage::Error { message, .. }) => Err(BackendError::Refused(message)),
       _ => Err(BackendError::Uncertain(
-        "invalid rmux lifecycle response".into(),
+        "invalid ctmux lifecycle response".into(),
       )),
     }
   })
   .await;
   result.unwrap_or_else(|_| {
     Err(BackendError::Uncertain(
-      "rmux lifecycle request timed out".into(),
+      "ctmux lifecycle request timed out".into(),
     ))
   })
 }
 
-async fn connect_for_creation(socket: &std::path::Path) -> Result<rmux_ipc::Stream, RequestError> {
+async fn connect_for_creation(socket: &std::path::Path) -> Result<ctmux_ipc::Stream, RequestError> {
   timeout(Duration::from_secs(10), async {
-    let mut stream = rmux_ipc::connect_or_start_daemon(socket)
+    let mut stream = ctmux_ipc::connect_or_start_daemon(socket)
       .await
       .map_err(RequestError::internal)?;
-    rmux_proto::write_frame(
+    ctmux_proto::write_frame(
       &mut stream,
-      &rmux_proto::ClientMessage::Handshake {
-        protocol_version: rmux_proto::PROTOCOL_VERSION,
-        client_name: "taskd".into(),
+      &ctmux_proto::ClientMessage::Handshake {
+        protocol_version: ctmux_proto::PROTOCOL_VERSION,
+        client_name: "ctl-taskd".into(),
         client_version: env!("CARGO_PKG_VERSION").into(),
       },
     )
     .await
     .map_err(RequestError::internal)?;
-    match rmux_proto::read_frame(&mut stream)
+    match ctmux_proto::read_frame(&mut stream)
       .await
       .map_err(RequestError::internal)?
     {
-      Some(rmux_proto::ServerMessage::HandshakeAccepted { .. }) => Ok(stream),
+      Some(ctmux_proto::ServerMessage::HandshakeAccepted { .. }) => Ok(stream),
       response => Err(RequestError::internal(format!(
-        "rmux handshake failed: {response:?}"
+        "ctmux handshake failed: {response:?}"
       ))),
     }
   })
   .await
-  .map_err(|_| RequestError::internal("rmux connection timed out"))?
+  .map_err(|_| RequestError::internal("ctmux connection timed out"))?
 }
 
 impl State {
@@ -119,15 +119,15 @@ impl State {
   ) -> Result<TaskInfo, RequestError> {
     execution_definition(&definition)?;
     // Hold a confirmed data connection while releasing the previous outcome.
-    // Otherwise an idle rmuxd can exit between release and the next creation.
-    // Only an explicit start may auto-start rmuxd; reconciliation never does.
-    let _connection = connect_for_creation(&self.rmux_socket).await?;
+    // Otherwise an idle ctmuxd can exit between release and the next creation.
+    // Only an explicit start may auto-start ctmuxd; reconciliation never does.
+    let _connection = connect_for_creation(&self.ctmux_socket).await?;
     self.release_outcome(task_id).await?;
     let mut task = self.show(task_id).await?;
     task.active_run = Some(RunInfo {
       definition: Some(definition.clone()),
       interactive: Some(InteractiveRun {
-        rmux_socket: self.rmux_socket.clone(),
+        ctmux_socket: self.ctmux_socket.clone(),
         instance_id: String::new(),
         session_id: None,
         released: false,
@@ -153,7 +153,7 @@ impl State {
     task.desired_state = DesiredState::Running;
     self.store_task(task).await?;
     // The durable intent and instance pin precede creation. Retrying this run
-    // after taskd crashes cannot create a second process or target a new rmuxd.
+    // after ctl-taskd crashes cannot create a second process or target a new ctmuxd.
     self.reconcile_one(task_id).await?;
     self.show(task_id).await
   }
@@ -218,7 +218,7 @@ impl State {
     } else if session.is_none() && needs_creation {
       let definition = execution_definition(&task.definition)?;
       Some(ManagedOperation::Start {
-        command: rmux_proto::CommandSpec {
+        command: ctmux_proto::CommandSpec {
           program: definition.program,
           arguments: definition.arguments,
         },
@@ -327,7 +327,7 @@ impl State {
           }
           Err(error) => {
             if failures.get(&task.task_id) != Some(&error.message) {
-              eprintln!("taskd: task {}: {}", task.task_id, error.message);
+              eprintln!("ctl-taskd: task {}: {}", task.task_id, error.message);
             }
             failures.insert(task.task_id, error.message);
           }
@@ -345,7 +345,7 @@ impl State {
         return Ok(task);
       }
       if Instant::now() >= deadline {
-        return Err(RequestError::internal("rmux session did not stop"));
+        return Err(RequestError::internal("ctmux session did not stop"));
       }
       tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -354,7 +354,7 @@ impl State {
 
 fn backend_error(error: BackendError) -> RequestError {
   RequestError::internal(match error {
-    BackendError::Gone => "rmuxd is unavailable".into(),
+    BackendError::Gone => "ctmuxd is unavailable".into(),
     BackendError::Refused(message) | BackendError::Uncertain(message) => message,
   })
 }

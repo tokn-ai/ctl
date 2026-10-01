@@ -1,4 +1,4 @@
-use rmux_proto::{TerminalCheckpoint, TerminalSize};
+use ctmux_proto::{TerminalCheckpoint, TerminalSize};
 
 /// A PTY-sized emulator. Host viewport changes never resize this model.
 pub struct Model {
@@ -169,8 +169,8 @@ mod tests {
     let mut model = model();
     model.feed(b"old");
     model.restore(&TerminalCheckpoint {
-      format: rmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
-      format_version: rmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
       sequence: 7,
       terminal_size: TerminalSize {
         columns: 12,
@@ -214,8 +214,8 @@ mod tests {
     model.feed(b"\r\nfive");
     assert!(!frozen.join("\n").contains("five"));
     model.restore(&TerminalCheckpoint {
-      format: rmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
-      format_version: rmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
       sequence: 100,
       terminal_size: TerminalSize {
         columns: 12,

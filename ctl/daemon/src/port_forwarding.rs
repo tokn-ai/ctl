@@ -6,7 +6,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
-use ctld_ipc::{LocalPortForward, PortForwardState, PortForwardStatus, SshTarget};
+use ctl_ipc::{LocalPortForward, PortForwardState, PortForwardStatus, SshTarget};
 
 use super::{RequestError, State, control_master_is_ready, run_forward_command};
 

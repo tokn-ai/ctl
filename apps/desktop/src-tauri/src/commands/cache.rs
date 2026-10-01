@@ -3,7 +3,7 @@ use crate::{
   error::{CommandErrorDto, CommandResult},
   state::AppState,
 };
-use rmux_client::{
+use ctmux_client::{
   AttachmentEvent,
   cache::{CacheIdentity, CacheStore},
 };

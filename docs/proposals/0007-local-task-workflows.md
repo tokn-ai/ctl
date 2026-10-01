@@ -34,7 +34,7 @@ named development server with a fixed directory. It is awkward for a `build`
 shortcut used in several projects, a command worth running only once, or a
 script invoked repeatedly by a timer.
 
-The current protocol already distinguishes definitions and runs, and rmux
+The current protocol already distinguishes definitions and runs, and ctmux
 already provides terminal ownership and attachment. Extend those foundations
 while making execution context, reuse, and lifecycle policy explicit.
 
@@ -88,7 +88,7 @@ Definitions support two directory policies:
 
 A manual run may explicitly override the directory for that invocation. The
 override is recorded in the run and does not edit the saved definition. Never
-fall back to taskd's own current directory when invocation context is missing.
+fall back to ctl-taskd's own current directory when invocation context is missing.
 
 For example, a global `build` definition using the invocation directory can run
 in `/work/app-a` and `/work/app-b` simultaneously. A fixed-directory `api` always
@@ -101,7 +101,7 @@ schedule does not change how manual invocations resolve the same definition.
 Missing directories fail visibly instead of falling back to the user's home.
 
 Manual invocation must also define executable lookup, environment inheritance,
-and argument overrides. Today background processes inherit taskd's environment;
+and argument overrides. Today background processes inherit ctl-taskd's environment;
 that does not reliably match the invoking shell. The request should carry the
 required invocation context, with an explicit environment policy for scheduled
 runs. The exact inheritance and persistence rules remain an acceptance decision.
@@ -115,9 +115,9 @@ such as `cd` or `export`, require shell integration and are outside this proposa
 Keep terminal requirements separate from whether the user is currently watching
 the run:
 
-- **Terminal backend**: rmuxd owns the PTY, process, terminal output, and input.
+- **Terminal backend**: ctmuxd owns the PTY, process, terminal output, and input.
   A client may attach or detach without changing that backend.
-- **Pipe backend**: taskd owns the process and stdout/stderr logs. A client may
+- **Pipe backend**: ctl-taskd owns the process and stdout/stderr logs. A client may
   wait for completion or follow logs, then stop following while execution continues.
 
 A user can launch a managed command in the foreground and detach when it takes
@@ -177,7 +177,7 @@ occurrence identity and run intent to reconcile uncertain launch results and
 avoid starting duplicate runs after reconnect or daemon restart. It must not
 claim exactly-once external effects for arbitrary commands. Automatic daemon
 startup at login or boot is a separate integration; scheduling initially
-requires taskd to be available. Enabled schedules keep a running taskd from
+requires ctl-taskd to be available. Enabled schedules keep a running ctl-taskd from
 exiting for idleness while it waits for the next occurrence.
 
 ### Names, storage, and history
@@ -191,7 +191,7 @@ the complete invocation and scheduling design remains proposed.
 Names identify definitions within a scope. They are not run IDs and do not need
 to become unique names such as `build-2` just to permit another invocation.
 Scheduled references bind stable definition identity and project context at
-configuration time; they do not rediscover a project from taskd's directory.
+configuration time; they do not rediscover a project from ctl-taskd's directory.
 
 Taskd remains authoritative for runs, lifecycle state, schedules, and execution
 policy. Definitions must be usable from the CLI without requiring the desktop
@@ -230,7 +230,7 @@ must be explicit when no project context is available.
 ### Compatibility and migration
 
 The existing implementation provides task registration, one active and latest
-run per task, persisted metadata, bounded in-memory background logs, and rmux
+run per task, persisted metadata, bounded in-memory background logs, and ctmux
 attachment. It does not yet provide these scheduling or invocation policies.
 
 Preserve existing task IDs, names, stopped/running state, run snapshots, and
@@ -243,7 +243,7 @@ can retain their managed instance identity while new definitions support
 independent invocations.
 
 Do not mutate or restart existing processes during migration. In particular,
-keep managed rmux session ownership and task/run identities intact. Define a
+keep managed ctmux session ownership and task/run identities intact. Define a
 versioned protocol and recoverable storage migration before changing the current
 registration model. Legacy create/start commands retain their current semantics
 until an explicit migration or replacement is documented.
@@ -259,7 +259,7 @@ environment must not silently be sent as valid remote execution context.
 3. Directory policies resolve at the documented boundary, with no daemon-cwd fallback.
 4. Automatic invocations have a complete context without a calling terminal.
 5. Definition edits affect future invocations, never active runs or recorded results.
-6. Terminal processes and output remain owned by rmuxd; pipe execution remains in taskd.
+6. Terminal processes and output remain owned by ctmuxd; pipe execution remains in ctl-taskd.
 7. Detaching preserves the process, run identity, and execution backend.
 8. Reuse, scheduling, restart, concurrency, and history retention are separate choices.
 9. Ambiguous names never select an arbitrary run for a destructive operation.
@@ -284,7 +284,7 @@ environment must not silently be sent as valid remote execution context.
 ## Out of scope
 
 - Ctrl+Z followed by `task bg`, adopting an arbitrary PID or shell job, moving
-  that job to another terminal, or extracting one job from an existing rmux shell.
+  that job to another terminal, or extracting one job from an existing ctmux shell.
   Investigate these together with shell integration, process groups, terminal
   ownership, reliable exit observation, and platform constraints in a later proposal.
 - New remote invocation-context or scheduling behavior.
@@ -315,4 +315,4 @@ environment must not silently be sent as valid remote execution context.
 - [Tasks in the desktop workspace](0005-desktop-tasks.md)
 - [Explicit task routing over SSH](0006-remote-tasks.md)
 - [Architecture](../architecture.md)
-- [rmux local lifecycle control](../rmux-local-control.md)
+- [ctmux local lifecycle control](../ctmux-local-control.md)

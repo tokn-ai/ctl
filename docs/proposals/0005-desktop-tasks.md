@@ -55,7 +55,7 @@ Tasks                 [+] +--------------------------------+
   It does not replace the default registration.
 - A task header shows name, host, mode, state, command, working directory, and
   the current/latest run's exit result. Start, Stop, and Restart availability
-  follows taskd state; pending operations disable conflicting actions.
+  follows ctl-taskd state; pending operations disable conflicting actions.
 - Background output is a plain text log with distinguishable stdout/stderr,
   copy, follow, and clear-view controls. Clear view does not delete daemon logs.
   Old logs retained on screen are clearly separated when a new run starts.
@@ -65,9 +65,9 @@ Tasks                 [+] +--------------------------------+
   tab. If an ordinary session tab is already open, adopt it in place as the task
   tab. Deduplication uses host plus session ID, and task identity survives restart.
 - The Sessions sidebar groups ordinary sessions by host and derives a separate
-  Tasks group from taskd's active interactive runs. A task-owned rmux session is
+  Tasks group from ctl-taskd's active interactive runs. A task-owned ctmux session is
   shown only once, is never persisted as an ordinary workspace session, and is
-  stopped through taskd rather than killed directly through rmuxd.
+  stopped through ctl-taskd rather than killed directly through ctmuxd.
 - Closing a tab only closes its view. Removing a saved definition does not stop
   or unregister tasks. Removing a managed task requires it to be stopped and
   names that task explicitly. Forgetting a workspace reference is separate.
@@ -80,10 +80,10 @@ Tasks                 [+] +--------------------------------+
 ### Loading, errors, and restoration
 
 An empty saved section offers **Create task definition**. The managed section
-shows local taskd tasks, including tasks created through the CLI. Each can be
+shows local ctl-taskd tasks, including tasks created through the CLI. Each can be
 opened and explicitly saved as a reusable workspace definition.
 
-Loading and unavailable states are distinct from an empty task list. A taskd
+Loading and unavailable states are distinct from an empty task list. A ctl-taskd
 connection failure shows a retry action and preserves task references and tabs.
 `starting` and `unknown` have explicit labels; unknown is never presented as
 stopped. Failed actions remain visible beside the relevant task with an error
@@ -109,10 +109,10 @@ existing framed protocol; do not execute and parse the human-readable ctl CLI.
   teardown. Bound retained frontend output and preserve incremental UTF-8 decoding.
 - Reuse workspace load/update with its existing revision conflict handling for
   saved definitions, registration references, and presentation state.
-- Reuse existing rmux inspection and attachment commands for interactive output.
+- Reuse existing ctmux inspection and attachment commands for interactive output.
 
 Registration must be idempotent before the app retries it after a lost response.
-Add a stable registration identity to taskd rather than using display names as
+Add a stable registration identity to ctl-taskd rather than using display names as
 identity. Persist a pending registration reference before dispatch. Concurrent
 windows must converge on the same registration or show a conflict; they must not
 create duplicate default tasks. Additional instances receive new identities.
@@ -120,7 +120,7 @@ create duplicate default tasks. Additional instances receive new identities.
 Changing a saved definition does not mutate a managed task. If they differ,
 show **Saved definition has changes** with an explicit Apply action available
 while stopped. Starting the registered command remains a separately labelled
-choice. Applying requires a taskd update operation and immutable definition
+choice. Applying requires a ctl-taskd update operation and immutable definition
 snapshots in run records so previous results are not relabelled with a new command.
 
 Use cancellable status refresh while the app is active. A slow or stale response
@@ -131,7 +131,7 @@ previous run. Errors from background subscriptions do not tear down unrelated ta
 
 Shared TypeScript types belong in `src/lib/types.ts`, with snake_case serialized
 fields and matching Rust DTOs. Taskd remains authoritative for live status,
-desired state, runs, exit results, and background logs. Rmuxd remains authoritative
+desired state, runs, exit results, and background logs. Ctmuxd remains authoritative
 for interactive processes and terminal output.
 
 Migrate workspace schema version 1 to version 2 with:
@@ -141,7 +141,7 @@ Migrate workspace schema version 1 to version 2 with:
 - `task_references`: `host_id`, registration identity, optional `task_id`,
   optional `definition_id`, and the last applied definition revision.
 - Tagged tab references: `session`, `task`, or `task_definition`. A task tab is
-  keyed by host/task identity; its current session ID is resolved from taskd.
+  keyed by host/task identity; its current session ID is resolved from ctl-taskd.
 - A tagged active-tab reference and existing tab order.
 
 The migration preserves existing hosts, terminal membership, tab order, and active
@@ -172,7 +172,7 @@ rather than accumulate task protocol and persistence logic.
 - [Proposal 0003: Managed tasks in ctl](0003-task-system.md)
 - [Proposal 0007: Local task definitions, runs, and schedules](0007-local-task-workflows.md)
 - [Workspace implementation](../../apps/desktop/src-tauri/src/workspace/mod.rs)
-- [rmux local-control protocol](../rmux-local-control.md)
+- [ctmux local-control protocol](../ctmux-local-control.md)
 
 
 ## Sidebar and draft storage update

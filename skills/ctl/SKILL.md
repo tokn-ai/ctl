@@ -39,7 +39,7 @@ back to an OpenSSH alias or destination. Ambiguous saved names fail; use the ID.
 preferred method is used. A failed selected route does not choose another route.
 
 Host catalog commands take a positional host and reject `-H`. SSH/SCP also take
-their destination positionally. VPN management and `taskd restart` are local.
+their destination positionally. VPN management and `ctl-taskd restart` are local.
 
 Check `ctl --version`, `ctl --help`, and the relevant native subcommand's
 `--help` when availability or flags are uncertain. There is no global `--json`.
@@ -95,4 +95,4 @@ override the saved route. An explicit SCP `-S` retains the user's transport.
 Plain shells, exec, SSH, and SCP need only the remote SSH service. Persistent
 sessions and registered tasks need remote ctl companions; the CLI does not
 automatically install them. A restricted service-only SSH account may support
-rmux/tasks while rejecting ordinary commands, file transfers, or forwarding.
+ctmux/tasks while rejecting ordinary commands, file transfers, or forwarding.

@@ -40,7 +40,7 @@ describe("terminal tab state", () => {
     const local = session("same");
     const remote = {
       ...session("same"),
-      target: { kind: "ssh", destination: "rmux-docker" } as const,
+      target: { kind: "ssh", destination: "ctmux-docker" } as const,
     };
 
     expect(openTerminalTab(openTerminalTab([], local), remote)).toEqual([

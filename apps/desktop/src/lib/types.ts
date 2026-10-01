@@ -80,7 +80,7 @@ export type ComponentActionKind = "restart" | "reconnect";
 
 export interface ComponentVersionRow {
   component_id: string;
-  component: "rmux" | "ctld" | "rmuxd" | "taskd" | "ctl_agent";
+  component: "ctmux" | "ctld" | "ctmuxd" | "ctl-taskd" | "ctl_agent";
   label: string;
   location: "local" | "remote";
   host_id: string | null;
@@ -189,7 +189,7 @@ export interface NativeCommandBinding {
 export interface RemoteIdentity {
   remote_id: string;
   agent_version: string;
-  rmux_restart_supported?: boolean;
+  ctmux_restart_supported?: boolean;
   bundle?: RemoteAgentInstallResult;
 }
 
@@ -592,7 +592,7 @@ export interface SshPrompt {
   message: string;
 }
 
-export interface RemoteRmuxRestartResult {
+export interface RemoteCtmuxRestartResult {
   terminated_sessions: number;
 }
 
@@ -925,7 +925,7 @@ export interface TaskRun {
   ended_at_ms: number | null;
   exit_code: number | null;
   definition?: TaskDefinition;
-  interactive?: { session_id: string | null; instance_id: string; rmux_socket: string; released: boolean };
+  interactive?: { session_id: string | null; instance_id: string; ctmux_socket: string; released: boolean };
 }
 export interface ManagedTask {
   task_id: string;

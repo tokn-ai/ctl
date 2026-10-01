@@ -5,10 +5,10 @@ use std::{
   time::Duration,
 };
 
-use rmux_ipc::{LocalControlClientMessage, LocalControlServerMessage, ManagedOperation};
-use task_proto::{
+use ctl_task_proto::{
   ClientMessage, DesiredState, ExecutionMode, RunState, ServerMessage, TaskDefinition, TaskInfo,
 };
+use ctmux_ipc::{LocalControlClientMessage, LocalControlServerMessage, ManagedOperation};
 use tokio::{
   process::{Child, Command},
   sync::{Mutex, MutexGuard},
@@ -17,18 +17,18 @@ use tokio::{
 };
 use uuid::Uuid;
 
-// Each fixture embeds rmuxd and owns real PTYs. Keep their lifetimes isolated,
-// as in rmuxd's reconnect suite, including process shutdown and pipe cleanup.
+// Each fixture embeds ctmuxd and owns real PTYs. Keep their lifetimes isolated,
+// as in ctmuxd's reconnect suite, including process shutdown and pipe cleanup.
 static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct Fixture {
   _pty_guard: MutexGuard<'static, ()>,
   root: PathBuf,
   task_socket: PathBuf,
-  rmux_socket: PathBuf,
+  ctmux_socket: PathBuf,
   taskd: Child,
-  rmuxd: Option<JoinHandle<Result<(), rmuxd::DaemonError>>>,
-  keepalive: Option<rmux_ipc::Stream>,
+  ctmuxd: Option<JoinHandle<Result<(), ctmuxd::DaemonError>>>,
+  keepalive: Option<ctmux_ipc::Stream>,
 }
 
 impl Fixture {
@@ -40,46 +40,49 @@ impl Fixture {
     #[cfg(windows)]
     let root = std::env::temp_dir().join(format!("task-pty-{id}"));
     #[cfg(unix)]
-    let (task_socket, rmux_socket) = (root.join("task/task.sock"), root.join("rmux/rmux.sock"));
+    let (task_socket, ctmux_socket) = (root.join("task/task.sock"), root.join("ctmux/ctmux.sock"));
     #[cfg(windows)]
-    let (task_socket, rmux_socket) = (
+    let (task_socket, ctmux_socket) = (
       PathBuf::from(format!(r"\\.\pipe\task-pty-{id}")),
-      PathBuf::from(format!(r"\\.\pipe\rmux-task-pty-{id}")),
+      PathBuf::from(format!(r"\\.\pipe\ctmux-task-pty-{id}")),
     );
-    let rmuxd = spawn_rmux(rmux_socket.clone());
-    let keepalive = connect_rmux(&rmux_socket).await;
-    let taskd = launch_taskd(&root, &task_socket, &rmux_socket).await;
+    let ctmuxd = spawn_ctmux(ctmux_socket.clone());
+    let keepalive = connect_ctmux(&ctmux_socket).await;
+    let taskd = launch_taskd(&root, &task_socket, &ctmux_socket).await;
     Self {
       _pty_guard: pty_guard,
       root,
       task_socket,
-      rmux_socket,
+      ctmux_socket,
       taskd,
-      rmuxd: Some(rmuxd),
+      ctmuxd: Some(ctmuxd),
       keepalive: Some(keepalive),
     }
   }
 
   async fn request(&self, request: ClientMessage) -> ServerMessage {
     timeout(Duration::from_secs(20), async {
-      let mut stream = task_ipc::connect(&self.task_socket).await.unwrap();
-      task_proto::write_frame(
+      let mut stream = ctl_task_ipc::connect(&self.task_socket).await.unwrap();
+      ctl_task_proto::write_frame(
         &mut stream,
         &ClientMessage::Handshake {
-          protocol_version: task_proto::PROTOCOL_VERSION,
+          protocol_version: ctl_task_proto::PROTOCOL_VERSION,
           client_name: "interactive-test".into(),
         },
       )
       .await
       .unwrap();
       assert!(matches!(
-        task_proto::read_frame(&mut stream).await.unwrap(),
+        ctl_task_proto::read_frame(&mut stream).await.unwrap(),
         Some(ServerMessage::HandshakeAccepted { .. })
       ));
-      task_proto::write_frame(&mut stream, &request)
+      ctl_task_proto::write_frame(&mut stream, &request)
         .await
         .unwrap();
-      task_proto::read_frame(&mut stream).await.unwrap().unwrap()
+      ctl_task_proto::read_frame(&mut stream)
+        .await
+        .unwrap()
+        .unwrap()
     })
     .await
     .expect("task request timed out")
@@ -132,16 +135,16 @@ impl Fixture {
   }
 
   async fn relaunch_taskd(&mut self) {
-    self.taskd = launch_taskd(&self.root, &self.task_socket, &self.rmux_socket).await;
+    self.taskd = launch_taskd(&self.root, &self.task_socket, &self.ctmux_socket).await;
   }
 
   async fn close(mut self) {
     self.taskd.kill().await.unwrap();
-    if let Some(daemon) = self.rmuxd.take() {
+    if let Some(daemon) = self.ctmuxd.take() {
       if !daemon.is_finished() {
-        let control = rmux_ipc::control_socket_path(&self.rmux_socket).unwrap();
-        let stream = rmux_ipc::connect_existing_daemon(&control).await.unwrap();
-        rmux_ipc::request_local_daemon_restart(stream)
+        let control = ctmux_ipc::control_socket_path(&self.ctmux_socket).unwrap();
+        let stream = ctmux_ipc::connect_existing_daemon(&control).await.unwrap();
+        ctmux_ipc::request_local_daemon_restart(stream)
           .await
           .unwrap();
       }
@@ -156,54 +159,54 @@ impl Fixture {
   }
 }
 
-fn spawn_rmux(socket_path: PathBuf) -> JoinHandle<Result<(), rmuxd::DaemonError>> {
-  tokio::spawn(rmuxd::run(rmuxd::DaemonConfig {
+fn spawn_ctmux(socket_path: PathBuf) -> JoinHandle<Result<(), ctmuxd::DaemonError>> {
+  tokio::spawn(ctmuxd::run(ctmuxd::DaemonConfig {
     socket_path,
     startup_idle_timeout: Duration::from_secs(30),
     ..Default::default()
   }))
 }
 
-async fn connect_rmux(socket: &Path) -> rmux_ipc::Stream {
+async fn connect_ctmux(socket: &Path) -> ctmux_ipc::Stream {
   timeout(Duration::from_secs(10), async {
     loop {
-      if let Ok(mut stream) = rmux_ipc::connect_existing_daemon(socket).await {
+      if let Ok(mut stream) = ctmux_ipc::connect_existing_daemon(socket).await {
         // A replacement's pipe can connect before it can serve a handshake.
         // Readiness requires a protocol response, not just an open transport.
         let handshake = async {
-          rmux_proto::write_frame(
+          ctmux_proto::write_frame(
             &mut stream,
-            &rmux_proto::ClientMessage::Handshake {
-              protocol_version: rmux_proto::PROTOCOL_VERSION,
+            &ctmux_proto::ClientMessage::Handshake {
+              protocol_version: ctmux_proto::PROTOCOL_VERSION,
               client_name: "task-test".into(),
               client_version: "test".into(),
             },
           )
           .await?;
-          rmux_proto::read_frame::<_, rmux_proto::ServerMessage>(&mut stream).await
+          ctmux_proto::read_frame::<_, ctmux_proto::ServerMessage>(&mut stream).await
         }
         .await;
         match handshake {
-          Ok(Some(rmux_proto::ServerMessage::HandshakeAccepted { .. })) => return stream,
-          Ok(None) | Err(rmux_proto::CodecError::Io(_)) => {}
-          other => panic!("unexpected rmuxd readiness response: {other:?}"),
+          Ok(Some(ctmux_proto::ServerMessage::HandshakeAccepted { .. })) => return stream,
+          Ok(None) | Err(ctmux_proto::CodecError::Io(_)) => {}
+          other => panic!("unexpected ctmuxd readiness response: {other:?}"),
         }
       }
       sleep(Duration::from_millis(25)).await;
     }
   })
   .await
-  .expect("rmuxd did not complete its readiness handshake within 10 seconds")
+  .expect("ctmuxd did not complete its readiness handshake within 10 seconds")
 }
 
-async fn launch_taskd(root: &Path, socket: &Path, rmux: &Path) -> Child {
-  let child = Command::new(env!("CARGO_BIN_EXE_taskd"))
+async fn launch_taskd(root: &Path, socket: &Path, ctmux: &Path) -> Child {
+  let child = Command::new(env!("CARGO_BIN_EXE_ctl-taskd"))
     .arg("--socket")
     .arg(socket)
     .arg("--data-directory")
     .arg(root.join("data"))
-    .arg("--rmux-socket")
-    .arg(rmux)
+    .arg("--ctmux-socket")
+    .arg(ctmux)
     .kill_on_drop(true)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
@@ -212,10 +215,10 @@ async fn launch_taskd(root: &Path, socket: &Path, rmux: &Path) -> Child {
     .unwrap();
   let deadline = Instant::now() + Duration::from_secs(10);
   loop {
-    if task_ipc::connect(socket).await.is_ok() {
+    if ctl_task_ipc::connect(socket).await.is_ok() {
       return child;
     }
-    assert!(Instant::now() < deadline, "taskd did not start");
+    assert!(Instant::now() < deadline, "ctl-taskd did not start");
     sleep(Duration::from_millis(25)).await;
   }
 }
@@ -240,12 +243,12 @@ async fn managed(
 ) -> LocalControlServerMessage {
   let run = task.active_run.as_ref().or(task.last_run.as_ref()).unwrap();
   let backend = run.interactive.as_ref().unwrap();
-  let control = rmux_ipc::control_socket_path(&fixture.rmux_socket).unwrap();
-  let mut stream = rmux_ipc::connect_existing_daemon(&control).await.unwrap();
-  rmux_ipc::local_control_handshake(&mut stream)
+  let control = ctmux_ipc::control_socket_path(&fixture.ctmux_socket).unwrap();
+  let mut stream = ctmux_ipc::connect_existing_daemon(&control).await.unwrap();
+  ctmux_ipc::local_control_handshake(&mut stream)
     .await
     .unwrap();
-  rmux_ipc::write_local_control_frame(
+  ctmux_ipc::write_local_control_frame(
     &mut stream,
     &LocalControlClientMessage::ManageSession {
       expected_instance: if matches!(operation, ManagedOperation::Status) {
@@ -262,7 +265,7 @@ async fn managed(
   .unwrap();
   timeout(
     Duration::from_secs(15),
-    rmux_ipc::read_local_control_frame(&mut stream),
+    ctmux_ipc::read_local_control_frame(&mut stream),
   )
   .await
   .unwrap()
@@ -270,39 +273,39 @@ async fn managed(
   .unwrap()
 }
 
-async fn rmux_message(stream: &mut rmux_ipc::Stream) -> rmux_proto::ServerMessage {
-  timeout(Duration::from_secs(15), rmux_proto::read_frame(stream))
+async fn ctmux_message(stream: &mut ctmux_ipc::Stream) -> ctmux_proto::ServerMessage {
+  timeout(Duration::from_secs(15), ctmux_proto::read_frame(stream))
     .await
     .unwrap()
     .unwrap()
     .unwrap()
 }
 
-async fn attach(fixture: &Fixture, session: &str) -> rmux_ipc::Stream {
-  let mut stream = connect_rmux(&fixture.rmux_socket).await;
-  rmux_proto::write_frame(
+async fn attach(fixture: &Fixture, session: &str) -> ctmux_ipc::Stream {
+  let mut stream = connect_ctmux(&fixture.ctmux_socket).await;
+  ctmux_proto::write_frame(
     &mut stream,
-    &rmux_proto::ClientMessage::AttachSession {
+    &ctmux_proto::ClientMessage::AttachSession {
       session: session.into(),
       resume_from: None,
-      terminal_size: rmux_proto::TerminalSize::default(),
+      terminal_size: ctmux_proto::TerminalSize::default(),
       request_input_lease: true,
       request_layout_lease: true,
       request_command_line: false,
       request_running_command: false,
-      presentation_window_bytes: rmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES,
+      presentation_window_bytes: ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES,
     },
   )
   .await
   .unwrap();
-  let rmux_proto::ServerMessage::Attached { checkpoint, .. } = rmux_message(&mut stream).await
+  let ctmux_proto::ServerMessage::Attached { checkpoint, .. } = ctmux_message(&mut stream).await
   else {
     panic!("task session could not be attached");
   };
   if let Some(checkpoint) = checkpoint {
-    rmux_proto::write_frame(
+    ctmux_proto::write_frame(
       &mut stream,
-      &rmux_proto::ClientMessage::PresentationApplied {
+      &ctmux_proto::ClientMessage::PresentationApplied {
         sequence: checkpoint.sequence,
       },
     )
@@ -312,10 +315,10 @@ async fn attach(fixture: &Fixture, session: &str) -> rmux_ipc::Stream {
   stream
 }
 
-async fn input(stream: &mut rmux_ipc::Stream, command: &str) {
-  rmux_proto::write_frame(
+async fn input(stream: &mut ctmux_ipc::Stream, command: &str) {
+  ctmux_proto::write_frame(
     stream,
-    &rmux_proto::ClientMessage::Input {
+    &ctmux_proto::ClientMessage::Input {
       data: command.as_bytes().to_vec(),
     },
   )
@@ -339,14 +342,14 @@ async fn interactive_task_recovers_the_same_session_and_restarts_explicitly() {
   input(&mut terminal, "echo TASK_IO_WORKS\r").await;
   let mut output = Vec::new();
   loop {
-    if let rmux_proto::ServerMessage::Output {
+    if let ctmux_proto::ServerMessage::Output {
       data, sequence_end, ..
-    } = rmux_message(&mut terminal).await
+    } = ctmux_message(&mut terminal).await
     {
       output.extend(data);
-      rmux_proto::write_frame(
+      ctmux_proto::write_frame(
         &mut terminal,
-        &rmux_proto::ClientMessage::PresentationApplied {
+        &ctmux_proto::ClientMessage::PresentationApplied {
           sequence: sequence_end,
         },
       )
@@ -359,7 +362,7 @@ async fn interactive_task_recovers_the_same_session_and_restarts_explicitly() {
   }
   drop(terminal);
   fixture.taskd.kill().await.unwrap();
-  // Simulate a crash after rmuxd accepted creation but before taskd saved its reply.
+  // Simulate a crash after ctmuxd accepted creation but before ctl-taskd saved its reply.
   let path = fixture.root.join("data/state.json");
   let mut stored: serde_json::Value =
     serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -384,7 +387,7 @@ async fn interactive_task_recovers_the_same_session_and_restarts_explicitly() {
       })
       .await,
     ServerMessage::Error {
-      code: task_proto::ErrorCode::AlreadyRunning,
+      code: ctl_task_proto::ErrorCode::AlreadyRunning,
       ..
     }
   ));
@@ -397,7 +400,7 @@ async fn interactive_task_recovers_the_same_session_and_restarts_explicitly() {
       })
       .await,
     ServerMessage::Error {
-      code: task_proto::ErrorCode::UnsupportedExecutionMode,
+      code: ctl_task_proto::ErrorCode::UnsupportedExecutionMode,
       ..
     }
   ));
@@ -423,7 +426,7 @@ async fn interactive_task_recovers_the_same_session_and_restarts_explicitly() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rmux_retains_exit_until_taskd_persists_it() {
+async fn ctmux_retains_exit_until_taskd_persists_it() {
   let mut fixture = Fixture::start().await;
   fixture.create().await;
   let started = fixture
@@ -464,8 +467,8 @@ async fn rmux_retains_exit_until_taskd_persists_it() {
   fixture.keepalive.take();
   sleep(Duration::from_millis(350)).await;
   assert!(
-    !fixture.rmuxd.as_ref().unwrap().is_finished(),
-    "unacknowledged exit must retain rmuxd"
+    !fixture.ctmuxd.as_ref().unwrap().is_finished(),
+    "unacknowledged exit must retain ctmuxd"
   );
   fixture.relaunch_taskd().await;
   let finished = fixture
@@ -479,7 +482,7 @@ async fn rmux_retains_exit_until_taskd_persists_it() {
     .await;
   assert_eq!(finished.last_run.as_ref().unwrap().state, RunState::Failed);
   assert_eq!(finished.last_run.as_ref().unwrap().exit_code, Some(7));
-  timeout(Duration::from_secs(10), fixture.rmuxd.take().unwrap())
+  timeout(Duration::from_secs(10), fixture.ctmuxd.take().unwrap())
     .await
     .unwrap()
     .unwrap()
@@ -488,7 +491,7 @@ async fn rmux_retains_exit_until_taskd_persists_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replacing_rmuxd_fails_the_old_run_without_creating_a_new_one() {
+async fn replacing_ctmuxd_fails_the_old_run_without_creating_a_new_one() {
   let mut fixture = Fixture::start().await;
   fixture.create().await;
   let started = fixture
@@ -497,20 +500,20 @@ async fn replacing_rmuxd_fails_the_old_run_without_creating_a_new_one() {
     })
     .await;
   fixture.taskd.kill().await.unwrap();
-  let control = rmux_ipc::control_socket_path(&fixture.rmux_socket).unwrap();
-  rmux_ipc::request_local_daemon_restart(
-    rmux_ipc::connect_existing_daemon(&control).await.unwrap(),
+  let control = ctmux_ipc::control_socket_path(&fixture.ctmux_socket).unwrap();
+  ctmux_ipc::request_local_daemon_restart(
+    ctmux_ipc::connect_existing_daemon(&control).await.unwrap(),
   )
   .await
   .unwrap();
   fixture.keepalive.take();
-  timeout(Duration::from_secs(15), fixture.rmuxd.take().unwrap())
+  timeout(Duration::from_secs(15), fixture.ctmuxd.take().unwrap())
     .await
     .unwrap()
     .unwrap()
     .unwrap();
-  fixture.rmuxd = Some(spawn_rmux(fixture.rmux_socket.clone()));
-  fixture.keepalive = Some(connect_rmux(&fixture.rmux_socket).await);
+  fixture.ctmuxd = Some(spawn_ctmux(fixture.ctmux_socket.clone()));
+  fixture.keepalive = Some(connect_ctmux(&fixture.ctmux_socket).await);
   fixture.relaunch_taskd().await;
   let finished = fixture.wait_for(|task| task.active_run.is_none()).await;
   assert_eq!(finished.desired_state, DesiredState::Stopped);
@@ -521,11 +524,11 @@ async fn replacing_rmuxd_fails_the_old_run_without_creating_a_new_one() {
   assert_eq!(finished.last_run.as_ref().unwrap().state, RunState::Failed);
   assert_eq!(finished.last_run.as_ref().unwrap().exit_code, None);
   let stream = fixture.keepalive.as_mut().unwrap();
-  rmux_proto::write_frame(stream, &rmux_proto::ClientMessage::ListSessions)
+  ctmux_proto::write_frame(stream, &ctmux_proto::ClientMessage::ListSessions)
     .await
     .unwrap();
   assert!(
-    matches!(rmux_message(stream).await, rmux_proto::ServerMessage::SessionList { sessions } if sessions.is_empty())
+    matches!(ctmux_message(stream).await, ctmux_proto::ServerMessage::SessionList { sessions } if sessions.is_empty())
   );
   fixture.close().await;
 }
@@ -536,16 +539,16 @@ async fn persisted_creation_intent_is_idempotent_and_retired_runs_stay_retired()
   let mut task = fixture.create().await;
   fixture.taskd.kill().await.unwrap();
   task.desired_state = DesiredState::Running;
-  task.active_run = Some(task_proto::RunInfo {
+  task.active_run = Some(ctl_task_proto::RunInfo {
     definition: Some(task.definition.clone()),
     run_id: Uuid::new_v4().to_string(),
     state: RunState::Starting,
     started_at_ms: 1,
     ended_at_ms: None,
     exit_code: None,
-    interactive: Some(task_proto::InteractiveRun {
+    interactive: Some(ctl_task_proto::InteractiveRun {
       released: false,
-      rmux_socket: fixture.rmux_socket.clone(),
+      ctmux_socket: fixture.ctmux_socket.clone(),
       instance_id: String::new(),
       session_id: None,
     }),
@@ -585,7 +588,7 @@ async fn persisted_creation_intent_is_idempotent_and_retired_runs_stay_retired()
     task.active_run.as_ref().unwrap().run_id
   );
   let start = ManagedOperation::Start {
-    command: rmux_proto::CommandSpec {
+    command: ctmux_proto::CommandSpec {
       program: task.definition.program,
       arguments: task.definition.arguments,
     },

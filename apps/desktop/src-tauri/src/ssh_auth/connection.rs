@@ -65,7 +65,7 @@ async fn remote_service_with_timeout<T>(
     .map_err(|_| {
       CommandErrorDto::new(
         "remote_connection_timeout",
-        "Timed out opening the remote rmux service over SSH. Try again.",
+        "Timed out opening the remote ctmux service over SSH. Try again.",
       )
     })?
 }

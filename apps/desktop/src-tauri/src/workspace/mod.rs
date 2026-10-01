@@ -14,9 +14,9 @@ mod tests;
 
 use std::collections::HashSet;
 
+use ctl_task_store::DefinitionScope;
+pub use ctl_task_store::SavedTaskDefinition;
 use serde::{Deserialize, Serialize};
-use task_store::DefinitionScope;
-pub use task_store::SavedTaskDefinition;
 use tauri::Manager as _;
 
 #[cfg(test)]
@@ -26,8 +26,8 @@ pub use hosts::{WorkspaceConnectionMethod, WorkspaceHost};
 
 use crate::dto::{TerminalSizeDto, valid_observation_timestamp};
 use crate::error::{CommandErrorDto, CommandResult};
-pub use ctl_core::hosts::WorkspaceSshGateway;
-use ctl_core::hosts::validated_gateway_ids;
+pub use ctl_client::hosts::WorkspaceSshGateway;
+use ctl_client::hosts::validated_gateway_ids;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,7 +127,7 @@ pub struct TaskDefinitionDraft {
   #[serde(default, skip_serializing_if = "DraftBaseRevision::is_unknown")]
   pub base_revision: DraftBaseRevision,
   pub definition_id: String,
-  pub definition: task_proto::TaskDefinition,
+  pub definition: ctl_task_proto::TaskDefinition,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,9 +527,10 @@ fn workspace_repository(app: &tauri::AppHandle) -> CommandResult<repository::Rep
     .path()
     .app_data_dir()
     .map_err(CommandErrorDto::backend)?;
-  let definition_path = task_store::global_path().map_err(crate::task_definitions::store_error)?;
+  let definition_path =
+    ctl_task_store::global_path().map_err(crate::task_definitions::store_error)?;
   Ok(
-    repository::Repository::new(home.join(".tokn").join("rmux"))
+    repository::Repository::new(home.join(".tokn").join("ctmux"))
       .with_legacy_directory(legacy_directory)
       .with_definition_store(definition_path),
   )

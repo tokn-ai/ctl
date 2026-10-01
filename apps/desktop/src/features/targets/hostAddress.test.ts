@@ -3,9 +3,9 @@ import { parseHostAddress } from "./hostAddress";
 
 describe("host address", () => {
   it("parses structured user, host, port, and bracketed IPv6", () => {
-    expect(parseHostAddress("rmux@127.0.0.1:2222")).toEqual({
+    expect(parseHostAddress("ctmux@127.0.0.1:2222")).toEqual({
       hostname: "127.0.0.1",
-      user: "rmux",
+      user: "ctmux",
       port: 2222,
     });
     expect(parseHostAddress("[::1]:2222")).toEqual({

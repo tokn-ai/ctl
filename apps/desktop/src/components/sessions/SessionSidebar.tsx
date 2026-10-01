@@ -214,7 +214,7 @@ export function SessionSidebar({
   }
 
   return (
-    <aside className="session-sidebar" aria-label="rmux sessions">
+    <aside className="session-sidebar" aria-label="ctmux sessions">
       <div className="sidebar-connections">
         <header className="sidebar-header">
           <strong>Sessions</strong>

@@ -8,7 +8,7 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use ctld_ipc::{VpnState, VpnStatus};
+use ctl_ipc::{VpnState, VpnStatus};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, Command};

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use rmux_client::AttachmentEvent;
+use ctmux_client::AttachmentEvent;
 
 use crate::dto::valid_observation_timestamp;
 
@@ -67,28 +67,28 @@ impl Observations {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use rmux_client::{AttachExit, AttachExitReason};
+  use ctmux_client::{AttachExit, AttachExitReason};
 
   #[test]
   fn geometry_and_checkpoints_publish_their_observation_before_the_next_heartbeat_interval() {
-    let size = rmux_proto::TerminalSize::default();
+    let size = ctmux_proto::TerminalSize::default();
     let events = [
       AttachmentEvent::PtyGeometryChanged {
         terminal_size: size.clone(),
         observed_sequence: 0,
       },
       AttachmentEvent::Checkpoint {
-        checkpoint: rmux_proto::TerminalCheckpoint {
-          format: rmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
-          format_version: rmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+        checkpoint: ctmux_proto::TerminalCheckpoint {
+          format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+          format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
           sequence: 0,
           terminal_size: size,
           payload: Vec::new(),
           input_prefix: Vec::new(),
         },
-        history: rmux_proto::TerminalHistorySnapshot {
-          format: rmux_proto::TERMINAL_HISTORY_FORMAT.into(),
-          format_version: rmux_proto::TERMINAL_HISTORY_FORMAT_VERSION,
+        history: ctmux_proto::TerminalHistorySnapshot {
+          format: ctmux_proto::TERMINAL_HISTORY_FORMAT.into(),
+          format_version: ctmux_proto::TERMINAL_HISTORY_FORMAT_VERSION,
           sequence: 0,
           generation: 0,
           revision: 0,

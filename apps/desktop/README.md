@@ -1,6 +1,6 @@
-# rmux app
+# ctmux app
 
-The desktop client for local and SSH-connected daemon-owned `rmux` terminal
+The desktop client for local and SSH-connected daemon-owned `ctmux` terminal
 sessions. It uses Tauri 2, React/TypeScript, and xterm.js.
 
 Connection indicators distinguish observed SSH availability, active terminal
@@ -9,9 +9,9 @@ attachments, and last-known session activity. See the
 
 ## About and component versions
 
-Open **About rmux** from the info button, command palette, or macOS app menu.
-The page shows the app version, local `ctld`, `rmuxd`, and `taskd` versions and
-protocols, and `ctl-agent`/`rmuxd` metadata observed on active remote terminal
+Open **About ctmux** from the info button, command palette, or macOS app menu.
+The page shows the app version, local `ctld`, `ctmuxd`, and `ctl-taskd` versions and
+protocols, and `ctl-agent`/`ctmuxd` metadata observed on active remote terminal
 connections. Separate SSH and VPN ctld owners appear separately when configured.
 Running versions are compared with this app's component build. Each component
 uses one compact row with its version, protocol, status, and action. Hover over
@@ -35,10 +35,10 @@ impact confirmation. The replacement's build and protocols are verified afterwar
   daemon keeps it alive, then expires after its heartbeat timeout. Surviving SSH
   masters can be reused after restart.
   Saved VPN profiles and Tailscale identities remain available for reconnecting.
-- Local and remote `rmuxd` restarts end all of that daemon's terminal sessions,
+- Local and remote `ctmuxd` restarts end all of that daemon's terminal sessions,
   including other clients and interactive tasks. Runtime options return to the
   replacement's defaults.
-- `taskd` refuses while tasks are running and preserves its storage, definitions,
+- `ctl-taskd` refuses while tasks are running and preserves its storage, definitions,
   history, and terminal-daemon endpoint.
 - `ctl-agent` offers **Reconnect** for the matching app transports across windows.
   Remote terminal processes remain running; the new connections verify identity
@@ -71,7 +71,7 @@ Closing the dialog also retries pending cleanup in the background for up to
 identity is preserved; cleanup never forcibly removes a shared running container.
 
 Tailscale's optional **Device name in Tailscale** is under Advanced options. It
-names this VPN device in the Tailscale device list; rmux assigns a name if left
+names this VPN device in the Tailscale device list; ctmux assigns a name if left
 blank. Advanced options also allow access to advertised subnet routes.
 Disconnecting a saved connection retains the Tailscale device's login.
 Each saved connection has one item combining its settings and live status,
@@ -130,7 +130,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-On macOS and Linux, Tauri builds `ctld`, `rmuxd`, and `taskd` before every native
+On macOS and Linux, Tauri builds `ctld`, `ctmuxd`, and `ctl-taskd` before every native
 launch, including Rust hot reloads. The Cargo runner preserves the selected
 target, profile, and output directory. On Windows, helpers are built once at
 development startup. `pnpm dev` starts only the frontend; `pnpm daemons:build`
@@ -152,7 +152,7 @@ waits for it, verifies all four archives, and stages them in the ignored Tauri
 resource directory. `pnpm agents:sync --main` is an explicit compatibility
 shortcut for using the latest successful main-branch set.
 
-The app may also use the path in `RMUXD_BIN`. A saved host represents a named
+The app may also use the path in `CTMUXD_BIN`. A saved host represents a named
 machine with one remote account/environment. Addresses and gateway routes are
 named connection methods on that host. **Add host** guides you through
 `[user@]hostname[:port]` (or an SSH config alias), a display name, **Connect through**,
@@ -163,7 +163,7 @@ keeps the route valid when its randomly assigned port changes. If that VPN is
 missing or cannot connect, the host connection fails without a direct fallback.
 Cancelling a host connection leaves the VPN available to other hosts; use the
 VPN page to disconnect it. After verification, the app saves the named host and
-its first `SSH` method in `~/.tokn/rmux/hosts.json`. Display names may contain
+its first `SSH` method in `~/.tokn/ctmux/hosts.json`. Display names may contain
 spaces; they are independent of SSH aliases. No storage-choice step or implicit
 OpenSSH config write is involved.
 
@@ -187,7 +187,7 @@ existing config aliases, VPNs, or gateway routes; the saved method remains in th
 host catalog. OpenSSH requests host-key confirmation, passwords,
 passphrases, or interactive responses through the quick-input overlay. If
 `ctl-agent` is missing, packaged builds can install the matching
-checksummed `ctl-agent`, `rmuxd`, and `taskd` bundle for the remote user. Custom
+checksummed `ctl-agent`, `ctmuxd`, and `ctl-taskd` bundle for the remote user. Custom
 command paths are not supported. Each development commit has a distinct bundle
 ID, so a remote host cannot silently retain an older build with the same app
 version. App-local connection settings are supplied to OpenSSH as fixed
@@ -209,18 +209,18 @@ off for direct and Tailscale methods. VPN and SOCKS5 routes always use a private
 master so an existing direct connection cannot bypass the selected route.
 Checked methods honor the destination's effective
 `ControlMaster`, `ControlPath`, and `ControlPersist` settings, including `Include`
-and `Match` rules. Unchecked methods use rmux's private master while retaining
+and `Match` rules. Unchecked methods use ctmux's private master while retaining
 their alias and other SSH settings. The choice and alias origin are retained per
 method in `hosts.json` when the host is saved or customized; older saved methods
 keep their defaults. Verification uses the selected mode, and an explicit
 connection applies it to remembered sessions. An existing configured master can be reused even
 with `ControlMaster no`. If no usable control path is configured, or sharing is
-disabled and no master is running, rmux uses its private master with a five-minute
+disabled and no master is running, ctmux uses its private master with a five-minute
 idle lifetime and protocol keepalives that detect an unresponsive server after
 roughly thirty seconds. Existing and configured shared masters keep their current
 policy. For
 `ControlMaster ask` or `autoask`, start the alias in a terminal first so its
-master retains a working helper for sharing confirmations; rmux can then reuse it.
+master retains a working helper for sharing confirmations; ctmux can then reuse it.
 
 Open **Host settings** from the host row to rename the machine or its methods,
 add or edit a connection, remove a method while retaining at least one, or
@@ -234,13 +234,13 @@ apply that route to the host's remembered sessions.
 
 Remote host rows show live **Connected**, **Connecting**, **Disconnected**, or
 **Error** status; hover the status to see active connection methods or diagnostics.
-**Disconnect host** closes rmux's channels for the host's saved and active
+**Disconnect host** closes ctmux's channels for the host's saved and active
 methods and pauses its forwards. It stops private masters, but leaves configured
 masters and other applications' channels under OpenSSH's lifetime policy. Port
-forwards through a configured master use local listeners owned by rmux, so
+forwards through a configured master use local listeners owned by ctmux, so
 disconnecting cannot remove another application's forward. Remote shells and tasks keep running, and tabs,
 credentials, and saved forwarding preferences are retained. Use **Connect host**
-to resume. Other rmux windows using those methods also disconnect. Status and manual
+to resume. Other ctmux windows using those methods also disconnect. Status and manual
 pauses are runtime state; status checks never authenticate or start `ctld`.
 
 All methods on a host must reach its verified account-owned ctl environment.
@@ -271,9 +271,9 @@ unavailable until discovery finds it again. Connections use ordinary SSH over th
 tailnet, including the usual SSH user/config and credential settings; browser
 approval for Tailscale SSH check mode is a separate follow-up.
 
-Saved host definitions and reusable gateways live in `~/.tokn/rmux/hosts.json`;
+Saved host definitions and reusable gateways live in `~/.tokn/ctmux/hosts.json`;
 sessions, tabs, tasks, forwarding, and observed remote identities live in
-`~/.tokn/rmux/workspace.json`. On first load, an existing workspace is imported
+`~/.tokn/ctmux/workspace.json`. On first load, an existing workspace is imported
 from Tauri's former app-data directory if the new file does not exist; the
 original remains available for recovery. Schema 8 moves existing hosts and
 gateways into the catalog before removing them from the workspace. Schema 7 is
@@ -295,7 +295,7 @@ Credential prompts appear within the action, which continues after verification.
 Cancelling authentication creates or imports nothing; New shell keeps the working
 directory draft. Background refreshes never prompt for authentication.
 Old sessions were never saved, so the first migration requires explicit import.
-See [workspace persistence](../../docs/rmux-workspace.md) for recovery and tests.
+See [workspace persistence](../../docs/ctmux-workspace.md) for recovery and tests.
 
 The Ports activity panel lists every saved local forward across SSH hosts,
 including stopped entries, and shows `ctld`'s current active, waiting, or error
@@ -318,7 +318,7 @@ present and remains the default for a new shell. The sidebar groups remembered
 sessions under their named hosts. A failed host reports its own error while
 last-known sessions from other targets remain usable.
 
-SSH uses `ctl-core` and the system `ssh` executable with a fixed remote command
+SSH uses `ctl-client` and the system `ssh` executable with a fixed remote command
 that prepends the app-managed directory before running `ctl-agent connect`;
 SSH agent forwarding, X11, local commands, and PTY allocation remain disabled.
 Local agent identities can be used for authentication without forwarding that
@@ -355,12 +355,12 @@ to three minutes and Escape cancels it. On non-Unix platforms, preconfigured non
 remains available.
 
 On macOS, `ctld` is packaged as the app-like helper
-`rmux.app/Contents/Helpers/ctld.app`. Release builds sign that helper with the
-permanent `io.rmux.desktop.ctld` bundle identifier and embed its matching
+`ctmux.app/Contents/Helpers/ctld.app`. Release builds sign that helper with the
+permanent `io.ctmux.desktop.ctld` bundle identifier and embed its matching
 Developer ID provisioning profile. This gives `ctld` its own Keychain identity;
 the main app and the other sidecars receive no credential-access entitlement.
 Without the profile-authorized application identifier, the Data Protection
-Keychain rejects credential storage and rmux reports the signing error instead
+Keychain rejects credential storage and ctmux reports the signing error instead
 of silently weakening the access policy.
 
 For local Touch ID testing with any Apple Account, first run
@@ -372,8 +372,8 @@ profiles expire after seven days; after initial setup the signed-development
 launcher asks Xcode to refresh an expired profile automatically.
 
 Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
-profiles and `~/Library/Application Support/rmux/signing/ctld.provisionprofile`,
-selects the newest unexpired profile for `io.rmux.desktop.ctld`, discovers its
+profiles and `~/Library/Application Support/ctmux/signing/ctld.provisionprofile`,
+selects the newest unexpired profile for `io.ctmux.desktop.ctld`, discovers its
 matching signing certificate in the login Keychain, and selects a private,
 stable `ctld` endpoint for this worktree under the system temporary directory.
 The signed daemon runs independently of `tauri dev`, so quitting or relaunching
@@ -410,7 +410,7 @@ non-secret repository variables. `APPLE_CERTIFICATE`,
 `APPLE_CERTIFICATE_PASSWORD`, `APPLE_CTLD_PROVISIONING_PROFILE`, and
 `APPLE_API_KEY_CONTENT` are repository secrets. The certificate and profile
 must be for Developer ID distribution, and the profile must authorize exactly
-the team-prefixed `io.rmux.desktop.ctld` application identifier.
+the team-prefixed `io.ctmux.desktop.ctld` application identifier.
 If any required signing value is absent, CI explicitly skips Apple signing
 and notarization, builds the desktop packages, and labels the draft release's
 macOS assets as unsigned. Those builds cannot store Touch ID-protected
@@ -443,12 +443,12 @@ palette.
 Open the command palette with `Cmd-Shift-P` on macOS or `Ctrl-Shift-P` on
 Windows/Linux. It exposes session creation, refresh, switching, disconnect and
 close, plus terminal input, layout, reconnect, focus, and a destructive
-`Restart rmuxd` maintenance action. Restart has no default shortcut or permanent
+`Restart ctmuxd` maintenance action. Restart has no default shortcut or permanent
 button: selecting it opens a quick-input confirmation, with Cancel focused.
 It first verifies the running daemon's separate local-control
 endpoint; an older daemon that lacks it leaves the active tab attached and
 reports that restart is unavailable. Once accepted, it terminates every local
-rmux session (including sessions opened by other apps) before both daemon
+ctmux session (including sessions opened by other apps) before both daemon
 endpoints drain and a fresh daemon starts. Local workspace entries become
 missing rather than being silently removed.
 Remote tabs and their SSH attachments are unrelated and remain intact. It
@@ -562,14 +562,14 @@ or open SSH connections. See [preview details](dev/README.md).
 pnpm check
 pnpm test
 pnpm build
-cargo test -p rmux-app
+cargo test -p ctmux-app
 ```
 
 An opt-in backend integration test covers remote create, list, attach, and
 kill through the same command functions invoked by Tauri:
 
 ```sh
-RMUX_TEST_SSH_TARGET=rmux-docker cargo test -p rmux-app \
+CTMUX_TEST_SSH_TARGET=ctmux-docker cargo test -p ctmux-app \
   commands::tests::creates_lists_attaches_and_kills_a_session_over_ssh \
   -- --ignored --exact
 ```
@@ -580,11 +580,11 @@ known-hosts file; provide the fingerprint independently inspected in the
 container, never one learned from an unverified connection:
 
 ```sh
-cargo build -p rmux-app
-RMUX_TEST_ASKPASS_PROGRAM=/absolute/path/to/target/debug/rmux-app \
-RMUX_TEST_SSH_IDENTITY=/absolute/path/to/private-key \
-RMUX_TEST_SSH_FINGERPRINT=SHA256:verified-container-fingerprint \
-cargo test -p rmux-app ssh_auth::tests -- --ignored
+cargo build -p ctmux-app
+CTMUX_TEST_ASKPASS_PROGRAM=/absolute/path/to/target/debug/ctmux-app \
+CTMUX_TEST_SSH_IDENTITY=/absolute/path/to/private-key \
+CTMUX_TEST_SSH_FINGERPRINT=SHA256:verified-container-fingerprint \
+cargo test -p ctmux-app ssh_auth::tests -- --ignored
 ```
 
 The GUI never resizes an existing PTY merely because it was selected. **Resize

@@ -5,7 +5,7 @@ a saved definition, or copying a retained run snapshot.
 
 A saved definition is a local recipe: name, program, arguments, working
 directory, and execution mode. It is separate from a registered task owned by
-taskd. Direct saves and catalog operations do not connect to taskd or start a
+ctl-taskd. Direct saves and catalog operations do not connect to ctl-taskd or start a
 process. Creating from a definition copies its values into a new registration;
 later catalog changes do not update that task. These operations are local-only:
 `--host` is rejected, including for `create --from-definition` and
@@ -58,7 +58,7 @@ overwrites an existing name.
 
 `create INSTANCE --from-definition SELECTOR` retains the copied program,
 arguments, cwd, and mode while using INSTANCE as the registered task's name.
-Its name must be unique in taskd. `--from-definition` conflicts with an inline
+Its name must be unique in ctl-taskd. `--from-definition` conflicts with an inline
 command, `--cwd`, and `--mode`; specify the desired values in the saved recipe.
 Scope flags on `task create` require `--from-definition`.
 
@@ -90,7 +90,7 @@ does not stop or remove an already registered task.
 ctl task save previous-build --from-run RUN_ID --project /srv/api
 ```
 
-This connects to local taskd, starting it if necessary to read metadata,
+This connects to local ctl-taskd, starting it if necessary to read metadata,
 without starting a new run. Supply an actual run ID; a task ID is different,
 and current `task show` output does not expose run IDs. Only active/latest
 retained runs are available, and a missing definition snapshot is an error.

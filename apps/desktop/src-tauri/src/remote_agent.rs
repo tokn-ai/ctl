@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use ctl_core::{
+use ctl_client::{
   RemoteInstallEvent, SshConnectionOptions, SshInteraction,
   install_ssh_unix_agent_interactive_with_progress, probe_ssh_unix_platform_interactive,
 };
@@ -96,8 +96,8 @@ async fn install_bundle(
   let bundle = read_verified_bundle(bundle_directories(app)?, target_triple).await?;
   verify_bundle_revision(
     &bundle.git_revision,
-    env!("RMUX_SOURCE_REVISION"),
-    env!("RMUX_COMPONENTS_DIRTY") == "true",
+    env!("CTMUX_SOURCE_REVISION"),
+    env!("CTMUX_COMPONENTS_DIRTY") == "true",
   )?;
   updates.send_modify(|progress| {
     progress.phase = Phase::Connecting;
@@ -430,7 +430,7 @@ mod tests {
   #[test]
   fn verifies_bundle_checksum_before_installation() {
     let directory = std::env::temp_dir().join(format!(
-      "rmux-agent-bundle-{}",
+      "ctmux-agent-bundle-{}",
       uuid::Uuid::new_v4().simple()
     ));
     std::fs::create_dir(&directory).unwrap();

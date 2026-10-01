@@ -1,7 +1,7 @@
 //! Human-readable reasons contain only trusted connection/file metadata.
 
-use ctld_ipc::SshTarget;
-use ctld_ipc::credentials::StoredCredential;
+use ctl_ipc::SshTarget;
+use ctl_ipc::credentials::StoredCredential;
 
 pub(super) fn text(value: &str) -> String {
   let clean: String = value
@@ -77,7 +77,7 @@ pub(super) fn credential(target: &SshTarget, prompt: &str) -> String {
   };
   let mut destination = connection(target);
   for gateway in &target.gateways {
-    if gateway.kind != ctld_ipc::GatewayKind::Ssh {
+    if gateway.kind != ctl_ipc::GatewayKind::Ssh {
       continue;
     }
     let trusted = endpoint(
@@ -182,15 +182,15 @@ mod tests {
   #[test]
   fn only_a_configured_gateway_can_name_a_gateway_password() {
     let mut target = target();
-    target.gateways.push(ctld_ipc::SshGateway {
-      kind: ctld_ipc::GatewayKind::Ssh,
+    target.gateways.push(ctl_ipc::SshGateway {
+      kind: ctl_ipc::GatewayKind::Ssh,
       vpn: None,
       destination: "gateway-alias".into(),
       hostname: Some("jump.example.invalid".into()),
       user: Some("bob".into()),
       port: Some(2200),
       identity_file: None,
-      mode: ctld_ipc::SshGatewayMode::Automatic,
+      mode: ctl_ipc::SshGatewayMode::Automatic,
     });
     let reason = credential(&target, "bob@jump.example.invalid's password: ");
     assert!(reason.contains("bob@jump.example.invalid:2200 (SSH gateway)"));
@@ -205,7 +205,7 @@ mod tests {
       credential_id: "fixture".into(),
       scope_id: "fixture".into(),
       name: "SSH password".into(),
-      kind: ctld_ipc::credentials::CredentialKind::SshPassword,
+      kind: ctl_ipc::credentials::CredentialKind::SshPassword,
       target: Some("alice@host.example.invalid".into()),
       account: Some("alice".into()),
       key_name: None,

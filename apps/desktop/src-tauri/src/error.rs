@@ -1,6 +1,6 @@
-use ctl_core::CoreError;
-use rmux_client::ClientError;
-use rmux_proto::ErrorCode;
+use ctl_client::CoreError;
+use ctmux_client::ClientError;
+use ctmux_proto::ErrorCode;
 use serde::Serialize;
 
 pub type CommandResult<T> = Result<T, CommandErrorDto>;
@@ -95,8 +95,8 @@ pub fn protocol_error_code(code: &ErrorCode) -> &'static str {
   }
 }
 
-impl From<ctl_core::hosts::HostError> for CommandErrorDto {
-  fn from(error: ctl_core::hosts::HostError) -> Self {
+impl From<ctl_client::hosts::HostError> for CommandErrorDto {
+  fn from(error: ctl_client::hosts::HostError) -> Self {
     Self::new(error.code, error.message)
   }
 }

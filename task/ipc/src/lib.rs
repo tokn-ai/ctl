@@ -1,4 +1,4 @@
-//! Per-user transport shared by taskd and its clients.
+//! Per-user transport shared by ctl-taskd and its clients.
 mod component;
 pub use component::{ComponentStatus, component_status};
 use std::path::{Path, PathBuf};
@@ -30,26 +30,30 @@ pub async fn connect(path: &Path) -> io::Result<Stream> {
 ///
 /// # Panics
 /// On Windows, panics if neither a local user data directory nor
-/// `TASKD_RUNTIME_DIR` is available.
+/// `CTL_TASKD_RUNTIME_DIR` is available.
 #[must_use]
 pub fn socket_path() -> PathBuf {
   #[cfg(unix)]
   {
-    if let Some(directory) = env::var_os("TASKD_RUNTIME_DIR") {
-      return PathBuf::from(directory).join("taskd.sock");
+    if let Some(directory) = env::var_os("CTL_TASKD_RUNTIME_DIR") {
+      return PathBuf::from(directory).join("ctl-taskd.sock");
     }
     if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
-      return PathBuf::from(directory).join("taskd/taskd.sock");
+      return PathBuf::from(directory).join("ctl-taskd/ctl-taskd.sock");
     }
     let uid = rustix::process::getuid().as_raw();
-    PathBuf::from("/tmp").join(format!("taskd-{uid}/taskd.sock"))
+    PathBuf::from("/tmp").join(format!("ctl-taskd-{uid}/ctl-taskd.sock"))
   }
   #[cfg(windows)]
   {
     use std::os::windows::ffi::OsStrExt;
     // A stable namespace, not an authentication secret; the pipe ACL controls access.
-    let directory = env::var_os("TASKD_RUNTIME_DIR").map_or_else(
-      || dirs::data_local_dir().expect("Windows user has a local data directory"),
+    let directory = env::var_os("CTL_TASKD_RUNTIME_DIR").map_or_else(
+      || {
+        dirs::data_local_dir()
+          .expect("Windows user has a local data directory")
+          .join("ctl-taskd")
+      },
       PathBuf::from,
     );
     let bytes: Vec<u8> = directory

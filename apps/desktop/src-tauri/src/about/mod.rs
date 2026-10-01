@@ -15,7 +15,7 @@ pub async fn get_component_versions(
   state: tauri::State<'_, crate::state::AppState>,
 ) -> crate::error::CommandResult<ComponentVersionsSnapshot> {
   let ctld_owners = local::owners();
-  let (ctld, rmuxd, taskd, remote) = tokio::join!(
+  let (ctld, ctmuxd, taskd, remote) = tokio::join!(
     async {
       let mut tasks = tokio::task::JoinSet::new();
       for owner in ctld_owners {
@@ -36,26 +36,26 @@ pub async fn get_component_versions(
       rows.sort_by(|left, right| left.label.cmp(&right.label));
       rows
     },
-    local::rmuxd(),
+    local::ctmuxd(),
     local::taskd(),
     state.remote_observations(),
   );
-  let mut app = ComponentVersionRow::local("rmux", "rmux");
+  let mut app = ComponentVersionRow::local("ctmux", "ctmux");
   app.observation = "bundled";
   app.status = VersionStatus::Current;
   app.running = Some(ComponentVersionInfo {
     version: Some(env!("CARGO_PKG_VERSION").into()),
-    source_revision: (!env!("RMUX_SOURCE_REVISION").is_empty())
-      .then(|| env!("RMUX_SOURCE_REVISION").into()),
+    source_revision: (!env!("CTMUX_SOURCE_REVISION").is_empty())
+      .then(|| env!("CTMUX_SOURCE_REVISION").into()),
     source_fingerprint: None,
     dirty: None,
     protocols: vec![
-      ProtocolVersion::new("ctld", ctld_ipc::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctld_lifecycle", ctld_ipc::lifecycle::PROTOCOL_VERSION),
-      ProtocolVersion::new("rmux", rmux_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("rmux_control", rmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
-      ProtocolVersion::new("task", task_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("task_control", task_proto::control::PROTOCOL_VERSION),
+      ProtocolVersion::new("ctld", ctl_ipc::PROTOCOL_VERSION),
+      ProtocolVersion::new("ctld_lifecycle", ctl_ipc::lifecycle::PROTOCOL_VERSION),
+      ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION),
+      ProtocolVersion::new("ctmux_control", ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
+      ProtocolVersion::new("task", ctl_task_proto::PROTOCOL_VERSION),
+      ProtocolVersion::new("task_control", ctl_task_proto::control::PROTOCOL_VERSION),
       ProtocolVersion::new("ctl_identity", ctl_proto::IDENTITY_PROTOCOL_VERSION),
     ],
   });
@@ -63,7 +63,7 @@ pub async fn get_component_versions(
   Ok(ComponentVersionsSnapshot {
     components: std::iter::once(app)
       .chain(ctld)
-      .chain([rmuxd, taskd])
+      .chain([ctmuxd, taskd])
       .chain(observations::rows(remote))
       .collect(),
   })

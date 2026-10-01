@@ -352,11 +352,11 @@ export function useTaskWorkspace(
 
   const restartDaemon = () =>
     perform(async () => {
-      setDaemonStatus("Restarting taskd…");
+      setDaemonStatus("Restarting ctl-taskd…");
       try {
         await restartTaskDaemon();
         setRefreshError(null);
-        setDaemonStatus("taskd restarted.");
+        setDaemonStatus("ctl-taskd restarted.");
       } catch (failure) {
         setDaemonStatus(null);
         throw failure;

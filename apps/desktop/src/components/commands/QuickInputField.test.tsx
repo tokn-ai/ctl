@@ -214,7 +214,7 @@ describe("quick-input suggestions", () => {
           label: "Host",
           suggestions: {
             label: "SSH config hosts",
-            items: [{ id: "ssh-config:rmux-test", label: "rmux-test" }],
+            items: [{ id: "ssh-config:ctmux-test", label: "ctmux-test" }],
           },
         }}
         onSubmit={submit}
@@ -225,7 +225,7 @@ describe("quick-input suggestions", () => {
       screen.getByRole("listbox", { name: "SSH config hosts" }),
     ).toBeTruthy();
     await userEvent.setup().keyboard("{ArrowDown}{Enter}");
-    expect(submit).toHaveBeenCalledExactlyOnceWith("ssh-config:rmux-test");
+    expect(submit).toHaveBeenCalledExactlyOnceWith("ssh-config:ctmux-test");
   });
 
   it("filters discovered hosts by their detail and submits the stable suggestion ID", async () => {

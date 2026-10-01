@@ -1,14 +1,14 @@
 use clap::{Subcommand, ValueEnum};
 
+use ctl_task_client::connect_or_start;
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
-use task_client::connect_or_start;
 
-use task_ipc::{Stream, socket_path};
-use task_proto::{
+use ctl_task_ipc::{Stream, socket_path};
+use ctl_task_proto::{
   ClientMessage, ExecutionMode, PROTOCOL_VERSION, ServerMessage, TaskDefinition, TaskInfo,
   read_frame, write_frame,
 };
@@ -37,12 +37,12 @@ pub trait Connector {
   fn connect_task(&self) -> ConnectFuture<'_, Self::Stream, Self::Error>;
   fn is_local_task_target(&self) -> bool;
 
-  /// Attaches to the selected target's rmux session. The socket path belongs to
+  /// Attaches to the selected target's ctmux session. The socket path belongs to
   /// that target and must only be used as local IPC for a local target.
-  fn attach_interactive(&self, session: String, rmux_socket: PathBuf) -> AttachFuture<'_>;
+  fn attach_interactive(&self, session: String, ctmux_socket: PathBuf) -> AttachFuture<'_>;
 }
 
-/// Connector for the local per-user task daemon and its rmux sessions.
+/// Connector for the local per-user task daemon and its ctmux sessions.
 #[derive(Debug, Clone)]
 pub struct LocalConnector {
   socket_path: PathBuf,
@@ -57,7 +57,7 @@ impl LocalConnector {
 
 impl Connector for LocalConnector {
   type Stream = Stream;
-  type Error = task_client::ClientError;
+  type Error = ctl_task_client::ClientError;
 
   fn connect_task(&self) -> ConnectFuture<'_, Self::Stream, Self::Error> {
     Box::pin(connect_or_start(&self.socket_path))
@@ -67,24 +67,24 @@ impl Connector for LocalConnector {
     true
   }
 
-  fn attach_interactive(&self, session: String, rmux_socket: PathBuf) -> AttachFuture<'_> {
+  fn attach_interactive(&self, session: String, ctmux_socket: PathBuf) -> AttachFuture<'_> {
     Box::pin(
-      async move { attach_session(session, &rmux_cli::LocalConnector::new(rmux_socket)).await },
+      async move { attach_session(session, &ctmux_cli::LocalConnector::new(ctmux_socket)).await },
     )
   }
 }
 
-/// Runs the interactive rmux attachment through the target's connector.
+/// Runs the interactive ctmux attachment through the target's connector.
 ///
 /// # Errors
 ///
 /// Returns an error when the session cannot be reached or terminal attachment fails.
-pub async fn attach_session<C: rmux_cli::Connector>(
+pub async fn attach_session<C: ctmux_cli::Connector>(
   session: String,
   connector: &C,
 ) -> Result<(), CommandError> {
-  rmux_cli::run(
-    rmux_cli::Command::Attach {
+  ctmux_cli::run(
+    ctmux_cli::Command::Attach {
       session: Some(session),
       target: None,
       raw: true,
@@ -167,12 +167,12 @@ impl From<Mode> for ExecutionMode {
   }
 }
 
-/// Runs one task command against the local per-user taskd.
+/// Runs one task command against the local per-user ctl-taskd.
 ///
 /// # Errors
 ///
-/// Returns an error when taskd cannot be reached, a protocol exchange fails,
-/// taskd rejects the operation, or log output cannot be written.
+/// Returns an error when ctl-taskd cannot be reached, a protocol exchange fails,
+/// ctl-taskd rejects the operation, or log output cannot be written.
 pub async fn run(command: Command) -> Result<(), CommandError> {
   run_with_connector(command, &LocalConnector::new(socket_path())).await
 }
@@ -254,18 +254,18 @@ async fn attach_task<C: Connector>(task: &TaskInfo, connector: &C) -> Result<(),
     .as_ref()
     .and_then(|run| run.interactive.as_ref())
     .ok_or_else(|| CommandError::Server {
-      code: task_proto::ErrorCode::NotRunning,
+      code: ctl_task_proto::ErrorCode::NotRunning,
       message: "task has no active interactive run".into(),
     })?;
   let session = backend
     .session_id
     .clone()
     .ok_or_else(|| CommandError::Server {
-      code: task_proto::ErrorCode::NotRunning,
+      code: ctl_task_proto::ErrorCode::NotRunning,
       message: "interactive session is not ready".into(),
     })?;
   connector
-    .attach_interactive(session, backend.rmux_socket.clone())
+    .attach_interactive(session, backend.ctmux_socket.clone())
     .await
 }
 
@@ -382,8 +382,8 @@ async fn print_logs<S: AsyncRead + AsyncWrite + Unpin>(
     match read_required(stream).await? {
       ServerMessage::Log { event } => {
         let output: &mut dyn Write = match event.stream {
-          task_proto::LogStream::Stdout => &mut io::stdout(),
-          task_proto::LogStream::Stderr => &mut io::stderr(),
+          ctl_task_proto::LogStream::Stdout => &mut io::stdout(),
+          ctl_task_proto::LogStream::Stderr => &mut io::stderr(),
         };
         output.write_all(&event.data)?;
         output.flush()?;
@@ -404,12 +404,12 @@ fn print_task(task: &TaskInfo) {
       .as_ref()
       .or(task.last_run.as_ref())
       .map_or("stopped", |run| match run.state {
-        task_proto::RunState::Starting => "starting",
-        task_proto::RunState::Unknown => "unknown",
-        task_proto::RunState::Running => "running",
-        task_proto::RunState::Completed => "completed",
-        task_proto::RunState::Failed => "failed",
-        task_proto::RunState::Stopped => "stopped",
+        ctl_task_proto::RunState::Starting => "starting",
+        ctl_task_proto::RunState::Unknown => "unknown",
+        ctl_task_proto::RunState::Running => "running",
+        ctl_task_proto::RunState::Completed => "completed",
+        ctl_task_proto::RunState::Failed => "failed",
+        ctl_task_proto::RunState::Stopped => "stopped",
       });
   println!(
     "{}\t{}\t{}\t{}",
@@ -422,7 +422,7 @@ fn print_task(task: &TaskInfo) {
     .and_then(|run| run.interactive.as_ref())
     && let Some(session) = &backend.session_id
   {
-    println!("  rmux session: {session}");
+    println!("  ctmux session: {session}");
   }
 }
 
@@ -503,29 +503,29 @@ pub enum CommandError {
   #[error(transparent)]
   Definition(#[from] DefinitionError),
   #[error(transparent)]
-  Client(#[from] task_client::ClientError),
+  Client(#[from] ctl_task_client::ClientError),
   #[error(transparent)]
-  Rmux(#[from] rmux_cli::CommandError),
+  Ctmux(#[from] ctmux_cli::CommandError),
   #[error("could not resolve task working directory: {0}")]
   WorkingDirectory(#[source] io::Error),
   #[error("task command must include a program")]
   MissingProgram,
-  #[error("taskd {operation} timed out")]
+  #[error("ctl-taskd {operation} timed out")]
   Timeout { operation: &'static str },
   #[error(transparent)]
-  Codec(#[from] task_proto::CodecError),
-  #[error("could not connect to taskd: {0}")]
+  Codec(#[from] ctl_task_proto::CodecError),
+  #[error("could not connect to ctl-taskd: {0}")]
   Connect(#[source] Box<dyn std::error::Error + Send + Sync>),
-  #[error("taskd closed the connection before responding")]
+  #[error("ctl-taskd closed the connection before responding")]
   UnexpectedEndOfStream,
   #[error("expected {expected}, received {actual}")]
   UnexpectedResponse {
     expected: &'static str,
     actual: String,
   },
-  #[error("taskd error {code:?}: {message}")]
+  #[error("ctl-taskd error {code:?}: {message}")]
   Server {
-    code: task_proto::ErrorCode,
+    code: ctl_task_proto::ErrorCode,
     message: String,
   },
   #[error("terminal output failed: {0}")]

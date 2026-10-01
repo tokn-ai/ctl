@@ -23,14 +23,14 @@ const execFile = promisify(execFileCallback);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "../..");
 const appDirectory = path.join(repositoryRoot, "apps/desktop");
-const bundleIdentifier = "io.rmux.desktop.ctld";
+const bundleIdentifier = "io.ctmux.desktop.ctld";
 const provisioningTemplate = path.join(
   scriptDirectory,
   "macos/ctld-provisioning",
 );
 const localProfile = path.join(
   homedir(),
-  "Library/Application Support/rmux/signing/ctld.provisionprofile",
+  "Library/Application Support/ctmux/signing/ctld.provisionprofile",
 );
 
 interface Profile {
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const inspectionDirectory = await mkdtemp(path.join(tmpdir(), "rmux-profile-"));
+  const inspectionDirectory = await mkdtemp(path.join(tmpdir(), "ctmux-profile-"));
   let supervisorDirectory: string | undefined;
   let daemon: SignedDaemon | undefined;
   let supervisor: Awaited<ReturnType<typeof serveAppSupervisor>> | undefined;
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
       await readFile(path.join(appDirectory, "src-tauri/tauri.conf.json"), "utf8"),
     ) as { version?: string };
     if (!tauriConfig.version) {
-      throw new Error("rmux has no version in src-tauri/tauri.conf.json");
+      throw new Error("ctmux has no version in src-tauri/tauri.conf.json");
     }
 
     const runtimeDirectory = await prepareSignedRuntime(repositoryRoot);
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
       CTLD_BIN: daemon.executable,
       CTLD_RUNTIME_DIR: runtimeDirectory,
       CTLD_SOCKET_PATH: daemon.socket_path,
-      RMUX_DEV_APP_SUPERVISOR: supervisorSocket,
+      CTMUX_DEV_APP_SUPERVISOR: supervisorSocket,
     };
     tauri = spawn("pnpm", ["tauri", "dev", ...process.argv.slice(2)], {
       cwd: appDirectory,
@@ -124,7 +124,7 @@ async function main(): Promise<void> {
     const { code, signal } = await waitForExit(tauri);
     if (appExit) {
       if (appExit.code !== 0) {
-        throw new Error(`rmux exited with ${appExit.signal ? `signal ${appExit.signal}` : `status ${appExit.code ?? "unknown"}`}`);
+        throw new Error(`ctmux exited with ${appExit.signal ? `signal ${appExit.signal}` : `status ${appExit.code ?? "unknown"}`}`);
       }
     } else if (code !== 0 && signal === null) {
       throw new Error(`tauri dev exited with status ${code ?? "unknown"}`);

@@ -12,7 +12,7 @@ const status_labels: Record<ComponentVersionStatus, string> = {
 };
 
 const protocol_labels: Record<string, string> = {
-  rmux: "Session", rmux_control: "Local control", task: "Task", task_control: "Task control",
+  ctmux: "Session", ctmux_control: "Local control", task: "Task", task_control: "Task control",
   ctld: "ctld IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Agent identity",
 };
 
@@ -42,7 +42,7 @@ function statusLabel(row: ComponentVersionRow): string {
 }
 
 const compact_protocol_labels: Record<string, string> = {
-  rmux: "Session", rmux_control: "Control", task: "Task", task_control: "Control",
+  ctmux: "Session", ctmux_control: "Control", task: "Task", task_control: "Control",
   ctld: "IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Identity",
 };
 

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-const daemonNames = ["ctld", "rmuxd", "taskd"] as const;
+const daemonNames = ["ctld", "ctmuxd", "ctl-taskd"] as const;
 type DaemonName = (typeof daemonNames)[number];
 
 export type DaemonExecutables = Record<DaemonName, string>;

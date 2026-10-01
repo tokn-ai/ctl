@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rmux_client::get_shell_state;
+use ctmux_client::get_shell_state;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
@@ -81,7 +81,7 @@ async fn inspect_requested(
 }
 
 async fn inspect_stream(
-  stream: ctl_core::Transport,
+  stream: ctl_client::Transport,
   target: ConnectionTargetDto,
   session_id: String,
 ) -> SessionInspectionDto {

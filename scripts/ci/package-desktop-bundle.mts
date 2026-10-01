@@ -85,7 +85,7 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
     source: await findInstaller(options.input_directory, directory, extension),
     extension,
   })));
-  const appDirectory = join(options.input_directory, "macos", "rmux.app");
+  const appDirectory = join(options.input_directory, "macos", "ctmux.app");
   if (isMac) {
     const info = await lstat(appDirectory).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") {
@@ -106,7 +106,7 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
   if ((await readdir(options.output_directory)).length !== 0) {
     throw new Error(`desktop output directory must be empty: ${options.output_directory}`);
   }
-  const prefix = `rmux-${options.bundle_id}-${options.target}`;
+  const prefix = `ctmux-${options.bundle_id}-${options.target}`;
   const assets: DesktopBundleManifest["assets"] = [];
   const recordAsset = async (name: string): Promise<void> => {
     const sha256 = await checksum(join(options.output_directory, name));
@@ -126,7 +126,7 @@ export async function packageDesktopBundle(options: DesktopBundleOptions): Promi
     // preserve the executable modes and symlinks inside a raw .app directory.
     await execute("tar", [
       "-czf", resolve(options.output_directory, name),
-      "-C", resolve(options.input_directory, "macos"), "rmux.app",
+      "-C", resolve(options.input_directory, "macos"), "ctmux.app",
     ]);
     await recordAsset(name);
   }

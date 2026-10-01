@@ -115,8 +115,8 @@ export function formatTerminalTitle(
   shellState: ShellStateSummary | null,
 ): TerminalTitle {
   const path = shellState
-    ? displayWorkingDirectory(shellState) || session?.name || "rmux"
-    : session?.name || "rmux";
+    ? displayWorkingDirectory(shellState) || session?.name || "ctmux"
+    : session?.name || "ctmux";
   const command = shellState ? displayShell(shellState) : null;
 
   return {

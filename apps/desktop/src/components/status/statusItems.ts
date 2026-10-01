@@ -41,17 +41,17 @@ function item(
 function connectionStatus(phase: ConnectionPhase): StatusItem | null {
   switch (phase) {
     case "connecting":
-      return item("connection", "CONNECTING", "Connecting to the rmux session.", {
+      return item("connection", "CONNECTING", "Connecting to the ctmux session.", {
         tone: "warning",
       });
     case "reconnecting":
-      return item("connection", "RECONNECTING", "Restoring the rmux attachment.", {
+      return item("connection", "RECONNECTING", "Restoring the ctmux attachment.", {
         tone: "warning",
       });
     case "retry_wait":
       return item("connection", "WAITING TO RETRY", "The terminal is disconnected; a reconnect attempt is scheduled.", { tone: "warning" });
     case "disconnected":
-      return item("connection", "DISCONNECTED", "The rmux attachment is disconnected.", {
+      return item("connection", "DISCONNECTED", "The ctmux attachment is disconnected.", {
         tone: "warning",
       });
     case "ended":
@@ -59,7 +59,7 @@ function connectionStatus(phase: ConnectionPhase): StatusItem | null {
         tone: "warning",
       });
     case "error":
-      return item("connection", "ERROR", "The rmux attachment encountered an error.", {
+      return item("connection", "ERROR", "The ctmux attachment encountered an error.", {
         tone: "danger",
       });
     case "idle":

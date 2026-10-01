@@ -1,15 +1,15 @@
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 
-use ctld_ipc::{ClientMessage, PromptKind, ServerMessage, SshTarget};
+use ctl_ipc::{ClientMessage, PromptKind, ServerMessage, SshTarget};
 use zeroize::Zeroizing;
 
 pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
-  let mut stream = ctld_ipc::connect_or_start_daemon().await?;
+  let mut stream = ctl_ipc::connect_or_start_daemon().await?;
   handshake(&mut stream).await?;
-  ctld_ipc::write_frame(&mut stream, &ClientMessage::EnsureMaster { target }).await?;
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::EnsureMaster { target }).await?;
   loop {
-    match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
+    match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
       Some(ServerMessage::Prompt {
         prompt_id,
         kind,
@@ -18,7 +18,7 @@ pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
         let response = tokio::task::spawn_blocking(move || prompt(kind, &message))
           .await
           .map_err(|_| Error::PromptWorkerStopped)??;
-        ctld_ipc::write_frame(
+        ctl_ipc::write_frame(
           &mut stream,
           &ClientMessage::PromptResponse {
             prompt_id,
@@ -37,10 +37,10 @@ pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
 }
 
 pub async fn request(message: ClientMessage) -> Result<ServerMessage, Error> {
-  let mut stream = ctld_ipc::connect_or_start_daemon().await?;
+  let mut stream = ctl_ipc::connect_or_start_daemon().await?;
   handshake(&mut stream).await?;
-  ctld_ipc::write_frame(&mut stream, &message).await?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
+  ctl_ipc::write_frame(&mut stream, &message).await?;
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
     Some(ServerMessage::Error { code, message }) => Err(Error::Daemon { code, message }),
     Some(message) => Ok(message),
     None => Err(Error::ConnectionClosed),
@@ -50,9 +50,9 @@ pub async fn request(message: ClientMessage) -> Result<ServerMessage, Error> {
 /// Exchange a passive observation without starting ctld or authenticating SSH.
 pub async fn request_existing(message: ClientMessage) -> Result<Option<ServerMessage>, Error> {
   let exchange = async {
-    let mut stream = match ctld_ipc::connect_existing().await {
+    let mut stream = match ctl_ipc::connect_existing().await {
       Ok(stream) => stream,
-      Err(ctld_ipc::ConnectError::Connect(error))
+      Err(ctl_ipc::ConnectError::Connect(error))
         if matches!(
           error.kind(),
           io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
@@ -63,8 +63,8 @@ pub async fn request_existing(message: ClientMessage) -> Result<Option<ServerMes
       Err(error) => return Err(error.into()),
     };
     handshake(&mut stream).await?;
-    ctld_ipc::write_frame(&mut stream, &message).await?;
-    let response = ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+    ctl_ipc::write_frame(&mut stream, &message).await?;
+    let response = ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
       .await?
       .ok_or(Error::ConnectionClosed)?;
     Ok(Some(response))
@@ -74,17 +74,17 @@ pub async fn request_existing(message: ClientMessage) -> Result<Option<ServerMes
     .map_err(|_| Error::StatusTimeout)?
 }
 
-async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), Error> {
-  ctld_ipc::write_frame(
+async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), Error> {
+  ctl_ipc::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: ctld_ipc::PROTOCOL_VERSION,
+      protocol_version: ctl_ipc::PROTOCOL_VERSION,
     },
   )
   .await?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(stream).await? {
+  match ctl_ipc::read_frame::<_, ServerMessage>(stream).await? {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
-      if protocol_version == ctld_ipc::PROTOCOL_VERSION =>
+      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
     {
       Ok(())
     }
@@ -136,9 +136,9 @@ pub enum Error {
   #[error("ctld status query timed out")]
   StatusTimeout,
   #[error(transparent)]
-  Connect(#[from] ctld_ipc::ConnectError),
+  Connect(#[from] ctl_ipc::ConnectError),
   #[error(transparent)]
-  Codec(#[from] ctld_ipc::CodecError),
+  Codec(#[from] ctl_ipc::CodecError),
   #[error("ctld closed the SSH authentication request")]
   ConnectionClosed,
   #[error("ctld returned an unexpected response")]

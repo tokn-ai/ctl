@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use ctld_ipc::{ClientMessage, ServerMessage};
+use ctl_ipc::{ClientMessage, ServerMessage};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -45,31 +45,31 @@ impl Fixture {
       .map(str::to_owned)
       .collect()
   }
-  fn broker(&self) -> tokio::task::JoinHandle<ctld_ipc::SshTarget> {
+  fn broker(&self) -> tokio::task::JoinHandle<ctl_ipc::SshTarget> {
     let listener = tokio::net::UnixListener::bind(self.0.join("ctld.sock")).unwrap();
     let socket = self.0.join("master");
     tokio::spawn(async move {
       let (mut stream, _) = listener.accept().await.unwrap();
       assert!(matches!(
-        ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
           .await
           .unwrap(),
         Some(ClientMessage::Handshake { .. })
       ));
-      ctld_ipc::write_frame(
+      ctl_ipc::write_frame(
         &mut stream,
         &ServerMessage::HandshakeAccepted {
-          protocol_version: ctld_ipc::PROTOCOL_VERSION,
+          protocol_version: ctl_ipc::PROTOCOL_VERSION,
         },
       )
       .await
       .unwrap();
       let Some(ClientMessage::EnsureMaster { target }) =
-        ctld_ipc::read_frame(&mut stream).await.unwrap()
+        ctl_ipc::read_frame(&mut stream).await.unwrap()
       else {
         panic!("expected master request")
       };
-      ctld_ipc::write_frame(
+      ctl_ipc::write_frame(
         &mut stream,
         &ServerMessage::MasterReady {
           control_path: socket,
@@ -262,24 +262,24 @@ async fn native_ports_add_list_and_remove_use_the_same_daemon_target() {
   let listener = tokio::net::UnixListener::bind(fixture.0.join("ctld.sock")).unwrap();
   let socket = fixture.0.join("master");
   let daemon = tokio::spawn(async move {
-    let mut saved: Option<ctld_ipc::LocalPortForward> = None;
+    let mut saved: Option<ctl_ipc::LocalPortForward> = None;
     for _ in 0..5 {
       let (mut stream, _) = listener.accept().await.unwrap();
       assert!(matches!(
-        ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
           .await
           .unwrap(),
         Some(ClientMessage::Handshake { .. })
       ));
-      ctld_ipc::write_frame(
+      ctl_ipc::write_frame(
         &mut stream,
         &ServerMessage::HandshakeAccepted {
-          protocol_version: ctld_ipc::PROTOCOL_VERSION,
+          protocol_version: ctl_ipc::PROTOCOL_VERSION,
         },
       )
       .await
       .unwrap();
-      let request: ClientMessage = ctld_ipc::read_frame(&mut stream).await.unwrap().unwrap();
+      let request: ClientMessage = ctl_ipc::read_frame(&mut stream).await.unwrap().unwrap();
       let response = match request {
         ClientMessage::EnsureMaster { target } => {
           assert_eq!(target.destination, "10.0.0.20");
@@ -297,9 +297,9 @@ async fn native_ports_add_list_and_remove_use_the_same_daemon_target() {
           assert_eq!(forward.local_port, 8080);
           saved = enabled.then(|| forward.clone());
           ServerMessage::PortForwardConfigured {
-            status: ctld_ipc::PortForwardStatus {
+            status: ctl_ipc::PortForwardStatus {
               forward,
-              state: ctld_ipc::PortForwardState::Active,
+              state: ctl_ipc::PortForwardState::Active,
               message: None,
             },
           }
@@ -309,9 +309,9 @@ async fn native_ports_add_list_and_remove_use_the_same_daemon_target() {
           ServerMessage::PortForwards {
             statuses: saved
               .iter()
-              .map(|forward| ctld_ipc::PortForwardStatus {
+              .map(|forward| ctl_ipc::PortForwardStatus {
                 forward: forward.clone(),
-                state: ctld_ipc::PortForwardState::Active,
+                state: ctl_ipc::PortForwardState::Active,
                 message: None,
               })
               .collect(),
@@ -319,7 +319,7 @@ async fn native_ports_add_list_and_remove_use_the_same_daemon_target() {
         }
         _ => panic!("unexpected request"),
       };
-      ctld_ipc::write_frame(&mut stream, &response).await.unwrap();
+      ctl_ipc::write_frame(&mut stream, &response).await.unwrap();
     }
     assert!(saved.is_none());
   });

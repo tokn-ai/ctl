@@ -1,12 +1,12 @@
 [package]
-name = "task-client"
+name = "ctl-task-client"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-component-info = { workspace = true, features = ["executable"] }
-task-ipc.workspace = true
-task-proto.workspace = true
+ctl-component-info = { workspace = true, features = ["executable"] }
+ctl-task-ipc.workspace = true
+ctl-task-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

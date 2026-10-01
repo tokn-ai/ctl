@@ -11,7 +11,7 @@ limit them to a test target.
 ## Manage in the desktop app
 
 Build the image once with `./docker/openconnect/run.sh build`, then open the
-**VPN** sidebar in rmux. Add a named connection with its server, username, and
+**VPN** sidebar in ctmux. Add a named connection with its server, username, and
 password, save it, and choose **Connect**. Authentication method and the optional
 connectivity-check target are under advanced settings. The panel supports editing
 and deleting saved connections, disconnecting, and copying the SOCKS5 endpoint.
@@ -25,7 +25,7 @@ protocol must be recreated.
 The app saves connections in a private JSON file. At connection time, ctld sends
 the selected configuration over attached stdin to the container, which creates
 a private environment file in tmpfs. That generated file disappears when the
-container exits; the app never asks users to manage `.env` files. Closing rmux
+container exits; the app never asks users to manage `.env` files. Closing ctmux
 leaves the connection running under ctld. Compatible containers started by another ctld also appear in the panel.
 Connect acquires this daemon's heartbeat interest; Disconnect releases only that
 interest. A shared container remains visible while another daemon uses it. Each saved connection combines

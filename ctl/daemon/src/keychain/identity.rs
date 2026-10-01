@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
 
-pub(super) const SERVICE: &str = "io.rmux.desktop.ctld.ssh-identity";
+pub(super) const SERVICE: &str = "io.ctmux.desktop.ctld.ssh-identity";
 const MAX_COMMENT_BYTES: usize = 16 * 1024;
 
 pub(crate) fn saved_metadata(

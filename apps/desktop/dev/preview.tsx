@@ -78,13 +78,13 @@ if (credentials_param === "import") {
 }
 let component_versions = previewComponentVersions();
 if (about_param === "partial") {
-  const daemon = component_versions.components.find((row) => row.component === "rmuxd")!;
+  const daemon = component_versions.components.find((row) => row.component === "ctmuxd")!;
   daemon.running = null;
   daemon.status = "unavailable";
-  daemon.error = "The running rmuxd did not respond before the check timed out.";
+  daemon.error = "The running ctmuxd did not respond before the check timed out.";
 }
 if (about_param === "legacy") {
-  const daemon = component_versions.components.find((row) => row.component === "taskd")!;
+  const daemon = component_versions.components.find((row) => row.component === "ctl-taskd")!;
   daemon.running = { version: null, source_revision: null, source_fingerprint: null, dirty: null, protocols: [{ name: "task", version: 3 }] };
   daemon.status = "unknown";
   daemon.detail = "The running daemon reports its protocol but no build identity.";
@@ -115,7 +115,7 @@ let vpn_connections: VpnConnectionsSnapshot = {
     connection_id: "research-vpn", name: "Research", url: "https://research.example.com",
     username: "researcher", has_password: true, auth_method: null, target_ip: null,
   }, {
-    provider: "tailscale", connection_id: "tailnet-vpn", name: "Tailnet", hostname: "rmux-preview", accept_routes: false,
+    provider: "tailscale", connection_id: "tailnet-vpn", name: "Tailnet", hostname: "ctmux-preview", accept_routes: false,
   }],
 };
 const stopped_vpn: VpnStatus = {
@@ -149,7 +149,7 @@ if (vpn_param === "tailscale-sign-in" || vpn_param === "tailscale-connected") {
   if (connected) signed_in_tailnets.add("tailnet-vpn");
   vpn_snapshot.connections.push({
     provider: "tailscale", vpn_id: "tailnet-vpn", connection_id: "tailnet-vpn",
-    state: connected ? "connected" : "starting", running: connected, hostname: "rmux-preview",
+    state: connected ? "connected" : "starting", running: connected, hostname: "ctmux-preview",
     tailnet: connected ? "example.test" : null, username: connected ? "sample@example.test" : null,
     auth_url: connected ? null : "https://login.tailscale.com/a/examplePreview",
     message: connected ? null : "Sign in to finish connecting.",
@@ -232,13 +232,13 @@ mockIPC((command, payload) => {
       const { component_id } = request<{ component_id: string }>(payload);
       const row = component_versions.components.find((item) => item.component_id === component_id);
       if (!row?.action) throw new Error("This component does not support a managed action.");
-      if (row.component === "taskd" && tasks.some((task) => task.active_run)) throw new Error("Stop active tasks before restarting taskd.");
-      const terminal_sessions = row.component === "rmuxd" ? sessions.filter((session) => (session.target.kind === "local") === (row.location === "local")).length : null;
+      if (row.component === "ctl-taskd" && tasks.some((task) => task.active_run)) throw new Error("Stop active tasks before restarting ctl-taskd.");
+      const terminal_sessions = row.component === "ctmuxd" ? sessions.filter((session) => (session.target.kind === "local") === (row.location === "local")).length : null;
       const description = row.component === "ctld" ? `Stops ${vpn_snapshot.connections.length} managed VPN connections and may interrupt SSH connections and port forwards.`
         : row.component === "ctl_agent" ? "Reconnects this app’s terminal connections to this remote environment. Remote sessions keep running."
-        : row.component === "taskd" ? "Restarts taskd. Saved task definitions and drafts are retained."
-        : row.location === "local" ? "Terminates every local rmux session, including sessions opened by other apps. This cannot be undone."
-        : "Terminates every rmux session for this remote environment, including sessions opened by other clients. This cannot be undone.";
+        : row.component === "ctl-taskd" ? "Restarts ctl-taskd. Saved task definitions and drafts are retained."
+        : row.location === "local" ? "Terminates every local ctmux session, including sessions opened by other apps. This cannot be undone."
+        : "Terminates every ctmux session for this remote environment, including sessions opened by other clients. This cannot be undone.";
       return { action_token: `preview-action-${component_id}`, component_id, component: row.component, location: row.location, host_id: row.host_id, label: row.label, action: row.action, running: row.running, available: row.available,
         impact: { ssh_connections: null, port_forwards: null, vpn_connections: row.component === "ctld" ? vpn_snapshot.connections.length : null, terminal_sessions, description } };
     }
@@ -271,7 +271,7 @@ mockIPC((command, payload) => {
       const connection: TailscaleVpnConnection = { ...input, provider: "tailscale", connection_id };
       vpn_enrollments.set(enrollment_id, { connection, created_at: Date.now(), adopted: false });
       const status: VpnStatus = { ...stopped_vpn, provider: "tailscale", vpn_id: connection_id, connection_id,
-        state: "starting", hostname: input.hostname ?? "rmux-preview", message: "Starting Tailscale…" };
+        state: "starting", hostname: input.hostname ?? "ctmux-preview", message: "Starting Tailscale…" };
       vpn_snapshot.connections.push(status);
       return { enrollment_id, connection_id, status, error: null } satisfies VpnEnrollmentSnapshot;
     }
@@ -527,7 +527,7 @@ mockIPC((command, payload) => {
       const run = task?.active_run ?? task?.last_run;
       if (run) {
         const output = task?.task_id === "preview-task-0"
-          ? "Sample workspace · browser preview\n\n> rmux-app@0.1.0 dev\n> vite\n\n  VITE v7.0.4  ready in 184 ms\n\n  ➜  Local:   http://localhost:1430/\n  ➜  Network: use --host to expose\n\n  10:42:18 [vite] hmr update /src/App.css\n  10:42:20 [vite] hmr update /src/components/sessions/SessionSidebar.tsx\n"
+          ? "Sample workspace · browser preview\n\n> ctmux-app@0.1.0 dev\n> vite\n\n  VITE v7.0.4  ready in 184 ms\n\n  ➜  Local:   http://localhost:1430/\n  ➜  Network: use --host to expose\n\n  10:42:18 [vite] hmr update /src/App.css\n  10:42:20 [vite] hmr update /src/components/sessions/SessionSidebar.tsx\n"
           : "Sample workspace · browser preview\n\nAll checks passed.\nProcess exited with code 0.\n";
         channel<TaskLogEvent>(payload, "onEvent").onmessage({ event_type: "log", subscription_id, run_id: run.run_id, sequence: "1", stream: "stdout", data: Array.from(new TextEncoder().encode(output)) });
       }

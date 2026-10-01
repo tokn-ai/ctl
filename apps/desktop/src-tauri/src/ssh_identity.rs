@@ -97,7 +97,7 @@ mod tests {
 
   impl TestHome {
     fn new() -> Self {
-      let path = std::env::temp_dir().join(format!("rmux-identity-test-{}", uuid::Uuid::new_v4()));
+      let path = std::env::temp_dir().join(format!("ctmux-identity-test-{}", uuid::Uuid::new_v4()));
       fs::create_dir_all(&path).unwrap();
       Self(path)
     }

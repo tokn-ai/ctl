@@ -99,7 +99,7 @@ jobs:
       - name: Build remote components
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
-          -p ctl-agent -p rmuxd -p taskd
+          -p ctl-agent -p ctmuxd -p ctl-taskd
 
       - name: Package remote components
         shell: bash
@@ -284,12 +284,12 @@ jobs:
           APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
         shell: bash
         run: |
-          cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p rmuxd -p taskd
+          cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p ctmuxd -p ctl-taskd
           mkdir -p apps/desktop/src-tauri/binaries
-          cp "target/${{ matrix.target }}/release/rmuxd" \
-            "apps/desktop/src-tauri/binaries/rmuxd-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/taskd" \
-            "apps/desktop/src-tauri/binaries/taskd-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/ctmuxd" \
+            "apps/desktop/src-tauri/binaries/ctmuxd-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/ctl-taskd" \
+            "apps/desktop/src-tauri/binaries/ctl-taskd-${{ matrix.target }}"
           if [[ "${{ runner.os }}" == macOS ]]; then
             ./scripts/ci/package-ctld-app.sh \
               "target/${{ matrix.target }}/release/ctld" \
@@ -323,10 +323,10 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          app="target/${{ matrix.target }}/release/bundle/macos/rmux.app"
-          test -x "$app/Contents/MacOS/rmux-app"
-          test -x "$app/Contents/MacOS/rmuxd"
-          test -x "$app/Contents/MacOS/taskd"
+          app="target/${{ matrix.target }}/release/bundle/macos/ctmux.app"
+          test -x "$app/Contents/MacOS/ctmux-app"
+          test -x "$app/Contents/MacOS/ctmuxd"
+          test -x "$app/Contents/MacOS/ctl-taskd"
           test -x "$app/Contents/Helpers/ctld.app/Contents/MacOS/ctld"
           plutil -lint "$app/Contents/Helpers/ctld.app/Contents/Info.plist"
           test -f "$app/Contents/Resources/resources/agent-bundles/bundle-set.json"
@@ -335,7 +335,7 @@ jobs:
         if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
-          app="target/${{ matrix.target }}/release/bundle/macos/rmux.app"
+          app="target/${{ matrix.target }}/release/bundle/macos/ctmux.app"
           ctld="$app/Contents/Helpers/ctld.app"
           test -f "$ctld/Contents/embedded.provisionprofile"
           codesign --verify --strict --verbose=2 "$ctld"
@@ -383,7 +383,7 @@ jobs:
       - name: Upload desktop bundles
         uses: actions/upload-artifact@v4
         with:
-          name: rmux-desktop-${{ matrix.target }}
+          name: ctmux-desktop-${{ matrix.target }}
           path: target/desktop-assets/*
           if-no-files-found: error
           retention-days: 30
@@ -414,7 +414,7 @@ jobs:
       - name: Download desktop assets
         uses: actions/download-artifact@v5
         with:
-          pattern: rmux-desktop-*
+          pattern: ctmux-desktop-*
           path: target/release-assets
           merge-multiple: true
 

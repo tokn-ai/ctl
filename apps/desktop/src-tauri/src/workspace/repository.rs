@@ -149,7 +149,7 @@ impl Repository {
       // Preserve the original workspace before writing to either store. Import
       // is idempotent, so retrying after a crash between commits is safe.
       self.ensure_backup("workspace-v2.backup.json")?;
-      let imported = task_store::Repository::new(self.definition_path.clone())
+      let imported = ctl_task_store::Repository::new(self.definition_path.clone())
         .import_legacy(&snapshot.document.task_definitions)
         .map_err(crate::task_definitions::store_error)?;
       for reference in &mut snapshot.document.task_references {
@@ -278,7 +278,7 @@ impl Repository {
   }
 
   fn lock(&self) -> CommandResult<File> {
-    ctl_core::hosts::storage::lock_directory(&self.directory).map_err(Into::into)
+    ctl_client::hosts::storage::lock_directory(&self.directory).map_err(Into::into)
   }
 
   fn write(&self, bytes: &[u8]) -> io::Result<()> {

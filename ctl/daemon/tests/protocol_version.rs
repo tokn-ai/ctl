@@ -10,7 +10,7 @@ fn protocol_version_prints_the_ipc_version_and_exits() {
   assert!(output.status.success());
   assert_eq!(
     String::from_utf8(output.stdout).unwrap(),
-    format!("{}\n", ctld_ipc::PROTOCOL_VERSION)
+    format!("{}\n", ctl_ipc::PROTOCOL_VERSION)
   );
   assert_eq!(output.stderr, Vec::<u8>::new());
 }
@@ -23,20 +23,20 @@ fn component_info_reports_embedded_build_and_both_protocols_without_a_service() 
     .output()
     .unwrap();
   assert!(output.status.success());
-  let info: component_info::ComponentInfo = serde_json::from_slice(&output.stdout).unwrap();
-  assert_eq!(info.build, component_info::build_info());
+  let info: ctl_component_info::ComponentInfo = serde_json::from_slice(&output.stdout).unwrap();
+  assert_eq!(info.build, ctl_component_info::build_info());
   assert!(
     info
       .protocols
       .iter()
-      .any(|protocol| protocol.name == "ctld" && protocol.version == ctld_ipc::PROTOCOL_VERSION)
+      .any(|protocol| protocol.name == "ctld" && protocol.version == ctl_ipc::PROTOCOL_VERSION)
   );
   assert!(
     info
       .protocols
       .iter()
       .any(|protocol| protocol.name == "ctld_lifecycle"
-        && protocol.version == ctld_ipc::lifecycle::PROTOCOL_VERSION)
+        && protocol.version == ctl_ipc::lifecycle::PROTOCOL_VERSION)
   );
   assert_eq!(output.stderr, Vec::<u8>::new());
 }

@@ -337,7 +337,7 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
-  it("remembers and opens a remote shell created while another window restarts local rmuxd", async () => {
+  it("remembers and opens a remote shell created while another window restarts local ctmuxd", async () => {
     let finish!: (session: SessionSummary) => void;
     api.createSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     render(<TerminalPage />);
@@ -379,8 +379,8 @@ describe("workspace-backed terminal page", () => {
     await screen.findByRole("button", { name: "Connect host" });
     const terminal = page.container.querySelector(".terminal-workspace")!;
     const updates_before = api.updateWorkspace.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "About rmux" }));
-    await screen.findByRole("heading", { name: "About rmux" });
+    fireEvent.click(screen.getByRole("button", { name: "About ctmux" }));
+    await screen.findByRole("heading", { name: "About ctmux" });
     await waitFor(() => expect(api.getComponentVersions).toHaveBeenCalledOnce());
     expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
     expect(terminal.hasAttribute("hidden")).toBe(true);
@@ -389,10 +389,10 @@ describe("workspace-backed terminal page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(terminal.hasAttribute("hidden")).toBe(false);
     nativeCommand(COMMAND_IDS.about);
-    await screen.findByRole("heading", { name: "About rmux" });
+    await screen.findByRole("heading", { name: "About ctmux" });
     expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
     fireEvent.click(screen.getByRole("tab", { name: "VPN" }));
-    expect(screen.queryByRole("heading", { name: "About rmux" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "About ctmux" })).toBeNull();
     expect(terminal.hasAttribute("hidden")).toBe(false);
   });
 
@@ -415,11 +415,11 @@ describe("workspace-backed terminal page", () => {
     act(() => terminalSurface.on_input?.(new Uint8Array([65])));
     expect(attachment.handleInput).not.toHaveBeenCalled();
     nativeCommand(COMMAND_IDS.about);
-    await screen.findByRole("heading", { name: "About rmux" });
+    await screen.findByRole("heading", { name: "About ctmux" });
     expect(screen.queryByRole("heading", { name: "Credentials" })).toBeNull();
     nativeCommand(COMMAND_IDS.credentials);
     await screen.findByRole("heading", { name: "Credentials" });
-    expect(screen.queryByRole("heading", { name: "About rmux" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "About ctmux" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(terminal.hasAttribute("hidden")).toBe(false);
     expect(page.container.querySelector(".terminal-workspace")).toBe(terminal);
@@ -441,9 +441,9 @@ describe("workspace-backed terminal page", () => {
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     shortcut("KeyP");
-    fireEvent.change(screen.getByRole("combobox", { name: "Search commands" }), { target: { value: "About rmux" } });
-    fireEvent.click(screen.getByRole("option", { name: /About rmux/ }));
-    await screen.findByRole("heading", { name: "About rmux" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Search commands" }), { target: { value: "About ctmux" } });
+    fireEvent.click(screen.getByRole("option", { name: /About ctmux/ }));
+    await screen.findByRole("heading", { name: "About ctmux" });
     expect(api.getComponentVersions).toHaveBeenCalledOnce();
     expect(screen.queryByRole("combobox", { name: "Search commands" })).toBeNull();
   });
@@ -881,7 +881,7 @@ describe("workspace-backed terminal page", () => {
     expect((api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument).task_drafts?.[0].base_revision).toBe("r1");
   });
 
-  it("restarts taskd from the palette and prevents duplicate requests while pending", async () => {
+  it("restarts ctl-taskd from the palette and prevents duplicate requests while pending", async () => {
     let finish!: () => void;
     api.restartTaskDaemon.mockImplementationOnce(
       () =>
@@ -895,49 +895,49 @@ describe("workspace-backed terminal page", () => {
     fireEvent.change(
       screen.getByRole("combobox", { name: "Search commands" }),
       {
-        target: { value: "Restart taskd" },
+        target: { value: "Restart ctl-taskd" },
       },
     );
-    fireEvent.click(screen.getByRole("option", { name: /Restart taskd/ }));
-    await screen.findByText("Restarting taskd…");
+    fireEvent.click(screen.getByRole("option", { name: /Restart ctl-taskd/ }));
+    await screen.findByText("Restarting ctl-taskd…");
     nativeCommand(COMMAND_IDS.restartTaskDaemon, 2);
     expect(api.restartTaskDaemon).toHaveBeenCalledTimes(1);
     await act(async () => {
       finish();
     });
-    await screen.findByText("taskd restarted.");
+    await screen.findByText("ctl-taskd restarted.");
     expect(api.taskRequest).toHaveBeenCalledWith({ type: "list_tasks" });
     expect(api.restartLocalDaemon).not.toHaveBeenCalled();
   });
 
-  it("shows taskd restart errors as notifications without stale progress cards", async () => {
+  it("shows ctl-taskd restart errors as notifications without stale progress cards", async () => {
     api.restartTaskDaemon.mockRejectedValueOnce(
-      new Error("Stop active tasks before restarting taskd."),
+      new Error("Stop active tasks before restarting ctl-taskd."),
     );
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     nativeCommand(COMMAND_IDS.restartTaskDaemon);
-    await screen.findByText("Stop active tasks before restarting taskd.");
-    expect(screen.queryByText("taskd restarted.")).toBeNull();
-    expect(screen.queryByText("Restarting taskd…")).toBeNull();
+    await screen.findByText("Stop active tasks before restarting ctl-taskd.");
+    expect(screen.queryByText("ctl-taskd restarted.")).toBeNull();
+    expect(screen.queryByText("Restarting ctl-taskd…")).toBeNull();
   });
 
   it("reviews hidden cards from Tasks, keeps dismissed errors dismissed, and resets history on remount", async () => {
-    api.restartTaskDaemon.mockRejectedValueOnce(new Error("Stop active tasks before restarting taskd."));
+    api.restartTaskDaemon.mockRejectedValueOnce(new Error("Stop active tasks before restarting ctl-taskd."));
     const page = render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
     nativeCommand(COMMAND_IDS.restartTaskDaemon);
-    await screen.findByText("Stop active tasks before restarting taskd.");
+    await screen.findByText("Stop active tasks before restarting ctl-taskd.");
     fireEvent.click(screen.getByRole("button", { name: "Hide Tasks notification" }));
-    expect(screen.queryByText("Stop active tasks before restarting taskd.")).toBeNull();
+    expect(screen.queryByText("Stop active tasks before restarting ctl-taskd.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Notifications, 1 unread" }));
     const center = screen.getByRole("region", { name: "Notification center" });
-    expect(within(center).getByText("Stop active tasks before restarting taskd.")).toBeTruthy();
+    expect(within(center).getByText("Stop active tasks before restarting ctl-taskd.")).toBeTruthy();
     fireEvent.click(within(center).getByRole("button", { name: "Dismiss Tasks notification" }));
     fireEvent.click(screen.getByRole("button", { name: "Hide notification center" }));
     fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
     fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
-    expect(screen.queryByText("Stop active tasks before restarting taskd.")).toBeNull();
+    expect(screen.queryByText("Stop active tasks before restarting ctl-taskd.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
     expect(screen.getByText("No notifications")).toBeTruthy();
     page.unmount();
@@ -2840,7 +2840,7 @@ describe("workspace-backed terminal page", () => {
   });
 
   it("retires a remote timeout only after session inspection recovers, despite a live SSH master", async () => {
-    const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote rmux service over SSH. Try again." };
+    const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote ctmux service over SSH. Try again." };
     api.sshConnectionStatus.mockResolvedValue({ connected: true, manually_disconnected: false });
     api.inspectKnownSessions.mockRejectedValueOnce(failure);
     render(<TerminalPage />);

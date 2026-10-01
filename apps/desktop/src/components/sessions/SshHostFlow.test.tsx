@@ -67,12 +67,12 @@ function setup() {
 async function details(user: ReturnType<typeof userEvent.setup>) {
   await user.type(
     screen.getByLabelText("SSH host"),
-    "rmux@127.0.0.1:2222{Enter}",
+    "ctmux@127.0.0.1:2222{Enter}",
   );
   await user.clear(screen.getByLabelText("Name / SSH alias"));
   await user.type(
     screen.getByLabelText("Name / SSH alias"),
-    "rmux-test{Enter}",
+    "ctmux-test{Enter}",
   );
   await user.click(screen.getByRole("option", { name: /^Direct/ }));
 }
@@ -91,7 +91,7 @@ function setupNewHost(suggestions: string[] = [], tailscaleDevices: TailscaleDev
 }
 
 async function newHostDetails(user: ReturnType<typeof userEvent.setup>, selectDirect = true) {
-  await user.type(screen.getByLabelText("SSH host"), "rmux@127.0.0.1:2222{Enter}");
+  await user.type(screen.getByLabelText("SSH host"), "ctmux@127.0.0.1:2222{Enter}");
   await user.clear(screen.getByLabelText("Host name"));
   await user.type(screen.getByLabelText("Host name"), "Development server{Enter}");
   if (selectDirect) await user.click(screen.getByRole("option", { name: /^Direct/ }));
@@ -379,12 +379,12 @@ describe("SSH host quick-input flow", () => {
     expect(probeSshHost).not.toHaveBeenCalled();
     await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      destination: "127.0.0.1", hostname: "127.0.0.1", user: "rmux", port: 2222,
+      destination: "127.0.0.1", hostname: "127.0.0.1", user: "ctmux", port: 2222,
     }), expect.any(String), expect.any(Function));
     expect(save).not.toHaveBeenCalled();
     await act(async () => finishProbe(remoteInfo));
     await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({
-      destination: "127.0.0.1", hostname: "127.0.0.1", user: "rmux", port: 2222,
+      destination: "127.0.0.1", hostname: "127.0.0.1", user: "ctmux", port: 2222,
     }), remoteInfo));
     expect(close).toHaveBeenCalledOnce();
     expect(recover).not.toHaveBeenCalled();
@@ -505,7 +505,7 @@ describe("SSH host quick-input flow", () => {
     expect(close).not.toHaveBeenCalled();
     await user.click(screen.getByRole("option", { name: "Connect" }));
     await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({
-      destination: "127.0.0.1", user: "rmux", port: 2222,
+      destination: "127.0.0.1", user: "ctmux", port: 2222,
     }), remoteInfo));
     expect(probeSshHost).toHaveBeenCalledTimes(2);
     expect(close).toHaveBeenCalledOnce();
@@ -543,7 +543,7 @@ describe("SSH host quick-input flow", () => {
     await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
     await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({
-      hostname: "127.0.0.1", user: "rmux", port: 2222,
+      hostname: "127.0.0.1", user: "ctmux", port: 2222,
     }), remoteInfo));
     expect(installRemoteAgent).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
@@ -889,14 +889,14 @@ describe("SSH host quick-input flow", () => {
 
     expect(screen.getByRole("dialog", { name: "Add host with gateways" })).toBeTruthy();
     expect(screen.queryByLabelText("SSH host")).toBeNull();
-    await user.type(screen.getByLabelText("SSH host or config alias"), "rmux@127.0.0.1:2222");
-    await user.type(screen.getByLabelText("SSH alias (optional)"), "rmux-test");
+    await user.type(screen.getByLabelText("SSH host or config alias"), "ctmux@127.0.0.1:2222");
+    await user.type(screen.getByLabelText("SSH alias (optional)"), "ctmux-test");
     await user.click(screen.getByRole("button", { name: "Add" }));
     await user.click(screen.getByRole("button", { name: "Connect" }));
 
     expect(probeSshHost).toHaveBeenCalledWith(
       expect.objectContaining({
-        destination: "rmux-test",
+        destination: "ctmux-test",
         gateway_route: [{ gateway_id: "edge", mode: "automatic" }],
         gateways: [expect.objectContaining({ destination: "edge.example" })],
       }),
@@ -906,7 +906,7 @@ describe("SSH host quick-input flow", () => {
     expect(onSaveRoutedHost).not.toHaveBeenCalled();
     await act(async () => completeProbe?.(remoteInfo));
     await waitFor(() => expect(onSaveRoutedHost).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: "rmux-test" }),
+      expect.objectContaining({ destination: "ctmux-test" }),
       [{ gateway_id: "edge", name: "Edge", destination: "edge.example" }],
       remoteInfo,
     ));
@@ -968,8 +968,8 @@ describe("SSH host quick-input flow", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText("SSH host or config alias"), "rmux@127.0.0.1:2222");
-    await user.type(screen.getByLabelText("SSH alias (optional)"), "rmux-test");
+    await user.type(screen.getByLabelText("SSH host or config alias"), "ctmux@127.0.0.1:2222");
+    await user.type(screen.getByLabelText("SSH alias (optional)"), "ctmux-test");
     expect((screen.getByRole("button", { name: "Connect" }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole("button", { name: "+ New gateway" }));
     await user.type(screen.getByLabelText("Name"), "Bastion");
@@ -989,7 +989,7 @@ describe("SSH host quick-input flow", () => {
     await user.click(screen.getByRole("button", { name: "Previous step" }));
     expect(screen.getByRole("dialog", { name: "Add host with gateways" })).toBeTruthy();
     expect((screen.getByLabelText("SSH host or config alias") as HTMLInputElement).value)
-      .toBe("rmux@127.0.0.1:2222");
+      .toBe("ctmux@127.0.0.1:2222");
     expect(screen.getByText("1. Bastion")).toBeTruthy();
   });
 
@@ -1122,7 +1122,7 @@ describe("SSH host quick-input flow", () => {
     await screen.findByRole("dialog", { name: "Save host" });
     await user.keyboard("{Escape}");
     expect(forgetSshCredentials).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: "rmux-test" }),
+      expect.objectContaining({ destination: "ctmux-test" }),
     );
     expect(save).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
@@ -1141,7 +1141,7 @@ describe("SSH host quick-input flow", () => {
     await screen.findByRole("option", { name: /Install remote components/ });
     await user.keyboard("{Escape}");
     expect(forgetSshCredentials).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: "rmux-test" }),
+      expect.objectContaining({ destination: "ctmux-test" }),
     );
     expect(close).toHaveBeenCalledOnce();
   });
@@ -1222,9 +1222,9 @@ describe("SSH host quick-input flow", () => {
     await user.click(screen.getByRole("option", { name: /This app only/ }));
     expect(save).toHaveBeenCalledWith(
       {
-        alias: "rmux-test",
+        alias: "ctmux-test",
         hostname: "127.0.0.1",
-        user: "rmux",
+        user: "ctmux",
         port: 2222,
         identity_file: "~/.ssh/local.id_rsa",
       },
@@ -1371,7 +1371,7 @@ describe("SSH host quick-input flow", () => {
     );
     await screen.findByRole("dialog", { name: "Save host" });
     expect(installRemoteAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: "rmux-test" }),
+      expect.objectContaining({ destination: "ctmux-test" }),
       expect.any(String),
       expect.any(Function),
       expect.any(Function),
@@ -1411,14 +1411,14 @@ describe("SSH host quick-input flow", () => {
     act(() => report({ ...progress, phase: "extracting", transferred_bytes: progress.total_bytes, bytes_per_second: 0 }));
     expect(screen.getByRole("status").textContent).toContain("Extracting ctl-agent-bundle-linux.tar.gz");
     expect(screen.getByText("8 MiB / 8 MiB · 100% · Transfer complete")).toBeTruthy();
-    act(() => report({ ...progress, phase: "checking", file_name: "rmuxd", transferred_bytes: progress.total_bytes }));
-    expect(screen.getByRole("status").textContent).toBe("Checking rmuxd…");
+    act(() => report({ ...progress, phase: "checking", file_name: "ctmuxd", transferred_bytes: progress.total_bytes }));
+    expect(screen.getByRole("status").textContent).toBe("Checking ctmuxd…");
     const attempt_id = vi.mocked(installRemoteAgent).mock.lastCall![1];
     await user.keyboard("{Escape}");
     expect(close).toHaveBeenCalledOnce();
     expect(cancelSshProbe).toHaveBeenCalledWith(attempt_id);
     act(() => report({ ...progress, phase: "activating" }));
-    expect(screen.getByRole("status").textContent).toBe("Checking rmuxd…");
+    expect(screen.getByRole("status").textContent).toBe("Checking ctmuxd…");
   });
 
   it("clears transfer progress on retry and ignores events from the failed attempt", async () => {

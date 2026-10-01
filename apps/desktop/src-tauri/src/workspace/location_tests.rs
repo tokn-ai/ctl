@@ -11,7 +11,7 @@ struct Fixture(PathBuf);
 impl Fixture {
   fn new() -> Self {
     Self(std::env::temp_dir().join(format!(
-      "rmux-workspace-location-test-{}",
+      "ctmux-workspace-location-test-{}",
       uuid::Uuid::new_v4()
     )))
   }

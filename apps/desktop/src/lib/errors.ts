@@ -34,5 +34,5 @@ export function errorMessage(error: unknown): string {
   ) {
     return error.message;
   }
-  return "An unexpected rmux error occurred.";
+  return "An unexpected ctmux error occurred.";
 }

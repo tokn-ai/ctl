@@ -20,15 +20,15 @@ pub(super) fn connection_status(
 
 pub(super) fn configure_port_forward(
   _target: &ConnectionTargetDto,
-  _forward: ctld_ipc::LocalPortForward,
+  _forward: ctl_ipc::LocalPortForward,
   _enabled: bool,
-) -> Ready<CommandResult<ctld_ipc::PortForwardStatus>> {
+) -> Ready<CommandResult<ctl_ipc::PortForwardStatus>> {
   unsupported()
 }
 
 pub(super) fn list_port_forwards(
   _target: &ConnectionTargetDto,
-) -> Ready<CommandResult<Vec<ctld_ipc::PortForwardStatus>>> {
+) -> Ready<CommandResult<Vec<ctl_ipc::PortForwardStatus>>> {
   unsupported()
 }
 

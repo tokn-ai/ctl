@@ -1,12 +1,12 @@
 $ErrorActionPreference = 'Stop'
 $ctl = (Resolve-Path 'target/debug/ctl.exe').Path
-$taskd = (Resolve-Path 'target/debug/taskd.exe').Path
-$existing = @(Get-Process taskd -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+$ctlTaskd = (Resolve-Path 'target/debug/ctl-taskd.exe').Path
+$existing = @(Get-Process ctl-taskd -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ('ctl-task-smoke-' + [guid]::NewGuid())
-$env:TASKD_RUNTIME_DIR = Join-Path $root 'runtime'
-$env:TASKD_DATA_DIR = Join-Path $root 'data'
-# Leave TASKD_BIN unset to exercise sibling taskd.exe discovery and auto-start.
-Remove-Item Env:TASKD_BIN -ErrorAction SilentlyContinue
+$env:CTL_TASKD_RUNTIME_DIR = Join-Path $root 'runtime'
+$env:CTL_TASKD_DATA_DIR = Join-Path $root 'data'
+# Leave CTL_TASKD_BIN unset to exercise sibling ctl-taskd.exe discovery and auto-start.
+Remove-Item Env:CTL_TASKD_BIN -ErrorAction SilentlyContinue
 
 function Invoke-Ctl {
   param([string[]] $Arguments)
@@ -36,8 +36,8 @@ try {
     Pop-Location
   }
 } finally {
-  Get-Process taskd -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -notin $existing -and $_.Path -eq $taskd } |
+  Get-Process ctl-taskd -ErrorAction SilentlyContinue |
+    Where-Object { $_.Id -notin $existing -and $_.Path -eq $ctlTaskd } |
     Stop-Process -Force
   Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
 }

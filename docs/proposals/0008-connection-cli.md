@@ -4,7 +4,7 @@
 - Created: 2026-10-01
 
 This extends the command scope of [Proposal 0002](0002-ctl.md) while retaining
-its fixed rmux/task service protocols and remote authentication boundary.
+its fixed ctmux/task service protocols and remote authentication boundary.
 
 ## Motivation
 
@@ -14,7 +14,7 @@ cannot discover a private ctld SOCKS/VPN master from its destination alone.
 
 ## Command surface
 
-- `ctl [-H host] shell` creates and attaches a persistent rmux session.
+- `ctl [-H host] shell` creates and attaches a persistent ctmux session.
   `--session name` attaches or creates that name; `--plain` opens an ordinary shell.
 - `ctl [-H host] exec -- program arguments...` runs once without a PTY and
   preserves the exit status and input/output streams. Unix remote arguments
@@ -23,7 +23,7 @@ cannot discover a private ctld SOCKS/VPN master from its destination alone.
   the existing ctld registry. Runtime forwards outlive the client, are visible
   through desktop Ports refresh, and are not implicitly persisted by the desktop.
 - `ctl ssh host [command...]` and `ctl scp source destination` retain OpenSSH's
-  ordinary shell, execution, and copy semantics. They do not create rmux sessions.
+  ordinary shell, execution, and copy semantics. They do not create ctmux sessions.
 
 - `ctl host list/show/status` inspect saved hosts and passive per-method ctld
   state. `add/update/remove` edit the shared catalog; `method` manages alternate
@@ -59,7 +59,7 @@ terminal, never the stdin stream carrying a command or file-transfer protocol.
 ## Invariants
 
 1. Ordinary SSH operations require no remote ctl component or new listener.
-2. Persistent rmux/task operations retain the fixed agent service transport;
+2. Persistent ctmux/task operations retain the fixed agent service transport;
    pinned saved identities are verified before those service requests.
 3. A route never reuses a different route's private master merely because the
    destination IP matches.

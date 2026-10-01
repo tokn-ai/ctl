@@ -36,7 +36,7 @@ async fn resolves_explicit_and_configured_jump_chains_once_and_stops_cycles() {
     user: None,
     port: None,
     identity_file: None,
-    mode: ctld_ipc::SshGatewayMode::Automatic,
+    mode: ctl_ipc::SshGatewayMode::Automatic,
   });
   let queried = Arc::new(Mutex::new(Vec::new()));
   let recorded = Arc::clone(&queried);
@@ -215,7 +215,7 @@ fn explicit_gateway_configuration_matches_the_actual_effective_destination() {
     user: Some("alice".into()),
     port: Some(2200),
     identity_file: None,
-    mode: ctld_ipc::SshGatewayMode::Automatic,
+    mode: ctl_ipc::SshGatewayMode::Automatic,
   };
   let target = gateway_target(&gateway).unwrap();
   assert_eq!(target.destination, "effective.test");

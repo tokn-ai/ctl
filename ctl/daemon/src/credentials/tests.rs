@@ -1,5 +1,5 @@
 use super::*;
-use ctld_ipc::credentials::{CredentialKind, Inventory, StoredCredential};
+use ctl_ipc::credentials::{CredentialKind, Inventory, StoredCredential};
 
 fn run_fixture(input: &[u8], handle: impl FnOnce(&Request) -> Response) -> Response {
   let mut output = Vec::new();

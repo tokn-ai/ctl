@@ -1,12 +1,12 @@
 #![cfg(unix)]
 
 use ctl_agent::{ConnectConfig, Service};
-use std::path::PathBuf;
-use std::time::Duration;
-use task_proto::{
+use ctl_task_proto::{
   ClientMessage, ExecutionMode, PROTOCOL_VERSION, RunState, ServerMessage, TaskDefinition,
   read_frame, write_frame,
 };
+use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, DuplexStream};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -24,9 +24,9 @@ impl TestDirectory {
   }
 
   fn config(&self) -> ConnectConfig {
-    let mut config = ConnectConfig::new(self.0.join("rmux.sock"));
+    let mut config = ConnectConfig::new(self.0.join("ctmux.sock"));
     config.service = Service::Task;
-    config.task_socket = self.0.join("taskd.sock");
+    config.task_socket = self.0.join("ctl-taskd.sock");
     config
   }
 }
@@ -104,7 +104,7 @@ async fn reject_incompatible_handshake(config: &ConnectConfig) {
   assert!(matches!(
     message(&mut wrong_version).await,
     ServerMessage::Error {
-      code: task_proto::ErrorCode::ProtocolVersionMismatch,
+      code: ctl_task_proto::ErrorCode::ProtocolVersionMismatch,
       ..
     }
   ));
@@ -123,14 +123,14 @@ async fn task_handshake_requests_and_log_disconnect_preserve_the_running_task() 
   // A running task endpoint must be reused without attempting to start either
   // daemon, even when the supplied companion paths cannot execute.
   config.taskd_bin = Some(directory.0.join("missing-taskd"));
-  config.rmuxd_bin = Some(directory.0.join("missing-rmuxd"));
-  let daemon = tokio::spawn(taskd::run(taskd::DaemonConfig {
+  config.ctmuxd_bin = Some(directory.0.join("missing-ctmuxd"));
+  let daemon = tokio::spawn(ctl_taskd::run(ctl_taskd::DaemonConfig {
     socket_path: config.task_socket.clone(),
     data_directory: directory.0.join("data"),
-    rmux_socket: config.rmux_socket.clone(),
+    ctmux_socket: config.ctmux_socket.clone(),
   }));
   timeout(TEST_TIMEOUT, async {
-    while task_ipc::connect(&config.task_socket).await.is_err() {
+    while ctl_task_ipc::connect(&config.task_socket).await.is_err() {
       sleep(Duration::from_millis(10)).await;
     }
   })
@@ -225,10 +225,10 @@ async fn task_handshake_requests_and_log_disconnect_preserve_the_running_task() 
 }
 
 #[tokio::test]
-async fn missing_task_endpoint_does_not_fall_back_to_rmux_or_emit_readiness() {
+async fn missing_task_endpoint_does_not_fall_back_to_ctmux_or_emit_readiness() {
   let directory = TestDirectory::new();
   let config = directory.config();
-  let _rmux = tokio::net::UnixListener::bind(&config.rmux_socket).unwrap();
+  let _ctmux = tokio::net::UnixListener::bind(&config.ctmux_socket).unwrap();
   let (mut client, gateway) = tokio::io::duplex(64);
   let (reader, writer) = tokio::io::split(gateway);
   let error = ctl_agent::connect(reader, writer, &config)
@@ -245,14 +245,14 @@ fn cli_requires_an_installed_sibling_and_ignores_taskd_bin_override() {
   std::fs::copy(env!("CARGO_BIN_EXE_ctl-agent"), &executable).unwrap();
   let output = std::process::Command::new(&executable)
     .args(["connect", "--service", "task"])
-    .env("TASKD_RUNTIME_DIR", &directory.0)
-    .env("TASKD_BIN", &executable)
+    .env("CTL_TASKD_RUNTIME_DIR", &directory.0)
+    .env("CTL_TASKD_BIN", &executable)
     .output()
     .unwrap();
   assert!(!output.status.success());
   assert_eq!(output.stdout, Vec::<u8>::new());
   assert!(
-    String::from_utf8_lossy(&output.stderr).contains("install taskd beside ctl-agent"),
+    String::from_utf8_lossy(&output.stderr).contains("install ctl-taskd beside ctl-agent"),
     "{}",
     String::from_utf8_lossy(&output.stderr)
   );

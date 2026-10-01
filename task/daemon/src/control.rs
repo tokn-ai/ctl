@@ -1,13 +1,13 @@
 use super::{State, Stream};
+use ctl_task_proto::{control, write_frame};
 use serde::Deserialize;
-use task_proto::{control, write_frame};
 use tokio::time::{Duration, timeout};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum FirstMessage {
   Control(control::ClientMessage),
-  Task(task_proto::ClientMessage),
+  Task(ctl_task_proto::ClientMessage),
 }
 
 pub struct Request {
@@ -23,7 +23,7 @@ pub async fn accept_restart(mut request: Request, state: &State) -> Option<Strea
   let response = if protocol_version != control::PROTOCOL_VERSION {
     control::ServerMessage::Error {
       message: format!(
-        "taskd control protocol version {} is required",
+        "ctl-taskd control protocol version {} is required",
         control::PROTOCOL_VERSION
       ),
     }
@@ -36,8 +36,9 @@ pub async fn accept_restart(mut request: Request, state: &State) -> Option<Strea
     || !state.runtimes.lock().await.is_empty()
   {
     control::ServerMessage::Error {
-      message: "taskd has active tasks; stop them with ctl task stop before restarting taskd"
-        .into(),
+      message:
+        "ctl-taskd has active tasks; stop them with ctl task stop before restarting ctl-taskd"
+          .into(),
     }
   } else {
     control::ServerMessage::RestartAccepted {
@@ -46,7 +47,7 @@ pub async fn accept_restart(mut request: Request, state: &State) -> Option<Strea
         .parent()
         .expect("state has a directory")
         .to_owned(),
-      rmux_socket: state.rmux_socket.clone(),
+      ctmux_socket: state.ctmux_socket.clone(),
     }
   };
   let accepted = matches!(response, control::ServerMessage::RestartAccepted { .. });

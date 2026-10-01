@@ -1,9 +1,9 @@
-//! Background process ownership. PTYs belong to rmuxd, never taskd.
+//! Background process ownership. PTYs belong to ctmuxd, never ctl-taskd.
+use ctl_task_proto::TaskDefinition;
 use std::{
   io,
   process::{ExitStatus, Stdio},
 };
-use task_proto::TaskDefinition;
 use tokio::process::{ChildStderr, ChildStdout, Command};
 
 #[cfg(windows)]

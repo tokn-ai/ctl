@@ -26,7 +26,7 @@ function session(id: string): SessionSummary {
 function setup(
   activeSessionId: string | null = "first",
   shortcutPlatform: "macos" | "other" = "macos",
-  currentWorkingDirectory: string | null = "/work/rmux",
+  currentWorkingDirectory: string | null = "/work/ctmux",
   tabIds: readonly string[] = ["first", "second", "third"],
   phase: ConnectionPhase = "attached",
   attachmentSessionId: string | null = activeSessionId,
@@ -215,7 +215,7 @@ describe("terminal commands", () => {
   });
 
   it("cycles through open tabs and wraps around", () => {
-    const { tabs, actions, commands } = setup("first", "macos", "/work/rmux", [
+    const { tabs, actions, commands } = setup("first", "macos", "/work/ctmux", [
       "first",
       "third",
     ]);
@@ -245,7 +245,7 @@ describe("terminal commands", () => {
       const { sessions, actions, commands } = setup(
         activeSessionId,
         "macos",
-        "/work/rmux",
+        "/work/ctmux",
         ["first", "second", "third"],
         "attached",
         "second",
@@ -271,7 +271,7 @@ describe("terminal commands", () => {
     const { actions, commands } = setup(
       "first",
       "macos",
-      "/work/rmux",
+      "/work/ctmux",
       undefined,
       "attached",
       "first",
@@ -290,14 +290,14 @@ describe("terminal commands", () => {
       const { commands } = setup(
         "first",
         "macos",
-        "/work/rmux",
+        "/work/ctmux",
         undefined,
         "attached",
         "first",
         "second",
         state === "restart-confirmation",
         state === "restarting",
-        "/work/rmux",
+        "/work/ctmux",
         state === "closing" ? ["second"] : [],
         state === "disconnecting" ? "second" : null,
       );
@@ -309,14 +309,14 @@ describe("terminal commands", () => {
     const { commands } = setup(
       "first",
       "macos",
-      "/work/rmux",
+      "/work/ctmux",
       undefined,
       "attached",
       "first",
       "second",
       false,
       false,
-      "/work/rmux",
+      "/work/ctmux",
       ["first"],
     );
     expect(findCommand(commands, COMMAND_IDS.close).enabled).toBe(true);
@@ -393,7 +393,7 @@ describe("terminal commands", () => {
     const { sessions, commands } = setup(
       "second",
       "macos",
-      "/work/rmux",
+      "/work/ctmux",
       ["first", "second"],
       "error",
       "second",
@@ -411,7 +411,7 @@ describe("terminal commands", () => {
     const { sessions, commands } = setup(
       "second",
       "macos",
-      "/work/rmux",
+      "/work/ctmux",
       ["first", "second"],
       "idle",
       null,
@@ -430,7 +430,7 @@ describe("terminal commands", () => {
     const { sessions, commands } = setup(
       "second",
       "macos",
-      "/work/rmux",
+      "/work/ctmux",
       ["first", "second"],
       "connecting",
       "second",
@@ -450,7 +450,7 @@ describe("terminal commands", () => {
     const { commands } = setup(
       "second",
       "macos",
-      "/work/rmux",
+      "/work/ctmux",
       ["first", "second"],
       "attached",
       "first",
@@ -474,7 +474,7 @@ describe("terminal commands", () => {
 
     expect(restart).toMatchObject({
       category: "Daemon",
-      title: "Restart rmuxd",
+      title: "Restart ctmuxd",
       keepPaletteOpen: false,
       focusTerminalAfterRun: false,
     });
@@ -485,7 +485,7 @@ describe("terminal commands", () => {
     const confirmation = setup(
       "first",
       "macos",
-      "/work/rmux",
+      "/work/ctmux",
       ["first", "second", "third"],
       "attached",
       "first",
@@ -498,7 +498,7 @@ describe("terminal commands", () => {
     );
 
     expect(confirm).toMatchObject({
-      title: "Restart rmuxd",
+      title: "Restart ctmuxd",
       enabled: false,
       keepPaletteOpen: false,
     });

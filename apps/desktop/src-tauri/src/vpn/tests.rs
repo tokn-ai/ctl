@@ -63,7 +63,10 @@ fn round_trip_returns_summaries_and_an_opaque_revision() {
   let repository = fixture.repository();
   let empty = repository.load().unwrap();
   assert_eq!(empty.revision, None);
-  assert!(empty.connections.is_empty());
+  assert_eq!(
+    empty.connections,
+    Vec::<models::VpnConnectionSummary>::new()
+  );
   let password = "test '$literal' #password";
   let saved = repository.save(save_request(None, Some(password))).unwrap();
   assert_eq!(repository.load().unwrap(), saved);
@@ -213,7 +216,10 @@ fn deleting_an_active_connection_is_rejected_for_each_active_state() {
       &VpnSnapshot::default(),
     )
     .unwrap();
-  assert!(deleted.connections.is_empty());
+  assert_eq!(
+    deleted.connections,
+    Vec::<models::VpnConnectionSummary>::new()
+  );
   assert!(repository.connection("connection-one").is_err());
 }
 
@@ -246,7 +252,10 @@ fn unrelated_active_vpns_do_not_block_saved_connection_changes() {
       &status,
     )
     .unwrap();
-  assert!(deleted.connections.is_empty());
+  assert_eq!(
+    deleted.connections,
+    Vec::<models::VpnConnectionSummary>::new()
+  );
 }
 
 #[test]

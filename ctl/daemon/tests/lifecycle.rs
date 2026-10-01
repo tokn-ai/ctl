@@ -162,8 +162,8 @@ async fn vpn_status_observes_shared_inventory_once_per_request() {
     .list()
     .await
     .unwrap();
-  assert!(snapshot.connections.is_empty());
-  assert!(snapshot.discovery_warnings.is_empty());
+  assert_eq!(snapshot.connections, Vec::<ctld_ipc::VpnStatus>::new());
+  assert_eq!(snapshot.discovery_warnings, Vec::<String>::new());
   let calls = std::fs::read_to_string(owner.0.join("docker.calls")).unwrap();
   let calls: Vec<_> = calls.lines().skip(prior).collect();
   assert_eq!(calls.len(), 1, "shared inventory is scanned once");

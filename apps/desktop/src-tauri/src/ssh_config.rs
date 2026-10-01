@@ -368,7 +368,7 @@ mod tests {
     let discovery = discover_hosts_from_home(temporary.path());
 
     assert_eq!(discovery.hosts, ["root", "first", "second", "repeated"]);
-    assert!(discovery.warnings.is_empty());
+    assert_eq!(discovery.warnings, Vec::<String>::new());
   }
 
   #[test]

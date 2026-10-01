@@ -845,7 +845,15 @@ mod tests {
     assert_eq!(fixture.presentation()?.history, ["past"]);
     fixture.store.archive("local", "session", "Closed again")?;
     fixture.store.delete_archive("local", "session")?;
-    assert!(fixture.store.archives()?.is_empty());
+    assert_eq!(
+      fixture
+        .store
+        .archives()?
+        .into_iter()
+        .map(|archive| (archive.host_key, archive.session_id))
+        .collect::<Vec<_>>(),
+      Vec::<(String, String)>::new()
+    );
     Ok(())
   }
 
@@ -924,7 +932,10 @@ mod tests {
     let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
     fixture.checkpoint(0, "last screen", &borrowed)?;
     fixture.store.archive("local", "session", "Closed")?;
-    assert!(fixture.store.archives()?[0].terminals[0].lines.is_empty());
+    assert_eq!(
+      fixture.store.archives()?[0].terminals[0].lines,
+      Vec::<String>::new()
+    );
     let mut offset = 0;
     let mut all = Vec::new();
     loop {

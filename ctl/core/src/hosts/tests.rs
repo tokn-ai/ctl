@@ -35,7 +35,7 @@ fn saved_names_ids_methods_and_routes_share_one_resolution() {
     .unwrap();
   assert_eq!(target.destination, "lan-box");
   assert!(target.uses_ssh_config_master());
-  assert!(target.gateways.is_empty());
+  assert_eq!(target.gateways, Vec::<ctld_ipc::SshGateway>::new());
 }
 
 #[test]

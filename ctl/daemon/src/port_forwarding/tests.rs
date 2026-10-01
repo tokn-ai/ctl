@@ -149,7 +149,10 @@ async fn moving_a_forward_cancels_its_exact_previous_route_before_starting_the_n
       },
     ]
   );
-  assert!(registry.list(&control, &old).await.is_empty());
+  assert_eq!(
+    registry.list(&control, &old).await,
+    Vec::<PortForwardStatus>::new()
+  );
   assert_eq!(registry.list(&control, &next).await, vec![status.clone()]);
   // Replaying startup restoration is idempotent, and a later authentication
   // through the obsolete route cannot recreate its removed forward.
@@ -188,7 +191,10 @@ async fn disable_uses_stored_owner_and_definition_even_after_the_method_was_dele
     }
   );
   registry.activate(&control, &old).await;
-  assert!(registry.records.is_empty());
+  assert_eq!(
+    registry.records.keys().collect::<Vec<_>>(),
+    Vec::<&String>::new()
+  );
   assert_eq!(control.changes.lock().unwrap().len(), 2);
 }
 
@@ -211,14 +217,20 @@ async fn failed_cancellation_keeps_the_previous_owner_for_both_move_and_disable(
         .is_err()
     );
     assert_eq!(registry.list(&control, &old).await, vec![original]);
-    assert!(registry.list(&control, &next).await.is_empty());
+    assert_eq!(
+      registry.list(&control, &next).await,
+      Vec::<PortForwardStatus>::new()
+    );
     assert_eq!(control.changes.lock().unwrap().len(), 2);
     control.fail_cancel.store(false, Ordering::SeqCst);
     registry
       .configure(&control, next.clone(), forward(), enabled)
       .await
       .unwrap();
-    assert!(registry.list(&control, &old).await.is_empty());
+    assert_eq!(
+      registry.list(&control, &old).await,
+      Vec::<PortForwardStatus>::new()
+    );
     assert_eq!(
       registry.list(&control, &next).await.len(),
       usize::from(enabled)
@@ -241,7 +253,7 @@ async fn moving_a_waiting_forward_prevents_the_old_master_from_activating_it_lat
     .await
     .unwrap();
   registry.activate(&control, &old).await;
-  assert!(control.changes.lock().unwrap().is_empty());
+  assert_eq!(*control.changes.lock().unwrap(), Vec::<Change>::new());
   control.ready.lock().unwrap().insert(next.clone());
   registry.activate(&control, &next).await;
   assert_eq!(
@@ -379,7 +391,10 @@ async fn failed_disconnect_retains_listener_cancellation_responsibility() {
     .configure(&control, target, forward(), false)
     .await
     .unwrap();
-  assert!(registry.records.is_empty());
+  assert_eq!(
+    registry.records.keys().collect::<Vec<_>>(),
+    Vec::<&String>::new()
+  );
 }
 
 #[tokio::test]

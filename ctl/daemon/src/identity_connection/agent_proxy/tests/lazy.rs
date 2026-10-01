@@ -239,7 +239,7 @@ async fn denied_and_mismatched_unlocks_never_repeat_or_sign() {
     }
     assert_eq!(unlocker.calls.load(Ordering::SeqCst), 1);
     for log in unlocker.logs.lock().unwrap().iter() {
-      assert!(log.lock().unwrap().is_empty());
+      assert_eq!(*log.lock().unwrap(), Vec::<Vec<u8>>::new());
     }
     for socket in unlocker.sockets.lock().unwrap().iter() {
       assert!(!socket.exists());
@@ -311,7 +311,7 @@ async fn file_replacement_before_signing_cannot_use_the_prepared_identity() {
       .unwrap(),
     [FAILURE]
   );
-  assert!(unlocker.sockets.lock().unwrap().is_empty());
+  assert_eq!(*unlocker.sockets.lock().unwrap(), Vec::<PathBuf>::new());
 }
 
 #[tokio::test]
@@ -336,7 +336,7 @@ async fn canceling_the_attempt_during_unlock_cannot_publish_an_agent_afterward()
     io::ErrorKind::UnexpectedEof
   );
   unlocker.gate.as_ref().unwrap().add_permits(1);
-  assert!(unlocker.sockets.lock().unwrap().is_empty());
+  assert_eq!(*unlocker.sockets.lock().unwrap(), Vec::<PathBuf>::new());
 }
 
 #[tokio::test]
@@ -461,7 +461,7 @@ async fn failed_upstream_transport_does_not_allow_a_later_saved_key_fallback() {
       [FAILURE]
     );
   }
-  assert!(peers[0].keys.is_empty());
+  assert_eq!(peers[0].keys, HashSet::<Vec<u8>>::new());
   assert_eq!(unlocker.calls.load(Ordering::SeqCst), 0);
   worker.await.unwrap();
 }

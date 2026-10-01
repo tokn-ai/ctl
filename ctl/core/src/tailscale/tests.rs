@@ -26,7 +26,7 @@ fn peer(id: &str) -> Value {
 fn parses_stable_ids_and_offline_peers_without_using_map_keys_as_identity() {
   let discovery = parse_status(&running(json!({"nodekey:rotates": peer("n-stable")})));
   assert_eq!(discovery.state, DiscoveryState::Available);
-  assert!(discovery.warnings.is_empty());
+  assert_eq!(discovery.warnings, Vec::<String>::new());
   assert_eq!(
     discovery.devices,
     vec![TailscaleDevice {
@@ -124,7 +124,7 @@ fn recognizes_stopped_login_and_unknown_backend_states() {
   ] {
     let discovery = parse_status(&json!({"BackendState": backend, "Peer": {"x": peer("n-x")}}));
     assert_eq!(discovery.state, state, "{backend}");
-    assert!(discovery.devices.is_empty());
+    assert_eq!(discovery.devices, Vec::<TailscaleDevice>::new());
     assert_eq!(discovery.warnings.len(), 1);
   }
 }
@@ -134,7 +134,7 @@ fn empty_tailnet_is_available_but_invalid_peer_collection_is_an_error() {
   for peers in [Value::Null, json!({})] {
     let discovery = parse_status(&running(peers));
     assert_eq!(discovery.state, DiscoveryState::Available);
-    assert!(discovery.devices.is_empty());
+    assert_eq!(discovery.devices, Vec::<TailscaleDevice>::new());
   }
   assert_eq!(
     parse_status(&running(json!([]))).state,
@@ -173,7 +173,7 @@ fn malformed_json_and_process_failures_produce_nonfatal_discovery_errors() {
       stderr: stderr.as_bytes().to_vec(),
     });
     assert_eq!(discovery.state, state);
-    assert!(discovery.devices.is_empty());
+    assert_eq!(discovery.devices, Vec::<TailscaleDevice>::new());
   }
 }
 
@@ -218,7 +218,7 @@ async fn output_reads_are_bounded() {
 async fn missing_client_is_reported_without_failure() {
   let discovery = discover(&[], STATUS_TIMEOUT).await;
   assert_eq!(discovery.state, DiscoveryState::NotInstalled);
-  assert!(discovery.devices.is_empty());
+  assert_eq!(discovery.devices, Vec::<TailscaleDevice>::new());
 }
 
 #[cfg(unix)]

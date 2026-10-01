@@ -328,7 +328,7 @@ async fn human_status_escapes_terminal_controls_and_preserves_readable_unicode()
   )
   .await;
   assert!(output.status.success());
-  assert!(output.stderr.is_empty());
+  assert_eq!(output.stderr, Vec::<u8>::new());
   let text = String::from_utf8(output.stdout).unwrap();
   let lines: Vec<_> = text.lines().collect();
   assert_eq!(lines.len(), 2);
@@ -378,7 +378,7 @@ async fn status_lists_multiple_connections_and_aligns_every_column() {
   .await;
   assert!(matches!(request, ClientMessage::VpnStatus));
   assert!(output.status.success());
-  assert!(output.stderr.is_empty());
+  assert_eq!(output.stderr, Vec::<u8>::new());
   let text = String::from_utf8(output.stdout).unwrap();
   let lines: Vec<_> = text.lines().collect();
   assert_eq!(lines.len(), 3);
@@ -505,7 +505,7 @@ async fn targeted_stop_selects_one_vpn_and_rejects_unsafe_legacy_fallback() {
     } else {
       assert!(request.is_none());
       assert!(!output.status.success());
-      assert!(output.stdout.is_empty());
+      assert_eq!(output.stdout, Vec::<u8>::new());
       let diagnostic = String::from_utf8(output.stderr).unwrap();
       assert!(diagnostic.contains("vpn_targeted_stop_unsupported"));
       assert!(diagnostic.contains("ctl vpn stop"));
@@ -532,7 +532,7 @@ async fn targeted_stop_does_not_stop_a_different_legacy_connection() {
   .await;
   assert!(matches!(request, ClientMessage::VpnStatus));
   assert!(!output.status.success());
-  assert!(output.stdout.is_empty());
+  assert_eq!(output.stdout, Vec::<u8>::new());
   assert!(
     String::from_utf8(output.stderr)
       .unwrap()
@@ -556,7 +556,7 @@ async fn stop_without_an_id_reports_ambiguity_and_never_stops_all_connections() 
   .await;
   assert!(matches!(request, ClientMessage::StopVpn));
   assert!(!output.status.success());
-  assert!(output.stdout.is_empty());
+  assert_eq!(output.stdout, Vec::<u8>::new());
   assert!(
     String::from_utf8(output.stderr)
       .unwrap()
@@ -575,7 +575,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
       let text = String::from_utf8(output.stdout).unwrap();
       assert!(text.starts_with("VPN inventory unavailable."));
       assert!(text.contains("ctld is not running"));
-      assert!(output.stderr.is_empty());
+      assert_eq!(output.stderr, Vec::<u8>::new());
     } else {
       assert_text_status(&output, DISCONNECTED_TABLE);
     }
@@ -587,7 +587,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
     if action == "status" {
       assert!(output.status.success());
       let snapshot: VpnSnapshot = serde_json::from_slice(&output.stdout).unwrap();
-      assert!(snapshot.connections.is_empty());
+      assert_eq!(snapshot.connections, Vec::<ctld_ipc::VpnStatus>::new());
       assert_eq!(snapshot.discovery_warnings.len(), 1);
     } else {
       assert_json_status(&output, &VpnStatus::default());
@@ -602,7 +602,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
       }
       let output = fixture.command(&args).output().await.unwrap();
       assert!(!output.status.success());
-      assert!(output.stdout.is_empty());
+      assert_eq!(output.stdout, Vec::<u8>::new());
       assert!(
         String::from_utf8(output.stderr)
           .unwrap()
@@ -669,7 +669,7 @@ async fn daemon_errors_are_reported_without_success_output() {
     .await;
     assert!(matches!(request, ClientMessage::StartVpn { .. }));
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("vpn_start_failed"));
     assert!(stderr.contains("synthetic startup failure"));

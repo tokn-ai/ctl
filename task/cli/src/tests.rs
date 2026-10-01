@@ -28,7 +28,14 @@ impl MockConnector {
   }
 
   async fn assert_complete(&self, connections: usize) {
-    assert!(self.exchanges.lock().unwrap().is_empty());
+    {
+      let exchanges = self.exchanges.lock().unwrap();
+      let pending = exchanges
+        .iter()
+        .map(|exchange| (&exchange.request, &exchange.responses))
+        .collect::<Vec<_>>();
+      assert_eq!(pending, Vec::<(&ClientMessage, &Vec<ServerMessage>)>::new());
+    }
     let servers = std::mem::take(&mut *self.servers.lock().unwrap());
     assert_eq!(servers.len(), connections);
     for server in servers {

@@ -135,7 +135,7 @@ mod tests {
     fs::create_dir(ssh.join("key-directory")).unwrap();
     fs::write(ssh.join("key-directory/nested-key"), []).unwrap();
     let catalog = discover_from_home(&home.0);
-    assert!(catalog.warnings.is_empty());
+    assert_eq!(catalog.warnings, Vec::<String>::new());
     assert_eq!(
       catalog
         .identity_files
@@ -165,7 +165,7 @@ mod tests {
     );
     fs::write(home.0.join(".ssh"), []).unwrap();
     let catalog = discover_from_home(&home.0);
-    assert!(catalog.identity_files.is_empty());
+    assert_eq!(catalog.identity_files, Vec::<SshIdentityFileDto>::new());
     assert_eq!(catalog.warnings.len(), 1);
   }
 

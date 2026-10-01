@@ -170,7 +170,7 @@ mod tests {
 
   #[test]
   fn legacy_metadata_is_unknown_and_saved_hosts_cannot_supply_live_rows() {
-    assert!(rows(Vec::new()).is_empty());
+    assert_eq!(rows(Vec::new()), Vec::<ComponentVersionRow>::new());
     let mut legacy = observation();
     legacy.identity.build = None;
     legacy.handshake.build = None;

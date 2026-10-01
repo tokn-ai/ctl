@@ -175,10 +175,9 @@ fn list_identifies_every_document_with_usable_name_and_file_selectors() {
     .collect();
   assert_eq!(entries.iter().copied().collect::<BTreeSet<_>>(), expected);
   for (name, file) in entries {
-    assert!(
-      !fixture
-        .succeeds(&["skill", name, "--file", file])
-        .is_empty()
+    assert_ne!(
+      fixture.succeeds(&["skill", name, "--file", file]),
+      Vec::<u8>::new()
     );
   }
   fixture.assert_unchanged();
@@ -195,7 +194,7 @@ fn listing_conflicts_with_explicit_document_selection() {
   ] {
     let output = fixture.output(args);
     assert_eq!(output.status.code(), Some(2), "{args:?}");
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--list"));
   }
   fixture.assert_unchanged();
@@ -207,7 +206,7 @@ fn unknown_names_are_reported_by_the_argument_parser() {
   for name in ["unknown", "../ctl-host", "ctl-session/SKILL.md"] {
     let output = fixture.output(&["skill", name]);
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains(name));
     assert!(error.contains("ctl-host"));

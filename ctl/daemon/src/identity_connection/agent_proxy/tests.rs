@@ -158,8 +158,8 @@ async fn rejects_agent_mutations_and_unknown_extensions_without_forwarding_them(
     exchange(&mut client, &extension).await.unwrap(),
     [EXTENSION_FAILURE]
   );
-  assert!(existing.log.lock().unwrap().is_empty());
-  assert!(local.log.lock().unwrap().is_empty());
+  assert_eq!(*existing.log.lock().unwrap(), Vec::<Vec<u8>>::new());
+  assert_eq!(*local.log.lock().unwrap(), Vec::<Vec<u8>>::new());
 }
 
 #[tokio::test]
@@ -229,7 +229,7 @@ async fn a_failed_upstream_exchange_closes_that_stream_before_any_later_request(
   };
   assert!(peer.request(&[REQUEST_IDENTITIES]).await.is_err());
   assert!(peer.stream.is_none());
-  assert!(peer.keys.is_empty());
+  assert_eq!(peer.keys, HashSet::<Vec<u8>>::new());
   assert!(peer.request(&[REQUEST_IDENTITIES]).await.is_err());
   worker.await.unwrap();
 }

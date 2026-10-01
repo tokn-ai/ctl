@@ -365,7 +365,10 @@ fn migrates_v3_workspace_to_current_schema() {
   let loaded = fixture.repository().load().unwrap();
 
   assert_eq!(loaded.document.schema_version, 8);
-  assert!(loaded.document.port_forwards.is_empty());
+  assert_eq!(
+    loaded.document.port_forwards,
+    Vec::<WorkspacePortForward>::new()
+  );
   assert_eq!(
     fs::read(fixture.0.join("workspace-v3.backup.json")).unwrap(),
     bytes
@@ -422,7 +425,10 @@ fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
   let loaded = fixture.repository().load().unwrap();
 
   assert_eq!(loaded.document.schema_version, 8);
-  assert!(loaded.document.ssh_gateways.is_empty());
+  assert_eq!(
+    loaded.document.ssh_gateways,
+    Vec::<WorkspaceSshGateway>::new()
+  );
   assert_eq!(
     fs::read(fixture.0.join("workspace-v5.backup.json")).unwrap(),
     bytes
@@ -608,7 +614,10 @@ fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() 
   store.import_legacy(std::slice::from_ref(&saved)).unwrap();
   let snapshot = fixture.repository().load().unwrap();
   assert_eq!(snapshot.document.schema_version, 8);
-  assert!(snapshot.document.task_definitions.is_empty());
+  assert_eq!(
+    snapshot.document.task_definitions,
+    Vec::<SavedTaskDefinition>::new()
+  );
   let definitions = store.load().unwrap().definitions;
   assert_eq!(definitions.len(), 1);
   assert_eq!(definitions[0].definition, saved.definition);

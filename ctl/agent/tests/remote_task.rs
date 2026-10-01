@@ -250,7 +250,7 @@ fn cli_requires_an_installed_sibling_and_ignores_taskd_bin_override() {
     .output()
     .unwrap();
   assert!(!output.status.success());
-  assert!(output.stdout.is_empty());
+  assert_eq!(output.stdout, Vec::<u8>::new());
   assert!(
     String::from_utf8_lossy(&output.stderr).contains("install taskd beside ctl-agent"),
     "{}",

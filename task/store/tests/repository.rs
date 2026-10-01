@@ -54,7 +54,10 @@ fn legacy(definition_id: &str, name: &str) -> SavedTaskDefinition {
 #[test]
 fn reading_an_absent_store_has_no_filesystem_side_effects() {
   let fixture = Fixture::new();
-  assert!(fixture.repository().load().unwrap().definitions.is_empty());
+  assert_eq!(
+    fixture.repository().load().unwrap().definitions,
+    Vec::<SavedTaskDefinition>::new()
+  );
   assert!(!fixture.root.join("config").exists());
 }
 
@@ -98,7 +101,10 @@ fn saves_are_create_only_or_revision_checked_and_removal_is_checked() {
     Err(StoreError::Conflict { .. })
   ));
   repository.remove("build-id", &second.revision).unwrap();
-  assert!(repository.load().unwrap().definitions.is_empty());
+  assert_eq!(
+    repository.load().unwrap().definitions,
+    Vec::<SavedTaskDefinition>::new()
+  );
 }
 
 #[test]

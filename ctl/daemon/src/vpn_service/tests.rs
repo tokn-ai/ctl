@@ -801,7 +801,10 @@ async fn stopping_a_tailscale_start_waits_for_the_provider_to_release_its_contai
     .unwrap()
     .unwrap()
     .unwrap();
-  assert!(service.list().await.unwrap().connections.is_empty());
+  assert_eq!(
+    service.list().await.unwrap().connections,
+    Vec::<VpnStatus>::new()
+  );
   owner.shutdown().await;
 }
 
@@ -914,7 +917,10 @@ async fn slow_identity_cleanup_reserves_only_its_profile_and_preserves_its_resul
       .unwrap()
       .unwrap()
       .unwrap();
-    assert!(service.list().await.unwrap().connections.is_empty());
+    assert_eq!(
+      service.list().await.unwrap().connections,
+      Vec::<VpnStatus>::new()
+    );
     service.start_connection(same_profile).await.unwrap();
     owner.shutdown().await;
   }

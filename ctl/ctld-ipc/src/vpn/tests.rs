@@ -33,7 +33,7 @@ fn old_multi_vpn_daemons_do_not_claim_tailscale_support() {
   .unwrap();
   assert_eq!(old.supported_providers, vec![VpnProvider::Openconnect]);
   assert!(!old.supports_tailscale_enrollment);
-  assert!(old.discovery_warnings.is_empty());
+  assert_eq!(old.discovery_warnings, Vec::<String>::new());
   let older_tailscale: VpnSnapshot = serde_json::from_value(serde_json::json!({
     "connections":[], "supports_multiple":true, "supported_providers":["openconnect", "tailscale"]
   }))
@@ -504,7 +504,7 @@ mod endpoints {
       assert_eq!(client.status().await.unwrap(), VpnStatus::default());
       assert_eq!(client.stop().await.unwrap(), VpnStatus::default());
       let inventory = client.list().await.unwrap();
-      assert!(inventory.connections.is_empty());
+      assert_eq!(inventory.connections, Vec::<VpnStatus>::new());
       assert_eq!(inventory.discovery_warnings.len(), 1);
       assert!(inventory.discovery_warnings[0].contains("ctld is not running"));
       assert_eq!(

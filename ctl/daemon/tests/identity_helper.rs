@@ -150,7 +150,7 @@ fn rejected_requests_never_reach_keychain_or_echo_secret_fields() {
     child.stdin.take().unwrap().write_all(&request).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::<u8>::new());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-secret-canary"));
     assert!(
       matches!(serde_json::from_slice::<Response>(&output.stdout).unwrap(), Response::Error { code, .. } if code == "identity_invalid_request")

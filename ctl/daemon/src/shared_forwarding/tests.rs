@@ -62,7 +62,10 @@ async fn occupied_ports_fail_without_disturbing_the_existing_listener() {
     registry.start_with(&target(), &forward, echo).await,
     Err(RequestError::PortForwardFailed(_))
   ));
-  assert!(registry.listeners.is_empty());
+  assert_eq!(
+    registry.listeners.keys().collect::<Vec<_>>(),
+    Vec::<&(SshTarget, LocalPortForward)>::new()
+  );
   assert!(!registry.cancel(&target(), &forward).await);
   let client = TcpStream::connect(external.local_addr().unwrap())
     .await
@@ -111,7 +114,10 @@ async fn each_connection_has_its_own_channel_and_cancellation_closes_owned_clien
       0
     );
   }
-  assert!(registry.listeners.is_empty());
+  assert_eq!(
+    registry.listeners.keys().collect::<Vec<_>>(),
+    Vec::<&(SshTarget, LocalPortForward)>::new()
+  );
 }
 
 #[tokio::test]
@@ -182,7 +188,10 @@ async fn listener_validation_prevents_implicit_or_public_bind_addresses() {
       Err(RequestError::InvalidRequest(_))
     ));
   }
-  assert!(registry.listeners.is_empty());
+  assert_eq!(
+    registry.listeners.keys().collect::<Vec<_>>(),
+    Vec::<&(SshTarget, LocalPortForward)>::new()
+  );
 }
 
 #[cfg(unix)]

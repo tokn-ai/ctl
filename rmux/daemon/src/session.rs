@@ -2229,7 +2229,7 @@ mod tests {
 
     let history = terminal.history.snapshot(0);
     assert_eq!(history.generation, old_checkpoint_history.generation + 1);
-    assert!(history.lines.is_empty());
+    assert_eq!(history.lines, Vec::<String>::new());
     assert_eq!(terminal.checkpoint_history, old_checkpoint_history);
     assert_eq!(terminal.terminal.lines().count(), 2);
   }
@@ -2267,7 +2267,7 @@ mod tests {
     let cleared = history.snapshot(0);
     assert_eq!(cleared.generation, first.generation + 1);
     assert!(!cleared.truncated);
-    assert!(cleared.lines.is_empty());
+    assert_eq!(cleared.lines, Vec::<String>::new());
   }
 
   #[test]

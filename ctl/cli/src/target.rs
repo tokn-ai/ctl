@@ -12,17 +12,21 @@ pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<Resolve
       tailscale_node_id: None,
     });
   };
-  let path = std::env::var_os("CTL_HOSTS_PATH")
-    .map_or_else(
-      || dirs::home_dir().map(|home| home.join(".tokn/rmux/hosts.json")),
-      |path| Some(PathBuf::from(path)),
-    )
-    .ok_or_else(|| HostError::new("home_unavailable", "Could not find the home directory."))?;
+  let path = catalog_path()?;
   let mut resolved = hosts::resolve(&hosts::load_catalog(&path)?, host, method)?;
   if resolved.tailscale_node_id.is_some() {
     resolved.resolve_tailscale(&ctl_core::tailscale::discover_devices().await.devices)?;
   }
   Ok(resolved)
+}
+
+pub fn catalog_path() -> Result<PathBuf, HostError> {
+  std::env::var_os("CTL_HOSTS_PATH")
+    .map_or_else(
+      || dirs::home_dir().map(|home| home.join(".tokn/rmux/hosts.json")),
+      |path| Some(PathBuf::from(path)),
+    )
+    .ok_or_else(|| HostError::new("home_unavailable", "Could not find the home directory."))
 }
 
 pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {

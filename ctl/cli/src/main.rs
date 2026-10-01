@@ -1,10 +1,12 @@
 mod commands;
 mod connection;
+mod host;
 mod openssh;
 #[cfg(unix)]
 mod port;
 #[cfg(unix)]
 mod ssh_broker;
+mod table;
 mod target;
 mod vpn;
 
@@ -39,6 +41,11 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Manage saved hosts and inspect their connection status.
+  Host {
+    #[command(subcommand)]
+    command: host::Command,
+  },
   /// Open a persistent rmux shell (or an ordinary shell with --plain).
   Shell {
     /// Attach to this named session, creating it if absent.

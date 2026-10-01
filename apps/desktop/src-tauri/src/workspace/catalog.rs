@@ -1,13 +1,8 @@
 //! Reusable saved connections. SSH config projections never enter this store.
 
-use std::fs::File;
-use std::io::{self, Read};
-
 use serde::Deserialize;
 
-use super::repository::{
-  MAX_WORKSPACE_BYTES, Repository, content_revision, regular_file_or_absent,
-};
+use super::repository::{Repository, content_revision};
 use super::{WorkspaceHost, WorkspaceSshGateway};
 use crate::error::{CommandErrorDto, CommandResult};
 
@@ -22,46 +17,12 @@ pub struct UpdateHostsRequest {
 
 impl Repository {
   pub(super) fn read_catalog(&self) -> CommandResult<HostCatalogSnapshot> {
-    let path = self.directory.join("hosts.json");
-    regular_file_or_absent(&path).map_err(io_error)?;
-    let file = match File::open(&path) {
-      Ok(file) => file,
-      Err(error) if error.kind() == io::ErrorKind::NotFound => {
-        return Ok(HostCatalogSnapshot::default());
-      }
-      Err(error) => return Err(io_error(error)),
-    };
-    let mut bytes = Vec::new();
-    file
-      .take(MAX_WORKSPACE_BYTES + 1)
-      .read_to_end(&mut bytes)
-      .map_err(io_error)?;
-    if bytes.len() as u64 > MAX_WORKSPACE_BYTES {
-      return Err(too_large());
-    }
-    let mut snapshot: HostCatalogSnapshot = serde_json::from_slice(&bytes).map_err(|error| {
-      CommandErrorDto::new(
-        "hosts_unreadable",
-        format!("Could not read hosts.json; the file has been preserved: {error}"),
-      )
-    })?;
-    snapshot.document.validate()?;
-    if snapshot.revision.as_ref().is_none_or(String::is_empty) {
-      return Err(CommandErrorDto::new(
-        "hosts_invalid",
-        "The host catalog has no revision. Its file has not been changed.",
-      ));
-    }
-    snapshot.revision = Some(content_revision(&snapshot.document)?);
-    Ok(snapshot)
+    ctl_core::hosts::storage::load(&self.directory.join("hosts.json")).map_err(Into::into)
   }
 
   pub(super) fn persist_catalog(&self, snapshot: &HostCatalogSnapshot) -> CommandResult<()> {
-    let bytes = serde_json::to_vec_pretty(snapshot).map_err(CommandErrorDto::backend)?;
-    if bytes.len() as u64 > MAX_WORKSPACE_BYTES {
-      return Err(too_large());
-    }
-    self.write_named("hosts.json", &bytes).map_err(io_error)
+    ctl_core::hosts::storage::persist_under_lock(&self.directory.join("hosts.json"), snapshot)
+      .map_err(Into::into)
   }
 
   /// Import the complete batch in memory before writing. Conflicts preserve both
@@ -116,20 +77,5 @@ fn import_conflict(kind: &str, id: &str) -> CommandErrorDto {
     format!(
       "The saved {kind} {id:?} differs from the workspace being migrated. Both files have been preserved."
     ),
-  )
-}
-
-fn too_large() -> CommandErrorDto {
-  CommandErrorDto::new(
-    "hosts_too_large",
-    "The host catalog exceeds its size limit. Its file has not been changed.",
-  )
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn io_error(error: io::Error) -> CommandErrorDto {
-  CommandErrorDto::new(
-    "hosts_io_failed",
-    format!("Could not access hosts.json: {error}"),
   )
 }

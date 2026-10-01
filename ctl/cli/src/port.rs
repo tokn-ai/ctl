@@ -88,20 +88,38 @@ fn print_statuses(statuses: &[PortForwardStatus], json: bool) -> Result<(), Erro
   if json {
     println!("{}", serde_json::to_string(statuses)?);
   } else {
-    for status in statuses {
+    let rows = statuses.iter().map(|status| {
       let forward = &status.forward;
-      println!(
-        "{}\t{}:{} → {}:{}\t{:?}",
-        forward.forward_id,
-        forward.bind_address,
-        forward.local_port,
-        forward.remote_host,
-        forward.remote_port,
-        status.state
-      );
+      [
+        forward.forward_id.clone(),
+        endpoint(&forward.bind_address, forward.local_port),
+        endpoint(&forward.remote_host, forward.remote_port),
+        format!("{:?}", status.state),
+      ]
+    });
+    println!(
+      "{}",
+      crate::table::format(["ID", "LOCAL", "REMOTE", "STATUS"], rows)
+    );
+    for status in statuses {
+      if let Some(message) = &status.message {
+        println!(
+          "{}: {}",
+          crate::table::text(&status.forward.forward_id),
+          crate::table::text(message)
+        );
+      }
     }
   }
   Ok(())
+}
+
+fn endpoint(host: &str, port: u16) -> String {
+  if host.contains(':') {
+    format!("[{host}]:{port}")
+  } else {
+    format!("{host}:{port}")
+  }
 }
 
 fn parse_forward(value: &str, forward_id: String) -> Result<LocalPortForward, Error> {

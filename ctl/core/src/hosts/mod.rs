@@ -4,6 +4,7 @@ mod catalog;
 mod gateways;
 mod models;
 mod resolver;
+pub mod storage;
 mod target;
 #[cfg(test)]
 mod tests;

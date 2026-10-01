@@ -47,6 +47,33 @@ pub async fn request(message: ClientMessage) -> Result<ServerMessage, Error> {
   }
 }
 
+/// Exchange a passive observation without starting ctld or authenticating SSH.
+pub async fn request_existing(message: ClientMessage) -> Result<Option<ServerMessage>, Error> {
+  let exchange = async {
+    let mut stream = match ctld_ipc::connect_existing().await {
+      Ok(stream) => stream,
+      Err(ctld_ipc::ConnectError::Connect(error))
+        if matches!(
+          error.kind(),
+          io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        ) =>
+      {
+        return Ok(None);
+      }
+      Err(error) => return Err(error.into()),
+    };
+    handshake(&mut stream).await?;
+    ctld_ipc::write_frame(&mut stream, &message).await?;
+    let response = ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+      .await?
+      .ok_or(Error::ConnectionClosed)?;
+    Ok(Some(response))
+  };
+  tokio::time::timeout(std::time::Duration::from_secs(15), exchange)
+    .await
+    .map_err(|_| Error::StatusTimeout)?
+}
+
 async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), Error> {
   ctld_ipc::write_frame(
     stream,
@@ -106,6 +133,8 @@ fn read_response() -> Result<String, Error> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+  #[error("ctld status query timed out")]
+  StatusTimeout,
   #[error(transparent)]
   Connect(#[from] ctld_ipc::ConnectError),
   #[error(transparent)]

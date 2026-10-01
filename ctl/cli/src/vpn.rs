@@ -1,8 +1,6 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use unicode_width::UnicodeWidthStr as _;
-
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
   /// Start the VPN and print its connection status.
@@ -144,17 +142,7 @@ fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
     "USERNAME",
     "SOCKS5 ENDPOINT",
   ];
-  let widths = std::array::from_fn(|index| {
-    rows
-      .iter()
-      .map(|row| row[index].width())
-      .fold(headers[index].width(), usize::max)
-  });
-  let mut table = format_row(headers, widths);
-  for row in &rows {
-    table.push('\n');
-    table.push_str(&format_row(row.each_ref().map(String::as_str), widths));
-  }
+  let mut table = crate::table::format(headers, rows);
   for status in statuses {
     if let Some(url) = &status.auth_url
       && ctld_ipc::vpn::is_tailscale_auth_url(url)
@@ -180,32 +168,11 @@ fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
   table
 }
 
-fn format_row<const COLUMNS: usize>(cells: [&str; COLUMNS], widths: [usize; COLUMNS]) -> String {
-  let mut row = String::new();
-  for (index, cell) in cells.into_iter().enumerate() {
-    row.push_str(cell);
-    if index + 1 < cells.len() {
-      row.push_str(&" ".repeat(widths[index] - cell.width() + 2));
-    }
-  }
-  row
-}
-
 fn display_value(value: Option<&str>) -> String {
   let value = value
     .filter(|value| !value.is_empty())
     .unwrap_or("unavailable");
-  let mut rendered = String::with_capacity(value.len());
-  for character in value.chars() {
-    if character.is_control()
-      || matches!(character, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-    {
-      rendered.extend(character.escape_default());
-    } else {
-      rendered.push(character);
-    }
-  }
-  rendered
+  crate::table::text(value)
 }
 
 #[derive(Debug, thiserror::Error)]

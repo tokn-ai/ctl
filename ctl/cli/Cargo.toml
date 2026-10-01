@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 clap.workspace = true
+comfy-table.workspace = true
 ctl-core.workspace = true
 ctld-ipc.workspace = true
 dirs.workspace = true
@@ -16,8 +17,10 @@ task-client.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-unicode-width.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rpassword.workspace = true

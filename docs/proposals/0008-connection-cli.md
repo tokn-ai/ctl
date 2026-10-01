@@ -25,6 +25,11 @@ cannot discover a private ctld SOCKS/VPN master from its destination alone.
 - `ctl ssh host [command...]` and `ctl scp source destination` retain OpenSSH's
   ordinary shell, execution, and copy semantics. They do not create rmux sessions.
 
+- `ctl host list/show/status` inspect saved hosts and passive per-method ctld
+  state. `add/update/remove` edit the shared catalog; `method` manages alternate
+  routes and the preferred method. Explicit `connect/disconnect` control SSH
+  connections without opening a shell. Host removal only removes its definition.
+
 ## Shared resolution and transport
 
 A host selects a saved catalog name or stable ID first. Unknown names fall back

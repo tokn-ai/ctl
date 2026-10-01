@@ -25,6 +25,7 @@ impl Fixture {
 set -eu
 root=${0%/*}
 printf '%s\n' "$*" >> "$root/calls"
+printf '%s\n' "$*" >> "$root/calls-${0##*/}"
 case "$1" in
   ps) cat "$root/inventory" ;;
   container)
@@ -47,7 +48,12 @@ case "$1" in
       exit 1
     fi
     ;;
-  exec) [ ! -f "$root/heartbeat-failed" ] ;;
+  exec)
+    if [ -f "$root/heartbeat-failed" ]; then
+      : > "$root/heartbeat-rejected"
+      exit 1
+    fi
+    ;;
   rm) : ;;
   *) exit 2 ;;
 esac
@@ -80,6 +86,16 @@ impl Drop for Fixture {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.root);
   }
+}
+
+async fn wait_until(message: &str, condition: impl Fn() -> bool) {
+  timeout(Duration::from_secs(10), async {
+    while !condition() {
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect(message);
 }
 
 fn connection() -> VpnConnection {
@@ -425,13 +441,26 @@ async fn engine_outage_is_not_reported_as_a_missing_container() {
 #[tokio::test]
 async fn dropping_one_interest_does_not_stop_or_remove_the_shared_container() {
   let fixture = Fixture::new();
+  // Both clients address the same fixture and immutable container. Separate
+  // logs identify which interest actually renews after the other is dropped.
+  let second_engine = fixture.root.join("second-engine");
+  fs::copy(&fixture.engine, &second_engine).unwrap();
   let first = heartbeat(&fixture.engine, ID).await.unwrap();
-  let second = heartbeat(&fixture.engine, ID).await.unwrap();
+  let second = heartbeat(&second_engine, ID).await.unwrap();
   drop(first);
-  sleep(HEARTBEAT_INTERVAL + Duration::from_millis(150)).await;
+  let second_calls = || {
+    fs::read_to_string(fixture.root.join("calls-second-engine"))
+      .unwrap()
+      .lines()
+      .count()
+  };
+  let before = second_calls();
+  wait_until("the surviving interest did not renew its heartbeat", || {
+    second_calls() > before
+  })
+  .await;
   drop(second);
   let calls = fixture.calls();
-  assert!(calls.len() >= 3);
   assert!(
     calls
       .iter()
@@ -444,13 +473,15 @@ async fn dropping_one_interest_does_not_stop_or_remove_the_shared_container() {
 async fn initial_heartbeat_waits_for_entrypoint_bootstrap() {
   let fixture = Fixture::new();
   fs::write(fixture.root.join("heartbeat-failed"), "").unwrap();
-  let marker = fixture.root.join("heartbeat-failed");
-  let bootstrap = tokio::spawn(async move {
-    sleep(Duration::from_millis(150)).await;
-    fs::remove_file(marker).unwrap();
+  let (interest, ()) = tokio::join!(heartbeat(&fixture.engine, ID), async {
+    wait_until(
+      "the initial heartbeat was not rejected before bootstrap",
+      || fixture.root.join("heartbeat-rejected").exists(),
+    )
+    .await;
+    fs::remove_file(fixture.root.join("heartbeat-failed")).unwrap();
   });
-  let interest = heartbeat(&fixture.engine, ID).await.unwrap();
-  bootstrap.await.unwrap();
+  let interest = interest.unwrap();
   assert!(fixture.calls().len() >= 2);
   drop(interest);
 }

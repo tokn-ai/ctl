@@ -146,6 +146,7 @@ mod engine {
   async fn simultaneous_starts_adopt_the_same_atomic_container_reservation() {
     let engine = FakeEngine::new();
     fs::write(engine.root.join("ready"), "").unwrap();
+    fs::write(engine.root.join("delayed_publication"), "").unwrap();
     let (first, second) = timeout(TEST_TIMEOUT, async {
       tokio::join!(engine.start(), engine.start())
     })
@@ -154,6 +155,14 @@ mod engine {
     let mut first = first.unwrap();
     let mut second = second.unwrap();
     assert_eq!(first.status().container_id, second.status().container_id);
+    assert!(engine.root.join("name_conflict").exists());
+    assert!(
+      fs::read_to_string(engine.root.join("unpublished.inspect"))
+        .unwrap()
+        .lines()
+        .count()
+        >= 3
+    );
     assert_eq!(
       fs::read_to_string(engine.root.join("run.count"))
         .unwrap()
@@ -310,6 +319,93 @@ mod engine {
   }
 
   #[tokio::test]
+  async fn legacy_discovery_checks_health_by_immutable_id_without_acquiring_interest() {
+    let engine = FakeEngine::new();
+    fs::write(engine.root.join("ready"), "").unwrap();
+    let id = "a".repeat(64);
+    let status = discovered_status_at(
+      &engine.executable,
+      &id,
+      "ctld-vpn-legacy",
+      Some(49152),
+      true,
+    )
+    .await;
+    assert_eq!(status.state, VpnState::Connected);
+    assert!(status.running);
+    assert_eq!(
+      status.endpoint.as_deref(),
+      Some("socks5h://127.0.0.1:49152")
+    );
+    assert_eq!(status.container_id.as_deref(), Some(id.as_str()));
+    assert_eq!(status.container_name.as_deref(), Some("ctld-vpn-legacy"));
+    assert_eq!(status.locally_connected, Some(false));
+    assert!(!status.shared_container);
+    assert!(status.connection_id.is_none());
+    assert!(status.vpn_url.is_none());
+    assert!(status.username.is_none());
+    assert_eq!(
+      fs::read_to_string(engine.root.join("exec.calls")).unwrap(),
+      format!("exec\n{id}\n/usr/local/bin/vpn-healthcheck\n")
+    );
+    for forbidden in ["heartbeats", "input", "run.args", "remove.args"] {
+      assert!(!engine.root.join(forbidden).exists());
+    }
+  }
+
+  #[tokio::test]
+  async fn a_running_legacy_container_without_healthy_vpn_never_publishes_a_proxy() {
+    let engine = FakeEngine::new();
+    let status = discovered_status_at(
+      &engine.executable,
+      &"a".repeat(64),
+      "ctld-vpn-legacy",
+      Some(49152),
+      true,
+    )
+    .await;
+    assert_eq!(status.state, VpnState::Starting);
+    assert!(!status.running);
+    assert!(status.endpoint.is_none());
+    assert!(engine.root.join("exec.calls").exists());
+    assert!(!engine.root.join("heartbeats").exists());
+  }
+
+  #[tokio::test]
+  async fn legacy_discovery_never_executes_against_names_stopped_containers_or_missing_ports() {
+    let engine = FakeEngine::new();
+    fs::write(engine.root.join("ready"), "").unwrap();
+    let id = "a".repeat(64);
+    for (identity, port, running) in [
+      ("ctld-vpn-legacy", Some(49152), true),
+      (id.as_str(), Some(49152), false),
+      (id.as_str(), None, true),
+      (id.as_str(), Some(0), true),
+    ] {
+      let status = discovered_status_at(
+        &engine.executable,
+        identity,
+        "ctld-vpn-legacy",
+        port,
+        running,
+      )
+      .await;
+      assert!(!status.running);
+      assert!(status.endpoint.is_none());
+      assert_eq!(
+        status.state,
+        if running {
+          VpnState::Starting
+        } else {
+          VpnState::Stopped
+        }
+      );
+    }
+    assert!(!engine.root.join("exec.calls").exists());
+    assert!(!engine.root.join("heartbeats").exists());
+  }
+
+  #[tokio::test]
   async fn startup_failure_reports_a_safe_cause_without_stopping_other_containers() {
     let engine = FakeEngine::new();
     fs::write(
@@ -317,7 +413,12 @@ mod engine {
       "getaddrinfo failed: vpn.invalid private-test-password",
     )
     .unwrap();
-    let Err(error) = timeout(TEST_TIMEOUT, engine.start()).await.unwrap() else {
+    // Failure first observes a possible concurrent owner, then awaits bounded
+    // cleanup of an owned Created reservation before returning diagnostics.
+    let Err(error) = timeout(TEST_TIMEOUT + CREATOR_ADOPTION_TIMEOUT, engine.start())
+      .await
+      .unwrap()
+    else {
       panic!("expected startup failure");
     };
     assert!(error.to_string().contains("could not be resolved"));

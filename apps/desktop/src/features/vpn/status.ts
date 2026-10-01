@@ -11,6 +11,17 @@ export function vpnAggregateState(statuses: readonly VpnStatus[]): VpnState {
   return "stopped";
 }
 
+/** Activity describes observed containers; incomplete inventory cannot prove disconnection. */
+export function vpnActivity(statuses: readonly VpnStatus[], uncertain_ids: ReadonlySet<string>, discovery_warnings: readonly string[]) {
+  const active = statuses.filter((status) => status.state !== "stopped");
+  const observed = active.filter((status) => !status.status_unavailable && !uncertain_ids.has(vpnRuntimeId(status)));
+  return {
+    state: vpnAggregateState(observed),
+    active_count: observed.length,
+    inventory_incomplete: discovery_warnings.length > 0 || uncertain_ids.size > 0 || observed.length !== active.length,
+  };
+}
+
 export function vpnNeedsSignIn(status: VpnStatus | null | undefined): boolean {
   return status?.provider === "tailscale" && !status.status_unavailable && status.state === "starting" && Boolean(status.auth_url);
 }

@@ -285,6 +285,13 @@ tab indicator. Signed development keeps its isolated daemon endpoint;
 `CTLD_VPN_SOCKET_PATH` explicitly selects another daemon for native VPN operations.
 Every ctld discovers the same protocol-compatible containers for its user and
 engine. `locally_connected` distinguishes local interest from passive discovery.
+Historical provider labels and exact generated names also identify legacy
+containers for passive display. Their immutable IDs and readiness are verified,
+but their labels cannot establish a saved profile or user ownership; they remain
+unmanaged synthetic items. `container_kind` distinguishes shared and legacy
+runtimes. Legacy inventory excludes every shared-label namespace and offers no
+adoption, heartbeat, or shutdown operation. Each status request observes the
+inventory once and derives its legacy singleton response from that same snapshot.
 Connect takes interest even when a compatible container is already running;
 Disconnect releases it and keeps globally running status visible. Status never
 renews interest. Profile mutations require complete inventory. Closing the app

@@ -28,14 +28,22 @@ printf '%s\n' "$*" >> "$root/calls"
 case "$1" in
   ps) cat "$root/inventory" ;;
   container)
+    id=$3
     if [ -f "$root/unavailable" ]; then
       printf '%s\n' 'Cannot connect to the container engine' >&2
       exit 1
     fi
-    if [ -f "$root/inspect-$3" ]; then
-      cat "$root/inspect-$3"
+    if [ -f "$root/delay-inspect" ]; then
+      mkdir "$root/active-$$"
+      set -- "$root"/active-*
+      printf '%s\n' "$#" >> "$root/concurrency"
+      sleep 0.1
+      rmdir "$root/active-$$"
+    fi
+    if [ -f "$root/inspect-$id" ]; then
+      cat "$root/inspect-$id"
     else
-      printf '%s\n' "Error: No such container: $3" >&2
+      printf '%s\n' "Error: No such container: $id" >&2
       exit 1
     fi
     ;;
@@ -110,6 +118,179 @@ fn inspection(
     "State": { "Running": running, "ExitCode": 0, "Status": state, "Health": { "Status": "healthy" } },
     "NetworkSettings": { "Ports": { "1080/tcp": [{ "HostIp": "127.0.0.1", "HostPort": "23456" }] } }
   }])
+}
+
+fn legacy_inspection(provider: VpnProvider, id: &str) -> serde_json::Value {
+  let (service, name) = match provider {
+    VpnProvider::Tailscale => ("tailscale", format!("ctld-tailscale-{id}")),
+    VpnProvider::Openconnect => ("openconnect", format!("ctld-openconnect-{}", &id[..32])),
+  };
+  serde_json::json!([{
+    "Id": id,
+    "Name": format!("/{name}"),
+    "Config": { "Labels": { "io.ctl.service": service, "io.ctl.lease": "historical-lease" } },
+    "State": { "Running": true, "Status": "running" },
+    "NetworkSettings": { "Ports": { "1080/tcp": [{ "HostIp": "127.0.0.1", "HostPort": "23456" }] } }
+  }])
+}
+
+#[test]
+fn legacy_observation_has_immutable_identity_without_claiming_profile_ownership() {
+  for provider in [VpnProvider::Tailscale, VpnProvider::Openconnect] {
+    let value = legacy_inspection(provider, ID);
+    let observed = parse_legacy_descriptor(
+      Path::new("engine"),
+      ID,
+      &serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(observed.id, ID);
+    assert_eq!(observed.provider, provider);
+    assert_eq!(observed.port, Some(23456));
+    assert!(observed.running);
+    assert_eq!(observed.state, "running");
+    assert_eq!(observed.engine, Path::new("engine"));
+    assert_eq!(
+      observed.name,
+      value[0]["Name"]
+        .as_str()
+        .unwrap()
+        .strip_prefix('/')
+        .unwrap()
+    );
+    assert!(
+      parse_legacy_descriptor(
+        Path::new("engine"),
+        OTHER_ID,
+        &serde_json::to_vec(&value).unwrap()
+      )
+      .is_err()
+    );
+  }
+}
+
+#[test]
+fn legacy_observation_ignores_shared_namespaces_and_unrecognized_resources() {
+  let original = legacy_inspection(VpnProvider::Tailscale, ID);
+  for label in [LABEL_PROTOCOL, LABEL_USER, LABEL_ID, LABEL_METADATA] {
+    let mut value = original.clone();
+    value[0]["Config"]["Labels"][label] = "".into();
+    assert!(
+      parse_legacy_descriptor(
+        Path::new("engine"),
+        ID,
+        &serde_json::to_vec(&value).unwrap()
+      )
+      .unwrap()
+      .is_none()
+    );
+  }
+  for name in [
+    "ctld-tailscale-short",
+    "ctld-tailscale-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ctld-openconnect-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "/ctld-tailscale-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "unrelated-container",
+  ] {
+    let mut value = original.clone();
+    value[0]["Name"] = format!("/{name}").into();
+    assert!(
+      parse_legacy_descriptor(
+        Path::new("engine"),
+        ID,
+        &serde_json::to_vec(&value).unwrap()
+      )
+      .unwrap()
+      .is_none()
+    );
+  }
+  let mut value = original;
+  value[0]["Config"]["Labels"][LABEL_SERVICE] = "unrelated-service".into();
+  assert!(
+    parse_legacy_descriptor(
+      Path::new("engine"),
+      ID,
+      &serde_json::to_vec(&value).unwrap()
+    )
+    .unwrap()
+    .is_none()
+  );
+}
+
+#[tokio::test]
+async fn legacy_inventory_is_passive_deduplicated_and_excludes_new_namespaces() {
+  let fixture = Fixture::new();
+  fixture.inspect(ID, &legacy_inspection(VpnProvider::Tailscale, ID));
+  let mut foreign = legacy_inspection(VpnProvider::Tailscale, OTHER_ID);
+  foreign[0]["Config"]["Labels"][LABEL_USER] = "other-user".into();
+  fixture.inspect(OTHER_ID, &foreign);
+  fs::write(
+    fixture.root.join("inventory"),
+    format!("{ID}\n{ID}\n{OTHER_ID}\n"),
+  )
+  .unwrap();
+  let inventory = list_legacy(&fixture.engine).await.unwrap();
+  assert_eq!(inventory.len(), 1);
+  assert_eq!(inventory[0].id, ID);
+  assert_eq!(fixture.calls().len(), 3);
+  assert!(fixture.calls()[0].contains("--filter label=io.ctl.service"));
+  assert!(
+    fixture
+      .calls()
+      .iter()
+      .all(|call| call.starts_with("ps ") || call.starts_with("container inspect "))
+  );
+}
+
+#[tokio::test]
+async fn legacy_inventory_rejects_overflow_and_engine_failures() {
+  let fixture = Fixture::new();
+  let mut inventory = String::new();
+  for id in 0..=MAX_CONTAINERS {
+    writeln!(inventory, "{id:064x}").unwrap();
+  }
+  fs::write(fixture.root.join("inventory"), inventory).unwrap();
+  assert!(
+    list_legacy(&fixture.engine)
+      .await
+      .unwrap_err()
+      .to_string()
+      .contains("safety limit")
+  );
+  assert_eq!(fixture.calls().len(), 1);
+  fs::write(fixture.root.join("inventory"), format!("{ID}\n")).unwrap();
+  fs::write(fixture.root.join("unavailable"), "").unwrap();
+  assert!(list_legacy(&fixture.engine).await.is_err());
+}
+
+#[tokio::test]
+async fn legacy_inventory_inspections_are_parallel_with_a_fixed_concurrency_limit() {
+  let fixture = Fixture::new();
+  fs::write(fixture.root.join("delay-inspect"), "").unwrap();
+  let mut inventory = String::new();
+  for id in 0..(INSPECT_CONCURRENCY * 2) {
+    let id = format!("{id:064x}");
+    writeln!(inventory, "{id}").unwrap();
+    fixture.inspect(&id, &legacy_inspection(VpnProvider::Tailscale, &id));
+  }
+  fs::write(fixture.root.join("inventory"), inventory).unwrap();
+  let observed = list_legacy(&fixture.engine).await.unwrap();
+  assert_eq!(observed.len(), INSPECT_CONCURRENCY * 2);
+  let parallelism = fs::read_to_string(fixture.root.join("concurrency"))
+    .unwrap()
+    .lines()
+    .map(|line| line.parse::<usize>().unwrap())
+    .max()
+    .unwrap();
+  assert!(parallelism > 1);
+  assert!(parallelism <= INSPECT_CONCURRENCY);
+  assert!(
+    fixture
+      .calls()
+      .iter()
+      .all(|call| call.starts_with("ps ") || call.starts_with("container inspect "))
+  );
 }
 
 #[test]

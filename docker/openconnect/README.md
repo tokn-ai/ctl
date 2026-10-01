@@ -81,8 +81,12 @@ Status JSON is a snapshot with `connections`, `supports_multiple`, and optional
 `discovery_warnings` when the container inventory could not be checked. Each
 connection includes `vpn_id`, `vpn_url`, `username`, `endpoint`, `container_name`,
 `running`, `connection_id`, `state`, immutable `container_id`, `shared_container`,
-and `locally_connected`. The table's USE column distinguishes this ctld from a
-container discovered without local heartbeat interest. Start and stop JSON return the affected
+and `locally_connected`. `container_kind` classifies observed runtimes as
+`shared` or `legacy`; older daemon replies omit it. The table's USE column
+distinguishes this ctld, shared containers, and passively observed legacy
+containers. Legacy readiness is checked without acquiring interest or reading
+credentials; disconnect through the original daemon before recreating it for
+sharing. Start and stop JSON return the affected
 connection. Saved connections use their profile ID as `vpn_id`; file-based starts
 receive a stable ID derived from the canonical settings path. The VPN server is its HTTPS origin; credentials,
 paths, queries, and fragments are omitted. `state` is `stopped`, `starting`,

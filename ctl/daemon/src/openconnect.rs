@@ -13,7 +13,7 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout};
 
 use crate::vpn_container::{self, ContainerDescriptor, Interest, RuntimeMetadata};
 
@@ -27,6 +27,7 @@ use diagnostics::Diagnostics;
 const IMAGE: &str = "localhost/ctl-openconnect:local";
 const START_TIMEOUT: Duration = Duration::from_secs(75);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const CREATOR_ADOPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Each daemon owns only its renewal task. Container lifetime is decided by
 /// the in-container watchdog after every interested daemon stops renewing.
@@ -122,6 +123,7 @@ impl ManagedVpn {
   }
 
   async fn poll_ready(&mut self) -> io::Result<()> {
+    let mut adoption_deadline = None;
     loop {
       let found = vpn_container::inspect_named(&self.engine, &self.container_name).await?;
       if let Some(container) = found {
@@ -168,12 +170,19 @@ impl ManagedVpn {
       } else if let Some(child) = &mut self.child
         && let Some(status) = child.try_wait()?
       {
-        let reason = self.diagnostic().await.unwrap_or(
-          "Build the image with docker/openconnect/run.sh build and check the VPN settings",
-        );
-        return Err(io::Error::other(format!(
-          "OpenConnect container exited ({status}): {reason}"
-        )));
+        // A conflicting run can exit before the engine publishes the winner's
+        // descriptor. Re-observe that reservation within a bounded window;
+        // attached CLI exit alone says nothing about shared container ownership.
+        let deadline =
+          adoption_deadline.get_or_insert_with(|| Instant::now() + CREATOR_ADOPTION_TIMEOUT);
+        if Instant::now() >= *deadline {
+          let reason = self.diagnostic().await.unwrap_or(
+            "Build the image with docker/openconnect/run.sh build and check the VPN settings",
+          );
+          return Err(io::Error::other(format!(
+            "OpenConnect container exited ({status}): {reason}"
+          )));
+        }
       }
       sleep(Duration::from_millis(250)).await;
     }
@@ -183,13 +192,65 @@ impl ManagedVpn {
 /// Probes readiness without acquiring or renewing interest in the container.
 pub(super) async fn discovered_status(container: &ContainerDescriptor) -> VpnStatus {
   let mut status = container.basic_status();
-  if container.running
-    && let Some(port) = container.port
+  update_discovered_readiness(
+    &container.engine,
+    &container.id,
+    container.port,
+    container.running,
+    &mut status,
+  )
+  .await;
+  status
+}
+
+/// Observes a legacy container without adopting it or reading its credentials.
+pub(super) async fn discovered_status_at(
+  engine: &Path,
+  id: &str,
+  name: &str,
+  port: Option<u16>,
+  running: bool,
+) -> VpnStatus {
+  let mut status = VpnStatus {
+    container_id: Some(id.into()),
+    container_name: Some(name.into()),
+    locally_connected: Some(false),
+    state: if running {
+      VpnState::Starting
+    } else {
+      VpnState::Stopped
+    },
+    ..VpnStatus::default()
+  };
+  update_discovered_readiness(engine, id, port, running, &mut status).await;
+  status
+}
+
+async fn update_discovered_readiness(
+  engine: &Path,
+  id: &str,
+  port: Option<u16>,
+  running: bool,
+  status: &mut VpnStatus,
+) {
+  // Never accept a mutable container name, including from passive legacy input.
+  let immutable = id.len() == 64
+    && id
+      .bytes()
+      .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+  status.running = false;
+  status.endpoint = None;
+  if running {
+    status.state = VpnState::Starting;
+  }
+  if running
+    && immutable
+    && let Some(port) = port.filter(|port| *port != 0)
   {
     let ready = timeout(
       COMMAND_TIMEOUT,
-      engine_command(&container.engine)
-        .args(["exec", &container.id, "/usr/local/bin/vpn-healthcheck"])
+      engine_command(engine)
+        .args(["exec", id, "/usr/local/bin/vpn-healthcheck"])
         .stdout(Stdio::null())
         .status(),
     )
@@ -204,7 +265,6 @@ pub(super) async fn discovered_status(container: &ContainerDescriptor) -> VpnSta
       .running
       .then(|| format!("socks5h://127.0.0.1:{port}"));
   }
-  status
 }
 
 impl Drop for ManagedVpn {

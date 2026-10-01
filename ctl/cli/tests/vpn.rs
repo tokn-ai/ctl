@@ -720,6 +720,29 @@ async fn shared_container_status_distinguishes_local_interest_and_keeps_endpoint
 }
 
 #[tokio::test]
+async fn legacy_container_status_is_observed_without_claiming_shared_ownership() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let legacy = VpnStatus {
+    vpn_id: Some("container-example".into()),
+    connection_id: None,
+    container_kind: Some(ctld_ipc::VpnContainerKind::Legacy),
+    shared_container: false,
+    locally_connected: Some(false),
+    ..connected()
+  };
+  let (output, _) = exchange(&fixture, &listener, &["vpn", "status"], response(legacy)).await;
+  assert!(output.status.success());
+  let text = String::from_utf8(output.stdout).unwrap();
+  assert!(text.lines().next().unwrap().contains("USE"));
+  assert!(text.contains("legacy"));
+  assert!(text.contains("connected"));
+  assert!(text.contains("socks5h://127.0.0.1:43210"));
+  assert!(!text.contains("shared"));
+  assert!(!text.contains("this ctld"));
+}
+
+#[tokio::test]
 async fn default_vpn_client_honors_the_vpn_socket_override() {
   let fixture = Fixture::new();
   let selected = fixture.directory.join("vpn-override.sock");

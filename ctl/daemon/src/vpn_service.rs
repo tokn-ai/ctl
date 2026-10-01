@@ -17,6 +17,7 @@ use crate::tailscale;
 type Reply = oneshot::Sender<Result<VpnStatus, String>>;
 const MAX_CONNECTIONS: usize = 16;
 const MAX_WAITING_REPLIES: usize = 16;
+const DISCOVERY_CONCURRENCY: usize = 16;
 
 enum Request {
   Start {
@@ -97,6 +98,7 @@ impl VpnService {
     Ok(released)
   }
 
+  #[cfg(test)]
   pub(super) async fn status(&self) -> Result<VpnStatus, String> {
     Ok(
       self
@@ -277,12 +279,41 @@ fn unavailable() -> String {
 
 async fn discover_containers() -> Result<Vec<VpnStatus>, String> {
   let engine = openconnect::find_engine().map_err(|error| error.to_string())?;
-  let containers = crate::vpn_container::list(&engine)
-    .await
-    .map_err(|error| error.to_string())?;
+  let (containers, legacy) = tokio::try_join!(
+    crate::vpn_container::list(&engine),
+    crate::vpn_container::list_legacy(&engine),
+  )
+  .map_err(|error| error.to_string())?;
+  let mut pending = containers
+    .into_iter()
+    .map(|container| DiscoveredContainer::Shared(Box::new(container)))
+    .chain(legacy.into_iter().map(DiscoveredContainer::Legacy));
   let mut inspections = tokio::task::JoinSet::new();
-  for container in containers {
-    inspections.spawn(async move {
+  let mut statuses = Vec::new();
+  loop {
+    while inspections.len() < DISCOVERY_CONCURRENCY {
+      let Some(container) = pending.next() else {
+        break;
+      };
+      inspections.spawn(observe_container(container));
+    }
+    let Some(result) = inspections.join_next().await else {
+      break;
+    };
+    statuses.push(result.map_err(|error| error.to_string())?);
+  }
+  statuses.sort_by(|left, right| left.vpn_id.cmp(&right.vpn_id));
+  Ok(statuses)
+}
+
+enum DiscoveredContainer {
+  Shared(Box<crate::vpn_container::ContainerDescriptor>),
+  Legacy(crate::vpn_container::LegacyContainerDescriptor),
+}
+
+async fn observe_container(container: DiscoveredContainer) -> VpnStatus {
+  match container {
+    DiscoveredContainer::Shared(container) => {
       let mut status = if container.metadata.provider == VpnProvider::Openconnect {
         openconnect::discovered_status(&container).await
       } else {
@@ -306,14 +337,57 @@ async fn discover_containers() -> Result<Vec<VpnStatus>, String> {
       }
       status.locally_connected = Some(false);
       status
-    });
+    }
+    DiscoveredContainer::Legacy(container) => observe_legacy_container(container).await,
   }
-  let mut statuses = Vec::new();
-  while let Some(result) = inspections.join_next().await {
-    statuses.push(result.map_err(|error| error.to_string())?);
+}
+
+async fn observe_legacy_container(
+  container: crate::vpn_container::LegacyContainerDescriptor,
+) -> VpnStatus {
+  let mut status = VpnStatus {
+    state: if container.running || container.state == "created" {
+      VpnState::Starting
+    } else {
+      VpnState::Stopped
+    },
+    ..VpnStatus::default()
+  };
+  if container.running {
+    match container.provider {
+      VpnProvider::Openconnect => {
+        status = openconnect::discovered_status_at(
+          &container.engine,
+          &container.id,
+          &container.name,
+          container.port,
+          container.running,
+        )
+        .await;
+      }
+      VpnProvider::Tailscale => {
+        if let Some(port) = container.port {
+          status =
+            tailscale::discovered_status(&container.engine, &container.id, &container.name, port)
+              .await;
+        }
+      }
+    }
   }
-  statuses.sort_by(|left, right| left.vpn_id.cmp(&right.vpn_id));
-  Ok(statuses)
+  status.provider = container.provider;
+  status.vpn_id = Some(format!("container-{}", container.id));
+  status.container_id = Some(container.id);
+  status.container_name = Some(container.name);
+  status.connection_id = None;
+  status.shared_container = false;
+  status.container_kind = Some(ctld_ipc::VpnContainerKind::Legacy);
+  status.locally_connected = Some(false);
+  let migration = "This legacy VPN does not support shared heartbeats. Disconnect it through the ctld that started it, then reconnect to enable sharing.";
+  status.message = Some(match status.message {
+    Some(message) => format!("{migration} {message}"),
+    None => migration.into(),
+  });
+  status
 }
 
 fn merge_discovered(snapshot: &mut VpnSnapshot, discovered: Vec<VpnStatus>) {

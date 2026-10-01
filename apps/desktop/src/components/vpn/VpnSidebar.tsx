@@ -31,9 +31,9 @@ export function VpnSidebar({ model }: Props) {
           </button>
         </header>
         <div className="vpn-sidebar-body">
-          {model.statuses.length === 0 && (!model.status_loaded || model.status_stale) ? (
+          {model.statuses.length === 0 && (!model.status_loaded || model.status_stale || model.discovery_warnings.length > 0) ? (
             <div className="vpn-notice">
-              <p role="status">{model.status_stale ? "VPN status unavailable." : "Checking VPN…"}</p>
+              <p role="status">{model.status_stale || model.discovery_warnings.length > 0 ? "VPN status unavailable." : "Checking VPN…"}</p>
             </div>
           ) : null}
           {model.status_loaded && !model.supports_multiple ? (

@@ -14,7 +14,9 @@ if command=='run':
     sys.stderr.write((root/'failure').read_text())
     sys.exit(1)
   try: (root/'reservation').mkdir()
-  except FileExistsError: sys.exit(1)
+  except FileExistsError:
+    (root/'name_conflict').touch()
+    sys.exit(1)
   labels={}
   for i,arg in enumerate(args):
     if arg=='--label':
@@ -22,6 +24,14 @@ if command=='run':
   name=args[args.index('--name')+1]
   container={'Id':'a'*64,'Name':'/'+name,'Config':{'Labels':labels},'State':{'Running':True,'Status':'running','ExitCode':0,'Health':{'Status':'healthy'}},'NetworkSettings':{'Ports':{'1080/tcp':[{'HostIp':'127.0.0.1','HostPort':'49152'}]}}}
   if (root/'created').exists(): container['State'].update(Running=False,Status='created')
+  if (root/'delayed_publication').exists():
+    # Make the conflicting run exit before inspect can observe the winner.
+    # Multiple probes force startup to tolerate a pending name reservation.
+    while True:
+      probes=root/'unpublished.inspect'
+      if (root/'name_conflict').exists() and probes.exists() and len(probes.read_text().splitlines()) >= 3:
+        break
+      time.sleep(0.01)
   temporary=root/'container.pending'
   temporary.write_text(json.dumps([container]))
   temporary.replace(path)
@@ -31,6 +41,8 @@ if command=='run':
   while True: time.sleep(0.05)
 elif command=='container' and args[1]=='inspect':
   if not path.exists():
+    if (root/'name_conflict').exists():
+      with (root/'unpublished.inspect').open('a') as stream: stream.write('missing\n')
     sys.stderr.write('Error: No such container\n'); sys.exit(1)
   data=json.loads(path.read_text())
   if (root/'exited').exists(): data[0]['State'].update(Running=False,Status='exited')
@@ -38,6 +50,7 @@ elif command=='container' and args[1]=='inspect':
 elif command=='ps':
   if path.exists(): print('a'*64)
 elif command=='exec':
+  with (root/'exec.calls').open('a') as stream: stream.write('\n'.join(args)+'\n')
   if args[-1]=='/run/ctl/heartbeat.sh':
     with (root/'heartbeats').open('a') as stream: stream.write('ping\n')
   elif not (root/'ready').exists(): sys.exit(1)

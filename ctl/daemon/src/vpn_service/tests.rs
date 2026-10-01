@@ -9,6 +9,32 @@ use super::*;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[tokio::test]
+async fn legacy_observations_do_not_claim_a_saved_profile_or_local_interest() {
+  let status = observe_legacy_container(crate::vpn_container::LegacyContainerDescriptor {
+    engine: PathBuf::from("/does-not-exist"),
+    id: "a".repeat(64),
+    name: format!("ctld-tailscale-{}", "b".repeat(64)),
+    provider: VpnProvider::Tailscale,
+    port: None,
+    running: false,
+    state: "created".into(),
+  })
+  .await;
+  assert_eq!(
+    status.container_kind,
+    Some(ctld_ipc::VpnContainerKind::Legacy)
+  );
+  assert!(!status.shared_container);
+  assert_eq!(status.locally_connected, Some(false));
+  assert_eq!(status.connection_id, None);
+  assert_eq!(status.vpn_id, Some(format!("container-{}", "a".repeat(64))));
+  assert_eq!(status.state, VpnState::Starting);
+  assert!(!status.running);
+  assert!(status.endpoint.is_none());
+  assert!(status.message.unwrap().contains("ctld that started it"));
+}
+
 #[test]
 fn distinct_immutable_containers_are_not_hidden_by_a_reused_profile_id() {
   let mut snapshot = VpnSnapshot {

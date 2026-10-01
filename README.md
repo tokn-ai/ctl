@@ -15,6 +15,35 @@ the system OpenSSH client. Unix hosts use the default remote command; Windows
 hosts use `--remote-platform windows` and the default cmd.exe SSH shell.
 Windows desktop support remains pending.
 
+## Agent skills
+
+The `ctl` binary bundles the [parent ctl skill](skills/ctl/SKILL.md), focused
+child skills, and their supporting references. Read them without a source
+checkout, daemon, configuration, or authentication:
+
+```sh
+ctl skill
+ctl skill ctl-task
+ctl skill task --file references/definitions.md
+ctl skill --file references/setup.md
+ctl skill --list
+```
+
+`ctl skill` prints the parent; selecting a name prints that skill's `SKILL.md`.
+`--file PATH` selects a bundled Markdown file within the chosen skill, and
+`--list` lists all bundled name/file pairs. Output preserves the document's
+exact bytes. Short names `host`, `session`, `task`, `port`, and `vpn` are aliases
+for their `ctl-` names. Read only the skill or reference needed for the task.
+
+The parent covers workflow selection, one-off commands, file copies, and setup.
+It routes to separate skills that can also be used independently:
+
+- [ctl-host](skills/ctl-host/SKILL.md) (`ctl skill ctl-host`): saved hosts, methods, and connection status.
+- [ctl-session](skills/ctl-session/SKILL.md) (`ctl skill ctl-session`): persistent shells, sessions, and panes.
+- [ctl-task](skills/ctl-task/SKILL.md) (`ctl skill ctl-task`): managed tasks and reusable local definitions.
+- [ctl-port](skills/ctl-port/SKILL.md) (`ctl skill ctl-port`): daemon-owned local SSH forwards.
+- [ctl-vpn](skills/ctl-vpn/SKILL.md) (`ctl skill ctl-vpn`): local OpenConnect and Tailscale containers.
+
 ## Build
 
 ```sh
@@ -510,8 +539,9 @@ Status prints a table of VPN IDs, providers, states, servers, usernames, and ran
 allocated loopback SOCKS5 endpoints. Multiple VPNs can run independently. Use the
 ID from the table to stop one; an untargeted stop requires at most one active VPN.
 Add `--json` for scripts. Start launches `ctld`
-if needed. Stop leaves `ctld` running, and
-the container also exits when `ctld` exits. See the
+if needed. Stop leaves `ctld` running and releases that daemon's heartbeat
+interest. A shared container remains available while another daemon uses it,
+then exits after the final heartbeat expires. See the
 [OpenConnect setup](docker/openconnect/README.md) for building the image and
 configuring the private env file, or the [Tailscale guide](docker/tailscale/README.md)
 for browser sign-in and persistent container state. The desktop VPN page manages
@@ -625,7 +655,7 @@ remote user's PATH. Enable Windows OpenSSH Server with its default `cmd.exe`
 shell, then select the server platform explicitly from either client platform:
 
 ```sh
-ctl --host windows-host --remote-platform windows rmux new development -- cmd.exe /D /Q
+ctl --host windows-host --remote-platform windows rmux new --name development -- cmd.exe /D /Q
 ctl --host windows-host --remote-platform windows rmux attach development
 ctl --host windows-host --remote-platform windows task list
 ```

@@ -125,7 +125,7 @@ mod tests {
       read::<_, ClientMessage>(&mut reader).await.unwrap(),
       ClientMessage::PrepareRmuxRestart { .. }
     ));
-    assert!(!reader.is_empty());
+    assert_ne!(reader, &[] as &[u8]);
     assert!(matches!(
       read::<_, ClientMessage>(&mut reader).await.unwrap(),
       ClientMessage::Confirm {}

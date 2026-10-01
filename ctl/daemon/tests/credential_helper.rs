@@ -30,7 +30,7 @@ fn invalid_request_returns_only_a_bounded_error_without_starting_a_daemon() {
     // All fixtures are rejected before touching any real Keychain item.
     let output = request(&bytes);
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::<u8>::new());
     assert!(output.stdout.len() <= MAX_RESPONSE_BYTES);
     let response: Response = serde_json::from_slice(&output.stdout).unwrap();
     assert!(

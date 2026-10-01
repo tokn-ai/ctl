@@ -215,7 +215,7 @@ async fn socks_hops_preserve_order_and_resolve_names_remotely() {
     stream.write_all(b"SSH-2.0-fixture\r\n").await.unwrap();
     let mut received = Vec::new();
     stream.read_to_end(&mut received).await.unwrap();
-    assert!(received.is_empty());
+    assert_eq!(received, Vec::<u8>::new());
   });
   let mut second = socks_gateway(address);
   second.destination = "second.invalid".into();
@@ -243,7 +243,7 @@ async fn socks_authentication_request_is_declined_without_credentials() {
     stream.write_all(&[5, 2]).await.unwrap();
     let mut received = Vec::new();
     stream.read_to_end(&mut received).await.unwrap();
-    assert!(received.is_empty());
+    assert_eq!(received, Vec::<u8>::new());
   });
   let result = check(&[socks_gateway(address)], &endpoint(address)).await;
   assert_eq!(

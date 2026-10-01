@@ -1,0 +1,3 @@
+interface:
+  display_name: "ctl"
+  short_description: "Run and manage local or remote work with ctl"

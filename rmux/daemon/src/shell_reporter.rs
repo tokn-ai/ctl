@@ -777,7 +777,7 @@ mod tests {
     let mut receive = |report| reports.push(report);
     parser.push(&record, &mut receive);
 
-    assert!(reports.is_empty());
+    assert_eq!(reports, Vec::<ShellReport>::new());
   }
 
   #[test]
@@ -888,7 +888,7 @@ mod tests {
     let mut receive = |report| reports.push(report);
     parser.push(&record, &mut receive);
 
-    assert!(reports.is_empty());
+    assert_eq!(reports, Vec::<ShellReport>::new());
   }
 
   #[test]
@@ -909,7 +909,7 @@ mod tests {
     let mut receive = |report| reports.push(report);
     parser.push(&record, &mut receive);
 
-    assert!(reports.is_empty());
+    assert_eq!(reports, Vec::<ShellReport>::new());
   }
 
   #[test]

@@ -411,6 +411,9 @@ mod tests {
     assert!(!confirmations.contains_key("expired"));
     assert!(take_confirmation(&mut confirmations, "main", "ready", now).is_ok());
     assert!(take_confirmation(&mut confirmations, "main", "ready", now).is_err());
-    assert!(confirmations.is_empty());
+    assert_eq!(
+      confirmations.keys().collect::<Vec<_>>(),
+      Vec::<&String>::new()
+    );
   }
 }

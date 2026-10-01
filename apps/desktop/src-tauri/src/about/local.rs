@@ -411,7 +411,7 @@ mod tests {
     )
     .await
     .unwrap_err();
-    assert!(!error.is_empty());
+    assert_ne!(error, String::new());
   }
 
   #[test]

@@ -160,7 +160,7 @@ fn request_budget_leaves_room_for_json_escaping() {
     })
     .collect();
   let paths = bounded_paths(&names);
-  assert!(!paths.is_empty());
+  assert_ne!(paths, Vec::<String>::new());
   assert!(paths.len() < 512);
   let encoded = serde_json::to_vec(&Request::List { paths }).unwrap();
   assert!(encoded.len() <= ctld_ipc::identities::MAX_REQUEST_BYTES);
@@ -267,7 +267,7 @@ fn identity_file_none_is_an_intentional_absence_not_a_discovery_error() {
     None,
   );
   assert!(hints.complete);
-  assert!(hints.names.is_empty());
+  assert_eq!(hints.names, BTreeMap::<String, BTreeSet<String>>::new());
 }
 
 #[test]

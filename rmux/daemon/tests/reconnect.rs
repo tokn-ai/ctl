@@ -277,7 +277,7 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
     } = required_message(&mut attachment).await?
     {
       assert_eq!(sequence_start, checkpoint.sequence);
-      assert!(!data.is_empty());
+      assert_ne!(data, Vec::<u8>::new());
       assert!(data.len() <= 4 * 1024);
       break sequence_end;
     }
@@ -313,7 +313,7 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
     } = required_message(&mut attachment).await?
     {
       assert_eq!(sequence_start, first_sequence_end);
-      assert!(!data.is_empty());
+      assert_ne!(data, Vec::<u8>::new());
       acknowledge_output(&mut attachment, sequence_end).await?;
       break;
     }

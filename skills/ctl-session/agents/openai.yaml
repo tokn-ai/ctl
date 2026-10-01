@@ -1,0 +1,3 @@
+interface:
+  display_name: "ctl Sessions"
+  short_description: "Manage persistent ctl shells and terminal sessions"

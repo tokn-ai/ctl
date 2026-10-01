@@ -465,7 +465,7 @@ fn catalog_migration_retries_after_catalog_commit_and_keeps_original_backup() {
   let loaded = fixture.repository().load().unwrap();
   assert_eq!(loaded_catalog.document, catalog());
   assert_eq!(loaded.document.schema_version, 8);
-  assert!(loaded.document.hosts.is_empty());
+  assert_eq!(loaded.document.hosts, Vec::<WorkspaceHost>::new());
   assert_eq!(loaded.document.sessions, old.sessions);
   assert_eq!(loaded.document.tabs, old.tabs);
   assert_eq!(
@@ -549,14 +549,9 @@ fn host_and_gateway_import_is_one_validated_batch() {
   let saved = fixture.repository().load_hosts().unwrap();
   assert_eq!(saved.document.ssh_gateways, vec![gateway]);
   assert_eq!(saved.document.hosts, vec![old.hosts[1].clone()]);
-  assert!(
-    fixture
-      .repository()
-      .load()
-      .unwrap()
-      .document
-      .ssh_gateways
-      .is_empty()
+  assert_eq!(
+    fixture.repository().load().unwrap().document.ssh_gateways,
+    Vec::<WorkspaceSshGateway>::new()
   );
 }
 

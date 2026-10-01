@@ -1119,7 +1119,7 @@ mod tests {
       .next()
       .unwrap();
     let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
-    assert!(remainder.is_empty());
+    assert_eq!(remainder, &[] as &[u8]);
     let bytes = pairs
       .iter()
       .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())

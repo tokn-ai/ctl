@@ -157,7 +157,7 @@ fn sidecar_scope_and_account_must_match_validated_metadata() {
     ),
   ]);
   assert!(index.required());
-  assert!(index.credentials.is_empty());
+  assert_eq!(index.credentials, Vec::<StoredCredential>::new());
   let mut wrong_service = indexed_credential();
   wrong_service
     .attributes
@@ -180,7 +180,10 @@ fn imports_only_owned_credentials_and_retains_source_dates() {
   let imported = imported_records(vec![source, record("unrelated", "unrelated", "unrelated")]);
   assert!(imported.complete);
   assert_eq!(imported.credentials, [expected]);
-  assert!(imported.identities.is_empty());
+  assert_eq!(
+    imported.identities.keys().collect::<Vec<_>>(),
+    Vec::<&String>::new()
+  );
 }
 
 #[test]
@@ -235,14 +238,17 @@ fn identity_sidecar_requires_canonical_path_digest_and_exact_file_binding() {
     &serde_json::to_string(&metadata).unwrap(),
   )]);
   assert!(imported.complete);
-  assert!(imported.credentials.is_empty());
+  assert_eq!(imported.credentials, Vec::<StoredCredential>::new());
   assert!(imported.identities.contains_key(&identity_id));
   let wrong = project(vec![
     marker(),
     record(SERVICE, &identity_account(&"c".repeat(64)), &comment),
   ]);
   assert!(wrong.required());
-  assert!(wrong.identities.is_empty());
+  assert_eq!(
+    wrong.identities.keys().collect::<Vec<_>>(),
+    Vec::<&String>::new()
+  );
 }
 
 #[test]
@@ -264,7 +270,10 @@ fn partial_import_recovers_valid_rows_beside_malformed_owned_items() {
     imported.credentials[0].credential_id,
     expected.credential_id
   );
-  assert!(imported.identities.is_empty());
+  assert_eq!(
+    imported.identities.keys().collect::<Vec<_>>(),
+    Vec::<&String>::new()
+  );
 }
 
 #[test]

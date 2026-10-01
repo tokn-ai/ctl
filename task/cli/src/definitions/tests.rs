@@ -110,13 +110,9 @@ async fn direct_save_is_offline_and_updates_and_removal_require_matching_revisio
   assert!(catalog.remove("renamed", &saved.revision).is_err());
   assert_eq!(catalog.lookup("renamed").unwrap(), updated);
   catalog.remove("renamed", &updated.revision).unwrap();
-  assert!(
-    directory
-      .repository()
-      .load()
-      .unwrap()
-      .definitions
-      .is_empty()
+  assert_eq!(
+    directory.repository().load().unwrap().definitions,
+    Vec::<SavedTaskDefinition>::new()
   );
 }
 

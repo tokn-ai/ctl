@@ -4,6 +4,7 @@ mod host;
 mod openssh;
 #[cfg(unix)]
 mod port;
+mod skill;
 #[cfg(unix)]
 mod ssh_broker;
 mod table;
@@ -41,6 +42,8 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Print bundled agent skills and supporting guides without connecting.
+  Skill(skill::Arguments),
   /// Manage saved hosts and inspect their connection status.
   Host {
     #[command(subcommand)]

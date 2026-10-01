@@ -1,0 +1,3 @@
+interface:
+  display_name: "ctl VPN"
+  short_description: "Manage local OpenConnect and Tailscale VPNs"

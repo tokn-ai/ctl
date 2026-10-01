@@ -231,7 +231,15 @@ async fn restarted_state_observes_saved_mux_without_adopting_or_config_evaluatio
     })
   ));
   master.await.unwrap();
-  assert!(restarted.configured_connections.lock().unwrap().is_empty());
+  assert_eq!(
+    restarted
+      .configured_connections
+      .lock()
+      .unwrap()
+      .keys()
+      .collect::<Vec<_>>(),
+    Vec::<&String>::new()
+  );
 
   // A disappeared endpoint proves absence; discovery must never start SSH.
   fs::remove_file(fixture.endpoint().control_path).unwrap();

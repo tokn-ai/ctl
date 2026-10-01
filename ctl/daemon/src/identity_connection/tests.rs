@@ -71,7 +71,15 @@ async fn a_remote_key_prompt_cannot_load_or_save_a_key_outside_the_prepared_iden
       Zeroizing::new("login secret".into()),
     ),
   ]);
-  assert!(prepared.verify_captured(&mut captured).await.is_empty());
+  assert_eq!(
+    prepared
+      .verify_captured(&mut captured)
+      .await
+      .iter()
+      .map(VerifiedPassphrase::name)
+      .collect::<Vec<_>>(),
+    Vec::<String>::new()
+  );
   assert!(prepared.agent.is_none());
   assert_eq!(captured.len(), 1);
   assert!(captured.contains_key("alice@example.test's password:"));
@@ -107,7 +115,7 @@ async fn a_remote_key_prompt_always_requests_user_input_instead_of_keychain_auto
     )
     .await
     .unwrap();
-    assert!(attempted.is_empty());
+    assert_eq!(attempted, HashSet::<String>::new());
     assert_eq!(captured.len(), 1);
   });
   let Some(ctld_ipc::ServerMessage::Prompt {

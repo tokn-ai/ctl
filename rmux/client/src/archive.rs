@@ -185,7 +185,14 @@ mod tests {
     reopened.delete("offline-host", "missing-session")?;
     assert_eq!(reopened.list()?.len(), 1);
     reopened.delete("another-host", "missing-session")?;
-    assert!(reopened.list()?.is_empty());
+    assert_eq!(
+      reopened
+        .list()?
+        .into_iter()
+        .map(|archive| (archive.host_key, archive.session_id))
+        .collect::<Vec<_>>(),
+      Vec::<(String, String)>::new()
+    );
     fs::remove_dir_all(directory)
   }
 }

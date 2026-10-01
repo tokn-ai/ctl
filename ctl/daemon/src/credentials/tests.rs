@@ -84,7 +84,7 @@ fn response_limit_preserves_valid_json_and_reports_truncation() {
   let Response::Inventory { inventory } = serde_json::from_slice(&output).unwrap() else {
     panic!("expected inventory");
   };
-  assert!(!inventory.credentials.is_empty());
+  assert_ne!(inventory.credentials, Vec::<StoredCredential>::new());
   assert!(inventory.credentials.len() < 1024);
   assert!(!inventory.complete);
   assert!(inventory.warning.is_some());

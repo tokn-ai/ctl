@@ -234,7 +234,10 @@ mod tests {
         .await
         .is_err()
     );
-    assert!(PENDING.lock().await.is_empty());
+    assert_eq!(
+      PENDING.lock().await.keys().collect::<Vec<_>>(),
+      Vec::<&Key>::new()
+    );
   }
 
   #[test]

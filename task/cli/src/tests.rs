@@ -1,7 +1,7 @@
 use super::*;
+use ctl_task_proto::{DesiredState, InteractiveRun, LogEvent, LogStream, RunInfo, RunState};
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use task_proto::{DesiredState, InteractiveRun, LogEvent, LogStream, RunInfo, RunState};
 use tokio::io::DuplexStream;
 use tokio::task::JoinHandle;
 
@@ -89,13 +89,13 @@ impl Connector for MockConnector {
     self.local
   }
 
-  fn attach_interactive(&self, session: String, rmux_socket: PathBuf) -> AttachFuture<'_> {
+  fn attach_interactive(&self, session: String, ctmux_socket: PathBuf) -> AttachFuture<'_> {
     Box::pin(async move {
       self
         .attachments
         .lock()
         .unwrap()
-        .push((session, rmux_socket));
+        .push((session, ctmux_socket));
       Ok(())
     })
   }
@@ -315,7 +315,7 @@ async fn interactive_attachment_is_delegated_to_the_selected_target() {
     exit_code: None,
     interactive: Some(InteractiveRun {
       released: false,
-      rmux_socket: PathBuf::from("/remote/rmux.sock"),
+      ctmux_socket: PathBuf::from("/remote/ctmux.sock"),
       instance_id: "instance-42".into(),
       session_id: Some("session-42".into()),
     }),
@@ -340,7 +340,7 @@ async fn interactive_attachment_is_delegated_to_the_selected_target() {
   connector.assert_complete(1).await;
   assert_eq!(
     *connector.attachments.lock().unwrap(),
-    vec![("session-42".into(), PathBuf::from("/remote/rmux.sock"))]
+    vec![("session-42".into(), PathBuf::from("/remote/ctmux.sock"))]
   );
 }
 
@@ -360,8 +360,8 @@ impl DefinitionDirectory {
     }
   }
 
-  fn repository(&self) -> task_store::Repository {
-    task_store::Repository::new(task_store::project_path(&self.0).unwrap())
+  fn repository(&self) -> ctl_task_store::Repository {
+    ctl_task_store::Repository::new(ctl_task_store::project_path(&self.0).unwrap())
   }
 }
 

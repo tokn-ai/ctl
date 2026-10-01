@@ -32,7 +32,7 @@ describe("connection targets", () => {
   it("gives equal daemon session ids distinct composite identities", () => {
     const local = session(LOCAL_TARGET, "same-id");
     const remote = session(
-      { kind: "ssh", destination: "rmux-docker" },
+      { kind: "ssh", destination: "ctmux-docker" },
       "same-id",
     );
 
@@ -42,7 +42,7 @@ describe("connection targets", () => {
   });
 
   it("normalizes aliases and rejects empty or control-bearing destinations", () => {
-    expect(normalizeSshDestination("  rmux-docker ")).toBe("rmux-docker");
+    expect(normalizeSshDestination("  ctmux-docker ")).toBe("ctmux-docker");
     expect(normalizeSshDestination("  ")).toBeNull();
     expect(normalizeSshDestination("host\ncommand")).toBeNull();
   });
@@ -57,19 +57,19 @@ describe("connection targets", () => {
   it("reads unique normalized SSH destinations from legacy storage", () => {
     const storage = memoryStorage();
     storage.setItem(
-      "rmux.remote_hosts",
+      "ctmux.remote_hosts",
       JSON.stringify({
         schema_version: 2,
         ssh_hosts: [
-          { destination: "rmux-docker" },
-          { destination: " rmux-docker " },
+          { destination: "ctmux-docker" },
+          { destination: " ctmux-docker " },
           { destination: "lab" },
         ],
       }),
     );
 
     expect(loadRemoteTargets(storage)).toEqual([
-      { kind: "ssh", destination: "rmux-docker" },
+      { kind: "ssh", destination: "ctmux-docker" },
       { kind: "ssh", destination: "lab" },
     ]);
   });
@@ -77,23 +77,23 @@ describe("connection targets", () => {
   it("reads app-local SSH settings from legacy schema two", () => {
     const storage = memoryStorage();
     const target = appLocalSshTarget({
-      alias: "rmux-remote-test",
+      alias: "ctmux-remote-test",
       hostname: "127.0.0.1",
-      user: "rmux",
+      user: "ctmux",
       port: 2222,
       identity_file: "~/.ssh/local.id_rsa",
     });
     expect(target).not.toBeNull();
 
     storage.setItem(
-      "rmux.remote_hosts",
+      "ctmux.remote_hosts",
       JSON.stringify({
         schema_version: 2,
         ssh_hosts: [
           {
-            destination: "rmux-remote-test",
+            destination: "ctmux-remote-test",
             hostname: "127.0.0.1",
-            user: "rmux",
+            user: "ctmux",
             port: 2222,
             identity_file: "~/.ssh/local.id_rsa",
           },
@@ -118,7 +118,7 @@ describe("connection targets", () => {
   it("migrates schema-one destination lists on read", () => {
     const storage = memoryStorage();
     storage.setItem(
-      "rmux.remote_hosts",
+      "ctmux.remote_hosts",
       JSON.stringify({ schema_version: 1, ssh_destinations: ["legacy"] }),
     );
 
@@ -129,11 +129,11 @@ describe("connection targets", () => {
 
   it("ignores malformed or unknown persisted schemas", () => {
     const storage = memoryStorage();
-    storage.setItem("rmux.remote_hosts", "not-json");
+    storage.setItem("ctmux.remote_hosts", "not-json");
     expect(loadRemoteTargets(storage)).toEqual([]);
 
     storage.setItem(
-      "rmux.remote_hosts",
+      "ctmux.remote_hosts",
       JSON.stringify({ schema_version: 2, ssh_destinations: ["host"] }),
     );
     expect(loadRemoteTargets(storage)).toEqual([]);
@@ -144,13 +144,13 @@ describe("connection targets", () => {
       inactiveSshConfigDestinations(
         [
           { destination: " workstation " },
-          { destination: "rmux-docker" },
+          { destination: "ctmux-docker" },
           { destination: "workstation" },
           { destination: "host\ncommand" },
         ],
         [LOCAL_TARGET, { kind: "ssh", destination: "workstation" }],
       ),
-    ).toEqual(["rmux-docker"]);
+    ).toEqual(["ctmux-docker"]);
   });
 });
 

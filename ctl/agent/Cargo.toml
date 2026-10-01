@@ -4,25 +4,25 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-component-info.workspace = true
+ctl-component-info.workspace = true
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 ctl-proto.workspace = true
 clap.workspace = true
-rmux-ipc.workspace = true
-task-ipc.workspace = true
+ctmux-ipc.workspace = true
+ctl-task-ipc.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-ctl-core.workspace = true
-rmux-client.workspace = true
-rmux-proto.workspace = true
-rmuxd = { path = "../../rmux/daemon" }
-task-proto.workspace = true
-taskd = { path = "../../task/daemon" }
+ctl-client.workspace = true
+ctmux-client.workspace = true
+ctmux-proto.workspace = true
+ctmuxd = { path = "../../ctmux/daemon" }
+ctl-task-proto.workspace = true
+ctl-taskd = { path = "../../task/daemon" }
 
 [lints]
 workspace = true

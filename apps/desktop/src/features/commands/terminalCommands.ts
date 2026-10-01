@@ -104,8 +104,8 @@ export function buildTerminalCommands(
   const daemonRestartInteractionBlocked =
     context.daemonRestartConfirmationPending || context.restartingDaemon;
   const daemonRestartInteractionDisabledReason = context.restartingDaemon
-    ? "rmuxd is restarting."
-    : "Confirm or cancel the pending rmuxd restart first.";
+    ? "ctmuxd is restarting."
+    : "Confirm or cancel the pending ctmuxd restart first.";
   const sessionFor = (args: CommandArguments = {}) =>
     args.session_key === undefined
       ? activeSession
@@ -130,12 +130,12 @@ export function buildTerminalCommands(
   const daemonRestartBlocked =
     context.creating || context.newShellOpen || daemonRestartInteractionBlocked;
   const daemonRestartDisabledReason = context.restartingDaemon
-    ? "rmuxd is already restarting."
+    ? "ctmuxd is already restarting."
     : context.daemonRestartConfirmationPending
       ? daemonRestartInteractionDisabledReason
       : context.creating
         ? "Wait for the shell being created to finish."
-        : "Close the new-shell dialog before restarting rmuxd.";
+        : "Close the new-shell dialog before restarting ctmuxd.";
 
   const commands: AppCommand[] = [
     {
@@ -206,9 +206,9 @@ export function buildTerminalCommands(
         !context.daemonRestartConfirmationPending &&
         !context.restartingDaemon,
       disabledReason: context.restartingDaemon
-        ? "rmuxd is restarting."
+        ? "ctmuxd is restarting."
         : context.daemonRestartConfirmationPending
-          ? "Confirm or cancel the pending rmuxd restart first."
+          ? "Confirm or cancel the pending ctmuxd restart first."
           : context.creating
             ? "A shell is being created."
             : "The new-shell dialog is already open.",
@@ -227,9 +227,9 @@ export function buildTerminalCommands(
         !context.daemonRestartConfirmationPending &&
         !context.restartingDaemon,
       disabledReason: context.restartingDaemon
-        ? "rmuxd is restarting."
+        ? "ctmuxd is restarting."
         : context.daemonRestartConfirmationPending
-          ? "Confirm or cancel the pending rmuxd restart first."
+          ? "Confirm or cancel the pending ctmuxd restart first."
           : context.creating
             ? "A terminal tab is already being created."
             : "The current shell has not reported its working directory.",
@@ -394,9 +394,9 @@ export function buildTerminalCommands(
     {
       id: COMMAND_IDS.restartDaemon,
       category: "Daemon",
-      title: "Restart rmuxd",
+      title: "Restart ctmuxd",
       detail:
-        "Terminate every local rmux session, including other apps’ sessions, and start a new daemon.",
+        "Terminate every local ctmux session, including other apps’ sessions, and start a new daemon.",
       keywords: ["daemon", "restart", "protocol", "version", "recover"],
       enabled: !daemonRestartBlocked,
       disabledReason: daemonRestartDisabledReason,

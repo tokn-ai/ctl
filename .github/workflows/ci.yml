@@ -130,23 +130,23 @@ jobs:
       - name: Check portable crates and test sources
         run: >-
           cargo check --locked --target x86_64-pc-windows-msvc --all-targets
-          -p rmux-proto -p rmux-core -p rmux-client -p task-proto
-          -p ctl-core -p ctl-proto -p rmux-ipc -p task-ipc -p task-store -p task-cli -p taskd -p ctl -p ctl-agent -p rmux -p rmuxd -p rmux-tui
+          -p ctmux-proto -p ctmux-core -p ctmux-client -p ctl-task-proto
+          -p ctl-client -p ctl-proto -p ctmux-ipc -p ctl-task-ipc -p ctl-task-store -p ctl-task-cli -p ctl-taskd -p ctl-cli -p ctl-agent -p ctmux-cli -p ctmuxd -p ctmux-tui
 
       - name: Test Windows tasks and protocol framing
-        run: cargo test --locked -p taskd -p task-ipc -p task-proto -p task-store -p task-cli -p ctl -p ctl-core -p ctl-proto -p ctl-agent -p rmux-proto -p rmux-tui
+        run: cargo test --locked -p ctl-taskd -p ctl-task-ipc -p ctl-task-proto -p ctl-task-store -p ctl-task-cli -p ctl-cli -p ctl-client -p ctl-proto -p ctl-agent -p ctmux-proto -p ctmux-tui
 
       - name: Test Windows ConPTY sessions
-        run: cargo test --locked -p rmuxd --test windows_conpty
+        run: cargo test --locked -p ctmuxd --test windows_conpty
 
       - name: Build Windows executables
-        run: cargo build --locked -p ctl -p ctl-agent -p taskd -p rmux -p rmuxd -p rmux-tui
+        run: cargo build --locked -p ctl-cli -p ctl-agent -p ctl-taskd -p ctmux-cli -p ctmuxd -p ctmux-tui
 
       - name: Exercise ctl task auto-start and commands
         run: ./scripts/ci/windows-tasks.ps1
 
-      - name: Exercise Windows rmux auto-start and local ctl routing
-        run: ./scripts/ci/windows-rmux.ps1
+      - name: Exercise Windows ctmux auto-start and local ctl routing
+        run: ./scripts/ci/windows-ctmux.ps1
 
       - name: Test authenticated Windows SSH gateway and reconnect
         run: ./scripts/ci/windows-ssh.ps1

@@ -1,7 +1,7 @@
 mod edit;
 mod status;
 
-use ctl_core::hosts::{self, HostCatalogDocument, HostError, WorkspaceHost};
+use ctl_client::hosts::{self, HostCatalogDocument, HostError, WorkspaceHost};
 use edit::ConnectionOptions;
 
 #[derive(Debug, clap::Subcommand)]

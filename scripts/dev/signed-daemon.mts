@@ -83,7 +83,7 @@ export class SignedDaemon {
     if (runningProtocol !== undefined) {
       let diagnostic: string | undefined;
       if (runningProtocol !== helper.protocol_version) {
-        diagnostic = `Signed development ctld is still using protocol ${runningProtocol}; the selected helper uses ${helper.protocol_version}. Existing connections were preserved. Open About rmux and explicitly restart ctld to use the new helper.`;
+        diagnostic = `Signed development ctld is still using protocol ${runningProtocol}; the selected helper uses ${helper.protocol_version}. Existing connections were preserved. Open About ctmux and explicitly restart ctld to use the new helper.`;
       } else if (selectionChanged) {
         diagnostic = "New signed helper staged; use About → Restart ctld to apply it. Existing connections preserved.";
       }

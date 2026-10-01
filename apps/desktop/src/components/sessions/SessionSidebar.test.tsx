@@ -47,7 +47,7 @@ const listedOnlySession: SessionSummary = {
 const shellState: ShellStateSummary = {
   shell_type: "zsh",
   cwd: "/Users/clouds/Projects/Tools/ctl/apps/desktop",
-  running_command: "cargo test -p rmux-app",
+  running_command: "cargo test -p ctmux-app",
   prompt_phase: "running",
   tui_hint: "inline",
   revision: "1",
@@ -216,7 +216,7 @@ describe("SessionSidebar", () => {
 
   it.each(["inspection", "attachment"])("shows a timed-out %s despite an open SSH master", (source) => {
     const remoteSession = { ...session, target: remoteHost };
-    const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote rmux service over SSH. Try again." };
+    const failure = { code: "remote_connection_timeout", message: "Timed out opening the remote ctmux service over SSH. Try again." };
     renderHostConnection({ state: "connected", method_names: ["Direct"], message: null }, {
       targetErrors: source === "inspection" ? new Map([[targetKey(remoteHost), failure]]) : new Map(),
       attachmentStates: source === "attachment" ? new Map([[sessionKey(remoteSession), {
@@ -479,7 +479,7 @@ describe("SessionSidebar", () => {
     );
 
     const fullTitle =
-      "/Users/clouds/Projects/Tools/ctl/apps/desktop — cargo test -p rmux-app";
+      "/Users/clouds/Projects/Tools/ctl/apps/desktop — cargo test -p ctmux-app";
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(
@@ -640,8 +640,8 @@ describe("SessionSidebar", () => {
         exit_code: null,
         interactive: {
           session_id: "task-session",
-          instance_id: "rmux-1",
-          rmux_socket: "/tmp/rmux.sock",
+          instance_id: "ctmux-1",
+          ctmux_socket: "/tmp/ctmux.sock",
           released: false,
         },
       },

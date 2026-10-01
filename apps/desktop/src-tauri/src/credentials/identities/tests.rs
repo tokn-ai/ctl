@@ -1,5 +1,5 @@
 use super::*;
-use ctld_ipc::identities::{FileState, PassphraseState};
+use ctl_ipc::identities::{FileState, PassphraseState};
 
 fn file() -> IdentityFile {
   IdentityFile {
@@ -163,7 +163,7 @@ fn request_budget_leaves_room_for_json_escaping() {
   assert_ne!(paths, Vec::<String>::new());
   assert!(paths.len() < 512);
   let encoded = serde_json::to_vec(&Request::List { paths }).unwrap();
-  assert!(encoded.len() <= ctld_ipc::identities::MAX_REQUEST_BYTES);
+  assert!(encoded.len() <= ctl_ipc::identities::MAX_REQUEST_BYTES);
 }
 
 #[cfg(unix)]

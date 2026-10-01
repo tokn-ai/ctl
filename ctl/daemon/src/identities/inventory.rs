@@ -1,5 +1,5 @@
 use super::{IdentityError, SavedIdentity, files, inspect_path};
-use ctld_ipc::identities::{FileState, IdentityFile, Inventory, MAX_PATHS, PassphraseState};
+use ctl_ipc::identities::{FileState, IdentityFile, Inventory, MAX_PATHS, PassphraseState};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 

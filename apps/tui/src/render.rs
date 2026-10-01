@@ -9,7 +9,7 @@ use crossterm::{
     Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
   },
 };
-use rmux_proto::ViewInfo;
+use ctmux_proto::ViewInfo;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
@@ -419,7 +419,7 @@ mod tests {
 
   #[test]
   fn dividers_use_reserved_cells_and_leave_the_status_row_free() {
-    use rmux_proto::{SplitAxis, TerminalSize, ViewLayout};
+    use ctmux_proto::{SplitAxis, TerminalSize, ViewLayout};
     let layout = ViewLayout::Split {
       axis: SplitAxis::Horizontal,
       children: vec![

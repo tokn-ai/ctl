@@ -5,7 +5,7 @@ use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ctld_ipc::{ClientMessage, ServerMessage, VpnSnapshot, VpnState, VpnStatus};
+use ctl_ipc::{ClientMessage, ServerMessage, VpnSnapshot, VpnState, VpnStatus};
 use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -63,20 +63,20 @@ impl Drop for Fixture {
 async fn reply(listener: &UnixListener, response: ServerMessage) -> ClientMessage {
   let (mut stream, _) = listener.accept().await.unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
+    ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
     Some(ClientMessage::Handshake { protocol_version })
-      if protocol_version == ctld_ipc::PROTOCOL_VERSION
+      if protocol_version == ctl_ipc::PROTOCOL_VERSION
   ));
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ServerMessage::HandshakeAccepted {
-      protocol_version: ctld_ipc::PROTOCOL_VERSION,
+      protocol_version: ctl_ipc::PROTOCOL_VERSION,
     },
   )
   .await
   .unwrap();
-  let request = ctld_ipc::read_frame(&mut stream).await.unwrap().unwrap();
-  ctld_ipc::write_frame(&mut stream, &response).await.unwrap();
+  let request = ctl_ipc::read_frame(&mut stream).await.unwrap().unwrap();
+  ctl_ipc::write_frame(&mut stream, &response).await.unwrap();
   request
 }
 
@@ -221,7 +221,7 @@ async fn tailscale_start_reports_pending_login_and_sends_provider_settings() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let pending = VpnStatus {
-    provider: ctld_ipc::VpnProvider::Tailscale,
+    provider: ctl_ipc::VpnProvider::Tailscale,
     vpn_id: Some("team".into()),
     connection_id: Some("team".into()),
     state: VpnState::Starting,
@@ -234,7 +234,7 @@ async fn tailscale_start_reports_pending_login_and_sends_provider_settings() {
     "--id",
     "team",
     "--hostname",
-    "rmux-test",
+    "ctmux-test",
     "--accept-routes",
   ]);
   let server = async {
@@ -257,7 +257,7 @@ async fn tailscale_start_reports_pending_login_and_sends_provider_settings() {
   assert!(text.contains("Sign in for team: https://login.tailscale.com/a/123abc"));
   assert!(
     matches!(request, ClientMessage::StartVpnConnection { connection } if connection.connection_id == "team"
-    && matches!(&connection.settings, ctld_ipc::VpnSettings::Tailscale { hostname: Some(hostname), accept_routes: true } if hostname == "rmux-test"))
+    && matches!(&connection.settings, ctl_ipc::VpnSettings::Tailscale { hostname: Some(hostname), accept_routes: true } if hostname == "ctmux-test"))
   );
 }
 
@@ -266,7 +266,7 @@ async fn tailscale_status_explains_required_device_approval() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let pending = VpnStatus {
-    provider: ctld_ipc::VpnProvider::Tailscale,
+    provider: ctl_ipc::VpnProvider::Tailscale,
     vpn_id: Some("team".into()),
     state: VpnState::Starting,
     message: Some("Approve this device in the Tailscale admin console".into()),
@@ -436,7 +436,7 @@ async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
         ..legacy
       }],
       supports_multiple: false,
-      supported_providers: vec![ctld_ipc::VpnProvider::Openconnect],
+      supported_providers: vec![ctl_ipc::VpnProvider::Openconnect],
       supports_tailscale_enrollment: false,
       discovery_warnings: Vec::new(),
     },
@@ -587,7 +587,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
     if action == "status" {
       assert!(output.status.success());
       let snapshot: VpnSnapshot = serde_json::from_slice(&output.stdout).unwrap();
-      assert_eq!(snapshot.connections, Vec::<ctld_ipc::VpnStatus>::new());
+      assert_eq!(snapshot.connections, Vec::<ctl_ipc::VpnStatus>::new());
       assert_eq!(snapshot.discovery_warnings.len(), 1);
     } else {
       assert_json_status(&output, &VpnStatus::default());
@@ -623,7 +623,7 @@ async fn start_launches_ctld_when_absent() {
     &helper,
     format!(
       "#!/bin/sh\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {}\nelse\n  touch \"$CTL_VPN_TEST_MARKER\"\nfi\n",
-      ctld_ipc::PROTOCOL_VERSION
+      ctl_ipc::PROTOCOL_VERSION
     ),
   )
   .unwrap();
@@ -728,7 +728,7 @@ async fn default_vpn_client_honors_the_vpn_socket_override() {
   let mut command = fixture.command(&["vpn", "status", "--json"]);
   command
     .env("CTLD_VPN_SOCKET_PATH", &selected)
-    .env("RMUX_DEV_DAEMON_SUPERVISOR", "1");
+    .env("CTMUX_DEV_DAEMON_SUPERVISOR", "1");
   let (output, request) = timeout(Duration::from_secs(5), async {
     tokio::join!(command.output(), reply(&listener, response(connected())))
   })

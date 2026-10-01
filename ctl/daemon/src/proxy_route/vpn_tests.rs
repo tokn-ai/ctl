@@ -1,5 +1,5 @@
 use super::*;
-use ctld_ipc::{ClientMessage, ServerMessage, SshGatewayMode, VpnSnapshot, VpnStatus};
+use ctl_ipc::{ClientMessage, ServerMessage, SshGatewayMode, VpnSnapshot, VpnStatus};
 use std::path::PathBuf;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::task::JoinHandle;
@@ -18,22 +18,22 @@ impl OwnerFixture {
       for connections in snapshots {
         let (mut stream, _) = listener.accept().await.unwrap();
         assert!(matches!(
-          ctld_ipc::read_frame(&mut stream).await.unwrap(),
+          ctl_ipc::read_frame(&mut stream).await.unwrap(),
           Some(ClientMessage::Handshake { .. })
         ));
-        ctld_ipc::write_frame(
+        ctl_ipc::write_frame(
           &mut stream,
           &ServerMessage::HandshakeAccepted {
-            protocol_version: ctld_ipc::PROTOCOL_VERSION,
+            protocol_version: ctl_ipc::PROTOCOL_VERSION,
           },
         )
         .await
         .unwrap();
         assert!(matches!(
-          ctld_ipc::read_frame(&mut stream).await.unwrap(),
+          ctl_ipc::read_frame(&mut stream).await.unwrap(),
           Some(ClientMessage::VpnStatus)
         ));
-        ctld_ipc::write_frame(
+        ctl_ipc::write_frame(
           &mut stream,
           &ServerMessage::VpnStatus {
             status: connections.first().cloned().unwrap_or_default().into(),

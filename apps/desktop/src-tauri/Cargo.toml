@@ -1,32 +1,32 @@
 [package]
-name = "rmux-app"
+name = "ctmux-app"
 version.workspace = true
 edition.workspace = true
-description = "Graphical client for local and SSH-connected rmux terminal sessions"
+description = "Graphical client for local and SSH-connected ctmux terminal sessions"
 publish = false
 
 [lib]
-name = "rmux_app_lib"
+name = "ctmux_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-component-info.workspace = true
+ctl-component-info.workspace = true
 ctl-proto.workspace = true
-task-client.workspace = true
-task-proto.workspace = true
-task-store.workspace = true
-task-ipc.workspace = true
+ctl-task-client.workspace = true
+ctl-task-proto.workspace = true
+ctl-task-store.workspace = true
+ctl-task-ipc.workspace = true
 base64.workspace = true
-ctl-core.workspace = true
-ctld-ipc.workspace = true
+ctl-client.workspace = true
+ctl-ipc.workspace = true
 dirs.workspace = true
 glob.workspace = true
-rmux-client.workspace = true
-rmux-ipc.workspace = true
-rmux-proto.workspace = true
+ctmux-client.workspace = true
+ctmux-ipc.workspace = true
+ctmux-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 semver = "1"

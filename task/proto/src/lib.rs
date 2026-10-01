@@ -5,7 +5,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +46,7 @@ pub enum RunState {
 pub struct InteractiveRun {
   #[serde(default)]
   pub released: bool,
-  pub rmux_socket: std::path::PathBuf,
+  pub ctmux_socket: std::path::PathBuf,
   pub instance_id: String,
   pub session_id: Option<String>,
 }

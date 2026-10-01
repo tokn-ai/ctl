@@ -12,8 +12,8 @@ import {
 
 test("selects Cargo settings while excluding app targets, features, and arguments", () => {
   assert.deepEqual(selectDaemonBuildArguments([
-    "run", "--package", "rmux-app", "--features", "custom-protocol",
-    "--bin=rmux-app", "--no-default-features", "--all-features",
+    "run", "--package", "ctmux-app", "--features", "custom-protocol",
+    "--bin=ctmux-app", "--no-default-features", "--all-features",
     "--message-format", "json", "--target", "aarch64-apple-darwin",
     "--target-dir", "/tmp/custom target", "--profile=development",
     "--manifest-path", "apps/desktop/src-tauri/Cargo.toml",
@@ -29,7 +29,7 @@ test("selects Cargo settings while excluding app targets, features, and argument
 
 test("preserves short Cargo options and equals-form build settings", () => {
   assert.deepEqual(selectDaemonBuildArguments([
-    "run", "-p", "rmux-app", "-Fcustom-protocol", "-F", "devtools",
+    "run", "-p", "ctmux-app", "-Fcustom-protocol", "-F", "devtools",
     "-r", "-vv", "-j", "4", "-j2", "-mCargo.toml", "-Z", "unstable-options",
     "--target=aarch64-apple-darwin", "--target-dir=custom", "--frozen",
     "--ignore-rust-version", "--keep-going", "--future-incompat-report",
@@ -79,7 +79,7 @@ async function fakeCargo(
   status = 0,
   diagnostics = "",
 ): Promise<{ cwd: string; env: NodeJS.ProcessEnv; invocation: string }> {
-  const cwd = await realpath(await mkdtemp(join(tmpdir(), "rmux-daemon-build-test-")));
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), "ctmux-daemon-build-test-")));
   context.after(() => rm(cwd, { recursive: true, force: true }));
   const invocation = join(cwd, "cargo-invocation.json");
   await writeFile(join(cwd, "cargo"), `#!${process.execPath}
@@ -108,22 +108,22 @@ const subprocessOptions = { skip: process.platform === "win32" };
 test("builds all daemon packages and returns Cargo-reported custom output paths", subprocessOptions, async (context) => {
   const cargo = await fakeCargo(context, [
     artifact("ctld", "custom target/aarch64-apple-darwin/development/ctld"),
-    artifact("rmuxd", "/different-output/rmuxd"),
-    artifact("taskd", "custom target/aarch64-apple-darwin/development/taskd"),
+    artifact("ctmuxd", "/different-output/ctmuxd"),
+    artifact("ctl-taskd", "custom target/aarch64-apple-darwin/development/ctl-taskd"),
   ]);
   assert.deepEqual(await buildDaemons([
     "run", "--profile", "development", "--target", "aarch64-apple-darwin",
     "--features", "app-only", "--locked", "--", "--app-only",
   ], cargo.cwd, cargo.env), {
     ctld: join(cargo.cwd, "custom target/aarch64-apple-darwin/development/ctld"),
-    rmuxd: "/different-output/rmuxd",
-    taskd: join(cargo.cwd, "custom target/aarch64-apple-darwin/development/taskd"),
+    ctmuxd: "/different-output/ctmuxd",
+    "ctl-taskd": join(cargo.cwd, "custom target/aarch64-apple-darwin/development/ctl-taskd"),
   });
   assert.deepEqual(JSON.parse(await readFile(cargo.invocation, "utf8")), {
     args: [
       "build", "--profile", "development", "--target", "aarch64-apple-darwin", "--locked",
       "--message-format=json-render-diagnostics",
-      "--package", "ctld", "--package", "rmuxd", "--package", "taskd",
+      "--package", "ctld", "--package", "ctmuxd", "--package", "ctl-taskd",
     ],
     cwd: cargo.cwd,
     target_dir: "custom target directory",
@@ -133,8 +133,8 @@ test("builds all daemon packages and returns Cargo-reported custom output paths"
 test("rejects failed builds even when Cargo emitted all executable artifacts", subprocessOptions, async (context) => {
   const cargo = await fakeCargo(context, [
     artifact("ctld", "/target/ctld"),
-    artifact("rmuxd", "/target/rmuxd"),
-    artifact("taskd", "/target/taskd"),
+    artifact("ctmuxd", "/target/ctmuxd"),
+    artifact("ctl-taskd", "/target/ctl-taskd"),
   ], 101);
   await assert.rejects(buildDaemons([], cargo.cwd, cargo.env), (error: unknown) => {
     assert.ok(error instanceof DaemonBuildError);
@@ -157,7 +157,7 @@ test("identifies compiler failures separately from other Cargo errors", subproce
 
 test("rejects incomplete successful builds instead of guessing old executable paths", subprocessOptions, async (context) => {
   const cargo = await fakeCargo(context, [artifact("ctld", "/target/ctld")]);
-  await assert.rejects(buildDaemons([], cargo.cwd, cargo.env), /executable for rmuxd/);
+  await assert.rejects(buildDaemons([], cargo.cwd, cargo.env), /executable for ctmuxd/);
 });
 
 test("rejects ambiguous daemon artifacts from multiple Cargo targets", subprocessOptions, async (context) => {

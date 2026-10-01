@@ -1,0 +1,30 @@
+[package]
+name = "ctmux-cli"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "ctmux_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ctmux"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+clap.workspace = true
+ctmux-client.workspace = true
+ctmux-ipc.workspace = true
+ctmux-proto.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+ctmux-tui = { path = "../../apps/tui" }
+
+[dev-dependencies]
+ctmuxd.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -2,72 +2,72 @@
 
 The monorepo contains two products with independent responsibilities:
 
-- `rmux` provides persistent local terminal sessions.
+- `ctmux` provides persistent local terminal sessions.
 - `ctl` routes terminal and task commands locally or through an SSH-authorized
   remote command. Taskd owns task definitions and background execution.
 
-The current milestones make `rmux` usable through a desktop client that mixes
+The current milestones make `ctmux` usable through a desktop client that mixes
 local and SSH targets, and through `ctl` from an SSH-authorized remote client.
-The remote boundary exposes the fixed `rmux` and `task` services; generic
+The remote boundary exposes the fixed `ctmux` and `task` services; generic
 remote administration, files, port forwarding, and desktop control
 remain out of scope.
 
 ## Process ownership
 
-`rmuxd` is a per-user daemon. It owns every PTY and the processes using them. A local
-`rmux` client connects over per-user IPC and may disappear without affecting a
+`ctmuxd` is a per-user daemon. It owns every PTY and the processes using them. A local
+`ctmux` client connects over per-user IPC and may disappear without affecting a
 session.
 
 `ctl-agent connect` is a disposable SSH remote-command gateway:
 
 ```text
-local:  rmux / rmux-app -> local IPC -> rmuxd -> PTY -> shell
-remote: ctl / rmux-app -> OpenSSH -> ctl-agent connect -> local IPC
-                                                    -> rmuxd -> PTY -> shell
+local:  ctmux / ctmux-app -> local IPC -> ctmuxd -> PTY -> shell
+remote: ctl / ctmux-app -> OpenSSH -> ctl-agent connect -> local IPC
+                                                    -> ctmuxd -> PTY -> shell
 ```
 
 Each SSH channel gets a new `ctl-agent connect` process. Ending that process drops
 only its local attachment stream and must not affect a terminal session. If
-`rmuxd` itself exits, an exact running PTY is not recoverable in the initial
+`ctmuxd` itself exits, an exact running PTY is not recoverable in the initial
 architecture. Later disk-backed metadata may reconstruct explicitly
 restartable tasks as a new process generation.
 
 `ctl-agent` owns no terminal, session, or task state. It relays raw bytes
 between SSH stdin/stdout and the selected fixed local data endpoint. The default
-`rmux` service uses `rmuxd`; `connect --service task` uses `taskd`. The gateway
+`ctmux` service uses `ctmuxd`; `connect --service task` uses `ctl-taskd`. The gateway
 does not decode or reframe either protocol, and a remote peer cannot choose a
 local socket path or service outside this enum. Taskd owns background child
-processes; its interactive tasks use rmuxd's PTYs and normal rmux attachments.
+processes; its interactive tasks use ctmuxd's PTYs and normal ctmux attachments.
 
 ## Crate boundaries
 
-- `process-info`: read-only, best-effort shell cwd and foreground-job inspection
-  on macOS/Linux, independent of rmux protocols, PTY ownership, and shell hooks.
-- `rmux-proto`: versioned, platform-independent wire messages and framing.
-- `rmux-core`: output journal and portable session-domain behavior.
-- `rmux-client`: portable client-side protocol state, checkpoint restoration,
+- `ctmux-process-info`: read-only, best-effort shell cwd and foreground-job inspection
+  on macOS/Linux, independent of ctmux protocols, PTY ownership, and shell hooks.
+- `ctmux-proto`: versioned, platform-independent wire messages and framing.
+- `ctmux-core`: output journal and portable session-domain behavior.
+- `ctmux-client`: portable client-side protocol state, checkpoint restoration,
   attachment liveness, and terminal attachment behavior over an injected byte
   stream.
-- `rmux-ipc`: per-user local endpoint selection and transport setup.
-- `rmuxd`: local IPC, PTY/process ownership, and session coordination.
-- `rmux`: canonical local CLI and reusable rmux command implementation.
-- `rmux-app`: local/SSH Tauri/React terminal client in `apps/desktop`. Its Rust
-  adapter composes `ctl-core` transport with `rmux-client`; its webview owns
+- `ctmux-ipc`: per-user local endpoint selection and transport setup.
+- `ctmuxd`: local IPC, PTY/process ownership, and session coordination.
+- `ctmux`: canonical local CLI and reusable ctmux command implementation.
+- `ctmux-app`: local/SSH Tauri/React terminal client in `apps/desktop`. Its Rust
+  adapter composes `ctl-client` transport with `ctmux-client`; its webview owns
   xterm rendering, viewport, and local scrollback.
-- `ctl-core`: local/SSH transport selector. Its remote path owns an OpenSSH
+- `ctl-client`: local/SSH transport selector. Its remote path owns an OpenSSH
   child, invokes one fixed `ctl-agent connect` command, and exposes the resulting
   byte stream to the selected control-domain client.
-- `ctl-agent`: per-connection SSH remote-command adapter for the fixed local rmux
+- `ctl-agent`: per-connection SSH remote-command adapter for the fixed local ctmux
   data and task endpoints.
-- `ctl`: control router. `ctl rmux` redirects the canonical rmux command
+- `ctl`: control router. `ctl ctmux` redirects the canonical ctmux command
   surface locally by default or through an explicit OpenSSH destination.
   `ctl task` routes the managed-task command surface through the same target.
 
-OS-specific IPC and PTY implementation details must not enter `rmux-proto` or
-`rmux-client`.
+OS-specific IPC and PTY implementation details must not enter `ctmux-proto` or
+`ctmux-client`.
 Local IPC uses Unix-domain sockets on macOS and Linux and owner-restricted
 named pipes on Windows. `ctl-agent` relays the appropriate local data endpoint
-without changing the SSH transport or rmux protocol. Unix remote commands prepend
+without changing the SSH transport or ctmux protocol. Unix remote commands prepend
 the fixed app-managed directory to `PATH` and use `exec ctl-agent connect`;
 Windows hosts with the default cmd.exe SSH shell use
 `ctl-agent.exe connect`, selected through `--remote-platform windows`.
@@ -97,7 +97,7 @@ Task routing appends the fixed `--service task` arguments on either platform.
 12. OpenSSH owns host verification, encryption, and user authorization. `ctl`
     adds no network listener, forwarding, application key, or pairing state.
 13. A `ctl-agent connect` exit closes only its local stream and never terminates an
-    `rmuxd` session. A replacement SSH channel may rebind the logical
+    `ctmuxd` session. A replacement SSH channel may rebind the logical
     attachment using its memory-only token and renderer-applied raw sequence.
 14. Optional shell-awareness metadata is advisory, memory-only session state.
     It is delivered as complete snapshots beside raw output, never inferred
@@ -111,19 +111,19 @@ cannot disturb an established desktop layout.
 
 ## Desktop client boundary
 
-`rmux-app` is a client, not an embedded daemon. Every Tauri request carries an
-explicit local or OpenSSH target. The backend composes `ctl-core` with
-`rmux-client`, connects to the same per-user local endpoint as the CLI, and may
-start a sibling `rmuxd`, but it does not link PTY, journal,
+`ctmux-app` is a client, not an embedded daemon. Every Tauri request carries an
+explicit local or OpenSSH target. The backend composes `ctl-client` with
+`ctmux-client`, connects to the same per-user local endpoint as the CLI, and may
+start a sibling `ctmuxd`, but it does not link PTY, journal,
 checkpoint-production, or session-lifetime logic into the app process.
 Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
 The app persists session/workspace state separately from saved host definitions.
-Schema 8 of `~/.tokn/rmux/workspace.json` contains session references, cached cwd
+Schema 8 of `~/.tokn/ctmux/workspace.json` contains session references, cached cwd
 labels, last observed terminal dimensions and times, task references, forwards,
 tab order, selection, and observed remote
-identities for referenced hosts. Schema 1 of `~/.tokn/rmux/hosts.json` contains
+identities for referenced hosts. Schema 1 of `~/.tokn/ctmux/hosts.json` contains
 remote hosts with stable IDs, named connection methods and preferred method IDs,
 and reusable gateways. The local host is synthesized. Runtime status, output,
 credentials, and attachment tokens are never written to either file. A host
@@ -204,12 +204,12 @@ master startup is not activated twice. The local `ctld` IPC protocol is version
 The About page performs bounded, passive queries against selected local owners.
 It enumerates both SSH and VPN ctld endpoints, deduplicating identical owners.
 An independent ctld lifecycle protocol reports build identity and data-protocol
-version even when the app's data protocol differs. rmuxd exposes equivalent
+version even when the app's data protocol differs. ctmuxd exposes equivalent
 metadata through its local-control handshake, with a data-handshake fallback for
-legacy owners. taskd accepts a passive control metadata query. Standalone
+legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
-`component-info` embeds the release version, source revision, dirty flag, and a
+`ctl-component-info` embeds the release version, source revision, dirty flag, and a
 deterministic fingerprint of Rust component sources and dependency definitions.
 The fingerprint normalizes platform path separators and text line endings. It
 excludes credentials, runtime configuration, and build output. Equal release
@@ -229,15 +229,15 @@ startup. The client verifies a fresh instance with matching build and protocol.
 Legacy owners are inspected where possible but never stopped by process-name or
 PID guesses. Restart does not delete saved VPN identities or profiles.
 
-About uses the same confirmation model for local rmuxd and taskd. A preparation
+About uses the same confirmation model for local ctmuxd and ctl-taskd. A preparation
 retains the existing owner's stream and hashes the selected replacement executable.
 It rechecks the helper before shutdown and startup, then verifies the successor's
-build and protocols. rmuxd's control-v1 restart remains usable without build
-reporting; taskd can retain an unsent control stream for legacy idle-only restart.
+build and protocols. ctmuxd's control-v1 restart remains usable without build
+reporting; ctl-taskd can retain an unsent control stream for legacy idle-only restart.
 Taskd's daemon-side mutation lock rejects active runs and preserves storage and
-rmux endpoints through shutdown. No diagnostic query starts a missing daemon.
+ctmux endpoints through shutdown. No diagnostic query starts a missing daemon.
 
-Remote rmuxd preparation runs a fixed ctl-agent maintenance command through an
+Remote ctmuxd preparation runs a fixed ctl-agent maintenance command through an
 existing multiplexed SSH connection, with fresh authentication disabled. It pins
 the account identity, daemon control stream, and installed companion executable
 before awaiting confirmation. Session-reset events reconcile all app windows
@@ -266,7 +266,7 @@ The desktop VPN panel stores named connection details in private, schema-version
 `vpns.json` under the app configuration directory. Native commands return metadata
 and password-presence flags, use hashed revisions for optimistic writes, and load
 the saved secret only when connecting. Both desktop and CLI use the shared
-`ctld-ipc::vpn` client. OpenConnect structured starts send the configuration to the container
+`ctl-ipc::vpn` client. OpenConnect structured starts send the configuration to the container
 over its attached stdin; the container writes a mode-0600 environment file on
 private tmpfs. No generated credential file is left on the host. CLI-provided
 environment files are read as bounded private snapshots and use the same
@@ -414,7 +414,7 @@ plaintext buffers are zeroized after use. On Linux, newly entered reusable
 secrets are discarded after authentication. Other interactive responses are
 not stored.
 
-The desktop **Credentials** page lists identity-file metadata and saved rmux
+The desktop **Credentials** page lists identity-file metadata and saved ctmux
 credential attributes. Its bounded one-shot `ctld --credential-request` and
 `ctld --identity-request` helpers provide metadata, verified identity-passphrase
 writes, and exact-item deletion without restarting the running daemon.
@@ -439,9 +439,9 @@ backups and target-to-method migration. IDs and references never change.
 Legacy WebView host settings migrate only when no native workspace exists;
 the legacy copy is removed only after successful catalog and workspace writes.
 Previous sessions were never persisted and require explicit import.
-See `docs/rmux-workspace.md` for the lifecycle and migration contract.
+See `docs/ctmux-workspace.md` for the lifecycle and migration contract.
 
-The GUI omits a name when it creates a shell, so `rmuxd` applies the same
+The GUI omits a name when it creates a shell, so `ctmuxd` applies the same
 collision-safe `session-N` allocation used by every unnamed client. Its session
 list merges authoritative geometry changes from the active attachment into the
 matching row. **Disconnect** removes a selected open tab and preserves the
@@ -450,11 +450,11 @@ already detached and is removed only from this window. **Remove from workspace**
 also forgets membership without terminating the shell. **Terminate session** is the
 explicit one-shot kill operation and terminates the session for all attachments.
 
-`Restart rmuxd` is a command-palette-only, destructive maintenance action. It
+`Restart ctmuxd` is a command-palette-only, destructive maintenance action. It
 first preflights a separate owner-only local-control endpoint beside the normal
 data endpoint. If an already-running older daemon does not support that
 endpoint, the action returns `daemon_restart_unsupported` before detaching the
-active view. After it accepts restart, `rmuxd` atomically stops admitting new
+active view. After it accepts restart, `ctmuxd` atomically stops admitting new
 sessions and attachments, snapshots all live sessions, and requests their
 termination. Existing data connections are then closed so a stalled client
 cannot pin daemon drain; a connected attachment may observe its normal
@@ -462,7 +462,7 @@ session-ended event before that close. The GUI waits for both local endpoints
 to drain, then starts a fresh daemon. It never unlinks a live endpoint or
 guesses and signals a process ID.
 
-The local-control endpoint is deliberately distinct from `rmux-proto` and is
+The local-control endpoint is deliberately distinct from `ctmux-proto` and is
 never relayed by `ctl-agent`; a remote `ctl` client cannot restart a daemon.
 The backend records the target owned by its active attachment actor, so a
 local restart detaches only a local attachment; a remote attachment in the
@@ -470,12 +470,12 @@ same window remains live. The frontend marks local entries missing after a
 successful or potentially destructive local restart, retaining their references
 and tabs. It does not refresh or reconnect remote hosts as a side effect. The
 confirmation warns that local sessions opened by other apps are affected too.
-Because `rmuxd` owns the PTYs, this is not a reconnect or session-preserving
+Because `ctmuxd` owns the PTYs, this is not a reconnect or session-preserving
 recovery mechanism. If a restart has been accepted but the old daemon does not
 drain in time, the action fails without force-stopping it. Raw-protocol version
 compatibility remains the solution for an incompatible daemon, rather than
 turning restart into a protocol-mismatch escape hatch. See
-`docs/rmux-local-control.md` for the local-control protocol and lifecycle.
+`docs/ctmux-local-control.md` for the local-control protocol and lifecycle.
 
 Concurrent CLI and GUI auto-start attempts may launch more than one daemon
 candidate. Candidates serialize stale-socket inspection and replacement with
@@ -552,7 +552,7 @@ detaches without killing daemon-owned sessions. Windows and Linux use
 
 ## Attachment ownership
 
-`rmuxd` treats each `attach_session` request as a logical attachment. Its
+`ctmuxd` treats each `attach_session` request as a logical attachment. Its
 identifier remains daemon-private and is not a client identity. The client
 receives only a random, memory-only token that may rebind a replacement
 transport during a bounded grace period.
@@ -564,10 +564,10 @@ possession of an attachment's token may supersede that attachment's stale
 transport generation; it does not displace another logical attachment.
 
 To prevent a sleeping or half-open client from pinning either capability,
-`rmuxd` negotiates a heartbeat cadence and liveness deadline during the
+`ctmuxd` negotiates a heartbeat cadence and liveness deadline during the
 handshake. Only inbound client activity renews that deadline after the initial
 attachment transfer. That transfer has its own finite delivery deadline, since
-a client learns the heartbeat cadence only after `attached` and `rmuxd`
+a client learns the heartbeat cadence only after `attached` and `ctmuxd`
 serially delivers initial replay before it can process queued heartbeats. A
 silent transport is closed, but its logical attachment remains resumable for
 one bounded reconnect interval. Possession of the attachment token immediately
@@ -577,13 +577,13 @@ and checkpoint state remain intact.
 
 ## Remote control boundary
 
-`ctl rmux`, persistent `ctl shell`, and `ctl task` connect directly to the current
+`ctl ctmux`, persistent `ctl shell`, and `ctl task` connect directly to the current
 user's owner-only endpoint for the chosen command domain by default. Global
 `--host`/`-H` resolves saved ctl hosts before OpenSSH aliases/destinations and
 invokes the system OpenSSH client with
 PTY allocation and all forwarding disabled, an OpenSSH destination supplied
 by the user, and a fixed managed-directory `PATH` prefix followed by
-`exec ctl-agent connect` for rmux or `exec ctl-agent connect --service task`
+`exec ctl-agent connect` for ctmux or `exec ctl-agent connect --service task`
 for tasks. The desktop may additionally run closed, fixed platform-probe and
 per-user installation commands after explicit user action; callers cannot
 supply a command, version path, or archive destination. OpenSSH
@@ -598,19 +598,19 @@ arbitrary-command RPC to `ctl-agent`. `ssh`/`scp` use saved ctl host names as ho
 aliases; compatible Unix sessions reuse ctld's master. Explicit transport
 options bypass managed reuse and retain OpenSSH behavior. `port` manages the
 existing ctld forwarding registry. Host/catalog models and read-only Tailscale
-discovery live in `ctl-core` for both desktop and CLI use; saved files retain
+discovery live in `ctl-client` for both desktop and CLI use; saved files retain
 their existing schema and location. See [Proposal 0008](proposals/0008-connection-cli.md).
 
 `ctl-agent connect` has no network listener or session registry. Its persistent
 account-owned UUID lives in `~/.tokn/ctl/remote-id`; it is an environment identity,
-not a machine ID. Its service enum chooses rmux or task. It writes one fixed
+not a machine ID. Its service enum chooses ctmux or task. It writes one fixed
 readiness marker, after which SSH stdin/stdout carries that service's raw protocol;
 diagnostics use stderr. The helper connects only to the current user's fixed
-data endpoint and cannot reach rmux's owner-only maintenance endpoint. Taskd
+data endpoint and cannot reach ctmux's owner-only maintenance endpoint. Taskd
 may use maintenance locally to manage interactive runs. Its authority is exactly
 that of the already SSH-authenticated operating-system account.
 
-Reconnect state stays inside `rmuxd`. Its opaque attachment tokens are random,
+Reconnect state stays inside `ctmuxd`. Its opaque attachment tokens are random,
 memory-only, session-scoped credentials for rebinding a replacement stream;
 they are not device identities or substitutes for SSH authorization. See
 `docs/ctl-protocol.md` for the transport contract and `docs/remote-mvp.md` for
@@ -618,14 +618,14 @@ setup.
 
 ## Shell awareness
 
-`rmuxd` can track a shell descriptor, cwd display string, prompt phase,
+`ctmuxd` can track a shell descriptor, cwd display string, prompt phase,
 optional editable command buffer/cursor, optional bounded running-command
 summary, native process identity/foreground job, and an alternate-screen
 presentation hint. This is not terminal emulation and does not introduce
 viewport commands: clients still own
 scrolling, selection, search, and rendering.
 
-`process-info` anchors observations to the spawned child's PID and birth token.
+`ctmux-process-info` anchors observations to the spawned child's PID and birth token.
 On macOS it uses libproc; on Linux it reads `/proc`. The daemon supplies the
 PTY's foreground process group, and the crate verifies candidate ancestry back
 to the managed shell. Only process names are collected, never argv or environment.
@@ -650,22 +650,22 @@ mapped into the app's title UI.
 
 On the current Unix implementation, an opt-in shell integration writes bounded
 full snapshots to a unique owner-only FIFO supplied as
-`RMUX_SHELL_STATE_PIPE`. The integration removes that environment variable and
+`CTMUX_SHELL_STATE_PIPE`. The integration removes that environment variable and
 opens the FIFO only for each report, so commands it executes do not inherit a
-reporter capability. The FIFO is not an `rmux-proto` client endpoint. That
+reporter capability. The FIFO is not an `ctmux-proto` client endpoint. That
 keeps the reporter's separate typed-buffer records out of raw journal,
 checkpoints, replay, and future journal persistence; normal terminal echo is
 still canonical raw output. Reports are advisory because a child process can
-lie; `rmuxd` assigns the revision and output-sequence correlation itself, and
+lie; `ctmuxd` assigns the revision and output-sequence correlation itself, and
 coalesces/rate-limits reports before they can contend with PTY ingestion.
 
 The live edit buffer and running-command summary may contain secrets. They are
 never in `SessionInfo` or the session list, and `get_shell_state` always
 redacts both. An attachment must opt in to each separately and currently own
-the input lease before `rmuxd` sends it. The shipped `zsh` v2 integration
+the input lease before `ctmuxd` sends it. The shipped `zsh` v2 integration
 replaces editable text with a bounded running-command summary before command
 execution; `bash` does not advertise either live-editing or running-command
-capability. `rmux attach` and `ctl rmux attach` are raw terminal presenters and
+capability. `ctmux attach` and `ctl ctmux attach` are raw terminal presenters and
 intentionally do not request or print either value.
 
 Version-2 FIFO reports preserve the version-1 nine-field NUL-delimited wire
@@ -681,16 +681,16 @@ changes input or layout ownership.
 
 ## Checkpoints
 
-`rmuxd` continuously interprets raw output into terminal state. At bounded
+`ctmuxd` continuously interprets raw output into terminal state. At bounded
 output intervals, or before a prior checkpoint would no longer bridge retained
 journal data, it creates a versioned checkpoint. A checkpoint captures the
 live terminal state and the parser state required to consume subsequent output.
-At that exact raw sequence, `rmuxd` also captures a bounded full replacement of
+At that exact raw sequence, `ctmuxd` also captures a bounded full replacement of
 normalized logical lines above the live grid. It does not capture process
 memory, shell-awareness state, or cwd. A current shell-awareness snapshot
 travels separately with `attached` and later state-change messages.
 
-The current `rmux` CLI restores a compatible checkpoint by writing its VT
+The current `ctmux` CLI restores a compatible checkpoint by writing its VT
 restore stream to the local terminal. It reports a size mismatch but does not
 resize the remote PTY. Because a native terminal cannot atomically replace its
 outer scrollback, the CLI does not inject the normalized history snapshot. The
@@ -699,7 +699,7 @@ GUI recreates its owned renderer and restores both history and live state.
 ### Renderer-safe checkpoint application
 
 A checkpoint is an initialization program for a clean terminal renderer, not
-an idempotent screen delta. In particular, the current `rmux_vt_state` version
+an idempotent screen delta. In particular, the current `ctmux_vt_state` version
 1 payload is an `avt` VT dump. It recreates the represented buffers and modes,
 but does not promise to erase unrelated content or parser state already held by
 the receiving renderer.
@@ -751,7 +751,7 @@ Only `applied_next_sequence` is eligible for the next `attach_session`
 or starting an asynchronous terminal write is not enough. A checkpoint becomes
 applied only after the fresh renderer has accepted its `payload` and
 `input_prefix`; its applied position is then exactly `checkpoint.sequence`.
-The controller sends that progress to `rmuxd` as coalesced
+The controller sends that progress to `ctmuxd` as coalesced
 `presentation_applied` delivery credit. The daemon stops sending presentation
 events at the negotiated byte/event window instead of closing the transport.
 Heartbeats and control messages remain live while output is paused.
@@ -819,22 +819,22 @@ emulator in headless mode:
 ## Managed tasks
 
 Taskd owns task definitions, desired state, and run records. Background runs use
-pipes and process ownership in taskd; interactive runs use PTYs and process
-ownership in rmuxd. Taskd uses the owner-only rmux local-control endpoint for
+pipes and process ownership in ctl-taskd; interactive runs use PTYs and process
+ownership in ctmuxd. Taskd uses the owner-only ctmux local-control endpoint for
 idempotent creation and lifecycle reconciliation. Terminal input, output, leases,
-and geometry continue through normal rmux attachments, including `ctl task attach`.
+and geometry continue through normal ctmux attachments, including `ctl task attach`.
 
 Interactive run intent is persisted before creation, keyed by task/run UUID and
-pinned to the rmuxd instance UUID. Taskd can recover a live session or its retained
+pinned to the ctmuxd instance UUID. Taskd can recover a live session or its retained
 exit result after restarting. It acknowledges the result only after saving it.
-An rmuxd replacement fails old runs without automatic recreation. The CLI routes
+An ctmuxd replacement fails old runs without automatic recreation. The CLI routes
 task registration, lifecycle, and background logs to the selected local or SSH
-target. Interactive attachment uses a separate rmux channel to that same target;
+target. Interactive attachment uses a separate ctmux channel to that same target;
 remote socket metadata never selects a local endpoint. Remote definitions default
 to the remote user's home directory, and relative working directories resolve
-there. The desktop workspace task interface currently uses local taskd. See
+there. The desktop workspace task interface currently uses local ctl-taskd. See
 [proposal 0003](proposals/0003-task-system.md) and the
-[local-control protocol](rmux-local-control.md) for lifecycle and retention rules,
+[local-control protocol](ctmux-local-control.md) for lifecycle and retention rules,
 and [proposal 0006](proposals/0006-remote-tasks.md) for SSH service selection.
 
 The local CLI currently captures cwd when a task is created. A registered task
@@ -845,8 +845,8 @@ extending saved definitions to independent local runs, explicit caller or fixed
 working directories, and local scheduling. It preserves the SSH gateway boundary
 and defers arbitrary shell-job adoption through `Ctrl+Z` and `task bg`.
 
-Saved local definitions now use the shared `task-store` crate. CLI and desktop
+Saved local definitions now use the shared `ctl-task-store` crate. CLI and desktop
 read the same project/global catalogs; workspace schema 3 retains only definition
 references, source selection, and drafts. Saving uses content revisions and
-atomic replacement, independently of taskd's registered-task state. See
+atomic replacement, independently of ctl-taskd's registered-task state. See
 [shared task definitions](task-definitions.md) for storage and migration.

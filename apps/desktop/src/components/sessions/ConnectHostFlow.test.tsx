@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SshConnectionTarget, SshPrompt, WorkspaceHost } from "../../lib/types";
-import { cancelSshProbe, installRemoteAgent, restartRemoteRmux, checkRemoteRmuxRestart, probeSshHost, respondSshPrompt } from "../../lib/tauri";
+import { cancelSshProbe, installRemoteAgent, restartRemoteCtmux, checkRemoteCtmuxRestart, probeSshHost, respondSshPrompt } from "../../lib/tauri";
 import { hostTarget } from "../../features/workspace/workspaceModel";
 import { ConnectHostFlow } from "./ConnectHostFlow";
 
@@ -14,8 +14,8 @@ vi.mock("../../lib/tauri", async (original) => ({
   cancelSshProbe: vi.fn(),
   respondSshPrompt: vi.fn(),
   installRemoteAgent: vi.fn(),
-  restartRemoteRmux: vi.fn(),
-  checkRemoteRmuxRestart: vi.fn(),
+  restartRemoteCtmux: vi.fn(),
+  checkRemoteCtmuxRestart: vi.fn(),
 }));
 
 const remoteInfo = { remote_id: "builder-account", agent_version: "0.1.0" };
@@ -32,8 +32,8 @@ const host: WorkspaceHost = {
 const target = hostTarget(host, [], "home") as SshConnectionTarget;
 
 beforeEach(() => {
-  vi.mocked(checkRemoteRmuxRestart).mockReset().mockResolvedValue({ ...remoteInfo, rmux_restart_supported: true });
-  vi.mocked(restartRemoteRmux).mockReset().mockResolvedValue({ terminated_sessions: 2 });
+  vi.mocked(checkRemoteCtmuxRestart).mockReset().mockResolvedValue({ ...remoteInfo, ctmux_restart_supported: true });
+  vi.mocked(restartRemoteCtmux).mockReset().mockResolvedValue({ terminated_sessions: 2 });
   vi.mocked(probeSshHost).mockReset().mockResolvedValue(remoteInfo);
   vi.mocked(cancelSshProbe).mockReset().mockResolvedValue(undefined);
   vi.mocked(respondSshPrompt).mockReset().mockResolvedValue(undefined);
@@ -196,8 +196,8 @@ describe("connection method selection", () => {
     });
     const { user, onClose, onConnected } = setup({ selected_method_id: "home" });
     await user.click(await screen.findByRole("option", { name: /Update remote components/ }));
-    await screen.findByRole("dialog", { name: "Force restart remote rmux?" });
-    expect(restartRemoteRmux).not.toHaveBeenCalled();
+    await screen.findByRole("dialog", { name: "Force restart remote ctmux?" });
+    expect(restartRemoteCtmux).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Not now" }));
     expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
     expect(installRemoteAgent).toHaveBeenCalledOnce();
@@ -213,56 +213,56 @@ describe("connection method selection", () => {
     vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "protocol_version_mismatch", message: "old daemon" });
     const { user, onClose, onConnected } = setup({ target, updateRequired: true });
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
-    await screen.findByRole("dialog", { name: "Force restart remote rmux?" });
+    await screen.findByRole("dialog", { name: "Force restart remote ctmux?" });
     expect(screen.getByText(/including sessions used by other clients/)).toBeTruthy();
-    expect(restartRemoteRmux).not.toHaveBeenCalled();
+    expect(restartRemoteCtmux).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Force restart" }));
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-    expect(restartRemoteRmux).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
+    expect(restartRemoteCtmux).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function));
     expect(vi.mocked(probeSshHost).mock.calls.map(([candidate]) => candidate)).toEqual([target, target]);
     expect(onConnected).toHaveBeenCalledExactlyOnceWith(target);
   });
 
   it("shows restart failures and requires another confirmation before retrying", async () => {
     vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "protocol_version_mismatch", message: "old daemon" });
-    vi.mocked(restartRemoteRmux).mockRejectedValueOnce(new Error("Restart control is unavailable"));
+    vi.mocked(restartRemoteCtmux).mockRejectedValueOnce(new Error("Restart control is unavailable"));
     const { user, onClose } = setup({ target, updateRequired: true });
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
     await user.click(await screen.findByRole("button", { name: "Force restart" }));
     expect((await screen.findByRole("alert")).textContent).toBe("Restart control is unavailable");
     expect(onClose).not.toHaveBeenCalled();
     expect(probeSshHost).toHaveBeenCalledOnce();
-    await user.click(screen.getByRole("option", { name: /Force restart remote rmux/ }));
-    expect(restartRemoteRmux).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("option", { name: /Force restart remote ctmux/ }));
+    expect(restartRemoteCtmux).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "Force restart" }));
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-    expect(restartRemoteRmux).toHaveBeenCalledTimes(2);
+    expect(restartRemoteCtmux).toHaveBeenCalledTimes(2);
   });
 
   it("does not reconnect after the user closes an in-flight restart", async () => {
     let finish!: (value: { terminated_sessions: number }) => void;
-    vi.mocked(restartRemoteRmux).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    vi.mocked(restartRemoteCtmux).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "protocol_version_mismatch", message: "old daemon" });
     const { user, onClose, onConnected } = setup({ target, updateRequired: true });
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
     await user.click(await screen.findByRole("button", { name: "Force restart" }));
-    await screen.findByRole("dialog", { name: "Restarting remote rmux" });
+    await screen.findByRole("dialog", { name: "Restarting remote ctmux" });
     await user.keyboard("{Escape}");
     await act(async () => finish({ terminated_sessions: 2 }));
     expect(onClose).toHaveBeenCalledOnce();
     expect(onConnected).not.toHaveBeenCalled();
     expect(probeSshHost).toHaveBeenCalledOnce();
-    expect(cancelSshProbe).toHaveBeenCalledWith(vi.mocked(restartRemoteRmux).mock.calls[0][1]);
+    expect(cancelSshProbe).toHaveBeenCalledWith(vi.mocked(restartRemoteCtmux).mock.calls[0][1]);
   });
   it("does not offer force restart when the installed agent lacks support", async () => {
     vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "protocol_version_mismatch", message: "old daemon" });
-    vi.mocked(checkRemoteRmuxRestart).mockRejectedValueOnce({ code: "remote_restart_unsupported", message: "Install a current component bundle" });
+    vi.mocked(checkRemoteCtmuxRestart).mockRejectedValueOnce({ code: "remote_restart_unsupported", message: "Install a current component bundle" });
     const { user } = setup({ target, updateRequired: true });
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
     expect((await screen.findByRole("alert")).textContent).toBe("Install a current component bundle");
     expect(screen.queryByRole("button", { name: "Force restart" })).toBeNull();
     expect(screen.queryByRole("option", { name: /Force restart/ })).toBeNull();
-    expect(restartRemoteRmux).not.toHaveBeenCalled();
+    expect(restartRemoteCtmux).not.toHaveBeenCalled();
   });
 
 });

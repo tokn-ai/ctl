@@ -1,4 +1,4 @@
-use ctl_core::hosts::{self, HostCatalogDocument, WorkspaceHost};
+use ctl_client::hosts::{self, HostCatalogDocument, WorkspaceHost};
 use serde::Serialize;
 
 use super::{Error, host_index, method_index};
@@ -37,7 +37,7 @@ pub(super) async fn display(
       .iter()
       .any(|method| method.tailscale_node_id.is_some())
   }) {
-    ctl_core::tailscale::discover_devices().await.devices
+    ctl_client::tailscale::discover_devices().await.devices
   } else {
     Vec::new()
   };
@@ -169,7 +169,7 @@ fn print_rows(views: &[HostView<'_>]) {
 
 #[cfg(unix)]
 async fn observe(target: hosts::ConnectionTargetDto) -> Result<&'static str, String> {
-  use ctld_ipc::{ClientMessage, ServerMessage};
+  use ctl_ipc::{ClientMessage, ServerMessage};
   let response = crate::ssh_broker::request_existing(ClientMessage::ConnectionStatus {
     target: target.to_ssh_target().map_err(|error| error.to_string())?,
   })
@@ -212,7 +212,7 @@ pub(super) async fn connect(
     Some(&host.connection_methods[index].method_id),
   )?;
   if resolved.tailscale_node_id.is_some() {
-    resolved.resolve_tailscale(&ctl_core::tailscale::discover_devices().await.devices)?;
+    resolved.resolve_tailscale(&ctl_client::tailscale::discover_devices().await.devices)?;
   }
   crate::target::ensure_vpn(&resolved.target).await?;
   crate::ssh_broker::ensure_master(resolved.target.to_ssh_target()?).await?;
@@ -229,7 +229,7 @@ pub(super) async fn disconnect(
   selector: &str,
   method: Option<&str>,
 ) -> Result<(), Error> {
-  use ctld_ipc::{ClientMessage, ServerMessage};
+  use ctl_ipc::{ClientMessage, ServerMessage};
   let host = &catalog.hosts[host_index(catalog, selector)?];
   let selected = method
     .map(|method| method_index(host, Some(method)))
@@ -239,7 +239,7 @@ pub(super) async fn disconnect(
     .iter()
     .any(|method| method.tailscale_node_id.is_some())
   {
-    ctl_core::tailscale::discover_devices().await.devices
+    ctl_client::tailscale::discover_devices().await.devices
   } else {
     Vec::new()
   };

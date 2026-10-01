@@ -1,12 +1,12 @@
 {
-  "name": "rmux-app",
+  "name": "ctmux-app",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "predev": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/sync-agent-bundles.mts --check",
     "dev": "vite",
-    "daemons:build": "cargo build --locked --manifest-path ../../Cargo.toml -p ctld -p rmuxd -p taskd",
+    "daemons:build": "cargo build --locked --manifest-path ../../Cargo.toml -p ctld -p ctmuxd -p ctl-taskd",
     "build": "tsc && vite build",
     "check": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "agents:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning ../../scripts/dev/sync-agent-bundles.mts --check",

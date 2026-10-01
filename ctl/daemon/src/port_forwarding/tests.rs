@@ -108,15 +108,15 @@ async fn shutdown_cancels_only_owned_listeners_and_reports_unreleased_records() 
 async fn moving_a_forward_cancels_its_exact_previous_route_before_starting_the_new_one() {
   let old = target("office-network");
   let mut next = target("preferred-route");
-  next.gateways.push(ctld_ipc::SshGateway {
-    kind: ctld_ipc::GatewayKind::Ssh,
+  next.gateways.push(ctl_ipc::SshGateway {
+    kind: ctl_ipc::GatewayKind::Ssh,
     vpn: None,
     destination: "bastion".into(),
     hostname: None,
     user: None,
     port: None,
     identity_file: None,
-    mode: ctld_ipc::SshGatewayMode::Automatic,
+    mode: ctl_ipc::SshGatewayMode::Automatic,
   });
   let control = Control::ready(&[old.clone(), next.clone()]);
   let mut registry = ForwardRegistry::default();

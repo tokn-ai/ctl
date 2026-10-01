@@ -174,7 +174,7 @@ export function VpnConnectionEditor({ connection, saving, error, on_save, on_clo
             <label>
               Device name in Tailscale
               <input value={hostname} aria-label="Device name in Tailscale" onChange={(event) => setHostname(event.target.value)} disabled={locked} autoComplete="off" spellCheck={false} placeholder="Assigned automatically" />
-              <small>The name shown in Tailscale’s device list. Leave blank for rmux to choose one.</small>
+              <small>The name shown in Tailscale’s device list. Leave blank for ctmux to choose one.</small>
             </label>
             <label className="vpn-checkbox-option">
               <input type="checkbox" checked={accept_routes} onChange={(event) => setAcceptRoutes(event.target.checked)} disabled={locked} />

@@ -29,7 +29,7 @@ interface Record {
 }
 
 async function fixture(context: TestContext): Promise<Fixture> {
-  const root = await realpath(await mkdtemp("/tmp/rmux-app-test-"));
+  const root = await realpath(await mkdtemp("/tmp/ctmux-app-test-"));
   const executable = path.join(root, "app.cjs");
   const log = path.join(root, "events.jsonl");
   await writeFile(executable, `#!${process.execPath}
@@ -127,7 +127,7 @@ test("launches an adjacent independent snapshot with exact runtime context", uni
   await data.supervisor.close();
   assert.equal(running(app.pid), false);
   assert.deepEqual(data.exits, []);
-  assert.deepEqual((await readdir(data.root)).filter((name) => name.startsWith(".rmux-app-dev-")), []);
+  assert.deepEqual((await readdir(data.root)).filter((name) => name.startsWith(".ctmux-app-dev-")), []);
 });
 
 test("preparation failure preserves the current app and surfaces only safe client error", unixOnly, async (context) => {
@@ -156,11 +156,11 @@ test("disconnect during preparation cancels replacement and cleans its snapshot"
   await pause(30);
   preparation.release();
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if ((await readdir(data.root)).filter((name) => name.startsWith(".rmux-app-dev-")).length === 1) break;
+    if ((await readdir(data.root)).filter((name) => name.startsWith(".ctmux-app-dev-")).length === 1) break;
     await pause();
   }
   assert.equal(running(original.pid), true);
-  assert.equal((await readdir(data.root)).filter((name) => name.startsWith(".rmux-app-dev-")).length, 1);
+  assert.equal((await readdir(data.root)).filter((name) => name.startsWith(".ctmux-app-dev-")).length, 1);
   assert.equal((await records(data)).filter((record) => record.type === "start").length, 1);
 });
 
@@ -245,7 +245,7 @@ test("shutdown during preparation cancels new launch and drains cleanup", unixOn
   preparation.release();
   await closed;
   assert.equal(running(app.pid), false);
-  assert.deepEqual((await readdir(data.root)).filter((name) => name.startsWith(".rmux-app-dev-")), []);
+  assert.deepEqual((await readdir(data.root)).filter((name) => name.startsWith(".ctmux-app-dev-")), []);
   assert.deepEqual(data.exits, []);
 });
 
@@ -255,7 +255,7 @@ test("failed operating-system launch reports error and cleans snapshot", unixOnl
   const relay = client(data);
   assert.deepEqual(await relay.next(), { type: "error", message: "The successfully built app could not be started" });
   await data.supervisor.close();
-  assert.deepEqual((await readdir(data.root)).filter((name) => name.startsWith(".rmux-app-dev-")), []);
+  assert.deepEqual((await readdir(data.root)).filter((name) => name.startsWith(".ctmux-app-dev-")), []);
   assert.deepEqual(data.exits, []);
 });
 

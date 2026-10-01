@@ -95,7 +95,7 @@ describe("createStatusGroups", () => {
       history_gap: true,
       shell_state: {
         shell_type: "bash",
-        cwd: "/work/rmux",
+        cwd: "/work/ctmux",
         running_command: "cargo test",
         prompt_phase: "running",
         tui_hint: "inline",
@@ -105,7 +105,7 @@ describe("createStatusGroups", () => {
     });
 
     expect(labels(createStatusGroups(current))).toEqual({
-      context: ["bash", "/work/rmux"],
+      context: ["bash", "/work/ctmux"],
       indicators: ["LAST KNOWN", "107×24", "RECONNECTING", "HISTORY GAP"],
     });
   });

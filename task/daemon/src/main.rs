@@ -1,6 +1,6 @@
 use clap::Parser;
+use ctl_taskd::{DaemonConfig, default_data_directory, socket_path};
 use std::path::PathBuf;
-use taskd::{DaemonConfig, default_data_directory, socket_path};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Per-user managed task daemon")]
@@ -15,7 +15,7 @@ struct Arguments {
   data_directory: Option<PathBuf>,
 
   #[arg(long)]
-  rmux_socket: Option<PathBuf>,
+  ctmux_socket: Option<PathBuf>,
 
   #[arg(long, hide = true)]
   detach_from_terminal: bool,
@@ -24,16 +24,16 @@ struct Arguments {
 fn main() {
   let arguments = Arguments::parse();
   if arguments.component_info {
-    let info = component_info::ComponentInfo {
-      build: component_info::build_info(),
+    let info = ctl_component_info::ComponentInfo {
+      build: ctl_component_info::build_info(),
       protocols: vec![
-        component_info::ProtocolInfo {
+        ctl_component_info::ProtocolInfo {
           name: "task".into(),
-          version: task_proto::PROTOCOL_VERSION,
+          version: ctl_task_proto::PROTOCOL_VERSION,
         },
-        component_info::ProtocolInfo {
+        ctl_component_info::ProtocolInfo {
           name: "task_control".into(),
-          version: task_proto::control::PROTOCOL_VERSION,
+          version: ctl_task_proto::control::PROTOCOL_VERSION,
         },
       ],
     };
@@ -47,12 +47,14 @@ fn main() {
   if arguments.detach_from_terminal
     && let Err(error) = detach_from_terminal()
   {
-    eprintln!("taskd: could not detach from the invoking terminal: {error}");
+    eprintln!("ctl-taskd: could not detach from the invoking terminal: {error}");
     std::process::exit(1);
   }
 
   let config = DaemonConfig {
-    rmux_socket: arguments.rmux_socket.unwrap_or_else(rmux_ipc::socket_path),
+    ctmux_socket: arguments
+      .ctmux_socket
+      .unwrap_or_else(ctmux_ipc::socket_path),
     socket_path: arguments.socket.unwrap_or_else(socket_path),
     data_directory: arguments
       .data_directory
@@ -64,12 +66,12 @@ fn main() {
   {
     Ok(runtime) => runtime,
     Err(error) => {
-      eprintln!("taskd: could not initialize the async runtime: {error}");
+      eprintln!("ctl-taskd: could not initialize the async runtime: {error}");
       std::process::exit(1);
     }
   };
-  if let Err(error) = runtime.block_on(taskd::run(config)) {
-    eprintln!("taskd: {error}");
+  if let Err(error) = runtime.block_on(ctl_taskd::run(config)) {
+    eprintln!("ctl-taskd: {error}");
     std::process::exit(1);
   }
 }

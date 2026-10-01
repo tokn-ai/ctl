@@ -48,7 +48,7 @@ pub enum Command {
 
 pub async fn run(command: Command) -> Result<(), Error> {
   let (status, json) = match command {
-    Command::Start { env_file, json } => (ctld_ipc::vpn::start(env_file).await?, json),
+    Command::Start { env_file, json } => (ctl_ipc::vpn::start(env_file).await?, json),
     Command::StartTailscale {
       connection_id,
       name,
@@ -56,18 +56,18 @@ pub async fn run(command: Command) -> Result<(), Error> {
       accept_routes,
       json,
     } => {
-      let connection = ctld_ipc::VpnConnection {
+      let connection = ctl_ipc::VpnConnection {
         connection_id,
         name,
-        settings: ctld_ipc::VpnSettings::Tailscale {
+        settings: ctl_ipc::VpnSettings::Tailscale {
           hostname,
           accept_routes,
         },
       };
-      (ctld_ipc::vpn::start_connection(connection).await?, json)
+      (ctl_ipc::vpn::start_connection(connection).await?, json)
     }
     Command::Status { json } => {
-      let snapshot = ctld_ipc::vpn::list().await?;
+      let snapshot = ctl_ipc::vpn::list().await?;
       let output = if json {
         serde_json::to_string(&snapshot)?
       } else {
@@ -87,8 +87,8 @@ pub async fn run(command: Command) -> Result<(), Error> {
     }
     Command::Stop { vpn_id, json } => {
       let status = match vpn_id {
-        Some(vpn_id) => ctld_ipc::vpn::stop_id(&vpn_id).await?,
-        None => ctld_ipc::vpn::stop().await?,
+        Some(vpn_id) => ctl_ipc::vpn::stop_id(&vpn_id).await?,
+        None => ctl_ipc::vpn::stop().await?,
       };
       (status, json)
     }
@@ -101,8 +101,8 @@ pub async fn run(command: Command) -> Result<(), Error> {
   Ok(())
 }
 
-fn status_row(status: &ctld_ipc::VpnStatus) -> [String; 6] {
-  use ctld_ipc::VpnState;
+fn status_row(status: &ctl_ipc::VpnStatus) -> [String; 6] {
+  use ctl_ipc::VpnState;
 
   let state = if status.status_unavailable {
     "unavailable"
@@ -117,8 +117,8 @@ fn status_row(status: &ctld_ipc::VpnStatus) -> [String; 6] {
   };
   let vpn_id = display_value(status.vpn_id.as_deref().or(Some("-")));
   let provider = match status.provider {
-    ctld_ipc::VpnProvider::Openconnect => "OpenConnect",
-    ctld_ipc::VpnProvider::Tailscale => "Tailscale",
+    ctl_ipc::VpnProvider::Openconnect => "OpenConnect",
+    ctl_ipc::VpnProvider::Tailscale => "Tailscale",
   };
   if status.state == VpnState::Stopped {
     [
@@ -141,9 +141,9 @@ fn status_row(status: &ctld_ipc::VpnStatus) -> [String; 6] {
   }
 }
 
-fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
+fn format_statuses(statuses: &[ctl_ipc::VpnStatus]) -> String {
   let rows: Vec<_> = if statuses.is_empty() {
-    vec![status_row(&ctld_ipc::VpnStatus::default())]
+    vec![status_row(&ctl_ipc::VpnStatus::default())]
   } else {
     statuses.iter().map(status_row).collect()
   };
@@ -195,7 +195,7 @@ fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
   for status in statuses {
     if let Some(url) = &status.auth_url
       && !status.status_unavailable
-      && ctld_ipc::vpn::is_tailscale_auth_url(url)
+      && ctl_ipc::vpn::is_tailscale_auth_url(url)
     {
       let _ = write!(
         table,
@@ -228,7 +228,7 @@ fn display_value(value: Option<&str>) -> String {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   #[error(transparent)]
-  Vpn(#[from] ctld_ipc::vpn::VpnError),
+  Vpn(#[from] ctl_ipc::vpn::VpnError),
   #[error(transparent)]
   Json(#[from] serde_json::Error),
 }

@@ -33,7 +33,7 @@ const remoteTargets = [
 ];
 
 async function fixture(t: TestContext): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "rmux-release-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "ctmux-release-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const addAsset = async (name: string): Promise<string> => {
     const content = `test bundle ${name}`;
@@ -54,7 +54,7 @@ async function fixture(t: TestContext): Promise<string> {
     const extensions = target.endsWith("apple-darwin") ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
     const assets: { name: string; sha256: string }[] = [];
     for (const extension of extensions) {
-      const name = `rmux-${identity.bundle_id}-${target}.${extension}`;
+      const name = `ctmux-${identity.bundle_id}-${target}.${extension}`;
       assets.push({ name, sha256: await addAsset(name) });
     }
     await writeFile(join(directory, `desktop-${target}.json`), JSON.stringify({
@@ -209,7 +209,7 @@ test("rejects missing desktop formats and filenames from a different build", asy
     const directory = await fixture(t);
     const path = join(directory, "desktop-aarch64-apple-darwin.json");
     const manifest = JSON.parse(await readFile(path, "utf8"));
-    manifest.assets[0].name = "rmux-old-build-aarch64-apple-darwin.dmg";
+    manifest.assets[0].name = "ctmux-old-build-aarch64-apple-darwin.dmg";
     await writeFile(path, JSON.stringify(manifest));
     await assert.rejects(validateReleaseBundle(identity, directory), /Unexpected desktop package filename/);
   });
@@ -272,7 +272,7 @@ test("rejects traversal, symlinks, and invalid signing modes", async (t) => {
 });
 
 test("replaces only generated notes and describes unsigned macOS limitations", () => {
-  const old = "User introduction.\n<!-- rmux-ci:start -->old build<!-- rmux-ci:end -->\nUser changelog.";
+  const old = "User introduction.\n<!-- ctmux-ci:start -->old build<!-- ctmux-ci:end -->\nUser changelog.";
   const updated = releaseNotes(exampleBundle, old);
   assert.ok(updated.startsWith("User introduction.\n"));
   assert.ok(updated.endsWith("\nUser changelog."));
@@ -281,15 +281,15 @@ test("replaces only generated notes and describes unsigned macOS limitations", (
   assert.ok(updated.includes("Touch ID credential storage is unavailable"));
   assert.ok(!updated.includes("old build"));
   assert.equal(releaseNotes(exampleBundle, updated), updated);
-  assert.throws(() => releaseNotes(exampleBundle, "<!-- rmux-ci:start -->incomplete"), /malformed/);
+  assert.throws(() => releaseNotes(exampleBundle, "<!-- ctmux-ci:start -->incomplete"), /malformed/);
 });
 
 test("existing draft uploads managed assets, preserves manual assets and notes, then cleans up", async () => {
   const github = mockGithub({
     assets: [
-      { id: 1, name: "obsolete.dmg", label: "rmux-ci: obsolete.dmg" },
+      { id: 1, name: "obsolete.dmg", label: "ctmux-ci: obsolete.dmg" },
       { id: 2, name: "manual.pdf", label: null },
-      { id: 3, name: "desktop.json", label: "rmux-ci: desktop.json" },
+      { id: 3, name: "desktop.json", label: "ctmux-ci: desktop.json" },
     ],
     latest_body: "Notes edited while the upload ran.",
   });
@@ -302,7 +302,7 @@ test("existing draft uploads managed assets, preserves manual assets and notes, 
   assert.ok(upload > 0 && patch > upload && deletion > patch);
   const uploadUrl = new URL(github.calls[upload]![1]!);
   assert.equal(uploadUrl.searchParams.get("name"), "new-package.dmg");
-  assert.equal(uploadUrl.searchParams.get("label"), "rmux-ci: new-package.dmg");
+  assert.equal(uploadUrl.searchParams.get("label"), "ctmux-ci: new-package.dmg");
   assert.ok(github.calls[upload]!.includes("/tmp/bundles/new-package.dmg"));
   assert.ok(github.calls[upload]!.includes("Content-Type: application/octet-stream"));
   assert.deepEqual(github.calls.filter((args) => args.includes("DELETE")), [
@@ -310,7 +310,7 @@ test("existing draft uploads managed assets, preserves manual assets and notes, 
     ["api", "repos/tokn-ai/ctl/releases/assets/1", "--method", "DELETE"],
   ]);
   assert.equal(github.payloads[0]!.tag_name, "v0.1.0");
-  assert.equal(github.payloads[0]!.name, "rmux v0.1.0");
+  assert.equal(github.payloads[0]!.name, "ctmux v0.1.0");
   assert.equal(github.payloads[0]!.target_commitish, identity.git_revision);
   assert.ok(String(github.payloads[0]!.body).startsWith("Notes edited while the upload ran."));
   assert.ok(!("draft" in github.payloads[0]!));
@@ -393,7 +393,7 @@ test("rechecks draft status before uploading", async () => {
 test("upload failure preserves obsolete assets and previous metadata", async () => {
   const github = mockGithub({
     upload_error: true,
-    assets: [{ id: 1, name: "previous.dmg", label: "rmux-ci: previous.dmg" }],
+    assets: [{ id: 1, name: "previous.dmg", label: "ctmux-ci: previous.dmg" }],
   });
   await assert.rejects(updateDraftRelease("tokn-ai/ctl", exampleBundle, github.gh), /Upload failed/);
   assert.ok(!github.calls.some((args) => args.includes("DELETE") || args.includes("PATCH")));
@@ -405,6 +405,6 @@ test("rejects a manual attachment collision before uploading anything", async ()
   assert.ok(!github.calls.some(isMutation));
   assert.deepEqual(planAssetUpdate([
     { id: 1, name: "manual.pdf", label: "" },
-    { id: 2, name: "old.dmg", label: "rmux-ci: old.dmg" },
-  ], []), [{ id: 2, name: "old.dmg", label: "rmux-ci: old.dmg" }]);
+    { id: 2, name: "old.dmg", label: "ctmux-ci: old.dmg" },
+  ], []), [{ id: 2, name: "old.dmg", label: "ctmux-ci: old.dmg" }]);
 });

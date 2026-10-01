@@ -2,14 +2,14 @@
 
 #[cfg(any(target_os = "macos", test))]
 use {
-  ctld_ipc::SshTarget,
-  ctld_ipc::credentials::{CredentialKind, Inventory, StoredCredential},
+  ctl_ipc::SshTarget,
+  ctl_ipc::credentials::{CredentialKind, Inventory, StoredCredential},
   serde::{Deserialize, Serialize},
   std::collections::HashMap,
 };
 
 #[cfg(any(target_os = "macos", test))]
-pub(crate) const SERVICE_PREFIX: &str = "io.rmux.desktop.ctld.ssh.";
+pub(crate) const SERVICE_PREFIX: &str = "dev.tokn-ai.ctl.ctld.ssh.";
 #[cfg(any(target_os = "macos", test))]
 pub(crate) const MAX_SEARCH_ITEMS: usize = 4096;
 #[cfg(any(target_os = "macos", test))]

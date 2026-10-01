@@ -7,11 +7,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmux_client::{
+use ctmux_client::{
   AttachRequest, AttachmentController, AttachmentControllerOptions, ClientIdentity,
-  DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach, get_shell_state, request as rmux_request,
+  DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach, get_shell_state, request as ctmux_request,
 };
-use rmux_proto::{ClientMessage, ServerMessage};
+use ctmux_proto::{ClientMessage, ServerMessage};
 use tauri::ipc::Channel;
 use tauri::{State, WebviewWindow};
 use tokio::task::JoinSet;
@@ -31,7 +31,7 @@ use crate::ssh_config;
 use crate::state::{AppState, AttachmentActor, forward_attachment_events};
 use crate::transport;
 
-const CLIENT_NAME: &str = "rmux-app";
+const CLIENT_NAME: &str = "ctmux-app";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOCAL_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_millis(250);
 const REMOTE_SESSION_SHELL_STATE_INSPECTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -106,7 +106,7 @@ pub async fn list_sessions(request: TargetRequestDto) -> CommandResult<SessionLi
 
 async fn discover_sessions(request: TargetRequestDto) -> CommandResult<SessionListDto> {
   let stream = transport::connect(&request.target).await?;
-  let response = rmux_request(stream, &client_identity(), ClientMessage::ListSessions)
+  let response = ctmux_request(stream, &client_identity(), ClientMessage::ListSessions)
     .await
     .map_err(CommandErrorDto::client)?;
   let observed_at_ms = observation_timestamp_ms();
@@ -136,7 +136,7 @@ async fn discover_sessions(request: TargetRequestDto) -> CommandResult<SessionLi
 /// neutral title while keeping the list usable.
 async fn inspect_session_shell_states(
   target: &crate::dto::ConnectionTargetDto,
-  sessions: &[rmux_proto::SessionInfo],
+  sessions: &[ctmux_proto::SessionInfo],
 ) -> BTreeMap<String, ShellStateDto> {
   let mut shell_states = BTreeMap::new();
   let mut session_ids = sessions.iter().map(|session| session.session_id.clone());
@@ -195,7 +195,7 @@ pub async fn create_session(request: CreateSessionRequestDto) -> CommandResult<S
     (None, false) => None,
   };
   let stream = transport::connect(&request.target).await?;
-  let response = rmux_request(
+  let response = ctmux_request(
     stream,
     &client_identity(),
     ClientMessage::CreateSession {
@@ -216,7 +216,7 @@ pub async fn create_session(request: CreateSessionRequestDto) -> CommandResult<S
 #[tauri::command]
 pub async fn kill_session(request: KillSessionRequestDto) -> CommandResult<()> {
   let stream = transport::connect(&request.target).await?;
-  let response = rmux_request(
+  let response = ctmux_request(
     stream,
     &client_identity(),
     ClientMessage::KillSession {
@@ -231,7 +231,7 @@ pub async fn kill_session(request: KillSessionRequestDto) -> CommandResult<()> {
   }
 }
 
-/// Gracefully replaces the local `rmuxd` process after terminating all of its
+/// Gracefully replaces the local `ctmuxd` process after terminating all of its
 /// sessions through its owner-only local-control endpoint.
 ///
 /// It first probes the endpoint without touching the active attachment. A
@@ -347,7 +347,7 @@ async fn open_reserved_attachment(
     ..AttachmentControllerOptions::default()
   };
   let remote_observation = match &stream {
-    ctl_core::Transport::Ssh(stream) => {
+    ctl_client::Transport::Ssh(stream) => {
       stream.remote_identity.as_deref().cloned().map(|identity| {
         crate::about::observations::RemoteObservation {
           identity,
@@ -361,14 +361,14 @@ async fn open_reserved_attachment(
         }
       })
     }
-    ctl_core::Transport::Local(_) => None,
+    ctl_client::Transport::Local(_) => None,
   };
   let (controller, control, events) =
     AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
   let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
   let actor = Arc::new(
     AttachmentActor::new(attachment_id.clone(), window_label.clone(), target, control)
-      .with_cache(rmux_client::cache::CacheIdentity {
+      .with_cache(ctmux_client::cache::CacheIdentity {
         host_key: request
           .cache_host_key
           .unwrap_or_else(|| match &request.target {
@@ -486,7 +486,7 @@ fn client_identity() -> ClientIdentity {
 
 fn unexpected_response(expected: &str, _actual: &ServerMessage) -> CommandErrorDto {
   CommandErrorDto::new(
-    "unexpected_rmux_response",
+    "unexpected_ctmux_response",
     format!("expected {expected}, received another response type"),
   )
 }
@@ -501,21 +501,21 @@ mod tests {
   /// structured settings used by app-local hosts. Authentication and host
   /// verification remain owned by OpenSSH.
   #[tokio::test]
-  #[ignore = "requires RMUX_TEST_SSH_TARGET and a live ctl-agent SSH endpoint"]
+  #[ignore = "requires CTMUX_TEST_SSH_TARGET and a live ctl-agent SSH endpoint"]
   async fn creates_lists_attaches_and_kills_a_session_over_ssh() {
-    let destination = std::env::var("RMUX_TEST_SSH_TARGET")
-      .expect("set RMUX_TEST_SSH_TARGET to an OpenSSH destination");
+    let destination = std::env::var("CTMUX_TEST_SSH_TARGET")
+      .expect("set CTMUX_TEST_SSH_TARGET to an OpenSSH destination");
     let target = ConnectionTargetDto::Ssh {
       ssh_config_alias: None,
       use_ssh_config_master: None,
       remote_info: None,
       destination,
-      hostname: std::env::var("RMUX_TEST_SSH_HOSTNAME").ok(),
-      user: std::env::var("RMUX_TEST_SSH_USER").ok(),
-      port: std::env::var("RMUX_TEST_SSH_PORT")
+      hostname: std::env::var("CTMUX_TEST_SSH_HOSTNAME").ok(),
+      user: std::env::var("CTMUX_TEST_SSH_USER").ok(),
+      port: std::env::var("CTMUX_TEST_SSH_PORT")
         .ok()
-        .map(|port| port.parse().expect("RMUX_TEST_SSH_PORT must be a u16")),
-      identity_file: std::env::var("RMUX_TEST_SSH_IDENTITY_FILE").ok(),
+        .map(|port| port.parse().expect("CTMUX_TEST_SSH_PORT must be a u16")),
+      identity_file: std::env::var("CTMUX_TEST_SSH_IDENTITY_FILE").ok(),
       gateway_route: Vec::new(),
       vpn_connection_id: None,
       gateways: Box::default(),
@@ -555,7 +555,7 @@ mod tests {
       AttachRequest {
         session: created.session_id.clone(),
         resume_from: None,
-        terminal_size: rmux_proto::TerminalSize::default(),
+        terminal_size: ctmux_proto::TerminalSize::default(),
         request_input_lease: false,
         request_layout_lease: false,
         request_command_line: false,

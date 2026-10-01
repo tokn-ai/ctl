@@ -1,7 +1,7 @@
 # Saved credentials
 
 Open **Credentials** from the sidebar or command palette to inspect credentials
-managed by rmux and local SSH identity files. The page displays names, credential
+managed by ctmux and local SSH identity files. The page displays names, credential
 types, accounts or targets, storage locations, and recorded dates. It has no reveal or copy-secret action.
 
 ## Identity files
@@ -10,7 +10,7 @@ Each identity file has one row with its name and path, verified key type and
 fingerprint when available, recorded host references, and passphrase status.
 The inventory includes paths configured by saved hosts and their gateways (including
 unavailable hosts), literal `IdentityFile` paths from SSH config and included
-files, keys discovered directly in `~/.ssh`, and paths attached to saved rmux
+files, keys discovered directly in `~/.ssh`, and paths attached to saved ctmux
 identity passphrases. Symlinks to the same existing file share a row. Discovery
 does not connect to hosts or execute SSH config `Match exec` commands. Paths
 requiring connection-specific expansion and bounded discovery omissions produce
@@ -78,7 +78,7 @@ the page does not restart active SSH connections automatically.
 
 Authentication requests describe their purpose: the key file whose passphrase
 is being read or replaced, the SSH account and destination whose password is
-needed, or the explicit import of previously saved rmux credential metadata.
+needed, or the explicit import of previously saved ctmux credential metadata.
 Connection setup discovers public identities without unlocking saved keys. Only
 an SSH signature request for a configured key can read its saved passphrase and
 protected binding together. Password-only connections therefore do not request
@@ -115,7 +115,7 @@ The noninteractive list request has its own operation name, so an older helper
 rejects it before performing an authenticated legacy inventory.
 An older helper must be updated or rebuilt to support this page.
 
-Keychain results are restricted to rmux's credential namespace; saved "never
+Keychain results are restricted to ctmux's credential namespace; saved "never
 save" preferences and credentials owned by other applications are excluded.
 Malformed requests, inaccessible storage, and oversized inventories are
 reported explicitly. Tests use synthetic metadata and helper processes, without

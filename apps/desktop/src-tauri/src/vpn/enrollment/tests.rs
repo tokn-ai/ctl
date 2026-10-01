@@ -9,7 +9,7 @@ use super::*;
 struct Fixture(PathBuf);
 impl Fixture {
   fn new() -> Self {
-    Self(std::env::temp_dir().join(format!("rmux-enrollment-{}", uuid::Uuid::new_v4())))
+    Self(std::env::temp_dir().join(format!("ctmux-enrollment-{}", uuid::Uuid::new_v4())))
   }
 }
 impl Drop for Fixture {

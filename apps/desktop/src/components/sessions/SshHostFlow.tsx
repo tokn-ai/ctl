@@ -18,8 +18,8 @@ import {
   forgetSshCredentials,
   installRemoteAgent,
   openVpnSignIn,
-  restartRemoteRmux,
-  checkRemoteRmuxRestart,
+  restartRemoteCtmux,
+  checkRemoteCtmuxRestart,
   probeSshHost,
   respondSshPrompt,
   saveSshConfigHost,
@@ -363,7 +363,7 @@ export function SshHostFlow({
     attemptRef.current = attempt;
     setStep("progress");
     try {
-      await checkRemoteRmuxRestart(candidate, attempt, (next) => {
+      await checkRemoteCtmuxRestart(candidate, attempt, (next) => {
         if (attemptRef.current === attempt && !closedRef.current) setPrompt(next);
       });
       if (attemptRef.current !== attempt || closedRef.current) return;
@@ -393,7 +393,7 @@ export function SshHostFlow({
     setStep("restarting");
     onConnectionChange?.(candidate, "connecting");
     try {
-      await restartRemoteRmux(candidate, attempt, (next) => {
+      await restartRemoteCtmux(candidate, attempt, (next) => {
         if (attemptRef.current === attempt && !closedRef.current) setPrompt(next);
       });
       if (attemptRef.current !== attempt || closedRef.current) return;
@@ -631,7 +631,7 @@ export function SshHostFlow({
       mode = {
         kind: "input",
         label: "SSH host",
-        placeholder: "rmux@127.0.0.1:2222",
+        placeholder: "ctmux@127.0.0.1:2222",
         initial_value: address,
         suggestions: suggestions.length || availableTailscaleDevices.length || discoveryLoading
           ? {
@@ -670,7 +670,7 @@ export function SshHostFlow({
     case "ssh_user":
       title = target ? "SSH user" : "SSH user · 3/5";
       description = "Choose the SSH account on this Tailscale device. Leave blank to use your SSH default." +
-        (target ? " Choosing an account saves this host customization in rmux after verification." : "");
+        (target ? " Choosing an account saves this host customization in ctmux after verification." : "");
       mode = {
         kind: "input",
         label: "SSH user",
@@ -769,7 +769,7 @@ export function SshHostFlow({
               {
                 id: "ssh_config",
                 label: "OpenSSH config",
-                detail: "Reusable by ssh, ctl, and rmux-app.",
+                detail: "Reusable by ssh, ctl, and ctmux-app.",
               },
               {
                 id: "local_storage",
@@ -782,7 +782,7 @@ export function SshHostFlow({
       break;
     case "save_retry":
       title = "Could not save host";
-      description = "The connection is verified. Retry saving this host to rmux.";
+      description = "The connection is verified. Retry saving this host to ctmux.";
       mode = saving
         ? { kind: "progress", message: "Saving host…" }
         : { kind: "pick", choices: [{ id: "save", label: "Retry saving host" }] };
@@ -798,11 +798,11 @@ export function SshHostFlow({
       description = needs_vpn_sign_in
         ? "Sign in to Tailscale with your browser, then choose Connect to continue. You can also manage this connection from the VPN page."
         : needsDaemonRestart
-          ? "The bundled components were installed, but the running rmux daemon is still incompatible. Choose Force restart to end its existing terminal sessions, or Connect to check again. The update has not stopped running sessions."
+          ? "The bundled components were installed, but the running ctmux daemon is still incompatible. Choose Force restart to end its existing terminal sessions, or Connect to check again. The update has not stopped running sessions."
           : (step === "retry" || step === "update") && canInstallAgent
             ? (needsUpdate
               ? "Update the remote components to match this app. Running sessions are preserved; an already-running daemon may still need to be restarted on the host."
-              : "SSH is available, but this host is missing the rmux remote components. Install them for this user or retry after installing them manually.")
+              : "SSH is available, but this host is missing the ctmux remote components. Install them for this user or retry after installing them manually.")
             : "OpenSSH will ask for host verification or authentication if needed.";
       mode = opening_vpn_sign_in ? { kind: "progress", message: "Opening sign-in in your browser…" } : {
         kind: "pick",
@@ -813,11 +813,11 @@ export function SshHostFlow({
                 {
                   id: "install_agent",
                   label: needsUpdate ? "Update remote components" : "Install remote components",
-                  detail: "Install the bundled ctl-agent, rmuxd, and taskd for this user.",
+                  detail: "Install the bundled ctl-agent, ctmuxd, and ctl-taskd for this user.",
                 },
               ]
             : []),
-          ...(needsDaemonRestart ? [{ id: "restart_rmux", label: "Force restart remote rmux…" }] : []),
+          ...(needsDaemonRestart ? [{ id: "restart_ctmux", label: "Force restart remote ctmux…" }] : []),
           ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
         ],
       };
@@ -825,12 +825,12 @@ export function SshHostFlow({
       else if (!target) onBack = back(complex || editingConnection ? "route" : configuredRef.current && !onSaveNewHost ? "host" : "auth");
       break;
     case "restart_confirm":
-      title = "Force restart remote rmux?";
+      title = "Force restart remote ctmux?";
       description = "The components were updated, but the running daemon is still incompatible. Force restart ends all terminal sessions on this host for this account, including sessions used by other clients. Running commands may be interrupted.";
       mode = { kind: "confirm", confirm_label: "Force restart", destructive: true };
       break;
     case "restarting":
-      title = "Restarting remote rmux";
+      title = "Restarting remote ctmux";
       description = "Ending terminal sessions and starting the updated daemon. Closing this dialog stops waiting; it cannot undo the restart.";
       mode = { kind: "progress" };
       break;
@@ -992,7 +992,7 @@ export function SshHostFlow({
         } finally {
           if (!closedRef.current) setOpeningVpnSignIn(false);
         }
-      } else if (value === "restart_rmux") setStep("restart_confirm");
+      } else if (value === "restart_ctmux") setStep("restart_confirm");
       else if (value === "install_agent") void installAgent(candidateRef.current);
       else void connect(candidateRef.current);
     }

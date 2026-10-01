@@ -57,7 +57,7 @@ export function WorkspaceSidebar({
   return (
     <div className="workspace-sidebar">
       <div className="sidebar-rail">
-        <div className="workbench-brand" title="rmux" aria-label="rmux">
+        <div className="workbench-brand" title="ctmux" aria-label="ctmux">
           <Icon name="terminal" size={24} />
         </div>
         <nav
@@ -121,7 +121,7 @@ export function WorkspaceSidebar({
           </button>
         ) : null}
         {on_about ? (
-          <button className="rail-settings" type="button" onClick={on_about} aria-label="About rmux" title="About rmux" aria-pressed={about_open}>
+          <button className="rail-settings" type="button" onClick={on_about} aria-label="About ctmux" title="About ctmux" aria-pressed={about_open}>
             <Icon name="info" size={21} />
           </button>
         ) : null}

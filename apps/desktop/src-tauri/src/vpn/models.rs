@@ -1,4 +1,4 @@
-use ctld_ipc::{VpnConnection, VpnSettings};
+use ctl_ipc::{VpnConnection, VpnSettings};
 use serde::{Deserialize, Deserializer, Serialize};
 use zeroize::Zeroizing;
 
@@ -192,6 +192,6 @@ pub struct SaveVpnEnrollmentRequest {
 pub struct VpnEnrollmentSnapshot {
   pub(super) enrollment_id: String,
   pub(super) connection_id: String,
-  pub(super) status: ctld_ipc::VpnStatus,
+  pub(super) status: ctl_ipc::VpnStatus,
   pub(super) error: Option<crate::error::CommandErrorDto>,
 }

@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
 
-use ctld_ipc::{GatewayKind, SshGateway, VpnGateway, VpnState};
+use ctl_ipc::{GatewayKind, SshGateway, VpnGateway, VpnState};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use zeroize::Zeroizing;
@@ -100,7 +100,7 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
         .args(["-o", "ForwardAgent=no"])
         .args(["-o", "ForwardX11=no"]);
       if !prefix.is_empty() {
-        let proxy = ctld_ipc::proxy_command(prefix).map_err(io::Error::other)?;
+        let proxy = ctl_ipc::proxy_command(prefix).map_err(io::Error::other)?;
         command.arg("-o").arg(format!("ProxyCommand={proxy}"));
       }
       if let Some(port) = gateway.port {
@@ -140,7 +140,7 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
 }
 
 async fn vpn_endpoint(vpn: &VpnGateway) -> io::Result<SocketAddr> {
-  let snapshot = ctld_ipc::vpn::Client::new(vpn.socket_path.clone())
+  let snapshot = ctl_ipc::vpn::Client::new(vpn.socket_path.clone())
     .list()
     .await
     .map_err(io::Error::other)?;
@@ -355,7 +355,7 @@ impl AsyncWrite for StdioPipe {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use ctld_ipc::SshGatewayMode;
+  use ctl_ipc::SshGatewayMode;
   use tokio::net::TcpListener;
 
   #[tokio::test]

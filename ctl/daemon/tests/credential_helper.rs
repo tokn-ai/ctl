@@ -1,4 +1,4 @@
-use ctld_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Response};
+use ctl_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Response};
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 

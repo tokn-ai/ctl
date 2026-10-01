@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rmux_client::{AttachRequest, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach};
+use ctmux_client::{
+  AttachRequest, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach,
+};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -22,10 +24,10 @@ use crate::dto::{
 const TEST_NAME: &str = "workspace::remote_test::docker_workspace_survives_client_restart";
 
 #[tokio::test]
-#[ignore = "requires the explicit local Docker SSH fixture and RMUX_WORKSPACE_TEST_IDENTITY"]
+#[ignore = "requires the explicit local Docker SSH fixture and CTMUX_WORKSPACE_TEST_IDENTITY"]
 async fn docker_workspace_survives_client_restart() -> Result<(), String> {
-  let identity_file = std::env::var("RMUX_WORKSPACE_TEST_IDENTITY").map_err(
-    |_| "Set RMUX_WORKSPACE_TEST_IDENTITY to the development container's SSH identity path.",
+  let identity_file = std::env::var("CTMUX_WORKSPACE_TEST_IDENTITY").map_err(
+    |_| "Set CTMUX_WORKSPACE_TEST_IDENTITY to the development container's SSH identity path.",
   )?;
   let target = ConnectionTargetDto::Ssh {
     ssh_config_alias: None,
@@ -33,16 +35,16 @@ async fn docker_workspace_survives_client_restart() -> Result<(), String> {
     remote_info: None,
     destination: "workspace-smoke".into(),
     hostname: Some("127.0.0.1".into()),
-    user: Some("rmux".into()),
+    user: Some("ctmux".into()),
     port: Some(2222),
     identity_file: Some(identity_file),
     gateway_route: Vec::new(),
     vpn_connection_id: None,
     gateways: Box::default(),
   };
-  if let Ok(phase) = std::env::var("RMUX_WORKSPACE_TEST_PHASE") {
+  if let Ok(phase) = std::env::var("CTMUX_WORKSPACE_TEST_PHASE") {
     let directory = PathBuf::from(
-      std::env::var("RMUX_WORKSPACE_TEST_DIRECTORY").map_err(|error| error.to_string())?,
+      std::env::var("CTMUX_WORKSPACE_TEST_DIRECTORY").map_err(|error| error.to_string())?,
     );
     return match phase.as_str() {
       "create" => create_phase(&directory, &target).await,
@@ -52,15 +54,15 @@ async fn docker_workspace_survives_client_restart() -> Result<(), String> {
   }
 
   let directory =
-    std::env::temp_dir().join(format!("rmux-live-workspace-{}", uuid::Uuid::new_v4()));
+    std::env::temp_dir().join(format!("ctmux-live-workspace-{}", uuid::Uuid::new_v4()));
   std::fs::create_dir(&directory).map_err(|error| error.to_string())?;
   let result = async {
     for phase in ["create", "restore"] {
       let mut child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
       child
         .args([TEST_NAME, "--exact", "--ignored", "--nocapture"])
-        .env("RMUX_WORKSPACE_TEST_PHASE", phase)
-        .env("RMUX_WORKSPACE_TEST_DIRECTORY", &directory)
+        .env("CTMUX_WORKSPACE_TEST_PHASE", phase)
+        .env("CTMUX_WORKSPACE_TEST_DIRECTORY", &directory)
         .kill_on_drop(true);
       let output = timeout(Duration::from_secs(45), child.output())
         .await
@@ -216,7 +218,7 @@ async fn restore_phase(directory: &Path, target: &ConnectionTargetDto) -> Result
     AttachRequest {
       session: session_id.clone(),
       resume_from: None,
-      terminal_size: rmux_proto::TerminalSize::default(),
+      terminal_size: ctmux_proto::TerminalSize::default(),
       request_input_lease: false,
       request_layout_lease: false,
       request_command_line: false,

@@ -1,4 +1,4 @@
-//! Shared local storage for reusable task definitions, independent of taskd.
+//! Shared local storage for reusable task definitions, independent of ctl-taskd.
 
 mod paths;
 mod repository;
@@ -6,8 +6,8 @@ mod repository;
 use std::io;
 use std::path::PathBuf;
 
+use ctl_task_proto::TaskDefinition;
 use serde::{Deserialize, Serialize};
-use task_proto::TaskDefinition;
 use thiserror::Error;
 
 pub use paths::{DefinitionScope, discover_project, global_path, project_path};

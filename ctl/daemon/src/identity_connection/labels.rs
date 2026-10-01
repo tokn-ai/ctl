@@ -1,6 +1,6 @@
 //! Names in authentication requests come from the local connection settings.
 
-use ctld_ipc::SshTarget;
+use ctl_ipc::SshTarget;
 
 pub(crate) fn save_offer_message(context: &str, names: impl IntoIterator<Item = String>) -> String {
   let mut names: Vec<_> = names.into_iter().collect();

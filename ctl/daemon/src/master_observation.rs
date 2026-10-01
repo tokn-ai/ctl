@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use ctld_ipc::SshTarget;
+use ctl_ipc::SshTarget;
 use tokio::process::Command;
 
 use super::target_lifecycle::AttemptStatus;
@@ -349,12 +349,12 @@ mod tests {
         None,
       )
       .unwrap();
-    let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(handle_connection(server, state));
     handshake(&mut client).await.unwrap();
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
-      &ctld_ipc::ClientMessage::ConnectionStatus { target },
+      &ctl_ipc::ClientMessage::ConnectionStatus { target },
     )
     .await
     .unwrap();
@@ -366,7 +366,7 @@ mod tests {
       }
       response = tokio::time::timeout(
         Duration::from_secs(5),
-        ctld_ipc::read_frame::<_, ServerMessage>(&mut client),
+        ctl_ipc::read_frame::<_, ServerMessage>(&mut client),
       ) => response.unwrap().unwrap(),
     };
     assert!(matches!(

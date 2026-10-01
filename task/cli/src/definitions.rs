@@ -1,8 +1,8 @@
 use super::{CommandError, Connector, Mode, connect, local_working_directory, one, unexpected};
 use clap::{Args, Subcommand};
+use ctl_task_proto::{ClientMessage, TaskDefinition, TaskInfo};
+use ctl_task_store::{DefinitionScope, Repository, SavedTaskDefinition, StoreError};
 use std::path::PathBuf;
-use task_proto::{ClientMessage, TaskDefinition, TaskInfo};
-use task_store::{DefinitionScope, Repository, SavedTaskDefinition, StoreError};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Default, Args)]
@@ -55,7 +55,7 @@ pub struct SaveArguments {
   /// Require the current revision when updating; obtain it with definitions show.
   #[arg(long, requires = "definition_id")]
   pub expected_revision: Option<String>,
-  /// Copy the exact active or latest retained run snapshot from local taskd.
+  /// Copy the exact active or latest retained run snapshot from local ctl-taskd.
   #[arg(long, conflicts_with_all = ["command", "cwd", "mode"])]
   pub from_run: Option<String>,
   /// Capture this local directory; defaults to the caller's current directory.
@@ -89,7 +89,7 @@ impl Catalog {
     } else {
       let current = std::env::current_dir().map_err(DefinitionError::CurrentDirectory)?;
       let mut scopes = Vec::new();
-      if let Some(project_root) = task_store::discover_project(&current)? {
+      if let Some(project_root) = ctl_task_store::discover_project(&current)? {
         scopes.push(DefinitionScope::Project { project_root });
       }
       scopes.push(DefinitionScope::Global);
@@ -228,7 +228,7 @@ pub(super) async fn save_record<C: Connector>(
     }
     let mut stream = connect(connector).await?;
     let response = one(&mut stream, ClientMessage::ListTasks).await?;
-    let task_proto::ServerMessage::TaskList { tasks } = response else {
+    let ctl_task_proto::ServerMessage::TaskList { tasks } = response else {
       return Err(unexpected("task_list", &response));
     };
     definition_from_run(&tasks, &run_id)?

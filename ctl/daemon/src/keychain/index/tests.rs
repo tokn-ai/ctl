@@ -1,5 +1,5 @@
 use super::*;
-use ctld_ipc::credentials::CredentialKind;
+use ctl_ipc::credentials::CredentialKind;
 use sha2::{Digest as _, Sha256};
 
 fn credential() -> StoredCredential {

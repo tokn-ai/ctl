@@ -2,6 +2,12 @@ mod control;
 mod interactive;
 mod process;
 
+use ctl_task_ipc::Stream;
+pub use ctl_task_ipc::socket_path;
+use ctl_task_proto::{
+  ClientMessage, DesiredState, ErrorCode, ExecutionMode, LogEvent, LogStream, PROTOCOL_VERSION,
+  RunInfo, RunState, ServerMessage, TaskDefinition, TaskInfo, read_frame, write_frame,
+};
 #[cfg(windows)]
 use interprocess::local_socket::traits::tokio::Listener as _;
 use serde::{Deserialize, Serialize};
@@ -14,12 +20,6 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use task_ipc::Stream;
-pub use task_ipc::socket_path;
-use task_proto::{
-  ClientMessage, DesiredState, ErrorCode, ExecutionMode, LogEvent, LogStream, PROTOCOL_VERSION,
-  RunInfo, RunState, ServerMessage, TaskDefinition, TaskInfo, read_frame, write_frame,
-};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 #[cfg(unix)]
@@ -36,7 +36,7 @@ const MAX_LOG_BYTES_PER_RUN: usize = 4 * 1024 * 1024;
 pub struct DaemonConfig {
   pub socket_path: PathBuf,
   pub data_directory: PathBuf,
-  pub rmux_socket: PathBuf,
+  pub ctmux_socket: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,12 +63,12 @@ struct State {
   logs: Mutex<HashMap<String, Vec<LogEvent>>>,
   activity: broadcast::Sender<Activity>,
   persistence_path: PathBuf,
-  rmux_socket: PathBuf,
+  ctmux_socket: PathBuf,
   _state_lock: fs::File,
 }
 
 impl State {
-  fn load(data_directory: &Path, rmux_socket: PathBuf) -> Result<Self, DaemonError> {
+  fn load(data_directory: &Path, ctmux_socket: PathBuf) -> Result<Self, DaemonError> {
     prepare_data_directory(data_directory)?;
     let state_lock = fs::OpenOptions::new()
       .read(true)
@@ -124,7 +124,7 @@ impl State {
       logs: Mutex::new(HashMap::new()),
       activity,
       persistence_path: state_path,
-      rmux_socket,
+      ctmux_socket,
       _state_lock: state_lock,
     };
     state.persist_blocking(
@@ -500,7 +500,7 @@ impl State {
     if task.definition.execution_mode == ExecutionMode::Interactive {
       return Err(RequestError::new(
         ErrorCode::UnsupportedExecutionMode,
-        "interactive output belongs to rmuxd; use ctl task attach",
+        "interactive output belongs to ctmuxd; use ctl task attach",
       ));
     }
     let run = task.active_run.as_ref().or(task.last_run.as_ref());
@@ -576,7 +576,7 @@ impl State {
   }
 }
 
-/// Runs taskd until it receives an interrupt or encounters an endpoint error.
+/// Runs ctl-taskd until it receives an interrupt or encounters an endpoint error.
 ///
 /// # Errors
 ///
@@ -594,10 +594,10 @@ async fn serve(config: DaemonConfig) -> Result<Option<Stream>, DaemonError> {
   #[cfg(unix)]
   let listener = bind_listener(&config.socket_path).await?;
   #[cfg(windows)]
-  let listener = task_ipc::windows::bind(&config.socket_path).map_err(DaemonError::Socket)?;
+  let listener = ctl_task_ipc::windows::bind(&config.socket_path).map_err(DaemonError::Socket)?;
   #[cfg(unix)]
   let _socket_guard = SocketGuard(config.socket_path.clone());
-  let state = Arc::new(State::load(&config.data_directory, config.rmux_socket)?);
+  let state = Arc::new(State::load(&config.data_directory, config.ctmux_socket)?);
   let (control_tx, mut control_rx) = mpsc::channel(1);
   let mut connections = tokio::task::JoinSet::new();
   let reconciliation = state.reconcile_interactive();
@@ -639,18 +639,18 @@ async fn handle_connection(
   mut stream: Stream,
   state: Arc<State>,
   control_tx: mpsc::Sender<control::Request>,
-) -> Result<(), task_proto::CodecError> {
+) -> Result<(), ctl_task_proto::CodecError> {
   let handshake = match read_frame::<_, control::FirstMessage>(&mut stream).await? {
-    Some(control::FirstMessage::Control(task_proto::control::ClientMessage::ComponentStatus {
-      protocol_version,
-    })) => {
-      let response = if protocol_version == task_proto::control::PROTOCOL_VERSION {
-        task_proto::control::ServerMessage::ComponentStatus {
-          build: component_info::build_info(),
+    Some(control::FirstMessage::Control(
+      ctl_task_proto::control::ClientMessage::ComponentStatus { protocol_version },
+    )) => {
+      let response = if protocol_version == ctl_task_proto::control::PROTOCOL_VERSION {
+        ctl_task_proto::control::ServerMessage::ComponentStatus {
+          build: ctl_component_info::build_info(),
           protocol_version: PROTOCOL_VERSION,
         }
       } else {
-        task_proto::control::ServerMessage::Error {
+        ctl_task_proto::control::ServerMessage::Error {
           message: "Unsupported diagnostics protocol".into(),
         }
       };
@@ -710,7 +710,7 @@ async fn handle_request(
   stream: &mut Stream,
   state: &Arc<State>,
   request: ClientMessage,
-) -> Result<(), task_proto::CodecError> {
+) -> Result<(), ctl_task_proto::CodecError> {
   // Serialize state-changing requests through publication of each runtime handle.
   // Log followers must not hold this guard, since stop may be their next event.
   let _mutation = if matches!(
@@ -836,7 +836,7 @@ fn trim_logs(events: &mut Vec<LogEvent>) {
 async fn send_error(
   stream: &mut Stream,
   error: RequestError,
-) -> Result<(), task_proto::CodecError> {
+) -> Result<(), ctl_task_proto::CodecError> {
   write_frame(
     stream,
     &ServerMessage::Error {
@@ -950,11 +950,11 @@ fn now_ms() -> u64 {
 
 #[must_use]
 pub fn default_data_directory() -> PathBuf {
-  env::var_os("TASKD_DATA_DIR").map_or_else(
+  env::var_os("CTL_TASKD_DATA_DIR").map_or_else(
     || {
       dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("ctl/taskd")
+        .join("ctl-taskd")
     },
     PathBuf::from,
   )
@@ -965,7 +965,7 @@ fn prepare_runtime_directory(socket_path: &Path) -> Result<(), DaemonError> {
   let directory = socket_path.parent().ok_or_else(|| {
     DaemonError::RuntimeDirectory(io::Error::new(
       io::ErrorKind::InvalidInput,
-      "taskd socket has no parent directory",
+      "ctl-taskd socket has no parent directory",
     ))
   })?;
   fs::create_dir_all(directory).map_err(DaemonError::RuntimeDirectory)?;
@@ -1036,17 +1036,17 @@ impl RequestError {
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
-  #[error("could not prepare taskd runtime directory: {0}")]
+  #[error("could not prepare ctl-taskd runtime directory: {0}")]
   RuntimeDirectory(#[source] io::Error),
-  #[error("could not prepare taskd data directory: {0}")]
+  #[error("could not prepare ctl-taskd data directory: {0}")]
   DataDirectory(#[source] io::Error),
-  #[error("could not bind taskd socket: {0}")]
+  #[error("could not bind ctl-taskd socket: {0}")]
   Socket(#[source] io::Error),
-  #[error("taskd is already running at {}", .0.display())]
+  #[error("ctl-taskd is already running at {}", .0.display())]
   AlreadyRunning(PathBuf),
   #[error("refusing to replace unsafe socket path {}", .0.display())]
   UnsafeSocket(PathBuf),
-  #[error("could not accept taskd connection: {0}")]
+  #[error("could not accept ctl-taskd connection: {0}")]
   Accept(#[source] io::Error),
   #[error("could not read task state: {0}")]
   ReadState(#[source] io::Error),

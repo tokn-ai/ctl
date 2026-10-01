@@ -12,23 +12,23 @@ the user's request includes setup or the work requires an authorized setup.
 | Operation | Client-side companions | Controlled host |
 | --- | --- | --- |
 | Local exec/plain shell | None | Local program |
-| Local persistent sessions | `rmuxd` | Local machine |
-| Local background tasks | `taskd` | Local machine |
-| Local interactive tasks | `taskd`, `rmuxd` | Local machine |
+| Local persistent sessions | `ctmuxd` | Local machine |
+| Local background tasks | `ctl-taskd` | Local machine |
+| Local interactive tasks | `ctl-taskd`, `ctmuxd` | Local machine |
 | Unix remote native commands / saved connections | `ctld` | SSH service |
-| Remote sessions/tasks | `ctld` on Unix client | `ctl-agent`, `rmuxd` and/or `taskd` |
+| Remote sessions/tasks | `ctld` on Unix client | `ctl-agent`, `ctmuxd` and/or `ctl-taskd` |
 | Managed ports / VPN | `ctld` on Unix client | SSH service for ports; local container engine for VPN |
 
 Keep client and companion versions aligned. Helpers normally resolve beside
-their client, with supported fallback locations; `CTLD_BIN`, `RMUXD_BIN`, and
-`TASKD_BIN` select explicit daemon executables. An override names an executable,
+their client, with supported fallback locations; `CTLD_BIN`, `CTMUXD_BIN`, and
+`CTL_TASKD_BIN` select explicit daemon executables. An override names an executable,
 not a directory. Remote companions must belong to the SSH account and be
 available together through the managed installation or noninteractive PATH.
 
 When working from the ctl source checkout, a local CLI/service build is:
 
 ```sh
-cargo build -p ctl -p ctld -p rmuxd -p taskd -p ctl-agent
+cargo build -p ctl-cli -p ctld -p ctmuxd -p ctl-taskd -p ctl-agent
 ./target/debug/ctl --help
 ```
 
@@ -55,12 +55,12 @@ connect HOST` authenticates SSH without installing components.
   subcommand. A manually run `ctl-agent connect` waits for protocol input; it
   is not a finite health-check command.
 - **Old daemon:** `ctl taskd restart` is local-only and refuses active tasks.
-  Restarting `rmuxd` terminates its terminals; inspect sessions before considering
+  Restarting `ctmuxd` terminates its terminals; inspect sessions before considering
   that disruptive recovery. Do not use an unrelated daemon restart to fix a
   catalog or authentication error.
 
 For a Windows SSH service target, use `ctl -H HOST --remote-platform windows
-rmux ...` or `task ...`. Install the `.exe` companions together on the remote
+ctmux ...` or `task ...`. Install the `.exe` companions together on the remote
 PATH. The supported server shell is cmd.exe; custom shells and PowerShell are
 not covered by this transport. Host connect/disconnect, managed ports, and
 managed VPNs currently require a Unix client.

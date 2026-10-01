@@ -1,10 +1,10 @@
 #![cfg(unix)]
 
-use rmux_client::{
+use ctmux_client::{
   AttachRequest, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach, request,
   resume_attach,
 };
-use rmux_proto::{
+use ctmux_proto::{
   ClientMessage, CommandSpec, ServerMessage, SessionStatus, TerminalSize, read_frame, write_frame,
 };
 use std::error::Error;
@@ -44,8 +44,8 @@ impl Drop for TestDirectory {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> TestResult {
   let directory = TestDirectory::new();
-  let socket = directory.path.join("rmux.sock");
-  let daemon = spawn_rmuxd(&socket);
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_ctmuxd(&socket);
   wait_for_socket(&socket).await?;
   let identity = ClientIdentity {
     name: "ctl-agent-integration-test".into(),
@@ -148,7 +148,7 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
 
   timeout(TEST_TIMEOUT, daemon)
     .await
-    .map_err(|_| "rmuxd did not exit after its final session ended")???;
+    .map_err(|_| "ctmuxd did not exit after its final session ended")???;
   Ok(())
 }
 
@@ -182,13 +182,13 @@ async fn open_gateway(socket: &Path) -> TestResult<DuplexStream> {
   Ok(client)
 }
 
-fn spawn_rmuxd(socket: &Path) -> JoinHandle<Result<(), rmuxd::DaemonError>> {
-  let config = rmuxd::DaemonConfig {
+fn spawn_ctmuxd(socket: &Path) -> JoinHandle<Result<(), ctmuxd::DaemonError>> {
+  let config = ctmuxd::DaemonConfig {
     socket_path: socket.into(),
     startup_idle_timeout: TEST_TIMEOUT,
-    ..rmuxd::DaemonConfig::default()
+    ..ctmuxd::DaemonConfig::default()
   };
-  tokio::spawn(rmuxd::run(config))
+  tokio::spawn(ctmuxd::run(config))
 }
 
 async fn wait_for_socket(socket: &Path) -> TestResult {
@@ -231,8 +231,8 @@ async fn read_output_until(stream: &mut DuplexStream, marker: &[u8]) -> TestResu
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() -> TestResult {
   let directory = TestDirectory::new();
-  let socket = directory.path.join("rmux.sock");
-  let daemon = spawn_rmuxd(&socket);
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_ctmuxd(&socket);
   wait_for_socket(&socket).await?;
   let identity = ClientIdentity {
     name: "restart-test".into(),
@@ -252,9 +252,9 @@ async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() ->
   assert!(matches!(created, ServerMessage::SessionCreated { .. }));
 
   // The fixture executable records startup; an in-process daemon supplies the
-  // replacement endpoint without depending on a separately built rmuxd binary.
+  // replacement endpoint without depending on a separately built ctmuxd binary.
   let marker = directory.path.join("started");
-  let executable = directory.path.join("rmuxd");
+  let executable = directory.path.join("ctmuxd");
   std::fs::write(
     &executable,
     format!(
@@ -264,9 +264,9 @@ async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() ->
   )?;
   std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
   let mut config = ctl_agent::ConnectConfig::new(socket.clone());
-  config.rmuxd_bin = Some(executable);
+  config.ctmuxd_bin = Some(executable);
 
-  let rejected = ctl_agent::restart::restart_rmux(&config, "expected", "different").await;
+  let rejected = ctl_agent::restart::restart_ctmux(&config, "expected", "different").await;
   assert!(rejected.is_err());
   assert!(!daemon.is_finished());
   assert!(!marker.exists());
@@ -281,13 +281,13 @@ async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() ->
     })
     .await
     .expect("installed companion started");
-    spawn_rmuxd(&replacement_socket)
+    spawn_ctmuxd(&replacement_socket)
       .await
       .expect("replacement daemon task")
   });
   let outcome = timeout(
     TEST_TIMEOUT,
-    ctl_agent::restart::restart_rmux(&config, "expected", "expected"),
+    ctl_agent::restart::restart_ctmux(&config, "expected", "expected"),
   )
   .await??;
   assert_eq!(outcome.terminated_sessions, 1);
@@ -302,8 +302,8 @@ async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() ->
   )
   .await?;
   assert!(matches!(sessions, ServerMessage::SessionList { sessions } if sessions.is_empty()));
-  let control = rmux_ipc::control_socket_path(&socket)?;
-  rmux_ipc::request_local_daemon_restart(UnixStream::connect(control).await?).await?;
+  let control = ctmux_ipc::control_socket_path(&socket)?;
+  ctmux_ipc::request_local_daemon_restart(UnixStream::connect(control).await?).await?;
   timeout(TEST_TIMEOUT, replacement).await???;
   Ok(())
 }
@@ -311,24 +311,24 @@ async fn confirmed_restart_ends_sessions_and_starts_the_installed_companion() ->
 #[tokio::test]
 async fn unsupported_restart_does_not_touch_a_live_data_endpoint() -> TestResult {
   let directory = TestDirectory::new();
-  let socket = directory.path.join("rmux.sock");
+  let socket = directory.path.join("ctmux.sock");
   let listener = tokio::net::UnixListener::bind(&socket)?;
-  let control = rmux_ipc::control_socket_path(&socket)?;
+  let control = ctmux_ipc::control_socket_path(&socket)?;
   let control_listener = tokio::net::UnixListener::bind(&control)?;
   let server = tokio::spawn(async move {
     let (mut stream, _) = control_listener.accept().await.unwrap();
-    let hello: Option<rmux_ipc::LocalControlClientMessage> =
-      rmux_ipc::read_local_control_frame(&mut stream)
+    let hello: Option<ctmux_ipc::LocalControlClientMessage> =
+      ctmux_ipc::read_local_control_frame(&mut stream)
         .await
         .unwrap();
     assert!(matches!(
       hello,
-      Some(rmux_ipc::LocalControlClientMessage::Handshake { .. })
+      Some(ctmux_ipc::LocalControlClientMessage::Handshake { .. })
     ));
-    rmux_ipc::write_local_control_frame(
+    ctmux_ipc::write_local_control_frame(
       &mut stream,
-      &rmux_ipc::LocalControlServerMessage::HandshakeAccepted {
-        protocol_version: rmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
+      &ctmux_ipc::LocalControlServerMessage::HandshakeAccepted {
+        protocol_version: ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
         restart_supported: false,
         build: None,
         data_protocol_version: None,
@@ -337,8 +337,8 @@ async fn unsupported_restart_does_not_touch_a_live_data_endpoint() -> TestResult
     )
     .await
     .unwrap();
-    let request: Option<rmux_ipc::LocalControlClientMessage> =
-      rmux_ipc::read_local_control_frame(&mut stream)
+    let request: Option<ctmux_ipc::LocalControlClientMessage> =
+      ctmux_ipc::read_local_control_frame(&mut stream)
         .await
         .unwrap();
     assert!(
@@ -347,9 +347,9 @@ async fn unsupported_restart_does_not_touch_a_live_data_endpoint() -> TestResult
     );
   });
   let mut config = ctl_agent::ConnectConfig::new(socket.clone());
-  config.rmuxd_bin = Some("/bin/true".into());
+  config.ctmuxd_bin = Some("/bin/true".into());
   assert!(
-    ctl_agent::restart::restart_rmux(&config, "expected", "expected")
+    ctl_agent::restart::restart_ctmux(&config, "expected", "expected")
       .await
       .is_err()
   );

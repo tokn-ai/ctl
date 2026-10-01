@@ -10,7 +10,7 @@ struct Fixture(PathBuf);
 
 impl Fixture {
   fn new() -> Self {
-    Self(std::env::temp_dir().join(format!("rmux-workspace-test-{}", uuid::Uuid::new_v4())))
+    Self(std::env::temp_dir().join(format!("ctmux-workspace-test-{}", uuid::Uuid::new_v4())))
   }
 
   fn repository(&self) -> Repository {
@@ -439,7 +439,7 @@ fn migrates_v5_workspace_to_gateway_schema_and_preserves_a_backup() {
 fn gateway_routes_require_unique_saved_gateway_references() {
   let mut document = legacy_populated();
   document.ssh_gateways.push(WorkspaceSshGateway {
-    kind: ctld_ipc::GatewayKind::Ssh,
+    kind: ctl_ipc::GatewayKind::Ssh,
     gateway_id: "edge".into(),
     name: "Edge".into(),
     destination: "edge.example".into(),
@@ -480,7 +480,7 @@ fn gateway_routes_require_unique_saved_gateway_references() {
 fn socks5_gateway_round_trips_and_requires_a_port() {
   let mut document = legacy_populated();
   document.ssh_gateways.push(WorkspaceSshGateway {
-    kind: ctld_ipc::GatewayKind::Socks5,
+    kind: ctl_ipc::GatewayKind::Socks5,
     gateway_id: "proxy".into(),
     name: "Proxy".into(),
     destination: "proxy.internal".into(),
@@ -492,7 +492,7 @@ fn socks5_gateway_round_trips_and_requires_a_port() {
   });
   let restored: super::WorkspaceDocument =
     serde_json::from_value(serde_json::to_value(&document).unwrap()).unwrap();
-  assert_eq!(restored.ssh_gateways[0].kind, ctld_ipc::GatewayKind::Socks5);
+  assert_eq!(restored.ssh_gateways[0].kind, ctl_ipc::GatewayKind::Socks5);
   assert!(restored.validate().is_ok());
   document.ssh_gateways[0].port = None;
   assert!(document.validate().is_err());
@@ -548,12 +548,12 @@ fn incomplete_task_drafts_round_trip_without_becoming_runnable_definitions() {
     scope: None,
     base_revision: DraftBaseRevision::Unknown,
     definition_id: uuid::Uuid::new_v4().to_string(),
-    definition: task_proto::TaskDefinition {
+    definition: ctl_task_proto::TaskDefinition {
       name: String::new(),
       program: String::new(),
       arguments: vec![String::new()],
       working_directory: Some("unfinished/relative".into()),
-      execution_mode: task_proto::ExecutionMode::Background,
+      execution_mode: ctl_task_proto::ExecutionMode::Background,
     },
   });
   fixture
@@ -572,12 +572,12 @@ fn legacy_definition() -> SavedTaskDefinition {
   SavedTaskDefinition {
     definition_id: uuid::Uuid::new_v4().to_string(),
     revision: "legacy-revision".into(),
-    definition: task_proto::TaskDefinition {
+    definition: ctl_task_proto::TaskDefinition {
       name: "build".into(),
       program: "cargo".into(),
       arguments: vec!["build".into()],
       working_directory: None,
-      execution_mode: task_proto::ExecutionMode::Background,
+      execution_mode: ctl_task_proto::ExecutionMode::Background,
     },
   }
 }
@@ -609,7 +609,7 @@ fn imports_definitions_once_and_preserves_refs_and_legacy_directory_semantics() 
   let fixture = Fixture::new();
   let saved = legacy_definition();
   let original = write_legacy(&fixture, &saved);
-  let store = task_store::Repository::new(fixture.0.join("tasks.json"));
+  let store = ctl_task_store::Repository::new(fixture.0.join("tasks.json"));
   // Simulate a crash after import but before the workspace migration commits.
   store.import_legacy(std::slice::from_ref(&saved)).unwrap();
   let snapshot = fixture.repository().load().unwrap();
@@ -662,7 +662,7 @@ fn conflicting_import_keeps_workspace_and_shared_definition_unchanged() {
   let fixture = Fixture::new();
   let saved = legacy_definition();
   let bytes = write_legacy(&fixture, &saved);
-  let store = task_store::Repository::new(fixture.0.join("tasks.json"));
+  let store = ctl_task_store::Repository::new(fixture.0.join("tasks.json"));
   let mut other = saved.definition.clone();
   other.arguments = vec!["test".into()];
   store
@@ -744,7 +744,7 @@ fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_ses
     remote_id: uuid::Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
     build: None,
-    rmux_restart_supported: false,
+    ctmux_restart_supported: false,
     bundle: Some(Box::new(ctl_proto::BundleVersion {
       app_version: "0.1.0".into(),
       bundle_id: "development-abc".into(),
@@ -874,7 +874,7 @@ fn test_remote_identity() -> ctl_proto::RemoteIdentity {
     remote_id: uuid::Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
     build: None,
-    rmux_restart_supported: false,
+    ctmux_restart_supported: false,
     bundle: None,
   }
 }

@@ -1,7 +1,7 @@
 use super::*;
-use ctld_ipc::credentials::CredentialKind as StoredKind;
+use ctl_ipc::credentials::CredentialKind as StoredKind;
 #[cfg(unix)]
-use ctld_ipc::credentials::{Request, Response};
+use ctl_ipc::credentials::{Request, Response};
 
 fn id() -> String {
   format!("{}:{}", "a".repeat(64), "b".repeat(64))

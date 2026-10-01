@@ -6,7 +6,7 @@ or terminal. These independent observations must remain separate:
 | Observation | Evidence | What it does not establish |
 | --- | --- | --- |
 | SSH connected | The local OpenSSH control master answered `-O check` | Remote reachability or terminal attachment health |
-| Remote connection timed out | Opening the remote rmux service timed out while a local SSH master remains available | Authentication failure, confirmed SSH disconnection, or remote process exit |
+| Remote connection timed out | Opening the remote ctmux service timed out while a local SSH master remains available | Authentication failure, confirmed SSH disconnection, or remote process exit |
 | SSH available | The configured route returned an SSH identification greeting during a brief probe | Successful authentication, verified host identity, or an established SSH session |
 | Terminal attached | This attachment completed its protocol handshake and has not reported closure/failure | Other terminals or connection methods are healthy |
 | Session ended | An explicit session-ended event or confirmed missing-session response | A transport failure alone never proves process exit |

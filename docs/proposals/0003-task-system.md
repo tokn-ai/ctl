@@ -6,13 +6,13 @@
 ## Summary
 
 `ctl task` manages reusable commands and their executions on local or remote
-hosts. A per-user `taskd` owns task registration, desired state, execution
+hosts. A per-user `ctl-taskd` owns task registration, desired state, execution
 policy, and run history. Tasks have explicit interactive and background modes
-so terminal processes remain owned by rmux while noninteractive processes and
-logs remain owned by taskd.
+so terminal processes remain owned by ctmux while noninteractive processes and
+logs remain owned by ctl-taskd.
 
 The desktop app workspace may save reusable task definitions and references to
-managed tasks. A task may also be created directly in taskd without first being
+managed tasks. A task may also be created directly in ctl-taskd without first being
 saved in a workspace.
 
 ## Motivation
@@ -21,7 +21,7 @@ Users need a simpler alternative to a system service manager for development
 servers, long-running commands, and finite jobs. A task should remain known
 after it stops, retain useful run state, and be runnable again without
 re-entering its command. Interactive commands should retain the terminal
-behavior and attachment model already provided by rmux.
+behavior and attachment model already provided by ctmux.
 
 Task definitions, managed tasks, and concrete executions have different
 lifetimes. Keeping them distinct prevents a workspace edit from silently
@@ -41,7 +41,7 @@ live daemon state.
 
 ### Managed task
 
-A task registered with taskd under a stable task ID. It has a definition
+A task registered with ctl-taskd under a stable task ID. It has a definition
 snapshot, desired state, and references to its runs. It remains registered
 while stopped and after a run completes.
 
@@ -61,21 +61,21 @@ than erasing the previous run.
 
 ### Interactive
 
-An interactive task runs inside an rmux session. Taskd decides what and when to
-run, then asks rmuxd to create the session with task and run metadata. Rmuxd
+An interactive task runs inside an ctmux session. Taskd decides what and when to
+run, then asks ctmuxd to create the session with task and run metadata. Ctmuxd
 owns the PTY, child process, ordered terminal output, geometry, input, and
-process exit. Users view and control the run through normal rmux attachments.
+process exit. Users view and control the run through normal ctmux attachments.
 
-Taskd records the returned rmux session ID and observes its lifecycle. It does
-not proxy or duplicate the terminal stream. After taskd restarts, it can
-reconcile persisted runs with rmux sessions tagged by task ID and run ID.
+Taskd records the returned ctmux session ID and observes its lifecycle. It does
+not proxy or duplicate the terminal stream. After ctl-taskd restarts, it can
+reconcile persisted runs with ctmux sessions tagged by task ID and run ID.
 
 ### Background
 
 A background task runs without a PTY. Taskd launches and owns the child process,
 captures stdout and stderr as ordered log events, observes exit, and implements
 termination. Users inspect its output through task log commands and the desktop
-app rather than through an rmux attachment.
+app rather than through an ctmux attachment.
 
 Background mode preserves stdout and stderr as separate streams. It does not
 support terminal input, terminal geometry, or terminal control sequences as an
@@ -94,25 +94,25 @@ Execution ownership depends on mode:
 
 | Concern | Interactive task | Background task |
 | --- | --- | --- |
-| Child process | rmuxd | taskd |
-| PTY | rmuxd | None |
-| Canonical output | rmuxd terminal journal | taskd stdout/stderr log |
-| Input and geometry | rmux leases | Not supported |
-| Definition and policy | taskd | taskd |
-| Run history | taskd | taskd |
+| Child process | ctmuxd | ctl-taskd |
+| PTY | ctmuxd | None |
+| Canonical output | ctmuxd terminal journal | ctl-taskd stdout/stderr log |
+| Input and geometry | ctmux leases | Not supported |
+| Definition and policy | ctl-taskd | ctl-taskd |
+| Run history | ctl-taskd | ctl-taskd |
 
-Every PTY is owned by rmuxd. Taskd must not implement a second terminal
+Every PTY is owned by ctmuxd. Taskd must not implement a second terminal
 multiplexer or collect an interactive run's terminal output as a second
 authoritative journal.
 
 ## Lifecycle
 
 Starting a stopped managed task creates a run from its current definition
-snapshot. For an interactive task, taskd requests a new rmux session. For a
-background task, taskd starts a process with pipes. Taskd records the run as
+snapshot. For an interactive task, ctl-taskd requests a new ctmux session. For a
+background task, ctl-taskd starts a process with pipes. Taskd records the run as
 running only after the corresponding execution owner accepts creation.
 
-When a process exits, its execution owner supplies the outcome to taskd. Taskd
+When a process exits, its execution owner supplies the outcome to ctl-taskd. Taskd
 records the completed run and evaluates the restart policy. A restart creates a
 new run. Stopping a task changes its desired state first, then requests
 termination from the execution owner so an intentional stop cannot trigger an
@@ -130,8 +130,8 @@ The existing desktop workspace may store:
 - presentation choices such as ordering and selection.
 
 It does not own live status, desired state, run history, process IDs, output,
-or restart decisions. Those values come from taskd. Equal task IDs on different
-hosts are distinct and use the same stable host identity model as rmux session
+or restart decisions. Those values come from ctl-taskd. Equal task IDs on different
+hosts are distinct and use the same stable host identity model as ctmux session
 references.
 
 Saving a directly created task into the workspace copies its definition as a
@@ -155,31 +155,31 @@ ctl task attach <task>
 ctl task remove <task>
 ```
 
-The global `--host` option selects the target consistently with `ctl rmux`.
-Interactive runs expose their rmux session identity so `ctl rmux attach` and
+The global `--host` option selects the target consistently with `ctl ctmux`.
+Interactive runs expose their ctmux session identity so `ctl ctmux attach` and
 the desktop app can attach without a second terminal interface.
 
 ## Remote boundary
 
 Remote task control must continue to rely on OpenSSH authentication and fixed
-remote commands. It must not make taskd a network listener or expose an
+remote commands. It must not make ctl-taskd a network listener or expose an
 arbitrary local endpoint. [Proposal 0006](0006-remote-tasks.md) resolves the
 gateway shape with `ctl-agent connect --service task`. The fixed command selects
 the service before its own protocol handshake. Raw task requests are not mixed
-with `rmux-proto`, and the rmuxd maintenance endpoint remains local-only.
+with `ctmux-proto`, and the ctmuxd maintenance endpoint remains local-only.
 
 ## Invariants
 
 1. Taskd owns task identity, definitions, desired state, policy, and run
    history in both modes.
-2. Every PTY and every process connected to one is owned by rmuxd.
+2. Every PTY and every process connected to one is owned by ctmuxd.
 3. Taskd owns background processes and their stdout/stderr logs.
 4. A run uses an immutable definition snapshot.
 5. Restart creates a new run with a new run ID.
 6. Workspace edits do not silently change managed tasks or active runs.
 7. Removing a workspace entry does not stop or unregister a managed task.
-8. Interactive output has one canonical journal owned by rmuxd.
-9. Background output has one canonical log owned by taskd.
+8. Interactive output has one canonical journal owned by ctmuxd.
+9. Background output has one canonical log owned by ctl-taskd.
 10. Remote access uses OpenSSH and a fixed, explicitly scoped gateway.
 
 ## Out of scope
@@ -193,19 +193,19 @@ proposals if later needed.
 
 1. Which task and run records are persisted, where they are stored, and what
    atomicity and migration rules the storage format requires.
-2. Whether a keep-running task resumes automatically after taskd restart,
+2. Whether a keep-running task resumes automatically after ctl-taskd restart,
    login, or machine reboot, and how platform service registration works.
-3. What happens to a background child when taskd crashes, and whether recovery
+3. What happens to a background child when ctl-taskd crashes, and whether recovery
    restarts it or supports adoption.
-4. How taskd receives reliable interactive-session exit events and reconciles
-   sessions that end while taskd is unavailable.
-5. How rmux session metadata exposes task ID and run ID without turning rmux
+4. How ctl-taskd receives reliable interactive-session exit events and reconciles
+   sessions that end while ctl-taskd is unavailable.
+5. How ctmux session metadata exposes task ID and run ID without turning ctmux
    into the task authority.
 6. The restart-policy model, retry limits, backoff, and successful-exit
    semantics.
 7. Background log retention, ordering, rotation, following, and redaction.
 8. Environment-variable storage, secret handling, and inheritance rules.
-9. Whether task names are unique globally within one taskd or may be grouped
+9. Whether task names are unique globally within one ctl-taskd or may be grouped
     into namespaces.
 
 ## Implementation status
@@ -219,7 +219,7 @@ until that design is accepted and implemented. Arbitrary shell-job adoption
 through `Ctrl+Z` followed by `task bg` is deferred by that proposal.
 
 The definition-saving portion now uses shared project/global catalogs through
-`task-store`, with CLI and desktop access and migration from embedded workspace
+`ctl-task-store`, with CLI and desktop access and migration from embedded workspace
 definitions. See [shared task definitions](../task-definitions.md). Independent
 invocations, directory policies, and scheduling remain pending.
 
@@ -228,18 +228,18 @@ The versioned task protocol supports task registration, start, stop, restart,
 show, list, remove, background logs, and interactive attachment. Taskd persists
 task definitions plus active and latest completed runs. Background execution
 uses process groups on Unix and Job Objects on Windows, with bounded in-memory
-stdout/stderr logs. Interactive execution uses the rmux local-control lifecycle
-API and normal rmux attachments.
+stdout/stderr logs. Interactive execution uses the ctmux local-control lifecycle
+API and normal ctmux attachments.
 
-Interactive run intent is persisted before creation and pinned to an rmuxd
+Interactive run intent is persisted before creation and pinned to an ctmuxd
 instance UUID. Taskd reconciles by task/run UUID, adopts the existing session
 after restart, and acknowledges exit only after saving the result. Missing or
-replaced rmuxd instances fail the run without automatic recreation. Ambiguous
+replaced ctmuxd instances fail the run without automatic recreation. Ambiguous
 transport failures leave the run `unknown` and block another start until
 reconciliation resolves its state. Pending creation is `starting`.
 
 SSH task routing is implemented through the explicit task service, with
-interactive attachment through rmux on the same target. The desktop workspace
+interactive attachment through ctmux on the same target. The desktop workspace
 has local task integration. Persistent background logs, full run history, and
 restart policies remain pending, so this proposal stays
 **Proposed**. Definition editing is not yet exposed; the stored definition is
@@ -248,25 +248,25 @@ references and the new states; existing background state records remain readable
 
 ## Detailed specifications
 
-- [Proposal 0001: Persistent terminal sessions with rmux](0001-rmux.md)
+- [Proposal 0001: Persistent terminal sessions with ctmux](0001-ctmux.md)
 - [Proposal 0002: Local and SSH control routing with ctl](0002-ctl.md)
 - [Proposal 0006: Explicit task routing over SSH](0006-remote-tasks.md)
 - [Proposal 0007: Local task definitions, runs, and schedules](0007-local-task-workflows.md)
 - [Architecture](../architecture.md)
-- [rmux protocol](../rmux-protocol.md)
+- [ctmux protocol](../ctmux-protocol.md)
 - [ctl SSH transport](../ctl-protocol.md)
-- [rmux local lifecycle control](../rmux-local-control.md)
+- [ctmux local lifecycle control](../ctmux-local-control.md)
 
 ### Windows background execution
 
-Windows taskd uses a local named pipe with an owner-only DACL and remote clients
+Windows ctl-taskd uses a local named pipe with an owner-only DACL and remote clients
 rejected. Job assignment occurs before the new process resumes. A run ends with
 its root process; remaining descendants are terminated before logs finish.
 Stop terminates the job immediately, with no Unix signal emulation. Closing
-or crashing taskd kills its jobs. On recovery, previously active runs become
+or crashing ctl-taskd kills its jobs. On recovery, previously active runs become
 failed and stopped; they are not adopted or automatically restarted.
 
 The state directory has a lifetime exclusive file lock, preventing multiple
 endpoints from writing the same state. State replacement uses the platform's
 rename operation. Windows files inherit the data directory's ACL; custom
-locations must retain user-private access. Interactive task PTYs are owned by rmuxd.
+locations must retain user-private access. Interactive task PTYs are owned by ctmuxd.

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use ctld_ipc::SshTarget;
+use ctl_ipc::SshTarget;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::Command;
 
@@ -64,7 +64,7 @@ pub(super) async fn resolve(target: &SshTarget) -> Result<MasterEndpoint, Reques
   let policy = read_policy(config_command(target)).await?;
   if let Some(path) = policy.path {
     // ControlMaster=no can still use a running master; it only disables
-    // creation. A missing path or disabled creation uses rmux's private master.
+    // creation. A missing path or disabled creation uses ctmux's private master.
     let ready = control_master_is_ready(target, &path).await;
     if policy.asks_permission && !ready {
       return Err(external_master_required());
@@ -88,7 +88,7 @@ pub(super) async fn resolve(target: &SshTarget) -> Result<MasterEndpoint, Reques
 
 pub(super) fn external_master_required() -> RequestError {
   RequestError::SshConfig(
-    "ControlMaster ask/autoask requires a master started outside rmux so OpenSSH can keep showing its sharing confirmations. Start this SSH alias in your terminal, then connect again.".into(),
+    "ControlMaster ask/autoask requires a master started outside ctmux so OpenSSH can keep showing its sharing confirmations. Start this SSH alias in your terminal, then connect again.".into(),
   )
 }
 

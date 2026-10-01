@@ -25,7 +25,7 @@ mod vpn_service;
 #[cfg(test)]
 mod master_policy_tests;
 
-use ctld_ipc::{
+use ctl_ipc::{
   ClientMessage, GatewayKind, LocalPortForward, PromptKind, ServerMessage, SshGateway,
   SshGatewayMode, SshTarget,
 };
@@ -238,7 +238,7 @@ enum RequestError {
   #[error("VPN operation failed: {0}")]
   VpnFailed(String),
   #[error(transparent)]
-  Codec(#[from] ctld_ipc::CodecError),
+  Codec(#[from] ctl_ipc::CodecError),
   #[error("ctld client ended the request")]
   ClientClosed,
   #[error("invalid ctld request: {0}")]
@@ -297,7 +297,7 @@ pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
     tokio::select! {
       biased;
       Some(mut stream) = restarts.recv() => {
-        let _ = ctld_ipc::write_frame(&mut stream, &ctld_ipc::lifecycle::Response::CtldRestartAccepted {
+        let _ = ctl_ipc::write_frame(&mut stream, &ctl_ipc::lifecycle::Response::CtldRestartAccepted {
           instance_id: instance_id.clone(),
         }).await;
         restarting = Some(stream);
@@ -334,7 +334,7 @@ pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
   drop(listener);
   drop(guard);
   if !forwards_released && let Some(stream) = &mut restarting {
-    let _ = ctld_ipc::write_frame(stream, &ctld_ipc::lifecycle::Response::CtldError {
+    let _ = ctl_ipc::write_frame(stream, &ctl_ipc::lifecycle::Response::CtldError {
       code: "ctld_forward_cleanup_failed".into(),
       message: "ctld stopped, but some SSH forwarding listeners could not be released. No replacement was started. Check those forwards before restarting again.".into(),
     }).await;
@@ -372,9 +372,9 @@ async fn run_askpass() -> Result<(), Box<dyn std::error::Error>> {
   }
   let confirm = std::env::var("SSH_ASKPASS_PROMPT").ok().as_deref() == Some("confirm")
     || is_host_confirmation(&message);
-  let mut stream = ctld_ipc::connect_existing().await?;
+  let mut stream = ctl_ipc::connect_existing().await?;
   handshake(&mut stream).await?;
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::Askpass {
       token,
@@ -383,7 +383,7 @@ async fn run_askpass() -> Result<(), Box<dyn std::error::Error>> {
     },
   )
   .await?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
+  match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
     Some(ServerMessage::AskpassResponse {
       response: Some(response),
     }) => {
@@ -403,7 +403,7 @@ async fn handle_connection(
   mut stream: tokio::net::UnixStream,
   state: Arc<State>,
 ) -> Result<(), RequestError> {
-  let first = ctld_ipc::read_frame::<_, lifecycle::FirstMessage>(&mut stream)
+  let first = ctl_ipc::read_frame::<_, lifecycle::FirstMessage>(&mut stream)
     .await?
     .ok_or(RequestError::ClientClosed)?;
   let lifecycle::FirstMessage::Client(handshake) = first else {
@@ -413,7 +413,7 @@ async fn handle_connection(
     return lifecycle::handle(stream, &state, request).await;
   };
   accept_handshake(&mut stream, Some(*handshake)).await?;
-  let mut request = ctld_ipc::read_frame::<_, ClientMessage>(&mut stream)
+  let mut request = ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
     .await?
     .ok_or(RequestError::ClientClosed)?;
   normalize_request_target(&mut request);
@@ -454,7 +454,7 @@ async fn handle_connection(
     }
   };
   if let Err(error) = &result {
-    let _ = ctld_ipc::write_frame(
+    let _ = ctl_ipc::write_frame(
       &mut stream,
       &ServerMessage::Error {
         code: error.code().to_owned(),
@@ -467,7 +467,7 @@ async fn handle_connection(
 }
 
 async fn handle_vpn_request(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   request: ClientMessage,
 ) -> Result<(), RequestError> {
@@ -496,7 +496,7 @@ async fn handle_vpn_request(
             .forget_tailscale_identity(connection_id)
             .await
             .map_err(RequestError::VpnFailed)?;
-          return ctld_ipc::write_frame(stream, &ServerMessage::VpnIdentityForgotten)
+          return ctl_ipc::write_frame(stream, &ServerMessage::VpnIdentityForgotten)
             .await
             .map_err(Into::into);
         }
@@ -507,7 +507,7 @@ async fn handle_vpn_request(
       (status, snapshot)
     }
   };
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     stream,
     &ServerMessage::VpnStatus {
       status: status.into(),
@@ -540,17 +540,17 @@ fn normalize_request_target(request: &mut ClientMessage) {
   }
 }
 
-async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), ctld_ipc::CodecError> {
-  ctld_ipc::write_frame(
+async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), ctl_ipc::CodecError> {
+  ctl_ipc::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: ctld_ipc::PROTOCOL_VERSION,
+      protocol_version: ctl_ipc::PROTOCOL_VERSION,
     },
   )
   .await?;
-  match ctld_ipc::read_frame::<_, ServerMessage>(stream).await? {
+  match ctl_ipc::read_frame::<_, ServerMessage>(stream).await? {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
-      if protocol_version == ctld_ipc::PROTOCOL_VERSION =>
+      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
     {
       Ok(())
     }
@@ -559,20 +559,20 @@ async fn handshake(stream: &mut ctld_ipc::Stream) -> Result<(), ctld_ipc::CodecE
 }
 
 #[cfg(test)]
-async fn handshake_server(stream: &mut ctld_ipc::Stream) -> Result<(), RequestError> {
-  let request = ctld_ipc::read_frame::<_, ClientMessage>(stream).await?;
+async fn handshake_server(stream: &mut ctl_ipc::Stream) -> Result<(), RequestError> {
+  let request = ctl_ipc::read_frame::<_, ClientMessage>(stream).await?;
   accept_handshake(stream, request).await
 }
 
 async fn accept_handshake(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   request: Option<ClientMessage>,
 ) -> Result<(), RequestError> {
   match request {
     Some(ClientMessage::Handshake { protocol_version })
-      if protocol_version == ctld_ipc::PROTOCOL_VERSION =>
+      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
     {
-      ctld_ipc::write_frame(
+      ctl_ipc::write_frame(
         stream,
         &ServerMessage::HandshakeAccepted { protocol_version },
       )
@@ -581,10 +581,10 @@ async fn accept_handshake(
     }
     Some(ClientMessage::Handshake { protocol_version }) => {
       let error = RequestError::ProtocolVersionMismatch {
-        expected: ctld_ipc::PROTOCOL_VERSION,
+        expected: ctl_ipc::PROTOCOL_VERSION,
         actual: protocol_version,
       };
-      ctld_ipc::write_frame(
+      ctl_ipc::write_frame(
         stream,
         &ServerMessage::Error {
           code: error.code().to_owned(),
@@ -599,7 +599,7 @@ async fn accept_handshake(
 }
 
 async fn ensure_master(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: Arc<State>,
   target: SshTarget,
 ) -> Result<(), RequestError> {
@@ -637,7 +637,7 @@ async fn ensure_master(
       })
       .await?;
     return attempt
-      .run(ctld_ipc::write_frame(
+      .run(ctl_ipc::write_frame(
         stream,
         &ServerMessage::MasterReady { control_path },
       ))
@@ -692,7 +692,7 @@ async fn ensure_master(
 }
 
 async fn wait_for_master(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
   endpoint: &MasterEndpoint,
@@ -732,7 +732,7 @@ async fn wait_for_master(
         .activate(&SshForwardControl { state }, target)
         .await;
       drop(forwards);
-      ctld_ipc::write_frame(
+      ctl_ipc::write_frame(
         stream,
         &ServerMessage::MasterReady {
           control_path: control_path.clone(),
@@ -861,7 +861,7 @@ impl RequestError {
 }
 
 async fn answer_prompt(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   target: &SshTarget,
   prompt: PromptRequest,
   attempted_stored: &mut HashSet<String>,
@@ -891,7 +891,7 @@ async fn answer_prompt(
   let _ = (target, attempted_stored);
 
   let prompt_id = uuid::Uuid::new_v4().to_string();
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     stream,
     &ServerMessage::Prompt {
       prompt_id: prompt_id.clone(),
@@ -904,7 +904,7 @@ async fn answer_prompt(
     },
   )
   .await?;
-  let response = match ctld_ipc::read_frame::<_, ClientMessage>(stream).await? {
+  let response = match ctl_ipc::read_frame::<_, ClientMessage>(stream).await? {
     Some(ClientMessage::PromptResponse {
       prompt_id: response_id,
       response,
@@ -920,7 +920,7 @@ async fn answer_prompt(
 
 #[cfg(target_os = "macos")]
 async fn handle_save_offer(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   target: &SshTarget,
   captured: &mut HashMap<String, Zeroizing<String>>,
   identities: &mut identity_connection::PreparedIdentities,
@@ -999,7 +999,7 @@ async fn handle_save_offer(
 
 #[cfg(target_os = "macos")]
 async fn report_save_error(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   message: &str,
 ) -> Result<(), RequestError> {
   let message = if message.contains("-34018") {
@@ -1018,12 +1018,12 @@ async fn report_save_error(
 
 #[cfg(target_os = "macos")]
 async fn request_ui(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   kind: PromptKind,
   message: &str,
 ) -> Result<Option<Zeroizing<String>>, RequestError> {
   let prompt_id = uuid::Uuid::new_v4().to_string();
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     stream,
     &ServerMessage::Prompt {
       prompt_id: prompt_id.clone(),
@@ -1032,7 +1032,7 @@ async fn request_ui(
     },
   )
   .await?;
-  match ctld_ipc::read_frame::<_, ClientMessage>(stream).await? {
+  match ctl_ipc::read_frame::<_, ClientMessage>(stream).await? {
     Some(ClientMessage::PromptResponse {
       prompt_id: response_id,
       response,
@@ -1042,7 +1042,7 @@ async fn request_ui(
 }
 
 async fn handle_askpass(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   token: &str,
   message: String,
@@ -1065,12 +1065,12 @@ async fn handle_askpass(
     .await
     .map_err(|_| RequestError::ClientClosed)?;
   let response = response_rx.await.map_err(|_| RequestError::ClientClosed)?;
-  ctld_ipc::write_frame(stream, &ServerMessage::AskpassResponse { response }).await?;
+  ctl_ipc::write_frame(stream, &ServerMessage::AskpassResponse { response }).await?;
   Ok(())
 }
 
 async fn master_status(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
@@ -1092,12 +1092,12 @@ async fn master_status(
   } else {
     ServerMessage::AuthenticationRequired
   };
-  ctld_ipc::write_frame(stream, &message).await?;
+  ctl_ipc::write_frame(stream, &message).await?;
   Ok(())
 }
 
 async fn disconnect_master(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
@@ -1131,7 +1131,7 @@ async fn disconnect_master(
     .unwrap()
     .remove(&target_key(target));
   forwards.master_replaced(target);
-  ctld_ipc::write_frame(stream, &ServerMessage::MasterDisconnected).await?;
+  ctl_ipc::write_frame(stream, &ServerMessage::MasterDisconnected).await?;
   Ok(())
 }
 
@@ -1139,7 +1139,7 @@ async fn disconnect_master(
 /// A successful observation does not prove the SSH transport or remote service
 /// is healthy; an unsuccessful observation must not imply disconnection.
 async fn connection_status(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
@@ -1153,7 +1153,7 @@ async fn connection_status(
     }
   })
   .await?;
-  ctld_ipc::write_frame(stream, &message).await?;
+  ctl_ipc::write_frame(stream, &message).await?;
   Ok(())
 }
 
@@ -1196,7 +1196,7 @@ async fn exit_master(target: &SshTarget, control_path: &Path) -> Result<(), Requ
 }
 
 async fn delete_credentials(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
   validate_target(target)?;
@@ -1208,12 +1208,12 @@ async fn delete_credentials(
       .map_err(|_| RequestError::InvalidRequest("keychain worker stopped"))?
       .map_err(|_| RequestError::InvalidRequest("could not delete Keychain credential"))?;
   }
-  ctld_ipc::write_frame(stream, &ServerMessage::CredentialsDeleted).await?;
+  ctl_ipc::write_frame(stream, &ServerMessage::CredentialsDeleted).await?;
   Ok(())
 }
 
 async fn configure_port_forward(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   target: SshTarget,
   forward: LocalPortForward,
@@ -1230,12 +1230,12 @@ async fn configure_port_forward(
   let status = forwards
     .configure(&SshForwardControl { state }, target, forward, enabled)
     .await?;
-  ctld_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
+  ctl_ipc::write_frame(stream, &ServerMessage::PortForwardConfigured { status }).await?;
   Ok(())
 }
 
 async fn list_port_forwards(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
@@ -1246,12 +1246,12 @@ async fn list_port_forwards(
     .await
     .list(&SshForwardControl { state }, target)
     .await;
-  ctld_ipc::write_frame(stream, &ServerMessage::PortForwards { statuses }).await?;
+  ctl_ipc::write_frame(stream, &ServerMessage::PortForwards { statuses }).await?;
   Ok(())
 }
 
 async fn list_remote_listeners(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   state: &State,
   target: &SshTarget,
 ) -> Result<(), RequestError> {
@@ -1262,7 +1262,7 @@ async fn list_remote_listeners(
   let _target_guard = attempt.run(lifecycle.lock.lock()).await?;
   lifecycle.require_connected()?;
   let Some(endpoint) = state.existing_endpoint(target)? else {
-    ctld_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
+    ctl_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
     return Ok(());
   };
   let control_path = endpoint.control_path;
@@ -1270,14 +1270,14 @@ async fn list_remote_listeners(
     .run(control_master_is_ready(target, &control_path))
     .await?
   {
-    ctld_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
+    ctl_ipc::write_frame(stream, &ServerMessage::AuthenticationRequired).await?;
     return Ok(());
   }
 
   let catalog = attempt
     .run(run_listener_discovery(target, &control_path))
     .await??;
-  ctld_ipc::write_frame(stream, &ServerMessage::RemoteListeners { catalog }).await?;
+  ctl_ipc::write_frame(stream, &ServerMessage::RemoteListeners { catalog }).await?;
   Ok(())
 }
 
@@ -1617,7 +1617,7 @@ fn append_target_arguments(command: &mut Command, target: &SshTarget) {
     .iter()
     .any(|gateway| gateway.kind.requires_proxy_command())
   {
-    let proxy = ctld_ipc::proxy_command(&target.gateways).unwrap_or_else(|_| "false".into());
+    let proxy = ctl_ipc::proxy_command(&target.gateways).unwrap_or_else(|_| "false".into());
     command.arg("-o").arg(format!("ProxyCommand={proxy}"));
   } else if !target.gateways.is_empty() {
     // -o respects a prior fail-closed ProxyCommand; -J rejects that combination.
@@ -1675,7 +1675,7 @@ fn gateway_jump_specification(gateway: &SshGateway) -> String {
 }
 
 fn control_path(target: &SshTarget) -> PathBuf {
-  control_path_for_socket(target, &ctld_ipc::socket_path())
+  control_path_for_socket(target, &ctl_ipc::socket_path())
 }
 
 fn control_path_for_socket(target: &SshTarget, daemon_socket: &Path) -> PathBuf {
@@ -1912,10 +1912,10 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn vpn_request_failures_are_reported_over_ipc() {
-    let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(handle_connection(server, Arc::new(State::default())));
     handshake(&mut client).await.unwrap();
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
       &ClientMessage::StartVpn {
         env_file: PathBuf::from("/missing/vpn.env"),
@@ -1924,7 +1924,7 @@ mod tests {
     .await
     .unwrap();
     assert!(matches!(
-      ctld_ipc::read_frame(&mut client).await.unwrap(),
+      ctl_ipc::read_frame(&mut client).await.unwrap(),
       Some(ServerMessage::Error { code, .. }) if code == "vpn_failed"
     ));
     assert!(server.await.unwrap().is_err());
@@ -1933,20 +1933,20 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn handshake_accepts_the_current_protocol() {
-    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(async move { handshake_server(&mut server).await });
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
       &ClientMessage::Handshake {
-        protocol_version: ctld_ipc::PROTOCOL_VERSION,
+        protocol_version: ctl_ipc::PROTOCOL_VERSION,
       },
     )
     .await
     .unwrap();
     assert!(matches!(
-      ctld_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+      ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
       Some(ServerMessage::HandshakeAccepted { protocol_version })
-        if protocol_version == ctld_ipc::PROTOCOL_VERSION
+        if protocol_version == ctl_ipc::PROTOCOL_VERSION
     ));
     server.await.unwrap().unwrap();
   }
@@ -1954,10 +1954,10 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn handshake_rejection_reports_both_protocol_versions() {
-    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(async move { handshake_server(&mut server).await });
-    let old_version = ctld_ipc::PROTOCOL_VERSION - 1;
-    ctld_ipc::write_frame(
+    let old_version = ctl_ipc::PROTOCOL_VERSION - 1;
+    ctl_ipc::write_frame(
       &mut client,
       &ClientMessage::Handshake {
         protocol_version: old_version,
@@ -1966,20 +1966,20 @@ mod tests {
     .await
     .unwrap();
     let Some(ServerMessage::Error { code, message }) =
-      ctld_ipc::read_frame(&mut client).await.unwrap()
+      ctl_ipc::read_frame(&mut client).await.unwrap()
     else {
       panic!("expected a structured handshake rejection");
     };
     assert_eq!(code, "ctld_protocol_version_mismatch");
     assert!(message.contains(&format!(
       "requires local protocol {}",
-      ctld_ipc::PROTOCOL_VERSION
+      ctl_ipc::PROTOCOL_VERSION
     )));
     assert!(message.contains(&format!("client requested {old_version}")));
     assert!(matches!(
       server.await.unwrap(),
       Err(RequestError::ProtocolVersionMismatch { expected, actual })
-        if expected == ctld_ipc::PROTOCOL_VERSION && actual == old_version
+        if expected == ctl_ipc::PROTOCOL_VERSION && actual == old_version
     ));
   }
 
@@ -2021,7 +2021,7 @@ mod tests {
         identity_file: None,
         gateways: if through_gateway {
           vec![SshGateway {
-            kind: ctld_ipc::GatewayKind::Ssh,
+            kind: ctl_ipc::GatewayKind::Ssh,
             vpn: None,
             destination: "127.0.0.1".into(),
             hostname: None,
@@ -2072,13 +2072,13 @@ mod tests {
       ..target()
     };
     assert!(!control_path(&target).exists());
-    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     for _ in 0..2 {
       disconnect_master(&mut server, &state, &target)
         .await
         .unwrap();
       assert!(matches!(
-        ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+        ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
           .await
           .unwrap(),
         Some(ServerMessage::MasterDisconnected)
@@ -2096,7 +2096,7 @@ mod tests {
       .await
       .unwrap();
     assert!(matches!(
-      ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+      ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
         .await
         .unwrap(),
       Some(ServerMessage::ConnectionStatus {
@@ -2113,7 +2113,7 @@ mod tests {
     lifecycle.resume(&lifecycle.attempt()).unwrap();
     master_status(&mut server, &state, &target).await.unwrap();
     assert!(matches!(
-      ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+      ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
         .await
         .unwrap(),
       Some(ServerMessage::AuthenticationRequired)
@@ -2125,7 +2125,7 @@ mod tests {
   async fn disconnect_interrupts_an_unanswered_ssh_prompt_and_releases_the_target_lock() {
     let lifecycle = Arc::new(TargetLifecycle::default());
     let worker_lifecycle = Arc::clone(&lifecycle);
-    let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     let (response, response_rx) = oneshot::channel();
     let worker = tokio::spawn(async move {
       let mut attempt = worker_lifecycle.attempt();
@@ -2145,7 +2145,7 @@ mod tests {
         .await
     });
     assert!(matches!(
-      ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+      ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
         .await
         .unwrap(),
       Some(ServerMessage::Prompt { .. })
@@ -2204,7 +2204,7 @@ mod tests {
     assert_ne!(first, control_path_for_socket(&same_alias, daemon_socket));
     let mut routed = target();
     routed.gateways.push(SshGateway {
-      kind: ctld_ipc::GatewayKind::Ssh,
+      kind: ctl_ipc::GatewayKind::Ssh,
       vpn: None,
       destination: "edge.example".into(),
       hostname: None,
@@ -2327,30 +2327,30 @@ mod tests {
       std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
       0o600
     );
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut stream,
       &ClientMessage::Handshake {
-        protocol_version: ctld_ipc::PROTOCOL_VERSION,
+        protocol_version: ctl_ipc::PROTOCOL_VERSION,
       },
     )
     .await
     .unwrap();
     assert!(matches!(
-      ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+      ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
         .await
         .unwrap(),
       Some(ServerMessage::HandshakeAccepted { .. })
     ));
     let mut invalid = target();
     invalid.port = Some(0);
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut stream,
       &ClientMessage::MasterStatus { target: invalid },
     )
     .await
     .unwrap();
     assert!(matches!(
-      ctld_ipc::read_frame::<_, ServerMessage>(&mut stream)
+      ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
         .await
         .unwrap(),
       Some(ServerMessage::Error { code, .. }) if code == "ctld_protocol_error"

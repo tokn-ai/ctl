@@ -5,7 +5,7 @@
 
 [Proposal 0006](0006-remote-tasks.md) extends this command convention and daemon
 lifetime boundary to the fixed task service. The original scope below records
-the rmux gateway implementation.
+the ctmux gateway implementation.
 
 ## Summary
 
@@ -14,18 +14,18 @@ its routing, authentication, and process ownership boundaries.
 
 ## Motivation
 
-The Windows rmux daemon already owns ConPTY sessions. Users need to reach those
+The Windows ctmux daemon already owns ConPTY sessions. Users need to reach those
 sessions through SSH and keep them alive when a remote connection closes.
 
 ## Design
 
-`ctl --host HOST --remote-platform windows rmux ...` selects the fixed
+`ctl --host HOST --remote-platform windows ctmux ...` selects the fixed
 `ctl-agent.exe connect` command. The default Unix platform continues to select
 `exec ctl-agent connect`, regardless of the client's operating system. Windows hosts
 currently require OpenSSH's default cmd.exe shell.
 
-`ctl-agent` relays binary stdio to the authenticated user's fixed rmux named pipe.
-If absent, it starts the absolute-path companion `rmuxd.exe`, detached from the
+`ctl-agent` relays binary stdio to the authenticated user's fixed ctmux named pipe.
+If absent, it starts the absolute-path companion `ctmuxd.exe`, detached from the
 console and with job breakaway so OpenSSH channel cleanup cannot kill it.
 Failure to obtain permitted breakaway is an explicit startup error.
 
@@ -33,7 +33,7 @@ Failure to obtain permitted breakaway is an explicit startup error.
 
 1. OpenSSH owns authentication and host verification; no forwarding is enabled.
 2. Platform selection accepts an enum, never an arbitrary remote command.
-3. rmuxd owns every process and PTY in its sessions; ctl-agent owns only the relay.
+3. ctmuxd owns every process and PTY in its sessions; ctl-agent owns only the relay.
 4. SSH disconnect must not terminate a daemon-owned session.
 5. The remote gateway exposes only the fixed data endpoint, never maintenance.
 6. Local Windows routing continues to use owner-restricted named pipes.

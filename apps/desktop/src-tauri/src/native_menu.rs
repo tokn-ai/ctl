@@ -5,8 +5,8 @@ use tauri::menu::{
 };
 use tauri::{AppHandle, Emitter as _, Manager as _};
 
-const NATIVE_COMMAND_EVENT: &str = "rmux://command";
-const COMMAND_MENU_ID: &str = "rmux.commands";
+const NATIVE_COMMAND_EVENT: &str = "ctmux://command";
+const COMMAND_MENU_ID: &str = "ctmux.commands";
 
 pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
   let package = app_handle.package_info();
@@ -17,8 +17,8 @@ pub fn build(app_handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     &[
       &MenuItem::with_id(
         app_handle,
-        "rmux.command.app.about",
-        "About rmux",
+        "ctmux.command.app.about",
+        "About ctmux",
         true,
         None::<&str>,
       )?,
@@ -117,7 +117,7 @@ pub fn sync(
       .transpose()?;
     let item = MenuItem::with_id(
       app,
-      format!("rmux.command.{}", binding.command_id),
+      format!("ctmux.command.{}", binding.command_id),
       &binding.title,
       binding.enabled,
       accelerator.as_deref(),
@@ -151,7 +151,7 @@ fn current_event_is_key_repeat() -> bool {
 fn frontend_command(menu_id: &MenuId) -> Option<&str> {
   menu_id
     .as_ref()
-    .strip_prefix("rmux.command.")
+    .strip_prefix("ctmux.command.")
     .filter(|id| crate::keybindings::valid_command_id(id))
 }
 
@@ -182,16 +182,16 @@ mod tests {
   }
 
   #[test]
-  fn maps_only_rmux_session_menu_items_to_frontend_commands() {
+  fn maps_only_ctmux_session_menu_items_to_frontend_commands() {
     assert_eq!(
-      frontend_command(&MenuId::new("rmux.command.app.about")),
+      frontend_command(&MenuId::new("ctmux.command.app.about")),
       Some("app.about")
     );
     assert_eq!(
-      frontend_command(&MenuId::new("rmux.command.session.close")),
+      frontend_command(&MenuId::new("ctmux.command.session.close")),
       Some("session.close")
     );
     assert!(frontend_command(&MenuId::new("undo")).is_none());
-    assert!(frontend_command(&MenuId::new("rmux.command.")).is_none());
+    assert!(frontend_command(&MenuId::new("ctmux.command.")).is_none());
   }
 }

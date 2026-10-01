@@ -11,7 +11,7 @@ import { packageDesktopBundle, type DesktopBundleOptions } from "./package-deskt
 const execute = promisify(execFile);
 
 async function fixture(context: TestContext, target = "x86_64-unknown-linux-gnu"): Promise<DesktopBundleOptions> {
-  const root = await mkdtemp(join(tmpdir(), "rmux-desktop-packaging-"));
+  const root = await mkdtemp(join(tmpdir(), "ctmux-desktop-packaging-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   return {
     target,
@@ -30,18 +30,18 @@ async function file(path: string, content: string, mode = 0o644): Promise<void> 
 }
 
 async function linuxInstallers(options: DesktopBundleOptions): Promise<void> {
-  await file(join(options.input_directory, "deb", "rmux_0.1.0_amd64.deb"), "Debian installer");
-  await file(join(options.input_directory, "rpm", "rmux-0.1.0-1.x86_64.rpm"), "RPM installer");
-  await file(join(options.input_directory, "appimage", "rmux_0.1.0_amd64.AppImage"), "AppImage installer", 0o755);
+  await file(join(options.input_directory, "deb", "ctmux_0.1.0_amd64.deb"), "Debian installer");
+  await file(join(options.input_directory, "rpm", "ctmux-0.1.0-1.x86_64.rpm"), "RPM installer");
+  await file(join(options.input_directory, "appimage", "ctmux_0.1.0_amd64.AppImage"), "AppImage installer", 0o755);
 }
 
 async function macBundle(options: DesktopBundleOptions): Promise<string> {
-  const app = join(options.input_directory, "macos", "rmux.app");
+  const app = join(options.input_directory, "macos", "ctmux.app");
   await file(join(app, "Contents", "Info.plist"), "<plist>fixture app</plist>");
-  await file(join(app, "Contents", "MacOS", "rmux-app"), "#!/bin/sh\nexit 0\n", 0o755);
+  await file(join(app, "Contents", "MacOS", "ctmux-app"), "#!/bin/sh\nexit 0\n", 0o755);
   await file(join(app, "Contents", "Helpers", "ctld.app", "Contents", "MacOS", "ctld"), "helper", 0o751);
-  await symlink("rmux-app", join(app, "Contents", "MacOS", "current"));
-  await file(join(options.input_directory, "dmg", "rmux_0.1.0_aarch64.dmg"), "Disk image");
+  await symlink("ctmux-app", join(app, "Contents", "MacOS", "current"));
+  await file(join(options.input_directory, "dmg", "ctmux_0.1.0_aarch64.dmg"), "Disk image");
   return app;
 }
 
@@ -61,7 +61,7 @@ test("stages every Linux installer with target-specific names and matching check
     assets: manifest.assets,
   });
   assert.deepEqual(manifest.assets.map((asset) => asset.name), [".deb", ".rpm", ".AppImage"].map(
-    (extension) => `rmux-${options.bundle_id}-${options.target}${extension}`,
+    (extension) => `ctmux-${options.bundle_id}-${options.target}${extension}`,
   ));
   for (const asset of manifest.assets) {
     const contents = await readFile(join(options.output_directory, asset.name));
@@ -79,16 +79,16 @@ test("archives the macOS app with executable modes and relative symlinks intact"
   const manifest = await packageDesktopBundle(options);
   assert.equal(manifest.signing_mode, "unsigned");
   assert.deepEqual(manifest.assets.map((asset) => asset.name), [".dmg", ".app.tar.gz"].map(
-    (extension) => `rmux-${options.bundle_id}-${options.target}${extension}`,
+    (extension) => `ctmux-${options.bundle_id}-${options.target}${extension}`,
   ));
   const archive = join(options.output_directory, manifest.assets[1].name);
   const extracted = join(dirname(options.output_directory), "extracted");
   await mkdir(extracted);
   await execute("tar", ["-xzf", archive, "-C", extracted]);
-  const app = join(extracted, "rmux.app");
-  assert.equal((await lstat(join(app, "Contents", "MacOS", "rmux-app"))).mode & 0o777, 0o755);
+  const app = join(extracted, "ctmux.app");
+  assert.equal((await lstat(join(app, "Contents", "MacOS", "ctmux-app"))).mode & 0o777, 0o755);
   assert.equal((await lstat(join(app, "Contents", "Helpers", "ctld.app", "Contents", "MacOS", "ctld"))).mode & 0o777, 0o751);
-  assert.equal(await readlink(join(app, "Contents", "MacOS", "current")), "rmux-app");
+  assert.equal(await readlink(join(app, "Contents", "MacOS", "current")), "ctmux-app");
   assert.equal(await readFile(join(app, "Contents", "MacOS", "current"), "utf8"), "#!/bin/sh\nexit 0\n");
   for (const asset of manifest.assets) {
     assert.equal(asset.sha256, createHash("sha256").update(await readFile(join(options.output_directory, asset.name))).digest("hex"));
@@ -126,9 +126,9 @@ test("rejects missing macOS app and disk image", async (context) => {
 test("rejects symlink and empty installers", async (context) => {
   const options = await fixture(context);
   await linuxInstallers(options);
-  const installer = join(options.input_directory, "deb", "rmux_0.1.0_amd64.deb");
+  const installer = join(options.input_directory, "deb", "ctmux_0.1.0_amd64.deb");
   await rm(installer);
-  await symlink("../rpm/rmux-0.1.0-1.x86_64.rpm", installer);
+  await symlink("../rpm/ctmux-0.1.0-1.x86_64.rpm", installer);
   await assert.rejects(packageDesktopBundle(options), /nonempty regular file/);
   await rm(installer);
   await file(installer, "");

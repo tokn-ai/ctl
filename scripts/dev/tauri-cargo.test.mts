@@ -9,9 +9,9 @@ import test from "node:test";
 const runner = fileURLToPath(new URL("./tauri-cargo.sh", import.meta.url));
 
 async function fixture() {
-  const directory = await mkdtemp(path.join(tmpdir(), "rmux-runner-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "ctmux-runner-"));
   const log = path.join(directory, "calls.jsonl");
-  const artifacts = Object.fromEntries(["ctld", "rmuxd", "taskd"].map((name) => [name, path.join(directory, name)]));
+  const artifacts = Object.fromEntries(["ctld", "ctmuxd", "ctl-taskd"].map((name) => [name, path.join(directory, name)]));
   for (const artifact of Object.values(artifacts)) await writeFile(artifact, "fixture");
   await writeFile(path.join(directory, "cargo"), `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -32,7 +32,7 @@ if (args[0] === "build") {
     artifacts,
     env: {
       ...process.env,
-      RMUX_DEV_APP_SUPERVISOR: undefined,
+      CTMUX_DEV_APP_SUPERVISOR: undefined,
       PATH: `${directory}${path.delimiter}${process.env.PATH}`,
       FIXTURE_LOG: log,
       FIXTURE_ARTIFACTS: JSON.stringify(artifacts),

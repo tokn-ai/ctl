@@ -6,7 +6,7 @@ use super::repository::{Repository, content_revision};
 use super::{WorkspaceHost, WorkspaceSshGateway};
 use crate::error::{CommandErrorDto, CommandResult};
 
-pub use ctl_core::hosts::{HostCatalogDocument, HostCatalogSnapshot};
+pub use ctl_client::hosts::{HostCatalogDocument, HostCatalogSnapshot};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,11 +17,11 @@ pub struct UpdateHostsRequest {
 
 impl Repository {
   pub(super) fn read_catalog(&self) -> CommandResult<HostCatalogSnapshot> {
-    ctl_core::hosts::storage::load(&self.directory.join("hosts.json")).map_err(Into::into)
+    ctl_client::hosts::storage::load(&self.directory.join("hosts.json")).map_err(Into::into)
   }
 
   pub(super) fn persist_catalog(&self, snapshot: &HostCatalogSnapshot) -> CommandResult<()> {
-    ctl_core::hosts::storage::persist_under_lock(&self.directory.join("hosts.json"), snapshot)
+    ctl_client::hosts::storage::persist_under_lock(&self.directory.join("hosts.json"), snapshot)
       .map_err(Into::into)
   }
 

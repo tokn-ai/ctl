@@ -15,6 +15,6 @@ describe("command errors", () => {
   it("handles ordinary errors and unknown rejection values", () => {
     expect(errorCode(new Error("failed"))).toBeNull();
     expect(errorMessage(new Error("failed"))).toBe("failed");
-    expect(errorMessage(null)).toBe("An unexpected rmux error occurred.");
+    expect(errorMessage(null)).toBe("An unexpected ctmux error occurred.");
   });
 });

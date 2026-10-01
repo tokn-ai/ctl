@@ -6,7 +6,7 @@ use std::process::Stdio;
 #[cfg(unix)]
 use std::time::Duration;
 
-use ctld_ipc::{VpnProvider, VpnSnapshot, VpnState};
+use ctl_ipc::{VpnProvider, VpnSnapshot, VpnState};
 
 use crate::error::{CommandErrorDto, CommandResult};
 
@@ -36,7 +36,7 @@ where
   let url = status
     .auth_url
     .as_deref()
-    .filter(|url| ctld_ipc::vpn::is_tailscale_auth_url(url))
+    .filter(|url| ctl_ipc::vpn::is_tailscale_auth_url(url))
     .ok_or_else(|| {
       CommandErrorDto::new(
         "vpn_sign_in_unavailable",
@@ -95,7 +95,7 @@ fn browser_error() -> CommandErrorDto {
 
 #[cfg(test)]
 mod tests {
-  use ctld_ipc::VpnStatus;
+  use ctl_ipc::VpnStatus;
 
   use super::*;
 

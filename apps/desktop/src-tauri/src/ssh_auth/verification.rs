@@ -1,5 +1,5 @@
 use crate::error::{CommandErrorDto, CommandResult};
-use rmux_client::{ClientIdentity, handshake};
+use ctmux_client::{ClientIdentity, handshake};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// A ctl-agent marker alone does not prove that the remote daemon speaks our protocol.
@@ -7,7 +7,7 @@ pub async fn verify(mut stream: impl AsyncRead + AsyncWrite + Unpin) -> CommandR
   handshake(
     &mut stream,
     &ClientIdentity {
-      name: "rmux-app".into(),
+      name: "ctmux-app".into(),
       version: env!("CARGO_PKG_VERSION").into(),
     },
   )
@@ -19,7 +19,7 @@ pub async fn verify(mut stream: impl AsyncRead + AsyncWrite + Unpin) -> CommandR
 #[cfg(test)]
 mod tests {
   use super::*;
-  use rmux_proto::{ClientMessage, ErrorCode, ServerMessage, read_frame, write_frame};
+  use ctmux_proto::{ClientMessage, ErrorCode, ServerMessage, read_frame, write_frame};
 
   #[tokio::test]
   async fn rejects_an_incompatible_daemon_during_protocol_verification() {

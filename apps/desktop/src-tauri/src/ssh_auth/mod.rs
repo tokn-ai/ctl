@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
+use ctl_client::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tokio::sync::{oneshot, watch};
@@ -31,7 +31,7 @@ fn registry() -> &'static Mutex<Registry> {
 }
 
 struct Attempt {
-  target: ctld_ipc::SshTarget,
+  target: ctl_ipc::SshTarget,
   cancel: watch::Sender<bool>,
   responses: Mutex<HashMap<String, oneshot::Sender<Option<Zeroizing<String>>>>>,
 }
@@ -128,7 +128,7 @@ async fn connect_with(
         &destination,
         &options,
         &interaction,
-        ctl_core::RemoteService::Rmux,
+        ctl_client::RemoteService::Ctmux,
       )
       .await
       .map_err(|error| CommandErrorDto::transport(&error))?;
@@ -259,23 +259,23 @@ pub async fn install_agent(
 }
 
 fn require_restart_support(identity: &ctl_proto::RemoteIdentity) -> CommandResult<()> {
-  if identity.rmux_restart_supported {
+  if identity.ctmux_restart_supported {
     return Ok(());
   }
   Err(CommandErrorDto::new(
     "remote_restart_unsupported",
-    "The installed ctl-agent does not support remote restart. Install a current component bundle, or restart rmuxd manually on the host.",
+    "The installed ctl-agent does not support remote restart. Install a current component bundle, or restart ctmuxd manually on the host.",
   ))
 }
 
 /// Called only after the UI's destructive restart confirmation.
-pub async fn restart_rmux(
+pub async fn restart_ctmux(
   app: tauri::AppHandle,
   window: String,
   attempt_id: String,
   target: ConnectionTargetDto,
   channel: Channel<SshPromptDto>,
-) -> CommandResult<ctl_proto::RemoteRmuxRestartResult> {
+) -> CommandResult<ctl_proto::RemoteCtmuxRestartResult> {
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
@@ -324,7 +324,7 @@ pub async fn restart_rmux(
       ));
     };
     let interaction = SshInteraction::Multiplexed { control_path };
-    let command = ctl_core::restart_ssh_rmux_interactive(
+    let command = ctl_client::restart_ssh_ctmux_interactive(
       &destination,
       &options,
       &interaction,

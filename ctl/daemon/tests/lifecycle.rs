@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use ctld_ipc::lifecycle::{Client, DaemonStatus, Request, Response};
+use ctl_ipc::lifecycle::{Client, DaemonStatus, Request, Response};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -34,21 +34,21 @@ impl Drop for IsolatedOwner {
 }
 
 async fn stop_owner(socket: &Path) {
-  let Ok(mut stream) = ctld_ipc::connect_existing_at(socket).await else {
+  let Ok(mut stream) = ctl_ipc::connect_existing_at(socket).await else {
     return;
   };
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &Request::CtldInspect {
-      protocol_version: ctld_ipc::lifecycle::PROTOCOL_VERSION,
+      protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
     },
   )
   .await
   .unwrap();
-  let Some(Response::CtldInfo { info }) = ctld_ipc::read_frame(&mut stream).await.unwrap() else {
+  let Some(Response::CtldInfo { info }) = ctl_ipc::read_frame(&mut stream).await.unwrap() else {
     return;
   };
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     &mut stream,
     &Request::CtldRestart {
       expected_instance_id: info.instance_id,
@@ -57,13 +57,13 @@ async fn stop_owner(socket: &Path) {
   .await
   .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, Response>(&mut stream)
+    ctl_ipc::read_frame::<_, Response>(&mut stream)
       .await
       .unwrap(),
     Some(Response::CtldRestartAccepted { .. })
   ));
   assert!(
-    ctld_ipc::read_frame::<_, Response>(&mut stream)
+    ctl_ipc::read_frame::<_, Response>(&mut stream)
       .await
       .unwrap()
       .is_none()
@@ -158,11 +158,11 @@ async fn vpn_status_observes_shared_inventory_once_per_request() {
     .unwrap_or_default()
     .lines()
     .count();
-  let snapshot = ctld_ipc::vpn::Client::new(owner.socket())
+  let snapshot = ctl_ipc::vpn::Client::new(owner.socket())
     .list()
     .await
     .unwrap();
-  assert_eq!(snapshot.connections, Vec::<ctld_ipc::VpnStatus>::new());
+  assert_eq!(snapshot.connections, Vec::<ctl_ipc::VpnStatus>::new());
   assert_eq!(snapshot.discovery_warnings, Vec::<String>::new());
   let calls = std::fs::read_to_string(owner.0.join("docker.calls")).unwrap();
   let calls: Vec<_> = calls.lines().skip(prior).collect();

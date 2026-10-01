@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use rmux_client::{AttachExit, AttachExitReason, AttachedSession, AttachmentControl};
-use rmux_proto::{
+use ctmux_client::{AttachExit, AttachExitReason, AttachedSession, AttachmentControl};
+use ctmux_proto::{
   ErrorCode, LeaseKind, LeaseStatus, PromptPhase, SessionInfo, SessionStatus, ShellState,
   ShellType, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, TuiHint,
 };
@@ -29,9 +29,9 @@ pub(crate) fn observation_timestamp_ms() -> Option<u64> {
     .filter(|value| valid_observation_timestamp(*value))
 }
 
-pub use ctl_core::hosts::ConnectionTargetDto;
+pub use ctl_client::hosts::ConnectionTargetDto;
 #[cfg(test)]
-pub use ctl_core::hosts::{SshGatewayModeDto, SshGatewayRouteStepDto};
+pub use ctl_client::hosts::{SshGatewayModeDto, SshGatewayRouteStepDto};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TargetRequestDto {
@@ -212,7 +212,7 @@ pub struct SessionListDto {
   pub shell_states: BTreeMap<String, ShellStateDto>,
 }
 
-/// Result of a destructive local `rmuxd` restart.
+/// Result of a destructive local `ctmuxd` restart.
 ///
 /// The count includes sessions for which the daemon accepted a termination
 /// request before the replacement daemon passed its health check.
@@ -329,7 +329,7 @@ impl From<TuiHint> for TuiHintDto {
 ///
 /// Editable command-line data is deliberately absent from this DTO. The
 /// running-command summary is separately requested by the GUI and remains
-/// subject to rmuxd's input-lease visibility policy.
+/// subject to ctmuxd's input-lease visibility policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ShellStateDto {
   pub revision: String,
@@ -504,7 +504,7 @@ impl PresentationAcknowledgement {
   pub async fn apply(
     self,
     control: &AttachmentControl,
-  ) -> Result<(), rmux_client::AttachmentAcknowledgementError> {
+  ) -> Result<(), ctmux_client::AttachmentAcknowledgementError> {
     match self {
       Self::Checkpoint { sequence } => control.acknowledge_checkpoint(sequence).await,
       Self::Output { sequence_end } => control.acknowledge_output(sequence_end).await,
@@ -730,7 +730,7 @@ pub fn parse_sequence(value: Option<String>) -> CommandResult<Option<u64>> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use rmux_proto::{ShellCapabilities, ShellDescriptor};
+  use ctmux_proto::{ShellCapabilities, ShellDescriptor};
 
   #[test]
   fn identity_checks_pin_the_environment_but_not_its_version_or_credentials() {
@@ -738,7 +738,7 @@ mod tests {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
       build: None,
-      rmux_restart_supported: false,
+      ctmux_restart_supported: false,
       bundle: None,
     };
     let mut target = ConnectionTargetDto::ssh("host");
@@ -802,14 +802,14 @@ mod tests {
   fn ssh_target_uses_a_tagged_snake_case_shape() {
     let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
       "kind": "ssh",
-      "destination": "rmux-docker"
+      "destination": "ctmux-docker"
     }))
     .unwrap();
 
-    assert_eq!(target, ConnectionTargetDto::ssh("rmux-docker"));
+    assert_eq!(target, ConnectionTargetDto::ssh("ctmux-docker"));
     assert_eq!(
       serde_json::to_value(target).unwrap(),
-      serde_json::json!({ "kind": "ssh", "destination": "rmux-docker" })
+      serde_json::json!({ "kind": "ssh", "destination": "ctmux-docker" })
     );
   }
 
@@ -842,9 +842,9 @@ mod tests {
   fn app_local_ssh_target_serializes_only_structured_settings() {
     let target: ConnectionTargetDto = serde_json::from_value(serde_json::json!({
       "kind": "ssh",
-      "destination": "rmux-remote-test",
+      "destination": "ctmux-remote-test",
       "hostname": "127.0.0.1",
-      "user": "rmux",
+      "user": "ctmux",
       "port": 2222,
       "identity_file": "~/.ssh/local.id_rsa"
     }))
@@ -854,9 +854,9 @@ mod tests {
       serde_json::to_value(target).unwrap(),
       serde_json::json!({
         "kind": "ssh",
-        "destination": "rmux-remote-test",
+        "destination": "ctmux-remote-test",
         "hostname": "127.0.0.1",
-        "user": "rmux",
+        "user": "ctmux",
         "port": 2222,
         "identity_file": "~/.ssh/local.id_rsa"
       })
@@ -867,13 +867,13 @@ mod tests {
   fn ssh_config_catalog_uses_destination_strings_and_warnings() {
     let json = serde_json::to_value(SshConfigHostCatalogDto {
       hosts: vec![SshConfigHostDto {
-        destination: "rmux-docker".into(),
+        destination: "ctmux-docker".into(),
       }],
       warnings: vec!["partial discovery".into()],
     })
     .unwrap();
 
-    assert_eq!(json["hosts"][0]["destination"], "rmux-docker");
+    assert_eq!(json["hosts"][0]["destination"], "ctmux-docker");
     assert_eq!(json["warnings"][0], "partial discovery");
   }
 
@@ -973,8 +973,8 @@ mod tests {
   #[test]
   fn terminal_history_preserves_u64_precision_as_decimal_strings() {
     let dto = TerminalHistorySnapshotDto::from(TerminalHistorySnapshot {
-      format: rmux_proto::TERMINAL_HISTORY_FORMAT.into(),
-      format_version: rmux_proto::TERMINAL_HISTORY_FORMAT_VERSION,
+      format: ctmux_proto::TERMINAL_HISTORY_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_HISTORY_FORMAT_VERSION,
       sequence: u64::MAX,
       generation: u64::MAX - 1,
       revision: u64::MAX - 2,
@@ -993,7 +993,7 @@ mod tests {
   #[test]
   fn shell_state_dto_never_serializes_the_editable_command_line() {
     let state = ShellState {
-      current_command_line: Some(rmux_proto::CommandLine {
+      current_command_line: Some(ctmux_proto::CommandLine {
         text: "secret".into(),
         cursor_scalar_offset: Some(6),
       }),

@@ -1,6 +1,6 @@
 //! Cooperative lifecycle control on the owner-only ctld endpoint.
 
-use ctld_ipc::lifecycle::{DaemonBinaryInfo, DaemonInfo, Request, Response};
+use ctl_ipc::lifecycle::{DaemonBinaryInfo, DaemonInfo, Request, Response};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
@@ -11,16 +11,16 @@ use super::{RequestError, State};
 #[serde(untagged)]
 pub(super) enum FirstMessage {
   Lifecycle(Request),
-  Client(Box<ctld_ipc::ClientMessage>),
+  Client(Box<ctl_ipc::ClientMessage>),
 }
 
 pub(super) struct Control {
   pub(super) instance_id: String,
-  restart: mpsc::Sender<ctld_ipc::Stream>,
+  restart: mpsc::Sender<ctl_ipc::Stream>,
 }
 
 impl Control {
-  pub(super) fn new() -> (Self, mpsc::Receiver<ctld_ipc::Stream>) {
+  pub(super) fn new() -> (Self, mpsc::Receiver<ctl_ipc::Stream>) {
     let (restart, receiver) = mpsc::channel(1);
     (
       Self {
@@ -33,7 +33,7 @@ impl Control {
 }
 
 pub(super) async fn handle(
-  mut stream: ctld_ipc::Stream,
+  mut stream: ctl_ipc::Stream,
   state: &State,
   request: Request,
 ) -> Result<(), RequestError> {
@@ -42,7 +42,7 @@ pub(super) async fn handle(
       "lifecycle control is unavailable",
     ));
   };
-  if !matches!(request, Request::CtldInspect { protocol_version } if protocol_version == ctld_ipc::lifecycle::PROTOCOL_VERSION)
+  if !matches!(request, Request::CtldInspect { protocol_version } if protocol_version == ctl_ipc::lifecycle::PROTOCOL_VERSION)
   {
     return error(
       &mut stream,
@@ -59,7 +59,7 @@ pub(super) async fn handle(
       .connections
       .into_iter()
       .filter(|connection| {
-        connection.state != ctld_ipc::VpnState::Stopped
+        connection.state != ctl_ipc::VpnState::Stopped
           && connection.locally_connected != Some(false)
       })
       .count()
@@ -71,12 +71,12 @@ pub(super) async fn handle(
     binary: DaemonBinaryInfo::current(),
     active_vpn_count: u32::try_from(active_vpn_count).unwrap_or(u32::MAX),
   };
-  ctld_ipc::write_frame(&mut stream, &Response::CtldInfo { info }).await?;
+  ctl_ipc::write_frame(&mut stream, &Response::CtldInfo { info }).await?;
   // Native confirmation tokens expire after one minute; retain this exact
   // process connection long enough to confirm without reselecting an owner.
   let Ok(request) = timeout(
     Duration::from_secs(90),
-    ctld_ipc::read_frame::<_, Request>(&mut stream),
+    ctl_ipc::read_frame::<_, Request>(&mut stream),
   )
   .await
   else {
@@ -109,11 +109,11 @@ pub(super) async fn handle(
 }
 
 async fn error(
-  stream: &mut ctld_ipc::Stream,
+  stream: &mut ctl_ipc::Stream,
   code: &str,
   message: &str,
 ) -> Result<(), RequestError> {
-  ctld_ipc::write_frame(
+  ctl_ipc::write_frame(
     stream,
     &Response::CtldError {
       code: code.into(),
@@ -137,17 +137,17 @@ mod tests {
       lifecycle: Some(control),
       ..State::default()
     });
-    let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
     let handler = tokio::spawn(super::super::handle_connection(server, state));
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
       &Request::CtldInspect {
-        protocol_version: ctld_ipc::lifecycle::PROTOCOL_VERSION,
+        protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
       },
     )
     .await
     .unwrap();
-    let Some(Response::CtldInfo { info }) = ctld_ipc::read_frame(&mut client).await.unwrap() else {
+    let Some(Response::CtldInfo { info }) = ctl_ipc::read_frame(&mut client).await.unwrap() else {
       panic!("missing identity");
     };
     assert_eq!(info.instance_id, expected);
@@ -165,20 +165,20 @@ mod tests {
       lifecycle: Some(control),
       ..State::default()
     });
-    let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
     let handler = tokio::spawn(super::super::handle_connection(server, state));
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
       &Request::CtldInspect {
-        protocol_version: ctld_ipc::lifecycle::PROTOCOL_VERSION,
+        protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
       },
     )
     .await
     .unwrap();
-    ctld_ipc::read_frame::<_, Response>(&mut client)
+    ctl_ipc::read_frame::<_, Response>(&mut client)
       .await
       .unwrap();
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
       &Request::CtldRestart {
         expected_instance_id: "another-owner".into(),
@@ -187,7 +187,7 @@ mod tests {
     .await
     .unwrap();
     assert!(
-      matches!(ctld_ipc::read_frame::<_, Response>(&mut client).await.unwrap(), Some(Response::CtldError { code, .. }) if code == "ctld_owner_changed")
+      matches!(ctl_ipc::read_frame::<_, Response>(&mut client).await.unwrap(), Some(Response::CtldError { code, .. }) if code == "ctld_owner_changed")
     );
     handler.await.unwrap().unwrap();
     assert!(restarts.try_recv().is_err());
@@ -201,20 +201,20 @@ mod tests {
       lifecycle: Some(control),
       ..State::default()
     });
-    let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+    let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
     let handler = tokio::spawn(super::super::handle_connection(server, state));
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
       &Request::CtldInspect {
-        protocol_version: ctld_ipc::lifecycle::PROTOCOL_VERSION,
+        protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
       },
     )
     .await
     .unwrap();
-    ctld_ipc::read_frame::<_, Response>(&mut client)
+    ctl_ipc::read_frame::<_, Response>(&mut client)
       .await
       .unwrap();
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut client,
       &Request::CtldRestart {
         expected_instance_id: expected,
@@ -227,14 +227,14 @@ mod tests {
     assert!(
       timeout(
         Duration::from_millis(20),
-        ctld_ipc::read_frame::<_, Response>(&mut client)
+        ctl_ipc::read_frame::<_, Response>(&mut client)
       )
       .await
       .is_err()
     );
     drop(owned);
     assert!(
-      ctld_ipc::read_frame::<_, Response>(&mut client)
+      ctl_ipc::read_frame::<_, Response>(&mut client)
         .await
         .unwrap()
         .is_none()

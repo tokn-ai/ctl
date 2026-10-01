@@ -1,11 +1,11 @@
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
-use task_ipc::{Stream, connect};
-use task_proto::{
+use ctl_task_ipc::{Stream, connect};
+use ctl_task_proto::{
   ClientMessage, ExecutionMode, PROTOCOL_VERSION, RunState, ServerMessage, TaskDefinition,
   read_frame, write_frame,
 };
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -23,11 +23,11 @@ impl TestDaemon {
     let temporary = PathBuf::from("/tmp");
     #[cfg(windows)]
     let temporary = std::env::temp_dir();
-    let root = temporary.join(format!("taskd-test-{}", &unique[..8]));
+    let root = temporary.join(format!("ctl-taskd-test-{}", &unique[..8]));
     #[cfg(unix)]
-    let socket = root.join("run/taskd.sock");
+    let socket = root.join("run/ctl-taskd.sock");
     #[cfg(windows)]
-    let socket = PathBuf::from(format!(r"\\.\pipe\taskd-test-{unique}"));
+    let socket = PathBuf::from(format!(r"\\.\pipe\ctl-taskd-test-{unique}"));
     Self::launch(root, socket).await
   }
 
@@ -35,7 +35,7 @@ impl TestDaemon {
     // The Windows named pipe can accept connections before task storage has
     // created its directories. Fixture files must not depend on that timing.
     std::fs::create_dir_all(&root).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_taskd"))
+    let child = Command::new(env!("CARGO_BIN_EXE_ctl-taskd"))
       .arg("--socket")
       .arg(&socket)
       .arg("--data-directory")
@@ -54,7 +54,7 @@ impl TestDaemon {
           break;
         }
         Err(_) if Instant::now() < deadline => sleep(Duration::from_millis(20)).await,
-        Err(error) => panic!("taskd did not open its socket: {error}"),
+        Err(error) => panic!("ctl-taskd did not open its socket: {error}"),
       }
     }
     Self {
@@ -407,7 +407,7 @@ async fn registration_retries_reuse_identity_and_updates_preserve_run_definition
       })
       .await,
     ServerMessage::Error {
-      code: task_proto::ErrorCode::AlreadyRunning,
+      code: ctl_task_proto::ErrorCode::AlreadyRunning,
       ..
     }
   ));
@@ -419,7 +419,7 @@ async fn registration_retries_reuse_identity_and_updates_preserve_run_definition
 
 #[tokio::test]
 async fn daemon_restart_refuses_active_tasks_and_releases_idle_state() {
-  use task_proto::control;
+  use ctl_task_proto::control;
   let mut daemon = TestDaemon::start().await;
   let definition = TaskDefinition {
     name: "restart-survivor".into(),

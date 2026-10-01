@@ -13,8 +13,8 @@ test("metadata retains Cargo resolution settings and excludes app/build-only opt
     "run", "--manifest-path", "workspace with spaces/Cargo.toml",
     "--config", "config with spaces.toml", "--config=build.incremental=false",
     "--target", "targets/custom-macos.json", "--profile", "development",
-    "--target-dir", "custom output", "--package", "rmux-app",
-    "--bin=rmux-app", "--features", "devtools", "--no-default-features",
+    "--target-dir", "custom output", "--package", "ctmux-app",
+    "--bin=ctmux-app", "--features", "devtools", "--no-default-features",
     "--jobs", "4", "--color", "always", "--release", "--locked", "--offline",
     "--", "--manifest-path", "app argument", "--config", "app config",
   ]), [
@@ -55,8 +55,8 @@ test("metadata forwards unstable Cargo switches without forwarding profile or ta
 function artifacts(directory: string): DaemonExecutables {
   return {
     ctld: path.join(directory, "ctld"),
-    rmuxd: path.join(directory, "rmuxd"),
-    taskd: path.join(directory, "taskd"),
+    ctmuxd: path.join(directory, "ctmuxd"),
+    "ctl-taskd": path.join(directory, "ctl-taskd"),
   };
 }
 
@@ -82,10 +82,10 @@ test("rejects helpers from different targets or profiles", () => {
   const root = path.resolve("fixture output");
   const common = artifacts(path.join(root, "aarch64-apple-darwin", "debug"));
   for (const different of [
-    path.join(root, "aarch64-apple-darwin", "release", "rmuxd"),
-    path.join(root, "x86_64-apple-darwin", "debug", "rmuxd"),
+    path.join(root, "aarch64-apple-darwin", "release", "ctmuxd"),
+    path.join(root, "x86_64-apple-darwin", "debug", "ctmuxd"),
   ]) {
-    assert.throws(() => targetFromArtifacts(root, { ...common, rmuxd: different }), /one Cargo target\/profile/);
+    assert.throws(() => targetFromArtifacts(root, { ...common, ctmuxd: different }), /one Cargo target\/profile/);
   }
 });
 

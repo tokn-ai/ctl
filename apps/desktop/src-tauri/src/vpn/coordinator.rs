@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as RegistryMutex, Weak};
 use std::time::Duration;
 
-use ctld_ipc::VpnStatus;
+use ctl_ipc::VpnStatus;
 use tokio::sync::{Mutex, Notify};
 
 use crate::error::{CommandErrorDto, CommandResult};

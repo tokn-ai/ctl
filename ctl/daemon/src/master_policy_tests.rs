@@ -113,7 +113,7 @@ async fn vpn_routes_force_a_private_master_and_use_stable_profile_identity() {
   routed.use_ssh_config_master = Some(true);
   routed.gateways.push(SshGateway {
     kind: GatewayKind::Vpn,
-    vpn: Some(ctld_ipc::VpnGateway {
+    vpn: Some(ctl_ipc::VpnGateway {
       connection_id: "saved-vpn".into(),
       socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
     }),
@@ -202,12 +202,12 @@ async fn a_direct_method_can_adopt_and_release_a_configured_master() {
   let command = master_command(&direct, &endpoint);
   let args: Vec<_> = command.as_std().get_args().collect();
   assert_eq!(args[args.len() - 2], "example.test");
-  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   disconnect_master(&mut server, &state, &direct)
     .await
     .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+    ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
       .await
       .unwrap(),
     Some(ServerMessage::MasterDisconnected)
@@ -229,11 +229,11 @@ async fn an_explicit_default_and_omitted_preference_share_disconnect_state() {
         target: target(alias),
       },
     ] {
-      let (mut client, server) = ctld_ipc::Stream::pair().unwrap();
+      let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
       let server = tokio::spawn(handle_connection(server, Arc::clone(&state)));
       handshake(&mut client).await.unwrap();
-      ctld_ipc::write_frame(&mut client, &request).await.unwrap();
-      let response = ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+      ctl_ipc::write_frame(&mut client, &request).await.unwrap();
+      let response = ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
         .await
         .unwrap();
       assert!(matches!(
@@ -279,12 +279,12 @@ async fn shared_disconnect_closes_only_our_anchor_and_preserves_external_socket(
       .anchor
       .is_some()
   );
-  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   disconnect_master(&mut server, &state, &configured)
     .await
     .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+    ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
       .await
       .unwrap(),
     Some(ServerMessage::MasterDisconnected)
@@ -303,7 +303,7 @@ async fn shared_disconnect_closes_only_our_anchor_and_preserves_external_socket(
     .await
     .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+    ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
       .await
       .unwrap(),
     Some(ServerMessage::ConnectionStatus {
@@ -323,13 +323,13 @@ async fn shared_disconnect_closes_only_our_anchor_and_preserves_external_socket(
 async fn an_external_socket_is_not_a_connection_until_adopted() {
   let state = State::default();
   let configured = target(Some("builder"));
-  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   assert!(state.endpoint(&configured).is_none());
   master_status(&mut server, &state, &configured)
     .await
     .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+    ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
       .await
       .unwrap(),
     Some(ServerMessage::AuthenticationRequired)
@@ -444,7 +444,7 @@ fn disappearing_reuse_only_masters_do_not_authorize_shared_startup() {
   assert_eq!(fallback.control_path, control_path(&configured));
   assert!(matches!(
     endpoint(SharedMasterStartup::ExternalOnly).after_missing_master(&configured),
-    Err(RequestError::SshConfig(message)) if message.contains("started outside rmux")
+    Err(RequestError::SshConfig(message)) if message.contains("started outside ctmux")
   ));
   let creatable = endpoint(SharedMasterStartup::Create)
     .after_missing_master(&configured)

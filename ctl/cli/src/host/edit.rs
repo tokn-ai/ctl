@@ -1,4 +1,4 @@
-use ctl_core::hosts::{
+use ctl_client::hosts::{
   ConnectionTargetDto, HostCatalogDocument, SshGatewayModeDto, SshGatewayRouteStepDto,
   WorkspaceConnectionMethod, WorkspaceHost,
 };

@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState, VpnStatus};
+use ctl_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState, VpnStatus};
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::coordinator::{Coordinator, cancelled};
@@ -27,7 +27,7 @@ trait Runtime: Send + Sync {
   fn forget(&self, connection_id: &str) -> RuntimeFuture<'_, ()>;
 }
 
-struct NativeRuntime(ctld_ipc::vpn::Client);
+struct NativeRuntime(ctl_ipc::vpn::Client);
 
 impl Runtime for NativeRuntime {
   fn supported(&self) -> RuntimeFuture<'_, ()> {

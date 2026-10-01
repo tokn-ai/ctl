@@ -42,8 +42,8 @@ impl Drop for Fixture {
   }
 }
 
-fn target() -> ctld_ipc::SshTarget {
-  ctld_ipc::SshTarget {
+fn target() -> ctl_ipc::SshTarget {
+  ctl_ipc::SshTarget {
     destination: "fixture.invalid".into(),
     ssh_config_alias: Some("fixture.invalid".into()),
     use_ssh_config_master: None,
@@ -217,12 +217,12 @@ async fn restarted_state_observes_saved_mux_without_adopting_or_config_evaluatio
   let restarted = fixture.state();
   let listener = tokio::net::UnixListener::bind(fixture.endpoint().control_path).unwrap();
   let master = tokio::spawn(mux_alive(listener));
-  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   crate::connection_status(&mut server, &restarted, &target())
     .await
     .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+    ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
       .await
       .unwrap(),
     Some(ServerMessage::ConnectionStatus {
@@ -247,7 +247,7 @@ async fn restarted_state_observes_saved_mux_without_adopting_or_config_evaluatio
     .await
     .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+    ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
       .await
       .unwrap(),
     Some(ServerMessage::ConnectionStatus {
@@ -267,12 +267,12 @@ async fn master_lookup_and_shared_disconnect_use_the_saved_endpoint() {
   let restarted = fixture.state();
   let listener = tokio::net::UnixListener::bind(fixture.endpoint().control_path).unwrap();
   let master = tokio::spawn(mux_alive(listener));
-  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   crate::master_status(&mut server, &restarted, &target())
     .await
     .unwrap();
   assert!(
-    matches!(ctld_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+    matches!(ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
     Some(ServerMessage::MasterReady {control_path}) if control_path == fixture.endpoint().control_path)
   );
   master.await.unwrap();
@@ -306,12 +306,12 @@ async fn paused_status_does_not_read_even_malformed_persisted_metadata() {
   .unwrap();
   let restarted = fixture.state();
   restarted.target(&target()).pause();
-  let (mut client, mut server) = ctld_ipc::Stream::pair().unwrap();
+  let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   crate::connection_status(&mut server, &restarted, &target())
     .await
     .unwrap();
   assert!(matches!(
-    ctld_ipc::read_frame::<_, ServerMessage>(&mut client)
+    ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
       .await
       .unwrap(),
     Some(ServerMessage::ConnectionStatus {

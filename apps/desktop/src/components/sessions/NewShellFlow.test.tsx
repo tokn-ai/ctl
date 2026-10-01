@@ -32,7 +32,7 @@ const remote: ConnectionTarget = {
   destination: "remote",
   hostname: "127.0.0.1",
   port: 2222,
-  user: "rmux",
+  user: "ctmux",
   identity_file: "/keys/test",
 };
 

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use ctld_ipc::identities::{IdentityFile, Inventory, MAX_PATHS, Request, Response};
+use ctl_ipc::identities::{IdentityFile, Inventory, MAX_PATHS, Request, Response};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -120,7 +120,7 @@ pub async fn forget_identity_passphrase(request: ForgetRequest) -> CommandResult
 
 #[cfg(unix)]
 async fn exchange(request: Request) -> CommandResult<Response> {
-  let executable = ctld_ipc::daemon_executable().map_err(|_| super::process::unavailable())?;
+  let executable = ctl_ipc::daemon_executable().map_err(|_| super::process::unavailable())?;
   exchange_with(tokio::process::Command::new(executable), request).await
 }
 
@@ -134,7 +134,7 @@ async fn exchange_with(
   command: tokio::process::Command,
   request: Request,
 ) -> CommandResult<Response> {
-  use ctld_ipc::identities::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
+  use ctl_ipc::identities::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 
   let requires_metadata_support = matches!(request, Request::ListMetadata { .. });
   let bytes = Zeroizing::new(
@@ -356,7 +356,7 @@ fn normalize_path(value: &str, home: Option<&Path>) -> Option<String> {
 fn bounded_paths(names: &BTreeMap<String, BTreeSet<String>>) -> Vec<String> {
   // Reserve space for JSON escaping and fixed fields. Overlong hints do not
   // block discovery or hide Keychain entries recovered by the helper itself.
-  let mut remaining = ctld_ipc::identities::MAX_REQUEST_BYTES / 2;
+  let mut remaining = ctl_ipc::identities::MAX_REQUEST_BYTES / 2;
   names
     .keys()
     .take_while(|path| {

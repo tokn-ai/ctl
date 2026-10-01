@@ -8,9 +8,9 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const managedLabelPrefix = "rmux-ci: ";
-const notesStart = "<!-- rmux-ci:start -->";
-const notesEnd = "<!-- rmux-ci:end -->";
+const managedLabelPrefix = "ctmux-ci: ";
+const notesStart = "<!-- ctmux-ci:start -->";
+const notesEnd = "<!-- ctmux-ci:end -->";
 const desktopTargets = [
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
@@ -160,7 +160,7 @@ export async function validateReleaseBundle(
     const extensions = target.endsWith("apple-darwin")
       ? ["dmg", "app.tar.gz"]
       : ["deb", "rpm", "AppImage"];
-    const expectedAssets = new Set(extensions.map((extension) => `rmux-${identity.bundle_id}-${target}.${extension}`));
+    const expectedAssets = new Set(extensions.map((extension) => `ctmux-${identity.bundle_id}-${target}.${extension}`));
     if (
       manifest.schema_version !== 1 ||
       manifest.target !== target ||
@@ -237,7 +237,7 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
     body.indexOf(notesStart, start + notesStart.length) !== -1 ||
     body.indexOf(notesEnd, end + notesEnd.length) !== -1
   ) {
-    throw new Error("Release notes contain malformed rmux-ci markers; repair them before retrying");
+    throw new Error("Release notes contain malformed ctmux-ci markers; repair them before retrying");
   }
   return body.slice(0, start) + section + body.slice(end + notesEnd.length);
 }
@@ -323,7 +323,7 @@ export async function updateDraftRelease(
     return { status: "published", html_url: release.html_url };
   }
   await verifyReleaseTag(gh, repository, tag, bundle.git_revision);
-  const tempDirectory = await mkdtemp(join(tmpdir(), "rmux-release-"));
+  const tempDirectory = await mkdtemp(join(tmpdir(), "ctmux-release-"));
   try {
     // Validate markers before touching assets, including on an existing draft.
     const notes = releaseNotes(bundle, release?.body ?? null);
@@ -333,7 +333,7 @@ export async function updateDraftRelease(
         tag_name: tag,
         draft: true,
         target_commitish: bundle.git_revision,
-        name: `rmux ${tag}`,
+        name: `ctmux ${tag}`,
         body: notes,
       }));
       // The release list can lag behind creation. Use the returned ID immediately.
@@ -380,7 +380,7 @@ export async function updateDraftRelease(
     await writeFile(payloadPath, JSON.stringify({
       // Keep the pending tag explicit; GitHub can otherwise retain its untagged draft placeholder.
       tag_name: tag,
-      name: `rmux ${tag}`,
+      name: `ctmux ${tag}`,
       target_commitish: bundle.git_revision,
       body: releaseNotes(bundle, latest.body),
     }));

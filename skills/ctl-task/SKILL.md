@@ -15,19 +15,19 @@ Use this skill for `ctl task`. For saving reusable commands, catalog changes,
 | Need | Command |
 | --- | --- |
 | Run once and preserve the command's exit status | `ctl exec -- PROGRAM ARGS...` |
-| Keep a terminal session through disconnects | `ctl rmux new --detached --name NAME --cwd /absolute/path -- PROGRAM ARGS...` |
+| Keep a terminal session through disconnects | `ctl ctmux new --detached --name NAME --cwd /absolute/path -- PROGRAM ARGS...` |
 | Register a named process with start/stop/restart and background logs | `ctl task create NAME --cwd /absolute/path --start -- PROGRAM ARGS...` |
 | Manage a process that requires terminal input or a PTY | Add `--mode interactive` to task creation |
 
-A registered task retains its definition and latest run metadata in taskd.
+A registered task retains its definition and latest run metadata in ctl-taskd.
 Registration and execution are separate: creation starts only with `--start`.
 Each task has at most one active run. Names are unique within the selected
-host's taskd; task selectors accept a name or task ID. Inspect existing tasks
+host's ctl-taskd; task selectors accept a name or task ID. Inspect existing tasks
 before creating another registration for the same work.
 
 ## Select the target and command
 
-Omitting `--host` uses local taskd. For SSH, carry the same host and connection
+Omitting `--host` uses local ctl-taskd. For SSH, carry the same host and connection
 method through creation, inspection, logs, attachment, and lifecycle commands:
 
 ```sh
@@ -78,7 +78,7 @@ before choosing which lifecycle operation to perform.
 Background stop targets the process group on Unix, escalating if needed.
 On Windows it terminates the Job Object's process tree. When the root process
 finishes, remaining background descendants are cleaned up. Interactive stop
-terminates the rmux-owned session. Starting and restarting are explicit;
+terminates the ctmux-owned session. Starting and restarting are explicit;
 automatic restart and scheduling are not implemented.
 
 Background logs select the active run, otherwise the latest run. `--follow`
@@ -99,13 +99,13 @@ leases from an existing owner. Detach with **Ctrl+]** to keep the process
 running and release leases. Unexpected transport loss preserves the session
 and leases for reconnect grace, normally 30 seconds. EOF on attachment stdin
 also detaches, so attachment is not a finite log capture command. `task show`
-prints the session ID for a separate `ctl rmux attach SESSION_ID`, where
+prints the session ID for a separate `ctl ctmux attach SESSION_ID`, where
 `--read-only` and optional `--resize` provide explicit attachment choices.
 
 ## Interpret results and daemon limits
 
 Registered-task commands print task ID, name, state, and program, plus an
-optional rmux session line. They have no `--json` option and do not print argv,
+optional ctmux session line. They have no `--json` option and do not print argv,
 cwd, run ID, or numeric exit code. A successful control command means the
 request succeeded; it does not mean the managed program completed successfully.
 Inspect `task show` after completion: `completed` means exit 0; `failed` can
@@ -115,14 +115,14 @@ child's exit code. Use `ctl exec` when the exact exit status is required.
 `starting` or `unknown` represents an active run awaiting creation or
 reconciliation; inspect it rather than attempting repeated starts. Taskd
 persists registrations and latest results, but background processes depend on
-taskd. Interactive runs can reconcile after taskd restart while the same rmuxd
-instance remains alive; losing or replacing rmuxd fails affected runs without
+ctl-taskd. Interactive runs can reconcile after ctl-taskd restart while the same ctmuxd
+instance remains alive; losing or replacing ctmuxd fails affected runs without
 automatically recreating them.
 
-Local tasks require taskd; interactive tasks also require rmuxd. Remote task
+Local tasks require ctl-taskd; interactive tasks also require ctmuxd. Remote task
 operations require ctl-agent and those daemons on the destination, plus ctld
 on Unix clients. Helpers start on demand and must match their clients. Check
-`TASKD_BIN`, `RMUXD_BIN`, or `CTLD_BIN` overrides when startup/version errors
-point to an unexpected helper. `ctl taskd restart` controls only local taskd,
-starts it if absent, and refuses active tasks. An rmuxd restart terminates its
+`CTL_TASKD_BIN`, `CTMUXD_BIN`, or `CTLD_BIN` overrides when startup/version errors
+point to an unexpected helper. `ctl taskd restart` controls only local ctl-taskd,
+starts it if absent, and refuses active tasks. An ctmuxd restart terminates its
 sessions; do not use it as a routine recovery for running work.

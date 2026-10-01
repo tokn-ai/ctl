@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use task_store::{DefinitionScope, discover_project, global_path, project_path};
+use ctl_task_store::{DefinitionScope, discover_project, global_path, project_path};
 
 struct Fixture(PathBuf);
 

@@ -1,7 +1,7 @@
 use crate::error::CommandErrorDto;
 
 #[cfg(unix)]
-use rmux_ipc::{LocalControlClientError, LocalControlErrorCode};
+use ctmux_ipc::{LocalControlClientError, LocalControlErrorCode};
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -65,7 +65,7 @@ pub type LocalStream = tokio::io::DuplexStream;
 /// than silently starting a replacement with unrelated sessions.
 #[cfg(unix)]
 pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
-  rmux_ipc::connect_existing_daemon(&rmux_ipc::socket_path())
+  ctmux_ipc::connect_existing_daemon(&ctmux_ipc::socket_path())
     .await
     .map_err(CommandErrorDto::backend)
 }
@@ -75,7 +75,7 @@ pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
 ///
 /// This probe has no side effects. In particular, a running legacy daemon
 /// keeps the GUI attachment intact and produces `daemon_restart_unsupported`
-/// rather than receiving an unknown raw `rmux-proto` message.
+/// rather than receiving an unknown raw `ctmux-proto` message.
 ///
 /// # Errors
 ///
@@ -83,9 +83,9 @@ pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
 /// endpoint is absent or does not advertise cooperative restart.
 #[cfg(unix)]
 pub async fn preflight_restart_daemon() -> Result<RestartDaemonPreflight, CommandErrorDto> {
-  let data_socket_path = rmux_ipc::socket_path();
+  let data_socket_path = ctmux_ipc::socket_path();
   let control_socket_path =
-    rmux_ipc::control_socket_path(&data_socket_path).map_err(restart_preflight_failure)?;
+    ctmux_ipc::control_socket_path(&data_socket_path).map_err(restart_preflight_failure)?;
   preflight_restart_daemon_at(&data_socket_path, &control_socket_path).await
 }
 
@@ -94,7 +94,7 @@ async fn preflight_restart_daemon_at(
   data_socket_path: &Path,
   control_socket_path: &Path,
 ) -> Result<RestartDaemonPreflight, CommandErrorDto> {
-  match rmux_ipc::connect_existing_daemon(control_socket_path).await {
+  match ctmux_ipc::connect_existing_daemon(control_socket_path).await {
     Ok(mut stream) => {
       let capabilities = preflight_local_control_handshake_with_timeout(&mut stream).await?;
       if capabilities.restart_supported {
@@ -107,16 +107,16 @@ async fn preflight_restart_daemon_at(
         }))
       } else {
         Err(restart_unsupported(
-          "the running rmuxd does not advertise cooperative restart support",
+          "the running ctmuxd does not advertise cooperative restart support",
         ))
       }
     }
     Err(error) if error.is_endpoint_unavailable() => {
-      match rmux_ipc::connect_existing_daemon(data_socket_path).await {
+      match ctmux_ipc::connect_existing_daemon(data_socket_path).await {
         Ok(stream) => {
           drop(stream);
           Err(restart_unsupported(
-            "the running rmuxd has no owner-only local-control endpoint; restart it manually to upgrade",
+            "the running ctmuxd has no owner-only local-control endpoint; restart it manually to upgrade",
           ))
         }
         Err(data_error) if data_error.is_endpoint_unavailable() => {
@@ -161,7 +161,7 @@ pub(crate) async fn restart_daemon(
     RestartDaemonPreflight::DaemonAbsent(paths) => (paths, 0),
   };
 
-  rmux_ipc::wait_for_daemon_shutdown(
+  ctmux_ipc::wait_for_daemon_shutdown(
     &paths.data_socket_path,
     &paths.control_socket_path,
     DAEMON_RESTART_DRAIN_TIMEOUT,
@@ -170,15 +170,15 @@ pub(crate) async fn restart_daemon(
   .map_err(|error| {
     CommandErrorDto::new(
       "daemon_restart_drain_failed",
-      format!("rmuxd did not stop cleanly: {error}. It was not forcibly restarted."),
+      format!("ctmuxd did not stop cleanly: {error}. It was not forcibly restarted."),
     )
   })?;
 
-  let data_stream = rmux_ipc::connect_or_start_daemon(&paths.data_socket_path)
+  let data_stream = ctmux_ipc::connect_or_start_daemon(&paths.data_socket_path)
     .await
     .map_err(CommandErrorDto::backend)?;
   drop(data_stream);
-  let mut control_stream = rmux_ipc::connect_existing_daemon(&paths.control_socket_path)
+  let mut control_stream = ctmux_ipc::connect_existing_daemon(&paths.control_socket_path)
     .await
     .map_err(CommandErrorDto::backend)?;
   let capabilities = local_control_handshake_with_timeout(&mut control_stream)
@@ -186,7 +186,7 @@ pub(crate) async fn restart_daemon(
     .map_err(restart_transition_error)?;
   if !capabilities.restart_supported {
     return Err(restart_transition_error(restart_unsupported(
-      "the replacement rmuxd does not advertise cooperative restart support",
+      "the replacement ctmuxd does not advertise cooperative restart support",
     )));
   }
 
@@ -198,16 +198,16 @@ pub(crate) async fn restart_daemon(
 #[cfg(unix)]
 async fn local_control_handshake_with_timeout(
   stream: &mut LocalStream,
-) -> Result<rmux_ipc::LocalControlCapabilities, CommandErrorDto> {
+) -> Result<ctmux_ipc::LocalControlCapabilities, CommandErrorDto> {
   timeout(
     DAEMON_RESTART_REQUEST_TIMEOUT,
-    rmux_ipc::local_control_handshake(stream),
+    ctmux_ipc::local_control_handshake(stream),
   )
   .await
   .map_err(|_elapsed| {
     CommandErrorDto::new(
       "daemon_restart_request_timeout",
-      "rmuxd did not respond to the local-control handshake within three seconds",
+      "ctmuxd did not respond to the local-control handshake within three seconds",
     )
   })?
   .map_err(local_control_error)
@@ -216,15 +216,15 @@ async fn local_control_handshake_with_timeout(
 #[cfg(unix)]
 async fn preflight_local_control_handshake_with_timeout(
   stream: &mut LocalStream,
-) -> Result<rmux_ipc::LocalControlCapabilities, CommandErrorDto> {
+) -> Result<ctmux_ipc::LocalControlCapabilities, CommandErrorDto> {
   timeout(
     DAEMON_RESTART_REQUEST_TIMEOUT,
-    rmux_ipc::local_control_handshake(stream),
+    ctmux_ipc::local_control_handshake(stream),
   )
   .await
   .map_err(|_elapsed| {
     restart_unsupported(
-      "the running rmuxd did not complete the owner-only local-control handshake; restart it manually to upgrade",
+      "the running ctmuxd did not complete the owner-only local-control handshake; restart it manually to upgrade",
     )
   })?
   .map_err(preflight_local_control_error)
@@ -234,13 +234,13 @@ async fn preflight_local_control_handshake_with_timeout(
 async fn request_restart_with_timeout(stream: &mut LocalStream) -> Result<u32, CommandErrorDto> {
   timeout(
     DAEMON_RESTART_REQUEST_TIMEOUT,
-    rmux_ipc::request_local_daemon_restart_after_handshake(stream),
+    ctmux_ipc::request_local_daemon_restart_after_handshake(stream),
   )
   .await
   .map_err(|_elapsed| {
     CommandErrorDto::new(
       "daemon_restart_request_timeout",
-      "rmuxd did not respond to the cooperative restart request within three seconds",
+      "ctmuxd did not respond to the cooperative restart request within three seconds",
     )
   })?
   .map_err(local_control_error)
@@ -250,7 +250,7 @@ async fn request_restart_with_timeout(stream: &mut LocalStream) -> Result<u32, C
 fn local_control_error(error: LocalControlClientError) -> CommandErrorDto {
   match error {
     LocalControlClientError::RestartUnsupported => restart_unsupported(
-      "the running rmuxd does not support cooperative restart; restart it manually to upgrade",
+      "the running ctmuxd does not support cooperative restart; restart it manually to upgrade",
     ),
     LocalControlClientError::Server {
       code: LocalControlErrorCode::RestartUnsupported,
@@ -291,7 +291,7 @@ fn preflight_local_control_error(error: LocalControlClientError) -> CommandError
 #[cfg(unix)]
 fn restart_preflight_failure(error: impl std::fmt::Display) -> CommandErrorDto {
   restart_unsupported(format!(
-    "the running rmuxd cannot safely perform cooperative restart: {error}"
+    "the running ctmuxd cannot safely perform cooperative restart: {error}"
   ))
 }
 
@@ -332,7 +332,7 @@ pub fn default_working_directory() -> Result<String, CommandErrorDto> {
 pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
   Err(CommandErrorDto::new(
     "unsupported_platform",
-    "local rmux transport is not implemented on this platform",
+    "local ctmux transport is not implemented on this platform",
   ))
 }
 
@@ -340,7 +340,7 @@ pub async fn connect_existing() -> Result<LocalStream, CommandErrorDto> {
 pub async fn preflight_restart_daemon() -> Result<RestartDaemonPreflight, CommandErrorDto> {
   Err(CommandErrorDto::new(
     "unsupported_platform",
-    "local rmux transport is not implemented on this platform",
+    "local ctmux transport is not implemented on this platform",
   ))
 }
 
@@ -350,7 +350,7 @@ pub(crate) async fn restart_daemon(
 ) -> Result<RestartLocalDaemonOutcome, CommandErrorDto> {
   Err(CommandErrorDto::new(
     "unsupported_platform",
-    "local rmux transport is not implemented on this platform",
+    "local ctmux transport is not implemented on this platform",
   ))
 }
 

@@ -2,15 +2,15 @@
 
 use std::collections::HashMap;
 
+use ctl_ipc::credentials::StoredCredential;
 use ctl_keychain_client::{Authentication, Presence, Query, Record, Write};
-use ctld_ipc::credentials::StoredCredential;
 use serde::{Deserialize, Serialize};
 
 use super::Error;
 use crate::credential_metadata::{self, Attributes, SERVICE_PREFIX};
 use crate::identities::SavedIdentity;
 
-const SERVICE: &str = "io.rmux.desktop.ctld.metadata";
+const SERVICE: &str = "dev.tokn-ai.ctl.ctld.metadata";
 const MARKER: &str = "import-complete";
 const PENDING_PREFIX: &str = "pending:";
 const MAX_ITEMS: usize = 8192;
@@ -194,7 +194,7 @@ fn write(account: &str, comment: &str) -> Result<(), Error> {
   ctl_keychain_client::upsert(&Write {
     service: SERVICE,
     account,
-    label: "rmux credential metadata",
+    label: "ctmux credential metadata",
     comment,
     data: b"",
     biometric: false,
@@ -303,7 +303,7 @@ pub(super) fn import() -> Result<(), Error> {
     limit: MAX_ITEMS + 1,
     secret: false,
     authentication: Authentication::Allow {
-      reason: "Import names and metadata for saved rmux SSH passwords and identity passphrases, and reconcile interrupted credential updates without returning password or passphrase values.",
+      reason: "Import names and metadata for saved ctmux SSH passwords and identity passphrases, and reconcile interrupted credential updates without returning password or passphrase values.",
     },
   })?;
   let imported = imported_records(records);

@@ -376,7 +376,7 @@ mod tests {
 
   #[test]
   fn editable_settings_round_trip_and_reject_stale_writes() {
-    let dir = std::env::temp_dir().join(format!("rmux-keybindings-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("ctmux-keybindings-{}", uuid::Uuid::new_v4()));
     let initial = read(&dir).unwrap();
     assert!(initial.revision.is_none());
     let document = KeybindingsDocument {
@@ -475,7 +475,7 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn refuses_symlink_settings_without_changing_the_target() {
-    let dir = std::env::temp_dir().join(format!("rmux-keybindings-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("ctmux-keybindings-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&dir).unwrap();
     let target = dir.join("unrelated.json");
     fs::write(&target, "keep me").unwrap();

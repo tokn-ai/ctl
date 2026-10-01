@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnState, VpnStatus};
+use ctl_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnState, VpnStatus};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{oneshot, watch};
@@ -54,7 +54,7 @@ impl Config {
     Ok(Self {
       hostname: hostname
         .clone()
-        .unwrap_or_else(|| format!("rmux-{}", &container_name[15..27])),
+        .unwrap_or_else(|| format!("ctmux-{}", &container_name[15..27])),
       container_name,
       accept_routes: *accept_routes,
       runtime: RuntimeMetadata::for_connection(connection)?,
@@ -496,8 +496,7 @@ struct UserStatus {
 impl BackendStatus {
   fn is_actionable(&self) -> bool {
     matches!(self.backend_state.as_str(), "Running" | "NeedsMachineAuth")
-      || (self.backend_state == "NeedsLogin"
-        && ctld_ipc::vpn::is_tailscale_auth_url(&self.auth_url))
+      || (self.backend_state == "NeedsLogin" && ctl_ipc::vpn::is_tailscale_auth_url(&self.auth_url))
   }
 
   fn status(&self, container_name: &str, port: u16) -> VpnStatus {
@@ -532,7 +531,7 @@ impl BackendStatus {
       }
       "NeedsLogin" => {
         status.auth_url =
-          ctld_ipc::vpn::is_tailscale_auth_url(&self.auth_url).then(|| self.auth_url.clone());
+          ctl_ipc::vpn::is_tailscale_auth_url(&self.auth_url).then(|| self.auth_url.clone());
         status.message = Some(
           if status.auth_url.is_some() {
             "Sign in to Tailscale in your browser"

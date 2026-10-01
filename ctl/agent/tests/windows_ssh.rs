@@ -1,7 +1,7 @@
 #![cfg(windows)]
 
-use ctl_core::SshTransport as Stream;
-use rmux_proto::{
+use ctl_client::SshTransport as Stream;
+use ctmux_proto::{
   ClientMessage, CommandSpec, DEFAULT_PRESENTATION_WINDOW_BYTES, PROTOCOL_VERSION, ServerMessage,
   TerminalSize, read_frame, write_frame,
 };
@@ -12,13 +12,13 @@ struct Gateway;
 impl Gateway {
   async fn connect(&self) -> Stream {
     let host = std::env::var("CTL_TEST_SSH_HOST").expect("set CTL_TEST_SSH_HOST");
-    let options = ctl_core::SshConnectionOptions {
-      remote_platform: ctl_core::RemotePlatform::Windows,
-      ..ctl_core::SshConnectionOptions::default()
+    let options = ctl_client::SshConnectionOptions {
+      remote_platform: ctl_client::RemotePlatform::Windows,
+      ..ctl_client::SshConnectionOptions::default()
     };
     let mut stream = timeout(
       Duration::from_secs(20),
-      ctl_core::open_ssh_tunnel_interactive(&host, &options, &ctl_core::SshInteraction::Batch),
+      ctl_client::open_ssh_tunnel_interactive(&host, &options, &ctl_client::SshInteraction::Batch),
     )
     .await
     .expect("SSH connection timed out")

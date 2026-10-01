@@ -227,7 +227,7 @@ describe("VPN sidebar", () => {
 
 
 describe("Tailscale VPN items", () => {
-  const tailscale: VpnConnection = { provider: "tailscale", connection_id: "tailnet", name: "Tailnet", hostname: "rmux-work", accept_routes: false };
+  const tailscale: VpnConnection = { provider: "tailscale", connection_id: "tailnet", name: "Tailnet", hostname: "ctmux-work", accept_routes: false };
   const pending = runtime("tailnet", { provider: "tailscale", state: "starting", running: false, endpoint: null,
     auth_url: "https://login.tailscale.com/a/example", vpn_url: null, username: null });
 
@@ -257,9 +257,9 @@ describe("Tailscale VPN items", () => {
     expect((region("Tailnet").getByRole("button", { name: "Sign in to Tailnet" }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(region("Tailnet").getByRole("button", { name: "Cancel connection to Tailnet" }));
     expect(state.stop).toHaveBeenCalledWith("tailnet");
-    rerender(<VpnSidebar model={{ ...state, statuses: [{ ...pending, state: "connected", auth_url: null, hostname: "rmux-node", tailnet: "example.test", username: "user@example.test" }] }} />);
+    rerender(<VpnSidebar model={{ ...state, statuses: [{ ...pending, state: "connected", auth_url: null, hostname: "ctmux-node", tailnet: "example.test", username: "user@example.test" }] }} />);
     expect(region("Tailnet").getByText("Connected")).toBeTruthy();
-    expect(region("Tailnet").getByText("rmux-node")).toBeTruthy();
+    expect(region("Tailnet").getByText("ctmux-node")).toBeTruthy();
     expect(region("Tailnet").getByText("example.test")).toBeTruthy();
     expect(region("Tailnet").queryByRole("button", { name: /Sign in/ })).toBeNull();
   });

@@ -26,19 +26,19 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
   useEffect(() => { if (visible) heading.current?.focus(); }, [visible]);
   const has_dialog = model.preflight !== null;
   useEffect(() => { on_dialog_change(has_dialog); }, [has_dialog, on_dialog_change]);
-  const app = model.snapshot?.components.find((row) => row.component === "rmux");
-  const local = model.snapshot?.components.filter((row) => row.location === "local" && row.component !== "rmux") ?? [];
+  const app = model.snapshot?.components.find((row) => row.component === "ctmux");
+  const local = model.snapshot?.components.filter((row) => row.location === "local" && row.component !== "ctmux") ?? [];
   const remote = model.snapshot?.components.filter((row) => row.location === "remote") ?? [];
   const table_props = { busy_id: model.busy_id, restarting: model.restarting, action_error: model.action_error, on_restart: (id: string) => void model.requestRestart(id) };
 
   return <>
-    <section className="about-page" aria-label="About rmux" hidden={!visible}>
+    <section className="about-page" aria-label="About ctmux" hidden={!visible}>
       <header className="about-page-header">
-        <div><p className="about-eyebrow">RMUX</p><h1 ref={heading} tabIndex={-1}>About rmux</h1><p className="about-muted">Versions of this app and the components it uses.</p></div>
+        <div><p className="about-eyebrow">CTMUX</p><h1 ref={heading} tabIndex={-1}>About ctmux</h1><p className="about-muted">Versions of this app and the components it uses.</p></div>
         <button type="button" onClick={on_close} className="about-back"><Icon name="close" />Back to workspace</button>
       </header>
       <div className="about-content">
-        <div className="about-app-card"><Icon name="terminal" size={36} /><div><strong>rmux</strong><p>{app ? versionLabel(app.running) : model.loading ? "Checking app version…" : "Version unavailable"}</p><small>Desktop application</small></div></div>
+        <div className="about-app-card"><Icon name="terminal" size={36} /><div><strong>ctmux</strong><p>{app ? versionLabel(app.running) : model.loading ? "Checking app version…" : "Version unavailable"}</p><small>Desktop application</small></div></div>
         <div className="about-refresh-row"><p>{model.checked_at === null ? "Component versions have not been checked." : `Last checked ${new Date(model.checked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`}</p><button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}><Icon name="refresh" />{model.loading ? "Checking…" : "Refresh versions"}</button></div>
         {model.error ? <p className="about-error" role="alert">Could not refresh versions: {model.error}{model.snapshot ? " Showing the last successful check." : ""}</p> : null}
         {model.action_error && !model.snapshot?.components.some((row) => row.component_id === model.action_error!.component_id) ? <p className="about-error" role="alert">{model.action_error.message}</p> : null}

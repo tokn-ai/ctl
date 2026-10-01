@@ -1,10 +1,10 @@
 use super::*;
-use rmux_proto::CommandSpec;
+use ctmux_proto::CommandSpec;
 use std::os::unix::fs::PermissionsExt;
 
 struct Daemon {
   directory: PathBuf,
-  task: tokio::task::JoinHandle<std::result::Result<(), rmuxd::DaemonError>>,
+  task: tokio::task::JoinHandle<std::result::Result<(), ctmuxd::DaemonError>>,
 }
 
 impl Daemon {
@@ -13,10 +13,10 @@ impl Daemon {
       std::env::temp_dir().join(format!("rtui-{}", &uuid::Uuid::new_v4().to_string()[..8]));
     std::fs::create_dir(&directory)?;
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
-    let socket = directory.join("rmux.sock");
-    let task = tokio::spawn(rmuxd::run(rmuxd::DaemonConfig {
+    let socket = directory.join("ctmux.sock");
+    let task = tokio::spawn(ctmuxd::run(ctmuxd::DaemonConfig {
       socket_path: socket.clone(),
-      ..rmuxd::DaemonConfig::default()
+      ..ctmuxd::DaemonConfig::default()
     }));
     let daemon = Self { directory, task };
     timeout(Duration::from_secs(5), async {
@@ -34,7 +34,7 @@ impl Daemon {
 
   fn app(&self, read_only: bool) -> App {
     let mut app = App::new(
-      self.directory.join("rmux.sock"),
+      self.directory.join("ctmux.sock"),
       read_only,
       input::parse_prefix("Ctrl+b").unwrap(),
     );

@@ -1,6 +1,6 @@
 use crate::error::{CommandErrorDto, CommandResult};
-use rmux_client::archive::{ArchiveStore, SessionArchive};
-use rmux_client::cache::CacheStore;
+use ctmux_client::archive::{ArchiveStore, SessionArchive};
+use ctmux_client::cache::CacheStore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]

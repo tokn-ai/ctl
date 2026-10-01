@@ -6,7 +6,7 @@ use crate::{
   render::{Frame, Renderer},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
-use rmux_proto::{
+use ctmux_proto::{
   ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
   ViewInfo,
 };
@@ -22,7 +22,7 @@ enum Overlay {
   Sessions(usize),
   Kill(String),
   Archives(usize),
-  ArchiveTerminals(Box<rmux_client::archive::SessionArchive>, usize),
+  ArchiveTerminals(Box<ctmux_client::archive::SessionArchive>, usize),
 }
 
 pub struct App {
@@ -33,10 +33,10 @@ pub struct App {
   prefix: Prefix,
   prefix_pending: bool,
   sessions: Vec<SessionInfo>,
-  archives: Vec<rmux_client::archive::SessionArchive>,
+  archives: Vec<ctmux_client::archive::SessionArchive>,
   ended: Option<String>,
   selected_id: String,
-  archived_panes: Vec<rmux_client::archive::ArchivedPane>,
+  archived_panes: Vec<ctmux_client::archive::ArchivedPane>,
   view: Option<ViewInfo>,
   panes: BTreeMap<String, Pane>,
   focused: String,
@@ -89,8 +89,8 @@ impl App {
 
   async fn request(&self, message: ClientMessage) -> Result<ServerMessage> {
     timeout(Duration::from_secs(5), async {
-      let stream = rmux_ipc::connect_or_start_daemon(&self.socket).await?;
-      Ok(rmux_client::request(stream, &identity(), message).await?)
+      let stream = ctmux_ipc::connect_or_start_daemon(&self.socket).await?;
+      Ok(ctmux_client::request(stream, &identity(), message).await?)
     })
     .await?
   }
@@ -121,14 +121,14 @@ impl App {
     Ok(())
   }
 
-  fn archive_store(&self) -> std::io::Result<rmux_client::archive::ArchiveStore> {
+  fn archive_store(&self) -> std::io::Result<ctmux_client::archive::ArchiveStore> {
     match &self.archive_directory {
-      Some(directory) => Ok(rmux_client::archive::ArchiveStore::new(directory.clone())),
-      None => rmux_client::archive::ArchiveStore::for_client("tui"),
+      Some(directory) => Ok(ctmux_client::archive::ArchiveStore::new(directory.clone())),
+      None => ctmux_client::archive::ArchiveStore::for_client("tui"),
     }
   }
 
-  fn local_archives(&self) -> Result<Vec<rmux_client::archive::SessionArchive>> {
+  fn local_archives(&self) -> Result<Vec<ctmux_client::archive::SessionArchive>> {
     Ok(
       self
         .archive_store()?
@@ -140,7 +140,7 @@ impl App {
   }
 
   fn save_archive(&self) -> Result<()> {
-    use rmux_client::archive::{ArchivedPane, SessionArchive};
+    use ctmux_client::archive::{ArchivedPane, SessionArchive};
     let mut terminals = self.archived_panes.clone();
     terminals.extend(
       self
@@ -550,9 +550,9 @@ impl App {
           self.copy_buffer = Some(text.clone());
           let sent = crate::terminal::copy_to_clipboard(&text)?;
           self.notice(if sent {
-            "Copied to rmux buffer; clipboard requested (OSC 52)".into()
+            "Copied to ctmux buffer; clipboard requested (OSC 52)".into()
           } else {
-            "Copied to rmux buffer; selection exceeds clipboard limit".into()
+            "Copied to ctmux buffer; selection exceeds clipboard limit".into()
           });
         }
       }
@@ -571,7 +571,7 @@ impl App {
       if let Some(mut pane) = self.panes.remove(&self.focused) {
         self
           .archived_panes
-          .push(rmux_client::archive::ArchivedPane {
+          .push(ctmux_client::archive::ArchivedPane {
             terminal_id: self.focused.clone(),
             reason: pane.ended.clone().unwrap_or_default(),
             lines: pane.model.copy_lines(),
@@ -910,7 +910,7 @@ impl App {
       .get(&self.focused)
       .is_some_and(|pane| pane.connected);
     format!(
-      " rmux [{name}] pane {index} | {} | {} | {} ? help | {}/{} sessions ",
+      " ctmux [{name}] pane {index} | {} | {} | {} ? help | {}/{} sessions ",
       if !connected {
         "reconnecting"
       } else if input {
@@ -1016,16 +1016,16 @@ impl App {
 
 fn session_not_found(error: &crate::Error) -> bool {
   matches!(
-    error.downcast_ref::<rmux_client::ClientError>(),
-    Some(rmux_client::ClientError::Server {
-      code: rmux_proto::ErrorCode::SessionNotFound,
+    error.downcast_ref::<ctmux_client::ClientError>(),
+    Some(ctmux_client::ClientError::Server {
+      code: ctmux_proto::ErrorCode::SessionNotFound,
       ..
     })
   )
 }
 
 fn adjacent(
-  panes: &[rmux_proto::PaneGeometry],
+  panes: &[ctmux_proto::PaneGeometry],
   focused: &str,
   direction: KeyCode,
 ) -> Option<String> {
@@ -1036,7 +1036,7 @@ fn adjacent(
   } else {
     -1
   };
-  let center = |pane: &rmux_proto::PaneGeometry| {
+  let center = |pane: &ctmux_proto::PaneGeometry| {
     (
       i32::from(pane.left) * 2 + i32::from(pane.columns),
       i32::from(pane.top) * 2 + i32::from(pane.rows),

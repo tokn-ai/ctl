@@ -1,0 +1,11 @@
+[package]
+name = "ctmux-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ctmux-proto.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

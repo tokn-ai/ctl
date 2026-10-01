@@ -67,8 +67,8 @@ fn installed_identity(remote_id: String, executable: &Path) -> io::Result<Remote
   let identity = RemoteIdentity {
     remote_id,
     agent_version: env!("CARGO_PKG_VERSION").into(),
-    build: Some(component_info::build_info()),
-    rmux_restart_supported: true,
+    build: Some(ctl_component_info::build_info()),
+    ctmux_restart_supported: true,
     bundle,
   };
   if !identity.is_valid() {

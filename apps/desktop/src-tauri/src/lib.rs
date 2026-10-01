@@ -28,7 +28,7 @@ mod vpn;
 mod workspace;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-/// Starts the native rmux application runtime.
+/// Starts the native ctmux application runtime.
 ///
 /// # Panics
 ///
@@ -109,7 +109,7 @@ pub fn run() {
       commands::save_ssh_config_host,
       ssh_auth::commands::probe_ssh_host,
       ssh_auth::commands::install_remote_agent,
-      ssh_auth::commands::restart_remote_rmux,
+      ssh_auth::commands::restart_remote_ctmux,
       ssh_auth::commands::respond_ssh_prompt,
       ssh_auth::commands::cancel_ssh_probe,
       ssh_auth::commands::forget_ssh_credentials,
@@ -133,5 +133,5 @@ pub fn run() {
       commands::detach_attachment,
     ])
     .run(tauri::generate_context!())
-    .expect("failed to run rmux");
+    .expect("failed to run ctmux");
 }

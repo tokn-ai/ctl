@@ -10,7 +10,7 @@ mod verification;
 
 use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
-use ctl_core::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
+use ctl_client::{ConnectionTarget, SshInteraction, Transport, open_identified_ssh_service};
 use serde::Serialize;
 use tauri::ipc::Channel;
 
@@ -67,7 +67,7 @@ async fn connect_identified(
     &destination,
     &options,
     &SshInteraction::Batch,
-    ctl_core::RemoteService::Rmux,
+    ctl_client::RemoteService::Ctmux,
   )
   .await
   .map_err(|error| CommandErrorDto::transport(&error))?;

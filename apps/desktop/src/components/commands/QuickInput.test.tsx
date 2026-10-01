@@ -100,8 +100,8 @@ describe("QuickInput interactions", () => {
       </StrictMode>,
     );
     const user = userEvent.setup();
-    await user.type(screen.getByRole("textbox"), "rmux@127.0.0.1:2222{Enter}");
-    expect(submit).toHaveBeenCalledWith("rmux@127.0.0.1:2222");
+    await user.type(screen.getByRole("textbox"), "ctmux@127.0.0.1:2222{Enter}");
+    expect(submit).toHaveBeenCalledWith("ctmux@127.0.0.1:2222");
   });
 
   it("defaults destructive confirmation to Cancel, not the destructive action", async () => {

@@ -1,7 +1,7 @@
 //! Stateless SSH remote-command gateway for local ctl services.
 //!
 //! `ctl-agent connect` is a disposable process. It relays one SSH channel's
-//! stdin/stdout to the fixed per-user `rmuxd` endpoint (or `taskd` with
+//! stdin/stdout to the fixed per-user `ctmuxd` endpoint (or `ctl-taskd` with
 //! `--service task`) and owns no terminal, task, or reconnect state. Identified
 //! connections read an account-owned ID that survives component upgrades.
 
@@ -10,7 +10,7 @@ pub mod listeners;
 pub mod maintenance;
 pub mod restart;
 
-use rmux_ipc::Stream;
+use ctmux_ipc::Stream;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -22,11 +22,11 @@ use tokio::time::{Instant, sleep};
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
 pub const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 
-/// Services exposed by the SSH gateway. Local rmux control is never exposed.
+/// Services exposed by the SSH gateway. Local ctmux control is never exposed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Service {
   #[default]
-  Rmux,
+  Ctmux,
   Task,
 }
 
@@ -35,42 +35,42 @@ pub struct ConnectConfig {
   pub service: Service,
   /// Metadata emitted only when the client requested the identified protocol.
   pub identity: Option<ctl_proto::RemoteIdentity>,
-  /// Fixed per-user local `rmuxd` endpoint. It is never client controlled.
-  pub rmux_socket: PathBuf,
-  /// Absolute installed `rmuxd` path used only when the endpoint is absent.
-  pub rmuxd_bin: Option<PathBuf>,
-  /// Fixed per-user local `taskd` endpoint. It is never client controlled.
+  /// Fixed per-user local `ctmuxd` endpoint. It is never client controlled.
+  pub ctmux_socket: PathBuf,
+  /// Absolute installed `ctmuxd` path used only when the endpoint is absent.
+  pub ctmuxd_bin: Option<PathBuf>,
+  /// Fixed per-user local `ctl-taskd` endpoint. It is never client controlled.
   pub task_socket: PathBuf,
-  /// Absolute installed `taskd` path used only when the endpoint is absent.
+  /// Absolute installed `ctl-taskd` path used only when the endpoint is absent.
   pub taskd_bin: Option<PathBuf>,
 }
 
 impl ConnectConfig {
   #[must_use]
-  pub fn new(rmux_socket: PathBuf) -> Self {
+  pub fn new(ctmux_socket: PathBuf) -> Self {
     Self {
-      service: Service::Rmux,
+      service: Service::Ctmux,
       identity: None,
-      rmux_socket,
-      rmuxd_bin: None,
-      task_socket: task_ipc::socket_path(),
+      ctmux_socket,
+      ctmuxd_bin: None,
+      task_socket: ctl_task_ipc::socket_path(),
       taskd_bin: None,
     }
   }
 
   fn socket(&self) -> &Path {
     match self.service {
-      Service::Rmux => &self.rmux_socket,
+      Service::Ctmux => &self.ctmux_socket,
       Service::Task => &self.task_socket,
     }
   }
 
   fn executable(&self) -> Result<&Path, AgentError> {
     match self.service {
-      Service::Rmux => self
-        .rmuxd_bin
+      Service::Ctmux => self
+        .ctmuxd_bin
         .as_deref()
-        .ok_or_else(|| AgentError::RmuxUnavailable(self.rmux_socket.clone())),
+        .ok_or_else(|| AgentError::CtmuxUnavailable(self.ctmux_socket.clone())),
       Service::Task => self
         .taskd_bin
         .as_deref()
@@ -140,10 +140,10 @@ where
 
 async fn connect_existing_daemon(config: &ConnectConfig) -> Result<Stream, AgentError> {
   match config.service {
-    Service::Rmux => rmux_ipc::connect_existing_daemon(config.socket())
+    Service::Ctmux => ctmux_ipc::connect_existing_daemon(config.socket())
       .await
-      .map_err(AgentError::RmuxConnect),
-    Service::Task => task_ipc::connect(config.socket())
+      .map_err(AgentError::CtmuxConnect),
+    Service::Task => ctl_task_ipc::connect(config.socket())
       .await
       .map_err(AgentError::TaskConnect),
   }
@@ -174,7 +174,7 @@ fn daemon_command(config: &ConnectConfig) -> Result<std::process::Command, Agent
   let executable = config.executable()?;
   if !executable.is_absolute() {
     return Err(match config.service {
-      Service::Rmux => AgentError::RmuxdPathNotAbsolute(executable.into()),
+      Service::Ctmux => AgentError::CtmuxdPathNotAbsolute(executable.into()),
       Service::Task => AgentError::TaskdPathNotAbsolute(executable.into()),
     });
   }
@@ -196,7 +196,7 @@ fn daemon_command(config: &ConnectConfig) -> Result<std::process::Command, Agent
     .stdout(Stdio::null())
     .stderr(Stdio::null());
   if config.service == Service::Task {
-    command.arg("--rmux-socket").arg(&config.rmux_socket);
+    command.arg("--ctmux-socket").arg(&config.ctmux_socket);
   }
   Ok(command)
 }
@@ -205,7 +205,7 @@ fn start_daemon(config: &ConnectConfig) -> Result<(), AgentError> {
   let mut command = daemon_command(config)?;
   let executable = PathBuf::from(command.get_program());
   command.spawn().map_err(|source| match config.service {
-    Service::Rmux => AgentError::StartRmuxd { executable, source },
+    Service::Ctmux => AgentError::StartCtmuxd { executable, source },
     Service::Task => AgentError::StartTaskd { executable, source },
   })?;
   Ok(())
@@ -213,26 +213,26 @@ fn start_daemon(config: &ConnectConfig) -> Result<(), AgentError> {
 
 #[derive(Debug, Error)]
 pub enum AgentError {
-  #[error("the local task service is unavailable at {} (install taskd beside ctl-agent)", .0.display())]
+  #[error("the local task service is unavailable at {} (install ctl-taskd beside ctl-agent)", .0.display())]
   TaskUnavailable(PathBuf),
   #[error("could not connect to the local task service: {0}")]
   TaskConnect(#[source] io::Error),
-  #[error("the taskd path must be absolute: {}", .0.display())]
+  #[error("the ctl-taskd path must be absolute: {}", .0.display())]
   TaskdPathNotAbsolute(PathBuf),
-  #[error("could not start taskd at {}: {source}", executable.display())]
+  #[error("could not start ctl-taskd at {}: {source}", executable.display())]
   StartTaskd {
     executable: PathBuf,
     #[source]
     source: io::Error,
   },
-  #[error("the local rmux service is unavailable at {}", .0.display())]
-  RmuxUnavailable(PathBuf),
-  #[error("could not connect to the local rmux service: {0}")]
-  RmuxConnect(#[source] rmux_ipc::ConnectError),
-  #[error("the rmuxd path must be absolute: {}", .0.display())]
-  RmuxdPathNotAbsolute(PathBuf),
-  #[error("could not start rmuxd at {}: {source}", executable.display())]
-  StartRmuxd {
+  #[error("the local ctmux service is unavailable at {}", .0.display())]
+  CtmuxUnavailable(PathBuf),
+  #[error("could not connect to the local ctmux service: {0}")]
+  CtmuxConnect(#[source] ctmux_ipc::ConnectError),
+  #[error("the ctmuxd path must be absolute: {}", .0.display())]
+  CtmuxdPathNotAbsolute(PathBuf),
+  #[error("could not start ctmuxd at {}: {source}", executable.display())]
+  StartCtmuxd {
     executable: PathBuf,
     #[source]
     source: io::Error,
@@ -244,7 +244,7 @@ pub enum AgentError {
 impl AgentError {
   fn is_endpoint_unavailable(&self) -> bool {
     match self {
-      Self::RmuxConnect(error) => error.is_endpoint_unavailable(),
+      Self::CtmuxConnect(error) => error.is_endpoint_unavailable(),
       Self::TaskConnect(error) => matches!(
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
@@ -259,8 +259,8 @@ mod tests {
   use super::*;
 
   #[test]
-  fn task_daemon_starts_detached_with_the_gateway_rmux_endpoint() {
-    let mut config = ConnectConfig::new(rmux_ipc::socket_path());
+  fn task_daemon_starts_detached_with_the_gateway_ctmux_endpoint() {
+    let mut config = ConnectConfig::new(ctmux_ipc::socket_path());
     config.service = Service::Task;
     // current_exe is absolute on every supported platform.
     config.taskd_bin = Some(std::env::current_exe().unwrap());
@@ -272,17 +272,17 @@ mod tests {
         std::ffi::OsStr::new("--socket"),
         config.task_socket.as_os_str(),
         std::ffi::OsStr::new("--detach-from-terminal"),
-        std::ffi::OsStr::new("--rmux-socket"),
-        config.rmux_socket.as_os_str(),
+        std::ffi::OsStr::new("--ctmux-socket"),
+        config.ctmux_socket.as_os_str(),
       ]
     );
   }
 
   #[test]
   fn task_daemon_never_uses_a_relative_executable() {
-    let mut config = ConnectConfig::new(rmux_ipc::socket_path());
+    let mut config = ConnectConfig::new(ctmux_ipc::socket_path());
     config.service = Service::Task;
-    config.taskd_bin = Some("taskd".into());
+    config.taskd_bin = Some("ctl-taskd".into());
     assert!(matches!(
       daemon_command(&config),
       Err(AgentError::TaskdPathNotAbsolute(_))

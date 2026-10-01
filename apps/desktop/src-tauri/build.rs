@@ -23,14 +23,14 @@ fn main() {
     }
   }
   let revision = git(&["rev-parse", "HEAD"]).unwrap_or_default();
-  println!("cargo:rustc-env=RMUX_SOURCE_REVISION={revision}");
+  println!("cargo:rustc-env=CTMUX_SOURCE_REVISION={revision}");
   let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../..");
   for path in [
     "ctl",
-    "rmux",
+    "ctmux",
     "task",
-    "component-info",
-    "process-info",
+    "ctl-component-info",
+    "ctmux-process-info",
     "Cargo.toml",
     "Cargo.lock",
   ] {
@@ -42,14 +42,14 @@ fn main() {
     "--untracked-files=normal",
     "--",
     "../../../ctl",
-    "../../../rmux",
+    "../../../ctmux",
     "../../../task",
-    "../../../component-info",
-    "../../../process-info",
+    "../../../ctl-component-info",
+    "../../../ctmux-process-info",
     "../../../Cargo.toml",
     "../../../Cargo.lock",
   ])
   .is_none_or(|status| !status.is_empty());
-  println!("cargo:rustc-env=RMUX_COMPONENTS_DIRTY={dirty}");
+  println!("cargo:rustc-env=CTMUX_COMPONENTS_DIRTY={dirty}");
   tauri_build::build();
 }

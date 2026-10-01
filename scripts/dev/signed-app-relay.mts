@@ -39,9 +39,9 @@ export async function relayApp(socket_path: string, request: AppLaunchRequest, o
 }
 
 async function main(): Promise<void> {
-  const supervisor = process.env.RMUX_DEV_APP_SUPERVISOR;
-  const ctld_executable = process.env.RMUX_DEV_CTLD_EXECUTABLE;
-  const marker = process.env.RMUX_DEV_APP_FAILURE_MARKER;
+  const supervisor = process.env.CTMUX_DEV_APP_SUPERVISOR;
+  const ctld_executable = process.env.CTMUX_DEV_CTLD_EXECUTABLE;
+  const marker = process.env.CTMUX_DEV_APP_FAILURE_MARKER;
   const [executable, ...args] = process.argv.slice(2);
   if (!supervisor || !ctld_executable || !marker || !executable) throw new Error("Signed app relay is missing its launch context");
   process.exitCode = await relayApp(supervisor, {
@@ -53,7 +53,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   main().catch(async (error: unknown) => {
     // Cargo appends its own exit diagnostic. Let the wrapper restore Tauri's
     // recoverable build-failure classification after Cargo finishes writing.
-    const marker = process.env.RMUX_DEV_APP_FAILURE_MARKER;
+    const marker = process.env.CTMUX_DEV_APP_FAILURE_MARKER;
     if (marker) await writeFile(marker, "failed", { mode: 0o600 }).catch(() => {});
     console.error(error instanceof Error ? error.message : "Signed app relay failed");
     process.exitCode = 1;

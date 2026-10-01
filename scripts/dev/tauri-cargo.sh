@@ -5,7 +5,7 @@ set -eu
 # successful builds to the app supervisor; unsigned runs keep Cargo ownership.
 if [ "${1:-}" = run ]; then
   script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-  if [ -n "${RMUX_DEV_APP_SUPERVISOR:-}" ]; then
+  if [ -n "${CTMUX_DEV_APP_SUPERVISOR:-}" ]; then
     exec node --experimental-strip-types --disable-warning=ExperimentalWarning \
       "$script_directory/signed-cargo.mts" "$@"
   fi

@@ -1,4 +1,4 @@
-use ctld_ipc::{VpnConnection, VpnSettings};
+use ctl_ipc::{VpnConnection, VpnSettings};
 use zeroize::Zeroizing;
 
 use super::*;

@@ -1,9 +1,9 @@
-//! Shared local definition storage. Does not start taskd or execute commands.
+//! Shared local definition storage. Does not start ctl-taskd or execute commands.
 
 use std::path::PathBuf;
 
+use ctl_task_store::{DefinitionScope, Repository, SavedTaskDefinition};
 use serde::{Deserialize, Serialize};
-use task_store::{DefinitionScope, Repository, SavedTaskDefinition};
 
 use crate::error::{CommandErrorDto, CommandResult};
 
@@ -19,7 +19,7 @@ pub struct SaveDefinitionRequest {
   scope: DefinitionScope,
   definition_id: String,
   expected_revision: Option<String>,
-  definition: task_proto::TaskDefinition,
+  definition: ctl_task_proto::TaskDefinition,
 }
 
 #[derive(Deserialize)]
@@ -51,12 +51,12 @@ fn scope_path(scope: &DefinitionScope) -> CommandResult<PathBuf> {
 
 // Owned adapter for Result::map_err.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn store_error(error: task_store::StoreError) -> CommandErrorDto {
+pub(crate) fn store_error(error: ctl_task_store::StoreError) -> CommandErrorDto {
   let code = match &error {
-    task_store::StoreError::Conflict { .. } => "definition_conflict",
-    task_store::StoreError::NameConflict { .. } => "definition_name_conflict",
-    task_store::StoreError::NotFound { .. } => "definition_not_found",
-    task_store::StoreError::InvalidProjectRoot { .. } => "definition_scope_invalid",
+    ctl_task_store::StoreError::Conflict { .. } => "definition_conflict",
+    ctl_task_store::StoreError::NameConflict { .. } => "definition_name_conflict",
+    ctl_task_store::StoreError::NotFound { .. } => "definition_not_found",
+    ctl_task_store::StoreError::InvalidProjectRoot { .. } => "definition_scope_invalid",
     _ => "definition_store_error",
   };
   CommandErrorDto::new(code, error.to_string())

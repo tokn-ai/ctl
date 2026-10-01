@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::process::Command;
 
-use ctl_core::hosts::ConnectionTargetDto;
+use ctl_client::hosts::ConnectionTargetDto;
 
 pub async fn plain_shell(target: &ConnectionTargetDto) -> Result<i32, Error> {
   if target.is_local() {
@@ -22,7 +22,7 @@ pub async fn plain_shell(target: &ConnectionTargetDto) -> Result<i32, Error> {
 pub async fn execute(
   target: &ConnectionTargetDto,
   arguments: Vec<String>,
-  platform: ctl_core::RemotePlatform,
+  platform: ctl_client::RemotePlatform,
 ) -> Result<i32, Error> {
   if target.is_local() {
     let mut command = Command::new(&arguments[0]);
@@ -32,7 +32,7 @@ pub async fn execute(
   let mut command = ssh_command(target).await?;
   command.arg("-T").arg(target.label());
   match platform {
-    ctl_core::RemotePlatform::Unix => {
+    ctl_client::RemotePlatform::Unix => {
       command.arg(
         arguments
           .iter()
@@ -41,7 +41,7 @@ pub async fn execute(
           .join(" "),
       );
     }
-    ctl_core::RemotePlatform::Windows => {
+    ctl_client::RemotePlatform::Windows => {
       command.args(arguments);
     }
   }
@@ -63,7 +63,7 @@ pub async fn ssh_command(target: &ConnectionTargetDto) -> Result<Command, Error>
 }
 
 /// Explicit structured fields become defaults after any user-supplied options.
-pub fn target_arguments(target: &ctld_ipc::SshTarget) -> Result<Vec<OsString>, Error> {
+pub fn target_arguments(target: &ctl_ipc::SshTarget) -> Result<Vec<OsString>, Error> {
   let mut result = Vec::new();
   let mut option = |value: String| {
     result.push("-o".into());
@@ -81,7 +81,7 @@ pub fn target_arguments(target: &ctld_ipc::SshTarget) -> Result<Vec<OsString>, E
   if target
     .gateways
     .iter()
-    .any(|gateway| gateway.mode == ctld_ipc::SshGatewayMode::AgentRelayOnly)
+    .any(|gateway| gateway.mode == ctl_ipc::SshGatewayMode::AgentRelayOnly)
   {
     return Err(Error::AgentRelay);
   }
@@ -92,7 +92,7 @@ pub fn target_arguments(target: &ctld_ipc::SshTarget) -> Result<Vec<OsString>, E
   {
     option(format!(
       "ProxyCommand={}",
-      ctld_ipc::proxy_command(&target.gateways)?
+      ctl_ipc::proxy_command(&target.gateways)?
     ));
     // Never let a direct SSH-config master bypass the selected route.
     option("ControlPath=none".into());
@@ -154,12 +154,12 @@ pub enum Error {
   #[error(transparent)]
   Target(#[from] crate::target::Error),
   #[error(transparent)]
-  Host(#[from] ctl_core::hosts::HostError),
+  Host(#[from] ctl_client::hosts::HostError),
   #[cfg(unix)]
   #[error(transparent)]
   Broker(#[from] crate::ssh_broker::Error),
   #[error(transparent)]
-  Connect(#[from] ctld_ipc::ConnectError),
+  Connect(#[from] ctl_ipc::ConnectError),
   #[error("Could not launch command: {0}")]
   Process(#[from] std::io::Error),
   #[error(

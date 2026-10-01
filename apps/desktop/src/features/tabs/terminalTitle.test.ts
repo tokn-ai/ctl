@@ -27,14 +27,14 @@ describe("formatTerminalTitle", () => {
       formatTerminalTitle(
         { name: "session-1" },
         shellState({
-          running_command: "cargo test -p rmux-app",
+          running_command: "cargo test -p ctmux-app",
           prompt_phase: "running",
         }),
       ),
     ).toEqual({
       path: "/Users/clouds/Projects/Tools/ctl",
-      command: "cargo test -p rmux-app",
-      text: "/Users/clouds/Projects/Tools/ctl — cargo test -p rmux-app",
+      command: "cargo test -p ctmux-app",
+      text: "/Users/clouds/Projects/Tools/ctl — cargo test -p ctmux-app",
     });
   });
 

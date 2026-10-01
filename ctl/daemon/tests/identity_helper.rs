@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
+use ctl_ipc::identities::{MAX_REQUEST_BYTES, Response};
 use ctld::identities::{IdentityError, LocalAgent, inspect_path};
-use ctld_ipc::identities::{MAX_REQUEST_BYTES, Response};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

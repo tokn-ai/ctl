@@ -2,7 +2,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
 import type { AppCommand } from "./types";
 
-export const NATIVE_COMMAND_EVENT = "rmux://command";
+export const NATIVE_COMMAND_EVENT = "ctmux://command";
 
 export function findEnabledNativeCommand(
   commands: readonly AppCommand[],

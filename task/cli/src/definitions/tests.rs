@@ -1,7 +1,7 @@
 use super::*;
 use crate::{AttachFuture, Command, ConnectFuture};
 use clap::Parser;
-use task_proto::{DesiredState, ExecutionMode, RunInfo, RunState};
+use ctl_task_proto::{DesiredState, ExecutionMode, RunInfo, RunState};
 use tokio::io::DuplexStream;
 
 struct TestDirectory(PathBuf);
@@ -21,7 +21,7 @@ impl TestDirectory {
   }
 
   fn repository(&self) -> Repository {
-    Repository::new(task_store::project_path(&self.0).unwrap())
+    Repository::new(ctl_task_store::project_path(&self.0).unwrap())
   }
 }
 
@@ -40,14 +40,14 @@ impl Connector for NoDaemon {
   type Error = std::io::Error;
 
   fn connect_task(&self) -> ConnectFuture<'_, DuplexStream, Self::Error> {
-    panic!("local catalog operation must not connect to taskd")
+    panic!("local catalog operation must not connect to ctl-taskd")
   }
 
   fn is_local_task_target(&self) -> bool {
     self.local
   }
 
-  fn attach_interactive(&self, _session: String, _rmux_socket: PathBuf) -> AttachFuture<'_> {
+  fn attach_interactive(&self, _session: String, _ctmux_socket: PathBuf) -> AttachFuture<'_> {
     panic!("local catalog operation must not attach")
   }
 }
@@ -239,7 +239,7 @@ async fn remote_local_file_commands_fail_before_accessing_the_scope_or_daemon() 
       Err(CommandError::Definition(DefinitionError::LocalOnly))
     ));
   }
-  assert!(!task_store::project_path(&directory.0).unwrap().exists());
+  assert!(!ctl_task_store::project_path(&directory.0).unwrap().exists());
 }
 
 #[derive(Parser)]

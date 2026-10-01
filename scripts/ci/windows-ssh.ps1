@@ -34,7 +34,7 @@ $originalAcls = @{}
 try {
   Stop-Service sshd -ErrorAction SilentlyContinue
   # The fixed remote command resolves installed executables through the server's PATH.
-  foreach ($binary in @('ctl-agent.exe', 'rmuxd.exe')) {
+  foreach ($binary in @('ctl-agent.exe', 'ctmuxd.exe')) {
     $destination = Join-Path $env:WINDIR "System32\$binary"
     if (Test-Path $destination) { throw "Refusing to replace $destination" }
     Copy-Item "target\debug\$binary" $destination
@@ -108,7 +108,7 @@ $originalConfig
   Invoke-Native -Program "$openssh\ssh.exe" -Arguments @('-vvv', '-E', "$root\client.log", 'ctl-windows-ci', 'echo', 'SSH_AUTHENTICATED')
   $env:CTL_TEST_SSH_HOST = 'ctl-windows-ci'
   Invoke-Native -Program 'cargo' -Arguments @('test', '--locked', '-p', 'ctl-agent', '--test', 'windows_ssh', '--', '--ignored', '--nocapture')
-  Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'rmux', 'list')
+  Invoke-Native -Program '.\target\debug\ctl.exe' -Arguments @('--host', 'ctl-windows-ci', '--remote-platform', 'windows', 'ctmux', 'list')
 } catch {
   Stop-Service sshd -ErrorAction SilentlyContinue
   Get-Content "$root\client.log" -Tail 100 -ErrorAction SilentlyContinue
@@ -127,7 +127,7 @@ $originalConfig
   throw
 } finally {
   Stop-Service sshd -ErrorAction SilentlyContinue
-  Get-CimInstance Win32_Process -Filter "Name = 'rmuxd.exe'" | Where-Object { $_.ExecutablePath -in $installed } | ForEach-Object {
+  Get-CimInstance Win32_Process -Filter "Name = 'ctmuxd.exe'" | Where-Object { $_.ExecutablePath -in $installed } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
   }
   foreach ($binary in $installed) { Remove-Item $binary -Force -ErrorAction SilentlyContinue }

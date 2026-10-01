@@ -64,7 +64,7 @@ fn host_crud_preserves_identity_and_unselected_connection_settings() {
   let fixture = Fixture::new();
   let added = fixture.add();
   let id = added["host_id"].as_str().unwrap();
-  let identity = json!({"remote_id": "9dcefd7e-2b35-43d8-97d9-7508186dbac0", "agent_version": "0.1.0", "rmux_restart_supported": false});
+  let identity = json!({"remote_id": "9dcefd7e-2b35-43d8-97d9-7508186dbac0", "agent_version": "0.1.0", "ctmux_restart_supported": false});
   let mut snapshot: Value = serde_json::from_slice(&fixture.bytes()).unwrap();
   snapshot["document"]["hosts"][0]["remote_info"] = identity.clone();
   fs::write(
@@ -280,24 +280,24 @@ fn status_keeps_catalog_order_beyond_the_concurrency_limit() {
 #[cfg(unix)]
 mod unix {
   use super::*;
-  use ctld_ipc::{ClientMessage, ServerMessage};
+  use ctl_ipc::{ClientMessage, ServerMessage};
   use std::process::Output;
 
-  async fn accept(listener: &tokio::net::UnixListener) -> (ctld_ipc::Stream, ClientMessage) {
+  async fn accept(listener: &tokio::net::UnixListener) -> (ctl_ipc::Stream, ClientMessage) {
     let (mut stream, _) = listener.accept().await.unwrap();
     assert!(matches!(
-      ctld_ipc::read_frame(&mut stream).await.unwrap(),
+      ctl_ipc::read_frame(&mut stream).await.unwrap(),
       Some(ClientMessage::Handshake { .. })
     ));
-    ctld_ipc::write_frame(
+    ctl_ipc::write_frame(
       &mut stream,
       &ServerMessage::HandshakeAccepted {
-        protocol_version: ctld_ipc::PROTOCOL_VERSION,
+        protocol_version: ctl_ipc::PROTOCOL_VERSION,
       },
     )
     .await
     .unwrap();
-    let message = ctld_ipc::read_frame(&mut stream).await.unwrap().unwrap();
+    let message = ctl_ipc::read_frame(&mut stream).await.unwrap().unwrap();
     (stream, message)
   }
 
@@ -343,7 +343,7 @@ mod unix {
             message: "control check failed".into(),
           },
         };
-        ctld_ipc::write_frame(&mut stream, &response).await.unwrap();
+        ctl_ipc::write_frame(&mut stream, &response).await.unwrap();
       }
     });
     let output = run(&fixture, &["host", "status", "work", "--json"]).await;
@@ -374,7 +374,7 @@ mod unix {
         panic!("expected authentication")
       };
       assert_eq!(target.destination, "other");
-      ctld_ipc::write_frame(
+      ctl_ipc::write_frame(
         &mut stream,
         &ServerMessage::MasterReady {
           control_path: PathBuf::from("unused"),
@@ -389,7 +389,7 @@ mod unix {
           panic!("expected disconnect")
         };
         destinations.push(target.destination);
-        ctld_ipc::write_frame(&mut stream, &ServerMessage::MasterDisconnected)
+        ctl_ipc::write_frame(&mut stream, &ServerMessage::MasterDisconnected)
           .await
           .unwrap();
       }

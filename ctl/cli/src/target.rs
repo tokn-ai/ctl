@@ -1,4 +1,4 @@
-use ctl_core::hosts::{self, ConnectionTargetDto, HostError, ResolvedHost};
+use ctl_client::hosts::{self, ConnectionTargetDto, HostError, ResolvedHost};
 use std::path::PathBuf;
 
 pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<ResolvedHost, HostError> {
@@ -15,7 +15,7 @@ pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<Resolve
   let path = catalog_path()?;
   let mut resolved = hosts::resolve(&hosts::load_catalog(&path)?, host, method)?;
   if resolved.tailscale_node_id.is_some() {
-    resolved.resolve_tailscale(&ctl_core::tailscale::discover_devices().await.devices)?;
+    resolved.resolve_tailscale(&ctl_client::tailscale::discover_devices().await.devices)?;
   }
   Ok(resolved)
 }
@@ -23,7 +23,7 @@ pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<Resolve
 pub fn catalog_path() -> Result<PathBuf, HostError> {
   std::env::var_os("CTL_HOSTS_PATH")
     .map_or_else(
-      || dirs::home_dir().map(|home| home.join(".tokn/rmux/hosts.json")),
+      || dirs::home_dir().map(|home| home.join(".tokn/ctmux/hosts.json")),
       |path| Some(PathBuf::from(path)),
     )
     .ok_or_else(|| HostError::new("home_unavailable", "Could not find the home directory."))
@@ -37,25 +37,25 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
   else {
     return Ok(());
   };
-  let client = ctld_ipc::vpn::Client::new(ctld_ipc::vpn::socket_path());
-  let client = if std::env::var_os("RMUX_DEV_DAEMON_SUPERVISOR").is_some() {
-    client.with_daemon_executable(ctld_ipc::default_daemon_executable()?)
+  let client = ctl_ipc::vpn::Client::new(ctl_ipc::vpn::socket_path());
+  let client = if std::env::var_os("CTMUX_DEV_DAEMON_SUPERVISOR").is_some() {
+    client.with_daemon_executable(ctl_ipc::default_daemon_executable()?)
   } else {
     client
   };
   if client.list().await?.connections.iter().any(|status| {
-    status.vpn_id.as_deref() == Some(id) && status.state == ctld_ipc::VpnState::Connected
+    status.vpn_id.as_deref() == Some(id) && status.state == ctl_ipc::VpnState::Connected
   }) {
     return Ok(());
   }
   let path = std::env::var_os("CTL_VPNS_PATH")
     .map(PathBuf::from)
-    .or_else(|| dirs::config_dir().map(|path| path.join("io.rmux.desktop/vpns.json")))
+    .or_else(|| dirs::config_dir().map(|path| path.join("dev.tokn-ai.ctl.ctmux/vpns.json")))
     .ok_or(Error::MissingVpn)?;
   let connection = load_vpn(&path, id)?;
   eprintln!("Connecting VPN {}…", connection.name);
   let status = client.start_connection(connection).await?;
-  if status.state != ctld_ipc::VpnState::Connected {
+  if status.state != ctl_ipc::VpnState::Connected {
     if let Some(url) = status.auth_url {
       eprintln!("Sign in to the VPN: {url}");
     }
@@ -64,7 +64,7 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
   Ok(())
 }
 
-fn load_vpn(path: &std::path::Path, id: &str) -> Result<ctld_ipc::VpnConnection, Error> {
+fn load_vpn(path: &std::path::Path, id: &str) -> Result<ctl_ipc::VpnConnection, Error> {
   use std::io::Read as _;
   let mut options = std::fs::OpenOptions::new();
   options.read(true);
@@ -108,11 +108,11 @@ fn load_vpn(path: &std::path::Path, id: &str) -> Result<ctld_ipc::VpnConnection,
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   #[error(transparent)]
-  Connect(#[from] ctld_ipc::ConnectError),
+  Connect(#[from] ctl_ipc::ConnectError),
   #[error(transparent)]
   Host(#[from] HostError),
   #[error(transparent)]
-  Vpn(#[from] ctld_ipc::vpn::VpnError),
+  Vpn(#[from] ctl_ipc::vpn::VpnError),
   #[error("Could not load the host's saved VPN. Check the VPN settings in the desktop app.")]
   MissingVpn,
   #[error("VPN settings must be owned by the current user and private (mode 0600).")]

@@ -1,8 +1,8 @@
 # Shared local task definitions
 
-The CLI and desktop use the same `task-store` Rust repository for saved
-definitions. Direct command saves and catalog operations do not start taskd.
-Registered tasks and their active/latest run records remain owned by taskd;
+The CLI and desktop use the same `ctl-task-store` Rust repository for saved
+definitions. Direct command saves and catalog operations do not start ctl-taskd.
+Registered tasks and their active/latest run records remain owned by ctl-taskd;
 saving a definition does not modify an existing registered task or process.
 
 ## Locations and scopes
@@ -56,7 +56,7 @@ Add `--global` or `--project PATH` to select a catalog explicitly. Updates requi
 both a stable definition ID and the expected revision. A new save fails on an
 existing name or ID rather than replacing it. Renaming keeps the definition ID.
 
-`save --from-run` connects to local taskd, starting the daemon if needed to read
+`save --from-run` connects to local ctl-taskd, starting the daemon if needed to read
 retained snapshots. It does not start a new task. It uses the stored snapshot
 belonging to the selected run, even
 if the registered task has since been edited. Only active/latest retained runs
@@ -67,7 +67,7 @@ context that was never recorded.
 
 `create --from-definition` copies the saved command, mode, and directory into a
 new registered task using the requested instance name. Later definition edits
-do not update that task. Existing registered-task names remain unique per taskd,
+do not update that task. Existing registered-task names remain unique per ctl-taskd,
 and existing create/start behavior remains intact.
 
 These catalog commands and saved-definition creation are local-only. Supplying

@@ -9,7 +9,7 @@ vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightCo
 
 const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", version: 11 }] };
 const snapshot: ComponentVersionsSnapshot = { components: [
-  { component_id: "app", component: "rmux", label: "rmux", location: "local", host_id: null, observation: "bundled", status: "current", running: current, available: current, restart_supported: false, action: null, detail: null, error: null },
+  { component_id: "app", component: "ctmux", label: "ctmux", location: "local", host_id: null, observation: "bundled", status: "current", running: current, available: current, restart_supported: false, action: null, detail: null, error: null },
   { component_id: "owner-1", component: "ctld", label: "ctld (SSH)", location: "local", host_id: null, observation: "running", status: "different_build", running: { ...current, source_revision: "112233445566" }, available: current, restart_supported: true, action: "restart", detail: "SSH and VPN broker", error: null },
   { component_id: "remote-1", component: "ctl_agent", label: "ctl-agent — Development", location: "remote", host_id: "dev", observation: "last_observed", status: "unknown", running: { ...current, source_revision: null, source_fingerprint: null }, available: current, restart_supported: false, action: null, detail: null, error: null },
 ] };
@@ -29,14 +29,14 @@ describe("About page", () => {
     const rows = structuredClone(snapshot);
     rows.components[2].action = "reconnect";
     rows.components[2].restart_supported = false;
-    rows.components.push({ ...rows.components[1], component_id: "local-taskd", component: "taskd", label: "taskd" });
+    rows.components.push({ ...rows.components[1], component_id: "local-taskd", component: "ctl-taskd", label: "ctl-taskd" });
     api.versions.mockResolvedValue(rows);
     const reconnect = { ...preflight, component_id: "remote-1", component: "ctl_agent" as const, location: "remote" as const, host_id: "dev", action: "reconnect" as const, label: "ctl-agent — Development", impact: { ...preflight.impact, description: "Reconnects these terminal transports. Remote sessions keep running." } };
     api.preflight.mockResolvedValue(reconnect);
     const execute_action = vi.fn().mockResolvedValue({ detail: "Two terminal transports reconnected." });
     render(<AboutPage {...props()} execute_action={execute_action} />);
-    expect(await screen.findByRole("button", { name: "Restart taskd" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Restart rmux" })).toBeNull();
+    expect(await screen.findByRole("button", { name: "Restart ctl-taskd" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restart ctmux" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Reconnect ctl-agent — Development" }));
     const dialog = await screen.findByRole("dialog", { name: "Reconnect ctl-agent — Development" });
     expect(within(dialog).getByText(/Remote sessions keep running/)).toBeTruthy();
@@ -48,11 +48,11 @@ describe("About page", () => {
 
   it("distinguishes unreported builds from incomplete verification without hiding protocol mismatch", async () => {
     const legacy = structuredClone(snapshot);
-    legacy.components[1] = { ...legacy.components[1], component: "taskd", label: "taskd", status: "unknown", running: { ...current, version: null, source_revision: null, source_fingerprint: null } };
+    legacy.components[1] = { ...legacy.components[1], component: "ctl-taskd", label: "ctl-taskd", status: "unknown", running: { ...current, version: null, source_revision: null, source_fingerprint: null } };
     legacy.components[2].running = { ...current, source_fingerprint: null };
     api.versions.mockResolvedValue(legacy);
     render(<AboutPage {...props()} />);
-    const legacy_row = (await screen.findByText("taskd")).closest("tr")!;
+    const legacy_row = (await screen.findByText("ctl-taskd")).closest("tr")!;
     expect(within(legacy_row).getByText("Build not reported")).toBeTruthy();
     expect(screen.getByText("Build unverified")).toBeTruthy();
     legacy.components[1].status = "incompatible";

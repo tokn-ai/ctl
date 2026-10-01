@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ctld_ipc::credentials::{Inventory, StoredCredential, scope_id};
+use ctl_ipc::credentials::{Inventory, StoredCredential, scope_id};
 #[cfg(target_os = "macos")]
-use ctld_ipc::credentials::{Request, Response};
+use ctl_ipc::credentials::{Request, Response};
 
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::vpn::{CredentialMetadata, CredentialSettings};
@@ -166,7 +166,7 @@ fn host_metadata(targets: &[NamedTarget]) -> (BTreeMap<String, HostMetadata>, bo
   (hosts, complete)
 }
 
-fn valid_target(target: &ctld_ipc::SshTarget) -> bool {
+fn valid_target(target: &ctl_ipc::SshTarget) -> bool {
   let optional = |value: &Option<String>| {
     value
       .as_ref()
@@ -194,7 +194,7 @@ fn valid_target(target: &ctld_ipc::SshTarget) -> bool {
         && optional(&gateway.user)
         && path(&gateway.identity_file)
         && gateway.port != Some(0)
-        && (index == 0 || gateway.kind != ctld_ipc::GatewayKind::Vpn)
+        && (index == 0 || gateway.kind != ctl_ipc::GatewayKind::Vpn)
     })
     && serde_json::to_vec(target).is_ok_and(|bytes| bytes.len() <= 32 * 1024)
 }
@@ -309,9 +309,9 @@ fn keychain_record(
 ) -> CredentialRecord {
   let host = hosts.get(&credential.scope_id);
   let kind = match credential.kind {
-    ctld_ipc::credentials::CredentialKind::SshPassword => CredentialKind::SshPassword,
-    ctld_ipc::credentials::CredentialKind::SshKeyPassphrase => CredentialKind::SshKeyPassphrase,
-    ctld_ipc::credentials::CredentialKind::SshCredential => CredentialKind::SshCredential,
+    ctl_ipc::credentials::CredentialKind::SshPassword => CredentialKind::SshPassword,
+    ctl_ipc::credentials::CredentialKind::SshKeyPassphrase => CredentialKind::SshKeyPassphrase,
+    ctl_ipc::credentials::CredentialKind::SshCredential => CredentialKind::SshCredential,
   };
   let key_name = clean(credential.key_name).and_then(|value| {
     value

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ctld_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response};
+use ctl_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response};
 use tokio::process::Command;
 use zeroize::Zeroizing;
 
@@ -18,7 +18,7 @@ const HELPER_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[cfg(target_os = "macos")]
 pub(super) async fn request(request: Request) -> CommandResult<Response> {
-  let executable = ctld_ipc::daemon_executable().map_err(|_| unavailable())?;
+  let executable = ctl_ipc::daemon_executable().map_err(|_| unavailable())?;
   exchange(Command::new(executable), request, HELPER_TIMEOUT).await
 }
 

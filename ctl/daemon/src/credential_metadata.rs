@@ -9,7 +9,7 @@ use {
 };
 
 #[cfg(any(target_os = "macos", test))]
-pub(crate) const SERVICE_PREFIX: &str = "io.ctmux.desktop.ctld.ssh.";
+pub(crate) const SERVICE_PREFIX: &str = "dev.tokn-ai.ctl.ctld.ssh.";
 #[cfg(any(target_os = "macos", test))]
 pub(crate) const MAX_SEARCH_ITEMS: usize = 4096;
 #[cfg(any(target_os = "macos", test))]

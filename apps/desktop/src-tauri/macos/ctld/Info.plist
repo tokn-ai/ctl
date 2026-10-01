@@ -7,7 +7,7 @@
   <key>CFBundleExecutable</key>
   <string>ctld</string>
   <key>CFBundleIdentifier</key>
-  <string>io.ctmux.desktop.ctld</string>
+  <string>dev.tokn-ai.ctl.ctld</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

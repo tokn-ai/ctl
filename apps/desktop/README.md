@@ -356,7 +356,7 @@ remains available.
 
 On macOS, `ctld` is packaged as the app-like helper
 `ctmux.app/Contents/Helpers/ctld.app`. Release builds sign that helper with the
-permanent `io.ctmux.desktop.ctld` bundle identifier and embed its matching
+permanent `dev.tokn-ai.ctl.ctld` bundle identifier and embed its matching
 Developer ID provisioning profile. This gives `ctld` its own Keychain identity;
 the main app and the other sidecars receive no credential-access entitlement.
 Without the profile-authorized application identifier, the Data Protection
@@ -373,7 +373,7 @@ launcher asks Xcode to refresh an expired profile automatically.
 
 Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
 profiles and `~/Library/Application Support/ctmux/signing/ctld.provisionprofile`,
-selects the newest unexpired profile for `io.ctmux.desktop.ctld`, discovers its
+selects the newest unexpired profile for `dev.tokn-ai.ctl.ctld`, discovers its
 matching signing certificate in the login Keychain, and selects a private,
 stable `ctld` endpoint for this worktree under the system temporary directory.
 The signed daemon runs independently of `tauri dev`, so quitting or relaunching
@@ -410,7 +410,7 @@ non-secret repository variables. `APPLE_CERTIFICATE`,
 `APPLE_CERTIFICATE_PASSWORD`, `APPLE_CTLD_PROVISIONING_PROFILE`, and
 `APPLE_API_KEY_CONTENT` are repository secrets. The certificate and profile
 must be for Developer ID distribution, and the profile must authorize exactly
-the team-prefixed `io.ctmux.desktop.ctld` application identifier.
+the team-prefixed `dev.tokn-ai.ctl.ctld` application identifier.
 If any required signing value is absent, CI explicitly skips Apple signing
 and notarization, builds the desktop packages, and labels the draft release's
 macOS assets as unsigned. Those builds cannot store Touch ID-protected

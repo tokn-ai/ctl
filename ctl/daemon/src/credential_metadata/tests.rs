@@ -54,7 +54,7 @@ fn inventory_excludes_other_services_and_save_preferences() {
   let mut policy = attributes();
   policy.insert(
     "svce".into(),
-    format!("io.ctmux.desktop.ctld.ssh-save-policy.{}", "a".repeat(64)),
+    format!("dev.tokn-ai.ctl.ctld.ssh-save-policy.{}", "a".repeat(64)),
   );
   policy.insert("acct".into(), "policy".into());
   let inventory = inventory_from_attributes([Some(other), Some(policy), Some(attributes())]);

@@ -10,7 +10,7 @@ use super::Error;
 use crate::credential_metadata::{self, Attributes, SERVICE_PREFIX};
 use crate::identities::SavedIdentity;
 
-const SERVICE: &str = "io.ctmux.desktop.ctld.metadata";
+const SERVICE: &str = "dev.tokn-ai.ctl.ctld.metadata";
 const MARKER: &str = "import-complete";
 const PENDING_PREFIX: &str = "pending:";
 const MAX_ITEMS: usize = 8192;

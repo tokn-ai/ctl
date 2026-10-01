@@ -23,7 +23,7 @@ const execFile = promisify(execFileCallback);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "../..");
 const appDirectory = path.join(repositoryRoot, "apps/desktop");
-const bundleIdentifier = "io.ctmux.desktop.ctld";
+const bundleIdentifier = "dev.tokn-ai.ctl.ctld";
 const provisioningTemplate = path.join(
   scriptDirectory,
   "macos/ctld-provisioning",

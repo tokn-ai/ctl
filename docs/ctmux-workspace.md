@@ -14,7 +14,7 @@ The native backend keeps two files under `~/.tokn/ctmux` on every platform:
 
 Their shared lock file and migration backups live alongside them. If `workspace.json`
 is absent, ctmux imports a valid workspace from the former Tauri app-data
-directory (`~/Library/Application Support/io.ctmux.desktop` on macOS). The original
+directory (`~/Library/Application Support/dev.tokn-ai.ctl.ctmux` on macOS). The original
 file and backups remain available for recovery. An existing new-location file
 always takes precedence.
 

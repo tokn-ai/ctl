@@ -9,7 +9,7 @@ fi
 ctld_binary=$1
 output_app=$2
 app_version=$3
-bundle_identifier=io.ctmux.desktop.ctld
+bundle_identifier=dev.tokn-ai.ctl.ctld
 template_directory=apps/desktop/src-tauri/macos/ctld
 
 if [ "$(uname -s)" != Darwin ]; then

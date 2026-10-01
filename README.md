@@ -70,8 +70,9 @@ migration are provided. Default configuration, archives, runtime endpoints,
 desktop identifiers, and Keychain services use the new names; existing data is
 left untouched. Set `CTMUXD_BIN` / `CTMUX_RUNTIME_DIR` for terminal overrides and
 `CTL_TASKD_BIN` / `CTL_TASKD_RUNTIME_DIR` / `CTL_TASKD_DATA_DIR` for task overrides.
-The desktop bundle identifier is `io.ctmux.desktop`, and its signed connection
-helper uses `io.ctmux.desktop.ctld`; signing requires profiles for these identifiers.
+The desktop bundle identifier is `dev.tokn-ai.ctl.ctmux`, and its signed connection
+helper uses `dev.tokn-ai.ctl.ctld`. Signing the helper requires a matching
+provisioning profile.
 Update clients, daemons, and remote agent bundles together. The renamed build
 uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protocol
 12, remote identity protocol 3, and remote maintenance protocol 2.
@@ -531,7 +532,7 @@ protocol; an explicit `scp -S` selects the user's own transport instead.
 
 Host settings are shared with the desktop in `~/.tokn/ctmux/hosts.json`. CLI
 overrides `CTL_HOSTS_PATH` and `CTL_VPNS_PATH` select alternate catalog files;
-the default VPN file is the desktop's `io.ctmux.desktop/vpns.json` under the
+the default VPN file is the desktop's `dev.tokn-ai.ctl.ctmux/vpns.json` under the
 platform configuration directory. These commands do not edit SSH config.
 
 ### Managed port forwards

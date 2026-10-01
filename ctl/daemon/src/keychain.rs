@@ -14,8 +14,8 @@ mod index;
 mod operation;
 mod purpose;
 
-const KEYCHAIN_SERVICE_PREFIX: &str = "io.ctmux.desktop.ctld.ssh";
-const SAVE_POLICY_SERVICE_PREFIX: &str = "io.ctmux.desktop.ctld.ssh-save-policy";
+const KEYCHAIN_SERVICE_PREFIX: &str = "dev.tokn-ai.ctl.ctld.ssh";
+const SAVE_POLICY_SERVICE_PREFIX: &str = "dev.tokn-ai.ctl.ctld.ssh-save-policy";
 const SAVE_POLICY_ACCOUNT: &str = "policy";
 const NEVER_SAVE: &[u8] = b"never";
 pub const MISSING_ENTITLEMENT: i32 = -34_018;

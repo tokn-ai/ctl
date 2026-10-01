@@ -50,7 +50,7 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
   }
   let path = std::env::var_os("CTL_VPNS_PATH")
     .map(PathBuf::from)
-    .or_else(|| dirs::config_dir().map(|path| path.join("io.ctmux.desktop/vpns.json")))
+    .or_else(|| dirs::config_dir().map(|path| path.join("dev.tokn-ai.ctl.ctmux/vpns.json")))
     .ok_or(Error::MissingVpn)?;
   let connection = load_vpn(&path, id)?;
   eprintln!("Connecting VPN {}…", connection.name);

@@ -23,6 +23,11 @@ is pending. `ctld` also checks that the local SOCKS5 listener is available befor
 reporting a usable endpoint. If Tailscale needs another login, the endpoint is
 withdrawn and a new sign-in link becomes available.
 
+The listener check completes a short-lived SOCKS5 UDP association and closes it
+without sending any datagrams or contacting a remote host. Completing the request
+avoids the `could not read packet header` errors that greeting-only checks produce
+in the container logs.
+
 Each profile uses a durable named volume for its Tailscale state. Container and
 volume names are derived from a hash of the local owner and saved profile ID;
 neither a private hostname nor a username is embedded in those names. Docker's

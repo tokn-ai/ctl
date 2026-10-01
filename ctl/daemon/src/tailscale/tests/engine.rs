@@ -1,4 +1,5 @@
 use std::fs;
+use tokio::io::AsyncReadExt as _;
 
 use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 
@@ -40,6 +41,16 @@ impl Engine {
         stream.read_exact(&mut greeting).await.unwrap();
         assert_eq!(greeting, [5, 1, 0]);
         stream.write_all(&[5, 0]).await.unwrap();
+        // A greeting alone is incomplete: tailscaled reports EOF here as
+        // "could not read packet header". Require a complete local association.
+        let mut request = [0; 10];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(request, [5, 3, 0, 1, 0, 0, 0, 0, 0, 0]);
+        stream
+          .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 123, 45])
+          .await
+          .unwrap();
+        assert_eq!(stream.read(&mut [0; 1]).await.unwrap(), 0);
       }
     });
     Self {

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::{Mutex, MutexGuard};
 
 const MALFORMED_CATALOG: &[u8] = b"this is not a host catalog; must not be read";
 
@@ -53,23 +54,34 @@ const DOCUMENTS: &[(&str, &str, &[u8])] = &[
   ),
 ];
 
-struct Fixture(PathBuf);
+// Keep executable copies and child lifetimes serialized. A parallel fork can
+// inherit a copy's writable descriptor before exec and cause ETXTBSY on Linux.
+static SUBPROCESS_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+struct Fixture {
+  directory: PathBuf,
+  _execution_guard: MutexGuard<'static, ()>,
+}
 
 impl Fixture {
   fn new() -> Self {
+    let execution_guard = SUBPROCESS_FIXTURE_LOCK.lock().unwrap();
     let path = std::env::temp_dir().join(format!("ctl-skill-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&path).unwrap();
     fs::create_dir(path.join("bin")).unwrap();
     fs::create_dir(path.join("work")).unwrap();
     fs::write(path.join("hosts.json"), MALFORMED_CATALOG).unwrap();
-    let fixture = Self(path);
+    let fixture = Self {
+      directory: path,
+      _execution_guard: execution_guard,
+    };
     fs::copy(env!("CARGO_BIN_EXE_ctl"), fixture.binary()).unwrap();
     fixture
   }
 
   fn binary(&self) -> PathBuf {
     self
-      .0
+      .directory
       .join("bin")
       .join(if cfg!(windows) { "ctl.exe" } else { "ctl" })
   }
@@ -77,15 +89,15 @@ impl Fixture {
   fn output(&self, args: &[&str]) -> Output {
     Command::new(self.binary())
       .args(args)
-      .current_dir(self.0.join("work"))
+      .current_dir(self.directory.join("work"))
       .env_remove("CTL_SCP_SSH_TRANSPORT")
-      .env("CTL_HOSTS_PATH", self.0.join("hosts.json"))
-      .env("CTLD_SOCKET_PATH", self.0.join("ctld.sock"))
-      .env("CTMUX_RUNTIME_DIR", self.0.join("ctmux-runtime"))
-      .env("CTL_TASKD_RUNTIME_DIR", self.0.join("task-runtime"))
-      .env("CTLD_BIN", self.0.join("must-not-start-ctld"))
-      .env("CTMUXD_BIN", self.0.join("must-not-start-ctmuxd"))
-      .env("CTL_TASKD_BIN", self.0.join("must-not-start-taskd"))
+      .env("CTL_HOSTS_PATH", self.directory.join("hosts.json"))
+      .env("CTLD_SOCKET_PATH", self.directory.join("ctld.sock"))
+      .env("CTMUX_RUNTIME_DIR", self.directory.join("ctmux-runtime"))
+      .env("CTL_TASKD_RUNTIME_DIR", self.directory.join("task-runtime"))
+      .env("CTLD_BIN", self.directory.join("must-not-start-ctld"))
+      .env("CTMUXD_BIN", self.directory.join("must-not-start-ctmuxd"))
+      .env("CTL_TASKD_BIN", self.directory.join("must-not-start-taskd"))
       .output()
       .unwrap()
   }
@@ -109,15 +121,20 @@ impl Fixture {
   }
 
   fn assert_unchanged(&self) {
-    let entries: BTreeSet<_> = fs::read_dir(&self.0)
+    let entries: BTreeSet<_> = fs::read_dir(&self.directory)
       .unwrap()
       .map(|entry| entry.unwrap().file_name())
       .collect();
     let expected = ["bin", "hosts.json", "work"].map(std::ffi::OsString::from);
     assert_eq!(entries, BTreeSet::from(expected));
-    assert!(fs::read_dir(self.0.join("work")).unwrap().next().is_none());
+    assert!(
+      fs::read_dir(self.directory.join("work"))
+        .unwrap()
+        .next()
+        .is_none()
+    );
     assert_eq!(
-      fs::read(self.0.join("hosts.json")).unwrap(),
+      fs::read(self.directory.join("hosts.json")).unwrap(),
       MALFORMED_CATALOG
     );
   }
@@ -125,7 +142,7 @@ impl Fixture {
 
 impl Drop for Fixture {
   fn drop(&mut self) {
-    let _ = fs::remove_dir_all(&self.0);
+    let _ = fs::remove_dir_all(&self.directory);
   }
 }
 
@@ -233,7 +250,7 @@ fn file_selection_rejects_missing_documents_and_filesystem_paths() {
     assert!(error.contains("bundled file"), "{name} {file}: {error}");
     assert!(error.contains(name), "{name} {file}: {error}");
   }
-  let path = fixture.0.join("hosts.json");
+  let path = fixture.directory.join("hosts.json");
   fixture.fails(&["skill", "--file", path.to_str().unwrap()]);
   fixture.assert_unchanged();
 }

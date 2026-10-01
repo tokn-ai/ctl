@@ -6,6 +6,8 @@ use std::os::unix::net::UnixListener;
 
 use super::*;
 
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct Fixture {
   root: std::path::PathBuf,
 }
@@ -38,6 +40,7 @@ impl Fixture {
       .unwrap();
     }
     fs::write(root.join("watchdog.sh"), vpn_container::WATCHDOG_SCRIPT).unwrap();
+    fs::write(root.join("clock"), "100.00 0.00\n").unwrap();
     let entrypoint = ENTRYPOINT
       .replace(
         "/run/ctl/watchdog.sh",
@@ -47,6 +50,16 @@ impl Fixture {
       .replace("/state", &root.join("state").to_string_lossy());
     fs::write(root.join("entrypoint.sh"), entrypoint).unwrap();
     Self { root }
+  }
+
+  async fn wait_file(&self, name: &str) {
+    timeout(TEST_TIMEOUT, async {
+      while !self.root.join(name).exists() {
+        sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("fixture did not publish {name}"));
   }
 }
 
@@ -78,30 +91,24 @@ async fn a_failed_watchdog_stops_tailscale_during_boot_and_after_socket_publicat
       .env("CTLD_ACCEPT_ROUTES", "false")
       .env("CTLD_HOSTNAME", "test-device")
       .env("CTLD_HEARTBEAT_DIR", fixture.root.join("heartbeat"))
-      // The real watchdog exits when it cannot read its monotonic clock.
-      .env(
-        "CTLD_HEARTBEAT_CLOCK_FILE",
-        fixture.root.join("missing-clock"),
-      )
+      .env("CTLD_HEARTBEAT_CLOCK_FILE", fixture.root.join("clock"))
       .stdin(Stdio::null())
       .stdout(Stdio::null())
       .stderr(Stdio::null())
       .kill_on_drop(true)
       .spawn()
       .unwrap();
-    let status = timeout(Duration::from_secs(5), child.wait())
-      .await
-      .unwrap()
-      .unwrap();
+    // The real watchdog begins with a valid clock. Only fail it after the fake
+    // daemon has installed its TERM handler, including during socket startup.
+    fixture.wait_file("daemon.started").await;
+    fs::remove_file(fixture.root.join("clock")).unwrap();
+    let status = timeout(TEST_TIMEOUT, child.wait()).await.unwrap().unwrap();
     assert!(
       !status.success(),
       "entrypoint ignored watchdog failure: socket published={published}"
     );
-    if fixture.root.join("daemon.started").exists() {
-      assert!(
-        fixture.root.join("daemon.finished").exists(),
-        "tailscaled outlived the failed watchdog"
-      );
-    }
+    // Shutdown is bounded; allow the signaled child to finish scheduling its
+    // graceful exit after the parent has returned rather than assuming ordering.
+    fixture.wait_file("daemon.finished").await;
   }
 }

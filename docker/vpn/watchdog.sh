@@ -15,7 +15,9 @@ case "$now" in ''|*[!0-9]*) exit 1 ;; esac
 mkdir -p "$state/beats/$((now + grace))"
 
 live_heartbeat() {
-  IFS=' ' read -r uptime ignored < "$clock"
+  # Conditional callers suppress set -e inside this function. A failed read
+  # must not reuse the previous timestamp and keep expired interests alive.
+  IFS=' ' read -r uptime ignored < "$clock" || return 1
   now=${uptime%%.*}
   case "$now" in ''|*[!0-9]*) return 1 ;; esac
   found=false

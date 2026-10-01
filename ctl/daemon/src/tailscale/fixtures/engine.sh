@@ -46,11 +46,14 @@ if args[0] == "run":
   (container / "labels").write_text(json.dumps(labels))
   (container / "name").write_text(name)
   if (root / "legacy").exists():
-    (container / "labels").write_text(json.dumps({"io.ctl.lease": "legacy-owner"}))
+    labels = {"io.ctl.lease": "legacy-owner"}
+    (container / "labels").write_text(json.dumps(labels))
   if (root / "created_only").exists():
-    (container / "state").write_text("created")
+    state = "created"
+    (container / "state").write_text(state)
   else:
-    (container / "state").write_text("running")
+    state = "running"
+    (container / "state").write_text(state)
     watchdog = r'''
 import os
 from pathlib import Path
@@ -76,23 +79,31 @@ while container.exists():
       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
       start_new_session=True)
     (root / "watchdog.pid").write_text(str(child.pid))
+  # Docker publishes one complete inspect response, not individual property files.
+  # Cancellation may kill this CLI immediately after publication, so the snapshot
+  # is also the barrier proving a Created reservation can be safely inspected.
+  descriptor = {"Id": container_id, "Name": "/" + name,
+    "Config": {"Labels": labels},
+    "State": {"Running": state == "running", "Status": state, "ExitCode": 0},
+    "NetworkSettings": {"Ports": {"1080/tcp": [{"HostIp": "127.0.0.1", "HostPort": (root / "port").read_text()}]}}
+  }
+  temporary = container / "descriptor.pending"
+  temporary.write_text(json.dumps([descriptor]))
+  temporary.replace(container / "descriptor.json")
   print(container_id)
   if (root / "creator_client_failed").exists():
     sys.exit(1)
 
 elif args[:2] == ["container", "inspect"]:
   append("inspect.calls", args[2])
-  if not (container / "labels").exists():
+  try:
+    descriptor = json.loads((container / "descriptor.json").read_text())
+  except FileNotFoundError:
     missing()
-  name = (container / "name").read_text()
+  name = descriptor[0]["Name"].removeprefix("/")
   if args[2] not in [container_id, name]:
     missing()
-  state = (container / "state").read_text()
-  print(json.dumps([{"Id": container_id, "Name": "/" + name,
-    "Config": {"Labels": json.loads((container / "labels").read_text())},
-    "State": {"Running": state == "running", "Status": state, "ExitCode": 0},
-    "NetworkSettings": {"Ports": {"1080/tcp": [{"HostIp": "127.0.0.1", "HostPort": (root / "port").read_text()}]}}
-  }]))
+  print(json.dumps(descriptor))
 
 elif args[:2] == ["container", "ls"] or args[0] == "ps":
   if container.exists():

@@ -612,3 +612,11 @@ fn heartbeat_cannot_acknowledge_renewal_after_shutdown_is_claimed() {
   );
   assert!(!fixture.root.join("heartbeats/beats").exists());
 }
+
+#[test]
+fn watchdog_does_not_reuse_stale_time_after_the_clock_source_disappears() {
+  let mut fixture = WatchdogFixture::new();
+  assert!(fixture.target.running());
+  fs::remove_file(fixture.files.root.join("clock")).unwrap();
+  fixture.wait_exit();
+}

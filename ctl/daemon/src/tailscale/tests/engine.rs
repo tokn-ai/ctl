@@ -301,7 +301,7 @@ async fn cancellation_removes_only_its_unstarted_reservation_without_force() {
   let mut startup = Box::pin(start_config(settings, &engine.executable));
   tokio::select! {
     result = &mut startup => panic!("startup completed: {}", result.is_ok()),
-    () = engine.wait_file("container/labels") => {},
+    () = engine.wait_file("container/descriptor.json") => {},
   }
   cancel.send(()).unwrap();
   assert!(startup.await.is_err());

@@ -96,7 +96,9 @@ fn inspection(
 ) -> serde_json::Value {
   let mut labels: HashMap<String, String> = labels_arguments(metadata)
     .unwrap()
-    .chunks_exact(2)
+    .as_chunks::<2>()
+    .0
+    .iter()
     .map(|argument| argument[1].split_once('=').unwrap())
     .map(|(key, value)| (key.to_owned(), value.to_owned()))
     .collect();

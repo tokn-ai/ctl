@@ -602,5 +602,5 @@ async fn cleanup_reservation(engine: &Path, name: &str, token: &str) {
   .await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

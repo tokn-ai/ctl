@@ -4,6 +4,7 @@ import type {
   TerminalSize,
 } from "../../lib/types";
 import { sessionKey, targetKey } from "../targets/targets";
+import { hasKnownTerminalSize, mergeSessionObservation, observedAt, sameTerminalSize } from "./sessionObservation";
 
 export interface SessionListRefreshToken {
   requestId: number;
@@ -40,8 +41,10 @@ export class SessionListRefreshGuard {
 
 export function replaceSessionList(
   sessions: readonly SessionSummary[],
+  current: readonly SessionSummary[] = [],
 ): SessionSummary[] {
-  return [...sessions];
+  const previous = new Map(current.map((session) => [sessionKey(session), session]));
+  return sessions.map((session) => mergeSessionObservation(previous.get(sessionKey(session)), session));
 }
 
 export function prependSession(
@@ -49,7 +52,7 @@ export function prependSession(
   session: SessionSummary,
 ): SessionSummary[] {
   return [
-    session,
+    mergeSessionObservation(sessions.find((item) => sessionKey(item) === sessionKey(session)), session),
     ...sessions.filter((item) => sessionKey(item) !== sessionKey(session)),
   ];
 }
@@ -73,8 +76,30 @@ export function mergeTargetSessionLists(
 
   return targets.flatMap((target) => {
     const key = targetKey(target);
-    return [...(refreshed.get(key) ?? currentByTarget.get(key) ?? [])];
+    return replaceSessionList(refreshed.get(key) ?? currentByTarget.get(key) ?? [], currentByTarget.get(key));
   });
+}
+
+export function syncSessionObservation(
+  sessions: SessionSummary[],
+  identity: string,
+  observed: SessionSummary,
+): SessionSummary[] {
+  if (sessionKey(observed) !== identity || observedAt(observed) === null && !hasKnownTerminalSize(observed)) return sessions;
+  const index = sessions.findIndex((session) => sessionKey(session) === identity);
+  if (index === -1) return sessions;
+  const session = sessions[index];
+  const observation = mergeSessionObservation(session, observed);
+  if (sameTerminalSize(session.terminal_size, observation.terminal_size) &&
+    observedAt(session) === observedAt(observation) && hasKnownTerminalSize(session) === hasKnownTerminalSize(observation)) return sessions;
+  const updated = [...sessions];
+  updated[index] = {
+    ...session,
+    terminal_size: observation.terminal_size,
+    terminal_size_known: observation.terminal_size_known,
+    last_seen_at_ms: observation.last_seen_at_ms,
+  };
+  return updated;
 }
 
 export function syncSessionTerminalSize(
@@ -105,13 +130,4 @@ export function removeSession(
   identity: string,
 ): SessionSummary[] {
   return sessions.filter((session) => sessionKey(session) !== identity);
-}
-
-function sameTerminalSize(left: TerminalSize, right: TerminalSize): boolean {
-  return (
-    left.columns === right.columns &&
-    left.rows === right.rows &&
-    left.pixel_width === right.pixel_width &&
-    left.pixel_height === right.pixel_height
-  );
 }

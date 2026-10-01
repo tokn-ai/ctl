@@ -52,6 +52,8 @@ fn populated(_revision: &str) -> WorkspaceSnapshot {
     name: "shell".into(),
     last_known_cwd: Some("/work".into()),
     last_known_cwd_display: Some("~/work".into()),
+    last_known_terminal_size: None,
+    last_seen_at_ms: None,
   });
   document.tabs.push(document.sessions[0].reference().into());
   document.active_tab = document.tabs.first().cloned();

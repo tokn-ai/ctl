@@ -47,6 +47,45 @@ export function savedWorkspace(): WorkspaceSnapshot & { document: LegacyWorkspac
 }
 
 describe("workspace model", () => {
+  it("roundtrips observed dimensions and time without restoring live status", () => {
+    const document = savedWorkspace().document;
+    document.sessions[0].last_known_terminal_size = { columns: 140, rows: 38, pixel_width: null, pixel_height: null };
+    document.sessions[0].last_seen_at_ms = 1234;
+    const view = restoreWorkspace(document);
+    expect(view.sessions[0]).toMatchObject({ status: "unknown", terminal_size: document.sessions[0].last_known_terminal_size, terminal_size_known: true, last_seen_at_ms: 1234 });
+    expect(workspaceDocument(view).sessions[0]).toMatchObject(document.sessions[0]);
+  });
+
+  it("preserves standalone time without turning fallback dimensions into evidence", () => {
+    const document = savedWorkspace().document;
+    document.sessions[0].last_seen_at_ms = 1234;
+    const view = restoreWorkspace(document);
+    expect(view.sessions[0]).toMatchObject({ terminal_size: { columns: 80, rows: 24 }, terminal_size_known: false, last_seen_at_ms: 1234 });
+    const saved = workspaceDocument(view).sessions[0];
+    expect(saved.last_seen_at_ms).toBe(1234);
+    expect(saved.last_known_terminal_size).toBeUndefined();
+  });
+
+  it("retains explicitly saved geometry without inventing an observation time", () => {
+    const document = savedWorkspace().document;
+    document.sessions[0].last_known_terminal_size = { columns: 100, rows: 30, pixel_width: 0, pixel_height: 0 };
+    const view = restoreWorkspace(document);
+    const saved = workspaceDocument(view).sessions[0];
+    expect(saved.last_known_terminal_size).toEqual(document.sessions[0].last_known_terminal_size);
+    expect(saved.last_seen_at_ms).toBeUndefined();
+  });
+
+  it("does not persist legacy or invalid fallback geometry and time", () => {
+    const document = savedWorkspace().document;
+    document.sessions[0].last_known_terminal_size = { columns: 0, rows: 24, pixel_width: null, pixel_height: null };
+    document.sessions[0].last_seen_at_ms = 8_640_000_000_000_001;
+    const saved = workspaceDocument(restoreWorkspace(document)).sessions;
+    for (const session of saved) {
+      expect(session.last_seen_at_ms).toBeUndefined();
+      expect(session.last_known_terminal_size).toBeUndefined();
+    }
+  });
+
   it("restores tab order and stable references, with unverified runtime state", () => {
     const snapshot = savedWorkspace();
     const view = restoreWorkspace(snapshot.document);

@@ -10,8 +10,12 @@ use tauri::ipc::Channel;
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{sleep, timeout};
 
-use crate::dto::{AttachmentEventDto, ConnectionTargetDto, PresentationAcknowledgement};
+use crate::dto::{
+  AttachmentEventDto, ConnectionTargetDto, PresentationAcknowledgement, observation_timestamp_ms,
+};
 use crate::error::{CommandErrorDto, CommandResult};
+
+mod observation;
 
 const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(30);
@@ -536,6 +540,7 @@ pub async fn forward_attachment_events(
 ) {
   tokio::pin!(controller);
 
+  let mut observations = observation::Observations::default();
   let mut bridge_error = None;
   let outcome = loop {
     if actor.has_pending_presentation().await {
@@ -560,6 +565,11 @@ pub async fn forward_attachment_events(
         let Some(event) = event else {
           break controller.await;
         };
+        if let Err(error) = observe_event(&mut observations, &actor.attachment_id, &channel, &event) {
+          bridge_error = Some(error);
+          let _ignored = actor.control.detach().await;
+          break controller.await;
+        }
         let forwarding = forward_event(&actor, &channel, event);
         tokio::pin!(forwarding);
         let forwarded = tokio::select! {
@@ -583,6 +593,8 @@ pub async fn forward_attachment_events(
 
   let require_checkpoint = actor.has_pending_presentation().await;
   actor.clear_pending().await;
+  // A timeout/disconnect is not new contact. Flush only the last incoming time.
+  let _ignored = publish_observation(&actor.attachment_id, &channel, observations.flush());
   if let Some(error) = bridge_error {
     let _ignored = channel.send(AttachmentEventDto::attachment_error(
       &actor.attachment_id,
@@ -611,6 +623,34 @@ pub async fn forward_attachment_events(
     .release(&actor.window_label, &actor.attachment_id)
     .await;
   actor.mark_closed();
+}
+
+fn observe_event(
+  observations: &mut observation::Observations,
+  attachment_id: &str,
+  channel: &Channel<AttachmentEventDto>,
+  event: &AttachmentEvent,
+) -> CommandResult<()> {
+  // Capture receipt before filesystem writes or renderer acknowledgements can
+  // delay forwarding. Idle heartbeats are observations too.
+  let observed = observations.record(event, observation_timestamp_ms(), std::time::Instant::now());
+  publish_observation(attachment_id, channel, observed)
+}
+
+fn publish_observation(
+  attachment_id: &str,
+  channel: &Channel<AttachmentEventDto>,
+  observed_at_ms: Option<u64>,
+) -> CommandResult<()> {
+  if let Some(last_seen_at_ms) = observed_at_ms {
+    channel
+      .send(AttachmentEventDto::SessionObserved {
+        attachment_id: attachment_id.to_owned(),
+        last_seen_at_ms,
+      })
+      .map_err(|error| CommandErrorDto::new("attachment_channel_closed", error.to_string()))?;
+  }
+  Ok(())
 }
 
 async fn forward_event(
@@ -693,6 +733,34 @@ async fn forward_event(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn quiet_heartbeat_publishes_an_observation_without_a_presentation_event() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let channel = Channel::new(move |body| {
+      sender
+        .send(body.deserialize::<serde_json::Value>().unwrap())
+        .unwrap();
+      Ok(())
+    });
+    let mut observations = observation::Observations::default();
+    observe_event(
+      &mut observations,
+      "quiet-attachment",
+      &channel,
+      &AttachmentEvent::HeartbeatAck { nonce: 1 },
+    )
+    .unwrap();
+    let event = receiver.try_recv().unwrap();
+    assert_eq!(event["event_type"], "session_observed");
+    assert_eq!(event["attachment_id"], "quiet-attachment");
+    assert!(
+      event["last_seen_at_ms"]
+        .as_u64()
+        .is_some_and(crate::dto::valid_observation_timestamp)
+    );
+    assert!(receiver.try_recv().is_err());
+  }
 
   #[tokio::test]
   async fn opening_and_releasing_a_pane_preserves_sibling_reservations() {

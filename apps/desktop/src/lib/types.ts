@@ -351,6 +351,8 @@ export interface WorkspaceSession extends SessionReference {
   name: string;
   last_known_cwd: string | null;
   last_known_cwd_display: string | null;
+  last_known_terminal_size?: TerminalSize | null;
+  last_seen_at_ms?: number | null;
 }
 
 export interface WorkspaceDocument {
@@ -640,6 +642,9 @@ export interface SessionSummary {
   status: SessionStatus;
   terminal_size: TerminalSize;
   next_sequence: Sequence;
+  last_seen_at_ms?: number | null;
+  /** Internal provenance: restored fallback dimensions are never observed. */
+  terminal_size_known?: boolean;
 }
 
 export type ShellType =
@@ -822,6 +827,11 @@ export interface ShellStateChangedEvent extends AttachmentEventBase {
   shell_state: ShellStateSummary;
 }
 
+export interface SessionObservedEvent extends AttachmentEventBase {
+  event_type: "session_observed";
+  last_seen_at_ms: number;
+}
+
 export interface ServerErrorEvent extends AttachmentEventBase {
   event_type: "server_error";
   code: string;
@@ -859,6 +869,7 @@ export type AttachmentEvent =
   | PtyGeometryChangedEvent
   | LeaseStatusEvent
   | ShellStateChangedEvent
+  | SessionObservedEvent
   | ServerErrorEvent
   | SessionEndedEvent
   | AttachmentExitedEvent

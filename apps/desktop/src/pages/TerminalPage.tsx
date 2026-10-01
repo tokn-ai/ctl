@@ -80,14 +80,14 @@ import {
   SessionListRefreshGuard,
   prependSession,
   removeSession,
-  syncSessionTerminalSize,
+  syncSessionObservation,
 } from "../features/sessions/sessionListState";
+import { mergeSessionObservation } from "../features/sessions/sessionObservation";
 import { XtermRenderer } from "../features/terminal/XtermRenderer";
 import {
   closeTerminalTab,
   openTerminalTab,
   reconcileTerminalTabs,
-  syncTabTerminalSize,
 } from "../features/tabs/tabState";
 import {
   compactTerminalTitleParts,
@@ -439,7 +439,7 @@ function TerminalWorkbench() {
             const identity = sessionKey(known);
             refreshed.set(
               identity,
-              inspection.session ?? {
+              inspection.session ? mergeSessionObservation(known, inspection.session) : {
                 ...known,
                 status:
                   inspection.error?.code === "session_not_found"
@@ -1314,12 +1314,13 @@ function TerminalWorkbench() {
         : state.phase === "error" ? state.error_code === "session_not_found" ? "missing" : "unreachable"
         : state.phase === "attached" ? "running" : null;
       const update = (current: SessionSummary[]) => {
-        const resized = syncSessionTerminalSize(current, key, session.terminal_size);
-        return status && resized.some((candidate) => sameSession(candidate, session) && candidate.status !== status)
-          ? resized.map((candidate) => sameSession(candidate, session) ? { ...candidate, status } : candidate)
-          : resized;
+        const resized = syncSessionObservation(current, key, session);
+        if (status && resized.some((candidate) => sameSession(candidate, session) && candidate.status !== status)) {
+          refreshGuardRef.current.recordMutation();
+          return resized.map((candidate) => sameSession(candidate, session) ? { ...candidate, status } : candidate);
+        }
+        return resized;
       };
-      refreshGuardRef.current.recordMutation();
       setSessions((current) => {
         const next = update(current);
         sessionsRef.current = next;
@@ -1368,21 +1369,20 @@ function TerminalWorkbench() {
     if (!attachedSession || !attachedTerminalSize) {
       return;
     }
-    refreshGuardRef.current.recordMutation();
     setSessions((current) => {
-      const next = syncSessionTerminalSize(
+      const next = syncSessionObservation(
         current,
         sessionKey(attachedSession),
-        attachedTerminalSize,
+        attachedSession,
       );
       sessionsRef.current = next;
       return next;
     });
     setTabs((current) => {
-      const next = syncTabTerminalSize(
+      const next = syncSessionObservation(
         current,
         sessionKey(attachedSession),
-        attachedTerminalSize,
+        attachedSession,
       );
       tabsRef.current = next;
       return next;
@@ -1393,6 +1393,8 @@ function TerminalWorkbench() {
     attachedTerminalSize?.rows,
     attachedTerminalSize?.pixel_width,
     attachedTerminalSize?.pixel_height,
+    attachedSession?.last_seen_at_ms,
+    attachedSession?.terminal_size_known,
   ]);
 
   useEffect(() => {

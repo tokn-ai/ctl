@@ -56,6 +56,8 @@ fn legacy_populated() -> WorkspaceDocument {
     name: "shell".into(),
     last_known_cwd: Some("/work".into()),
     last_known_cwd_display: Some("~/work".into()),
+    last_known_terminal_size: None,
+    last_seen_at_ms: None,
   });
   document.tabs.push(document.sessions[0].reference().into());
   document.active_tab = document.tabs.first().cloned();
@@ -67,6 +69,73 @@ fn populated() -> WorkspaceDocument {
   document.schema_version = 8;
   document.hosts.clear();
   document
+}
+
+#[test]
+fn previous_workspace_sessions_remain_readable_without_observation_metadata() {
+  let mut value = serde_json::to_value(populated()).unwrap();
+  let session = value["sessions"][0].as_object_mut().unwrap();
+  session.remove("last_known_terminal_size");
+  session.remove("last_seen_at_ms");
+  let document: WorkspaceDocument = serde_json::from_value(value).unwrap();
+  document.validate().unwrap();
+  assert!(document.sessions[0].last_known_terminal_size.is_none());
+  assert!(document.sessions[0].last_seen_at_ms.is_none());
+}
+
+#[test]
+fn last_confirmed_session_geometry_and_observation_survive_workspace_roundtrip() {
+  let fixture = Fixture::new();
+  let mut document = populated();
+  document.sessions[0].last_known_terminal_size = Some(TerminalSizeDto {
+    columns: 137,
+    rows: 41,
+    pixel_width: Some(1096),
+    pixel_height: Some(656),
+  });
+  document.sessions[0].last_seen_at_ms = Some(1_759_300_000_000);
+  let saved = fixture
+    .repository()
+    .update(UpdateWorkspaceRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load().unwrap(), saved);
+  let value: serde_json::Value =
+    serde_json::from_slice(&fs::read(fixture.0.join("workspace.json")).unwrap()).unwrap();
+  assert_eq!(
+    value["document"]["sessions"][0]["last_seen_at_ms"],
+    1_759_300_000_000_u64
+  );
+  assert_eq!(
+    value["document"]["sessions"][0]["last_known_terminal_size"]["columns"],
+    137
+  );
+}
+
+#[test]
+fn invalid_session_observation_metadata_is_rejected() {
+  for (columns, rows) in [(0, 24), (80, 0)] {
+    let mut document = populated();
+    document.sessions[0].last_known_terminal_size = Some(TerminalSizeDto {
+      columns,
+      rows,
+      pixel_width: None,
+      pixel_height: None,
+    });
+    assert_eq!(document.validate().unwrap_err().code, "workspace_invalid");
+  }
+  for timestamp in [0, crate::dto::MAX_OBSERVATION_TIMESTAMP_MS + 1, u64::MAX] {
+    let mut document = populated();
+    document.sessions[0].last_seen_at_ms = Some(timestamp);
+    assert_eq!(document.validate().unwrap_err().code, "workspace_invalid");
+  }
+  for timestamp in [1, crate::dto::MAX_OBSERVATION_TIMESTAMP_MS] {
+    let mut document = populated();
+    document.sessions[0].last_seen_at_ms = Some(timestamp);
+    document.validate().unwrap();
+  }
 }
 
 #[test]

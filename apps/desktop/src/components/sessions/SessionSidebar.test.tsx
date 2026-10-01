@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -95,9 +95,93 @@ function renderHostConnection(
   return props;
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe("SessionSidebar", () => {
+  it.each(["idle", "connecting", "reconnecting", "retry_wait", "disconnected", "error", "ended"] as const)(
+    "shows compact observed age alongside the %s connection state", (phase) => {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-10-01T12:00:00.000Z");
+      const known = { ...session, last_seen_at_ms: Date.parse("2026-10-01T10:00:00.000Z") };
+      renderHostConnection(undefined, {
+        sessions: [known],
+        attachmentStates: new Map([[sessionKey(known), { ...initialAttachmentState(), phase, session: known }]]),
+      });
+      const row = screen.getByRole("button", { name: "Shell — first" });
+      const age = within(row).getByText("2h ago");
+      expect(age.tagName).toBe("TIME");
+      expect(age.closest(".session-age")?.parentElement).toBe(row.querySelector("small"));
+      expect(age.closest(".session-detail-label")).toBeNull();
+      expect(age.getAttribute("datetime")).toBe("2026-10-01T10:00:00.000Z");
+      expect(age.title).toBe("Last observed by this app: 2026-10-01T10:00:00.000Z");
+      expect(row.getAttribute("aria-description")).toBe(age.title);
+      expect(row.querySelector(".session-status")?.getAttribute("data-status")).toBe(phase);
+      expect(row.querySelector("small")?.title).toContain("80×24");
+      expect(row.textContent).not.toContain("80×24");
+      expect(row.textContent).not.toContain("Seen 2h ago");
+      expect(row.textContent).not.toContain("Last seen 2h ago");
+    },
+  );
+
+  it("keeps attached metadata without an age or relative-time timer", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-10-01T12:00:00.000Z");
+    const known = { ...session, last_seen_at_ms: Date.parse("2026-10-01T10:00:00.000Z") };
+    renderHostConnection(undefined, {
+      sessions: [known],
+      attachmentStates: new Map([[sessionKey(known), { ...initialAttachmentState(), phase: "attached", session: known }]]),
+    });
+    const row = screen.getByRole("button", { name: "Shell — first" });
+    expect(within(row).getByText("Attached")).toBeTruthy();
+    expect(row.querySelector("time")).toBeNull();
+    expect(row.querySelector("small")?.title).toContain("80×24");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not present restored placeholder dimensions or invent last-seen time", () => {
+    vi.useFakeTimers();
+    renderHostConnection(undefined, { sessions: [session, { ...secondSession, last_seen_at_ms: NaN }] });
+    for (const name of ["first", "second"]) {
+      const row = screen.getByRole("button", { name: `Shell — ${name}` });
+      expect(row.querySelector("time")).toBeNull();
+      expect(row.querySelector("small")?.title).not.toContain("80×24");
+      expect(row.getAttribute("aria-description")).toBeNull();
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves unknown size provenance even when a last-seen timestamp is saved", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-10-01T12:00:00.000Z");
+    renderHostConnection(undefined, { sessions: [{
+      ...session, terminal_size_known: false, last_seen_at_ms: Date.parse("2026-10-01T10:00:00.000Z"),
+    }] });
+    const row = screen.getByRole("button", { name: "Shell — first" });
+    expect(within(row).getByText("2h ago")).toBeTruthy();
+    expect(row.querySelector("small")?.title).not.toContain("80×24");
+  });
+
+  it("refreshes every unattached age with one sidebar timer and releases it on close", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-10-01T12:00:00.000Z");
+    renderHostConnection(undefined, { sessions: [
+      { ...session, last_seen_at_ms: Date.parse("2026-10-01T11:00:30.000Z") },
+      { ...secondSession, last_seen_at_ms: Date.parse("2026-10-01T10:00:30.000Z") },
+    ] });
+    expect(screen.getByText("59m ago")).toBeTruthy();
+    expect(screen.getByText("1h ago")).toBeTruthy();
+    expect(vi.getTimerCount()).toBe(1);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByText("59m ago")).toBeNull();
+    expect(screen.getByText("1h ago")).toBeTruthy();
+    expect(screen.getByText("2h ago")).toBeTruthy();
+    cleanup();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([
     [{ state: "available", reason: null }, "SSH available"],
     [{ state: "unavailable", reason: "connection_refused" }, "SSH unavailable"],
@@ -399,7 +483,7 @@ describe("SessionSidebar", () => {
     expect(markup).toContain(`title="${fullTitle}"`);
     expect(markup).toContain("<strong>…/desktop — …mux-app</strong>");
     expect(markup).toContain(
-      `<small title="${session.name} · Last seen running · Session last reported running">${session.name}<span aria-hidden="true"> · </span>`,
+      `<small class="session-details" title="${session.name} · Last seen running · Session last reported running"><span class="session-detail-label">${session.name}<span aria-hidden="true"> · </span>`,
     );
     expect(markup).not.toContain(`<strong>${session.name}</strong>`);
   });

@@ -23,7 +23,7 @@ use crate::dto::{
   OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentRequestDto,
   RestartLocalDaemonResponseDto, SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto,
   SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, SshConfigHostCatalogDto,
-  SshConfigHostDto, TargetRequestDto, decode_input, parse_sequence,
+  SshConfigHostDto, TargetRequestDto, decode_input, observation_timestamp_ms, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -109,6 +109,7 @@ async fn discover_sessions(request: TargetRequestDto) -> CommandResult<SessionLi
   let response = rmux_request(stream, &client_identity(), ClientMessage::ListSessions)
     .await
     .map_err(CommandErrorDto::client)?;
+  let observed_at_ms = observation_timestamp_ms();
   match response {
     ServerMessage::SessionList { sessions } => Ok(SessionListDto {
       // A large inventory or stalled metadata lookup must not prevent import.
@@ -120,7 +121,7 @@ async fn discover_sessions(request: TargetRequestDto) -> CommandResult<SessionLi
       .unwrap_or_default(),
       sessions: sessions
         .into_iter()
-        .map(|session| SessionDto::new(session, request.target.clone()))
+        .map(|session| SessionDto::observed_at(session, request.target.clone(), observed_at_ms))
         .collect(),
     }),
     response => Err(unexpected_response("session_list", &response)),

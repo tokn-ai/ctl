@@ -127,6 +127,26 @@ impl Repository {
       .connections
       .iter()
       .position(|connection| connection.connection_id == input.connection_id);
+    if let Some(index) = existing
+      && !matches!(
+        (
+          &current.document.connections[index].settings,
+          &input.settings
+        ),
+        (
+          VpnSettings::Openconnect { .. },
+          VpnSettingsInput::Openconnect { .. }
+        ) | (
+          VpnSettings::Tailscale { .. },
+          VpnSettingsInput::Tailscale { .. }
+        )
+      )
+    {
+      return Err(error(
+        "vpn_connection_provider_changed",
+        "Create a new connection to use a different VPN provider.",
+      ));
+    }
     let settings = match input.settings {
       VpnSettingsInput::Openconnect {
         url,
@@ -380,13 +400,19 @@ fn not_found() -> CommandErrorDto {
 }
 
 fn require_disconnected(connection_id: &str, status: &VpnSnapshot) -> CommandResult<()> {
+  if !status.discovery_warnings.is_empty() {
+    return Err(error(
+      "vpn_discovery_incomplete",
+      "VPN container status is incomplete. Refresh before changing saved connections.",
+    ));
+  }
   if status.connections.iter().any(|connection| {
     connection.connection_id.as_deref() == Some(connection_id)
       && connection.state != VpnState::Stopped
   }) {
     return Err(error(
       "vpn_connection_active",
-      "Disconnect this VPN before changing its saved connection.",
+      "Wait until this VPN container stops before changing its saved connection.",
     ));
   }
   Ok(())

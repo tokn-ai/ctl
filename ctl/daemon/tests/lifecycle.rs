@@ -113,3 +113,74 @@ async fn restart_replaces_only_an_isolated_owner_and_verifies_the_new_build() {
   stop_owner(&owner.socket()).await;
   assert_eq!(client.probe().await.unwrap(), DaemonStatus::Absent);
 }
+
+#[tokio::test]
+async fn vpn_status_observes_shared_inventory_once_per_request() {
+  let directory =
+    PathBuf::from("/tmp").join(format!("cl-vpn-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+  std::fs::create_dir(&directory).unwrap();
+  std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let owner = IsolatedOwner(directory);
+  let engine = owner.0.join("docker");
+  std::fs::write(
+    &engine,
+    "#!/bin/sh\n[ \"$1\" = ps ] || exit 1\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\n",
+  )
+  .unwrap();
+  std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctld"))
+    .arg("--socket")
+    .arg(owner.socket())
+    .env("PATH", &owner.0)
+    .env_remove("CTLD_ASKPASS")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+  let lifecycle = Client::new(owner.socket());
+  timeout(Duration::from_secs(10), async {
+    loop {
+      if matches!(
+        lifecycle.probe().await.unwrap(),
+        DaemonStatus::Running { .. }
+      ) {
+        break;
+      }
+      sleep(Duration::from_millis(20)).await;
+    }
+  })
+  .await
+  .unwrap();
+  // The readiness query observes lifecycle metadata independently of VPN status.
+  let prior = std::fs::read_to_string(owner.0.join("docker.calls"))
+    .unwrap_or_default()
+    .lines()
+    .count();
+  let snapshot = ctld_ipc::vpn::Client::new(owner.socket())
+    .list()
+    .await
+    .unwrap();
+  assert!(snapshot.connections.is_empty());
+  assert!(snapshot.discovery_warnings.is_empty());
+  let calls = std::fs::read_to_string(owner.0.join("docker.calls")).unwrap();
+  let calls: Vec<_> = calls.lines().skip(prior).collect();
+  assert_eq!(calls.len(), 1, "shared inventory is scanned once");
+  assert_eq!(
+    calls
+      .iter()
+      .filter(|call| call.contains("label=io.ctl.vpn.protocol=1"))
+      .count(),
+    1,
+  );
+  assert!(!calls[0].contains("label=io.ctl.service"));
+  stop_owner(&owner.socket()).await;
+  assert!(
+    timeout(Duration::from_secs(5), child.wait())
+      .await
+      .unwrap()
+      .unwrap()
+      .success()
+  );
+}

@@ -1,0 +1,11 @@
+*
+!docker/
+!docker/openconnect/
+!docker/openconnect/entrypoint.sh
+!docker/openconnect/ssh-handshake.sh
+!docker/openconnect/vpn-network.sh
+!docker/openconnect/healthcheck.sh
+!docker/openconnect/Dockerfile
+!docker/vpn/
+!docker/vpn/heartbeat.sh
+!docker/vpn/watchdog.sh

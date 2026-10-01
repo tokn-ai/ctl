@@ -1,21 +1,20 @@
-//! Persistent Tailscale identities with a short-lived, ctld-owned container.
+//! Persistent Tailscale identities in independently heartbeated shared containers.
 
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnState, VpnStatus};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncWriteExt as _;
-use tokio::process::Child;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 
-use crate::openconnect::{engine_command, find_engine, parse_published_port};
+use crate::openconnect::{engine_command, find_engine};
+use crate::vpn_container::{self, ContainerDescriptor, CreationGuard, Interest, RuntimeMetadata};
 
 mod socks;
 use socks::ready as socks_ready;
@@ -24,12 +23,13 @@ const IMAGE: &str = "docker.io/tailscale/tailscale:v1.94.2";
 const ENTRYPOINT: &str = include_str!("../../../docker/tailscale/entrypoint.sh");
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_mins(2);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const ADOPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(super) struct Config {
   container_name: String,
   hostname: String,
   accept_routes: bool,
+  runtime: RuntimeMetadata,
   pub(super) cancellation: Option<oneshot::Receiver<()>>,
 }
 
@@ -57,6 +57,7 @@ impl Config {
         .unwrap_or_else(|| format!("rmux-{}", &container_name[15..27])),
       container_name,
       accept_routes: *accept_routes,
+      runtime: RuntimeMetadata::for_connection(connection)?,
       cancellation: None,
     })
   }
@@ -71,14 +72,10 @@ fn container_name(owner: &Path, connection_id: &str) -> String {
 }
 
 pub(super) struct ManagedVpn {
-  child: Child,
-  heartbeat: JoinHandle<()>,
-  monitor: Option<JoinHandle<()>>,
+  interest: Option<Interest>,
+  monitor: Option<JoinHandle<io::Result<ExitStatus>>>,
   status: watch::Receiver<VpnStatus>,
-  engine: PathBuf,
-  container_name: String,
-  container_id: Option<String>,
-  lease_id: String,
+  container: ContainerDescriptor,
 }
 
 impl ManagedVpn {
@@ -87,123 +84,88 @@ impl ManagedVpn {
   }
 
   pub(super) async fn exited(&mut self) -> io::Result<ExitStatus> {
-    self.child.wait().await
+    // The actor polls and drops this future repeatedly. Retaining the monitor
+    // task preserves the immutable-ID inspection and its timers between polls.
+    let result = self
+      .monitor
+      .as_mut()
+      .expect("ready VPN has a monitor")
+      .await
+      .map_err(io::Error::other);
+    // A completed JoinHandle cannot be polled again during later shutdown.
+    self.monitor.take();
+    result?
   }
 
   pub(super) async fn shutdown(&mut self) {
-    self.heartbeat.abort();
+    self.interest.take();
     if let Some(monitor) = self.monitor.take() {
       monitor.abort();
+      let _ = monitor.await;
     }
-    if let Some(container_id) = &self.container_id {
-      let _ = timeout(
-        COMMAND_TIMEOUT,
-        engine_command(&self.engine)
-          .args(["stop", "--time", "3", container_id])
-          .stdout(Stdio::null())
-          .status(),
-      )
-      .await;
-      // An engine may report a successful stop for a Created container without
-      // applying --rm. Remove it explicitly by the verified immutable ID too.
-      let _ = timeout(
-        COMMAND_TIMEOUT,
-        engine_command(&self.engine)
-          .args(["rm", "--force", container_id])
-          .stdout(Stdio::null())
-          .status(),
-      )
-      .await;
-    }
-    let _ = self.child.start_kill();
-    let _ = timeout(COMMAND_TIMEOUT, self.child.wait()).await;
-  }
-
-  async fn cancel_startup(&mut self) {
-    self.heartbeat.abort();
-    let _ = self.child.start_kill();
-    let _ = timeout(COMMAND_TIMEOUT, self.child.wait()).await;
-    // Create may have reached the engine just before the attached client died.
-    // Inspect after reaping it, including a short window for a late engine
-    // response. Created-but-not-started containers have no heartbeat watchdog.
-    // Never remove a reservation with another owner's random lease label.
-    let _ = timeout(Duration::from_secs(2), async {
-      loop {
-        match inspect_owned(&self.engine, &self.container_name, &self.lease_id).await {
-          Ok(container) => {
-            self.container_id = Some(container.id);
-            break;
-          }
-          Err(error) if error.kind() == io::ErrorKind::PermissionDenied => break,
-          Err(_) => sleep(Duration::from_millis(50)).await,
-        }
-      }
-    })
-    .await;
-    self.shutdown().await;
   }
 
   fn start_monitor(&mut self, updates: watch::Sender<VpnStatus>, port: u16) {
-    let engine = self.engine.clone();
-    let container_name = self.container_name.clone();
-    let container_id = self
-      .container_id
-      .clone()
-      .expect("ready container has an ID");
+    let container = self.container.clone();
     self.monitor = Some(tokio::spawn(async move {
+      let mut exited = Box::pin(container.exited());
       let mut ticks = interval(Duration::from_secs(2));
       ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
       loop {
-        ticks.tick().await;
-        let status = if let Ok(backend) = backend_status(&engine, &container_id).await {
-          let status = backend.status(&container_name, port);
-          if status.running && socks_ready(port).await.is_err() {
-            let mut pending = pending_status(&container_name);
-            pending.message = Some("Waiting for the Tailscale SOCKS5 proxy".into());
-            pending
-          } else {
-            status
+        tokio::select! {
+          result = &mut exited => return result,
+          _ = ticks.tick() => {
+            let status = discovered_status(&container.engine, &container.id, &container.name, port).await;
+            if updates.send(container_status(&container, status)).is_err() {
+              return Err(io::Error::new(io::ErrorKind::Interrupted, "Tailscale status monitor was released"));
+            }
           }
-        } else {
-          let mut status = pending_status(&container_name);
-          status.message = Some("Waiting for the Tailscale service".into());
-          status
-        };
-        if updates.send(status).is_err() {
-          break;
         }
       }
     }));
   }
 
-  async fn wait_ready(&mut self) -> io::Result<(u16, BackendStatus)> {
-    timeout(START_TIMEOUT, async {
+  async fn wait_ready(&self) -> io::Result<(u16, BackendStatus)> {
+    let mut exited = Box::pin(self.container.exited());
+    let ready = async {
       loop {
-        if self.child.try_wait()?.is_some() {
-          return Err(io::Error::other("Tailscale container exited; check the container engine and image availability, or whether this profile is already owned by another ctld"));
-        }
-        if let Ok((container_id, port)) = published_port(&self.engine, &self.container_name, &self.lease_id).await
-          && let Ok(status) = backend_status(&self.engine, &container_id).await
+        if let Some(port) = self.container.port
+          && let Ok(status) = backend_status(&self.container.engine, &self.container.id).await
           && status.is_actionable()
           && socks_ready(port).await.is_ok()
         {
-          self.container_id = Some(container_id);
           return Ok((port, status));
         }
         sleep(Duration::from_millis(250)).await;
       }
-    }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Tailscale container did not start within 120 seconds; check the container engine and image download"))?
+    };
+    tokio::select! {
+      result = ready => result,
+      result = &mut exited => {
+        result?;
+        Err(io::Error::other("Tailscale container exited before becoming ready"))
+      }
+    }
   }
 }
 
 impl Drop for ManagedVpn {
   fn drop(&mut self) {
-    self.heartbeat.abort();
+    self.interest.take();
     if let Some(monitor) = &self.monitor {
       monitor.abort();
     }
-    let _ = self.child.start_kill();
   }
+}
+
+fn container_status(container: &ContainerDescriptor, mut status: VpnStatus) -> VpnStatus {
+  let metadata = container.basic_status();
+  status.vpn_id = metadata.vpn_id;
+  status.connection_id = metadata.connection_id;
+  status.container_id = Some(container.id.clone());
+  status.shared_container = container.shared_supported;
+  status.locally_connected = Some(true);
+  status
 }
 
 pub(super) async fn start(config: Config) -> io::Result<ManagedVpn> {
@@ -299,164 +261,150 @@ async fn cancelled(cancellation: Option<oneshot::Receiver<()>>) {
   }
 }
 
-async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
-  // Docker/Podman reserve names atomically. The deterministic name prevents
-  // another daemon mounting this profile's identity while its owner is alive.
-  // A killed owner releases that reservation after the 15-second watchdog.
-  let container_name = config.container_name;
-  let cancellation = config.cancellation;
-  let lease_id = uuid::Uuid::new_v4().simple().to_string();
-  let volume = format!("{container_name}-state:/state");
-  let mut child = engine_command(engine)
-    .args([
-      "run",
-      "--rm",
-      "--init",
-      "--interactive",
-      "--pull=missing",
-      "--restart=no",
-      "--name",
-      &container_name,
-      "--label",
-      "io.ctl.service=tailscale",
-      "--label",
-      &format!("io.ctl.lease={lease_id}"),
-      "--publish",
-      "127.0.0.1::1080/tcp",
-      "--volume",
-      &volume,
-      "--env",
-      &format!("CTLD_HOSTNAME={}", config.hostname),
-      "--env",
-      &format!("CTLD_ACCEPT_ROUTES={}", config.accept_routes),
-      "--entrypoint",
-      "/bin/sh",
-      IMAGE,
-      "-c",
-      ENTRYPOINT,
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .spawn()?;
-  let mut stdin = child.stdin.take().expect("container stdin was piped");
-  let heartbeat = tokio::spawn(async move {
-    let mut ticks = interval(HEARTBEAT_INTERVAL);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVpn> {
+  let cancellation = config.cancellation.take();
+  let mut reservation = None;
+  let result = {
+    let startup = async {
+      let container = prepare_container(&config, engine, &mut reservation).await?;
+      let interest = container.interest().await?;
+      let (updates, status) = watch::channel(container_status(
+        &container,
+        pending_status(&container.name),
+      ));
+      let mut vpn = ManagedVpn {
+        interest: Some(interest),
+        monitor: None,
+        status,
+        container,
+      };
+      let (port, backend) = vpn.wait_ready().await?;
+      updates.send_replace(container_status(
+        &vpn.container,
+        backend.status(&vpn.container.name, port),
+      ));
+      vpn.start_monitor(updates, port);
+      Ok(vpn)
+    };
+    tokio::select! {
+      result = timeout(START_TIMEOUT, startup) => result.unwrap_or_else(|_| Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "Tailscale container did not start within 120 seconds; check the container engine and image download",
+      ))),
+      () = cancelled(cancellation) => Err(io::Error::new(io::ErrorKind::Interrupted, "Tailscale startup was cancelled")),
+    }
+  };
+  if result.is_err()
+    && let Some(reservation) = &mut reservation
+  {
+    reservation.cleanup().await;
+  }
+  result
+}
+
+async fn prepare_container(
+  config: &Config,
+  engine: &Path,
+  reservation: &mut Option<CreationGuard>,
+) -> io::Result<ContainerDescriptor> {
+  if let Some(container) = vpn_container::inspect_named(engine, &config.container_name).await? {
+    container.compatible(&config.runtime)?;
+    return await_running(config, engine).await;
+  }
+  // The engine atomically reserves the stable profile name. A losing creator
+  // adopts the compatible winner rather than opening a second identity volume.
+  let token = uuid::Uuid::new_v4().to_string();
+  *reservation = Some(CreationGuard::new(
+    engine.to_path_buf(),
+    config.container_name.clone(),
+    token.clone(),
+  ));
+  let result = run_container(config, engine, &token).await;
+  match await_running(config, engine).await {
+    Ok(container) => {
+      reservation
+        .as_mut()
+        .expect("create reservation exists")
+        .disarm();
+      Ok(container)
+    }
+    Err(error) => match result {
+      Err(create_error) if error.kind() == io::ErrorKind::TimedOut => Err(create_error),
+      _ => Err(error),
+    },
+  }
+}
+
+async fn await_running(config: &Config, engine: &Path) -> io::Result<ContainerDescriptor> {
+  timeout(ADOPTION_TIMEOUT, async {
     loop {
-      ticks.tick().await;
-      if !matches!(
-        timeout(HEARTBEAT_INTERVAL, stdin.write_all(b"ping\n")).await,
-        Ok(Ok(()))
-      ) {
-        break;
+      if let Some(container) = vpn_container::inspect_named(engine, &config.container_name).await? {
+        container.compatible(&config.runtime)?;
+        if container.running && container.port.is_some() {
+          return Ok(container);
+        }
+        if container.state != "created" && !container.running {
+          return Err(io::Error::other(
+            "Tailscale container is stopped; recreate it before connecting",
+          ));
+        }
       }
+      sleep(Duration::from_millis(50)).await;
     }
-  });
-  let (updates, status) = watch::channel(pending_status(&container_name));
-  let mut vpn = ManagedVpn {
-    child,
-    heartbeat,
-    monitor: None,
-    status,
-    engine: engine.to_path_buf(),
-    container_name,
-    container_id: None,
-    lease_id,
-  };
-  let startup = tokio::select! {
-    result = vpn.wait_ready() => result,
-    () = cancelled(cancellation) => {
-      vpn.cancel_startup().await;
-      return Err(io::Error::new(io::ErrorKind::Interrupted, "Tailscale startup was cancelled"));
-    }
-  };
-  let (port, backend) = match startup {
-    Ok(ready) => ready,
-    Err(error) => {
-      vpn.cancel_startup().await;
-      return Err(error);
-    }
-  };
-  updates.send_replace(backend.status(&vpn.container_name, port));
-  vpn.start_monitor(updates, port);
-  Ok(vpn)
+  })
+  .await
+  .map_err(|_| {
+    io::Error::new(
+      io::ErrorKind::TimedOut,
+      "Tailscale shared container did not become available",
+    )
+  })?
 }
 
-async fn published_port(
-  engine: &Path,
-  container_name: &str,
-  lease_id: &str,
-) -> io::Result<(String, u16)> {
-  let container = inspect_owned(engine, container_name, lease_id).await?;
-  let network = container
-    .network
-    .ok_or_else(|| io::Error::other("container network is not available yet"))?;
-  Ok((
-    container.id,
-    parse_published_port(&serde_json::to_vec(&network.ports)?)?,
-  ))
-}
-
-#[derive(Deserialize)]
-struct Container {
-  #[serde(rename = "Id", alias = "ID")]
-  id: String,
-  #[serde(rename = "Config")]
-  config: ContainerConfig,
-  #[serde(rename = "NetworkSettings", default)]
-  network: Option<ContainerNetwork>,
-}
-
-#[derive(Deserialize)]
-struct ContainerConfig {
-  #[serde(rename = "Labels", default)]
-  labels: Option<HashMap<String, String>>,
-}
-
-#[derive(Deserialize)]
-struct ContainerNetwork {
-  #[serde(rename = "Ports", default)]
-  ports: serde_json::Value,
-}
-
-async fn inspect_owned(
-  engine: &Path,
-  container_name: &str,
-  lease_id: &str,
-) -> io::Result<Container> {
-  // Raw inspect JSON works across Docker and Podman. Their Go template data
-  // exposes the container ID under incompatible field names (.Id versus .ID).
-  let output = timeout(
-    COMMAND_TIMEOUT,
-    engine_command(engine)
-      .args(["container", "inspect", container_name])
-      .output(),
-  )
-  .await??;
+async fn run_container(config: &Config, engine: &Path, token: &str) -> io::Result<()> {
+  let volume = format!("{}-state:/state", config.container_name);
+  let mut command = engine_command(engine);
+  command.args([
+    "run",
+    "--detach",
+    "--rm",
+    "--init",
+    "--pull=missing",
+    "--restart=no",
+    "--name",
+    &config.container_name,
+    "--label",
+    &format!("io.ctl.vpn.creator={token}"),
+    "--publish",
+    "127.0.0.1::1080/tcp",
+    "--volume",
+    &volume,
+    "--env",
+    &format!("CTLD_HOSTNAME={}", config.hostname),
+    "--env",
+    &format!("CTLD_ACCEPT_ROUTES={}", config.accept_routes),
+  ]);
+  command.args(vpn_container::labels_arguments(&config.runtime)?);
+  let output = command
+    .args(["--entrypoint", "/bin/sh", IMAGE, "-c", &entrypoint()])
+    .stdout(Stdio::piped())
+    .output()
+    .await?;
   if !output.status.success() {
-    return Err(io::Error::other("container port is not available yet"));
-  }
-  parse_owned_container(&output.stdout, lease_id)
-}
-
-fn parse_owned_container(bytes: &[u8], lease_id: &str) -> io::Result<Container> {
-  let mut containers: Vec<Container> = serde_json::from_slice(bytes)?;
-  if containers.len() != 1 {
-    return Err(io::Error::other("expected one Tailscale container"));
-  }
-  let container = containers.pop().expect("exactly one inspected container");
-  let lease = container
-    .config
-    .labels
-    .as_ref()
-    .and_then(|labels| labels.get("io.ctl.lease"));
-  if lease.map(String::as_str) != Some(lease_id) || container.id.is_empty() {
-    return Err(io::Error::new(
-      io::ErrorKind::PermissionDenied,
-      "Tailscale container belongs to another owner",
+    return Err(io::Error::other(
+      "Could not create the Tailscale container; check the engine and image availability",
     ));
   }
-  Ok(container)
+  Ok(())
+}
+
+fn entrypoint() -> String {
+  format!(
+    "mkdir -p /run/ctl; chmod 700 /run/ctl\ncat > /run/ctl/heartbeat.sh <<'CTLD_HEARTBEAT'\n{}\nCTLD_HEARTBEAT\ncat > /run/ctl/watchdog.sh <<'CTLD_WATCHDOG'\n{}\nCTLD_WATCHDOG\n{}",
+    vpn_container::HEARTBEAT_SCRIPT,
+    vpn_container::WATCHDOG_SCRIPT,
+    ENTRYPOINT,
+  )
 }
 
 async fn backend_status(engine: &Path, container_name: &str) -> io::Result<BackendStatus> {
@@ -478,6 +426,29 @@ async fn backend_status(engine: &Path, container_name: &str) -> io::Result<Backe
   // `tailscale status` may exit nonzero before login while returning valid JSON.
   serde_json::from_slice(&output.stdout)
     .map_err(|_| io::Error::other("Tailscale status is not available yet"))
+}
+
+/// Observes a discovered container without acquiring a heartbeat interest.
+pub(super) async fn discovered_status(
+  engine: &Path,
+  container_id: &str,
+  container_name: &str,
+  port: u16,
+) -> VpnStatus {
+  if let Ok(backend) = backend_status(engine, container_id).await {
+    let status = backend.status(container_name, port);
+    if status.running && socks_ready(port).await.is_err() {
+      let mut pending = pending_status(container_name);
+      pending.message = Some("Waiting for the Tailscale SOCKS5 proxy".into());
+      pending
+    } else {
+      status
+    }
+  } else {
+    let mut pending = pending_status(container_name);
+    pending.message = Some("Waiting for the Tailscale service".into());
+    pending
+  }
 }
 
 fn pending_status(container_name: &str) -> VpnStatus {

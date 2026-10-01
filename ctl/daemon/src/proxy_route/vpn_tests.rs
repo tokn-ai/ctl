@@ -36,7 +36,7 @@ impl OwnerFixture {
         ctld_ipc::write_frame(
           &mut stream,
           &ServerMessage::VpnStatus {
-            status: connections.first().cloned().unwrap_or_default(),
+            status: connections.first().cloned().unwrap_or_default().into(),
             snapshot: Some(VpnSnapshot {
               connections,
               supports_multiple: true,

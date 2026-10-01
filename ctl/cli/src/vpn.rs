@@ -29,13 +29,13 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
-  /// Print every managed VPN connection without starting ctld.
+  /// Print local connections and shared VPN containers without starting ctld.
   Status {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
   },
-  /// Stop a VPN connection, keeping ctld running.
+  /// Release this daemon's VPN connection, keeping ctld running.
   Stop {
     /// VPN ID from status; required when multiple VPNs are running.
     #[arg(value_name = "VPN_ID")]
@@ -71,7 +71,16 @@ pub async fn run(command: Command) -> Result<(), Error> {
       let output = if json {
         serde_json::to_string(&snapshot)?
       } else {
-        format_statuses(&snapshot.connections)
+        let mut output =
+          if snapshot.connections.is_empty() && !snapshot.discovery_warnings.is_empty() {
+            "VPN inventory unavailable.".into()
+          } else {
+            format_statuses(&snapshot.connections)
+          };
+        for warning in &snapshot.discovery_warnings {
+          let _ = write!(output, "\n\nWarning: {}", crate::table::text(warning));
+        }
+        output
       };
       println!("{output}");
       return Ok(());
@@ -95,12 +104,16 @@ pub async fn run(command: Command) -> Result<(), Error> {
 fn status_row(status: &ctld_ipc::VpnStatus) -> [String; 6] {
   use ctld_ipc::VpnState;
 
-  let state = match status.state {
-    VpnState::Stopped => "disconnected",
-    VpnState::Starting if status.auth_url.is_some() => "sign-in required",
-    VpnState::Starting => "starting",
-    VpnState::Connected => "connected",
-    VpnState::Stopping => "stopping",
+  let state = if status.status_unavailable {
+    "unavailable"
+  } else {
+    match status.state {
+      VpnState::Stopped => "disconnected",
+      VpnState::Starting if status.auth_url.is_some() => "sign-in required",
+      VpnState::Starting => "starting",
+      VpnState::Connected => "connected",
+      VpnState::Stopping => "stopping",
+    }
   };
   let vpn_id = display_value(status.vpn_id.as_deref().or(Some("-")));
   let provider = match status.provider {
@@ -142,9 +155,46 @@ fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
     "USERNAME",
     "SOCKS5 ENDPOINT",
   ];
-  let mut table = crate::table::format(headers, rows);
+  let mut table = if statuses
+    .iter()
+    .any(|status| status.locally_connected.is_some() || status.shared_container)
+  {
+    let rows = rows.into_iter().enumerate().map(
+      |(index, [id, provider, state, server, username, endpoint])| {
+        let usage = match statuses[index].locally_connected {
+          Some(true) => "this ctld",
+          Some(false) => "shared",
+          None => "-",
+        };
+        [
+          id,
+          provider,
+          state,
+          usage.into(),
+          server,
+          username,
+          endpoint,
+        ]
+      },
+    );
+    crate::table::format(
+      [
+        "VPN ID",
+        "PROVIDER",
+        "STATE",
+        "USE",
+        "SERVER",
+        "USERNAME",
+        "SOCKS5 ENDPOINT",
+      ],
+      rows,
+    )
+  } else {
+    crate::table::format(headers, rows)
+  };
   for status in statuses {
     if let Some(url) = &status.auth_url
+      && !status.status_unavailable
       && ctld_ipc::vpn::is_tailscale_auth_url(url)
     {
       let _ = write!(

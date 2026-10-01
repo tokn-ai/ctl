@@ -30,8 +30,10 @@ live version.
 Each supported daemon row offers **Restart**, with a replacement check and an
 impact confirmation. The replacement's build and protocols are verified afterward.
 
-- `ctld` stops its owned port forwards and VPN containers, and can interrupt SSH
-  connections. Surviving SSH masters can be reused after restart.
+- `ctld` stops its owned port forwards, releases its VPN heartbeat interests, and
+  can interrupt SSH connections. A shared VPN remains available while another
+  daemon keeps it alive, then expires after its heartbeat timeout. Surviving SSH
+  masters can be reused after restart.
   Saved VPN profiles and Tailscale identities remain available for reconnecting.
 - Local and remote `rmuxd` restarts end all of that daemon's terminal sessions,
   including other clients and interactive tasks. Runtime options return to the
@@ -59,8 +61,14 @@ enter a name and choose **Sign in with Tailscale**. The dialog shows startup
 progress and opens your browser when sign-in is ready. Finish authentication,
 review the connected account and tailnet, then choose **Save connection**.
 **Open browser** lets you retry opening the sign-in page. Settings are saved only
-after login succeeds; Cancel stops the unsaved connection and removes its local
-identity. A failed save keeps the authenticated setup available for retry.
+after login succeeds; Cancel releases the unsaved connection and removes its
+local identity once its container has stopped. If the shared container is still
+running or its status cannot be checked, the dialog reports **VPN cleanup
+pending** and offers **Retry cleanup**. A failed save keeps the authenticated
+setup available for retry.
+Closing the dialog also retries pending cleanup in the background for up to
+25 seconds. If the app exits first or cleanup remains unconfirmed, the unsaved
+identity is preserved; cleanup never forcibly removes a shared running container.
 
 Tailscale's optional **Device name in Tailscale** is under Advanced options. It
 names this VPN device in the Tailscale device list; rmux assigns a name if left
@@ -71,10 +79,18 @@ including the VPN server, username, and copyable SOCKS5 endpoint when connected.
 An active connection without a matching saved profile appears as a temporary item. The VPN tab shows an active
 indicator even while another panel is open. Connections started from the CLI are
 also visible, including their server and username. Multiple VPNs can run at once,
-each with its own SOCKS5 endpoint. **Disconnect** targets only that item and also
-cancels its pending startup. An older daemon can still be inspected, but must be
+each with its own SOCKS5 endpoint. A shared container appears as **Connected**
+even when this app's daemon has no heartbeat interest in it. **Connect** on a
+matching saved profile lets this daemon keep it alive. **Disconnect** releases
+only this daemon's interest and also cancels its pending startup; the container
+remains visible while it is running. Settings cannot be changed or deleted until
+the container stops. An older daemon can still be inspected, but must be
 updated to connect multiple VPNs or disconnect a connection by ID. The CLI's
 untargeted `ctl vpn stop` remains available for its current connection.
+
+Only containers using the current shared-heartbeat protocol appear in inventory.
+Incomplete inventory shows **Status unavailable** rather than claiming all VPNs
+are disconnected.
 
 Connection settings, including OpenConnect passwords, are stored in a private `vpns.json` file in
 the app's configuration directory. The webview receives metadata and a
@@ -84,18 +100,21 @@ Users do not need to create or select an environment file. Tailscale stores its
 device identity in a private Docker volume, separate from the JSON settings.
 Existing OpenConnect profiles remain readable and migrate on the next save.
 
-Signed development keeps VPN ownership on the normal per-user daemon even though
-SSH uses its persistent, per-worktree signed daemon. This makes VPNs started by
-the CLI visible in the app. Set `CTLD_VPN_SOCKET_PATH` to select a custom VPN
-owner for the app; use the same path as `CTLD_SOCKET_PATH` in the CLI.
+Signed development uses its persistent, per-worktree signed daemon for VPN and
+SSH operations. Each daemon discovers shared VPN containers through the local
+Docker engine, so the CLI and app can see the same containers while keeping
+independent connections to them. Set `CTLD_VPN_SOCKET_PATH` to select a custom
+VPN daemon; otherwise VPN operations use `CTLD_SOCKET_PATH` like SSH operations.
 
 This requires a running Docker-compatible engine. Build the OpenConnect image
 with `./docker/openconnect/run.sh build` from the repository root; Tailscale pulls
 its pinned official image on first use. Tailscale requires an updated `ctld`.
-On macOS and
-Linux the app and `ctl vpn` share the local `ctld` owner, including connections
-started from the CLI. Closing the app leaves the VPN running; disconnecting or
-exiting `ctld` stops the container. The SOCKS proxy follows the container's routes;
+On macOS and Linux, each connected `ctld` sends heartbeats to its VPN container.
+Closing the app leaves its daemon and VPN interest running. Disconnecting or
+exiting `ctld` releases that daemon's interest; after all heartbeats stop, the
+container exits automatically after its timeout. `ctl vpn status` distinguishes
+connections kept alive by **this ctld** from discovered **shared** containers.
+The SOCKS proxy follows the container's routes;
 it does not change the Mac's system routes. Choose a saved VPN in a host's
 **Connect through** step to route that host through its current SOCKS5 endpoint.
 See the [OpenConnect guide](../../docker/openconnect/README.md) or

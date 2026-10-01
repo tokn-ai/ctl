@@ -12,13 +12,27 @@ if [ "$#" -gt 0 ]; then
   shift
 fi
 
+build_image() {
+  # Both Docker and Podman receive only the files needed by this image.
+  vpn_build_context=$(mktemp -d "${TMPDIR:-/tmp}/ctl-openconnect-build.XXXXXX")
+  trap 'rm -rf -- "$vpn_build_context"' EXIT
+  mkdir -p "$vpn_build_context/docker/openconnect" "$vpn_build_context/docker/vpn"
+  for script in Dockerfile entrypoint.sh ssh-handshake.sh vpn-network.sh healthcheck.sh; do
+    cp "$script_dir/$script" "$vpn_build_context/docker/openconnect/$script"
+  done
+  cp "$repo_dir/docker/vpn/heartbeat.sh" "$repo_dir/docker/vpn/watchdog.sh" "$vpn_build_context/docker/vpn/"
+  docker build --file "$vpn_build_context/docker/openconnect/Dockerfile" --tag "$image_name" "$vpn_build_context"
+  rm -rf -- "$vpn_build_context"
+  trap - EXIT
+}
+
 case "$action" in
   build)
     [ "$#" -eq 0 ] || {
       printf 'Usage: %s build\n' "$0" >&2
       exit 2
     }
-    docker build --tag "$image_name" "$script_dir"
+    build_image
     ;;
   start)
     if ! [ -f "$config_file" ]; then
@@ -26,7 +40,7 @@ case "$action" in
       exit 1
     fi
     chmod 0600 "$config_file"
-    docker build --tag "$image_name" "$script_dir"
+    build_image
     cargo build --manifest-path "$repo_dir/Cargo.toml" \
       --target-dir "$repo_dir/target" -p ctl -p ctld
     exec "$ctl_binary" vpn start --env-file "$config_file" "$@"

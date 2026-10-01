@@ -223,7 +223,7 @@ host metadata as evidence of a currently running agent.
 ctld restart pins a lifecycle stream to an instance and verifies the selected
 replacement before confirmation. Native confirmation tokens are window-scoped,
 expire, and can be consumed once. On confirmation, the same owner and replacement
-are rechecked. The daemon stops accepting requests, drains its VPNs and owned
+are rechecked. The daemon stops accepting requests, releases its VPN heartbeat interests and drains owned
 forwards, releases its endpoint, and closes the pinned stream before replacement
 startup. The client verifies a fresh instance with matching build and protocol.
 Legacy owners are inspected where possible but never stopped by process-name or
@@ -248,15 +248,18 @@ actors against the original environment and session before reporting success.
 
 ### Managed VPNs
 
-`ctl vpn start --env-file PATH` asks the local `ctld` to own an OpenConnect
-container, starting the daemon if needed. The settings path defaults to `.env`
+`ctl vpn start --env-file PATH` asks the local `ctld` to acquire heartbeat
+interest in a shared OpenConnect container, starting the daemon if needed. The
+settings path defaults to `.env`
 and is resolved relative to the caller's directory. Its SOCKS5 listener uses a
 random loopback port, printed in a readable connection-status table after the VPN and
 proxy are ready. Start, status, and stop accept `--json` for machine-readable output.
-`ctl vpn status` lists every runtime ID and endpoint; `ctl vpn stop VPN_ID` stops
-only that container while
-keeping the broker running. Status and stop never start a daemon. The container
-also stops when its owning daemon exits. VPN commands reject `--host` and use
+`ctl vpn status` lists local interests and compatible shared containers, with
+immutable container IDs and their random SOCKS5 endpoints. `ctl vpn stop VPN_ID`
+releases only the selected local interest while keeping the broker running.
+Status and stop never start a daemon. An absent daemon or incomplete engine
+inventory reports a discovery warning rather than a confident empty result. VPN
+commands reject `--host` and use
 the owner-only local IPC endpoint, selectable through `CTLD_SOCKET_PATH`.
 
 The desktop VPN panel stores named connection details in private, schema-versioned
@@ -278,11 +281,22 @@ readable as singleton snapshots with `supports_multiple: false`; targeted stop
 requires an updated daemon. Explicit `ctl vpn stop` remains available for a legacy
 owner, without risking a different connection through an implicit fallback.
 Desktop status polling continues while other panels are open and updates the VPN
-tab indicator. Signed development uses the shared per-user VPN owner rather than
-its temporary SSH helper; `CTLD_VPN_SOCKET_PATH` explicitly selects another VPN
-owner for all native VPN operations. Status polling never starts a daemon or
-reconnects automatically; closing the panel or app does not stop the daemon-owned
-VPN.
+tab indicator. Signed development keeps its isolated daemon endpoint;
+`CTLD_VPN_SOCKET_PATH` explicitly selects another daemon for native VPN operations.
+Every ctld discovers the same protocol-compatible containers for its user and
+engine. `locally_connected` distinguishes local interest from passive discovery.
+Containers without the current protocol and ownership labels are unsupported
+and excluded from inventory. Each status request observes shared inventory once
+and derives its singleton response from that same snapshot.
+OpenConnect creation verifies the local image's protocol label before sending
+credentials and uses its immutable image ID, so a mutable tag cannot replace the
+verified image. Adopting a compatible running container does not require that
+image tag to remain installed. Tailscale installs the shared scripts from the
+daemon's embedded entrypoint rather than relying on its upstream image.
+Connect takes interest even when a compatible container is already running;
+Disconnect releases it and keeps globally running status visible. Status never
+renews interest. Profile mutations require complete inventory. Closing the app
+does not terminate a durable daemon or its renewal tasks.
 
 Tailscale uses the same per-profile owner and stable route IDs. Profiles carry a
 provider tag; schema 1 OpenConnect files are read without rewriting and migrate
@@ -290,8 +304,10 @@ to schema 2 on a successful mutation. Tailscale settings contain only an optiona
 device hostname and an `accept_routes` preference. Its node identity lives in a
 durable Docker volume keyed by the local owner and profile ID. Disconnect and
 profile deletion retain that volume. Container names reserve each identity
-exclusively, and lease labels plus immutable container IDs prevent another
-daemon's launch from being adopted or removed. Container inspection parses typed
+exclusively. User, protocol, profile, and routing-settings labels permit
+compatible reuse across daemons. Creation tokens allow cancellation to remove
+only its own still-Created reservation; running containers are never force-removed.
+Container inspection parses typed
 JSON from Docker and Podman, including their ID spelling variants, without
 engine-specific Go template assumptions.
 
@@ -301,14 +317,22 @@ writing `vpns.json`. The editor observes startup, browser sign-in, device approv
 and errors, and opens the browser only for a current validated login URL. Once
 connected, Save inserts the exact enrolled settings without reconnecting or
 replacing its identity. Failed writes leave the enrollment available for retry.
-Cancel stops the provisional connection and removes only its unused local
-identity volume; it does not revoke the device in the remote tailnet. A profile
+Cancel releases the provisional connection's heartbeat interest and removes
+only an unused local identity volume. If a container still references it or
+inventory is unavailable, the draft stays registered with Cleanup pending and
+a retry action after watchdog expiry. This does not revoke the device in the
+remote tailnet. A profile
 already written to disk is never removed by delayed enrollment cancellation.
 
 `ctl vpn start-tailscale --id ID` and the desktop app launch a pinned official
 image in userspace mode, with a random loopback SOCKS5 port and no host route
-changes. The attached stdin heartbeat controls the container lifetime, including
-when `ctld` is killed. Startup waits for the local service and SOCKS5 listener,
+changes. Both providers use the same in-container heartbeat watchdog. Every
+interested ctld renews through an independent engine exec addressed to an immutable
+container ID, every two seconds. A monotonic 15-second deadline expires only after
+all senders stop; startup has its own 15-second grace. Stdin EOF and creator CLI
+exit have no lifetime authority. The watchdog closes VPN and SOCKS5 services,
+then the engine removes the container. Tailscale identity volumes persist.
+Startup waits for the local service and SOCKS5 listener,
 then returns when connected or when browser sign-in or device approval is needed.
 Browser authentication can remain pending without a deadline.
 Status reports `starting` plus an optional `auth_url` until Tailscale is running,

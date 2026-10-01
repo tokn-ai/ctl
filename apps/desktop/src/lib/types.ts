@@ -471,6 +471,12 @@ export interface VpnStatus {
   /** Local SOCKS5 proxy, distinct from the VPN server. */
   endpoint: string | null;
   container_name: string | null;
+  container_id?: string | null;
+  shared_container?: boolean;
+  /** Omitted by older daemons; false means this daemon has no heartbeat interest. */
+  locally_connected?: boolean | null;
+  /** Metadata is retained because the current container state could not be observed. */
+  status_unavailable?: boolean;
 }
 
 export interface VpnSnapshot {
@@ -479,6 +485,7 @@ export interface VpnSnapshot {
   supports_tailscale_enrollment?: boolean;
   connections: VpnStatus[];
   supports_multiple: boolean;
+  discovery_warnings?: string[];
 }
 
 export interface LocalPortForward {

@@ -218,6 +218,18 @@ pub struct VpnStatus {
   #[serde(default)]
   pub username: Option<String>,
   pub container_name: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container_id: Option<String>,
+  /// The container accepts independent heartbeat interests from multiple daemons.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub shared_container: bool,
+  /// Whether this daemon currently keeps the shared container alive.
+  /// Older daemons omit this field and retain their original ownership behavior.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub locally_connected: Option<bool>,
+  /// The retained metadata has not been verified against the container engine.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub status_unavailable: bool,
   pub running: bool,
   pub connection_id: Option<String>,
   pub state: VpnState,
@@ -231,6 +243,9 @@ pub struct VpnSnapshot {
   pub supported_providers: Vec<VpnProvider>,
   #[serde(default)]
   pub supports_tailscale_enrollment: bool,
+  /// Container inventory failures; healthy local connections remain visible.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub discovery_warnings: Vec<String>,
 }
 
 fn legacy_vpn_providers() -> Vec<VpnProvider> {
@@ -244,6 +259,7 @@ impl Default for VpnSnapshot {
       supports_multiple: true,
       supported_providers: vec![VpnProvider::Openconnect, VpnProvider::Tailscale],
       supports_tailscale_enrollment: true,
+      discovery_warnings: Vec::new(),
     }
   }
 }
@@ -358,7 +374,7 @@ pub enum ServerMessage {
     catalog: ctl_proto::TcpListenerCatalog,
   },
   VpnStatus {
-    status: VpnStatus,
+    status: Box<VpnStatus>,
     #[serde(default)]
     snapshot: Option<VpnSnapshot>,
   },

@@ -19,6 +19,7 @@ mod shared_forwarding;
 mod ssh_config_master;
 mod tailscale;
 mod target_lifecycle;
+mod vpn_container;
 mod vpn_service;
 
 #[cfg(test)]
@@ -474,28 +475,47 @@ async fn handle_vpn_request(
     .vpn_service
     .as_ref()
     .ok_or_else(|| RequestError::VpnFailed("VPN service is unavailable".into()))?;
-  let status = match request {
-    ClientMessage::StartVpn { env_file } => service.start(env_file).await,
-    ClientMessage::StartVpnConnection { connection } => service.start_connection(connection).await,
-    ClientMessage::StopVpn => service.stop().await,
-    ClientMessage::StopVpnById { vpn_id } => service.stop_id(vpn_id).await,
-    ClientMessage::VpnStatus => service.status().await,
-    ClientMessage::ForgetTailscaleIdentity { connection_id } => {
-      service
-        .forget_tailscale_identity(connection_id)
-        .await
-        .map_err(RequestError::VpnFailed)?;
-      return ctld_ipc::write_frame(stream, &ServerMessage::VpnIdentityForgotten)
-        .await
-        .map_err(Into::into);
+  let (status, snapshot) = match request {
+    ClientMessage::VpnStatus => {
+      // One observation supplies both wire forms. Repeating discovery can exceed
+      // the client's deadline and make an otherwise healthy inventory disappear.
+      let snapshot = service.list().await.map_err(RequestError::VpnFailed)?;
+      let status = snapshot.connections.first().cloned().unwrap_or_default();
+      (status, snapshot)
     }
-    _ => return Err(RequestError::InvalidRequest("expected a VPN request")),
-  }
-  .map_err(RequestError::VpnFailed)?;
-  let snapshot = Some(service.list().await.map_err(RequestError::VpnFailed)?);
-  ctld_ipc::write_frame(stream, &ServerMessage::VpnStatus { status, snapshot })
-    .await
-    .map_err(Into::into)
+    request => {
+      let status = match request {
+        ClientMessage::StartVpn { env_file } => service.start(env_file).await,
+        ClientMessage::StartVpnConnection { connection } => {
+          service.start_connection(connection).await
+        }
+        ClientMessage::StopVpn => service.stop().await,
+        ClientMessage::StopVpnById { vpn_id } => service.stop_id(vpn_id).await,
+        ClientMessage::ForgetTailscaleIdentity { connection_id } => {
+          service
+            .forget_tailscale_identity(connection_id)
+            .await
+            .map_err(RequestError::VpnFailed)?;
+          return ctld_ipc::write_frame(stream, &ServerMessage::VpnIdentityForgotten)
+            .await
+            .map_err(Into::into);
+        }
+        _ => return Err(RequestError::InvalidRequest("expected a VPN request")),
+      }
+      .map_err(RequestError::VpnFailed)?;
+      let snapshot = service.list().await.map_err(RequestError::VpnFailed)?;
+      (status, snapshot)
+    }
+  };
+  ctld_ipc::write_frame(
+    stream,
+    &ServerMessage::VpnStatus {
+      status: status.into(),
+      snapshot: Some(snapshot),
+    },
+  )
+  .await
+  .map_err(Into::into)
 }
 
 fn normalize_request_target(request: &mut ClientMessage) {

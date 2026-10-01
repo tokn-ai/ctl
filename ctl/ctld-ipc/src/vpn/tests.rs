@@ -33,6 +33,7 @@ fn old_multi_vpn_daemons_do_not_claim_tailscale_support() {
   .unwrap();
   assert_eq!(old.supported_providers, vec![VpnProvider::Openconnect]);
   assert!(!old.supports_tailscale_enrollment);
+  assert!(old.discovery_warnings.is_empty());
   let older_tailscale: VpnSnapshot = serde_json::from_value(serde_json::json!({
     "connections":[], "supports_multiple":true, "supported_providers":["openconnect", "tailscale"]
   }))
@@ -154,7 +155,7 @@ async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
     crate::write_frame(
       &mut server,
       &ServerMessage::VpnStatus {
-        status: response,
+        status: Box::new(response),
         snapshot: None,
       },
     )
@@ -282,7 +283,7 @@ mod endpoints {
         crate::write_frame(
           &mut stream,
           &ServerMessage::VpnStatus {
-            status: VpnStatus::default(),
+            status: Box::default(),
             snapshot: Some(VpnSnapshot {
               supported_providers: if supported {
                 vec![VpnProvider::Openconnect, VpnProvider::Tailscale]
@@ -304,12 +305,12 @@ mod endpoints {
           crate::write_frame(
             &mut stream,
             &ServerMessage::VpnStatus {
-              status: VpnStatus {
+              status: Box::new(VpnStatus {
                 provider: VpnProvider::Tailscale,
                 state: VpnState::Starting,
                 auth_url: Some("https://login.tailscale.com/a/123abc".into()),
                 ..VpnStatus::default()
-              },
+              }),
               snapshot: None,
             },
           )
@@ -357,7 +358,7 @@ mod endpoints {
         crate::write_frame(
           &mut stream,
           &ServerMessage::VpnStatus {
-            status: VpnStatus::default(),
+            status: Box::default(),
             snapshot: Some(VpnSnapshot {
               supports_tailscale_enrollment: supported,
               ..VpnSnapshot::default()
@@ -376,7 +377,7 @@ mod endpoints {
             ServerMessage::VpnIdentityForgotten
           } else {
             ServerMessage::VpnStatus {
-              status: VpnStatus::default(),
+              status: Box::default(),
               snapshot: None,
             }
           };
@@ -452,7 +453,7 @@ mod endpoints {
         crate::write_frame(
           &mut stream,
           &ServerMessage::VpnStatus {
-            status: response.clone(),
+            status: Box::new(response.clone()),
             snapshot: None,
           },
         )
@@ -502,7 +503,10 @@ mod endpoints {
       let client = Client::new(selected.clone());
       assert_eq!(client.status().await.unwrap(), VpnStatus::default());
       assert_eq!(client.stop().await.unwrap(), VpnStatus::default());
-      assert_eq!(client.list().await.unwrap(), VpnSnapshot::default());
+      let inventory = client.list().await.unwrap();
+      assert!(inventory.connections.is_empty());
+      assert_eq!(inventory.discovery_warnings.len(), 1);
+      assert!(inventory.discovery_warnings[0].contains("ctld is not running"));
       assert_eq!(
         client.stop_id("missing").await.unwrap(),
         VpnStatus::default()
@@ -555,9 +559,15 @@ mod endpoints {
         supports_multiple: true,
         ..VpnSnapshot::default()
       });
-      crate::write_frame(&mut stream, &ServerMessage::VpnStatus { status, snapshot })
-        .await
-        .unwrap();
+      crate::write_frame(
+        &mut stream,
+        &ServerMessage::VpnStatus {
+          status: Box::new(status),
+          snapshot,
+        },
+      )
+      .await
+      .unwrap();
       let (mut stream, request) = read_request(&listener).await;
       assert!(
         matches!(request, ClientMessage::StopVpnById { vpn_id } if vpn_id == "selected-profile")
@@ -565,7 +575,7 @@ mod endpoints {
       crate::write_frame(
         &mut stream,
         &ServerMessage::VpnStatus {
-          status: VpnStatus::default(),
+          status: Box::default(),
           snapshot: None,
         },
       )
@@ -605,7 +615,7 @@ mod endpoints {
         crate::write_frame(
           &mut stream,
           &ServerMessage::VpnStatus {
-            status,
+            status: Box::new(status),
             snapshot: None,
           },
         )
@@ -675,6 +685,51 @@ fn legacy_status_ids_are_stable_and_do_not_claim_multi_connection_support() {
       supports_multiple: false,
       supported_providers: vec![VpnProvider::Openconnect],
       supports_tailscale_enrollment: false,
+      discovery_warnings: Vec::new(),
     }
   );
+}
+
+#[test]
+fn local_daemon_selection_preserves_signed_and_explicit_scopes() {
+  assert_eq!(
+    select_socket_path(None, "signed-development.sock".into()),
+    PathBuf::from("signed-development.sock")
+  );
+  assert_eq!(
+    select_socket_path(
+      Some("vpn-override.sock".into()),
+      "signed-development.sock".into()
+    ),
+    PathBuf::from("vpn-override.sock")
+  );
+}
+
+#[test]
+fn shared_status_is_additive_and_legacy_ownership_remains_unknown() {
+  let legacy: VpnStatus = serde_json::from_value(serde_json::json!({
+    "endpoint":null,"container_name":null,"running":false,"connection_id":null,"state":"stopped"
+  }))
+  .unwrap();
+  assert!(!legacy.shared_container);
+  assert_eq!(legacy.locally_connected, None);
+  assert_eq!(legacy.container_id, None);
+  let shared = VpnStatus {
+    vpn_id: Some("profile-one".into()),
+    container_id: Some("container-id".into()),
+    shared_container: true,
+    locally_connected: Some(false),
+    state: VpnState::Connected,
+    running: true,
+    ..VpnStatus::default()
+  };
+  let serialized = serde_json::to_value(&shared).unwrap();
+  assert_eq!(serialized["locally_connected"], false);
+  assert_eq!(
+    serde_json::from_value::<VpnStatus>(serialized).unwrap(),
+    shared
+  );
+  let legacy_serialized = serde_json::to_value(legacy).unwrap();
+  assert!(legacy_serialized.get("locally_connected").is_none());
+  assert!(legacy_serialized.get("shared_container").is_none());
 }

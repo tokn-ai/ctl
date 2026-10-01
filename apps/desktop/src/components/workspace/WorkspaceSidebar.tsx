@@ -12,6 +12,7 @@ interface Props {
   vpn_state?: VpnState;
   vpn_active_count?: number;
   vpn_status_stale?: boolean;
+  vpn_inventory_incomplete?: boolean;
   on_keybindings?(): void;
   on_about?(): void;
   about_open?: boolean;
@@ -29,6 +30,7 @@ export function WorkspaceSidebar({
   vpn_state,
   vpn_active_count = 0,
   vpn_status_stale = false,
+  vpn_inventory_incomplete = false,
   on_keybindings,
   on_about,
   about_open = false,
@@ -42,13 +44,16 @@ export function WorkspaceSidebar({
     ports: "Ports",
     vpn: "VPN",
   } as const;
-  const vpn_state_description = vpn_status_stale ? "Status unavailable" : vpn_state ? {
+  const vpn_unavailable = vpn_status_stale || (vpn_inventory_incomplete && vpn_active_count === 0);
+  const vpn_state_description = vpn_unavailable ? "Status unavailable" : vpn_state ? {
     starting: "Connecting",
     connected: "Connected",
     stopping: "Disconnecting",
     stopped: "Disconnected",
   }[vpn_state] : undefined;
-  const vpn_description = !vpn_status_stale && vpn_active_count > 1 ? `${vpn_active_count} active VPNs` : vpn_state_description;
+  const vpn_activity_description = !vpn_unavailable && vpn_active_count > 1 ? `${vpn_active_count} active VPNs` : vpn_state_description;
+  const vpn_description = vpn_inventory_incomplete && !vpn_unavailable && vpn_activity_description
+    ? `${vpn_activity_description} · Inventory incomplete` : vpn_activity_description;
   return (
     <div className="workspace-sidebar">
       <div className="sidebar-rail">
@@ -90,9 +95,9 @@ export function WorkspaceSidebar({
               }}
             >
               <Icon name={view === "sessions" ? "terminal" : view} size={23} />
-              {view === "vpn" && (vpn_status_stale || (vpn_state && vpn_state !== "stopped")) ? (
+              {view === "vpn" && (vpn_unavailable || (vpn_state && vpn_state !== "stopped")) ? (
                 <span
-                  className={`vpn-activity-indicator ${vpn_status_stale ? "stale" : vpn_state}`}
+                  className={`vpn-activity-indicator ${vpn_unavailable ? "stale" : vpn_state}`}
                   aria-hidden="true"
                 />
               ) : null}

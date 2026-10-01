@@ -459,3 +459,141 @@ describe("adopting an authenticated Tailscale enrollment", () => {
     expect(stopVpn).not.toHaveBeenCalled();
   });
 });
+
+
+describe("shared VPN container interests", () => {
+  it("joins a foreign saved container without losing its connected endpoint, then releases only local interest", async () => {
+    const shared = runtime("work", { shared_container: true, locally_connected: false, container_id: "container-one" });
+    backend = observe(shared);
+    const joining = deferred<VpnStatus>();
+    vi.mocked(connectVpn).mockReturnValueOnce(joining.promise);
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.stop("work"); });
+    expect(stopVpn).not.toHaveBeenCalled();
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.connect("work"); });
+    expect(status(result, "work")).toEqual(shared);
+    const local = { ...shared, locally_connected: true };
+    backend = observe(local);
+    await act(async () => { joining.resolve(local); await pending; });
+    expect(connectVpn).toHaveBeenCalledExactlyOnceWith("work");
+    const releasing = deferred<VpnStatus>();
+    vi.mocked(stopVpn).mockReturnValueOnce(releasing.promise);
+    act(() => { pending = result.current.stop("work"); });
+    expect(status(result, "work")?.state).toBe("connected");
+    expect(status(result, "work")?.endpoint).toBe(shared.endpoint);
+    backend = observe(shared);
+    await act(async () => { releasing.resolve(shared); await pending; });
+    expect(result.current.statuses).toEqual([shared]);
+    expect(result.current.actions.size).toBe(0);
+    act(() => result.current.editConnection(connection));
+    await act(async () => { await result.current.deleteConnection("work"); });
+    expect(result.current.editor).toBeNull();
+    expect(deleteVpnConnection).not.toHaveBeenCalled();
+    await act(async () => { await result.current.stop("work"); });
+    expect(stopVpn).toHaveBeenCalledOnce();
+  });
+
+  it("a failed local release reconciles when interest is gone even while the container remains", async () => {
+    const local = runtime("work", { shared_container: true, locally_connected: true });
+    backend = observe(local);
+    vi.mocked(stopVpn).mockRejectedValueOnce(new Error("Release reply timed out"));
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    await act(async () => { await result.current.stop("work"); });
+    expect(result.current.action_errors.has("work")).toBe(true);
+    const foreign = { ...local, locally_connected: false };
+    backend = observe(foreign);
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.action_errors.has("work")).toBe(false);
+    expect(result.current.uncertain_ids.has("work")).toBe(false);
+    expect(result.current.statuses).toEqual([foreign]);
+  });
+
+  it("retains unseen rows under partial discovery, blocks mutations, and clears uncertainty on complete discovery", async () => {
+    const local = runtime("work", { shared_container: true, locally_connected: true });
+    const foreign = runtime("research", { shared_container: true, locally_connected: false });
+    backend = observe(local, foreign);
+    const { result } = renderHook(() => useVpn(true));
+    await ready(result);
+    backend = { ...observe(local), discovery_warnings: ["Container inventory unavailable"] };
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.statuses).toEqual([local, foreign]);
+    expect(result.current.uncertain_ids.has("research")).toBe(true);
+    expect(result.current.uncertain_ids.has("work")).toBe(false);
+    expect(result.current.status_stale).toBe(false);
+    expect(result.current.discovery_warnings).toEqual(backend.discovery_warnings);
+    await act(async () => { await result.current.connect("research"); await result.current.deleteConnection("research"); });
+    act(() => result.current.editConnection(research));
+    expect(connectVpn).not.toHaveBeenCalled();
+    expect(deleteVpnConnection).not.toHaveBeenCalled();
+    expect(result.current.editor).toBeNull();
+    backend = observe(local);
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.statuses).toEqual([local]);
+    expect(result.current.discovery_warnings).toEqual([]);
+    expect(result.current.uncertain_ids.size).toBe(0);
+  });
+});
+
+
+it("can explicitly Connect when an absent daemon makes inventory unavailable while protecting saved profiles", async () => {
+  backend = { ...observe(), discovery_warnings: ["The selected ctld is not running; VPN container inventory is unavailable."] };
+  const { result } = renderHook(() => useVpn(true));
+  await ready(result);
+  act(() => result.current.editConnection(connection));
+  await act(async () => { await result.current.deleteConnection("work"); });
+  expect(result.current.editor).toBeNull();
+  expect(deleteVpnConnection).not.toHaveBeenCalled();
+  await act(async () => { await result.current.connect("work"); });
+  expect(connectVpn).toHaveBeenCalledExactlyOnceWith("work");
+  expect(status(result, "work")?.state).toBe("connected");
+});
+
+it("can cancel joining a foreign shared container without hiding it or accepting late local success", async () => {
+  const foreign = runtime("work", { shared_container: true, locally_connected: false });
+  backend = observe(foreign);
+  const joining = deferred<VpnStatus>();
+  vi.mocked(connectVpn).mockReturnValueOnce(joining.promise);
+  vi.mocked(stopVpn).mockResolvedValueOnce(foreign);
+  const { result } = renderHook(() => useVpn(true));
+  await ready(result);
+  let pending!: Promise<void>;
+  act(() => { pending = result.current.connect("work"); });
+  await act(async () => { await result.current.stop("work"); });
+  expect(stopVpn).toHaveBeenCalledExactlyOnceWith("work");
+  await act(async () => { joining.resolve({ ...foreign, locally_connected: true }); await pending; });
+  expect(result.current.statuses).toEqual([foreign]);
+  expect(result.current.actions.size).toBe(0);
+});
+
+
+it("retains released shared metadata as unavailable until fresh inventory confirms it", async () => {
+  const local = runtime("work", { shared_container: true, locally_connected: true });
+  const retained = { ...local, locally_connected: false, status_unavailable: true };
+  backend = observe(local);
+  vi.mocked(stopVpn).mockImplementationOnce(async () => {
+    backend = { ...observe(), discovery_warnings: ["Container inventory unavailable"] };
+    return retained;
+  });
+  const { result } = renderHook(() => useVpn(true));
+  await ready(result);
+  await act(async () => { await result.current.stop("work"); });
+  expect(result.current.statuses).toEqual([retained]);
+  expect(result.current.uncertain_ids.has("work")).toBe(true);
+  expect(result.current.actions.size).toBe(0);
+  expect(status(result, "work")?.endpoint).toBe(local.endpoint);
+  // Even a returned row cannot confirm its container when marked unavailable.
+  backend = observe(retained);
+  await act(async () => { await result.current.refresh(); });
+  expect(result.current.uncertain_ids.has("work")).toBe(true);
+  const confirmed = { ...retained, status_unavailable: false };
+  backend = observe(confirmed);
+  await act(async () => { await result.current.refresh(); });
+  expect(result.current.statuses).toEqual([confirmed]);
+  expect(result.current.uncertain_ids.has("work")).toBe(false);
+  backend = observe();
+  await act(async () => { await result.current.refresh(); });
+  expect(result.current.statuses).toEqual([]);
+});

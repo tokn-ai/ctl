@@ -33,7 +33,7 @@ import { useWorkspaceConnections } from "../features/workspace/useWorkspaceConne
 import { useHostConnections } from "../features/workspace/useHostConnections";
 import { usePortForwarding } from "../features/portForwarding/usePortForwarding";
 import { useVpn } from "../features/vpn/useVpn";
-import { vpnAggregateState } from "../features/vpn/status";
+import { vpnActivity } from "../features/vpn/status";
 import { VpnSidebar } from "../components/vpn/VpnSidebar";
 import {
   recoverRemoteHost,
@@ -340,6 +340,7 @@ function TerminalWorkbench() {
   );
   const sidebarTargets = workspaceSidebarTargets(workspace);
   const vpn = useVpn(workspace.ready && !workspace.closing);
+  const vpn_activity = vpnActivity(vpn.statuses, vpn.uncertain_ids, vpn.discovery_warnings);
   const credential_targets = useMemo(
     () => credentialTargets(workspace.hosts, workspace.ssh_gateways),
     [workspace.hosts, workspace.ssh_gateways],
@@ -1833,9 +1834,10 @@ function TerminalWorkbench() {
                 if (view === "ports") void portForwarding.refreshAll();
               }}
               vpn={<VpnSidebar model={vpn} />}
-              vpn_state={vpn.status_loaded ? vpnAggregateState(vpn.statuses) : undefined}
-              vpn_active_count={vpn.statuses.length}
+              vpn_state={vpn.status_loaded ? vpn_activity.state : undefined}
+              vpn_active_count={vpn_activity.active_count}
               vpn_status_stale={vpn.status_stale}
+              vpn_inventory_incomplete={vpn_activity.inventory_incomplete}
               tasks={
                 <TaskSidebar
                   model={taskWorkspace}

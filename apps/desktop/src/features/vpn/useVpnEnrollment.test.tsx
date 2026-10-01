@@ -150,3 +150,31 @@ describe("Tailscale enrollment", () => {
     expect(openVpnSignIn).toHaveBeenCalledOnce();
   });
 });
+
+
+it("reports shared-container cleanup as pending and can retry without closing or restarting sign-in", async () => {
+  const message = "The VPN connection was released, but its shared container is still running.";
+  vi.mocked(cancelVpnEnrollment).mockRejectedValueOnce({ code: "vpn_cleanup_pending", message }).mockResolvedValueOnce(undefined);
+  const { result, on_close, on_connection_id } = setup();
+  await act(async () => { await result.current.begin(input); });
+  await act(async () => { await result.current.cancel(); });
+  expect(result.current.cleanup_pending).toBe(true);
+  expect(result.current.error).toBe(message);
+  expect(on_close).not.toHaveBeenCalled();
+  expect(on_connection_id).not.toHaveBeenCalledWith(null);
+  await act(async () => { await result.current.cancel(); });
+  expect(cancelVpnEnrollment).toHaveBeenCalledTimes(2);
+  expect(beginVpnEnrollment).toHaveBeenCalledOnce();
+  expect(result.current.cleanup_pending).toBe(false);
+  expect(on_close).toHaveBeenCalledOnce();
+});
+
+
+it("does not allow saving a login whose retained container status is unavailable", async () => {
+  vi.mocked(beginVpnEnrollment).mockResolvedValue({ ...connected, status: { ...connected.status, status_unavailable: true } });
+  const { result, on_save } = setup();
+  await act(async () => { await result.current.begin(input); });
+  expect(result.current.ready).toBe(false);
+  await act(async () => { expect(await result.current.save()).toBe(false); });
+  expect(on_save).not.toHaveBeenCalled();
+});

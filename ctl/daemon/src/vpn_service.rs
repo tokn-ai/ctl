@@ -8,10 +8,8 @@ use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 
 use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState, VpnStatus};
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use zeroize::Zeroizing;
 
 use crate::openconnect::{self, Metadata};
 use crate::tailscale;
@@ -19,6 +17,7 @@ use crate::tailscale;
 type Reply = oneshot::Sender<Result<VpnStatus, String>>;
 const MAX_CONNECTIONS: usize = 16;
 const MAX_WAITING_REPLIES: usize = 16;
+const DISCOVERY_CONCURRENCY: usize = 16;
 
 enum Request {
   Start {
@@ -39,6 +38,7 @@ enum Request {
 #[derive(Clone)]
 pub(super) struct VpnService {
   requests: mpsc::Sender<Request>,
+  discover_containers: bool,
 }
 
 impl VpnService {
@@ -67,10 +67,38 @@ impl VpnService {
   }
 
   async fn stop_selected(&self, vpn_id: Option<String>) -> Result<VpnStatus, String> {
+    let local = self.local_list().await?;
+    let selected = vpn_id.clone().or_else(|| {
+      (local.connections.len() == 1)
+        .then(|| local.connections[0].vpn_id.clone())
+        .flatten()
+    });
     let (reply, result) = oneshot::channel();
-    self.request(Request::Stop { vpn_id, reply }, result).await
+    let released = self
+      .request(Request::Stop { vpn_id, reply }, result)
+      .await?;
+    // Releasing one daemon's interest does not promise global disconnection.
+    if self.discover_containers
+      && let Some(id) = selected
+    {
+      let snapshot = self.list().await?;
+      if !snapshot.discovery_warnings.is_empty() {
+        return released_without_inventory(&local, &id);
+      }
+      if let Some(mut status) = snapshot
+        .connections
+        .into_iter()
+        .find(|status| status.vpn_id.as_deref() == Some(&id))
+      {
+        status.locally_connected = Some(false);
+        status.message = Some("Released by this ctld; the VPN remains available while another ctld sends heartbeats, or until the heartbeat timeout.".into());
+        return Ok(status);
+      }
+    }
+    Ok(released)
   }
 
+  #[cfg(test)]
   pub(super) async fn status(&self) -> Result<VpnStatus, String> {
     Ok(
       self
@@ -84,6 +112,32 @@ impl VpnService {
   }
 
   pub(super) async fn list(&self) -> Result<VpnSnapshot, String> {
+    let mut snapshot = self.local_list().await?;
+    if !self.discover_containers {
+      return Ok(snapshot);
+    }
+    // Leave time for IPC framing within the client's five-second status limit.
+    // Dropping this future aborts its bounded engine inspections.
+    let discovered = tokio::time::timeout(std::time::Duration::from_secs(3), discover_containers())
+      .await
+      .unwrap_or_else(|_| Err("Shared VPN discovery timed out; check the container engine".into()));
+    match discovered {
+      Ok(statuses) => merge_discovered(&mut snapshot, statuses),
+      Err(error) => {
+        snapshot
+          .discovery_warnings
+          .push(format!("Could not discover shared VPN containers: {error}"));
+        for status in &mut snapshot.connections {
+          if status.container_id.is_some() {
+            status.status_unavailable = true;
+          }
+        }
+      }
+    }
+    Ok(snapshot)
+  }
+
+  async fn local_list(&self) -> Result<VpnSnapshot, String> {
     let (reply, result) = oneshot::channel();
     self.request(Request::List(reply), result).await
   }
@@ -118,6 +172,23 @@ impl VpnService {
   }
 }
 
+fn released_without_inventory(local: &VpnSnapshot, id: &str) -> Result<VpnStatus, String> {
+  let Some(previous) = local
+    .connections
+    .iter()
+    .find(|status| status.vpn_id.as_deref() == Some(id))
+  else {
+    return Err(
+      "This ctld has no connection to release; shared VPN status could not be checked".into(),
+    );
+  };
+  let mut status = previous.clone();
+  status.locally_connected = Some(false);
+  status.status_unavailable = true;
+  status.message = Some("Released by this ctld; shared VPN status could not be checked. Refresh when the container engine is available.".into());
+  Ok(status)
+}
+
 pub(super) struct VpnOwner {
   shutdown: Option<oneshot::Sender<()>>,
   task: Option<JoinHandle<()>>,
@@ -146,7 +217,9 @@ impl Drop for VpnOwner {
 }
 
 pub(super) fn spawn() -> (VpnService, VpnOwner) {
-  spawn_with(start_provider)
+  let (mut service, owner) = spawn_with(start_provider);
+  service.discover_containers = true;
+  (service, owner)
 }
 
 enum Config {
@@ -155,13 +228,17 @@ enum Config {
 }
 
 impl Config {
-  fn cancellation(&mut self) -> Option<oneshot::Sender<()>> {
+  fn cancellation(&mut self) -> oneshot::Sender<()> {
     match self {
-      Self::Openconnect(_) => None,
+      Self::Openconnect(config) => {
+        let (cancel, cancellation) = oneshot::channel();
+        config.cancellation = Some(cancellation);
+        cancel
+      }
       Self::Tailscale(config) => {
         let (cancel, cancellation) = oneshot::channel();
         config.cancellation = Some(cancellation);
-        Some(cancel)
+        cancel
       }
     }
   }
@@ -181,21 +258,101 @@ impl Config {
 }
 
 enum ManagedVpn {
-  Openconnect(openconnect::ManagedVpn),
-  Tailscale(tailscale::ManagedVpn),
+  Openconnect(Box<openconnect::ManagedVpn>),
+  Tailscale(Box<tailscale::ManagedVpn>),
 }
 
 async fn start_provider(config: Config) -> io::Result<ManagedVpn> {
   match config {
     Config::Openconnect(config) => openconnect::start(config)
       .await
-      .map(ManagedVpn::Openconnect),
-    Config::Tailscale(config) => tailscale::start(config).await.map(ManagedVpn::Tailscale),
+      .map(|vpn| ManagedVpn::Openconnect(Box::new(vpn))),
+    Config::Tailscale(config) => tailscale::start(config)
+      .await
+      .map(|vpn| ManagedVpn::Tailscale(Box::new(vpn))),
   }
 }
 
 fn unavailable() -> String {
   "ctld VPN service is shutting down".to_owned()
+}
+
+async fn discover_containers() -> Result<Vec<VpnStatus>, String> {
+  let engine = openconnect::find_engine().map_err(|error| error.to_string())?;
+  let containers = crate::vpn_container::list(&engine)
+    .await
+    .map_err(|error| error.to_string())?;
+  let mut pending = containers.into_iter();
+  let mut inspections = tokio::task::JoinSet::new();
+  let mut statuses = Vec::new();
+  loop {
+    while inspections.len() < DISCOVERY_CONCURRENCY {
+      let Some(container) = pending.next() else {
+        break;
+      };
+      inspections.spawn(observe_container(container));
+    }
+    let Some(result) = inspections.join_next().await else {
+      break;
+    };
+    statuses.push(result.map_err(|error| error.to_string())?);
+  }
+  statuses.sort_by(|left, right| left.vpn_id.cmp(&right.vpn_id));
+  Ok(statuses)
+}
+
+async fn observe_container(container: crate::vpn_container::ContainerDescriptor) -> VpnStatus {
+  let mut status = if container.metadata.provider == VpnProvider::Openconnect {
+    openconnect::discovered_status(&container).await
+  } else {
+    container.basic_status()
+  };
+  if container.running
+    && container.metadata.provider == VpnProvider::Tailscale
+    && let Some(port) = container.port
+  {
+    let observed =
+      tailscale::discovered_status(&container.engine, &container.id, &container.name, port).await;
+    status.running = observed.running;
+    status.state = observed.state;
+    status.endpoint = observed.endpoint;
+    status.auth_url = observed.auth_url;
+    status.hostname = observed.hostname;
+    status.tailnet = observed.tailnet;
+    status.username = observed.username;
+    status.message = observed.message;
+  }
+  status.locally_connected = Some(false);
+  status
+}
+
+fn merge_discovered(snapshot: &mut VpnSnapshot, discovered: Vec<VpnStatus>) {
+  for status in discovered {
+    let existing = snapshot.connections.iter_mut().find(|local| {
+      status
+        .container_id
+        .as_ref()
+        .is_some_and(|id| local.container_id.as_ref() == Some(id))
+        || ((status.container_id.is_none() || local.container_id.is_none())
+          && status
+            .vpn_id
+            .as_ref()
+            .is_some_and(|id| local.vpn_id.as_ref() == Some(id)))
+    });
+    if let Some(local) = existing {
+      // A live container inspection is fresher than a provider's cached startup
+      // result. Keep this daemon's interest and its profile association.
+      if status.container_id.is_some() && status.container_id == local.container_id {
+        let locally_connected = local.locally_connected;
+        let connection_id = local.connection_id.clone();
+        *local = status;
+        local.locally_connected = locally_connected;
+        local.connection_id = connection_id;
+      }
+    } else {
+      snapshot.connections.push(status);
+    }
+  }
 }
 
 // The private lease boundary lets lifecycle tests exercise the actor without
@@ -240,7 +397,7 @@ enum Identity {
   Cleanup(String),
   Connection {
     connection_id: String,
-    fingerprint: [u8; 32],
+    fingerprint: String,
   },
 }
 
@@ -293,8 +450,9 @@ impl<L: Lease, S> Entry<L, S> {
         ..VpnStatus::default()
       },
     };
-    status.vpn_id = Some(vpn_id.to_owned());
+    status.vpn_id.get_or_insert_with(|| vpn_id.to_owned());
     status.connection_id = self.identity.as_ref().and_then(Identity::connection_id);
+    status.locally_connected = Some(!matches!(self.phase, Phase::Stopping(_)));
     status.provider = self.provider;
     if self.provider == VpnProvider::Openconnect {
       status.vpn_url.clone_from(&self.metadata.vpn_url);
@@ -319,7 +477,7 @@ impl<L: Lease, S> Entry<L, S> {
 }
 
 enum Event<L> {
-  Prepared(Result<Prepared, String>),
+  Prepared(Result<Box<Prepared>, String>),
   Started(io::Result<L>),
   Exited(io::Result<()>),
   Stopped,
@@ -430,7 +588,7 @@ where
     }
     let metadata = prepared.config.metadata();
     let provider = prepared.config.provider();
-    let cancellation = prepared.config.cancellation();
+    let cancellation = Some(prepared.config.cancellation());
     self.entries.insert(
       id,
       Entry {
@@ -456,6 +614,15 @@ where
         return;
       }
       self.entries.keys().next().cloned().unwrap_or_default()
+    };
+    let id = if self.entries.contains_key(&id) {
+      id
+    } else {
+      self
+        .entries
+        .iter()
+        .find(|(key, entry)| entry.status(key).vpn_id.as_deref() == Some(&id))
+        .map_or(id.clone(), |(key, _)| key.clone())
     };
     self.stop_entry(&id, Some(reply));
   }
@@ -547,7 +714,10 @@ where
   fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<(String, Event<L>)> {
     for (id, entry) in &mut self.entries {
       let event = match &mut entry.phase {
-        Phase::Preparing(future) => future.as_mut().poll(cx).map(Event::Prepared),
+        Phase::Preparing(future) => future
+          .as_mut()
+          .poll(cx)
+          .map(|result| Event::Prepared(result.map(Box::new))),
         Phase::Starting(future) => future.as_mut().poll(cx).map(Event::Started),
         Phase::Stopping(future) => future.as_mut().poll(cx).map(|()| Event::Stopped),
         Phase::Connected(lease) => pin!(lease.exited()).poll(cx).map(Event::Exited),
@@ -565,7 +735,7 @@ where
       .remove(&id)
       .expect("completed operation has an owner");
     match event {
-      Event::Prepared(Ok(prepared)) => {
+      Event::Prepared(Ok(mut prepared)) => {
         if let Some((other_id, other)) = self
           .entries
           .iter_mut()
@@ -580,6 +750,7 @@ where
         entry.identity = Some(prepared.identity);
         entry.metadata = prepared.config.metadata();
         entry.provider = prepared.config.provider();
+        entry.cancellation = Some(prepared.config.cancellation());
         entry.phase = Phase::Starting(Box::pin((self.start)(prepared.config)));
       }
       Event::Prepared(Err(error)) => {
@@ -637,11 +808,11 @@ fn prepare_connection(connection: VpnConnection) -> Result<Prepared, String> {
     }
   }
   .map_err(|error| error.to_string())?;
-  let serialized =
-    Zeroizing::new(serde_json::to_vec(&connection).map_err(|_| "invalid VPN connection")?);
+  let runtime = crate::vpn_container::RuntimeMetadata::for_connection(&connection)
+    .map_err(|error| error.to_string())?;
   let identity = Identity::Connection {
     connection_id: connection.connection_id,
-    fingerprint: Sha256::digest(serialized.as_slice()).into(),
+    fingerprint: runtime.settings_key,
   };
   Ok(Prepared { identity, config })
 }
@@ -709,7 +880,10 @@ where
     registry.shutdown().await;
   });
   (
-    VpnService { requests },
+    VpnService {
+      requests,
+      discover_containers: false,
+    },
     VpnOwner {
       shutdown: Some(shutdown),
       task: Some(task),

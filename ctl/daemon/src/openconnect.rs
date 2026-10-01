@@ -1,4 +1,4 @@
-//! A container lease owned by ctld, including when the host process crashes.
+//! One daemon's heartbeat interest in a shared `OpenConnect` container.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -13,7 +13,9 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep, timeout};
+use tokio::time::{Instant, sleep, timeout};
+
+use crate::vpn_container::{self, ContainerDescriptor, Interest, RuntimeMetadata};
 
 mod config;
 mod diagnostics;
@@ -25,136 +27,211 @@ use diagnostics::Diagnostics;
 const IMAGE: &str = "localhost/ctl-openconnect:local";
 const START_TIMEOUT: Duration = Duration::from_secs(75);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const CREATOR_ADOPTION_TIMEOUT: Duration = Duration::from_secs(3);
+const IMAGE_MISSING: &str =
+  "The OpenConnect container image is missing. Build it with docker/openconnect/run.sh build.";
+const IMAGE_OUTDATED: &str = "The OpenConnect container image does not support shared VPN heartbeats. Rebuild it with docker/openconnect/run.sh build.";
+const IMAGE_INSPECTION_FAILED: &str = "Could not verify the OpenConnect container image. Start Docker or the Podman machine and try again.";
 
-/// Dropping the lease stops heartbeats even when startup is cancelled. The
-/// container's own watchdog also works if ctld or the attached CLI receives SIGKILL.
+/// Each daemon owns only its renewal task. Container lifetime is decided by
+/// the in-container watchdog after every interested daemon stops renewing.
 pub struct ManagedVpn {
-  child: Child,
-  heartbeat: JoinHandle<()>,
+  child: Option<Child>,
+  input: Option<JoinHandle<()>>,
+  interest: Option<Interest>,
+  monitor: Option<JoinHandle<io::Result<ExitStatus>>>,
+  container: Option<ContainerDescriptor>,
   container_name: String,
   endpoint: Option<String>,
   engine: PathBuf,
-  diagnostics: Diagnostics,
-  metadata: Metadata,
+  diagnostics: Option<Diagnostics>,
+  runtime: RuntimeMetadata,
+  creation: Option<vpn_container::CreationGuard>,
 }
 
 impl ManagedVpn {
   #[must_use]
   pub fn status(&self) -> VpnStatus {
-    VpnStatus {
-      vpn_id: None,
-      endpoint: self.endpoint.clone(),
-      vpn_url: self.endpoint.as_ref().and(self.metadata.vpn_url.clone()),
-      username: self.endpoint.as_ref().and(self.metadata.username.clone()),
-      container_name: Some(self.container_name.clone()),
-      running: self.endpoint.is_some(),
-      connection_id: None,
-      state: if self.endpoint.is_some() {
-        VpnState::Connected
-      } else {
-        VpnState::Stopped
-      },
-      ..VpnStatus::default()
+    let mut status = self
+      .container
+      .as_ref()
+      .map_or_else(VpnStatus::default, ContainerDescriptor::basic_status);
+    status.vpn_id = Some(self.runtime.connection_id.clone());
+    status.connection_id = self
+      .runtime
+      .saved_profile
+      .then(|| self.runtime.connection_id.clone());
+    status.endpoint.clone_from(&self.endpoint);
+    status.vpn_url.clone_from(&self.runtime.vpn_url);
+    status.username.clone_from(&self.runtime.username);
+    status.container_name = Some(self.container_name.clone());
+    status.running = self.endpoint.is_some();
+    status.state = if status.running {
+      VpnState::Connected
+    } else {
+      VpnState::Starting
+    };
+    status.locally_connected = Some(true);
+    status
+  }
+
+  /// Observes the immutable container, independently of its creator's CLI.
+  ///
+  /// # Errors
+  /// Returns engine observation failures or an unavailable monitor.
+  pub async fn exited(&mut self) -> io::Result<ExitStatus> {
+    match self.monitor.as_mut() {
+      Some(monitor) => monitor.await.map_err(io::Error::other)?,
+      None => Err(io::Error::other(
+        "OpenConnect container monitor is unavailable",
+      )),
     }
   }
 
-  /// Waits for the attached container process to exit.
-  ///
-  /// # Errors
-  /// Returns an error if the container CLI cannot be reaped.
-  pub async fn exited(&mut self) -> io::Result<ExitStatus> {
-    self.child.wait().await
+  pub async fn shutdown(&mut self) {
+    self.interest.take();
+    if let Some(monitor) = self.monitor.take() {
+      monitor.abort();
+    }
+    if let Some(input) = self.input.take() {
+      input.abort();
+    }
+    if let Some(child) = &mut self.child {
+      let _ = child.start_kill();
+      let _ = timeout(COMMAND_TIMEOUT, child.wait()).await;
+    }
+    self.child = None;
+    if let Some(mut creation) = self.creation.take() {
+      creation.cleanup().await;
+    }
   }
 
-  pub async fn shutdown(&mut self) {
-    self.endpoint = None;
-    self.heartbeat.abort();
-    // Explicit removal makes normal shutdown prompt; the in-container lease
-    // timeout remains the fallback if the engine is unreachable.
-    let _ = timeout(
-      COMMAND_TIMEOUT,
-      engine_command(&self.engine)
-        .args(["rm", "--force", &self.container_name])
-        .stdout(Stdio::null())
-        .status(),
-    )
-    .await;
-    let _ = self.child.start_kill();
-    let _ = timeout(COMMAND_TIMEOUT, self.child.wait()).await;
+  async fn diagnostic(&mut self) -> Option<&'static str> {
+    match self.diagnostics.as_mut() {
+      Some(diagnostics) => diagnostics.finish().await,
+      None => None,
+    }
   }
 
   async fn wait_ready(&mut self) -> io::Result<()> {
-    if let Ok(result) = timeout(START_TIMEOUT, self.poll_ready()).await {
-      result
-    } else {
-      let reason = self
-        .diagnostics
-        .finish()
-        .await
-        .unwrap_or("OpenConnect VPN and SOCKS5 listener did not become ready within 75 seconds");
-      Err(io::Error::new(io::ErrorKind::TimedOut, reason))
+    match timeout(START_TIMEOUT, self.poll_ready()).await {
+      Ok(result) => result,
+      Err(_) => Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        self
+          .diagnostic()
+          .await
+          .unwrap_or("OpenConnect VPN and SOCKS5 listener did not become ready within 75 seconds"),
+      )),
     }
   }
 
   async fn poll_ready(&mut self) -> io::Result<()> {
+    let mut adoption_deadline = None;
     loop {
-      if let Some(status) = self.child.try_wait()? {
-        if let Some(reason) = self.diagnostics.finish().await {
+      let found = vpn_container::inspect_named(&self.engine, &self.container_name).await?;
+      if let Some(container) = found {
+        container.compatible(&self.runtime)?;
+        if container.running {
+          if let Some(mut creation) = self.creation.take() {
+            creation.disarm();
+          }
+          if self.interest.is_none()
+            && let Ok(interest) = container.interest().await
+          {
+            self.interest = Some(interest);
+          }
+          if self.interest.is_some()
+            && let Some(port) = container.port
+          {
+            let ready = timeout(
+              COMMAND_TIMEOUT,
+              engine_command(&self.engine)
+                .args(["exec", &container.id, "/usr/local/bin/vpn-healthcheck"])
+                .stdout(Stdio::null())
+                .status(),
+            )
+            .await;
+            if matches!(ready, Ok(Ok(status)) if status.success()) {
+              self.endpoint = Some(format!("socks5h://127.0.0.1:{port}"));
+              let monitored = container.clone();
+              self.monitor = Some(tokio::spawn(async move { monitored.exited().await }));
+              self.container = Some(container);
+              return Ok(());
+            }
+          }
+        } else if container.state != "created"
+          && self
+            .child
+            .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_some())
+        {
+          return Err(io::Error::other(self.diagnostic().await.unwrap_or(
+            "OpenConnect container exited before its VPN became ready",
+          )));
+        }
+        self.container = Some(container);
+      } else if let Some(child) = &mut self.child
+        && let Some(status) = child.try_wait()?
+      {
+        // A conflicting run can exit before the engine publishes the winner's
+        // descriptor. Re-observe that reservation within a bounded window;
+        // attached CLI exit alone says nothing about shared container ownership.
+        let deadline =
+          adoption_deadline.get_or_insert_with(|| Instant::now() + CREATOR_ADOPTION_TIMEOUT);
+        if Instant::now() >= *deadline {
+          let reason = self.diagnostic().await.unwrap_or(
+            "Build the image with docker/openconnect/run.sh build and check the VPN settings",
+          );
           return Err(io::Error::other(format!(
             "OpenConnect container exited ({status}): {reason}"
           )));
         }
-        return Err(io::Error::other(format!(
-          "OpenConnect container exited ({status}); build the image with docker/openconnect/run.sh build and check the VPN settings"
-        )));
       }
-      if let Ok(port) = self.published_port().await {
-        let ready = timeout(
-          COMMAND_TIMEOUT,
-          engine_command(&self.engine)
-            .args([
-              "exec",
-              &self.container_name,
-              "/usr/local/bin/vpn-healthcheck",
-            ])
-            .stdout(Stdio::null())
-            .status(),
-        )
-        .await;
-        if matches!(ready, Ok(Ok(status)) if status.success()) {
-          self.endpoint = Some(format!("socks5h://127.0.0.1:{port}"));
-          return Ok(());
-        }
-      }
-      sleep(Duration::from_millis(500)).await;
+      sleep(Duration::from_millis(250)).await;
     }
   }
+}
 
-  async fn published_port(&self) -> io::Result<u16> {
-    let output = timeout(
+/// Probes readiness without acquiring or renewing interest in the container.
+pub(super) async fn discovered_status(container: &ContainerDescriptor) -> VpnStatus {
+  let mut status = container.basic_status();
+  if container.running
+    && let Some(port) = container.port
+  {
+    let ready = timeout(
       COMMAND_TIMEOUT,
-      engine_command(&self.engine)
-        .args([
-          "inspect",
-          "--format",
-          "{{json .NetworkSettings.Ports}}",
-          &self.container_name,
-        ])
-        .output(),
+      engine_command(&container.engine)
+        .args(["exec", &container.id, "/usr/local/bin/vpn-healthcheck"])
+        .stdout(Stdio::null())
+        .status(),
     )
-    .await??;
-    if !output.status.success() {
-      return Err(io::Error::other("container port is not available yet"));
-    }
-    parse_published_port(&output.stdout)
+    .await;
+    status.running = matches!(ready, Ok(Ok(result)) if result.success());
+    status.state = if status.running {
+      VpnState::Connected
+    } else {
+      VpnState::Starting
+    };
+    status.endpoint = status
+      .running
+      .then(|| format!("socks5h://127.0.0.1:{port}"));
   }
+  status
 }
 
 impl Drop for ManagedVpn {
   fn drop(&mut self) {
-    self.heartbeat.abort();
-    let _ = self.child.start_kill();
+    self.interest.take();
+    if let Some(monitor) = &self.monitor {
+      monitor.abort();
+    }
+    if let Some(input) = &self.input {
+      input.abort();
+    }
+    if let Some(child) = &mut self.child {
+      let _ = child.start_kill();
+    }
   }
 }
 
@@ -175,85 +252,171 @@ pub(super) async fn start(config: Config) -> io::Result<ManagedVpn> {
   start_config(config, &find_engine()?).await
 }
 
-async fn start_config(config: Config, engine: &Path) -> io::Result<ManagedVpn> {
-  let container_name = format!("ctld-openconnect-{}", uuid::Uuid::new_v4().simple());
-  let mut command = engine_command(engine);
-  command.args([
-    "run",
-    "--rm",
-    "--init",
-    "--interactive",
-    "--pull=never",
-    "--restart=no",
-    "--name",
-    &container_name,
-    "--label",
-    "io.ctl.service=openconnect",
-    "--security-opt",
-    "label=disable",
-    "--cap-add",
-    "NET_ADMIN",
-    "--device",
-    "/dev/net/tun",
-    "--publish",
-    "127.0.0.1::1080/tcp",
-  ]);
-  command.args([
-    "--env",
-    "CTLD_CONFIG_STDIN=1",
-    "--tmpfs",
-    "/run/secrets:rw,noexec,nosuid,nodev,mode=0700,size=65536",
-  ]);
-  let mut payload = zeroize::Zeroizing::new(BASE64.encode(config.content.as_bytes()));
-  payload.push('\n');
-  let metadata = config.metadata;
-  drop(config.content);
-  let mut child = command
-    .arg(IMAGE)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()?;
-  let diagnostics = Diagnostics::new(
-    child.stdout.take().expect("container stdout was piped"),
-    child.stderr.take().expect("container stderr was piped"),
-  );
-  let mut stdin = child.stdin.take().expect("container stdin was piped");
-  let heartbeat = tokio::spawn(async move {
-    if !matches!(
-      timeout(COMMAND_TIMEOUT, stdin.write_all(payload.as_bytes())).await,
-      Ok(Ok(()))
-    ) {
-      return;
-    }
-    // Drop and zeroize the credentials before entering the heartbeat loop.
-    drop(payload);
-    let mut ticks = interval(HEARTBEAT_INTERVAL);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-      ticks.tick().await;
-      if !matches!(
-        timeout(HEARTBEAT_INTERVAL, stdin.write_all(b"ping\n")).await,
-        Ok(Ok(()))
-      ) {
-        break;
-      }
-    }
-  });
+async fn start_config(mut config: Config, engine: &Path) -> io::Result<ManagedVpn> {
+  let cancellation = config.cancellation.take();
+  let container_name = vpn_container::container_name(&config.runtime)?;
+  let mut child = None;
+  let mut diagnostics = None;
+  let mut input = None;
+  let mut creation = None;
+  if vpn_container::inspect_named(engine, &container_name)
+    .await?
+    .is_none()
+  {
+    let image_id = verify_shared_image(engine).await?;
+    let mut command = engine_command(engine);
+    command.args([
+      "run",
+      "--rm",
+      "--init",
+      "--interactive",
+      "--sig-proxy=false",
+      "--pull=never",
+      "--restart=no",
+      "--name",
+      &container_name,
+      "--security-opt",
+      "label=disable",
+      "--cap-add",
+      "NET_ADMIN",
+      "--device",
+      "/dev/net/tun",
+      "--publish",
+      "127.0.0.1::1080/tcp",
+    ]);
+    command.args(vpn_container::labels_arguments(&config.runtime)?);
+    let creator = uuid::Uuid::new_v4().to_string();
+    command.args(["--label", &format!("io.ctl.vpn.creator={creator}")]);
+    creation = Some(vpn_container::CreationGuard::new(
+      engine.to_path_buf(),
+      container_name.clone(),
+      creator,
+    ));
+    command.args([
+      "--env",
+      "CTLD_CONFIG_STDIN=1",
+      "--tmpfs",
+      "/run/secrets:rw,noexec,nosuid,nodev,mode=0700,size=65536",
+    ]);
+    let mut payload = zeroize::Zeroizing::new(BASE64.encode(config.content.as_bytes()));
+    payload.push('\n');
+    let mut created = command
+      .arg(image_id)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()?;
+    diagnostics = Some(Diagnostics::new(
+      created.stdout.take().expect("container stdout was piped"),
+      created.stderr.take().expect("container stderr was piped"),
+    ));
+    let mut stdin = created.stdin.take().expect("container stdin was piped");
+    input = Some(tokio::spawn(async move {
+      let _ = timeout(COMMAND_TIMEOUT, stdin.write_all(payload.as_bytes())).await;
+      // Config travels only once. EOF has no authority over shared lifetime.
+    }));
+    child = Some(created);
+  }
   let mut vpn = ManagedVpn {
     child,
-    heartbeat,
+    input,
+    interest: None,
+    monitor: None,
+    container: None,
     container_name,
     endpoint: None,
     engine: engine.to_path_buf(),
     diagnostics,
-    metadata,
+    runtime: config.runtime,
+    creation,
   };
-  if let Err(error) = vpn.wait_ready().await {
+  let cancelled = async move {
+    if let Some(cancellation) = cancellation {
+      let _ = cancellation.await;
+    } else {
+      std::future::pending::<()>().await;
+    }
+  };
+  let result = tokio::select! {
+    result = vpn.wait_ready() => result,
+    () = cancelled => Err(io::Error::new(io::ErrorKind::Interrupted, "OpenConnect startup was cancelled")),
+  };
+  if let Err(error) = result {
     vpn.shutdown().await;
     return Err(error);
   }
   Ok(vpn)
+}
+
+#[derive(Deserialize)]
+struct ImageCapability {
+  #[serde(rename = "Id", alias = "ID")]
+  id: String,
+  #[serde(rename = "Config")]
+  config: ImageConfiguration,
+}
+
+#[derive(Deserialize)]
+struct ImageConfiguration {
+  #[serde(rename = "Labels")]
+  labels: Option<HashMap<String, String>>,
+}
+
+async fn verify_shared_image(engine: &Path) -> io::Result<String> {
+  // Runtime labels are supplied by ctld, so they cannot prove that an old local
+  // image contains the shared heartbeat entrypoint. Check the image itself
+  // before creating a container or handing its process any credentials.
+  let output = timeout(
+    COMMAND_TIMEOUT,
+    engine_command(engine)
+      .args(["image", "inspect", IMAGE])
+      .stderr(Stdio::piped())
+      .output(),
+  )
+  .await
+  .map_err(|_| io::Error::other(IMAGE_INSPECTION_FAILED))?
+  .map_err(|_| io::Error::other(IMAGE_INSPECTION_FAILED))?;
+  if !output.status.success() {
+    // Inspect errors can include engine addresses or supplied text. Match only
+    // fixed missing-image signatures and never return raw output to the client.
+    let message = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    return Err(
+      if message.contains("no such image")
+        || message.contains("image not known")
+        || message.contains("no such object")
+      {
+        io::Error::new(io::ErrorKind::NotFound, IMAGE_MISSING)
+      } else {
+        io::Error::other(IMAGE_INSPECTION_FAILED)
+      },
+    );
+  }
+  let images: Vec<ImageCapability> = serde_json::from_slice(&output.stdout)
+    .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, IMAGE_OUTDATED))?;
+  if images.len() != 1 {
+    return Err(io::Error::other(IMAGE_INSPECTION_FAILED));
+  }
+  let image = images.into_iter().next().expect("one inspected image");
+  if image
+    .config
+    .labels
+    .as_ref()
+    .and_then(|labels| labels.get(vpn_container::LABEL_PROTOCOL))
+    .map(String::as_str)
+    != Some(vpn_container::PROTOCOL)
+  {
+    return Err(io::Error::new(io::ErrorKind::Unsupported, IMAGE_OUTDATED));
+  }
+  // Freeze the verified image contents across any concurrent tag replacement.
+  let id = image.id.strip_prefix("sha256:").unwrap_or(&image.id);
+  if id.len() != 64
+    || !id
+      .bytes()
+      .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+  {
+    return Err(io::Error::other(IMAGE_INSPECTION_FAILED));
+  }
+  Ok(id.into())
 }
 
 pub(super) fn find_engine() -> io::Result<PathBuf> {

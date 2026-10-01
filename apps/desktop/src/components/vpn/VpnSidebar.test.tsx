@@ -23,7 +23,7 @@ function model(overrides: Partial<VpnController> = {}): VpnController {
   return {
     connections: [connection], catalog_loaded: true, catalog_loading: false, catalog_error: null,
     statuses: [], supports_multiple: true, supported_providers: ["openconnect", "tailscale"], supports_tailscale_enrollment: true, enrollment_connection_id: null, signing_in_ids: new Set(),
-    status_loaded: true, status_loading: false, status_stale: false, status_error: null, last_checked_at: null,
+    status_loaded: true, status_loading: false, status_stale: false, status_error: null, discovery_warnings: [], last_checked_at: null,
     actions: new Map(), action_errors: new Map(), uncertain_ids: new Set(), profile_busy: false, deleting_id: null,
     editor: null, editor_error: null, editor_saving: false,
     refresh: vi.fn().mockResolvedValue(undefined), connect: vi.fn().mockResolvedValue(undefined), stop: vi.fn().mockResolvedValue(undefined),
@@ -282,4 +282,54 @@ it("hides only the current enrollment from synthetic runtime items", () => {
   ] })} />);
   expect(screen.getAllByRole("region")).toHaveLength(1);
   expect(screen.getByText("Not saved in this app")).toBeTruthy();
+});
+
+
+describe("shared VPN container items", () => {
+  it("shows a shared saved connection as connected and can join it but cannot release another daemon's interest", async () => {
+    const user = userEvent.setup();
+    const state = model({ statuses: [runtime("work", { shared_container: true, locally_connected: false })] });
+    const { rerender } = render(<VpnSidebar model={state} />);
+    expect(region().getByText("Connected")).toBeTruthy();
+    expect(region().getByText("Shared VPN · This ctld is not keeping it connected.")).toBeTruthy();
+    expect(region().getByText("socks5h://127.0.0.1:49152")).toBeTruthy();
+    expect((region().getByRole("button", { name: "Disconnect Work" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(region().getByRole("button", { name: "Connect Work" }));
+    expect(state.connect).toHaveBeenCalledWith("work");
+    expect((region().getByRole("button", { name: "Edit Work" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((region().getByRole("button", { name: "Delete Work" }) as HTMLButtonElement).disabled).toBe(true);
+    rerender(<VpnSidebar model={{ ...state, statuses: [runtime("work", { shared_container: true, locally_connected: true })] }} />);
+    expect(region().queryByRole("button", { name: "Connect Work" })).toBeNull();
+    await user.click(region().getByRole("button", { name: "Disconnect Work" }));
+    expect(state.stop).toHaveBeenCalledWith("work");
+  });
+
+  it("shows unknown shared profiles without offering a configuration-free Connect or Disconnect", () => {
+    render(<VpnSidebar model={model({ connections: [], statuses: [runtime("external", { connection_id: null, shared_container: true, locally_connected: false })] })} />);
+    expect(region("Connected VPN").getByText("Connected")).toBeTruthy();
+    expect(region("Connected VPN").queryByRole("button", { name: /Connect / })).toBeNull();
+    expect((region("Connected VPN").getByRole("button", { name: "Disconnect VPN" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("keeps confirmed local rows usable while warning about incomplete shared discovery", () => {
+    const state = model({ connections: [connection, research], statuses: [runtime()], discovery_warnings: ["Container inventory unavailable"] });
+    const { rerender } = render(<VpnSidebar model={state} />);
+    expect(region().getByText("Connected")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toBe("Container inventory unavailable");
+    expect((region().getByRole("button", { name: "Disconnect Work" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((region("Research").getByRole("button", { name: "Connect Research" }) as HTMLButtonElement).disabled).toBe(false);
+    rerender(<VpnSidebar model={{ ...state, connections: [], statuses: [] }} />);
+    expect(screen.queryByText("No saved VPN connections.")).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("VPN status unavailable.");
+  });
+});
+
+it("shows retained released shared metadata as unavailable and disables copying until confirmed", () => {
+  render(<VpnSidebar model={model({ statuses: [runtime("work", { shared_container: true, locally_connected: false, status_unavailable: true })] })} />);
+  expect(region().getByText("Status unavailable")).toBeTruthy();
+  expect(region().getByText("Last known state: Connected")).toBeTruthy();
+  expect(region().getByText("socks5h://127.0.0.1:49152")).toBeTruthy();
+  expect((region().getByRole("button", { name: "Copy SOCKS endpoint" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((region().getByRole("button", { name: "Disconnect Work" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((region().getByRole("button", { name: "Connect Work" }) as HTMLButtonElement).disabled).toBe(true);
 });

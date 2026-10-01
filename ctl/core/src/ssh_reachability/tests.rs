@@ -346,7 +346,7 @@ async fn managed_vpn_uses_only_status_request_and_existing_socks_listener() {
     ctld_ipc::write_frame(
       &mut stream,
       &ServerMessage::VpnStatus {
-        status: status.clone(),
+        status: status.clone().into(),
         snapshot: Some(VpnSnapshot {
           connections: vec![status],
           ..VpnSnapshot::default()

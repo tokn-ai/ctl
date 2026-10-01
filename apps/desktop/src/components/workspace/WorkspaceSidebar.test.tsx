@@ -52,6 +52,22 @@ describe("workspace sidebar", () => {
     expect(tab.getAttribute("aria-description")).toBe("Status unavailable");
   });
 
+  it("does not claim disconnection for incomplete inventory while preserving confirmed activity", () => {
+    const props = {
+      selected: "sessions" as const, onSelect: vi.fn(),
+      sessions: null, tasks: null, ports: null, vpn: null, vpn_inventory_incomplete: true,
+    };
+    const panel = render(<WorkspaceSidebar {...props} vpn_state="stopped" vpn_active_count={0} />);
+    const tab = screen.getByRole("tab", { name: "VPN" });
+    expect(tab.getAttribute("aria-description")).toBe("Status unavailable");
+    expect(tab.querySelector(".vpn-activity-indicator.stale")).toBeTruthy();
+    panel.rerender(<WorkspaceSidebar {...props} vpn_state="connected" vpn_active_count={1} />);
+    expect(tab.getAttribute("aria-description")).toBe("Connected · Inventory incomplete");
+    expect(tab.querySelector(".vpn-activity-indicator.connected")).toBeTruthy();
+    panel.rerender(<WorkspaceSidebar {...props} vpn_state="connected" vpn_active_count={2} />);
+    expect(tab.getAttribute("aria-description")).toBe("2 active VPNs · Inventory incomplete");
+  });
+
   it("selects the ports panel from the activity rail", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();

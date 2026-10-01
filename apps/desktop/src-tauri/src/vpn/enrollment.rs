@@ -5,6 +5,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnSnapshot, VpnState, VpnStatus};
 use tokio::sync::Mutex as AsyncMutex;
@@ -15,6 +16,8 @@ use super::{COORDINATORS, Repository, VpnConnectionsSnapshot, client, runtime_er
 use crate::error::{CommandErrorDto, CommandResult};
 
 type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = CommandResult<T>> + Send + 'a>>;
+const CLOSED_WINDOW_CLEANUP_GRACE: Duration = Duration::from_secs(16);
+const CLOSED_WINDOW_CLEANUP_DEADLINE: Duration = Duration::from_secs(25);
 
 trait Runtime: Send + Sync {
   fn supported(&self) -> RuntimeFuture<'_, ()>;
@@ -70,7 +73,7 @@ impl Runtime for NativeRuntime {
 
 #[derive(Default)]
 pub(super) struct Enrollments {
-  entries: Mutex<HashMap<String, Arc<Enrollment>>>,
+  entries: Arc<Mutex<HashMap<String, Arc<Enrollment>>>>,
 }
 
 struct Enrollment {
@@ -91,6 +94,7 @@ struct EnrollmentState {
   dispatched: bool,
   lifecycle: Lifecycle,
   error: Option<CommandErrorDto>,
+  cleanup_retry_scheduled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -148,6 +152,7 @@ impl Enrollments {
         dispatched: false,
         lifecycle: Lifecycle::Draft,
         error: None,
+        cleanup_retry_scheduled: false,
       })),
     });
     let initial = enrollment.snapshot(enrollment.pending(), None);
@@ -222,7 +227,28 @@ impl Enrollments {
       // Keep failed cleanup registered and leave identity intact if storage or
       // the owner is unavailable. A closed app must never guess that it is safe
       // to discard a profile whose save result was interrupted.
-      let _ = self.cancel(window_label, &id).await;
+      if let Err(error) = self.cancel(window_label, &id).await
+        && error.code == "vpn_cleanup_pending"
+        && let Ok(enrollment) = self.get(window_label, &id)
+      {
+        let schedule = {
+          let mut state = lock(&enrollment.state);
+          if state.cleanup_retry_scheduled {
+            false
+          } else {
+            state.cleanup_retry_scheduled = true;
+            true
+          }
+        };
+        if !schedule {
+          continue;
+        }
+        let entries = Arc::clone(&self.entries);
+        tokio::spawn(async move {
+          retry_closed_enrollment(&entries, &enrollment).await;
+          lock(&enrollment.state).cleanup_retry_scheduled = false;
+        });
+      }
     }
   }
 }
@@ -278,6 +304,7 @@ impl Enrollment {
 
   async fn status(&self) -> CommandResult<VpnEnrollmentSnapshot> {
     let snapshot = self.runtime.list().await?;
+    let incomplete = !snapshot.discovery_warnings.is_empty();
     let state = lock(&self.state);
     let mut error = state.error.clone();
     let mut status = snapshot.connections.into_iter()
@@ -285,7 +312,7 @@ impl Enrollment {
       .unwrap_or_else(|| {
         let mut pending = self.pending();
         if state.lifecycle == Lifecycle::Discarding { pending.state = VpnState::Stopping; }
-        else if !state.starting {
+        else if !state.starting && !incomplete {
           pending.state = VpnState::Stopped;
           pending.message = None;
           if error.is_none() && state.lifecycle != Lifecycle::Adopted {
@@ -297,6 +324,12 @@ impl Enrollment {
     if state.lifecycle == Lifecycle::Discarding {
       status.state = VpnState::Stopping;
       status.auth_url = None;
+    }
+    if incomplete {
+      status.status_unavailable = true;
+      status.auth_url = None;
+      status.message =
+        Some("Tailscale container status is unavailable. Refresh to check it again.".into());
     }
     Ok(self.snapshot(status, error))
   }
@@ -328,6 +361,16 @@ impl Enrollment {
     }
     let _change = self.coordinator.changes.lock().await;
     let snapshot = self.runtime.list().await?;
+    if !snapshot.discovery_warnings.is_empty()
+      || snapshot.connections.iter().any(|status| {
+        matches_connection(status, &self.connection.connection_id) && status.status_unavailable
+      })
+    {
+      return Err(CommandErrorDto::new(
+        "vpn_discovery_incomplete",
+        "Tailscale status could not be confirmed. Refresh before saving this connection.",
+      ));
+    }
     if !snapshot.connections.iter().any(|status| {
       matches_connection(status, &self.connection.connection_id)
         && status.state == VpnState::Connected
@@ -403,8 +446,61 @@ impl Enrollment {
       lock(&self.state).lifecycle = Lifecycle::Adopted;
       return Ok(());
     }
+    let inventory = self.runtime.list().await?;
+    if !inventory.discovery_warnings.is_empty()
+      || inventory.connections.iter().any(|status| {
+        matches_connection(status, &self.connection.connection_id) && status.status_unavailable
+      })
+    {
+      return Err(CommandErrorDto::new(
+        "vpn_cleanup_pending",
+        "The VPN connection was released, but container inventory is unavailable. Retry cancellation once its status can be checked.",
+      ));
+    }
+    if inventory.connections.iter().any(|status| {
+      matches_connection(status, &self.connection.connection_id)
+        && (status.running || status.state != VpnState::Stopped)
+    }) {
+      // Releasing our heartbeat does not stop a container kept alive elsewhere.
+      // Keep the draft registered and its identity intact until passive expiry.
+      return Err(CommandErrorDto::new(
+        "vpn_cleanup_pending",
+        "The VPN connection was released, but its shared container is still running. Wait for it to expire, then retry cancellation to remove the unsaved identity.",
+      ));
+    }
     self.runtime.forget(&self.connection.connection_id).await
   }
+}
+
+async fn retry_closed_enrollment(
+  entries: &Mutex<HashMap<String, Arc<Enrollment>>>,
+  enrollment: &Arc<Enrollment>,
+) {
+  // Let the watchdog expire our released heartbeat before trying identity removal.
+  // The process may exit before this best-effort task finishes; preserving the
+  // identity is safer than removing a shared container or an interrupted save.
+  let _ = tokio::time::timeout(CLOSED_WINDOW_CLEANUP_DEADLINE, async {
+    tokio::time::sleep(CLOSED_WINDOW_CLEANUP_GRACE).await;
+    loop {
+      if !lock(entries)
+        .get(&enrollment.id)
+        .is_some_and(|current| Arc::ptr_eq(current, enrollment))
+      {
+        return;
+      }
+      match enrollment.cancel().await {
+        Ok(()) => {
+          lock(entries).remove(&enrollment.id);
+          return;
+        }
+        Err(error) if error.code == "vpn_cleanup_pending" => {
+          tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(_) => return,
+      }
+    }
+  })
+  .await;
 }
 
 fn matches_connection(status: &VpnStatus, connection_id: &str) -> bool {

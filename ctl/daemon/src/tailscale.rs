@@ -9,14 +9,16 @@ use std::time::Duration;
 use ctld_ipc::{VpnConnection, VpnProvider, VpnSettings, VpnState, VpnStatus};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpStream;
+use tokio::io::AsyncWriteExt as _;
 use tokio::process::Child;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 
 use crate::openconnect::{engine_command, find_engine, parse_published_port};
+
+mod socks;
+use socks::ready as socks_ready;
 
 const IMAGE: &str = "docker.io/tailscale/tailscale:v1.94.2";
 const ENTRYPOINT: &str = include_str!("../../../docker/tailscale/entrypoint.sh");
@@ -476,20 +478,6 @@ async fn backend_status(engine: &Path, container_name: &str) -> io::Result<Backe
   // `tailscale status` may exit nonzero before login while returning valid JSON.
   serde_json::from_slice(&output.stdout)
     .map_err(|_| io::Error::other("Tailscale status is not available yet"))
-}
-
-async fn socks_ready(port: u16) -> io::Result<()> {
-  timeout(COMMAND_TIMEOUT, async {
-    let mut stream = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await?;
-    stream.write_all(&[5, 1, 0]).await?;
-    let mut answer = [0; 2];
-    stream.read_exact(&mut answer).await?;
-    if answer != [5, 0] {
-      return Err(io::Error::other("SOCKS5 listener is not ready"));
-    }
-    Ok(())
-  })
-  .await?
 }
 
 fn pending_status(container_name: &str) -> VpnStatus {

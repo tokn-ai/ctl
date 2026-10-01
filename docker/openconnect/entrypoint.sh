@@ -42,7 +42,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# ctld owns this stream. Preserve it before OpenConnect receives its password.
+# Keep only the one configuration frame; EOF is independent of container life.
 exec 3<&0
 # Saved connections arrive as one bounded base64 line. Keep the generated env
 # only in the container's private tmpfs; the host never writes these secrets.
@@ -57,14 +57,8 @@ if [ "${CTLD_CONFIG_STDIN:-}" = 1 ]; then
   unset config_payload
   chmod 600 "$config_file"
 fi
-entrypoint_pid=$$
-(
-  while IFS= read -r -t 15 heartbeat <&3; do
-    [ "$heartbeat" = ping ] || break
-  done
-  printf '%s\n' 'ctld heartbeat ended; stopping the VPN and SOCKS5.' >&2
-  kill -TERM "$entrypoint_pid" 2>/dev/null || :
-) &
+exec 3<&-
+/bin/sh /run/ctl/watchdog.sh "$$" &
 heartbeat_pid=$!
 child_pids+=("$heartbeat_pid")
 

@@ -37,6 +37,7 @@ export interface VpnController {
   status_loading: boolean;
   status_stale: boolean;
   status_error: string | null;
+  discovery_warnings: readonly string[];
   last_checked_at: number | null;
   actions: ReadonlyMap<string, VpnAction>;
   action_errors: ReadonlyMap<string, string>;
@@ -75,6 +76,7 @@ export function useVpn(enabled: boolean): VpnController {
   const [status_loading, setStatusLoading] = useState(false);
   const [status_stale, setStatusStale] = useState(false);
   const [status_error, setStatusError] = useState<string | null>(null);
+  const [discovery_warnings, setDiscoveryWarnings] = useState<readonly string[]>([]);
   const [last_checked_at, setLastCheckedAt] = useState<number | null>(null);
   const [actions, setActions] = useState<ReadonlyMap<string, VpnAction>>(new Map());
   const [action_errors, setActionErrors] = useState<ReadonlyMap<string, string>>(new Map());
@@ -97,6 +99,7 @@ export function useVpn(enabled: boolean): VpnController {
   const sign_in_failed_ids = useRef(new Set<string>());
   const status_loaded_ref = useRef(false);
   const status_stale_ref = useRef(false);
+  const discovery_warnings_ref = useRef<readonly string[]>([]);
   const status_generation = useRef(0);
   const status_request = useRef<PendingRefresh | null>(null);
   const actions_ref = useRef(new Map<string, VpnAction>());
@@ -160,7 +163,20 @@ export function useVpn(enabled: boolean): VpnController {
       try {
         const snapshot = await vpnStatus();
         if (!mounted.current || generation !== status_generation.current) return;
+        const warnings = snapshot.discovery_warnings ?? [];
         const next = new Map(snapshot.connections.filter((status) => status.state !== "stopped").map((status) => [vpnRuntimeId(status), status]));
+        for (const [vpn_id, status] of next) {
+          if (status.status_unavailable) uncertain_ids_ref.current.add(vpn_id);
+        }
+        if (warnings.length > 0) {
+          // An unavailable container engine cannot prove a previously seen VPN disappeared.
+          for (const [vpn_id, previous] of statuses_ref.current) {
+            if (!next.has(vpn_id)) {
+              next.set(vpn_id, previous);
+              uncertain_ids_ref.current.add(vpn_id);
+            }
+          }
+        }
         // A whole-daemon observation must not undo newer or pending work on an individual VPN.
         for (const [vpn_id, current_generation] of runtime_generations.current) {
           if (observed_generations.get(vpn_id) !== current_generation || actions_ref.current.has(vpn_id)) {
@@ -171,14 +187,19 @@ export function useVpn(enabled: boolean): VpnController {
           }
           const failure = failed_actions.current.get(vpn_id);
           const observed = next.get(vpn_id);
-          uncertain_ids_ref.current.delete(vpn_id);
+          if (!observed?.status_unavailable && (!warnings.length || snapshot.connections.some((status) => vpnRuntimeId(status) === vpn_id))) uncertain_ids_ref.current.delete(vpn_id);
           if (failure?.generation === current_generation && (
-            (failure.kind === "stop" && !observed) ||
-            (failure.kind === "connect" && observed?.state === "connected" && observed.connection_id === failure.connection_id)
+            (failure.kind === "stop" && ((!observed && !warnings.length) || observed?.locally_connected === false)) ||
+            (failure.kind === "connect" && observed?.state === "connected" && !observed.status_unavailable && observed.locally_connected !== false && observed.connection_id === failure.connection_id)
           )) {
             failed_actions.current.delete(vpn_id);
             action_errors_ref.current.delete(vpn_id);
           }
+        }
+        for (const vpn_id of uncertain_ids_ref.current) {
+          if (!actions_ref.current.has(vpn_id) && !failed_actions.current.has(vpn_id) &&
+            !next.get(vpn_id)?.status_unavailable &&
+            (!warnings.length || snapshot.connections.some((status) => vpnRuntimeId(status) === vpn_id))) uncertain_ids_ref.current.delete(vpn_id);
         }
         for (const vpn_id of sign_in_failed_ids.current) {
           if (!vpnNeedsSignIn(next.get(vpn_id))) {
@@ -193,10 +214,12 @@ export function useVpn(enabled: boolean): VpnController {
         setSupportsTailscaleEnrollment(snapshot.supports_tailscale_enrollment === true);
         status_loaded_ref.current = true;
         status_stale_ref.current = false;
+        discovery_warnings_ref.current = warnings;
         setSupportsMultiple(snapshot.supports_multiple);
         setStatusLoaded(true);
         setStatusStale(false);
         setStatusError(null);
+        setDiscoveryWarnings(warnings);
         setLastCheckedAt(Date.now());
         setActionErrors(new Map(action_errors_ref.current));
         setUncertainIds(new Set(uncertain_ids_ref.current));
@@ -263,6 +286,7 @@ export function useVpn(enabled: boolean): VpnController {
   }, [enabled, refresh, refreshStatus]);
 
   const isActive = useCallback((connection_id: string) =>
+    discovery_warnings_ref.current.length > 0 ||
     uncertain_ids_ref.current.has(connection_id) ||
     [...statuses_ref.current.values()].some((status) => status.connection_id === connection_id) ||
     [...actions_ref.current.values()].some((action) => action.connection_id === connection_id), []);
@@ -284,7 +308,13 @@ export function useVpn(enabled: boolean): VpnController {
     const current = () => mounted.current && started_lifetime === lifetime.current && runtime_generations.current.get(vpn_id) === generation;
     try {
       const next = await operation();
-      if (current()) publishRuntime(vpn_id, next);
+      if (current()) {
+        publishRuntime(vpn_id, next);
+        if (next.status_unavailable) {
+          uncertain_ids_ref.current.add(vpnRuntimeId(next));
+          setUncertainIds(new Set(uncertain_ids_ref.current));
+        }
+      }
     } catch (failure) {
       if (current()) {
         publishRuntime(vpn_id, previous);
@@ -335,25 +365,31 @@ export function useVpn(enabled: boolean): VpnController {
   }, []);
 
   const connect = useCallback(async (connection_id: string) => {
-    if (!mounted.current || !status_loaded_ref.current || status_stale_ref.current || isActive(connection_id)) return;
+    if (!mounted.current || !status_loaded_ref.current || status_stale_ref.current) return;
+    const existing = [...statuses_ref.current.values()].find((status) => status.connection_id === connection_id);
+    const vpn_id = existing ? vpnRuntimeId(existing) : connection_id;
+    if (uncertain_ids_ref.current.has(vpn_id) || actions_ref.current.has(vpn_id) ||
+      [...actions_ref.current.values()].some((action) => action.connection_id === connection_id) ||
+      (existing && existing.locally_connected !== false)) return;
     if (!supports_multiple_ref.current && (statuses_ref.current.size > 0 || actions_ref.current.size > 0 || uncertain_ids_ref.current.size > 0)) return;
     const connection = catalog_ref.current.connections.find((item) => item.connection_id === connection_id);
     if (!connection || !supported_providers_ref.current.includes(connection.provider ?? "openconnect")) return;
-    await runAction(connection_id, { kind: "connect", connection_id }, {
+    await runAction(vpn_id, { kind: "connect", connection_id }, existing ?? {
       vpn_id: connection_id, connection_id, state: "starting", running: false,
       provider: connection.provider ?? "openconnect",
       ...(connection.provider === "tailscale" ? { hostname: connection.hostname } : { vpn_url: connection.url, username: connection.username }),
       endpoint: null, container_name: null,
     }, () => connectVpn(connection_id));
-    if (connection.provider === "tailscale" && vpnNeedsSignIn(statuses_ref.current.get(connection_id))) await signIn(connection_id);
-  }, [isActive, runAction, signIn]);
+    if (connection.provider === "tailscale" && vpnNeedsSignIn(statuses_ref.current.get(vpn_id))) await signIn(vpn_id);
+  }, [runAction, signIn]);
 
   const stop = useCallback(async (vpn_id: string) => {
     if (!mounted.current || !supports_multiple_ref.current || actions_ref.current.get(vpn_id)?.kind === "stop") return;
     const previous = statuses_ref.current.get(vpn_id);
+    if (previous?.locally_connected === false && actions_ref.current.get(vpn_id)?.kind !== "connect") return;
     if (!previous && !uncertain_ids_ref.current.has(vpn_id)) return;
     const connection_id = previous?.connection_id ?? (catalog_ref.current.connections.some((connection) => connection.connection_id === vpn_id) ? vpn_id : null);
-    await runAction(vpn_id, { kind: "stop", connection_id }, {
+    await runAction(vpn_id, { kind: "stop", connection_id }, previous?.shared_container ? previous : {
       endpoint: null, container_name: null, ...previous, connection_id, vpn_id, state: "stopping", running: false,
     }, () => stopVpn(vpn_id));
   }, [runAction]);
@@ -483,7 +519,7 @@ export function useVpn(enabled: boolean): VpnController {
   return {
     connections: catalog.connections,
     catalog_loaded, catalog_loading, catalog_error,
-    statuses, supports_multiple, supported_providers, supports_tailscale_enrollment, enrollment_connection_id, signing_in_ids, status_loaded, status_loading, status_stale, status_error, last_checked_at,
+    statuses, supports_multiple, supported_providers, supports_tailscale_enrollment, enrollment_connection_id, signing_in_ids, status_loaded, status_loading, status_stale, status_error, discovery_warnings, last_checked_at,
     actions, action_errors, uncertain_ids, profile_busy, deleting_id, editor, editor_error, editor_saving,
     refresh, connect, stop, signIn, addConnection, editConnection, closeEditor, saveConnection, saveEnrollment, setEnrollmentConnectionId, deleteConnection,
   };

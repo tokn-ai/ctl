@@ -19,6 +19,8 @@ pub(crate) struct Metadata {
 pub(crate) struct Config {
   pub(crate) content: Zeroizing<String>,
   pub(crate) metadata: Metadata,
+  pub(crate) runtime: crate::vpn_container::RuntimeMetadata,
+  pub(crate) cancellation: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl Config {
@@ -55,6 +57,8 @@ impl Config {
     Ok(Self {
       content,
       metadata: Metadata::new(url, username)?,
+      runtime: crate::vpn_container::RuntimeMetadata::for_connection(connection)?,
+      cancellation: None,
     })
   }
 }
@@ -162,7 +166,21 @@ fn read_file_blocking(path: &Path) -> io::Result<(PathBuf, Config)> {
     return Err(invalid("VPN env file must be at most 48 KiB"));
   }
   let metadata = parse_metadata(&content)?;
-  Ok((path, Config { content, metadata }))
+  let runtime = crate::vpn_container::RuntimeMetadata::for_env(
+    &path,
+    &content,
+    metadata.vpn_url.clone(),
+    metadata.username.clone(),
+  )?;
+  Ok((
+    path,
+    Config {
+      content,
+      metadata,
+      runtime,
+      cancellation: None,
+    },
+  ))
 }
 
 fn parse_metadata(content: &str) -> io::Result<Metadata> {

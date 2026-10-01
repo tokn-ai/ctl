@@ -10,10 +10,12 @@ RUN apt-get update \
     vpnc-scripts \
   && rm -rf /var/lib/apt/lists/*
 
-COPY entrypoint.sh /usr/local/bin/openconnect-entrypoint
-COPY ssh-handshake.sh /usr/local/bin/ssh-handshake
-COPY vpn-network.sh /usr/local/bin/vpn-network
-COPY healthcheck.sh /usr/local/bin/vpn-healthcheck
+COPY docker/openconnect/entrypoint.sh /usr/local/bin/openconnect-entrypoint
+COPY docker/openconnect/ssh-handshake.sh /usr/local/bin/ssh-handshake
+COPY docker/openconnect/vpn-network.sh /usr/local/bin/vpn-network
+COPY docker/openconnect/healthcheck.sh /usr/local/bin/vpn-healthcheck
+COPY docker/vpn/heartbeat.sh /run/ctl/heartbeat.sh
+COPY docker/vpn/watchdog.sh /run/ctl/watchdog.sh
 RUN chmod 0755 /usr/local/bin/openconnect-entrypoint \
     /usr/local/bin/ssh-handshake /usr/local/bin/vpn-network \
     /usr/local/bin/vpn-healthcheck

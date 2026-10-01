@@ -12,11 +12,12 @@ export function vpnAggregateState(statuses: readonly VpnStatus[]): VpnState {
 }
 
 export function vpnNeedsSignIn(status: VpnStatus | null | undefined): boolean {
-  return status?.provider === "tailscale" && status.state === "starting" && Boolean(status.auth_url);
+  return status?.provider === "tailscale" && !status.status_unavailable && status.state === "starting" && Boolean(status.auth_url);
 }
 
 export function vpnRouteDetail(connection: VpnConnection, statuses: readonly VpnStatus[]): string {
   const runtime = statuses.find((status) => status.connection_id === connection.connection_id);
+  if (runtime?.status_unavailable) return "Status unavailable";
   if (vpnNeedsSignIn(runtime)) return "Sign in from the VPN page";
   if (runtime?.state === "connected") return "Connected";
   if (runtime?.state === "starting") return "Connecting…";

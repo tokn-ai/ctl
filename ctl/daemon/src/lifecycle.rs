@@ -58,7 +58,10 @@ pub(super) async fn handle(
       .map_err(RequestError::VpnFailed)?
       .connections
       .into_iter()
-      .filter(|connection| connection.state != ctld_ipc::VpnState::Stopped)
+      .filter(|connection| {
+        connection.state != ctld_ipc::VpnState::Stopped
+          && connection.locally_connected != Some(false)
+      })
       .count()
   } else {
     0

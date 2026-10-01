@@ -19,6 +19,7 @@ mod shared_forwarding;
 mod ssh_config_master;
 mod tailscale;
 mod target_lifecycle;
+mod vpn_container;
 mod vpn_service;
 
 #[cfg(test)]
@@ -493,9 +494,15 @@ async fn handle_vpn_request(
   }
   .map_err(RequestError::VpnFailed)?;
   let snapshot = Some(service.list().await.map_err(RequestError::VpnFailed)?);
-  ctld_ipc::write_frame(stream, &ServerMessage::VpnStatus { status, snapshot })
-    .await
-    .map_err(Into::into)
+  ctld_ipc::write_frame(
+    stream,
+    &ServerMessage::VpnStatus {
+      status: status.into(),
+      snapshot,
+    },
+  )
+  .await
+  .map_err(Into::into)
 }
 
 fn normalize_request_target(request: &mut ClientMessage) {

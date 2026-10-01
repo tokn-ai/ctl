@@ -604,37 +604,39 @@ fn tailscale_profiles_store_settings_without_openconnect_credentials() {
 }
 
 #[test]
-fn existing_openconnect_secret_is_dropped_when_switching_provider() {
-  let fixture = Fixture::new();
-  let repository = fixture.repository();
-  let saved = repository
-    .save(save_request(None, Some("previous-test-secret")))
-    .unwrap();
-  let switched = repository
-    .save(SaveVpnConnectionRequest {
-      expected_revision: saved.revision,
-      connection: VpnConnectionInput {
-        connection_id: "connection-one".into(),
-        name: "Tailnet".into(),
-        settings: VpnSettingsInput::Tailscale {
-          hostname: None,
-          accept_routes: false,
-        },
-      },
-    })
-    .unwrap();
-  assert!(
-    !String::from_utf8(fixture.bytes())
-      .unwrap()
-      .contains("previous-test-secret")
-  );
-  assert_eq!(
-    repository
-      .save(save_request(switched.revision, None))
-      .unwrap_err()
-      .code,
-    "vpn_connections_invalid"
-  );
+fn saved_connection_identity_cannot_switch_vpn_provider() {
+  for starts_as_tailscale in [false, true] {
+    let fixture = Fixture::new();
+    let repository = fixture.repository();
+    let mut original = save_request(None, Some("previous-test-secret"));
+    let mut replacement = save_request(None, Some("replacement-test-secret"));
+    let tailscale = VpnSettingsInput::Tailscale {
+      hostname: None,
+      accept_routes: false,
+    };
+    if starts_as_tailscale {
+      original.connection.settings = tailscale;
+    } else {
+      replacement.connection.settings = tailscale;
+    }
+    let saved = repository.save(original).unwrap();
+    let bytes = fixture.bytes();
+    replacement.expected_revision = saved.revision;
+    assert_eq!(
+      repository.save(replacement).unwrap_err().code,
+      "vpn_connection_provider_changed"
+    );
+    assert_eq!(fixture.bytes(), bytes);
+    let retained = repository.connection("connection-one").unwrap();
+    assert_eq!(
+      retained.provider(),
+      if starts_as_tailscale {
+        VpnProvider::Tailscale
+      } else {
+        VpnProvider::Openconnect
+      }
+    );
+  }
 }
 
 #[test]
@@ -679,4 +681,54 @@ fn input_accepts_legacy_openconnect_but_rejects_unknown_provider_fields() {
     }))
     .is_err()
   );
+}
+
+#[test]
+fn shared_foreign_container_and_incomplete_inventory_protect_saved_profiles() {
+  let fixture = Fixture::new();
+  let repository = fixture.repository();
+  let saved = repository
+    .save(save_request(None, Some("test-secret")))
+    .unwrap();
+  let bytes = fixture.bytes();
+  let active = VpnSnapshot {
+    connections: vec![VpnStatus {
+      connection_id: Some("connection-one".into()),
+      state: VpnState::Connected,
+      shared_container: true,
+      locally_connected: Some(false),
+      ..VpnStatus::default()
+    }],
+    ..VpnSnapshot::default()
+  };
+  let incomplete = VpnSnapshot {
+    discovery_warnings: vec!["Container inventory unavailable".into()],
+    ..VpnSnapshot::default()
+  };
+  for (snapshot, code) in [
+    (active, "vpn_connection_active"),
+    (incomplete, "vpn_discovery_incomplete"),
+  ] {
+    assert_eq!(
+      repository
+        .save_with_status(save_request(saved.revision.clone(), None), &snapshot)
+        .unwrap_err()
+        .code,
+      code
+    );
+    assert_eq!(
+      repository
+        .delete(
+          &DeleteVpnConnectionRequest {
+            expected_revision: saved.revision.clone(),
+            connection_id: "connection-one".into(),
+          },
+          &snapshot
+        )
+        .unwrap_err()
+        .code,
+      code
+    );
+    assert_eq!(fixture.bytes(), bytes);
+  }
 }

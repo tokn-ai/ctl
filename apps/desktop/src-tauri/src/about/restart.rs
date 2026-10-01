@@ -172,7 +172,7 @@ async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prepared
       response.running = Some(ctld_version(before.binary.clone()));
       response.available = Some(ctld_version(prepared.available.info.clone()));
       response.impact.vpn_connections = Some(before.active_vpn_count);
-      response.impact.description = "Stops this broker's port forwards and managed VPN containers, and may interrupt SSH connections. Surviving SSH connections can be reused; remote terminal sessions remain on their host.".into();
+      response.impact.description = "Stops this broker's port forwards, releases its VPN connections, and may interrupt SSH connections. Shared VPN containers remain available while another ctld keeps them alive, then expire after their heartbeat timeout. Surviving SSH connections can be reused; remote terminal sessions remain on their host.".into();
       Operation::Ctld { owner, prepared }
     }
   };

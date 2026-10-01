@@ -2,21 +2,6 @@
 
 use std::io;
 use std::path::PathBuf;
-
-/// VPNs keep the shared owner when the desktop isolates its development SSH helper.
-#[must_use]
-pub fn socket_path() -> PathBuf {
-  std::env::var_os("CTLD_VPN_SOCKET_PATH").map_or_else(
-    || {
-      if std::env::var_os("RMUX_DEV_DAEMON_SUPERVISOR").is_some() {
-        crate::default_socket_path()
-      } else {
-        crate::socket_path()
-      }
-    },
-    PathBuf::from,
-  )
-}
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -25,6 +10,19 @@ use crate::{
   ClientMessage, ConnectError, ServerMessage, VpnConnection, VpnProvider, VpnSnapshot, VpnState,
   VpnStatus,
 };
+
+/// Selects this client's daemon; shared containers are discovered by that daemon.
+#[must_use]
+pub fn socket_path() -> PathBuf {
+  select_socket_path(
+    std::env::var_os("CTLD_VPN_SOCKET_PATH").map(PathBuf::from),
+    crate::socket_path(),
+  )
+}
+
+fn select_socket_path(vpn_override: Option<PathBuf>, inherited: PathBuf) -> PathBuf {
+  vpn_override.unwrap_or(inherited)
+}
 
 /// A VPN client pinned to one daemon endpoint for every operation.
 #[derive(Clone, Debug)]
@@ -157,7 +155,8 @@ impl Client {
       .map(|response| response.status)
   }
 
-  /// Stops the selected owner's VPN without starting or stopping ctld itself.
+  /// Releases this daemon's VPN interest without starting or stopping ctld itself.
+  /// A shared container can remain available to other daemons until its timeout.
   ///
   /// # Errors
   /// Returns an error for an inaccessible daemon or invalid/late response.
@@ -168,7 +167,7 @@ impl Client {
       .map(|response| response.status)
   }
 
-  /// Lists every connection owned by the selected daemon without starting it.
+  /// Lists this daemon's connections and discovered shared containers without starting it.
   ///
   /// # Errors
   /// Returns connection, protocol, or timeout failures.
@@ -179,7 +178,7 @@ impl Client {
       .map(Response::snapshot)
   }
 
-  /// Stops exactly one connection. Legacy owners cannot stop by ID atomically,
+  /// Releases exactly one local connection. Legacy owners cannot stop by ID atomically,
   /// so an active legacy connection requires an update or an explicit `stop()`.
   ///
   /// # Errors
@@ -245,7 +244,10 @@ impl Client {
         {
           return Ok(Response {
             status: VpnStatus::default(),
-            snapshot: Some(VpnSnapshot::default()),
+            snapshot: Some(VpnSnapshot {
+              discovery_warnings: vec!["The selected ctld is not running; VPN container inventory is unavailable. Connect a saved VPN or start ctld to inspect it.".into()],
+              ..VpnSnapshot::default()
+            }),
           });
         }
         Err(error) => return Err(error.into()),
@@ -259,7 +261,7 @@ impl Client {
 
 impl Default for Client {
   fn default() -> Self {
-    Self::new(crate::socket_path())
+    Self::new(socket_path())
   }
 }
 
@@ -287,7 +289,7 @@ pub async fn status() -> Result<VpnStatus, VpnError> {
   Client::default().status().await
 }
 
-/// Stops the environment-selected owner's VPN without starting a daemon.
+/// Releases the environment-selected daemon's VPN interest without starting it.
 ///
 /// # Errors
 /// Returns an error for an inaccessible daemon or invalid/late response.
@@ -329,6 +331,7 @@ impl Response {
         supports_multiple: false,
         supported_providers: vec![VpnProvider::Openconnect],
         supports_tailscale_enrollment: false,
+        discovery_warnings: Vec::new(),
       }
     })
   }
@@ -398,7 +401,7 @@ where
       if !matches!(message, ClientMessage::ForgetTailscaleIdentity { .. }) =>
     {
       Ok(Response {
-        status: normalize_status(status),
+        status: normalize_status(*status),
         snapshot,
       })
     }

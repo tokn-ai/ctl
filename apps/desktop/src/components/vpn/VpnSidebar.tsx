@@ -39,7 +39,7 @@ export function VpnSidebar({ model }: Props) {
           {model.status_loaded && !model.supports_multiple ? (
             <p className="vpn-notice">Update ctld to manage individual VPNs and connect to multiple VPNs at the same time.</p>
           ) : null}
-          {[model.status_error, model.catalog_error, ...detached_errors.map(([, message]) => message)].filter(Boolean).map((message, index) => (
+          {[model.status_error, ...model.discovery_warnings, model.catalog_error, ...detached_errors.map(([, message]) => message)].filter(Boolean).map((message, index) => (
             <p className="vpn-error" role="alert" key={`${index}-${message}`}>{message}</p>
           ))}
           {model.catalog_loading && !model.catalog_loaded && external.length === 0 ? <p className="vpn-loading" role="status">Loading saved connections…</p> : null}
@@ -54,7 +54,7 @@ export function VpnSidebar({ model }: Props) {
               />
             ))}
           </div>
-          {model.catalog_loaded && item_count === 0 ? (
+          {model.catalog_loaded && model.status_loaded && !model.status_stale && model.discovery_warnings.length === 0 && item_count === 0 ? (
             <div className="sidebar-state vpn-empty">
               <Icon name="vpn" size={28} class_name="empty-glyph" />
               <p>No saved VPN connections.</p>

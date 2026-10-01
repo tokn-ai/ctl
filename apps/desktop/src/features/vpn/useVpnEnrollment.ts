@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { errorMessage } from "../../lib/errors";
+import { errorCode, errorMessage } from "../../lib/errors";
 import { beginVpnEnrollment, cancelVpnEnrollment, openVpnSignIn, vpnEnrollmentStatus } from "../../lib/tauri";
 import type { VpnEnrollmentInput, VpnEnrollmentSnapshot } from "../../lib/types";
 import { vpnNeedsSignIn } from "./status";
@@ -18,6 +18,7 @@ export function useVpnEnrollment(options: Options) {
   const [started, setStarted] = useState(false);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [cleanup_pending, setCleanupPending] = useState(false);
   const [opening_browser, setOpeningBrowser] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [browser_error, setBrowserError] = useState<string | null>(null);
@@ -68,6 +69,7 @@ export function useVpnEnrollment(options: Options) {
     if (!mounted.current || cancel_requested.current) return;
     setSnapshot(next);
     setError(null);
+    setCleanupPending(false);
     if (next.status.state === "connected") setBrowserError(null);
     callbacks.current.on_connection_id?.(next.connection_id);
   }, []);
@@ -133,6 +135,7 @@ export function useVpnEnrollment(options: Options) {
     setStarted(true);
     setStarting(true);
     setError(null);
+    setCleanupPending(false);
     setBrowserError(null);
     const pending = (async () => {
       try {
@@ -162,11 +165,16 @@ export function useVpnEnrollment(options: Options) {
         await begin_pending.current;
         await discard();
         if (mounted.current) {
+          setCleanupPending(false);
           callbacks.current.on_connection_id?.(null);
           callbacks.current.on_close();
         }
       } catch (failure) {
-        if (mounted.current) setError(`Could not cancel this sign-in: ${errorMessage(failure)}`);
+        if (mounted.current) {
+          const pending_cleanup = errorCode(failure) === "vpn_cleanup_pending";
+          setCleanupPending(pending_cleanup);
+          setError(pending_cleanup ? errorMessage(failure) : `Could not cancel this sign-in: ${errorMessage(failure)}`);
+        }
       } finally {
         if (mounted.current) setCancelling(false);
       }
@@ -176,7 +184,7 @@ export function useVpnEnrollment(options: Options) {
     if (cancel_pending.current === pending) cancel_pending.current = null;
   }, [discard]);
 
-  const ready = snapshot?.status.state === "connected" && snapshot.status.running && Boolean(snapshot.status.endpoint) && !snapshot.error && !error;
+  const ready = snapshot?.status.state === "connected" && !snapshot.status.status_unavailable && snapshot.status.running && Boolean(snapshot.status.endpoint) && !snapshot.error && !error;
   const save = useCallback(async () => {
     if (!ready || !current.current || saving.current || cancel_requested.current || !callbacks.current.on_save) return false;
     saving.current = true;
@@ -190,5 +198,5 @@ export function useVpnEnrollment(options: Options) {
     }
   }, [discard, ready]);
 
-  return { snapshot, started, starting, cancelling, opening_browser, error, browser_error, ready, begin, cancel, openBrowser, refresh, save };
+  return { snapshot, started, starting, cancelling, cleanup_pending, opening_browser, error, browser_error, ready, begin, cancel, openBrowser, refresh, save };
 }

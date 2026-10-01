@@ -27,6 +27,7 @@ struct FakeRuntime {
   forget_count: AtomicUsize,
   fail_support: AtomicBool,
   fail_forget: AtomicBool,
+  retain_on_stop: AtomicBool,
   hold_support: AtomicBool,
   support_entered: Notify,
   release_support: Notify,
@@ -69,6 +70,14 @@ impl Runtime for FakeRuntime {
   fn stop(&self, _: &str) -> RuntimeFuture<'_, VpnStatus> {
     Box::pin(async {
       self.stop_count.fetch_add(1, Ordering::SeqCst);
+      if self.retain_on_stop.load(Ordering::SeqCst) {
+        let mut snapshot = lock(&self.snapshot);
+        if let Some(status) = snapshot.connections.first_mut() {
+          status.shared_container = true;
+          status.locally_connected = Some(false);
+          return Ok(status.clone());
+        }
+      }
       lock(&self.snapshot).connections.clear();
       Ok(VpnStatus::default())
     })
@@ -409,4 +418,173 @@ async fn disk_failure_keeps_the_authenticated_enrollment_ready_for_save_retry() 
   );
   assert_eq!(runtime.start_count.load(Ordering::SeqCst), 1);
   assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancellation_keeps_shared_identity_until_passive_disappearance_then_allows_retry() {
+  let fixture = Fixture::new();
+  let registry = Enrollments::default();
+  let runtime = Arc::new(FakeRuntime::default());
+  runtime.retain_on_stop.store(true, Ordering::SeqCst);
+  let draft = begin(&registry, &fixture, &runtime);
+  started(&registry, &draft.enrollment_id).await;
+  authenticate(&runtime);
+  assert_eq!(
+    registry
+      .cancel("window-one", &draft.enrollment_id)
+      .await
+      .unwrap_err()
+      .code,
+    "vpn_cleanup_pending"
+  );
+  assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 0);
+  assert!(registry.get("window-one", &draft.enrollment_id).is_ok());
+  assert_eq!(
+    lock(&runtime.snapshot).connections[0].locally_connected,
+    Some(false)
+  );
+  lock(&runtime.snapshot).connections.clear();
+  registry
+    .cancel("window-one", &draft.enrollment_id)
+    .await
+    .unwrap();
+  assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 1);
+  assert!(registry.get("window-one", &draft.enrollment_id).is_err());
+}
+
+#[tokio::test]
+async fn cancellation_cannot_forget_an_identity_while_container_inventory_is_incomplete() {
+  let fixture = Fixture::new();
+  let registry = Enrollments::default();
+  let runtime = Arc::new(FakeRuntime::default());
+  let draft = begin(&registry, &fixture, &runtime);
+  started(&registry, &draft.enrollment_id).await;
+  lock(&runtime.snapshot).discovery_warnings = vec!["Container inventory unavailable".into()];
+  assert_eq!(
+    registry
+      .cancel("window-one", &draft.enrollment_id)
+      .await
+      .unwrap_err()
+      .code,
+    "vpn_cleanup_pending"
+  );
+  assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 0);
+  lock(&runtime.snapshot).discovery_warnings.clear();
+  registry
+    .cancel("window-one", &draft.enrollment_id)
+    .await
+    .unwrap();
+  assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn incomplete_enrollment_inventory_never_confirms_login_or_disconnect() {
+  let fixture = Fixture::new();
+  let registry = Enrollments::default();
+  let runtime = Arc::new(FakeRuntime::default());
+  let draft = begin(&registry, &fixture, &runtime);
+  started(&registry, &draft.enrollment_id).await;
+  authenticate(&runtime);
+  for unavailable_row in [false, true] {
+    {
+      let mut snapshot = lock(&runtime.snapshot);
+      snapshot.connections[0].status_unavailable = unavailable_row;
+      snapshot.discovery_warnings = if unavailable_row {
+        vec![]
+      } else {
+        vec!["Container inventory unavailable".into()]
+      };
+    }
+    assert_eq!(
+      registry
+        .save("window-one", &draft.enrollment_id, None)
+        .await
+        .unwrap_err()
+        .code,
+      "vpn_discovery_incomplete"
+    );
+    assert!(!fixture.0.join("vpns.json").exists());
+  }
+  {
+    let mut snapshot = lock(&runtime.snapshot);
+    snapshot.connections.clear();
+    snapshot.discovery_warnings = vec!["Container inventory unavailable".into()];
+  }
+  let observation = registry
+    .status("window-one", &draft.enrollment_id)
+    .await
+    .unwrap();
+  assert!(observation.status.status_unavailable);
+  assert_ne!(observation.status.state, VpnState::Stopped);
+  assert!(observation.status.auth_url.is_none());
+  assert!(observation.error.is_none());
+}
+
+#[tokio::test]
+async fn closed_window_retries_identity_cleanup_after_passive_watchdog_grace() {
+  let fixture = Fixture::new();
+  let registry = Enrollments::default();
+  let runtime = Arc::new(FakeRuntime::default());
+  runtime.retain_on_stop.store(true, Ordering::SeqCst);
+  let draft = begin(&registry, &fixture, &runtime);
+  started(&registry, &draft.enrollment_id).await;
+  tokio::time::pause();
+  registry.close_window("window-one").await;
+  assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 0);
+  assert!(registry.get("window-one", &draft.enrollment_id).is_ok());
+  tokio::task::yield_now().await;
+  lock(&runtime.snapshot).connections.clear();
+  tokio::time::advance(CLOSED_WINDOW_CLEANUP_GRACE).await;
+  tokio::time::resume();
+  timeout(Duration::from_secs(3), async {
+    while registry.get("window-one", &draft.enrollment_id).is_ok() {
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .unwrap();
+  assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn closed_window_cleanup_rechecks_adoption_and_is_bounded_while_shared_container_runs() {
+  for adopt in [false, true] {
+    let fixture = Fixture::new();
+    let registry = Enrollments::default();
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.retain_on_stop.store(true, Ordering::SeqCst);
+    let draft = begin(&registry, &fixture, &runtime);
+    started(&registry, &draft.enrollment_id).await;
+    let entry = registry.get("window-one", &draft.enrollment_id).unwrap();
+    tokio::time::pause();
+    registry.close_window("window-one").await;
+    tokio::task::yield_now().await;
+    if adopt {
+      let connection = lock(&runtime.started).clone().unwrap();
+      Repository::new(fixture.0.clone())
+        .save_enrollment(None, connection)
+        .unwrap();
+    }
+    tokio::time::advance(if adopt {
+      CLOSED_WINDOW_CLEANUP_GRACE
+    } else {
+      CLOSED_WINDOW_CLEANUP_DEADLINE
+    })
+    .await;
+    tokio::time::resume();
+    timeout(Duration::from_secs(3), async {
+      while lock(&entry.state).cleanup_retry_scheduled {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(runtime.forget_count.load(Ordering::SeqCst), 0);
+    if adopt {
+      assert!(registry.get("window-one", &draft.enrollment_id).is_err());
+      assert_eq!(runtime.stop_count.load(Ordering::SeqCst), 1);
+    } else {
+      assert!(registry.get("window-one", &draft.enrollment_id).is_ok());
+    }
+  }
 }

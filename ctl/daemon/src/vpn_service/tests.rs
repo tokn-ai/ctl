@@ -3,10 +3,104 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::{sleep, timeout};
+use zeroize::Zeroizing;
 
 use super::*;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[test]
+fn distinct_immutable_containers_are_not_hidden_by_a_reused_profile_id() {
+  let mut snapshot = VpnSnapshot {
+    connections: vec![VpnStatus {
+      vpn_id: Some("profile".into()),
+      container_id: Some("first".into()),
+      ..VpnStatus::default()
+    }],
+    ..VpnSnapshot::default()
+  };
+  merge_discovered(
+    &mut snapshot,
+    vec![VpnStatus {
+      vpn_id: Some("profile".into()),
+      container_id: Some("second".into()),
+      ..VpnStatus::default()
+    }],
+  );
+  assert_eq!(snapshot.connections.len(), 2);
+}
+
+#[test]
+fn release_without_inventory_retains_uncertain_container_metadata() {
+  let local = VpnSnapshot {
+    connections: vec![VpnStatus {
+      vpn_id: Some("profile".into()),
+      container_id: Some("immutable-id".into()),
+      endpoint: Some("socks5h://127.0.0.1:54321".into()),
+      running: true,
+      state: VpnState::Connected,
+      locally_connected: Some(true),
+      ..VpnStatus::default()
+    }],
+    ..VpnSnapshot::default()
+  };
+  let status = released_without_inventory(&local, "profile").unwrap();
+  assert_eq!(status.container_id, local.connections[0].container_id);
+  assert_eq!(status.endpoint, local.connections[0].endpoint);
+  assert_eq!(status.state, VpnState::Connected);
+  assert_eq!(status.locally_connected, Some(false));
+  assert!(status.status_unavailable);
+  assert!(released_without_inventory(&local, "foreign").is_err());
+}
+
+#[test]
+fn shared_inventory_preserves_local_interest_and_updates_container_readiness() {
+  let local = VpnStatus {
+    vpn_id: Some("profile".into()),
+    container_id: Some("immutable-id".into()),
+    locally_connected: Some(true),
+    running: true,
+    state: VpnState::Connected,
+    endpoint: Some("socks5h://127.0.0.1:54321".into()),
+    ..VpnStatus::default()
+  };
+  let mut snapshot = VpnSnapshot {
+    connections: vec![local.clone()],
+    ..VpnSnapshot::default()
+  };
+  let observed = VpnStatus {
+    state: VpnState::Starting,
+    running: false,
+    endpoint: None,
+    locally_connected: Some(false),
+    ..local
+  };
+  merge_discovered(&mut snapshot, vec![observed]);
+  assert_eq!(snapshot.connections.len(), 1);
+  assert_eq!(snapshot.connections[0].locally_connected, Some(true));
+  assert_eq!(snapshot.connections[0].connection_id, None);
+  assert!(!snapshot.connections[0].running);
+  assert_eq!(snapshot.connections[0].endpoint, None);
+}
+
+#[test]
+fn discovered_containers_remain_visible_after_local_interest_is_released() {
+  let mut snapshot = VpnSnapshot::default();
+  let foreign = VpnStatus {
+    vpn_id: Some("profile".into()),
+    container_id: Some("immutable-id".into()),
+    locally_connected: Some(false),
+    shared_container: true,
+    running: true,
+    state: VpnState::Connected,
+    ..VpnStatus::default()
+  };
+  merge_discovered(&mut snapshot, vec![foreign.clone()]);
+  merge_discovered(&mut snapshot, vec![foreign]);
+  assert_eq!(snapshot.connections.len(), 1);
+  assert_eq!(snapshot.connections[0].locally_connected, Some(false));
+  assert_eq!(snapshot.connections[0].state, VpnState::Connected);
+}
 
 #[derive(Default)]
 struct Probe {
@@ -91,15 +185,17 @@ impl Harness {
     let probe = Arc::new(Probe::default());
     let factory_probe = Arc::clone(&probe);
     let (started, starts) = mpsc::unbounded_channel();
-    let (service, owner) = spawn_with(move |_| {
+    let (service, owner) = spawn_with(move |config| {
       let (ready, result) = oneshot::channel();
       let guard = StartupGuard(Arc::clone(&factory_probe));
       let _ = started.send(ready);
+      let cancellation = startup_cancellation(config);
       async move {
         let _guard = guard;
-        result
-          .await
-          .unwrap_or_else(|_| Err(io::Error::other("fake startup ended")))
+        tokio::select! {
+          result = result => result.unwrap_or_else(|_| Err(io::Error::other("fake startup ended"))),
+          _ = cancellation => Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")),
+        }
       }
     });
     Self {
@@ -141,6 +237,13 @@ impl Harness {
         .running
     );
     exit
+  }
+}
+
+fn startup_cancellation(config: Config) -> oneshot::Receiver<()> {
+  match config {
+    Config::Openconnect(config) => config.cancellation.unwrap(),
+    Config::Tailscale(config) => config.cancellation.unwrap(),
   }
 }
 
@@ -240,7 +343,10 @@ async fn same_config_reuses_the_lease_and_keeps_its_original_metadata() {
 
 #[tokio::test]
 async fn registry_capacity_is_bounded_and_targeted_stop_releases_only_its_entry() {
-  let mut registry = Registry::new(|_| std::future::pending::<io::Result<FakeLease>>());
+  let mut registry = Registry::new(|config| async move {
+    let _ = startup_cancellation(config).await;
+    Err::<FakeLease, _>(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+  });
   let mut results = Vec::new();
   for index in 0..MAX_CONNECTIONS {
     let mut connection = saved_connection();
@@ -255,6 +361,8 @@ async fn registry_capacity_is_bounded_and_targeted_stop_releases_only_its_entry(
   assert_eq!(registry.snapshot().connections.len(), MAX_CONNECTIONS);
   let (reply, stopped) = oneshot::channel();
   registry.stop(Some("profile-0".into()), reply);
+  let (id, event) = poll_fn(|cx| registry.poll_event(cx)).await;
+  registry.event(id, event);
   assert_eq!(stopped.await.unwrap().unwrap(), VpnStatus::default());
   assert!(
     results
@@ -529,13 +637,29 @@ async fn saved_connections_report_phases_and_require_stop_before_config_changes(
   assert!(harness.starts.try_recv().is_err());
 
   let mut changed = saved_connection();
-  let VpnSettings::Openconnect { password, .. } = &mut changed.settings else {
+  let VpnSettings::Openconnect { url, .. } = &mut changed.settings else {
+    unreachable!()
+  };
+  url.push_str("/different-login");
+  let error = harness.service.start_connection(changed).await.unwrap_err();
+  assert!(error.contains("stop this connection"));
+  assert!(!error.contains("different-login"));
+
+  let mut credential_update = saved_connection();
+  credential_update.name = "Renamed profile".into();
+  let VpnSettings::Openconnect { password, .. } = &mut credential_update.settings else {
     unreachable!()
   };
   *password = Zeroizing::new("changed-password".into());
-  let error = harness.service.start_connection(changed).await.unwrap_err();
-  assert!(error.contains("stop this connection"));
-  assert!(!error.contains("changed-password"));
+  assert_eq!(
+    harness
+      .service
+      .start_connection(credential_update)
+      .await
+      .unwrap(),
+    status
+  );
+  assert!(harness.starts.try_recv().is_err());
 
   let (release, wait) = oneshot::channel();
   *harness.probe.shutdown_gate.lock().unwrap() = Some(wait);

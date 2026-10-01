@@ -1,83 +1,145 @@
 #!/bin/sh
+# A detached fake engine: container state and watchdog outlive each CLI invocation.
 set -eu
 root=$(dirname "$0")
-case "$1" in
-  run)
-    printf '%s\n' "$@" > "$root/run.args"
-    if [ -f "$root/late_create" ]; then
-      for arg in "$@"; do
-        case "$arg" in
-          io.ctl.lease=*) printf '%s' "${arg#io.ctl.lease=}" > "$root/pending.lease" ;;
-        esac
-      done
-      printf '%s' "$$" > "$root/run.pid"
-      while IFS= read -r heartbeat; do
-        printf '%s\n' "$heartbeat" >> "$root/heartbeats"
-      done
-      exit 0
-    fi
-    if [ -f "$root/separate_container" ]; then
-      # Keep engine-client exit separate from actual container removal.
-      [ ! -f "$root/container.running" ] || exit 1
-      : > "$root/container.running"
-    fi
-    if [ -f "$root/competing" ]; then
-      printf '%s' other-owner > "$root/lease"
-      sleep 0.2
-      exit 1
-    fi
-    for arg in "$@"; do
-      case "$arg" in
-        io.ctl.lease=*) printf '%s' "${arg#io.ctl.lease=}" > "$root/lease" ;;
-      esac
-    done
-    printf '%s' "$$" > "$root/run.pid"
-    while IFS= read -r heartbeat; do
-      printf '%s\n' "$heartbeat" >> "$root/heartbeats"
-    done
-    ;;
-  container)
-    if [ "$2" = ls ]; then
-      [ ! -f "$root/engine_unavailable" ] || exit 1
-      [ ! -f "$root/container.running" ] || printf '%s\n' 'test-container-id'
-      exit 0
-    fi
-    [ "$2" = inspect ] || exit 1
-    if [ -f "$root/late_create" ] && [ ! -f "$root/lease" ]; then
-      : > "$root/first_inspect"
-      if [ -f "$root/create_after_client_exit" ]; then
-        cp "$root/pending.lease" "$root/lease"
-        : > "$root/container.running"
-      fi
-      exit 1
-    fi
-    [ -f "$root/lease" ] || exit 1
-    printf '[{"Id":"test-container-id","Config":{"Labels":{"io.ctl.lease":"%s"}},"NetworkSettings":{"Ports":{"1080/tcp":[{"HostIp":"127.0.0.1","HostPort":"%s"}]}}}]\n' "$(cat "$root/lease")" "$(cat "$root/port")"
-    ;;
-  volume)
-    case "$2" in
-      ls)
-        [ ! -f "$root/engine_unavailable" ] || exit 1
-        [ ! -f "$root/volume" ] || cat "$root/volume"
-        ;;
-      rm)
-        printf '%s\n' "$@" > "$root/volume-remove.args"
-        [ ! -f "$root/volume_in_use" ] || exit 1
-        rm -f "$root/volume"
-        ;;
-      *) exit 1 ;;
-    esac
-    ;;
-  exec)
-    [ ! -f "$root/no_status" ] || exit 1
-    cat "$root/status.json"
-    ;;
-  stop|rm)
-    printf '%s\n' "$@" > "$root/remove.args"
-    if [ "$1" = rm ] || [ ! -f "$root/late_create" ]; then
-      rm -f "$root/container.running"
-    fi
-    kill -TERM "$(cat "$root/run.pid")" 2>/dev/null || :
-    ;;
-  *) exit 1 ;;
-esac
+exec python3 - "$root" "$@" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+root = Path(sys.argv[1])
+args = sys.argv[2:]
+container = root / "container"
+container_id = "a" * 64
+
+def missing():
+  print("Error: No such container", file=sys.stderr)
+  sys.exit(1)
+
+def append(name, value):
+  with (root / name).open("a") as file:
+    file.write(value + "\n")
+
+if (root / "engine_unavailable").exists():
+  print("Cannot connect to the container engine", file=sys.stderr)
+  sys.exit(1)
+
+if args[0] == "run":
+  append("run.calls", "run")
+  (root / "run.args").write_text("\n".join(args) + "\n")
+  try:
+    container.mkdir()
+  except FileExistsError:
+    sys.exit(1)
+  append("created.calls", "created")
+  labels = {}
+  name = ""
+  for index, value in enumerate(args[:-1]):
+    if value == "--label":
+      key, label = args[index + 1].split("=", 1)
+      labels[key] = label
+    if value == "--name":
+      name = args[index + 1]
+  (container / "labels").write_text(json.dumps(labels))
+  (container / "name").write_text(name)
+  if (root / "legacy").exists():
+    (container / "labels").write_text(json.dumps({"io.ctl.lease": "legacy-owner"}))
+  if (root / "created_only").exists():
+    (container / "state").write_text("created")
+  else:
+    (container / "state").write_text("running")
+    watchdog = r'''
+import os
+from pathlib import Path
+import sys
+import time
+root = Path(sys.argv[1])
+container = root / "container"
+initial = time.monotonic()
+while container.exists():
+  last = initial
+  try:
+    last = float((container / "heartbeat").read_text())
+  except (FileNotFoundError, ValueError):
+    pass
+  if time.monotonic() - last > 4:
+    import shutil
+    shutil.rmtree(container, ignore_errors=True)
+    (root / "watchdog.exited").write_text("expired")
+    break
+  time.sleep(0.1)
+'''
+    child = subprocess.Popen([sys.executable, "-c", watchdog, str(root)],
+      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+      start_new_session=True)
+    (root / "watchdog.pid").write_text(str(child.pid))
+  print(container_id)
+  if (root / "creator_client_failed").exists():
+    sys.exit(1)
+
+elif args[:2] == ["container", "inspect"]:
+  append("inspect.calls", args[2])
+  if not (container / "labels").exists():
+    missing()
+  name = (container / "name").read_text()
+  if args[2] not in [container_id, name]:
+    missing()
+  state = (container / "state").read_text()
+  print(json.dumps([{"Id": container_id, "Name": "/" + name,
+    "Config": {"Labels": json.loads((container / "labels").read_text())},
+    "State": {"Running": state == "running", "Status": state, "ExitCode": 0},
+    "NetworkSettings": {"Ports": {"1080/tcp": [{"HostIp": "127.0.0.1", "HostPort": (root / "port").read_text()}]}}
+  }]))
+
+elif args[:2] == ["container", "ls"] or args[0] == "ps":
+  if container.exists():
+    print(container_id)
+
+elif args[0] == "exec":
+  if not container.exists() or (container / "state").read_text() != "running":
+    missing()
+  if args[1] != container_id:
+    sys.exit(1)
+  if "/run/ctl/heartbeat.sh" in args:
+    value = str(time.monotonic())
+    temporary = container / ("heartbeat-" + str(os.getpid()))
+    temporary.write_text(value)
+    temporary.replace(container / "heartbeat")
+    append("heartbeats", value)
+  else:
+    if (root / "no_status").exists():
+      sys.exit(1)
+    print((root / "status.json").read_text())
+
+elif args[0] == "rm":
+  (root / "remove.args").write_text("\n".join(args) + "\n")
+  if args[-1] != container_id:
+    sys.exit(1)
+  # Non-force removal is rejected if startup won the inspect/remove race.
+  if container.exists() and (container / "state").read_text() == "running" and "--force" not in args:
+    sys.exit(1)
+  import shutil
+  shutil.rmtree(container, ignore_errors=True)
+
+elif args[0] == "stop":
+  (root / "remove.args").write_text("\n".join(args) + "\n")
+  import shutil
+  shutil.rmtree(container, ignore_errors=True)
+
+elif args[0] == "volume":
+  if args[1] == "ls":
+    if (root / "volume").exists():
+      print((root / "volume").read_text(), end="")
+  elif args[1] == "rm":
+    (root / "volume-remove.args").write_text("\n".join(args) + "\n")
+    if (root / "volume_in_use").exists() or container.exists():
+      sys.exit(1)
+    (root / "volume").unlink(missing_ok=True)
+  else:
+    sys.exit(1)
+else:
+  sys.exit(1)
+PY

@@ -64,37 +64,26 @@ fn identity_names_are_stable_private_and_scoped_to_profile_and_user() {
 }
 
 #[test]
-fn docker_and_podman_inspect_json_verify_the_lease_without_template_field_names() {
-  for id_key in ["Id", "ID"] {
-    let bytes = format!(
-      r#"[{{"{id_key}":"owned-container","Config":{{"Labels":{{"io.ctl.lease":"owner-token"}}}},"NetworkSettings":{{"Ports":{{"1080/tcp":[{{"HostIp":"127.0.0.1","HostPort":"49152"}}]}}}}}}]"#
-    );
-    let container = parse_owned_container(bytes.as_bytes(), "owner-token").unwrap();
-    assert_eq!(container.id, "owned-container");
-    assert_eq!(
-      parse_published_port(&serde_json::to_vec(&container.network.unwrap().ports).unwrap())
-        .unwrap(),
-      49152
-    );
-    assert_eq!(
-      parse_owned_container(bytes.as_bytes(), "another-owner")
-        .err()
-        .unwrap()
-        .kind(),
-      io::ErrorKind::PermissionDenied
-    );
-  }
-  let created = parse_owned_container(br#"[{"Id":"created-container","Config":{"Labels":{"io.ctl.lease":"owner-token"}},"NetworkSettings":null}]"#, "owner-token").unwrap();
-  assert_eq!(created.id, "created-container");
-  assert!(created.network.is_none());
-  for bytes in [
-    b"[]".as_slice(),
-    br#"[{"Id":"owned-container","Config":{"Labels":null},"NetworkSettings":{"Ports":null}}]"#,
-    br#"{"Id":"owned-container"}"#,
-  ] {
-    assert!(parse_owned_container(bytes, "owner-token").is_err());
-  }
+fn shared_settings_are_compatible_without_reconfiguring_a_running_device() {
+  let first = config("first");
+  let repeated = config("first");
+  assert_eq!(first.runtime, repeated.runtime);
+  let changed = Config::from_connection(&VpnConnection {
+    connection_id: "first".into(),
+    name: "Renamed profile".into(),
+    settings: VpnSettings::Tailscale {
+      hostname: Some("different-device".into()),
+      accept_routes: false,
+    },
+  })
+  .unwrap();
+  assert_eq!(first.container_name, changed.container_name);
+  assert_ne!(first.runtime.settings_key, changed.runtime.settings_key);
+  assert!(!entrypoint().contains("read -r -t 15 heartbeat"));
 }
 
 #[cfg(unix)]
 mod engine;
+
+#[cfg(unix)]
+mod watchdog;

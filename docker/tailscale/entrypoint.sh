@@ -2,10 +2,8 @@
 set -eu
 umask 077
 
-# The attached stdin is ctld's lease. EOF or a missed heartbeat also handles a
-# killed owner or engine client; persistent node identity lives only in /state.
-exec 3<&0
-owner_pid=$$
+# Every interested daemon renews the same container heartbeat through exec.
+# Persistent node identity lives only in /state.
 daemon_pid=
 login_pid=
 heartbeat_pid=
@@ -25,12 +23,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-(
-  while IFS= read -r -t 15 heartbeat <&3; do
-    [ "$heartbeat" = ping ] || break
-  done
-  kill -TERM "$owner_pid" 2>/dev/null || :
-) &
+/bin/sh /run/ctl/watchdog.sh "$$" &
 heartbeat_pid=$!
 
 mkdir -p /state /run/tailscale
@@ -40,6 +33,7 @@ tailscaled --tun=userspace-networking --statedir=/state --state=/state/tailscale
 daemon_pid=$!
 while [ ! -S /run/tailscale/tailscaled.sock ]; do
   kill -0 "$daemon_pid" 2>/dev/null || exit 1
+  kill -0 "$heartbeat_pid" 2>/dev/null || exit 1
   sleep 0.2
 done
 
@@ -53,6 +47,8 @@ start_login() {
 }
 start_login
 while kill -0 "$daemon_pid" 2>/dev/null; do
+  # The VPN must never survive without its independently expiring watchdog.
+  kill -0 "$heartbeat_pid" 2>/dev/null || exit 1
   if ! kill -0 "$login_pid" 2>/dev/null; then
     wait "$login_pid" || :
     # An expired identity needs a new interactive URL while retaining ownership.

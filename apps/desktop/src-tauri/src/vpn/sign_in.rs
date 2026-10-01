@@ -18,7 +18,9 @@ where
   let status = snapshot
     .connections
     .iter()
-    .find(|status| status.vpn_id.as_deref() == Some(vpn_id))
+    .find(|status| {
+      status.vpn_id.as_deref() == Some(vpn_id) || status.connection_id.as_deref() == Some(vpn_id)
+    })
     .ok_or_else(|| {
       CommandErrorDto::new(
         "vpn_sign_in_unavailable",
@@ -128,6 +130,20 @@ mod tests {
       .code,
       "vpn_sign_in_unavailable",
     );
+  }
+
+  #[tokio::test]
+  async fn discovered_shared_login_can_open_by_saved_profile_identity() {
+    let mut current = snapshot("https://login.tailscale.com/a/testToken123");
+    current.connections[0].connection_id = Some("saved-profile".into());
+    current.connections[0].shared_container = true;
+    current.connections[0].locally_connected = Some(false);
+    open(&current, "saved-profile", |url| async move {
+      assert_eq!(url, "https://login.tailscale.com/a/testToken123");
+      Ok(())
+    })
+    .await
+    .unwrap();
   }
 
   #[tokio::test]

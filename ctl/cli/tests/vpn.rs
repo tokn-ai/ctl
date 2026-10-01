@@ -47,6 +47,7 @@ impl Fixture {
       .env("CTLD_SOCKET_PATH", self.socket())
       .env("CTLD_BIN", self.directory.join("missing-ctld"))
       .env_remove("CTLD_ASKPASS")
+      .env_remove("CTLD_VPN_SOCKET_PATH")
       .stdin(Stdio::null())
       .kill_on_drop(true);
     command
@@ -123,7 +124,7 @@ fn response(status: VpnStatus) -> ServerMessage {
       supports_multiple: true,
       ..VpnSnapshot::default()
     }),
-    status,
+    status: Box::new(status),
   }
 }
 
@@ -370,7 +371,7 @@ async fn status_lists_multiple_connections_and_aligns_every_column() {
     &listener,
     &["vpn", "status"],
     ServerMessage::VpnStatus {
-      status: first.clone(),
+      status: Box::new(first.clone()),
       snapshot: Some(snapshot.clone()),
     },
   )
@@ -401,7 +402,7 @@ async fn status_lists_multiple_connections_and_aligns_every_column() {
     &listener,
     &["vpn", "status", "--json"],
     ServerMessage::VpnStatus {
-      status: first,
+      status: Box::new(first),
       snapshot: Some(snapshot.clone()),
     },
   )
@@ -422,7 +423,7 @@ async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
     &listener,
     &["vpn", "status", "--json"],
     ServerMessage::VpnStatus {
-      status: legacy.clone(),
+      status: Box::new(legacy.clone()),
       snapshot: None,
     },
   )
@@ -437,6 +438,7 @@ async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
       supports_multiple: false,
       supported_providers: vec![ctld_ipc::VpnProvider::Openconnect],
       supports_tailscale_enrollment: false,
+      discovery_warnings: Vec::new(),
     },
   );
 }
@@ -459,7 +461,7 @@ async fn targeted_stop_selects_one_vpn_and_rejects_unsafe_legacy_fallback() {
     let server = async {
       let initial = if supports_multiple {
         ServerMessage::VpnStatus {
-          status: connected.clone(),
+          status: Box::new(connected.clone()),
           snapshot: Some(VpnSnapshot {
             connections: vec![
               VpnStatus {
@@ -477,7 +479,7 @@ async fn targeted_stop_selects_one_vpn_and_rejects_unsafe_legacy_fallback() {
         }
       } else {
         ServerMessage::VpnStatus {
-          status: connected.clone(),
+          status: Box::new(connected.clone()),
           snapshot: None,
         }
       };
@@ -520,10 +522,10 @@ async fn targeted_stop_does_not_stop_a_different_legacy_connection() {
     &listener,
     &["vpn", "stop", "different-vpn", "--json"],
     ServerMessage::VpnStatus {
-      status: VpnStatus {
+      status: Box::new(VpnStatus {
         vpn_id: None,
         ..connected()
-      },
+      }),
       snapshot: None,
     },
   )
@@ -563,18 +565,30 @@ async fn stop_without_an_id_reports_ambiguity_and_never_stops_all_connections() 
 }
 
 #[tokio::test]
-async fn missing_daemon_is_stopped_and_remote_commands_are_rejected() {
+async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remote_commands_are_rejected()
+ {
   let fixture = Fixture::new();
   for action in ["status", "stop"] {
     let output = fixture.command(&["vpn", action]).output().await.unwrap();
-    assert_text_status(&output, DISCONNECTED_TABLE);
+    if action == "status" {
+      assert!(output.status.success());
+      let text = String::from_utf8(output.stdout).unwrap();
+      assert!(text.starts_with("VPN inventory unavailable."));
+      assert!(text.contains("ctld is not running"));
+      assert!(output.stderr.is_empty());
+    } else {
+      assert_text_status(&output, DISCONNECTED_TABLE);
+    }
     let output = fixture
       .command(&["vpn", action, "--json"])
       .output()
       .await
       .unwrap();
     if action == "status" {
-      assert_json_snapshot(&output, &VpnSnapshot::default());
+      assert!(output.status.success());
+      let snapshot: VpnSnapshot = serde_json::from_slice(&output.stdout).unwrap();
+      assert!(snapshot.connections.is_empty());
+      assert_eq!(snapshot.discovery_warnings.len(), 1);
     } else {
       assert_json_status(&output, &VpnStatus::default());
     }
@@ -660,4 +674,92 @@ async fn daemon_errors_are_reported_without_success_output() {
     assert!(stderr.contains("vpn_start_failed"));
     assert!(stderr.contains("synthetic startup failure"));
   }
+}
+
+#[tokio::test]
+async fn shared_container_status_distinguishes_local_interest_and_keeps_endpoint() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let snapshot = VpnSnapshot {
+    connections: vec![
+      VpnStatus {
+        vpn_id: Some("local-profile".into()),
+        shared_container: true,
+        locally_connected: Some(true),
+        ..connected()
+      },
+      VpnStatus {
+        vpn_id: Some("shared-profile".into()),
+        shared_container: true,
+        locally_connected: Some(false),
+        ..connected()
+      },
+    ],
+    discovery_warnings: vec!["Some container metadata could not be read".into()],
+    ..VpnSnapshot::default()
+  };
+  let (output, _) = exchange(
+    &fixture,
+    &listener,
+    &["vpn", "status"],
+    ServerMessage::VpnStatus {
+      status: Box::new(snapshot.connections[0].clone()),
+      snapshot: Some(snapshot),
+    },
+  )
+  .await;
+  assert!(output.status.success());
+  let text = String::from_utf8(output.stdout).unwrap();
+  let rows: Vec<_> = text.lines().collect();
+  assert!(rows[0].contains("USE"));
+  assert!(rows[1].contains("this ctld"));
+  assert!(rows[2].contains("shared"));
+  assert!(rows[2].contains("connected"));
+  assert!(rows[2].contains("socks5h://127.0.0.1:43210"));
+  assert!(text.contains("Warning: Some container metadata could not be read"));
+}
+
+#[tokio::test]
+async fn default_vpn_client_honors_the_vpn_socket_override() {
+  let fixture = Fixture::new();
+  let selected = fixture.directory.join("vpn-override.sock");
+  let listener = UnixListener::bind(&selected).unwrap();
+  let unused = UnixListener::bind(fixture.socket()).unwrap();
+  let mut command = fixture.command(&["vpn", "status", "--json"]);
+  command
+    .env("CTLD_VPN_SOCKET_PATH", &selected)
+    .env("RMUX_DEV_DAEMON_SUPERVISOR", "1");
+  let (output, request) = timeout(Duration::from_secs(5), async {
+    tokio::join!(command.output(), reply(&listener, response(connected())))
+  })
+  .await
+  .unwrap();
+  assert!(output.unwrap().status.success());
+  assert!(matches!(request, ClientMessage::VpnStatus));
+  assert!(
+    timeout(Duration::from_millis(30), unused.accept())
+      .await
+      .is_err()
+  );
+}
+
+#[tokio::test]
+async fn released_shared_container_with_unavailable_status_retains_metadata_without_claiming_connected()
+ {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let retained = VpnStatus {
+    shared_container: true,
+    locally_connected: Some(false),
+    status_unavailable: true,
+    ..connected()
+  };
+  let (output, _) = exchange(&fixture, &listener, &["vpn", "stop"], response(retained)).await;
+  assert!(output.status.success());
+  let text = String::from_utf8(output.stdout).unwrap();
+  assert!(text.contains("unavailable"));
+  assert!(text.contains("shared"));
+  assert!(text.contains("https://vpn.example.com"));
+  assert!(text.contains("socks5h://127.0.0.1:43210"));
+  assert!(!text.contains("connected"));
 }

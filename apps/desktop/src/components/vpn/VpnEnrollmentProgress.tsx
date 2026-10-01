@@ -10,12 +10,14 @@ export function VpnEnrollmentProgress({ enrollment }: Props) {
   const needs_sign_in = vpnNeedsSignIn(status);
   const failure = enrollment.snapshot?.error?.message ?? enrollment.error;
   const message = enrollment.cancelling ? "Canceling sign-in…"
-    : enrollment.starting ? "Starting Tailscale…"
-      : failure ? "Could not complete sign-in"
-        : enrollment.ready ? "Signed in to Tailscale"
-          : enrollment.opening_browser ? "Opening your browser…"
-            : needs_sign_in ? "Finish signing in with your browser"
-              : status?.message ?? "Starting Tailscale…";
+    : enrollment.cleanup_pending ? "VPN cleanup pending"
+      : enrollment.starting ? "Starting Tailscale…"
+        : status?.status_unavailable ? "Tailscale status unavailable"
+          : failure ? "Could not complete sign-in"
+            : enrollment.ready ? "Signed in to Tailscale"
+              : enrollment.opening_browser ? "Opening your browser…"
+                : needs_sign_in ? "Finish signing in with your browser"
+                  : status?.message ?? "Starting Tailscale…";
 
   return <section className="vpn-enrollment" aria-label="Tailscale sign-in">
     <p role="status" aria-live="polite"><strong>{message}</strong></p>
@@ -30,10 +32,11 @@ export function VpnEnrollmentProgress({ enrollment }: Props) {
       {needs_sign_in ? "Complete sign-in in the browser. This dialog updates automatically when you return."
         : "Preparing your connection. You can cancel while it starts."}
     </p> : null}
-    {needs_sign_in && !enrollment.cancelling ? <button type="button" disabled={enrollment.opening_browser || enrollment.starting} onClick={() => void enrollment.openBrowser()}>
+    {needs_sign_in && !enrollment.cancelling && !enrollment.cleanup_pending ? <button type="button" disabled={enrollment.opening_browser || enrollment.starting} onClick={() => void enrollment.openBrowser()}>
       {enrollment.opening_browser ? "Opening browser…" : "Open browser"}
     </button> : null}
-    {enrollment.error && enrollment.snapshot && !enrollment.snapshot.error && !enrollment.cancelling ? <button type="button" onClick={() => void enrollment.refresh()}>Refresh status</button> : null}
+    {enrollment.cleanup_pending && !enrollment.cancelling ? <button type="button" onClick={() => void enrollment.cancel()}>Retry cleanup</button>
+      : enrollment.error && enrollment.snapshot && !enrollment.snapshot.error && !enrollment.cancelling ? <button type="button" onClick={() => void enrollment.refresh()}>Refresh status</button> : null}
     {failure ? <p className="vpn-error" role="alert">{failure}</p> : null}
     {enrollment.browser_error ? <p className="vpn-error" role="alert">{enrollment.browser_error} Choose Open browser to try again.</p> : null}
   </section>;

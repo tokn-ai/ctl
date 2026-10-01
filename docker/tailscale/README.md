@@ -37,10 +37,9 @@ container and SOCKS5 port, renewing independent heartbeats. Protocol, user,
 profile, and routing settings are checked before reuse. Cleanup addresses the
 immutable container ID and never force-removes a running shared container.
 
-Existing containers created before shared heartbeats appear in CLI and app
-inventory as legacy connections. Their Tailscale status and SOCKS5 readiness are
-observed without renewing interest or adopting the container. Disconnect through
-the original daemon, then reconnect to share it; its identity volume is retained.
+Inventory accepts only the current heartbeat protocol and user namespace.
+Containers created before shared heartbeats must be recreated; the persistent
+identity volume is retained.
 
 Cancelling an unsaved sign-in releases its local heartbeat interest. If a
 container still uses the draft identity, the app reports cleanup pending and

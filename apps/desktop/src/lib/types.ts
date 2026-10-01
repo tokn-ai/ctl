@@ -473,8 +473,6 @@ export interface VpnStatus {
   container_name: string | null;
   container_id?: string | null;
   shared_container?: boolean;
-  /** Older daemons omit this runtime classification. */
-  container_kind?: "shared" | "legacy";
   /** Omitted by older daemons; false means this daemon has no heartbeat interest. */
   locally_connected?: boolean | null;
   /** Metadata is retained because the current container state could not be observed. */

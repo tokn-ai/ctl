@@ -551,18 +551,6 @@ it("can explicitly Connect when an absent daemon makes inventory unavailable whi
   expect(status(result, "work")?.state).toBe("connected");
 });
 
-it("observes legacy VPNs without joining or releasing their resources", async () => {
-  const legacy = runtime("work", { container_kind: "legacy", locally_connected: false });
-  backend = observe(legacy);
-  const { result } = renderHook(() => useVpn(true));
-  await ready(result);
-  await act(async () => { await result.current.connect("work"); await result.current.stop("work"); });
-  expect(result.current.statuses).toEqual([legacy]);
-  expect(connectVpn).not.toHaveBeenCalled();
-  expect(stopVpn).not.toHaveBeenCalled();
-});
-
-
 it("can cancel joining a foreign shared container without hiding it or accepting late local success", async () => {
   const foreign = runtime("work", { shared_container: true, locally_connected: false });
   backend = observe(foreign);

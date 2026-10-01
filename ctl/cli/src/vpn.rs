@@ -155,19 +155,16 @@ fn format_statuses(statuses: &[ctld_ipc::VpnStatus]) -> String {
     "USERNAME",
     "SOCKS5 ENDPOINT",
   ];
-  let mut table = if statuses.iter().any(|status| {
-    status.locally_connected.is_some() || status.shared_container || status.container_kind.is_some()
-  }) {
+  let mut table = if statuses
+    .iter()
+    .any(|status| status.locally_connected.is_some() || status.shared_container)
+  {
     let rows = rows.into_iter().enumerate().map(
       |(index, [id, provider, state, server, username, endpoint])| {
-        let usage = if statuses[index].container_kind == Some(ctld_ipc::VpnContainerKind::Legacy) {
-          "legacy"
-        } else {
-          match statuses[index].locally_connected {
-            Some(true) => "this ctld",
-            Some(false) => "shared",
-            None => "-",
-          }
+        let usage = match statuses[index].locally_connected {
+          Some(true) => "this ctld",
+          Some(false) => "shared",
+          None => "-",
         };
         [
           id,

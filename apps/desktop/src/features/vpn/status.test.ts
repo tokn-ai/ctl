@@ -15,9 +15,9 @@ describe("VPN activity observations", () => {
     expect(vpnActivity([], new Set(), ["Container engine unavailable"])).toEqual({ state: "stopped", active_count: 0, inventory_incomplete: true });
   });
 
-  it("counts confirmed legacy and shared VPNs while excluding retained uncertain states", () => {
+  it("counts confirmed shared VPNs while excluding retained uncertain states", () => {
     const statuses = [
-      runtime("legacy", { container_kind: "legacy", locally_connected: false }),
+      runtime("local", { shared_container: true, locally_connected: true }),
       runtime("shared", { shared_container: true, locally_connected: false }),
       runtime("unavailable", { status_unavailable: true }),
       runtime("cached"),

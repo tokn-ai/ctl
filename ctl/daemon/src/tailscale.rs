@@ -164,7 +164,6 @@ fn container_status(container: &ContainerDescriptor, mut status: VpnStatus) -> V
   status.connection_id = metadata.connection_id;
   status.container_id = Some(container.id.clone());
   status.shared_container = container.shared_supported;
-  status.container_kind = metadata.container_kind;
   status.locally_connected = Some(true);
   status
 }

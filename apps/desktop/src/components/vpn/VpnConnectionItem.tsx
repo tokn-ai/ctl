@@ -21,8 +21,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
   const active = runtime !== null || uncertain || action !== undefined;
   const action_error = model.action_errors.get(vpn_id);
   const state = action?.kind === "stop" ? "stopping" : action?.kind === "connect" && !runtime ? "starting" : runtime?.state ?? "stopped";
-  const legacy = runtime?.container_kind === "legacy";
-  const name = connection?.name ?? (legacy ? "Legacy VPN" : state === "connected" ? "Connected VPN" : "VPN connection");
+  const name = connection?.name ?? (state === "connected" ? "Connected VPN" : "VPN connection");
   const stopping = state === "stopping";
   const checking = (!model.status_loaded || uncertain) && !action;
   const stale = (model.status_stale || (uncertain && runtime !== null)) && !action;
@@ -38,7 +37,7 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
   const foreign = runtime?.locally_connected === false;
   const vpn_url = vpnServerLabel(runtime?.vpn_url ?? saved_openconnect?.url);
   const username = runtime?.username ?? saved_openconnect?.username;
-  const can_connect = !legacy && provider_supported && model.status_loaded && !model.status_stale && !action &&
+  const can_connect = provider_supported && model.status_loaded && !model.status_stale && !action &&
     !uncertain && (model.supports_multiple || (model.statuses.length === 0 && model.actions.size === 0 && model.uncertain_ids.size === 0));
   const source_note = model.catalog_loading && !model.catalog_loaded ? "Loading saved connections…"
     : !model.catalog_loaded || model.catalog_error ? "Saved connection unavailable"
@@ -73,7 +72,6 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
         <span>{status_label}</span>
       </div>
       {!connection ? <small>{source_note}</small> : null}
-      {legacy && !runtime?.message ? <small>Legacy VPN · Disconnect it through the ctld that started it, then reconnect to enable sharing.</small> : null}
       {runtime?.shared_container ? <small>{foreign ? "Shared VPN · This ctld is not keeping it connected." : runtime.locally_connected === true ? "Shared VPN · Kept connected by this ctld." : "Shared VPN"}</small> : null}
       {runtime && stale && model.status_loaded ? <small>Last known state: {statusLabel(runtime.state)}</small> : null}
       <dl className="vpn-connection-details">
@@ -118,8 +116,8 @@ export function VpnConnectionItem({ connection, runtime, model }: Props) {
         {active ? (
           <button
             type="button"
-            disabled={legacy || stopping || (foreign && !connecting) || !model.supports_multiple}
-            title={legacy ? "Disconnect this legacy VPN through the ctld that started it." : foreign && !connecting ? "This ctld has no connection to release." : !model.supports_multiple ? "Update ctld to disconnect this VPN safely." : undefined}
+            disabled={stopping || (foreign && !connecting) || !model.supports_multiple}
+            title={foreign && !connecting ? "This ctld has no connection to release." : !model.supports_multiple ? "Update ctld to disconnect this VPN safely." : undefined}
             onClick={() => void model.stop(vpn_id)}
             aria-label={connection
               ? `${state === "starting" || connecting ? "Cancel connection to" : "Disconnect"} ${connection.name}`

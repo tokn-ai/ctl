@@ -115,7 +115,7 @@ async fn restart_replaces_only_an_isolated_owner_and_verifies_the_new_build() {
 }
 
 #[tokio::test]
-async fn vpn_status_observes_each_inventory_once_per_request() {
+async fn vpn_status_observes_shared_inventory_once_per_request() {
   let directory =
     PathBuf::from("/tmp").join(format!("cl-vpn-{}", &uuid::Uuid::new_v4().to_string()[..8]));
   std::fs::create_dir(&directory).unwrap();
@@ -166,7 +166,7 @@ async fn vpn_status_observes_each_inventory_once_per_request() {
   assert!(snapshot.discovery_warnings.is_empty());
   let calls = std::fs::read_to_string(owner.0.join("docker.calls")).unwrap();
   let calls: Vec<_> = calls.lines().skip(prior).collect();
-  assert_eq!(calls.len(), 2, "each inventory is scanned once");
+  assert_eq!(calls.len(), 1, "shared inventory is scanned once");
   assert_eq!(
     calls
       .iter()
@@ -174,13 +174,7 @@ async fn vpn_status_observes_each_inventory_once_per_request() {
       .count(),
     1,
   );
-  assert_eq!(
-    calls
-      .iter()
-      .filter(|call| call.contains("label=io.ctl.service"))
-      .count(),
-    1,
-  );
+  assert!(!calls[0].contains("label=io.ctl.service"));
   stop_owner(&owner.socket()).await;
   assert!(
     timeout(Duration::from_secs(5), child.wait())

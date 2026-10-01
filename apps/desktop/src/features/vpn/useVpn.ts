@@ -370,7 +370,7 @@ export function useVpn(enabled: boolean): VpnController {
     const vpn_id = existing ? vpnRuntimeId(existing) : connection_id;
     if (uncertain_ids_ref.current.has(vpn_id) || actions_ref.current.has(vpn_id) ||
       [...actions_ref.current.values()].some((action) => action.connection_id === connection_id) ||
-      (existing && (existing.container_kind === "legacy" || existing.locally_connected !== false))) return;
+      (existing && existing.locally_connected !== false)) return;
     if (!supports_multiple_ref.current && (statuses_ref.current.size > 0 || actions_ref.current.size > 0 || uncertain_ids_ref.current.size > 0)) return;
     const connection = catalog_ref.current.connections.find((item) => item.connection_id === connection_id);
     if (!connection || !supported_providers_ref.current.includes(connection.provider ?? "openconnect")) return;
@@ -386,7 +386,6 @@ export function useVpn(enabled: boolean): VpnController {
   const stop = useCallback(async (vpn_id: string) => {
     if (!mounted.current || !supports_multiple_ref.current || actions_ref.current.get(vpn_id)?.kind === "stop") return;
     const previous = statuses_ref.current.get(vpn_id);
-    if (previous?.container_kind === "legacy") return;
     if (previous?.locally_connected === false && actions_ref.current.get(vpn_id)?.kind !== "connect") return;
     if (!previous && !uncertain_ids_ref.current.has(vpn_id)) return;
     const connection_id = previous?.connection_id ?? (catalog_ref.current.connections.some((connection) => connection.connection_id === vpn_id) ? vpn_id : null);

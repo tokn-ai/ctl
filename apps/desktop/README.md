@@ -88,11 +88,9 @@ the container stops. An older daemon can still be inspected, but must be
 updated to connect multiple VPNs or disconnect a connection by ID. The CLI's
 untargeted `ctl vpn stop` remains available for its current connection.
 
-Containers created before shared-heartbeat support remain visible as **Legacy
-VPN** items, with confirmed connection details and a copyable SOCKS5 endpoint.
-They cannot be adopted or disconnected by another daemon. Disconnect through
-their original app or CLI, then reconnect to enable sharing. Incomplete inventory
-shows **Status unavailable** rather than claiming all VPNs are disconnected.
+Only containers using the current shared-heartbeat protocol appear in inventory.
+Incomplete inventory shows **Status unavailable** rather than claiming all VPNs
+are disconnected.
 
 Connection settings, including OpenConnect passwords, are stored in a private `vpns.json` file in
 the app's configuration directory. The webview receives metadata and a

@@ -27,7 +27,6 @@ const LABEL_PROTOCOL: &str = "io.ctl.vpn.protocol";
 const LABEL_USER: &str = "io.ctl.vpn.user";
 const LABEL_ID: &str = "io.ctl.vpn.id";
 const LABEL_METADATA: &str = "io.ctl.vpn.metadata";
-const LABEL_SERVICE: &str = "io.ctl.service";
 
 /// Compatibility metadata exposes only the gateway origin and a routing-settings
 /// fingerprint. The authentication password never participates in that key.
@@ -198,20 +197,6 @@ pub(super) struct ContainerDescriptor {
   healthy: bool,
 }
 
-/// A passive observation of a pre-heartbeat container. Its historical labels
-/// cannot establish user ownership, a saved profile, or compatible settings.
-/// This type deliberately offers no interest, adoption, or shutdown methods.
-#[derive(Clone, Debug)]
-pub(super) struct LegacyContainerDescriptor {
-  pub engine: PathBuf,
-  pub id: String,
-  pub name: String,
-  pub provider: VpnProvider,
-  pub port: Option<u16>,
-  pub running: bool,
-  pub state: String,
-}
-
 impl ContainerDescriptor {
   pub(super) fn compatible(&self, metadata: &RuntimeMetadata) -> io::Result<()> {
     if self.shared_supported && self.metadata == *metadata {
@@ -240,7 +225,6 @@ impl ContainerDescriptor {
       container_name: Some(self.name.clone()),
       container_id: Some(self.id.clone()),
       shared_container: true,
-      container_kind: Some(ctld_ipc::VpnContainerKind::Shared),
       locally_connected: Some(false),
       vpn_url: self.metadata.vpn_url.clone(),
       username: self.metadata.username.clone(),
@@ -359,24 +343,9 @@ async fn list_bounded(engine: &Path) -> io::Result<Vec<ContainerDescriptor>> {
     ],
   )
   .await?;
-  let mut containers = inspect_inventory(engine, ids, |engine, id, bytes| {
-    parse_descriptor(engine, id, bytes).map(Some)
-  })
-  .await?;
+  let mut containers = inspect_inventory(engine, ids).await?;
   containers.sort_by(|left, right| left.id.cmp(&right.id));
   Ok(containers)
-}
-
-/// Lists only recognized legacy containers for display, without making any
-/// ownership claim or changing their original daemon's lifetime contract.
-pub(super) async fn list_legacy(engine: &Path) -> io::Result<Vec<LegacyContainerDescriptor>> {
-  timeout(INVENTORY_TIMEOUT, async {
-    let ids = inventory_ids(engine, &[format!("label={LABEL_SERVICE}")]).await?;
-    let mut containers = inspect_inventory(engine, ids, parse_legacy_descriptor).await?;
-    containers.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(containers)
-  })
-  .await?
 }
 
 async fn inventory_ids(engine: &Path, filters: &[String]) -> io::Result<Vec<String>> {
@@ -409,11 +378,10 @@ async fn inventory_ids(engine: &Path, filters: &[String]) -> io::Result<Vec<Stri
   Ok(pending)
 }
 
-async fn inspect_inventory<T: Send + 'static>(
+async fn inspect_inventory(
   engine: &Path,
   ids: Vec<String>,
-  parse: fn(&Path, &str, &[u8]) -> io::Result<Option<T>>,
-) -> io::Result<Vec<T>> {
+) -> io::Result<Vec<ContainerDescriptor>> {
   let mut active = JoinSet::new();
   let mut pending = ids.into_iter();
   let mut containers = Vec::new();
@@ -423,13 +391,7 @@ async fn inspect_inventory<T: Send + 'static>(
         break;
       };
       let engine = engine.to_path_buf();
-      active.spawn(async move {
-        inspect_bytes(&engine, &id)
-          .await?
-          .map(|bytes| parse(&engine, &id, &bytes))
-          .transpose()
-          .map(Option::flatten)
-      });
+      active.spawn(async move { inspect_named(&engine, &id).await });
     }
     let Some(result) = active.join_next().await else {
       break;
@@ -572,56 +534,6 @@ fn parse_descriptor(
       .state
       .health
       .is_some_and(|health| health.status == "healthy"),
-  })
-}
-
-fn parse_legacy_descriptor(
-  engine: &Path,
-  requested: &str,
-  bytes: &[u8],
-) -> io::Result<Option<LegacyContainerDescriptor>> {
-  let mut values: Vec<Inspection> = serde_json::from_slice(bytes)?;
-  if values.len() != 1 {
-    return Err(invalid("Expected one inspected VPN container"));
-  }
-  let raw = values.pop().expect("one inspected container");
-  if !immutable_id(requested) || raw.id != requested {
-    return Err(io::Error::new(
-      io::ErrorKind::PermissionDenied,
-      "The legacy container's immutable identity did not match its inspection",
-    ));
-  }
-  let labels = &raw.config.labels;
-  if [LABEL_PROTOCOL, LABEL_USER, LABEL_ID, LABEL_METADATA]
-    .iter()
-    .any(|label| labels.contains_key(*label))
-  {
-    return Ok(None);
-  }
-  let name = raw.name.strip_prefix('/').unwrap_or(&raw.name);
-  let provider = match labels.get(LABEL_SERVICE).map(String::as_str) {
-    Some("tailscale") if legacy_name(name, "ctld-tailscale-", 64) => VpnProvider::Tailscale,
-    Some("openconnect") if legacy_name(name, "ctld-openconnect-", 32) => VpnProvider::Openconnect,
-    _ => return Ok(None),
-  };
-  let port = parse_published_port(&serde_json::to_vec(&raw.network.ports)?).ok();
-  Ok(Some(LegacyContainerDescriptor {
-    engine: engine.to_path_buf(),
-    id: raw.id,
-    name: name.to_owned(),
-    provider,
-    port,
-    running: raw.state.running,
-    state: raw.state.status,
-  }))
-}
-
-fn legacy_name(name: &str, prefix: &str, suffix_length: usize) -> bool {
-  name.strip_prefix(prefix).is_some_and(|suffix| {
-    suffix.len() == suffix_length
-      && suffix
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
   })
 }
 

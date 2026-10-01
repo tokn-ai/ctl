@@ -192,65 +192,13 @@ impl ManagedVpn {
 /// Probes readiness without acquiring or renewing interest in the container.
 pub(super) async fn discovered_status(container: &ContainerDescriptor) -> VpnStatus {
   let mut status = container.basic_status();
-  update_discovered_readiness(
-    &container.engine,
-    &container.id,
-    container.port,
-    container.running,
-    &mut status,
-  )
-  .await;
-  status
-}
-
-/// Observes a legacy container without adopting it or reading its credentials.
-pub(super) async fn discovered_status_at(
-  engine: &Path,
-  id: &str,
-  name: &str,
-  port: Option<u16>,
-  running: bool,
-) -> VpnStatus {
-  let mut status = VpnStatus {
-    container_id: Some(id.into()),
-    container_name: Some(name.into()),
-    locally_connected: Some(false),
-    state: if running {
-      VpnState::Starting
-    } else {
-      VpnState::Stopped
-    },
-    ..VpnStatus::default()
-  };
-  update_discovered_readiness(engine, id, port, running, &mut status).await;
-  status
-}
-
-async fn update_discovered_readiness(
-  engine: &Path,
-  id: &str,
-  port: Option<u16>,
-  running: bool,
-  status: &mut VpnStatus,
-) {
-  // Never accept a mutable container name, including from passive legacy input.
-  let immutable = id.len() == 64
-    && id
-      .bytes()
-      .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
-  status.running = false;
-  status.endpoint = None;
-  if running {
-    status.state = VpnState::Starting;
-  }
-  if running
-    && immutable
-    && let Some(port) = port.filter(|port| *port != 0)
+  if container.running
+    && let Some(port) = container.port
   {
     let ready = timeout(
       COMMAND_TIMEOUT,
-      engine_command(engine)
-        .args(["exec", id, "/usr/local/bin/vpn-healthcheck"])
+      engine_command(&container.engine)
+        .args(["exec", &container.id, "/usr/local/bin/vpn-healthcheck"])
         .stdout(Stdio::null())
         .status(),
     )
@@ -265,6 +213,7 @@ async fn update_discovered_readiness(
       .running
       .then(|| format!("socks5h://127.0.0.1:{port}"));
   }
+  status
 }
 
 impl Drop for ManagedVpn {

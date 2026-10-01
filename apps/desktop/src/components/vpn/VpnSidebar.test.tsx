@@ -324,35 +324,6 @@ describe("shared VPN container items", () => {
   });
 });
 
-describe("passively discovered legacy VPNs", () => {
-  it("shows connected metadata and copies a ready endpoint without offering management", async () => {
-    const user = userEvent.setup();
-    const clipboard = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
-    const state = model({ connections: [], statuses: [runtime("container-example", {
-      connection_id: null, container_kind: "legacy", shared_container: false, locally_connected: false,
-    })] });
-    render(<VpnSidebar model={state} />);
-    const item = region("Legacy VPN");
-    expect(item.getByText("Connected")).toBeTruthy();
-    expect(item.getByText("https://gateway.example.test")).toBeTruthy();
-    expect(item.getByText("connected-user")).toBeTruthy();
-    expect(item.getByText(/Disconnect it through the ctld that started it, then reconnect/)).toBeTruthy();
-    expect(item.queryByText(/^Shared VPN/)).toBeNull();
-    expect(item.queryByRole("button", { name: /Connect / })).toBeNull();
-    expect((item.getByRole("button", { name: "Disconnect VPN" }) as HTMLButtonElement).disabled).toBe(true);
-    await user.click(item.getByRole("button", { name: "Copy SOCKS endpoint" }));
-    expect(clipboard).toHaveBeenCalledWith("socks5h://127.0.0.1:49153");
-    expect(state.stop).not.toHaveBeenCalled();
-  });
-
-  it("cannot join or release a legacy runtime even if it carries a saved profile association", () => {
-    render(<VpnSidebar model={model({ statuses: [runtime("work", { container_kind: "legacy", locally_connected: false })] })} />);
-    expect((region().getByRole("button", { name: "Connect Work" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((region().getByRole("button", { name: "Disconnect Work" }) as HTMLButtonElement).disabled).toBe(true);
-  });
-});
-
-
 it("shows retained released shared metadata as unavailable and disables copying until confirmed", () => {
   render(<VpnSidebar model={model({ statuses: [runtime("work", { shared_container: true, locally_connected: false, status_unavailable: true })] })} />);
   expect(region().getByText("Status unavailable")).toBeTruthy();

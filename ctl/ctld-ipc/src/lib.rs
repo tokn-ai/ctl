@@ -195,13 +195,6 @@ pub struct PortForwardStatus {
   pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VpnContainerKind {
-  Shared,
-  Legacy,
-}
-
 /// The endpoint is available only after the managed VPN and SOCKS5 listener are ready.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnStatus {
@@ -230,10 +223,6 @@ pub struct VpnStatus {
   /// The container accepts independent heartbeat interests from multiple daemons.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub shared_container: bool,
-  /// A verified shared runtime or a passive observation of a legacy container.
-  /// Older daemon replies omit this classification.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub container_kind: Option<VpnContainerKind>,
   /// Whether this daemon currently keeps the shared container alive.
   /// Older daemons omit this field and retain their original ownership behavior.
   #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -2,6 +2,14 @@
 name = "ctmux-client"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client library for persistent ctmux terminal sessions and views"
+readme = "README.md"
+categories = ["network-programming"]
+keywords = ["ctmux", "terminal", "client"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info.workspace = true

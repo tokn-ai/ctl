@@ -2,7 +2,14 @@
 name = "ctl-keychain-client"
 version.workspace = true
 edition.workspace = true
-publish = false
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Owned macOS Keychain interfaces for ctl credential storage"
+readme = "README.md"
+categories = ["os::macos-apis"]
+keywords = ["ctl", "macos", "keychain"]
+publish = ["crates-io"]
 
 [dependencies]
 zeroize.workspace = true

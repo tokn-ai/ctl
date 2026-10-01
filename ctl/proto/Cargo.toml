@@ -2,6 +2,14 @@
 name = "ctl-proto"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Remote identity and maintenance protocols for ctl agents"
+readme = "README.md"
+categories = ["network-programming"]
+keywords = ["ctl", "protocol", "ssh"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info.workspace = true

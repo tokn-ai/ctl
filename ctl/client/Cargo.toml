@@ -2,6 +2,14 @@
 name = "ctl-client"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client transports, SSH connections, and remote component management for ctl"
+readme = "README.md"
+categories = ["network-programming"]
+keywords = ["ctl", "ssh", "client"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info.workspace = true

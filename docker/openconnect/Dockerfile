@@ -16,8 +16,8 @@ COPY docker/openconnect/entrypoint.sh /usr/local/bin/openconnect-entrypoint
 COPY docker/openconnect/ssh-handshake.sh /usr/local/bin/ssh-handshake
 COPY docker/openconnect/vpn-network.sh /usr/local/bin/vpn-network
 COPY docker/openconnect/healthcheck.sh /usr/local/bin/vpn-healthcheck
-COPY docker/vpn/heartbeat.sh /run/ctl/heartbeat.sh
-COPY docker/vpn/watchdog.sh /run/ctl/watchdog.sh
+COPY ctl/daemon/assets/vpn/heartbeat.sh /run/ctl/heartbeat.sh
+COPY ctl/daemon/assets/vpn/watchdog.sh /run/ctl/watchdog.sh
 RUN chmod 0755 /usr/local/bin/openconnect-entrypoint \
     /usr/local/bin/ssh-handshake /usr/local/bin/vpn-network \
     /usr/local/bin/vpn-healthcheck

@@ -59,47 +59,47 @@ const RESOURCES: &[Resource] = &[
   Resource {
     name: Name::Ctl,
     file: "SKILL.md",
-    content: include_str!("../../../skills/ctl/SKILL.md"),
+    content: include_str!("../skills/ctl/SKILL.md"),
   },
   Resource {
     name: Name::Ctl,
     file: "references/setup.md",
-    content: include_str!("../../../skills/ctl/references/setup.md"),
+    content: include_str!("../skills/ctl/references/setup.md"),
   },
   Resource {
     name: Name::Host,
     file: "SKILL.md",
-    content: include_str!("../../../skills/ctl-host/SKILL.md"),
+    content: include_str!("../skills/ctl-host/SKILL.md"),
   },
   Resource {
     name: Name::Session,
     file: "SKILL.md",
-    content: include_str!("../../../skills/ctl-session/SKILL.md"),
+    content: include_str!("../skills/ctl-session/SKILL.md"),
   },
   Resource {
     name: Name::Task,
     file: "SKILL.md",
-    content: include_str!("../../../skills/ctl-task/SKILL.md"),
+    content: include_str!("../skills/ctl-task/SKILL.md"),
   },
   Resource {
     name: Name::Task,
     file: "references/definitions.md",
-    content: include_str!("../../../skills/ctl-task/references/definitions.md"),
+    content: include_str!("../skills/ctl-task/references/definitions.md"),
   },
   Resource {
     name: Name::Port,
     file: "SKILL.md",
-    content: include_str!("../../../skills/ctl-port/SKILL.md"),
+    content: include_str!("../skills/ctl-port/SKILL.md"),
   },
   Resource {
     name: Name::Vpn,
     file: "SKILL.md",
-    content: include_str!("../../../skills/ctl-vpn/SKILL.md"),
+    content: include_str!("../skills/ctl-vpn/SKILL.md"),
   },
   Resource {
     name: Name::Vpn,
     file: "references/setup.md",
-    content: include_str!("../../../skills/ctl-vpn/references/setup.md"),
+    content: include_str!("../skills/ctl-vpn/references/setup.md"),
   },
 ];
 

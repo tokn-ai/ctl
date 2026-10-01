@@ -2,6 +2,14 @@
 name = "ctmux-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line client and terminal UI for persistent ctmux sessions"
+readme = "README.md"
+categories = ["command-line-utilities"]
+keywords = ["ctmux", "terminal", "multiplexer"]
+publish = ["crates-io"]
 
 [lib]
 name = "ctmux_cli"
@@ -20,7 +28,7 @@ ctmux-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
-ctmux-tui = { path = "../../apps/tui" }
+ctmux-tui.workspace = true
 
 [dev-dependencies]
 ctmuxd.workspace = true

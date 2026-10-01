@@ -2,6 +2,14 @@
 name = "ctl-ipc"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local connection broker protocol and lifecycle management for ctld"
+readme = "README.md"
+categories = ["network-programming"]
+keywords = ["ctl", "ipc", "ssh"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info.workspace = true

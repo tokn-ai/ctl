@@ -2,6 +2,14 @@
 name = "ctl-agent"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SSH gateway for remote ctl terminal sessions and managed tasks"
+readme = "README.md"
+categories = ["command-line-utilities"]
+keywords = ["ctl", "ssh", "terminal", "tasks"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info.workspace = true
@@ -20,9 +28,9 @@ tokio.workspace = true
 ctl-client.workspace = true
 ctmux-client.workspace = true
 ctmux-proto.workspace = true
-ctmuxd = { path = "../../ctmux/daemon" }
+ctmuxd.workspace = true
 ctl-task-proto.workspace = true
-ctl-taskd = { path = "../../task/daemon" }
+ctl-taskd.workspace = true
 
 [lints]
 workspace = true

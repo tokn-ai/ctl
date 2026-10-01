@@ -2,8 +2,14 @@
 name = "ctld"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Per-user SSH connection and credential broker for ctl"
-publish = false
+readme = "README.md"
+categories = ["command-line-utilities"]
+keywords = ["ctl", "ssh", "daemon", "vpn"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info.workspace = true
@@ -26,7 +32,7 @@ zeroize.workspace = true
 rustix.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ctl-keychain-client = { path = "../keychain-client" }
+ctl-keychain-client.workspace = true
 security-framework = { version = "3.7", features = ["OSX_10_15"] }
 
 [lints]

@@ -16,11 +16,11 @@ build_image() {
   # Both Docker and Podman receive only the files needed by this image.
   vpn_build_context=$(mktemp -d "${TMPDIR:-/tmp}/ctl-openconnect-build.XXXXXX")
   trap 'rm -rf -- "$vpn_build_context"' EXIT
-  mkdir -p "$vpn_build_context/docker/openconnect" "$vpn_build_context/docker/vpn"
+  mkdir -p "$vpn_build_context/docker/openconnect" "$vpn_build_context/ctl/daemon/assets/vpn"
   for script in Dockerfile entrypoint.sh ssh-handshake.sh vpn-network.sh healthcheck.sh; do
     cp "$script_dir/$script" "$vpn_build_context/docker/openconnect/$script"
   done
-  cp "$repo_dir/docker/vpn/heartbeat.sh" "$repo_dir/docker/vpn/watchdog.sh" "$vpn_build_context/docker/vpn/"
+  cp "$repo_dir/ctl/daemon/assets/vpn/heartbeat.sh" "$repo_dir/ctl/daemon/assets/vpn/watchdog.sh" "$vpn_build_context/ctl/daemon/assets/vpn/"
   docker build --file "$vpn_build_context/docker/openconnect/Dockerfile" --tag "$image_name" "$vpn_build_context"
   rm -rf -- "$vpn_build_context"
   trap - EXIT

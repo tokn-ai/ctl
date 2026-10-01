@@ -2,6 +2,14 @@
 name = "ctl-component-info"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Build identity and executable metadata shared by ctl and ctmux components"
+readme = "README.md"
+categories = ["development-tools"]
+keywords = ["ctl", "ctmux", "metadata"]
+publish = ["crates-io"]
 
 [dependencies]
 serde.workspace = true
@@ -14,6 +22,11 @@ executable = ["dep:serde_json", "dep:sha2", "dep:tokio"]
 
 [build-dependencies]
 sha2.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

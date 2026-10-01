@@ -7,50 +7,46 @@ use std::sync::{Mutex, MutexGuard};
 const MALFORMED_CATALOG: &[u8] = b"this is not a host catalog; must not be read";
 
 const DOCUMENTS: &[(&str, &str, &[u8])] = &[
-  (
-    "ctl",
-    "SKILL.md",
-    include_bytes!("../../../skills/ctl/SKILL.md"),
-  ),
+  ("ctl", "SKILL.md", include_bytes!("../skills/ctl/SKILL.md")),
   (
     "ctl",
     "references/setup.md",
-    include_bytes!("../../../skills/ctl/references/setup.md"),
+    include_bytes!("../skills/ctl/references/setup.md"),
   ),
   (
     "ctl-host",
     "SKILL.md",
-    include_bytes!("../../../skills/ctl-host/SKILL.md"),
+    include_bytes!("../skills/ctl-host/SKILL.md"),
   ),
   (
     "ctl-session",
     "SKILL.md",
-    include_bytes!("../../../skills/ctl-session/SKILL.md"),
+    include_bytes!("../skills/ctl-session/SKILL.md"),
   ),
   (
     "ctl-task",
     "SKILL.md",
-    include_bytes!("../../../skills/ctl-task/SKILL.md"),
+    include_bytes!("../skills/ctl-task/SKILL.md"),
   ),
   (
     "ctl-task",
     "references/definitions.md",
-    include_bytes!("../../../skills/ctl-task/references/definitions.md"),
+    include_bytes!("../skills/ctl-task/references/definitions.md"),
   ),
   (
     "ctl-port",
     "SKILL.md",
-    include_bytes!("../../../skills/ctl-port/SKILL.md"),
+    include_bytes!("../skills/ctl-port/SKILL.md"),
   ),
   (
     "ctl-vpn",
     "SKILL.md",
-    include_bytes!("../../../skills/ctl-vpn/SKILL.md"),
+    include_bytes!("../skills/ctl-vpn/SKILL.md"),
   ),
   (
     "ctl-vpn",
     "references/setup.md",
-    include_bytes!("../../../skills/ctl-vpn/references/setup.md"),
+    include_bytes!("../skills/ctl-vpn/references/setup.md"),
   ),
 ];
 
@@ -171,7 +167,7 @@ fn short_names_select_the_same_child_skills() {
   }
   assert_eq!(
     fixture.succeeds(&["skill", "vpn", "--file", "references/setup.md"]),
-    include_bytes!("../../../skills/ctl-vpn/references/setup.md").as_slice()
+    include_bytes!("../skills/ctl-vpn/references/setup.md").as_slice()
   );
   fixture.assert_unchanged();
 }

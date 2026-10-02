@@ -163,7 +163,7 @@ mod tests {
   }
 
   #[test]
-  fn vpn_start_uses_a_local_env_file_and_exposes_status_and_stop() {
+  fn vpn_start_uses_a_local_env_file_and_exposes_list_and_stop() {
     let arguments = Arguments::try_parse_from(["ctl", "vpn", "start"]).unwrap();
     assert_eq!(arguments.host, None);
     assert!(matches!(
@@ -178,17 +178,17 @@ mod tests {
       Command::Vpn { command: vpn::Command::Start { env_file, json: false } }
         if env_file == std::path::Path::new("work.env")
     ));
-    for action in ["status", "stop"] {
+    for action in ["list", "stop"] {
       assert!(Arguments::try_parse_from(["ctl", "vpn", action]).is_ok());
       assert!(Arguments::try_parse_from(["ctl", "vpn", action, "--env-file", ".env"]).is_err());
     }
-    for action in ["start", "status", "stop"] {
+    for action in ["start", "list", "stop"] {
       let arguments = Arguments::try_parse_from(["ctl", "vpn", action, "--json"]).unwrap();
       assert!(matches!(
         arguments.command,
         Command::Vpn {
           command: vpn::Command::Start { json: true, .. }
-            | vpn::Command::Status { json: true }
+            | vpn::Command::List { json: true }
             | vpn::Command::Stop { json: true, .. }
         }
       ));
@@ -199,6 +199,7 @@ mod tests {
       Command::Vpn { command: vpn::Command::Stop { vpn_id: Some(vpn_id), json: false } }
         if vpn_id == "test-vpn"
     ));
+    assert!(Arguments::try_parse_from(["ctl", "vpn", "status"]).is_err());
   }
 
   #[test]

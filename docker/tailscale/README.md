@@ -23,6 +23,21 @@ is pending. `ctld` also checks that the local SOCKS5 listener is available befor
 reporting a usable endpoint. If Tailscale needs another login, the endpoint is
 withdrawn and a new sign-in link becomes available.
 
+Inspect saved profiles and runtime connections with `ctl vpn list`. To reconnect
+a saved Tailscale profile after its container is removed, use
+`ctl vpn connect NAME_OR_ID`. An exact profile ID takes precedence over a unique
+exact name. Connect starts ctld when needed and reuses the retained identity
+volume when recreating the container. Follow any returned sign-in link, then run
+list to check the current state and SOCKS5 endpoint. List never starts ctld or
+renews a heartbeat; a saved profile is unavailable when runtime inventory cannot
+be checked. With complete inventory, an unmatched saved profile is disconnected.
+
+For a new CLI-only identity, use `ctl vpn start-tailscale --id my-tailnet` and
+reuse that ID on later starts. Connect, start-tailscale, list, and stop support
+`--json`. List returns sanitized merged `entries`, raw runtime `connections`,
+capability fields, and inventory warnings. CLI-only starts do not create saved
+desktop profiles.
+
 The listener check completes a short-lived SOCKS5 UDP association and closes it
 without sending any datagrams or contacting a remote host. Completing the request
 avoids the `could not read packet header` errors that greeting-only checks produce

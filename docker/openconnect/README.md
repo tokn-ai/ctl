@@ -72,25 +72,42 @@ Build the image once, then use the current ctl and ctld binaries:
 ```sh
 ./docker/openconnect/run.sh build
 ctl vpn start --env-file .env
-ctl vpn status
+ctl vpn list
 ctl vpn stop VPN_ID
 ```
 
-`ctl` talks to ctld and starts the daemon automatically if needed. Starting the
-VPN waits for its tunnel interface, routes, DNS, and SOCKS listener to become
+Start and connect talk to ctld and start the daemon automatically if needed.
+Starting the VPN waits for its tunnel interface, routes, DNS, and SOCKS listener to become
 ready, then prints a table with the VPN state, server, username, and randomly
-assigned SOCKS5 endpoint. Start, status, and stop accept `--json` for scripts.
-Status JSON is a snapshot with `connections`, `supports_multiple`, and optional
-`discovery_warnings` when the container inventory could not be checked. Each
-connection includes `vpn_id`, `vpn_url`, `username`, `endpoint`, `container_name`,
-`running`, `connection_id`, `state`, immutable `container_id`, `shared_container`,
-and `locally_connected`. The table's USE column distinguishes this ctld from a
-shared container discovered without local heartbeat interest. Inventory accepts
-only the current heartbeat protocol and user namespace. Start and stop JSON return the affected
-connection. Saved connections use their profile ID as `vpn_id`; file-based starts
-receive a stable ID derived from the canonical settings path. The VPN server is its HTTPS origin; credentials,
-paths, queries, and fragments are omitted. `state` is `stopped`, `starting`,
-`connected`, or `stopping`; CLI-started connections have a null `connection_id`.
+assigned SOCKS5 endpoint. Use `ctl vpn connect NAME_OR_ID` for an existing saved
+desktop profile; it reuses a compatible container or recreates a missing one.
+An exact stable profile ID takes precedence over a unique exact name. The saved
+catalog defaults to `~/.tokn/ctl/vpns.json`; `CTL_VPNS_PATH` selects another file.
+
+List combines saved profiles with runtime connections and compatible shared
+containers. Its table shows name, provider, state, server or tailnet, username,
+SOCKS5 endpoint, and VPN ID. Saved profiles stay visible after container removal.
+An unmatched saved profile is disconnected only when runtime
+inventory is complete; otherwise it is unavailable. List never starts ctld or
+renews a heartbeat.
+
+Connect, start, list, and stop accept `--json` for scripts. List JSON is a snapshot
+with sanitized merged `entries`, raw runtime `connections`, capability fields,
+and optional `discovery_warnings` when the container inventory could not be
+checked. If the saved catalog cannot be read, runtime entries remain available
+with `profile_warnings`. Each runtime connection includes `vpn_id`, `vpn_url`,
+`username`, `endpoint`, `container_name`, `running`, `connection_id`, `state`,
+immutable `container_id`, `shared_container`,
+and `locally_connected`. The table's USE column appears only when a displayed
+VPN has `locally_connected: false`. It shows `owned` when the selected daemon
+holds heartbeat interest and `shared` for a container discovered without local
+interest. The JSON fields are unchanged. Inventory accepts only the current
+heartbeat protocol and user namespace. Connect, start, and stop
+JSON return the affected connection. Saved connections use their profile ID as
+`vpn_id`; file-based starts receive a stable ID derived from the canonical
+settings path. The VPN server is its HTTPS origin; credentials, paths, queries,
+and fragments are omitted. `state` is `stopped`, `starting`,
+`connected`, or `stopping`; file-based starts have a null `connection_id`.
 The ready proxy endpoint is a `socks5h://127.0.0.1:PORT` URL.
 
 Each VPN owns a separate container and random SOCKS5 endpoint. Use `ctl vpn stop VPN_ID` to release one local connection. Without an ID, stop
@@ -108,7 +125,7 @@ binaries, then invokes ctl with the root `.env`:
 
 ```sh
 ./docker/openconnect/run.sh start
-./docker/openconnect/run.sh status
+./docker/openconnect/run.sh list
 ./docker/openconnect/run.sh stop
 ```
 
@@ -124,19 +141,19 @@ or stopping a connection by ID. Explicit `ctl vpn stop` can stop its current VPN
 The VPN keeps running after `ctl vpn start` exits because ctld renews its heartbeat.
 `ctl vpn stop VPN_ID` and daemon exit release only that daemon's renewal task.
 The container removes itself after the last heartbeat expires. Another daemon
-can reuse the same profile and random port by connecting to it. Status inspection
+can reuse the same profile and random port by connecting to it. List inspection
 never renews a heartbeat. Release every interested daemon before changing an
 active profile's routing settings.
 
 ## Use the current endpoint
 
 This shell example uses Python 3 to read the randomly assigned endpoint from
-ctl status. `socks5h` resolves names inside the container using its current DNS
+ctl list. `socks5h` resolves names inside the container using its current DNS
 configuration, including VPN-provided DNS servers:
 
 ```sh
 vpn_id=VPN_ID
-endpoint=$(ctl vpn status --json | python3 -c \
+endpoint=$(ctl vpn list --json | python3 -c \
   'import json, sys; print(next(v["endpoint"] for v in json.load(sys.stdin)["connections"] if v["vpn_id"] == sys.argv[1]))' "$vpn_id")
 curl --proxy "$endpoint" https://example.com
 ```
@@ -148,8 +165,8 @@ socks_address=${endpoint#socks5h://}
 ssh -o "ProxyCommand=nc -X 5 -x $socks_address %h %p" USER@HOST
 ```
 
-When using the checkout helper, replace `ctl vpn status --json` with
-`./docker/openconnect/run.sh status --json` to query through the same binaries.
+When using the checkout helper, replace `ctl vpn list --json` with
+`./docker/openconnect/run.sh list --json` to query through the same binaries.
 The proxy supports TCP, including SSH and HTTPS; it does not provide SOCKS5 UDP
 relay. Configure each application to use the proxy. It does not install routes
 on the Mac itself.
@@ -163,8 +180,9 @@ against the settings provided for the VPN. Diagnostics return fixed messages;
 ctld does not retain or return raw container output, which may contain private
 gateway details. Unrecognized failures retain a generic exit or timeout message.
 
-Use a connection's `container_name` from `ctl vpn status --json` with Docker to inspect logs or run the optional
-connectivity probe while the VPN is running:
+Use a runtime connection's `container_name` from `ctl vpn list --json` with
+Docker to inspect logs or run the optional connectivity probe while the VPN is
+running:
 
 ```sh
 docker logs --follow CONTAINER_NAME

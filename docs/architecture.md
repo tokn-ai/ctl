@@ -268,11 +268,17 @@ interest in a shared OpenConnect container, starting the daemon if needed. The
 settings path defaults to `.env`
 and is resolved relative to the caller's directory. Its SOCKS5 listener uses a
 random loopback port, printed in a readable connection-status table after the VPN and
-proxy are ready. Start, status, and stop accept `--json` for machine-readable output.
-`ctl vpn status` lists local interests and compatible shared containers, with
-immutable container IDs and their random SOCKS5 endpoints. `ctl vpn stop VPN_ID`
-releases only the selected local interest while keeping the broker running.
-Status and stop never start a daemon. An absent daemon or incomplete engine
+proxy are ready. Connect, start, list, and stop accept `--json` for machine-readable
+output. `ctl vpn list` combines saved profiles with local interests and compatible
+shared containers, retaining runtime entries without saved profiles. Its JSON
+snapshot adds sanitized merged `entries` to the runtime `connections`, capability
+fields, and discovery warnings. Saved metadata excludes passwords and URL
+credentials, paths, queries, and fragments. A saved profile without a runtime
+connection is disconnected only when inventory is complete; otherwise it is
+unavailable. If the catalog cannot be read, runtime entries remain available with
+`profile_warnings`. `ctl vpn stop VPN_ID` releases only the selected local interest
+while keeping the broker running.
+List and stop never start a daemon. An absent daemon or incomplete engine
 inventory reports a discovery warning rather than a confident empty result. VPN
 commands reject `--host` and use
 the owner-only local IPC endpoint, selectable through `CTLD_SOCKET_PATH`.
@@ -281,7 +287,12 @@ The desktop VPN panel stores named connection details in private, schema-version
 `vpns.json` under the app configuration directory. Native commands return metadata
 and password-presence flags, use hashed revisions for optimistic writes, and load
 the saved secret only when connecting. Both desktop and CLI use the shared
-`ctl-ipc::vpn` client. OpenConnect structured starts send the configuration to the container
+`ctl-ipc::vpn` client. `ctl vpn connect NAME_OR_ID` resolves an exact saved profile
+ID before a unique exact name, then connects through that client, recreating a
+missing container and starting ctld when needed. CLI connect, list, and host VPN
+routes share a bounded private profile reader accepting schema 1 and 2. The
+catalog defaults to `~/.tokn/ctl/vpns.json`; `CTL_VPNS_PATH` selects another file.
+OpenConnect structured starts send the configuration to the container
 over its attached stdin; the container writes a mode-0600 environment file on
 private tmpfs. No generated credential file is left on the host. CLI-provided
 environment files are read as bounded private snapshots and use the same

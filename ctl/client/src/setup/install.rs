@@ -13,12 +13,13 @@ pub(super) struct Session {
   destination: PathBuf,
   pub manifest: Manifest,
   pub reused: bool,
-  _lock: File,
+  _lock: SetupLock,
 }
 
-impl Session {
-  pub fn begin(home: &Path, manifest: Manifest) -> Result<Self, Error> {
-    let root = ctl_ipc::managed::ensure_component_directory(home)?;
+struct SetupLock(File);
+
+impl SetupLock {
+  fn acquire(root: &Path) -> Result<Self, Error> {
     let lock = rustix::fs::open(
       root.join("setup.lock"),
       rustix::fs::OFlags::CREATE
@@ -43,6 +44,22 @@ impl Session {
       fs::TryLockError::WouldBlock => Error::Busy,
       fs::TryLockError::Error(error) => Error::Io(error),
     })?;
+    Ok(Self(lock))
+  }
+}
+
+impl Drop for SetupLock {
+  fn drop(&mut self) {
+    // Closing our descriptor alone can leave a forked child's descriptor
+    // holding the lock until exec. Explicitly release the shared lock now.
+    let _ = self.0.unlock();
+  }
+}
+
+impl Session {
+  pub fn begin(home: &Path, manifest: Manifest) -> Result<Self, Error> {
+    let root = ctl_ipc::managed::ensure_component_directory(home)?;
+    let lock = SetupLock::acquire(&root)?;
     // A well-formed dangling selection can be repaired by verified setup, while
     // unsafe paths and foreign-owned selections are never silently replaced.
     ctl_ipc::managed::validate_current_selection(home)?;
@@ -178,5 +195,47 @@ impl Session {
 impl Drop for Session {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.work);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  struct Home(PathBuf);
+
+  impl Home {
+    fn new() -> Self {
+      let path =
+        std::env::temp_dir().join(format!("ctld-setup-lock-test-{}", uuid::Uuid::new_v4()));
+      fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+      Self(path)
+    }
+  }
+
+  impl Drop for Home {
+    fn drop(&mut self) {
+      let _ = fs::remove_dir_all(&self.0);
+    }
+  }
+
+  #[test]
+  #[expect(
+    clippy::used_underscore_binding,
+    reason = "the regression duplicates the descriptor held by the otherwise unread RAII guard"
+  )]
+  fn dropping_session_releases_lock_while_an_inherited_descriptor_remains_open() {
+    let home = Home::new();
+    let manifest = super::super::manifest::fixture();
+    let session = Session::begin(&home.0, manifest.clone()).unwrap();
+    // A duplicated descriptor shares the same open file description, as an
+    // unrelated subprocess does between fork and exec despite CLOEXEC.
+    let inherited = session._lock.0.try_clone().unwrap();
+    let staging = session.work().to_owned();
+    drop(session);
+    assert!(!staging.exists());
+    let next = Session::begin(&home.0, manifest).unwrap();
+    drop(inherited);
+    drop(next);
   }
 }

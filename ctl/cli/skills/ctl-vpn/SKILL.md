@@ -1,22 +1,44 @@
 ---
 name: ctl-vpn
-description: List and connect saved VPN profiles, or start, inspect, and release ctl-managed OpenConnect or Tailscale containers and their local SOCKS5 endpoints, including pending Tailscale sign-in and shared ownership.
+description: Create or remove saved VPN profiles, list their runtime state, and start or stop ctl-managed OpenConnect or Tailscale connections and local SOCKS5 endpoints, including pending Tailscale sign-in and shared ownership.
 ---
 
 # ctl vpn
 
 Use `ctl vpn` locally on a Unix client. `-H` is rejected; these commands manage
-the local ctld's VPN interest, not a remote machine's VPN. Connecting or starting
-a VPN requires Docker or Podman to be running. Connect and start launch the
-selected ctld if needed; list and stop do not. List reads the saved catalog and
-passively probes the selected daemon without acquiring or renewing heartbeat
-interest.
+the local ctld's VPN interest, not a remote machine's VPN. Starting a VPN requires
+Docker or Podman to be running. Start launches the selected ctld if needed;
+create, list, stop, and remove do not. List reads the saved catalog and passively
+probes the selected daemon without acquiring or renewing heartbeat interest.
 
-## Connect a saved profile
+## Create a saved profile
+
+```sh
+ctl vpn create
+```
+
+Create opens an interactive questionnaire, asks for the provider and its settings,
+then saves a profile in `~/.tokn/ctl/vpns.json`, shared with the desktop VPN page.
+`CTL_VPNS_PATH` selects another catalog. OpenConnect asks for a gateway, username,
+masked password, and optional authentication method and connectivity-check target.
+Tailscale asks for an optional device hostname and whether to accept advertised
+subnet routes. The questionnaire validates answers before saving and assigns a
+stable profile ID. Ctrl-C or Esc
+cancels without changing the catalog. Creation does not contact ctld, build an
+image, or start a container. It requires an interactive terminal; never supply
+passwords in command arguments, diagnostic output, or a shell script.
+`create --json` keeps prompts on stderr and returns only the saved profile's
+sanitized metadata on stdout; it still requires an interactive terminal.
+
+For OpenConnect setup or a missing/incompatible image, read
+[setup.md](references/setup.md) with
+`ctl skill ctl-vpn --file references/setup.md`.
+
+## List and start a saved profile
 
 ```sh
 ctl vpn list --json
-ctl vpn connect NAME_OR_ID --json
+ctl vpn start NAME_OR_ID --json
 ```
 
 Saved profiles are shared with the desktop VPN page in
@@ -29,43 +51,19 @@ USERNAME, SOCKS5 ENDPOINT, and VPN ID. The USE column appears only when at least
 one displayed VPN is marked `shared`. Saved display metadata never includes
 passwords or URL credentials, paths, queries, or fragments.
 
-Connect selects an exact stable `connection_id` first, then a unique exact name.
-Use the ID from list if multiple profiles have the same name. Connect reads the
+Start selects an exact stable `connection_id` first, then a unique exact name.
+Use the ID from list if multiple profiles have the same name. Start reads the
 profile's credentials privately, reuses a compatible container, or recreates a
 missing container. Run it again to recover after container removal or daemon
 restart. It returns the affected connection object and does not add a profile to
 the saved catalog. Read the current endpoint from that result or list because
 the port may change on recreation.
 
-OpenConnect still requires the compatible image described in
-[setup.md](references/setup.md). A saved Tailscale profile may require browser
-sign-in; follow the returned `auth_url` and readiness guidance below.
-
-## Start the chosen provider
-
-For OpenConnect, read [setup.md](references/setup.md) with
-`ctl skill ctl-vpn --file references/setup.md` when preparing the private
-settings file or resolving a missing/incompatible image. The image must already
-support ctl's shared heartbeat protocol.
-
-```sh
-ctl vpn start --env-file /absolute/path/to/company.env --json
-```
-
-`--env-file` defaults to `.env` relative to the invoking directory. This is an
-Array Networks OpenConnect connection. Start waits for the VPN and proxy to
-become ready. Repeating a start for the same settings path reuses its active
-connection; editing the file does not reconfigure that running connection.
-
-For Tailscale, supply a stable ID and reuse it to keep the device's login:
-
-```sh
-ctl vpn start-tailscale --id my-tailnet --hostname ctl-work --json
-```
-
-`--name` sets a display name and defaults to `Tailscale`. Add `--accept-routes`
-only when advertised subnet routes are wanted. The official pinned image is
-downloaded on first use; no OpenConnect image build is needed. This container's
+Omitting the selector opens a saved-profile picker in an interactive terminal.
+Scripts must supply a selector. OpenConnect uses Array Networks authentication
+and waits for the VPN and proxy to become ready. It requires the compatible image
+described in setup. Tailscale downloads its pinned official image on first use
+and retains the same device login when restarting the same profile. Its
 authentication is separate from an installed Tailscale client on the host.
 
 A successful start may return `state: "starting"` and `auth_url` for sign-in.
@@ -75,18 +73,17 @@ indefinitely and can be stopped. Report a usable connection only after
 `state` is `connected`, `status_unavailable` is not true, and `endpoint` is
 present. If reauthentication becomes necessary, the endpoint is withdrawn.
 
-CLI starts do not add saved VPN profiles to the desktop app. For selecting an
-existing saved VPN profile as an SSH host route, use
+For selecting an existing saved VPN profile as an SSH host route, use
 [ctl-host](../ctl-host/SKILL.md), available with `ctl skill ctl-host`.
 
 ## Inspect and use an endpoint
 
 ```sh
 ctl vpn list --json
-ctl vpn stop VPN_ID --json
+ctl vpn stop NAME_OR_ID --json
 ```
 
-Connect, start, and stop JSON return the affected connection object. List returns
+Start and stop JSON return the affected connection object. List returns
 a snapshot with sanitized merged `entries`, raw runtime `connections`,
 `supports_multiple`, `supported_providers`, `supports_tailscale_enrollment`, and
 optional `discovery_warnings`. If the saved catalog cannot be read, list retains
@@ -97,12 +94,15 @@ fields include `vpn_id`, `provider`, `state`, `endpoint`, `running`,
 `status_unavailable`. States are `stopped`, `starting`, `connected`, and
 `stopping`; providers are `openconnect` and `tailscale`.
 
-Select by the returned `vpn_id`, not array position or container name. File-based
-OpenConnect IDs derive from the canonical settings path and have a null
-`connection_id`; saved profiles and Tailscale use their stable connection IDs.
-Multiple connections can coexist. An untargeted `ctl vpn stop` requires zero or
-one local connection; discovered shared containers do not make that choice
-ambiguous.
+Stop accepts an exact saved profile ID, a unique exact profile name, or a runtime
+`vpn_id` from list. Use a runtime ID for a connection without a saved profile;
+do not select by array position or container name. Multiple connections can
+coexist. Omitting the stop selector opens a picker of local connections in an
+interactive terminal when the daemon reports `supports_multiple: true`. A legacy
+daemon reports only one local connection; with an omitted selector, the CLI uses
+its untargeted stop directly instead of a picker. In scripts, an untargeted stop
+requires zero or one local connection; discovered
+shared containers do not make that choice ambiguous.
 
 An empty runtime `connections` array can coexist with saved profiles in `entries`.
 Do not interpret an empty `connections` array with `discovery_warnings` as proof
@@ -135,9 +135,34 @@ continued visibility is expected. After the last heartbeat expires, the
 container removes itself, which may take up to 15 seconds. Verify the local
 interest was released instead of forcing removal of a shared container.
 
-Use the same daemon socket selection for connect, start, list, and stop:
+Use the same daemon socket selection for start, list, and stop:
 `CTLD_VPN_SOCKET_PATH` takes precedence over `CTLD_SOCKET_PATH`. Different ctld
 endpoints can share compatible containers for the same user and engine.
 Release every interested daemon before changing active routing settings.
-Tailscale stop retains its durable identity volume and login; changing `--id`
-creates a separate identity. Do not remove that volume for routine disconnects.
+Tailscale stop retains its durable identity volume and login; creating a new
+profile creates a separate identity. Do not remove that volume for routine
+disconnects.
+
+## Remove a saved profile
+
+```sh
+ctl vpn remove NAME_OR_ID
+```
+
+Remove selects an exact saved profile ID before a unique exact name. Omitting
+the selector opens a saved-profile picker, like start. It always asks for
+interactive confirmation, defaulting to No; `--json` does not bypass that prompt
+and there is no `--yes` flag. Choosing No or cancelling leaves the catalog
+unchanged without querying ctld.
+
+After confirmation, remove passively checks runtime inventory. The selected VPN
+must be stopped and inventory must be complete; active containers (including
+shared ones), stopping, or unverified state block deletion. Release every interested daemon's heartbeat and
+wait for container exit first. Remove never starts a daemon or stops a VPN
+automatically. Missing, incomplete, or legacy inventory must be resolved by
+starting or updating ctld before retrying.
+
+Removal deletes only the saved catalog entry. Its JSON result contains exactly
+`removed: true`, `connection_id`, `name`, and `provider`. Tailscale identity
+volumes are retained; removal does not revoke a device in the remote tailnet.
+Use stop for a routine disconnect when the saved profile should remain available.

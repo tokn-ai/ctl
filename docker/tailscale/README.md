@@ -25,18 +25,32 @@ withdrawn and a new sign-in link becomes available.
 
 Inspect saved profiles and runtime connections with `ctl vpn list`. To reconnect
 a saved Tailscale profile after its container is removed, use
-`ctl vpn connect NAME_OR_ID`. An exact profile ID takes precedence over a unique
-exact name. Connect starts ctld when needed and reuses the retained identity
+`ctl vpn start NAME_OR_ID`. An exact profile ID takes precedence over a unique
+exact name. Start launches ctld when needed and reuses the retained identity
 volume when recreating the container. Follow any returned sign-in link, then run
 list to check the current state and SOCKS5 endpoint. List never starts ctld or
 renews a heartbeat; a saved profile is unavailable when runtime inventory cannot
 be checked. With complete inventory, an unmatched saved profile is disconnected.
 
-For a new CLI-only identity, use `ctl vpn start-tailscale --id my-tailnet` and
-reuse that ID on later starts. Connect, start-tailscale, list, and stop support
-`--json`. List returns sanitized merged `entries`, raw runtime `connections`,
-capability fields, and inventory warnings. CLI-only starts do not create saved
-desktop profiles.
+To create a saved Tailscale profile, run `ctl vpn create` and choose Tailscale.
+The questionnaire asks for a display name, an optional device hostname, and
+whether to accept advertised subnet routes. Creation only saves the profile;
+browser sign-in begins when starting it. Starting the same profile retains its
+device identity and login. Omitting the start selector opens a picker in an
+interactive terminal; stop does the same with a current daemon. Scripts must
+supply a start selector; an
+untargeted stop requires zero or one local connection. All five commands support
+`--json`; create remains interactive and returns only saved metadata. List
+returns sanitized merged `entries`, raw runtime `connections`,
+capability fields, and inventory warnings.
+
+Use `ctl vpn remove NAME_OR_ID` to delete a saved profile, or omit the selector
+for a profile picker. Removal always requires interactive confirmation,
+defaulting to No, with no `--yes` bypass. It retains the Tailscale identity volume
+and does not revoke the device in the remote tailnet. After confirmation it
+requires complete runtime inventory and a stopped VPN. Release its heartbeat
+interests and wait for container exit first; remove never starts a daemon or
+stops a VPN automatically.
 
 The listener check completes a short-lived SOCKS5 UDP association and closes it
 without sending any datagrams or contacting a remote host. Completing the request

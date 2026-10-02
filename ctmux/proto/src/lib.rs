@@ -629,7 +629,7 @@ pub enum ServerMessage {
     protocol_version: u16,
     server_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    build: Option<ctl_component_info::ComponentBuildInfo>,
+    build: Option<ctl_core::component::ComponentBuildInfo>,
     /// Suggested cadence for attached-client heartbeats.
     heartbeat_interval_ms: u64,
     /// Maximum interval without client activity before an attachment expires.

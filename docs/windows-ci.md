@@ -99,7 +99,7 @@ then drains stdout/stderr before publishing the final run state. Taskd waits
 on the root using Tokio's cancellation-safe wait; it does not cancel the
 wrapper's blocking job-completion wait. See [process-wrap's Job Object API](https://docs.rs/process-wrap/10.0.0/process_wrap/tokio/struct.JobObject.html).
 
-State defaults to `%LOCALAPPDATA%\ctl-taskd` and inherits directory ACLs.
+State defaults to `%USERPROFILE%\.tokn\ctl\taskd` and inherits directory ACLs.
 `CTL_TASKD_DATA_DIR` and `--data-directory` overrides must point to a private user
 directory. An exclusive lifetime file lock prevents concurrent state writers.
 The temporary state file is replaced with `std::fs::rename`, which supports

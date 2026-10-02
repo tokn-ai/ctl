@@ -90,7 +90,7 @@ fn insert(
       // The remote table explicitly labels this reference as "This app build".
       // Confirmed actions inspect the installed remote replacement separately.
       available: Some(ComponentVersionInfo::from_build(
-        ctl_component_info::build_info(),
+        ctl_core::component::build_info(),
         expected_protocols,
       )),
       restart_supported: component == "ctmuxd" && observation.identity.ctmux_restart_supported,
@@ -117,7 +117,7 @@ mod tests {
   use std::time::Duration;
 
   fn observation() -> RemoteObservation {
-    let build = ctl_component_info::build_info();
+    let build = ctl_core::component::build_info();
     RemoteObservation {
       identity: ctl_proto::RemoteIdentity {
         remote_id: "4db8b2dd-f953-458a-9124-97449c22a71f".into(),
@@ -187,7 +187,7 @@ mod tests {
         .expect("the app build is known independently of remote metadata");
       assert_eq!(
         reference.source_fingerprint,
-        Some(ctl_component_info::build_info().source_fingerprint)
+        Some(ctl_core::component::build_info().source_fingerprint)
       );
       assert_eq!(reference.protocols, row.required_protocols);
       assert!(row.running.unwrap().source_fingerprint.is_none());

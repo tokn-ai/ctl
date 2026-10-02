@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use ctl_ipc::{VpnConnection, VpnSnapshot, VpnStatus};
-use tauri::Manager as _;
 
 use crate::error::{CommandErrorDto, CommandResult};
 use coordinator::{Cancellation, Coordinators};
@@ -206,10 +205,8 @@ fn require_connected(status: &VpnStatus) -> CommandResult<()> {
   ))
 }
 
-fn directory(app: &tauri::AppHandle) -> CommandResult<PathBuf> {
-  app
-    .path()
-    .app_config_dir()
+fn directory(_app: &tauri::AppHandle) -> CommandResult<PathBuf> {
+  ctl_core::paths::directory()
     .map_err(|_| CommandErrorDto::new("vpn_storage_unavailable", "Could not locate VPN settings."))
 }
 

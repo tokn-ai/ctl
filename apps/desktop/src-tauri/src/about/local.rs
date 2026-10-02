@@ -287,7 +287,7 @@ async fn read_binary(executable: PathBuf, component: &str) -> Result<ComponentVe
 }
 
 fn parse_binary_info(output: &[u8], component: &str) -> Result<ComponentVersionInfo, String> {
-  let info: ctl_component_info::ComponentInfo = serde_json::from_slice(output)
+  let info: ctl_core::component::ComponentInfo = serde_json::from_slice(output)
     .map_err(|_| "The selected helper returned invalid component metadata")?;
   let protocol_name = match component {
     "ctld" => "ctld",
@@ -434,9 +434,9 @@ mod tests {
 
   #[test]
   fn structured_versions_require_the_correct_component_but_preserve_protocol_mismatches() {
-    let mut info = ctl_component_info::ComponentInfo {
-      build: ctl_component_info::build_info(),
-      protocols: vec![ctl_component_info::ProtocolInfo {
+    let mut info = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
+      protocols: vec![ctl_core::component::ProtocolInfo {
         name: "ctmux".into(),
         version: ctmux_proto::PROTOCOL_VERSION + 1,
       }],
@@ -460,7 +460,7 @@ mod tests {
     for component in ["ctmuxd", "ctl-taskd"] {
       let mut row = ComponentVersionRow::local(component, component);
       let mut info = ComponentVersionInfo::from_build(
-        ctl_component_info::build_info(),
+        ctl_core::component::build_info(),
         row.required_protocols.clone(),
       );
       row.available = Some(info.clone());

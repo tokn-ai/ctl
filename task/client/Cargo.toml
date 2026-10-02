@@ -12,7 +12,7 @@ keywords = ["ctl", "tasks", "client"]
 publish = ["crates-io"]
 
 [dependencies]
-ctl-component-info = { workspace = true, features = ["executable"] }
+ctl-core = { workspace = true, features = ["executable"] }
 ctl-task-ipc.workspace = true
 ctl-task-proto.workspace = true
 thiserror.workspace = true

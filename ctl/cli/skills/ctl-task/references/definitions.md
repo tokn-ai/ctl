@@ -16,9 +16,7 @@ later catalog changes do not update that task. These operations are local-only:
 | Scope | Catalog path |
 | --- | --- |
 | Project | `<project-root>/.ctl/tasks.json` |
-| Global, macOS | `~/Library/Application Support/ctl/tasks.json` |
-| Global, Linux | `$XDG_CONFIG_HOME/ctl/tasks.json`, default `~/.config/ctl/tasks.json` |
-| Global, Windows | `%APPDATA%\ctl\tasks.json` |
+| Global, all platforms | `~/.tokn/ctl/tasks.json` |
 
 With no explicit scope, CLI discovery walks upward from the caller's cwd to
 the nearest `.ctl/tasks.json` or `.git` file/directory. Worktrees and nested

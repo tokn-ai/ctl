@@ -1,6 +1,12 @@
-# ctl-component-info
+# ctl-core
 
-Build identity and executable metadata shared by ctl and ctmux components.
+Shared foundations for ctl and ctmux components:
+
+- `component`: build identity, component metadata, and protocol versions.
+- `executable`: bounded inspection and verification of replacement executables,
+  enabled by the `executable` feature.
+- `paths`: the shared `~/.tokn/ctl` storage directory on every platform.
+  Resolving it does not create files or import data from former locations.
 
 Workspace builds fingerprint the Rust component sources, dependency definitions,
 and embedded shell scripts/skills. Registry builds fingerprint this package's

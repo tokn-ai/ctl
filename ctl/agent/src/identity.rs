@@ -26,14 +26,7 @@ fn inspect_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity>
 }
 
 fn data_directory() -> io::Result<PathBuf> {
-  dirs::home_dir()
-    .map(|home| home.join(".tokn/ctl"))
-    .ok_or_else(|| {
-      io::Error::new(
-        io::ErrorKind::NotFound,
-        "remote home directory is unavailable",
-      )
-    })
+  ctl_core::paths::directory()
 }
 
 fn discover_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity> {
@@ -67,7 +60,7 @@ fn installed_identity(remote_id: String, executable: &Path) -> io::Result<Remote
   let identity = RemoteIdentity {
     remote_id,
     agent_version: env!("CARGO_PKG_VERSION").into(),
-    build: Some(ctl_component_info::build_info()),
+    build: Some(ctl_core::component::build_info()),
     ctmux_restart_supported: true,
     bundle,
   };

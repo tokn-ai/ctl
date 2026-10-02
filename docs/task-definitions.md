@@ -10,9 +10,7 @@ saving a definition does not modify an existing registered task or process.
 | Scope | File |
 | --- | --- |
 | Project | `<project-root>/.ctl/tasks.json` |
-| Global on macOS | `~/Library/Application Support/ctl/tasks.json` |
-| Global on Linux | `$XDG_CONFIG_HOME/ctl/tasks.json`, defaulting to `~/.config/ctl/tasks.json` |
-| Global on Windows | `%APPDATA%\ctl\tasks.json` |
+| Global, all platforms | `~/.tokn/ctl/tasks.json` |
 
 CLI discovery walks upward from the current directory and stops at the nearest
 `.ctl/tasks.json` or `.git` file/directory. Git worktrees and nested repositories

@@ -4,7 +4,7 @@ use super::{
   manifest::{BUNDLE_IDENTIFIER, MAX_ARCHIVE_BYTES, MAX_MANIFEST_BYTES, Manifest},
 };
 use base64::Engine as _;
-use ctl_component_info::executable::PreparedExecutable;
+use ctl_core::executable::PreparedExecutable;
 use std::io::{self, Read as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
@@ -146,7 +146,7 @@ async fn verify_and_activate(
 
 fn verify_build_identity(
   manifest: &Manifest,
-  build: &ctl_component_info::ComponentBuildInfo,
+  build: &ctl_core::component::ComponentBuildInfo,
 ) -> Result<(), Error> {
   let source_matches = manifest
     .development
@@ -723,7 +723,7 @@ mod tests {
   fn development_identity_allows_dirty_sources_only_when_the_embedded_metadata_matches() {
     let (_, development) = development_bundle();
     let identity = development.development.as_ref().unwrap();
-    let build = ctl_component_info::ComponentBuildInfo {
+    let build = ctl_core::component::ComponentBuildInfo {
       version: development.app_version.clone(),
       source_revision: Some(development.git_revision.clone()),
       source_fingerprint: identity.source_fingerprint.clone(),

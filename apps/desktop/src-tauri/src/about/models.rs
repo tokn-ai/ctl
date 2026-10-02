@@ -1,4 +1,4 @@
-use ctl_component_info::ComponentBuildInfo;
+use ctl_core::component::ComponentBuildInfo;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,7 +26,7 @@ pub struct ComponentVersionInfo {
 }
 
 impl ComponentVersionInfo {
-  pub fn from_component(info: ctl_component_info::ComponentInfo) -> Self {
+  pub fn from_component(info: ctl_core::component::ComponentInfo) -> Self {
     Self::from_build(
       info.build,
       info
@@ -163,7 +163,7 @@ impl ComponentVersionRow {
 }
 
 fn expected_component_version() -> ComponentVersionInfo {
-  ComponentVersionInfo::from_build(ctl_component_info::build_info(), Vec::new())
+  ComponentVersionInfo::from_build(ctl_core::component::build_info(), Vec::new())
 }
 
 fn required_protocols(component: &str) -> Vec<ProtocolVersion> {

@@ -173,7 +173,7 @@ fn valid_preparation(info: &CtmuxPreparation, expected_remote_id: &str) -> bool 
       .running
       .build
       .as_ref()
-      .is_none_or(ctl_component_info::ComponentBuildInfo::is_valid)
+      .is_none_or(ctl_core::component::ComponentBuildInfo::is_valid)
     && info
       .available
       .protocols

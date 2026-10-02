@@ -163,7 +163,7 @@ keeps the route valid when its randomly assigned port changes. If that VPN is
 missing or cannot connect, the host connection fails without a direct fallback.
 Cancelling a host connection leaves the VPN available to other hosts; use the
 VPN page to disconnect it. After verification, the app saves the named host and
-its first `SSH` method in `~/.tokn/ctmux/hosts.json`. Display names may contain
+its first `SSH` method in `~/.tokn/ctl/hosts.json`. Display names may contain
 spaces; they are independent of SSH aliases. No storage-choice step or implicit
 OpenSSH config write is involved.
 
@@ -271,12 +271,12 @@ unavailable until discovery finds it again. Connections use ordinary SSH over th
 tailnet, including the usual SSH user/config and credential settings; browser
 approval for Tailscale SSH check mode is a separate follow-up.
 
-Saved host definitions and reusable gateways live in `~/.tokn/ctmux/hosts.json`;
+Saved host definitions and reusable gateways live in `~/.tokn/ctl/hosts.json`;
 sessions, tabs, tasks, forwarding, and observed remote identities live in
-`~/.tokn/ctmux/workspace.json`. On first load, an existing workspace is imported
-from Tauri's former app-data directory if the new file does not exist; the
-original remains available for recovery. Schema 8 moves existing hosts and
-gateways into the catalog before removing them from the workspace. Schema 7 is
+`~/.tokn/ctl/workspace.json`. VPN profiles, keybindings, and global task
+definitions use `vpns.json`, `keybindings.json`, and `tasks.json` in that same
+directory. Old storage locations are not read or migrated. Schema 8 moves
+existing hosts and gateways into the catalog before removing them from the workspace. Schema 7 is
 backed up as `workspace-v7.backup.json`; earlier schemas retain their corresponding
 backups. Host IDs and all session/task/port references remain unchanged.
 It remembers known sessions, cached paths, last observed terminal sizes and times,

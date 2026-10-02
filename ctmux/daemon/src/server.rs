@@ -551,7 +551,7 @@ async fn accept_local_control_handshake(stream: &mut Stream) -> Result<bool, Con
     &LocalControlServerMessage::HandshakeAccepted {
       protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
       restart_supported: true,
-      build: Some(ctl_component_info::build_info()),
+      build: Some(ctl_core::component::build_info()),
       data_protocol_version: Some(PROTOCOL_VERSION),
       managed_sessions_supported: true,
     },
@@ -743,7 +743,7 @@ async fn handle_active_connection(
     &ServerMessage::HandshakeAccepted {
       protocol_version: PROTOCOL_VERSION,
       server_version: SERVER_VERSION.into(),
-      build: Some(ctl_component_info::build_info()),
+      build: Some(ctl_core::component::build_info()),
       heartbeat_interval_ms: attachment_liveness.heartbeat_interval_ms,
       attachment_liveness_timeout_ms: attachment_liveness.timeout_ms,
     },

@@ -41,11 +41,11 @@ mod unix {
       let metadata = ComponentInfo {
         build: info.build.clone(),
         protocols: vec![
-          ctl_component_info::ProtocolInfo {
+          ctl_core::component::ProtocolInfo {
             name: "ctld".into(),
             version: info.protocol_version,
           },
-          ctl_component_info::ProtocolInfo {
+          ctl_core::component::ProtocolInfo {
             name: "ctld_lifecycle".into(),
             version: info.lifecycle_protocol_version,
           },

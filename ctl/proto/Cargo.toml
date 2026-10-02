@@ -12,7 +12,7 @@ keywords = ["ctl", "protocol", "ssh"]
 publish = ["crates-io"]
 
 [dependencies]
-ctl-component-info.workspace = true
+ctl-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

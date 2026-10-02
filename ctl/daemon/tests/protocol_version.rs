@@ -23,8 +23,8 @@ fn component_info_reports_embedded_build_and_both_protocols_without_a_service() 
     .output()
     .unwrap();
   assert!(output.status.success());
-  let info: ctl_component_info::ComponentInfo = serde_json::from_slice(&output.stdout).unwrap();
-  assert_eq!(info.build, ctl_component_info::build_info());
+  let info: ctl_core::component::ComponentInfo = serde_json::from_slice(&output.stdout).unwrap();
+  assert_eq!(info.build, ctl_core::component::build_info());
   assert!(
     info
       .protocols

@@ -168,14 +168,14 @@ async fn lazy_provider_covers_startup_availability_overrides_and_passive_queries
   let _execution_guard = tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
   let fixture = Fixture::new();
   let executable = fixture.0.join("ctld");
-  let metadata = serde_json::to_string(&ctl_component_info::ComponentInfo {
-    build: ctl_component_info::build_info(),
+  let metadata = serde_json::to_string(&ctl_core::component::ComponentInfo {
+    build: ctl_core::component::build_info(),
     protocols: vec![
-      ctl_component_info::ProtocolInfo {
+      ctl_core::component::ProtocolInfo {
         name: "ctld".into(),
         version: PROTOCOL_VERSION,
       },
-      ctl_component_info::ProtocolInfo {
+      ctl_core::component::ProtocolInfo {
         name: "ctld_lifecycle".into(),
         version: lifecycle::PROTOCOL_VERSION,
       },

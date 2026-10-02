@@ -40,7 +40,7 @@ For the first publication, publish packages in the following order, waiting
 until each package is available in the registry before its dependants:
 
 ```text
-ctl-component-info
+ctl-core
 ctl-keychain-client
 ctmux-process-info
 ctl-proto
@@ -137,6 +137,6 @@ notarization, and a stapled ticket. npm and PyPI installers can consume those
 same signed release archives; language-specific installers are not yet provided.
 
 Registry builds use Cargo's archive provenance and a fingerprint of the shared
-`ctl-component-info` package. Full checkout builds fingerprint the component
+`ctl-core` package. Full checkout builds fingerprint the component
 workspace, including embedded resources. Their fingerprints differ even for
 the same commit; install components from the same distribution together.

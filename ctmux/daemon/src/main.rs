@@ -37,14 +37,14 @@ struct Arguments {
 fn main() {
   let arguments = Arguments::parse();
   if arguments.component_info {
-    let info = ctl_component_info::ComponentInfo {
-      build: ctl_component_info::build_info(),
+    let info = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
       protocols: vec![
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "ctmux".into(),
           version: ctmux_proto::PROTOCOL_VERSION,
         },
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "ctmux_control".into(),
           version: ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
         },

@@ -12,7 +12,7 @@ keywords = ["ctl", "ssh", "daemon", "vpn"]
 publish = ["crates-io"]
 
 [dependencies]
-ctl-component-info.workspace = true
+ctl-core.workspace = true
 clap.workspace = true
 base64.workspace = true
 dirs.workspace = true

@@ -657,7 +657,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ctl-client",
- "ctl-component-info",
+ "ctl-core",
  "ctl-proto",
  "ctl-task-ipc",
  "ctl-task-proto",
@@ -666,7 +666,6 @@ dependencies = [
  "ctmux-ipc",
  "ctmux-proto",
  "ctmuxd",
- "dirs",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -681,6 +680,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "ctl-client",
+ "ctl-core",
  "ctl-ipc",
  "ctl-task-cli",
  "ctl-task-client",
@@ -701,7 +701,7 @@ dependencies = [
 name = "ctl-client"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",
@@ -718,9 +718,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctl-component-info"
+name = "ctl-core"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "serde",
  "serde_json",
  "sha2",
@@ -731,7 +732,7 @@ dependencies = [
 name = "ctl-ipc"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "ctl-proto",
  "dirs",
  "interprocess",
@@ -761,7 +762,7 @@ dependencies = [
 name = "ctl-proto"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "serde",
  "serde_json",
  "tokio",
@@ -789,7 +790,7 @@ dependencies = [
 name = "ctl-task-client"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "ctl-task-ipc",
  "ctl-task-proto",
  "serde_json",
@@ -801,7 +802,7 @@ dependencies = [
 name = "ctl-task-ipc"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "ctl-task-proto",
  "dirs",
  "interprocess",
@@ -815,7 +816,7 @@ dependencies = [
 name = "ctl-task-proto"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -826,8 +827,8 @@ dependencies = [
 name = "ctl-task-store"
 version = "0.1.0"
 dependencies = [
+ "ctl-core",
  "ctl-task-proto",
- "dirs",
  "serde",
  "serde_json",
  "sha2",
@@ -840,7 +841,7 @@ name = "ctl-taskd"
 version = "0.1.0"
 dependencies = [
  "clap",
- "ctl-component-info",
+ "ctl-core",
  "ctl-task-ipc",
  "ctl-task-proto",
  "ctmux-ipc",
@@ -864,7 +865,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
- "ctl-component-info",
+ "ctl-core",
  "ctl-ipc",
  "ctl-keychain-client",
  "ctl-proto",
@@ -888,7 +889,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ctl-client",
- "ctl-component-info",
+ "ctl-core",
  "ctl-ipc",
  "ctl-proto",
  "ctl-task-client",
@@ -937,9 +938,8 @@ version = "0.1.0"
 dependencies = [
  "avt",
  "crossterm",
- "ctl-component-info",
+ "ctl-core",
  "ctmux-proto",
- "dirs",
  "serde",
  "serde_json",
  "sha2",
@@ -960,7 +960,7 @@ dependencies = [
 name = "ctmux-ipc"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "ctmux-proto",
  "dirs",
  "interprocess",
@@ -986,7 +986,7 @@ dependencies = [
 name = "ctmux-proto"
 version = "0.1.0"
 dependencies = [
- "ctl-component-info",
+ "ctl-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1017,7 +1017,7 @@ version = "0.1.0"
 dependencies = [
  "avt",
  "clap",
- "ctl-component-info",
+ "ctl-core",
  "ctmux-core",
  "ctmux-ipc",
  "ctmux-process-info",

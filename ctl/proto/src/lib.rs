@@ -39,7 +39,7 @@ pub struct RemoteIdentity {
   pub remote_id: String,
   pub agent_version: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub build: Option<ctl_component_info::ComponentBuildInfo>,
+  pub build: Option<ctl_core::component::ComponentBuildInfo>,
   #[serde(default)]
   pub ctmux_restart_supported: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,14 +145,14 @@ mod tests {
     let mut identity = RemoteIdentity {
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: env!("CARGO_PKG_VERSION").into(),
-      build: Some(ctl_component_info::build_info()),
+      build: Some(ctl_core::component::build_info()),
       ctmux_restart_supported: false,
       bundle: None,
     };
     assert!(identity.is_valid());
     identity.build.as_mut().unwrap().source_fingerprint = "invalid".into();
     assert!(!identity.is_valid());
-    identity.build = Some(ctl_component_info::build_info());
+    identity.build = Some(ctl_core::component::build_info());
     identity.build.as_mut().unwrap().version = "0.0.0".into();
     assert!(!identity.is_valid());
   }

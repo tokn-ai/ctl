@@ -1,7 +1,8 @@
 //! Prepared cooperative restart of one selected ctmuxd owner.
 
-use ctl_component_info::{
-  ComponentBuildInfo, ComponentInfo, ProtocolInfo, executable::PreparedExecutable,
+use ctl_core::{
+  component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo},
+  executable::PreparedExecutable,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -24,14 +24,14 @@ struct Arguments {
 fn main() {
   let arguments = Arguments::parse();
   if arguments.component_info {
-    let info = ctl_component_info::ComponentInfo {
-      build: ctl_component_info::build_info(),
+    let info = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
       protocols: vec![
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "task".into(),
           version: ctl_task_proto::PROTOCOL_VERSION,
         },
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "task_control".into(),
           version: ctl_task_proto::control::PROTOCOL_VERSION,
         },
@@ -51,14 +51,22 @@ fn main() {
     std::process::exit(1);
   }
 
+  let data_directory = match arguments
+    .data_directory
+    .map_or_else(default_data_directory, Ok)
+  {
+    Ok(directory) => directory,
+    Err(error) => {
+      eprintln!("ctl-taskd: could not locate the task state directory: {error}");
+      std::process::exit(1);
+    }
+  };
   let config = DaemonConfig {
     ctmux_socket: arguments
       .ctmux_socket
       .unwrap_or_else(ctmux_ipc::socket_path),
     socket_path: arguments.socket.unwrap_or_else(socket_path),
-    data_directory: arguments
-      .data_directory
-      .unwrap_or_else(default_data_directory),
+    data_directory,
   };
   let runtime = match tokio::runtime::Builder::new_multi_thread()
     .enable_all()

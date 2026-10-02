@@ -1,5 +1,5 @@
 //! Passive task owner inspection, independent of task execution.
-use ctl_component_info::ComponentBuildInfo;
+use ctl_core::component::ComponentBuildInfo;
 use ctl_task_proto::{ClientMessage, ServerMessage, control, read_frame, write_frame};
 use std::io;
 use std::path::Path;
@@ -121,7 +121,7 @@ mod tests {
       write_frame(
         &mut stream,
         &control::ServerMessage::ComponentStatus {
-          build: ctl_component_info::build_info(),
+          build: ctl_core::component::build_info(),
           protocol_version: ctl_task_proto::PROTOCOL_VERSION + 1,
         },
       )

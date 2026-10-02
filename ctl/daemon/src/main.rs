@@ -67,14 +67,14 @@ fn main() {
     return;
   }
   if arguments.component_info {
-    let metadata = ctl_component_info::ComponentInfo {
-      build: ctl_component_info::build_info(),
+    let metadata = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
       protocols: vec![
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "ctld".into(),
           version: ctl_ipc::PROTOCOL_VERSION,
         },
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "ctld_lifecycle".into(),
           version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
         },

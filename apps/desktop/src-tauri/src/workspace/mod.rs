@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use ctl_task_store::DefinitionScope;
 pub use ctl_task_store::SavedTaskDefinition;
 use serde::{Deserialize, Serialize};
-use tauri::Manager as _;
 
 #[cfg(test)]
 pub use catalog::HostCatalogDocument;
@@ -516,22 +515,14 @@ pub async fn update_hosts(
     .map_err(CommandErrorDto::backend)?
 }
 
-fn workspace_repository(app: &tauri::AppHandle) -> CommandResult<repository::Repository> {
-  let home = dirs::home_dir().ok_or_else(|| {
+fn workspace_repository(_app: &tauri::AppHandle) -> CommandResult<repository::Repository> {
+  let directory = ctl_core::paths::directory().map_err(|_| {
     CommandErrorDto::new(
       "home_directory_unavailable",
       "Could not find the home directory for the workspace.",
     )
   })?;
-  let legacy_directory = app
-    .path()
-    .app_data_dir()
-    .map_err(CommandErrorDto::backend)?;
   let definition_path =
     ctl_task_store::global_path().map_err(crate::task_definitions::store_error)?;
-  Ok(
-    repository::Repository::new(home.join(".tokn").join("ctmux"))
-      .with_legacy_directory(legacy_directory)
-      .with_definition_store(definition_path),
-  )
+  Ok(repository::Repository::new(directory).with_definition_store(definition_path))
 }

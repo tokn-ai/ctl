@@ -3,7 +3,7 @@ use super::{
   LocalControlClientMessage, LocalControlErrorCode, LocalControlServerMessage, connect,
   control_socket_path,
 };
-use ctl_component_info::ComponentBuildInfo;
+use ctl_core::component::ComponentBuildInfo;
 use std::io;
 use std::path::Path;
 use std::time::Duration;

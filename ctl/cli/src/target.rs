@@ -23,7 +23,11 @@ pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<Resolve
 pub fn catalog_path() -> Result<PathBuf, HostError> {
   std::env::var_os("CTL_HOSTS_PATH")
     .map_or_else(
-      || dirs::home_dir().map(|home| home.join(".tokn/ctmux/hosts.json")),
+      || {
+        ctl_core::paths::directory()
+          .ok()
+          .map(|directory| directory.join("hosts.json"))
+      },
       |path| Some(PathBuf::from(path)),
     )
     .ok_or_else(|| HostError::new("home_unavailable", "Could not find the home directory."))
@@ -50,7 +54,11 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
   }
   let path = std::env::var_os("CTL_VPNS_PATH")
     .map(PathBuf::from)
-    .or_else(|| dirs::config_dir().map(|path| path.join("dev.tokn-ai.ctl.ctmux/vpns.json")))
+    .or_else(|| {
+      ctl_core::paths::directory()
+        .ok()
+        .map(|directory| directory.join("vpns.json"))
+    })
     .ok_or(Error::MissingVpn)?;
   let connection = load_vpn(&path, id)?;
   eprintln!("Connecting VPN {}…", connection.name);

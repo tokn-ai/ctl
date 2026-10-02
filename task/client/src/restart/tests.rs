@@ -25,7 +25,7 @@ impl Fixture {
     std::fs::create_dir_all(&root).unwrap();
     let executable = root.join("helper");
     let info = ComponentInfo {
-      build: ctl_component_info::build_info(),
+      build: ctl_core::component::build_info(),
       protocols: vec![
         ProtocolInfo {
           name: "task".into(),

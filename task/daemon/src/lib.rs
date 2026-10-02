@@ -646,7 +646,7 @@ async fn handle_connection(
     )) => {
       let response = if protocol_version == ctl_task_proto::control::PROTOCOL_VERSION {
         ctl_task_proto::control::ServerMessage::ComponentStatus {
-          build: ctl_component_info::build_info(),
+          build: ctl_core::component::build_info(),
           protocol_version: PROTOCOL_VERSION,
         }
       } else {
@@ -948,15 +948,15 @@ fn now_ms() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
-#[must_use]
-pub fn default_data_directory() -> PathBuf {
+/// Resolves the task state directory, respecting `CTL_TASKD_DATA_DIR`.
+///
+/// # Errors
+/// Returns an error when the user's home directory is unavailable and no
+/// explicit data directory has been supplied.
+pub fn default_data_directory() -> io::Result<PathBuf> {
   env::var_os("CTL_TASKD_DATA_DIR").map_or_else(
-    || {
-      dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ctl-taskd")
-    },
-    PathBuf::from,
+    || ctl_core::paths::directory().map(|directory| directory.join("taskd")),
+    |directory| Ok(PathBuf::from(directory)),
   )
 }
 

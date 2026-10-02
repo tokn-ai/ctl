@@ -7,16 +7,16 @@ can be remembered by several clients. `ctl-agent` stores only its environment ID
 
 ## Disk format and ownership
 
-The native backend keeps two files under `~/.tokn/ctmux` on every platform:
+The native backend keeps two files under `~/.tokn/ctl` on every platform:
 
 - `hosts.json` (schema 1) owns saved remote hosts and reusable gateways.
 - `workspace.json` (schema 8) owns session membership and presentation state.
 
-Their shared lock file and migration backups live alongside them. If `workspace.json`
-is absent, ctmux imports a valid workspace from the former Tauri app-data
-directory (`~/Library/Application Support/dev.tokn-ai.ctl.ctmux` on macOS). The original
-file and backups remain available for recovery. An existing new-location file
-always takes precedence.
+Their shared lock file and schema backups live alongside them. The app reads
+only this location; old `rmux`, `ctmux`, and Tauri app-data locations are not
+imported. VPN profiles and keybindings use `vpns.json` and `keybindings.json` in
+the same directory. Global reusable task definitions use `tasks.json` there;
+project definitions stay in `<project-root>/.ctl/tasks.json`.
 
 The host catalog contains:
 
@@ -358,7 +358,7 @@ session are not introduced here.
 
 The desktop records output received by opened sessions, including background tabs,
 split panes, and interactive task terminals. Each host/session/terminal has two
-local files under the platform data directory's `ctmux/desktop/sessions` store:
+local files under `~/.tokn/ctl/ctmux/desktop/sessions`:
 
 - `history.jsonl` appends completed logical scrollback lines. Wrapped rows are
   joined, replayed sequence ranges are skipped, and saved history is not evicted

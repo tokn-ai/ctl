@@ -40,7 +40,7 @@ For the first publication, publish packages in the following order, waiting
 until each package is available in the registry before its dependants:
 
 ```text
-ctl-component-info
+ctl-core
 ctl-keychain-client
 ctmux-process-info
 ctl-proto
@@ -101,6 +101,6 @@ provisioning profile, or Keychain entitlement needed for Touch ID-protected
 saved credentials. Use the signed desktop distribution for those capabilities.
 
 Registry builds use Cargo's archive provenance and a fingerprint of the shared
-`ctl-component-info` package. Full checkout builds fingerprint the component
+`ctl-core` package. Full checkout builds fingerprint the component
 workspace, including embedded resources. Their fingerprints differ even for
 the same commit; install components from the same distribution together.

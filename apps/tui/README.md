@@ -164,7 +164,7 @@ is needed for archives. The desktop **Archived** browser uses its own local stor
 
 Set `CTMUX_ARCHIVE_DIRECTORY` to override the client storage directory.
 
-Archives live below the user's local data directory in `ctmux/tui/archives/`
-(or `ctmux/desktop/archives/` for the desktop). They expire after seven days and
-are removed when listing the store. No daemon flags or protocol changes are
+Archives live in `~/.tokn/ctl/ctmux/tui/archives/`
+(or `~/.tokn/ctl/ctmux/desktop/archives/` for desktop text archives). They expire
+after seven days and are removed when listing the store. No daemon flags or protocol changes are
 needed. `ctl ctmux archives` also lists this client's TUI archive metadata.

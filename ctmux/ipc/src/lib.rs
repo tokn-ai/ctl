@@ -123,7 +123,7 @@ pub enum LocalControlServerMessage {
     protocol_version: u16,
     restart_supported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    build: Option<ctl_component_info::ComponentBuildInfo>,
+    build: Option<ctl_core::component::ComponentBuildInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     data_protocol_version: Option<u16>,
     #[serde(default)]

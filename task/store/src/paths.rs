@@ -28,14 +28,14 @@ impl DefinitionScope {
   }
 }
 
-/// Returns the user's platform configuration directory followed by `ctl/tasks.json`.
+/// Returns `~/.tokn/ctl/tasks.json` on every platform.
 ///
 /// # Errors
-/// Returns an error when the platform has no configuration directory.
+/// Returns an error when the current user's home directory is unavailable.
 pub fn global_path() -> Result<PathBuf, StoreError> {
-  dirs::config_dir()
-    .map(|directory| directory.join("ctl/tasks.json"))
-    .ok_or(StoreError::ConfigDirectoryUnavailable)
+  ctl_core::paths::directory()
+    .map(|directory| directory.join("tasks.json"))
+    .map_err(|_| StoreError::ConfigDirectoryUnavailable)
 }
 
 /// Returns `<project-root>/.ctl/tasks.json` using the root's physical absolute path.

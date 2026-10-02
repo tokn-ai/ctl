@@ -59,6 +59,72 @@ impl Drop for Fixture {
   }
 }
 
+#[cfg(unix)]
+#[test]
+fn default_catalog_round_trip_uses_ctl_root_and_ignores_former_locations() {
+  let fixture = Fixture::new();
+  let former = fixture.0.join(".tokn/ctmux");
+  fs::create_dir_all(&former).unwrap();
+  fs::write(former.join("hosts.json"), b"broken old catalog").unwrap();
+  let run = |args: &[&str]| {
+    let output = fixture
+      .command(args)
+      .env_remove("CTL_HOSTS_PATH")
+      .env("HOME", &fixture.0)
+      .env("XDG_CONFIG_HOME", fixture.0.join("other-config"))
+      .output()
+      .unwrap();
+    assert!(
+      output.status.success(),
+      "{}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<Value>(&output.stdout).unwrap()
+  };
+  assert_eq!(run(&["host", "list", "--json"]), json!([]));
+  let added = run(&["host", "add", "work", "10.0.0.20", "--json"]);
+  assert_eq!(run(&["host", "show", "work", "--json"])["host"], added);
+  assert!(fixture.0.join(".tokn/ctl/hosts.json").is_file());
+  assert_eq!(
+    fs::read(former.join("hosts.json")).unwrap(),
+    b"broken old catalog"
+  );
+  assert!(!fixture.0.join("other-config").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn global_task_catalog_round_trip_uses_ctl_root() {
+  let fixture = Fixture::new();
+  let former = fixture.0.join("other-config/ctl");
+  fs::create_dir_all(&former).unwrap();
+  fs::write(former.join("tasks.json"), b"broken old task catalog").unwrap();
+  let run = |args: &[&str]| {
+    let output = fixture
+      .command(args)
+      .env("HOME", &fixture.0)
+      .env("XDG_CONFIG_HOME", fixture.0.join("other-config"))
+      .output()
+      .unwrap();
+    assert!(
+      output.status.success(),
+      "{}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<Value>(&output.stdout).unwrap()
+  };
+  let saved = run(&["task", "save", "build", "--global", "--", "true"]);
+  assert_eq!(
+    run(&["task", "definitions", "show", "build", "--global"]),
+    saved
+  );
+  assert!(fixture.0.join(".tokn/ctl/tasks.json").is_file());
+  assert_eq!(
+    fs::read(former.join("tasks.json")).unwrap(),
+    b"broken old task catalog"
+  );
+}
+
 #[test]
 fn host_crud_preserves_identity_and_unselected_connection_settings() {
   let fixture = Fixture::new();

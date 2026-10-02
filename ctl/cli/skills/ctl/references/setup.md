@@ -19,12 +19,13 @@ the user's request includes setup or the work requires an authorized setup.
 | Remote sessions/tasks | `ctld` on Unix client | `ctl-agent`, `ctmuxd` and/or `ctl-taskd` |
 | Managed ports / VPN | `ctld` on Unix client | SSH service for ports; local container engine for VPN |
 
-Keep client and companion versions aligned. `CTLD_BIN`, `CTMUXD_BIN`, and
-`CTL_TASKD_BIN` select explicit daemon executables; an override names an
-executable, not a directory. On macOS, `ctld` otherwise resolves from the desktop
-bundle first, then any embedded CLI helper, then the signed managed installation,
-then beside the client or
-on PATH. Terminal/task helpers normally resolve beside the client. Remote
+Keep terminal/task companion versions aligned with the client. `CTLD_BIN`,
+`CTMUXD_BIN`, and `CTL_TASKD_BIN` select explicit daemon executables; an override names an
+executable, not a directory. On macOS, a standalone CLI otherwise prefers a
+verified compatible shared `ctld.app`, then its own bundled helper, then beside
+the client or on PATH, with a nearby desktop bundle taking precedence over loose
+executables. The desktop continues to prefer its own bundled helper.
+Terminal/task helpers normally resolve beside the client. Remote
 companions must belong to the SSH account and be available together through
 the managed installation or noninteractive PATH.
 
@@ -40,8 +41,9 @@ from the published GitHub release matching the installed CLI's version and
 architecture. It cannot install a draft or select a different/latest release.
 The bundle lives under
 `~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`; the component's
-`current` symlink selects it independently from the remote agent installation.
-The archive, Apple identity/profile, notarization, and helper build/protocol are
+`current` symlink selects the release independently from the remote agent
+installation, and an architecture/API selection selects the shared CLI helper.
+The archive, Apple identity/profile, notarization, and helper build/APIs are
 verified before selection. No `sudo`, daemon start, or automatic restart occurs.
 Existing connections keep their running daemon, and `CTLD_BIN` remains an
 override. `ctl setup --json` reports the version/path and whether setup reused an
@@ -49,11 +51,20 @@ existing installation. On other Unix platforms, install `ctld` from Cargo
 alongside the CLI. Cargo compilation alone does not provide Apple's signing
 identity or the macOS Keychain entitlement.
 
+Shared discovery requires the native architecture, ctld protocol 12, lifecycle
+protocol 1, and one-shot helper API 1. It verifies the app's build identity against
+its own installation manifest; its release version and source fingerprint need
+not match the CLI's. Signed development apps retain provisioning expiry and
+certificate checks, use `development/<archive-sha256>/`, and update
+`selected/<target>-ctld12-lifecycle1-helper1` without changing release `current`.
+All standalone CLI builds, including ordinary Cargo builds, can reuse them.
+
 Official macOS CLI downloads embed their matching signed helper. They prepare
-it locally when starting a daemon or creating a fresh SOCKS/VPN proxy route;
-`ctl setup` uses the embedded payload too. No helper download occurs. Existing
+it locally when no compatible shared app is selected and a command starts a
+daemon or creates a fresh SOCKS/VPN proxy route; `ctl setup` uses the embedded
+payload too. No helper download occurs. Existing
 daemon/master reuse and passive status reads do not install a helper. Ordinary
-Cargo builds keep the separate installation flow above.
+Cargo builds contain no embedded helper and use shared discovery or explicit setup.
 
 When working from the ctl source checkout, a local CLI/service build is:
 
@@ -86,8 +97,9 @@ connect HOST` authenticates SSH without installing components.
   is not a finite health-check command.
 - **Missing signed macOS helper:** for authorized local setup, run `ctl setup`.
   A missing release artifact requires the publisher to publish the matching
-  signed release. Do not substitute a different version, untrusted download,
-  or unsigned binary to bypass signature/profile/notarization failure.
+  signed release. Discovery can reuse another verified compatible installation;
+  do not substitute an untrusted download or unsigned binary to bypass
+  signature/profile/notarization failure.
 - **Old daemon:** `ctl taskd restart` is local-only and refuses active tasks.
   Restarting `ctmuxd` terminates its terminals; inspect sessions before considering
   that disruptive recovery. Do not use an unrelated daemon restart to fix a

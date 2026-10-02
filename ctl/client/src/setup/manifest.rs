@@ -51,17 +51,37 @@ impl Manifest {
     Self::parse_with_policy(bytes, version, target, true)
   }
 
+  /// Installed helpers are validated against their own release identity, not
+  /// the discovering client's version. API compatibility is checked separately.
+  pub fn parse_installed(bytes: &[u8], target: &str) -> Result<Self, Error> {
+    let manifest = Self::decode(bytes)?;
+    let version = manifest.app_version.clone();
+    let development = manifest.development.is_some();
+    Self::validate(manifest, &version, target, development)
+  }
+
   fn parse_with_policy(
     bytes: &[u8],
     version: &str,
     target: &str,
     development: bool,
   ) -> Result<Self, Error> {
+    Self::validate(Self::decode(bytes)?, version, target, development)
+  }
+
+  fn decode(bytes: &[u8]) -> Result<Self, Error> {
     if bytes.len() > MAX_MANIFEST_BYTES {
       return Err(Error::InvalidRelease("oversized manifest".into()));
     }
-    let manifest: Self =
-      serde_json::from_slice(bytes).map_err(|error| Error::InvalidRelease(error.to_string()))?;
+    serde_json::from_slice(bytes).map_err(|error| Error::InvalidRelease(error.to_string()))
+  }
+
+  fn validate(
+    manifest: Self,
+    version: &str,
+    target: &str,
+    development: bool,
+  ) -> Result<Self, Error> {
     let valid_version = !version.is_empty()
       && version.len() <= 128
       && version
@@ -150,6 +170,28 @@ pub(super) fn fixture() -> Manifest {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn installed_identity_is_independent_of_the_client_release() {
+    let mut manifest = fixture();
+    manifest.app_version = "0.2.0".into();
+    manifest.bundle_id = manifest.app_version.clone();
+    manifest.archive = format!(
+      "ctld-{}-{}.app.tar.gz",
+      manifest.app_version, manifest.target
+    );
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    assert_eq!(
+      Manifest::parse_installed(&bytes, &manifest.target).unwrap(),
+      manifest
+    );
+    assert!(Manifest::parse(&bytes, "0.1.0", &manifest.target).is_err());
+    assert!(Manifest::parse_installed(&bytes, "x86_64-apple-darwin").is_err());
+    manifest.notarized = false;
+    assert!(
+      Manifest::parse_installed(&serde_json::to_vec(&manifest).unwrap(), &manifest.target).is_err()
+    );
+  }
 
   #[test]
   fn only_matching_signed_immutable_releases_are_accepted() {

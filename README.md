@@ -75,7 +75,8 @@ helper uses `dev.tokn-ai.ctl.ctld`. Signing the helper requires a matching
 provisioning profile.
 Update clients, daemons, and remote agent bundles together. The renamed build
 uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protocol
-12, remote identity protocol 3, and remote maintenance protocol 2.
+12, ctld lifecycle protocol 1, ctld one-shot helper API 1, remote identity
+protocol 3, and remote maintenance protocol 2.
 
 ## Configuration and persistent state
 
@@ -118,31 +119,44 @@ ctl setup
 `ctl setup` installs the signed and notarized `ctld.app` for the installed CLI's
 version and Mac architecture. It downloads the matching `v<version>` release;
 it does not select the latest release. The full bundle lives at
-`~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`, and an atomic
-`current` symlink selects it. This is separate from the remote agent's existing
-`~/.tokn/ctl/versions/` and `current` installation.
+`~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`. Setup updates
+the release `current` symlink and a selection for its architecture and supported
+APIs, replacing each link atomically. This is separate from the remote agent's
+existing `~/.tokn/ctl/versions/` and `current` installation.
 
 Setup checks the release checksum, Apple Developer ID signature, provisioning
-profile, notarization, and helper build/protocol identity before selecting the
-helper. It needs no `sudo` and never starts, stops, or restarts a daemon, so
-running connections continue using their current daemon. `ctl setup --json`
+profile, notarization, and helper build/API identity against the installation's
+own manifest before selecting the helper. It needs no `sudo` and never starts,
+stops, or restarts a daemon, so running connections continue using their current
+daemon. `ctl setup --json`
 prints the installed version, executable path, and whether the installation was
 reused.
 
-`CTLD_BIN` selects an explicit executable. Without that override, macOS resolves
-the desktop's bundled helper first, then any helper embedded in the CLI, then
-this managed installation, then a
-sibling executable or `PATH`. On other Unix platforms, install `ctld` from
-Cargo alongside the CLI; `ctl setup` is a macOS-only command. Source-built macOS
+`CTLD_BIN` selects an explicit executable. Without that override, a standalone
+macOS CLI prefers a verified, compatible managed `ctld.app`, then its own bundled
+helper, then a nearby desktop bundle, sibling executable, or `PATH`. The desktop
+continues to prefer its own bundled helper. On other Unix platforms, install
+`ctld` from Cargo alongside the CLI; `ctl setup` is a macOS-only command. Source-built macOS
 `ctld` remains useful for development but does not acquire our Apple signing
 identity or Keychain entitlement through Cargo.
 
 Official macOS CLI downloads embed the matching signed and notarized `ctld.app`.
-They prepare that helper locally when a command needs to start a daemon; no
-helper download is needed. `ctl setup` also uses the embedded bundle. Existing
-daemon connections and passive status queries do not trigger installation.
+They prepare that helper locally when a command needs to start a daemon and no
+compatible shared app is selected; no helper download is needed. `ctl setup`
+also uses the embedded bundle. Existing compatible daemon connections and passive
+status queries do not trigger installation.
 Build these CLI downloads with the dedicated [release command](docs/ci-bundles.md#build-a-cli-with-ctld-embedded).
-Ordinary Cargo builds and `cargo install ctl-cli` continue to use separate helpers.
+Ordinary Cargo builds and `cargo install ctl-cli` also discover compatible shared
+apps, including signed development installations; they contain no embedded helper.
+
+Selections live at
+`~/.tokn/ctl/components/ctld/selected/<target>-ctld12-lifecycle1-helper1`.
+Compatibility requires the native architecture and the `ctld`, `ctld_lifecycle`,
+and `ctld_helper` API versions. The helper's build identity must match its own
+manifest; it does not have to match the CLI's commit, fingerprint, or release
+version. Discovery verifies the selected app instead of choosing a cache entry
+by its directory name or modification time. Unsafe or invalid selected
+installations produce a verification error.
 
 For a signed macOS CLI from a local checkout, provision once with the same
 Xcode project used by Tauri:
@@ -171,9 +185,11 @@ Apple's timestamp service. Distributable releases still require secure timestamp
 The CLI prepares its helper when needed; `target/ctl-dev/ctl setup` also installs
 it explicitly. Development helpers live under
 `~/.tokn/ctl/components/ctld/development/<archive-sha256>/ctld.app`. They retain
-their signature and provisioning checks, use a separate cache, and leave the
-release `current` symlink intact. Expired profiles require rebuilding. Existing
-daemons keep running until you explicitly restart them.
+their signature and provisioning checks, use a separate immutable cache, and
+update the shared selection for their architecture and APIs while leaving the
+release `current` symlink intact. All standalone CLI builds can reuse that
+selection. Expired profiles require rebuilding. Existing compatible daemons keep
+running until you explicitly restart them.
 
 ```sh
 cargo build --workspace

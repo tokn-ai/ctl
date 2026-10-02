@@ -11,8 +11,22 @@ On macOS, saved credentials and Touch ID require the signed helper with the
 Official version releases provide a Developer ID signed, notarized, and stapled
 `ctld.app` for both macOS architectures. Run `ctl setup` to install the helper
 matching the CLI's release under `~/.tokn/ctl/components/ctld/`; the desktop app
-is not required. Setup preserves the complete bundle and switches `current`
-atomically without restarting the daemon. Source builds remain available for
+is not required. Setup preserves the complete bundle, updates the release
+`current` symlink, and selects it for its architecture and APIs without
+restarting the daemon.
+
+Standalone macOS CLI builds prefer a verified compatible shared `ctld.app` after
+an explicit `CTLD_BIN` override, before their own bundled or loose helper.
+Compatibility requires the native target, ctld protocol 12, lifecycle protocol
+1, and one-shot helper API 1; the installed helper's version and source
+fingerprint need not match the CLI's. Its signature, provisioning, and build
+metadata are still checked against its own installation manifest.
+
+Signed development builds use the immutable
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache and update
+`selected/<target>-ctld12-lifecycle1-helper1` while leaving release `current`
+unchanged. Ordinary Cargo CLI builds can reuse that selection. The desktop
+continues to prefer its own bundled helper. Source builds remain available for
 development and other Unix platforms.
 
 Part of [ctl and ctmux](https://github.com/tokn-ai/ctl). See the

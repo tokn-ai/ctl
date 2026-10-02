@@ -743,6 +743,88 @@ async fn default_vpn_client_honors_the_vpn_socket_override() {
   );
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn saved_host_reuses_connected_vpn_without_resolving_a_helper() {
+  use std::os::unix::fs::PermissionsExt as _;
+
+  let fixture = Fixture::new();
+  let hosts = fixture.directory.join("hosts.json");
+  std::fs::write(
+    &hosts,
+    serde_json::to_vec(&serde_json::json!({
+      "revision": "test",
+      "document": {
+        "schema_version": 1,
+        "ssh_gateways": [],
+        "hosts": [{
+          "host_id": "work",
+          "name": "work",
+          "preferred_method_id": "vpn",
+          "connection_methods": [{
+            "method_id": "vpn",
+            "name": "VPN",
+            "target": {
+              "kind": "ssh",
+              "destination": "host.example.invalid",
+              "vpn_connection_id": "test-vpn"
+            }
+          }]
+        }]
+      }
+    }))
+    .unwrap(),
+  )
+  .unwrap();
+  // This cache would fail executable discovery. Reusing the existing owner
+  // should never inspect it, even if an old supervisor flag was inherited.
+  let mut component = fixture.directory.clone();
+  for name in [".tokn", "ctl", "components", "ctld", "versions"] {
+    component.push(name);
+    std::fs::create_dir(&component).unwrap();
+    std::fs::set_permissions(&component, std::fs::Permissions::from_mode(0o700)).unwrap();
+  }
+  std::fs::write(
+    component.parent().unwrap().join("current"),
+    "invalid selection",
+  )
+  .unwrap();
+  let ssh = fixture.directory.join("ssh");
+  std::fs::write(&ssh, "#!/bin/sh\nexit 0\n").unwrap();
+  std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let mut command = fixture.command(&["-H", "work", "exec", "--", "true"]);
+  command
+    .env("HOME", &fixture.directory)
+    .env("PATH", &fixture.directory)
+    .env("CTL_HOSTS_PATH", &hosts)
+    .env("CTLD_VPN_SOCKET_PATH", fixture.socket())
+    .env("CTMUX_DEV_DAEMON_SUPERVISOR", "1");
+  let server = async {
+    assert!(matches!(
+      reply(&listener, response(connected())).await,
+      ClientMessage::VpnStatus
+    ));
+    let request = reply(
+      &listener,
+      ServerMessage::MasterReady {
+        control_path: fixture.directory.join("existing-master"),
+      },
+    )
+    .await;
+    assert!(matches!(request, ClientMessage::EnsureMaster { .. }));
+  };
+  let (output, ()) = timeout(Duration::from_secs(5), async {
+    tokio::join!(command.output(), server)
+  })
+  .await
+  .unwrap();
+  let output = output.unwrap();
+  assert!(output.status.success(), "{output:?}");
+  assert_eq!(output.stdout, Vec::<u8>::new());
+  assert_eq!(output.stderr, Vec::<u8>::new());
+}
+
 #[tokio::test]
 async fn released_shared_container_with_unavailable_status_retains_metadata_without_claiming_connected()
  {

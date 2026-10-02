@@ -18,8 +18,8 @@ cargo install --locked ctl-cli ctld ctmuxd ctl-taskd
 
 Cargo installs only the selected packages' executables. `ctld`, `ctmuxd`, and
 `ctl-taskd` are companion daemons and must be installed separately from `ctl-cli`.
-Keep their versions aligned. Terminal/task daemons should share the CLI's binary
-directory; `ctl setup` installs the macOS helper under
+Keep terminal/task companion versions aligned with the CLI. These daemons should
+share the CLI's binary directory; `ctl setup` installs the macOS helper under
 `~/.tokn/ctl/components/ctld/` and switches its `current` symlink after verifying
 the full signed and notarized app bundle. It never restarts an existing daemon.
 
@@ -28,15 +28,19 @@ on the controlled machine. On macOS, Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does
 not supply its Keychain entitlement. Setup selects the release matching this
 CLI's version and architecture and requires that release to be published.
-`CTLD_BIN` remains an explicit override. Otherwise the desktop's bundled helper
-has priority over an embedded CLI helper, then the managed installation, then a sibling
-or `PATH` executable.
+`CTLD_BIN` remains an explicit override. Otherwise a standalone macOS CLI prefers
+a verified compatible shared `ctld.app`, then its own bundled helper, then a
+nearby desktop bundle, sibling, or `PATH` executable. The desktop continues to
+prefer its own bundled helper. Shared apps must match the native architecture and ctld protocol 12,
+lifecycle protocol 1, and one-shot helper API 1. Their build identity is checked
+against their own installation manifest; their release version, commit, and
+fingerprint need not equal the CLI's.
 
 Official macOS CLI downloads carry the complete matching signed `ctld.app`
 inside the `ctl` executable. They install it under the same managed directory
-when a command needs the helper, or when you run `ctl setup`, without downloading
-it. Running daemons and passive status reads are preserved. `CTLD_BIN` and the
-desktop helper retain priority. A dedicated
+when a command needs the helper and no compatible shared app is selected, or
+when you run `ctl setup`, without downloading it. Running compatible daemons
+and passive status reads are preserved. A dedicated
 [build/release command](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#build-a-cli-with-ctld-embedded)
 compiles and bundles the helper; ordinary Cargo installation does not embed it.
 
@@ -52,8 +56,11 @@ target/ctl-dev/ctl --help
 The build discovers and refreshes the provisioning profile, signs and embeds
 `ctld.app`, and signs the CLI with the matching certificate. No notarization
 credentials are needed. Development helpers use a separate cache under
-`~/.tokn/ctl/components/ctld/development/` and preserve the release selection.
-Rebuild if the profile expires; existing daemons require an explicit restart.
+`~/.tokn/ctl/components/ctld/development/` and leave release `current` unchanged.
+Installation updates `selected/<target>-ctld12-lifecycle1-helper1`, which all
+standalone CLI builds, including ordinary Cargo builds, can reuse after signature
+and provisioning verification. Rebuild if the profile expires; existing daemons
+require an explicit restart.
 
 ## Use
 

@@ -92,39 +92,7 @@ impl Session {
             "existing version is not a private owned directory".into(),
           ));
         }
-        let marker = rustix::fs::open(
-          session.destination.join("installation.json"),
-          rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::NONBLOCK
-            | rustix::fs::OFlags::CLOEXEC,
-          rustix::fs::Mode::empty(),
-        )
-        .map_err(std::io::Error::from)?;
-        let marker = File::from(marker);
-        let metadata = marker.metadata()?;
-        if !metadata.is_file()
-          || metadata.uid() != rustix::process::getuid().as_raw()
-          || metadata.permissions().mode() & 0o077 != 0
-        {
-          return Err(Error::InvalidRelease(
-            "existing installation marker is not a private owned regular file".into(),
-          ));
-        }
-        let mut contents = Vec::new();
-        marker
-          .take(super::manifest::MAX_MANIFEST_BYTES as u64 + 1)
-          .read_to_end(&mut contents)?;
-        let parse = if session.manifest.development.is_some() {
-          Manifest::parse_development
-        } else {
-          Manifest::parse
-        };
-        let existing = parse(
-          &contents,
-          &session.manifest.app_version,
-          &session.manifest.target,
-        )?;
+        let existing = read_manifest(&session.destination, &session.manifest.target)?;
         if existing != session.manifest {
           return Err(Error::InvalidRelease("this version is already installed with different release contents; it was left unchanged".into()));
         }
@@ -132,6 +100,38 @@ impl Session {
       }
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
       Err(error) => return Err(error.into()),
+    }
+    Ok(session)
+  }
+
+  #[cfg(target_os = "macos")]
+  pub fn open_installed(
+    home: &Path,
+    target: &str,
+    installation: &ctl_ipc::managed::CompatibleInstallation,
+  ) -> Result<Self, Error> {
+    let manifest = read_manifest(&installation.directory, target)?;
+    if manifest.development.is_some() != installation.development {
+      return Err(Error::InvalidRelease(
+        "selected helper signing policy does not match its cache".into(),
+      ));
+    }
+    let root = ctl_ipc::managed::component_directory(home);
+    let expected = if installation.development {
+      root.join("development").join(&manifest.sha256)
+    } else {
+      root.join("versions").join(manifest.directory_name())
+    };
+    if expected.canonicalize()? != installation.directory.canonicalize()? {
+      return Err(Error::InvalidRelease(
+        "selected helper location does not match its installation manifest".into(),
+      ));
+    }
+    let session = Self::begin(home, manifest)?;
+    if !session.reused {
+      return Err(Error::InvalidRelease(
+        "selected helper changed while opening its installation".into(),
+      ));
     }
     Ok(session)
   }
@@ -177,6 +177,7 @@ impl Session {
     if self.manifest.development.is_none() {
       ctl_ipc::managed::validate_current_selection(&self.home)?;
     }
+    ctl_ipc::managed::validate_compatible_selection(&self.home, &self.manifest.target)?;
     self.executable()?;
     if !self.reused {
       let marker = OpenOptions::new()
@@ -190,6 +191,7 @@ impl Session {
     }
     let executable = self.executable_after_activation()?;
     if self.manifest.development.is_some() {
+      self.select_compatible()?;
       return Ok(self.outcome(executable));
     }
     let next = self.root.join(format!(".current-{}", uuid::Uuid::new_v4()));
@@ -201,7 +203,18 @@ impl Session {
       let _ = fs::remove_file(&next);
       return Err(error.into());
     }
+    self.select_compatible()?;
     Ok(self.outcome(executable))
+  }
+
+  fn select_compatible(&self) -> Result<(), Error> {
+    ctl_ipc::managed::select_compatible_installation(
+      &self.home,
+      &self.manifest.target,
+      &self.destination,
+      self.manifest.development.is_some(),
+    )?;
+    Ok(())
   }
 
   fn executable_after_activation(&self) -> Result<PathBuf, Error> {
@@ -221,6 +234,34 @@ impl Session {
       reused: self.reused,
     }
   }
+}
+
+fn read_manifest(directory: &Path, target: &str) -> Result<Manifest, Error> {
+  let marker = File::from(
+    rustix::fs::open(
+      directory.join("installation.json"),
+      rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::CLOEXEC,
+      rustix::fs::Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?,
+  );
+  let metadata = marker.metadata()?;
+  if !metadata.is_file()
+    || metadata.uid() != rustix::process::getuid().as_raw()
+    || metadata.permissions().mode() & 0o077 != 0
+  {
+    return Err(Error::InvalidRelease(
+      "existing installation marker is not a private owned regular file".into(),
+    ));
+  }
+  let mut contents = Vec::new();
+  marker
+    .take(super::manifest::MAX_MANIFEST_BYTES as u64 + 1)
+    .read_to_end(&mut contents)?;
+  Manifest::parse_installed(&contents, target)
 }
 
 impl Drop for Session {

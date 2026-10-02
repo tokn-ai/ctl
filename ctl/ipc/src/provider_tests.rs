@@ -87,16 +87,140 @@ async fn failed_or_cancelled_preparation_can_be_retried() {
 #[tokio::test]
 async fn absent_provider_payload_preserves_sibling_discovery() {
   let fixture = Fixture::new();
-  let current = fixture.0.join("ctl");
-  let sibling = fixture.0.join("ctld");
+  let current = fixture.0.join("bin/ctl");
+  std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+  let sibling = current.with_file_name("ctld");
   std::fs::write(&sibling, "source-built helper").unwrap();
-  let provider = DaemonProvider::new(|| Box::pin(async { Ok(None) }));
+  let provider = DaemonProvider::with_policy(
+    || Box::pin(async { Ok(None) }),
+    DaemonDiscoveryPolicy::SharedFirst,
+  );
   assert_eq!(
     prepare_default_daemon(&current, None, Some(&provider))
       .await
       .unwrap(),
     sibling
   );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn standalone_shared_helper_precedes_bundle_after_verified_preparation() {
+  let fixture = Fixture::new();
+  let desktop = fixture.0.join("ctmux.app/Contents/MacOS/ctl");
+  let bundled = bundled_macos_daemon(&desktop).unwrap();
+  std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+  std::fs::write(&bundled, "desktop helper").unwrap();
+  let shared = fixture.0.join("verified-shared-helper");
+  let calls = Arc::new(AtomicUsize::new(0));
+  let observed = calls.clone();
+  let verified = shared.clone();
+  let standalone = DaemonProvider::with_policy(
+    move || {
+      observed.fetch_add(1, Ordering::Relaxed);
+      let executable = verified.clone();
+      Box::pin(async move { Ok(Some(executable)) })
+    },
+    DaemonDiscoveryPolicy::SharedFirst,
+  );
+
+  // Synchronous discovery cannot verify or install shared helpers.
+  assert_eq!(
+    default_macos_daemon(&desktop, Some(&fixture.0), Some(&standalone)).unwrap(),
+    bundled
+  );
+  assert_eq!(calls.load(Ordering::Relaxed), 0);
+  assert_eq!(
+    prepare_default_daemon(&desktop, Some(&fixture.0), Some(&standalone))
+      .await
+      .unwrap(),
+    shared
+  );
+  assert_eq!(
+    default_macos_daemon(&desktop, Some(&fixture.0), Some(&standalone)).unwrap(),
+    shared
+  );
+  assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+  let observed = calls.clone();
+  let desktop_provider = DaemonProvider::new(move || {
+    observed.fetch_add(1, Ordering::Relaxed);
+    Box::pin(async { Ok(Some(PathBuf::from("another-helper"))) })
+  });
+  assert_eq!(
+    prepare_default_daemon(&desktop, Some(&fixture.0), Some(&desktop_provider))
+      .await
+      .unwrap(),
+    bundled
+  );
+  assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn standalone_absent_payload_does_not_select_unverified_legacy_installation() {
+  let fixture = Fixture::new();
+  let current = fixture.0.join("bin/ctl");
+  std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+  let directory = managed::ensure_component_directory(&fixture.0).unwrap();
+  let selection = "versions/0.1.0-aarch64-apple-darwin";
+  let contents = directory.join(selection).join("ctld.app/Contents");
+  std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+  std::fs::create_dir(contents.join("_CodeSignature")).unwrap();
+  for resource in [
+    "Info.plist",
+    "embedded.provisionprofile",
+    "_CodeSignature/CodeResources",
+    "CodeResources",
+    "MacOS/ctld",
+  ] {
+    std::fs::write(contents.join(resource), "unverified helper").unwrap();
+  }
+  let helper = contents.join("MacOS/ctld");
+  std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+  symlink(selection, directory.join("current")).unwrap();
+  // Desktop discovery retains its existing managed selection behavior.
+  assert_eq!(
+    default_macos_daemon(&current, Some(&fixture.0), None).unwrap(),
+    helper.canonicalize().unwrap()
+  );
+  let standalone = DaemonProvider::with_policy(
+    || Box::pin(async { Ok(None) }),
+    DaemonDiscoveryPolicy::SharedFirst,
+  );
+  assert_eq!(
+    default_macos_daemon(&current, Some(&fixture.0), Some(&standalone)).unwrap(),
+    PathBuf::from("ctld")
+  );
+  assert_eq!(
+    prepare_default_daemon(&current, Some(&fixture.0), Some(&standalone))
+      .await
+      .unwrap(),
+    PathBuf::from("ctld")
+  );
+  let sibling = current.with_file_name("ctld");
+  std::fs::write(&sibling, "source-built helper").unwrap();
+  assert_eq!(
+    prepare_default_daemon(&current, Some(&fixture.0), Some(&standalone))
+      .await
+      .unwrap(),
+    sibling
+  );
+  let bundled = bundled_macos_daemon(&current).unwrap();
+  std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+  std::fs::write(&bundled, "desktop helper").unwrap();
+  assert_eq!(
+    prepare_default_daemon(&current, Some(&fixture.0), Some(&standalone))
+      .await
+      .unwrap(),
+    bundled
+  );
+  std::fs::remove_file(directory.join("current")).unwrap();
+  symlink("../outside", directory.join("current")).unwrap();
+  assert!(matches!(
+    prepare_default_daemon(&current, Some(&fixture.0), Some(&standalone)).await,
+    Err(ConnectError::StartDaemon { .. })
+  ));
 }
 
 #[cfg(target_os = "macos")]
@@ -110,7 +234,8 @@ async fn desktop_priority_and_managed_selection_trust_precede_provider_execution
     Box::pin(async { Ok(Some(PathBuf::from("verified-new-helper"))) })
   });
   let directory = managed::ensure_component_directory(&fixture.0).unwrap();
-  let current = fixture.0.join("ctl");
+  let current = fixture.0.join("bin/ctl");
+  std::fs::create_dir_all(current.parent().unwrap()).unwrap();
   symlink("../outside", directory.join("current")).unwrap();
   assert!(matches!(
     prepare_default_daemon(&current, Some(&fixture.0), Some(&provider)).await,
@@ -186,51 +311,54 @@ async fn lazy_provider_covers_startup_availability_overrides_and_passive_queries
     "#!/bin/sh\ncase \"$1\" in\n--protocol-version) echo {PROTOCOL_VERSION};;\n--component-info) printf '%s\\n' '{metadata}';;\n*) /usr/bin/touch \"$CTLD_PROVIDER_TEST_STARTED\";;\nesac\n"
   )).unwrap();
   std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-  for mode in [
-    "existing",
-    "passive",
-    "override",
-    "explicit",
-    "startup",
-    "available",
-    "busy",
-  ] {
-    let called = fixture.0.join(format!("called-{mode}"));
-    let started = fixture.0.join(format!("started-{mode}"));
-    let mut child = tokio::process::Command::new(env::current_exe().unwrap());
-    child
-      .args([
-        "--exact",
-        "provider_tests::registered_provider_child",
-        "--nocapture",
-      ])
-      .env_remove(DAEMON_EXECUTABLE_ENV)
-      .env("HOME", &fixture.0)
-      .env("CTLD_PROVIDER_TEST_MODE", mode)
-      .env("CTLD_PROVIDER_TEST_EXECUTABLE", &executable)
-      .env("CTLD_PROVIDER_TEST_CALLED", &called)
-      .env("CTLD_PROVIDER_TEST_STARTED", &started)
-      .kill_on_drop(true);
-    if mode == "override" {
-      child.env(DAEMON_EXECUTABLE_ENV, &executable);
+  for policy in ["desktop", "standalone"] {
+    for mode in [
+      "existing",
+      "passive",
+      "override",
+      "explicit",
+      "startup",
+      "available",
+      "busy",
+    ] {
+      let called = fixture.0.join(format!("called-{policy}-{mode}"));
+      let started = fixture.0.join(format!("started-{policy}-{mode}"));
+      let mut child = tokio::process::Command::new(env::current_exe().unwrap());
+      child
+        .args([
+          "--exact",
+          "provider_tests::registered_provider_child",
+          "--nocapture",
+        ])
+        .env_remove(DAEMON_EXECUTABLE_ENV)
+        .env("HOME", &fixture.0)
+        .env("CTLD_PROVIDER_TEST_MODE", mode)
+        .env("CTLD_PROVIDER_TEST_POLICY", policy)
+        .env("CTLD_PROVIDER_TEST_EXECUTABLE", &executable)
+        .env("CTLD_PROVIDER_TEST_CALLED", &called)
+        .env("CTLD_PROVIDER_TEST_STARTED", &started)
+        .kill_on_drop(true);
+      if mode == "override" {
+        child.env(DAEMON_EXECUTABLE_ENV, &executable);
+      }
+      let output = timeout(Duration::from_secs(5), child.output())
+        .await
+        .unwrap()
+        .unwrap();
+      assert!(output.status.success(), "{mode}: {output:?}");
+      let expected = match mode {
+        "startup" | "available" => 1,
+        "busy" => 2,
+        _ => 0,
+      };
+      let calls = std::fs::read_to_string(called).unwrap_or_default();
+      assert_eq!(calls.lines().count(), expected, "{mode}");
+      assert_eq!(
+        started.exists(),
+        matches!(mode, "startup" | "override" | "explicit"),
+        "{mode}"
+      );
     }
-    let output = timeout(Duration::from_secs(5), child.output())
-      .await
-      .unwrap()
-      .unwrap();
-    assert!(output.status.success(), "{mode}: {output:?}");
-    let expected = match mode {
-      "startup" | "available" => 1,
-      "busy" => 2,
-      _ => 0,
-    };
-    let calls = std::fs::read_to_string(called).unwrap_or_default();
-    assert_eq!(calls.lines().count(), expected, "{mode}");
-    assert_eq!(
-      started.exists(),
-      matches!(mode, "startup" | "override" | "explicit"),
-      "{mode}"
-    );
   }
 }
 
@@ -253,11 +381,14 @@ async fn registered_provider_child() {
   let _endpoint = Endpoint(socket.clone());
   let executable = PathBuf::from(env::var_os("CTLD_PROVIDER_TEST_EXECUTABLE").unwrap());
   let started = PathBuf::from(env::var_os("CTLD_PROVIDER_TEST_STARTED").unwrap());
-  register_daemon_executable_provider(test_provider).unwrap();
+  let register = match env::var("CTLD_PROVIDER_TEST_POLICY").unwrap().as_str() {
+    "desktop" => register_daemon_executable_provider,
+    "standalone" => register_standalone_daemon_executable_provider,
+    policy => panic!("unexpected provider policy {policy}"),
+  };
+  register(test_provider).unwrap();
   assert_eq!(
-    register_daemon_executable_provider(test_provider)
-      .unwrap_err()
-      .kind(),
+    register(test_provider).unwrap_err().kind(),
     io::ErrorKind::AlreadyExists
   );
   if mode == "existing" {

@@ -101,10 +101,13 @@ certificate. It compiles `ctld`, signs the complete app, embeds it in `ctl`, the
 signs the CLI and atomically replaces the development output. It allows local
 source changes and needs no notarization credentials. Its manifest binds the
 helper's revision, source fingerprint, and dirty flag. Development bundles use
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` and never update the
-release selection. The runtime still checks signature, provisioning expiry,
-certificate identity, source metadata, and protocol compatibility. Rebuild
-after a profile expires. An existing daemon is never restarted automatically.
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/`. They update the shared
+architecture/API selection while leaving the release `current` symlink intact.
+All standalone CLI builds, including ordinary Cargo builds, can reuse that
+selected app. The runtime still checks signature, provisioning expiry,
+certificate identity, source metadata against the app's own manifest, and API
+compatibility. Rebuild after a profile expires. An existing compatible daemon is
+never restarted automatically.
 
 Local signing explicitly uses `--timestamp=none` for both the helper and CLI,
 so an unavailable Apple timestamp service does not block development. Release
@@ -178,31 +181,40 @@ publisher Team ID and requires an Apple Developer ID signature for that team
 and `dev.tokn-ai.ctl.ctld`; there is no separately compiled vendor Team ID pin.
 Archive size/hash, distribution profile, and notarization are checked before
 executing the helper's metadata query. Its build/protocol identity is then
-verified before selection.
+verified against the installation manifest before selection. Discovery can
+reuse another release or development build when its native target and `ctld`,
+`ctld_lifecycle`, and `ctld_helper` APIs match the CLI's requirements; its release
+version, revision, and fingerprint need not equal the CLI's.
 
 The full signed bundle is installed without `sudo`:
 
 ```text
 ~/.tokn/ctl/components/ctld/
   versions/<version>-<target>/ctld.app/
+  development/<archive-sha256>/ctld.app/
   current -> versions/<version>-<target>
+  selected/<target>-ctld12-lifecycle1-helper1 -> ../versions/<version>-<target>
 ```
 
 Remote-agent `~/.tokn/ctl/versions/` and `current` remain independent. An existing
 matching installation is verified and reused; setup does not overwrite a
-version with different release contents. `current` is selected atomically, and
-setup never starts, stops, or restarts a daemon. Existing connections continue
-using their running daemon until it is stopped explicitly.
+version with different release contents. Release setup updates `current`; both
+release and development setup atomically update the architecture/API selection.
+A development selection points to `../development/<archive-sha256>` and does
+not change `current`. Discovery follows this explicit selection instead of
+sorting directories by hash or modification time. Setup never starts, stops,
+or restarts a daemon. Existing compatible connections continue using their
+running daemon until it is stopped explicitly.
 
-An explicit `CTLD_BIN` executable override has highest priority. Otherwise macOS
-prefers the desktop bundle's helper, then an embedded CLI helper, then the managed
-installation, then a
-sibling executable or `PATH`. An invalid managed selection fails rather than
-falling back to a loose executable. `ctl setup --json` prints the result with
+An explicit `CTLD_BIN` executable override has highest priority. Otherwise the
+standalone macOS CLI prefers a verified compatible selected managed app, then its
+own bundled helper, then a nearby desktop bundle, sibling executable, or `PATH`.
+The desktop continues to prefer its own bundled helper. Unsafe or invalid selected
+installations produce a verification error. `ctl setup --json` prints the result with
 `component`, `version`, `executable`, and `reused` fields.
 
-A CLI built with the bundled release command prepares its matching embedded
-helper after the desktop helper and before the managed/sibling/PATH fallback.
+A CLI built with the bundled release command prepares its embedded helper when
+no compatible shared app is selected, before the sibling/`PATH` fallback.
 It uses the same verified install transaction without downloading anything.
 Preparation is lazy: starting an absent daemon, inspecting an explicit
 replacement, or creating a fresh proxy route can require it. Passive status

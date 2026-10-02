@@ -5,6 +5,7 @@ fn protocol_version_prints_the_ipc_version_and_exits() {
   let output = Command::new(env!("CARGO_BIN_EXE_ctld"))
     .arg("--protocol-version")
     .env_remove("CTLD_ASKPASS")
+    .env_remove("CTLD_IDENTITY_ASKPASS")
     .output()
     .unwrap();
   assert!(output.status.success());
@@ -16,10 +17,15 @@ fn protocol_version_prints_the_ipc_version_and_exits() {
 }
 
 #[test]
-fn component_info_reports_embedded_build_and_both_protocols_without_a_service() {
+fn component_info_reports_embedded_build_and_all_apis_without_a_service() {
+  let directory = std::env::temp_dir().join(format!("ctld-metadata-{}", uuid::Uuid::new_v4()));
+  std::fs::create_dir(&directory).unwrap();
   let output = Command::new(env!("CARGO_BIN_EXE_ctld"))
     .arg("--component-info")
+    .arg("--socket")
+    .arg(directory.join("ctld.sock"))
     .env_remove("CTLD_ASKPASS")
+    .env_remove("CTLD_IDENTITY_ASKPASS")
     .output()
     .unwrap();
   assert!(output.status.success());
@@ -38,5 +44,10 @@ fn component_info_reports_embedded_build_and_both_protocols_without_a_service() 
       .any(|protocol| protocol.name == "ctld_lifecycle"
         && protocol.version == ctl_ipc::lifecycle::PROTOCOL_VERSION)
   );
+  assert!(info.protocols.iter().any(
+    |protocol| protocol.name == "ctld_helper" && protocol.version == ctl_ipc::HELPER_API_VERSION
+  ));
   assert_eq!(output.stderr, Vec::<u8>::new());
+  assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+  std::fs::remove_dir(directory).unwrap();
 }

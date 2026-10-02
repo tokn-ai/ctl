@@ -2,6 +2,25 @@
 
 use std::path::{Path, PathBuf};
 
+/// One immutable installation selected for this client's required helper APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompatibleInstallation {
+  pub directory: PathBuf,
+  pub development: bool,
+}
+
+#[cfg(unix)]
+mod selection;
+
+#[cfg(all(test, unix))]
+mod selection_tests;
+
+#[cfg(unix)]
+pub use selection::{
+  compatible_selection, resolve_compatible_installation, select_compatible_installation,
+  validate_compatible_selection,
+};
+
 /// Returns the installation directory without inspecting the filesystem.
 #[must_use]
 pub fn component_directory(home: &Path) -> PathBuf {
@@ -157,7 +176,7 @@ mod filesystem {
     validate_candidate(&directory, relative, development)
   }
 
-  fn validate_candidate(
+  pub(super) fn validate_candidate(
     directory: &Path,
     relative: &Path,
     development: bool,
@@ -238,7 +257,7 @@ mod filesystem {
     executable.canonicalize()
   }
 
-  fn checked_component_directory(home: &Path) -> io::Result<PathBuf> {
+  pub(super) fn checked_component_directory(home: &Path) -> io::Result<PathBuf> {
     let mut directory = checked_home(home)?;
     for name in ANCESTORS {
       directory.push(name);
@@ -253,7 +272,7 @@ mod filesystem {
     Ok(home)
   }
 
-  fn ensure_directory(path: &Path, private: bool) -> io::Result<()> {
+  pub(super) fn ensure_directory(path: &Path, private: bool) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
       Ok(()) => {}
       Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -262,7 +281,7 @@ mod filesystem {
     check_directory(path, private)
   }
 
-  fn check_directory(path: &Path, private: bool) -> io::Result<()> {
+  pub(super) fn check_directory(path: &Path, private: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir() || !owned(&metadata) || metadata.mode() & 0o022 != 0 {
       return Err(invalid_path(
@@ -290,7 +309,7 @@ mod filesystem {
     Ok(())
   }
 
-  fn owned(metadata: &fs::Metadata) -> bool {
+  pub(super) fn owned(metadata: &fs::Metadata) -> bool {
     metadata.uid() == rustix::process::getuid().as_raw()
   }
 
@@ -304,7 +323,7 @@ mod filesystem {
       && path.as_os_str() == path.components().collect::<PathBuf>().as_os_str()
   }
 
-  fn invalid_path(path: &Path, reason: &str) -> io::Error {
+  pub(super) fn invalid_path(path: &Path, reason: &str) -> io::Error {
     io::Error::new(
       io::ErrorKind::PermissionDenied,
       format!(
@@ -323,12 +342,12 @@ mod tests {
   use std::os::unix::fs::{PermissionsExt as _, symlink};
   use std::sync::atomic::{AtomicU64, Ordering};
 
-  struct Fixture {
-    home: PathBuf,
+  pub(super) struct Fixture {
+    pub(super) home: PathBuf,
   }
 
   impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
       static NEXT: AtomicU64 = AtomicU64::new(0);
       let home = std::env::temp_dir().join(format!(
         "ctld-managed-{}-{}",
@@ -340,7 +359,7 @@ mod tests {
       Self { home }
     }
 
-    fn install(&self, version: &str) -> PathBuf {
+    pub(super) fn install(&self, version: &str) -> PathBuf {
       let directory = ensure_component_directory(&self.home).unwrap();
       let bundle = directory.join("versions").join(version).join("ctld.app");
       let contents = bundle.join("Contents");
@@ -361,7 +380,7 @@ mod tests {
       executable
     }
 
-    fn select(&self, target: &str) {
+    pub(super) fn select(&self, target: &str) {
       let current = component_directory(&self.home).join("current");
       let _ = fs::remove_file(&current);
       symlink(target, current).unwrap();

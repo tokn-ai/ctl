@@ -42,11 +42,6 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
     return Ok(());
   };
   let client = ctl_ipc::vpn::Client::new(ctl_ipc::vpn::socket_path());
-  let client = if std::env::var_os("CTMUX_DEV_DAEMON_SUPERVISOR").is_some() {
-    client.with_daemon_executable(ctl_ipc::default_daemon_executable()?)
-  } else {
-    client
-  };
   if client.list().await?.connections.iter().any(|status| {
     status.vpn_id.as_deref() == Some(id) && status.state == ctl_ipc::VpnState::Connected
   }) {

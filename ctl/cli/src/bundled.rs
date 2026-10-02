@@ -37,29 +37,18 @@ impl EmbeddedBundle {
 include!(concat!(env!("OUT_DIR"), "/bundled_ctld.rs"));
 
 pub fn register() -> std::io::Result<()> {
-  if BUNDLED_CTLD.is_some() {
-    ctl_ipc::register_daemon_executable_provider(|| Box::pin(prepare()))?;
-  }
-  Ok(())
+  ctl_ipc::register_standalone_daemon_executable_provider(|| Box::pin(prepare()))
 }
 
 async fn prepare() -> std::io::Result<Option<std::path::PathBuf>> {
-  let bundle = BUNDLED_CTLD.unwrap();
   let mut waiting = false;
   loop {
-    let result = bundle
-      .install(|event| {
-        if matches!(event, SetupEvent::Extracting) {
-          eprintln!("Preparing bundled ctld...");
-        }
-      })
-      .await;
-    match result {
-      Ok(outcome) => return Ok(Some(outcome.executable)),
+    match prepare_once().await {
+      Ok(executable) => return Ok(executable),
       Err(setup::Error::Busy) => {
-        // Another CLI may be preparing this same immutable bundle. The OS lock
-        // is released even if that process exits; every verification operation
-        // is bounded. Keep cancellation available while waiting to reuse it.
+        // Another CLI may be selecting or preparing a shared installation. The
+        // OS lock is released even if that process exits; every verification
+        // operation is bounded. Keep cancellation available while waiting.
         if !waiting {
           eprintln!("Waiting for another ctld setup to finish...");
           waiting = true;
@@ -69,6 +58,23 @@ async fn prepare() -> std::io::Result<Option<std::path::PathBuf>> {
       Err(error) => return Err(std::io::Error::other(error)),
     }
   }
+}
+
+async fn prepare_once() -> Result<Option<std::path::PathBuf>, setup::Error> {
+  if let Some(executable) = setup::discover_compatible_ctld().await? {
+    return Ok(Some(executable));
+  }
+  let Some(bundle) = BUNDLED_CTLD else {
+    return Ok(None);
+  };
+  let outcome = bundle
+    .install(|event| {
+      if matches!(event, SetupEvent::Extracting) {
+        eprintln!("Preparing bundled ctld...");
+      }
+    })
+    .await?;
+  Ok(Some(outcome.executable))
 }
 
 pub async fn install(

@@ -86,7 +86,7 @@ pub(super) async fn install_bundled_development(
   install_archive(&home, manifest, archive, &on_progress).await
 }
 
-fn release_target() -> Result<&'static str, Error> {
+pub(super) fn release_target() -> Result<&'static str, Error> {
   match std::env::consts::ARCH {
     "aarch64" => Ok("aarch64-apple-darwin"),
     "x86_64" => Ok("x86_64-apple-darwin"),
@@ -127,21 +127,24 @@ async fn verify_and_activate(
   on_progress: &impl Fn(SetupEvent),
 ) -> Result<SetupOutcome, Error> {
   on_progress(SetupEvent::Verifying);
-  let executable = session.executable()?;
-  verify(&session).await?;
-  // Execute metadata queries only after the selected Apple signature policy.
-  let prepared = PreparedExecutable::prepare(
-    executable,
-    &[
-      ("ctld", ctl_ipc::PROTOCOL_VERSION),
-      ("ctld_lifecycle", ctl_ipc::lifecycle::PROTOCOL_VERSION),
-    ],
-  )
-  .await?;
-  verify_build_identity(&session.manifest, &prepared.info.build)?;
-  prepared.verify().await?;
+  let prepared = verify_helper(&session).await?;
+  if !super::discovery::compatible(&prepared.info) {
+    return Err(Error::Verification(
+      "helper does not provide the required broker, lifecycle, and helper APIs".into(),
+    ));
+  }
   on_progress(SetupEvent::Activating);
   session.activate()
+}
+
+pub(super) async fn verify_helper(session: &Session) -> Result<PreparedExecutable, Error> {
+  let executable = session.executable()?;
+  verify(session).await?;
+  // Execute metadata queries only after the selected Apple signature policy.
+  let prepared = PreparedExecutable::prepare(executable, &[]).await?;
+  verify_build_identity(&session.manifest, &prepared.info.build)?;
+  prepared.verify().await?;
+  Ok(prepared)
 }
 
 fn verify_build_identity(
@@ -385,9 +388,9 @@ async fn verify(session: &Session) -> Result<(), Error> {
 async fn verify_signature(session: &Session) -> Result<(), Error> {
   let app = session.app();
   let team = &session.manifest.team_identifier;
-  // The publisher Team ID comes from the fixed repository's HTTPS manifest or
-  // the manifest embedded alongside the signed helper in this CLI build.
-  // The requirement additionally checks Apple's Developer ID certificate chain.
+  // The publisher Team ID comes from the fixed repository's HTTPS manifest,
+  // an embedded manifest, or the private installation receipt recorded by setup.
+  // The requirement additionally checks the applicable Apple certificate chain.
   let development = session.manifest.development.is_some();
   let requirement = if development {
     format!(
@@ -409,6 +412,25 @@ async fn verify_signature(session: &Session) -> Result<(), Error> {
   )
   .await?;
   require_success(&output, "Apple code signature")?;
+  let architecture = match session.manifest.target.as_str() {
+    "aarch64-apple-darwin" => "arm64",
+    "x86_64-apple-darwin" => "x86_64",
+    _ => {
+      return Err(Error::InvalidRelease(
+        "unsupported helper architecture".into(),
+      ));
+    }
+  };
+  let architecture = tool(
+    "/usr/bin/lipo",
+    &[
+      app.join("Contents/MacOS/ctld").as_os_str(),
+      "-verify_arch".as_ref(),
+      architecture.as_ref(),
+    ],
+  )
+  .await?;
+  require_success(&architecture, "helper native architecture")?;
   let info = app.join("Contents/Info.plist");
   if plist_string(&info, "CFBundleIdentifier").await? != BUNDLE_IDENTIFIER
     || plist_string(&info, "CFBundleShortVersionString").await? != session.manifest.app_version
@@ -838,6 +860,11 @@ mod tests {
       .unwrap();
     assert!(reused.reused);
     assert_eq!(reused.executable, installed.executable);
+    assert_staging_clean(&home.0);
+    assert_eq!(
+      super::super::discovery::discover(&home.0).await.unwrap(),
+      Some(installed.executable)
+    );
     assert_staging_clean(&home.0);
     assert!(
       ctl_ipc::managed::resolve_executable(&home.0)

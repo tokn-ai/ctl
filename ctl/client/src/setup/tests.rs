@@ -26,6 +26,42 @@ impl Drop for Home {
   }
 }
 
+#[test]
+fn corrupt_shared_selection_cannot_publish_a_new_release_current() {
+  let home = Home::new();
+  let bytes = compressed(&contents(None));
+  let original = release(&bytes);
+  Session::begin(&home.0, original.clone())
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .activate()
+    .unwrap();
+  let root = ctl_ipc::managed::component_directory(&home.0);
+  let current = fs::read_link(root.join("current")).unwrap();
+  let selection = ctl_ipc::managed::compatible_selection(&home.0, &original.target).unwrap();
+  fs::remove_file(&selection).unwrap();
+  fs::write(&selection, b"corrupt selection").unwrap();
+  let mut replacement = original;
+  replacement.app_version = "0.2.0".into();
+  replacement.bundle_id = replacement.app_version.clone();
+  replacement.archive = format!(
+    "ctld-{}-{}.app.tar.gz",
+    replacement.app_version, replacement.target
+  );
+  let destination = root.join("versions").join(replacement.directory_name());
+  assert!(
+    Session::begin(&home.0, replacement)
+      .unwrap()
+      .unpack(&bytes)
+      .unwrap()
+      .activate()
+      .is_err()
+  );
+  assert_eq!(fs::read_link(root.join("current")).unwrap(), current);
+  assert!(!destination.exists());
+}
+
 const FILES: [&str; 5] = [
   "ctld.app/Contents/Info.plist",
   "ctld.app/Contents/embedded.provisionprofile",

@@ -1617,7 +1617,10 @@ fn append_target_arguments(command: &mut Command, target: &SshTarget) {
     .iter()
     .any(|gateway| gateway.kind.requires_proxy_command())
   {
-    let proxy = ctl_ipc::proxy_command(&target.gateways).unwrap_or_else(|_| "false".into());
+    let proxy = std::env::current_exe().map_or_else(
+      |_| "false".into(),
+      |executable| ctl_ipc::proxy_command_with_executable(&target.gateways, &executable),
+    );
     command.arg("-o").arg(format!("ProxyCommand={proxy}"));
   } else if !target.gateways.is_empty() {
     // -o respects a prior fail-closed ProxyCommand; -J rejects that combination.

@@ -2,6 +2,8 @@
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod archive;
+#[cfg(target_os = "macos")]
+mod discovery;
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod install;
 #[cfg(target_os = "macos")]
@@ -32,6 +34,30 @@ pub struct SetupOutcome {
   pub version: String,
   pub executable: PathBuf,
   pub reused: bool,
+}
+
+/// Discovers a selected shared macOS helper without downloading or restarting it.
+/// Both signed releases and provisioned development apps are reusable when their
+/// own installation identity is verified and the required helper APIs match.
+///
+/// # Errors
+/// Rejects unsafe selections, invalid installation metadata, failed Apple
+/// signature/provisioning checks, or unavailable trust-service inspection.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "discovery retains its asynchronous API on other platforms"
+  )
+)]
+pub async fn discover_compatible_ctld() -> Result<Option<PathBuf>, Error> {
+  #[cfg(target_os = "macos")]
+  {
+    let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+    discovery::discover(&home).await
+  }
+  #[cfg(not(target_os = "macos"))]
+  Ok(None)
 }
 
 #[derive(Debug, thiserror::Error)]

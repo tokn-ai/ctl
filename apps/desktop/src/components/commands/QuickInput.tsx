@@ -30,6 +30,7 @@ export type QuickInputMode =
 interface QuickInputProps {
   title: string;
   description?: string;
+  warning?: string | null;
   error?: string | null;
   mode: QuickInputMode;
   onSubmit(value: string): void | Promise<void>;
@@ -46,6 +47,7 @@ interface QuickInputProps {
 export function QuickInput({
   title,
   description,
+  warning,
   error,
   mode,
   onSubmit,
@@ -162,6 +164,9 @@ export function QuickInput({
       </header>
       {description ? (
         <p className="quick-input-description">{description}</p>
+      ) : null}
+      {warning ? (
+        <p className="quick-input-warning" role="status">{warning}</p>
       ) : null}
       {mode.kind === "input" ? (
         <QuickInputField

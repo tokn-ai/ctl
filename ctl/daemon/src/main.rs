@@ -78,6 +78,10 @@ fn main() {
           name: "ctld_lifecycle".into(),
           version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
         },
+        ctl_core::component::ProtocolInfo {
+          name: "ctld_helper".into(),
+          version: ctl_ipc::HELPER_API_VERSION,
+        },
       ],
     };
     println!(

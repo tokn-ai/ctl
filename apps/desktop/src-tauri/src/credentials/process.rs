@@ -91,6 +91,18 @@ async fn read_limited(reader: impl AsyncRead + Unpin, maximum: usize) -> std::io
   Ok(output)
 }
 
+pub(super) fn preparation_error(error: ctl_ipc::ConnectError) -> CommandErrorDto {
+  if matches!(error, ctl_ipc::ConnectError::PrepareDaemon(source) if source.kind() == std::io::ErrorKind::TimedOut)
+  {
+    CommandErrorDto::new(
+      "credential_helper_timeout",
+      crate::daemon_helper::TIMEOUT_MESSAGE,
+    )
+  } else {
+    unavailable()
+  }
+}
+
 pub(super) fn unavailable() -> CommandErrorDto {
   CommandErrorDto::new(
     "credential_helper_unavailable",

@@ -100,7 +100,8 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
         .args(["-o", "ForwardAgent=no"])
         .args(["-o", "ForwardX11=no"]);
       if !prefix.is_empty() {
-        let proxy = ctl_ipc::proxy_command(prefix).map_err(io::Error::other)?;
+        let executable = std::env::current_exe()?;
+        let proxy = ctl_ipc::proxy_command_with_executable(prefix, &executable);
         command.arg("-o").arg(format!("ProxyCommand={proxy}"));
       }
       if let Some(port) = gateway.port {

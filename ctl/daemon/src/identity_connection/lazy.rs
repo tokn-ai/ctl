@@ -11,6 +11,7 @@ use std::sync::{Mutex as SyncMutex, Weak};
 use base64::Engine as _;
 use tokio::sync::Mutex;
 
+use super::fallback::{Fallbacks, Reason};
 use crate::identities::{self, IdentitySnapshot, LocalAgent};
 
 pub(super) struct Candidate {
@@ -38,7 +39,7 @@ pub(super) struct UnlockedAgent {
   pub(super) _owner: Box<dyn Send>,
 }
 
-type UnlockFuture = Pin<Box<dyn Future<Output = Option<UnlockedAgent>> + Send>>;
+type UnlockFuture = Pin<Box<dyn Future<Output = Result<UnlockedAgent, Reason>> + Send>>;
 
 pub(super) trait Unlocker: Send + Sync {
   fn unlock(
@@ -74,11 +75,17 @@ impl Unlocker for KeychainUnlocker {
         identities::saved_passphrase_cancellable(&selected, Some(&context), &canceled)
       })
       .await
-      .ok()?
-      .ok()??;
-      let mut agent = LocalAgent::start().await.ok()?;
-      let verified = agent.add_identity(&snapshot, secret).await.ok()?;
-      Some(UnlockedAgent {
+      .map_err(|_| Reason::WorkerFailed)?
+      .map_err(Reason::Identity)?
+      .ok_or(Reason::NotSaved)?;
+      let mut agent = LocalAgent::start()
+        .await
+        .map_err(|_| Reason::AgentUnavailable)?;
+      let verified = agent
+        .add_identity(&snapshot, secret)
+        .await
+        .map_err(Reason::Identity)?;
+      Ok(UnlockedAgent {
         public_key: verified.public_key,
         socket: agent.socket_path().to_owned(),
         _owner: Box::new(agent),
@@ -91,6 +98,7 @@ pub(super) struct LazyIdentities {
   candidates: Vec<Candidate>,
   context: String,
   unlocker: Arc<dyn Unlocker>,
+  fallbacks: Arc<Fallbacks>,
   // A missing entry is unattempted, None is failed/in progress, Some is ready.
   // Holding this lock across unlock serializes and coalesces all clients.
   unlocked: Mutex<HashMap<Vec<u8>, Option<UnlockedAgent>>>,
@@ -106,19 +114,34 @@ struct Cancellation {
 }
 
 impl LazyIdentities {
-  pub(super) fn new(candidates: Vec<Candidate>, context: String) -> Self {
-    Self::with_unlocker(candidates, context, Arc::new(KeychainUnlocker))
+  pub(super) fn new(
+    candidates: Vec<Candidate>,
+    context: String,
+    fallbacks: Arc<Fallbacks>,
+  ) -> Self {
+    Self::with_unlocker_and_fallbacks(candidates, context, Arc::new(KeychainUnlocker), fallbacks)
   }
 
+  #[cfg(test)]
   pub(super) fn with_unlocker(
     candidates: Vec<Candidate>,
     context: String,
     unlocker: Arc<dyn Unlocker>,
   ) -> Self {
+    Self::with_unlocker_and_fallbacks(candidates, context, unlocker, Arc::default())
+  }
+
+  pub(super) fn with_unlocker_and_fallbacks(
+    candidates: Vec<Candidate>,
+    context: String,
+    unlocker: Arc<dyn Unlocker>,
+    fallbacks: Arc<Fallbacks>,
+  ) -> Self {
     Self {
       candidates,
       context,
       unlocker,
+      fallbacks,
       unlocked: Mutex::new(HashMap::new()),
       cancellation: SyncMutex::default(),
     }
@@ -145,6 +168,19 @@ impl LazyIdentities {
     })
   }
 
+  pub(super) fn record_failure(&self, key: &[u8], reason: Reason) {
+    if !self.is_canceled()
+      && let Some(candidate) = self
+        .candidates
+        .iter()
+        .find(|candidate| candidate.blob == key)
+    {
+      self
+        .fallbacks
+        .record(&candidate.snapshot.identity_id, reason);
+    }
+  }
+
   pub(super) async fn agent_for(&self, key: &[u8]) -> Option<PathBuf> {
     let candidate = self
       .candidates
@@ -169,7 +205,7 @@ impl LazyIdentities {
       cancellation.active = Some(Arc::downgrade(&canceled));
     }
     let _cancel_read = CancelRead(Arc::clone(&canceled));
-    let agent = tokio::time::timeout(
+    let result = tokio::time::timeout(
       super::agent_proxy::REQUEST_TIMEOUT,
       self.unlocker.unlock(
         Arc::clone(&candidate.snapshot),
@@ -177,12 +213,29 @@ impl LazyIdentities {
         Arc::clone(&canceled),
       ),
     )
-    .await
-    .ok()??;
-    if canceled.load(Ordering::Acquire) || public_blob(&agent.public_key).as_deref() != Some(key) {
+    .await;
+    if canceled.load(Ordering::Acquire) {
+      return None;
+    }
+    let agent = match result
+      .map_err(|_| Reason::TimedOut)
+      .and_then(std::convert::identity)
+    {
+      Ok(agent) => agent,
+      Err(reason) => {
+        self.record_failure(key, reason);
+        return None;
+      }
+    };
+    if public_blob(&agent.public_key).as_deref() != Some(key) {
+      self.record_failure(
+        key,
+        Reason::Identity(identities::IdentityError::UnlockFailed),
+      );
       return None;
     }
     let socket = agent.socket.clone();
+    self.fallbacks.clear(&candidate.snapshot.identity_id);
     unlocked.insert(key.to_vec(), Some(agent));
     Some(socket)
   }

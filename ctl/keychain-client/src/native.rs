@@ -1,10 +1,11 @@
 use super::{Authentication, Error, Presence, Query, Record, Write};
 use core_foundation::array::CFArray;
-use core_foundation::base::{CFType, TCFType};
+use core_foundation::base::{CFAllocatorRef, CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::data::CFData;
 use core_foundation::date::CFDate;
 use core_foundation::dictionary::CFDictionary;
+use core_foundation::error::{CFError, CFErrorRef};
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
@@ -29,10 +30,19 @@ unsafe extern "C" {
   static kSecUseOperationPrompt: CFStringRef;
   static kSecUseAuthenticationUIFail: CFStringRef;
   static kSecUseAuthenticationUIAllow: CFStringRef;
+  // SecTaskRef is an opaque Core Foundation object; CFType owns its lifetime.
+  fn SecTaskCreateFromSelf(allocator: CFAllocatorRef) -> CFTypeRef;
+  fn SecTaskCopyValueForEntitlement(
+    task: CFTypeRef,
+    entitlement: CFStringRef,
+    error: *mut CFErrorRef,
+  ) -> CFTypeRef;
 }
 
 const NOT_FOUND: i32 = -25_300;
+const NOT_AVAILABLE: i32 = -25_291;
 const INTERACTION_NOT_ALLOWED: i32 = -25_308;
+const MISSING_ENTITLEMENT: i32 = -34_018;
 const PARAM: i32 = -50;
 const MAX_RESULTS: usize = 8193;
 type Parameters = Vec<(CFString, CFType)>;
@@ -254,6 +264,73 @@ pub fn exists(service: &str, account: &str) -> Result<Presence, Error> {
   }
 }
 
+/// Check the current process's Data Protection Keychain access using one exact
+/// metadata item. Does not return passwords, mutate Keychain, or display UI.
+///
+/// A missing item is allowed only after checking the process's application ID.
+/// macOS may give an unsigned process an implicit read-only smart-card group;
+/// its not-found result alone would incorrectly suggest that saving is usable.
+/// The subsequent Keychain query makes securityd evaluate runtime provisioning,
+/// rather than trusting the entitlement claim or an on-disk signature alone.
+///
+/// # Errors
+/// Returns `errSecMissingEntitlement` for a missing/invalid application ID, or
+/// an `OSStatus` if runtime entitlement inspection or the metadata query fails.
+/// Successful preflight cannot guarantee a later write/authentication succeeds.
+pub fn check_availability(service: &str, account: &str) -> Result<(), Error> {
+  with_application_identifier(runtime_application_identifier(), || {
+    exists(service, account)
+  })
+}
+
+fn runtime_application_identifier() -> Result<Option<CFType>, Error> {
+  // SAFETY: this public API creates the current process's owned SecTask object.
+  let task = unsafe { SecTaskCreateFromSelf(ptr::null()) };
+  if task.is_null() {
+    return Err(Error(NOT_AVAILABLE));
+  }
+  // SAFETY: the non-null SecTask follows Core Foundation's Create rule.
+  let task = unsafe { CFType::wrap_under_create_rule(task) };
+  let name = CFString::new("com.apple.application-identifier");
+  let mut error = ptr::null_mut();
+  // SAFETY: task, entitlement name, and the output pointer remain live. Both
+  // returned values follow the Copy rule and are released by their wrappers.
+  let value = unsafe {
+    SecTaskCopyValueForEntitlement(
+      task.as_CFTypeRef(),
+      name.as_concrete_TypeRef(),
+      &raw mut error,
+    )
+  };
+  let value = (!value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) });
+  let error = (!error.is_null()).then(|| unsafe { CFError::wrap_under_create_rule(error) });
+  if error.is_some() {
+    // SecTask errors can be POSIX errors, so do not reinterpret their codes as
+    // Keychain OSStatus values (or mistake an inspection failure for absence).
+    Err(Error(NOT_AVAILABLE))
+  } else {
+    Ok(value)
+  }
+}
+
+fn with_application_identifier(
+  identifier: Result<Option<CFType>, Error>,
+  probe: impl FnOnce() -> Result<Presence, Error>,
+) -> Result<(), Error> {
+  let identifier = identifier?
+    .and_then(|value| value.downcast::<CFString>())
+    .map(|value| value.to_string());
+  if identifier.as_deref().is_none_or(|value| {
+    value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control)
+  }) {
+    return Err(Error(MISSING_ENTITLEMENT));
+  }
+  match probe()? {
+    Presence::Present | Presence::Missing => Ok(()),
+    Presence::Protected => Err(Error(INTERACTION_NOT_ALLOWED)),
+  }
+}
+
 /// Atomically update data and metadata, retaining an existing item's ACL.
 ///
 /// # Errors
@@ -344,6 +421,63 @@ fn status_result(status: i32) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn application_identifier() -> CFType {
+    CFString::new("FIXTURE123.dev.tokn-ai.ctl.ctld").into_CFType()
+  }
+
+  #[test]
+  fn missing_or_malformed_application_id_never_probes_keychain() {
+    for value in [
+      None,
+      Some(CFBoolean::true_value().into_CFType()),
+      Some(CFString::new("").into_CFType()),
+      Some(CFString::new("fixture\napp").into_CFType()),
+      Some(CFString::new(&"x".repeat(1025)).into_CFType()),
+    ] {
+      assert_eq!(
+        with_application_identifier(Ok(value), || {
+          panic!("unsigned or malformed process must not rely on item-not-found")
+        }),
+        Err(Error(MISSING_ENTITLEMENT))
+      );
+    }
+    assert_eq!(
+      with_application_identifier(Err(Error(NOT_AVAILABLE)), || {
+        panic!("failed runtime inspection must not probe Keychain")
+      }),
+      Err(Error(NOT_AVAILABLE))
+    );
+  }
+
+  #[test]
+  fn authorized_missing_metadata_is_available_but_access_errors_are_preserved() {
+    for presence in [Presence::Missing, Presence::Present] {
+      assert_eq!(
+        with_application_identifier(Ok(Some(application_identifier())), || Ok(presence)),
+        Ok(())
+      );
+    }
+    assert_eq!(
+      with_application_identifier(Ok(Some(application_identifier())), || Ok(
+        Presence::Protected
+      )),
+      Err(Error(INTERACTION_NOT_ALLOWED))
+    );
+    for code in [
+      MISSING_ENTITLEMENT,
+      NOT_AVAILABLE,
+      -25_315,
+      -25_293,
+      -128,
+      PARAM,
+    ] {
+      assert_eq!(
+        with_application_identifier(Ok(Some(application_identifier())), || Err(Error(code))),
+        Err(Error(code))
+      );
+    }
+  }
 
   #[test]
   fn secret_reads_require_an_exact_service_and_account() {

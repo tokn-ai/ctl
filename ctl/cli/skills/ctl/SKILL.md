@@ -21,6 +21,7 @@ or authentication. `-H`, `--method`, and `--remote-platform` are rejected for
 
 | Need | Command or child skill |
 | --- | --- |
+| Install the signed macOS connection helper for this CLI version | `ctl setup`; [setup reference](references/setup.md) |
 | Run once, stream output, preserve exit status | `ctl exec -- PROGRAM ARGS...`; guidance below |
 | Ordinary SSH login or file copy | `ctl ssh` / `ctl scp`; guidance below |
 | Inspect or edit saved hosts and connection methods | [ctl-host](../ctl-host/SKILL.md), `ctl skill ctl-host` |
@@ -39,7 +40,7 @@ back to an OpenSSH alias or destination. Ambiguous saved names fail; use the ID.
 preferred method is used. A failed selected route does not choose another route.
 
 Host catalog commands take a positional host and reject `-H`. SSH/SCP also take
-their destination positionally. VPN management and `ctl-taskd restart` are local.
+their destination positionally. `ctl setup`, VPN management, and `ctl taskd restart` are local.
 
 Check `ctl --version`, `ctl --help`, and the relevant native subcommand's
 `--help` when availability or flags are uncertain. There is no global `--json`.

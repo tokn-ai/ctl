@@ -9,10 +9,13 @@ use zeroize::Zeroizing;
 
 use crate::credential_metadata::{self, Attributes, Metadata, SERVICE_PREFIX};
 
+mod availability;
 pub(crate) mod identity;
 mod index;
 mod operation;
 mod purpose;
+
+pub(crate) use availability::availability;
 
 const KEYCHAIN_SERVICE_PREFIX: &str = "dev.tokn-ai.ctl.ctld.ssh";
 const SAVE_POLICY_SERVICE_PREFIX: &str = "dev.tokn-ai.ctl.ctld.ssh-save-policy";
@@ -38,6 +41,14 @@ impl From<ctl_keychain_client::Error> for Error {
 impl Error {
   pub fn is_missing_entitlement(self) -> bool {
     self.0.code() == MISSING_ENTITLEMENT
+  }
+
+  pub fn is_unavailable(self) -> bool {
+    self.is_missing_entitlement() || self.0.code() == -25_291
+  }
+
+  pub fn is_locked(self) -> bool {
+    matches!(self.0.code(), -25_308 | -25_315 | -25_293 | -128)
   }
 
   pub fn is_busy(self) -> bool {
@@ -118,6 +129,10 @@ pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) ->
 }
 
 pub fn should_offer_save(target: &SshTarget) -> Result<bool, Error> {
+  availability::with_access_policy(availability, || read_save_policy(target))
+}
+
+fn read_save_policy(target: &SshTarget) -> Result<bool, Error> {
   let records = ctl_keychain_client::search(&Query {
     service: Some(&policy_service(target)),
     account: Some(SAVE_POLICY_ACCOUNT),
@@ -184,6 +199,7 @@ fn delete_inner(target: &SshTarget) -> Result<(), Error> {
 /// Inventory reads only the non-biometric metadata index and noninteractive
 /// existence checks. It never authorizes access to a stored password.
 pub fn list() -> Result<Inventory, Error> {
+  availability()?;
   let (credentials, _, complete) = index::list()?;
   let metadata_import_required = index::required()?;
   Ok(Inventory {

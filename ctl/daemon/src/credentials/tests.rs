@@ -94,7 +94,8 @@ fn response_limit_preserves_valid_json_and_reports_truncation() {
 #[test]
 fn keychain_errors_do_not_appear_as_a_successful_empty_inventory() {
   for (status, expected) in [
-    (-34_018, "credential_store_unavailable"),
+    (-34_018, "credential_store_missing_entitlement"),
+    (-25_291, "credential_store_unavailable"),
     (-25_308, "credential_store_locked"),
     (-128, "credential_store_locked"),
     (-50, "credential_list_failed"),
@@ -103,6 +104,18 @@ fn keychain_errors_do_not_appear_as_a_successful_empty_inventory() {
     let response = keychain_error(failure, "credential_list_failed");
     assert!(matches!(response, Response::Error { code, .. } if code == expected));
   }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn service_unavailable_does_not_tell_users_to_sign_the_daemon() {
+  let failure = ctl_keychain_client::Error(-25_291).into();
+  let Response::Error { message, .. } = keychain_error(failure, "credential_list_failed") else {
+    panic!("unavailable service must return an error");
+  };
+  assert!(message.contains("login session"));
+  assert!(!message.contains("signed"));
+  assert!(!message.contains("entitlement"));
 }
 
 #[cfg(not(target_os = "macos"))]

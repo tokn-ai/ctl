@@ -85,6 +85,14 @@ protected binding together. Password-only connections therefore do not request
 identity-passphrase access; a gateway or server that actually requires both
 credentials can still need separate authorizations.
 
+When OpenSSH needs manual password or key-passphrase entry, the authentication
+prompt explains whether no usable saved credential was found or Keychain access
+was unavailable, unauthorized, locked, or denied. This warning does not appear
+for unused keys or an already-authenticated master. Before offering to save a
+credential, ctld checks its current Keychain access without reading a password
+or displaying authentication UI. If access is unavailable, it completes the
+connection without a save offer or an extra passphrase import.
+
 Creation and modification dates are Keychain metadata, not a record of the last
 login. Missing dates are shown as not recorded. Source errors do not hide rows
 successfully read from another source, and a failed refresh marks retained rows

@@ -374,6 +374,10 @@ so the local team selection does not modify tracked files. Free Personal Team
 profiles expire after seven days; after initial setup the signed-development
 launcher asks Xcode to refresh an expired profile automatically.
 
+The standalone CLI shares this provisioning project and profile discovery.
+From the repository root, `node scripts/dev/ctl-signed.mts` builds a signed CLI
+with `ctld.app` embedded; see the [CLI development instructions](../../README.md#build).
+
 Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
 profiles and `~/Library/Application Support/ctmux/signing/ctld.provisionprofile`,
 selects the newest unexpired profile for `dev.tokn-ai.ctl.ctld`, discovers its
@@ -400,12 +404,21 @@ daemon. Signed bundles remain available for running helpers and pending restart
 operations after the launcher exits. Private SSH masters still expire after
 five idle minutes; surviving the app's exit does not disable that timeout.
 
-The launcher needs no signing environment variables. Tauri arguments,
-such as `--release`, can be passed through `pnpm tauri:dev:signed --release`.
+The launcher needs no signing environment variables. Local helper signing
+explicitly disables timestamps, so Apple's timestamp service is not needed
+for this development flow.
+
+Tauri arguments, such as `--release`, can be passed through
+`pnpm tauri:dev:signed --release`.
 Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
 failed build, following Tauri's behavior.
-Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch ID-protected
-credentials. Run the launcher regression tests with `pnpm test:dev`.
+Ordinary `pnpm tauri dev` keeps the desktop's bundled helper first, then discovers
+a compatible, verified `ctld.app` selected under `~/.tokn/ctl`, including signed
+development installations. Without one it falls back to a loose, unsigned daemon
+and cannot store Touch ID-protected credentials. Installing a signed helper does
+not change an already-running daemon: use **About → Restart** to replace that
+owner explicitly. The restart can interrupt its SSH forwards and VPN connections.
+Run the launcher regression tests with `pnpm test:dev`.
 
 The release workflow derives the Team ID and signing identity from the profile
 and imported certificate. It expects `APPLE_API_ISSUER` and `APPLE_API_KEY` as

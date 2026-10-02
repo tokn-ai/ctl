@@ -234,7 +234,10 @@ async function protocolVersion(executable: string): Promise<number> {
 async function packageBundle(executable: string, bundle: string, config: SignedDaemonConfig): Promise<void> {
   const child = ownDaemon(spawn(path.join(config.repository_root, "scripts/ci/package-ctld-app.sh"), [executable, bundle, config.app_version], {
     cwd: config.repository_root,
-    env: { ...helperEnvironment(), CTLD_PROVISIONING_PROFILE: config.profile_path },
+    env: {
+      ...helperEnvironment(), CTLD_PROVISIONING_PROFILE: config.profile_path,
+      CTLD_SIGNING_TIMESTAMP: "none", CTLD_REQUIRE_DISTRIBUTION_SIGNING: "false",
+    },
     stdio: "inherit",
   }));
   await child.exited;

@@ -82,11 +82,16 @@ pub(super) fn ctld_version(binary: DaemonBinaryInfo) -> ComponentVersionInfo {
   )
 }
 
-pub(super) async fn ctld(owner: Owner) -> ComponentVersionRow {
+pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
   let mut row = ComponentVersionRow::local("ctld", &owner.label);
   row.component_id = owner.id.clone();
   let client = Client::new(owner.socket.clone());
+  // This discovers an existing verified helper only; it never installs a
+  // payload or replaces the owner observed by the separate passive probe.
   let (running, available) = tokio::join!(client.probe(), async {
+    owner.executable = crate::daemon_helper::executable()
+      .await
+      .map_err(|error| error.to_string());
     owner
       .client()?
       .available()
@@ -374,6 +379,69 @@ async fn binary_output(executable: &Path, argument: &str) -> Result<Vec<u8>, Str
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(target_os = "macos")]
+  #[tokio::test]
+  async fn shared_helper_available_child() {
+    if std::env::var("CTMUX_HELPER_TEST_MODE").as_deref() != Ok("about") {
+      return;
+    }
+    ctl_ipc::register_daemon_executable_provider(crate::daemon_helper::tests::provider).unwrap();
+    let owner = owners().remove(0);
+    let row = ctld(owner).await;
+    assert!(row.available.is_some(), "{:?}", row.error);
+    assert!(row.error.is_none(), "{:?}", row.error);
+    assert_eq!(row.status, VersionStatus::NotRunning);
+    assert_eq!(
+      crate::daemon_helper::executable().await.unwrap(),
+      crate::daemon_helper::tests::shared_executable()
+    );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[tokio::test]
+  async fn shared_helper_timeout_preserves_running_status_child() {
+    if std::env::var("CTMUX_HELPER_TEST_MODE").as_deref() != Ok("about_timeout") {
+      return;
+    }
+    ctl_ipc::register_daemon_executable_provider(crate::daemon_helper::tests::provider).unwrap();
+    let owner = owners().remove(0);
+    let listener = tokio::net::UnixListener::bind(&owner.socket).unwrap();
+    let row = tokio::spawn(ctld(owner));
+    // The passive inspection must begin while helper discovery is still pending.
+    let (mut peer, _) = listener.accept().await.unwrap();
+    assert!(matches!(
+      ctl_ipc::read_frame::<_, ctl_ipc::lifecycle::Request>(&mut peer)
+        .await
+        .unwrap(),
+      Some(ctl_ipc::lifecycle::Request::CtldInspect { .. })
+    ));
+    ctl_ipc::write_frame(
+      &mut peer,
+      &ctl_ipc::lifecycle::Response::CtldInfo {
+        info: ctl_ipc::lifecycle::DaemonInfo {
+          instance_id: "existing-owner".into(),
+          binary: crate::daemon_helper::tests::binary_info(),
+          active_vpn_count: 0,
+        },
+      },
+    )
+    .await
+    .unwrap();
+    drop(peer);
+    tokio::time::pause();
+    tokio::time::advance(crate::daemon_helper::PREPARATION_TIMEOUT).await;
+    let row = row.await.unwrap();
+    assert!(row.running.is_some(), "{row:?}");
+    assert!(row.available.is_none(), "{row:?}");
+    assert!(!row.restart_supported);
+    assert!(
+      row
+        .error
+        .unwrap()
+        .contains(crate::daemon_helper::TIMEOUT_MESSAGE)
+    );
+  }
 
   fn owner(socket: &str, label: &str) -> Owner {
     Owner {

@@ -31,8 +31,9 @@ pub async fn ensure_master(
         prompt_id,
         kind,
         message,
+        warning,
       }) => {
-        let response = request_response(Some(context), prompt_kind(kind), message).await;
+        let response = request_response(Some(context), prompt_kind(kind), message, warning).await;
         ctl_ipc::write_frame(
           &mut stream,
           &ClientMessage::PromptResponse {

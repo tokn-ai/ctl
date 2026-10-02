@@ -1215,13 +1215,17 @@ button:disabled {
   flex: 1;
   font-size: 13px;
 }
-.quick-input-description {
+.quick-input-description,
+.quick-input-warning {
   margin: 0;
   padding: 0 12px 12px;
   color: var(--muted);
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.quick-input-warning {
+  color: var(--warning);
 }
 .quick-input-detail {
   display: block;

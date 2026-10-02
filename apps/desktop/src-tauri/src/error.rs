@@ -73,7 +73,7 @@ impl CommandErrorDto {
       | CoreError::InvalidAgentBundleId(_) => {
         Self::new("remote_agent_install_failed", error.to_string())
       }
-      CoreError::LocalIpc(_) | CoreError::LocalTask(_) => {
+      CoreError::LocalIpc(_) | CoreError::LocalTask(_) | CoreError::LocalConnection(_) => {
         Self::new("local_connection_failed", error.to_string())
       }
     }

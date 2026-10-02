@@ -133,6 +133,7 @@ async fn metadata(path: &Path) -> io::Result<ComponentInfo> {
     let mut child = tokio::process::Command::new(path)
       .arg("--component-info")
       .env_remove("CTLD_ASKPASS")
+      .env_remove("CTLD_IDENTITY_ASKPASS")
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::null())
@@ -175,6 +176,65 @@ mod tests {
 
   static NEXT: AtomicUsize = AtomicUsize::new(0);
   static SCRIPTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+  #[tokio::test]
+  async fn metadata_query_ignores_inherited_askpass_modes() {
+    let _guard = SCRIPTS.lock().await;
+    let directory = std::env::temp_dir().join(format!(
+      "component-metadata-environment-{}-{}",
+      std::process::id(),
+      NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("helper");
+    let info = ComponentInfo {
+      build: crate::component::build_info(),
+      protocols: vec![ProtocolInfo {
+        name: "test".into(),
+        version: 1,
+      }],
+    };
+    // Actual daemon askpass dispatch happens before command-line parsing. A
+    // query must clear both inherited selectors before launching the helper.
+    std::fs::write(
+      &path,
+      format!(
+        "#!/bin/sh\nset -eu\n[ \"$1\" = --component-info ]\n[ \"${{CTLD_ASKPASS:-}}\" != 1 ]\n[ \"${{CTLD_IDENTITY_ASKPASS:-}}\" != 1 ]\nprintf '%s\\n' '{}'\n",
+        serde_json::to_string(&info).unwrap()
+      ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+    child
+      .args([
+        "--exact",
+        "executable::tests::metadata_query_child",
+        "--nocapture",
+      ])
+      .env("CTL_METADATA_TEST_EXECUTABLE", &path)
+      .env("CTLD_ASKPASS", "1")
+      .env("CTLD_IDENTITY_ASKPASS", "1")
+      .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(5), child.output())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    std::fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[tokio::test]
+  async fn metadata_query_child() {
+    let Some(executable) = std::env::var_os("CTL_METADATA_TEST_EXECUTABLE") else {
+      return;
+    };
+    assert_eq!(std::env::var("CTLD_ASKPASS").unwrap(), "1");
+    assert_eq!(std::env::var("CTLD_IDENTITY_ASKPASS").unwrap(), "1");
+    PreparedExecutable::prepare(PathBuf::from(executable), &[("test", 1)])
+      .await
+      .unwrap();
+  }
 
   #[tokio::test]
   async fn recheck_detects_changed_contents_even_with_identical_reported_build() {

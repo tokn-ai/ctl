@@ -57,13 +57,41 @@ pub async fn ssh_command(target: &ConnectionTargetDto) -> Result<Command, Error>
     let path = crate::ssh_broker::ensure_master(target.clone()).await?;
     command.args([OsString::from("-S"), path.into_os_string()]);
     command.args(["-o", "ControlMaster=no", "-o", "ProxyCommand=false"]);
+    // The owner already opened this route. Reusing it needs no proxy helper
+    // executable and must not install a new bundle for an existing connection.
+    let mut defaults = target.clone();
+    defaults.gateways.clear();
+    command.args(target_arguments(&defaults)?);
   }
-  command.args(target_arguments(&target)?);
+  #[cfg(not(unix))]
+  command.args(prepared_target_arguments(&target).await?);
   Ok(command)
 }
 
 /// Explicit structured fields become defaults after any user-supplied options.
 pub fn target_arguments(target: &ctl_ipc::SshTarget) -> Result<Vec<OsString>, Error> {
+  target_arguments_with_proxy(target, None)
+}
+
+pub async fn prepared_target_arguments(
+  target: &ctl_ipc::SshTarget,
+) -> Result<Vec<OsString>, Error> {
+  let proxy = if target
+    .gateways
+    .iter()
+    .any(|gateway| gateway.kind.requires_proxy_command())
+  {
+    Some(ctl_ipc::prepare_proxy_command(&target.gateways).await?)
+  } else {
+    None
+  };
+  target_arguments_with_proxy(target, proxy)
+}
+
+fn target_arguments_with_proxy(
+  target: &ctl_ipc::SshTarget,
+  proxy: Option<String>,
+) -> Result<Vec<OsString>, Error> {
   let mut result = Vec::new();
   let mut option = |value: String| {
     result.push("-o".into());
@@ -90,10 +118,11 @@ pub fn target_arguments(target: &ctl_ipc::SshTarget) -> Result<Vec<OsString>, Er
     .iter()
     .any(|gateway| gateway.kind.requires_proxy_command())
   {
-    option(format!(
-      "ProxyCommand={}",
-      ctl_ipc::proxy_command(&target.gateways)?
-    ));
+    let proxy = match proxy {
+      Some(proxy) => proxy,
+      None => ctl_ipc::proxy_command(&target.gateways)?,
+    };
+    option(format!("ProxyCommand={proxy}"));
     // Never let a direct SSH-config master bypass the selected route.
     option("ControlPath=none".into());
   } else if !target.gateways.is_empty() {

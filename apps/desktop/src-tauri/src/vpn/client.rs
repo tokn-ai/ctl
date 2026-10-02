@@ -1,9 +1,9 @@
-//! Select the app's daemon and configured signed helper for VPN operations.
+//! Select the app's daemon endpoint without preparing a helper for passive use.
 
 use std::path::PathBuf;
 
-pub(super) fn client() -> Result<ctl_ipc::vpn::Client, ctl_ipc::vpn::VpnError> {
-  Ok(ctl_ipc::vpn::Client::default().with_daemon_executable(ctl_ipc::daemon_executable()?))
+pub(super) fn client() -> ctl_ipc::vpn::Client {
+  ctl_ipc::vpn::Client::default()
 }
 
 pub(super) fn selected_daemon_executable() -> Result<Option<PathBuf>, ctl_ipc::ConnectError> {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::identities;
+use crate::identity_connection::fallback::{Fallbacks, Reason};
 use crate::identity_connection::lazy::{Candidate, LazyIdentities, UnlockedAgent, Unlocker};
 use base64::Engine as _;
 use std::future::Future;
@@ -85,6 +86,7 @@ struct MockUnlocker {
   logs: Arc<Mutex<Vec<Log>>>,
   sockets: Arc<Mutex<Vec<PathBuf>>>,
   tokens: Mutex<Vec<Arc<AtomicBool>>>,
+  failure: Option<Reason>,
 }
 
 impl MockUnlocker {
@@ -96,7 +98,14 @@ impl MockUnlocker {
       logs: Arc::default(),
       sockets: Arc::default(),
       tokens: Mutex::default(),
+      failure: None,
     })
+  }
+
+  fn failing(reason: Reason) -> Arc<Self> {
+    let mut unlocker = Self::new(None, false);
+    Arc::get_mut(&mut unlocker).unwrap().failure = Some(reason);
+    unlocker
   }
 }
 
@@ -106,27 +115,36 @@ impl Unlocker for MockUnlocker {
     snapshot: Arc<identities::IdentitySnapshot>,
     _context: String,
     canceled: Arc<AtomicBool>,
-  ) -> Pin<Box<dyn Future<Output = Option<UnlockedAgent>> + Send>> {
+  ) -> Pin<Box<dyn Future<Output = Result<UnlockedAgent, Reason>> + Send>> {
     self.calls.fetch_add(1, Ordering::SeqCst);
     self.tokens.lock().unwrap().push(Arc::clone(&canceled));
     let public_key = self.public_key.clone();
     let gate = self.gate.clone();
     let logs = Arc::clone(&self.logs);
     let sockets = Arc::clone(&self.sockets);
+    let failure = self.failure;
     Box::pin(async move {
       if let Some(gate) = gate {
-        gate.acquire().await.ok()?.forget();
+        gate
+          .acquire()
+          .await
+          .map_err(|_| Reason::AgentUnavailable)?
+          .forget();
       }
       if canceled.load(Ordering::Acquire) {
-        return None;
+        return Err(Reason::Identity(identities::IdentityError::UnlockFailed));
       }
-      identities::ensure_current(&snapshot).ok()?;
-      let public_key = public_key?;
-      let blob = crate::identity_connection::lazy::public_blob(&public_key)?;
+      identities::ensure_current(&snapshot).map_err(Reason::Identity)?;
+      if let Some(reason) = failure {
+        return Err(reason);
+      }
+      let public_key = public_key.ok_or(Reason::NotSaved)?;
+      let blob = crate::identity_connection::lazy::public_blob(&public_key)
+        .ok_or(Reason::PublicHintUnavailable)?;
       let agent = FakeAgent::new(&blob, b"lazy signature");
       logs.lock().unwrap().push(Arc::clone(&agent.log));
       sockets.lock().unwrap().push(agent.socket.clone());
-      Some(UnlockedAgent {
+      Ok(UnlockedAgent {
         public_key,
         socket: agent.socket.clone(),
         _owner: Box::new(agent),
@@ -213,6 +231,63 @@ async fn signing_before_enumeration_cannot_read_a_saved_passphrase() {
     [FAILURE]
   );
   assert_eq!(unlocker.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn lazy_unlock_retains_the_fallback_cause_without_warning_for_unused_keys() {
+  let fixture = Fixture::new();
+  for (reason, message) in [
+    (Reason::NotSaved, "No usable saved passphrase"),
+    (
+      Reason::Identity(identities::IdentityError::KeychainMissingEntitlement),
+      "not authorized for Keychain access",
+    ),
+    (
+      Reason::Identity(identities::IdentityError::KeychainUnavailable),
+      "Keychain access is unavailable",
+    ),
+    (
+      Reason::Identity(identities::IdentityError::KeychainLocked),
+      "locked or was not allowed",
+    ),
+    (
+      Reason::Identity(identities::IdentityError::KeychainBusy),
+      "Another Keychain request",
+    ),
+  ] {
+    let fallbacks = Arc::new(Fallbacks::default());
+    let unlocker = MockUnlocker::failing(reason);
+    let registry = LazyIdentities::with_unlocker_and_fallbacks(
+      vec![fixture.candidate()],
+      "synthetic connection".into(),
+      unlocker.clone(),
+      Arc::clone(&fallbacks),
+    );
+    assert!(fallbacks.warning(&fixture.snapshot.identity_id).is_none());
+    assert_eq!(registry.public_identities().count(), 1);
+    assert!(fallbacks.warning(&fixture.snapshot.identity_id).is_none());
+    for _ in 0..2 {
+      assert!(registry.agent_for(&fixture.blob).await.is_none());
+      assert!(
+        fallbacks
+          .warning(&fixture.snapshot.identity_id)
+          .unwrap()
+          .contains(message)
+      );
+    }
+    assert_eq!(unlocker.calls.load(Ordering::SeqCst), 1);
+  }
+  let fallbacks = Arc::new(Fallbacks::default());
+  fallbacks.record(&fixture.snapshot.identity_id, Reason::NotSaved);
+  let unlocker = MockUnlocker::new(Some(fixture.public_key.clone()), false);
+  let registry = LazyIdentities::with_unlocker_and_fallbacks(
+    vec![fixture.candidate()],
+    "synthetic connection".into(),
+    unlocker,
+    Arc::clone(&fallbacks),
+  );
+  assert!(registry.agent_for(&fixture.blob).await.is_some());
+  assert!(fallbacks.warning(&fixture.snapshot.identity_id).is_none());
 }
 
 #[tokio::test]

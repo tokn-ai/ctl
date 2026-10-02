@@ -31,38 +31,45 @@ const remoteTargets = [
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ];
+const macTargets = ["x86_64-apple-darwin", "aarch64-apple-darwin"];
 
-async function fixture(t: TestContext): Promise<string> {
+async function writeAsset(directory: string, name: string, bytes: Buffer): Promise<{
+  sha256: string;
+  archive_size: number;
+}> {
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  await writeFile(join(directory, name), bytes);
+  await writeFile(join(directory, `${name}.sha256`), `${sha256}  ${name}\n`);
+  return { sha256, archive_size: bytes.length };
+}
+
+async function fixture(t: TestContext, buildIdentity: BundleIdentity = identity): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "ctmux-release-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const addAsset = async (name: string): Promise<string> => {
-    const content = `test bundle ${name}`;
-    const sha256 = createHash("sha256").update(content).digest("hex");
-    await writeFile(join(directory, name), content);
-    await writeFile(join(directory, `${name}.sha256`), `${sha256}  ${name}\n`);
-    return sha256;
+    return (await writeAsset(directory, name, Buffer.from(`test bundle ${name}`))).sha256;
   };
   const targets: Record<string, { archive: string; sha256: string }> = {};
   for (const target of remoteTargets) {
-    const archive = `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`;
+    const archive = `ctl-agent-bundle-${buildIdentity.bundle_id}-${target}.tar.gz`;
     targets[target] = { archive, sha256: await addAsset(archive) };
   }
   await writeFile(join(directory, "bundle-set.json"), JSON.stringify({
-    schema_version: 1, ...identity, targets,
+    schema_version: 1, ...buildIdentity, targets,
   }));
   for (const target of desktopTargets) {
     const extensions = target.endsWith("apple-darwin") ? ["dmg", "app.tar.gz"] : ["deb", "rpm", "AppImage"];
     const assets: { name: string; sha256: string }[] = [];
     for (const extension of extensions) {
-      const name = `ctmux-${identity.bundle_id}-${target}.${extension}`;
+      const name = `ctmux-${buildIdentity.bundle_id}-${target}.${extension}`;
       assets.push({ name, sha256: await addAsset(name) });
     }
     await writeFile(join(directory, `desktop-${target}.json`), JSON.stringify({
       schema_version: 1,
       target,
-      bundle_id: identity.bundle_id,
-      git_revision: identity.git_revision,
-      signing_mode: target.endsWith("apple-darwin") ? "unsigned" : "not_applicable",
+      bundle_id: buildIdentity.bundle_id,
+      git_revision: buildIdentity.git_revision,
+      signing_mode: target.endsWith("apple-darwin") ? (buildIdentity.bundle_id === buildIdentity.app_version ? "signed" : "unsigned") : "not_applicable",
       assets,
     }));
   }
@@ -74,7 +81,34 @@ const exampleBundle: ReleaseBundle = {
   asset_directory: "/tmp/bundles",
   asset_names: ["new-package.dmg", "desktop.json"],
   unsigned_targets: ["aarch64-apple-darwin"],
+  signed_ctld_targets: [],
+  bundled_cli_targets: [],
 };
+
+async function ctldAssets(directory: string, buildIdentity: BundleIdentity = identity): Promise<void> {
+  for (const target of macTargets) {
+    const archive = `ctld-${buildIdentity.bundle_id}-${target}.app.tar.gz`;
+    const asset = await writeAsset(directory, archive, Buffer.from(`fixture signed helper ${target}`));
+    await writeFile(join(directory, `ctld-${target}.json`), JSON.stringify({
+      schema_version: 1, component: "ctld", ...buildIdentity, target,
+      bundle_identifier: "dev.tokn-ai.ctl.ctld", team_identifier: "ABC123DEF4",
+      signing_mode: "signed", notarized: true, archive, ...asset,
+    }));
+  }
+}
+
+async function cliAssets(directory: string, buildIdentity: BundleIdentity = identity): Promise<void> {
+  for (const target of macTargets) {
+    const ctldManifest = JSON.parse(await readFile(join(directory, `ctld-${target}.json`), "utf8"));
+    const archive = `ctl-${buildIdentity.bundle_id}-${target}.tar.gz`;
+    const asset = await writeAsset(directory, archive, Buffer.from(`fixture signed ctl ${target}`));
+    await writeFile(join(directory, `ctl-cli-${target}.json`), JSON.stringify({
+      schema_version: 1, component: "ctl-cli", ...buildIdentity, target,
+      team_identifier: ctldManifest.team_identifier, signing_mode: "signed", notarized: true,
+      bundled_ctld_sha256: ctldManifest.sha256, archive, ...asset,
+    }));
+  }
+}
 
 interface MockRelease {
   id: number;
@@ -188,6 +222,162 @@ test("validates all four desktop and remote targets and their checksum files", a
   assert.equal(bundle.asset_names.length, 33);
   assert.deepEqual(bundle.unsigned_targets, ["x86_64-apple-darwin", "aarch64-apple-darwin"]);
   assert.ok(bundle.asset_names.includes("bundle-set.json"));
+});
+
+test("accepts a complete signed standalone helper pair without CLI assets in development builds", async (t) => {
+  const directory = await fixture(t);
+  await ctldAssets(directory);
+  const bundle = await validateReleaseBundle(identity, directory);
+  assert.equal(bundle.asset_names.length, 39);
+  assert.deepEqual(bundle.signed_ctld_targets, macTargets);
+  assert.deepEqual(bundle.bundled_cli_targets, []);
+  assert.ok(releaseNotes(bundle, null).includes("signed, notarized, and stapled ctld.app"));
+});
+
+test("accepts matching signed helper and bundled CLI pairs in development and version builds", async (t) => {
+  for (const buildIdentity of [identity, { ...identity, bundle_id: identity.app_version }]) {
+    await t.test(buildIdentity.bundle_id, async (t) => {
+      const directory = await fixture(t, buildIdentity);
+      await ctldAssets(directory, buildIdentity);
+      await cliAssets(directory, buildIdentity);
+      const bundle = await validateReleaseBundle(buildIdentity, directory);
+      assert.equal(bundle.asset_names.length, 45);
+      assert.deepEqual(bundle.signed_ctld_targets, macTargets);
+      assert.deepEqual(bundle.bundled_cli_targets, macTargets);
+      const notes = releaseNotes(bundle, null);
+      assert.ok(notes.includes("signed, notarized, and stapled ctld.app"));
+      assert.ok(notes.includes("signed and notarized ctl CLI archives"));
+      assert.ok(notes.includes("ctld helper embedded for offline setup"));
+    });
+  }
+});
+
+test("version builds require signed macOS desktops and complete helper and CLI pairs", async (t) => {
+  const versionIdentity = { ...identity, bundle_id: identity.app_version };
+  await t.test("missing helpers", async (t) => {
+    const directory = await fixture(t, versionIdentity);
+    await assert.rejects(validateReleaseBundle(versionIdentity, directory), /ctld-x86_64-apple-darwin.json/);
+  });
+  await t.test("incomplete helper pair", async (t) => {
+    const directory = await fixture(t);
+    await ctldAssets(directory);
+    await rm(join(directory, "ctld-aarch64-apple-darwin.json"));
+    await assert.rejects(validateReleaseBundle(identity, directory), /ctld-aarch64-apple-darwin.json/);
+  });
+  await t.test("missing CLI pair", async (t) => {
+    const directory = await fixture(t, versionIdentity);
+    await ctldAssets(directory, versionIdentity);
+    await assert.rejects(validateReleaseBundle(versionIdentity, directory), /ctl-cli-x86_64-apple-darwin.json/);
+  });
+  await t.test("incomplete development CLI pair", async (t) => {
+    const directory = await fixture(t);
+    await ctldAssets(directory);
+    await cliAssets(directory);
+    await rm(join(directory, "ctl-cli-aarch64-apple-darwin.json"));
+    await assert.rejects(validateReleaseBundle(identity, directory), /ctl-cli-aarch64-apple-darwin.json/);
+  });
+  await t.test("CLI pair without standalone helper manifests", async (t) => {
+    const directory = await fixture(t);
+    await ctldAssets(directory);
+    await cliAssets(directory);
+    for (const target of macTargets) {
+      await rm(join(directory, `ctld-${target}.json`));
+    }
+    await assert.rejects(validateReleaseBundle(identity, directory), /ctld-x86_64-apple-darwin.json/);
+  });
+  await t.test("unsigned version desktop", async (t) => {
+    const directory = await fixture(t, versionIdentity);
+    await ctldAssets(directory, versionIdentity);
+    const path = join(directory, "desktop-aarch64-apple-darwin.json");
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.signing_mode = "unsigned";
+    await writeFile(path, JSON.stringify(manifest));
+    await assert.rejects(validateReleaseBundle(versionIdentity, directory), /require signed macOS desktop/);
+  });
+});
+
+test("rejects CLI manifests with untrusted signing policy, mixed builds, or a different embedded helper", async (t) => {
+  for (const change of [
+    { component: "ctld" },
+    { app_version: "0.2.0" },
+    { bundle_id: "other-build" },
+    { git_revision: "a".repeat(40) },
+    { target: "x86_64-apple-darwin" },
+    { team_identifier: "OTHERTEAM1" },
+    { signing_mode: "unsigned" },
+    { notarized: false },
+    { bundled_ctld_sha256: "0".repeat(64) },
+    { archive: "../ctl.tar.gz" },
+    { archive_size: 1 },
+    { sha256: "0".repeat(64) },
+  ]) {
+    await t.test(JSON.stringify(change), async (t) => {
+      const directory = await fixture(t);
+      await ctldAssets(directory);
+      await cliAssets(directory);
+      const path = join(directory, "ctl-cli-aarch64-apple-darwin.json");
+      const manifest = JSON.parse(await readFile(path, "utf8"));
+      await writeFile(path, JSON.stringify({ ...manifest, ...change }));
+      await assert.rejects(validateReleaseBundle(identity, directory), /ctl CLI manifest|size mismatch|Checksum mismatch/);
+    });
+  }
+});
+
+test("validates CLI archive bytes, checksum files, and regular file types", async (t) => {
+  const archive = `ctl-${identity.bundle_id}-aarch64-apple-darwin.tar.gz`;
+  await t.test("corrupt archive with unchanged size", async (t) => {
+    const directory = await fixture(t);
+    await ctldAssets(directory);
+    await cliAssets(directory);
+    const path = join(directory, archive);
+    await writeFile(path, Buffer.alloc((await readFile(path)).length));
+    await assert.rejects(validateReleaseBundle(identity, directory), /Checksum mismatch/);
+  });
+  await t.test("invalid checksum file", async (t) => {
+    const directory = await fixture(t);
+    await ctldAssets(directory);
+    await cliAssets(directory);
+    await writeFile(join(directory, `${archive}.sha256`), "unverified");
+    await assert.rejects(validateReleaseBundle(identity, directory), /Invalid checksum file/);
+  });
+  for (const name of ["ctl-cli-aarch64-apple-darwin.json", archive, `${archive}.sha256`]) {
+    await t.test(`symlink ${name}`, async (t) => {
+      const directory = await fixture(t);
+      await ctldAssets(directory);
+      await cliAssets(directory);
+      const path = join(directory, name);
+      const bytes = await readFile(path);
+      const outsideDirectory = await mkdtemp(join(tmpdir(), "ctmux-release-symlink-test-"));
+      t.after(() => rm(outsideDirectory, { recursive: true, force: true }));
+      const outside = join(outsideDirectory, name);
+      await writeFile(outside, bytes);
+      await rm(path);
+      await symlink(outside, path);
+      await assert.rejects(validateReleaseBundle(identity, directory), /regular file/);
+    });
+  }
+});
+
+test("rejects untrusted, mixed, or corrupt standalone helper assets", async (t) => {
+  for (const change of [
+    { component: "other" },
+    { app_version: "0.2.0" },
+    { bundle_identifier: "wrong.identifier" },
+    { signing_mode: "unsigned" },
+    { notarized: false },
+    { team_identifier: "OTHERTEAM1" },
+    { archive_size: 1 },
+    { sha256: "0".repeat(64) },
+  ]) {
+    await t.test(JSON.stringify(change), async (t) => {
+      const directory = await fixture(t);
+      await ctldAssets(directory);
+      const path = join(directory, "ctld-aarch64-apple-darwin.json");
+      const manifest = JSON.parse(await readFile(path, "utf8"));
+      await writeFile(path, JSON.stringify({ ...manifest, ...change }));
+      await assert.rejects(validateReleaseBundle(identity, directory), /ctld manifest|team identity|size mismatch|Checksum mismatch/);
+    });
+  }
 });
 
 test("refuses an incomplete target set", async (t) => {

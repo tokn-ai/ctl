@@ -18,6 +18,7 @@ use tokio::sync::watch;
 
 pub mod hosts;
 pub mod maintenance;
+pub mod setup;
 mod ssh_install;
 pub mod ssh_reachability;
 mod ssh_startup;
@@ -411,7 +412,7 @@ pub async fn open_ssh_service_interactive(
   let mut command = Command::new(SSH_PROGRAM);
 
   // Insert local-only options before `--`; never append them to the remote command.
-  let arguments = ssh_service_arguments(destination, options, service);
+  let arguments = ssh_service_arguments(destination, options, interaction, service).await?;
   let extra = configure_ssh_interaction(&mut command, interaction);
   command.args(extra).args(arguments);
   start_ssh_transport(command).await
@@ -432,7 +433,7 @@ pub async fn open_identified_ssh_service(
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
     .args(extra)
-    .args(ssh_service_arguments(destination, options, service))
+    .args(ssh_service_arguments(destination, options, interaction, service).await?)
     .arg("--identity");
   start_ssh_transport_identified(command, true, false, ready(())).await
 }
@@ -461,11 +462,7 @@ pub async fn open_identified_ssh_service_after_authentication(
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
     .args(extra)
-    .args(ssh_authenticated_service_arguments(
-      destination,
-      options,
-      service,
-    ))
+    .args(ssh_authenticated_service_arguments(destination, options, interaction, service).await?)
     .arg("--identity");
   start_ssh_transport_identified(command, true, true, on_authenticated).await
 }
@@ -578,7 +575,7 @@ async fn run_ssh_command_interactive(
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
     .args(extra)
-    .args(ssh_base_arguments(destination, options))
+    .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
     .arg(remote_command);
   run_fixed_command(command, input).await
 }
@@ -749,7 +746,8 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     // This is a preface-read failure enriched with stderr; retain its previous
     // reconnect behavior (for example after a transient connection refusal).
     CoreError::SshStartup(_) => true,
-    CoreError::LocalTask(_)
+    CoreError::LocalConnection(_)
+    | CoreError::LocalTask(_)
     | CoreError::InvalidSshDestination(_)
     | CoreError::InvalidSshOption(_)
     | CoreError::StartSsh(_)
@@ -852,51 +850,107 @@ fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Res
 }
 
 #[cfg(test)]
-fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsString> {
-  ssh_service_arguments(destination, options, RemoteService::Ctmux)
+async fn ssh_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsString> {
+  ssh_service_arguments(
+    destination,
+    options,
+    &SshInteraction::Inherit,
+    RemoteService::Ctmux,
+  )
+  .await
+  .unwrap()
 }
 
-fn ssh_service_arguments(
+async fn ssh_service_arguments(
   destination: &str,
   options: &SshConnectionOptions,
+  interaction: &SshInteraction,
   service: RemoteService,
-) -> Vec<OsString> {
+) -> Result<Vec<OsString>, CoreError> {
   ssh_service_arguments_with_command(
     destination,
     options,
+    interaction,
     options.remote_platform.command(),
     service,
   )
+  .await
 }
 
-fn ssh_authenticated_service_arguments(
+async fn ssh_authenticated_service_arguments(
   destination: &str,
   options: &SshConnectionOptions,
+  interaction: &SshInteraction,
   service: RemoteService,
-) -> Vec<OsString> {
+) -> Result<Vec<OsString>, CoreError> {
   ssh_service_arguments_with_command(
     destination,
     options,
+    interaction,
     &[UNIX_AUTHENTICATED_GATEWAY_COMMAND],
     service,
   )
+  .await
 }
 
-fn ssh_service_arguments_with_command(
+async fn ssh_service_arguments_with_command(
   destination: &str,
   options: &SshConnectionOptions,
+  interaction: &SshInteraction,
   command: &[&str],
   service: RemoteService,
-) -> Vec<OsString> {
-  let mut arguments = ssh_base_arguments(destination, options);
+) -> Result<Vec<OsString>, CoreError> {
+  let mut arguments = prepare_ssh_base_arguments(destination, options, interaction).await?;
+  append_service_arguments(&mut arguments, command, service);
+  Ok(arguments)
+}
+
+fn append_service_arguments(
+  arguments: &mut Vec<OsString>,
+  command: &[&str],
+  service: RemoteService,
+) {
   arguments.extend(command.iter().map(OsString::from));
   if service == RemoteService::Task {
     arguments.extend([OsString::from("--service"), OsString::from("task")]);
   }
-  arguments
 }
 
-fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<OsString> {
+async fn prepare_ssh_base_arguments(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+) -> Result<Vec<OsString>, CoreError> {
+  let fresh_route = !matches!(interaction, SshInteraction::Multiplexed { .. });
+  let proxy = if fresh_route
+    && options
+      .gateways
+      .iter()
+      .any(|gateway| gateway.kind.requires_proxy_command())
+  {
+    let gateways = options
+      .gateways
+      .iter()
+      .map(SshGateway::to_ipc)
+      .collect::<Vec<_>>();
+    Some(ctl_ipc::prepare_proxy_command(&gateways).await?)
+  } else {
+    None
+  };
+  Ok(ssh_base_arguments_with_proxy(
+    destination,
+    options,
+    proxy,
+    fresh_route,
+  ))
+}
+
+fn ssh_base_arguments_with_proxy(
+  destination: &str,
+  options: &SshConnectionOptions,
+  proxy: Option<String>,
+  fresh_route: bool,
+) -> Vec<OsString> {
   let mut arguments = [
     "-T",
     "-o",
@@ -913,24 +967,14 @@ fn ssh_base_arguments(destination: &str, options: &SshConnectionOptions) -> Vec<
   .into_iter()
   .map(OsString::from)
   .collect::<Vec<_>>();
-  if options
-    .gateways
-    .iter()
-    .any(|gateway| gateway.kind.requires_proxy_command())
-  {
-    let gateways = options
-      .gateways
-      .iter()
-      .map(SshGateway::to_ipc)
-      .collect::<Vec<_>>();
-    let proxy = ctl_ipc::proxy_command(&gateways).unwrap_or_else(|_| "false".into());
+  if let Some(proxy) = proxy {
     arguments.extend([
       OsString::from("-o"),
       OsString::from(format!("ProxyCommand={proxy}")),
       OsString::from("-o"),
       OsString::from("ControlPath=none"),
     ]);
-  } else if !options.gateways.is_empty() {
+  } else if fresh_route && !options.gateways.is_empty() {
     arguments.extend([
       // Unlike -J, this form respects an earlier ProxyCommand without treating
       // it as a conflicting argument. Multiplexed mode disables fresh routes.
@@ -996,6 +1040,8 @@ pub enum CoreError {
   LocalIpc(#[from] ctmux_ipc::ConnectError),
   #[error(transparent)]
   LocalTask(#[from] ctl_task_client::ClientError),
+  #[error(transparent)]
+  LocalConnection(#[from] ctl_ipc::ConnectError),
   #[error("invalid SSH destination '{0}'")]
   InvalidSshDestination(String),
   #[error("invalid structured SSH setting '{0}'")]
@@ -1035,10 +1081,10 @@ mod tests {
   use super::*;
   use tokio::io::AsyncWriteExt;
 
-  #[test]
-  fn ssh_command_uses_a_fixed_remote_command_and_disables_forwarding() {
+  #[tokio::test]
+  async fn ssh_command_uses_a_fixed_remote_command_and_disables_forwarding() {
     assert_eq!(
-      ssh_arguments("workstation", &SshConnectionOptions::default()),
+      ssh_arguments("workstation", &SshConnectionOptions::default()).await,
       [
         "-T",
         "-o",
@@ -1059,21 +1105,21 @@ mod tests {
     );
   }
 
-  #[test]
-  fn windows_remote_command_is_fixed_and_independent_of_client_platform() {
+  #[tokio::test]
+  async fn windows_remote_command_is_fixed_and_independent_of_client_platform() {
     let options = SshConnectionOptions {
       remote_platform: RemotePlatform::Windows,
       ..SshConnectionOptions::default()
     };
-    let arguments = ssh_arguments("windows-host", &options);
+    let arguments = ssh_arguments("windows-host", &options).await;
     assert_eq!(
       &arguments[arguments.len() - 4..],
       ["--", "windows-host", "ctl-agent.exe", "connect"].map(OsString::from)
     );
   }
 
-  #[test]
-  fn mixed_gateway_route_uses_the_ordered_proxy_helper() {
+  #[tokio::test]
+  async fn mixed_gateway_route_uses_the_ordered_proxy_helper() {
     let options = SshConnectionOptions {
       gateways: vec![
         SshGateway {
@@ -1099,7 +1145,9 @@ mod tests {
       ],
       ..SshConnectionOptions::default()
     };
-    let args = ssh_base_arguments("target.internal", &options);
+    let args = prepare_ssh_base_arguments("target.internal", &options, &SshInteraction::Inherit)
+      .await
+      .unwrap();
     let proxy = args
       .iter()
       .find(|arg| arg.to_string_lossy().starts_with("ProxyCommand="))
@@ -1129,8 +1177,8 @@ mod tests {
     assert_eq!(route[1].destination, "bastion.internal");
   }
 
-  #[test]
-  fn managed_vpn_routes_use_a_private_proxy_and_reject_stale_endpoints() {
+  #[tokio::test]
+  async fn managed_vpn_routes_use_a_private_proxy_and_reject_stale_endpoints() {
     let gateway = SshGateway {
       kind: ctl_ipc::GatewayKind::Vpn,
       vpn: Some(ctl_ipc::VpnGateway {
@@ -1149,7 +1197,9 @@ mod tests {
       ..SshConnectionOptions::default()
     };
     assert!(validate_ssh_target("target", &options).is_ok());
-    let args = ssh_base_arguments("target", &options);
+    let args = prepare_ssh_base_arguments("target", &options, &SshInteraction::Inherit)
+      .await
+      .unwrap();
     assert!(args.iter().any(|arg| arg == "ControlPath=none"));
     assert!(
       args
@@ -1167,8 +1217,8 @@ mod tests {
     assert!(validate_ssh_target("target", &options).is_err());
   }
 
-  #[test]
-  fn ssh_command_preserves_the_order_and_endpoint_fields_of_native_gateways() {
+  #[tokio::test]
+  async fn ssh_command_preserves_the_order_and_endpoint_fields_of_native_gateways() {
     let options = SshConnectionOptions {
       gateways: vec![
         SshGateway {
@@ -1195,7 +1245,7 @@ mod tests {
       ..SshConnectionOptions::default()
     };
 
-    let arguments = ssh_arguments("server", &options);
+    let arguments = ssh_arguments("server", &options).await;
     let jump = arguments
       .windows(2)
       .find(|pair| pair[0] == "-o" && pair[1].to_string_lossy().starts_with("ProxyJump="))
@@ -1203,16 +1253,30 @@ mod tests {
     assert_eq!(jump[1], "ProxyJump=edge-alias,operator@[2001:db8::2]:2222");
   }
 
-  #[test]
-  fn task_service_only_appends_fixed_arguments_on_either_remote_platform() {
+  #[tokio::test]
+  async fn task_service_only_appends_fixed_arguments_on_either_remote_platform() {
     for remote_platform in [RemotePlatform::Unix, RemotePlatform::Windows] {
       let options = SshConnectionOptions {
         remote_platform,
         port: Some(2222),
         ..SshConnectionOptions::default()
       };
-      let ctmux = ssh_service_arguments("host", &options, RemoteService::Ctmux);
-      let task = ssh_service_arguments("host", &options, RemoteService::Task);
+      let ctmux = ssh_service_arguments(
+        "host",
+        &options,
+        &SshInteraction::Inherit,
+        RemoteService::Ctmux,
+      )
+      .await
+      .unwrap();
+      let task = ssh_service_arguments(
+        "host",
+        &options,
+        &SshInteraction::Inherit,
+        RemoteService::Task,
+      )
+      .await
+      .unwrap();
       assert_eq!(&task[..ctmux.len()], ctmux.as_slice());
       assert_eq!(
         &task[ctmux.len()..],
@@ -1221,10 +1285,17 @@ mod tests {
     }
   }
 
-  #[test]
-  fn authenticated_service_uses_a_fixed_marker_before_the_unix_gateway() {
+  #[tokio::test]
+  async fn authenticated_service_uses_a_fixed_marker_before_the_unix_gateway() {
     let options = SshConnectionOptions::default();
-    let arguments = ssh_authenticated_service_arguments("host", &options, RemoteService::Ctmux);
+    let arguments = ssh_authenticated_service_arguments(
+      "host",
+      &options,
+      &SshInteraction::Inherit,
+      RemoteService::Ctmux,
+    )
+    .await
+    .unwrap();
     assert_eq!(
       &arguments[arguments.len() - 3..],
       ["--", "host", UNIX_AUTHENTICATED_GATEWAY_COMMAND].map(OsString::from)
@@ -1238,8 +1309,8 @@ mod tests {
     assert!(validate_destination("user@host").is_ok());
   }
 
-  #[test]
-  fn structured_ssh_settings_are_separate_arguments_before_the_destination() {
+  #[tokio::test]
+  async fn structured_ssh_settings_are_separate_arguments_before_the_destination() {
     let options = SshConnectionOptions {
       remote_platform: RemotePlatform::Unix,
       hostname: Some("127.0.0.1".into()),
@@ -1248,7 +1319,7 @@ mod tests {
       identity_file: Some(PathBuf::from("/tmp/key with spaces")),
       gateways: Vec::new(),
     };
-    let arguments = ssh_arguments("ctmux-remote-test", &options);
+    let arguments = ssh_arguments("ctmux-remote-test", &options).await;
 
     assert!(validate_ssh_target("ctmux-remote-test", &options).is_ok());
     assert_eq!(

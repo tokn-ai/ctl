@@ -17,4 +17,11 @@ describe("Identity mutation errors", () => {
         .toBe("Another Keychain request is still active. Complete or cancel it, then try again.");
     }
   });
+
+  it("distinguishes helper authorization from an unavailable Keychain session", () => {
+    expect(identityMutationError({ code: "identity_keychain_missing_entitlement", message: "sample-secret-fixture" }))
+      .toContain("signed ctld app with its matching provisioning profile");
+    expect(identityMutationError({ code: "identity_keychain_unavailable", message: "sample-secret-fixture" }))
+      .toContain("macOS login session");
+  });
 });

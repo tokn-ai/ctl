@@ -75,7 +75,8 @@ helper uses `dev.tokn-ai.ctl.ctld`. Signing the helper requires a matching
 provisioning profile.
 Update clients, daemons, and remote agent bundles together. The renamed build
 uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protocol
-12, remote identity protocol 3, and remote maintenance protocol 2.
+12, ctld lifecycle protocol 1, ctld one-shot helper API 1, remote identity
+protocol 3, and remote maintenance protocol 2.
 
 ## Configuration and persistent state
 
@@ -106,6 +107,89 @@ Remote identity and component bundles already use this root as `remote-id`,
 Rust 1.97 or newer is required. The Rust packages use the MIT license.
 See [Cargo publishing](docs/publishing.md) for package verification, installation,
 and the dependency order for the first crates.io release.
+
+After the packages and matching GitHub release are published, install the CLI
+and its local terminal/task companions on macOS:
+
+```sh
+cargo install --locked ctl-cli ctmuxd ctl-taskd
+ctl setup
+```
+
+`ctl setup` installs the signed and notarized `ctld.app` for the installed CLI's
+version and Mac architecture. It downloads the matching `v<version>` release;
+it does not select the latest release. The full bundle lives at
+`~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`. Setup updates
+the release `current` symlink and a selection for its architecture and supported
+APIs, replacing each link atomically. This is separate from the remote agent's
+existing `~/.tokn/ctl/versions/` and `current` installation.
+
+Setup checks the release checksum, Apple Developer ID signature, provisioning
+profile, notarization, and helper build/API identity against the installation's
+own manifest before selecting the helper. It needs no `sudo` and never starts,
+stops, or restarts a daemon, so running connections continue using their current
+daemon. `ctl setup --json`
+prints the installed version, executable path, and whether the installation was
+reused.
+
+`CTLD_BIN` selects an explicit executable. Without that override, a standalone
+macOS CLI prefers a verified, compatible managed `ctld.app`, then its own bundled
+helper, then a nearby desktop bundle, sibling executable, or `PATH`. The desktop
+continues to prefer its own bundled helper. On other Unix platforms, install
+`ctld` from Cargo alongside the CLI; `ctl setup` is a macOS-only command. Source-built macOS
+`ctld` remains useful for development but does not acquire our Apple signing
+identity or Keychain entitlement through Cargo.
+
+Official macOS CLI downloads embed the matching signed and notarized `ctld.app`.
+They prepare that helper locally when a command needs to start a daemon and no
+compatible shared app is selected; no helper download is needed. `ctl setup`
+also uses the embedded bundle. Existing compatible daemon connections and passive
+status queries do not trigger installation.
+Build these CLI downloads with the dedicated [release command](docs/ci-bundles.md#build-a-cli-with-ctld-embedded).
+Ordinary Cargo builds and `cargo install ctl-cli` also discover compatible shared
+apps, including signed development installations; they contain no embedded helper.
+
+Selections live at
+`~/.tokn/ctl/components/ctld/selected/<target>-ctld12-lifecycle1-helper1`.
+Compatibility requires the native architecture and the `ctld`, `ctld_lifecycle`,
+and `ctld_helper` API versions. The helper's build identity must match its own
+manifest; it does not have to match the CLI's commit, fingerprint, or release
+version. Discovery verifies the selected app instead of choosing a cache entry
+by its directory name or modification time. Unsafe or invalid selected
+installations produce a verification error.
+
+For a signed macOS CLI from a local checkout, provision once with the same
+Xcode project used by Tauri:
+
+```sh
+node scripts/dev/ctl-signed.mts --provision
+```
+
+In Xcode, select the `ctld-provisioning` target, choose your team under
+**Signing & Capabilities**, and build once. Then build and use the CLI:
+
+```sh
+node scripts/dev/ctl-signed.mts
+target/ctl-dev/ctl --help
+```
+
+The build discovers your profile and matching Keychain certificate, refreshing
+the profile through Xcode when needed. It compiles and signs `ctld.app`, embeds
+it inside the signed CLI, and supports uncommitted source changes. No signing
+environment variables or notarization credentials are required. The output
+follows Cargo's configured target directory.
+
+Development signing explicitly disables timestamps, so it does not depend on
+Apple's timestamp service. Distributable releases still require secure timestamps.
+
+The CLI prepares its helper when needed; `target/ctl-dev/ctl setup` also installs
+it explicitly. Development helpers live under
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/ctld.app`. They retain
+their signature and provisioning checks, use a separate immutable cache, and
+update the shared selection for their architecture and APIs while leaving the
+release `current` symlink intact. All standalone CLI builds can reuse that
+selection. Expired profiles require rebuilding. Existing compatible daemons keep
+running until you explicitly restart them.
 
 ```sh
 cargo build --workspace
@@ -138,15 +222,23 @@ cargo install --path ctmux/cli
 ```
 
 For remote access, install `ctmuxd`, `ctl-taskd`, and `ctl-agent` together on the
-controlled device and `ctl` with `ctld` on each Unix client:
+controlled device:
 
 ```sh
 cargo install --path ctmux/daemon
 cargo install --path task/daemon
 cargo install --path ctl/agent
+```
+
+On a Linux client, install `ctl` and `ctld` together from the checkout:
+
+```sh
 cargo install --path ctl/daemon
 cargo install --path ctl/cli
 ```
+
+For the official signed macOS helper, use the published CLI installation and
+`ctl setup` shown above. A source-built `ctld` is available for local development.
 
 The local task runner also requires `ctl-taskd` beside `ctl`, or `CTL_TASKD_BIN` set to
 the daemon executable:
@@ -179,26 +271,31 @@ pnpm agents:sync
 `pnpm agents:sync --main` deliberately uses the latest successful `main`
 bundle set when exact source parity is not required.
 
-The `Desktop and remote-agent bundles` workflow builds static Linux and native
-macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
+The `Desktop, control daemon, and remote-agent bundles` workflow builds static
+Linux and native macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
 pushes and manual runs build both; `build_desktop=false` keeps a manual run
 remote-only, as used by `pnpm agents:sync`. Each desktop package contains all
 four remote targets and matching local `ctld`, `ctmuxd`, and `ctl-taskd` helpers.
 Release bundle IDs are semantic versions; other runs include the source
 revision so different development builds never share a remote install
-directory. Tag names must match the app version as `v<version>`.
+directory. Tag names must match the Cargo and desktop versions as `v<version>`.
 
 Successful full builds on main or a version tag create or refresh the
 `v<version>` draft release with installers, macOS app archives, remote bundles,
-manifests, and SHA-256 checksums. Branch builds remain Actions artifacts.
+manifests, and SHA-256 checksums. Version tags also include signed, notarized,
+and stapled standalone `ctld.app` archives for both Mac architectures. Branch
+builds remain Actions artifacts.
 The workflow never publishes a release, preserves manually added assets and
 notes, and leaves already-published versions unchanged. Bump the app version
 to start the next draft after publishing.
 
-When Apple signing credentials are incomplete, macOS packages still build
-without signing or notarization and the draft notes identify them as unsigned.
-These builds cannot store Touch ID-protected credentials. Configured signing
-errors still fail the build rather than silently producing unsigned packages.
+Main development builds can produce unsigned macOS desktop packages when Apple
+credentials are incomplete, and their draft notes identify them as unsigned.
+Version-tag macOS builds require distribution signing and fail if the required
+credentials are missing. Standalone `ctld` artifacts always require signing and
+notarization; manual runs can request them with `build_ctld=true`. See
+[release bundles and Apple signing](docs/ci-bundles.md) for the credential
+requirements and release asset contract.
 
 ## Use
 

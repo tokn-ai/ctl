@@ -40,7 +40,7 @@ fn isolated_package_uses_archive_provenance_and_ignores_neighbours() {
   let fixture = Fixture::new();
   fixture.write("Cargo.toml", "[workspace]\n");
   fixture.write("Cargo.lock", "# enclosing workspace\n");
-  for name in ["ctl", "ctmux", "task", "ctmux-process-info"] {
+  for name in ["ctl-paths", "ctl", "ctmux", "task", "ctmux-process-info"] {
     fixture.write(&format!("{name}/src/lib.rs"), "// enclosing source\n");
   }
   fixture.write(
@@ -106,6 +106,7 @@ fn embedded_assets_affect_workspace_identity_but_user_files_do_not() {
   fixture.write("Cargo.lock", "# lock\n");
   for name in [
     "ctl-component-info",
+    "ctl-paths",
     "ctl",
     "ctmux",
     "task",
@@ -132,6 +133,12 @@ fn embedded_assets_affect_workspace_identity_but_user_files_do_not() {
   fixture.write("ctl/cli/skills/ctl/SKILL.md", "# changed skill\n");
   assert_ne!(
     script_changed.fingerprint,
+    build_support::read_identity(&manifest_dir).fingerprint
+  );
+  let before_paths = build_support::read_identity(&manifest_dir);
+  fixture.write("ctl-paths/src/lib.rs", "// changed storage root\n");
+  assert_ne!(
+    before_paths.fingerprint,
     build_support::read_identity(&manifest_dir).fingerprint
   );
   assert!(before.revision.is_none());

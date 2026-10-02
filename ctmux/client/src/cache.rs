@@ -389,10 +389,9 @@ fn select_primary(root: &Path, selected: &Path) -> io::Result<()> {
 
 impl CacheStore {
   /// # Errors
-  /// Returns an error when the local data directory is unavailable.
+  /// Returns an error when the current user's home directory is unavailable.
   pub fn for_client(client: &str) -> io::Result<Self> {
-    let base =
-      dirs::data_local_dir().ok_or_else(|| io::Error::other("Local data directory unavailable"))?;
+    let base = ctl_paths::directory()?;
     Ok(Self::new(base.join("ctmux").join(client).join("sessions")))
   }
   #[must_use]

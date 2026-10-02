@@ -15,7 +15,6 @@ pub(super) const MAX_WORKSPACE_BYTES: u64 = 4 * 1024 * 1024;
 pub(super) struct Repository {
   pub(super) directory: PathBuf,
   definition_path: PathBuf,
-  legacy_directory: Option<PathBuf>,
 }
 
 impl Repository {
@@ -23,7 +22,6 @@ impl Repository {
     Self {
       definition_path: directory.join("tasks.json"),
       directory,
-      legacy_directory: None,
     }
   }
 
@@ -32,16 +30,8 @@ impl Repository {
     self
   }
 
-  pub fn with_legacy_directory(mut self, directory: PathBuf) -> Self {
-    if directory != self.directory {
-      self.legacy_directory = Some(directory);
-    }
-    self
-  }
-
   pub fn load(&self) -> CommandResult<WorkspaceSnapshot> {
     let _lock = self.lock()?;
-    self.migrate_location()?;
     self.migrate_document(self.read()?)
   }
 
@@ -54,7 +44,6 @@ impl Repository {
     }
     request.document.validate()?;
     let _lock = self.lock()?;
-    self.migrate_location()?;
     // Read and validate even when the caller expects an absent file. Never
     // replace an unreadable, corrupt, unsupported, or concurrently edited file.
     let current = self.migrate_document(self.read()?)?;
@@ -74,7 +63,6 @@ impl Repository {
 
   pub fn load_hosts(&self) -> CommandResult<HostCatalogSnapshot> {
     let _lock = self.lock()?;
-    self.migrate_location()?;
     self.migrate_document(self.read()?)?;
     self.read_catalog()
   }
@@ -82,7 +70,6 @@ impl Repository {
   pub fn update_hosts(&self, request: UpdateHostsRequest) -> CommandResult<HostCatalogSnapshot> {
     request.document.validate()?;
     let _lock = self.lock()?;
-    self.migrate_location()?;
     self.migrate_document(self.read()?)?;
     let current = self.read_catalog()?;
     if current.revision != request.expected_revision {
@@ -97,36 +84,6 @@ impl Repository {
     };
     self.persist_catalog(&snapshot)?;
     Ok(snapshot)
-  }
-
-  // The destination lock is always acquired first. Older app versions only
-  // acquire the legacy lock, so migration cannot deadlock with their writes.
-  fn migrate_location(&self) -> CommandResult<()> {
-    let Some(directory) = &self.legacy_directory else {
-      return Ok(());
-    };
-    let destination = self.directory.join("workspace.json");
-    regular_file_or_absent(&destination).map_err(io_error)?;
-    if destination.try_exists().map_err(io_error)? {
-      return Ok(());
-    }
-    let source = directory.join("workspace.json");
-    regular_file_or_absent(&source).map_err(io_error)?;
-    if !source.try_exists().map_err(io_error)? {
-      return Ok(());
-    }
-
-    let legacy = Self::new(directory.clone());
-    let _legacy_lock = legacy.lock()?;
-    if let Some(bytes) = legacy.read_bytes()? {
-      // Validate before importing. Copy the exact document and revision so a
-      // location change does not invalidate a pending save from this client.
-      decode_snapshot(&bytes)?;
-      self.write(&bytes).map_err(io_error)?;
-    }
-    // Retain the source and its backups for recovery. Once a destination
-    // exists, it is authoritative even if an older app updates the old path.
-    Ok(())
   }
 
   fn persist_snapshot(&self, snapshot: &WorkspaceSnapshot) -> CommandResult<()> {

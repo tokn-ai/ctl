@@ -26,14 +26,7 @@ fn inspect_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity>
 }
 
 fn data_directory() -> io::Result<PathBuf> {
-  dirs::home_dir()
-    .map(|home| home.join(".tokn/ctl"))
-    .ok_or_else(|| {
-      io::Error::new(
-        io::ErrorKind::NotFound,
-        "remote home directory is unavailable",
-      )
-    })
+  ctl_paths::directory()
 }
 
 fn discover_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity> {

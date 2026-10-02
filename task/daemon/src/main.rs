@@ -51,14 +51,22 @@ fn main() {
     std::process::exit(1);
   }
 
+  let data_directory = match arguments
+    .data_directory
+    .map_or_else(default_data_directory, Ok)
+  {
+    Ok(directory) => directory,
+    Err(error) => {
+      eprintln!("ctl-taskd: could not locate the task state directory: {error}");
+      std::process::exit(1);
+    }
+  };
   let config = DaemonConfig {
     ctmux_socket: arguments
       .ctmux_socket
       .unwrap_or_else(ctmux_ipc::socket_path),
     socket_path: arguments.socket.unwrap_or_else(socket_path),
-    data_directory: arguments
-      .data_directory
-      .unwrap_or_else(default_data_directory),
+    data_directory,
   };
   let runtime = match tokio::runtime::Builder::new_multi_thread()
     .enable_all()

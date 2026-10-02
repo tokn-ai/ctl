@@ -5,7 +5,6 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager as _;
 
 use crate::error::{CommandErrorDto, CommandResult};
 
@@ -193,11 +192,8 @@ pub struct SaveKeybindingsRequest {
 }
 
 #[tauri::command]
-pub async fn load_keybindings(app: tauri::AppHandle) -> CommandResult<KeybindingsSnapshot> {
-  let directory = app
-    .path()
-    .app_config_dir()
-    .map_err(CommandErrorDto::backend)?;
+pub async fn load_keybindings(_app: tauri::AppHandle) -> CommandResult<KeybindingsSnapshot> {
+  let directory = ctl_paths::directory().map_err(CommandErrorDto::backend)?;
   tauri::async_runtime::spawn_blocking(move || read(&directory))
     .await
     .map_err(CommandErrorDto::backend)?
@@ -205,13 +201,10 @@ pub async fn load_keybindings(app: tauri::AppHandle) -> CommandResult<Keybinding
 
 #[tauri::command]
 pub async fn save_keybindings(
-  app: tauri::AppHandle,
+  _app: tauri::AppHandle,
   request: SaveKeybindingsRequest,
 ) -> CommandResult<KeybindingsSnapshot> {
-  let directory = app
-    .path()
-    .app_config_dir()
-    .map_err(CommandErrorDto::backend)?;
+  let directory = ctl_paths::directory().map_err(CommandErrorDto::backend)?;
   tauri::async_runtime::spawn_blocking(move || save(&directory, &request))
     .await
     .map_err(CommandErrorDto::backend)?

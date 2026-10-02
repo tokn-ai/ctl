@@ -12,10 +12,10 @@ keywords = ["ctmux", "terminal", "client"]
 publish = ["crates-io"]
 
 [dependencies]
+ctl-paths.workspace = true
 ctl-component-info.workspace = true
 avt.workspace = true
 crossterm.workspace = true
-dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

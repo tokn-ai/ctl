@@ -77,6 +77,30 @@ Update clients, daemons, and remote agent bundles together. The renamed build
 uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protocol
 12, remote identity protocol 3, and remote maintenance protocol 2.
 
+## Configuration and persistent state
+
+Application configuration files and persistent component state use `~/.tokn/ctl`
+on every platform, independently of the desktop bundle identifier:
+
+| File or directory | Contents |
+| --- | --- |
+| `hosts.json` | Hosts shared by the CLI and desktop |
+| `workspace.json` | Desktop sessions, tabs, and presentation state |
+| `vpns.json` | Saved VPN profiles |
+| `keybindings.json` | Desktop keyboard shortcuts |
+| `tasks.json` | Global reusable task definitions |
+| `taskd/` | Registered tasks and retained run metadata |
+| `ctmux/desktop/sessions/` | Desktop session output cache and durable archives |
+| `ctmux/desktop/archives/`, `ctmux/tui/archives/` | Client-specific text archives |
+
+Project task definitions stay in `<project-root>/.ctl/tasks.json`. Explicit
+`CTL_HOSTS_PATH`, `CTL_VPNS_PATH`, `CTL_TASKD_DATA_DIR`, and
+`CTMUX_ARCHIVE_DIRECTORY` overrides retain their existing behavior. Old storage
+locations are not read or migrated. SSH credentials remain in macOS Keychain;
+runtime sockets continue to use private OS-specific runtime directories.
+Remote identity and component bundles already use this root as `remote-id`,
+`versions/`, and `current`.
+
 ## Build
 
 Rust 1.97 or newer is required. The Rust packages use the MIT license.
@@ -301,7 +325,7 @@ opening a session connects on demand. A host is a named machine, independent
 of its IP address, hostname, or gateway route. Each host supports one remote
 account/environment and multiple named connection methods. **Add host** asks
 for the SSH address, a display name, and authentication, then verifies the
-connection and automatically saves the named host to `~/.tokn/ctmux/hosts.json`.
+connection and automatically saves the named host to `~/.tokn/ctl/hosts.json`.
 New addresses start with a method named `SSH`; saved aliases retain their `SSH config` method.
 Additional methods and gateway routes are
 available in **Host settings**. New-host creation does not modify OpenSSH config.
@@ -454,7 +478,7 @@ ctl host remove office
 ```
 
 `host` manages the same saved definitions as the desktop in
-`~/.tokn/ctmux/hosts.json` (`CTL_HOSTS_PATH` overrides it). Select hosts and methods
+`~/.tokn/ctl/hosts.json` (`CTL_HOSTS_PATH` overrides it). Select hosts and methods
 by name or stable ID. These management commands require saved hosts; to save an
 SSH config alias, use `ctl host add work my-ssh-alias --ssh-config`. `host list`
 shows saved definitions only, not unsaved SSH config or Tailscale discoveries.
@@ -534,10 +558,10 @@ incompatible master. Explicit proxy options override the saved route.
 as its SSH subprocess, retaining OpenSSH's paths, progress display, and transfer
 protocol; an explicit `scp -S` selects the user's own transport instead.
 
-Host settings are shared with the desktop in `~/.tokn/ctmux/hosts.json`. CLI
+Host settings are shared with the desktop in `~/.tokn/ctl/hosts.json`. CLI
 overrides `CTL_HOSTS_PATH` and `CTL_VPNS_PATH` select alternate catalog files;
-the default VPN file is the desktop's `dev.tokn-ai.ctl.ctmux/vpns.json` under the
-platform configuration directory. These commands do not edit SSH config.
+the default VPN file is `~/.tokn/ctl/vpns.json`. These commands do not edit SSH
+config.
 
 ### Managed port forwards
 
@@ -671,8 +695,9 @@ termination signal to the group and escalates if it does not exit.
 Windows background tasks use owner-restricted local named pipes and Job Objects.
 Stop terminates the entire process tree; ctl-taskd exit also terminates its jobs.
 Task completion follows the root process and cleans up remaining descendants.
-Windows state defaults to `%LOCALAPPDATA%\ctl-taskd` and inherits filesystem ACLs;
-custom data directories should be private to the user.
+Task state defaults to `~/.tokn/ctl/taskd` on every platform. Unix directories
+use owner-only permissions; Windows files inherit directory ACLs. Custom data
+directories should be private to the user.
 
 Architecture and protocol details are in [`docs/architecture.md`](docs/architecture.md)
 and [`docs/ctmux-protocol.md`](docs/ctmux-protocol.md). Numbered

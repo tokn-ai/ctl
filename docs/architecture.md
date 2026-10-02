@@ -120,10 +120,10 @@ Closing the window drops its attachment and leases while the daemon-owned
 session continues.
 
 The app persists session/workspace state separately from saved host definitions.
-Schema 8 of `~/.tokn/ctmux/workspace.json` contains session references, cached cwd
+Schema 8 of `~/.tokn/ctl/workspace.json` contains session references, cached cwd
 labels, last observed terminal dimensions and times, task references, forwards,
 tab order, selection, and observed remote
-identities for referenced hosts. Schema 1 of `~/.tokn/ctmux/hosts.json` contains
+identities for referenced hosts. Schema 1 of `~/.tokn/ctl/hosts.json` contains
 remote hosts with stable IDs, named connection methods and preferred method IDs,
 and reusable gateways. The local host is synthesized. Runtime status, output,
 credentials, and attachment tokens are never written to either file. A host

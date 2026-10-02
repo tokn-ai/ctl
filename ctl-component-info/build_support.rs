@@ -6,6 +6,7 @@ use std::process::Command;
 // data, or build output. Embedded scripts and skills are component sources.
 const COMPONENT_ROOTS: &[&str] = &[
   "ctl-component-info",
+  "ctl-paths",
   "ctl",
   "ctmux",
   "task",

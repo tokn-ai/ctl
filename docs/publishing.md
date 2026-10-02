@@ -40,6 +40,7 @@ For the first publication, publish packages in the following order, waiting
 until each package is available in the registry before its dependants:
 
 ```text
+ctl-paths
 ctl-component-info
 ctl-keychain-client
 ctmux-process-info

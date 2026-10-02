@@ -658,6 +658,7 @@ dependencies = [
  "clap",
  "ctl-client",
  "ctl-component-info",
+ "ctl-paths",
  "ctl-proto",
  "ctl-task-ipc",
  "ctl-task-proto",
@@ -666,7 +667,6 @@ dependencies = [
  "ctmux-ipc",
  "ctmux-proto",
  "ctmuxd",
- "dirs",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -682,6 +682,7 @@ dependencies = [
  "comfy-table",
  "ctl-client",
  "ctl-ipc",
+ "ctl-paths",
  "ctl-task-cli",
  "ctl-task-client",
  "ctmux-cli",
@@ -758,6 +759,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctl-paths"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+]
+
+[[package]]
 name = "ctl-proto"
 version = "0.1.0"
 dependencies = [
@@ -826,8 +834,8 @@ dependencies = [
 name = "ctl-task-store"
 version = "0.1.0"
 dependencies = [
+ "ctl-paths",
  "ctl-task-proto",
- "dirs",
  "serde",
  "serde_json",
  "sha2",
@@ -841,6 +849,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ctl-component-info",
+ "ctl-paths",
  "ctl-task-ipc",
  "ctl-task-proto",
  "ctmux-ipc",
@@ -890,6 +899,7 @@ dependencies = [
  "ctl-client",
  "ctl-component-info",
  "ctl-ipc",
+ "ctl-paths",
  "ctl-proto",
  "ctl-task-client",
  "ctl-task-ipc",
@@ -938,8 +948,8 @@ dependencies = [
  "avt",
  "crossterm",
  "ctl-component-info",
+ "ctl-paths",
  "ctmux-proto",
- "dirs",
  "serde",
  "serde_json",
  "sha2",

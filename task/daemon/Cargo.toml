@@ -12,6 +12,7 @@ keywords = ["ctl", "tasks", "daemon"]
 publish = ["crates-io"]
 
 [dependencies]
+ctl-paths.workspace = true
 ctl-component-info.workspace = true
 ctmux-ipc.workspace = true
 ctmux-proto.workspace = true

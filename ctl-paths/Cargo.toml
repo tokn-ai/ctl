@@ -1,0 +1,18 @@
+[package]
+name = "ctl-paths"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared per-user storage directory for ctl and ctmux"
+readme = "README.md"
+categories = ["filesystem"]
+keywords = ["ctl", "ctmux", "storage"]
+publish = ["crates-io"]
+
+[dependencies]
+dirs.workspace = true
+
+[lints]
+workspace = true

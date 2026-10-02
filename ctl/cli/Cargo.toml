@@ -16,6 +16,7 @@ name = "ctl"
 path = "src/main.rs"
 
 [dependencies]
+ctl-paths.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
 ctl-client.workspace = true

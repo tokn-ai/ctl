@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ctl_ipc::{ClientMessage, ServerMessage, VpnSnapshot, VpnState, VpnStatus};
+use rustix::termios::LocalModes;
 use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -159,6 +160,23 @@ impl Terminal {
   }
 
   fn send(&mut self, keys: &str) {
+    // Prompts are rendered before console enters raw mode. Wait until control
+    // keys will reach the questionnaire instead of being interpreted as signals.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+      let termios = self.master.as_ref().unwrap().get_termios().unwrap();
+      if termios.local_flags.bits() & (LocalModes::ICANON | LocalModes::ISIG).bits() == 0 {
+        break;
+      }
+      assert!(
+        Instant::now() < deadline,
+        "terminal did not enter raw input mode before {keys:?}: {}",
+        String::from_utf8_lossy(&self.transcript)
+      );
+      if let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(1)) {
+        self.transcript.extend(bytes);
+      }
+    }
     let writer = self.writer.as_mut().unwrap();
     writer.write_all(keys.as_bytes()).unwrap();
     writer.flush().unwrap();
@@ -1707,7 +1725,12 @@ async fn remove_confirmation_defaults_to_no_and_cancellation_leaves_profiles_unc
     let mut terminal = Terminal::new(&fixture, &["vpn", "remove", "Work VPN"]);
     terminal.wait_for("Remove VPN profile");
     terminal.send(keys);
-    assert!(terminal.finish().success());
+    let status = terminal.finish();
+    assert!(
+      status.success(),
+      "terminal exited with {status:?} after {keys:?}: {}",
+      String::from_utf8_lossy(&terminal.transcript)
+    );
     assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
     assert_no_daemon_contact(&listener).await;
   }

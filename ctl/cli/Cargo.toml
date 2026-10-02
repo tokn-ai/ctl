@@ -51,5 +51,8 @@ rustix.workspace = true
 [target.'cfg(unix)'.build-dependencies]
 rustix.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { workspace = true, features = ["termios"] }
+
 [lints]
 workspace = true

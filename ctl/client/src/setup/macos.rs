@@ -578,17 +578,7 @@ async fn verify_development_profile(session: &Session, profile: &Path) -> Result
   require_success(&certificates, "read profile signing certificates")?;
   let certificates = decode_profile_certificates(&certificates.stdout)?;
   let prefix = session.work().join("signing-certificate-");
-  let extracted = tool(
-    "/usr/bin/codesign",
-    &[
-      "-d".as_ref(),
-      "--extract-certificates".as_ref(),
-      prefix.as_os_str(),
-      session.app().as_os_str(),
-    ],
-  )
-  .await?;
-  require_success(&extracted, "extract helper signing certificate")?;
+  extract_signing_certificates(&session.app(), &prefix).await?;
   let leaf = std::fs::File::from(
     rustix::fs::open(
       session.work().join("signing-certificate-0"),
@@ -617,6 +607,19 @@ async fn verify_development_profile(session: &Session, profile: &Path) -> Result
     ));
   }
   Ok(())
+}
+
+async fn extract_signing_certificates(app: &Path, prefix: &Path) -> Result<(), Error> {
+  // codesign's optional long-option arguments require the equals form. A
+  // separate prefix is instead parsed as another code object to inspect.
+  let mut argument = std::ffi::OsString::from("--extract-certificates=");
+  argument.push(prefix);
+  let extracted = tool(
+    "/usr/bin/codesign",
+    &["-d".as_ref(), argument.as_os_str(), app.as_os_str()],
+  )
+  .await?;
+  require_success(&extracted, "extract helper signing certificate")
 }
 
 fn decode_profile_certificates(xml: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
@@ -791,6 +794,62 @@ mod tests {
     ] {
       assert!(decode_profile_certificates(invalid).is_err());
     }
+  }
+
+  #[tokio::test]
+  async fn native_codesign_treats_certificate_prefix_as_its_optional_argument() {
+    let home = Home::new();
+    let prefix = home.0.join("requested certificate prefix-");
+    // Display a native signed tool without executing it or using a signing
+    // identity. With a separate optional argument, codesign treats this missing
+    // prefix as a second code object and fails before inspecting the tool.
+    extract_signing_certificates(Path::new("/usr/bin/codesign"), &prefix)
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  #[ignore = "requires a provisioned signed development helper"]
+  async fn provisioned_development_helper_installs_and_reuses_without_selecting_production() {
+    // Use an explicit temporary installation directory while retaining normal
+    // macOS trust-service/Keychain context. Fixture generation/signing happens
+    // separately; this test only verifies and queries the existing signed app.
+    let directory = std::path::PathBuf::from(
+      std::env::var_os("CTL_TEST_BUNDLED_CTLD_DIR")
+        .expect("set CTL_TEST_BUNDLED_CTLD_DIR to a signed development payload directory"),
+    );
+    let target = release_target().unwrap();
+    let manifest = Manifest::parse_development(
+      &std::fs::read(directory.join(format!("ctld-{target}.json"))).unwrap(),
+      env!("CARGO_PKG_VERSION"),
+      target,
+    )
+    .unwrap();
+    let archive = std::fs::read(directory.join(&manifest.archive)).unwrap();
+    let home = Home::new();
+    let installed = install_archive(&home.0, manifest.clone(), archive.clone(), &|_| {})
+      .await
+      .unwrap();
+    assert!(!installed.reused);
+    assert!(installed.executable.is_file());
+    assert_staging_clean(&home.0);
+    let reused = install_archive(&home.0, manifest, archive, &|_| {})
+      .await
+      .unwrap();
+    assert!(reused.reused);
+    assert_eq!(reused.executable, installed.executable);
+    assert_staging_clean(&home.0);
+    assert!(
+      ctl_ipc::managed::resolve_executable(&home.0)
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+      std::fs::symlink_metadata(ctl_ipc::managed::component_directory(&home.0).join("current"))
+        .unwrap_err()
+        .kind(),
+      io::ErrorKind::NotFound
+    );
   }
 
   #[tokio::test]

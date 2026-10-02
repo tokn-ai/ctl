@@ -6,8 +6,6 @@ use ctl_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Respo
 use tokio::process::Command;
 use zeroize::Zeroizing;
 
-#[cfg(unix)]
-use super::process::unavailable;
 use super::process::{self, invalid_response, unsupported as unsupported_helper};
 
 use crate::error::{CommandErrorDto, CommandResult};
@@ -20,21 +18,8 @@ const HELPER_TIMEOUT: Duration = Duration::from_mins(1);
 pub(super) async fn request(request: Request) -> CommandResult<Response> {
   let executable = crate::daemon_helper::executable()
     .await
-    .map_err(preparation_error)?;
+    .map_err(process::preparation_error)?;
   exchange(Command::new(executable), request, HELPER_TIMEOUT).await
-}
-
-#[cfg(unix)]
-pub(super) fn preparation_error(error: ctl_ipc::ConnectError) -> CommandErrorDto {
-  if matches!(error, ctl_ipc::ConnectError::PrepareDaemon(source) if source.kind() == std::io::ErrorKind::TimedOut)
-  {
-    CommandErrorDto::new(
-      "credential_helper_timeout",
-      crate::daemon_helper::TIMEOUT_MESSAGE,
-    )
-  } else {
-    unavailable()
-  }
 }
 
 pub(super) async fn exchange(
@@ -104,9 +89,13 @@ pub(super) fn sanitized_error(code: &str) -> CommandErrorDto {
     "credential_request_invalid" => {
       CommandErrorDto::new("invalid_credential_id", "Select a valid saved credential.")
     }
+    "credential_store_missing_entitlement" => CommandErrorDto::new(
+      "credential_store_missing_entitlement",
+      "This ctld helper is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile.",
+    ),
     "credential_store_unavailable" => CommandErrorDto::new(
       "credential_store_unavailable",
-      "This ctld helper cannot access the credential Keychain group. Use a properly signed app and ctld helper.",
+      "Keychain access is unavailable. Check your macOS login session and try again.",
     ),
     "credential_store_locked" => CommandErrorDto::new(
       "credential_store_locked",

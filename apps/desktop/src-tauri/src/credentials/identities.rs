@@ -122,7 +122,7 @@ pub async fn forget_identity_passphrase(request: ForgetRequest) -> CommandResult
 async fn exchange(request: Request) -> CommandResult<Response> {
   let executable = crate::daemon_helper::executable()
     .await
-    .map_err(super::helper::preparation_error)?;
+    .map_err(super::process::preparation_error)?;
   exchange_with(tokio::process::Command::new(executable), request).await
 }
 
@@ -442,9 +442,13 @@ fn sanitized_error(code: &str) -> CommandErrorDto {
       "identity_unlock_failed",
       "The passphrase could not unlock this key file.",
     ),
+    "identity_keychain_missing_entitlement" => (
+      "identity_keychain_missing_entitlement",
+      "This ctld helper is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile.",
+    ),
     "identity_keychain_unavailable" => (
       "identity_keychain_unavailable",
-      "Keychain is unavailable. Use a properly signed app and ctld helper.",
+      "Keychain access is unavailable. Check your macOS login session and try again.",
     ),
     "identity_keychain_locked" => (
       "identity_keychain_locked",

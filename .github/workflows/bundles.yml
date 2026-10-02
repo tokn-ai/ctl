@@ -1,4 +1,4 @@
-name: Desktop and remote-agent bundles
+name: Desktop, control daemon, and remote-agent bundles
 
 on:
   workflow_dispatch:
@@ -7,6 +7,11 @@ on:
         description: Build desktop packages (main/tag runs also update the draft release)
         required: true
         default: true
+        type: boolean
+      build_ctld:
+        description: Build signed and notarized standalone macOS ctld packages (requires Apple signing credentials)
+        required: true
+        default: false
         type: boolean
   push:
     branches:
@@ -44,6 +49,16 @@ jobs:
           app_version=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' apps/desktop/src-tauri/tauri.conf.json)
           if [[ -z "$app_version" ]]; then
             echo "could not read the app version" >&2
+            exit 1
+          fi
+          cargo_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [[ "$app_version" != "$cargo_version" ]]; then
+            echo "desktop version $app_version does not match Cargo release version $cargo_version" >&2
+            exit 1
+          fi
+          frontend_version=$(python3 -c 'import json; print(json.load(open("apps/desktop/package.json"))["version"])')
+          if [[ "$app_version" != "$frontend_version" ]]; then
+            echo "desktop app version $app_version does not match frontend package version $frontend_version" >&2
             exit 1
           fi
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
@@ -154,6 +169,108 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  ctld:
+    name: Signed standalone ctld (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_ctld)
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Require Apple distribution signing configuration
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+          NOTARY_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY }}
+          PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
+        shell: bash
+        run: |
+          missing=()
+          [[ -n "$CERTIFICATE_BASE64" ]] || missing+=(APPLE_CERTIFICATE)
+          [[ -n "$CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+          [[ -n "$NOTARY_ISSUER" ]] || missing+=(APPLE_API_ISSUER)
+          [[ -n "$NOTARY_KEY_CONTENT" ]] || missing+=(APPLE_API_KEY_CONTENT)
+          [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
+          [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Standalone ctld releases require Apple distribution signing; missing: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Import Apple signing certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Prepare Apple signing assets
+        env:
+          APPLE_API_ISSUER_VALUE: ${{ vars.APPLE_API_ISSUER }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY_VALUE: ${{ vars.APPLE_API_KEY }}
+          PROFILE_BASE64: ${{ secrets.APPLE_CTLD_PROVISIONING_PROFILE }}
+        shell: bash
+        run: |
+          profile="$RUNNER_TEMP/ctld.provisionprofile"
+          printf '%s' "$PROFILE_BASE64" | base64 --decode -o "$profile"
+          notary_key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_VALUE.p8"
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$notary_key"
+          chmod 600 "$notary_key"
+          echo "CTLD_PROVISIONING_PROFILE=$profile" >> "$GITHUB_ENV"
+          echo "CTLD_REQUIRE_DISTRIBUTION_SIGNING=true" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_VALUE" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY=$APPLE_API_KEY_VALUE" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=$notary_key" >> "$GITHUB_ENV"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ctld-${{ matrix.target }}
+
+      - name: Build and sign standalone ctld
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}" -p ctld
+          ./scripts/ci/package-ctld-app.sh \
+            "target/${{ matrix.target }}/release/ctld" \
+            target/ctld-app/ctld.app \
+            "${{ needs.metadata.outputs.app_version }}"
+
+      - name: Notarize and package standalone ctld
+        run: >-
+          node scripts/ci/package-ctld-bundle.mts
+          "${{ matrix.target }}"
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.bundle_id }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/ctld-app/ctld.app
+          target/ctld-assets
+
+      - name: Upload standalone ctld assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctld-standalone-${{ matrix.target }}
+          path: target/ctld-assets/*
+          if-no-files-found: error
+          retention-days: 30
+
   desktop:
     name: Desktop (${{ matrix.target }})
     if: github.event_name == 'push' || inputs.build_desktop
@@ -245,6 +362,10 @@ jobs:
           [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_API_KEY)
           [[ -n "$PROFILE_BASE64" ]] || missing+=(APPLE_CTLD_PROVISIONING_PROFILE)
           if (( ${#missing[@]} > 0 )); then
+            if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+              printf '::error::Version-tag macOS releases require Apple signing configuration: %s\n' "${missing[*]}"
+              exit 1
+            fi
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             printf '::notice::Building unsigned macOS packages; missing Apple signing configuration: %s\n' "${missing[*]}"
             echo 'macOS packages are unsigned and not notarized. Touch ID-protected credential storage requires a signed build.' >> "$GITHUB_STEP_SUMMARY"
@@ -282,6 +403,7 @@ jobs:
         env:
           CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
           APPLE_SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          CTLD_REQUIRE_DISTRIBUTION_SIGNING: ${{ github.ref_type == 'tag' }}
         shell: bash
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld -p ctmuxd -p ctl-taskd
@@ -390,11 +512,15 @@ jobs:
 
   draft-release:
     name: Update draft release
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      needs.metadata.result == 'success' && needs.remote-agent-set.result == 'success' &&
+      needs.desktop.result == 'success' && (needs.ctld.result == 'success' || needs.ctld.result == 'skipped')
     needs:
       - metadata
       - remote-agent-set
       - desktop
+      - ctld
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -423,6 +549,14 @@ jobs:
         with:
           name: ctl-agent-bundle-set
           path: target/release-assets
+
+      - name: Download standalone ctld assets
+        if: needs.ctld.result == 'success'
+        uses: actions/download-artifact@v5
+        with:
+          pattern: ctld-standalone-*
+          path: target/release-assets
+          merge-multiple: true
 
       - name: Create or refresh the version draft
         env:

@@ -81,7 +81,11 @@ family locally. Do not bypass verification with `--no-verify` when publishing.
 After publication, install the required companion executables explicitly:
 
 ```sh
-# Client machine: ctl plus its connection, terminal, and task daemons.
+# macOS client: ctl, terminal/task daemons, then the signed connection helper.
+cargo install --locked ctl-cli ctmuxd ctl-taskd
+ctl setup
+
+# Other Unix clients: source-built connection, terminal, and task daemons.
 cargo install --locked ctl-cli ctld ctmuxd ctl-taskd
 
 # Remote machine: SSH gateway plus persistent terminal and task daemons.
@@ -96,9 +100,33 @@ companions in the same binary directory, or use the documented executable path
 overrides. The `ctl-task-cli` package is a command library embedded in `ctl`;
 install `ctl-cli` for the `ctl task` command.
 
-On macOS, Cargo-installed `ctld` does not acquire the signing identity,
-provisioning profile, or Keychain entitlement needed for Touch ID-protected
-saved credentials. Use the signed desktop distribution for those capabilities.
+On macOS, `cargo install ctld` builds an unsigned source executable. It does not
+acquire the Developer ID signature, provisioning profile, or Keychain entitlement
+needed for Touch ID-protected saved credentials. `ctl setup` installs the complete
+signed and notarized helper from the GitHub release matching the CLI's Cargo
+version and architecture. That release must be published before setup can
+succeed; a draft or an Actions artifact is not an installation source.
+
+The helper is installed without `sudo` at
+`~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`; the component's
+`current` symlink is updated atomically after verification. Remote agent
+`~/.tokn/ctl/versions/` and `current` paths are independent. Setup never restarts
+the daemon or existing connections. Repeating setup checks and reuses the same
+immutable version when its release metadata matches.
+
+`CTLD_BIN` continues to override discovery. Otherwise, macOS prefers the signed
+desktop bundle's helper, then the managed installation, then a sibling or `PATH`
+executable. Setup obtains its expected Apple Team ID from the fixed
+`https://github.com/tokn-ai/ctl` release manifest over HTTPS; it does not contain
+a separately compiled vendor Team ID pin. It checks the archive hash and size,
+Apple's Developer ID certificate chain and application/team identity, embedded
+distribution provisioning, Gatekeeper notarization, and helper build/protocol
+identity before executing or selecting the helper.
+
+Publish the [signed macOS release assets](ci-bundles.md) alongside the crate
+family. Version-tag CI requires both Mac architectures, distribution signing,
+notarization, and a stapled ticket. npm and PyPI installers can consume those
+same signed release archives; language-specific installers are not yet provided.
 
 Registry builds use Cargo's archive provenance and a fingerprint of the shared
 `ctl-component-info` package. Full checkout builds fingerprint the component

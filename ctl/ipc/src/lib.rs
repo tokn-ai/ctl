@@ -3,6 +3,7 @@
 pub mod credentials;
 pub mod identities;
 pub mod lifecycle;
+pub mod managed;
 pub mod vpn;
 mod vpn_config;
 pub use vpn_config::{VpnConnection, VpnProvider, VpnSettings};
@@ -662,7 +663,11 @@ fn resolve_executable(selected: &Path) -> io::Result<PathBuf> {
           } else {
             io::ErrorKind::NotFound
           },
-          "ctld was not found as an executable on PATH",
+          if cfg!(target_os = "macos") {
+            "ctld was not found as an executable on PATH; run `ctl setup` to install the signed macOS helper"
+          } else {
+            "ctld was not found as an executable on PATH"
+          },
         )
       })?
   } else {
@@ -723,10 +728,11 @@ fn parse_daemon_protocol(stdout: &[u8]) -> io::Result<u16> {
     })
 }
 
-/// Resolves the daemon executable bundled beside the current client.
+/// Resolves an explicit `CTLD_BIN` override or the default daemon executable.
 ///
 /// # Errors
-/// Returns an error if the current executable path cannot be determined.
+/// Returns an error if the current executable path cannot be determined or a
+/// managed macOS installation is invalid.
 pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
@@ -734,23 +740,53 @@ pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   default_daemon_executable()
 }
 
-/// Resolves the sibling, bundled helper, or PATH daemon without `CTLD_BIN`.
+/// Resolves a bundled, managed, sibling, or PATH daemon without `CTLD_BIN`.
+/// The signed desktop bundle has priority on macOS, followed by the managed
+/// signed installation. Loose executables remain available for development.
 ///
 /// # Errors
-/// Returns an error if the current executable path cannot be determined.
+/// Returns an error if the current executable path cannot be determined or a
+/// managed macOS installation is invalid.
 pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
   let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
+  #[cfg(target_os = "macos")]
+  {
+    default_macos_daemon(&current_executable, dirs::home_dir().as_deref())
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    Ok(sibling_or_path_daemon(&current_executable))
+  }
+}
+
+fn sibling_or_path_daemon(current_executable: &Path) -> PathBuf {
   let sibling = current_executable.with_file_name(format!("ctld{}", env::consts::EXE_SUFFIX));
   if sibling.is_file() {
-    return Ok(sibling);
+    return sibling;
   }
-  #[cfg(target_os = "macos")]
-  if let Some(helper) = bundled_macos_daemon(&current_executable)
+  PathBuf::from(format!("ctld{}", env::consts::EXE_SUFFIX))
+}
+
+#[cfg(target_os = "macos")]
+fn default_macos_daemon(
+  current_executable: &Path,
+  home: Option<&Path>,
+) -> Result<PathBuf, ConnectError> {
+  if let Some(helper) = bundled_macos_daemon(current_executable)
     && helper.is_file()
   {
     return Ok(helper);
   }
-  Ok(PathBuf::from(format!("ctld{}", env::consts::EXE_SUFFIX)))
+  if let Some(home) = home
+    && let Some(helper) =
+      managed::resolve_executable(home).map_err(|source| ConnectError::StartDaemon {
+        executable: managed::executable(home),
+        source,
+      })?
+  {
+    return Ok(helper);
+  }
+  Ok(sibling_or_path_daemon(current_executable))
 }
 
 #[cfg(target_os = "macos")]
@@ -1143,6 +1179,79 @@ mod tests {
       Some(PathBuf::from(
         "/Applications/ctmux.app/Contents/Helpers/ctld.app/Contents/MacOS/ctld"
       ))
+    );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn signed_managed_helper_has_priority_over_loose_daemons_and_invalid_selection_fails() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+      fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+      }
+    }
+    let fixture = Fixture(env::temp_dir().join(format!(
+      "ctld-discovery-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    )));
+    std::fs::create_dir(&fixture.0).unwrap();
+    std::fs::set_permissions(&fixture.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let current_executable = fixture.0.join("ctl");
+    assert_eq!(
+      default_macos_daemon(&current_executable, Some(&fixture.0)).unwrap(),
+      PathBuf::from("ctld")
+    );
+    let sibling = fixture.0.join("ctld");
+    std::fs::write(&sibling, "source-built helper").unwrap();
+    assert_eq!(
+      default_macos_daemon(&current_executable, Some(&fixture.0)).unwrap(),
+      sibling
+    );
+
+    let directory = managed::ensure_component_directory(&fixture.0).unwrap();
+    let selection = "versions/0.1.0-aarch64-apple-darwin";
+    let contents = directory.join(selection).join("ctld.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::create_dir(contents.join("_CodeSignature")).unwrap();
+    for resource in [
+      "Info.plist",
+      "embedded.provisionprofile",
+      "_CodeSignature/CodeResources",
+      "CodeResources",
+      "MacOS/ctld",
+    ] {
+      std::fs::write(contents.join(resource), "signed helper").unwrap();
+    }
+    let managed_helper = contents.join("MacOS/ctld");
+    std::fs::set_permissions(&managed_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(selection, directory.join("current")).unwrap();
+    assert_eq!(
+      default_macos_daemon(&current_executable, Some(&fixture.0)).unwrap(),
+      managed_helper.canonicalize().unwrap()
+    );
+    std::fs::remove_file(directory.join("current")).unwrap();
+    symlink("../outside", directory.join("current")).unwrap();
+    assert!(matches!(
+      default_macos_daemon(&current_executable, Some(&fixture.0)),
+      Err(ConnectError::StartDaemon { .. })
+    ));
+
+    let desktop_executable = fixture.0.join("ctmux.app/Contents/MacOS/ctmux");
+    let bundled = bundled_macos_daemon(&desktop_executable).unwrap();
+    std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(desktop_executable.parent().unwrap()).unwrap();
+    std::fs::write(desktop_executable.with_file_name("ctld"), "loose helper").unwrap();
+    std::fs::write(&bundled, "desktop helper").unwrap();
+    assert_eq!(
+      default_macos_daemon(&desktop_executable, Some(&fixture.0)).unwrap(),
+      bundled
     );
   }
 

@@ -83,6 +83,35 @@ Rust 1.97 or newer is required. The Rust packages use the MIT license.
 See [Cargo publishing](docs/publishing.md) for package verification, installation,
 and the dependency order for the first crates.io release.
 
+After the packages and matching GitHub release are published, install the CLI
+and its local terminal/task companions on macOS:
+
+```sh
+cargo install --locked ctl-cli ctmuxd ctl-taskd
+ctl setup
+```
+
+`ctl setup` installs the signed and notarized `ctld.app` for the installed CLI's
+version and Mac architecture. It downloads the matching `v<version>` release;
+it does not select the latest release. The full bundle lives at
+`~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`, and an atomic
+`current` symlink selects it. This is separate from the remote agent's existing
+`~/.tokn/ctl/versions/` and `current` installation.
+
+Setup checks the release checksum, Apple Developer ID signature, provisioning
+profile, notarization, and helper build/protocol identity before selecting the
+helper. It needs no `sudo` and never starts, stops, or restarts a daemon, so
+running connections continue using their current daemon. `ctl setup --json`
+prints the installed version, executable path, and whether the installation was
+reused.
+
+`CTLD_BIN` selects an explicit executable. Without that override, macOS resolves
+the desktop's bundled helper first, then this managed installation, then a
+sibling executable or `PATH`. On other Unix platforms, install `ctld` from
+Cargo alongside the CLI; `ctl setup` is a macOS-only command. Source-built macOS
+`ctld` remains useful for development but does not acquire our Apple signing
+identity or Keychain entitlement through Cargo.
+
 ```sh
 cargo build --workspace
 ```
@@ -114,15 +143,23 @@ cargo install --path ctmux/cli
 ```
 
 For remote access, install `ctmuxd`, `ctl-taskd`, and `ctl-agent` together on the
-controlled device and `ctl` with `ctld` on each Unix client:
+controlled device:
 
 ```sh
 cargo install --path ctmux/daemon
 cargo install --path task/daemon
 cargo install --path ctl/agent
+```
+
+On a Linux client, install `ctl` and `ctld` together from the checkout:
+
+```sh
 cargo install --path ctl/daemon
 cargo install --path ctl/cli
 ```
+
+For the official signed macOS helper, use the published CLI installation and
+`ctl setup` shown above. A source-built `ctld` is available for local development.
 
 The local task runner also requires `ctl-taskd` beside `ctl`, or `CTL_TASKD_BIN` set to
 the daemon executable:
@@ -155,26 +192,31 @@ pnpm agents:sync
 `pnpm agents:sync --main` deliberately uses the latest successful `main`
 bundle set when exact source parity is not required.
 
-The `Desktop and remote-agent bundles` workflow builds static Linux and native
-macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
+The `Desktop, control daemon, and remote-agent bundles` workflow builds static
+Linux and native macOS remote bundles and desktop packages for x86-64 and ARM64. Main-branch
 pushes and manual runs build both; `build_desktop=false` keeps a manual run
 remote-only, as used by `pnpm agents:sync`. Each desktop package contains all
 four remote targets and matching local `ctld`, `ctmuxd`, and `ctl-taskd` helpers.
 Release bundle IDs are semantic versions; other runs include the source
 revision so different development builds never share a remote install
-directory. Tag names must match the app version as `v<version>`.
+directory. Tag names must match the Cargo and desktop versions as `v<version>`.
 
 Successful full builds on main or a version tag create or refresh the
 `v<version>` draft release with installers, macOS app archives, remote bundles,
-manifests, and SHA-256 checksums. Branch builds remain Actions artifacts.
+manifests, and SHA-256 checksums. Version tags also include signed, notarized,
+and stapled standalone `ctld.app` archives for both Mac architectures. Branch
+builds remain Actions artifacts.
 The workflow never publishes a release, preserves manually added assets and
 notes, and leaves already-published versions unchanged. Bump the app version
 to start the next draft after publishing.
 
-When Apple signing credentials are incomplete, macOS packages still build
-without signing or notarization and the draft notes identify them as unsigned.
-These builds cannot store Touch ID-protected credentials. Configured signing
-errors still fail the build rather than silently producing unsigned packages.
+Main development builds can produce unsigned macOS desktop packages when Apple
+credentials are incomplete, and their draft notes identify them as unsigned.
+Version-tag macOS builds require distribution signing and fail if the required
+credentials are missing. Standalone `ctld` artifacts always require signing and
+notarization; manual runs can request them with `build_ctld=true`. See
+[release bundles and Apple signing](docs/ci-bundles.md) for the credential
+requirements and release asset contract.
 
 ## Use
 

@@ -4,6 +4,7 @@ mod host;
 mod openssh;
 #[cfg(unix)]
 mod port;
+mod setup;
 mod skill;
 #[cfg(unix)]
 mod ssh_broker;
@@ -46,6 +47,8 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Install the signed macOS ctld helper for this ctl release, without restarting it.
+  Setup(setup::Arguments),
   /// Print bundled agent skills and supporting guides without connecting.
   Skill(skill::Arguments),
   /// Manage saved hosts and inspect their connection status.
@@ -140,6 +143,19 @@ async fn main() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn setup_accepts_json_and_never_accepts_unsigned_source_overrides() {
+    for options in [vec!["ctl", "setup"], vec!["ctl", "setup", "--json"]] {
+      assert!(matches!(
+        Arguments::try_parse_from(options).unwrap().command,
+        Command::Setup(_)
+      ));
+    }
+    for option in ["--url", "--version", "--unsigned", "--restart"] {
+      assert!(Arguments::try_parse_from(["ctl", "setup", option]).is_err());
+    }
+  }
 
   #[test]
   fn vpn_start_uses_a_local_env_file_and_exposes_status_and_stop() {

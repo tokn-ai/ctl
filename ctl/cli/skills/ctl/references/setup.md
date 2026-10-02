@@ -19,11 +19,34 @@ the user's request includes setup or the work requires an authorized setup.
 | Remote sessions/tasks | `ctld` on Unix client | `ctl-agent`, `ctmuxd` and/or `ctl-taskd` |
 | Managed ports / VPN | `ctld` on Unix client | SSH service for ports; local container engine for VPN |
 
-Keep client and companion versions aligned. Helpers normally resolve beside
-their client, with supported fallback locations; `CTLD_BIN`, `CTMUXD_BIN`, and
-`CTL_TASKD_BIN` select explicit daemon executables. An override names an executable,
-not a directory. Remote companions must belong to the SSH account and be
-available together through the managed installation or noninteractive PATH.
+Keep client and companion versions aligned. `CTLD_BIN`, `CTMUXD_BIN`, and
+`CTL_TASKD_BIN` select explicit daemon executables; an override names an
+executable, not a directory. On macOS, `ctld` otherwise resolves from the desktop
+bundle first, then the signed managed installation, then beside the client or
+on PATH. Terminal/task helpers normally resolve beside the client. Remote
+companions must belong to the SSH account and be available together through
+the managed installation or noninteractive PATH.
+
+For an authorized published CLI setup on macOS:
+
+```sh
+cargo install --locked ctl-cli ctmuxd ctl-taskd
+ctl setup
+```
+
+`ctl setup` is local and macOS-only. It installs the signed, notarized `ctld.app`
+from the published GitHub release matching the installed CLI's version and
+architecture. It cannot install a draft or select a different/latest release.
+The bundle lives under
+`~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`; the component's
+`current` symlink selects it independently from the remote agent installation.
+The archive, Apple identity/profile, notarization, and helper build/protocol are
+verified before selection. No `sudo`, daemon start, or automatic restart occurs.
+Existing connections keep their running daemon, and `CTLD_BIN` remains an
+override. `ctl setup --json` reports the version/path and whether setup reused an
+existing installation. On other Unix platforms, install `ctld` from Cargo
+alongside the CLI. Cargo compilation alone does not provide Apple's signing
+identity or the macOS Keychain entitlement.
 
 When working from the ctl source checkout, a local CLI/service build is:
 
@@ -54,6 +77,10 @@ connect HOST` authenticates SSH without installing components.
   noninteractive PATH and align components. The CLI has no remote installation
   subcommand. A manually run `ctl-agent connect` waits for protocol input; it
   is not a finite health-check command.
+- **Missing signed macOS helper:** for authorized local setup, run `ctl setup`.
+  A missing release artifact requires the publisher to publish the matching
+  signed release. Do not substitute a different version, untrusted download,
+  or unsigned binary to bypass signature/profile/notarization failure.
 - **Old daemon:** `ctl taskd restart` is local-only and refuses active tasks.
   Restarting `ctmuxd` terminates its terminals; inspect sessions before considering
   that disruptive recovery. Do not use an unrelated daemon restart to fix a

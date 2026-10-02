@@ -58,6 +58,13 @@ pub enum Error {
 /// # Errors
 /// Rejects unsupported platforms, unavailable releases, unsafe installation
 /// paths, concurrent setup, invalid archives, or failed signature/protocol checks.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "unsupported platforms retain the same asynchronous setup API"
+  )
+)]
 pub async fn install_signed_ctld(
   on_progress: impl Fn(SetupEvent) + Send + Sync,
 ) -> Result<SetupOutcome, Error> {

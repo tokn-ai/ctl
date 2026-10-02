@@ -865,7 +865,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
     }
     assert!(!fixture.socket().exists());
   }
-  for action in ["create", "list", "start", "stop"] {
+  for action in ["create", "list", "start", "stop", "remove"] {
     for json in [false, true] {
       let mut args = vec!["--host", "vpn-host", "vpn", action];
       if action == "start" {
@@ -1572,6 +1572,256 @@ async fn create_and_start_without_selector_require_a_terminal_without_mutation_o
       }
       assert_no_daemon_contact(&listener).await;
     }
+  }
+}
+
+#[tokio::test]
+async fn remove_requires_a_terminal_and_has_no_confirmation_bypass_flag() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let original = fixture.write_profiles(2, &[saved_openconnect()]);
+  for args in [
+    vec!["vpn", "remove"],
+    vec!["vpn", "remove", "Work VPN"],
+    vec!["vpn", "remove", "work-id", "--json"],
+    vec!["vpn", "remove", "work-id", "--yes"],
+  ] {
+    let output = fixture.output(&args).await;
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(!output.stderr.is_empty(), "{output:?}");
+    assert_no_saved_credentials(&output);
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+    assert_no_daemon_contact(&listener).await;
+  }
+}
+
+#[tokio::test]
+async fn remove_rejects_unknown_and_ambiguous_saved_selectors_without_prompting_or_ipc() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let mut second = saved_openconnect();
+  second["connection_id"] = "second-id".into();
+  let original = fixture.write_profiles(2, &[saved_openconnect(), second]);
+  for selector in ["unknown-profile", "Work VPN"] {
+    let mut terminal = Terminal::new(&fixture, &["vpn", "remove", selector]);
+    assert!(!terminal.finish().success());
+    let transcript = String::from_utf8_lossy(&terminal.transcript);
+    assert!(!transcript.contains("Remove VPN profile"));
+    assert!(!transcript.contains("Choose a VPN"));
+    assert!(!transcript.contains("saved-private-secret"));
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+    assert_no_daemon_contact(&listener).await;
+  }
+}
+
+#[tokio::test]
+async fn remove_confirmation_defaults_to_no_and_cancellation_leaves_profiles_unchanged_without_ipc()
+{
+  for keys in ["\r", "\u{3}"] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    let original = fixture.write_profiles(2, &[saved_openconnect()]);
+    let mut terminal = Terminal::new(&fixture, &["vpn", "remove", "Work VPN"]);
+    terminal.wait_for("Remove VPN profile");
+    terminal.send(keys);
+    assert!(terminal.finish().success());
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+    assert_no_daemon_contact(&listener).await;
+  }
+}
+
+#[tokio::test]
+async fn cancelling_remove_picker_keeps_saved_profiles_without_contacting_ctld() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let original = fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
+  let mut terminal = Terminal::new(&fixture, &["vpn", "remove"]);
+  terminal.wait_for("Choose a VPN to remove");
+  terminal.send("\u{1b}[B\u{1b}");
+  terminal.wait_for("Cancelled. No changes made.");
+  assert!(terminal.finish().success());
+  assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+  assert_no_daemon_contact(&listener).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_remove_selects_saved_names_ids_or_picker_and_returns_only_removed_metadata() {
+  for selector in [Some("work-id"), Some("Work VPN"), None] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    let mut remaining = saved_tailscale();
+    if selector == Some("work-id") {
+      remaining["name"] = "work-id".into();
+    }
+    let original = fixture.write_profiles(2, &[remaining.clone(), saved_openconnect()]);
+    let args = selector.map_or_else(
+      || vec!["vpn", "remove", "--json"],
+      |selector| vec!["vpn", "remove", selector, "--json"],
+    );
+    let mut terminal = Terminal::new(&fixture, &args);
+    if selector.is_none() {
+      terminal.wait_for("Choose a VPN to remove");
+      terminal.send("\u{1b}[B\r");
+    }
+    terminal.wait_for("Remove VPN profile Work VPN (work-id)?");
+    assert_no_daemon_contact(&listener).await;
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+    let server = tokio::spawn(async move {
+      let request = reply(&listener, response(VpnStatus::default())).await;
+      (request, listener)
+    });
+    terminal.send("y");
+    assert!(terminal.finish().success());
+    let (request, listener) = timeout(Duration::from_secs(5), server)
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(matches!(request, ClientMessage::VpnStatus));
+    assert_no_daemon_contact(&listener).await;
+    let transcript = String::from_utf8_lossy(&terminal.transcript);
+    let removed: serde_json::Value = transcript
+      .lines()
+      .rev()
+      .find_map(|line| serde_json::from_str(&line[line.find('{')?..]).ok())
+      .expect("remove must print its JSON result after confirmation");
+    assert_eq!(
+      removed,
+      serde_json::json!({
+        "removed": true,
+        "connection_id": "work-id",
+        "name": "Work VPN",
+        "provider": "openconnect",
+      })
+    );
+    assert!(!transcript.contains("saved-private-secret"));
+    assert!(!transcript.contains("saved-private-token"));
+    let document: serde_json::Value =
+      serde_json::from_slice(&std::fs::read(fixture.profiles_path()).unwrap()).unwrap();
+    assert_eq!(document["connections"], serde_json::json!([remaining]));
+    assert_eq!(
+      std::fs::metadata(fixture.profiles_path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777,
+      0o600
+    );
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_remove_refuses_active_shared_or_unverifiable_inventory_without_stopping_a_vpn() {
+  for scenario in [
+    "owned",
+    "shared",
+    "starting",
+    "unavailable",
+    "other_provider",
+    "warnings",
+    "legacy",
+  ] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    let original = fixture.write_profiles(2, &[saved_openconnect()]);
+    let mut active = VpnStatus {
+      vpn_id: Some("runtime-work".into()),
+      connection_id: Some("work-id".into()),
+      locally_connected: Some(true),
+      ..connected()
+    };
+    match scenario {
+      "shared" => {
+        active.shared_container = true;
+        active.locally_connected = Some(false);
+      }
+      "starting" => {
+        active.state = VpnState::Starting;
+        active.running = false;
+      }
+      "unavailable" => {
+        active.state = VpnState::Stopped;
+        active.running = false;
+        active.status_unavailable = true;
+      }
+      "other_provider" => active.provider = ctl_ipc::VpnProvider::Tailscale,
+      _ => {}
+    }
+    let snapshot = VpnSnapshot {
+      connections: if scenario == "warnings" {
+        Vec::new()
+      } else {
+        vec![active.clone()]
+      },
+      supports_multiple: true,
+      discovery_warnings: if scenario == "warnings" {
+        vec!["Partial container inventory".into()]
+      } else {
+        Vec::new()
+      },
+      ..VpnSnapshot::default()
+    };
+    let response = if scenario == "legacy" {
+      ServerMessage::VpnStatus {
+        status: Box::new(VpnStatus::default()),
+        snapshot: None,
+      }
+    } else {
+      ServerMessage::VpnStatus {
+        status: Box::new(active),
+        snapshot: Some(snapshot),
+      }
+    };
+    let mut terminal = Terminal::new(&fixture, &["vpn", "remove", "Work VPN"]);
+    terminal.wait_for("Remove VPN profile");
+    let server = tokio::spawn(async move {
+      let request = reply(&listener, response).await;
+      (request, listener)
+    });
+    terminal.send("y");
+    assert!(!terminal.finish().success());
+    let (request, listener) = timeout(Duration::from_secs(5), server)
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(matches!(request, ClientMessage::VpnStatus));
+    assert_no_daemon_contact(&listener).await;
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+    assert!(!String::from_utf8_lossy(&terminal.transcript).contains("saved-private-secret"));
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_remove_preserves_catalog_changes_made_while_the_confirmation_was_open() {
+  for deleted in [false, true] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
+    let mut terminal = Terminal::new(&fixture, &["vpn", "remove", "Work VPN"]);
+    terminal.wait_for("Remove VPN profile");
+    let current = if deleted {
+      fixture.write_profiles(2, &[saved_tailscale()])
+    } else {
+      let mut changed = saved_openconnect();
+      changed["password"] = "updated-private-password".into();
+      fixture.write_profiles(2, &[changed, saved_tailscale()])
+    };
+    let server = tokio::spawn(async move {
+      let request = reply(&listener, response(VpnStatus::default())).await;
+      (request, listener)
+    });
+    terminal.send("y");
+    assert!(!terminal.finish().success());
+    let (request, listener) = timeout(Duration::from_secs(5), server)
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(matches!(request, ClientMessage::VpnStatus));
+    assert_no_daemon_contact(&listener).await;
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), current);
+    let transcript = String::from_utf8_lossy(&terminal.transcript);
+    assert!(!transcript.contains("updated-private-password"));
+    assert!(!transcript.contains("saved-private-secret"));
   }
 }
 

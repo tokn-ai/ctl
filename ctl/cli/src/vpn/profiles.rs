@@ -56,10 +56,7 @@ pub(crate) fn create(path: &Path, connection: &VpnConnection) -> Result<(), Erro
   connection
     .validate()
     .map_err(|_| Error::InvalidConnection)?;
-  let directory = path
-    .parent()
-    .filter(|parent| !parent.as_os_str().is_empty())
-    .unwrap_or_else(|| Path::new("."));
+  let directory = parent(path);
   prepare_directory(directory)?;
   let _lock = lock_directory(directory)?;
   let mut document = load(path)?;
@@ -77,8 +74,43 @@ pub(crate) fn create(path: &Path, connection: &VpnConnection) -> Result<(), Erro
   {
     return Err(Error::DuplicateName);
   }
-  document.schema_version = 2;
   document.connections.push(connection.clone());
+  persist_under_lock(path, directory, document)
+}
+
+/// Remove only the confirmed profile, preserving edits to other profiles.
+/// Comparing all settings under the desktop writer lock prevents confirmation
+/// from deleting a profile that was edited or replaced while the prompt was open.
+pub(crate) fn remove(path: &Path, expected: &VpnConnection) -> Result<(), Error> {
+  let directory = parent(path);
+  prepare_directory(directory)?;
+  let _lock = lock_directory(directory)?;
+  let mut document = load(path)?;
+  let index = document
+    .connections
+    .iter()
+    .position(|connection| connection.connection_id == expected.connection_id)
+    .ok_or(Error::RemovalConflict)?;
+  if &document.connections[index] != expected {
+    return Err(Error::RemovalConflict);
+  }
+  document.connections.remove(index);
+  persist_under_lock(path, directory, document)
+}
+
+fn parent(path: &Path) -> &Path {
+  path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+    .unwrap_or_else(|| Path::new("."))
+}
+
+fn persist_under_lock(
+  path: &Path,
+  directory: &Path,
+  mut document: SavedVpnDocument,
+) -> Result<(), Error> {
+  document.schema_version = 2;
   document.validate()?;
   let bytes = zeroize::Zeroizing::new(
     serde_json::to_vec_pretty(&document).map_err(|_| Error::EncodingFailed)?,
@@ -181,6 +213,10 @@ fn owned_and_private(metadata: &Metadata) -> bool {
   #[cfg(unix)]
   {
     use std::os::unix::fs::MetadataExt as _;
+    #[allow(
+      clippy::useless_conversion,
+      reason = "mode_t is u16 on macOS and u32 on Linux; MetadataExt::mode is always u32"
+    )]
     let public_permissions = u32::from((rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO).bits());
     metadata.mode() & public_permissions == 0
       && metadata.uid() == rustix::process::getuid().as_raw()
@@ -262,6 +298,10 @@ pub enum Error {
   DuplicateId,
   #[error("A saved VPN already uses this name; choose another name.")]
   DuplicateName,
+  #[error(
+    "The selected VPN profile changed or was removed. Reload the catalog before removing it."
+  )]
+  RemovalConflict,
   #[error("Could not encode the VPN profiles; the saved catalog has not been changed.")]
   EncodingFailed,
   #[error("Could not finish saving the VPN profiles; reload the catalog before retrying.")]
@@ -339,6 +379,274 @@ mod tests {
         target_ip: Some("192.0.2.1".into()),
       },
     }
+  }
+
+  fn tailscale_profile(id: &str) -> VpnConnection {
+    VpnConnection {
+      connection_id: id.into(),
+      name: format!("Profile {id}"),
+      settings: VpnSettings::Tailscale {
+        hostname: Some("fixture-device".into()),
+        accept_routes: true,
+      },
+    }
+  }
+
+  #[test]
+  fn removes_each_provider_by_exact_id_and_preserves_other_profiles_in_order() {
+    for selected in [profile("work"), tailscale_profile("tailnet")] {
+      let fixture = Fixture::new();
+      let first = VpnConnection {
+        name: selected.name.clone(),
+        ..profile("first")
+      };
+      let last = profile("last");
+      fixture.write_document(vec![first.clone(), selected.clone(), last.clone()]);
+      remove(&fixture.path(), &selected).unwrap();
+      let saved = load(&fixture.path()).unwrap();
+      assert_eq!(saved.schema_version, 2);
+      assert_eq!(saved.connections.len(), 2);
+      assert!(saved.connections[0] == first);
+      assert!(saved.connections[1] == last);
+      assert_eq!(
+        fs::metadata(fixture.path()).unwrap().permissions().mode() & 0o777,
+        0o600
+      );
+      assert_eq!(
+        fs::metadata(fixture.0.join("vpns.lock"))
+          .unwrap()
+          .permissions()
+          .mode()
+          & 0o777,
+        0o600
+      );
+      fixture.assert_no_temporary_files();
+    }
+  }
+
+  #[test]
+  fn removing_the_last_profile_keeps_a_catalog_and_repeated_removal_is_a_conflict() {
+    let fixture = Fixture::new();
+    let selected = profile("work");
+    fixture.write_document(vec![selected.clone()]);
+    remove(&fixture.path(), &selected).unwrap();
+    assert!(load(&fixture.path()).unwrap().connections.is_empty());
+    let empty = fs::read(fixture.path()).unwrap();
+    assert!(matches!(
+      remove(&fixture.path(), &selected),
+      Err(Error::RemovalConflict)
+    ));
+    assert_eq!(fs::read(fixture.path()).unwrap(), empty);
+    fs::remove_file(fixture.path()).unwrap();
+    assert!(matches!(
+      remove(&fixture.path(), &selected),
+      Err(Error::RemovalConflict)
+    ));
+    assert!(!fixture.path().exists());
+    fixture.assert_no_temporary_files();
+  }
+
+  #[test]
+  fn waiting_removal_rereads_under_the_desktop_lock_and_preserves_unrelated_edits() {
+    let fixture = Fixture::new();
+    let selected = profile("selected");
+    fixture.write_document(vec![selected.clone(), profile("other")]);
+    let lock = private_options()
+      .create(true)
+      .read(true)
+      .write(true)
+      .open(fixture.0.join("vpns.lock"))
+      .unwrap();
+    lock.lock().unwrap();
+    let path = fixture.path();
+    let expected = selected.clone();
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (completed_sender, completed_receiver) = mpsc::channel();
+    let writer = std::thread::spawn(move || {
+      started_sender.send(()).unwrap();
+      completed_sender.send(remove(&path, &expected)).unwrap();
+    });
+    started_receiver.recv().unwrap();
+    assert!(matches!(
+      completed_receiver.recv_timeout(Duration::from_millis(50)),
+      Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    let updated = VpnConnection {
+      name: "Edited in desktop".into(),
+      ..profile("other")
+    };
+    let added = tailscale_profile("desktop-added");
+    fixture.write_document(vec![selected, updated.clone(), added.clone()]);
+    drop(lock);
+    completed_receiver
+      .recv_timeout(Duration::from_secs(5))
+      .unwrap()
+      .unwrap();
+    writer.join().unwrap();
+    let saved = load(&fixture.path()).unwrap();
+    assert_eq!(saved.connections.len(), 2);
+    assert!(saved.connections[0] == updated);
+    assert!(saved.connections[1] == added);
+    fixture.assert_no_temporary_files();
+  }
+
+  #[test]
+  fn selected_profile_changes_or_deletion_reject_removal_without_rewriting() {
+    let fixture = Fixture::new();
+    let expected = profile("selected");
+    let mut credentials_changed = expected.clone();
+    let VpnSettings::Openconnect { password, .. } = &mut credentials_changed.settings else {
+      unreachable!();
+    };
+    *password = zeroize::Zeroizing::new("edited-private-password-marker".into());
+    let renamed = VpnConnection {
+      name: "Edited name".into(),
+      ..expected.clone()
+    };
+    let provider_changed = VpnConnection {
+      name: expected.name.clone(),
+      ..tailscale_profile(&expected.connection_id)
+    };
+    for current in [
+      Some(credentials_changed),
+      Some(renamed),
+      Some(provider_changed),
+      None,
+    ] {
+      let mut connections = vec![profile("other")];
+      connections.extend(current);
+      fixture.write_document(connections);
+      let original = fs::read(fixture.path()).unwrap();
+      let error = remove(&fixture.path(), &expected).unwrap_err();
+      assert!(matches!(error, Error::RemovalConflict));
+      assert!(!error.to_string().contains("edited-private-password-marker"));
+      assert_eq!(fs::read(fixture.path()).unwrap(), original);
+      fixture.assert_no_temporary_files();
+    }
+  }
+
+  #[test]
+  fn removal_migrates_a_legacy_catalog_and_preserves_the_remaining_settings() {
+    let fixture = Fixture::new();
+    let connections = ["first", "selected", "last"].map(|id| {
+      serde_json::json!({
+        "connection_id": id,
+        "name": format!("Profile {id}"),
+        "url": "https://vpn.example.test/private?token=fixture-token",
+        "username": "fixture-user",
+        "password": "fixture-password",
+        "auth_method": "fixture-group",
+        "target_ip": "192.0.2.1"
+      })
+    });
+    let legacy = serde_json::json!({
+      "schema_version": 1,
+      "connections": connections
+    });
+    fixture.write(&serde_json::to_vec(&legacy).unwrap());
+    remove(&fixture.path(), &profile("selected")).unwrap();
+    let saved = load(&fixture.path()).unwrap();
+    assert_eq!(saved.schema_version, 2);
+    assert_eq!(saved.connections.len(), 2);
+    assert!(saved.connections[0] == profile("first"));
+    assert!(saved.connections[1] == profile("last"));
+    fixture.assert_no_temporary_files();
+  }
+
+  #[test]
+  fn removal_preserves_malformed_and_invalid_catalogs_with_secret_safe_errors() {
+    let fixture = Fixture::new();
+    let selected = profile("selected");
+    for bytes in [
+      br#"{"schema_version": 2, "connections": ["private-password-marker"]}"#.as_slice(),
+      br#"{"schema_version": 999, "connections": []}"#.as_slice(),
+      br#"{"schema_version": 2, "connections": [{"connection_id":"selected","name":"Profile selected","provider":"openconnect","url":"http://invalid.example.test","username":"fixture-user","password":"private-password-marker","auth_method":null,"target_ip":null}]}"#.as_slice(),
+    ] {
+      fixture.write(bytes);
+      let error = remove(&fixture.path(), &selected).unwrap_err();
+      assert!(matches!(error, Error::Invalid | Error::Validation(_)));
+      assert!(!error.to_string().contains("private-password-marker"));
+      assert_eq!(fs::read(fixture.path()).unwrap(), bytes);
+      fixture.assert_no_temporary_files();
+    }
+  }
+
+  #[test]
+  fn removal_preserves_catalogs_with_unsafe_file_or_directory_permissions() {
+    let fixture = Fixture::new();
+    let selected = profile("selected");
+    fixture.write_document(vec![selected.clone()]);
+    let original = fs::read(fixture.path()).unwrap();
+    fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(
+      remove(&fixture.path(), &selected),
+      Err(Error::UnsafeFile)
+    ));
+    assert_eq!(fs::read(fixture.path()).unwrap(), original);
+    assert_eq!(
+      fs::metadata(fixture.path()).unwrap().permissions().mode() & 0o777,
+      0o644
+    );
+    fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(matches!(
+      remove(&fixture.path(), &selected),
+      Err(Error::UnsafeDirectory)
+    ));
+    assert_eq!(fs::read(fixture.path()).unwrap(), original);
+    assert_eq!(
+      fs::metadata(&fixture.0).unwrap().permissions().mode() & 0o777,
+      0o777
+    );
+    fixture.assert_no_temporary_files();
+  }
+
+  #[test]
+  fn removal_rejects_symlink_parents_catalogs_and_locks_without_touching_targets() {
+    let fixture = Fixture::new();
+    let selected = profile("selected");
+    let actual = fixture.0.join("actual");
+    fs::DirBuilder::new().mode(0o700).create(&actual).unwrap();
+    let original = serde_json::to_vec(&SavedVpnDocument {
+      connections: vec![selected.clone()],
+      ..SavedVpnDocument::default()
+    })
+    .unwrap();
+    let target = actual.join("vpns.json");
+    fs::write(&target, &original).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let parent_link = fixture.0.join("directory-link");
+    symlink(&actual, &parent_link).unwrap();
+    assert!(matches!(
+      remove(&parent_link.join("vpns.json"), &selected),
+      Err(Error::UnsafeDirectory)
+    ));
+    assert_eq!(fs::read(&target).unwrap(), original);
+    assert!(!actual.join("vpns.lock").exists());
+    symlink(&target, fixture.path()).unwrap();
+    assert!(matches!(
+      remove(&fixture.path(), &selected),
+      Err(Error::UnsafeFile)
+    ));
+    assert_eq!(fs::read(&target).unwrap(), original);
+    fs::remove_file(fixture.path()).unwrap();
+    fixture.write_document(vec![selected.clone()]);
+    fs::remove_file(fixture.0.join("vpns.lock")).unwrap();
+    symlink(&target, fixture.0.join("vpns.lock")).unwrap();
+    assert!(matches!(
+      remove(&fixture.path(), &selected),
+      Err(Error::UnsafeFile)
+    ));
+    assert_eq!(fs::read(&target).unwrap(), original);
+    assert_eq!(
+      fs::read(fixture.path()).unwrap(),
+      serde_json::to_vec_pretty(&SavedVpnDocument {
+        connections: vec![selected],
+        ..SavedVpnDocument::default()
+      })
+      .unwrap()
+    );
+    fixture.assert_no_temporary_files();
   }
 
   #[test]

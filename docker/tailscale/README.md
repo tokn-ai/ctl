@@ -39,10 +39,18 @@ browser sign-in begins when starting it. Starting the same profile retains its
 device identity and login. Omitting the start selector opens a picker in an
 interactive terminal; stop does the same with a current daemon. Scripts must
 supply a start selector; an
-untargeted stop requires zero or one local connection. All four commands support
+untargeted stop requires zero or one local connection. All five commands support
 `--json`; create remains interactive and returns only saved metadata. List
 returns sanitized merged `entries`, raw runtime `connections`,
 capability fields, and inventory warnings.
+
+Use `ctl vpn remove NAME_OR_ID` to delete a saved profile, or omit the selector
+for a profile picker. Removal always requires interactive confirmation,
+defaulting to No, with no `--yes` bypass. It retains the Tailscale identity volume
+and does not revoke the device in the remote tailnet. After confirmation it
+requires complete runtime inventory and a stopped VPN. Release its heartbeat
+interests and wait for container exit first; remove never starts a daemon or
+stops a VPN automatically.
 
 The listener check completes a short-lived SOCKS5 UDP association and closes it
 without sending any datagrams or contacting a remote host. Completing the request

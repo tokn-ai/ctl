@@ -342,7 +342,7 @@ mod tests {
   async fn remote_vpn_commands_are_rejected_before_connecting() {
     use clap::Parser;
 
-    for action in ["create", "start", "list", "stop"] {
+    for action in ["create", "start", "list", "stop", "remove"] {
       let arguments =
         Arguments::try_parse_from(["ctl", "--host", "vpn-server", "vpn", action]).unwrap();
       assert!(matches!(

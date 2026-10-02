@@ -625,7 +625,7 @@ unique exact name, or a runtime VPN ID from list. With a current daemon, omittin
 it opens a picker of local connections in an interactive terminal. Older daemons
 support only one local connection, so an omitted selector uses their untargeted
 stop directly. In scripts, an untargeted stop requires at most one local
-connection. All four commands support `--json`.
+connection. All five commands support `--json`.
 Create remains interactive and returns only saved metadata, with prompts on
 stderr. List JSON includes merged `entries`, raw runtime `connections`, capability
 fields, and discovery warnings. If the saved catalog
@@ -637,6 +637,21 @@ while another daemon uses it, then exits after the final heartbeat expires. See 
 [OpenConnect setup](docker/openconnect/README.md) for building the image and
 creating a saved profile, or the [Tailscale guide](docker/tailscale/README.md)
 for browser sign-in and persistent container state.
+
+To delete a saved profile, run:
+
+```sh
+ctl vpn remove NAME_OR_ID
+```
+
+Remove selects an exact saved profile ID before a unique exact name. Omitting
+the selector opens a saved-profile picker. It always requires interactive
+confirmation, defaulting to No; there is no `--yes` bypass. Removal deletes the
+saved catalog entry and retains Tailscale identity volumes. Cancelling leaves
+the catalog unchanged without querying the daemon. After confirmation, removal
+requires complete runtime inventory and a stopped VPN. Release its heartbeat
+interests and wait for the container to exit first. Remove never starts or stops
+a daemon or VPN; an unavailable or legacy inventory blocks deletion.
 
 ## Managed tasks
 

@@ -254,8 +254,8 @@ OpenConnect or Tailscale profile without starting a daemon or container.
 the saved profile's container, starting the daemon and recreating a missing
 container when needed. Its SOCKS5 listener uses a
 random loopback port, printed in a readable connection-status table after the VPN and
-proxy are ready. Create, start, list, and stop accept `--json` for machine-readable
-output. Create remains interactive and returns only saved metadata, with prompts
+proxy are ready. Create, start, list, stop, and remove accept `--json` for
+machine-readable output. Create remains interactive and returns only saved metadata, with prompts
 on stderr. `ctl vpn list` combines saved profiles with local interests and compatible
 shared containers, retaining runtime entries without saved profiles. Its JSON
 snapshot adds sanitized merged `entries` to the runtime `connections`, capability
@@ -270,18 +270,31 @@ picker in an interactive terminal. An omitted stop selector opens a picker when
 the daemon reports `supports_multiple: true`; a legacy daemon's single local
 connection uses untargeted stop directly. Scripts must specify a start selector;
 an untargeted stop requires zero or one local connection.
-List and stop never start a daemon. An absent daemon or incomplete engine
+List, stop, and remove never start a daemon. An absent daemon or incomplete engine
 inventory reports a discovery warning rather than a confident empty result. VPN
 commands reject `--host` and use
 the owner-only local IPC endpoint, selectable through `CTLD_SOCKET_PATH`.
+
+`ctl vpn remove NAME_OR_ID` deletes a saved catalog entry after interactive
+confirmation, defaulting to No. It resolves an exact profile ID before a unique
+exact name; an omitted selector opens a saved-profile picker. There is no `--yes`
+bypass, including with `--json`. Removal retains Tailscale identity volumes and
+does not revoke devices in the remote tailnet. Choosing No or cancelling makes
+no IPC request or catalog write. After confirmation, remove checks complete
+runtime inventory and refuses active containers (including shared ones), stopping,
+or unverified state. The
+VPN must be stopped and its container gone before the catalog entry is deleted.
+Missing, incomplete, or legacy inventory blocks deletion; remove never starts
+ctld or stops the VPN automatically. JSON success contains exactly `removed: true`,
+`connection_id`, `name`, and `provider`.
 
 The desktop VPN panel stores named connection details in private, schema-versioned
 `vpns.json` under the app configuration directory. Native commands return metadata
 and password-presence flags, use hashed revisions for optimistic writes, and load
 the saved secret only when connecting. Both desktop and CLI use the shared
 `ctl-ipc::vpn` client. CLI start resolves an exact saved profile ID before a unique
-exact name, then connects through that client. CLI create, start, list, and host VPN
-routes share a bounded private profile reader accepting schema 1 and 2. The
+exact name, then connects through that client. CLI create, start, list, remove,
+and host VPN routes share a bounded private profile reader accepting schema 1 and 2. The
 catalog defaults to `~/.tokn/ctl/vpns.json`; `CTL_VPNS_PATH` selects another file.
 OpenConnect structured starts send the configuration to the container
 over its attached stdin; the container writes a mode-0600 environment file on

@@ -85,8 +85,8 @@ SOCKS5 endpoint, and VPN ID. Saved profiles stay visible after container removal
 An unmatched saved profile is disconnected only when runtime inventory is
 complete; otherwise it is unavailable. List never starts ctld or renews a heartbeat.
 
-Create, start, list, and stop accept `--json`. Create remains interactive; its
-JSON output contains only saved metadata and its prompts stay on stderr.
+Create, start, list, stop, and remove accept `--json`. Create remains interactive;
+its JSON output contains only saved metadata and its prompts stay on stderr.
 List JSON is a snapshot
 with sanitized merged `entries`, raw runtime `connections`, capability fields,
 and optional `discovery_warnings` when the container inventory could not be
@@ -114,6 +114,14 @@ an untargeted stop succeeds only when this daemon has zero or one connection;
 discovered containers do not make that selection ambiguous. Repeating a start
 for the same saved profile reuses its active connection.
 
+To delete a saved profile, use `ctl vpn remove NAME_OR_ID`. Omitting the selector
+opens a saved-profile picker. Removal always requires interactive confirmation,
+defaulting to No; there is no `--yes` bypass. It deletes the saved catalog entry
+and retains any Tailscale identity volume. After confirmation, removal requires
+complete runtime inventory and a stopped VPN. Release its heartbeat interests
+and wait for container exit first. Remove never starts a daemon or stops a VPN
+automatically; unavailable or legacy inventory blocks deletion.
+
 Connection metadata comes from the settings used to start the VPN and stays
 unchanged until it stops. An already running older ctld may return no server or
 username; the CLI displays `unavailable` until a connection is started by the
@@ -129,6 +137,10 @@ and both Rust binaries, then starts the selected saved profile:
 ./docker/openconnect/run.sh list
 ./docker/openconnect/run.sh stop NAME_OR_ID
 ```
+
+List, stop, and remove build the CLI only if its binary is missing. To delete a
+saved profile through the same helper, run
+`./docker/openconnect/run.sh remove NAME_OR_ID` and confirm interactively.
 
 The helper sets `CTLD_BIN` to the matching `target/debug/ctld` binary for daemon
 auto-start. Use `CTLD_SOCKET_PATH=/absolute/path/to/ctld.sock` consistently when

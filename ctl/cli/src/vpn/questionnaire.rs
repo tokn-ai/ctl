@@ -103,6 +103,23 @@ pub(super) fn pick(
   cancelled(select.filter_mode().max_rows(10).interact())
 }
 
+pub(super) fn confirm_remove(connection: &VpnConnection) -> Result<bool, super::Error> {
+  require_terminal("remove")?;
+  let confirmed = cancelled(
+    cliclack::confirm(format!(
+      "Remove VPN profile {} ({})?",
+      crate::table::text(&connection.name),
+      crate::table::text(&connection.connection_id)
+    ))
+    .initial_value(false)
+    .interact(),
+  )?;
+  if confirmed == Some(false) {
+    cliclack::outro_cancel("Cancelled. No changes made.")?;
+  }
+  Ok(confirmed == Some(true))
+}
+
 fn require_terminal(action: &'static str) -> Result<(), super::Error> {
   if available() {
     Ok(())

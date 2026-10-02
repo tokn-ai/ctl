@@ -1,6 +1,6 @@
 ---
 name: ctl-vpn
-description: Create saved VPN profiles, list their runtime state, and start or stop ctl-managed OpenConnect or Tailscale connections and local SOCKS5 endpoints, including pending Tailscale sign-in and shared ownership.
+description: Create or remove saved VPN profiles, list their runtime state, and start or stop ctl-managed OpenConnect or Tailscale connections and local SOCKS5 endpoints, including pending Tailscale sign-in and shared ownership.
 ---
 
 # ctl vpn
@@ -8,8 +8,8 @@ description: Create saved VPN profiles, list their runtime state, and start or s
 Use `ctl vpn` locally on a Unix client. `-H` is rejected; these commands manage
 the local ctld's VPN interest, not a remote machine's VPN. Starting a VPN requires
 Docker or Podman to be running. Start launches the selected ctld if needed;
-create, list, and stop do not. List reads the saved catalog and passively probes
-the selected daemon without acquiring or renewing heartbeat interest.
+create, list, stop, and remove do not. List reads the saved catalog and passively
+probes the selected daemon without acquiring or renewing heartbeat interest.
 
 ## Create a saved profile
 
@@ -142,3 +142,27 @@ Release every interested daemon before changing active routing settings.
 Tailscale stop retains its durable identity volume and login; creating a new
 profile creates a separate identity. Do not remove that volume for routine
 disconnects.
+
+## Remove a saved profile
+
+```sh
+ctl vpn remove NAME_OR_ID
+```
+
+Remove selects an exact saved profile ID before a unique exact name. Omitting
+the selector opens a saved-profile picker, like start. It always asks for
+interactive confirmation, defaulting to No; `--json` does not bypass that prompt
+and there is no `--yes` flag. Choosing No or cancelling leaves the catalog
+unchanged without querying ctld.
+
+After confirmation, remove passively checks runtime inventory. The selected VPN
+must be stopped and inventory must be complete; active containers (including
+shared ones), stopping, or unverified state block deletion. Release every interested daemon's heartbeat and
+wait for container exit first. Remove never starts a daemon or stops a VPN
+automatically. Missing, incomplete, or legacy inventory must be resolved by
+starting or updating ctld before retrying.
+
+Removal deletes only the saved catalog entry. Its JSON result contains exactly
+`removed: true`, `connection_id`, `name`, and `provider`. Tailscale identity
+volumes are retained; removal does not revoke a device in the remote tailnet.
+Use stop for a routine disconnect when the saved profile should remain available.

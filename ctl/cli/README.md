@@ -44,11 +44,18 @@ ID or unique exact name. `vpn stop` also accepts runtime VPN IDs. Omitting the
 start selector opens a picker in an interactive terminal; stop does the same
 with a current daemon. An older daemon uses its untargeted single-connection stop
 directly. Scripts must supply a start selector; an untargeted stop requires at most one local
-connection. All four commands support `--json`; create remains interactive and
+connection. All five commands support `--json`; create remains interactive and
 returns saved metadata, while list returns a snapshot
 with sanitized merged `entries`, raw runtime `connections`, and inventory warnings.
 Older daemons can report their local connection, but unmatched saved profiles
 remain unavailable because shared-container inventory cannot be verified.
+
+Use `vpn remove NAME_OR_ID` to delete a saved profile. Omitting its selector
+opens a profile picker. Removal always requires interactive confirmation,
+defaulting to No, and retains Tailscale identity volumes. There is no `--yes`
+bypass. After confirmation it requires complete runtime inventory and a stopped
+VPN; stop it and wait for container exit first. Remove never starts a daemon or
+stops a VPN automatically.
 
 The bundled skills and references are available without a daemon, connection,
 or source checkout.

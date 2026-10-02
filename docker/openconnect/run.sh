@@ -44,15 +44,15 @@ case "$action" in
       --target-dir "$repo_dir/target" -p ctl-cli -p ctld
     exec "$ctl_binary" vpn start "$@"
     ;;
-  list|stop)
+  list|stop|remove)
     if ! [ -x "$ctl_binary" ]; then
-      printf 'Build ctl with %s create or start before managing the VPN.\n' "$0" >&2
-      exit 1
+      cargo build --manifest-path "$repo_dir/Cargo.toml" \
+        --target-dir "$repo_dir/target" -p ctl-cli
     fi
     exec "$ctl_binary" vpn "$action" "$@"
     ;;
   *)
-    printf 'Usage: %s [build|create|start|list|stop] [NAME_OR_ID]\n' "$0" >&2
+    printf 'Usage: %s [build|create|start|list|stop|remove] [NAME_OR_ID]\n' "$0" >&2
     exit 2
     ;;
 esac

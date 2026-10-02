@@ -160,11 +160,11 @@ mod tests {
       Command::Vpn { command: vpn::Command::Start { profile: Some(profile), json: false } }
         if profile == "Work VPN"
     ));
-    for action in ["create", "list", "start", "stop"] {
+    for action in ["create", "list", "start", "stop", "remove"] {
       assert!(Arguments::try_parse_from(["ctl", "vpn", action]).is_ok());
       assert!(Arguments::try_parse_from(["ctl", "vpn", action, "--env-file", ".env"]).is_err());
     }
-    for action in ["create", "start", "list", "stop"] {
+    for action in ["create", "start", "list", "stop", "remove"] {
       let arguments = Arguments::try_parse_from(["ctl", "vpn", action, "--json"]).unwrap();
       assert!(matches!(
         arguments.command,
@@ -173,6 +173,7 @@ mod tests {
             | vpn::Command::Create { json: true }
             | vpn::Command::List { json: true }
             | vpn::Command::Stop { json: true, .. }
+            | vpn::Command::Remove { json: true, .. }
         }
       ));
     }
@@ -182,6 +183,13 @@ mod tests {
       Command::Vpn { command: vpn::Command::Stop { profile: Some(profile), json: false } }
         if profile == "test-vpn"
     ));
+    let arguments = Arguments::try_parse_from(["ctl", "vpn", "remove", "Work VPN"]).unwrap();
+    assert!(matches!(
+      arguments.command,
+      Command::Vpn { command: vpn::Command::Remove { profile: Some(profile), json: false } }
+        if profile == "Work VPN"
+    ));
+    assert!(Arguments::try_parse_from(["ctl", "vpn", "remove", "--yes"]).is_err());
     assert!(Arguments::try_parse_from(["ctl", "vpn", "status"]).is_err());
   }
 

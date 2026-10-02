@@ -112,8 +112,10 @@ its pinned official image on first use. Tailscale requires an updated `ctld`.
 On macOS and Linux, each connected `ctld` sends heartbeats to its VPN container.
 Closing the app leaves its daemon and VPN interest running. Disconnecting or
 exiting `ctld` releases that daemon's interest; after all heartbeats stop, the
-container exits automatically after its timeout. `ctl vpn status` distinguishes
-connections kept alive by **this ctld** from discovered **shared** containers.
+container exits automatically after its timeout. `ctl vpn list` combines saved
+profiles with runtime connections and distinguishes connections kept alive by
+**this ctld** from discovered **shared** containers. Saved profiles remain visible
+after container removal; use `ctl vpn connect NAME_OR_ID` to reconnect one.
 The SOCKS proxy follows the container's routes;
 it does not change the Mac's system routes. Choose a saved VPN in a host's
 **Connect through** step to route that host through its current SOCKS5 endpoint.

@@ -590,14 +590,17 @@ ctl vpn list
 ctl vpn connect NAME_OR_ID
 ctl vpn start --env-file .env
 ctl vpn start-tailscale --id my-tailnet
-ctl vpn status
 ctl vpn stop VPN_ID
 ```
 
-`list` shows saved VPN profiles from `~/.tokn/ctl/vpns.json`, including profiles
-whose containers have been removed. It does not need or start `ctld`. Use
-`CTL_VPNS_PATH` to select another catalog. `list --json` returns an array with
-`connection_id`, `name`, and `provider`; credentials are omitted.
+`list` combines saved VPN profiles from `~/.tokn/ctl/vpns.json` with local
+connections and compatible shared containers. It prints name, provider, state,
+heartbeat use, server or tailnet, username, SOCKS5 endpoint, and VPN ID. Profiles
+stay visible after their containers are removed. The daemon probe is passive:
+list never starts `ctld` or acquires heartbeat interest. A saved profile without
+a runtime connection is disconnected only when inventory is complete; otherwise
+its state is unavailable. Runtime connections without a saved profile also appear.
+Use `CTL_VPNS_PATH` to select another catalog.
 
 `connect NAME_OR_ID` connects an existing saved profile, starting `ctld` when
 needed. An exact stable `connection_id` takes precedence over a name; names must
@@ -611,14 +614,15 @@ Tailscale prints a browser sign-in link when needed. Reuse the same `--id` to
 retain its device identity and login. Add `--hostname NAME` to name the device or
 `--accept-routes` to use advertised subnet routes.
 
-Status is a passive inventory of runtime connections and containers, so an empty
-status does not mean there are no saved profiles. It prints a table of VPN IDs,
-providers, states, servers, usernames, and randomly allocated loopback SOCKS5
-endpoints. Multiple VPNs can run independently. Use the ID from the status table
-to stop one; an untargeted stop requires at most one active VPN.
-List, connect, start, status, and stop support `--json` for scripts. Start launches
-`ctld` if needed. Stop leaves `ctld` running and releases that daemon's heartbeat
-interest. A shared container remains available while another daemon uses it,
+Multiple VPNs can run independently. Use the VPN ID from list to stop one; an
+untargeted stop requires at most one active VPN. List, connect, start, and stop
+support `--json` for scripts. List JSON includes merged `entries`, raw runtime
+`connections`, capability fields, and discovery warnings. If the saved catalog
+cannot be read, runtime entries remain available with `profile_warnings`.
+Saved metadata excludes passwords and URL credentials, paths, queries, and
+fragments. Start launches `ctld` if needed. Stop leaves `ctld` running and
+releases that daemon's heartbeat interest. A shared container remains available
+while another daemon uses it,
 then exits after the final heartbeat expires. See the
 [OpenConnect setup](docker/openconnect/README.md) for building the image and
 configuring the private env file, or the [Tailscale guide](docker/tailscale/README.md)

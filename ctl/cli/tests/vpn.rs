@@ -178,7 +178,7 @@ fn connected() -> VpnStatus {
 }
 
 #[tokio::test]
-async fn start_status_and_stop_use_daemon_ipc_and_print_json() {
+async fn start_list_and_stop_use_daemon_ipc_and_print_json() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let ready = connected();
@@ -198,7 +198,7 @@ async fn start_status_and_stop_use_daemon_ipc_and_print_json() {
   let (output, request) = exchange(
     &fixture,
     &listener,
-    &["vpn", "status", "--json"],
+    &["vpn", "list", "--json"],
     response(ready.clone()),
   )
   .await;
@@ -225,15 +225,34 @@ async fn start_status_and_stop_use_daemon_ipc_and_print_json() {
 }
 
 #[tokio::test]
-async fn start_status_and_stop_print_a_human_readable_table_by_default() {
+async fn start_list_and_stop_print_a_human_readable_table_by_default() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
-  for action in ["start", "status"] {
-    let (output, _) = exchange(&fixture, &listener, &["vpn", action], response(connected())).await;
-    assert_text_status(
-      &output,
-      "VPN ID    PROVIDER     STATE      SERVER                   USERNAME   SOCKS5 ENDPOINT\ntest-vpn  OpenConnect  connected  https://vpn.example.com  test-user  socks5h://127.0.0.1:43210\n",
-    );
+  for action in ["start", "list"] {
+    let (output, request) =
+      exchange(&fixture, &listener, &["vpn", action], response(connected())).await;
+    if action == "list" {
+      assert!(matches!(request, ClientMessage::VpnStatus));
+      assert!(output.status.success(), "{output:?}");
+      assert!(output.stderr.is_empty(), "{output:?}");
+      let table = String::from_utf8(output.stdout).unwrap();
+      assert!(table.starts_with("NAME"));
+      for value in [
+        "OpenConnect",
+        "connected",
+        "https://vpn.example.com",
+        "test-user",
+        "socks5h://127.0.0.1:43210",
+        "test-vpn",
+      ] {
+        assert!(table.contains(value), "{table}");
+      }
+    } else {
+      assert_text_status(
+        &output,
+        "VPN ID    PROVIDER     STATE      SERVER                   USERNAME   SOCKS5 ENDPOINT\ntest-vpn  OpenConnect  connected  https://vpn.example.com  test-user  socks5h://127.0.0.1:43210\n",
+      );
+    }
   }
   let (output, _) = exchange(
     &fixture,
@@ -291,7 +310,44 @@ async fn tailscale_start_reports_pending_login_and_sends_provider_settings() {
 }
 
 #[tokio::test]
-async fn tailscale_status_explains_required_device_approval() {
+async fn start_only_reports_sign_in_for_valid_tailscale_authentication_urls() {
+  for (provider, auth_url) in [
+    (
+      ctl_ipc::VpnProvider::Openconnect,
+      "https://login.tailscale.com/a/123abc",
+    ),
+    (
+      ctl_ipc::VpnProvider::Tailscale,
+      "https://untrusted.example.test/a/123abc",
+    ),
+  ] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    let (output, _) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", "start"],
+      response(VpnStatus {
+        provider,
+        vpn_id: Some("pending-vpn".into()),
+        state: VpnState::Starting,
+        auth_url: Some(auth_url.into()),
+        ..VpnStatus::default()
+      }),
+    )
+    .await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("starting"));
+    assert!(!text.contains("sign-in required"));
+    assert!(!text.contains("Sign in"));
+    assert!(!text.contains(auth_url));
+  }
+}
+
+#[tokio::test]
+async fn tailscale_list_explains_required_device_approval() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let pending = VpnStatus {
@@ -301,52 +357,50 @@ async fn tailscale_status_explains_required_device_approval() {
     message: Some("Approve this device in the Tailscale admin console".into()),
     ..VpnStatus::default()
   };
-  let (output, _) = exchange(&fixture, &listener, &["vpn", "status"], response(pending)).await;
+  let (output, _) = exchange(&fixture, &listener, &["vpn", "list"], response(pending)).await;
   assert!(output.status.success());
   let text = String::from_utf8(output.stdout).unwrap();
   assert!(text.contains("team: Approve this device in the Tailscale admin console"));
 }
 
 #[tokio::test]
-async fn human_status_shows_lifecycle_and_unavailable_connection_details() {
+async fn human_list_shows_lifecycle_and_unavailable_connection_details() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   for (state, expected) in [
-    (
-      VpnState::Starting,
-      "VPN ID  PROVIDER     STATE     SERVER       USERNAME     SOCKS5 ENDPOINT\n-       OpenConnect  starting  unavailable  unavailable  unavailable\n",
-    ),
-    (
-      VpnState::Connected,
-      "VPN ID  PROVIDER     STATE      SERVER       USERNAME     SOCKS5 ENDPOINT\n-       OpenConnect  connected  unavailable  unavailable  unavailable\n",
-    ),
-    (
-      VpnState::Stopping,
-      "VPN ID  PROVIDER     STATE     SERVER       USERNAME     SOCKS5 ENDPOINT\n-       OpenConnect  stopping  unavailable  unavailable  unavailable\n",
-    ),
+    (VpnState::Starting, "starting"),
+    (VpnState::Connected, "connected"),
+    (VpnState::Stopping, "stopping"),
   ] {
     let (output, _) = exchange(
       &fixture,
       &listener,
-      &["vpn", "status"],
+      &["vpn", "list"],
       response(VpnStatus {
         state,
         ..VpnStatus::default()
       }),
     )
     .await;
-    assert_text_status(&output, expected);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let table = String::from_utf8(output.stdout).unwrap();
+    let rows: Vec<_> = table.lines().collect();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].contains("OpenConnect"));
+    assert!(rows[1].contains(expected));
+    assert!(!rows[1].contains("socks5h://"));
   }
 }
 
 #[tokio::test]
-async fn human_status_escapes_terminal_controls_and_preserves_readable_unicode() {
+async fn human_list_escapes_terminal_controls_and_preserves_readable_unicode() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let (output, _) = exchange(
     &fixture,
     &listener,
-    &["vpn", "status"],
+    &["vpn", "list"],
     response(VpnStatus {
       vpn_id: Some("test\n-vpn".into()),
       vpn_url: Some("https://vpn.example.com\u{001b}[2J".into()),
@@ -361,10 +415,9 @@ async fn human_status_escapes_terminal_controls_and_preserves_readable_unicode()
   let text = String::from_utf8(output.stdout).unwrap();
   let lines: Vec<_> = text.lines().collect();
   assert_eq!(lines.len(), 2);
-  assert!(lines[1].starts_with("test\\n-vpn"));
-  assert!(lines[1].contains("https://vpn.example.com\\u{1b}[2J"));
+  assert!(lines[1].contains("test\\n-vpn"));
   assert!(lines[1].contains("用户\\nadmin\\t\\u{202e}\\u{85}"));
-  assert!(lines[1].ends_with("socks5h://127.0.0.1:43210\\r"));
+  assert!(lines[1].contains("socks5h://127.0.0.1:43210\\r"));
   assert!(
     text
       .chars()
@@ -379,7 +432,7 @@ async fn human_status_escapes_terminal_controls_and_preserves_readable_unicode()
 }
 
 #[tokio::test]
-async fn status_lists_multiple_connections_and_aligns_every_column() {
+async fn list_shows_multiple_connections_and_aligns_every_column() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let first = connected();
@@ -398,7 +451,7 @@ async fn status_lists_multiple_connections_and_aligns_every_column() {
   let (output, request) = exchange(
     &fixture,
     &listener,
-    &["vpn", "status"],
+    &["vpn", "list"],
     ServerMessage::VpnStatus {
       status: Box::new(first.clone()),
       snapshot: Some(snapshot.clone()),
@@ -412,7 +465,7 @@ async fn status_lists_multiple_connections_and_aligns_every_column() {
   let lines: Vec<_> = text.lines().collect();
   assert_eq!(lines.len(), 3);
   for (line, connection) in lines[1..].iter().zip(&snapshot.connections) {
-    assert!(line.starts_with(connection.vpn_id.as_deref().unwrap()));
+    assert!(line.contains(connection.vpn_id.as_deref().unwrap()));
     for (heading, value) in [
       ("STATE", "connected"),
       ("SERVER", connection.vpn_url.as_deref().unwrap()),
@@ -429,7 +482,7 @@ async fn status_lists_multiple_connections_and_aligns_every_column() {
   let (output, _) = exchange(
     &fixture,
     &listener,
-    &["vpn", "status", "--json"],
+    &["vpn", "list", "--json"],
     ServerMessage::VpnStatus {
       status: Box::new(first),
       snapshot: Some(snapshot.clone()),
@@ -450,7 +503,7 @@ async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
   let (output, _) = exchange(
     &fixture,
     &listener,
-    &["vpn", "status", "--json"],
+    &["vpn", "list", "--json"],
     ServerMessage::VpnStatus {
       status: Box::new(legacy.clone()),
       snapshot: None,
@@ -597,12 +650,11 @@ async fn stop_without_an_id_reports_ambiguity_and_never_stops_all_connections() 
 async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remote_commands_are_rejected()
  {
   let fixture = Fixture::new();
-  for action in ["status", "stop"] {
+  for action in ["list", "stop"] {
     let output = fixture.command(&["vpn", action]).output().await.unwrap();
-    if action == "status" {
+    if action == "list" {
       assert!(output.status.success());
       let text = String::from_utf8(output.stdout).unwrap();
-      assert!(text.starts_with("VPN inventory unavailable."));
       assert!(text.contains("ctld is not running"));
       assert_eq!(output.stderr, Vec::<u8>::new());
     } else {
@@ -613,7 +665,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
       .output()
       .await
       .unwrap();
-    if action == "status" {
+    if action == "list" {
       assert!(output.status.success());
       let snapshot: VpnSnapshot = serde_json::from_slice(&output.stdout).unwrap();
       assert_eq!(snapshot.connections, Vec::<ctl_ipc::VpnStatus>::new());
@@ -623,7 +675,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
     }
     assert!(!fixture.socket().exists());
   }
-  for action in ["start", "status", "stop", "list", "connect"] {
+  for action in ["start", "list", "stop", "connect"] {
     for json in [false, true] {
       let mut args = vec!["--host", "vpn-host", "vpn", action];
       if action == "connect" {
@@ -724,7 +776,7 @@ async fn daemon_errors_are_reported_without_success_output() {
 }
 
 #[tokio::test]
-async fn shared_container_status_distinguishes_local_interest_and_keeps_endpoint() {
+async fn shared_container_list_distinguishes_local_interest_and_keeps_endpoint() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let snapshot = VpnSnapshot {
@@ -748,7 +800,7 @@ async fn shared_container_status_distinguishes_local_interest_and_keeps_endpoint
   let (output, _) = exchange(
     &fixture,
     &listener,
-    &["vpn", "status"],
+    &["vpn", "list"],
     ServerMessage::VpnStatus {
       status: Box::new(snapshot.connections[0].clone()),
       snapshot: Some(snapshot),
@@ -772,7 +824,7 @@ async fn default_vpn_client_honors_the_vpn_socket_override() {
   let selected = fixture.directory.join("vpn-override.sock");
   let listener = UnixListener::bind(&selected).unwrap();
   let unused = UnixListener::bind(fixture.socket()).unwrap();
-  let mut command = fixture.command(&["vpn", "status", "--json"]);
+  let mut command = fixture.command(&["vpn", "list", "--json"]);
   command
     .env("CTLD_VPN_SOCKET_PATH", &selected)
     .env("CTMUX_DEV_DAEMON_SUPERVISOR", "1");
@@ -816,7 +868,7 @@ fn saved_openconnect() -> serde_json::Value {
     "connection_id": "work-id",
     "name": "Work VPN",
     "provider": "openconnect",
-    "url": "https://vpn.saved.example.test/group",
+    "url": "https://vpn.saved.example.test/group?token=saved-private-token",
     "username": "saved-test-user",
     "password": "saved-private-secret",
     "auth_method": "certificate-group",
@@ -846,6 +898,45 @@ fn assert_no_saved_credentials(output: &Output) {
   }
 }
 
+fn assert_no_profile_secrets(output: &Output) {
+  for value in [
+    "saved-private-secret",
+    "saved-private-token",
+    "certificate-group",
+    "/group",
+    "\"password\"",
+    "\"auth_method\"",
+  ] {
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(value));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(value));
+  }
+}
+
+fn inventory(output: &Output) -> serde_json::Value {
+  assert!(output.status.success(), "{output:?}");
+  assert!(output.stderr.is_empty(), "{output:?}");
+  serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn entry_summaries(inventory: &serde_json::Value) -> serde_json::Value {
+  serde_json::Value::Array(
+    inventory["entries"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|entry| {
+        serde_json::json!({
+          "connection_id": entry["connection_id"],
+          "name": entry["name"],
+          "provider": entry["provider"],
+          "saved": entry["saved"],
+          "state": entry["state"],
+        })
+      })
+      .collect(),
+  )
+}
+
 async fn assert_no_daemon_contact(listener: &UnixListener) {
   assert!(
     timeout(Duration::from_millis(30), listener.accept())
@@ -855,7 +946,7 @@ async fn assert_no_daemon_contact(listener: &UnixListener) {
 }
 
 #[tokio::test]
-async fn list_reads_legacy_and_current_saved_profiles_without_daemon_contact_or_credentials() {
+async fn list_reads_saved_profiles_and_passively_checks_runtime_without_exposing_secrets() {
   for schema_version in [1, 2] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -865,6 +956,8 @@ async fn list_reads_legacy_and_current_saved_profiles_without_daemon_contact_or_
       "connection_id": "work-id",
       "name": "Work VPN",
       "provider": "openconnect",
+      "saved": true,
+      "state": "disconnected",
     })];
     if schema_version == 1 {
       openconnect.as_object_mut().unwrap().remove("provider");
@@ -875,22 +968,41 @@ async fn list_reads_legacy_and_current_saved_profiles_without_daemon_contact_or_
         "connection_id": "tailnet-id",
         "name": "Team VPN",
         "provider": "tailscale",
+        "saved": true,
+        "state": "disconnected",
       }));
     }
     let original = fixture.write_profiles(schema_version, &profiles);
-    let output = fixture.output(&["vpn", "list", "--json"]).await;
-    assert!(output.status.success(), "{output:?}");
-    assert!(output.stderr.is_empty(), "{output:?}");
+    let (output, request) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", "list", "--json"],
+      response(VpnStatus::default()),
+    )
+    .await;
+    assert!(matches!(request, ClientMessage::VpnStatus));
+    let value = inventory(&output);
+    assert_eq!(entry_summaries(&value), serde_json::json!(expected));
+    assert_eq!(value["connections"], serde_json::json!([]));
+    assert_eq!(value["supports_multiple"], true);
     assert_eq!(
-      serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-      serde_json::json!(expected)
+      value["entries"][0]["server"],
+      "https://vpn.saved.example.test"
     );
-    assert_no_saved_credentials(&output);
+    assert_eq!(value["entries"][0]["username"], "saved-test-user");
+    assert_no_profile_secrets(&output);
 
-    let output = fixture.output(&["vpn", "list"]).await;
+    let (output, request) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", "list"],
+      response(VpnStatus::default()),
+    )
+    .await;
+    assert!(matches!(request, ClientMessage::VpnStatus));
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
-    assert_no_saved_credentials(&output);
+    assert_no_profile_secrets(&output);
     let table = String::from_utf8(output.stdout).unwrap();
     let lines: Vec<_> = table.lines().collect();
     assert_eq!(lines.len(), profiles.len() + 1);
@@ -916,10 +1028,10 @@ async fn list_without_a_saved_catalog_is_empty_and_does_not_start_ctld() {
   let output = fixture.output(&["vpn", "list", "--json"]).await;
   assert!(output.status.success(), "{output:?}");
   assert!(output.stderr.is_empty(), "{output:?}");
-  assert_eq!(
-    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-    serde_json::json!([])
-  );
+  let value = inventory(&output);
+  assert_eq!(value["entries"], serde_json::json!([]));
+  assert_eq!(value["connections"], serde_json::json!([]));
+  assert_eq!(value["discovery_warnings"].as_array().unwrap().len(), 1);
   assert!(!fixture.socket().exists());
   assert!(!fixture.profiles_path().exists());
 
@@ -952,16 +1064,251 @@ async fn list_uses_the_desktop_catalog_path_by_default() {
     .unwrap();
   assert!(output.status.success(), "{output:?}");
   assert!(output.stderr.is_empty(), "{output:?}");
+  let value = inventory(&output);
   assert_eq!(
-    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+    entry_summaries(&value),
     serde_json::json!([{
       "connection_id": "work-id",
       "name": "Work VPN",
       "provider": "openconnect",
+      "saved": true,
+      "state": "unavailable",
     }])
   );
-  assert_no_saved_credentials(&output);
+  assert_no_profile_secrets(&output);
   assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn list_merges_saved_connected_disconnected_and_runtime_only_connections() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
+  let selected = VpnStatus {
+    connection_id: Some("work-id".into()),
+    vpn_url: Some("https://vpn.example.com/runtime-group?token=runtime-private-token".into()),
+    ..connected()
+  };
+  let unsaved = VpnStatus {
+    provider: ctl_ipc::VpnProvider::Tailscale,
+    vpn_id: Some("unsaved-vpn".into()),
+    connection_id: Some("unsaved-profile".into()),
+    endpoint: Some("socks5h://127.0.0.1:43211".into()),
+    tailnet: Some("team.example.test".into()),
+    vpn_url: None,
+    username: None,
+    ..connected()
+  };
+  let snapshot = VpnSnapshot {
+    connections: vec![selected.clone(), unsaved],
+    supports_multiple: true,
+    ..VpnSnapshot::default()
+  };
+  let response = || ServerMessage::VpnStatus {
+    status: Box::new(selected.clone()),
+    snapshot: Some(snapshot.clone()),
+  };
+  let (output, request) =
+    exchange(&fixture, &listener, &["vpn", "list", "--json"], response()).await;
+  assert!(matches!(request, ClientMessage::VpnStatus));
+  assert_json_snapshot(&output, &snapshot);
+  let value = inventory(&output);
+  assert_eq!(
+    entry_summaries(&value),
+    serde_json::json!([
+      {"connection_id": "work-id", "name": "Work VPN", "provider": "openconnect", "saved": true, "state": "connected"},
+      {"connection_id": "tailnet-id", "name": "Team VPN", "provider": "tailscale", "saved": true, "state": "disconnected"},
+      {"connection_id": "unsaved-profile", "name": null, "provider": "tailscale", "saved": false, "state": "connected"},
+    ])
+  );
+  assert_eq!(value["entries"][0]["vpn_id"], "test-vpn");
+  assert_eq!(value["entries"][0]["server"], "https://vpn.example.com");
+  assert_eq!(value["entries"][0]["username"], "test-user");
+  assert_eq!(value["entries"][0]["endpoint"], "socks5h://127.0.0.1:43210");
+  assert!(value["entries"][1]["endpoint"].is_null());
+  assert_eq!(value["entries"][2]["endpoint"], "socks5h://127.0.0.1:43211");
+  let entries = serde_json::to_string(&value["entries"]).unwrap();
+  assert!(!entries.contains("runtime-group"));
+  assert!(!entries.contains("runtime-private-token"));
+  assert_no_profile_secrets(&output);
+
+  let (output, request) = exchange(&fixture, &listener, &["vpn", "list"], response()).await;
+  assert!(matches!(request, ClientMessage::VpnStatus));
+  assert!(output.status.success(), "{output:?}");
+  assert!(output.stderr.is_empty(), "{output:?}");
+  assert_no_profile_secrets(&output);
+  let table = String::from_utf8(output.stdout).unwrap();
+  let rows: Vec<_> = table.lines().collect();
+  assert_eq!(rows.len(), 4);
+  assert!(rows[1].contains("Work VPN"));
+  assert!(rows[1].contains("connected"));
+  assert!(rows[1].contains("socks5h://127.0.0.1:43210"));
+  assert!(rows[2].contains("Team VPN"));
+  assert!(rows[2].contains("disconnected"));
+  assert!(!rows[2].contains("socks5h://"));
+  assert!(rows[3].contains("unsaved-vpn"));
+  assert!(rows[3].contains("socks5h://127.0.0.1:43211"));
+}
+
+#[tokio::test]
+async fn list_marks_unmatched_saved_profiles_unavailable_when_runtime_inventory_is_missing() {
+  for daemon_running in [false, true] {
+    let fixture = Fixture::new();
+    fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
+    let output = if daemon_running {
+      let listener = UnixListener::bind(fixture.socket()).unwrap();
+      let (output, request) = exchange(
+        &fixture,
+        &listener,
+        &["vpn", "list", "--json"],
+        ServerMessage::Error {
+          code: "vpn_inventory_failed".into(),
+          message: "Synthetic inventory read failure".into(),
+        },
+      )
+      .await;
+      assert!(matches!(request, ClientMessage::VpnStatus));
+      output
+    } else {
+      fixture.output(&["vpn", "list", "--json"]).await
+    };
+    let value = inventory(&output);
+    assert_eq!(value["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(value["connections"], serde_json::json!([]));
+    assert_ne!(
+      value["discovery_warnings"].as_array().unwrap().as_slice(),
+      &[] as &[serde_json::Value]
+    );
+    for entry in value["entries"].as_array().unwrap() {
+      assert_eq!(entry["saved"], true);
+      assert_eq!(entry["state"], "unavailable");
+      assert!(entry["endpoint"].is_null());
+    }
+    assert_no_profile_secrets(&output);
+    if !daemon_running {
+      assert!(!fixture.socket().exists());
+    }
+  }
+}
+
+#[tokio::test]
+async fn list_preserves_verified_connections_during_partial_inventory_and_hides_unverified_endpoints()
+ {
+  for unavailable in [false, true] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
+    let selected = VpnStatus {
+      connection_id: Some("work-id".into()),
+      status_unavailable: unavailable,
+      ..connected()
+    };
+    let snapshot = VpnSnapshot {
+      connections: vec![selected.clone()],
+      discovery_warnings: vec!["Partial VPN container inventory".into()],
+      ..VpnSnapshot::default()
+    };
+    let (output, request) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", "list", "--json"],
+      ServerMessage::VpnStatus {
+        status: Box::new(selected),
+        snapshot: Some(snapshot.clone()),
+      },
+    )
+    .await;
+    assert!(matches!(request, ClientMessage::VpnStatus));
+    assert_json_snapshot(&output, &snapshot);
+    let value = inventory(&output);
+    assert_eq!(value["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(
+      value["entries"][0]["state"],
+      if unavailable {
+        "unavailable"
+      } else {
+        "connected"
+      }
+    );
+    if unavailable {
+      assert!(value["entries"][0]["endpoint"].is_null());
+    } else {
+      assert_eq!(value["entries"][0]["endpoint"], "socks5h://127.0.0.1:43210");
+    }
+    assert_eq!(value["entries"][1]["state"], "unavailable");
+    assert!(value["entries"][1]["endpoint"].is_null());
+    assert_no_profile_secrets(&output);
+  }
+}
+
+#[tokio::test]
+async fn legacy_local_inventory_keeps_matched_connections_and_marks_unmatched_profiles_unavailable()
+{
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
+  let selected = VpnStatus {
+    connection_id: Some("work-id".into()),
+    ..connected()
+  };
+  let (output, request) = exchange(
+    &fixture,
+    &listener,
+    &["vpn", "list", "--json"],
+    ServerMessage::VpnStatus {
+      status: Box::new(selected.clone()),
+      snapshot: None,
+    },
+  )
+  .await;
+  assert!(matches!(request, ClientMessage::VpnStatus));
+  assert_json_snapshot(
+    &output,
+    &VpnSnapshot {
+      connections: vec![selected],
+      supports_multiple: false,
+      supported_providers: vec![ctl_ipc::VpnProvider::Openconnect],
+      supports_tailscale_enrollment: false,
+      discovery_warnings: Vec::new(),
+    },
+  );
+  let value = inventory(&output);
+  assert_eq!(
+    entry_summaries(&value),
+    serde_json::json!([
+      {"connection_id": "work-id", "name": "Work VPN", "provider": "openconnect", "saved": true, "state": "connected"},
+      {"connection_id": "tailnet-id", "name": "Team VPN", "provider": "tailscale", "saved": true, "state": "unavailable"},
+    ])
+  );
+  assert_eq!(value["entries"][0]["endpoint"], "socks5h://127.0.0.1:43210");
+  assert!(value["entries"][1]["endpoint"].is_null());
+  assert_no_profile_secrets(&output);
+}
+
+#[tokio::test]
+async fn status_is_rejected_and_list_is_the_only_inventory_command() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  for args in [vec!["vpn", "status"], vec!["vpn", "status", "--json"]] {
+    let output = fixture.output(&args).await;
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
+    assert_no_daemon_contact(&listener).await;
+  }
+  let output = fixture.output(&["vpn", "--help"]).await;
+  assert!(output.status.success(), "{output:?}");
+  let help = String::from_utf8(output.stdout).unwrap();
+  assert!(
+    help
+      .lines()
+      .any(|line| line.trim_start().starts_with("list "))
+  );
+  assert!(
+    !help
+      .lines()
+      .any(|line| line.trim_start().starts_with("status "))
+  );
 }
 
 #[tokio::test]
@@ -1122,7 +1469,7 @@ async fn saved_tailscale_connect_checks_capabilities_and_preserves_provider_sett
 }
 
 #[tokio::test]
-async fn saved_profile_commands_reject_unsafe_files_and_scrub_parse_errors_before_ipc() {
+async fn list_preserves_runtime_when_saved_files_are_unsafe_and_connect_rejects_them_before_ipc() {
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   for invalid_file in ["permissions", "symlink", "malformed"] {
@@ -1143,17 +1490,34 @@ async fn saved_profile_commands_reject_unsafe_files_and_scrub_parse_errors_befor
       }
       _ => unreachable!(),
     }
-    for args in [
-      vec!["vpn", "list", "--json"],
-      vec!["vpn", "connect", "work-id", "--json"],
-    ] {
-      let output = fixture.output(&args).await;
-      assert!(!output.status.success(), "{invalid_file}: {output:?}");
-      assert!(output.stdout.is_empty(), "{invalid_file}: {output:?}");
-      assert!(!output.stderr.is_empty(), "{invalid_file}: {output:?}");
-      assert_no_saved_credentials(&output);
-      assert_no_daemon_contact(&listener).await;
-    }
+    let ready = connected();
+    let (output, request) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", "list", "--json"],
+      response(ready.clone()),
+    )
+    .await;
+    assert!(matches!(request, ClientMessage::VpnStatus));
+    let value = inventory(&output);
+    assert_eq!(value["connections"], serde_json::json!([ready]));
+    assert_eq!(value["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(value["entries"][0]["saved"], false);
+    assert_eq!(value["entries"][0]["state"], "connected");
+    assert_ne!(
+      value["profile_warnings"].as_array().unwrap().as_slice(),
+      &[] as &[serde_json::Value]
+    );
+    assert_no_saved_credentials(&output);
+
+    let output = fixture
+      .output(&["vpn", "connect", "work-id", "--json"])
+      .await;
+    assert!(!output.status.success(), "{invalid_file}: {output:?}");
+    assert!(output.stdout.is_empty(), "{invalid_file}: {output:?}");
+    assert!(!output.stderr.is_empty(), "{invalid_file}: {output:?}");
+    assert_no_saved_credentials(&output);
+    assert_no_daemon_contact(&listener).await;
     if invalid_file != "malformed" {
       assert_eq!(std::fs::read(&path).unwrap(), original);
     }

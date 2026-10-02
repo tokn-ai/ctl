@@ -31,11 +31,15 @@ ctl skill
 ctl skill --list
 ```
 
-`vpn list` reads saved profiles from `~/.tokn/ctl/vpns.json` (or
-`CTL_VPNS_PATH`) without a daemon. `vpn connect` connects a saved profile and
-recreates its container when missing. Supply its exact stable ID or unique exact
-name. Both commands support `--json`; list output omits credentials. Use
-`vpn status` for the current runtime connections and SOCKS5 endpoints.
+`vpn list` combines saved profiles from `~/.tokn/ctl/vpns.json` (or
+`CTL_VPNS_PATH`) with runtime connections and their current SOCKS5 endpoints. It
+never starts a daemon. Saved profiles stay visible as disconnected when inventory
+is complete, or unavailable when it cannot be checked. `vpn connect` connects a
+saved profile and recreates its container when missing. Supply its exact stable
+ID or unique exact name. Both commands support `--json`; list returns a snapshot
+with sanitized merged `entries`, raw runtime `connections`, and inventory warnings.
+Older daemons can report their local connection, but unmatched saved profiles
+remain unavailable because shared-container inventory cannot be verified.
 
 The bundled skills and references are available without a daemon, connection,
 or source checkout.

@@ -116,16 +116,18 @@ fn keychain_error(failure: crate::keychain::Error, fallback: &str) -> Response {
     )
   } else if failure.is_missing_entitlement() {
     error(
-      "credential_store_unavailable",
-      "The selected ctld needs its signed Keychain entitlement to manage saved credentials.",
+      "credential_store_missing_entitlement",
+      "This ctld process is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile.",
     )
-  } else if matches!(
-    failure.0.code(),
-    -25_308 | -25_315 | -25_293 | -128 | -25_291
-  ) {
+  } else if failure.is_unavailable() {
+    error(
+      "credential_store_unavailable",
+      "Keychain access is unavailable. Check your macOS login session and try again.",
+    )
+  } else if failure.is_locked() {
     error(
       "credential_store_locked",
-      "Keychain access is locked, unavailable, or was not allowed.",
+      "Keychain access is locked or was not allowed.",
     )
   } else {
     error(

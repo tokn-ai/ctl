@@ -120,7 +120,9 @@ pub async fn forget_identity_passphrase(request: ForgetRequest) -> CommandResult
 
 #[cfg(unix)]
 async fn exchange(request: Request) -> CommandResult<Response> {
-  let executable = ctl_ipc::daemon_executable().map_err(|_| super::process::unavailable())?;
+  let executable = crate::daemon_helper::executable()
+    .await
+    .map_err(super::helper::preparation_error)?;
   exchange_with(tokio::process::Command::new(executable), request).await
 }
 

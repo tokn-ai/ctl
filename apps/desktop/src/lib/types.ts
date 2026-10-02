@@ -590,6 +590,7 @@ export interface SshPrompt {
     | "credential_save"
     | "credential_save_error";
   message: string;
+  warning?: string | null;
 }
 
 export interface RemoteCtmuxRestartResult {

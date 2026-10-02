@@ -10,6 +10,8 @@ mod request;
 #[cfg(unix)]
 pub use agent::{LocalAgent, askpass_exit_code, run_lifetime};
 pub use files::{IdentitySnapshot, inspect_path};
+#[cfg(target_os = "macos")]
+pub(crate) use public_hint::{SavedPublicKeyHint, saved_public_key_hint_checked};
 pub use public_hint::{public_key_hint, saved_public_key_hint};
 pub use request::run;
 
@@ -64,7 +66,11 @@ pub enum IdentityError {
   FileChanged,
   #[error("The passphrase could not unlock this identity file locally.")]
   UnlockFailed,
-  #[error("Keychain access is unavailable. Use a signed ctld with its Keychain entitlement.")]
+  #[error(
+    "This ctld process is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile."
+  )]
+  KeychainMissingEntitlement,
+  #[error("Keychain access is unavailable. Check your macOS login session and try again.")]
   KeychainUnavailable,
   #[error("Keychain access is locked or was not allowed.")]
   KeychainLocked,
@@ -97,6 +103,7 @@ impl IdentityError {
       Self::UnsupportedFile => "identity_unsupported",
       Self::FileChanged => "identity_file_changed",
       Self::UnlockFailed => "identity_unlock_failed",
+      Self::KeychainMissingEntitlement => "identity_keychain_missing_entitlement",
       Self::KeychainUnavailable => "identity_keychain_unavailable",
       Self::KeychainLocked => "identity_keychain_locked",
       Self::KeychainBusy => "identity_keychain_busy",

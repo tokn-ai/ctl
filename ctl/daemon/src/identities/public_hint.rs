@@ -5,7 +5,7 @@ use std::io::Read as _;
 
 use base64::Engine as _;
 
-use super::{IdentitySnapshot, SavedIdentity, ensure_current, files};
+use super::{IdentityError, IdentitySnapshot, SavedIdentity, ensure_current, files};
 
 // Bound public-file parsing and optional index metadata independently of the
 // larger private-key snapshot limit. Oversized hints use native SSH auth.
@@ -52,8 +52,39 @@ pub fn public_key_hint(snapshot: &IdentitySnapshot) -> Option<String> {
 /// noninteractively. Missing or unavailable metadata preserves native SSH auth.
 #[must_use]
 pub fn saved_public_key_hint(snapshot: &IdentitySnapshot) -> Option<String> {
-  let metadata = saved_metadata(snapshot)?;
-  saved_hint(snapshot, &metadata)
+  match saved_public_key_hint_checked(snapshot).ok()? {
+    SavedPublicKeyHint::Available(public_key) => Some(public_key),
+    SavedPublicKeyHint::Missing | SavedPublicKeyHint::Unavailable => None,
+  }
+}
+
+pub(crate) enum SavedPublicKeyHint {
+  Missing,
+  Unavailable,
+  Available(String),
+}
+
+pub(crate) fn saved_public_key_hint_checked(
+  snapshot: &IdentitySnapshot,
+) -> Result<SavedPublicKeyHint, IdentityError> {
+  if !snapshot.encrypted {
+    return Ok(SavedPublicKeyHint::Missing);
+  }
+  ensure_current(snapshot)?;
+  checked_hint(snapshot, saved_metadata_checked(snapshot))
+}
+
+fn checked_hint(
+  snapshot: &IdentitySnapshot,
+  metadata: Result<Option<SavedIdentity>, IdentityError>,
+) -> Result<SavedPublicKeyHint, IdentityError> {
+  let Some(metadata) = metadata? else {
+    return Ok(SavedPublicKeyHint::Missing);
+  };
+  Ok(saved_hint(snapshot, &metadata).map_or(
+    SavedPublicKeyHint::Unavailable,
+    SavedPublicKeyHint::Available,
+  ))
 }
 
 fn saved_hint(snapshot: &IdentitySnapshot, metadata: &SavedIdentity) -> Option<String> {
@@ -64,14 +95,29 @@ fn saved_hint(snapshot: &IdentitySnapshot, metadata: &SavedIdentity) -> Option<S
 }
 
 fn saved_metadata(snapshot: &IdentitySnapshot) -> Option<SavedIdentity> {
+  saved_metadata_checked(snapshot).ok().flatten()
+}
+
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unnecessary_wraps,
+    reason = "Keychain metadata errors are macOS-only"
+  )
+)]
+fn saved_metadata_checked(
+  snapshot: &IdentitySnapshot,
+) -> Result<Option<SavedIdentity>, IdentityError> {
   #[cfg(target_os = "macos")]
-  return crate::keychain::identity::saved_metadata(snapshot)
-    .ok()
-    .flatten();
+  {
+    crate::keychain::availability()
+      .map_err(|error| crate::keychain::identity::map_error(error, IdentityError::ListFailed))?;
+    crate::keychain::identity::saved_metadata(snapshot)
+  }
   #[cfg(not(target_os = "macos"))]
   {
     let _ = snapshot;
-    None
+    Ok(None)
   }
 }
 

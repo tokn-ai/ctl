@@ -9,7 +9,7 @@
 mod native;
 
 #[cfg(target_os = "macos")]
-pub use native::{delete, exists, search, upsert};
+pub use native::{check_availability, delete, exists, search, upsert};
 
 use std::collections::HashMap;
 use zeroize::Zeroizing;

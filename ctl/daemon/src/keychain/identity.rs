@@ -29,6 +29,7 @@ pub(crate) fn saved_metadata(
 }
 
 pub(crate) fn list() -> Result<(HashMap<String, SavedIdentity>, bool), IdentityError> {
+  super::availability().map_err(|error| map_error(error, IdentityError::ListFailed))?;
   let (_, entries, complete) =
     index::list().map_err(|error| map_error(error, IdentityError::ListFailed))?;
   Ok((entries, complete))
@@ -218,8 +219,10 @@ pub(crate) fn map_error(error: Error, fallback: IdentityError) -> IdentityError 
   if error.is_busy() {
     IdentityError::KeychainBusy
   } else if error.is_missing_entitlement() {
+    IdentityError::KeychainMissingEntitlement
+  } else if error.is_unavailable() {
     IdentityError::KeychainUnavailable
-  } else if matches!(error.0.code(), -25_308 | -25_315 | -25_293 | -128 | -25_291) {
+  } else if error.is_locked() {
     IdentityError::KeychainLocked
   } else {
     fallback
@@ -229,6 +232,47 @@ pub(crate) fn map_error(error: Error, fallback: IdentityError) -> IdentityError 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn access_errors_preserve_their_fallback_reason() {
+    assert!(matches!(
+      map_error(
+        ctl_keychain_client::Error(super::super::MISSING_ENTITLEMENT).into(),
+        IdentityError::ListFailed
+      ),
+      IdentityError::KeychainMissingEntitlement
+    ));
+    assert!(matches!(
+      map_error(
+        ctl_keychain_client::Error(-25_291).into(),
+        IdentityError::ListFailed
+      ),
+      IdentityError::KeychainUnavailable
+    ));
+    for code in [-25_308, -25_315, -25_293, -128] {
+      assert!(matches!(
+        map_error(
+          ctl_keychain_client::Error(code).into(),
+          IdentityError::ListFailed
+        ),
+        IdentityError::KeychainLocked
+      ));
+    }
+    assert!(matches!(
+      map_error(
+        ctl_keychain_client::Error(super::super::operation::BUSY).into(),
+        IdentityError::ListFailed
+      ),
+      IdentityError::KeychainBusy
+    ));
+    assert!(matches!(
+      map_error(
+        ctl_keychain_client::Error(-50).into(),
+        IdentityError::ListFailed
+      ),
+      IdentityError::ListFailed
+    ));
+  }
 
   #[test]
   fn canceled_unlock_never_starts_or_authenticates_after_waiting_for_the_lock() {

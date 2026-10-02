@@ -148,6 +148,9 @@ describe("Saved credential metadata import", () => {
     ["credential_store_busy", "Another Keychain request is still active. Complete or cancel it, then try importing again."],
     ["identity_keychain_busy", "Another Keychain request is still active. Complete or cancel it, then try importing again."],
     ["credential_store_locked", "Metadata import was not completed because Keychain access was locked, denied, or cancelled. Try again when ready to allow access."],
+    ["credential_store_missing_entitlement", "The credential helper is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile, then try the import again."],
+    ["identity_keychain_missing_entitlement", "The credential helper is not authorized for Keychain access. Use the signed ctld app with its matching provisioning profile, then try the import again."],
+    ["credential_store_unavailable", "Keychain access is unavailable. Check your macOS login session, then try the import again."],
     ["credential_import_failed", "Saved credential metadata could not be fully imported. Existing credentials are unchanged; try importing again."],
     ["constructor", "Could not import saved credential metadata. Check Keychain access and update ctld if needed, then try again."],
   ])("refreshes available metadata after %s without hiding required state", async (code, message) => {

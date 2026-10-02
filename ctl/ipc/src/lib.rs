@@ -471,6 +471,8 @@ pub enum ServerMessage {
     prompt_id: String,
     kind: PromptKind,
     message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
   },
   MasterReady {
     control_path: PathBuf,
@@ -1028,6 +1030,40 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn prompt_warnings_are_optional_for_existing_protocol_clients() {
+    #[derive(serde::Deserialize)]
+    struct LegacyPrompt {
+      prompt_id: String,
+      kind: PromptKind,
+      message: String,
+    }
+
+    let legacy = serde_json::json!({
+      "type": "prompt", "prompt_id": "one", "kind": "secret", "message": "Passphrase:"
+    });
+    let prompt: ServerMessage = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(
+      &prompt,
+      ServerMessage::Prompt { warning: None, .. }
+    ));
+    assert_eq!(serde_json::to_value(prompt).unwrap(), legacy);
+
+    let mut warned = legacy.clone();
+    warned["warning"] = "Keychain access is unavailable.".into();
+    let prompt: ServerMessage = serde_json::from_value(warned.clone()).unwrap();
+    assert!(
+      matches!(&prompt, ServerMessage::Prompt { warning: Some(value), .. }
+      if value == "Keychain access is unavailable.")
+    );
+    assert_eq!(serde_json::to_value(prompt).unwrap(), warned);
+
+    let old: LegacyPrompt = serde_json::from_value(warned).unwrap();
+    assert_eq!(old.prompt_id, "one");
+    assert!(matches!(old.kind, PromptKind::Secret));
+    assert_eq!(old.message, "Passphrase:");
+  }
 
   #[test]
   fn existing_gateway_json_remains_unchanged_and_vpn_references_are_strict() {

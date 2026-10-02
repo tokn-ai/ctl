@@ -412,8 +412,13 @@ Tauri arguments, such as `--release`, can be passed through
 `pnpm tauri:dev:signed --release`.
 Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
 failed build, following Tauri's behavior.
-Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch ID-protected
-credentials. Run the launcher regression tests with `pnpm test:dev`.
+Ordinary `pnpm tauri dev` keeps the desktop's bundled helper first, then discovers
+a compatible, verified `ctld.app` selected under `~/.tokn/ctl`, including signed
+development installations. Without one it falls back to a loose, unsigned daemon
+and cannot store Touch ID-protected credentials. Installing a signed helper does
+not change an already-running daemon: use **About → Restart** to replace that
+owner explicitly. The restart can interrupt its SSH forwards and VPN connections.
+Run the launcher regression tests with `pnpm test:dev`.
 
 The release workflow derives the Team ID and signing identity from the profile
 and imported certificate. It expects `APPLE_API_ISSUER` and `APPLE_API_KEY` as

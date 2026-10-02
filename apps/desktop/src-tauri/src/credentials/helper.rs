@@ -6,7 +6,7 @@ use ctl_ipc::credentials::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Respo
 use tokio::process::Command;
 use zeroize::Zeroizing;
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use super::process::unavailable;
 use super::process::{self, invalid_response, unsupported as unsupported_helper};
 
@@ -18,8 +18,23 @@ const HELPER_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[cfg(target_os = "macos")]
 pub(super) async fn request(request: Request) -> CommandResult<Response> {
-  let executable = ctl_ipc::daemon_executable().map_err(|_| unavailable())?;
+  let executable = crate::daemon_helper::executable()
+    .await
+    .map_err(preparation_error)?;
   exchange(Command::new(executable), request, HELPER_TIMEOUT).await
+}
+
+#[cfg(unix)]
+pub(super) fn preparation_error(error: ctl_ipc::ConnectError) -> CommandErrorDto {
+  if matches!(error, ctl_ipc::ConnectError::PrepareDaemon(source) if source.kind() == std::io::ErrorKind::TimedOut)
+  {
+    CommandErrorDto::new(
+      "credential_helper_timeout",
+      crate::daemon_helper::TIMEOUT_MESSAGE,
+    )
+  } else {
+    unavailable()
+  }
 }
 
 pub(super) async fn exchange(

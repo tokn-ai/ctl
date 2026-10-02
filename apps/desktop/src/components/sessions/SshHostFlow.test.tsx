@@ -1267,6 +1267,31 @@ describe("SSH host quick-input flow", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "No usable saved passphrase was found for this identity file.",
+    "This ctld process is not authorized for Keychain access. Use the signed ctld app.",
+  ])("shows the manual authentication reason: %s", async (warning) => {
+    let prompt: ((value: SshPrompt) => void) | undefined;
+    vi.mocked(probeSshHost).mockImplementation((_target, _attempt, callback) => {
+      prompt = callback;
+      return new Promise(() => undefined);
+    });
+    const { user } = setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /Password \/ interactive/ }));
+    await act(async () => prompt?.({
+      prompt_id: "manual-key", kind: "secret",
+      message: "Enter passphrase for key '/keys/work':", warning,
+    }));
+    expect(screen.getByRole("status").textContent).toBe(warning);
+    expect(screen.getByText("Enter passphrase for key '/keys/work':")).toBeTruthy();
+    expect(screen.getByLabelText("SSH response").getAttribute("type")).toBe("password");
+    expect(screen.queryByRole("option", { name: /^Yes/ })).toBeNull();
+    await user.type(screen.getByLabelText("SSH response"), "manual-secret{Enter}");
+    expect(respondSshPrompt).toHaveBeenCalledWith(expect.any(String), "manual-key", "manual-secret");
+    expect(screen.queryByText(warning)).toBeNull();
+  });
+
   it("offers yes, no, and never after SSH authentication without exposing the secret", async () => {
     let prompt: ((value: SshPrompt) => void) | undefined;
     vi.mocked(probeSshHost).mockImplementation(

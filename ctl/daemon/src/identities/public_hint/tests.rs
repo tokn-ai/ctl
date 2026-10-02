@@ -137,6 +137,31 @@ fn saved_hint_requires_matching_file_binding_and_public_metadata() {
 }
 
 #[test]
+fn saved_hint_lookup_keeps_missing_separate_from_unavailable_locked_or_busy() {
+  let fixture = Fixture::new();
+  let snapshot = fixture.opaque();
+  assert!(matches!(
+    checked_hint(&snapshot, Ok(None)).unwrap(),
+    SavedPublicKeyHint::Missing
+  ));
+  for error in [
+    IdentityError::KeychainMissingEntitlement,
+    IdentityError::KeychainUnavailable,
+    IdentityError::KeychainLocked,
+    IdentityError::KeychainBusy,
+    IdentityError::ListFailed,
+  ] {
+    let result = checked_hint(&snapshot, Err(error));
+    assert!(matches!(result, Err(actual) if actual.code() == error.code()));
+  }
+  let metadata = saved(&snapshot, &public(8));
+  assert!(matches!(
+    checked_hint(&snapshot, Ok(Some(metadata))).unwrap(),
+    SavedPublicKeyHint::Available(_)
+  ));
+}
+
+#[test]
 fn stale_public_sibling_does_not_override_verified_saved_hint() {
   let fixture = Fixture::new();
   let snapshot = fixture.opaque();

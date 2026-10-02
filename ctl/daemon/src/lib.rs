@@ -780,12 +780,17 @@ async fn wait_for_master(
         let Some(prompt) = prompt else {
           return Err(RequestError::ClientClosed);
         };
+        #[cfg(target_os = "macos")]
+        let warning = identities.fallback_warning(&prompt.message);
+        #[cfg(not(target_os = "macos"))]
+        let warning = None;
         answer_prompt(
           stream,
           target,
           prompt,
           &mut attempted_stored,
           &mut captured,
+          warning,
         ).await?;
       }
       () = sleep(MASTER_POLL_INTERVAL) => {}
@@ -866,8 +871,11 @@ async fn answer_prompt(
   prompt: PromptRequest,
   attempted_stored: &mut HashSet<String>,
   captured: &mut HashMap<String, Zeroizing<String>>,
+  warning: Option<String>,
 ) -> Result<(), RequestError> {
   let cacheable = !prompt.confirm && cacheable_prompt(&prompt.message);
+  #[cfg(target_os = "macos")]
+  let mut warning = warning;
   #[cfg(target_os = "macos")]
   if cacheable
     && !identity_connection::is_key_prompt(&prompt.message)
@@ -875,16 +883,24 @@ async fn answer_prompt(
   {
     let target = target.clone();
     let message = prompt.message.clone();
-    match tokio::task::spawn_blocking(move || keychain::load(&target, &message)).await {
+    match tokio::task::spawn_blocking(move || {
+      keychain::availability()?;
+      keychain::load(&target, &message)
+    })
+    .await
+    {
       Ok(Ok(Some(secret))) => {
         let _ = prompt.response.send(Some(secret));
         return Ok(());
       }
-      Ok(Err(error)) if !error.is_missing_entitlement() => {
-        let _ = prompt.response.send(None);
-        return Ok(());
+      Ok(Ok(None)) => warning = Some(password_fallback_warning(None)),
+      Ok(Err(error)) => warning = Some(password_fallback_warning(Some(error))),
+      Err(_) => {
+        warning = Some(
+          "The saved SSH password could not be checked. Enter it manually for this connection."
+            .into(),
+        );
       }
-      Ok(Ok(None) | Err(_)) | Err(_) => {}
     }
   }
   #[cfg(not(target_os = "macos"))]
@@ -901,6 +917,7 @@ async fn answer_prompt(
         PromptKind::Secret
       },
       message: prompt.message.clone(),
+      warning,
     },
   )
   .await?;
@@ -919,6 +936,22 @@ async fn answer_prompt(
 }
 
 #[cfg(target_os = "macos")]
+fn password_fallback_warning(error: Option<keychain::Error>) -> String {
+  let reason = match error {
+    None => "No saved password is available for this SSH connection.".into(),
+    Some(error) => {
+      let access = keychain::identity::map_error(error, identities::IdentityError::ListFailed);
+      if matches!(access, identities::IdentityError::ListFailed) {
+        "The saved SSH password could not be read.".into()
+      } else {
+        access.to_string()
+      }
+    }
+  };
+  format!("{reason} Enter the password manually for this connection.")
+}
+
+#[cfg(target_os = "macos")]
 async fn handle_save_offer(
   stream: &mut ctl_ipc::Stream,
   target: &SshTarget,
@@ -932,17 +965,22 @@ async fn handle_save_offer(
   let should_offer =
     tokio::task::spawn_blocking(move || keychain::should_offer_save(&policy_target))
       .await
-      .map_err(|_| RequestError::InvalidRequest("keychain worker stopped"));
-  let should_offer = match should_offer {
-    Ok(Ok(value)) => value,
-    Ok(Err(error)) => {
-      captured.clear();
-      report_save_error(stream, &error.to_string()).await?;
-      return Ok(());
-    }
-    Err(error) => return Err(error),
-  };
-  if !should_offer {
+      .ok()
+      .and_then(Result::ok);
+  handle_save_offer_with_policy(stream, target, captured, identities, should_offer).await
+}
+
+#[cfg(target_os = "macos")]
+async fn handle_save_offer_with_policy(
+  stream: &mut ctl_ipc::Stream,
+  target: &SshTarget,
+  captured: &mut HashMap<String, Zeroizing<String>>,
+  identities: &mut identity_connection::PreparedIdentities,
+  policy: Option<bool>,
+) -> Result<(), RequestError> {
+  // A failed access preflight is not a failed user-requested save. Keep the
+  // connection usable without importing passphrases or asking to save them.
+  if policy != Some(true) {
     captured.clear();
     return Ok(());
   }
@@ -1029,6 +1067,7 @@ async fn request_ui(
       prompt_id: prompt_id.clone(),
       kind,
       message: message.to_owned(),
+      warning: None,
     },
   )
   .await?;
@@ -2144,6 +2183,7 @@ mod tests {
           },
           &mut HashSet::new(),
           &mut HashMap::new(),
+          None,
         ))
         .await
     });
@@ -2184,6 +2224,56 @@ mod tests {
       "Are you sure you want to continue connecting (yes/no)?"
     ));
     assert!(!is_host_confirmation("Continue connecting?"));
+  }
+
+  #[cfg(target_os = "macos")]
+  #[tokio::test]
+  async fn unavailable_keychain_skips_saving_without_waiting_for_user_input() {
+    for policy in [None, Some(false)] {
+      let (_client, mut server) = ctl_ipc::Stream::pair().unwrap();
+      let mut captured = HashMap::from([
+        (
+          "alice@example.test's password:".into(),
+          Zeroizing::new("synthetic-password".into()),
+        ),
+        (
+          "Enter passphrase for key '/keys/work key':".into(),
+          Zeroizing::new("synthetic-passphrase".into()),
+        ),
+      ]);
+      let mut identities = identity_connection::PreparedIdentities::default();
+      tokio::time::timeout(
+        Duration::from_secs(1),
+        handle_save_offer_with_policy(
+          &mut server,
+          &target(),
+          &mut captured,
+          &mut identities,
+          policy,
+        ),
+      )
+      .await
+      .unwrap()
+      .unwrap();
+      assert!(captured.is_empty());
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn password_fallback_distinguishes_missing_credential_and_keychain_failure() {
+    let missing = password_fallback_warning(None);
+    assert!(missing.contains("No saved password"));
+    for (code, expected) in [
+      (-34_018, "not authorized"),
+      (-25_291, "unavailable"),
+      (-25_308, "locked"),
+    ] {
+      let warning = password_fallback_warning(Some(ctl_keychain_client::Error(code).into()));
+      assert!(warning.contains(expected));
+      assert!(warning.contains("Enter the password manually"));
+      assert!(!warning.contains("No saved password"));
+    }
   }
 
   #[test]

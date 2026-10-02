@@ -2,6 +2,7 @@ mod about;
 mod command_menu;
 mod commands;
 mod credentials;
+mod daemon_helper;
 mod dto;
 mod error;
 mod keybindings;
@@ -44,23 +45,12 @@ pub fn run() {
 
   builder
     .setup(|app| {
+      #[cfg(target_os = "macos")]
+      daemon_helper::register()?;
       state::register_main_window_cleanup(app);
       Ok(())
     })
-    .on_window_event(|window, event| {
-      if matches!(event, tauri::WindowEvent::Destroyed) {
-        use tauri::Manager as _;
-        let streams = window.state::<tasks::TaskStreams>().inner().clone();
-        let label = window.label().to_owned();
-        tauri::async_runtime::spawn(async move {
-          tokio::join!(
-            streams.close_window(&label),
-            vpn::close_window(&label),
-            about::close_window(&label)
-          );
-        });
-      }
-    })
+    .on_window_event(cleanup_destroyed_window)
     .invoke_handler(tauri::generate_handler![
       about::get_component_versions,
       about::restart::preflight_component_action,
@@ -134,4 +124,19 @@ pub fn run() {
     ])
     .run(tauri::generate_context!())
     .expect("failed to run ctmux");
+}
+
+fn cleanup_destroyed_window(window: &tauri::Window, event: &tauri::WindowEvent) {
+  if matches!(event, tauri::WindowEvent::Destroyed) {
+    use tauri::Manager as _;
+    let streams = window.state::<tasks::TaskStreams>().inner().clone();
+    let label = window.label().to_owned();
+    tauri::async_runtime::spawn(async move {
+      tokio::join!(
+        streams.close_window(&label),
+        vpn::close_window(&label),
+        about::close_window(&label)
+      );
+    });
+  }
 }

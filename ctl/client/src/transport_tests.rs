@@ -453,15 +453,123 @@ fn identified_fixture(json: &str) -> Command {
       out
     });
   let mut command = fixture(
-    "printf '%s' \"$CTL_TEST_STARTUP_NOISE\"; if [ -n \"$CTL_TEST_AUTHENTICATION_MARKER\" ]; then printf 'ctl-ssh-auth-v1\n'; fi; printf 'ctl-ssh-v3\n'; printf '%b' \"$CTL_TEST_IDENTITY_SIZE\"; printf '%s' \"$CTL_TEST_IDENTITY_JSON\"; cat",
+    "if [ -n \"$CTL_TEST_CHILD_PID\" ]; then printf '%s' \"$$\" > \"$CTL_TEST_CHILD_PID\"; fi; printf '%s' \"$CTL_TEST_STARTUP_NOISE\"; if [ -n \"$CTL_TEST_AUTHENTICATION_MARKER\" ]; then printf 'ctl-ssh-auth-v1\n'; fi; printf '%s\n' \"$CTL_TEST_IDENTITY_MARKER\"; printf '%b' \"$CTL_TEST_IDENTITY_SIZE\"; printf '%s' \"$CTL_TEST_IDENTITY_JSON\"; if [ -n \"$CTL_TEST_SERVICE_INPUT\" ]; then exec cat > \"$CTL_TEST_SERVICE_INPUT\"; fi; exec cat",
     "identified-transport.ps1",
   );
   command
     .env("CTL_TEST_IDENTITY_SIZE", size)
     .env("CTL_TEST_IDENTITY_JSON", json)
+    .env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v3")
     .env("CTL_TEST_STARTUP_NOISE", "")
-    .env("CTL_TEST_AUTHENTICATION_MARKER", "");
+    .env("CTL_TEST_AUTHENTICATION_MARKER", "")
+    .env("CTL_TEST_CHILD_PID", "")
+    .env("CTL_TEST_SERVICE_INPUT", "");
   command
+}
+
+#[tokio::test]
+async fn legacy_inspection_reads_only_identity_after_startup_noise() {
+  timeout(TEST_TIMEOUT, async {
+    let json = serde_json::json!({
+      "remote_id": uuid::Uuid::new_v4().to_string(),
+      "agent_version": "0.1.0",
+      "rmux_restart_supported": true,
+      "bundle": {
+        "app_version": "0.1.0",
+        "bundle_id": "0.1.0-dev.41d2f11",
+        "git_revision": "41d2f11",
+        "target_triple": "x86_64-unknown-linux-musl"
+      }
+    });
+    let mut command = identified_fixture(&json.to_string());
+    command.env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v2").env(
+      "CTL_TEST_STARTUP_NOISE",
+      "Welcome\nprofile without newline: ",
+    );
+    let identity = inspect_legacy_ssh_command(command).await.unwrap();
+    assert_eq!(identity.remote_id, json["remote_id"]);
+    assert_eq!(identity.bundle.unwrap().bundle_id, "0.1.0-dev.41d2f11");
+    assert!(!identity.ctmux_restart_supported);
+    assert!(identity.build.is_none());
+  })
+  .await
+  .expect("legacy inspection must close without waiting for service frames");
+}
+
+#[tokio::test]
+async fn legacy_inspection_rejects_invalid_and_oversized_metadata() {
+  timeout(TEST_TIMEOUT, async {
+    for json in ["{}".to_owned(), " ".repeat(8193)] {
+      let mut command = identified_fixture(&json);
+      command.env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v2");
+      assert!(matches!(
+        inspect_legacy_ssh_command(command).await,
+        Err(CoreError::RemoteIdentity(_))
+      ));
+    }
+  })
+  .await
+  .expect("invalid legacy metadata must terminate its producer");
+}
+
+#[tokio::test]
+async fn legacy_inspection_rejects_other_reserved_markers() {
+  timeout(TEST_TIMEOUT, async {
+    for marker in ["ctl-ssh-v3", "ctl-ssh-v99", "ctl-ssh-nf"] {
+      let mut command = identified_fixture("{}");
+      command.env("CTL_TEST_IDENTITY_MARKER", marker);
+      assert!(matches!(
+        inspect_legacy_ssh_command(command).await,
+        Err(CoreError::UnsupportedSshProtocol { marker: received }) if received == marker
+      ));
+    }
+  })
+  .await
+  .expect("only v2 is permitted for legacy inspection");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_inspection_reaps_its_child_without_sending_service_input() {
+  let directory = std::env::temp_dir().join(format!(
+    "ctl-legacy-inspection-{}",
+    uuid::Uuid::new_v4().simple()
+  ));
+  std::fs::create_dir(&directory).unwrap();
+  let json = serde_json::json!({
+    "remote_id": uuid::Uuid::new_v4().to_string(),
+    "agent_version": "0.1.0"
+  });
+  for (index, metadata) in [json.to_string(), "{}".into()].into_iter().enumerate() {
+    let pid_path = directory.join(format!("pid-{index}"));
+    let input_path = directory.join(format!("input-{index}"));
+    let mut command = identified_fixture(&metadata);
+    command
+      .env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v2")
+      .env("CTL_TEST_CHILD_PID", &pid_path)
+      .env("CTL_TEST_SERVICE_INPUT", &input_path);
+    let result = timeout(TEST_TIMEOUT, inspect_legacy_ssh_command(command))
+      .await
+      .unwrap();
+    assert_eq!(result.is_ok(), index == 0);
+    let pid = std::fs::read_to_string(pid_path).unwrap();
+    assert!(
+      !Command::new("kill")
+        .args(["-0", &pid])
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .unwrap()
+        .success(),
+      "legacy metadata producer was not reaped"
+    );
+    // The producer can be killed before creating the sink. If it did create it,
+    // the compatibility probe must still have sent no service bytes.
+    if input_path.exists() {
+      assert_eq!(std::fs::read(input_path).unwrap(), [] as [u8; 0]);
+    }
+  }
+  std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test]

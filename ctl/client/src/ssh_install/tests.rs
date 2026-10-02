@@ -137,10 +137,24 @@ impl BundleFixture {
       uuid::Uuid::new_v4().simple()
     ));
     let source = directory.join("source");
-    let archive = directory.join("bundle.tar.gz");
     std::fs::create_dir_all(&source).unwrap();
     for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
       std::fs::write(source.join(binary), binary).unwrap();
+    }
+    let mut fixture = Self {
+      directory,
+      archive: Vec::new(),
+    };
+    fixture.rebuild_archive();
+    fixture
+  }
+
+  fn rebuild_archive(&mut self) {
+    let source = self.directory.join("source");
+    let archive = self.directory.join("bundle.tar.gz");
+    let mut files = vec!["ctl-agent", "ctmuxd", "ctl-taskd"];
+    if source.join("manifest.json").exists() {
+      files.push("manifest.json");
     }
     assert!(
       std::process::Command::new("tar")
@@ -148,14 +162,39 @@ impl BundleFixture {
         .arg(&archive)
         .arg("-C")
         .arg(source)
-        .args(["ctl-agent", "ctmuxd", "ctl-taskd"])
+        .args(files)
         .status()
         .unwrap()
         .success()
     );
-    Self {
-      directory,
-      archive: std::fs::read(archive).unwrap(),
+    self.archive = std::fs::read(archive).unwrap();
+  }
+
+  async fn install(&self, bundle_id: &str) -> Result<(), CoreError> {
+    tokio::time::timeout(
+      std::time::Duration::from_secs(10),
+      run_install_command(
+        self.command_for(bundle_id, self.archive.len()),
+        &self.archive,
+        |_| {},
+      ),
+    )
+    .await
+    .unwrap()
+  }
+
+  fn assert_staging_clean(&self) {
+    let base = self.directory.join("home/.tokn/ctl");
+    for directory in [&base, &base.join("versions")] {
+      for entry in std::fs::read_dir(directory).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_str().unwrap();
+        assert!(!name.starts_with(".install-"), "left staging entry {name}");
+        assert!(
+          !name.starts_with(".current-"),
+          "left activation entry {name}"
+        );
+      }
     }
   }
 
@@ -236,6 +275,138 @@ async fn installer_replaces_an_existing_current_directory_symlink() {
     std::path::PathBuf::from("versions/0.1.0-new")
   );
   assert_eq!(std::fs::read_dir(old).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installer_reuses_identical_existing_components_without_replacing_files() {
+  use std::os::unix::fs::MetadataExt as _;
+  for manifest in [None, Some("matching manifest")] {
+    let mut fixture = BundleFixture::new();
+    if let Some(manifest) = manifest {
+      std::fs::write(fixture.directory.join("source/manifest.json"), manifest).unwrap();
+      fixture.rebuild_archive();
+    }
+    fixture.install("0.1.0-test").await.unwrap();
+    let destination = fixture.directory.join("home/.tokn/ctl/versions/0.1.0-test");
+    let inodes: Vec<_> = ["ctl-agent", "ctmuxd", "ctl-taskd"]
+      .iter()
+      .map(|binary| std::fs::metadata(destination.join(binary)).unwrap().ino())
+      .collect();
+    fixture.install("0.1.0-test").await.unwrap();
+    for (binary, inode) in ["ctl-agent", "ctmuxd", "ctl-taskd"].iter().zip(inodes) {
+      assert_eq!(
+        std::fs::metadata(destination.join(binary)).unwrap().ino(),
+        inode
+      );
+      assert_eq!(
+        std::fs::read_to_string(destination.join(binary)).unwrap(),
+        *binary
+      );
+    }
+    if let Some(manifest) = manifest {
+      assert_eq!(
+        std::fs::read_to_string(destination.join("manifest.json")).unwrap(),
+        manifest
+      );
+    }
+    fixture.assert_staging_clean();
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installer_rejects_differing_same_id_components_without_activation() {
+  use std::os::unix::fs::MetadataExt as _;
+  use std::sync::Mutex;
+  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+    let mut fixture = BundleFixture::new();
+    fixture.install("0.1.0-test").await.unwrap();
+    fixture.install("0.1.0-active").await.unwrap();
+    let base = fixture.directory.join("home/.tokn/ctl");
+    let destination = base.join("versions/0.1.0-test");
+    let inode = std::fs::metadata(destination.join(binary)).unwrap().ino();
+    std::fs::write(
+      fixture.directory.join("source").join(binary),
+      "different build",
+    )
+    .unwrap();
+    fixture.rebuild_archive();
+    let events = Mutex::new(Vec::new());
+    let result = tokio::time::timeout(
+      std::time::Duration::from_secs(10),
+      run_install_command(
+        fixture.command(fixture.archive.len()),
+        &fixture.archive,
+        |event| events.lock().unwrap().push(event),
+      ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      result,
+      Err(CoreError::SshCommandFailed { diagnostic, .. })
+        if diagnostic.contains("already exists with different") && diagnostic.contains(binary)
+    ));
+    let events = events.into_inner().unwrap();
+    assert!(!events.contains(&RemoteInstallEvent::Activating));
+    assert!(!events.contains(&RemoteInstallEvent::Complete));
+    assert_eq!(
+      std::fs::read_link(base.join("current")).unwrap(),
+      std::path::PathBuf::from("versions/0.1.0-active")
+    );
+    assert_eq!(
+      std::fs::metadata(destination.join(binary)).unwrap().ino(),
+      inode
+    );
+    for component in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+      assert_eq!(
+        std::fs::read_to_string(destination.join(component)).unwrap(),
+        component
+      );
+    }
+    fixture.assert_staging_clean();
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installer_rejects_differing_or_missing_same_id_manifests() {
+  for (original, replacement) in [
+    (Some("original manifest"), Some("different manifest")),
+    (Some("original manifest"), None),
+    (None, Some("provided manifest")),
+  ] {
+    let mut fixture = BundleFixture::new();
+    let source = fixture.directory.join("source/manifest.json");
+    if let Some(manifest) = original {
+      std::fs::write(&source, manifest).unwrap();
+      fixture.rebuild_archive();
+    }
+    fixture.install("0.1.0-test").await.unwrap();
+    if let Some(manifest) = replacement {
+      std::fs::write(&source, manifest).unwrap();
+    } else {
+      std::fs::remove_file(&source).unwrap();
+    }
+    fixture.rebuild_archive();
+    assert!(matches!(
+      fixture.install("0.1.0-test").await,
+      Err(CoreError::SshCommandFailed { diagnostic, .. })
+        if diagnostic.contains("already exists with different manifest.json")
+    ));
+    let base = fixture.directory.join("home/.tokn/ctl");
+    assert_eq!(
+      std::fs::read_link(base.join("current")).unwrap(),
+      std::path::PathBuf::from("versions/0.1.0-test")
+    );
+    let manifest = base.join("versions/0.1.0-test/manifest.json");
+    match original {
+      Some(original) => assert_eq!(std::fs::read_to_string(manifest).unwrap(), original),
+      None => assert!(!manifest.exists()),
+    }
+    fixture.assert_staging_clean();
+  }
 }
 
 #[cfg(unix)]

@@ -1,12 +1,11 @@
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ctl_client::{
   RemoteInstallEvent, SshConnectionOptions, SshInteraction,
   install_ssh_unix_agent_interactive_with_progress, probe_ssh_unix_platform_interactive,
+  remote_bundle::{self, Platform, VerifiedBundle},
 };
-use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
+use ctl_core::component::ComponentBuildInfo;
 use tauri::{AppHandle, Manager as _, ipc::Channel, path::BaseDirectory};
 use tokio::sync::watch;
 
@@ -17,50 +16,6 @@ use crate::dto::{
 use crate::error::{CommandErrorDto, CommandResult};
 
 mod progress;
-
-const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
-const MAX_BUNDLE_SET_BYTES: usize = 64 * 1024;
-const BUNDLE_SET_SCHEMA_VERSION: u32 = 1;
-const BUNDLE_SET_FILE: &str = "bundle-set.json";
-const PLATFORM_MARKER: &str = "ctl-platform-v1";
-const SUPPORTED_TARGETS: [&str; 4] = [
-  "x86_64-unknown-linux-musl",
-  "aarch64-unknown-linux-musl",
-  "x86_64-apple-darwin",
-  "aarch64-apple-darwin",
-];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RemotePlatform {
-  os: String,
-  architecture: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleSetManifest {
-  schema_version: u32,
-  app_version: String,
-  bundle_id: String,
-  git_revision: String,
-  targets: BTreeMap<String, BundleTargetManifest>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundleTargetManifest {
-  archive: String,
-  sha256: String,
-}
-
-#[derive(Debug)]
-struct VerifiedBundle {
-  app_version: String,
-  bundle_id: String,
-  git_revision: String,
-  archive: Vec<u8>,
-  file_name: String,
-}
 
 pub async fn install(
   app: &AppHandle,
@@ -91,14 +46,9 @@ async fn install_bundle(
     .await
     .map_err(|error| CommandErrorDto::new("remote_platform_probe_failed", error.to_string()))?;
   let platform = parse_platform(&platform)?;
-  let target_triple = platform.target_triple()?;
+  let target_triple = platform.target_triple().map_err(bundle_error)?;
   updates.send_modify(|progress| progress.phase = Phase::VerifyingBundle);
   let bundle = read_verified_bundle(bundle_directories(app)?, target_triple).await?;
-  verify_bundle_revision(
-    &bundle.git_revision,
-    env!("CTMUX_SOURCE_REVISION"),
-    env!("CTMUX_COMPONENTS_DIRTY") == "true",
-  )?;
   updates.send_modify(|progress| {
     progress.phase = Phase::Connecting;
     progress.file_name = Some(bundle.file_name.clone());
@@ -143,48 +93,12 @@ async fn install_bundle(
   })
 }
 
-impl RemotePlatform {
-  fn target_triple(&self) -> CommandResult<&'static str> {
-    match (self.os.as_str(), self.architecture.as_str()) {
-      ("Linux", "x86_64" | "amd64") => Ok("x86_64-unknown-linux-musl"),
-      ("Linux", "aarch64" | "arm64") => Ok("aarch64-unknown-linux-musl"),
-      ("Darwin", "x86_64" | "amd64") => Ok("x86_64-apple-darwin"),
-      ("Darwin", "aarch64" | "arm64") => Ok("aarch64-apple-darwin"),
-      _ => Err(CommandErrorDto::new(
-        "unsupported_remote_agent_target",
-        format!(
-          "No bundled ctl-agent is available for {} {}.",
-          self.os, self.architecture
-        ),
-      )),
-    }
-  }
-}
-
-fn parse_platform(output: &str) -> CommandResult<RemotePlatform> {
-  let mut lines = output.lines();
-  let marker = lines.next().map(str::trim_end);
-  let os = lines
-    .next()
-    .map(str::trim)
-    .filter(|value| !value.is_empty());
-  let architecture = lines
-    .next()
-    .map(str::trim)
-    .filter(|value| !value.is_empty());
-  if marker != Some(PLATFORM_MARKER)
-    || os.is_none()
-    || architecture.is_none()
-    || lines.any(|line| !line.trim().is_empty())
-  {
-    return Err(CommandErrorDto::new(
+fn parse_platform(output: &str) -> CommandResult<Platform> {
+  Platform::parse_probe(output).map_err(|_| {
+    CommandErrorDto::new(
       "invalid_remote_platform",
       "The SSH host returned an invalid platform probe response.",
-    ));
-  }
-  Ok(RemotePlatform {
-    os: os.unwrap().into(),
-    architecture: architecture.unwrap().into(),
+    )
   })
 }
 
@@ -217,141 +131,54 @@ fn development_bundle_directories(packaged: PathBuf, development: PathBuf) -> Ve
   }
 }
 
+fn expected_bundle_build() -> ComponentBuildInfo {
+  let mut expected = ctl_core::component::build_info();
+  expected.version = env!("CARGO_PKG_VERSION").into();
+  expected.source_revision =
+    (!env!("CTMUX_SOURCE_REVISION").is_empty()).then(|| env!("CTMUX_SOURCE_REVISION").into());
+  expected.dirty |= env!("CTMUX_COMPONENTS_DIRTY") == "true";
+  expected
+}
+
 async fn read_verified_bundle(
   directories: Vec<PathBuf>,
   target_triple: &str,
 ) -> CommandResult<VerifiedBundle> {
   let target_triple = target_triple.to_owned();
-  tokio::task::spawn_blocking(move || read_verified_bundle_sync(&directories, &target_triple))
-    .await
-    .map_err(CommandErrorDto::backend)?
+  let expected = expected_bundle_build();
+  tokio::task::spawn_blocking(move || {
+    read_verified_bundle_sync(&directories, &target_triple, &expected)
+  })
+  .await
+  .map_err(CommandErrorDto::backend)?
 }
 
 fn read_verified_bundle_sync(
   directories: &[PathBuf],
   target_triple: &str,
+  expected: &ComponentBuildInfo,
 ) -> CommandResult<VerifiedBundle> {
-  let directory = directories
-    .iter()
-    .find(|directory| directory.join(BUNDLE_SET_FILE).is_file())
-    .ok_or_else(bundle_unavailable)?;
-  let manifest_path = directory.join(BUNDLE_SET_FILE);
-  let manifest_bytes = std::fs::read(&manifest_path).map_err(CommandErrorDto::backend)?;
-  if manifest_bytes.len() > MAX_BUNDLE_SET_BYTES {
-    return Err(bundle_invalid(
-      "The remote bundle-set manifest is too large.",
-    ));
-  }
-  let manifest = parse_bundle_set(&manifest_bytes)?;
-  let target = manifest.targets.get(target_triple).ok_or_else(|| {
-    bundle_invalid(format!(
-      "The remote bundle set does not contain {target_triple}."
-    ))
-  })?;
-  let bundle_path = directory.join(&target.archive);
-  let archive = std::fs::read(bundle_path).map_err(CommandErrorDto::backend)?;
-  if archive.len() > MAX_BUNDLE_BYTES {
-    return Err(bundle_invalid(
-      "The bundled ctl-agent archive exceeds the size limit.",
-    ));
-  }
-  let actual = format!("{:x}", Sha256::digest(&archive));
-  if !actual.eq_ignore_ascii_case(&target.sha256) {
-    return Err(bundle_invalid(
-      "The bundled ctl-agent archive failed checksum verification.",
-    ));
-  }
-  Ok(VerifiedBundle {
-    app_version: manifest.app_version,
-    bundle_id: manifest.bundle_id,
-    git_revision: manifest.git_revision,
-    archive,
-    file_name: target.archive.clone(),
-  })
+  remote_bundle::read_verified_bundle(directories, target_triple, expected)
+    .map_err(bundle_error)?
+    .ok_or_else(bundle_unavailable)
 }
 
-fn parse_bundle_set(bytes: &[u8]) -> CommandResult<BundleSetManifest> {
-  let manifest: BundleSetManifest = serde_json::from_slice(bytes)
-    .map_err(|_| bundle_invalid("The remote bundle-set manifest is invalid JSON."))?;
-  if manifest.schema_version != BUNDLE_SET_SCHEMA_VERSION {
-    return Err(bundle_invalid(
-      "The remote bundle-set schema version is unsupported.",
-    ));
-  }
-  if manifest.app_version != env!("CARGO_PKG_VERSION") {
-    return Err(bundle_invalid(format!(
-      "The remote bundle set targets app version {}, not {}.",
-      manifest.app_version,
-      env!("CARGO_PKG_VERSION")
-    )));
-  }
-  if !is_safe_bundle_id(&manifest.bundle_id) {
-    return Err(bundle_invalid("The remote bundle id is invalid."));
-  }
-  if manifest.git_revision.len() != 40
-    || !manifest
-      .git_revision
-      .bytes()
-      .all(|byte| byte.is_ascii_hexdigit())
-  {
-    return Err(bundle_invalid("The remote bundle git revision is invalid."));
-  }
-  let development_bundle_id = format!(
-    "{}-dev.{}",
-    manifest.app_version,
-    &manifest.git_revision[..12]
-  );
-  if manifest.bundle_id != manifest.app_version && manifest.bundle_id != development_bundle_id {
-    return Err(bundle_invalid(
-      "The remote bundle id does not match its version and Git revision.",
-    ));
-  }
-  if manifest.targets.len() != SUPPORTED_TARGETS.len()
-    || SUPPORTED_TARGETS
-      .iter()
-      .any(|target| !manifest.targets.contains_key(*target))
-  {
-    return Err(bundle_invalid(
-      "The remote bundle set does not contain every supported target.",
-    ));
-  }
-  for (target_triple, target) in &manifest.targets {
-    let expected_archive = format!(
-      "ctl-agent-bundle-{}-{target_triple}.tar.gz",
-      manifest.bundle_id
-    );
-    if target.archive != expected_archive
-      || target.sha256.len() != 64
-      || !target.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-      return Err(bundle_invalid(format!(
-        "The remote bundle metadata for {target_triple} is invalid."
-      )));
-    }
-  }
-  Ok(manifest)
-}
-
-fn verify_bundle_revision(
-  bundle_revision: &str,
-  source_revision: &str,
-  components_dirty: bool,
-) -> CommandResult<()> {
-  if components_dirty || source_revision.is_empty() || bundle_revision != source_revision {
-    return Err(CommandErrorDto::new(
+fn bundle_error(error: remote_bundle::Error) -> CommandErrorDto {
+  match error {
+    remote_bundle::Error::NotAvailable(_) => bundle_unavailable(),
+    remote_bundle::Error::Invalid(message) => bundle_invalid(message),
+    remote_bundle::Error::Stale(_) => CommandErrorDto::new(
       "remote_agent_bundle_stale",
       "The remote component bundle does not match this app build. Commit component changes, run `pnpm agents:sync` from apps/desktop for that exact revision, and rebuild the app before updating this host.",
-    ));
+    ),
+    remote_bundle::Error::UnsupportedTarget(target) => CommandErrorDto::new(
+      "unsupported_remote_agent_target",
+      format!("No bundled ctl-agent is available for {target}."),
+    ),
+    error @ (remote_bundle::Error::Io(_) | remote_bundle::Error::Download(_)) => {
+      CommandErrorDto::backend(error)
+    }
   }
-  Ok(())
-}
-
-fn is_safe_bundle_id(bundle_id: &str) -> bool {
-  !bundle_id.is_empty()
-    && bundle_id.len() <= 128
-    && bundle_id
-      .bytes()
-      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
 }
 
 fn bundle_invalid(message: impl Into<String>) -> CommandErrorDto {
@@ -370,6 +197,77 @@ fn bundle_unavailable() -> CommandErrorDto {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use sha2::{Digest as _, Sha256};
+
+  const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+  const TARGET: &str = "aarch64-apple-darwin";
+
+  fn build(source_revision: &str, dirty: bool) -> ComponentBuildInfo {
+    ComponentBuildInfo {
+      version: env!("CARGO_PKG_VERSION").into(),
+      source_revision: (!source_revision.is_empty()).then(|| source_revision.into()),
+      source_fingerprint: "a".repeat(64),
+      dirty,
+    }
+  }
+
+  fn manifest(archive: &[u8]) -> serde_json::Value {
+    let bundle_id = format!("{}-dev.{}", env!("CARGO_PKG_VERSION"), &REVISION[..12]);
+    let sha256 = format!("{:x}", Sha256::digest(archive));
+    let targets = [
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+    ]
+    .into_iter()
+    .map(|target| {
+      (
+        target.to_owned(),
+        serde_json::json!({
+          "archive": format!("ctl-agent-bundle-{bundle_id}-{target}.tar.gz"),
+          "sha256": sha256,
+        }),
+      )
+    })
+    .collect::<serde_json::Map<_, _>>();
+    serde_json::json!({
+      "schema_version": 1,
+      "app_version": env!("CARGO_PKG_VERSION"),
+      "bundle_id": bundle_id,
+      "git_revision": REVISION,
+      "targets": targets,
+    })
+  }
+
+  struct Directory(PathBuf);
+
+  impl Directory {
+    fn new() -> Self {
+      let path = std::env::temp_dir().join(format!(
+        "ctmux-agent-bundle-{}",
+        uuid::Uuid::new_v4().simple()
+      ));
+      std::fs::create_dir(&path).unwrap();
+      Self(path)
+    }
+
+    fn install(&self, manifest: &serde_json::Value, archive: &[u8]) {
+      std::fs::write(
+        self.0.join("bundle-set.json"),
+        serde_json::to_vec(manifest).unwrap(),
+      )
+      .unwrap();
+      let name = manifest["targets"][TARGET]["archive"].as_str().unwrap();
+      std::fs::write(self.0.join(name), archive).unwrap();
+    }
+  }
+
+  impl Drop for Directory {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
 
   #[cfg(debug_assertions)]
   #[test]
@@ -389,18 +287,29 @@ mod tests {
 
   #[test]
   fn rejects_stale_or_uncommitted_component_bundles() {
-    assert!(verify_bundle_revision("new", "new", false).is_ok());
-    for (bundle, source, dirty) in [
-      ("old", "new", false),
-      ("new", "new", true),
-      ("new", "", false),
+    let directory = Directory::new();
+    directory.install(&manifest(b"trusted archive"), b"trusted archive");
+    assert!(
+      read_verified_bundle_sync(
+        std::slice::from_ref(&directory.0),
+        TARGET,
+        &build(REVISION, false)
+      )
+      .is_ok()
+    );
+    for (source, dirty) in [
+      ("a".repeat(40), false),
+      (REVISION.into(), true),
+      (String::new(), false),
     ] {
-      assert_eq!(
-        verify_bundle_revision(bundle, source, dirty)
-          .unwrap_err()
-          .code,
-        "remote_agent_bundle_stale"
-      );
+      let error = read_verified_bundle_sync(
+        std::slice::from_ref(&directory.0),
+        TARGET,
+        &build(&source, dirty),
+      )
+      .unwrap_err();
+      assert_eq!(error.code, "remote_agent_bundle_stale");
+      assert!(error.message.contains("pnpm agents:sync"));
     }
   }
 
@@ -412,86 +321,111 @@ mod tests {
       ("Darwin", "x86_64", "x86_64-apple-darwin"),
       ("Darwin", "arm64", "aarch64-apple-darwin"),
     ] {
-      let platform = parse_platform(&format!("{PLATFORM_MARKER}\n{os}\n{architecture}\n")).unwrap();
+      let platform = parse_platform(&format!("ctl-platform-v1\n{os}\n{architecture}\n")).unwrap();
       assert_eq!(platform.target_triple().unwrap(), expected);
     }
   }
 
   #[test]
   fn rejects_probe_noise_and_unsupported_targets() {
-    assert!(parse_platform("banner\nctl-platform-v1\nLinux\nx86_64\n").is_err());
+    let error = parse_platform("banner\nctl-platform-v1\nLinux\nx86_64\n").unwrap_err();
+    assert_eq!(error.code, "invalid_remote_platform");
     let platform = parse_platform("ctl-platform-v1\nFreeBSD\nx86_64\n").unwrap();
     assert_eq!(
-      platform.target_triple().unwrap_err().code,
+      platform
+        .target_triple()
+        .map_err(bundle_error)
+        .unwrap_err()
+        .code,
       "unsupported_remote_agent_target"
     );
   }
 
   #[test]
   fn verifies_bundle_checksum_before_installation() {
-    let directory = std::env::temp_dir().join(format!(
-      "ctmux-agent-bundle-{}",
-      uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir(&directory).unwrap();
-    let bundle_id = "0.1.0-dev.0123456789ab";
-    let target_triple = "aarch64-apple-darwin";
-    let bundle_name = format!("ctl-agent-bundle-{bundle_id}-{target_triple}.tar.gz");
-    let bundle = directory.join(&bundle_name);
-    std::fs::write(&bundle, b"trusted archive").unwrap();
-    let sha256 = format!("{:x}", Sha256::digest(b"trusted archive"));
-    let targets = SUPPORTED_TARGETS
-      .into_iter()
-      .map(|target| {
-        (
-          target.to_owned(),
-          serde_json::json!({
-            "archive": format!("ctl-agent-bundle-{bundle_id}-{target}.tar.gz"),
-            "sha256": sha256,
-          }),
-        )
-      })
-      .collect::<serde_json::Map<_, _>>();
-    let manifest = serde_json::json!({
-      "schema_version": 1,
-      "app_version": env!("CARGO_PKG_VERSION"),
-      "bundle_id": bundle_id,
-      "git_revision": "0123456789abcdef0123456789abcdef01234567",
-      "targets": targets,
-    });
-    std::fs::write(
-      directory.join(BUNDLE_SET_FILE),
-      serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    let directories = vec![directory.clone()];
-    let verified = read_verified_bundle_sync(&directories, target_triple).unwrap();
+    let directory = Directory::new();
+    let manifest = manifest(b"trusted archive");
+    directory.install(&manifest, b"trusted archive");
+    let directories = std::slice::from_ref(&directory.0);
+    let expected = build(REVISION, false);
+    let verified = read_verified_bundle_sync(directories, TARGET, &expected).unwrap();
     assert_eq!(verified.archive, b"trusted archive");
-    assert_eq!(verified.bundle_id, bundle_id);
-    std::fs::write(&bundle, b"changed archive").unwrap();
+    assert_eq!(verified.bundle_id, manifest["bundle_id"].as_str().unwrap());
+    directory.install(&manifest, b"changed archive");
     assert_eq!(
-      read_verified_bundle_sync(&directories, target_triple)
+      read_verified_bundle_sync(directories, TARGET, &expected)
         .unwrap_err()
         .code,
       "remote_agent_bundle_invalid"
     );
-    std::fs::remove_dir_all(directory).unwrap();
   }
 
   #[test]
   fn rejects_bundle_sets_for_another_app_version() {
-    let manifest = serde_json::json!({
-      "schema_version": 1,
-      "app_version": "999.0.0",
-      "bundle_id": "999.0.0",
-      "git_revision": "0123456789abcdef0123456789abcdef01234567",
-      "targets": {},
-    });
+    let directory = Directory::new();
+    let mut manifest = manifest(b"trusted archive");
+    manifest["app_version"] = serde_json::json!("999.0.0");
+    directory.install(&manifest, b"trusted archive");
     assert_eq!(
-      parse_bundle_set(&serde_json::to_vec(&manifest).unwrap())
+      read_verified_bundle_sync(
+        std::slice::from_ref(&directory.0),
+        TARGET,
+        &build(REVISION, false)
+      )
+      .unwrap_err()
+      .code,
+      "remote_agent_bundle_invalid"
+    );
+  }
+
+  #[test]
+  fn distinguishes_missing_bundle_sets_from_unreadable_selected_archives() {
+    let directory = Directory::new();
+    let directories = std::slice::from_ref(&directory.0);
+    let expected = build(REVISION, false);
+    assert_eq!(
+      read_verified_bundle_sync(directories, TARGET, &expected)
         .unwrap_err()
         .code,
-      "remote_agent_bundle_invalid"
+      "remote_agent_bundle_unavailable"
+    );
+    let manifest = manifest(b"trusted archive");
+    directory.install(&manifest, b"trusted archive");
+    let archive = manifest["targets"][TARGET]["archive"].as_str().unwrap();
+    std::fs::remove_file(directory.0.join(archive)).unwrap();
+    assert_eq!(
+      read_verified_bundle_sync(directories, TARGET, &expected)
+        .unwrap_err()
+        .code,
+      "backend_error"
+    );
+  }
+
+  #[test]
+  fn rejects_a_stale_development_bundle_before_a_valid_packaged_copy() {
+    let stale = Directory::new();
+    let valid = Directory::new();
+    let mut outdated = manifest(b"trusted archive");
+    outdated["git_revision"] = serde_json::json!("a".repeat(40));
+    outdated["bundle_id"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
+    for (target, metadata) in outdated["targets"].as_object_mut().unwrap().iter_mut() {
+      metadata["archive"] = serde_json::json!(format!(
+        "ctl-agent-bundle-{}-{}.tar.gz",
+        env!("CARGO_PKG_VERSION"),
+        target
+      ));
+    }
+    stale.install(&outdated, b"trusted archive");
+    valid.install(&manifest(b"trusted archive"), b"trusted archive");
+    assert_eq!(
+      read_verified_bundle_sync(
+        &[stale.0.clone(), valid.0.clone()],
+        TARGET,
+        &build(REVISION, false)
+      )
+      .unwrap_err()
+      .code,
+      "remote_agent_bundle_stale"
     );
   }
 }

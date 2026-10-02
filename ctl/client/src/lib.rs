@@ -18,6 +18,7 @@ use tokio::sync::watch;
 
 pub mod hosts;
 pub mod maintenance;
+pub mod remote_bundle;
 pub mod setup;
 mod ssh_install;
 pub mod ssh_reachability;
@@ -25,7 +26,8 @@ mod ssh_startup;
 pub mod tailscale;
 
 pub use ssh_install::{
-  RemoteInstallEvent, install_ssh_unix_agent_interactive,
+  RemoteInstallEvent, RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled,
+  RemoteInstallWatchdog, install_ssh_unix_agent_interactive,
   install_ssh_unix_agent_interactive_with_progress,
 };
 
@@ -438,6 +440,29 @@ pub async fn open_identified_ssh_service(
   start_ssh_transport_identified(command, true, false, ready(())).await
 }
 
+/// Reads legacy v2 identity solely to verify the account before replacing its
+/// incompatible components. No service requests are sent and no service stream
+/// is returned. The disposable SSH channel is terminated after metadata reads.
+///
+/// # Errors
+/// Returns validation, SSH startup, unsupported-marker, or bounded identity
+/// errors. This compatibility probe never permits a v2 service connection.
+pub async fn inspect_legacy_ssh_identity(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  service: RemoteService,
+) -> Result<ctl_proto::RemoteIdentity, CoreError> {
+  validate_ssh_target(destination, options)?;
+  let mut command = Command::new(SSH_PROGRAM);
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command
+    .args(extra)
+    .args(ssh_service_arguments(destination, options, interaction, service).await?)
+    .arg("--identity");
+  inspect_legacy_ssh_command(command).await
+}
+
 /// Opens an identified Unix service and pauses after SSH authentication.
 ///
 /// The fixed remote command emits an authentication marker before attempting
@@ -651,8 +676,70 @@ async fn start_ssh_transport(command: Command) -> Result<SshTransport, CoreError
   start_ssh_transport_identified(command, false, false, ready(())).await
 }
 
+struct SshStartup {
+  child: tokio::process::Child,
+  stdin: ChildStdin,
+  stdout: BufReader<ChildStdout>,
+  diagnostics: ssh_startup::Diagnostics,
+}
+
+fn spawn_ssh_command(mut command: Command) -> Result<SshStartup, CoreError> {
+  command
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  let mut child = command.spawn().map_err(CoreError::StartSsh)?;
+  let stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
+  let stdout = BufReader::new(child.stdout.take().ok_or(CoreError::MissingSshStdout)?);
+  let diagnostics = ssh_startup::Diagnostics::start(child.stderr.take());
+  Ok(SshStartup {
+    child,
+    stdin,
+    stdout,
+    diagnostics,
+  })
+}
+
+async fn inspect_legacy_ssh_command(
+  command: Command,
+) -> Result<ctl_proto::RemoteIdentity, CoreError> {
+  const LEGACY_PREFACE: &[u8] = b"ctl-ssh-v2\n";
+  let SshStartup {
+    mut child,
+    stdin,
+    mut stdout,
+    diagnostics,
+  } = spawn_ssh_command(command)?;
+  // Keep stdin open until disposal, without ever writing a service frame. This
+  // prevents the legacy relay from closing before it has emitted its identity.
+  let _stdin = stdin;
+  let probe = async {
+    ssh_startup::Preface::default()
+      .read_marker(&mut stdout, &[LEGACY_PREFACE], b"ctl-ssh-")
+      .await?;
+    Ok::<_, io::Error>(ctl_proto::read_identity(&mut stdout).await)
+  };
+  let result = match tokio::time::timeout(std::time::Duration::from_secs(30), probe).await {
+    Ok(Ok(identity)) => identity.map_err(CoreError::RemoteIdentity),
+    Ok(Err(error)) => {
+      return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+    }
+    Err(_) => Err(CoreError::RemoteIdentity(io::Error::new(
+      io::ErrorKind::TimedOut,
+      "legacy remote identity inspection timed out",
+    ))),
+  };
+  let _ = child.start_kill();
+  let reaped = child.wait().await;
+  drop(diagnostics);
+  let identity = result?;
+  reaped.map_err(CoreError::WaitSshCommand)?;
+  Ok(identity)
+}
+
 async fn start_ssh_transport_identified<F>(
-  mut command: Command,
+  command: Command,
   identified: bool,
   authentication_marker: bool,
   on_authenticated: F,
@@ -660,16 +747,12 @@ async fn start_ssh_transport_identified<F>(
 where
   F: Future<Output = ()>,
 {
-  command
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true);
-
-  let mut child = command.spawn().map_err(CoreError::StartSsh)?;
-  let stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
-  let mut stdout = BufReader::new(child.stdout.take().ok_or(CoreError::MissingSshStdout)?);
-  let diagnostics = ssh_startup::Diagnostics::start(child.stderr.take());
+  let SshStartup {
+    mut child,
+    stdin,
+    mut stdout,
+    diagnostics,
+  } = spawn_ssh_command(command)?;
   let mut preface = ssh_startup::Preface::default();
   let markers = [
     SSH_AUTHENTICATED_PREFACE,

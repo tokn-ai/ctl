@@ -15,6 +15,11 @@ const UNIX_INSTALL_COMMAND: &str = include_str!("ssh_install.sh");
 const MAX_PROGRESS_LINE_BYTES: u64 = 256;
 const INITIAL_PROGRESS_MARKER: &[u8] = b"ctl-install-progress-v1 receiving 0\n";
 
+mod progress;
+pub use progress::{
+  RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled, RemoteInstallWatchdog,
+};
+
 /// Receiver-confirmed installation progress from the fixed remote script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteInstallEvent {

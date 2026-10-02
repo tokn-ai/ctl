@@ -129,12 +129,28 @@ fixture persists this ID in its `ctl_data` volume across container replacement.
 The fixed-command allowlist includes the identity flag without accepting arbitrary
 remote commands. See `docs/ctmux-workspace.md` for identity storage and migration.
 
-If a CLI connection reports incompatible `ctl-ssh-v2`, the host still has the
-pre-rename remote bundle. Update the host's remote components from the current
-desktop app, or install a matching `ctl-agent`, `ctmuxd`, and `ctl-taskd` bundle
-manually and select it with `~/.tokn/ctl/current`. Updating only the local CLI
-does not replace remote binaries. Existing remote daemons may also need a
-restart if their service protocol differs; confirm session loss before doing so.
+An interactive CLI connection to a Unix host with missing remote components or
+an old `ctl-ssh-v2` agent offers to install matching components and retry once.
+The CLI verifies a saved machine ID using the old agent's identity response
+before uploading; if that ID cannot be verified, repair stops. It reuses the
+selected authenticated SSH connection, including its VPN/gateway route. Piped
+commands and later reconnects never prompt or install automatically.
+
+Repair validates the bundle's checksums, version, and exact clean source
+revision. It looks for local bundles (`CTL_REMOTE_BUNDLES_DIR`, checkout resources
+in debug builds, resources beside the executable, or `~/.tokn/ctl/agent-bundles`),
+then the matching official release, then an existing GitHub bundle
+artifact for that exact revision when `gh` is available. It never selects an
+arbitrary latest build or starts a workflow. For source development, `pnpm
+agents:sync` from `apps/desktop` prepares bundles for a clean pushed commit.
+Upload progress shows the archive, received bytes, speed, and installation
+stage; a healthy transfer has no overall time limit. Ctrl-C cancels repair.
+
+Installation selects `~/.tokn/ctl/current` without restarting running daemons or
+replacing a different existing bundle with the same ID. Existing old `rmux`
+sessions can keep running separately. If a running service still has an
+incompatible protocol after installation, the retried connection reports that
+error; inspect its sessions before considering a disruptive restart.
 
 The app restores known sessions from disk and automatically attaches the last
 selected tab if it is local. Remote hosts stay disconnected on startup.

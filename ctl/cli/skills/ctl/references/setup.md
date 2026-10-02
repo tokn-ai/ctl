@@ -91,10 +91,16 @@ connect HOST` authenticates SSH without installing components.
   route rather than substituting a destination or assuming an old address works.
 - **Remote identity mismatch:** stop the service request and investigate the
   host/account/route. Do not erase a pinned identity as routine recovery.
-- **Missing remote helper or protocol mismatch:** check the SSH account's
-  noninteractive PATH and align components. The CLI has no remote installation
-  subcommand. A manually run `ctl-agent connect` waits for protocol input; it
-  is not a finite health-check command.
+- **Missing remote helper or protocol mismatch:** an interactive Unix service
+  connection offers repair for a missing agent or recognized old `ctl-ssh-v2`
+  protocol, checks any saved machine ID, installs verified matching components,
+  and retries once. Confirm the repair only for the intended SSH account/route.
+  Piped commands, unknown protocol markers, and later reconnects do not offer
+  installation. A clean source build needs exact-revision bundles: run `pnpm
+  agents:sync` from `apps/desktop`, or set `CTL_REMOTE_BUNDLES_DIR` to that bundle
+  set. The CLI may download an existing verified exact-revision bundle artifact
+  through `gh`; it never dispatches a workflow. A manually run `ctl-agent
+  connect` waits for protocol input; it is not a finite health-check command.
 - **Missing signed macOS helper:** for authorized local setup, run `ctl setup`.
   A missing release artifact requires the publisher to publish the matching
   signed release. Discovery can reuse another verified compatible installation;

@@ -5,6 +5,7 @@ use ctl_client::{
 };
 use ctmux_cli::{CommandError, ConnectFuture, Connector};
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
@@ -75,13 +76,29 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   let connector = CtlConnector {
     target,
     settings: resolved.target,
+    recovery: Arc::default(),
   };
-  match arguments.command {
+  let operation = run_selected(arguments.command, &connector, platform);
+  tokio::select! {
+    result = operation => result,
+    interrupted = connector.recovery.interrupt() => {
+      interrupted.map_err(CliError::Interrupt)?;
+      Err(CliError::RepairCancelled)
+    }
+  }
+}
+
+async fn run_selected(
+  command: Command,
+  connector: &CtlConnector,
+  platform: ctl_client::RemotePlatform,
+) -> Result<i32, CliError> {
+  match command {
     Command::Shell {
       session,
       plain,
       cwd,
-    } => return run_shell(&connector, session, plain, cwd).await,
+    } => return run_shell(connector, session, plain, cwd).await,
     Command::Exec { command } => {
       return Ok(crate::connection::execute(&connector.settings, command, platform).await?);
     }
@@ -95,7 +112,7 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
       unreachable!("commands dispatched before target resolution")
     }
     Command::Ctmux { command } => {
-      ctmux_cli::run(command, &connector).await?;
+      ctmux_cli::run(command, connector).await?;
     }
     Command::Taskd {
       command: super::TaskdCommand::Restart,
@@ -107,7 +124,7 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
       println!("ctl-taskd is ready");
     }
     Command::Task { command } => {
-      ctl_task_cli::run_with_connector(command, &connector).await?;
+      ctl_task_cli::run_with_connector(command, connector).await?;
     }
     Command::Vpn { command } => {
       if !connector.target.is_local() {
@@ -153,6 +170,7 @@ async fn run_shell(
 struct CtlConnector {
   target: ConnectionTarget,
   settings: ctl_client::hosts::ConnectionTargetDto,
+  recovery: Arc<crate::remote::Recovery>,
 }
 
 impl CtlConnector {
@@ -161,13 +179,6 @@ impl CtlConnector {
     interaction: &ctl_client::SshInteraction,
     service: ctl_client::RemoteService,
   ) -> Result<Option<ctl_client::SshTransport>, CtlConnectError> {
-    let ctl_client::hosts::ConnectionTargetDto::Ssh {
-      remote_info: Some(_),
-      ..
-    } = &self.settings
-    else {
-      return Ok(None);
-    };
     let ConnectionTarget::Ssh {
       destination,
       options,
@@ -175,8 +186,31 @@ impl CtlConnector {
     else {
       return Ok(None);
     };
-    let stream =
-      ctl_client::open_identified_ssh_service(destination, options, interaction, service).await?;
+    // Repair may be offered only during the initial connection. Reconnects and
+    // interactive task attachments share the same state and never prompt again.
+    let stream = self
+      .recovery
+      .connect(
+        || ctl_client::open_identified_ssh_service(destination, options, interaction, service),
+        |error| async move {
+          if crate::remote::offer_repair(
+            &error,
+            destination,
+            options,
+            interaction,
+            service,
+            &self.settings,
+            &self.recovery,
+          )
+          .await?
+          {
+            Ok(())
+          } else {
+            Err(CtlConnectError::from(error))
+          }
+        },
+      )
+      .await?;
     let identity = stream.remote_identity.as_ref().ok_or_else(|| {
       ctl_client::hosts::HostError::new(
         "identity_missing",
@@ -190,6 +224,7 @@ impl CtlConnector {
   fn for_interactive_session(&self, ctmux_socket: PathBuf) -> Self {
     Self {
       settings: self.settings.clone(),
+      recovery: Arc::clone(&self.recovery),
       target: match &self.target {
         ConnectionTarget::Local { .. } => ConnectionTarget::Local {
           socket_path: ctmux_socket,
@@ -303,6 +338,8 @@ async fn ssh_interaction(
 #[derive(Debug, Error)]
 enum CtlConnectError {
   #[error(transparent)]
+  Repair(#[from] crate::remote::Error),
+  #[error(transparent)]
   Host(#[from] ctl_client::hosts::HostError),
   #[error(transparent)]
   Target(#[from] crate::target::Error),
@@ -315,6 +352,10 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[error("Remote repair cancelled.")]
+  RepairCancelled,
+  #[error("Could not listen for cancellation: {0}")]
+  Interrupt(std::io::Error),
   #[error(transparent)]
   Setup(#[from] ctl_client::setup::Error),
   #[error("Setup installs the local signed helper; omit --host, --method, and --remote-platform.")]
@@ -413,15 +454,18 @@ mod tests {
     let connector = CtlConnector {
       target: target.clone(),
       settings: ctl_client::hosts::ConnectionTargetDto::ssh("task-server"),
+      recovery: Arc::default(),
     };
     let attachment = connector.for_interactive_session(PathBuf::from("/remote/ctmux.sock"));
     assert_eq!(attachment.target, target);
+    assert!(Arc::ptr_eq(&attachment.recovery, &connector.recovery));
   }
 
   #[test]
   fn local_interactive_sessions_use_the_backend_socket() {
     let connector = CtlConnector {
       settings: ctl_client::hosts::ConnectionTargetDto::Local,
+      recovery: Arc::default(),
       target: ConnectionTarget::Local {
         socket_path: PathBuf::from("/default/ctmux.sock"),
       },

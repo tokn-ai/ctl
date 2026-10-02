@@ -141,6 +141,9 @@ it inside the signed CLI, and supports uncommitted source changes. No signing
 environment variables or notarization credentials are required. The output
 follows Cargo's configured target directory.
 
+Development signing explicitly disables timestamps, so it does not depend on
+Apple's timestamp service. Distributable releases still require secure timestamps.
+
 The CLI prepares its helper when needed; `target/ctl-dev/ctl setup` also installs
 it explicitly. Development helpers live under
 `~/.tokn/ctl/components/ctld/development/<archive-sha256>/ctld.app`. They retain

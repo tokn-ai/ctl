@@ -82,6 +82,7 @@ async function fixture(t: TestContext): Promise<Fixture> {
       APPLE_API_ISSUER: "11111111-2222-3333-4444-555555555555",
       CTL_BUNDLED_CTLD_DIR: "unrelated inherited payload",
       CTL_BUNDLED_CTLD_MODE: "development",
+      CTLD_SIGNING_TIMESTAMP: "none",
     },
   };
   await mkdir(options.ctld_assets!);
@@ -171,6 +172,7 @@ function fakeBuild(input: Fixture, options: {
     if (command === "/bin/sh") {
       assert.equal(args[0], "scripts/ci/package-ctld-app.sh");
       assert.equal(context.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING, "true");
+      assert.equal(context.env.CTLD_SIGNING_TIMESTAMP, "secure");
       await makeApp(args[2], args[3], await readFile(args[1]), false);
       await writeFile(context.env.CTLD_SIGNING_IDENTITY_OUTPUT!, fingerprint);
       return { stdout: "", stderr: "" };

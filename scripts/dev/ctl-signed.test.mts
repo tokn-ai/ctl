@@ -82,6 +82,7 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
     if (command === "/bin/sh") {
       if (failure === "helper-signing") throw new Error("fixture helper signing failed");
       assert.equal(context.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING, "false");
+      assert.equal(context.env.CTLD_SIGNING_TIMESTAMP, "none");
       assert.equal(context.env.CTLD_PROVISIONING_PROFILE, profile);
       const app = args[2]!;
       await mkdir(join(app, "Contents/MacOS"), { recursive: true });
@@ -105,6 +106,7 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
       if (args.includes("--force")) {
         if (failure === "cli-signing") throw new Error("fixture CLI signing failed");
         assert.equal(args[args.indexOf("--sign") + 1], identity);
+        assert.ok(args.includes("--timestamp=none"));
         assert.equal(args.includes("--timestamp"), false);
         assert.equal(args[args.indexOf("--identifier") + 1], "dev.tokn-ai.ctl.cli");
         await writeFile(args.at(-1)!, Buffer.concat([await readFile(args.at(-1)!), Buffer.from(signature)]));
@@ -119,6 +121,7 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
     options: {
       repository_root: root, home_directory: join(root, "home"), env: {
         CTLD_PROVISIONING_PROFILE: profile, CTLD_REQUIRE_DISTRIBUTION_SIGNING: "true",
+        CTLD_SIGNING_TIMESTAMP: "secure",
         CTL_BUNDLED_CTLD_DIR: "unrelated release payload", CTL_BUNDLED_CTLD_MODE: "release",
       },
     },
@@ -137,6 +140,7 @@ test("one native development build embeds a complete locally signed helper witho
   assert.ok((await readFile(input.output, "utf8")).endsWith(signature));
   assert.deepEqual((await readdir(join(input.target_directory, "ctl-dev"))).sort(), ["cargo", "ctl"]);
   assert.equal(input.calls.some((call) => ["git", "xcrun", "spctl"].includes(call.command)), false);
+  assert.equal(input.calls.some((call) => call.context.env.CTLD_SIGNING_TIMESTAMP === "secure"), false);
   assert.equal(input.calls.filter((call) => call.command === "cargo" && call.args[0] === "build").length, 2);
 });
 

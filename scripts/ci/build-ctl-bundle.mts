@@ -155,6 +155,7 @@ export async function buildCtlBundle(
   }
   const env: NodeJS.ProcessEnv = {
     ...(options.env ?? process.env), CTL_BUNDLED_CTLD_DIR: undefined, CTL_BUNDLED_CTLD_MODE: undefined,
+    CTLD_SIGNING_TIMESTAMP: undefined,
   };
   for (const key of ["APPLE_API_KEY_PATH", "APPLE_API_KEY", "APPLE_API_ISSUER"]) {
     if (!env[key]) throw new Error(`signed CLI releases require ${key}`);
@@ -192,7 +193,8 @@ export async function buildCtlBundle(
       ])).stdout, "ctld");
       const app = join(temporary, "ctld.app");
       await invoke("/bin/sh", ["scripts/ci/package-ctld-app.sh", artifact, app, options.app_version], {
-        CTLD_REQUIRE_DISTRIBUTION_SIGNING: "true", CTLD_SIGNING_IDENTITY_OUTPUT: identityPath,
+        CTLD_REQUIRE_DISTRIBUTION_SIGNING: "true", CTLD_SIGNING_TIMESTAMP: "secure",
+        CTLD_SIGNING_IDENTITY_OUTPUT: identityPath,
       });
       await packageCtldBundle({
         target: options.target, app_version: options.app_version, bundle_id: options.app_version,

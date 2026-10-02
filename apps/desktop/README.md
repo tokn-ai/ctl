@@ -401,8 +401,12 @@ daemon. Signed bundles remain available for running helpers and pending restart
 operations after the launcher exits. Private SSH masters still expire after
 five idle minutes; surviving the app's exit does not disable that timeout.
 
-The launcher needs no signing environment variables. Tauri arguments,
-such as `--release`, can be passed through `pnpm tauri:dev:signed --release`.
+The launcher needs no signing environment variables. Local helper signing
+explicitly disables timestamps, so Apple's timestamp service is not needed
+for this development flow.
+
+Tauri arguments, such as `--release`, can be passed through
+`pnpm tauri:dev:signed --release`.
 Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
 failed build, following Tauri's behavior.
 Ordinary `pnpm tauri dev` remains unsigned and cannot store Touch ID-protected

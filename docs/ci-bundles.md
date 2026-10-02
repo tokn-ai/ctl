@@ -106,6 +106,10 @@ release selection. The runtime still checks signature, provisioning expiry,
 certificate identity, source metadata, and protocol compatibility. Rebuild
 after a profile expires. An existing daemon is never restarted automatically.
 
+Local signing explicitly uses `--timestamp=none` for both the helper and CLI,
+so an unavailable Apple timestamp service does not block development. Release
+signing retains `--timestamp`; it fails if a secure timestamp cannot be obtained.
+
 For distributable releases, use the following command.
 
 On macOS, with a clean checkout, the matching Developer ID certificate installed

@@ -71,6 +71,7 @@ export async function buildSignedDevelopmentCli(
   const env: NodeJS.ProcessEnv = {
     ...(options.env ?? process.env), CTL_BUNDLED_CTLD_DIR: undefined, CTL_BUNDLED_CTLD_MODE: undefined,
     CTLD_REQUIRE_DISTRIBUTION_SIGNING: undefined, CTLD_SIGNING_IDENTITY_OUTPUT: undefined,
+    CTLD_SIGNING_TIMESTAMP: undefined,
     CTLD_ASKPASS: undefined, CTLD_ASKPASS_TOKEN: undefined, CTLD_IDENTITY_ASKPASS: undefined,
     CTLD_IDENTITY_ASKPASS_SOCKET: undefined, CTLD_IDENTITY_ASKPASS_TOKEN: undefined,
   };
@@ -119,7 +120,7 @@ export async function buildSignedDevelopmentCli(
       console.log("Signing ctld with your provisioning profile…");
       await invoke("/bin/sh", ["scripts/ci/package-ctld-app.sh", artifact, app, helper_version], {
         CTLD_PROVISIONING_PROFILE: profile.path, CTLD_REQUIRE_DISTRIBUTION_SIGNING: "false",
-        CTLD_SIGNING_IDENTITY_OUTPUT: identity_path,
+        CTLD_SIGNING_IDENTITY_OUTPUT: identity_path, CTLD_SIGNING_TIMESTAMP: "none",
       }, true);
       for (const relative of ["Contents/MacOS/ctld", "Contents/Info.plist", "Contents/embedded.provisionprofile", "Contents/_CodeSignature/CodeResources"]) {
         await regularFile(join(app, relative));
@@ -156,7 +157,7 @@ export async function buildSignedDevelopmentCli(
       await copyFile(cli_artifact, cli);
       await chmod(cli, 0o755);
       await invoke("lipo", ["-verify_arch", architecture, cli]);
-      await invoke("codesign", ["--force", "--options", "runtime", "--identifier", cli_identifier, "--sign", identity, cli], {}, true);
+      await invoke("codesign", ["--force", "--timestamp=none", "--options", "runtime", "--identifier", cli_identifier, "--sign", identity, cli], {}, true);
       const requirement = `=anchor apple generic and identifier "${cli_identifier}" and certificate leaf[subject.OU] = "${team}"`;
       await invoke("codesign", ["--verify", "--strict", "--test-requirement", requirement, cli]);
       const output = join(output_directory, "ctl");

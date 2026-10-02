@@ -1,13 +1,40 @@
 ---
 name: ctl-vpn
-description: Start, inspect, and release ctl-managed OpenConnect or Tailscale containers and their local SOCKS5 endpoints, including pending Tailscale sign-in and shared ownership.
+description: List and connect saved VPN profiles, or start, inspect, and release ctl-managed OpenConnect or Tailscale containers and their local SOCKS5 endpoints, including pending Tailscale sign-in and shared ownership.
 ---
 
 # ctl vpn
 
 Use `ctl vpn` locally on a Unix client. `-H` is rejected; these commands manage
-the local ctld's VPN interest, not a remote machine's VPN. Docker or Podman must
-be running. Start launches the selected ctld if needed; status and stop do not.
+the local ctld's VPN interest, not a remote machine's VPN. Connecting or starting
+a VPN requires Docker or Podman to be running. Connect and start launch the
+selected ctld if needed; status and stop do not. List reads the saved catalog
+without contacting or starting a daemon.
+
+## Connect a saved profile
+
+```sh
+ctl vpn list --json
+ctl vpn connect NAME_OR_ID --json
+```
+
+Saved profiles are shared with the desktop VPN page in
+`~/.tokn/ctl/vpns.json`. `CTL_VPNS_PATH` selects another catalog. List includes
+disconnected profiles and profiles whose containers have been removed. Its JSON
+output is an array containing only `connection_id`, `name`, and `provider`;
+credentials are omitted.
+
+Connect selects an exact stable `connection_id` first, then a unique exact name.
+Use the ID from list if multiple profiles have the same name. Connect reads the
+profile's credentials privately, reuses a compatible container, or recreates a
+missing container. Run it again to recover after container removal or daemon
+restart. It returns the affected connection object and does not add a profile to
+the saved catalog. Read the current endpoint from that result or status because
+the port may change on recreation.
+
+OpenConnect still requires the compatible image described in
+[setup.md](references/setup.md). A saved Tailscale profile may require browser
+sign-in; follow the returned `auth_url` and readiness guidance below.
 
 ## Start the chosen provider
 
@@ -54,8 +81,8 @@ ctl vpn status --json
 ctl vpn stop VPN_ID --json
 ```
 
-Start and stop JSON return the affected connection object. Status returns a
-snapshot with `connections`, `supports_multiple`, `supported_providers`,
+Connect, start, and stop JSON return the affected connection object. Status
+returns a snapshot with `connections`, `supports_multiple`, `supported_providers`,
 `supports_tailscale_enrollment`, and optional `discovery_warnings`. Connection
 fields include `vpn_id`, `provider`, `state`, `endpoint`, `running`,
 `connection_id`, `container_name`, and optional `auth_url`, `message`,
@@ -65,12 +92,15 @@ fields include `vpn_id`, `provider`, `state`, `endpoint`, `running`,
 
 Select by the returned `vpn_id`, not array position or container name. File-based
 OpenConnect IDs derive from the canonical settings path and have a null
-`connection_id`; Tailscale uses its supplied connection ID. Multiple connections
-can coexist. An untargeted `ctl vpn stop` requires zero or one local connection;
-discovered shared containers do not make that choice ambiguous.
+`connection_id`; saved profiles and Tailscale use their stable connection IDs.
+Multiple connections can coexist. An untargeted `ctl vpn stop` requires zero or
+one local connection; discovered shared containers do not make that choice
+ambiguous.
 
-Do not interpret an empty `connections` array with `discovery_warnings` as proof
-that no VPN containers exist. A missing selected daemon returns unavailable
+Status is a passive runtime inventory; it does not load saved profiles. Use list
+to inspect the saved catalog even when status returns no connections. Do not
+interpret an empty `connections` array with `discovery_warnings` as proof that no
+VPN containers exist. A missing selected daemon returns unavailable
 inventory without starting it. `status_unavailable: true` means retained
 metadata could not be verified. Older owners may omit fields or report
 `supports_multiple: false`; update that owner for multiple VPNs or targeted stop
@@ -97,7 +127,7 @@ continued visibility is expected. After the last heartbeat expires, the
 container removes itself, which may take up to 15 seconds. Verify the local
 interest was released instead of forcing removal of a shared container.
 
-Use the same daemon socket selection for start, status, and stop:
+Use the same daemon socket selection for connect, start, status, and stop:
 `CTLD_VPN_SOCKET_PATH` takes precedence over `CTLD_SOCKET_PATH`. Different ctld
 endpoints can share compatible containers for the same user and engine.
 Release every interested daemon before changing active routing settings.

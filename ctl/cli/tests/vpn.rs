@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +31,7 @@ impl Fixture {
         .as_nanos()
     ));
     std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     Self {
       directory: directory.canonicalize().unwrap(),
     }
@@ -39,6 +41,25 @@ impl Fixture {
     self.directory.join("ctld.sock")
   }
 
+  fn profiles_path(&self) -> PathBuf {
+    self.directory.join("vpns.json")
+  }
+
+  fn write_profiles(&self, schema_version: u32, connections: &[serde_json::Value]) -> Vec<u8> {
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+      "schema_version": schema_version,
+      "connections": connections,
+    }))
+    .unwrap();
+    self.write_profile_bytes(&bytes);
+    bytes
+  }
+
+  fn write_profile_bytes(&self, bytes: &[u8]) {
+    std::fs::write(self.profiles_path(), bytes).unwrap();
+    std::fs::set_permissions(self.profiles_path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+  }
+
   fn command(&self, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ctl"));
     command
@@ -46,11 +67,19 @@ impl Fixture {
       .current_dir(&self.directory)
       .env("CTLD_SOCKET_PATH", self.socket())
       .env("CTLD_BIN", self.directory.join("missing-ctld"))
+      .env("CTL_VPNS_PATH", self.profiles_path())
       .env_remove("CTLD_ASKPASS")
       .env_remove("CTLD_VPN_SOCKET_PATH")
       .stdin(Stdio::null())
       .kill_on_drop(true);
     command
+  }
+
+  async fn output(&self, args: &[&str]) -> Output {
+    timeout(Duration::from_secs(5), self.command(args).output())
+      .await
+      .unwrap()
+      .unwrap()
   }
 }
 
@@ -594,9 +623,12 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
     }
     assert!(!fixture.socket().exists());
   }
-  for action in ["start", "status", "stop"] {
+  for action in ["start", "status", "stop", "list", "connect"] {
     for json in [false, true] {
       let mut args = vec!["--host", "vpn-host", "vpn", action];
+      if action == "connect" {
+        args.push("work-id");
+      }
       if json {
         args.push("--json");
       }
@@ -613,43 +645,58 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
 }
 
 #[tokio::test]
-async fn start_launches_ctld_when_absent() {
-  use std::os::unix::fs::PermissionsExt as _;
-
-  let fixture = Fixture::new();
-  let helper = fixture.directory.join("ctld");
-  let marker = fixture.directory.join("started");
-  std::fs::write(
-    &helper,
-    format!(
-      "#!/bin/sh\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {}\nelse\n  touch \"$CTL_VPN_TEST_MARKER\"\nfi\n",
-      ctl_ipc::PROTOCOL_VERSION
-    ),
-  )
-  .unwrap();
-  std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
-  let mut command = fixture.command(&["vpn", "start"]);
-  command
-    .env("CTLD_BIN", helper)
-    .env("CTL_VPN_TEST_MARKER", &marker);
-  let stopped = VpnStatus::default();
-  let server = async {
-    while !marker.exists() {
-      tokio::time::sleep(Duration::from_millis(5)).await;
+async fn start_and_saved_connect_launch_ctld_when_absent() {
+  for action in ["start", "connect"] {
+    let fixture = Fixture::new();
+    let profile = saved_openconnect();
+    let expected: ctl_ipc::VpnConnection = serde_json::from_value(profile.clone()).unwrap();
+    fixture.write_profiles(2, &[profile]);
+    let helper = fixture.directory.join("ctld");
+    let marker = fixture.directory.join("started");
+    std::fs::write(
+      &helper,
+      format!(
+        "#!/bin/sh\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {}\nelse\n  touch \"$CTL_VPN_TEST_MARKER\"\nfi\n",
+        ctl_ipc::PROTOCOL_VERSION
+      ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let args = if action == "connect" {
+      vec!["vpn", action, "work-id"]
+    } else {
+      vec!["vpn", action]
+    };
+    let mut command = fixture.command(&args);
+    command
+      .env("CTLD_BIN", helper)
+      .env("CTL_VPN_TEST_MARKER", &marker);
+    let stopped = VpnStatus::default();
+    let server = async {
+      while !marker.exists() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+      }
+      let listener = UnixListener::bind(fixture.socket()).unwrap();
+      reply(&listener, response(stopped.clone())).await
+    };
+    let (output, request) = timeout(Duration::from_secs(5), async {
+      tokio::join!(command.output(), server)
+    })
+    .await
+    .unwrap();
+    assert_text_status(&output.unwrap(), DISCONNECTED_TABLE);
+    if action == "connect" {
+      assert!(matches!(
+        request,
+        ClientMessage::StartVpnConnection { connection } if connection == expected
+      ));
+    } else {
+      assert!(matches!(
+        request,
+        ClientMessage::StartVpn { env_file } if env_file == fixture.directory.join(".env")
+      ));
     }
-    let listener = UnixListener::bind(fixture.socket()).unwrap();
-    reply(&listener, response(stopped.clone())).await
-  };
-  let (output, request) = timeout(Duration::from_secs(5), async {
-    tokio::join!(command.output(), server)
-  })
-  .await
-  .unwrap();
-  assert_text_status(&output.unwrap(), DISCONNECTED_TABLE);
-  assert!(matches!(
-    request,
-    ClientMessage::StartVpn { env_file } if env_file == fixture.directory.join(".env")
-  ));
+  }
 }
 
 #[tokio::test]
@@ -762,4 +809,360 @@ async fn released_shared_container_with_unavailable_status_retains_metadata_with
   assert!(text.contains("https://vpn.example.com"));
   assert!(text.contains("socks5h://127.0.0.1:43210"));
   assert!(!text.contains("connected"));
+}
+
+fn saved_openconnect() -> serde_json::Value {
+  serde_json::json!({
+    "connection_id": "work-id",
+    "name": "Work VPN",
+    "provider": "openconnect",
+    "url": "https://vpn.saved.example.test/group",
+    "username": "saved-test-user",
+    "password": "saved-private-secret",
+    "auth_method": "certificate-group",
+    "target_ip": "10.1.2.3",
+  })
+}
+
+fn saved_tailscale() -> serde_json::Value {
+  serde_json::json!({
+    "connection_id": "tailnet-id",
+    "name": "Team VPN",
+    "provider": "tailscale",
+    "hostname": "ctl-test",
+    "accept_routes": true,
+  })
+}
+
+fn assert_no_saved_credentials(output: &Output) {
+  for value in [
+    "vpn.saved.example.test",
+    "saved-test-user",
+    "saved-private-secret",
+    "certificate-group",
+  ] {
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(value));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(value));
+  }
+}
+
+async fn assert_no_daemon_contact(listener: &UnixListener) {
+  assert!(
+    timeout(Duration::from_millis(30), listener.accept())
+      .await
+      .is_err()
+  );
+}
+
+#[tokio::test]
+async fn list_reads_legacy_and_current_saved_profiles_without_daemon_contact_or_credentials() {
+  for schema_version in [1, 2] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    let mut openconnect = saved_openconnect();
+    let mut profiles = vec![openconnect.clone()];
+    let mut expected = vec![serde_json::json!({
+      "connection_id": "work-id",
+      "name": "Work VPN",
+      "provider": "openconnect",
+    })];
+    if schema_version == 1 {
+      openconnect.as_object_mut().unwrap().remove("provider");
+      profiles[0] = openconnect;
+    } else {
+      profiles.push(saved_tailscale());
+      expected.push(serde_json::json!({
+        "connection_id": "tailnet-id",
+        "name": "Team VPN",
+        "provider": "tailscale",
+      }));
+    }
+    let original = fixture.write_profiles(schema_version, &profiles);
+    let output = fixture.output(&["vpn", "list", "--json"]).await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+      serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+      serde_json::json!(expected)
+    );
+    assert_no_saved_credentials(&output);
+
+    let output = fixture.output(&["vpn", "list"]).await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_no_saved_credentials(&output);
+    let table = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<_> = table.lines().collect();
+    assert_eq!(lines.len(), profiles.len() + 1);
+    assert!(lines[0].contains("VPN ID"));
+    assert!(lines[0].contains("NAME"));
+    assert!(lines[0].contains("PROVIDER"));
+    assert!(lines[1].contains("work-id"));
+    assert!(lines[1].contains("Work VPN"));
+    assert!(lines[1].contains("OpenConnect"));
+    if schema_version == 2 {
+      assert!(lines[2].contains("tailnet-id"));
+      assert!(lines[2].contains("Team VPN"));
+      assert!(lines[2].contains("Tailscale"));
+    }
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+    assert_no_daemon_contact(&listener).await;
+  }
+}
+
+#[tokio::test]
+async fn list_without_a_saved_catalog_is_empty_and_does_not_start_ctld() {
+  let fixture = Fixture::new();
+  let output = fixture.output(&["vpn", "list", "--json"]).await;
+  assert!(output.status.success(), "{output:?}");
+  assert!(output.stderr.is_empty(), "{output:?}");
+  assert_eq!(
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+    serde_json::json!([])
+  );
+  assert!(!fixture.socket().exists());
+  assert!(!fixture.profiles_path().exists());
+
+  let output = fixture
+    .output(&["vpn", "connect", "missing-profile", "--json"])
+    .await;
+  assert!(!output.status.success(), "{output:?}");
+  assert!(output.stdout.is_empty(), "{output:?}");
+  assert!(String::from_utf8_lossy(&output.stderr).contains("ctl vpn list"));
+  assert!(!fixture.socket().exists());
+  assert!(!fixture.profiles_path().exists());
+}
+
+#[tokio::test]
+async fn list_uses_the_desktop_catalog_path_by_default() {
+  let fixture = Fixture::new();
+  let bytes = fixture.write_profiles(2, &[saved_openconnect()]);
+  let directory = fixture.directory.join(".tokn/ctl");
+  std::fs::create_dir_all(&directory).unwrap();
+  std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let path = directory.join("vpns.json");
+  std::fs::rename(fixture.profiles_path(), &path).unwrap();
+  let mut command = fixture.command(&["vpn", "list", "--json"]);
+  command
+    .env("HOME", &fixture.directory)
+    .env_remove("CTL_VPNS_PATH");
+  let output = timeout(Duration::from_secs(5), command.output())
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(output.status.success(), "{output:?}");
+  assert!(output.stderr.is_empty(), "{output:?}");
+  assert_eq!(
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+    serde_json::json!([{
+      "connection_id": "work-id",
+      "name": "Work VPN",
+      "provider": "openconnect",
+    }])
+  );
+  assert_no_saved_credentials(&output);
+  assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn connect_selects_saved_name_or_id_and_sends_the_full_unchanged_profile() {
+  for (schema_version, selector) in [(1, "Work VPN"), (2, "work-id")] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    let mut profile = saved_openconnect();
+    if schema_version == 1 {
+      profile.as_object_mut().unwrap().remove("provider");
+    }
+    let expected: ctl_ipc::VpnConnection = serde_json::from_value(profile.clone()).unwrap();
+    let original = fixture.write_profiles(schema_version, &[profile]);
+    let ready = VpnStatus {
+      vpn_id: Some("work-id".into()),
+      connection_id: Some("work-id".into()),
+      ..connected()
+    };
+    let (output, request) = exchange(
+      &fixture,
+      &listener,
+      &["vpn", "connect", selector, "--json"],
+      response(ready.clone()),
+    )
+    .await;
+    assert_json_status(&output, &ready);
+    assert!(matches!(
+      request,
+      ClientMessage::StartVpnConnection { connection } if connection == expected
+    ));
+    assert_eq!(std::fs::read(fixture.profiles_path()).unwrap(), original);
+  }
+}
+
+#[tokio::test]
+async fn connect_prefers_an_exact_id_over_another_profiles_matching_name() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let selected = saved_openconnect();
+  let mut other = selected.clone();
+  other["connection_id"] = "other-id".into();
+  other["name"] = "work-id".into();
+  fixture.write_profiles(2, &[other, selected.clone()]);
+  let expected: ctl_ipc::VpnConnection = serde_json::from_value(selected).unwrap();
+  let (output, request) = exchange(
+    &fixture,
+    &listener,
+    &["vpn", "connect", "work-id"],
+    response(connected()),
+  )
+  .await;
+  assert!(output.status.success(), "{output:?}");
+  assert!(String::from_utf8_lossy(&output.stdout).contains("socks5h://127.0.0.1:43210"));
+  assert!(matches!(
+    request,
+    ClientMessage::StartVpnConnection { connection } if connection == expected
+  ));
+}
+
+#[tokio::test]
+async fn connect_rejects_unknown_and_ambiguous_names_before_contacting_ctld() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  let first = saved_openconnect();
+  let mut second = first.clone();
+  second["connection_id"] = "second-id".into();
+  fixture.write_profiles(2, &[first, second]);
+  for selector in ["unknown-profile", "Work VPN"] {
+    let output = fixture
+      .output(&["vpn", "connect", selector, "--json"])
+      .await;
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert_no_saved_credentials(&output);
+    let diagnostic = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    if selector == "Work VPN" {
+      assert!(
+        diagnostic.contains("ambiguous")
+          || diagnostic.contains("multiple")
+          || diagnostic.contains("more than one")
+      );
+    } else {
+      assert!(
+        diagnostic.contains("not found")
+          || diagnostic.contains("not_found")
+          || diagnostic.contains("no saved vpn")
+      );
+    }
+    assert_no_daemon_contact(&listener).await;
+  }
+}
+
+#[tokio::test]
+async fn saved_tailscale_connect_checks_capabilities_and_preserves_provider_settings() {
+  for supported in [true, false] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    let profile = saved_tailscale();
+    let expected: ctl_ipc::VpnConnection = serde_json::from_value(profile.clone()).unwrap();
+    fixture.write_profiles(2, &[profile]);
+    let pending = VpnStatus {
+      provider: ctl_ipc::VpnProvider::Tailscale,
+      vpn_id: Some("tailnet-id".into()),
+      connection_id: Some("tailnet-id".into()),
+      state: VpnState::Starting,
+      auth_url: Some("https://login.tailscale.com/a/123abc".into()),
+      ..VpnStatus::default()
+    };
+    let mut command = fixture.command(&["vpn", "connect", "Team VPN", "--json"]);
+    let server = async {
+      assert!(matches!(
+        reply(
+          &listener,
+          ServerMessage::VpnStatus {
+            status: Box::new(VpnStatus::default()),
+            snapshot: Some(VpnSnapshot {
+              supported_providers: if supported {
+                vec![
+                  ctl_ipc::VpnProvider::Openconnect,
+                  ctl_ipc::VpnProvider::Tailscale,
+                ]
+              } else {
+                vec![ctl_ipc::VpnProvider::Openconnect]
+              },
+              ..VpnSnapshot::default()
+            }),
+          }
+        )
+        .await,
+        ClientMessage::VpnStatus
+      ));
+      if supported {
+        Some(reply(&listener, response(pending.clone())).await)
+      } else {
+        None
+      }
+    };
+    let (output, request) = timeout(Duration::from_secs(5), async {
+      tokio::join!(command.output(), server)
+    })
+    .await
+    .unwrap();
+    let output = output.unwrap();
+    if supported {
+      assert_json_status(&output, &pending);
+      assert!(matches!(
+        request,
+        Some(ClientMessage::StartVpnConnection { connection }) if connection == expected
+      ));
+    } else {
+      assert!(request.is_none());
+      assert!(!output.status.success(), "{output:?}");
+      assert!(output.stdout.is_empty(), "{output:?}");
+      assert!(String::from_utf8_lossy(&output.stderr).contains("update and restart ctld"));
+      assert_no_daemon_contact(&listener).await;
+    }
+  }
+}
+
+#[tokio::test]
+async fn saved_profile_commands_reject_unsafe_files_and_scrub_parse_errors_before_ipc() {
+  let fixture = Fixture::new();
+  let listener = UnixListener::bind(fixture.socket()).unwrap();
+  for invalid_file in ["permissions", "symlink", "malformed"] {
+    let original = fixture.write_profiles(2, &[saved_openconnect()]);
+    let path = fixture.profiles_path();
+    match invalid_file {
+      "permissions" => {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+      }
+      "symlink" => {
+        let target = fixture.directory.join("real-vpns.json");
+        std::fs::rename(&path, &target).unwrap();
+        std::os::unix::fs::symlink(target, &path).unwrap();
+      }
+      "malformed" => {
+        fixture
+          .write_profile_bytes(br#"{"schema_version":"saved-private-secret","connections":[]}"#);
+      }
+      _ => unreachable!(),
+    }
+    for args in [
+      vec!["vpn", "list", "--json"],
+      vec!["vpn", "connect", "work-id", "--json"],
+    ] {
+      let output = fixture.output(&args).await;
+      assert!(!output.status.success(), "{invalid_file}: {output:?}");
+      assert!(output.stdout.is_empty(), "{invalid_file}: {output:?}");
+      assert!(!output.stderr.is_empty(), "{invalid_file}: {output:?}");
+      assert_no_saved_credentials(&output);
+      assert_no_daemon_contact(&listener).await;
+    }
+    if invalid_file != "malformed" {
+      assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+    if invalid_file == "permissions" {
+      assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o644
+      );
+    }
+    std::fs::remove_file(path).unwrap();
+  }
 }

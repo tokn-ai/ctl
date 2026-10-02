@@ -25,9 +25,17 @@ not supply its Keychain entitlement.
 ```sh
 ctl --help
 ctl host list
+ctl vpn list
+ctl vpn connect NAME_OR_ID
 ctl skill
 ctl skill --list
 ```
+
+`vpn list` reads saved profiles from `~/.tokn/ctl/vpns.json` (or
+`CTL_VPNS_PATH`) without a daemon. `vpn connect` connects a saved profile and
+recreates its container when missing. Supply its exact stable ID or unique exact
+name. Both commands support `--json`; list output omits credentials. Use
+`vpn status` for the current runtime connections and SOCKS5 endpoints.
 
 The bundled skills and references are available without a daemon, connection,
 or source checkout.

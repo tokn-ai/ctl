@@ -1,8 +1,24 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+pub(crate) mod profiles;
+
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
+  /// List saved VPN profiles without starting or contacting ctld.
+  List {
+    /// Print machine-readable JSON without credentials.
+    #[arg(long)]
+    json: bool,
+  },
+  /// Connect a saved VPN by name or ID, recreating its container when needed.
+  Connect {
+    #[arg(value_name = "NAME_OR_ID")]
+    profile: String,
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+  },
   /// Start the VPN and print its connection status.
   Start {
     /// Literal VPN settings file, resolved relative to the current directory.
@@ -48,6 +64,36 @@ pub enum Command {
 
 pub async fn run(command: Command) -> Result<(), Error> {
   let (status, json) = match command {
+    Command::List { json } => {
+      let document = profiles::load(&profiles::path()?)?;
+      let summaries: Vec<_> = document
+        .connections
+        .iter()
+        .map(ProfileSummary::from)
+        .collect();
+      if json {
+        println!("{}", serde_json::to_string(&summaries)?);
+      } else if summaries.is_empty() {
+        println!("No saved VPN profiles. Add a connection in the desktop VPN page.");
+      } else {
+        println!(
+          "{}",
+          crate::table::format(
+            ["VPN ID", "NAME", "PROVIDER"],
+            summaries.iter().map(|profile| [
+              profile.connection_id.into(),
+              profile.name.into(),
+              provider_name(profile.provider).into(),
+            ]),
+          )
+        );
+      }
+      return Ok(());
+    }
+    Command::Connect { profile, json } => {
+      let connection = profiles::resolve(profiles::load(&profiles::path()?)?, &profile)?;
+      (ctl_ipc::vpn::start_connection(connection).await?, json)
+    }
     Command::Start { env_file, json } => (ctl_ipc::vpn::start(env_file).await?, json),
     Command::StartTailscale {
       connection_id,
@@ -101,6 +147,31 @@ pub async fn run(command: Command) -> Result<(), Error> {
   Ok(())
 }
 
+/// Explicit metadata projection: saved settings contain authentication secrets.
+#[derive(serde::Serialize)]
+struct ProfileSummary<'a> {
+  connection_id: &'a str,
+  name: &'a str,
+  provider: ctl_ipc::VpnProvider,
+}
+
+impl<'a> From<&'a ctl_ipc::VpnConnection> for ProfileSummary<'a> {
+  fn from(connection: &'a ctl_ipc::VpnConnection) -> Self {
+    Self {
+      connection_id: &connection.connection_id,
+      name: &connection.name,
+      provider: connection.provider(),
+    }
+  }
+}
+
+fn provider_name(provider: ctl_ipc::VpnProvider) -> &'static str {
+  match provider {
+    ctl_ipc::VpnProvider::Openconnect => "OpenConnect",
+    ctl_ipc::VpnProvider::Tailscale => "Tailscale",
+  }
+}
+
 fn status_row(status: &ctl_ipc::VpnStatus) -> [String; 6] {
   use ctl_ipc::VpnState;
 
@@ -116,10 +187,7 @@ fn status_row(status: &ctl_ipc::VpnStatus) -> [String; 6] {
     }
   };
   let vpn_id = display_value(status.vpn_id.as_deref().or(Some("-")));
-  let provider = match status.provider {
-    ctl_ipc::VpnProvider::Openconnect => "OpenConnect",
-    ctl_ipc::VpnProvider::Tailscale => "Tailscale",
-  };
+  let provider = provider_name(status.provider);
   if status.state == VpnState::Stopped {
     [
       vpn_id,
@@ -227,6 +295,8 @@ fn display_value(value: Option<&str>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+  #[error(transparent)]
+  Profile(#[from] profiles::Error),
   #[error(transparent)]
   Vpn(#[from] ctl_ipc::vpn::VpnError),
   #[error(transparent)]

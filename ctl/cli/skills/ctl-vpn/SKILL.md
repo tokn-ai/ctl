@@ -24,9 +24,10 @@ Saved profiles are shared with the desktop VPN page in
 profiles whose containers have been removed, alongside runtime connections and
 compatible shared containers. An unmatched saved profile is disconnected only
 when runtime inventory is complete; otherwise it is unavailable. Runtime-only
-connections remain visible. The table shows NAME, PROVIDER, STATE, USE,
-SERVER/TAILNET, USERNAME, SOCKS5 ENDPOINT, and VPN ID. Saved display metadata never
-includes passwords or URL credentials, paths, queries, or fragments.
+connections remain visible. The table shows NAME, PROVIDER, STATE, SERVER/TAILNET,
+USERNAME, SOCKS5 ENDPOINT, and VPN ID. The USE column appears only when at least
+one displayed VPN is marked `shared`. Saved display metadata never includes
+passwords or URL credentials, paths, queries, or fragments.
 
 Connect selects an exact stable `connection_id` first, then a unique exact name.
 Use the ID from list if multiple profiles have the same name. Connect reads the
@@ -122,10 +123,11 @@ not provide SOCKS5 UDP relay.
 ## Shared lifetime and release
 
 ctld renews a separate heartbeat interest for each connection. The VPN can keep
-running after the start CLI exits. `locally_connected: true` means this ctld
-holds interest; `false` identifies a discovered container kept alive elsewhere.
-The table's USE column shows `this ctld` or `shared`. List inspection never
-acquires or renews interest.
+running after the start CLI exits. `locally_connected: true` means the selected
+daemon holds heartbeat interest, displayed as `owned`; `false` identifies a
+discovered container kept alive elsewhere, displayed as `shared`. USE appears
+only when a displayed VPN has `locally_connected: false`; the JSON fields are
+unchanged. List inspection never acquires or renews interest.
 
 Stop releases only the selected daemon's interest and leaves ctld running. A
 shared container may remain connected while another daemon holds interest; its

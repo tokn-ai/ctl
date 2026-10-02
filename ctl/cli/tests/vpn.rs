@@ -163,6 +163,15 @@ fn assert_text_status(output: &Output, expected: &str) {
   assert!(output.stderr.is_empty(), "{output:?}");
 }
 
+fn has_use_column(table: &str) -> bool {
+  table
+    .lines()
+    .next()
+    .unwrap_or_default()
+    .split_whitespace()
+    .any(|column| column == "USE")
+}
+
 fn connected() -> VpnStatus {
   VpnStatus {
     vpn_id: Some("test-vpn".into()),
@@ -237,6 +246,7 @@ async fn start_list_and_stop_print_a_human_readable_table_by_default() {
       assert!(output.stderr.is_empty(), "{output:?}");
       let table = String::from_utf8(output.stdout).unwrap();
       assert!(table.starts_with("NAME"));
+      assert!(!has_use_column(&table));
       for value in [
         "OpenConnect",
         "connected",
@@ -810,12 +820,49 @@ async fn shared_container_list_distinguishes_local_interest_and_keeps_endpoint()
   assert!(output.status.success());
   let text = String::from_utf8(output.stdout).unwrap();
   let rows: Vec<_> = text.lines().collect();
-  assert!(rows[0].contains("USE"));
-  assert!(rows[1].contains("this ctld"));
+  assert!(has_use_column(&text));
+  assert!(rows[1].contains("owned"));
+  assert!(!text.contains("this ctld"));
   assert!(rows[2].contains("shared"));
   assert!(rows[2].contains("connected"));
   assert!(rows[2].contains("socks5h://127.0.0.1:43210"));
   assert!(text.contains("Warning: Some container metadata could not be read"));
+}
+
+#[tokio::test]
+async fn vpn_tables_only_show_use_when_a_connection_is_displayed_as_shared() {
+  for locally_connected in [Some(true), None, Some(false)] {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.socket()).unwrap();
+    fixture.write_profiles(2, &[saved_openconnect()]);
+    let status = VpnStatus {
+      shared_container: true,
+      locally_connected,
+      connection_id: Some("work-id".into()),
+      ..connected()
+    };
+    for action in ["list", "start", "connect", "stop"] {
+      let args = if action == "connect" {
+        vec!["vpn", action, "work-id"]
+      } else {
+        vec!["vpn", action]
+      };
+      let (output, _) = exchange(&fixture, &listener, &args, response(status.clone())).await;
+      assert!(output.status.success(), "{output:?}");
+      assert!(output.stderr.is_empty(), "{output:?}");
+      let table = String::from_utf8(output.stdout).unwrap();
+      assert_eq!(
+        has_use_column(&table),
+        locally_connected == Some(false),
+        "{action}: {table}"
+      );
+      if locally_connected == Some(false) {
+        assert!(table.lines().nth(1).unwrap().contains("shared"));
+      }
+      assert!(!table.contains("this ctld"));
+      assert!(table.contains("socks5h://127.0.0.1:43210"));
+    }
+  }
 }
 
 #[tokio::test]
@@ -1004,6 +1051,7 @@ async fn list_reads_saved_profiles_and_passively_checks_runtime_without_exposing
     assert!(output.stderr.is_empty(), "{output:?}");
     assert_no_profile_secrets(&output);
     let table = String::from_utf8(output.stdout).unwrap();
+    assert!(!has_use_column(&table));
     let lines: Vec<_> = table.lines().collect();
     assert_eq!(lines.len(), profiles.len() + 1);
     assert!(lines[0].contains("VPN ID"));
@@ -1138,6 +1186,7 @@ async fn list_merges_saved_connected_disconnected_and_runtime_only_connections()
   assert!(output.stderr.is_empty(), "{output:?}");
   assert_no_profile_secrets(&output);
   let table = String::from_utf8(output.stdout).unwrap();
+  assert!(!has_use_column(&table));
   let rows: Vec<_> = table.lines().collect();
   assert_eq!(rows.len(), 4);
   assert!(rows[1].contains("Work VPN"));

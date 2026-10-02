@@ -188,39 +188,64 @@ pub(super) fn format(entries: &[Entry]) -> String {
   if entries.is_empty() {
     return "No saved VPN profiles or runtime connections.".into();
   }
-  crate::table::format(
+  let headers = [
+    "NAME",
+    "PROVIDER",
+    "STATE",
+    "SERVER",
+    "USERNAME",
+    "SOCKS5 ENDPOINT",
+    "VPN ID",
+  ];
+  let rows = entries.iter().map(|entry| {
+    let provider = match entry.provider {
+      VpnProvider::Openconnect => "OpenConnect",
+      VpnProvider::Tailscale => "Tailscale",
+    };
     [
-      "NAME",
-      "PROVIDER",
-      "STATE",
-      "USE",
-      "SERVER",
-      "USERNAME",
-      "SOCKS5 ENDPOINT",
-      "VPN ID",
-    ],
-    entries.iter().map(|entry| {
-      let usage = match entry.locally_connected {
-        Some(true) => "this ctld",
-        Some(false) => "shared",
-        None => "-",
-      };
-      let provider = match entry.provider {
-        VpnProvider::Openconnect => "OpenConnect",
-        VpnProvider::Tailscale => "Tailscale",
-      };
+      value(entry.name.as_deref()),
+      provider.into(),
+      entry.state.label().into(),
+      value(entry.server.as_deref()),
+      value(entry.username.as_deref()),
+      value(entry.endpoint.as_deref()),
+      value(entry.vpn_id.as_deref()),
+    ]
+  });
+  if entries
+    .iter()
+    .any(|entry| entry.locally_connected == Some(false))
+  {
+    let rows = rows.zip(entries).map(
+      |([name, provider, state, server, username, endpoint, id], entry)| {
+        [
+          name,
+          provider,
+          state,
+          super::usage_label(entry.locally_connected).into(),
+          server,
+          username,
+          endpoint,
+          id,
+        ]
+      },
+    );
+    crate::table::format(
       [
-        value(entry.name.as_deref()),
-        provider.into(),
-        entry.state.label().into(),
-        usage.into(),
-        value(entry.server.as_deref()),
-        value(entry.username.as_deref()),
-        value(entry.endpoint.as_deref()),
-        value(entry.vpn_id.as_deref()),
-      ]
-    }),
-  )
+        "NAME",
+        "PROVIDER",
+        "STATE",
+        "USE",
+        "SERVER",
+        "USERNAME",
+        "SOCKS5 ENDPOINT",
+        "VPN ID",
+      ],
+      rows,
+    )
+  } else {
+    crate::table::format(headers, rows)
+  }
 }
 
 fn value(value: Option<&str>) -> String {

@@ -264,20 +264,15 @@ fn format_statuses(statuses: &[ctl_ipc::VpnStatus]) -> String {
   ];
   let mut table = if statuses
     .iter()
-    .any(|status| status.locally_connected.is_some() || status.shared_container)
+    .any(|status| status.locally_connected == Some(false))
   {
-    let rows = rows.into_iter().enumerate().map(
-      |(index, [id, provider, state, server, username, endpoint])| {
-        let usage = match statuses[index].locally_connected {
-          Some(true) => "this ctld",
-          Some(false) => "shared",
-          None => "-",
-        };
+    let rows = rows.into_iter().zip(statuses).map(
+      |([id, provider, state, server, username, endpoint], status)| {
         [
           id,
           provider,
           state,
-          usage.into(),
+          usage_label(status.locally_connected).into(),
           server,
           username,
           endpoint,
@@ -301,6 +296,14 @@ fn format_statuses(statuses: &[ctl_ipc::VpnStatus]) -> String {
   };
   append_notes(&mut table, statuses);
   table
+}
+
+fn usage_label(locally_connected: Option<bool>) -> &'static str {
+  match locally_connected {
+    Some(true) => "owned",
+    Some(false) => "shared",
+    None => "-",
+  }
 }
 
 fn display_value(value: Option<&str>) -> String {

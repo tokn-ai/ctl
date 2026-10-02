@@ -595,8 +595,10 @@ ctl vpn stop VPN_ID
 
 `list` combines saved VPN profiles from `~/.tokn/ctl/vpns.json` with local
 connections and compatible shared containers. It prints name, provider, state,
-heartbeat use, server or tailnet, username, SOCKS5 endpoint, and VPN ID. Profiles
-stay visible after their containers are removed. The daemon probe is passive:
+server or tailnet, username, SOCKS5 endpoint, and VPN ID. When any displayed VPN
+is shared, a USE column distinguishes `owned` from `shared`; `owned` means the
+selected daemon holds heartbeat interest. Profiles stay visible after their
+containers are removed. The daemon probe is passive:
 list never starts `ctld` or acquires heartbeat interest. A saved profile without
 a runtime connection is disconnected only when inventory is complete; otherwise
 its state is unavailable. Runtime connections without a saved profile also appear.

@@ -85,9 +85,9 @@ An exact stable profile ID takes precedence over a unique exact name. The saved
 catalog defaults to `~/.tokn/ctl/vpns.json`; `CTL_VPNS_PATH` selects another file.
 
 List combines saved profiles with runtime connections and compatible shared
-containers. Its table shows name, provider, state, heartbeat use, server or
-tailnet, username, SOCKS5 endpoint, and VPN ID. Saved profiles stay visible after
-container removal. An unmatched saved profile is disconnected only when runtime
+containers. Its table shows name, provider, state, server or tailnet, username,
+SOCKS5 endpoint, and VPN ID. Saved profiles stay visible after container removal.
+An unmatched saved profile is disconnected only when runtime
 inventory is complete; otherwise it is unavailable. List never starts ctld or
 renews a heartbeat.
 
@@ -98,9 +98,11 @@ checked. If the saved catalog cannot be read, runtime entries remain available
 with `profile_warnings`. Each runtime connection includes `vpn_id`, `vpn_url`,
 `username`, `endpoint`, `container_name`, `running`, `connection_id`, `state`,
 immutable `container_id`, `shared_container`,
-and `locally_connected`. The table's USE column distinguishes this ctld from a
-shared container discovered without local heartbeat interest. Inventory accepts
-only the current heartbeat protocol and user namespace. Connect, start, and stop
+and `locally_connected`. The table's USE column appears only when a displayed
+VPN has `locally_connected: false`. It shows `owned` when the selected daemon
+holds heartbeat interest and `shared` for a container discovered without local
+interest. The JSON fields are unchanged. Inventory accepts only the current
+heartbeat protocol and user namespace. Connect, start, and stop
 JSON return the affected connection. Saved connections use their profile ID as
 `vpn_id`; file-based starts receive a stable ID derived from the canonical
 settings path. The VPN server is its HTTPS origin; credentials, paths, queries,

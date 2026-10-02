@@ -248,21 +248,28 @@ actors against the original environment and session before reporting success.
 
 ### Managed VPNs
 
-`ctl vpn start --env-file PATH` asks the local `ctld` to acquire heartbeat
-interest in a shared OpenConnect container, starting the daemon if needed. The
-settings path defaults to `.env`
-and is resolved relative to the caller's directory. Its SOCKS5 listener uses a
+`ctl vpn create` opens a provider-specific questionnaire and saves a private
+OpenConnect or Tailscale profile without starting a daemon or container.
+`ctl vpn start NAME_OR_ID` asks the local `ctld` to acquire heartbeat interest in
+the saved profile's container, starting the daemon and recreating a missing
+container when needed. Its SOCKS5 listener uses a
 random loopback port, printed in a readable connection-status table after the VPN and
-proxy are ready. Connect, start, list, and stop accept `--json` for machine-readable
-output. `ctl vpn list` combines saved profiles with local interests and compatible
+proxy are ready. Create, start, list, and stop accept `--json` for machine-readable
+output. Create remains interactive and returns only saved metadata, with prompts
+on stderr. `ctl vpn list` combines saved profiles with local interests and compatible
 shared containers, retaining runtime entries without saved profiles. Its JSON
 snapshot adds sanitized merged `entries` to the runtime `connections`, capability
 fields, and discovery warnings. Saved metadata excludes passwords and URL
 credentials, paths, queries, and fragments. A saved profile without a runtime
 connection is disconnected only when inventory is complete; otherwise it is
 unavailable. If the catalog cannot be read, runtime entries remain available with
-`profile_warnings`. `ctl vpn stop VPN_ID` releases only the selected local interest
-while keeping the broker running.
+`profile_warnings`. `ctl vpn stop NAME_OR_ID` accepts a saved profile's exact ID
+or unique exact name, or a runtime VPN ID, and releases only the selected local
+interest while keeping the broker running. An omitted start selector opens a
+picker in an interactive terminal. An omitted stop selector opens a picker when
+the daemon reports `supports_multiple: true`; a legacy daemon's single local
+connection uses untargeted stop directly. Scripts must specify a start selector;
+an untargeted stop requires zero or one local connection.
 List and stop never start a daemon. An absent daemon or incomplete engine
 inventory reports a discovery warning rather than a confident empty result. VPN
 commands reject `--host` and use
@@ -272,16 +279,15 @@ The desktop VPN panel stores named connection details in private, schema-version
 `vpns.json` under the app configuration directory. Native commands return metadata
 and password-presence flags, use hashed revisions for optimistic writes, and load
 the saved secret only when connecting. Both desktop and CLI use the shared
-`ctl-ipc::vpn` client. `ctl vpn connect NAME_OR_ID` resolves an exact saved profile
-ID before a unique exact name, then connects through that client, recreating a
-missing container and starting ctld when needed. CLI connect, list, and host VPN
+`ctl-ipc::vpn` client. CLI start resolves an exact saved profile ID before a unique
+exact name, then connects through that client. CLI create, start, list, and host VPN
 routes share a bounded private profile reader accepting schema 1 and 2. The
 catalog defaults to `~/.tokn/ctl/vpns.json`; `CTL_VPNS_PATH` selects another file.
 OpenConnect structured starts send the configuration to the container
 over its attached stdin; the container writes a mode-0600 environment file on
-private tmpfs. No generated credential file is left on the host. CLI-provided
-environment files are read as bounded private snapshots and use the same
-stdin/tmpfs flow. Cancellable preparation keeps status and stop responsive. Status
+private tmpfs. No generated credential file is left on the host. Saved CLI
+profiles use the same stdin/tmpfs flow. Cancellable preparation keeps status and
+stop responsive. Status
 lists each runtime ID, saved connection ID, gateway origin, and username from
 its actual startup snapshot. Each entry independently prepares, starts, connects,
 and stops; one failure or cancellation leaves the others running. Native
@@ -335,7 +341,7 @@ a retry action after watchdog expiry. This does not revoke the device in the
 remote tailnet. A profile
 already written to disk is never removed by delayed enrollment cancellation.
 
-`ctl vpn start-tailscale --id ID` and the desktop app launch a pinned official
+Starting a saved Tailscale profile from the CLI or desktop app launches a pinned official
 image in userspace mode, with a random loopback SOCKS5 port and no host route
 changes. Both providers use the same in-container heartbeat watchdog. Every
 interested ctld renews through an independent engine exec addressed to an immutable

@@ -142,31 +142,35 @@ mod tests {
   use super::*;
 
   #[test]
-  fn vpn_start_uses_a_local_env_file_and_exposes_list_and_stop() {
+  fn vpn_commands_use_saved_profiles_and_expose_the_questionnaire() {
     let arguments = Arguments::try_parse_from(["ctl", "vpn", "start"]).unwrap();
     assert_eq!(arguments.host, None);
     assert!(matches!(
       arguments.command,
-      Command::Vpn { command: vpn::Command::Start { env_file, json: false } }
-        if env_file == std::path::Path::new(".env")
+      Command::Vpn {
+        command: vpn::Command::Start {
+          profile: None,
+          json: false
+        }
+      }
     ));
-    let arguments =
-      Arguments::try_parse_from(["ctl", "vpn", "start", "--env-file", "work.env"]).unwrap();
+    let arguments = Arguments::try_parse_from(["ctl", "vpn", "start", "Work VPN"]).unwrap();
     assert!(matches!(
       arguments.command,
-      Command::Vpn { command: vpn::Command::Start { env_file, json: false } }
-        if env_file == std::path::Path::new("work.env")
+      Command::Vpn { command: vpn::Command::Start { profile: Some(profile), json: false } }
+        if profile == "Work VPN"
     ));
-    for action in ["list", "stop"] {
+    for action in ["create", "list", "start", "stop"] {
       assert!(Arguments::try_parse_from(["ctl", "vpn", action]).is_ok());
       assert!(Arguments::try_parse_from(["ctl", "vpn", action, "--env-file", ".env"]).is_err());
     }
-    for action in ["start", "list", "stop"] {
+    for action in ["create", "start", "list", "stop"] {
       let arguments = Arguments::try_parse_from(["ctl", "vpn", action, "--json"]).unwrap();
       assert!(matches!(
         arguments.command,
         Command::Vpn {
           command: vpn::Command::Start { json: true, .. }
+            | vpn::Command::Create { json: true }
             | vpn::Command::List { json: true }
             | vpn::Command::Stop { json: true, .. }
         }
@@ -175,42 +179,26 @@ mod tests {
     let arguments = Arguments::try_parse_from(["ctl", "vpn", "stop", "test-vpn"]).unwrap();
     assert!(matches!(
       arguments.command,
-      Command::Vpn { command: vpn::Command::Stop { vpn_id: Some(vpn_id), json: false } }
-        if vpn_id == "test-vpn"
+      Command::Vpn { command: vpn::Command::Stop { profile: Some(profile), json: false } }
+        if profile == "test-vpn"
     ));
     assert!(Arguments::try_parse_from(["ctl", "vpn", "status"]).is_err());
   }
 
   #[test]
-  fn tailscale_start_requires_stable_id_and_exposes_only_supported_options() {
-    assert!(Arguments::try_parse_from(["ctl", "vpn", "start-tailscale"]).is_err());
-    let arguments = Arguments::try_parse_from([
-      "ctl",
-      "vpn",
-      "start-tailscale",
+  fn vpn_rejects_removed_commands_and_provider_specific_start_flags() {
+    for command in ["connect", "start-tailscale"] {
+      assert!(Arguments::try_parse_from(["ctl", "vpn", command]).is_err());
+    }
+    for flag in [
+      "--env-file",
       "--id",
-      "team",
       "--hostname",
-      "ctmux-test",
+      "--auth-key",
       "--accept-routes",
-      "--json",
-    ])
-    .unwrap();
-    assert!(matches!(arguments.command, Command::Vpn {
-      command: vpn::Command::StartTailscale { connection_id, hostname: Some(hostname), accept_routes: true, json: true, .. }
-    } if connection_id == "team" && hostname == "ctmux-test"));
-    assert!(
-      Arguments::try_parse_from([
-        "ctl",
-        "vpn",
-        "start-tailscale",
-        "--id",
-        "team",
-        "--auth-key",
-        "secret"
-      ])
-      .is_err()
-    );
+    ] {
+      assert!(Arguments::try_parse_from(["ctl", "vpn", "start", flag]).is_err());
+    }
   }
 
   #[test]

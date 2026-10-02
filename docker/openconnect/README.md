@@ -25,7 +25,7 @@ protocol must be recreated.
 The app saves connections in a private JSON file. At connection time, ctld sends
 the selected configuration over attached stdin to the container, which creates
 a private environment file in tmpfs. That generated file disappears when the
-container exits; the app never asks users to manage `.env` files. Closing ctmux
+container exits. Closing ctmux
 leaves the connection running under ctld. Compatible containers started by another ctld also appear in the panel.
 Connect acquires this daemon's heartbeat interest; Disconnect releases only that
 interest. A shared container remains visible while another daemon uses it. Each saved connection combines
@@ -34,36 +34,28 @@ SOCKS5 endpoint. Only active connections without a matching saved profile get a
 temporary item. An indicator on the VPN tab
 shows connection activity while other panels are open.
 
-## CLI configuration
+## Create a profile from the CLI
 
-Copy `docker/openconnect/.env.example` to `.env` at the repository root if the
-file does not exist, then edit it:
+Run `ctl vpn create` in an interactive terminal and choose OpenConnect. The
+questionnaire asks for a display name, gateway address, username, masked password,
+optional authentication method, and optional IPv4 connectivity-check target. It saves
+the profile privately to `~/.tokn/ctl/vpns.json`, shared with the desktop VPN page.
+`CTL_VPNS_PATH` selects another catalog. Creation does not start ctld, build an
+image, or connect a VPN. Ctrl-C or Esc cancels without changing the catalog.
 
-```dotenv
-VPN_URL=https://your-vpn-host
-VPN_USERNAME=your-username
-VPN_PASSWORD=your-password
-# VPN_AUTH_METHOD=your-method-name
-# TARGET_IP=
-```
+A bare gateway address uses HTTPS; an HTTPS URL may include its port and path.
+OpenConnect's Array login form has a `method` field; provide the optional
+authentication method if the gateway requires it. Server certificate verification
+remains enabled. Enter passwords literally in the masked prompt.
 
-There is no port setting: Docker or Podman assigns the localhost port.
-`TARGET_IP` is optional and requests an SSH host-key handshake on port 22 after
-startup. Omitting it, leaving it empty, or failing that probe does not prevent
-the VPN and proxy from running.
+Docker or Podman assigns the localhost port. The optional connectivity-check
+target requests an SSH host-key handshake on port 22 after startup. Omitting it
+or failing that probe does not prevent the VPN and proxy from running.
 
-`VPN_URL` accepts a URL or a hostname/IP with an optional port and path. A bare
-address uses HTTPS. OpenConnect's Array login form has a `method` field; set
-`VPN_AUTH_METHOD` if the gateway needs a named method. Otherwise an empty value
-is sent. Server certificate verification remains enabled.
-
-Use literal, single-line values without shell quotes or escaping `$`, `#`, or
-spaces. The file is parsed as data, never evaluated as shell code. It is ignored
-by Git and image builds and set to mode `0600` by the helper. ctld reads a private,
-bounded snapshot and sends it over attached stdin to a mode-0600 file in container
-tmpfs, just like saved desktop connections.
-The password goes to OpenConnect through a separate stdin pipe, without being
-included in command arguments or container environment metadata.
+At startup, ctld sends the saved configuration privately over attached stdin to
+a mode-0600 environment file in container tmpfs. The password goes to OpenConnect
+through a separate stdin pipe, without being included in command arguments or
+container environment metadata.
 
 ## Manage with ctl
 
@@ -71,62 +63,71 @@ Build the image once, then use the current ctl and ctld binaries:
 
 ```sh
 ./docker/openconnect/run.sh build
-ctl vpn start --env-file .env
+ctl vpn create
+ctl vpn start NAME_OR_ID
 ctl vpn list
-ctl vpn stop VPN_ID
+ctl vpn stop NAME_OR_ID
 ```
 
-Start and connect talk to ctld and start the daemon automatically if needed.
-Starting the VPN waits for its tunnel interface, routes, DNS, and SOCKS listener to become
+Start talks to ctld and starts the daemon automatically if needed. Starting the
+VPN waits for its tunnel interface, routes, DNS, and SOCKS listener to become
 ready, then prints a table with the VPN state, server, username, and randomly
-assigned SOCKS5 endpoint. Use `ctl vpn connect NAME_OR_ID` for an existing saved
-desktop profile; it reuses a compatible container or recreates a missing one.
+assigned SOCKS5 endpoint. It reuses a compatible container or recreates a missing
+one.
 An exact stable profile ID takes precedence over a unique exact name. The saved
 catalog defaults to `~/.tokn/ctl/vpns.json`; `CTL_VPNS_PATH` selects another file.
+Omitting the start selector opens a profile picker in an interactive terminal;
+scripts must supply a selector.
 
 List combines saved profiles with runtime connections and compatible shared
 containers. Its table shows name, provider, state, server or tailnet, username,
 SOCKS5 endpoint, and VPN ID. Saved profiles stay visible after container removal.
-An unmatched saved profile is disconnected only when runtime
-inventory is complete; otherwise it is unavailable. List never starts ctld or
-renews a heartbeat.
+An unmatched saved profile is disconnected only when runtime inventory is
+complete; otherwise it is unavailable. List never starts ctld or renews a heartbeat.
 
-Connect, start, list, and stop accept `--json` for scripts. List JSON is a snapshot
+Create, start, list, and stop accept `--json`. Create remains interactive; its
+JSON output contains only saved metadata and its prompts stay on stderr.
+List JSON is a snapshot
 with sanitized merged `entries`, raw runtime `connections`, capability fields,
 and optional `discovery_warnings` when the container inventory could not be
 checked. If the saved catalog cannot be read, runtime entries remain available
 with `profile_warnings`. Each runtime connection includes `vpn_id`, `vpn_url`,
 `username`, `endpoint`, `container_name`, `running`, `connection_id`, `state`,
-immutable `container_id`, `shared_container`,
-and `locally_connected`. The table's USE column appears only when a displayed
+immutable `container_id`, `shared_container`, and `locally_connected`. The table's
+USE column appears only when a displayed
 VPN has `locally_connected: false`. It shows `owned` when the selected daemon
 holds heartbeat interest and `shared` for a container discovered without local
 interest. The JSON fields are unchanged. Inventory accepts only the current
-heartbeat protocol and user namespace. Connect, start, and stop
-JSON return the affected connection. Saved connections use their profile ID as
-`vpn_id`; file-based starts receive a stable ID derived from the canonical
-settings path. The VPN server is its HTTPS origin; credentials, paths, queries,
-and fragments are omitted. `state` is `stopped`, `starting`,
-`connected`, or `stopping`; file-based starts have a null `connection_id`.
+heartbeat protocol and user namespace. Start and stop JSON return the affected
+connection. Saved connections use their profile ID as `vpn_id`; runtime-only
+connections retain their runtime IDs. The VPN server is its HTTPS origin;
+credentials, paths, queries, and fragments are omitted. `state` is `stopped`,
+`starting`, `connected`, or `stopping`; older runtime-only connections may have a
+null `connection_id`.
 The ready proxy endpoint is a `socks5h://127.0.0.1:PORT` URL.
 
-Each VPN owns a separate container and random SOCKS5 endpoint. Use `ctl vpn stop VPN_ID` to release one local connection. Without an ID, stop
-succeeds only when this daemon has zero or one connection; discovered containers
-do not make that selection ambiguous. Repeating a start for the
-same saved connection or settings path reuses its active connection.
+Each VPN owns a separate container and random SOCKS5 endpoint. Stop accepts an
+exact saved profile ID, a unique exact profile name, or a runtime VPN ID from
+list. With a current daemon, omitting the selector opens a picker of local
+connections in an interactive terminal. In scripts,
+an untargeted stop succeeds only when this daemon has zero or one connection;
+discovered containers do not make that selection ambiguous. Repeating a start
+for the same saved profile reuses its active connection.
 
 Connection metadata comes from the settings used to start the VPN and stays
 unchanged until it stops. An already running older ctld may return no server or
 username; the CLI displays `unavailable` until a connection is started by the
 updated daemon.
 
-For development from this checkout, the helper builds the image and both Rust
-binaries, then invokes ctl with the root `.env`:
+For development from this checkout, the helper's create action builds the CLI
+and opens the questionnaire without building an image. Start builds the image
+and both Rust binaries, then starts the selected saved profile:
 
 ```sh
-./docker/openconnect/run.sh start
+./docker/openconnect/run.sh create
+./docker/openconnect/run.sh start NAME_OR_ID
 ./docker/openconnect/run.sh list
-./docker/openconnect/run.sh stop
+./docker/openconnect/run.sh stop NAME_OR_ID
 ```
 
 The helper sets `CTLD_BIN` to the matching `target/debug/ctld` binary for daemon
@@ -136,7 +137,8 @@ when its VPN owner should differ from its SSH helper. Signed development keeps i
 compatible containers for the same user and container engine.
 An older daemon returns `supports_multiple: false` and its existing connection
 remains visible. Update and restart that owner before starting simultaneous VPNs
-or stopping a connection by ID. Explicit `ctl vpn stop` can stop its current VPN.
+or stopping a connection by ID. An omitted selector uses that owner's untargeted
+stop directly, preserving `ctl vpn stop` for its single local connection.
 
 The VPN keeps running after `ctl vpn start` exits because ctld renews its heartbeat.
 `ctl vpn stop VPN_ID` and daemon exit release only that daemon's renewal task.

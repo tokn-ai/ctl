@@ -116,7 +116,7 @@ container exits automatically after its timeout. `ctl vpn list` combines saved
 profiles with runtime connections. When a displayed VPN is shared, its USE
 column distinguishes **owned** connections, whose heartbeat interest is held by
 the selected daemon, from discovered **shared** containers. Saved profiles remain
-visible after container removal; use `ctl vpn connect NAME_OR_ID` to reconnect one.
+visible after container removal; use `ctl vpn start NAME_OR_ID` to reconnect one.
 The SOCKS proxy follows the container's routes;
 it does not change the Mac's system routes. Choose a saved VPN in a host's
 **Connect through** step to route that host through its current SOCKS5 endpoint.

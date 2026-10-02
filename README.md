@@ -586,12 +586,17 @@ persistent workspace entries.
 Manage local OpenConnect and Tailscale containers through `ctld` using the `ctl` CLI:
 
 ```sh
+ctl vpn create
 ctl vpn list
-ctl vpn connect NAME_OR_ID
-ctl vpn start --env-file .env
-ctl vpn start-tailscale --id my-tailnet
-ctl vpn stop VPN_ID
+ctl vpn start NAME_OR_ID
+ctl vpn stop NAME_OR_ID
 ```
+
+`create` opens an interactive questionnaire for an OpenConnect or Tailscale
+profile. It masks password input and saves the profile privately to
+`~/.tokn/ctl/vpns.json`, shared with the desktop VPN page. Use `CTL_VPNS_PATH` to
+select another catalog. Creation only saves settings; it does not start `ctld`,
+build an image, or connect a VPN. Cancelling leaves the catalog unchanged.
 
 `list` combines saved VPN profiles from `~/.tokn/ctl/vpns.json` with local
 connections and compatible shared containers. It prints name, provider, state,
@@ -602,32 +607,35 @@ containers are removed. The daemon probe is passive:
 list never starts `ctld` or acquires heartbeat interest. A saved profile without
 a runtime connection is disconnected only when inventory is complete; otherwise
 its state is unavailable. Runtime connections without a saved profile also appear.
-Use `CTL_VPNS_PATH` to select another catalog.
 
-`connect NAME_OR_ID` connects an existing saved profile, starting `ctld` when
+`start NAME_OR_ID` connects an existing saved profile, starting `ctld` when
 needed. An exact stable `connection_id` takes precedence over a name; names must
 match exactly and identify a single profile. Use the ID from `list` when names
-are duplicated. Connect reads saved credentials privately and reuses a compatible
+are duplicated. Start reads saved credentials privately and reuses a compatible
 container or recreates it when missing. To recover after container removal, run
-`connect` again and use the newly reported SOCKS5 endpoint. Saved profiles are
-shared with the desktop VPN page. Connect does not create a new saved profile.
+`start` again and use the newly reported SOCKS5 endpoint. Omitting the selector
+opens a profile picker in an interactive terminal; scripts must supply it.
 
-Tailscale prints a browser sign-in link when needed. Reuse the same `--id` to
-retain its device identity and login. Add `--hostname NAME` to name the device or
-`--accept-routes` to use advertised subnet routes.
+Tailscale prints a browser sign-in link when needed. Starting the same saved
+profile retains its device identity and login. The creation questionnaire asks
+for an optional hostname and whether to accept advertised subnet routes.
 
-Multiple VPNs can run independently. Use the VPN ID from list to stop one; an
-untargeted stop requires at most one active VPN. List, connect, start, and stop
-support `--json` for scripts. List JSON includes merged `entries`, raw runtime
-`connections`, capability fields, and discovery warnings. If the saved catalog
+Multiple VPNs can run independently. Stop accepts a saved profile's exact ID or
+unique exact name, or a runtime VPN ID from list. With a current daemon, omitting
+it opens a picker of local connections in an interactive terminal. Older daemons
+support only one local connection, so an omitted selector uses their untargeted
+stop directly. In scripts, an untargeted stop requires at most one local
+connection. All four commands support `--json`.
+Create remains interactive and returns only saved metadata, with prompts on
+stderr. List JSON includes merged `entries`, raw runtime `connections`, capability
+fields, and discovery warnings. If the saved catalog
 cannot be read, runtime entries remain available with `profile_warnings`.
 Saved metadata excludes passwords and URL credentials, paths, queries, and
 fragments. Start launches `ctld` if needed. Stop leaves `ctld` running and
 releases that daemon's heartbeat interest. A shared container remains available
-while another daemon uses it,
-then exits after the final heartbeat expires. See the
+while another daemon uses it, then exits after the final heartbeat expires. See the
 [OpenConnect setup](docker/openconnect/README.md) for building the image and
-configuring the private env file, or the [Tailscale guide](docker/tailscale/README.md)
+creating a saved profile, or the [Tailscale guide](docker/tailscale/README.md)
 for browser sign-in and persistent container state.
 
 ## Managed tasks

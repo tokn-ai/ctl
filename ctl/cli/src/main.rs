@@ -48,7 +48,7 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-  /// Install the signed macOS ctld helper for this ctl release, without restarting it.
+  /// Install and verify this CLI's signed macOS ctld helper, without restarting it.
   Setup(setup::Arguments),
   /// Print bundled agent skills and supporting guides without connecting.
   Skill(skill::Arguments),

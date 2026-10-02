@@ -153,7 +153,9 @@ export async function buildCtlBundle(
     !/^[a-f0-9]{40}$/.test(options.git_revision)) {
     throw new Error("expected a macOS target, release version, and Git revision");
   }
-  const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env), CTL_BUNDLED_CTLD_DIR: undefined };
+  const env: NodeJS.ProcessEnv = {
+    ...(options.env ?? process.env), CTL_BUNDLED_CTLD_DIR: undefined, CTL_BUNDLED_CTLD_MODE: undefined,
+  };
   for (const key of ["APPLE_API_KEY_PATH", "APPLE_API_KEY", "APPLE_API_ISSUER"]) {
     if (!env[key]) throw new Error(`signed CLI releases require ${key}`);
   }
@@ -206,7 +208,7 @@ export async function buildCtlBundle(
     if (!/^[A-Fa-f0-9]{40}$/.test(identity)) throw new Error("invalid Developer ID certificate fingerprint");
     const executable = binaryArtifact((await invoke("cargo", [
       "build", "--locked", "--release", "--target", options.target, "-p", "ctl-cli", "--message-format=json-render-diagnostics",
-    ], { CTL_BUNDLED_CTLD_DIR: payload })).stdout, "ctl");
+    ], { CTL_BUNDLED_CTLD_DIR: payload, CTL_BUNDLED_CTLD_MODE: "signed" })).stdout, "ctl");
     const staging = join(temporary, "cli");
     await mkdir(staging);
     const cli = join(staging, "ctl");

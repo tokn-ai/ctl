@@ -32,6 +32,11 @@ impl<R: Read> Read for Budget<R> {
 }
 
 pub(super) fn extract(bytes: &[u8], manifest: &Manifest, destination: &Path) -> Result<(), Error> {
+  verify_checksum(bytes, manifest)?;
+  extract_bundle(bytes, manifest, destination)
+}
+
+fn verify_checksum(bytes: &[u8], manifest: &Manifest) -> Result<(), Error> {
   if bytes.len() as u64 != manifest.archive_size
     || format!("{:x}", Sha256::digest(bytes)) != manifest.sha256
   {
@@ -39,6 +44,10 @@ pub(super) fn extract(bytes: &[u8], manifest: &Manifest, destination: &Path) -> 
       "archive length or SHA-256 checksum does not match".into(),
     ));
   }
+  Ok(())
+}
+
+fn extract_bundle(bytes: &[u8], manifest: &Manifest, destination: &Path) -> Result<(), Error> {
   let reader = Budget {
     source: MultiGzDecoder::new(bytes),
     remaining: MAX_EXPANDED_BYTES,
@@ -120,11 +129,19 @@ pub(super) fn extract(bytes: &[u8], manifest: &Manifest, destination: &Path) -> 
     "Contents/embedded.provisionprofile",
     "Contents/_CodeSignature/CodeResources",
     "Contents/MacOS/ctld",
-    "Contents/CodeResources",
   ] {
     if !destination.join("ctld.app").join(name).is_file() {
       return Err(Error::InvalidRelease(format!("archive is missing {name}")));
     }
+  }
+  if manifest.development.is_none()
+    && !destination
+      .join("ctld.app/Contents/CodeResources")
+      .is_file()
+  {
+    return Err(Error::InvalidRelease(
+      "archive is missing Contents/CodeResources".into(),
+    ));
   }
   Ok(())
 }

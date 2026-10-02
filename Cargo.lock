@@ -712,6 +712,7 @@ dependencies = [
 name = "ctl-client"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "ctl-component-info",
  "ctl-ipc",
  "ctl-proto",

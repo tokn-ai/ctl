@@ -74,6 +74,73 @@ pub(super) fn release(bytes: &[u8]) -> Manifest {
   manifest
 }
 
+pub(super) fn development_bundle() -> (Vec<u8>, Manifest) {
+  let mut builder = tar::Builder::new(Vec::new());
+  for path in &FILES[..4] {
+    append(&mut builder, path, tar::EntryType::Regular);
+  }
+  let bytes = compressed(&builder.into_inner().unwrap());
+  let mut manifest = release(&bytes);
+  manifest.signing_mode = "development".into();
+  manifest.notarized = false;
+  manifest.bundle_id = format!("dev.{}", manifest.sha256);
+  manifest.development = Some(manifest::Development {
+    source_fingerprint: "c".repeat(64),
+    dirty: true,
+  });
+  (bytes, manifest)
+}
+
+#[test]
+fn development_installs_reuse_digest_cache_without_replacing_production_selection() {
+  let home = Home::new();
+  let production = compressed(&contents(None));
+  let installed = Session::begin(&home.0, release(&production))
+    .unwrap()
+    .unpack(&production)
+    .unwrap()
+    .activate()
+    .unwrap();
+  let root = ctl_ipc::managed::component_directory(&home.0);
+  let selected = fs::read_link(root.join("current")).unwrap();
+  let (bytes, manifest) = development_bundle();
+  let development = Session::begin(&home.0, manifest.clone())
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .activate()
+    .unwrap();
+  assert_eq!(
+    development.executable,
+    root
+      .join("development")
+      .join(&manifest.sha256)
+      .join("ctld.app/Contents/MacOS/ctld")
+      .canonicalize()
+      .unwrap()
+  );
+  assert_eq!(fs::read_link(root.join("current")).unwrap(), selected);
+  assert_eq!(
+    ctl_ipc::managed::resolve_executable(&home.0)
+      .unwrap()
+      .unwrap(),
+    installed.executable
+  );
+  assert!(Session::begin(&home.0, manifest.clone()).unwrap().reused);
+  let mut changed = manifest;
+  changed.development.as_mut().unwrap().dirty = false;
+  assert!(Session::begin(&home.0, changed).is_err());
+}
+
+#[test]
+fn development_bundle_can_omit_the_staple_but_release_policy_still_requires_it() {
+  let (bytes, development) = development_bundle();
+  let home = Home::new();
+  archive::extract(&bytes, &development, &home.0).unwrap();
+  let home = Home::new();
+  assert!(archive::extract(&bytes, &release(&bytes), &home.0).is_err());
+}
+
 #[test]
 fn extracts_complete_bundle_with_safe_permissions() {
   let home = Home::new();

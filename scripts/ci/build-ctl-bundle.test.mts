@@ -81,6 +81,7 @@ async function fixture(t: TestContext): Promise<Fixture> {
       APPLE_API_KEY_PATH: key, APPLE_API_KEY: "TESTKEY123",
       APPLE_API_ISSUER: "11111111-2222-3333-4444-555555555555",
       CTL_BUNDLED_CTLD_DIR: "unrelated inherited payload",
+      CTL_BUNDLED_CTLD_MODE: "development",
     },
   };
   await mkdir(options.ctld_assets!);
@@ -135,6 +136,7 @@ function fakeBuild(input: Fixture, options: {
     }
     if (command === "cargo" && args[0] === "metadata") {
       assert.equal(context.env.CTL_BUNDLED_CTLD_DIR, undefined);
+      assert.equal(context.env.CTL_BUNDLED_CTLD_MODE, undefined);
       return {
         stdout: JSON.stringify({ packages: ["ctld", "ctl-cli"].map((name) => ({
           name, version: options.cargo_version ?? input.options.app_version,
@@ -146,9 +148,11 @@ function fakeBuild(input: Fixture, options: {
       assert.equal(args[args.indexOf("--target") + 1], input.options.target);
       if (args[args.indexOf("-p") + 1] === "ctld") {
         assert.equal(context.env.CTL_BUNDLED_CTLD_DIR, undefined);
+        assert.equal(context.env.CTL_BUNDLED_CTLD_MODE, undefined);
         return { stdout: artifact("ctld", input.ctld_executable), stderr: "" };
       }
       const payload = context.env.CTL_BUNDLED_CTLD_DIR;
+      assert.equal(context.env.CTL_BUNDLED_CTLD_MODE, "signed");
       assert.ok(payload);
       assert.notEqual(payload, input.options.ctld_assets);
       const manifest = JSON.parse(await readFile(join(payload, `ctld-${input.options.target}.json`), "utf8"));

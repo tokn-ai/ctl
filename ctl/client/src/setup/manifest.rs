@@ -21,10 +21,42 @@ pub(super) struct Manifest {
   pub archive: String,
   pub sha256: String,
   pub archive_size: u64,
+  #[serde(
+    default,
+    skip_serializing_if = "Option::is_none",
+    deserialize_with = "development_identity"
+  )]
+  pub development: Option<Development>,
+}
+
+fn development_identity<'de, D: serde::Deserializer<'de>>(
+  deserializer: D,
+) -> Result<Option<Development>, D::Error> {
+  Development::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Development {
+  pub source_fingerprint: String,
+  pub dirty: bool,
 }
 
 impl Manifest {
   pub fn parse(bytes: &[u8], version: &str, target: &str) -> Result<Self, Error> {
+    Self::parse_with_policy(bytes, version, target, false)
+  }
+
+  pub fn parse_development(bytes: &[u8], version: &str, target: &str) -> Result<Self, Error> {
+    Self::parse_with_policy(bytes, version, target, true)
+  }
+
+  fn parse_with_policy(
+    bytes: &[u8],
+    version: &str,
+    target: &str,
+    development: bool,
+  ) -> Result<Self, Error> {
     if bytes.len() > MAX_MANIFEST_BYTES {
       return Err(Error::InvalidRelease("oversized manifest".into()));
     }
@@ -40,7 +72,6 @@ impl Manifest {
       || manifest.schema_version != 1
       || manifest.component != "ctld"
       || manifest.app_version != version
-      || manifest.bundle_id != version
       || manifest.target != target
       || manifest.bundle_identifier != BUNDLE_IDENTIFIER
       || manifest.team_identifier.len() != 10
@@ -48,8 +79,6 @@ impl Manifest {
         .team_identifier
         .bytes()
         .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-      || manifest.signing_mode != "signed"
-      || !manifest.notarized
       || manifest.git_revision.len() != 40
       || !manifest
         .git_revision
@@ -66,6 +95,28 @@ impl Manifest {
     {
       return Err(Error::InvalidRelease(
         "manifest identity, signature policy, or archive does not match this release".into(),
+      ));
+    }
+    let policy_valid = if development {
+      manifest.signing_mode == "development"
+        && !manifest.notarized
+        && manifest.bundle_id == format!("dev.{}", manifest.sha256)
+        && manifest.development.as_ref().is_some_and(|identity| {
+          identity.source_fingerprint.len() == 64
+            && identity
+              .source_fingerprint
+              .bytes()
+              .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+    } else {
+      manifest.signing_mode == "signed"
+        && manifest.notarized
+        && manifest.bundle_id == version
+        && manifest.development.is_none()
+    };
+    if !policy_valid {
+      return Err(Error::InvalidRelease(
+        "manifest does not satisfy the selected release or development policy".into(),
       ));
     }
     Ok(manifest)
@@ -92,6 +143,7 @@ pub(super) fn fixture() -> Manifest {
     archive: "ctld-0.1.0-aarch64-apple-darwin.app.tar.gz".into(),
     sha256: "b".repeat(64),
     archive_size: 1024,
+    development: None,
   }
 }
 
@@ -129,6 +181,56 @@ mod tests {
     assert!(
       Manifest::parse(
         &vec![b' '; MAX_MANIFEST_BYTES + 1],
+        "0.1.0",
+        "aarch64-apple-darwin"
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn development_policy_is_explicit_and_binds_the_archive_and_source_identity() {
+    let mut development = fixture();
+    development.signing_mode = "development".into();
+    development.notarized = false;
+    development.bundle_id = format!("dev.{}", development.sha256);
+    development.development = Some(Development {
+      source_fingerprint: "c".repeat(64),
+      dirty: true,
+    });
+    let parse = |manifest: &Manifest| {
+      Manifest::parse_development(
+        &serde_json::to_vec(manifest).unwrap(),
+        "0.1.0",
+        "aarch64-apple-darwin",
+      )
+    };
+    assert_eq!(parse(&development).unwrap(), development);
+    assert!(
+      Manifest::parse(
+        &serde_json::to_vec(&development).unwrap(),
+        "0.1.0",
+        "aarch64-apple-darwin"
+      )
+      .is_err()
+    );
+    assert!(parse(&fixture()).is_err());
+    for field in 0..5 {
+      let mut invalid = development.clone();
+      match field {
+        0 => invalid.signing_mode = "signed".into(),
+        1 => invalid.notarized = true,
+        2 => invalid.bundle_id = "dev.unrelated".into(),
+        3 => invalid.development = None,
+        _ => invalid.development.as_mut().unwrap().source_fingerprint = "G".repeat(64),
+      }
+      assert!(parse(&invalid).is_err(), "field {field}");
+    }
+    let mut release = serde_json::to_value(fixture()).unwrap();
+    release["development"] = serde_json::Value::Null;
+    assert!(
+      Manifest::parse(
+        &serde_json::to_vec(&release).unwrap(),
         "0.1.0",
         "aarch64-apple-darwin"
       )

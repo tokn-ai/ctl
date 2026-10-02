@@ -90,6 +90,12 @@ try {
   // remove the excluded desktop package from this isolated validation workspace.
   copyFileSync(join(root, "Cargo.lock"), join(directory, "Cargo.lock"));
   const target = join(metadata.target_directory, "publish-check");
+  // Cargo archives normalize source timestamps, so a new extraction can reuse
+  // stale build-script outputs from the previous verification. Rebuild every
+  // packaged member while retaining the external dependency cache.
+  run("cargo", [
+    "clean", "--target-dir", target, ...packages.flatMap((pkg) => ["--package", pkg.name]), ...offline,
+  ], directory);
   run("cargo", ["test", "--workspace", "--all-features", "--target-dir", target, ...offline], directory);
   console.log(`Verified archives and tests for ${packages.length} crates.`);
 } finally {

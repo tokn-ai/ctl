@@ -62,12 +62,17 @@ impl Session {
     let lock = SetupLock::acquire(&root)?;
     // A well-formed dangling selection can be repaired by verified setup, while
     // unsafe paths and foreign-owned selections are never silently replaced.
-    ctl_ipc::managed::validate_current_selection(home)?;
+    let destination = if manifest.development.is_some() {
+      ctl_ipc::managed::ensure_development_directory(home)?.join(&manifest.sha256)
+    } else {
+      ctl_ipc::managed::validate_current_selection(home)?;
+      root.join("versions").join(manifest.directory_name())
+    };
     let work = root.join(format!(".setup-{}", uuid::Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&work)?;
     let mut session = Self {
       home: home.to_owned(),
-      destination: root.join("versions").join(manifest.directory_name()),
+      destination,
       root,
       work,
       manifest,
@@ -110,7 +115,12 @@ impl Session {
         marker
           .take(super::manifest::MAX_MANIFEST_BYTES as u64 + 1)
           .read_to_end(&mut contents)?;
-        let existing = Manifest::parse(
+        let parse = if session.manifest.development.is_some() {
+          Manifest::parse_development
+        } else {
+          Manifest::parse
+        };
+        let existing = parse(
           &contents,
           &session.manifest.app_version,
           &session.manifest.target,
@@ -149,9 +159,12 @@ impl Session {
     } else {
       self.payload()
     };
-    Ok(ctl_ipc::managed::resolve_candidate_executable(
-      &self.home, &candidate,
-    )?)
+    let resolve = if self.manifest.development.is_some() {
+      ctl_ipc::managed::resolve_development_candidate_executable
+    } else {
+      ctl_ipc::managed::resolve_candidate_executable
+    };
+    Ok(resolve(&self.home, &candidate)?)
   }
 
   pub fn unpack(self, bytes: &[u8]) -> Result<Self, Error> {
@@ -161,7 +174,9 @@ impl Session {
 
   // Called only after platform signature checks and the bounded metadata query.
   pub fn activate(self) -> Result<SetupOutcome, Error> {
-    ctl_ipc::managed::validate_current_selection(&self.home)?;
+    if self.manifest.development.is_none() {
+      ctl_ipc::managed::validate_current_selection(&self.home)?;
+    }
     self.executable()?;
     if !self.reused {
       let marker = OpenOptions::new()
@@ -173,7 +188,10 @@ impl Session {
       marker.sync_all()?;
       fs::rename(self.payload(), &self.destination)?;
     }
-    let executable = ctl_ipc::managed::resolve_candidate_executable(&self.home, &self.destination)?;
+    let executable = self.executable_after_activation()?;
+    if self.manifest.development.is_some() {
+      return Ok(self.outcome(executable));
+    }
     let next = self.root.join(format!(".current-{}", uuid::Uuid::new_v4()));
     symlink(
       Path::new("versions").join(self.manifest.directory_name()),
@@ -183,12 +201,25 @@ impl Session {
       let _ = fs::remove_file(&next);
       return Err(error.into());
     }
-    Ok(SetupOutcome {
+    Ok(self.outcome(executable))
+  }
+
+  fn executable_after_activation(&self) -> Result<PathBuf, Error> {
+    let resolve = if self.manifest.development.is_some() {
+      ctl_ipc::managed::resolve_development_candidate_executable
+    } else {
+      ctl_ipc::managed::resolve_candidate_executable
+    };
+    Ok(resolve(&self.home, &self.destination)?)
+  }
+
+  fn outcome(&self, executable: PathBuf) -> SetupOutcome {
+    SetupOutcome {
       component: "ctld",
       version: self.manifest.app_version.clone(),
       executable,
       reused: self.reused,
-    })
+    }
   }
 }
 

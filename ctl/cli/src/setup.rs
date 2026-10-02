@@ -11,13 +11,20 @@ pub struct Arguments {
 
 pub async fn run(arguments: Arguments) -> Result<(), Error> {
   let progress = Mutex::new((None::<Instant>, Instant::now()));
+  let development = crate::bundled::is_development();
   let outcome = tokio::select! {
     result = crate::bundled::install(|event| {
       if arguments.json { return; }
       match event {
-        SetupEvent::Manifest => eprintln!("Checking signed ctld release metadata..."),
+        SetupEvent::Manifest => eprintln!("Checking {} ctld metadata...", if development { "development" } else { "signed release" }),
         SetupEvent::Extracting => eprintln!("Extracting ctld.app..."),
-        SetupEvent::Verifying => eprintln!("Verifying Apple signature, notarization, and helper protocol..."),
+        SetupEvent::Verifying => {
+          if development {
+            eprintln!("Verifying Apple signature, provisioning, and helper protocol...");
+          } else {
+            eprintln!("Verifying Apple signature, notarization, and helper protocol...");
+          }
+        }
         SetupEvent::Activating => eprintln!("Selecting the verified helper..."),
         SetupEvent::Downloading { received_bytes, total_bytes } => {
           let mut progress = progress.lock().unwrap();
@@ -47,9 +54,7 @@ pub async fn run(arguments: Arguments) -> Result<(), Error> {
       outcome.version,
       outcome.executable.display()
     );
-    println!(
-      "Running connections were preserved. Restart ctld explicitly to use the selected helper."
-    );
+    println!("Running connections were preserved. Restart ctld explicitly to use this helper.");
     if std::env::var_os("CTLD_BIN").is_some() {
       println!("CTLD_BIN is set and continues to override the managed helper.");
     }

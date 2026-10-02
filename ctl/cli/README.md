@@ -40,6 +40,21 @@ desktop helper retain priority. A dedicated
 [build/release command](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#build-a-cli-with-ctld-embedded)
 compiles and bundles the helper; ordinary Cargo installation does not embed it.
 
+For local macOS development, use the shared Xcode provisioning flow from a checkout:
+
+```sh
+node scripts/dev/ctl-signed.mts --provision
+# Choose your team in Xcode and build the provisioning target once.
+node scripts/dev/ctl-signed.mts
+target/ctl-dev/ctl --help
+```
+
+The build discovers and refreshes the provisioning profile, signs and embeds
+`ctld.app`, and signs the CLI with the matching certificate. No notarization
+credentials are needed. Development helpers use a separate cache under
+`~/.tokn/ctl/components/ctld/development/` and preserve the release selection.
+Rebuild if the profile expires; existing daemons require an explicit restart.
+
 ## Use
 
 ```sh

@@ -120,6 +120,34 @@ daemon connections and passive status queries do not trigger installation.
 Build these CLI downloads with the dedicated [release command](docs/ci-bundles.md#build-a-cli-with-ctld-embedded).
 Ordinary Cargo builds and `cargo install ctl-cli` continue to use separate helpers.
 
+For a signed macOS CLI from a local checkout, provision once with the same
+Xcode project used by Tauri:
+
+```sh
+node scripts/dev/ctl-signed.mts --provision
+```
+
+In Xcode, select the `ctld-provisioning` target, choose your team under
+**Signing & Capabilities**, and build once. Then build and use the CLI:
+
+```sh
+node scripts/dev/ctl-signed.mts
+target/ctl-dev/ctl --help
+```
+
+The build discovers your profile and matching Keychain certificate, refreshing
+the profile through Xcode when needed. It compiles and signs `ctld.app`, embeds
+it inside the signed CLI, and supports uncommitted source changes. No signing
+environment variables or notarization credentials are required. The output
+follows Cargo's configured target directory.
+
+The CLI prepares its helper when needed; `target/ctl-dev/ctl setup` also installs
+it explicitly. Development helpers live under
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/ctld.app`. They retain
+their signature and provisioning checks, use a separate cache, and leave the
+release `current` symlink intact. Expired profiles require rebuilding. Existing
+daemons keep running until you explicitly restart them.
+
 ```sh
 cargo build --workspace
 ```

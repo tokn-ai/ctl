@@ -48,7 +48,16 @@ impl Fixture {
   }
 
   fn reject(&self) {
-    assert!(bundle_build::stage(&self.source, &self.output, VERSION, TARGET).is_err());
+    assert!(
+      bundle_build::stage(
+        &self.source,
+        &self.output,
+        VERSION,
+        TARGET,
+        bundle_build::Mode::Signed
+      )
+      .is_err()
+    );
     assert_eq!(fs::read_dir(&self.output).unwrap().count(), 0);
   }
 }
@@ -81,7 +90,14 @@ fn manifest() -> Value {
 fn staged_payload_is_a_snapshot_of_the_matching_release() {
   let fixture = Fixture::new();
   let original_manifest = fs::read(fixture.manifest_path()).unwrap();
-  bundle_build::stage(&fixture.source, &fixture.output, VERSION, TARGET).unwrap();
+  bundle_build::stage(
+    &fixture.source,
+    &fixture.output,
+    VERSION,
+    TARGET,
+    bundle_build::Mode::Signed,
+  )
+  .unwrap();
   fs::write(fixture.manifest_path(), b"another build's manifest").unwrap();
   fs::write(fixture.archive_path(), b"another build's archive").unwrap();
   assert_eq!(
@@ -92,6 +108,87 @@ fn staged_payload_is_a_snapshot_of_the_matching_release() {
     fs::read(fixture.output.join("ctld.app.tar.gz")).unwrap(),
     ARCHIVE
   );
+}
+
+fn development_manifest() -> Value {
+  let mut manifest = manifest();
+  manifest["bundle_id"] = json!(format!("dev.{}", manifest["sha256"].as_str().unwrap()));
+  manifest["signing_mode"] = json!("development");
+  manifest["notarized"] = json!(false);
+  manifest["development"] = json!({ "source_fingerprint": "b".repeat(64), "dirty": true });
+  manifest
+}
+
+#[test]
+fn development_bundles_require_explicit_mode_and_cannot_replace_release_payloads() {
+  let fixture = Fixture::new();
+  fixture.write_manifest(&development_manifest());
+  fixture.reject();
+  bundle_build::stage(
+    &fixture.source,
+    &fixture.output,
+    VERSION,
+    TARGET,
+    bundle_build::Mode::Development,
+  )
+  .unwrap();
+  assert_eq!(
+    fs::read(fixture.output.join("ctld.app.tar.gz")).unwrap(),
+    ARCHIVE
+  );
+
+  let fixture = Fixture::new();
+  assert!(
+    bundle_build::stage(
+      &fixture.source,
+      &fixture.output,
+      VERSION,
+      TARGET,
+      bundle_build::Mode::Development
+    )
+    .is_err()
+  );
+  let mut release = manifest();
+  release["development"] = development_manifest()["development"].clone();
+  fixture.write_manifest(&release);
+  fixture.reject();
+}
+
+#[test]
+fn development_bundles_bind_the_cache_id_and_source_fingerprint() {
+  for (field, value) in [
+    ("bundle_id", json!("dev.other-archive")),
+    ("notarized", json!(true)),
+    ("development", json!(null)),
+    (
+      "development",
+      json!({ "source_fingerprint": "invalid", "dirty": true }),
+    ),
+    (
+      "development",
+      json!({ "source_fingerprint": "b".repeat(64), "dirty": "true" }),
+    ),
+    (
+      "development",
+      json!({ "source_fingerprint": "b".repeat(64), "dirty": true, "trust_override": true }),
+    ),
+  ] {
+    let fixture = Fixture::new();
+    let mut manifest = development_manifest();
+    manifest[field] = value;
+    fixture.write_manifest(&manifest);
+    assert!(
+      bundle_build::stage(
+        &fixture.source,
+        &fixture.output,
+        VERSION,
+        TARGET,
+        bundle_build::Mode::Development
+      )
+      .is_err()
+    );
+    assert_eq!(fs::read_dir(&fixture.output).unwrap().count(), 0);
+  }
 }
 
 #[test]
@@ -107,6 +204,7 @@ fn other_releases_unsigned_helpers_and_path_overrides_are_rejected_before_stagin
     ("archive", json!("../unverified.app.tar.gz")),
     ("archive_size", json!(128_u64 * 1024 * 1024 + 1)),
     ("unknown_policy_override", json!(true)),
+    ("development", json!(null)),
   ] {
     let fixture = Fixture::new();
     let mut invalid = manifest();
@@ -138,7 +236,8 @@ fn oversized_manifests_and_unsupported_targets_are_rejected() {
       &fixture.source,
       &fixture.output,
       VERSION,
-      "x86_64-unknown-linux-gnu"
+      "x86_64-unknown-linux-gnu",
+      bundle_build::Mode::Signed,
     )
     .is_err()
   );
@@ -184,7 +283,13 @@ fn fifo_payloads_are_rejected_without_waiting_for_a_writer() {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
       sender
-        .send(bundle_build::stage(&source, &output, VERSION, TARGET))
+        .send(bundle_build::stage(
+          &source,
+          &output,
+          VERSION,
+          TARGET,
+          bundle_build::Mode::Signed,
+        ))
         .unwrap();
     });
     assert!(

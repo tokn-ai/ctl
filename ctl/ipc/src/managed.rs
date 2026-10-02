@@ -16,8 +16,8 @@ pub fn executable(home: &Path) -> PathBuf {
 
 #[cfg(unix)]
 pub use filesystem::{
-  ensure_component_directory, resolve_candidate_executable, resolve_executable,
-  validate_current_selection,
+  ensure_component_directory, ensure_development_directory, resolve_candidate_executable,
+  resolve_development_candidate_executable, resolve_executable, validate_current_selection,
 };
 
 #[cfg(unix)]
@@ -45,6 +45,16 @@ mod filesystem {
     Ok(directory)
   }
 
+  /// Creates the private cache for explicitly provisioned development helpers.
+  ///
+  /// # Errors
+  /// Rejects untrusted parents or a nonprivate development cache.
+  pub fn ensure_development_directory(home: &Path) -> io::Result<PathBuf> {
+    let directory = ensure_component_directory(home)?.join("development");
+    ensure_directory(&directory, true)?;
+    Ok(directory)
+  }
+
   /// Validates and pins the selected managed helper to one installed version.
   ///
   /// A missing installation returns `None`. A malformed or incomplete
@@ -65,7 +75,7 @@ mod filesystem {
       return Ok(None);
     };
     // Resolve the already selected version, never the mutable `current` link.
-    validate_candidate(&directory, &selection).map(Some)
+    validate_candidate(&directory, &selection, false).map(Some)
   }
 
   /// Checks whether the existing selection can safely be replaced by setup.
@@ -121,15 +131,37 @@ mod filesystem {
   /// directory, uses symlinks, has untrusted ownership or permissions, or does
   /// not contain the complete signed and stapled bundle.
   pub fn resolve_candidate_executable(home: &Path, candidate: &Path) -> io::Result<PathBuf> {
+    resolve_candidate(home, candidate, false)
+  }
+
+  /// Validates only an explicit development cache or staging candidate.
+  /// Development bundles require a signed app and profile, but no staple.
+  /// This never reads or changes the production `current` selection.
+  ///
+  /// # Errors
+  /// Rejects unsafe paths, foreign ownership, writable resources, and incomplete
+  /// signed bundles. Cached names must be a complete SHA-256 archive digest.
+  pub fn resolve_development_candidate_executable(
+    home: &Path,
+    candidate: &Path,
+  ) -> io::Result<PathBuf> {
+    resolve_candidate(home, candidate, true)
+  }
+
+  fn resolve_candidate(home: &Path, candidate: &Path, development: bool) -> io::Result<PathBuf> {
     let directory = checked_component_directory(home)?;
     let relative = candidate
       .strip_prefix(&directory)
       .or_else(|_| candidate.strip_prefix(super::component_directory(home)))
       .map_err(|_| invalid_path(candidate, "must be inside the managed component directory"))?;
-    validate_candidate(&directory, relative)
+    validate_candidate(&directory, relative, development)
   }
 
-  fn validate_candidate(directory: &Path, relative: &Path) -> io::Result<PathBuf> {
+  fn validate_candidate(
+    directory: &Path,
+    relative: &Path,
+    development: bool,
+  ) -> io::Result<PathBuf> {
     let candidate = directory.join(relative);
     let components: Vec<_> = relative.components().collect();
     if relative.as_os_str() != components.iter().collect::<PathBuf>().as_os_str() {
@@ -139,9 +171,24 @@ mod filesystem {
       ));
     }
     match components.as_slice() {
-      [Component::Normal(parent), Component::Normal(_)] if *parent == "versions" => {
+      [Component::Normal(parent), Component::Normal(_)]
+        if !development && *parent == "versions" =>
+      {
         check_directory(&directory.join("versions"), true)?;
         check_directory(&candidate, false)?;
+      }
+      [Component::Normal(parent), Component::Normal(digest)]
+        if development
+          && *parent == "development"
+          && digest.to_str().is_some_and(|value| {
+            value.len() == 64
+              && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+          }) =>
+      {
+        check_directory(&directory.join("development"), true)?;
+        check_directory(&candidate, true)?;
       }
       [Component::Normal(work), Component::Normal(payload)]
         if *payload == "payload"
@@ -159,10 +206,10 @@ mod filesystem {
         ));
       }
     }
-    validate_bundle(&candidate)
+    validate_bundle(&candidate, development)
   }
 
-  fn validate_bundle(version: &Path) -> io::Result<PathBuf> {
+  fn validate_bundle(version: &Path, development: bool) -> io::Result<PathBuf> {
     let bundle = version.join("ctld.app");
     check_directory(&bundle, false)?;
     let contents = bundle.join("Contents");
@@ -173,9 +220,18 @@ mod filesystem {
       "Info.plist",
       "embedded.provisionprofile",
       "_CodeSignature/CodeResources",
-      "CodeResources",
     ] {
       check_file(&contents.join(resource), false)?;
+    }
+    let ticket = contents.join("CodeResources");
+    if development {
+      match fs::symlink_metadata(&ticket) {
+        Ok(_) => check_file(&ticket, false)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+      }
+    } else {
+      check_file(&ticket, false)?;
     }
     let executable = contents.join("MacOS/ctld");
     check_file(&executable, true)?;
@@ -473,6 +529,34 @@ mod tests {
         .kind(),
       io::ErrorKind::PermissionDenied
     );
+  }
+
+  #[test]
+  fn explicit_development_cache_is_private_complete_and_separate_from_release_discovery() {
+    let fixture = Fixture::new();
+    fixture.install("development-fixture");
+    let root = component_directory(&fixture.home);
+    let directory = ensure_development_directory(&fixture.home).unwrap();
+    let candidate = directory.join("a".repeat(64));
+    fs::rename(root.join("versions/development-fixture"), &candidate).unwrap();
+    fs::remove_file(candidate.join("ctld.app/Contents/CodeResources")).unwrap();
+    let executable = resolve_development_candidate_executable(&fixture.home, &candidate).unwrap();
+    assert_eq!(executable, candidate.join("ctld.app/Contents/MacOS/ctld"));
+    assert!(resolve_candidate_executable(&fixture.home, &candidate).is_err());
+    assert_eq!(resolve_executable(&fixture.home).unwrap(), None);
+    for invalid in [
+      root.join("versions/release"),
+      directory.join("short"),
+      candidate.join("../").join("a".repeat(64)),
+    ] {
+      assert!(resolve_development_candidate_executable(&fixture.home, &invalid).is_err());
+    }
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(resolve_development_candidate_executable(&fixture.home, &candidate).is_err());
+    assert!(ensure_development_directory(&fixture.home).is_err());
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_file(candidate.join("ctld.app/Contents/embedded.provisionprofile")).unwrap();
+    assert!(resolve_development_candidate_executable(&fixture.home, &candidate).is_err());
   }
 
   #[test]

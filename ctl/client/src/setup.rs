@@ -104,3 +104,31 @@ pub async fn install_bundled_ctld(
     Err(Error::UnsupportedPlatform)
   }
 }
+
+/// Installs an explicitly provisioned local development helper in its separate
+/// content-addressed cache. Requires an Apple-signed app and matching profile,
+/// verifies source identity and protocols, and leaves production selection alone.
+///
+/// # Errors
+/// Rejects unsupported platforms, mismatched development metadata, untrusted
+/// installation paths, invalid archives, and failed signature or profile checks.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "unsupported platforms retain the asynchronous API"
+  )
+)]
+pub async fn install_bundled_development_ctld(
+  manifest: &'static [u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+) -> Result<SetupOutcome, Error> {
+  #[cfg(target_os = "macos")]
+  return macos::install_bundled_development(manifest, archive, on_progress).await;
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = (manifest, archive, on_progress);
+    Err(Error::UnsupportedPlatform)
+  }
+}

@@ -586,27 +586,49 @@ persistent workspace entries.
 Manage local OpenConnect and Tailscale containers through `ctld` using the `ctl` CLI:
 
 ```sh
+ctl vpn list
+ctl vpn connect NAME_OR_ID
 ctl vpn start --env-file .env
 ctl vpn start-tailscale --id my-tailnet
-ctl vpn status
 ctl vpn stop VPN_ID
 ```
+
+`list` combines saved VPN profiles from `~/.tokn/ctl/vpns.json` with local
+connections and compatible shared containers. It prints name, provider, state,
+server or tailnet, username, SOCKS5 endpoint, and VPN ID. When any displayed VPN
+is shared, a USE column distinguishes `owned` from `shared`; `owned` means the
+selected daemon holds heartbeat interest. Profiles stay visible after their
+containers are removed. The daemon probe is passive:
+list never starts `ctld` or acquires heartbeat interest. A saved profile without
+a runtime connection is disconnected only when inventory is complete; otherwise
+its state is unavailable. Runtime connections without a saved profile also appear.
+Use `CTL_VPNS_PATH` to select another catalog.
+
+`connect NAME_OR_ID` connects an existing saved profile, starting `ctld` when
+needed. An exact stable `connection_id` takes precedence over a name; names must
+match exactly and identify a single profile. Use the ID from `list` when names
+are duplicated. Connect reads saved credentials privately and reuses a compatible
+container or recreates it when missing. To recover after container removal, run
+`connect` again and use the newly reported SOCKS5 endpoint. Saved profiles are
+shared with the desktop VPN page. Connect does not create a new saved profile.
 
 Tailscale prints a browser sign-in link when needed. Reuse the same `--id` to
 retain its device identity and login. Add `--hostname NAME` to name the device or
 `--accept-routes` to use advertised subnet routes.
 
-Status prints a table of VPN IDs, providers, states, servers, usernames, and randomly
-allocated loopback SOCKS5 endpoints. Multiple VPNs can run independently. Use the
-ID from the table to stop one; an untargeted stop requires at most one active VPN.
-Add `--json` for scripts. Start launches `ctld`
-if needed. Stop leaves `ctld` running and releases that daemon's heartbeat
-interest. A shared container remains available while another daemon uses it,
+Multiple VPNs can run independently. Use the VPN ID from list to stop one; an
+untargeted stop requires at most one active VPN. List, connect, start, and stop
+support `--json` for scripts. List JSON includes merged `entries`, raw runtime
+`connections`, capability fields, and discovery warnings. If the saved catalog
+cannot be read, runtime entries remain available with `profile_warnings`.
+Saved metadata excludes passwords and URL credentials, paths, queries, and
+fragments. Start launches `ctld` if needed. Stop leaves `ctld` running and
+releases that daemon's heartbeat interest. A shared container remains available
+while another daemon uses it,
 then exits after the final heartbeat expires. See the
 [OpenConnect setup](docker/openconnect/README.md) for building the image and
 configuring the private env file, or the [Tailscale guide](docker/tailscale/README.md)
-for browser sign-in and persistent container state. The desktop VPN page manages
-both providers through saved JSON profiles.
+for browser sign-in and persistent container state.
 
 ## Managed tasks
 

@@ -45,7 +45,7 @@ case "$action" in
       --target-dir "$repo_dir/target" -p ctl-cli -p ctld
     exec "$ctl_binary" vpn start --env-file "$config_file" "$@"
     ;;
-  status|stop)
+  list|stop)
     if ! [ -x "$ctl_binary" ] || ! [ -x "$CTLD_BIN" ]; then
       printf 'Build ctl and ctld with %s start before managing the VPN.\n' "$0" >&2
       exit 1
@@ -53,7 +53,7 @@ case "$action" in
     exec "$ctl_binary" vpn "$action" "$@"
     ;;
   *)
-    printf 'Usage: %s [build|start|status|stop]\n' "$0" >&2
+    printf 'Usage: %s [build|start|list|stop]\n' "$0" >&2
     exit 2
     ;;
 esac

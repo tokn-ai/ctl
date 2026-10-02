@@ -52,15 +52,12 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
   }) {
     return Ok(());
   }
-  let path = std::env::var_os("CTL_VPNS_PATH")
-    .map(PathBuf::from)
-    .or_else(|| {
-      ctl_core::paths::directory()
-        .ok()
-        .map(|directory| directory.join("vpns.json"))
-    })
+  let document = crate::vpn::profiles::load(&crate::vpn::profiles::path()?)?;
+  let connection = document
+    .connections
+    .into_iter()
+    .find(|connection| connection.connection_id == *id)
     .ok_or(Error::MissingVpn)?;
-  let connection = load_vpn(&path, id)?;
   eprintln!("Connecting VPN {}…", connection.name);
   let status = client.start_connection(connection).await?;
   if status.state != ctl_ipc::VpnState::Connected {
@@ -70,47 +67,6 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
     return Err(Error::VpnUnavailable);
   }
   Ok(())
-}
-
-fn load_vpn(path: &std::path::Path, id: &str) -> Result<ctl_ipc::VpnConnection, Error> {
-  use std::io::Read as _;
-  let mut options = std::fs::OpenOptions::new();
-  options.read(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    options.custom_flags(i32::from_ne_bytes(
-      rustix::fs::OFlags::NOFOLLOW.bits().to_ne_bytes(),
-    ));
-  }
-  let file = options.open(path).map_err(|_| Error::MissingVpn)?;
-  let metadata = file.metadata().map_err(|_| Error::MissingVpn)?;
-  if !metadata.is_file() {
-    return Err(Error::MissingVpn);
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::MetadataExt as _;
-    if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw() {
-      return Err(Error::VpnPermissions);
-    }
-  }
-  let mut bytes = zeroize::Zeroizing::new(Vec::new());
-  file
-    .take(2 * 1024 * 1024 + 1)
-    .read_to_end(&mut bytes)
-    .map_err(|_| Error::MissingVpn)?;
-  if bytes.len() > 2 * 1024 * 1024 {
-    return Err(Error::MissingVpn);
-  }
-  let document: hosts::SavedVpnDocument =
-    serde_json::from_slice(&bytes).map_err(|_| Error::MissingVpn)?;
-  document.validate()?;
-  document
-    .connections
-    .into_iter()
-    .find(|connection| connection.connection_id == id)
-    .ok_or(Error::MissingVpn)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,8 +79,8 @@ pub enum Error {
   Vpn(#[from] ctl_ipc::vpn::VpnError),
   #[error("Could not load the host's saved VPN. Check the VPN settings in the desktop app.")]
   MissingVpn,
-  #[error("VPN settings must be owned by the current user and private (mode 0600).")]
-  VpnPermissions,
+  #[error(transparent)]
+  Profile(#[from] crate::vpn::profiles::Error),
   #[error("The selected VPN is not connected. Complete sign-in and retry.")]
   VpnUnavailable,
 }

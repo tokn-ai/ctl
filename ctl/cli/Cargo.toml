@@ -30,6 +30,7 @@ ctl-task-client.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+url = "2.5.8"
 zeroize.workspace = true
 
 [dev-dependencies]

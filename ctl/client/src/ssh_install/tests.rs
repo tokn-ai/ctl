@@ -1,5 +1,7 @@
 use super::*;
 
+const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 extracting\nctl-install-progress-v1 checking ctl-agent\nctl-install-progress-v1 checking ctmuxd\nctl-install-progress-v1 checking ctl-taskd\nctl-install-progress-v1 activating\nctl-install-v1\n";
+
 #[test]
 fn bundle_ids_cannot_change_the_fixed_script_or_installation_path() {
   for bundle_id in ["", "../escape", "v1/release", "line\nbreak", "$(whoami)"] {
@@ -15,21 +17,22 @@ fn bundle_ids_cannot_change_the_fixed_script_or_installation_path() {
 async fn progress_requires_monotonic_receiver_bytes_and_complete_upload() {
   use std::sync::Mutex;
   let events = Mutex::new(Vec::new());
-  let valid = b"ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 extracting\nctl-install-progress-v1 checking ctl-agent\nctl-install-progress-v1 checking ctmuxd\nctl-install-progress-v1 checking ctl-taskd\nctl-install-progress-v1 activating\nctl-install-v1\n";
-  read_progress(&valid[..], 10, &|event| events.lock().unwrap().push(event))
-    .await
-    .unwrap();
+  read_progress(VALID_PROGRESS, 10, &|event| {
+    events.lock().unwrap().push(event);
+  })
+  .await
+  .unwrap();
   assert_eq!(
     events.lock().unwrap()[2],
     RemoteInstallEvent::Receiving { received_bytes: 10 }
   );
   for invalid in [
     "ctl-install-progress-v1 receiving 11\nctl-install-v1\n",
-    "ctl-install-progress-v1 receiving 10\nctl-install-progress-v1 receiving 11\nctl-install-v1\n",
-    "ctl-install-progress-v1 receiving 10\nctl-install-progress-v1 receiving 9\nctl-install-v1\n",
-    "ctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 4\nctl-install-v1\n",
-    "ctl-install-progress-v1 receiving 5\nctl-install-progress-v1 extracting\nctl-install-v1\n",
-    "ctl-install-progress-v1 receiving 10\n",
+    "ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 receiving 11\nctl-install-v1\n",
+    "ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 receiving 9\nctl-install-v1\n",
+    "ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 4\nctl-install-v1\n",
+    "ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 extracting\nctl-install-v1\n",
+    "ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 10\n",
     "banner\nctl-install-progress-v1 receiving 10\nctl-install-v1\n",
   ] {
     assert!(
@@ -43,6 +46,81 @@ async fn progress_requires_monotonic_receiver_bytes_and_complete_upload() {
       .await
       .is_err()
   );
+}
+
+#[tokio::test]
+async fn progress_accepts_startup_output_only_before_the_initial_marker() {
+  use std::sync::Mutex;
+  for startup in [
+    b"Welcome to the server\n".as_slice(),
+    b"\x1b[32mstartup without a final newline\x1b[0m".as_slice(),
+    b"\xff\x80\0startup output\n".as_slice(),
+  ] {
+    let output = [startup, VALID_PROGRESS].concat();
+    let events = Mutex::new(Vec::new());
+    read_progress(&output[..], 10, &|event| events.lock().unwrap().push(event))
+      .await
+      .unwrap();
+    let events = events.into_inner().unwrap();
+    assert_eq!(
+      events.first(),
+      Some(&RemoteInstallEvent::Receiving { received_bytes: 0 })
+    );
+    assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
+    assert_eq!(events.len(), 9);
+  }
+
+  for late_noise in [
+    b"banner\n".as_slice(),
+    b"\xff\0\n".as_slice(),
+    b"ctl-install-progress-v2 receiving 0\n".as_slice(),
+  ] {
+    let output = [INITIAL_PROGRESS_MARKER, late_noise, VALID_PROGRESS].concat();
+    assert_eq!(
+      read_progress(&output[..], 10, &|_| {})
+        .await
+        .unwrap_err()
+        .kind(),
+      io::ErrorKind::InvalidData
+    );
+  }
+}
+
+#[tokio::test]
+async fn progress_rejects_missing_or_unsupported_initial_markers() {
+  for invalid in [
+    b"ctl-install-progress-v1 receiving 5\n".as_slice(),
+    b"ctl-install-progress-v2 receiving 0\n".as_slice(),
+    b"ctl-install-v1\n".as_slice(),
+    b"ctl-install-progress-v1 receiving 0".as_slice(),
+    b"shell startup only\n".as_slice(),
+  ] {
+    let events = std::sync::Mutex::new(Vec::new());
+    assert!(
+      read_progress(invalid, 10, &|event| events.lock().unwrap().push(event))
+        .await
+        .is_err()
+    );
+    assert_eq!(events.into_inner().unwrap(), []);
+  }
+}
+
+#[tokio::test]
+async fn progress_drains_output_after_the_startup_limit_is_exceeded() {
+  use tokio::io::AsyncWriteExt as _;
+  let (mut writer, reader) = tokio::io::duplex(64);
+  let write = tokio::spawn(async move {
+    writer.write_all(&vec![b'x'; 128 * 1024]).await.unwrap();
+    writer.write_all(VALID_PROGRESS).await.unwrap();
+  });
+  let result = tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    read_progress(reader, 10, &|_| {}),
+  )
+  .await
+  .expect("invalid startup must drain stdout so the writer can finish");
+  assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+  write.await.unwrap();
 }
 
 #[cfg(unix)]
@@ -86,13 +164,47 @@ impl BundleFixture {
   }
 
   fn command_for(&self, bundle_id: &str, expected_bytes: usize) -> Command {
+    self.command_with_startup(bundle_id, expected_bytes, "")
+  }
+
+  fn command_with_startup(&self, bundle_id: &str, expected_bytes: usize, startup: &str) -> Command {
+    let script = format!(
+      "printf '%s' \"$CTL_INSTALL_TEST_STARTUP\"; {}",
+      install_script(bundle_id, expected_bytes).unwrap()
+    );
     let mut command = Command::new("sh");
     command
-      .args(["-c", &install_script(bundle_id, expected_bytes).unwrap()])
+      .args(["-c", &script])
+      .env("CTL_INSTALL_TEST_STARTUP", startup)
       .env("HOME", self.directory.join("home"))
       .env("XDG_DATA_HOME", self.directory.join("unused-data"));
     command
   }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installer_activates_components_despite_shell_startup_output() {
+  let fixture = BundleFixture::new();
+  tokio::time::timeout(
+    std::time::Duration::from_secs(10),
+    run_install_command(
+      fixture.command_with_startup(
+        "0.1.0-test",
+        fixture.archive.len(),
+        "Welcome to this server\n\x1b[32mloading profile\x1b[0m",
+      ),
+      &fixture.archive,
+      |_| {},
+    ),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert_eq!(
+    std::fs::read_link(fixture.directory.join("home/.tokn/ctl/current")).unwrap(),
+    std::path::PathBuf::from("versions/0.1.0-test")
+  );
 }
 
 #[cfg(unix)]

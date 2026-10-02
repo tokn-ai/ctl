@@ -122,10 +122,22 @@ detaches the daemon from the console and requests breakaway from the SSH job,
 with null standard streams. If job policy disallows breakaway, startup fails explicitly. The
 SSH gateway itself remains disposable and the maintenance pipe remains local.
 
-Non-interactive remote shell startup files must not write to stdout. Such bytes
-precede the readiness marker, so `ctl` rejects the connection with a focused
-startup-output error instead of feeding them to the selected protocol; stderr
-output is safe.
+Clients search for the readiness marker within the first 64 KiB of startup
+stdout, tolerating banners and shell startup text, including text without a
+final newline. Authentication and service markers share this limit. Buffered
+identity and service bytes after readiness remain untouched; the service
+protocol is strict. Platform probing, installation progress, inspection, and
+restart preparation similarly discard only the prelude before their fixed
+markers. After stdout starts, 30 seconds without another byte fails readiness;
+time spent waiting for SSH authentication before stdout or answering the
+authentication callback does not count. Startup files should still send
+diagnostics to stderr.
+
+An unsupported `ctl-ssh-*` marker fails immediately with a component update
+instruction. In particular, the pre-rename `ctl-ssh-v2` agent must be replaced
+with current `ctl-agent`, `ctmuxd`, and `ctl-taskd` components; it cannot serve the
+current identified protocol. Missing readiness or excessive startup output
+includes a bounded, escaped stdout preview and available SSH stderr diagnostics.
 
 ## Authorization boundary
 

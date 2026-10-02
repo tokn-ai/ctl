@@ -13,8 +13,8 @@ sibling daemon on demand when the binaries are installed together; either daemon
 may instead be started independently. Task control selects `ctl-taskd` explicitly,
 and interactive tasks also require `ctmuxd` with managed-session support.
 
-Verify that the fixed remote command works and that non-interactive startup
-files produce no stdout:
+Verify that the fixed remote command works. Clients tolerate bounded startup
+stdout before readiness, but shell startup diagnostics should use stderr:
 
 ```text
 ssh -T <host> exec ctl-agent connect
@@ -128,6 +128,13 @@ the saved host and tabs; older agents offer a component update first. The Docker
 fixture persists this ID in its `ctl_data` volume across container replacement.
 The fixed-command allowlist includes the identity flag without accepting arbitrary
 remote commands. See `docs/ctmux-workspace.md` for identity storage and migration.
+
+If a CLI connection reports incompatible `ctl-ssh-v2`, the host still has the
+pre-rename remote bundle. Update the host's remote components from the current
+desktop app, or install a matching `ctl-agent`, `ctmuxd`, and `ctl-taskd` bundle
+manually and select it with `~/.tokn/ctl/current`. Updating only the local CLI
+does not replace remote binaries. Existing remote daemons may also need a
+restart if their service protocol differs; confirm session loss before doing so.
 
 The app restores known sessions from disk and automatically attaches the last
 selected tab if it is local. Remote hosts stay disconnected on startup.

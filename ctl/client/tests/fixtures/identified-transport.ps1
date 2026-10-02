@@ -1,5 +1,11 @@
 $inputStream = [Console]::OpenStandardInput()
 $outputStream = [Console]::OpenStandardOutput()
+$startup = [Text.Encoding]::UTF8.GetBytes([string]$env:CTL_TEST_STARTUP_NOISE)
+$outputStream.Write($startup, 0, $startup.Length)
+if ($env:CTL_TEST_AUTHENTICATION_MARKER) {
+  $authenticated = [Text.Encoding]::ASCII.GetBytes("ctl-ssh-auth-v1`n")
+  $outputStream.Write($authenticated, 0, $authenticated.Length)
+}
 $preface = [Text.Encoding]::ASCII.GetBytes("ctl-ssh-v3`n")
 $outputStream.Write($preface, 0, $preface.Length)
 $metadata = [Text.Encoding]::UTF8.GetBytes($env:CTL_TEST_IDENTITY_JSON)

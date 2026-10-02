@@ -33,7 +33,7 @@ impl CommandErrorDto {
   pub fn transport(error: &CoreError) -> Self {
     match error {
       CoreError::AgentNotFound => Self::new("ctl_agent_not_found", error.to_string()),
-      CoreError::IdentityUnsupported => {
+      CoreError::IdentityUnsupported | CoreError::UnsupportedSshProtocol { .. } => {
         Self::new("ctl_agent_identity_unsupported", error.to_string())
       }
       CoreError::RemoteIdentity(_) => Self::new("invalid_remote_identity", error.to_string()),
@@ -64,7 +64,7 @@ impl CommandErrorDto {
         };
         Self::new(code, error.to_string())
       }
-      CoreError::InvalidSshPreface => Self::new("invalid_ssh_preface", error.to_string()),
+      CoreError::InvalidSshPreface(_) => Self::new("invalid_ssh_preface", error.to_string()),
       CoreError::WriteSshCommand(_)
       | CoreError::ReadSshCommand(_)
       | CoreError::WaitSshCommand(_)
@@ -111,6 +111,12 @@ mod tests {
       "error: unexpected argument '--identity' found\nUsage: ctl-agent connect [OPTIONS]".into(),
     ));
     assert_eq!(error.code, "ctl_agent_identity_unsupported");
+    let error = CommandErrorDto::transport(&CoreError::UnsupportedSshProtocol {
+      marker: "ctl-ssh-v2".into(),
+    });
+    assert_eq!(error.code, "ctl_agent_identity_unsupported");
+    assert!(error.message.contains("ctl-ssh-v2"));
+    assert!(error.message.contains("update the remote components"));
     let error = CommandErrorDto::transport(&CoreError::SshStartup(
       "Permission denied (publickey).".into(),
     ));

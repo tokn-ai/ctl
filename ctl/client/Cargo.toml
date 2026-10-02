@@ -10,6 +10,8 @@ readme = "README.md"
 categories = ["network-programming"]
 keywords = ["ctl", "ssh", "client"]
 publish = ["crates-io"]
+# Repository deployment fixture; the Docker wrapper is not part of this crate.
+exclude = ["tests/forced_command.rs"]
 
 [dependencies]
 ctl-core.workspace = true

@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
@@ -317,7 +317,7 @@ pub async fn open_task_transport_with_interaction(
 pub struct SshTransport {
   pub remote_identity: Option<Box<ctl_proto::RemoteIdentity>>,
   stdin: ChildStdin,
-  stdout: ChildStdout,
+  stdout: BufReader<ChildStdout>,
   shutdown: watch::Sender<bool>,
 }
 
@@ -525,14 +525,16 @@ pub async fn probe_ssh_unix_platform_interactive(
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
 ) -> Result<String, CoreError> {
-  let output = run_ssh_command_interactive(
+  const MARKER: &[u8] = b"ctl-platform-v1\n";
+  let command = ssh_command_interactive(
     destination,
     options,
     interaction,
     UNIX_PLATFORM_PROBE_COMMAND,
-    &[],
   )
   .await?;
+  let output = run_marked_fixed_command(command, &[], MARKER).await?;
+  let output = [MARKER, output.as_slice()].concat();
   String::from_utf8(output).map_err(|_| CoreError::InvalidSshCommandOutput)
 }
 
@@ -548,6 +550,7 @@ pub async fn restart_ssh_ctmux_interactive(
   expected_remote_id: &str,
 ) -> Result<ctl_proto::RemoteCtmuxRestartResult, CoreError> {
   const COMMAND: &str = concat!(
+    r#"printf 'ctl-command-v1\n'; "#,
     r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
     "exec ctl-agent restart-ctmux",
   );
@@ -555,18 +558,17 @@ pub async fn restart_ssh_ctmux_interactive(
     expected_remote_id: expected_remote_id.into(),
   })
   .map_err(|_| CoreError::InvalidSshCommandOutput)?;
-  let output =
-    run_ssh_command_interactive(destination, options, interaction, COMMAND, &input).await?;
+  let command = ssh_command_interactive(destination, options, interaction, COMMAND).await?;
+  let output = run_marked_fixed_command(command, &input, b"ctl-command-v1\n").await?;
   serde_json::from_slice(&output).map_err(|_| CoreError::InvalidSshCommandOutput)
 }
 
-async fn run_ssh_command_interactive(
+async fn ssh_command_interactive(
   destination: &str,
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
   remote_command: &str,
-  input: &[u8],
-) -> Result<Vec<u8>, CoreError> {
+) -> Result<Command, CoreError> {
   validate_ssh_target(destination, options)?;
   if options.remote_platform != RemotePlatform::Unix {
     return Err(CoreError::InvalidSshOption("remote_platform".into()));
@@ -577,10 +579,14 @@ async fn run_ssh_command_interactive(
     .args(extra)
     .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
     .arg(remote_command);
-  run_fixed_command(command, input).await
+  Ok(command)
 }
 
-async fn run_fixed_command(mut command: Command, input: &[u8]) -> Result<Vec<u8>, CoreError> {
+async fn run_marked_fixed_command(
+  mut command: Command,
+  input: &[u8],
+  marker: &[u8],
+) -> Result<Vec<u8>, CoreError> {
   command
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -589,7 +595,7 @@ async fn run_fixed_command(mut command: Command, input: &[u8]) -> Result<Vec<u8>
 
   let mut child = command.spawn().map_err(CoreError::StartSsh)?;
   let mut stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
-  let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
+  let stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
   let mut stderr = child.stderr.take().ok_or(CoreError::MissingSshStderr)?;
   let write = async move {
     let result = stdin.write_all(input).await;
@@ -598,12 +604,18 @@ async fn run_fixed_command(mut command: Command, input: &[u8]) -> Result<Vec<u8>
     drop(stdin);
     result
   };
-  let read_stdout = read_bounded_output(&mut stdout);
+  let read_stdout = async move {
+    let mut stdout = BufReader::new(stdout);
+    // Closing the owned pipe on framing failure also prevents the producer
+    // from blocking on verbose startup output while we await its diagnostics.
+    ssh_startup::Preface::default()
+      .read_marker(&mut stdout, &[marker], marker)
+      .await?;
+    read_bounded_output(&mut stdout).await
+  };
   let read_stderr = read_bounded_output(&mut stderr);
   let wait = child.wait();
   let (write, stdout, stderr, status) = tokio::join!(write, read_stdout, read_stderr, wait);
-  write.map_err(CoreError::WriteSshCommand)?;
-  let stdout = stdout.map_err(CoreError::ReadSshCommand)?;
   let stderr = stderr.map_err(CoreError::ReadSshCommand)?;
   let status = status.map_err(CoreError::WaitSshCommand)?;
   if !status.success() {
@@ -618,7 +630,8 @@ async fn run_fixed_command(mut command: Command, input: &[u8]) -> Result<Vec<u8>
       diagnostic,
     });
   }
-  Ok(stdout)
+  write.map_err(CoreError::WriteSshCommand)?;
+  stdout.map_err(CoreError::ReadSshCommand)
 }
 
 async fn read_bounded_output(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
@@ -655,41 +668,63 @@ where
 
   let mut child = command.spawn().map_err(CoreError::StartSsh)?;
   let stdin = child.stdin.take().ok_or(CoreError::MissingSshStdin)?;
-  let mut stdout = child.stdout.take().ok_or(CoreError::MissingSshStdout)?;
+  let mut stdout = BufReader::new(child.stdout.take().ok_or(CoreError::MissingSshStdout)?);
   let diagnostics = ssh_startup::Diagnostics::start(child.stderr.take());
-  if authentication_marker {
-    let mut preface = vec![0_u8; SSH_AUTHENTICATED_PREFACE.len()];
-    if let Err(error) = stdout.read_exact(&mut preface).await {
-      return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+  let mut preface = ssh_startup::Preface::default();
+  let markers = [
+    SSH_AUTHENTICATED_PREFACE,
+    SSH_TRANSPORT_PREFACE,
+    ctl_proto::IDENTITY_PREFACE,
+    SSH_AGENT_NOT_FOUND_PREFACE,
+  ];
+  let startup = async {
+    if authentication_marker {
+      if preface
+        .read_marker(&mut stdout, &markers, b"ctl-ssh-")
+        .await?
+        != 0
+      {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "remote command skipped the SSH authentication marker",
+        ));
+      }
+      on_authenticated.await;
     }
-    if preface != SSH_AUTHENTICATED_PREFACE {
-      let _ = child.kill().await;
-      drop(diagnostics);
-      return Err(CoreError::InvalidSshPreface);
-    }
-    on_authenticated.await;
+    preface
+      .read_marker(&mut stdout, &markers, b"ctl-ssh-")
+      .await
   }
-  let mut preface = vec![0_u8; SSH_TRANSPORT_PREFACE.len()];
-  if let Err(error) = stdout.read_exact(&mut preface).await {
-    return Err(ssh_startup::startup_error(child, diagnostics, error).await);
-  }
+  .await;
+  let marker = match startup {
+    Ok(index) => markers[index],
+    Err(error) => return Err(ssh_startup::startup_error(child, diagnostics, error).await),
+  };
   let expected = if identified {
     ctl_proto::IDENTITY_PREFACE
   } else {
     SSH_TRANSPORT_PREFACE
   };
-  if preface == SSH_AGENT_NOT_FOUND_PREFACE {
+  if marker == SSH_AGENT_NOT_FOUND_PREFACE {
     let _ = child.kill().await;
     drop(diagnostics);
     return Err(CoreError::AgentNotFound);
   }
-  if identified && preface == SSH_TRANSPORT_PREFACE {
+  if identified && marker == SSH_TRANSPORT_PREFACE {
     return Err(CoreError::IdentityUnsupported);
   }
-  if preface != expected {
-    let _ = child.kill().await;
-    drop(diagnostics);
-    return Err(CoreError::InvalidSshPreface);
+  if marker != expected {
+    return Err(
+      ssh_startup::startup_error(
+        child,
+        diagnostics,
+        io::Error::new(
+          io::ErrorKind::InvalidData,
+          "remote command returned an unexpected transport marker",
+        ),
+      )
+      .await,
+    );
   }
   let remote_identity = if identified {
     Some(Box::new(
@@ -700,26 +735,8 @@ where
   } else {
     None
   };
-  let (shutdown, mut shutdown_requested) = watch::channel(false);
-
-  tokio::spawn(async move {
-    tokio::select! {
-      result = child.wait() => {
-        if let Err(error) = result {
-          eprintln!("ctl: could not wait for ssh: {error}");
-        }
-      }
-      changed = shutdown_requested.changed() => {
-        if changed.is_ok() && *shutdown_requested.borrow() {
-          let _ignored = child.start_kill();
-        }
-        if let Err(error) = child.wait().await {
-          eprintln!("ctl: could not reap ssh: {error}");
-        }
-      }
-    }
-    drop(diagnostics);
-  });
+  let (shutdown, shutdown_requested) = watch::channel(false);
+  ssh_startup::supervise(child, diagnostics, shutdown_requested);
 
   Ok(SshTransport {
     remote_identity,
@@ -760,9 +777,10 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::SshCommandFailed { .. }
     | CoreError::InvalidSshCommandOutput
     | CoreError::InvalidAgentBundleId(_)
-    | CoreError::InvalidSshPreface
+    | CoreError::InvalidSshPreface(_)
     | CoreError::AgentNotFound
     | CoreError::IdentityUnsupported
+    | CoreError::UnsupportedSshProtocol { .. }
     | CoreError::RemoteIdentity(_) => false,
   }
 }
@@ -1034,6 +1052,10 @@ pub enum CoreError {
   AgentNotFound,
   #[error("remote components do not support environment identity; update the remote components")]
   IdentityUnsupported,
+  #[error(
+    "remote ctl-agent uses incompatible transport marker {marker:?}; update the remote components (ctl-agent, ctmuxd, and ctl-taskd) to match this client"
+  )]
+  UnsupportedSshProtocol { marker: String },
   #[error("could not read remote identity: {0}")]
   RemoteIdentity(#[source] io::Error),
   #[error(transparent)]
@@ -1070,10 +1092,8 @@ pub enum CoreError {
   ReadSshPreface(#[source] io::Error),
   #[error("SSH connection failed before ctl-agent was ready: {0}")]
   SshStartup(String),
-  #[error(
-    "remote stdout did not begin with the ctl-agent transport marker; check non-interactive shell startup output"
-  )]
-  InvalidSshPreface,
+  #[error("remote ctl-agent transport was not ready: {0}")]
+  InvalidSshPreface(String),
 }
 
 #[cfg(test)]

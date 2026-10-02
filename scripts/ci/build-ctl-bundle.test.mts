@@ -210,8 +210,11 @@ function fakeBuild(input: Fixture, options: {
       return { stdout: "", stderr: "" };
     }
     if (command === "lipo") {
-      assert.equal(args[1], "arm64");
-      if (options.reject_cli_architecture && args.at(-1)?.endsWith("/ctl")) {
+      assert.equal(args.length, 3);
+      assert.ok(args[0].endsWith("/ctl") || args[0].endsWith("/Contents/MacOS/ctld"));
+      assert.equal(args[1], "-verify_arch");
+      assert.equal(args[2], "arm64");
+      if (options.reject_cli_architecture && args[0].endsWith("/ctl")) {
         throw new Error("fixture rejected CLI architecture");
       }
       return { stdout: "", stderr: "" };

@@ -179,7 +179,7 @@ export async function packageCtldBundle(
     ) {
       throw new Error("ctld bundle metadata does not match the requested release version or identity");
     }
-    await run("lipo", ["-verify_arch", architecture, binary]);
+    await run("lipo", [binary, "-verify_arch", architecture]);
     const verify = (): ReturnType<ProcessRunner> => run("codesign", [
       "--verify", "--strict", "--verbose=2", "--test-requirement", signingRequirement(team), app,
     ]);

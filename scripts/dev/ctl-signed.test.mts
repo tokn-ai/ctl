@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -17,7 +17,11 @@ const source_fingerprint = "c".repeat(64);
 const target = "aarch64-apple-darwin";
 const signature = "\nfixture Apple Development signature";
 
-async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" | "cli-signing" | "cli-building" | "architecture") {
+async function fixture(
+  t: TestContext,
+  failure?: "metadata" | "helper-signing" | "cli-signing" | "cli-building" | "architecture",
+  native_options: { native_binary?: boolean; missing_cli_architecture?: boolean } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "ctl-signed-development-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target_directory = join(root, "target");
@@ -25,7 +29,11 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
   const ctld = join(root, "cargo-ctld");
   const ctl = join(root, "cargo-ctl");
   await writeFile(profile, "fixture Personal Team provisioning");
-  await writeFile(ctld, "fixture locally compiled ctld");
+  const helper_bytes = native_options.native_binary
+    ? await readFile(process.execPath) : Buffer.from("fixture locally compiled ctld");
+  const build_target = native_options.native_binary && process.arch === "x64" ? "x86_64-apple-darwin" : target;
+  const architecture = build_target === "aarch64-apple-darwin" ? "arm64" : "x86_64";
+  await writeFile(ctld, helper_bytes);
   await mkdir(join(target_directory, "ctl-dev"), { recursive: true, mode: 0o700 });
   const output = join(target_directory, "ctl-dev/ctl");
   await writeFile(output, "previous usable ctl");
@@ -34,7 +42,7 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
   const run: MacosCommandRunner = async (command, args, context) => {
     calls.push({ command, args, context });
     const empty = { stdout: "", stderr: "" };
-    if (command === "rustc") return { stdout: `host: ${target}\n`, stderr: "" };
+    if (command === "rustc") return { stdout: `host: ${build_target}\n`, stderr: "" };
     if (command === "cargo" && args[0] === "metadata") {
       return { stdout: JSON.stringify({ target_directory, packages: ["ctld", "ctl-cli"].map((name) => ({ name, version: "0.1.0" })) }), stderr: "" };
     }
@@ -44,7 +52,7 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
     }
     if (command === "cargo" && args[0] === "build") {
       assert.ok(args.includes("--locked"));
-      assert.equal(args[args.indexOf("--target") + 1], target);
+      assert.equal(args[args.indexOf("--target") + 1], build_target);
       const cargo_target = args[args.indexOf("--target-dir") + 1]!;
       assert.equal(cargo_target, join(target_directory, "ctl-dev/cargo"));
       await mkdir(cargo_target, { recursive: true });
@@ -57,7 +65,7 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
       if (failure === "cli-building") throw new Error("fixture CLI build failed");
       assert.equal(context.env.CTL_BUNDLED_CTLD_MODE, "development");
       const payload = context.env.CTL_BUNDLED_CTLD_DIR!;
-      manifest = JSON.parse(await readFile(join(payload, `ctld-${target}.json`), "utf8"));
+      manifest = JSON.parse(await readFile(join(payload, `ctld-${build_target}.json`), "utf8"));
       const bytes = await readFile(join(payload, manifest!.archive));
       assert.equal(manifest!.sha256, createHash("sha256").update(bytes).digest("hex"));
       const transported = join(root, "transported");
@@ -66,12 +74,13 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
       assert.equal(await readFile(join(transported, "ctld.app/Contents/embedded.provisionprofile"), "utf8"), "fixture Personal Team provisioning");
       assert.equal(await readFile(join(transported, "ctld.app/Contents/_CodeSignature/CodeResources"), "utf8"), "fixture resource seal");
       assert.equal((await readdir(join(transported, "ctld.app/Contents"))).includes("CodeResources"), false);
-      await writeFile(ctl, Buffer.concat([Buffer.from("fixture self-contained ctl\n"), bytes]));
+      if (native_options.native_binary) await copyFile(process.execPath, ctl);
+      else await writeFile(ctl, Buffer.concat([Buffer.from("fixture self-contained ctl\n"), bytes]));
       return { stdout: JSON.stringify({ reason: "compiler-artifact", target: { name: "ctl", kind: ["bin"] }, executable: ctl }), stderr: "" };
     }
     if (args[0] === "--component-info") {
       assert.notEqual(command, ctld);
-      assert.equal(await readFile(command, "utf8"), "fixture locally compiled ctld");
+      assert.deepEqual(await readFile(command), helper_bytes);
       // Changing Cargo's original output cannot change the snapshot being signed.
       await writeFile(ctld, "concurrent Cargo replacement");
       return { stdout: JSON.stringify({ build: {
@@ -89,7 +98,7 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
       await mkdir(join(app, "Contents/_CodeSignature"));
       await copyFile(args[1]!, join(app, "Contents/MacOS/ctld"));
       await chmod(join(app, "Contents/MacOS/ctld"), 0o755);
-      assert.equal(await readFile(join(app, "Contents/MacOS/ctld"), "utf8"), "fixture locally compiled ctld");
+      assert.deepEqual(await readFile(join(app, "Contents/MacOS/ctld")), helper_bytes);
       await copyFile(profile, join(app, "Contents/embedded.provisionprofile"));
       await writeFile(join(app, "Contents/Info.plist"), "fixture helper metadata");
       await writeFile(join(app, "Contents/_CodeSignature/CodeResources"), "fixture resource seal");
@@ -97,8 +106,16 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
       return empty;
     }
     if (command === "lipo") {
-      assert.equal(args[1], "arm64");
+      assert.equal(args.length, 3);
+      assert.equal((await lstat(args[0]!)).isFile(), true);
+      assert.equal(args[1], "-verify_arch");
+      assert.equal(args[2], architecture);
       if (failure === "architecture") throw new Error("fixture wrong architecture");
+      if (native_options.native_binary) {
+        const verification_args = native_options.missing_cli_architecture && args[0]!.endsWith("/ctl")
+          ? [args[0]!, "-verify_arch", "ppc"] : args;
+        return execute("/usr/bin/lipo", verification_args);
+      }
       return empty;
     }
     if (command === "codesign") {
@@ -109,7 +126,9 @@ async function fixture(t: TestContext, failure?: "metadata" | "helper-signing" |
         assert.ok(args.includes("--timestamp=none"));
         assert.equal(args.includes("--timestamp"), false);
         assert.equal(args[args.indexOf("--identifier") + 1], "dev.tokn-ai.ctl.cli");
-        await writeFile(args.at(-1)!, Buffer.concat([await readFile(args.at(-1)!), Buffer.from(signature)]));
+        if (!native_options.native_binary) {
+          await writeFile(args.at(-1)!, Buffer.concat([await readFile(args.at(-1)!), Buffer.from(signature)]));
+        }
       }
       return empty;
     }
@@ -196,5 +215,26 @@ test("overlapping signed builds serialize compilation and signing in their dedic
   const packages = input.calls.filter((call) => call.command === "cargo" && call.args[0] === "build")
     .map((call) => call.args[call.args.indexOf("-p") + 1]);
   assert.deepEqual(packages, ["ctld", "ctl-cli", "ctld", "ctl-cli"]);
+  assert.deepEqual((await readdir(join(input.target_directory, "ctl-dev"))).sort(), ["cargo", "ctl"]);
+});
+
+const native_macos = { skip: process.platform !== "darwin" || !["arm64", "x64"].includes(process.arch) };
+
+test("development workflow verifies both Mach-O artifacts with the native lipo parser", native_macos, async (t) => {
+  const input = await fixture(t, undefined, { native_binary: true });
+  assert.equal(await buildSignedDevelopmentCli(input.options, input.run), input.output);
+  assert.deepEqual(await readFile(input.output), await readFile(process.execPath));
+  const checks = input.calls.filter((call) => call.command === "lipo");
+  assert.equal(checks.length, 2);
+  assert.ok(checks[0]!.args[0]!.endsWith("/ctld.app/Contents/MacOS/ctld"));
+  assert.ok(checks[1]!.args[0]!.endsWith("/ctl"));
+});
+
+test("a native lipo architecture rejection preserves the previously published development CLI", native_macos, async (t) => {
+  const input = await fixture(t, undefined, { native_binary: true, missing_cli_architecture: true });
+  await assert.rejects(buildSignedDevelopmentCli(input.options, input.run), /lipo/);
+  assert.equal(await readFile(input.output, "utf8"), "previous usable ctl");
+  assert.equal(input.calls.filter((call) => call.command === "lipo").length, 2);
+  assert.equal(input.calls.some((call) => call.command === "codesign" && call.args.includes("--force")), false);
   assert.deepEqual((await readdir(join(input.target_directory, "ctl-dev"))).sort(), ["cargo", "ctl"]);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -69,6 +69,12 @@ function fakeApple(options: {
   const provisioningProfile = options.provisioning_profile ?? profile();
   const run: ProcessRunner = async (command, args) => {
     calls.push({ command, args });
+    if (command === "lipo") {
+      assert.equal(args.length, 3);
+      assert.ok(args[0].endsWith("/Contents/MacOS/ctld"));
+      assert.equal(args[1], "-verify_arch");
+      assert.ok(["arm64", "x86_64"].includes(args[2]));
+    }
     if (command === options.fail_command) {
       throw new Error(`fixture rejected ${command}`);
     }
@@ -189,6 +195,61 @@ test("native plutil handles provisioning dates and certificate data before fake 
   };
   const manifest = await packageCtldBundle(options, run);
   assert.equal(manifest.team_identifier, team);
+});
+
+test("native lipo verifies the helper's architecture through the packaging pipeline", { skip: process.platform !== "darwin" }, async (context) => {
+  const options = await fixture(context);
+  const architecture = process.arch === "arm64" ? "arm64" : "x86_64";
+  options.target = architecture === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  const binary = join(options.input_app, "Contents/MacOS/ctld");
+  await copyFile(process.execPath, binary);
+  const apple = fakeApple();
+  const run: ProcessRunner = async (command, args) => {
+    const result = await apple.run(command, args);
+    return command === "lipo" ? execute("/usr/bin/lipo", args) : result;
+  };
+  const manifest = await packageCtldBundle(options, run);
+  assert.equal(manifest.target, options.target);
+  assert.deepEqual(apple.calls.find(({ command }) => command === "lipo")?.args, [
+    binary, "-verify_arch", architecture,
+  ]);
+  assert.ok((await lstat(join(options.output_directory, manifest.archive))).isFile());
+});
+
+test("native lipo rejects an absent target architecture before signing or producing assets", { skip: process.platform !== "darwin" }, async (context) => {
+  const options = await fixture(context);
+  const architecture = process.arch === "arm64" ? "arm64" : "x86_64";
+  const missing = architecture === "arm64" ? "x86_64" : "arm64";
+  options.target = missing === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  const binary = join(options.input_app, "Contents/MacOS/ctld");
+  await copyFile(process.execPath, binary);
+  // A universal Node distribution may contain both supported release targets.
+  // Reduce it to the current architecture so the other target is always absent.
+  const { stdout } = await execute("/usr/bin/lipo", [binary, "-archs"]);
+  if (stdout.trim().split(/\s+/).length > 1) {
+    const thin = join(dirname(options.input_app), "thin-ctld");
+    await execute("/usr/bin/lipo", [binary, "-thin", architecture, "-output", thin]);
+    await rename(thin, binary);
+  }
+  const before = createHash("sha256").update(await readFile(binary)).digest("hex");
+  const apple = fakeApple();
+  const run: ProcessRunner = async (command, args) => {
+    const result = await apple.run(command, args);
+    return command === "lipo" ? execute("/usr/bin/lipo", args) : result;
+  };
+  await assert.rejects(packageCtldBundle(options, run), (error: unknown) => {
+    const failure = error as { code?: number; stderr?: string };
+    assert.equal(failure.code, 1);
+    // A malformed lipo argument list must not count as architecture rejection.
+    assert.ok(!failure.stderr?.includes("unknown architecture specification"));
+    return true;
+  });
+  assert.deepEqual(apple.calls.find(({ command }) => command === "lipo")?.args, [
+    binary, "-verify_arch", missing,
+  ]);
+  assert.ok(!apple.calls.some(({ command }) => command === "codesign" || command === "xcrun"));
+  assert.deepEqual(await readdir(options.output_directory), []);
+  assert.equal(createHash("sha256").update(await readFile(binary)).digest("hex"), before);
 });
 
 test("rejects development, expired, and mismatched provisioning profiles", async (context) => {

@@ -125,7 +125,7 @@ export async function buildSignedDevelopmentCli(
       for (const relative of ["Contents/MacOS/ctld", "Contents/Info.plist", "Contents/embedded.provisionprofile", "Contents/_CodeSignature/CodeResources"]) {
         await regularFile(join(app, relative));
       }
-      await invoke("lipo", ["-verify_arch", architecture, join(app, "Contents/MacOS/ctld")]);
+      await invoke("lipo", [join(app, "Contents/MacOS/ctld"), "-verify_arch", architecture]);
       await invoke("codesign", ["--verify", "--strict", app]);
       const team = /^TeamIdentifier=([A-Z0-9]{10})$/m.exec((await invoke("codesign", ["-d", "--verbose=2", app])).stderr)?.[1];
       if (!team) throw new Error("signed ctld does not report a valid Apple Team ID");
@@ -156,7 +156,7 @@ export async function buildSignedDevelopmentCli(
       const cli = join(temporary, "ctl");
       await copyFile(cli_artifact, cli);
       await chmod(cli, 0o755);
-      await invoke("lipo", ["-verify_arch", architecture, cli]);
+      await invoke("lipo", [cli, "-verify_arch", architecture]);
       await invoke("codesign", ["--force", "--timestamp=none", "--options", "runtime", "--identifier", cli_identifier, "--sign", identity, cli], {}, true);
       const requirement = `=anchor apple generic and identifier "${cli_identifier}" and certificate leaf[subject.OU] = "${team}"`;
       await invoke("codesign", ["--verify", "--strict", "--test-requirement", requirement, cli]);

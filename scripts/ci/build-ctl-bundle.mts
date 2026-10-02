@@ -131,7 +131,7 @@ async function verifyReusedHelper(
   await invoke("codesign", ["--verify", "--strict", "--test-requirement", requirement, app]);
   await invoke("xcrun", ["stapler", "validate", app]);
   await invoke("spctl", ["--assess", "--type", "execute", "--verbose=2", app]);
-  await invoke("lipo", ["-verify_arch", targets.get(manifest.target)!, join(app, "Contents", "MacOS", "ctld")]);
+  await invoke("lipo", [join(app, "Contents", "MacOS", "ctld"), "-verify_arch", targets.get(manifest.target)!]);
   const info = JSON.parse((await invoke("plutil", ["-convert", "json", "-o", "-", join(app, "Contents", "Info.plist")])).stdout);
   if (info?.CFBundleIdentifier !== "dev.tokn-ai.ctl.ctld" || info.CFBundleExecutable !== "ctld" ||
     info.CFBundleShortVersionString !== manifest.app_version || info.CFBundleVersion !== manifest.app_version) {
@@ -216,7 +216,7 @@ export async function buildCtlBundle(
     const cli = join(staging, "ctl");
     await copyFile(executable, cli);
     await chmod(cli, 0o755);
-    await invoke("lipo", ["-verify_arch", architecture, cli]);
+    await invoke("lipo", [cli, "-verify_arch", architecture]);
     await invoke("codesign", ["--force", "--timestamp", "--options", "runtime", "--identifier", cliIdentifier, "--sign", identity, cli]);
     const requirement = `=anchor apple generic and identifier "${cliIdentifier}" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${helper.team_identifier}"`;
     await invoke("codesign", ["--verify", "--strict", "--test-requirement", requirement, cli]);

@@ -209,8 +209,8 @@ metadata through its local-control handshake, with a data-handshake fallback for
 legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
-`ctl-component-info` embeds the release version, source revision, dirty flag, and a
-deterministic fingerprint of Rust component sources and dependency definitions.
+`ctl-core::component` embeds the release version, source revision, dirty flag,
+and a deterministic fingerprint of Rust component sources and dependency definitions.
 The fingerprint normalizes platform path separators and text line endings. It
 excludes credentials, runtime configuration, and build output. Equal release
 versions with unequal fingerprints are different builds, not ordered releases.

@@ -4,14 +4,7 @@ use std::process::Command;
 
 // Never inspect runtime configuration, credentials, environment files, user
 // data, or build output. Embedded scripts and skills are component sources.
-const COMPONENT_ROOTS: &[&str] = &[
-  "ctl-component-info",
-  "ctl-paths",
-  "ctl",
-  "ctmux",
-  "task",
-  "ctmux-process-info",
-];
+const COMPONENT_ROOTS: &[&str] = &["ctl-core", "ctl", "ctmux", "task", "ctmux-process-info"];
 
 pub struct BuildIdentity {
   pub fingerprint: String,
@@ -80,7 +73,7 @@ fn fingerprint(root: &Path, files: &mut [PathBuf], packaged: bool) -> String {
   let mut hash = Sha256::new();
   if packaged {
     // A registry package hashes its own sources, not the unavailable workspace.
-    hash.update(b"ctl-component-info package\0");
+    hash.update(b"ctl-core package\0");
   }
   for path in files {
     println!("cargo:rerun-if-changed={}", path.display());

@@ -1,7 +1,10 @@
 //! Prepared restart of an idle task owner, including older control-v1 owners.
 
 use super::{ClientError, daemon_executable, retryable, spawn_daemon, wait_for_endpoint};
-use ctl_component_info::{ComponentInfo, ProtocolInfo, executable::PreparedExecutable};
+use ctl_core::{
+  component::{ComponentInfo, ProtocolInfo},
+  executable::PreparedExecutable,
+};
 use ctl_task_ipc::{Stream, connect};
 use ctl_task_proto::{control, read_frame, write_frame};
 use std::path::PathBuf;

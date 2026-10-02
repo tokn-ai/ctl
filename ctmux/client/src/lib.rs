@@ -160,7 +160,7 @@ pub struct AttachmentLiveness {
 pub struct HandshakeInfo {
   pub server_version: String,
   pub protocol_version: u16,
-  pub build: Option<ctl_component_info::ComponentBuildInfo>,
+  pub build: Option<ctl_core::component::ComponentBuildInfo>,
   pub attachment_liveness: AttachmentLiveness,
 }
 

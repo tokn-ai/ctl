@@ -24,7 +24,7 @@ pub fn catalog_path() -> Result<PathBuf, HostError> {
   std::env::var_os("CTL_HOSTS_PATH")
     .map_or_else(
       || {
-        ctl_paths::directory()
+        ctl_core::paths::directory()
           .ok()
           .map(|directory| directory.join("hosts.json"))
       },
@@ -55,7 +55,7 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
   let path = std::env::var_os("CTL_VPNS_PATH")
     .map(PathBuf::from)
     .or_else(|| {
-      ctl_paths::directory()
+      ctl_core::paths::directory()
         .ok()
         .map(|directory| directory.join("vpns.json"))
     })

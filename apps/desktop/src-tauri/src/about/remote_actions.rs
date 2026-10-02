@@ -200,11 +200,11 @@ fn running_protocols(info: &ctl_proto::maintenance::RunningCtmux) -> Vec<Protoco
     .collect()
 }
 
-fn version(info: ctl_component_info::ComponentInfo) -> ComponentVersionInfo {
+fn version(info: ctl_core::component::ComponentInfo) -> ComponentVersionInfo {
   ComponentVersionInfo::from_component(info)
 }
 
-fn require_compatible_replacement(info: &ctl_component_info::ComponentInfo) -> CommandResult<()> {
+fn require_compatible_replacement(info: &ctl_core::component::ComponentInfo) -> CommandResult<()> {
   for (name, version) in [
     ("ctmux", ctmux_proto::PROTOCOL_VERSION),
     ("ctmux_control", ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
@@ -292,14 +292,14 @@ mod tests {
 
   #[test]
   fn incompatible_remote_replacements_are_rejected_before_confirmation() {
-    let mut info = ctl_component_info::ComponentInfo {
-      build: ctl_component_info::build_info(),
+    let mut info = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
       protocols: vec![
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "ctmux".into(),
           version: ctmux_proto::PROTOCOL_VERSION,
         },
-        ctl_component_info::ProtocolInfo {
+        ctl_core::component::ProtocolInfo {
           name: "ctmux_control".into(),
           version: ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
         },

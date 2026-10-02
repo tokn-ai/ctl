@@ -12,8 +12,7 @@ keywords = ["ctl", "ssh", "terminal", "tasks"]
 publish = ["crates-io"]
 
 [dependencies]
-ctl-paths.workspace = true
-ctl-component-info.workspace = true
+ctl-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

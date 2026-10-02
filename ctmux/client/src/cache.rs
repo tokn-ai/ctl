@@ -391,7 +391,7 @@ impl CacheStore {
   /// # Errors
   /// Returns an error when the current user's home directory is unavailable.
   pub fn for_client(client: &str) -> io::Result<Self> {
-    let base = ctl_paths::directory()?;
+    let base = ctl_core::paths::directory()?;
     Ok(Self::new(base.join("ctmux").join(client).join("sessions")))
   }
   #[must_use]

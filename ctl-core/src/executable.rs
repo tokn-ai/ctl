@@ -1,6 +1,6 @@
 //! Bounded inspection and identity checks for a selected replacement executable.
 
-use crate::ComponentInfo;
+use crate::component::ComponentInfo;
 use sha2::{Digest as _, Sha256};
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -169,7 +169,7 @@ async fn metadata(path: &Path) -> io::Result<ComponentInfo> {
 #[cfg(all(test, unix))]
 mod tests {
   use super::*;
-  use crate::ProtocolInfo;
+  use crate::component::ProtocolInfo;
   use std::os::unix::fs::PermissionsExt as _;
   use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -187,7 +187,7 @@ mod tests {
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("helper");
     let info = ComponentInfo {
-      build: crate::build_info(),
+      build: crate::component::build_info(),
       protocols: vec![ProtocolInfo {
         name: "test".into(),
         version: 1,

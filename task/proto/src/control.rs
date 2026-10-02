@@ -15,7 +15,7 @@ pub enum ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
   ComponentStatus {
-    build: ctl_component_info::ComponentBuildInfo,
+    build: ctl_core::component::ComponentBuildInfo,
     protocol_version: u16,
   },
   RestartAccepted {

@@ -646,7 +646,7 @@ async fn handle_connection(
     )) => {
       let response = if protocol_version == ctl_task_proto::control::PROTOCOL_VERSION {
         ctl_task_proto::control::ServerMessage::ComponentStatus {
-          build: ctl_component_info::build_info(),
+          build: ctl_core::component::build_info(),
           protocol_version: PROTOCOL_VERSION,
         }
       } else {
@@ -955,7 +955,7 @@ fn now_ms() -> u64 {
 /// explicit data directory has been supplied.
 pub fn default_data_directory() -> io::Result<PathBuf> {
   env::var_os("CTL_TASKD_DATA_DIR").map_or_else(
-    || ctl_paths::directory().map(|directory| directory.join("taskd")),
+    || ctl_core::paths::directory().map(|directory| directory.join("taskd")),
     |directory| Ok(PathBuf::from(directory)),
   )
 }

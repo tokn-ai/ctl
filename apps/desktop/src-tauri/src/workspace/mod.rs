@@ -516,7 +516,7 @@ pub async fn update_hosts(
 }
 
 fn workspace_repository(_app: &tauri::AppHandle) -> CommandResult<repository::Repository> {
-  let directory = ctl_paths::directory().map_err(|_| {
+  let directory = ctl_core::paths::directory().map_err(|_| {
     CommandErrorDto::new(
       "home_directory_unavailable",
       "Could not find the home directory for the workspace.",

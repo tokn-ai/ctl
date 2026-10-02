@@ -1,5 +1,5 @@
 //! Fixed, confirmation-bound maintenance over an already authenticated SSH channel.
-use ctl_component_info::{ComponentBuildInfo, ComponentInfo};
+use ctl_core::component::{ComponentBuildInfo, ComponentInfo};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};

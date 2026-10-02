@@ -50,9 +50,9 @@ async fn main() {
 
 async fn run(arguments: Arguments) -> Result<(), MainError> {
   if arguments.component_info {
-    let info = ctl_component_info::ComponentInfo {
-      build: ctl_component_info::build_info(),
-      protocols: vec![ctl_component_info::ProtocolInfo {
+    let info = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
+      protocols: vec![ctl_core::component::ProtocolInfo {
         name: "ctl_identity".into(),
         version: ctl_proto::IDENTITY_PROTOCOL_VERSION,
       }],

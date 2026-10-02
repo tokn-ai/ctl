@@ -2,9 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "executable")]
-pub mod executable;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProtocolInfo {
   pub name: String,

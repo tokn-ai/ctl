@@ -1,17 +1,18 @@
 [package]
-name = "ctl-component-info"
+name = "ctl-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Build identity and executable metadata shared by ctl and ctmux components"
+description = "Component identity, executable inspection, and storage paths shared by ctl and ctmux"
 readme = "README.md"
 categories = ["development-tools"]
-keywords = ["ctl", "ctmux", "metadata"]
+keywords = ["ctl", "ctmux", "metadata", "storage"]
 publish = ["crates-io"]
 
 [dependencies]
+dirs.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }

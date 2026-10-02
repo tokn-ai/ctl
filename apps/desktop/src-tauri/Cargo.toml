@@ -16,8 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-ctl-paths.workspace = true
-ctl-component-info.workspace = true
+ctl-core.workspace = true
 ctl-proto.workspace = true
 ctl-task-client.workspace = true
 ctl-task-proto.workspace = true

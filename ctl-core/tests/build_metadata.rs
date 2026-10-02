@@ -40,19 +40,16 @@ fn isolated_package_uses_archive_provenance_and_ignores_neighbours() {
   let fixture = Fixture::new();
   fixture.write("Cargo.toml", "[workspace]\n");
   fixture.write("Cargo.lock", "# enclosing workspace\n");
-  for name in ["ctl-paths", "ctl", "ctmux", "task", "ctmux-process-info"] {
+  for name in ["ctl", "ctmux", "task", "ctmux-process-info"] {
     fixture.write(&format!("{name}/src/lib.rs"), "// enclosing source\n");
   }
+  fixture.write("ctl-core/Cargo.toml", "[package]\nname = 'ctl-core'\n");
+  fixture.write("ctl-core/src/lib.rs", "// package source\n");
   fixture.write(
-    "ctl-component-info/Cargo.toml",
-    "[package]\nname = 'ctl-component-info'\n",
-  );
-  fixture.write("ctl-component-info/src/lib.rs", "// package source\n");
-  fixture.write(
-    "ctl-component-info/.cargo_vcs_info.json",
+    "ctl-core/.cargo_vcs_info.json",
     &format!("{{\"git\":{{\"sha1\":\"{}\"}}}}", "a".repeat(40)),
   );
-  let package = fixture.package().join("ctl-component-info");
+  let package = fixture.package().join("ctl-core");
   let before = build_support::read_identity(&package);
   assert_eq!(before.revision.as_deref(), Some("a".repeat(40).as_str()));
   assert!(!before.dirty);
@@ -60,10 +57,7 @@ fn isolated_package_uses_archive_provenance_and_ignores_neighbours() {
   fixture.write("ctmux/src/lib.rs", "// changed enclosing workspace\n");
   let after = build_support::read_identity(&package);
   assert_eq!(before.fingerprint, after.fingerprint);
-  fixture.write(
-    "ctl-component-info/src/lib.rs",
-    "// modified package source\n",
-  );
+  fixture.write("ctl-core/src/lib.rs", "// modified package source\n");
   assert_ne!(
     before.fingerprint,
     build_support::read_identity(&package).fingerprint
@@ -73,7 +67,7 @@ fn isolated_package_uses_archive_provenance_and_ignores_neighbours() {
 #[test]
 fn missing_invalid_and_dirty_provenance_never_claim_a_clean_release() {
   let fixture = Fixture::new();
-  fixture.write("Cargo.toml", "[package]\nname = 'ctl-component-info'\n");
+  fixture.write("Cargo.toml", "[package]\nname = 'ctl-core'\n");
   fixture.write("src/lib.rs", "// source\n");
   for provenance in [
     None,
@@ -104,19 +98,12 @@ fn embedded_assets_affect_workspace_identity_but_user_files_do_not() {
   let fixture = Fixture::new();
   fixture.write("Cargo.toml", "[workspace]\n");
   fixture.write("Cargo.lock", "# lock\n");
-  for name in [
-    "ctl-component-info",
-    "ctl-paths",
-    "ctl",
-    "ctmux",
-    "task",
-    "ctmux-process-info",
-  ] {
+  for name in ["ctl-core", "ctl", "ctmux", "task", "ctmux-process-info"] {
     fixture.write(&format!("{name}/src/lib.rs"), "// source\n");
   }
   fixture.write("ctl/daemon/assets/vpn/heartbeat.sh", "echo heartbeat\n");
   fixture.write("ctl/cli/skills/ctl/SKILL.md", "# bundled skill\n");
-  let manifest_dir = fixture.package().join("ctl-component-info");
+  let manifest_dir = fixture.package().join("ctl-core");
   let before = build_support::read_identity(&manifest_dir);
   fixture.write("ctl/daemon/.env", "SECRET=must-not-be-read\n");
   fixture.write(
@@ -136,7 +123,7 @@ fn embedded_assets_affect_workspace_identity_but_user_files_do_not() {
     build_support::read_identity(&manifest_dir).fingerprint
   );
   let before_paths = build_support::read_identity(&manifest_dir);
-  fixture.write("ctl-paths/src/lib.rs", "// changed storage root\n");
+  fixture.write("ctl-core/src/paths.rs", "// changed storage root\n");
   assert_ne!(
     before_paths.fingerprint,
     build_support::read_identity(&manifest_dir).fingerprint

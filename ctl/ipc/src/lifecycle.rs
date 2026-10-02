@@ -2,7 +2,7 @@
 //! Lifecycle frames are independent of the SSH/VPN protocol so a newer client
 //! can inspect an older data protocol without submitting an SSH or VPN request.
 
-use ctl_component_info::{ComponentBuildInfo, ComponentInfo};
+use ctl_core::component::{ComponentBuildInfo, ComponentInfo};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
@@ -25,7 +25,7 @@ impl DaemonBinaryInfo {
   #[must_use]
   pub fn current() -> Self {
     Self {
-      build: ctl_component_info::build_info(),
+      build: ctl_core::component::build_info(),
       protocol_version: crate::PROTOCOL_VERSION,
       lifecycle_protocol_version: PROTOCOL_VERSION,
     }

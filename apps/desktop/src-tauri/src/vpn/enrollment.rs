@@ -115,7 +115,7 @@ impl Enrollments {
       directory,
       window_label,
       request,
-      Arc::new(NativeRuntime(client::client().map_err(runtime_error)?)),
+      Arc::new(NativeRuntime(client::client())),
     )
   }
 

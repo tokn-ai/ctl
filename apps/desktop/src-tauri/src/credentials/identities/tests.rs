@@ -73,7 +73,11 @@ fn duplicate_or_invalid_metadata_cannot_create_ambiguous_actions() {
 fn keychain_failures_keep_their_category_without_forwarding_helper_text() {
   for (code, expected) in [
     ("identity_keychain_locked", "locked, denied, or cancelled"),
-    ("identity_keychain_unavailable", "properly signed"),
+    (
+      "identity_keychain_missing_entitlement",
+      "matching provisioning profile",
+    ),
+    ("identity_keychain_unavailable", "macOS login session"),
     ("private-fixture-canary", "could not be inspected"),
   ] {
     let inventory = Inventory {

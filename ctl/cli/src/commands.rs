@@ -7,7 +7,21 @@ use ctmux_cli::{CommandError, ConnectFuture, Connector};
 use std::path::PathBuf;
 use thiserror::Error;
 
+fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
+  let error = match &arguments.command {
+    Command::Setup(_) => CliError::SetupTarget,
+    Command::Skill(_) => CliError::SkillTarget,
+    _ => return Ok(()),
+  };
+  if arguments.host.is_some() || arguments.method.is_some() || arguments.remote_platform.is_some() {
+    Err(error)
+  } else {
+    Ok(())
+  }
+}
+
 pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
+  validate_local_command_target(&arguments)?;
   if arguments.host.is_some() {
     if matches!(arguments.command, Command::Vpn { .. }) {
       return Err(CliError::RemoteVpnUnsupported);
@@ -20,13 +34,11 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     }
   }
   match arguments.command {
+    Command::Setup(setup_arguments) => {
+      crate::setup::run(setup_arguments).await?;
+      return Ok(0);
+    }
     Command::Skill(skill_arguments) => {
-      if arguments.host.is_some()
-        || arguments.method.is_some()
-        || arguments.remote_platform.is_some()
-      {
-        return Err(CliError::SkillTarget);
-      }
       crate::skill::run(skill_arguments)?;
       return Ok(0);
     }
@@ -75,7 +87,11 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     }
     #[cfg(unix)]
     Command::Port { command } => crate::port::run(&connector.settings, command).await?,
-    Command::Skill(_) | Command::Host { .. } | Command::Ssh { .. } | Command::Scp { .. } => {
+    Command::Setup(_)
+    | Command::Skill(_)
+    | Command::Host { .. }
+    | Command::Ssh { .. }
+    | Command::Scp { .. } => {
       unreachable!("commands dispatched before target resolution")
     }
     Command::Ctmux { command } => {
@@ -300,6 +316,10 @@ enum CtlConnectError {
 #[derive(Debug, Error)]
 pub enum CliError {
   #[error(transparent)]
+  Setup(#[from] ctl_client::setup::Error),
+  #[error("Setup installs the local signed helper; omit --host, --method, and --remote-platform.")]
+  SetupTarget,
+  #[error(transparent)]
   Skill(#[from] crate::skill::Error),
   #[error("Skill documentation is bundled locally; omit --host, --method, and --remote-platform.")]
   SkillTarget,
@@ -337,6 +357,20 @@ pub enum CliError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn setup_rejects_remote_routing_before_download_or_connection() {
+    use clap::Parser;
+    for options in [
+      vec!["--host", "work"],
+      vec!["--host", "work", "--method", "ssh"],
+      vec!["--host", "work", "--remote-platform", "windows"],
+    ] {
+      let arguments =
+        Arguments::try_parse_from([vec!["ctl"], options, vec!["setup"]].concat()).unwrap();
+      assert!(matches!(run(arguments).await, Err(CliError::SetupTarget)));
+    }
+  }
 
   #[tokio::test]
   async fn remote_vpn_commands_are_rejected_before_connecting() {

@@ -13,6 +13,7 @@ use crate::identities::{self, IdentitySnapshot, LocalAgent, VerifiedIdentity};
 
 mod agent_proxy;
 mod config;
+mod fallback;
 mod labels;
 mod lazy;
 use agent_proxy::AgentProxy;
@@ -32,6 +33,7 @@ pub(super) struct PreparedIdentities {
   proxy: Option<AgentProxy>,
   public_files: Vec<(String, PathBuf)>,
   fallback_files: Vec<String>,
+  fallbacks: Arc<fallback::Fallbacks>,
 }
 
 pub(super) struct VerifiedPassphrase {
@@ -132,11 +134,11 @@ impl PreparedIdentities {
         )
       })
       .collect();
-    prepared.proxy = AgentProxy::with_identities(
-      lazy::LazyIdentities::new(candidates, connection_context(target)),
+    prepared.start_proxy(
+      candidates,
+      connection_context(target),
       configuration.agent.as_deref(),
-    )
-    .ok();
+    );
     for (snapshot, public_key) in hints {
       prepared.add_public_hint(
         &snapshot,
@@ -145,6 +147,31 @@ impl PreparedIdentities {
       );
     }
     prepared
+  }
+
+  fn start_proxy(
+    &mut self,
+    candidates: Vec<lazy::Candidate>,
+    context: String,
+    existing: Option<&Path>,
+  ) {
+    let candidate_ids: Vec<_> = candidates
+      .iter()
+      .map(|candidate| candidate.snapshot.identity_id.clone())
+      .collect();
+    match AgentProxy::with_identities(
+      lazy::LazyIdentities::new(candidates, context, Arc::clone(&self.fallbacks)),
+      existing,
+    ) {
+      Ok(proxy) => self.proxy = Some(proxy),
+      Err(_) => {
+        for identity_id in candidate_ids {
+          self
+            .fallbacks
+            .record(&identity_id, fallback::Reason::AgentUnavailable);
+        }
+      }
+    }
   }
 
   async fn saved_candidates(&self, reusable_ids: &HashSet<String>) -> Vec<lazy::Candidate> {
@@ -157,12 +184,30 @@ impl PreparedIdentities {
       let selected = Arc::clone(snapshot);
       // This exact metadata/presence check cannot display authentication UI or
       // read a secret. Unsaved/unknown keys keep OpenSSH's native file flow.
-      let Ok(Some(public_key)) =
-        tokio::task::spawn_blocking(move || identities::saved_public_key_hint(&selected)).await
-      else {
-        continue;
+      let hint =
+        tokio::task::spawn_blocking(move || identities::saved_public_key_hint_checked(&selected))
+          .await
+          .map_err(|_| fallback::Reason::WorkerFailed)
+          .and_then(|result| result.map_err(fallback::Reason::Identity))
+          .and_then(|hint| match hint {
+            identities::SavedPublicKeyHint::Available(public_key) => Ok(public_key),
+            identities::SavedPublicKeyHint::Missing => Err(fallback::Reason::NotSaved),
+            identities::SavedPublicKeyHint::Unavailable => {
+              Err(fallback::Reason::PublicHintUnavailable)
+            }
+          });
+      let public_key = match hint {
+        Ok(public_key) => public_key,
+        Err(reason) => {
+          self.fallbacks.record(&snapshot.identity_id, reason);
+          continue;
+        }
       };
       let Some(candidate) = lazy::Candidate::new(Arc::clone(snapshot), public_key) else {
+        self.fallbacks.record(
+          &snapshot.identity_id,
+          fallback::Reason::PublicHintUnavailable,
+        );
         continue;
       };
       if public_keys.insert(candidate.blob.clone()) {
@@ -172,16 +217,47 @@ impl PreparedIdentities {
     candidates
   }
 
+  pub(super) fn fallback_warning(&self, message: &str) -> Option<String> {
+    if !is_key_prompt(message) {
+      return None;
+    }
+    let path = prompt_path(message)?;
+    if let Some(snapshot) = self
+      .snapshots
+      .iter()
+      .find(|snapshot| snapshot.encrypted && path_matches(&path, &snapshot.path))
+    {
+      return self.fallbacks.warning(&snapshot.identity_id);
+    }
+    let mut snapshots = self
+      .snapshots
+      .iter()
+      .filter(|snapshot| snapshot.encrypted && snapshot.path.starts_with(&path));
+    let snapshot = snapshots.next()?;
+    // A truncated path must still uniquely identify one configured identity.
+    if snapshots.next().is_some() {
+      return None;
+    }
+    self.fallbacks.warning(&snapshot.identity_id)
+  }
+
   fn add_public_hint(
     &mut self,
     snapshot: &IdentitySnapshot,
     public_key: &str,
     configured_files: &[(String, String)],
   ) {
-    if snapshot.fingerprint.is_none()
-      && let Some(proxy) = &self.proxy
-      && let Ok(path) = proxy.write_public_key(public_key, self.public_files.len())
-    {
+    if snapshot.fingerprint.is_some() {
+      return;
+    }
+    if let Some(proxy) = &self.proxy {
+      let Ok(path) = proxy.write_public_key(public_key, self.public_files.len()) else {
+        self.fallbacks.record(
+          &snapshot.identity_id,
+          fallback::Reason::PublicHintUnavailable,
+        );
+        return;
+      };
       for (configured, resolved) in configured_files {
         if path_matches(resolved, &snapshot.path) {
           self.public_files.push((configured.clone(), path.clone()));

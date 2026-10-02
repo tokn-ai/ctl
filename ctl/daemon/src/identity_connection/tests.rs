@@ -2,6 +2,73 @@ use super::*;
 use std::fmt::Write as _;
 
 #[test]
+fn fallback_warnings_require_a_prompt_for_one_prepared_encrypted_identity() {
+  struct Fixture(PathBuf);
+  impl Drop for Fixture {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+  let directory =
+    Fixture(std::env::temp_dir().join(format!("ctld-fallback-warning-{}", uuid::Uuid::new_v4())));
+  std::fs::create_dir(&directory.0).unwrap();
+  let mut prepared = PreparedIdentities::default();
+  for name in ["identity", "identity-other", "plain"] {
+    let path = directory.0.join(name);
+    std::fs::write(&path, "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMBcwAwYBKgQQeHh4eHh4eHh4eHh4eHh4eA==\n-----END ENCRYPTED PRIVATE KEY-----\n").unwrap();
+    let mut snapshot = identities::inspect_path(path.to_str().unwrap()).unwrap();
+    snapshot.encrypted = name != "plain";
+    let reason = if name == "identity-other" {
+      fallback::Reason::NotSaved
+    } else {
+      fallback::Reason::Identity(identities::IdentityError::KeychainUnavailable)
+    };
+    prepared.fallbacks.record(&snapshot.identity_id, reason);
+    prepared.snapshots.push(Arc::new(snapshot));
+  }
+  assert!(
+    prepared
+      .fallback_warning("alice@example.test's password:")
+      .is_none()
+  );
+  assert!(
+    prepared
+      .fallback_warning("Enter passphrase for key '/unconfigured/key':")
+      .is_none()
+  );
+  assert!(
+    prepared
+      .fallback_warning("Enter passphrase for key malformed")
+      .is_none()
+  );
+  let prompt = |path: &str| format!("Enter passphrase for key '{path}':");
+  let warning = prepared
+    .fallback_warning(&prompt(&prepared.snapshots[0].path))
+    .unwrap();
+  assert!(warning.contains("Keychain access is unavailable"));
+  assert!(!warning.contains("No usable saved passphrase"));
+  assert!(
+    prepared
+      .fallback_warning(&prompt(&prepared.snapshots[1].path))
+      .unwrap()
+      .contains("No usable saved passphrase")
+  );
+  assert!(
+    prepared
+      .fallback_warning(&prompt(&prepared.snapshots[2].path))
+      .is_none()
+  );
+  let ambiguous = &prepared.snapshots[0].path[..prepared.snapshots[0].path.len() - 1];
+  assert!(prepared.fallback_warning(&prompt(ambiguous)).is_none());
+  prepared.fallbacks.clear(&prepared.snapshots[0].identity_id);
+  assert!(
+    prepared
+      .fallback_warning(&prompt(&prepared.snapshots[0].path))
+      .is_none()
+  );
+}
+
+#[test]
 fn effective_identity_paths_are_bounded_and_unresolved_tokens_are_not_guessed() {
   let configuration = parse_configuration(concat!(
     "hostname example.test\nuser alice\n",
@@ -112,6 +179,7 @@ async fn a_remote_key_prompt_always_requests_user_input_instead_of_keychain_auto
       },
       &mut attempted,
       &mut captured,
+      Some("Keychain access is unavailable.".into()),
     )
     .await
     .unwrap();
@@ -121,11 +189,13 @@ async fn a_remote_key_prompt_always_requests_user_input_instead_of_keychain_auto
   let Some(ctl_ipc::ServerMessage::Prompt {
     prompt_id,
     kind: ctl_ipc::PromptKind::Secret,
+    warning,
     ..
   }) = ctl_ipc::read_frame(&mut client).await.unwrap()
   else {
     panic!("key prompts must ask the user");
   };
+  assert_eq!(warning.as_deref(), Some("Keychain access is unavailable."));
   ctl_ipc::write_frame(
     &mut client,
     &ctl_ipc::ClientMessage::PromptResponse {

@@ -14,10 +14,16 @@ pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
         prompt_id,
         kind,
         message,
+        warning,
       }) => {
-        let response = tokio::task::spawn_blocking(move || prompt(kind, &message))
-          .await
-          .map_err(|_| Error::PromptWorkerStopped)??;
+        let response = tokio::task::spawn_blocking(move || {
+          if let Some(warning) = warning {
+            eprintln!("Warning: {warning}");
+          }
+          prompt(kind, &message)
+        })
+        .await
+        .map_err(|_| Error::PromptWorkerStopped)??;
         ctl_ipc::write_frame(
           &mut stream,
           &ClientMessage::PromptResponse {

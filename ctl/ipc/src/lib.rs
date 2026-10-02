@@ -3,14 +3,18 @@
 pub mod credentials;
 pub mod identities;
 pub mod lifecycle;
+pub mod managed;
 pub mod vpn;
 mod vpn_config;
 pub use vpn_config::{VpnConnection, VpnProvider, VpnSettings};
 
 use std::env;
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -30,8 +34,107 @@ const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 
+/// Lazy discovery and preparation supplied by a daemon client.
+pub type DaemonExecutableFuture = Pin<Box<dyn Future<Output = io::Result<Option<PathBuf>>> + Send>>;
+pub type DaemonExecutableProvider = fn() -> DaemonExecutableFuture;
+
+static DAEMON_PROVIDER: OnceLock<DaemonProvider> = OnceLock::new();
+
+struct DaemonProvider {
+  callback: Box<dyn Fn() -> DaemonExecutableFuture + Send + Sync>,
+  #[cfg(target_os = "macos")]
+  policy: DaemonDiscoveryPolicy,
+  executable: OnceLock<PathBuf>,
+  preparing: tokio::sync::Mutex<()>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DaemonDiscoveryPolicy {
+  DesktopFirst,
+  SharedFirst,
+}
+
+impl DaemonProvider {
+  fn new(callback: impl Fn() -> DaemonExecutableFuture + Send + Sync + 'static) -> Self {
+    Self::with_policy(callback, DaemonDiscoveryPolicy::DesktopFirst)
+  }
+
+  fn with_policy(
+    callback: impl Fn() -> DaemonExecutableFuture + Send + Sync + 'static,
+    policy: DaemonDiscoveryPolicy,
+  ) -> Self {
+    #[cfg(not(target_os = "macos"))]
+    let _ = policy;
+    Self {
+      callback: Box::new(callback),
+      #[cfg(target_os = "macos")]
+      policy,
+      executable: OnceLock::new(),
+      preparing: tokio::sync::Mutex::const_new(()),
+    }
+  }
+
+  async fn prepare(&self) -> io::Result<Option<PathBuf>> {
+    let _preparing = self.preparing.lock().await;
+    if let Some(executable) = self.executable.get() {
+      return Ok(Some(executable.clone()));
+    }
+    let executable = (self.callback)().await?;
+    if let Some(executable) = &executable {
+      let _ = self.executable.set(executable.clone());
+    }
+    Ok(executable)
+  }
+}
+
+/// Registers one process-local provider without preparing or executing a helper.
+/// Existing owners and passive observations do not consult the provider. Clients
+/// must verify their payload before returning an executable; returning `None`
+/// preserves ordinary daemon discovery. A nearby desktop bundle keeps priority.
+/// A successful preparation is reused for this process, while failed or cancelled
+/// preparation can be retried.
+///
+/// # Errors
+/// Returns an error if a provider has already been registered in this process.
+pub fn register_daemon_executable_provider(provider: DaemonExecutableProvider) -> io::Result<()> {
+  register_provider(DaemonProvider::new(provider))
+}
+
+/// Registers standalone CLI discovery before any nearby desktop bundle.
+/// The callback must verify compatibility and trust before returning a shared
+/// installation or preparing its embedded payload. Returning `None` falls back
+/// to a desktop bundle, sibling executable, or PATH; it does not select a managed
+/// installation without the callback's verification. Registration is lazy, so
+/// explicit overrides, existing owners, and passive observations are unaffected.
+///
+/// # Errors
+/// Returns an error if a provider has already been registered in this process.
+pub fn register_standalone_daemon_executable_provider(
+  provider: DaemonExecutableProvider,
+) -> io::Result<()> {
+  register_provider(DaemonProvider::with_policy(
+    provider,
+    DaemonDiscoveryPolicy::SharedFirst,
+  ))
+}
+
+fn register_provider(provider: DaemonProvider) -> io::Result<()> {
+  DAEMON_PROVIDER.set(provider).map_err(|_| {
+    io::Error::new(
+      io::ErrorKind::AlreadyExists,
+      "a ctld provider is already registered",
+    )
+  })
+}
+
 // Version 11 adds saved VPN connection requests and explicit lifecycle states.
 pub const PROTOCOL_VERSION: u16 = 12;
+
+/// Version of the one-shot credential, identity, askpass, and proxy interfaces.
+/// Bump this whenever their arguments, environment variables, request/response
+/// formats, or behavior change incompatibly. Broker and lifecycle protocols are
+/// versioned independently.
+pub const HELPER_API_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,6 +238,26 @@ pub struct SshTarget {
 /// Panics if serialization of the gateway route unexpectedly fails.
 pub fn proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
   let executable = daemon_executable()?;
+  Ok(proxy_command_with_executable(gateways, &executable))
+}
+
+/// Prepares the default helper before creating a fresh SOCKS/VPN SSH route.
+///
+/// # Errors
+/// Returns daemon discovery or bundled-helper preparation failures.
+pub async fn prepare_proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
+  let executable = prepare_daemon_executable().await?;
+  Ok(proxy_command_with_executable(gateways, &executable))
+}
+
+/// Formats a proxy route pinned to an already selected helper executable.
+/// Daemon children use their own executable to keep nested routes on the same
+/// verified helper without repeating discovery or consulting inherited overrides.
+///
+/// # Panics
+/// Panics if serialization of the gateway route unexpectedly fails.
+#[must_use]
+pub fn proxy_command_with_executable(gateways: &[SshGateway], executable: &Path) -> String {
   let executable = executable.to_string_lossy().replace('\'', "'\\''");
   let bytes = serde_json::to_vec(gateways).expect("gateway route is serializable");
   let encoded = bytes
@@ -144,9 +267,7 @@ pub fn proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
       write!(text, "{byte:02x}").expect("writing to a String cannot fail");
       text
     });
-  Ok(format!(
-    "'{executable}' --proxy-route {encoded} --proxy-host %h --proxy-port %p"
-  ))
+  format!("'{executable}' --proxy-route {encoded} --proxy-host %h --proxy-port %p")
 }
 
 impl SshTarget {
@@ -350,6 +471,8 @@ pub enum ServerMessage {
     prompt_id: String,
     kind: PromptKind,
     message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
   },
   MasterReady {
     control_path: PathBuf,
@@ -401,6 +524,8 @@ pub enum ConnectError {
   Connect(#[source] io::Error),
   #[error("could not determine the current executable: {0}")]
   CurrentExecutable(#[source] io::Error),
+  #[error("could not prepare the bundled ctld: {0}")]
+  PrepareDaemon(#[source] io::Error),
   #[error("could not start ctld using {}: {source}", executable.display())]
   StartDaemon {
     executable: PathBuf,
@@ -598,7 +723,7 @@ async fn connect(path: &Path) -> io::Result<Stream> {
 async fn start_daemon(path: &Path, executable: Option<&Path>) -> Result<(), ConnectError> {
   let selected = match executable {
     Some(executable) => executable.to_path_buf(),
-    None => daemon_executable()?,
+    None => prepare_daemon_executable().await?,
   };
   // A staged symlink may change between the protocol query and startup. Pin
   // both launches, and the helper's future children, to the same build.
@@ -662,7 +787,11 @@ fn resolve_executable(selected: &Path) -> io::Result<PathBuf> {
           } else {
             io::ErrorKind::NotFound
           },
-          "ctld was not found as an executable on PATH",
+          if cfg!(target_os = "macos") {
+            "ctld was not found as an executable on PATH; run `ctl setup` to install the signed macOS helper"
+          } else {
+            "ctld was not found as an executable on PATH"
+          },
         )
       })?
   } else {
@@ -681,6 +810,7 @@ async fn check_daemon_protocol(
   command
     .arg("--protocol-version")
     .env_remove("CTLD_ASKPASS")
+    .env_remove("CTLD_IDENTITY_ASKPASS")
     .stdin(Stdio::null())
     .kill_on_drop(true);
   let reported = timeout(query_timeout, command.output())
@@ -723,10 +853,11 @@ fn parse_daemon_protocol(stdout: &[u8]) -> io::Result<u16> {
     })
 }
 
-/// Resolves the daemon executable bundled beside the current client.
+/// Resolves an explicit `CTLD_BIN` override or the default daemon executable.
 ///
 /// # Errors
-/// Returns an error if the current executable path cannot be determined.
+/// Returns an error if the current executable path cannot be determined or a
+/// managed macOS installation is invalid.
 pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
     return Ok(PathBuf::from(executable));
@@ -734,23 +865,153 @@ pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   default_daemon_executable()
 }
 
-/// Resolves the sibling, bundled helper, or PATH daemon without `CTLD_BIN`.
+/// Resolves the selected daemon, lazily discovering or preparing a helper.
+/// Explicit overrides retain priority. Desktop clients prefer their signed
+/// bundle; standalone providers verify shared installations first. On macOS,
+/// unsafe managed selections fail before provider preparation. This function
+/// never starts or stops a daemon.
 ///
 /// # Errors
-/// Returns an error if the current executable path cannot be determined.
-pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
+/// Returns discovery, unsafe managed selection, or provider preparation errors.
+pub async fn prepare_daemon_executable() -> Result<PathBuf, ConnectError> {
+  if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
+    return Ok(PathBuf::from(executable));
+  }
   let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
-  let sibling = current_executable.with_file_name(format!("ctld{}", env::consts::EXE_SUFFIX));
-  if sibling.is_file() {
-    return Ok(sibling);
+  prepare_default_daemon(
+    &current_executable,
+    dirs::home_dir().as_deref(),
+    DAEMON_PROVIDER.get(),
+  )
+  .await
+}
+
+async fn prepare_default_daemon(
+  current_executable: &Path,
+  home: Option<&Path>,
+  provider: Option<&DaemonProvider>,
+) -> Result<PathBuf, ConnectError> {
+  #[cfg(target_os = "macos")]
+  {
+    if !shared_first(provider)
+      && let Some(helper) = bundled_macos_daemon(current_executable)
+      && helper.is_file()
+    {
+      return Ok(helper);
+    }
+    validate_managed_selection(home)?;
+  }
+  if let Some(provider) = provider
+    && let Some(executable) = provider
+      .prepare()
+      .await
+      .map_err(ConnectError::PrepareDaemon)?
+  {
+    return Ok(executable);
   }
   #[cfg(target_os = "macos")]
-  if let Some(helper) = bundled_macos_daemon(&current_executable)
+  {
+    default_macos_daemon(current_executable, home, provider)
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = home;
+    Ok(sibling_or_path_daemon(current_executable))
+  }
+}
+
+/// Resolves a bundled, managed, sibling, or PATH daemon without `CTLD_BIN`.
+/// On macOS, standalone providers' already verified helper takes priority over
+/// nearby desktop bundles. This synchronous resolver never calls the provider
+/// or selects unverified shared installations for standalone clients. Desktop
+/// clients retain bundle-first discovery. Loose executables remain available.
+///
+/// # Errors
+/// Returns an error if the current executable path cannot be determined or a
+/// managed macOS installation is invalid.
+pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
+  let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
+  #[cfg(target_os = "macos")]
+  {
+    default_macos_daemon(
+      &current_executable,
+      dirs::home_dir().as_deref(),
+      DAEMON_PROVIDER.get(),
+    )
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    if let Some(executable) = prepared_daemon(DAEMON_PROVIDER.get()) {
+      return Ok(executable);
+    }
+    Ok(sibling_or_path_daemon(&current_executable))
+  }
+}
+
+fn prepared_daemon(provider: Option<&DaemonProvider>) -> Option<PathBuf> {
+  provider
+    .and_then(|provider| provider.executable.get())
+    .cloned()
+}
+
+#[cfg(target_os = "macos")]
+fn shared_first(provider: Option<&DaemonProvider>) -> bool {
+  provider.is_some_and(|provider| provider.policy == DaemonDiscoveryPolicy::SharedFirst)
+}
+
+fn sibling_or_path_daemon(current_executable: &Path) -> PathBuf {
+  let sibling = current_executable.with_file_name(format!("ctld{}", env::consts::EXE_SUFFIX));
+  if sibling.is_file() {
+    return sibling;
+  }
+  PathBuf::from(format!("ctld{}", env::consts::EXE_SUFFIX))
+}
+
+#[cfg(target_os = "macos")]
+fn default_macos_daemon(
+  current_executable: &Path,
+  home: Option<&Path>,
+  provider: Option<&DaemonProvider>,
+) -> Result<PathBuf, ConnectError> {
+  if shared_first(provider) {
+    validate_managed_selection(home)?;
+    if let Some(executable) = prepared_daemon(provider) {
+      return Ok(executable);
+    }
+  }
+  if let Some(helper) = bundled_macos_daemon(current_executable)
     && helper.is_file()
   {
     return Ok(helper);
   }
-  Ok(PathBuf::from(format!("ctld{}", env::consts::EXE_SUFFIX)))
+  if shared_first(provider) {
+    return Ok(sibling_or_path_daemon(current_executable));
+  }
+  validate_managed_selection(home)?;
+  if let Some(executable) = prepared_daemon(provider) {
+    return Ok(executable);
+  }
+  if let Some(home) = home
+    && let Some(helper) =
+      managed::resolve_executable(home).map_err(|source| ConnectError::StartDaemon {
+        executable: managed::executable(home),
+        source,
+      })?
+  {
+    return Ok(helper);
+  }
+  Ok(sibling_or_path_daemon(current_executable))
+}
+
+#[cfg(target_os = "macos")]
+fn validate_managed_selection(home: Option<&Path>) -> Result<(), ConnectError> {
+  if let Some(home) = home {
+    managed::validate_current_selection(home).map_err(|source| ConnectError::StartDaemon {
+      executable: managed::executable(home),
+      source,
+    })?;
+  }
+  Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -769,6 +1030,40 @@ fn retryable_connect_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn prompt_warnings_are_optional_for_existing_protocol_clients() {
+    #[derive(serde::Deserialize)]
+    struct LegacyPrompt {
+      prompt_id: String,
+      kind: PromptKind,
+      message: String,
+    }
+
+    let legacy = serde_json::json!({
+      "type": "prompt", "prompt_id": "one", "kind": "secret", "message": "Passphrase:"
+    });
+    let prompt: ServerMessage = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(
+      &prompt,
+      ServerMessage::Prompt { warning: None, .. }
+    ));
+    assert_eq!(serde_json::to_value(prompt).unwrap(), legacy);
+
+    let mut warned = legacy.clone();
+    warned["warning"] = "Keychain access is unavailable.".into();
+    let prompt: ServerMessage = serde_json::from_value(warned.clone()).unwrap();
+    assert!(
+      matches!(&prompt, ServerMessage::Prompt { warning: Some(value), .. }
+      if value == "Keychain access is unavailable.")
+    );
+    assert_eq!(serde_json::to_value(prompt).unwrap(), warned);
+
+    let old: LegacyPrompt = serde_json::from_value(warned).unwrap();
+    assert_eq!(old.prompt_id, "one");
+    assert!(matches!(old.kind, PromptKind::Secret));
+    assert_eq!(old.message, "Passphrase:");
+  }
 
   #[test]
   fn existing_gateway_json_remains_unchanged_and_vpn_references_are_strict() {
@@ -946,6 +1241,44 @@ mod tests {
   async fn protocol_probe_accepts_matching_helper() {
     let fixture = ProtocolFixture::new(&format!("printf '%s\\n' {PROTOCOL_VERSION}")).await;
     check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
+      .await
+      .unwrap();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn protocol_probe_ignores_inherited_askpass_modes() {
+    let fixture = ProtocolFixture::new(&format!(
+      "[ \"${{CTLD_ASKPASS:-}}\" != 1 ]\n[ \"${{CTLD_IDENTITY_ASKPASS:-}}\" != 1 ]\nprintf '%s\\n' {PROTOCOL_VERSION}"
+    ))
+    .await;
+    let mut child = tokio::process::Command::new(env::current_exe().unwrap());
+    child
+      .args([
+        "--exact",
+        "tests::protocol_probe_environment_child",
+        "--nocapture",
+      ])
+      .env("CTLD_PROTOCOL_TEST_EXECUTABLE", &fixture.executable)
+      .env("CTLD_ASKPASS", "1")
+      .env("CTLD_IDENTITY_ASKPASS", "1")
+      .kill_on_drop(true);
+    let output = timeout(Duration::from_secs(5), child.output())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn protocol_probe_environment_child() {
+    let Some(executable) = env::var_os("CTLD_PROTOCOL_TEST_EXECUTABLE") else {
+      return;
+    };
+    assert_eq!(env::var("CTLD_ASKPASS").unwrap(), "1");
+    assert_eq!(env::var("CTLD_IDENTITY_ASKPASS").unwrap(), "1");
+    check_daemon_protocol(&PathBuf::from(executable), PROTOCOL_QUERY_TIMEOUT)
       .await
       .unwrap();
   }
@@ -1146,6 +1479,79 @@ mod tests {
     );
   }
 
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn signed_managed_helper_has_priority_over_loose_daemons_and_invalid_selection_fails() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+      fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+      }
+    }
+    let fixture = Fixture(env::temp_dir().join(format!(
+      "ctld-discovery-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    )));
+    std::fs::create_dir(&fixture.0).unwrap();
+    std::fs::set_permissions(&fixture.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let current_executable = fixture.0.join("ctl");
+    assert_eq!(
+      default_macos_daemon(&current_executable, Some(&fixture.0), None).unwrap(),
+      PathBuf::from("ctld")
+    );
+    let sibling = fixture.0.join("ctld");
+    std::fs::write(&sibling, "source-built helper").unwrap();
+    assert_eq!(
+      default_macos_daemon(&current_executable, Some(&fixture.0), None).unwrap(),
+      sibling
+    );
+
+    let directory = managed::ensure_component_directory(&fixture.0).unwrap();
+    let selection = "versions/0.1.0-aarch64-apple-darwin";
+    let contents = directory.join(selection).join("ctld.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::create_dir(contents.join("_CodeSignature")).unwrap();
+    for resource in [
+      "Info.plist",
+      "embedded.provisionprofile",
+      "_CodeSignature/CodeResources",
+      "CodeResources",
+      "MacOS/ctld",
+    ] {
+      std::fs::write(contents.join(resource), "signed helper").unwrap();
+    }
+    let managed_helper = contents.join("MacOS/ctld");
+    std::fs::set_permissions(&managed_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(selection, directory.join("current")).unwrap();
+    assert_eq!(
+      default_macos_daemon(&current_executable, Some(&fixture.0), None).unwrap(),
+      managed_helper.canonicalize().unwrap()
+    );
+    std::fs::remove_file(directory.join("current")).unwrap();
+    symlink("../outside", directory.join("current")).unwrap();
+    assert!(matches!(
+      default_macos_daemon(&current_executable, Some(&fixture.0), None),
+      Err(ConnectError::StartDaemon { .. })
+    ));
+
+    let desktop_executable = fixture.0.join("ctmux.app/Contents/MacOS/ctmux");
+    let bundled = bundled_macos_daemon(&desktop_executable).unwrap();
+    std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(desktop_executable.parent().unwrap()).unwrap();
+    std::fs::write(desktop_executable.with_file_name("ctld"), "loose helper").unwrap();
+    std::fs::write(&bundled, "desktop helper").unwrap();
+    assert_eq!(
+      default_macos_daemon(&desktop_executable, Some(&fixture.0), None).unwrap(),
+      bundled
+    );
+  }
+
   #[tokio::test]
   async fn frames_round_trip_secret_responses() {
     let (mut writer, mut reader) = tokio::io::duplex(1024);
@@ -1183,3 +1589,6 @@ mod tests {
     ));
   }
 }
+
+#[cfg(all(test, unix))]
+mod provider_tests;

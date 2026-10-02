@@ -1,9 +1,11 @@
+mod bundled;
 mod commands;
 mod connection;
 mod host;
 mod openssh;
 #[cfg(unix)]
 mod port;
+mod setup;
 mod skill;
 #[cfg(unix)]
 mod ssh_broker;
@@ -46,6 +48,8 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Install and verify this CLI's signed macOS ctld helper, without restarting it.
+  Setup(setup::Arguments),
   /// Print bundled agent skills and supporting guides without connecting.
   Skill(skill::Arguments),
   /// Manage saved hosts and inspect their connection status.
@@ -118,6 +122,10 @@ enum TaskdCommand {
 
 #[tokio::main]
 async fn main() {
+  if let Err(error) = bundled::register() {
+    eprintln!("ctl: {error}");
+    std::process::exit(1);
+  }
   let result = if std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some() {
     openssh::run_ssh(
       std::env::args_os().skip(1).collect(),
@@ -140,6 +148,19 @@ async fn main() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn setup_accepts_json_and_never_accepts_unsigned_source_overrides() {
+    for options in [vec!["ctl", "setup"], vec!["ctl", "setup", "--json"]] {
+      assert!(matches!(
+        Arguments::try_parse_from(options).unwrap().command,
+        Command::Setup(_)
+      ));
+    }
+    for option in ["--url", "--version", "--unsigned", "--restart"] {
+      assert!(Arguments::try_parse_from(["ctl", "setup", option]).is_err());
+    }
+  }
 
   #[test]
   fn vpn_start_uses_a_local_env_file_and_exposes_list_and_stop() {

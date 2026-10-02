@@ -29,6 +29,7 @@ pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_BINDINGS: usize = 16;
 const MAX_BINDING_BYTES: usize = 128 * 1024;
 
+use super::fallback::Reason;
 use super::lazy::LazyIdentities;
 
 pub(super) struct AgentProxy {
@@ -351,17 +352,23 @@ impl ClientIdentities {
     }
     if !self.peers.contains_key(key) {
       let socket = registry.agent_for(key).await?;
-      let mut peer = connect(&socket).await?;
+      let Some(mut peer) = connect(&socket).await else {
+        registry.record_failure(key, Reason::AgentUnavailable);
+        return None;
+      };
       for binding in &self.bindings {
-        if peer.request(binding).await.ok()?.as_slice() != [SUCCESS] {
+        if peer.request(binding).await.ok().as_deref() != Some(&[SUCCESS]) {
+          registry.record_failure(key, Reason::AgentUnavailable);
           return None;
         }
       }
-      let listed = peer.request(&[REQUEST_IDENTITIES]).await.ok()?;
-      if !parse_identities(&listed)?
-        .iter()
-        .any(|(public, _)| public == key)
-      {
+      let listed = peer
+        .request(&[REQUEST_IDENTITIES])
+        .await
+        .ok()
+        .and_then(|listed| parse_identities(&listed));
+      if !listed.is_some_and(|listed| listed.iter().any(|(public, _)| public == key)) {
+        registry.record_failure(key, Reason::AgentUnavailable);
         return None;
       }
       self.peers.insert(key.to_vec(), peer);
@@ -369,8 +376,17 @@ impl ClientIdentities {
     if registry.is_canceled() {
       return None;
     }
-    let response = self.peers.get_mut(key)?.request(request).await.ok()?;
-    (!registry.is_canceled() && response.first() == Some(&SIGN_RESPONSE)).then_some(response)
+    let response = self.peers.get_mut(key)?.request(request).await.ok();
+    if registry.is_canceled() {
+      return None;
+    }
+    if let Some(response) = response
+      && response.first() == Some(&SIGN_RESPONSE)
+    {
+      return Some(response);
+    }
+    registry.record_failure(key, Reason::AgentUnavailable);
+    None
   }
 }
 

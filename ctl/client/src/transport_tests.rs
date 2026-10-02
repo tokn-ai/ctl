@@ -8,6 +8,132 @@ use tokio::time::timeout;
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[cfg(unix)]
+#[tokio::test]
+async fn fresh_proxy_routes_propagate_preparation_failure_before_starting_ssh() {
+  use std::os::unix::fs::PermissionsExt as _;
+  struct Cleanup(PathBuf);
+  impl Drop for Cleanup {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+  let directory = std::env::temp_dir().join(format!("ctl-proxy-provider-{}", uuid::Uuid::new_v4()));
+  std::fs::create_dir(&directory).unwrap();
+  std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let _cleanup = Cleanup(directory.clone());
+  let output = timeout(
+    TEST_TIMEOUT,
+    Command::new(std::env::current_exe().unwrap())
+      .args([
+        "--exact",
+        "transport_tests::proxy_preparation_child",
+        "--nocapture",
+      ])
+      .env("CTL_PROXY_PROVIDER_TEST", "true")
+      .env("HOME", &directory)
+      .env_remove("CTLD_BIN")
+      .kill_on_drop(true)
+      .output(),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert!(output.status.success(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn proxy_preparation_child() {
+  use std::sync::atomic::AtomicUsize;
+  static CALLS: AtomicUsize = AtomicUsize::new(0);
+  fn failing_provider() -> ctl_ipc::DaemonExecutableFuture {
+    CALLS.fetch_add(1, Ordering::Relaxed);
+    Box::pin(async {
+      Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "bundled signature rejected",
+      ))
+    })
+  }
+  if std::env::var_os("CTL_PROXY_PROVIDER_TEST").is_none() {
+    return;
+  }
+  let rejected = |error| {
+    assert!(!is_retryable_connection_error(&error));
+    assert!(
+      matches!(error, CoreError::LocalConnection(ctl_ipc::ConnectError::PrepareDaemon(source)) if source.kind() == io::ErrorKind::PermissionDenied)
+    );
+  };
+  ctl_ipc::register_daemon_executable_provider(failing_provider).unwrap();
+  let mut options = SshConnectionOptions {
+    gateways: vec![loopback_gateway(1080)],
+    ..SshConnectionOptions::default()
+  };
+  prepare_ssh_base_arguments("fixture", &options, &SshInteraction::Inherit)
+    .await
+    .unwrap();
+  options.gateways[0].kind = ctl_ipc::GatewayKind::Socks5;
+  let multiplexed = SshInteraction::Multiplexed {
+    control_path: PathBuf::from("/tmp/absent-master"),
+  };
+  let arguments = prepare_ssh_base_arguments("fixture", &options, &multiplexed)
+    .await
+    .unwrap();
+  assert!(
+    !arguments
+      .iter()
+      .any(|argument| argument.to_string_lossy().starts_with("ProxyCommand="))
+  );
+  assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+
+  rejected(
+    open_ssh_service_interactive(
+      "fixture",
+      &options,
+      &SshInteraction::Inherit,
+      RemoteService::Ctmux,
+    )
+    .await
+    .err()
+    .unwrap(),
+  );
+  rejected(
+    open_identified_ssh_service(
+      "fixture",
+      &options,
+      &SshInteraction::Inherit,
+      RemoteService::Task,
+    )
+    .await
+    .err()
+    .unwrap(),
+  );
+  rejected(
+    open_identified_ssh_service_after_authentication(
+      "fixture",
+      &options,
+      &SshInteraction::Inherit,
+      RemoteService::Ctmux,
+      ready(()),
+    )
+    .await
+    .err()
+    .unwrap(),
+  );
+  rejected(
+    run_ssh_command_interactive("fixture", &options, &SshInteraction::Inherit, "true", &[])
+      .await
+      .unwrap_err(),
+  );
+  rejected(
+    install_ssh_unix_agent_interactive("fixture", &options, &SshInteraction::Inherit, "test", &[])
+      .await
+      .unwrap_err(),
+  );
+  assert_eq!(CALLS.load(Ordering::Relaxed), 5);
+}
+
+#[cfg(unix)]
 fn loopback_gateway(port: u16) -> SshGateway {
   SshGateway {
     kind: ctl_ipc::GatewayKind::Ssh,
@@ -22,7 +148,7 @@ fn loopback_gateway(port: u16) -> SshGateway {
 }
 
 #[cfg(unix)]
-fn multiplexed_ssh_command(options: &SshConnectionOptions, control_path: PathBuf) -> Command {
+async fn multiplexed_ssh_command(options: &SshConnectionOptions, control_path: PathBuf) -> Command {
   let mut command = Command::new(SSH_PROGRAM);
   // Isolate the real OpenSSH client from personal configuration and credentials.
   command.args(["-F", "/dev/null", "-o", "ConnectTimeout=1"]);
@@ -30,7 +156,11 @@ fn multiplexed_ssh_command(options: &SshConnectionOptions, control_path: PathBuf
   let extra = configure_ssh_interaction(&mut command, &interaction);
   command
     .args(extra)
-    .args(ssh_base_arguments("fixture", options))
+    .args(
+      prepare_ssh_base_arguments("fixture", options, &interaction)
+        .await
+        .unwrap(),
+    )
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -62,7 +192,7 @@ async fn multiplexed_missing_master_never_contacts_the_host_or_gateway() {
     };
     let path = PathBuf::from(format!("/tmp/ctl-mux-{}", uuid::Uuid::new_v4().simple()));
     assert!(!path.exists());
-    let mut command = multiplexed_ssh_command(&options, path);
+    let mut command = multiplexed_ssh_command(&options, path).await;
     command.arg("true");
     let output = tokio::select! {
       biased;
@@ -101,7 +231,11 @@ async fn openssh_gateway_options_preserve_master_only_precedence() {
       );
       command.args(extra);
     }
-    command.args(ssh_base_arguments("fixture", &options));
+    command.args(
+      prepare_ssh_base_arguments("fixture", &options, &SshInteraction::Inherit)
+        .await
+        .unwrap(),
+    );
     let output = command.output().await.unwrap();
     assert!(
       output.status.success(),

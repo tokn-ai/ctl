@@ -43,7 +43,13 @@ async fn prompt_responses_are_window_scoped_single_use_and_cancellable() {
   let guard = AttemptGuard(key.clone());
   let mut cancelled = context.attempt.cancel.subscribe();
   let task = tokio::spawn(async move {
-    request_response(Some(&context), SshPromptKind::Secret, "Password:".into()).await
+    request_response(
+      Some(&context),
+      SshPromptKind::Secret,
+      "Password:".into(),
+      Some("No saved password is available.".into()),
+    )
+    .await
   });
   let prompt = timeout(Duration::from_secs(5), prompts.recv())
     .await
@@ -51,6 +57,7 @@ async fn prompt_responses_are_window_scoped_single_use_and_cancellable() {
     .unwrap();
   let prompt_id = prompt["prompt_id"].as_str().unwrap();
   assert_eq!(prompt["kind"], "secret");
+  assert_eq!(prompt["warning"], "No saved password is available.");
   assert!(
     respond(
       "other-window",
@@ -82,6 +89,7 @@ async fn credential_save_choices_use_the_prompt_channel_without_sending_a_secret
       Some(&context),
       SshPromptKind::CredentialSave,
       "Save this SSH credential?".into(),
+      None,
     )
     .await
   });

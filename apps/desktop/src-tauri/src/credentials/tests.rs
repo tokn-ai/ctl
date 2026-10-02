@@ -417,6 +417,7 @@ async fn helper_output_and_lifetime_are_bounded() {
 fn known_helper_errors_preserve_actionable_categories_without_raw_messages() {
   for code in [
     "credential_store_unavailable",
+    "credential_store_missing_entitlement",
     "credential_store_locked",
     "credential_forget_failed",
   ] {

@@ -10,8 +10,8 @@ use super::Error;
 use crate::credential_metadata::{self, Attributes, SERVICE_PREFIX};
 use crate::identities::SavedIdentity;
 
-const SERVICE: &str = "dev.tokn-ai.ctl.ctld.metadata";
-const MARKER: &str = "import-complete";
+pub(super) const SERVICE: &str = "dev.tokn-ai.ctl.ctld.metadata";
+pub(super) const MARKER: &str = "import-complete";
 const PENDING_PREFIX: &str = "pending:";
 const MAX_ITEMS: usize = 8192;
 const MAX_COMMENT_BYTES: usize = 32 * 1024;

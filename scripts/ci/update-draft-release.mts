@@ -23,6 +23,7 @@ const remoteTargets = [
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ] as const;
+const ctldTargets = ["x86_64-apple-darwin", "aarch64-apple-darwin"] as const;
 
 export interface BundleIdentity {
   app_version: string;
@@ -34,6 +35,8 @@ export interface ReleaseBundle extends BundleIdentity {
   asset_directory: string;
   asset_names: string[];
   unsigned_targets: string[];
+  signed_ctld_targets: string[];
+  bundled_cli_targets: string[];
 }
 
 interface ReleaseAsset {
@@ -125,6 +128,8 @@ export async function validateReleaseBundle(
   const directory = resolve(asset_directory);
   const assetNames = new Set<string>();
   const unsignedTargets: string[] = [];
+  const signedCtldTargets: string[] = [];
+  const bundledCliTargets: string[] = [];
   const addNames = (names: string[]): void => {
     for (const name of names) {
       if (assetNames.has(name)) {
@@ -195,6 +200,74 @@ export async function validateReleaseBundle(
       addNames(await validateAsset(directory, asset.name, asset.sha256));
     }
   }
+  // Main builds may omit standalone helpers and bundled CLIs. Any component
+  // upload must be a complete pair; version builds require both signed pairs.
+  const names = await readdir(directory);
+  const ctldPresent = ctldTargets.some((target) => names.includes(`ctld-${target}.json`));
+  const cliPresent = ctldTargets.some((target) => names.includes(`ctl-cli-${target}.json`));
+  const versionBuild = identity.bundle_id === identity.app_version;
+  if (versionBuild && unsignedTargets.length > 0) {
+    throw new Error("Version releases require signed macOS desktop packages");
+  }
+  let ctldTeam: string | undefined;
+  const ctldManifests = new Map<string, Record<string, unknown>>();
+  if (ctldPresent || cliPresent || versionBuild) {
+    for (const target of ctldTargets) {
+      const manifestName = `ctld-${target}.json`;
+      const manifest = await readJson(directory, manifestName);
+      if (
+        manifest.schema_version !== 1 || manifest.component !== "ctld" ||
+        manifest.app_version !== identity.app_version || manifest.bundle_id !== identity.bundle_id ||
+        manifest.git_revision !== identity.git_revision || manifest.target !== target ||
+        manifest.bundle_identifier !== "dev.tokn-ai.ctl.ctld" ||
+        typeof manifest.team_identifier !== "string" || !/^[A-Z0-9]{10}$/.test(manifest.team_identifier) ||
+        manifest.signing_mode !== "signed" || manifest.notarized !== true ||
+        manifest.archive !== `ctld-${identity.bundle_id}-${target}.app.tar.gz` ||
+        !Number.isSafeInteger(manifest.archive_size) || (manifest.archive_size as number) <= 0 ||
+        (manifest.archive_size as number) > 128 * 1024 * 1024
+      ) {
+        throw new Error(`Invalid signed and notarized ctld manifest or build identity: ${manifestName}`);
+      }
+      if (ctldTeam !== undefined && manifest.team_identifier !== ctldTeam) {
+        throw new Error("Standalone ctld targets must use the same Apple team identity");
+      }
+      ctldTeam = manifest.team_identifier;
+      const archive = await requireFile(directory, manifest.archive);
+      if ((await lstat(archive)).size !== manifest.archive_size) {
+        throw new Error(`ctld archive size mismatch: ${manifest.archive}`);
+      }
+      addNames([manifestName]);
+      addNames(await validateAsset(directory, manifest.archive, manifest.sha256));
+      signedCtldTargets.push(target);
+      ctldManifests.set(target, manifest);
+    }
+  }
+  if (cliPresent || versionBuild) {
+    for (const target of ctldTargets) {
+      const manifestName = `ctl-cli-${target}.json`;
+      const manifest = await readJson(directory, manifestName);
+      const ctldManifest = ctldManifests.get(target);
+      if (
+        manifest.schema_version !== 1 || manifest.component !== "ctl-cli" ||
+        manifest.app_version !== identity.app_version || manifest.bundle_id !== identity.bundle_id ||
+        manifest.git_revision !== identity.git_revision || manifest.target !== target ||
+        !ctldManifest || manifest.team_identifier !== ctldManifest.team_identifier ||
+        manifest.signing_mode !== "signed" || manifest.notarized !== true ||
+        manifest.bundled_ctld_sha256 !== ctldManifest.sha256 ||
+        manifest.archive !== `ctl-${identity.bundle_id}-${target}.tar.gz` ||
+        !Number.isSafeInteger(manifest.archive_size) || (manifest.archive_size as number) <= 0
+      ) {
+        throw new Error(`Invalid signed and notarized ctl CLI manifest or matching helper identity: ${manifestName}`);
+      }
+      const archive = await requireFile(directory, manifest.archive);
+      if ((await lstat(archive)).size !== manifest.archive_size) {
+        throw new Error(`ctl CLI archive size mismatch: ${manifest.archive}`);
+      }
+      addNames([manifestName]);
+      addNames(await validateAsset(directory, manifest.archive, manifest.sha256));
+      bundledCliTargets.push(target);
+    }
+  }
   for (const name of await readdir(directory)) {
     if (!assetNames.has(name)) {
       throw new Error(`Unexpected file in release asset directory: ${name}`);
@@ -205,6 +278,8 @@ export async function validateReleaseBundle(
     asset_directory: directory,
     asset_names: [...assetNames].sort(),
     unsigned_targets: unsignedTargets,
+    signed_ctld_targets: signedCtldTargets,
+    bundled_cli_targets: bundledCliTargets,
   };
 }
 
@@ -217,6 +292,12 @@ export function releaseNotes(bundle: ReleaseBundle, previous: string | null): st
     "Contains Linux and macOS desktop packages for Intel/AMD and ARM64, plus matching remote-agent bundles.",
     "Each package includes a SHA-256 checksum file. Build manifests record the package hashes and source revision.",
   ];
+  if (bundle.signed_ctld_targets.length > 0) {
+    lines.push("Includes standalone Developer ID signed, notarized, and stapled ctld.app bundles for both macOS architectures.");
+  }
+  if (bundle.bundled_cli_targets.length > 0) {
+    lines.push("Includes Developer ID signed and notarized ctl CLI archives for both macOS architectures, with the matching ctld helper embedded for offline setup.");
+  }
   if (bundle.unsigned_targets.length > 0) {
     lines.push(
       "",

@@ -1,13 +1,51 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { copyFile, lstat, mkdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { fixture, packages, running, startExternal, starts, stopFixture, supervisor, unixOnly, waitReady, writeHelper } from "./signed-daemon.fixtures.mts";
+import { SignedDaemon } from "./signed-daemon.mts";
 
 const execFile = promisify(execFileCallback);
+
+test("Tauri development packaging explicitly disables inherited release timestamp policy", unixOnly, async (context) => {
+  const data = await fixture(context);
+  const script = path.join(data.root, "scripts/ci/package-ctld-app.sh");
+  const environment_log = path.join(data.root, "packaging-environment.json");
+  await writeFile(script, `#!${process.execPath}
+const fs = require("node:fs");
+const path = require("node:path");
+fs.writeFileSync(${JSON.stringify(environment_log)}, JSON.stringify({
+  timestamp: process.env.CTLD_SIGNING_TIMESTAMP,
+  distribution: process.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING,
+  profile: fs.readFileSync(process.env.CTLD_PROVISIONING_PROFILE, "utf8")
+}));
+const executable = path.join(process.argv[3], "Contents/MacOS/ctld");
+fs.mkdirSync(path.dirname(executable), { recursive: true });
+fs.copyFileSync(process.argv[2], executable);
+`);
+  await chmod(script, 0o700);
+  await data.supervisor.close();
+  data.supervisor = new SignedDaemon(data.config, { startup_timeout_ms: 800, shutdown_timeout_ms: 200 });
+  const previous_timestamp = process.env.CTLD_SIGNING_TIMESTAMP;
+  const previous_distribution = process.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING;
+  process.env.CTLD_SIGNING_TIMESTAMP = "secure";
+  process.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING = "true";
+  try {
+    await data.supervisor.prepare(data.executable);
+  } finally {
+    if (previous_timestamp === undefined) delete process.env.CTLD_SIGNING_TIMESTAMP;
+    else process.env.CTLD_SIGNING_TIMESTAMP = previous_timestamp;
+    if (previous_distribution === undefined) delete process.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING;
+    else process.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING = previous_distribution;
+  }
+  assert.deepEqual(JSON.parse(await readFile(environment_log, "utf8")), {
+    timestamp: "none", distribution: "false", profile: "test provisioning profile",
+  });
+  await waitReady(data, 5);
+});
 
 test("reuses a signed daemon across reloads and fresh supervisors", unixOnly, async (context) => {
   const data = await fixture(context);

@@ -165,7 +165,7 @@ impl Client {
   pub async fn available(&self) -> Result<AvailableDaemon, LifecycleError> {
     let selected = match &self.executable {
       Some(path) => path.clone(),
-      None => crate::daemon_executable()?,
+      None => crate::prepare_daemon_executable().await?,
     };
     let executable = crate::resolve_executable(&selected).map_err(|error| {
       if selected.components().count() == 1 && error.kind() == io::ErrorKind::NotFound {

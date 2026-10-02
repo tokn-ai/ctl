@@ -38,6 +38,24 @@ case "$app_version" in
 esac
 
 provisioning_profile=${CTLD_PROVISIONING_PROFILE:-}
+require_distribution_signing=${CTLD_REQUIRE_DISTRIBUTION_SIGNING:-false}
+signing_timestamp=${CTLD_SIGNING_TIMESTAMP:-secure}
+case "$signing_timestamp" in
+  secure) timestamp_argument=--timestamp ;;
+  none) timestamp_argument=--timestamp=none ;;
+  *)
+    echo "CTLD_SIGNING_TIMESTAMP must be secure or none" >&2
+    exit 2
+    ;;
+esac
+if [ "$require_distribution_signing" = true ] && [ "$signing_timestamp" = none ]; then
+  echo "distribution ctld signing requires a secure timestamp" >&2
+  exit 1
+fi
+if [ "$require_distribution_signing" = true ] && [ -z "$provisioning_profile" ]; then
+  echo "a distribution provisioning profile is required for standalone ctld releases" >&2
+  exit 1
+fi
 
 staging_directory=$(mktemp -d "${TMPDIR:-/tmp}/ctld-app.XXXXXX")
 trap 'rm -rf "$staging_directory"' EXIT HUP INT TERM
@@ -72,21 +90,41 @@ if [ -n "$provisioning_profile" ]; then
     exit 1
   fi
   case "$team_identifier" in
-    *[!a-zA-Z0-9]*|'')
+    *[!A-Z0-9]*|'')
       echo "ctld profile contains an invalid team identifier" >&2
       exit 1
       ;;
   esac
+  if [ "${#team_identifier}" -ne 10 ]; then
+    echo "ctld profile team identifier must contain 10 uppercase letters or digits" >&2
+    exit 1
+  fi
 
   get_task_allow=$(
     /usr/libexec/PlistBuddy \
       -c 'Print :Entitlements:get-task-allow' \
       "$decoded_profile" 2>/dev/null || printf 'false\n'
   )
+  if [ "$require_distribution_signing" = true ]; then
+    provisions_all_devices=$(
+      /usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' \
+        "$decoded_profile" 2>/dev/null || printf 'false\n'
+    )
+    security_get_task_allow=$(
+      /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.security.get-task-allow' \
+        "$decoded_profile" 2>/dev/null || printf 'false\n'
+    )
+    if [ "$provisions_all_devices" != true ] || [ "$get_task_allow" != false ] ||
+      [ "$security_get_task_allow" != false ]; then
+      echo "standalone ctld requires a Developer ID distribution profile without get-task-allow" >&2
+      exit 1
+    fi
+  fi
   signing_identity=
   valid_signing_identities=$(
     security find-identity -v -p codesigning |
-      awk '/^[[:space:]]*[0-9]+\)/ { print $2 }'
+      awk -v distribution="$require_distribution_signing" \
+        '/^[[:space:]]*[0-9]+\)/ && (distribution != "true" || /"Developer ID Application:/) { print $2 }'
   )
   certificate_index=0
   while certificate_base64=$(
@@ -114,23 +152,18 @@ if [ -n "$provisioning_profile" ]; then
     -e "s/@TEAM_IDENTIFIER@/$team_identifier/g" \
     "$template_directory/Entitlements.plist" > "$entitlements"
   plutil -lint "$entitlements" >/dev/null
-  if [ "$get_task_allow" = true ]; then
-    codesign \
-      --force \
-      --options runtime \
-      --entitlements "$entitlements" \
-      --sign "$signing_identity" \
-      "$staged_app"
-  else
-    codesign \
-      --force \
-      --options runtime \
-      --timestamp \
-      --entitlements "$entitlements" \
-      --sign "$signing_identity" \
-      "$staged_app"
-  fi
+  codesign \
+    --force \
+    --options runtime \
+    "$timestamp_argument" \
+    --entitlements "$entitlements" \
+    --sign "$signing_identity" \
+    "$staged_app"
   codesign --verify --strict --verbose=2 "$staged_app"
+  if [ "$require_distribution_signing" = true ]; then
+    requirement="=anchor apple generic and identifier \"$bundle_identifier\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team_identifier\""
+    codesign --verify --strict --test-requirement "$requirement" "$staged_app"
+  fi
 
   signed_entitlements="$staging_directory/signed-entitlements.plist"
   codesign -d --entitlements :- "$staged_app" \

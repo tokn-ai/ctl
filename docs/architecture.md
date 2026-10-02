@@ -197,7 +197,8 @@ post-authentication activation share a serialized registry so a late old-master
 activation cannot recreate a moved or disabled forward. Listener ownership is
 tracked separately from displayed status, and a forward configured during
 master startup is not activated twice. The local `ctld` IPC protocol is version
-11; older clients and daemons must be updated together and the daemon restarted.
+12. Incompatible clients and daemons require an update and explicit restart;
+compatible running owners can be reused across builds.
 
 ### Component diagnostics and replacement
 
@@ -208,6 +209,20 @@ version even when the app's data protocol differs. ctmuxd exposes equivalent
 metadata through its local-control handshake, with a data-handshake fallback for
 legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
+
+ctld metadata reports the data protocol (`ctld`, version 12), lifecycle protocol
+(`ctld_lifecycle`, version 1), and one-shot helper API (`ctld_helper`, version 1).
+The helper API covers credential, identity, askpass, and proxy helper modes.
+Standalone macOS CLI discovery first honors `CTLD_BIN`, then verifies a shared
+managed app selected for the native target and all three API versions. It falls
+back to its own bundled helper and then loose executable discovery when no
+compatible shared app is selected. The desktop keeps its own bundled helper
+first. Release and provisioned development installations use immutable caches
+and atomic `selected/<target>-ctld12-lifecycle1-helper1` links; development
+selection leaves the release `current` link intact. Verification checks the
+selected app's signature, provisioning, and metadata against its own manifest,
+so different client release versions or source fingerprints do not prevent
+compatible reuse. Discovery and setup never restart an existing daemon.
 
 `ctl-core::component` embeds the release version, source revision, dirty flag,
 and a deterministic fingerprint of Rust component sources and dependency definitions.

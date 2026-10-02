@@ -551,6 +551,7 @@ export function SshHostFlow({
         key={prompt.prompt_id}
         title={promptTitle(prompt)}
         description={prompt.message}
+        warning={prompt.warning}
         mode={promptMode(prompt)}
         onSubmit={answer}
         onCancel={close}

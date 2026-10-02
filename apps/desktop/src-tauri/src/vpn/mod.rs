@@ -266,7 +266,7 @@ async fn connect_saved(directory: PathBuf, request: ConnectVpnRequest) -> Comman
       connect_with_cancellation(
         directory,
         request,
-        |connection| async move { client::client()?.start_connection(connection).await },
+        |connection| async move { client::client().start_connection(connection).await },
         Some(cancellation),
       )
       .await
@@ -320,11 +320,7 @@ where
 
 #[tauri::command]
 pub async fn vpn_status() -> CommandResult<VpnSnapshot> {
-  client::client()
-    .map_err(runtime_error)?
-    .list()
-    .await
-    .map_err(runtime_error)
+  client::client().list().await.map_err(runtime_error)
 }
 
 #[tauri::command]
@@ -333,7 +329,6 @@ pub async fn stop_vpn(request: StopVpnRequest) -> CommandResult<VpnStatus> {
   coordinator
     .stop(|| async {
       client::client()
-        .map_err(runtime_error)?
         .stop_id(&request.vpn_id)
         .await
         .map_err(runtime_error)

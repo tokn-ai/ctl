@@ -56,12 +56,15 @@ pub struct SshPromptDto {
   prompt_id: String,
   kind: SshPromptKind,
   message: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  warning: Option<String>,
 }
 
 async fn request_response(
   context: Option<&PromptContext>,
   kind: SshPromptKind,
   message: String,
+  warning: Option<String>,
 ) -> Option<Zeroizing<String>> {
   let context = context?;
   let prompt_id = uuid::Uuid::new_v4().to_string();
@@ -76,6 +79,7 @@ async fn request_response(
     prompt_id: prompt_id.clone(),
     kind,
     message,
+    warning,
   });
   let response = if sent.is_ok() {
     tokio::time::timeout(Duration::from_mins(2), receiver)

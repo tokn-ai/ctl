@@ -150,8 +150,9 @@ the CLI's version and Mac architecture, rather than resolving the latest release
 or installing a draft. It trusts that repository's HTTPS manifest for the
 publisher Team ID and requires an Apple Developer ID signature for that team
 and `dev.tokn-ai.ctl.ctld`; there is no separately compiled vendor Team ID pin.
-Archive size/hash, distribution profile, notarization, and build/protocol identity
-are checked before downloaded code is executed or selected.
+Archive size/hash, distribution profile, and notarization are checked before
+executing the helper's metadata query. Its build/protocol identity is then
+verified before selection.
 
 The full signed bundle is installed without `sudo`:
 

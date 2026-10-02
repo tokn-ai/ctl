@@ -127,8 +127,9 @@ executable. Setup obtains its expected Apple Team ID from the fixed
 `https://github.com/tokn-ai/ctl` release manifest over HTTPS; it does not contain
 a separately compiled vendor Team ID pin. It checks the archive hash and size,
 Apple's Developer ID certificate chain and application/team identity, embedded
-distribution provisioning, Gatekeeper notarization, and helper build/protocol
-identity before executing or selecting the helper.
+distribution provisioning, and Gatekeeper notarization before executing the
+helper's metadata query. It verifies that build/protocol identity before
+selecting the helper.
 
 Publish the [signed macOS release assets](ci-bundles.md) alongside the crate
 family. Version-tag CI requires both Mac architectures, distribution signing,

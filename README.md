@@ -17,7 +17,7 @@ Windows desktop support remains pending.
 
 ## Agent skills
 
-The `ctl` binary bundles the [parent ctl skill](skills/ctl/SKILL.md), focused
+The `ctl` binary bundles the [parent ctl skill](ctl/cli/skills/ctl/SKILL.md), focused
 child skills, and their supporting references. Read them without a source
 checkout, daemon, configuration, or authentication:
 
@@ -38,11 +38,11 @@ for their `ctl-` names. Read only the skill or reference needed for the task.
 The parent covers workflow selection, one-off commands, file copies, and setup.
 It routes to separate skills that can also be used independently:
 
-- [ctl-host](skills/ctl-host/SKILL.md) (`ctl skill ctl-host`): saved hosts, methods, and connection status.
-- [ctl-session](skills/ctl-session/SKILL.md) (`ctl skill ctl-session`): persistent shells, sessions, and panes.
-- [ctl-task](skills/ctl-task/SKILL.md) (`ctl skill ctl-task`): managed tasks and reusable local definitions.
-- [ctl-port](skills/ctl-port/SKILL.md) (`ctl skill ctl-port`): daemon-owned local SSH forwards.
-- [ctl-vpn](skills/ctl-vpn/SKILL.md) (`ctl skill ctl-vpn`): local OpenConnect and Tailscale containers.
+- [ctl-host](ctl/cli/skills/ctl-host/SKILL.md) (`ctl skill ctl-host`): saved hosts, methods, and connection status.
+- [ctl-session](ctl/cli/skills/ctl-session/SKILL.md) (`ctl skill ctl-session`): persistent shells, sessions, and panes.
+- [ctl-task](ctl/cli/skills/ctl-task/SKILL.md) (`ctl skill ctl-task`): managed tasks and reusable local definitions.
+- [ctl-port](ctl/cli/skills/ctl-port/SKILL.md) (`ctl skill ctl-port`): daemon-owned local SSH forwards.
+- [ctl-vpn](ctl/cli/skills/ctl-vpn/SKILL.md) (`ctl skill ctl-vpn`): local OpenConnect and Tailscale containers.
 
 ## Package names
 
@@ -78,6 +78,10 @@ uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protoco
 12, remote identity protocol 3, and remote maintenance protocol 2.
 
 ## Build
+
+Rust 1.97 or newer is required. The Rust packages use the MIT license.
+See [Cargo publishing](docs/publishing.md) for package verification, installation,
+and the dependency order for the first crates.io release.
 
 ```sh
 cargo build --workspace

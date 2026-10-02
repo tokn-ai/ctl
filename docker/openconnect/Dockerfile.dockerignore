@@ -6,6 +6,9 @@
 !docker/openconnect/vpn-network.sh
 !docker/openconnect/healthcheck.sh
 !docker/openconnect/Dockerfile
-!docker/vpn/
-!docker/vpn/heartbeat.sh
-!docker/vpn/watchdog.sh
+!ctl/
+!ctl/daemon/
+!ctl/daemon/assets/
+!ctl/daemon/assets/vpn/
+!ctl/daemon/assets/vpn/heartbeat.sh
+!ctl/daemon/assets/vpn/watchdog.sh

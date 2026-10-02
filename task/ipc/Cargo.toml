@@ -2,6 +2,14 @@
 name = "ctl-task-ipc"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local IPC and daemon lifecycle management for ctl tasks"
+readme = "README.md"
+categories = ["network-programming"]
+keywords = ["ctl", "tasks", "ipc"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info.workspace = true

@@ -2,6 +2,14 @@
 name = "ctl-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for local and remote terminal sessions, tasks, SSH, and VPN connections"
+readme = "README.md"
+categories = ["command-line-utilities"]
+keywords = ["ctl", "ssh", "terminal", "tasks", "vpn"]
+publish = ["crates-io"]
 
 [[bin]]
 name = "ctl"

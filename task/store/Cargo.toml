@@ -2,6 +2,14 @@
 name = "ctl-task-store"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local storage for reusable ctl task definitions"
+readme = "README.md"
+categories = ["database"]
+keywords = ["ctl", "tasks", "storage"]
+publish = ["crates-io"]
 
 [dependencies]
 dirs.workspace = true

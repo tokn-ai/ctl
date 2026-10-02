@@ -2,6 +2,9 @@
 name = "ctmux-app"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Graphical client for local and SSH-connected ctmux terminal sessions"
 publish = false
 

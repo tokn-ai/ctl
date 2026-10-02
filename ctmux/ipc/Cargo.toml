@@ -2,6 +2,14 @@
 name = "ctmux-ipc"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local IPC and daemon lifecycle management for ctmux"
+readme = "README.md"
+categories = ["network-programming"]
+keywords = ["ctmux", "ipc", "terminal"]
+publish = ["crates-io"]
 
 [dependencies]
 ctl-component-info = { workspace = true, features = ["executable"] }

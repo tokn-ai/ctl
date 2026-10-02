@@ -4,7 +4,7 @@ Read-only, best-effort OS observations for a shell whose PID the caller owns.
 Independent of ctmux, Tauri, terminal rendering, and shell-integration scripts.
 
 ```rust,no_run
-use process_info::Inspector;
+use ctmux_process_info::Inspector;
 
 # fn example(shell_pid: u32, foreground_pgid: Option<u32>) -> std::io::Result<()> {
 let inspector = Inspector::new(shell_pid)?;

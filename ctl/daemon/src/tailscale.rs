@@ -20,7 +20,7 @@ mod socks;
 use socks::ready as socks_ready;
 
 const IMAGE: &str = "docker.io/tailscale/tailscale:v1.94.2";
-const ENTRYPOINT: &str = include_str!("../../../docker/tailscale/entrypoint.sh");
+const ENTRYPOINT: &str = include_str!("../assets/tailscale/entrypoint.sh");
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_mins(2);
 const ADOPTION_TIMEOUT: Duration = Duration::from_secs(3);

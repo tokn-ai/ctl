@@ -2,7 +2,14 @@
 name = "ctmux-process-info"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Best-effort, read-only inspection of a known shell and its foreground job"
+readme = "README.md"
+categories = ["os", "development-tools"]
+keywords = ["ctmux", "process", "terminal"]
+publish = ["crates-io"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"

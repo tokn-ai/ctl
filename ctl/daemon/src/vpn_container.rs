@@ -14,8 +14,8 @@ use tokio::time::{interval, sleep, timeout};
 
 use crate::openconnect::{engine_command, parse_published_port};
 
-pub(super) const HEARTBEAT_SCRIPT: &str = include_str!("../../../docker/vpn/heartbeat.sh");
-pub(super) const WATCHDOG_SCRIPT: &str = include_str!("../../../docker/vpn/watchdog.sh");
+pub(super) const HEARTBEAT_SCRIPT: &str = include_str!("../assets/vpn/heartbeat.sh");
+pub(super) const WATCHDOG_SCRIPT: &str = include_str!("../assets/vpn/watchdog.sh");
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const INITIAL_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(3);

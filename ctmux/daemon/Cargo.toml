@@ -2,6 +2,14 @@
 name = "ctmuxd"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Daemon for persistent ctmux terminal sessions and shared views"
+readme = "README.md"
+categories = ["command-line-utilities"]
+keywords = ["ctmux", "terminal", "daemon", "multiplexer"]
+publish = ["crates-io"]
 
 [dependencies]
 serde_json.workspace = true

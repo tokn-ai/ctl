@@ -77,10 +77,22 @@ async fn restart_replaces_only_an_isolated_owner_and_verifies_the_new_build() {
   std::fs::create_dir(&directory).unwrap();
   std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
   let owner = IsolatedOwner(directory);
-  let client =
-    Client::new(owner.socket()).with_daemon_executable(env!("CARGO_BIN_EXE_ctld").into());
+  // Lifecycle inspection scans VPN inventory. Both the initial owner and its
+  // replacement must use the fixture engine, never the host's Docker/Podman.
+  let engine = owner.0.join("docker");
+  std::fs::write(&engine, "#!/bin/sh\n[ \"$1\" = ps ]\n").unwrap();
+  std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o700)).unwrap();
+  std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ctld"), owner.0.join("daemon-bin")).unwrap();
+  let executable = owner.0.join("ctld");
+  std::fs::write(
+    &executable,
+    "#!/bin/sh\nfixture_dir=${0%/*}\nPATH=\"$fixture_dir:$PATH\"\nexport PATH\nexec \"$fixture_dir/daemon-bin\" \"$@\"\n",
+  )
+  .unwrap();
+  std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let client = Client::new(owner.socket()).with_daemon_executable(executable.clone());
   assert_eq!(client.probe().await.unwrap(), DaemonStatus::Absent);
-  let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctld"))
+  let mut child = tokio::process::Command::new(executable)
     .arg("--socket")
     .arg(owner.socket())
     .env_remove("CTLD_ASKPASS")

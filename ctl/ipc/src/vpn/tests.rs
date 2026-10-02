@@ -270,6 +270,102 @@ mod endpoints {
   }
 
   #[tokio::test]
+  async fn helper_preparation_does_not_consume_the_vpn_exchange_deadline() {
+    let _execution_guard = crate::tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
+    let fixture = Fixture::new();
+    let executable = fixture.0.join("ctld");
+    std::fs::write(
+      &executable,
+      format!(
+        "#!/bin/sh\nif [ \"$1\" = --protocol-version ]; then echo {}; fi\n",
+        crate::PROTOCOL_VERSION
+      ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = tokio::time::timeout(
+      Duration::from_secs(5),
+      tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+          "--exact",
+          "vpn::tests::endpoints::provider_deadline_child",
+          "--nocapture",
+        ])
+        .env("CTLD_VPN_PROVIDER_TEST", "true")
+        .env("CTLD_VPN_PROVIDER_EXECUTABLE", &executable)
+        .env("CTLD_VPN_PROVIDER_SOCKET", fixture.0.join("prepared.sock"))
+        .env("HOME", &fixture.0)
+        .env_remove("CTLD_BIN")
+        .kill_on_drop(true)
+        .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+  }
+
+  #[tokio::test]
+  async fn provider_deadline_child() {
+    fn delayed_provider() -> crate::DaemonExecutableFuture {
+      Box::pin(async {
+        // Longer than the VPN exchange deadline, as a cold Apple assessment
+        // can be longer than a capabilities query on the first invocation.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let listener = UnixListener::bind(std::env::var_os("CTLD_VPN_PROVIDER_SOCKET").unwrap())?;
+        tokio::spawn(async move {
+          let (mut stream, request) = read_request(&listener).await;
+          assert!(matches!(request, ClientMessage::VpnStatus));
+          crate::write_frame(
+            &mut stream,
+            &ServerMessage::VpnStatus {
+              status: Box::default(),
+              snapshot: None,
+            },
+          )
+          .await
+          .unwrap();
+        });
+        Ok(Some(PathBuf::from(
+          std::env::var_os("CTLD_VPN_PROVIDER_EXECUTABLE").unwrap(),
+        )))
+      })
+    }
+    if std::env::var_os("CTLD_VPN_PROVIDER_TEST").is_none() {
+      return;
+    }
+    crate::register_daemon_executable_provider(delayed_provider).unwrap();
+    let client = Client::new(PathBuf::from(
+      std::env::var_os("CTLD_VPN_PROVIDER_SOCKET").unwrap(),
+    ));
+    let response = client
+      .request(ClientMessage::VpnStatus, true, Duration::from_millis(100))
+      .await
+      .unwrap();
+    assert_eq!(response.status, VpnStatus::default());
+  }
+
+  #[tokio::test]
+  async fn passive_connections_and_unresponsive_exchanges_keep_their_deadline() {
+    let fixture = Fixture::new();
+    let socket = fixture.0.join("silent.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let client = Client::new(socket);
+    for start_daemon in [false, true] {
+      assert!(matches!(
+        client
+          .request(
+            ClientMessage::VpnStatus,
+            start_daemon,
+            Duration::from_millis(10)
+          )
+          .await,
+        Err(VpnError::Timeout)
+      ));
+    }
+  }
+
+  #[tokio::test]
   async fn tailscale_requires_explicit_support_before_sending_settings() {
     for supported in [false, true] {
       let fixture = Fixture::new();

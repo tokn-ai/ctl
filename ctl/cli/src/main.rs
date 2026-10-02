@@ -1,3 +1,4 @@
+mod bundled;
 mod commands;
 mod connection;
 mod host;
@@ -121,6 +122,10 @@ enum TaskdCommand {
 
 #[tokio::main]
 async fn main() {
+  if let Err(error) = bundled::register() {
+    eprintln!("ctl: {error}");
+    std::process::exit(1);
+  }
   let result = if std::env::var_os(openssh::SCP_TRANSPORT_ENV).is_some() {
     openssh::run_ssh(
       std::env::args_os().skip(1).collect(),

@@ -1,4 +1,4 @@
-//! Explicit installation of the signed, per-user macOS connection helper.
+//! Installation of the signed, per-user macOS connection helper.
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod archive;
@@ -73,6 +73,34 @@ pub async fn install_signed_ctld(
   #[cfg(not(target_os = "macos"))]
   {
     let _ = on_progress;
+    Err(Error::UnsupportedPlatform)
+  }
+}
+
+/// Installs a signed helper embedded in this CLI without downloading or starting
+/// any daemon. The complete app is verified with the same release policy as
+/// downloaded helpers before its metadata query is executed.
+///
+/// # Errors
+/// Rejects unsupported platforms, mismatched releases, unsafe installation
+/// paths, concurrent setup, invalid archives, or failed signature/protocol checks.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "unsupported platforms retain the same asynchronous setup API"
+  )
+)]
+pub async fn install_bundled_ctld(
+  manifest: &'static [u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+) -> Result<SetupOutcome, Error> {
+  #[cfg(target_os = "macos")]
+  return macos::install_bundled(manifest, archive, on_progress).await;
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = (manifest, archive, on_progress);
     Err(Error::UnsupportedPlatform)
   }
 }

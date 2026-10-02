@@ -223,13 +223,24 @@ impl Client {
     if !cfg!(unix) {
       return Err(VpnError::UnsupportedPlatform);
     }
-    tokio::time::timeout(deadline, async {
-      let connected = if start_daemon {
+    // Preparing a signed bundled helper has its own bounded verification.
+    // Keep it outside the VPN exchange deadline, particularly the short
+    // capabilities request made before starting Tailscale. Existing-only
+    // connections remain inside the passive request deadline.
+    let started = if start_daemon {
+      Some(
         crate::connect_or_start_daemon_at_with_executable(
           &self.socket_path,
           self.daemon_executable.as_deref(),
         )
-        .await
+        .await,
+      )
+    } else {
+      None
+    };
+    tokio::time::timeout(deadline, async {
+      let connected = if let Some(connected) = started {
+        connected
       } else {
         crate::connect_existing_at(&self.socket_path).await
       };

@@ -114,14 +114,7 @@ pub async fn run_ssh(mut arguments: Vec<OsString>, method: Option<&str>) -> Resu
   if invocation.route_override {
     target.gateways.clear();
   }
-  let mut defaults = if managed {
-    connection::target_arguments(&target)?
-  } else {
-    Vec::new()
-  };
-  if managed && !invocation.reuse {
-    defaults.extend([OsString::from("-o"), OsString::from("ControlPath=none")]);
-  }
+  let mut master = Vec::new();
   if managed && !invocation.inspect {
     if !invocation.route_override {
       crate::target::ensure_vpn(&resolved.target).await?;
@@ -129,7 +122,7 @@ pub async fn run_ssh(mut arguments: Vec<OsString>, method: Option<&str>) -> Resu
     #[cfg(unix)]
     if invocation.reuse {
       let socket = crate::ssh_broker::ensure_master(target.clone()).await?;
-      let mut master = vec![
+      master = vec![
         OsString::from("-S"),
         socket.into_os_string(),
         "-o".into(),
@@ -137,10 +130,31 @@ pub async fn run_ssh(mut arguments: Vec<OsString>, method: Option<&str>) -> Resu
         "-o".into(),
         "ProxyCommand=false".into(),
       ];
-      master.append(&mut defaults);
-      defaults = master;
     }
   }
+  let default_target = if master.is_empty() {
+    target.clone()
+  } else {
+    // The pinned master owns its route already; no proxy executable is
+    // needed just to reuse an existing connection.
+    let mut defaults = target.clone();
+    defaults.gateways.clear();
+    defaults
+  };
+  let mut defaults = if managed {
+    if invocation.inspect || !master.is_empty() {
+      connection::target_arguments(&default_target)?
+    } else {
+      connection::prepared_target_arguments(&default_target).await?
+    }
+  } else {
+    Vec::new()
+  };
+  if managed && !invocation.reuse {
+    defaults.extend([OsString::from("-o"), OsString::from("ControlPath=none")]);
+  }
+  master.append(&mut defaults);
+  let defaults = master;
   if managed {
     arguments[index] = target.destination.into();
   }

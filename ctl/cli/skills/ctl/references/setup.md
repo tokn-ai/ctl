@@ -22,7 +22,8 @@ the user's request includes setup or the work requires an authorized setup.
 Keep client and companion versions aligned. `CTLD_BIN`, `CTMUXD_BIN`, and
 `CTL_TASKD_BIN` select explicit daemon executables; an override names an
 executable, not a directory. On macOS, `ctld` otherwise resolves from the desktop
-bundle first, then the signed managed installation, then beside the client or
+bundle first, then any embedded CLI helper, then the signed managed installation,
+then beside the client or
 on PATH. Terminal/task helpers normally resolve beside the client. Remote
 companions must belong to the SSH account and be available together through
 the managed installation or noninteractive PATH.
@@ -47,6 +48,12 @@ override. `ctl setup --json` reports the version/path and whether setup reused a
 existing installation. On other Unix platforms, install `ctld` from Cargo
 alongside the CLI. Cargo compilation alone does not provide Apple's signing
 identity or the macOS Keychain entitlement.
+
+Official macOS CLI downloads embed their matching signed helper. They prepare
+it locally when starting a daemon or creating a fresh SOCKS/VPN proxy route;
+`ctl setup` uses the embedded payload too. No helper download occurs. Existing
+daemon/master reuse and passive status reads do not install a helper. Ordinary
+Cargo builds keep the separate installation flow above.
 
 When working from the ctl source checkout, a local CLI/service build is:
 

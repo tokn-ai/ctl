@@ -107,6 +107,12 @@ signed and notarized helper from the GitHub release matching the CLI's Cargo
 version and architecture. That release must be published before setup can
 succeed; a draft or an Actions artifact is not an installation source.
 
+The dedicated macOS [CLI release build](ci-bundles.md#build-a-cli-with-ctld-embedded)
+embeds the full signed helper in the `ctl` executable. That distribution prepares
+its helper from embedded bytes without network access and uses them for
+`ctl setup` too. This is separate from crates.io: ordinary `cargo install ctl-cli`
+still builds a CLI that obtains its signed helper through setup.
+
 The helper is installed without `sudo` at
 `~/.tokn/ctl/components/ctld/versions/<version>-<target>/ctld.app`; the component's
 `current` symlink is updated atomically after verification. Remote agent
@@ -115,7 +121,8 @@ the daemon or existing connections. Repeating setup checks and reuses the same
 immutable version when its release metadata matches.
 
 `CTLD_BIN` continues to override discovery. Otherwise, macOS prefers the signed
-desktop bundle's helper, then the managed installation, then a sibling or `PATH`
+desktop bundle's helper, then an embedded CLI helper, then the managed
+installation, then a sibling or `PATH`
 executable. Setup obtains its expected Apple Team ID from the fixed
 `https://github.com/tokn-ai/ctl` release manifest over HTTPS; it does not contain
 a separately compiled vendor Team ID pin. It checks the archive hash and size,

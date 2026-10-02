@@ -10,10 +10,10 @@ use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _, symlink};
 use std::path::PathBuf;
 
-struct Home(PathBuf);
+pub(super) struct Home(pub(super) PathBuf);
 
 impl Home {
-  fn new() -> Self {
+  pub(super) fn new() -> Self {
     let path = std::env::temp_dir().join(format!("ctld-setup-test-{}", uuid::Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
     Self(path)
@@ -50,13 +50,13 @@ fn append(builder: &mut tar::Builder<Vec<u8>>, path: &str, kind: tar::EntryType)
   builder.append(&header, data).unwrap();
 }
 
-fn compressed(raw: &[u8]) -> Vec<u8> {
+pub(super) fn compressed(raw: &[u8]) -> Vec<u8> {
   let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
   encoder.write_all(raw).unwrap();
   encoder.finish().unwrap()
 }
 
-fn contents(extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
+pub(super) fn contents(extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
   let mut builder = tar::Builder::new(Vec::new());
   for path in FILES {
     append(&mut builder, path, tar::EntryType::Regular);
@@ -67,7 +67,7 @@ fn contents(extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
   builder.into_inner().unwrap()
 }
 
-fn release(bytes: &[u8]) -> Manifest {
+pub(super) fn release(bytes: &[u8]) -> Manifest {
   let mut manifest = manifest::fixture();
   manifest.archive_size = bytes.len() as u64;
   manifest.sha256 = format!("{:x}", Sha256::digest(bytes));

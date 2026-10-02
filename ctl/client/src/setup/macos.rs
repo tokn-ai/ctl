@@ -18,11 +18,7 @@ pub(super) async fn install(
   on_progress: impl Fn(SetupEvent) + Send + Sync,
 ) -> Result<SetupOutcome, Error> {
   let version = env!("CARGO_PKG_VERSION");
-  let target = match std::env::consts::ARCH {
-    "aarch64" => "aarch64-apple-darwin",
-    "x86_64" => "x86_64-apple-darwin",
-    _ => return Err(Error::UnsupportedPlatform),
-  };
+  let target = release_target()?;
   let client = reqwest::Client::builder()
     .https_only(true)
     .connect_timeout(Duration::from_secs(15))
@@ -60,13 +56,62 @@ pub(super) async fn install(
       &on_progress,
     )
     .await?;
-    on_progress(SetupEvent::Extracting);
-    // The session and cleanup guard stay with the worker when the awaiting
-    // future is cancelled. It can finish extraction but cannot select a version.
-    tokio::task::spawn_blocking(move || session.unpack(&archive))
-      .await
-      .map_err(io::Error::other)??
+    unpack(session, archive, &on_progress).await?
   };
+  verify_and_activate(session, &on_progress).await
+}
+
+pub(super) async fn install_bundled(
+  manifest: &[u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+) -> Result<SetupOutcome, Error> {
+  on_progress(SetupEvent::Manifest);
+  let manifest = Manifest::parse(manifest, env!("CARGO_PKG_VERSION"), release_target()?)?;
+  let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+  install_archive(&home, manifest, archive, &on_progress).await
+}
+
+fn release_target() -> Result<&'static str, Error> {
+  match std::env::consts::ARCH {
+    "aarch64" => Ok("aarch64-apple-darwin"),
+    "x86_64" => Ok("x86_64-apple-darwin"),
+    _ => Err(Error::UnsupportedPlatform),
+  }
+}
+
+async fn install_archive(
+  home: &Path,
+  manifest: Manifest,
+  archive: impl AsRef<[u8]> + Send + 'static,
+  on_progress: &impl Fn(SetupEvent),
+) -> Result<SetupOutcome, Error> {
+  let session = Session::begin(home, manifest)?;
+  let session = if session.reused {
+    session
+  } else {
+    unpack(session, archive, on_progress).await?
+  };
+  verify_and_activate(session, on_progress).await
+}
+
+async fn unpack(
+  session: Session,
+  archive: impl AsRef<[u8]> + Send + 'static,
+  on_progress: &impl Fn(SetupEvent),
+) -> Result<Session, Error> {
+  on_progress(SetupEvent::Extracting);
+  // The session and cleanup guard stay with the worker when the awaiting
+  // future is cancelled. It can finish extraction but cannot select a version.
+  tokio::task::spawn_blocking(move || session.unpack(archive.as_ref()))
+    .await
+    .map_err(io::Error::other)?
+}
+
+async fn verify_and_activate(
+  session: Session,
+  on_progress: &impl Fn(SetupEvent),
+) -> Result<SetupOutcome, Error> {
   on_progress(SetupEvent::Verifying);
   let executable = session.executable()?;
   verify(&session).await?;
@@ -79,7 +124,7 @@ pub(super) async fn install(
     ],
   )
   .await?;
-  if prepared.info.build.version != version
+  if prepared.info.build.version != session.manifest.app_version
     || prepared.info.build.source_revision.as_deref() != Some(&session.manifest.git_revision)
     || prepared.info.build.dirty
   {
@@ -299,7 +344,8 @@ async fn plist_string(path: &Path, key: &str) -> Result<String, Error> {
 async fn verify(session: &Session) -> Result<(), Error> {
   let app = session.app();
   let team = &session.manifest.team_identifier;
-  // The publisher Team ID comes from the fixed repository's HTTPS manifest.
+  // The publisher Team ID comes from the fixed repository's HTTPS manifest or
+  // the manifest embedded alongside the signed helper in this CLI build.
   // The requirement additionally checks Apple's Developer ID certificate chain.
   let requirement = developer_id_requirement(team);
   let output = tool(
@@ -420,7 +466,100 @@ fn developer_id_requirement(team: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+  use super::super::tests::{Home, compressed, contents, release};
   use super::*;
+  use std::sync::Mutex;
+
+  fn assert_staging_clean(home: &Path) {
+    let root = ctl_ipc::managed::component_directory(home);
+    assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
+      !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".setup-")
+    }));
+  }
+
+  #[tokio::test]
+  async fn bundled_helper_requires_the_cli_version_and_target() {
+    let mut version = super::super::manifest::fixture();
+    version.app_version = "0.2.0".into();
+    let mut target = super::super::manifest::fixture();
+    target.target = if release_target().unwrap() == "aarch64-apple-darwin" {
+      "x86_64-apple-darwin"
+    } else {
+      "aarch64-apple-darwin"
+    }
+    .into();
+    for manifest in [version, target] {
+      let bytes = serde_json::to_vec(&manifest).unwrap();
+      let result = install_bundled(&bytes, b"unused archive", |_| {}).await;
+      assert!(matches!(result, Err(Error::InvalidRelease(_))));
+    }
+  }
+
+  #[tokio::test]
+  async fn bundled_archive_checksum_failure_never_reaches_signature_checks_or_activation() {
+    let home = Home::new();
+    let bytes = compressed(&contents(None));
+    let manifest = release(&bytes);
+    let mut corrupt = bytes;
+    corrupt[0] ^= 1;
+    let events = Mutex::new(Vec::new());
+    let result = install_archive(&home.0, manifest, corrupt, &|event| {
+      events.lock().unwrap().push(event);
+    })
+    .await;
+    assert!(matches!(result, Err(Error::InvalidRelease(_))));
+    assert!(matches!(
+      &events.into_inner().unwrap()[..],
+      [SetupEvent::Extracting]
+    ));
+    assert!(
+      ctl_ipc::managed::resolve_executable(&home.0)
+        .unwrap()
+        .is_none()
+    );
+    assert_staging_clean(&home.0);
+  }
+
+  #[tokio::test]
+  async fn bundled_reuse_still_verifies_apple_identity_before_executing_the_helper() {
+    let home = Home::new();
+    let bytes = compressed(&contents(None));
+    let manifest = release(&bytes);
+    let installed = Session::begin(&home.0, manifest.clone())
+      .unwrap()
+      .unpack(&bytes)
+      .unwrap()
+      .activate()
+      .unwrap();
+    let marker = home.0.join("unexpected-helper-execution");
+    std::fs::write(
+      &installed.executable,
+      format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    let events = Mutex::new(Vec::new());
+    let result = install_archive(&home.0, manifest, bytes, &|event| {
+      events.lock().unwrap().push(event);
+    })
+    .await;
+    assert!(matches!(result, Err(Error::Verification(_))));
+    assert!(matches!(
+      &events.into_inner().unwrap()[..],
+      [SetupEvent::Verifying]
+    ));
+    assert!(!marker.exists());
+    assert_eq!(
+      ctl_ipc::managed::resolve_executable(&home.0)
+        .unwrap()
+        .unwrap(),
+      installed.executable
+    );
+    assert_staging_clean(&home.0);
+  }
 
   struct File(std::path::PathBuf);
   impl File {

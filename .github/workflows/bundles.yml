@@ -246,6 +246,8 @@ jobs:
           key: ctld-${{ matrix.target }}
 
       - name: Build and sign standalone ctld
+        env:
+          CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
         run: |
           cargo build --locked --release --target "${{ matrix.target }}" -p ctld
           ./scripts/ci/package-ctld-app.sh \
@@ -268,6 +270,27 @@ jobs:
         with:
           name: ctld-standalone-${{ matrix.target }}
           path: target/ctld-assets/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build ctl with the signed helper embedded
+        if: needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version
+        env:
+          CTLD_SIGNING_IDENTITY_OUTPUT: ${{ runner.temp }}/ctld-signing-identity
+        run: >-
+          node scripts/ci/build-ctl-bundle.mts
+          "${{ matrix.target }}"
+          "${{ needs.metadata.outputs.app_version }}"
+          "${{ needs.metadata.outputs.git_revision }}"
+          target/ctl-cli-assets
+          target/ctld-assets
+
+      - name: Upload bundled ctl CLI
+        if: needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctl-cli-${{ matrix.target }}
+          path: target/ctl-cli-assets/*
           if-no-files-found: error
           retention-days: 30
 
@@ -555,6 +578,14 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           pattern: ctld-standalone-*
+          path: target/release-assets
+          merge-multiple: true
+
+      - name: Download bundled ctl CLI assets
+        if: needs.ctld.result == 'success' && needs.metadata.outputs.bundle_id == needs.metadata.outputs.app_version
+        uses: actions/download-artifact@v5
+        with:
+          pattern: ctl-cli-*
           path: target/release-assets
           merge-multiple: true
 

@@ -1,4 +1,4 @@
-use ctl_client::setup::{self, Error, SetupEvent};
+use ctl_client::setup::{Error, SetupEvent};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -12,10 +12,10 @@ pub struct Arguments {
 pub async fn run(arguments: Arguments) -> Result<(), Error> {
   let progress = Mutex::new((None::<Instant>, Instant::now()));
   let outcome = tokio::select! {
-    result = setup::install_signed_ctld(|event| {
+    result = crate::bundled::install(|event| {
       if arguments.json { return; }
       match event {
-        SetupEvent::Manifest => eprintln!("Fetching signed ctld release metadata..."),
+        SetupEvent::Manifest => eprintln!("Checking signed ctld release metadata..."),
         SetupEvent::Extracting => eprintln!("Extracting ctld.app..."),
         SetupEvent::Verifying => eprintln!("Verifying Apple signature, notarization, and helper protocol..."),
         SetupEvent::Activating => eprintln!("Selecting the verified helper..."),

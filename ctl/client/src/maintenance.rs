@@ -100,7 +100,14 @@ fn command(
   );
   command
     .args(extra)
-    .args(crate::ssh_base_arguments(destination, options))
+    // Maintenance only reuses this master; its ProxyCommand=false must never
+    // prepare or start a local proxy helper or permit a fresh route.
+    .args(crate::ssh_base_arguments_with_proxy(
+      destination,
+      options,
+      None,
+      false,
+    ))
     .arg(remote_command);
   Ok(command)
 }

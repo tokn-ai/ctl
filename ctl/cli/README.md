@@ -29,8 +29,16 @@ requires the signed, provisioned `ctld` helper; Cargo installation alone does
 not supply its Keychain entitlement. Setup selects the release matching this
 CLI's version and architecture and requires that release to be published.
 `CTLD_BIN` remains an explicit override. Otherwise the desktop's bundled helper
-has priority over the managed installation, which has priority over a sibling
+has priority over an embedded CLI helper, then the managed installation, then a sibling
 or `PATH` executable.
+
+Official macOS CLI downloads carry the complete matching signed `ctld.app`
+inside the `ctl` executable. They install it under the same managed directory
+when a command needs the helper, or when you run `ctl setup`, without downloading
+it. Running daemons and passive status reads are preserved. `CTLD_BIN` and the
+desktop helper retain priority. A dedicated
+[build/release command](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#build-a-cli-with-ctld-embedded)
+compiles and bundles the helper; ordinary Cargo installation does not embed it.
 
 ## Use
 

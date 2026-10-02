@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use crate::{
   CoreError, RemotePlatform, SSH_PROGRAM, SshConnectionOptions, SshInteraction,
-  configure_ssh_interaction, read_bounded_output, ssh_base_arguments, validate_ssh_target,
+  configure_ssh_interaction, prepare_ssh_base_arguments, read_bounded_output, validate_ssh_target,
 };
 
 const UNIX_INSTALL_COMMAND: &str = include_str!("ssh_install.sh");
@@ -70,7 +70,7 @@ pub async fn install_ssh_unix_agent_interactive_with_progress(
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
     .args(extra)
-    .args(ssh_base_arguments(destination, options))
+    .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
     .arg(script);
   run_install_command(command, archive, on_progress).await
 }

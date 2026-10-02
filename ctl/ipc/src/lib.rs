@@ -9,9 +9,12 @@ mod vpn_config;
 pub use vpn_config::{VpnConnection, VpnProvider, VpnSettings};
 
 use std::env;
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -30,6 +33,59 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
+
+/// Lazy preparation supplied by a client that carries its own daemon payload.
+pub type DaemonExecutableFuture = Pin<Box<dyn Future<Output = io::Result<Option<PathBuf>>> + Send>>;
+pub type DaemonExecutableProvider = fn() -> DaemonExecutableFuture;
+
+static DAEMON_PROVIDER: OnceLock<DaemonProvider> = OnceLock::new();
+
+struct DaemonProvider {
+  callback: Box<dyn Fn() -> DaemonExecutableFuture + Send + Sync>,
+  executable: OnceLock<PathBuf>,
+  preparing: tokio::sync::Mutex<()>,
+}
+
+impl DaemonProvider {
+  fn new(callback: impl Fn() -> DaemonExecutableFuture + Send + Sync + 'static) -> Self {
+    Self {
+      callback: Box::new(callback),
+      executable: OnceLock::new(),
+      preparing: tokio::sync::Mutex::const_new(()),
+    }
+  }
+
+  async fn prepare(&self) -> io::Result<Option<PathBuf>> {
+    let _preparing = self.preparing.lock().await;
+    if let Some(executable) = self.executable.get() {
+      return Ok(Some(executable.clone()));
+    }
+    let executable = (self.callback)().await?;
+    if let Some(executable) = &executable {
+      let _ = self.executable.set(executable.clone());
+    }
+    Ok(executable)
+  }
+}
+
+/// Registers one process-local provider without preparing or executing a helper.
+/// Existing owners and passive observations do not consult the provider. Clients
+/// must verify their payload before returning an executable; returning `None`
+/// preserves ordinary daemon discovery. A successful preparation is reused for
+/// this process, while failed or cancelled preparation can be retried.
+///
+/// # Errors
+/// Returns an error if a provider has already been registered in this process.
+pub fn register_daemon_executable_provider(provider: DaemonExecutableProvider) -> io::Result<()> {
+  DAEMON_PROVIDER
+    .set(DaemonProvider::new(provider))
+    .map_err(|_| {
+      io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "a ctld provider is already registered",
+      )
+    })
+}
 
 // Version 11 adds saved VPN connection requests and explicit lifecycle states.
 pub const PROTOCOL_VERSION: u16 = 12;
@@ -136,6 +192,19 @@ pub struct SshTarget {
 /// Panics if serialization of the gateway route unexpectedly fails.
 pub fn proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
   let executable = daemon_executable()?;
+  Ok(proxy_command_with_executable(gateways, &executable))
+}
+
+/// Prepares the default helper before creating a fresh SOCKS/VPN SSH route.
+///
+/// # Errors
+/// Returns daemon discovery or bundled-helper preparation failures.
+pub async fn prepare_proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
+  let executable = prepare_daemon_executable().await?;
+  Ok(proxy_command_with_executable(gateways, &executable))
+}
+
+fn proxy_command_with_executable(gateways: &[SshGateway], executable: &Path) -> String {
   let executable = executable.to_string_lossy().replace('\'', "'\\''");
   let bytes = serde_json::to_vec(gateways).expect("gateway route is serializable");
   let encoded = bytes
@@ -145,9 +214,7 @@ pub fn proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
       write!(text, "{byte:02x}").expect("writing to a String cannot fail");
       text
     });
-  Ok(format!(
-    "'{executable}' --proxy-route {encoded} --proxy-host %h --proxy-port %p"
-  ))
+  format!("'{executable}' --proxy-route {encoded} --proxy-host %h --proxy-port %p")
 }
 
 impl SshTarget {
@@ -402,6 +469,8 @@ pub enum ConnectError {
   Connect(#[source] io::Error),
   #[error("could not determine the current executable: {0}")]
   CurrentExecutable(#[source] io::Error),
+  #[error("could not prepare the bundled ctld: {0}")]
+  PrepareDaemon(#[source] io::Error),
   #[error("could not start ctld using {}: {source}", executable.display())]
   StartDaemon {
     executable: PathBuf,
@@ -599,7 +668,7 @@ async fn connect(path: &Path) -> io::Result<Stream> {
 async fn start_daemon(path: &Path, executable: Option<&Path>) -> Result<(), ConnectError> {
   let selected = match executable {
     Some(executable) => executable.to_path_buf(),
-    None => daemon_executable()?,
+    None => prepare_daemon_executable().await?,
   };
   // A staged symlink may change between the protocol query and startup. Pin
   // both launches, and the helper's future children, to the same build.
@@ -740,6 +809,60 @@ pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   default_daemon_executable()
 }
 
+/// Resolves the selected daemon, lazily preparing a client's bundled helper.
+/// Explicit overrides and signed desktop helpers retain priority. On macOS,
+/// unsafe managed selections fail before preparation; a valid old selection
+/// can be replaced by the provider's matching verified bundle. This function
+/// never starts or stops a daemon.
+///
+/// # Errors
+/// Returns discovery, unsafe managed selection, or provider preparation errors.
+pub async fn prepare_daemon_executable() -> Result<PathBuf, ConnectError> {
+  if let Some(executable) = env::var_os(DAEMON_EXECUTABLE_ENV) {
+    return Ok(PathBuf::from(executable));
+  }
+  let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
+  prepare_default_daemon(
+    &current_executable,
+    dirs::home_dir().as_deref(),
+    DAEMON_PROVIDER.get(),
+  )
+  .await
+}
+
+async fn prepare_default_daemon(
+  current_executable: &Path,
+  home: Option<&Path>,
+  provider: Option<&DaemonProvider>,
+) -> Result<PathBuf, ConnectError> {
+  #[cfg(target_os = "macos")]
+  {
+    if let Some(helper) = bundled_macos_daemon(current_executable)
+      && helper.is_file()
+    {
+      return Ok(helper);
+    }
+    validate_managed_selection(home)?;
+  }
+  if let Some(provider) = provider
+    && let Some(executable) = provider
+      .prepare()
+      .await
+      .map_err(ConnectError::PrepareDaemon)?
+  {
+    return Ok(executable);
+  }
+  #[cfg(target_os = "macos")]
+  {
+    default_macos_daemon(current_executable, home)
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = home;
+    Ok(sibling_or_path_daemon(current_executable))
+  }
+}
+
 /// Resolves a bundled, managed, sibling, or PATH daemon without `CTLD_BIN`.
 /// The signed desktop bundle has priority on macOS, followed by the managed
 /// signed installation. Loose executables remain available for development.
@@ -755,8 +878,18 @@ pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
   }
   #[cfg(not(target_os = "macos"))]
   {
+    if let Some(executable) = prepared_daemon() {
+      return Ok(executable);
+    }
     Ok(sibling_or_path_daemon(&current_executable))
   }
+}
+
+fn prepared_daemon() -> Option<PathBuf> {
+  DAEMON_PROVIDER
+    .get()
+    .and_then(|provider| provider.executable.get())
+    .cloned()
 }
 
 fn sibling_or_path_daemon(current_executable: &Path) -> PathBuf {
@@ -777,6 +910,10 @@ fn default_macos_daemon(
   {
     return Ok(helper);
   }
+  validate_managed_selection(home)?;
+  if let Some(executable) = prepared_daemon() {
+    return Ok(executable);
+  }
   if let Some(home) = home
     && let Some(helper) =
       managed::resolve_executable(home).map_err(|source| ConnectError::StartDaemon {
@@ -787,6 +924,17 @@ fn default_macos_daemon(
     return Ok(helper);
   }
   Ok(sibling_or_path_daemon(current_executable))
+}
+
+#[cfg(target_os = "macos")]
+fn validate_managed_selection(home: Option<&Path>) -> Result<(), ConnectError> {
+  if let Some(home) = home {
+    managed::validate_current_selection(home).map_err(|source| ConnectError::StartDaemon {
+      executable: managed::executable(home),
+      source,
+    })?;
+  }
+  Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1292,3 +1440,6 @@ mod tests {
     ));
   }
 }
+
+#[cfg(all(test, unix))]
+mod provider_tests;

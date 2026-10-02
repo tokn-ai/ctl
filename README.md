@@ -106,11 +106,19 @@ prints the installed version, executable path, and whether the installation was
 reused.
 
 `CTLD_BIN` selects an explicit executable. Without that override, macOS resolves
-the desktop's bundled helper first, then this managed installation, then a
+the desktop's bundled helper first, then any helper embedded in the CLI, then
+this managed installation, then a
 sibling executable or `PATH`. On other Unix platforms, install `ctld` from
 Cargo alongside the CLI; `ctl setup` is a macOS-only command. Source-built macOS
 `ctld` remains useful for development but does not acquire our Apple signing
 identity or Keychain entitlement through Cargo.
+
+Official macOS CLI downloads embed the matching signed and notarized `ctld.app`.
+They prepare that helper locally when a command needs to start a daemon; no
+helper download is needed. `ctl setup` also uses the embedded bundle. Existing
+daemon connections and passive status queries do not trigger installation.
+Build these CLI downloads with the dedicated [release command](docs/ci-bundles.md#build-a-cli-with-ctld-embedded).
+Ordinary Cargo builds and `cargo install ctl-cli` continue to use separate helpers.
 
 ```sh
 cargo build --workspace

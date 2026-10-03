@@ -2575,7 +2575,9 @@ async fn write_if_connected(stream: &mut UnixStream, message: &ClientMessage) ->
     Err(ctmux_proto::CodecError::Io(error))
       if matches!(
         error.kind(),
-        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        std::io::ErrorKind::BrokenPipe
+          | std::io::ErrorKind::ConnectionReset
+          | std::io::ErrorKind::NotConnected
       ) =>
     {
       Ok(())

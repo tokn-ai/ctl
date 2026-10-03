@@ -19,6 +19,12 @@ export function ArchiveBrowser({ targets, on_close }: {
   const [reading, setReading] = useState(false);
   const read_generation = useRef(0);
   const selected_lines = output?.key === output_key ? output.lines : selected_pane?.lines;
+  const selected_text = selected_lines?.some((line) => line.trim().length > 0) ? selected_lines.join("\n") : null;
+  const displayed_output = !selected_archive ? "Select an archived session."
+    : selected_text !== null ? selected_text
+      : reading ? "Loading retained output…"
+        : output?.key === output_key && output.next_offset ? "No readable text in the loaded output."
+          : "No readable retained output is available.";
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -104,7 +110,7 @@ export function ArchiveBrowser({ targets, on_close }: {
           </div>}
         </section>;
       })}</nav>
-      <pre className="archive-terminal" aria-label="Archived terminal output">{reading && !selected_lines?.length ? "Loading retained output…" : selected_archive ? selected_lines?.join("\n") || "No cached output was available." : "Select an archived session."}</pre>
+      <pre className="archive-terminal" aria-label="Archived terminal output">{displayed_output}</pre>
     </div>
     {output?.key === output_key && output?.next_offset && <button type="button" disabled={reading} onClick={readMore}>{reading ? "Loading…" : "Load more output"}</button>}
   </dialog>;

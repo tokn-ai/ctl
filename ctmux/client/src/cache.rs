@@ -157,12 +157,50 @@ fn history(directory: &Path, current: &Current, limit: Option<usize>) -> io::Res
   }
   Ok(result.into())
 }
-fn screen_lines(current: &Current) -> Vec<String> {
-  let mut screen = current.screen_lines.clone();
-  if !current.wrapped_prefix.is_empty()
-    && let Some(first) = screen.first_mut()
-  {
-    first.insert_str(0, &current.wrapped_prefix);
+fn archive_screen_lines(current: &Current) -> Vec<String> {
+  let size = &current.identity.terminal_size;
+  let mut terminal =
+    avt::terminal::Terminal::new((usize::from(size.columns), usize::from(size.rows)), Some(0));
+  let mut parser = avt::parser::Parser::default();
+  for character in current.payload.chars() {
+    if let Some(function) = parser.feed(character) {
+      terminal.execute(function);
+    }
+  }
+
+  let mut screen = Vec::new();
+  let mut prefix = current.wrapped_prefix.clone();
+  if terminal.active_buffer_type() == avt::terminal::BufferType::Alternate && !prefix.is_empty() {
+    // A partially scrolled primary line cannot continue in the alternate screen.
+    screen.push(std::mem::take(&mut prefix));
+  }
+  let mut unwrapper = avt::util::TextUnwrapper::new();
+  let last_content_row = terminal
+    .view()
+    .enumerate()
+    .filter_map(|(row, line)| {
+      let wrapped = unwrapper.push(line).is_none();
+      (wrapped || !line.text().trim_end().is_empty()).then_some(row)
+    })
+    .last();
+  let cursor = terminal.cursor();
+  if last_content_row.is_none() && cursor == (0, 0) && prefix.is_empty() {
+    return screen;
+  }
+  // Keep cursor-reached blank lines while excluding unused rows below the screen's content.
+  let last_row = cursor.row.max(last_content_row.unwrap_or(0));
+  let mut unwrapper = avt::util::TextUnwrapper::new();
+  for line in terminal.view().take(last_row + 1) {
+    if let Some(text) = unwrapper.push(line) {
+      prefix.push_str(&text);
+      screen.push(std::mem::take(&mut prefix));
+    }
+  }
+  if let Some(text) = unwrapper.flush() {
+    prefix.push_str(&text);
+  }
+  if !prefix.is_empty() {
+    screen.push(prefix);
   }
   screen
 }
@@ -669,7 +707,7 @@ impl CacheStore {
     }
     let next_offset = (position < current.history_bytes).then_some(position);
     if next_offset.is_none() {
-      lines.extend(screen_lines(&current));
+      lines.extend(archive_screen_lines(&current));
     }
     Ok(Some(ArchivePage { lines, next_offset }))
   }
@@ -757,6 +795,13 @@ mod tests {
         .store
         .load("local", "session", Some("pane"))?
         .ok_or_else(|| invalid("Missing test presentation"))
+    }
+    fn archive(&self) -> io::Result<ArchivePage> {
+      self.store.archive("local", "session", "Closed")?;
+      self
+        .store
+        .read_archive("local", "session", "pane", 0)?
+        .ok_or_else(|| invalid("Missing archive page"))
     }
   }
   impl Drop for Fixture {
@@ -925,6 +970,98 @@ mod tests {
   }
 
   #[test]
+  fn archive_empty_screen_retains_the_record_without_grid_padding() -> io::Result<()> {
+    let fixture = Fixture::new();
+    fixture.checkpoint(0, "", &[])?;
+    let payload = fixture.presentation()?.checkpoint.payload;
+    let page = fixture.archive()?;
+    assert_eq!(page.lines, Vec::<String>::new());
+    assert!(page.next_offset.is_none());
+    let archives = fixture.store.archives()?;
+    assert_eq!(archives.len(), 1);
+    assert_eq!(archives[0].terminals[0].terminal_id, "pane");
+    assert_eq!(archives[0].terminals[0].reason, "Closed");
+    assert_eq!(fixture.presentation()?.checkpoint.payload, payload);
+    Ok(())
+  }
+
+  #[test]
+  fn archive_short_tail_preserves_history_blanks_and_live_presentation() -> io::Result<()> {
+    let mut fixture = Fixture::new();
+    fixture.identity.terminal_size.rows = 6;
+    fixture.checkpoint(0, "tail", &["before", "", "after", ""])?;
+    let saved = fixture.presentation()?;
+    assert_eq!(
+      fixture.archive()?.lines,
+      ["before", "", "after", "", "tail"]
+    );
+    let restored = fixture.presentation()?;
+    assert_eq!(restored.history, saved.history);
+    assert_eq!(restored.checkpoint.payload, saved.checkpoint.payload);
+    assert_eq!(
+      restored.checkpoint.terminal_size,
+      saved.checkpoint.terminal_size
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn archive_tail_preserves_blank_lines_reached_by_output() -> io::Result<()> {
+    for (output, expected) in [
+      ("\r\n", vec!["", ""]),
+      ("tail\r\n\r\n", vec!["tail", "", ""]),
+      ("head\r\n\r\ntail\r\n", vec!["head", "", "tail", ""]),
+    ] {
+      let mut fixture = Fixture::new();
+      fixture.identity.terminal_size.rows = 6;
+      fixture.checkpoint(0, "", &[])?;
+      fixture.output(0, output)?;
+      assert_eq!(fixture.archive()?.lines, expected);
+    }
+    Ok(())
+  }
+
+  #[test]
+  fn archive_tail_retains_content_below_a_repositioned_cursor() -> io::Result<()> {
+    let mut fixture = Fixture::new();
+    fixture.identity.terminal_size.rows = 6;
+    fixture.checkpoint(0, "head\r\n\r\ntail\x1b[H", &[])?;
+    assert_eq!(fixture.archive()?.lines, ["head", "", "tail"]);
+    Ok(())
+  }
+
+  #[test]
+  fn archive_tail_joins_soft_wrapping_and_retains_interior_blank_lines() -> io::Result<()> {
+    let mut fixture = Fixture::new();
+    fixture.identity.terminal_size.columns = 3;
+    fixture.identity.terminal_size.rows = 6;
+    fixture.checkpoint(0, "abcdef\r\n\r\nhi", &[])?;
+    assert_eq!(fixture.archive()?.lines, ["abcdef", "", "hi"]);
+    Ok(())
+  }
+
+  #[test]
+  fn archive_tail_joins_a_partially_scrolled_logical_line() -> io::Result<()> {
+    let mut fixture = Fixture::new();
+    fixture.identity.terminal_size.columns = 3;
+    fixture.checkpoint(0, "", &[])?;
+    fixture.output(0, "abcdefghi")?;
+    assert_eq!(fixture.archive()?.lines, ["abcdefghi"]);
+    Ok(())
+  }
+
+  #[test]
+  fn archive_tail_keeps_primary_prefix_separate_from_alternate_screen() -> io::Result<()> {
+    let mut fixture = Fixture::new();
+    fixture.identity.terminal_size.columns = 3;
+    fixture.checkpoint(0, "", &[])?;
+    let sequence = fixture.output(0, "abcdefghi")?;
+    fixture.output(sequence, "\x1b[?1049h\x1b[HUI")?;
+    assert_eq!(fixture.archive()?.lines, ["abc", "UI"]);
+    Ok(())
+  }
+
+  #[test]
   fn archive_pages_retain_all_history_and_append_current_only_at_the_end() -> io::Result<()> {
     let fixture = Fixture::new();
     let lines: Vec<String> = (0..2500).map(|index| format!("line {index}")).collect();
@@ -952,6 +1089,7 @@ mod tests {
     }
     assert_eq!(&all[..2500], lines);
     assert_eq!(all[2500], "last screen");
+    assert_eq!(all.len(), 2501);
     Ok(())
   }
 

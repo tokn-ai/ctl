@@ -24,22 +24,23 @@ uuid.workspace = true
 ctl-proto.workspace = true
 ctl-ipc.workspace = true
 ctmux-ipc.workspace = true
+ctmux-proto.workspace = true
+ctl-task-proto.workspace = true
 ctl-task-client.workspace = true
 ctl-task-ipc.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "system-proxy"] }
 
-[dev-dependencies]
-serde_json.workspace = true
 flate2 = "1.1.9"
 tar = { version = "0.4.46", default-features = false }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 base64.workspace = true
 ctl-core = { workspace = true, features = ["executable"] }
-flate2 = "1.1.9"
-tar = { version = "0.4.46", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

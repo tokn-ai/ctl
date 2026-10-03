@@ -41,6 +41,8 @@ ctmux-proto.workspace = true
 portable-pty.workspace = true
 unicode-width.workspace = true
 sha2.workspace = true
+flate2 = "1.1.9"
+tar = { version = "0.4.46", default-features = false }
 
 [build-dependencies]
 ctl-core.workspace = true

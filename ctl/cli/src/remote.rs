@@ -124,7 +124,7 @@ pub(super) async fn offer_repair(
     return Err(Error::IdentityUnavailable);
   }
   let prompt = format!(
-    "{reason} Install matching remote components on {} and retry?",
+    "{reason} Install compatible remote components on {} and retry?",
     crate::table::text(destination),
   );
   let accepted =
@@ -159,7 +159,7 @@ async fn repair(
   let platform = Platform::parse_probe(&output)?;
   let target = platform.target_triple()?;
   eprintln!(
-    "ctl: Preparing matching components for {} {}...",
+    "ctl: Preparing compatible components for {} {}...",
     platform.os, platform.architecture
   );
   let bundle = bundle::matching_bundle(target).await?;

@@ -80,10 +80,7 @@ async fn open(config: &ConnectConfig, request: ClientMessage) -> (DuplexStream, 
     message(&mut client).await,
     ServerMessage::HandshakeAccepted {
       protocol_version: PROTOCOL_VERSION,
-      protocols: vec![
-        ctl_task_proto::protocol_info(),
-        ctl_task_proto::control::protocol_info()
-      ],
+      protocols: ctl_taskd::component_info().protocols,
     }
   );
   write_frame(&mut client, &request).await.unwrap();

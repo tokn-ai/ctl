@@ -24,16 +24,26 @@ share the CLI's binary directory; `ctl setup` installs the macOS helper under
 the full signed and notarized app bundle. It never restarts an existing daemon.
 
 For remote sessions and tasks, the controlled machine needs `ctl-agent`,
-`ctmuxd`, and `ctl-taskd`; remote VPNs also need `ctld`. Interactive Unix connections offer to repair missing
+`ctmuxd`, and `ctl-taskd`; remote VPNs also need `ctld`. Interactive Unix connections
+offer to repair missing
 or recognized older agents with a matching verified bundle, then retry once.
 Repair checks any saved machine ID first, shows upload progress and speed, and
 preserves running daemons. Ctrl-C cancels it; piped commands never prompt.
-Bundles must match the CLI's exact clean source revision. They can come from
+Bundles can come from
 `CTL_REMOTE_BUNDLES_DIR`, local resources, `~/.tokn/ctl/agent-bundles`, the matching
 official release, or an existing verified GitHub bundle artifact (requires `gh`).
 Downloaded manifests and archives are cached at
 `~/.tokn/ctl/agent-bundles/<revision>/<target>/` and verified again before reuse.
-Matching cache entries work offline and can serve any host with that platform.
+Schema-2 bundles include all four components and record their product/source identity and explicit
+protocol support. Compatible local or cached bundles can be reused across CLI
+releases and source revisions, including by development clients. Reuse checks
+all service and companion contracts, the target, archive and binary checksums,
+and agreement between the bundle-set and archived metadata. The exact current
+source cache is checked first, followed by compatible entries in stable revision
+order; this order does not imply which build is newest. Schema-1 bundles remain
+eligible only for the exact clean client build. Downloads still require a clean,
+identified CLI and match that source revision. Compatible cache entries work
+offline and can serve any host with that platform.
 Interrupted downloads never publish a partial entry; damaged cache entries are
 downloaded again. Explicit bundle overrides still reject invalid contents.
 Source developers can prepare their exact bundles with `pnpm agents:sync` from

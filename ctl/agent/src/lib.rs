@@ -25,17 +25,38 @@ use tokio::time::{Instant, sleep};
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
 pub const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 
-/// Complete published protocol map for this installed agent.
+/// Contracts implemented or used by this gateway build, including companion
+/// inspection and maintenance. Running daemons advertise their own contracts.
 #[must_use]
 pub fn agent_protocols() -> Vec<ctl_core::component::ProtocolInfo> {
   let mut protocols = ctl_proto::agent_protocols();
-  protocols.push(ctl_core::component::ProtocolInfo::new(
-    "ctl_remote_vpn",
-    ctl_ipc::remote_vpn::PROTOCOL_BUILD,
-    ctl_ipc::remote_vpn::PROTOCOL_VERSION,
-    ctl_ipc::remote_vpn::SUPPORTED_PROTOCOL_VERSIONS,
-  ));
+  protocols.extend([
+    ctmux_proto::protocol_info(),
+    ctmux_ipc::local_control_protocol_info(),
+    ctl_task_proto::protocol_info(),
+    ctl_task_proto::control::protocol_info(),
+    ctl_core::component::ProtocolInfo::new(
+      "ctld",
+      ctl_ipc::PROTOCOL_BUILD,
+      ctl_ipc::PROTOCOL_VERSION,
+      ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    ctl_core::component::ProtocolInfo::new(
+      "ctl_remote_vpn",
+      ctl_ipc::remote_vpn::PROTOCOL_BUILD,
+      ctl_ipc::remote_vpn::PROTOCOL_VERSION,
+      ctl_ipc::remote_vpn::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+  ]);
   protocols
+}
+
+#[must_use]
+pub fn component_info() -> ctl_core::component::ComponentInfo {
+  ctl_core::component::ComponentInfo {
+    build: ctl_core::component::build_info(),
+    protocols: agent_protocols(),
+  }
 }
 
 /// Services exposed by the SSH gateway. Local ctmux control is never exposed.

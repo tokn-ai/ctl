@@ -48,11 +48,14 @@ where
   F: FnOnce() -> FF,
   FF: Future<Output = Result<VerifiedBundle, Error>>,
 {
-  require_clean_build(expected)?;
   if let Some(bundle) = local_bundle(target, expected, directories, explicit).await? {
     return Ok(bundle);
   }
-  cache::get_or_download(cache_root, target, expected, download).await
+  cache::get_or_download(cache_root, target, expected, || async {
+    require_clean_build(expected)?;
+    download().await
+  })
+  .await
 }
 
 async fn download_bundle(
@@ -106,13 +109,13 @@ async fn local_bundle(
   let target = target.to_owned();
   let expected = expected.clone();
   let bundle = tokio::task::spawn_blocking(move || {
-    remote_bundle::read_verified_bundle(&directories, &target, &expected)
+    remote_bundle::read_reusable_bundle(&directories, &target, &expected)
   })
   .await??;
   if bundle.is_none() && explicit {
     return Err(
       remote_bundle::Error::NotAvailable(
-        "CTL_REMOTE_BUNDLES_DIR contains no bundle-set.json".into(),
+        "CTL_REMOTE_BUNDLES_DIR contains no reusable bundle for the remote target".into(),
       )
       .into(),
     );

@@ -1,9 +1,48 @@
 //! Account-owned identity stored independently of versioned component bundles.
+use ctl_core::component::{ComponentInfo, protocols_match};
 use ctl_proto::{BundleVersion, RemoteIdentity};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+
+const MAX_BUNDLE_MANIFEST_BYTES: usize = 64 * 1024;
+
+#[derive(Deserialize)]
+struct Manifest {
+  schema_version: u32,
+  #[serde(flatten)]
+  version: BundleVersion,
+  #[serde(default, deserialize_with = "deserialize_components")]
+  components: Option<BTreeMap<String, ComponentInfo>>,
+}
+
+fn deserialize_components<'de, D: serde::Deserializer<'de>>(
+  deserializer: D,
+) -> Result<Option<BTreeMap<String, ComponentInfo>>, D::Error> {
+  struct ComponentsVisitor;
+  impl<'de> serde::de::Visitor<'de> for ComponentsVisitor {
+    type Value = BTreeMap<String, ComponentInfo>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      formatter.write_str("a uniquely named map of the four bundled components")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+      let mut components = BTreeMap::new();
+      while let Some((name, component)) = map.next_entry::<String, ComponentInfo>()? {
+        if components.insert(name, component).is_some() || components.len() > 4 {
+          return Err(serde::de::Error::custom(
+            "duplicate or excessive bundle components",
+          ));
+        }
+      }
+      Ok(components)
+    }
+  }
+  deserializer.deserialize_map(ComponentsVisitor).map(Some)
+}
 
 /// Identifies the installed agent and its persistent per-user environment.
 ///
@@ -34,36 +73,26 @@ fn discover_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity
 }
 
 fn installed_identity(remote_id: String, executable: &Path) -> io::Result<RemoteIdentity> {
+  let component = crate::component_info();
   let manifest = executable.with_file_name("manifest.json");
   let bundle = match fs::File::open(manifest) {
     Ok(file) => {
-      #[derive(Deserialize)]
-      struct Manifest {
-        schema_version: u32,
-        #[serde(flatten)]
-        version: BundleVersion,
-      }
       let mut bytes = Vec::new();
-      file.take(8193).read_to_end(&mut bytes)?;
-      let manifest: Manifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-      if bytes.len() > 8192 || manifest.schema_version != 1 {
-        return Err(io::Error::new(
-          io::ErrorKind::InvalidData,
-          "invalid agent bundle manifest",
-        ));
-      }
-      Some(Box::new(manifest.version))
+      file
+        .take(MAX_BUNDLE_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+      Some(Box::new(parse_manifest(&bytes, &component)?))
     }
     Err(error) if error.kind() == io::ErrorKind::NotFound => None,
     Err(error) => return Err(error),
   };
   let identity = RemoteIdentity {
     remote_id,
-    agent_version: env!("CARGO_PKG_VERSION").into(),
-    build: Some(ctl_core::component::build_info()),
+    agent_version: component.build.version.clone(),
+    build: Some(component.build),
     ctmux_restart_supported: true,
     bundle,
-    protocols: crate::agent_protocols(),
+    protocols: component.protocols,
   };
   if !identity.is_valid() {
     return Err(io::Error::new(
@@ -72,6 +101,65 @@ fn installed_identity(remote_id: String, executable: &Path) -> io::Result<Remote
     ));
   }
   Ok(identity)
+}
+
+fn parse_manifest(bytes: &[u8], actual: &ComponentInfo) -> io::Result<BundleVersion> {
+  if bytes.len() > MAX_BUNDLE_MANIFEST_BYTES {
+    return Err(invalid_manifest());
+  }
+  let manifest: Manifest = serde_json::from_slice(bytes).map_err(|_| invalid_manifest())?;
+  match manifest.schema_version {
+    1 if manifest.components.is_none() => {}
+    2 => {
+      let components = manifest.components.as_ref().ok_or_else(invalid_manifest)?;
+      let version = &manifest.version;
+      if components.len() != 4
+        || ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
+          .iter()
+          .any(|name| !components.contains_key(*name))
+        || version.git_revision.len() != 40
+        || !version
+          .git_revision
+          .bytes()
+          .all(|byte| byte.is_ascii_hexdigit())
+        || components.values().any(|component| {
+          !component.is_valid()
+            || component.build.dirty
+            || component.build.version != version.app_version
+            || component.build.source_revision.as_deref() != Some(&version.git_revision)
+        })
+      {
+        return Err(invalid_manifest());
+      }
+      for (name, required) in [
+        ("ctmuxd", &["ctmux", "ctmux_control"][..]),
+        (
+          "ctl-taskd",
+          &["task", "task_control", "ctmux", "ctmux_control"][..],
+        ),
+        ("ctld", &["ctld", "ctld_lifecycle", "ctld_helper"][..]),
+      ] {
+        if required.iter().any(|required| {
+          !components[name]
+            .protocols
+            .iter()
+            .any(|protocol| protocol.name == *required)
+        }) {
+          return Err(invalid_manifest());
+        }
+      }
+      let claimed = &components["ctl-agent"];
+      if claimed.build != actual.build || !protocols_match(&claimed.protocols, &actual.protocols) {
+        return Err(invalid_manifest());
+      }
+    }
+    _ => return Err(invalid_manifest()),
+  }
+  Ok(manifest.version)
+}
+
+fn invalid_manifest() -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, "invalid agent bundle manifest")
 }
 
 fn read_id(path: &Path) -> io::Result<String> {
@@ -126,6 +214,146 @@ fn load_or_create_id(directory: &Path) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use serde_json::{Value, json};
+
+  fn bundled_component() -> ComponentInfo {
+    let mut component = crate::component_info();
+    component.build.version = "0.1.0".into();
+    component.build.source_revision = Some("a".repeat(40));
+    component.build.source_fingerprint = "b".repeat(64);
+    component.build.dirty = false;
+    component
+  }
+
+  fn versioned_manifest(component: &ComponentInfo) -> Value {
+    let companion = |protocols| ComponentInfo {
+      build: component.build.clone(),
+      protocols,
+    };
+    json!({
+      "schema_version": 2,
+      "app_version": component.build.version,
+      "bundle_id": "0.1.0-dev.aaaaaaaaaaaa",
+      "git_revision": component.build.source_revision,
+      "target_triple": "aarch64-apple-darwin",
+      "components": {
+        "ctl-agent": component,
+        "ctmuxd": companion(vec![ctmux_proto::protocol_info(), ctmux_ipc::local_control_protocol_info()]),
+        "ctl-taskd": companion(vec![ctl_task_proto::protocol_info(), ctl_task_proto::control::protocol_info(), ctmux_proto::protocol_info(), ctmux_ipc::local_control_protocol_info()]),
+        "ctld": companion(ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols),
+      }
+    })
+  }
+
+  #[test]
+  fn published_bundle_metadata_matches_the_actual_agent_without_changing_identity() {
+    let component = bundled_component();
+    let mut manifest = versioned_manifest(&component);
+    // A complete protocol map is independent of JSON array ordering.
+    manifest["components"]["ctl-agent"]["protocols"]
+      .as_array_mut()
+      .unwrap()
+      .reverse();
+    let version = parse_manifest(&serde_json::to_vec(&manifest).unwrap(), &component).unwrap();
+    assert_eq!(version.app_version, "0.1.0");
+    assert_eq!(version.git_revision, "a".repeat(40));
+    assert_eq!(version.bundle_id, "0.1.0-dev.aaaaaaaaaaaa");
+    let mut larger = serde_json::to_vec(&manifest).unwrap();
+    larger.resize(10 * 1024, b' ');
+    assert!(parse_manifest(&larger, &component).is_ok());
+  }
+
+  #[test]
+  fn published_bundle_metadata_cannot_claim_different_components_or_protocols() {
+    let component = bundled_component();
+    let valid = versioned_manifest(&component);
+    let mut cases = Vec::new();
+    let mut missing = valid.clone();
+    missing["components"]
+      .as_object_mut()
+      .unwrap()
+      .remove("ctmuxd");
+    cases.push(missing);
+    let mut extra = valid.clone();
+    extra["components"]["other"] = json!(component);
+    cases.push(extra);
+    let mut dirty = valid.clone();
+    dirty["components"]["ctl-taskd"]["build"]["dirty"] = json!(true);
+    cases.push(dirty);
+    let mut other_source = valid.clone();
+    other_source["components"]["ctmuxd"]["build"]["source_revision"] = json!("c".repeat(40));
+    cases.push(other_source);
+    let mut other_version = valid.clone();
+    other_version["components"]["ctl-taskd"]["build"]["version"] = json!("0.2.0");
+    cases.push(other_version);
+    let mut other_agent = valid.clone();
+    other_agent["components"]["ctl-agent"]["build"]["source_fingerprint"] = json!("c".repeat(64));
+    cases.push(other_agent);
+    let mut missing_protocol = valid.clone();
+    missing_protocol["components"]["ctl-agent"]["protocols"]
+      .as_array_mut()
+      .unwrap()
+      .pop();
+    cases.push(missing_protocol);
+    let mut invalid_protocol = valid.clone();
+    invalid_protocol["components"]["ctmuxd"]["protocols"][0]["supported_versions"] = json!([]);
+    cases.push(invalid_protocol);
+    let mut missing_companion_protocol = valid.clone();
+    missing_companion_protocol["components"]["ctl-taskd"]["protocols"]
+      .as_array_mut()
+      .unwrap()
+      .pop();
+    cases.push(missing_companion_protocol);
+    let mut missing_vpn_daemon = valid.clone();
+    missing_vpn_daemon["components"]
+      .as_object_mut()
+      .unwrap()
+      .remove("ctld");
+    cases.push(missing_vpn_daemon);
+    let mut missing_vpn_daemon_protocol = valid.clone();
+    missing_vpn_daemon_protocol["components"]["ctld"]["protocols"]
+      .as_array_mut()
+      .unwrap()
+      .pop();
+    cases.push(missing_vpn_daemon_protocol);
+    for manifest in cases {
+      assert_eq!(
+        parse_manifest(&serde_json::to_vec(&manifest).unwrap(), &component)
+          .unwrap_err()
+          .kind(),
+        io::ErrorKind::InvalidData,
+      );
+    }
+  }
+
+  #[test]
+  fn unknown_or_oversized_bundle_manifests_are_rejected() {
+    let component = bundled_component();
+    let mut unknown = versioned_manifest(&component);
+    unknown["schema_version"] = json!(3);
+    assert!(parse_manifest(&serde_json::to_vec(&unknown).unwrap(), &component).is_err());
+    let mut oversized = serde_json::to_vec(&versioned_manifest(&component)).unwrap();
+    oversized.resize(MAX_BUNDLE_MANIFEST_BYTES + 1, b' ');
+    assert!(parse_manifest(&oversized, &component).is_err());
+  }
+
+  #[test]
+  fn duplicate_components_and_schema_one_protocol_claims_are_rejected() {
+    let component = bundled_component();
+    let mut manifest = versioned_manifest(&component);
+    let bytes = serde_json::to_string(&manifest).unwrap();
+    let duplicate = bytes.replacen(
+      "\"components\":{",
+      &format!(
+        "\"components\":{{\"ctl-agent\":{},",
+        serde_json::to_string(&component).unwrap(),
+      ),
+      1,
+    );
+    assert!(parse_manifest(duplicate.as_bytes(), &component).is_err());
+    manifest["schema_version"] = json!(1);
+    assert!(parse_manifest(&serde_json::to_vec(&manifest).unwrap(), &component).is_err());
+  }
 
   #[test]
   fn passive_inspection_does_not_create_a_missing_identity() {

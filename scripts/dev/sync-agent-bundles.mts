@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
@@ -11,16 +10,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { agentTargets, maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget, type AgentBundleSet } from "../shared/agent-bundle.mts";
 
 const WORKFLOW = "bundles.yml";
 const ARTIFACT = "ctl-agent-bundle-set";
 const BUNDLE_SET_FILE = "bundle-set.json";
-const SUPPORTED_TARGETS = [
-  "x86_64-unknown-linux-musl",
-  "aarch64-unknown-linux-musl",
-  "x86_64-apple-darwin",
-  "aarch64-apple-darwin",
-] as const;
+const SUPPORTED_TARGETS = agentTargets;
 
 interface WorkflowRun {
   conclusion: string;
@@ -31,18 +26,7 @@ interface WorkflowRun {
   status: string;
 }
 
-interface BundleTarget {
-  archive: string;
-  sha256: string;
-}
-
-interface BundleSet {
-  schema_version: number;
-  app_version: string;
-  bundle_id: string;
-  git_revision: string;
-  targets: Record<string, BundleTarget>;
-}
+type BundleSet = AgentBundleSet;
 
 function run(
   command: string,
@@ -165,85 +149,22 @@ function requireString(
   return value;
 }
 
-function readBundleSet(
+async function readBundleSet(
   directory: string,
   appVersion: string,
   expectedRevision: string | undefined,
   verifyArchives: boolean,
-): BundleSet {
-  const manifestPath = join(directory, BUNDLE_SET_FILE);
-  const root = asRecord(JSON.parse(readFileSync(manifestPath, "utf8")), "bundle set");
-  const schemaVersion = root.schema_version;
-  const manifestAppVersion = requireString(root, "app_version");
-  const bundleId = requireString(root, "bundle_id");
-  const gitRevision = requireString(root, "git_revision");
-  const targets = asRecord(root.targets, "bundle-set targets");
-
-  if (schemaVersion !== 1) {
-    throw new Error(`unsupported bundle-set schema version: ${String(schemaVersion)}`);
-  }
-  if (manifestAppVersion !== appVersion) {
-    throw new Error(
-      `bundle set targets app ${manifestAppVersion}, but this checkout is ${appVersion}`,
-    );
-  }
-  if (!/^[a-zA-Z0-9._+-]{1,128}$/.test(bundleId)) {
-    throw new Error(`invalid bundle id: ${bundleId}`);
-  }
-  if (!/^[0-9a-fA-F]{40}$/.test(gitRevision)) {
-    throw new Error(`invalid bundle git revision: ${gitRevision}`);
-  }
-  const developmentBundleId = `${manifestAppVersion}-dev.${gitRevision.slice(0, 12)}`;
-  if (bundleId !== manifestAppVersion && bundleId !== developmentBundleId) {
-    throw new Error("bundle id does not match its app version and Git revision");
-  }
-  if (expectedRevision && gitRevision !== expectedRevision) {
-    throw new Error(
-      `bundle set is for ${gitRevision.slice(0, 12)}, not ${expectedRevision.slice(0, 12)}`,
-    );
-  }
-  const targetNames = Object.keys(targets).sort();
-  if (
-    targetNames.length !== SUPPORTED_TARGETS.length ||
-    SUPPORTED_TARGETS.some((target) => !targetNames.includes(target))
-  ) {
-    throw new Error("bundle set does not contain every supported target");
-  }
-
-  const parsedTargets: Record<string, BundleTarget> = {};
-  for (const target of SUPPORTED_TARGETS) {
-    const entry = asRecord(targets[target], `bundle target ${target}`);
-    const archive = requireString(entry, "archive");
-    const sha256 = requireString(entry, "sha256").toLowerCase();
-    const expectedArchive = `ctl-agent-bundle-${bundleId}-${target}.tar.gz`;
-    if (archive !== expectedArchive || !/^[0-9a-f]{64}$/.test(sha256)) {
-      throw new Error(`invalid bundle metadata for ${target}`);
+): Promise<BundleSet> {
+  const manifest = parseAgentBundleSet(
+    await readAgentFile(join(directory, BUNDLE_SET_FILE), maxAgentManifestBytes),
+    { app_version: appVersion, ...(expectedRevision ? { git_revision: expectedRevision } : {}) },
+  );
+  if (verifyArchives) {
+    for (const target of SUPPORTED_TARGETS) {
+      await verifyAgentBundleTarget(directory, manifest, target, manifest.targets[target]);
     }
-    if (verifyArchives) {
-      const archivePath = join(directory, archive);
-      const actual = createHash("sha256")
-        .update(readFileSync(archivePath))
-        .digest("hex");
-      if (actual !== sha256) {
-        throw new Error(`checksum mismatch for ${archive}`);
-      }
-      const sidecar = readFileSync(`${archivePath}.sha256`, "utf8")
-        .trim()
-        .split(/\s+/u);
-      if (sidecar[0]?.toLowerCase() !== sha256 || sidecar[1] !== archive) {
-        throw new Error(`invalid checksum sidecar for ${archive}`);
-      }
-    }
-    parsedTargets[target] = { archive, sha256 };
   }
-
-  return {
-    schema_version: 1,
-    app_version: manifestAppVersion,
-    bundle_id: bundleId,
-    git_revision: gitRevision,
-    targets: parsedTargets,
-  };
+  return manifest;
 }
 
 function appVersion(repoRoot: string): string {
@@ -252,7 +173,7 @@ function appVersion(repoRoot: string): string {
   return requireString(config, "version");
 }
 
-function checkBundles(repoRoot: string): void {
+async function checkBundles(repoRoot: string): Promise<void> {
   const destination = join(
     repoRoot,
     "apps/desktop/src-tauri/resources/agent-bundles",
@@ -264,7 +185,7 @@ function checkBundles(repoRoot: string): void {
     return;
   }
   try {
-    readBundleSet(destination, appVersion(repoRoot), revision, true);
+    await readBundleSet(destination, appVersion(repoRoot), revision, true);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(`Remote install bundles are not current: ${detail}`);
@@ -377,7 +298,7 @@ async function syncBundles(repoRoot: string, useMain: boolean): Promise<void> {
       repoRoot,
       true,
     );
-    const manifest = readBundleSet(temporaryDirectory, version, revision, true);
+    const manifest = await readBundleSet(temporaryDirectory, version, revision, true);
     const destination = join(
       repoRoot,
       "apps/desktop/src-tauri/resources/agent-bundles",
@@ -405,7 +326,7 @@ async function main(): Promise<void> {
 
   const repoRoot = git(["rev-parse", "--show-toplevel"], process.cwd());
   if (args[0] === "--check") {
-    checkBundles(repoRoot);
+    await checkBundles(repoRoot);
     return;
   }
   await syncBundles(repoRoot, args[0] === "--main");

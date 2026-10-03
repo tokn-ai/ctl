@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { archiveEntriesFixture, componentMapFixture, tarFixture } from "./agent-bundle.fixtures.mts";
 import {
   planAssetUpdate,
   releaseNotes,
@@ -223,6 +224,25 @@ test("validates all four desktop and remote targets and their checksum files", a
   assert.equal(bundle.asset_names.length, 33);
   assert.deepEqual(bundle.unsigned_targets, ["x86_64-apple-darwin", "aarch64-apple-darwin"]);
   assert.ok(bundle.asset_names.includes("bundle-set.json"));
+});
+
+test("validates schema2 remote metadata against archive contents before publishing", async (t) => {
+  const directory = await fixture(t);
+  const components = componentMapFixture(identity);
+  const targets: Record<string, unknown> = {};
+  for (const target of remoteTargets) {
+    const archive = `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`;
+    const asset = await writeAsset(directory, archive, tarFixture(archiveEntriesFixture(target, identity, components)));
+    targets[target] = { archive, sha256: asset.sha256, components };
+  }
+  const manifest = { schema_version: 2, ...identity, targets };
+  await writeFile(join(directory, "bundle-set.json"), JSON.stringify(manifest));
+  const verified = await validateReleaseBundle(identity, directory);
+  assert.ok(verified.asset_names.includes("bundle-set.json"));
+  const forged = structuredClone(manifest);
+  (forged.targets[remoteTargets[0]] as { components: ReturnType<typeof componentMapFixture> }).components.ctld.build.source_fingerprint = "b".repeat(64);
+  await writeFile(join(directory, "bundle-set.json"), JSON.stringify(forged));
+  await assert.rejects(validateReleaseBundle(identity, directory), /metadata differs/);
 });
 
 test("accepts a complete signed standalone helper pair without CLI assets in development builds", async (t) => {

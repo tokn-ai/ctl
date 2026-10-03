@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use ctl_client::remote_bundle::{BundleCacheEntry, VerifiedBundle};
+use ctl_client::remote_bundle::{self, BundleCacheEntry, VerifiedBundle};
 use ctl_core::component::ComponentBuildInfo;
 
 use super::super::Error;
@@ -18,21 +18,24 @@ where
   F: FnOnce() -> FF,
   FF: Future<Output = Result<VerifiedBundle, Error>>,
 {
-  let entry = if let Some(root) = root {
+  let cache_root = if let Some(root) = root {
     let owned_target = target.to_owned();
     let expected = expected.clone();
+    let owned_root = root.clone();
     let loaded = tokio::task::spawn_blocking(move || {
-      let entry = BundleCacheEntry::new(&root, &owned_target, &expected)?;
-      let bundle = entry.load()?;
-      Ok::<_, ctl_client::remote_bundle::Error>((entry, bundle))
+      remote_bundle::read_compatible_cached_bundle(&owned_root, &owned_target, &expected)
     })
     .await?;
     match loaded {
-      Ok((_, Some(bundle))) => {
-        eprintln!("ctl: Using cached remote components for {target}.");
+      Ok(Some(bundle)) => {
+        eprintln!(
+          "ctl: Using cached remote components {} ({}) for {target}.",
+          crate::table::text(&bundle.app_version),
+          &bundle.git_revision[..12],
+        );
         return Ok(bundle);
       }
-      Ok((entry, None)) => Some(entry),
+      Ok(None) => Some(root),
       Err(error) => {
         warn(&error);
         None
@@ -42,11 +45,14 @@ where
     None
   };
   let bundle = download().await?;
-  if let Some(entry) = entry {
+  if let Some(root) = cache_root {
+    let owned_target = target.to_owned();
+    let expected = expected.clone();
     // Keep both the bundle and staging cleanup in the blocking worker, so an
     // interrupted caller cannot remove files while publication is in progress.
     let (bundle, stored) = tokio::task::spawn_blocking(move || {
-      let result = entry.store(&bundle);
+      let result = BundleCacheEntry::new(&root, &owned_target, &expected)
+        .and_then(|entry| entry.store(&bundle));
       (bundle, result)
     })
     .await?;
@@ -64,3 +70,7 @@ fn warn(error: &impl std::fmt::Display) {
     crate::table::text(&error.to_string())
   );
 }
+
+#[cfg(test)]
+#[path = "cache/tests.rs"]
+mod tests;

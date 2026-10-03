@@ -84,16 +84,26 @@ export function helperProtocol(protocols: ProtocolInfo[], name = "ctld"): Protoc
   return protocol;
 }
 
-export function parseHelperComponent(stdout: string): ComponentInfo {
-  if (Buffer.byteLength(stdout) > maxComponentMetadata) throw new Error("ctld reported oversized component metadata");
-  const value: unknown = JSON.parse(stdout);
+export function parseComponent(value: unknown): ComponentInfo {
   const build = record(value) && record(value.build) ? value.build : undefined;
   if (!build || typeof build.version !== "string" || build.version.length === 0 || build.version.length > 256 ||
     /\p{Cc}/u.test(build.version) || (build.source_revision !== null && (typeof build.source_revision !== "string" || !/^(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(build.source_revision))) ||
     typeof build.source_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(build.source_fingerprint) || typeof build.dirty !== "boolean") {
-    throw new Error("ctld reported invalid source identity or version");
+    throw new Error("component reported invalid source identity or version");
   }
-  return { build: build as ComponentInfo["build"], protocols: parseHelperProtocols((value as Record<string, unknown>).protocols) };
+  const advertisements = (value as Record<string, unknown>).protocols;
+  if (!Array.isArray(advertisements) || advertisements.length > 128) throw new Error("invalid component protocol metadata");
+  const protocols = advertisements.map(parseProtocolInfo);
+  if (new Set(protocols.map((protocol) => protocol.name)).size !== protocols.length) {
+    throw new Error("component metadata repeats a protocol");
+  }
+  return { build: build as ComponentInfo["build"], protocols };
+}
+
+export function parseHelperComponent(stdout: string): ComponentInfo {
+  if (Buffer.byteLength(stdout) > maxComponentMetadata) throw new Error("ctld reported oversized component metadata");
+  const component = parseComponent(JSON.parse(stdout));
+  return { build: component.build, protocols: parseHelperProtocols(component.protocols) };
 }
 
 export function verifyReleaseComponent(stdout: string, app_version: string, git_revision: string): ComponentInfo {

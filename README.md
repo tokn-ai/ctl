@@ -646,8 +646,8 @@ the remote SSH service.
 
 Interactive Unix connections offer to install matching components when the
 remote agent is missing or uses the old `ctl-ssh-v2` protocol, then retry once.
-Repair verifies any saved machine ID and the bundle's exact clean source
-revision, reuses the chosen SSH route, and shows received bytes, speed, and
+Repair verifies any saved machine ID and the bundle's own source identity and
+checksums, reuses the chosen SSH route, and shows received bytes, speed, and
 installation stages. It preserves running daemons and can be cancelled with
 Ctrl-C. Piped commands and background reconnects never prompt. Local bundle
 sets can be selected with `CTL_REMOTE_BUNDLES_DIR`; otherwise the CLI checks
@@ -655,7 +655,14 @@ its local resources, `~/.tokn/ctl/agent-bundles`, and the verified download cach
 before the matching official release and existing exact-revision GitHub bundle
 artifacts when `gh` is installed. Downloads are cached under
 `~/.tokn/ctl/agent-bundles/<revision>/<target>/` for reuse across hosts; each reuse
-checks the version, source revision, and checksum without contacting GitHub.
+checks its own version, source revision, target, and checksums without contacting
+GitHub. Schema-2 bundles also verify each component's protocol advertisements
+against the archive and require explicit shared service and companion contracts.
+They can be reused across CLI releases and source revisions, including by
+development clients. The exact current source cache is preferred; other compatible
+entries use stable revision order. Older schema-1 bundles and new downloads still
+require the exact clean client source. Installing a cached bundle leaves running
+daemon owners in place; ordinary connections negotiate with those owners.
 For source development, run `pnpm agents:sync` from `apps/desktop` at the same
 clean pushed revision before rebuilding. See [remote setup](docs/remote-mvp.md).
 

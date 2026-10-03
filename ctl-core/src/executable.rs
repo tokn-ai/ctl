@@ -1,6 +1,7 @@
 //! Bounded inspection and identity checks for a selected replacement executable.
 
 use crate::component::ComponentInfo;
+use crate::protocol::ProtocolVersion;
 use sha2::{Digest as _, Sha256};
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -21,18 +22,21 @@ impl PreparedExecutable {
   ///
   /// # Errors
   /// Rejects unavailable, changing, malformed or incompatible executables.
-  pub async fn prepare(selected: PathBuf, required: &[(&str, u16)]) -> io::Result<Self> {
+  pub async fn prepare(
+    selected: PathBuf,
+    required: &[(&str, &[ProtocolVersion])],
+  ) -> io::Result<Self> {
     let path = resolve(&selected)?;
     let digest = fingerprint(path.clone()).await?;
     let info = metadata(&path).await?;
-    if !info.build.is_valid()
-      || required.iter().any(|(name, version)| {
+    if !info.is_valid()
+      || required.iter().any(|(name, versions)| {
         let entries: Vec<_> = info
           .protocols
           .iter()
           .filter(|entry| entry.name == *name)
           .collect();
-        entries.len() != 1 || entries[0].version != *version
+        entries.len() != 1 || entries[0].negotiate(versions).is_none()
       })
     {
       return Err(io::Error::other(
@@ -66,19 +70,12 @@ impl PreparedExecutable {
     Ok(())
   }
 
-  /// Compares observed successor metadata, independent of protocol entry order.
+  /// Compares observed successor metadata, independent of advertisement order.
   #[must_use]
   pub fn matches(&self, observed: &ComponentInfo) -> bool {
-    self.info.build == observed.build
-      && self.info.protocols.len() == observed.protocols.len()
-      && self.info.protocols.iter().all(|protocol| {
-        observed
-          .protocols
-          .iter()
-          .filter(|entry| *entry == protocol)
-          .count()
-          == 1
-      })
+    observed.is_valid()
+      && self.info.build == observed.build
+      && crate::component::protocols_match(&self.info.protocols, &observed.protocols)
   }
 }
 
@@ -174,6 +171,9 @@ mod tests {
   use std::os::unix::fs::PermissionsExt as _;
   use std::sync::atomic::{AtomicUsize, Ordering};
 
+  const OLD: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
+  const NEW: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
+
   static NEXT: AtomicUsize = AtomicUsize::new(0);
   static SCRIPTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -189,10 +189,7 @@ mod tests {
     let path = directory.join("helper");
     let info = ComponentInfo {
       build: crate::component::build_info(),
-      protocols: vec![ProtocolInfo {
-        name: "test".into(),
-        version: 1,
-      }],
+      protocols: vec![ProtocolInfo::new("test", 13, OLD, &[OLD])],
     };
     // Actual daemon askpass dispatch happens before command-line parsing. A
     // query must clear both inherited selectors before launching the helper.
@@ -231,7 +228,7 @@ mod tests {
     };
     assert_eq!(std::env::var("CTLD_ASKPASS").unwrap(), "1");
     assert_eq!(std::env::var("CTLD_IDENTITY_ASKPASS").unwrap(), "1");
-    PreparedExecutable::prepare(PathBuf::from(executable), &[("test", 1)])
+    PreparedExecutable::prepare(PathBuf::from(executable), &[("test", &[OLD])])
       .await
       .unwrap();
   }
@@ -248,10 +245,7 @@ mod tests {
     let path = root.join("helper");
     let info = ComponentInfo {
       build: crate::component::build_info(),
-      protocols: vec![ProtocolInfo {
-        name: "test".into(),
-        version: 1,
-      }],
+      protocols: vec![ProtocolInfo::new("test", 13, OLD, &[OLD])],
     };
     let contents = format!(
       "#!/bin/sh\nprintf '%s\\n' '{}'\n",
@@ -259,17 +253,62 @@ mod tests {
     );
     std::fs::write(&path, &contents).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let prepared = PreparedExecutable::prepare(path.clone(), &[("test", 1)])
+    let prepared = PreparedExecutable::prepare(path.clone(), &[("test", &[OLD])])
       .await
       .unwrap();
     prepared.verify().await.unwrap();
     std::fs::write(&path, format!("{contents}# changed executable\n")).unwrap();
     assert!(prepared.verify().await.is_err());
     assert!(
-      PreparedExecutable::prepare(path, &[("test", 2)])
+      PreparedExecutable::prepare(path, &[("test", &[NEW])])
         .await
         .is_err()
     );
+    std::fs::remove_dir_all(root).unwrap();
+  }
+
+  #[tokio::test]
+  async fn helper_inspection_negotiates_explicit_supported_contracts() {
+    let _guard = SCRIPTS.lock().await;
+    let root = std::env::temp_dir().join(format!(
+      "component-contracts-{}-{}",
+      std::process::id(),
+      NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("helper");
+    for (build, version, supported, required) in [
+      (13, OLD, vec![OLD], vec![OLD, NEW]),
+      (15, NEW, vec![OLD, NEW], vec![OLD]),
+    ] {
+      let info = ComponentInfo {
+        build: crate::component::build_info(),
+        protocols: vec![ProtocolInfo::new("test", build, version, &supported)],
+      };
+      std::fs::write(
+        &path,
+        format!(
+          "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+          serde_json::to_string(&info).unwrap()
+        ),
+      )
+      .unwrap();
+      std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+      let prepared = PreparedExecutable::prepare(path.clone(), &[("test", &required)])
+        .await
+        .unwrap();
+      assert_eq!(prepared.info, info);
+      let mut reordered = info.clone();
+      reordered.protocols[0].supported_versions.reverse();
+      assert!(prepared.matches(&reordered));
+      reordered.protocols[0].supported_versions = vec![version];
+      assert_eq!(prepared.matches(&reordered), supported.len() == 1);
+      assert!(
+        PreparedExecutable::prepare(path.clone(), &[("test", &[ProtocolVersion::new(2, 0, 17)])])
+          .await
+          .is_err()
+      );
+    }
     std::fs::remove_dir_all(root).unwrap();
   }
 }

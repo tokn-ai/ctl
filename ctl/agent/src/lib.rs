@@ -107,17 +107,32 @@ where
   R: AsyncRead + Unpin,
   W: AsyncWrite + Unpin,
 {
-  let daemon = connect_or_start_daemon(config).await?;
-  client_writer
-    .write_all(if config.identity.is_some() {
-      ctl_proto::IDENTITY_PREFACE
-    } else {
-      SSH_TRANSPORT_PREFACE
-    })
+  if config.identity.is_some() {
+    client_writer
+      .write_all(ctl_proto::IDENTITY_PREFACE)
+      .await
+      .map_err(AgentError::Relay)?;
+    tokio::time::timeout(
+      Duration::from_secs(30),
+      ctl_proto::accept_identity_contract(&mut client_reader, &mut client_writer),
+    )
     .await
+    .map_err(|_| {
+      AgentError::Relay(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "identity contract negotiation timed out",
+      ))
+    })?
     .map_err(AgentError::Relay)?;
+  }
+  let daemon = connect_or_start_daemon(config).await?;
   if let Some(identity) = &config.identity {
     ctl_proto::write_identity(&mut client_writer, identity)
+      .await
+      .map_err(AgentError::Relay)?;
+  } else {
+    client_writer
+      .write_all(SSH_TRANSPORT_PREFACE)
       .await
       .map_err(AgentError::Relay)?;
   }

@@ -27,14 +27,8 @@ impl Fixture {
     let info = ComponentInfo {
       build: ctl_core::component::build_info(),
       protocols: vec![
-        ProtocolInfo {
-          name: "task".into(),
-          version: ctl_task_proto::PROTOCOL_VERSION,
-        },
-        ProtocolInfo {
-          name: "task_control".into(),
-          version: control::PROTOCOL_VERSION,
-        },
+        ctl_task_proto::protocol_info(),
+        ctl_task_proto::control::protocol_info(),
       ],
     };
     std::fs::write(&executable, format!("#!/bin/sh\nif [ \"$1\" = --component-info ]; then\nprintf '%s\\n' '{}'\nelse\nprintf '%s\\n' \"$@\" > '{}'\nfi\n", serde_json::to_string(&info).unwrap(), root.join("spawned").display())).unwrap();
@@ -162,6 +156,7 @@ async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, L
     write_frame(
       &mut stream,
       &control::ServerMessage::RestartAccepted {
+        protocol_version: control::PROTOCOL_VERSION,
         data_directory: root.join("original-data"),
         ctmux_socket: root.join("original-ctmux.sock"),
       },
@@ -190,7 +185,9 @@ async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, L
       &mut stream,
       &control::ServerMessage::ComponentStatus {
         build: info.build,
-        protocol_version: ctl_task_proto::PROTOCOL_VERSION,
+        protocol_version: control::PROTOCOL_VERSION,
+        data_protocol_version: ctl_task_proto::PROTOCOL_VERSION,
+        protocols: info.protocols,
       },
     )
     .await

@@ -4,12 +4,12 @@ use crate::session::{
 };
 use ctmux_core::{JournalError, OutputChunk};
 use ctmux_ipc::{
-  LOCAL_CONTROL_PROTOCOL_VERSION, LocalControlClientMessage, LocalControlErrorCode,
+  LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS, LocalControlClientMessage, LocalControlErrorCode,
   LocalControlServerMessage, read_local_control_frame, write_local_control_frame,
 };
 use ctmux_proto::{
-  ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, PROTOCOL_VERSION, ServerMessage,
-  ShellState, read_frame, write_frame,
+  ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ShellState, read_frame, write_frame,
 };
 use std::collections::VecDeque;
 use std::io;
@@ -525,7 +525,7 @@ async fn accept_local_control_handshake(stream: &mut Stream) -> Result<bool, Con
   else {
     return Ok(false);
   };
-  let LocalControlClientMessage::Handshake { protocol_version } = handshake else {
+  let LocalControlClientMessage::Handshake { protocol } = handshake else {
     send_local_control_error(
       stream,
       LocalControlErrorCode::InvalidRequest,
@@ -534,22 +534,27 @@ async fn accept_local_control_handshake(stream: &mut Stream) -> Result<bool, Con
     .await?;
     return Ok(false);
   };
-  if protocol_version != LOCAL_CONTROL_PROTOCOL_VERSION {
+  let Some(protocol_version) = protocol.negotiate(LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS) else {
     send_local_control_error(
       stream,
       LocalControlErrorCode::ProtocolVersionMismatch,
       &format!(
-        "local-control client requested version {protocol_version}; this daemon supports {LOCAL_CONTROL_PROTOCOL_VERSION}"
+        "local-control client offered {:?}; this daemon supports {LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS:?}",
+        protocol.supported_versions,
       ),
     )
     .await?;
     return Ok(false);
-  }
+  };
 
   write_local_control_frame(
     stream,
     &LocalControlServerMessage::HandshakeAccepted {
-      protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+      protocol_version,
+      protocols: vec![
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
+      ],
       restart_supported: true,
       build: Some(ctl_core::component::build_info()),
       data_protocol_version: Some(PROTOCOL_VERSION),
@@ -713,10 +718,7 @@ async fn handle_active_connection(
     return Ok(());
   };
 
-  let ClientMessage::Handshake {
-    protocol_version, ..
-  } = handshake
-  else {
+  let ClientMessage::Handshake { protocol, .. } = handshake else {
     send_error(
       &mut stream,
       ErrorCode::InvalidRequest,
@@ -726,22 +728,27 @@ async fn handle_active_connection(
     return Ok(());
   };
 
-  if protocol_version != PROTOCOL_VERSION {
+  let Some(protocol_version) = protocol.negotiate(SUPPORTED_PROTOCOL_VERSIONS) else {
     send_error(
       &mut stream,
       ErrorCode::ProtocolVersionMismatch,
       &format!(
-        "client requested protocol version {protocol_version}; this daemon supports {PROTOCOL_VERSION}"
+        "client offered protocol contracts {:?}; this daemon supports {SUPPORTED_PROTOCOL_VERSIONS:?}",
+        protocol.supported_versions,
       ),
     )
     .await?;
     return Ok(());
-  }
+  };
 
   write_frame(
     &mut stream,
     &ServerMessage::HandshakeAccepted {
-      protocol_version: PROTOCOL_VERSION,
+      protocol_version,
+      protocols: vec![
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
+      ],
       server_version: SERVER_VERSION.into(),
       build: Some(ctl_core::component::build_info()),
       heartbeat_interval_ms: attachment_liveness.heartbeat_interval_ms,

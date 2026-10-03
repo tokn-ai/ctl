@@ -3,9 +3,8 @@ pub mod cache;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 pub use ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use ctmux_proto::{
-  ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
-  SessionInfo, ShellState, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, read_frame,
-  write_frame,
+  ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, ServerMessage, SessionInfo,
+  ShellState, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, read_frame, write_frame,
 };
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal};
@@ -159,7 +158,8 @@ pub struct AttachmentLiveness {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeInfo {
   pub server_version: String,
-  pub protocol_version: u16,
+  pub protocol_version: ctl_core::protocol::ProtocolVersion,
+  pub protocols: Vec<ctl_core::component::ProtocolInfo>,
   pub build: Option<ctl_core::component::ComponentBuildInfo>,
   pub attachment_liveness: AttachmentLiveness,
 }
@@ -758,7 +758,7 @@ where
   write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: PROTOCOL_VERSION,
+      protocol: ctmux_proto::protocol_offer(),
       client_name: identity.name.clone(),
       client_version: identity.version.clone(),
     },
@@ -768,16 +768,23 @@ where
   match read_response(stream).await? {
     ServerMessage::HandshakeAccepted {
       protocol_version,
+      protocols,
       server_version,
       build,
       heartbeat_interval_ms,
       attachment_liveness_timeout_ms,
       ..
-    } if protocol_version == PROTOCOL_VERSION => {
+    } if ctmux_proto::protocol_offer().accepts(protocol_version)
+      && ctl_core::component::protocols_are_valid(&protocols)
+      && protocols
+        .iter()
+        .any(|protocol| protocol.name == "ctmux" && protocol.supports(protocol_version)) =>
+    {
       attachment_liveness(heartbeat_interval_ms, attachment_liveness_timeout_ms).map(
         |attachment_liveness| HandshakeInfo {
           server_version,
           protocol_version,
+          protocols,
           build,
           attachment_liveness,
         },
@@ -2345,6 +2352,74 @@ pub enum ClientError {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use ctmux_proto::PROTOCOL_VERSION;
+
+  async fn protocol_reply(
+    selected: ctl_core::protocol::ProtocolVersion,
+    protocols: Vec<ctl_core::component::ProtocolInfo>,
+  ) -> Result<HandshakeInfo, ClientError> {
+    let (mut client, mut daemon) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+      assert!(
+        matches!(read_frame::<_, ClientMessage>(&mut daemon).await.unwrap(),
+        Some(ClientMessage::Handshake { protocol, .. }) if protocol == ctmux_proto::protocol_offer())
+      );
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HandshakeAccepted {
+          protocol_version: selected,
+          protocols,
+          server_version: "newer-server".into(),
+          build: None,
+          heartbeat_interval_ms: 1_000,
+          attachment_liveness_timeout_ms: 3_000,
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let result = handshake(
+      &mut client,
+      &ClientIdentity {
+        name: "protocol-test".into(),
+        version: "test".into(),
+      },
+    )
+    .await;
+    server.await.unwrap();
+    result
+  }
+
+  #[tokio::test]
+  async fn handshake_preserves_latest_contract_separately_from_selection() {
+    let latest = ctl_core::protocol::ProtocolVersion::new(1, 1, 15);
+    let advertised =
+      ctl_core::component::ProtocolInfo::new("ctmux", 15, latest, &[PROTOCOL_VERSION, latest]);
+    let info = protocol_reply(PROTOCOL_VERSION, vec![advertised.clone()])
+      .await
+      .unwrap();
+    assert_eq!(info.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(info.protocols, vec![advertised]);
+  }
+
+  #[tokio::test]
+  async fn handshake_rejects_unoffered_or_unadvertised_selection() {
+    let unoffered = ctl_core::protocol::ProtocolVersion::new(1, 0, 14);
+    let advertisement =
+      ctl_core::component::ProtocolInfo::new("ctmux", 14, unoffered, &[unoffered]);
+    assert!(matches!(
+      protocol_reply(unoffered, vec![advertisement.clone()]).await,
+      Err(ClientError::UnexpectedResponse { .. })
+    ));
+    assert!(matches!(
+      protocol_reply(PROTOCOL_VERSION, vec![advertisement]).await,
+      Err(ClientError::UnexpectedResponse { .. })
+    ));
+    assert!(matches!(
+      protocol_reply(PROTOCOL_VERSION, Vec::new()).await,
+      Err(ClientError::UnexpectedResponse { .. })
+    ));
+  }
 
   /// Hold readable final frames until a renderer acknowledgement encounters
   /// the peer's closed write side. This makes the half-close ordering exact.
@@ -2539,15 +2614,13 @@ mod tests {
       let handshake: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
       assert!(matches!(
         handshake,
-        ClientMessage::Handshake {
-          protocol_version: PROTOCOL_VERSION,
-          ..
-        }
+        ClientMessage::Handshake { protocol, .. } if protocol == ctmux_proto::protocol_offer()
       ));
       write_frame(
         &mut daemon,
         &ServerMessage::HandshakeAccepted {
           protocol_version: PROTOCOL_VERSION,
+          protocols: vec![ctmux_proto::protocol_info()],
           server_version: "test".into(),
           build: None,
           heartbeat_interval_ms: 1_000,
@@ -3487,15 +3560,13 @@ mod tests {
       let handshake: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
       assert!(matches!(
         handshake,
-        ClientMessage::Handshake {
-          protocol_version: PROTOCOL_VERSION,
-          ..
-        }
+        ClientMessage::Handshake { protocol, .. } if protocol == ctmux_proto::protocol_offer()
       ));
       write_frame(
         &mut daemon,
         &ServerMessage::HandshakeAccepted {
           protocol_version: PROTOCOL_VERSION,
+          protocols: vec![ctmux_proto::protocol_info()],
           server_version: "test".into(),
           build: None,
           heartbeat_interval_ms: 1_000,
@@ -3553,6 +3624,7 @@ mod tests {
       handshake_info: HandshakeInfo {
         server_version: "test".into(),
         protocol_version: PROTOCOL_VERSION,
+        protocols: vec![ctmux_proto::protocol_info()],
         build: None,
         attachment_liveness: AttachmentLiveness {
           heartbeat_interval: Duration::from_mins(1),

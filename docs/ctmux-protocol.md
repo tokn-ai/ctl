@@ -1,25 +1,25 @@
-# ctmux protocol version 13
+# ctmux published protocol 1.0.13
 
-The protocol is independent of local IPC and future remote transport. Version
-11 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+The protocol is independent of local IPC and future remote transport. Internal build
+11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
 
-### Version 7 attachment reconnect
+### Internal build 7 attachment reconnect
 
-Version 7 adds an opaque `attachment_token` to `attached` and a corresponding
+Internal build 7 adds an opaque `attachment_token` to `attached` and a corresponding
 `resume_attachment` request. The token rebinds a replacement transport to the
 same logical attachment during a bounded reconnect grace, preserving its input
-and layout leases. Protocol versions still match exactly during handshake.
+and layout leases. These earlier integer-only builds were unpublished development formats.
 
-Version 8 adds renderer-applied presentation flow control. Version 9 pairs
+Internal build 8 adds renderer-applied presentation flow control. Internal build 9 pairs
 every terminal checkpoint with a bounded normalized-history snapshot captured
 at the same raw sequence.
 
 ## Sessions, views, and terminals
 
-Version 10 separates three identities:
+Internal build 10 separates three identities:
 
 - A **session** is the named root returned by `list_sessions`.
 - Each session binds to one distinct, server-owned **view**.
@@ -40,7 +40,7 @@ layout order and ownership may change. Output and input ownership remain scoped 
 terminal; layout ownership spans its entire view. The historical `session_ended` stream event indicates the attached
 terminal's exit; other terminals in the root may still be running.
 
-Version 11 makes `resize` and the layout lease view-wide. An attachment to any
+Internal build 11 makes `resize` and the layout lease view-wide. An attachment to any
 member terminal may acquire the one layout lease; input leases remain independent.
 The resize owner supplies the full canvas size. The daemon allocates integer cell
 rectangles and resizes every member PTY, including hidden tab groups. Horizontal
@@ -100,13 +100,17 @@ daemon idle-exit behavior. Layouts survive client disconnects, but like PTYs,
 do not survive daemon restart. Task-managed roots retain one terminal and reject
 splits and transfers so task lifecycle ownership remains unambiguous.
 
-Protocol versions still match exactly. Version 12 removed tabbed views; version
-13 adopts the ctmux checkpoint/history format names. Update the app and daemon
-together. This does not migrate a running older daemon.
+Internal build 12 removed tabbed views; build 13 adopted the ctmux checkpoint/history
+format names. Published `1.0.13` is the first contract. Handshakes negotiate the
+highest explicit shared contract, with advertisements retained separately from
+the selection. See [versioning policy](protocol-versioning.md). Unpublished older
+daemons need replacement; this does not migrate their running sessions.
 
 ## Connection lifecycle
 
-Every connection starts with `handshake`. The daemon replies with
+Every connection starts with `handshake { protocol, client_name, client_version }`,
+where `protocol` advertises the internal build, latest published version, and
+explicit `supported_versions` set. The daemon replies with
 `handshake_accepted` or a structured error. One command follows a successful
 handshake.
 
@@ -461,7 +465,7 @@ History lines are the daemon emulator's normalized text after terminal controls
 have been interpreted. Soft-wrapped physical rows are merged into logical
 lines. Alternate-screen output is excluded. The snapshot is bounded by bytes,
 physical rows, and emulator cells; it is a full replacement, not an incremental
-patch. Version 1 does not preserve style runs in historical lines.
+patch. Internal build 1 does not preserve style runs in historical lines.
 
 The emulator strips trailing whitespace from each complete logical line before
 history storage; hard line breaks do not pad stored lines to the terminal width.

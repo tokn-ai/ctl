@@ -182,7 +182,7 @@ async fn structured_connection_round_trips_and_preserves_lifecycle_state() {
 async fn handshake_rejects_mismatched_protocol_and_preserves_daemon_error_codes() {
   for response in [
     ServerMessage::HandshakeAccepted {
-      protocol_version: crate::PROTOCOL_VERSION - 1,
+      protocol_version: ctl_core::protocol::ProtocolVersion::new(1, 0, 11),
     },
     ServerMessage::Error {
       code: "synthetic_failure".into(),
@@ -255,7 +255,7 @@ mod endpoints {
     let (mut stream, _) = listener.accept().await.unwrap();
     assert!(matches!(
       crate::read_frame(&mut stream).await.unwrap(),
-      Some(ClientMessage::Handshake { protocol_version }) if protocol_version == crate::PROTOCOL_VERSION
+      Some(ClientMessage::Handshake { protocol }) if protocol.accepts(crate::PROTOCOL_VERSION)
     ));
     crate::write_frame(
       &mut stream,
@@ -277,8 +277,12 @@ mod endpoints {
     std::fs::write(
       &executable,
       format!(
-        "#!/bin/sh\nif [ \"$1\" = --protocol-version ]; then echo {}; fi\n",
-        crate::PROTOCOL_VERSION
+        "#!/bin/sh\nif [ \"$1\" = --component-info ]; then printf '%s\\n' '{}'; fi\n",
+        serde_json::to_string(&ctl_core::component::ComponentInfo {
+          build: ctl_core::component::build_info(),
+          protocols: crate::lifecycle::DaemonBinaryInfo::current().protocols
+        })
+        .unwrap()
       ),
     )
     .unwrap();

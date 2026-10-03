@@ -66,7 +66,7 @@ impl Fixture {
       ctl_task_proto::write_frame(
         &mut stream,
         &ClientMessage::Handshake {
-          protocol_version: ctl_task_proto::PROTOCOL_VERSION,
+          protocol: ctl_task_proto::protocol_offer(),
           client_name: "interactive-test".into(),
         },
       )
@@ -177,7 +177,7 @@ async fn connect_ctmux(socket: &Path) -> ctmux_ipc::Stream {
           ctmux_proto::write_frame(
             &mut stream,
             &ctmux_proto::ClientMessage::Handshake {
-              protocol_version: ctmux_proto::PROTOCOL_VERSION,
+              protocol: ctmux_proto::protocol_offer(),
               client_name: "task-test".into(),
               client_version: "test".into(),
             },

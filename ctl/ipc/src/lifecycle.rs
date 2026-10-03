@@ -2,23 +2,36 @@
 //! Lifecycle frames are independent of the SSH/VPN protocol so a newer client
 //! can inspect an older data protocol without submitting an SSH or VPN request.
 
-use ctl_core::component::{ComponentBuildInfo, ComponentInfo};
+use ctl_core::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};
+use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 use tokio::time::{Instant, sleep, timeout};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_BUILD: u16 = 1;
+pub const CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_1;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_1];
+
+#[must_use]
+pub fn protocol_offer() -> ProtocolOffer {
+  ProtocolOffer::new(
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonBinaryInfo {
   pub build: ComponentBuildInfo,
-  pub protocol_version: u16,
-  pub lifecycle_protocol_version: u16,
+  pub protocol_version: ProtocolVersion,
+  pub lifecycle_protocol_version: ProtocolVersion,
+  pub protocols: Vec<ProtocolInfo>,
 }
 
 impl DaemonBinaryInfo {
@@ -28,7 +41,52 @@ impl DaemonBinaryInfo {
       build: ctl_core::component::build_info(),
       protocol_version: crate::PROTOCOL_VERSION,
       lifecycle_protocol_version: PROTOCOL_VERSION,
+      protocols: vec![
+        ProtocolInfo::new(
+          "ctld",
+          crate::PROTOCOL_BUILD,
+          crate::PROTOCOL_VERSION,
+          crate::SUPPORTED_PROTOCOL_VERSIONS,
+        ),
+        ProtocolInfo::new(
+          "ctld_lifecycle",
+          PROTOCOL_BUILD,
+          PROTOCOL_VERSION,
+          SUPPORTED_PROTOCOL_VERSIONS,
+        ),
+        ProtocolInfo::new(
+          "ctld_helper",
+          crate::HELPER_API_BUILD,
+          crate::HELPER_API_VERSION,
+          crate::SUPPORTED_HELPER_API_VERSIONS,
+        ),
+      ],
     }
+  }
+
+  #[must_use]
+  pub fn is_valid(&self) -> bool {
+    let metadata = ComponentInfo {
+      build: self.build.clone(),
+      protocols: self.protocols.clone(),
+    };
+    metadata.is_valid()
+      && self
+        .protocols
+        .iter()
+        .any(|entry| entry.name == "ctld" && entry.version == self.protocol_version)
+      && self.protocols.iter().any(|entry| {
+        entry.name == "ctld_lifecycle" && entry.version == self.lifecycle_protocol_version
+      })
+  }
+
+  #[must_use]
+  pub fn supports(&self, name: &str, local: &[ProtocolVersion]) -> bool {
+    self.is_valid()
+      && self
+        .protocols
+        .iter()
+        .any(|entry| entry.name == name && entry.negotiate(local).is_some())
   }
 }
 
@@ -62,16 +120,24 @@ pub struct RestartOutcome {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-  CtldInspect { protocol_version: u16 },
+  CtldInspect { protocol: ProtocolOffer },
   CtldRestart { expected_instance_id: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-  CtldInfo { info: DaemonInfo },
-  CtldRestartAccepted { instance_id: String },
-  CtldError { code: String, message: String },
+  CtldInfo {
+    protocol_version: ProtocolVersion,
+    info: DaemonInfo,
+  },
+  CtldRestartAccepted {
+    instance_id: String,
+  },
+  CtldError {
+    code: String,
+    message: String,
+  },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -174,24 +240,15 @@ impl Client {
         LifecycleError::Io(error)
       }
     })?;
-    let output = timeout(
-      QUERY_TIMEOUT,
-      tokio::process::Command::new(&executable)
-        .arg("--component-info")
-        .env_remove("CTLD_ASKPASS")
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output(),
-    )
-    .await
-    .map_err(|_| LifecycleError::Timeout)??;
-    if !output.status.success() || output.stdout.len() > 16 * 1024 {
-      return Err(LifecycleError::Unavailable(
-        "update or rebuild ctld together with the app".into(),
-      ));
-    }
-    let metadata: ComponentInfo = serde_json::from_slice(&output.stdout)
-      .map_err(|_| LifecycleError::Unavailable("invalid --component-info output".into()))?;
+    let metadata = crate::query_daemon_metadata(&executable, QUERY_TIMEOUT)
+      .await
+      .map_err(|error| match error.kind() {
+        io::ErrorKind::TimedOut => LifecycleError::Timeout,
+        io::ErrorKind::InvalidData | io::ErrorKind::Other => {
+          LifecycleError::Unavailable(error.to_string())
+        }
+        _ => LifecycleError::Io(error),
+      })?;
     let protocol = |name: &str| {
       let mut entries = metadata.protocols.iter().filter(|entry| entry.name == name);
       let value = entries.next()?.version;
@@ -203,9 +260,12 @@ impl Client {
       lifecycle_protocol_version: protocol("ctld_lifecycle")
         .ok_or_else(|| LifecycleError::Unavailable("missing lifecycle protocol".into()))?,
       build: metadata.build,
+      protocols: metadata.protocols,
     };
-    if !info.build.is_valid() {
-      return Err(LifecycleError::Unavailable("missing build identity".into()));
+    if !info.is_valid() {
+      return Err(LifecycleError::Unavailable(
+        "invalid component metadata".into(),
+      ));
     }
     Ok(AvailableDaemon { executable, info })
   }
@@ -216,8 +276,12 @@ impl Client {
   /// Rejects legacy owners and unavailable replacement binaries without mutation.
   pub async fn preflight_restart(&self) -> Result<PreparedRestart, LifecycleError> {
     let available = self.available().await?;
-    if available.info.protocol_version != crate::PROTOCOL_VERSION
-      || available.info.lifecycle_protocol_version != PROTOCOL_VERSION
+    if !available
+      .info
+      .supports("ctld", crate::SUPPORTED_PROTOCOL_VERSIONS)
+      || !available
+        .info
+        .supports("ctld_lifecycle", SUPPORTED_PROTOCOL_VERSIONS)
     {
       return Err(LifecycleError::Unavailable(
         "the selected executable uses an incompatible protocol".into(),
@@ -251,21 +315,19 @@ impl Client {
     timeout(QUERY_TIMEOUT, async {
       crate::write_frame(
         &mut stream,
-        &crate::ClientMessage::Handshake {
-          protocol_version: crate::PROTOCOL_VERSION,
-        },
+        &serde_json::json!({
+          "type": "handshake", "protocol_version": crate::PROTOCOL_BUILD
+        }),
       )
       .await
       .ok()?;
-      match crate::read_frame::<_, crate::ServerMessage>(&mut stream)
+      let response = crate::read_frame::<_, serde_json::Value>(&mut stream)
         .await
-        .ok()?
-      {
-        Some(crate::ServerMessage::HandshakeAccepted { protocol_version }) => {
-          Some(protocol_version)
-        }
-        _ => None,
+        .ok()??;
+      if response.get("type")?.as_str()? != "handshake_accepted" {
+        return None;
       }
+      u16::try_from(response.get("protocol_version")?.as_u64()?).ok()
     })
     .await
     .ok()
@@ -374,7 +436,7 @@ async fn inspect(stream: &mut crate::Stream) -> Result<DaemonInfo, LifecycleErro
     crate::write_frame(
       stream,
       &Request::CtldInspect {
-        protocol_version: PROTOCOL_VERSION,
+        protocol: protocol_offer(),
       },
     )
     .await?;
@@ -383,7 +445,19 @@ async fn inspect(stream: &mut crate::Stream) -> Result<DaemonInfo, LifecycleErro
       result => result?,
     };
     match response {
-      Some(Response::CtldInfo { info }) => Ok(info),
+      Some(Response::CtldInfo {
+        protocol_version,
+        info,
+      }) if protocol_offer().accepts(protocol_version)
+        && info.binary.is_valid()
+        && info
+          .binary
+          .protocols
+          .iter()
+          .any(|entry| entry.name == "ctld_lifecycle" && entry.supports(protocol_version)) =>
+      {
+        Ok(info)
+      }
       Some(Response::CtldError { code, message }) => {
         Err(LifecycleError::Rejected { code, message })
       }

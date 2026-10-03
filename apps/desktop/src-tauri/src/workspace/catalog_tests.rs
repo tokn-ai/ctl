@@ -55,6 +55,7 @@ fn host() -> WorkspaceHost {
 
 fn identity() -> ctl_proto::RemoteIdentity {
   ctl_proto::RemoteIdentity {
+    protocols: ctl_proto::agent_protocols(),
     remote_id: "9dcefd7e-2b35-43d8-97d9-7508186dbac0".into(),
     agent_version: "0.1.0".into(),
     build: None,

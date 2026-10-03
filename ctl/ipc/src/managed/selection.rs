@@ -163,9 +163,9 @@ fn selection_name(target: &str) -> io::Result<String> {
   }
   Ok(format!(
     "{target}-ctld{}-lifecycle{}-helper{}",
-    crate::PROTOCOL_VERSION,
-    crate::lifecycle::PROTOCOL_VERSION,
-    crate::HELPER_API_VERSION
+    crate::PROTOCOL_VERSION.major,
+    crate::lifecycle::PROTOCOL_VERSION.major,
+    crate::HELPER_API_VERSION.major
   ))
 }
 

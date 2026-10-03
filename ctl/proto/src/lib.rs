@@ -1,5 +1,8 @@
 //! Versioned metadata preceding the service protocol on identified SSH streams.
+mod identity_contract;
 pub mod maintenance;
+use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
+pub use identity_contract::{accept_identity_contract, negotiate_identity_contract};
 use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,9 +32,41 @@ pub struct RemoteCtmuxRestartResult {
   pub terminated_sessions: u32,
 }
 
-pub const IDENTITY_PROTOCOL_VERSION: u16 = 3;
-pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-v3\n";
+pub const IDENTITY_PROTOCOL_BUILD: u16 = 3;
+pub const IDENTITY_CONTRACT_V1_0_3: ProtocolVersion = ProtocolVersion::new(1, 0, 3);
+pub const IDENTITY_PROTOCOL_VERSION: ProtocolVersion = IDENTITY_CONTRACT_V1_0_3;
+pub const IDENTITY_SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[IDENTITY_CONTRACT_V1_0_3];
+/// Stable framing marker. Compatibility is negotiated after this marker.
+pub const IDENTITY_PREFACE: &[u8] = b"ctl-ssh-identity\n";
 const MAX_IDENTITY_BYTES: usize = 8192;
+
+#[must_use]
+pub fn identity_protocol_offer() -> ProtocolOffer {
+  ProtocolOffer::new(
+    IDENTITY_PROTOCOL_BUILD,
+    IDENTITY_PROTOCOL_VERSION,
+    IDENTITY_SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
+
+/// Protocol contracts implemented by this agent build, independent of release version.
+#[must_use]
+pub fn agent_protocols() -> Vec<ctl_core::component::ProtocolInfo> {
+  vec![
+    ctl_core::component::ProtocolInfo::new(
+      "ctl_identity",
+      IDENTITY_PROTOCOL_BUILD,
+      IDENTITY_PROTOCOL_VERSION,
+      IDENTITY_SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    ctl_core::component::ProtocolInfo::new(
+      "ctl_maintenance",
+      maintenance::PROTOCOL_BUILD,
+      maintenance::PROTOCOL_VERSION,
+      maintenance::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+  ]
+}
 
 /// Stable identity of a remote user's ctl environment, independent of its address.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,6 +79,8 @@ pub struct RemoteIdentity {
   pub ctmux_restart_supported: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub bundle: Option<Box<BundleVersion>>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub protocols: Vec<ctl_core::component::ProtocolInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -76,6 +113,16 @@ impl RemoteIdentity {
         .into_iter()
         .all(|value| text(value))
       })
+      && self.protocols.len() <= 32
+      && self
+        .protocols
+        .iter()
+        .all(ctl_core::component::ProtocolInfo::is_valid)
+      && self.protocols.iter().enumerate().all(|(index, protocol)| {
+        !self.protocols[..index]
+          .iter()
+          .any(|previous| previous.name == protocol.name)
+      })
   }
 }
 
@@ -97,7 +144,7 @@ pub async fn read_identity(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<
   Ok(identity)
 }
 
-/// Writes a bounded identity frame after the v3 preface.
+/// Writes a bounded identity frame after contract negotiation.
 ///
 /// # Errors
 /// Returns I/O or invalid-data errors for invalid metadata.
@@ -143,6 +190,7 @@ mod tests {
   #[test]
   fn rejects_malformed_or_inconsistent_agent_build() {
     let mut identity = RemoteIdentity {
+      protocols: agent_protocols(),
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: env!("CARGO_PKG_VERSION").into(),
       build: Some(ctl_core::component::build_info()),
@@ -160,6 +208,7 @@ mod tests {
   #[tokio::test]
   async fn metadata_round_trip_preserves_service_bytes() {
     let identity = RemoteIdentity {
+      protocols: agent_protocols(),
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
       build: None,

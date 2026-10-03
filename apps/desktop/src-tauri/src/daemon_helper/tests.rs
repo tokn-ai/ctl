@@ -76,16 +76,7 @@ impl Fixture {
 fn component_info() -> ctl_core::component::ComponentInfo {
   ctl_core::component::ComponentInfo {
     build: ctl_core::component::build_info(),
-    protocols: vec![
-      ctl_core::component::ProtocolInfo {
-        name: "ctld".into(),
-        version: ctl_ipc::PROTOCOL_VERSION,
-      },
-      ctl_core::component::ProtocolInfo {
-        name: "ctld_lifecycle".into(),
-        version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
-      },
-    ],
+    protocols: DaemonBinaryInfo::current().protocols,
   }
 }
 

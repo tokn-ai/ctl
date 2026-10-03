@@ -78,9 +78,9 @@ for (const version of [5, 6]) {
     assert.notEqual(await readlink(path.join(data.root, "runtime/ctld.app")), originalLink);
     assert.equal((await stat(path.join(originalLink, "Contents/MacOS/ctld"))).isFile(), true);
     const { stdout } = await execFile(original.ctld_bin!, ["--protocol-version"]);
-    assert.equal(stdout.trim(), "5", "retained daemon's child helper must remain on its original protocol");
+    assert.equal(stdout.trim(), "1.0.5", "retained daemon's child helper must remain on its original protocol");
     assert.equal(data.diagnostics.length, 1);
-    assert.match(data.diagnostics[0], version === 5 ? /New signed helper staged/ : /still using protocol 5/);
+    assert.match(data.diagnostics[0], version === 5 ? /New signed helper staged/ : /still using protocol 1\.0\.5/);
     await data.supervisor.prepare(data.executable);
     assert.equal(data.diagnostics.length, 1, "unchanged reload must not repeat the diagnostic");
     await waitReady(data, 5);
@@ -254,4 +254,20 @@ await daemon.close();
   assert.equal(await packages(data), 1);
   assert.equal(running(original.pid), true);
   assert.equal((await readFile(data.package_log, "utf8")).trim(), "package");
+});
+
+
+test("stages a newer contract while preserving a compatible older published daemon", unixOnly, async (context) => {
+  const data = await fixture(context);
+  await writeHelper(data, 13);
+  await data.supervisor.prepare(data.executable);
+  const [original] = await starts(data);
+  await writeHelper(data, 16, "ready", {name:"ctld", build:16, version:"1.1.15", supported_versions:["1.0.13", "1.1.15"]});
+  await data.supervisor.prepare(data.executable);
+  assert.equal((await starts(data)).length, 1);
+  assert.equal(running(original.pid), true);
+  assert.equal(await packages(data), 2);
+  assert.equal(data.diagnostics.length, 1);
+  assert.match(data.diagnostics[0], /New signed helper staged/);
+  await waitReady(data, 13);
 });

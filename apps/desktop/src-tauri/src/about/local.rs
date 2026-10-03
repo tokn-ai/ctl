@@ -75,10 +75,11 @@ fn deduplicate_owners(mut ssh: Owner, mut vpn: Owner) -> Vec<Owner> {
 pub(super) fn ctld_version(binary: DaemonBinaryInfo) -> ComponentVersionInfo {
   ComponentVersionInfo::from_build(
     binary.build,
-    vec![
-      ProtocolVersion::new("ctld", binary.protocol_version),
-      ProtocolVersion::new("ctld_lifecycle", binary.lifecycle_protocol_version),
-    ],
+    binary
+      .protocols
+      .into_iter()
+      .map(ProtocolVersion::from)
+      .collect(),
   )
 }
 
@@ -99,8 +100,13 @@ pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
       .map_err(|error| error.to_string())
   });
   let replacement_supported = available.as_ref().is_ok_and(|available| {
-    available.info.protocol_version == ctl_ipc::PROTOCOL_VERSION
-      && available.info.lifecycle_protocol_version == ctl_ipc::lifecycle::PROTOCOL_VERSION
+    available
+      .info
+      .supports("ctld", ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS)
+      && available.info.supports(
+        "ctld_lifecycle",
+        ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
+      )
   });
   match available {
     Ok(available) => {
@@ -122,15 +128,12 @@ pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
       row.detail = Some("This owner is not running. Opening About does not start it.".into());
     }
     Ok(DaemonStatus::Legacy { protocol_version }) => {
-      row.running = Some(ComponentVersionInfo {
-        protocols: protocol_version
-          .map(|version| ProtocolVersion::new("ctld", version))
-          .into_iter()
-          .collect(),
-        ..ComponentVersionInfo::default()
-      });
+      row.running = Some(ComponentVersionInfo::default());
       row.compare();
-      row.detail = Some("This running ctld predates version reporting and safe restart. Restart it manually to upgrade.".into());
+      row.detail = Some(protocol_version.map_or_else(
+        || "This running ctld predates published contracts and safe restart. Restart it manually to upgrade.".into(),
+        |build| format!("This running ctld uses unpublished protocol build {build} and predates safe restart. Restart it manually to upgrade."),
+      ));
     }
     Ok(DaemonStatus::Running { info }) => {
       row.running = Some(ctld_version(info.binary));
@@ -178,14 +181,9 @@ pub(super) async fn ctmuxd() -> ComponentVersionRow {
       row.restart_supported = info.restart_supported && compatible_replacement(&row);
       row.action = row.restart_supported.then_some(ComponentAction::Restart);
       let protocols = info
-        .protocol_version
-        .map(|version| ProtocolVersion::new("ctmux", version))
+        .protocols
         .into_iter()
-        .chain(
-          info
-            .control_protocol_version
-            .map(|version| ProtocolVersion::new("ctmux_control", version)),
-        )
+        .map(ProtocolVersion::from)
         .collect();
       row.running = Some(match info.build {
         Some(build) => ComponentVersionInfo::from_build(build, protocols),
@@ -229,14 +227,9 @@ pub(super) async fn taskd() -> ComponentVersionRow {
       row.restart_supported = compatible_replacement(&row);
       row.action = row.restart_supported.then_some(ComponentAction::Restart);
       let protocols = info
-        .protocol_version
-        .map(|version| ProtocolVersion::new("task", version))
+        .protocols
         .into_iter()
-        .chain(
-          info
-            .control_protocol_version
-            .map(|version| ProtocolVersion::new("task_control", version)),
-        )
+        .map(ProtocolVersion::from)
         .collect();
       row.running = Some(match info.build {
         Some(build) => ComponentVersionInfo::from_build(build, protocols),
@@ -266,10 +259,13 @@ fn compatible_replacement(row: &ComponentVersionRow) -> bool {
   row.available.as_ref().is_some_and(|available| {
     available.source_fingerprint.is_some()
       && row.required_protocols.iter().all(|required| {
-        available
-          .protocols
-          .iter()
-          .any(|protocol| protocol == required)
+        available.protocols.iter().any(|protocol| {
+          protocol.name == required.name
+            && protocol
+              .supported_versions
+              .iter()
+              .any(|version| required.supported_versions.contains(version))
+        })
       })
   })
 }
@@ -300,7 +296,7 @@ fn parse_binary_info(output: &[u8], component: &str) -> Result<ComponentVersionI
     "ctl-taskd" => "task",
     _ => return Err("Unknown helper component".into()),
   };
-  if !info.build.is_valid()
+  if !info.is_valid()
     || info
       .protocols
       .iter()
@@ -315,10 +311,7 @@ fn parse_binary_info(output: &[u8], component: &str) -> Result<ComponentVersionI
     info
       .protocols
       .into_iter()
-      .map(|protocol| ProtocolVersion {
-        name: protocol.name,
-        version: protocol.version,
-      })
+      .map(ProtocolVersion::from)
       .collect(),
   ))
 }
@@ -419,6 +412,7 @@ mod tests {
     ctl_ipc::write_frame(
       &mut peer,
       &ctl_ipc::lifecycle::Response::CtldInfo {
+        protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
         info: ctl_ipc::lifecycle::DaemonInfo {
           instance_id: "existing-owner".into(),
           binary: crate::daemon_helper::tests::binary_info(),
@@ -504,17 +498,23 @@ mod tests {
   fn structured_versions_require_the_correct_component_but_preserve_protocol_mismatches() {
     let mut info = ctl_core::component::ComponentInfo {
       build: ctl_core::component::build_info(),
-      protocols: vec![ctl_core::component::ProtocolInfo {
-        name: "ctmux".into(),
-        version: ctmux_proto::PROTOCOL_VERSION + 1,
-      }],
+      protocols: vec![ctl_core::component::ProtocolInfo::new(
+        "ctmux",
+        ctmux_proto::PROTOCOL_BUILD + 1,
+        ctl_core::protocol::ProtocolVersion::new(1, 0, ctmux_proto::PROTOCOL_BUILD + 1),
+        &[ctl_core::protocol::ProtocolVersion::new(
+          1,
+          0,
+          ctmux_proto::PROTOCOL_BUILD + 1,
+        )],
+      )],
     };
     let encoded = serde_json::to_vec(&info).unwrap();
     assert!(parse_binary_info(&encoded, "ctld").is_err());
     assert!(parse_binary_info(&encoded, "ctl-taskd").is_err());
     assert_eq!(
       parse_binary_info(&encoded, "ctmuxd").unwrap().protocols[0].version,
-      ctmux_proto::PROTOCOL_VERSION + 1
+      ctl_core::protocol::ProtocolVersion::new(1, 0, ctmux_proto::PROTOCOL_BUILD + 1)
     );
     info.protocols.push(info.protocols[0].clone());
     assert!(parse_binary_info(&serde_json::to_vec(&info).unwrap(), "ctmuxd").is_err());

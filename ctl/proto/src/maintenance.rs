@@ -1,17 +1,30 @@
 //! Fixed, confirmation-bound maintenance over an already authenticated SSH channel.
 use ctl_core::component::{ComponentBuildInfo, ComponentInfo};
+use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_BUILD: u16 = 2;
+pub const CONTRACT_V1_0_2: ProtocolVersion = ProtocolVersion::new(1, 0, 2);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_2;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_2];
+
+#[must_use]
+pub fn protocol_offer() -> ProtocolOffer {
+  ProtocolOffer::new(
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
 const MAX_FRAME_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
   PrepareCtmuxRestart {
-    protocol_version: u16,
+    protocol: ProtocolOffer,
     expected_remote_id: String,
   },
   Confirm {},
@@ -20,8 +33,9 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningCtmux {
   pub build: Option<ComponentBuildInfo>,
-  pub protocol_version: Option<u16>,
-  pub control_protocol_version: u16,
+  pub protocol_version: Option<ProtocolVersion>,
+  pub control_protocol_version: ProtocolVersion,
+  pub protocols: Vec<ctl_core::component::ProtocolInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +55,7 @@ pub struct CtmuxRestartCompleted {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
   Prepared {
+    protocol_version: ProtocolVersion,
     info: CtmuxPreparation,
   },
   Completed {
@@ -113,7 +128,7 @@ mod tests {
     write(
       &mut bytes,
       &ClientMessage::PrepareCtmuxRestart {
-        protocol_version: PROTOCOL_VERSION,
+        protocol: protocol_offer(),
         expected_remote_id: "test-identity".into(),
       },
     )

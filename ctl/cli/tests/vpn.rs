@@ -225,8 +225,8 @@ async fn reply(listener: &UnixListener, response: ServerMessage) -> ClientMessag
   let (mut stream, _) = listener.accept().await.unwrap();
   assert!(matches!(
     ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
-    Some(ClientMessage::Handshake { protocol_version })
-      if protocol_version == ctl_ipc::PROTOCOL_VERSION
+    Some(ClientMessage::Handshake { protocol })
+      if protocol.negotiate(ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS).is_some()
   ));
   ctl_ipc::write_frame(
     &mut stream,
@@ -912,11 +912,16 @@ async fn saved_start_launches_ctld_when_absent() {
   fixture.write_profiles(2, &[profile]);
   let helper = fixture.directory.join("ctld");
   let marker = fixture.directory.join("started");
+  let binary = ctl_ipc::lifecycle::DaemonBinaryInfo::current();
+  let metadata = serde_json::to_string(&serde_json::json!({
+    "build": binary.build,
+    "protocols": binary.protocols,
+  }))
+  .unwrap();
   std::fs::write(
     &helper,
     format!(
-      "#!/bin/sh\nif [ \"$1\" = --protocol-version ]; then\n  printf '%s\\n' {}\nelse\n  touch \"$CTL_VPN_TEST_MARKER\"\nfi\n",
-      ctl_ipc::PROTOCOL_VERSION
+      "#!/bin/sh\ncase \"$1\" in\n  --component-info) printf '%s\\n' '{metadata}';;\n  --socket) touch \"$CTL_VPN_TEST_MARKER\";;\n  *) exit 2;;\nesac\n"
     ),
   )
   .unwrap();

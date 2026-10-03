@@ -642,12 +642,19 @@ async fn handle_connection(
 ) -> Result<(), ctl_task_proto::CodecError> {
   let handshake = match read_frame::<_, control::FirstMessage>(&mut stream).await? {
     Some(control::FirstMessage::Control(
-      ctl_task_proto::control::ClientMessage::ComponentStatus { protocol_version },
+      ctl_task_proto::control::ClientMessage::ComponentStatus { protocol },
     )) => {
-      let response = if protocol_version == ctl_task_proto::control::PROTOCOL_VERSION {
+      let response = if let Some(protocol_version) =
+        protocol.negotiate(ctl_task_proto::control::SUPPORTED_PROTOCOL_VERSIONS)
+      {
         ctl_task_proto::control::ServerMessage::ComponentStatus {
           build: ctl_core::component::build_info(),
-          protocol_version: PROTOCOL_VERSION,
+          protocol_version,
+          data_protocol_version: PROTOCOL_VERSION,
+          protocols: vec![
+            ctl_task_proto::protocol_info(),
+            ctl_task_proto::control::protocol_info(),
+          ],
         }
       } else {
         ctl_task_proto::control::ServerMessage::Error {
@@ -664,41 +671,44 @@ async fn handle_connection(
     Some(control::FirstMessage::Task(request)) => Some(request),
     None => None,
   };
-  match handshake {
-    Some(ClientMessage::Handshake {
-      protocol_version, ..
-    }) if protocol_version == PROTOCOL_VERSION => {
-      write_frame(
-        &mut stream,
-        &ServerMessage::HandshakeAccepted {
-          protocol_version: PROTOCOL_VERSION,
-        },
-      )
-      .await?;
-    }
-    Some(ClientMessage::Handshake { .. }) => {
-      send_error(
-        &mut stream,
-        RequestError::new(
-          ErrorCode::ProtocolVersionMismatch,
-          format!("task protocol version {PROTOCOL_VERSION} is required"),
+  let Some(ClientMessage::Handshake { protocol, .. }) = handshake else {
+    send_error(
+      &mut stream,
+      RequestError::new(
+        ErrorCode::InvalidRequest,
+        "handshake must be the first message",
+      ),
+    )
+    .await?;
+    return Ok(());
+  };
+  let Some(protocol_version) = protocol.negotiate(ctl_task_proto::SUPPORTED_PROTOCOL_VERSIONS)
+  else {
+    send_error(
+      &mut stream,
+      RequestError::new(
+        ErrorCode::ProtocolVersionMismatch,
+        format!(
+          "client offered task contracts {:?}; this daemon supports {:?}",
+          protocol.supported_versions,
+          ctl_task_proto::SUPPORTED_PROTOCOL_VERSIONS
         ),
-      )
-      .await?;
-      return Ok(());
-    }
-    _ => {
-      send_error(
-        &mut stream,
-        RequestError::new(
-          ErrorCode::InvalidRequest,
-          "handshake must be the first message",
-        ),
-      )
-      .await?;
-      return Ok(());
-    }
-  }
+      ),
+    )
+    .await?;
+    return Ok(());
+  };
+  write_frame(
+    &mut stream,
+    &ServerMessage::HandshakeAccepted {
+      protocol_version,
+      protocols: vec![
+        ctl_task_proto::protocol_info(),
+        ctl_task_proto::control::protocol_info(),
+      ],
+    },
+  )
+  .await?;
 
   let Some(request) = read_frame::<_, ClientMessage>(&mut stream).await? else {
     return Ok(());

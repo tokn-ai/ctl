@@ -440,7 +440,7 @@ pub async fn open_identified_ssh_service(
   start_ssh_transport_identified(command, true, false, ready(())).await
 }
 
-/// Reads legacy v2 identity solely to verify the account before replacing its
+/// Reads legacy v2/v3 identity solely to verify the account before replacing its
 /// incompatible components. No service requests are sent and no service stream
 /// is returned. The disposable SSH channel is terminated after metadata reads.
 ///
@@ -704,7 +704,7 @@ fn spawn_ssh_command(mut command: Command) -> Result<SshStartup, CoreError> {
 async fn inspect_legacy_ssh_command(
   command: Command,
 ) -> Result<ctl_proto::RemoteIdentity, CoreError> {
-  const LEGACY_PREFACE: &[u8] = b"ctl-ssh-v2\n";
+  const LEGACY_PREFACES: &[&[u8]] = &[b"ctl-ssh-v2\n", b"ctl-ssh-v3\n"];
   let SshStartup {
     mut child,
     stdin,
@@ -716,7 +716,7 @@ async fn inspect_legacy_ssh_command(
   let _stdin = stdin;
   let probe = async {
     ssh_startup::Preface::default()
-      .read_marker(&mut stdout, &[LEGACY_PREFACE], b"ctl-ssh-")
+      .read_marker(&mut stdout, LEGACY_PREFACES, b"ctl-ssh-")
       .await?;
     Ok::<_, io::Error>(ctl_proto::read_identity(&mut stdout).await)
   };
@@ -749,7 +749,7 @@ where
 {
   let SshStartup {
     mut child,
-    stdin,
+    mut stdin,
     mut stdout,
     diagnostics,
   } = spawn_ssh_command(command)?;
@@ -810,11 +810,14 @@ where
     );
   }
   let remote_identity = if identified {
-    Some(Box::new(
-      ctl_proto::read_identity(&mut stdout)
-        .await
-        .map_err(CoreError::RemoteIdentity)?,
-    ))
+    let identity = match read_negotiated_ssh_identity(&mut stdout, &mut stdin).await {
+      Ok(identity) => identity,
+      Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+        return Err(ssh_startup::startup_error(child, diagnostics, error).await);
+      }
+      Err(error) => return Err(CoreError::RemoteIdentity(error)),
+    };
+    Some(Box::new(identity))
   } else {
     None
   };
@@ -827,6 +830,35 @@ where
     stdout,
     shutdown,
   })
+}
+
+async fn read_negotiated_ssh_identity(
+  stdout: &mut (impl AsyncRead + Unpin),
+  stdin: &mut (impl AsyncWrite + Unpin),
+) -> io::Result<ctl_proto::RemoteIdentity> {
+  let selected = tokio::time::timeout(
+    std::time::Duration::from_secs(30),
+    ctl_proto::negotiate_identity_contract(stdout, stdin),
+  )
+  .await
+  .map_err(|_| {
+    io::Error::new(
+      io::ErrorKind::TimedOut,
+      "identity contract negotiation timed out",
+    )
+  })??;
+  let identity = ctl_proto::read_identity(stdout).await?;
+  if !identity
+    .protocols
+    .iter()
+    .any(|protocol| protocol.name == "ctl_identity" && protocol.supports(selected))
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "remote identity metadata does not support the selected contract",
+    ));
+  }
+  Ok(identity)
 }
 
 /// Returns whether opening a replacement transport may succeed without a

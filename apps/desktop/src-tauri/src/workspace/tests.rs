@@ -741,6 +741,7 @@ fn draft_revision_distinguishes_unknown_base_from_new_definition() {
 fn remote_metadata_round_trips_and_rejects_corruption_without_changing_saved_sessions() {
   let fixture = Fixture::new();
   let identity = ctl_proto::RemoteIdentity {
+    protocols: ctl_proto::agent_protocols(),
     remote_id: uuid::Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
     build: None,
@@ -871,6 +872,7 @@ fn local_host_cannot_have_methods_preferences_or_remote_identity() {
 
 fn test_remote_identity() -> ctl_proto::RemoteIdentity {
   ctl_proto::RemoteIdentity {
+    protocols: ctl_proto::agent_protocols(),
     remote_id: uuid::Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
     build: None,

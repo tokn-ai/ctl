@@ -90,7 +90,7 @@ async fn connect_for_creation(socket: &std::path::Path) -> Result<ctmux_ipc::Str
     ctmux_proto::write_frame(
       &mut stream,
       &ctmux_proto::ClientMessage::Handshake {
-        protocol_version: ctmux_proto::PROTOCOL_VERSION,
+        protocol: ctmux_proto::protocol_offer(),
         client_name: "ctl-taskd".into(),
         client_version: env!("CARGO_PKG_VERSION").into(),
       },
@@ -101,7 +101,18 @@ async fn connect_for_creation(socket: &std::path::Path) -> Result<ctmux_ipc::Str
       .await
       .map_err(RequestError::internal)?
     {
-      Some(ctmux_proto::ServerMessage::HandshakeAccepted { .. }) => Ok(stream),
+      Some(ctmux_proto::ServerMessage::HandshakeAccepted {
+        protocol_version,
+        protocols,
+        ..
+      }) if ctmux_proto::protocol_offer().accepts(protocol_version)
+        && ctl_core::component::protocols_are_valid(&protocols)
+        && protocols
+          .iter()
+          .any(|protocol| protocol.name == "ctmux" && protocol.supports(protocol_version)) =>
+      {
+        Ok(stream)
+      }
       response => Err(RequestError::internal(format!(
         "ctmux handshake failed: {response:?}"
       ))),

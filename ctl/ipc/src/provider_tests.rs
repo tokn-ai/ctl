@@ -296,14 +296,18 @@ async fn lazy_provider_covers_startup_availability_overrides_and_passive_queries
   let metadata = serde_json::to_string(&ctl_core::component::ComponentInfo {
     build: ctl_core::component::build_info(),
     protocols: vec![
-      ctl_core::component::ProtocolInfo {
-        name: "ctld".into(),
-        version: PROTOCOL_VERSION,
-      },
-      ctl_core::component::ProtocolInfo {
-        name: "ctld_lifecycle".into(),
-        version: lifecycle::PROTOCOL_VERSION,
-      },
+      ctl_core::component::ProtocolInfo::new(
+        "ctld",
+        PROTOCOL_BUILD,
+        PROTOCOL_VERSION,
+        SUPPORTED_PROTOCOL_VERSIONS,
+      ),
+      ctl_core::component::ProtocolInfo::new(
+        "ctld_lifecycle",
+        lifecycle::PROTOCOL_BUILD,
+        lifecycle::PROTOCOL_VERSION,
+        lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
+      ),
     ],
   })
   .unwrap();

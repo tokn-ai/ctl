@@ -840,8 +840,9 @@ instance. Ctmuxd retains exit results until ctl-taskd records them. Replacing or
 losing ctmuxd fails the affected runs; ctl-taskd does not automatically recreate
 them. Starting and restarting remain explicit operations.
 
-Build and install `ctl`, `ctl-taskd`, and `ctmuxd` together. Task protocol version 4
-requires matching clients and daemons. SSH task routing additionally requires
+Task clients and daemons negotiate published contract `1.0.4`. Product release
+versions are independent; compatible implementations can come from different
+releases. See [protocol versioning](docs/protocol-versioning.md). SSH task routing additionally requires
 the matching gateway and SSH forced-command allowlist; rebuilding the Docker
 target updates all four binaries. Automatic restart policies remain pending.
 The desktop task interface currently manages local tasks.
@@ -885,8 +886,9 @@ PowerShell and custom SSH shells are not covered by this implementation.
 Desktop remote-platform selection remains pending.
 
 The SSH gateway is named `ctl-agent` (`ctl-agent.exe` on Windows), reflecting
-its per-connection lifetime. Ordinary connections use the `ctl-ssh-v1` transport
-marker, then negotiate the selected service's protocol version. Update the
+its per-connection lifetime. CLI and desktop service channels use the stable
+`ctl-ssh-identity` marker, negotiate identity, then negotiate the selected service's
+published contract. Update the
 client, remote executables, and any SSH forced-command configuration together.
 
 ### Exited sessions

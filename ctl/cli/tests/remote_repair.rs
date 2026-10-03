@@ -124,35 +124,7 @@ esac
       "git_revision": revision,
       "target_triple": target,
     });
-    let mut transport = b"ctl-ssh-v3\n".to_vec();
-    transport.extend(frame(&json!({
-      "remote_id": EXPECTED_ID,
-      "agent_version": build.version,
-      "build": build,
-      "ctmux_restart_supported": true,
-      "bundle": {
-        "app_version": build.version,
-        "bundle_id": bundle_id,
-        "git_revision": revision,
-        "target_triple": target,
-      },
-    })));
-    transport.extend(frame(&json!({
-      "type": "handshake_accepted", "protocol_version": 13,
-      "server_version": build.version, "build": build,
-      "heartbeat_interval_ms": 1000, "attachment_liveness_timeout_ms": 30000,
-    })));
-    fs::write(self.0.join("upgraded-transport"), transport).unwrap();
-    fs::write(
-      self.0.join("session-list"),
-      frame(&json!({"type": "session_list", "sessions": []})),
-    )
-    .unwrap();
-    let handshake = json!({
-      "type": "handshake", "protocol_version": 13,
-      "client_name": "ctl", "client_version": build.version,
-    });
-    let requests = frame(&handshake).len() + frame(&json!({"type": "list_sessions"})).len();
+    let requests = self.repaired_transport(build, &bundle_id, target);
     let payload = self.0.join("payload");
     fs::create_dir(&payload).unwrap();
     fs::write(
@@ -160,7 +132,7 @@ esac
       serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
-    // Record both real client requests before returning the final response, so
+    // Record all client frames before returning the final response, so
     // dropping the one-shot transport cannot race the fixture's input capture.
     fs::write(
       payload.join("ctl-agent"),
@@ -217,6 +189,51 @@ esac
     bundle_id
   }
 
+  fn repaired_transport(
+    &self,
+    build: &ctl_core::component::ComponentBuildInfo,
+    bundle_id: &str,
+    target: &str,
+  ) -> usize {
+    let mut transport = ctl_proto::IDENTITY_PREFACE.to_vec();
+    transport.extend(frame(
+      &serde_json::to_value(ctl_proto::identity_protocol_offer()).unwrap(),
+    ));
+    transport.extend(frame(&json!({
+      "remote_id": EXPECTED_ID,
+      "protocols": ctl_proto::agent_protocols(),
+      "agent_version": build.version,
+      "build": build,
+      "ctmux_restart_supported": true,
+      "bundle": {
+        "app_version": build.version,
+        "bundle_id": bundle_id,
+        "git_revision": build.source_revision,
+        "target_triple": target,
+      },
+    })));
+    transport.extend(frame(&json!({
+      "type": "handshake_accepted", "protocol_version": ctmux_proto::PROTOCOL_VERSION,
+      "protocols": [ctmux_proto::protocol_info()],
+      "server_version": build.version, "build": build,
+      "heartbeat_interval_ms": 1000, "attachment_liveness_timeout_ms": 30000,
+    })));
+    fs::write(self.0.join("upgraded-transport"), transport).unwrap();
+    fs::write(
+      self.0.join("session-list"),
+      frame(&json!({"type": "session_list", "sessions": []})),
+    )
+    .unwrap();
+    let handshake = json!({
+      "type": "handshake", "protocol": ctmux_proto::protocol_offer(),
+      "client_name": "ctl", "client_version": build.version,
+    });
+    let selection = json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION});
+    frame(&selection).len()
+      + frame(&handshake).len()
+      + frame(&json!({"type": "list_sessions"})).len()
+  }
+
   fn script(&self, name: &str, body: &str) {
     let path = self.0.join(name);
     fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
@@ -231,8 +248,8 @@ esac
         let (mut stream, _) = listener.accept().await.unwrap();
         assert!(matches!(
           ctl_ipc::read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
-          Some(ClientMessage::Handshake { protocol_version })
-            if protocol_version == ctl_ipc::PROTOCOL_VERSION
+          Some(ClientMessage::Handshake { protocol })
+            if protocol.negotiate(ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS).is_some()
         ));
         ctl_ipc::write_frame(
           &mut stream,
@@ -635,7 +652,8 @@ async fn verify_successful_repair(cached: bool) {
   assert_eq!(
     requests,
     [
-      json!({"type": "handshake", "protocol_version": 13, "client_name": "ctl", "client_version": build.version}),
+      json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION}),
+      json!({"type": "handshake", "protocol": ctmux_proto::protocol_offer(), "client_name": "ctl", "client_version": build.version}),
       json!({"type": "list_sessions"}),
     ]
   );

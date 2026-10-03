@@ -4,6 +4,7 @@ import { createReadStream } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { helperProtocol, maxComponentMetadata, negotiateProtocol, parseHelperComponent, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
 import { inspectDaemon } from "./signed-daemon-probe.mts";
 import { withPreparationLock } from "./signed-preparation-lock.mts";
 import { ensurePrivateDirectory } from "./signed-runtime.mts";
@@ -40,7 +41,7 @@ interface OwnedDaemon {
 interface PreparedHelper {
   bundle: string;
   executable: string;
-  protocol_version: number;
+  protocols: ProtocolInfo[];
 }
 
 /** Stages signed helpers while preserving the independently owned development daemon. */
@@ -82,8 +83,8 @@ export class SignedDaemon {
     const runningProtocol = await inspectDaemon(this.socket_path, this.operations.startup_timeout_ms ?? 5_000);
     if (runningProtocol !== undefined) {
       let diagnostic: string | undefined;
-      if (runningProtocol !== helper.protocol_version) {
-        diagnostic = `Signed development ctld is still using protocol ${runningProtocol}; the selected helper uses ${helper.protocol_version}. Existing connections were preserved. Open About ctmux and explicitly restart ctld to use the new helper.`;
+      if (!negotiateProtocol(runningProtocol, helperProtocol(helper.protocols))) {
+        diagnostic = `Signed development ctld is still using protocol ${runningProtocol.version}; the selected helper uses ${helperProtocol(helper.protocols).version}. Existing connections were preserved. Open About ctmux and explicitly restart ctld to use the new helper.`;
       } else if (selectionChanged) {
         diagnostic = "New signed helper staged; use About → Restart ctld to apply it. Existing connections preserved.";
       }
@@ -111,7 +112,7 @@ export class SignedDaemon {
       stdio: "ignore",
     }));
     try {
-      await this.waitForDaemon(daemon, helper.protocol_version);
+      await this.waitForDaemon(daemon, helper.protocols);
       daemon.child.unref();
     } catch (error) {
       // Never unlink the endpoint: an explicit external restart might have won
@@ -153,7 +154,7 @@ export class SignedDaemon {
         await ensurePrivateDirectory(directory);
         const marker = await readFile(path.join(directory, "fingerprint"), "utf8");
         if (marker !== fingerprint) throw new Error("cached signed ctld bundle metadata is invalid");
-        return { bundle, executable: packagedExecutable, protocol_version: await protocolVersion(packagedExecutable) };
+        return { bundle, executable: packagedExecutable, protocols: await helperProtocols(packagedExecutable) };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         // An incomplete published directory is never overwritten: it might be
@@ -171,13 +172,13 @@ export class SignedDaemon {
       } else {
         await packageBundle(artifact, stagedBundle, { ...this.config, profile_path: profile, repository_root: recipe });
       }
-      const version = await protocolVersion(path.join(stagedBundle, "Contents/MacOS/ctld"));
+      const protocols = await helperProtocols(path.join(stagedBundle, "Contents/MacOS/ctld"));
       await rm(artifact);
       await rm(profile);
       await rm(recipe, { recursive: true });
       await writeFile(path.join(staging, "fingerprint"), fingerprint, { mode: 0o600 });
       await rename(staging, directory);
-      return { bundle, executable: packagedExecutable, protocol_version: version };
+      return { bundle, executable: packagedExecutable, protocols };
     } finally {
       // Only unpublished snapshots are removed. Published builds can still be
       // executable paths of ctld, SSH askpass, and proxy children across launches.
@@ -203,13 +204,13 @@ export class SignedDaemon {
     }
   }
 
-  private async waitForDaemon(daemon: OwnedDaemon, expectedProtocol: number): Promise<void> {
+  private async waitForDaemon(daemon: OwnedDaemon, expectedProtocols: ProtocolInfo[]): Promise<void> {
     const deadline = Date.now() + (this.operations.startup_timeout_ms ?? 5_000);
     while (Date.now() < deadline) {
       if (!isRunning(daemon)) throw daemon.spawn_error ?? new Error("new signed ctld stopped during startup");
       const version = await inspectDaemon(this.socket_path, Math.max(1, deadline - Date.now()));
       if (version !== undefined) {
-        if (version !== expectedProtocol) throw new Error("new signed ctld returned an unexpected protocol version");
+        if (!sameProtocols([version], [helperProtocol(expectedProtocols)])) throw new Error("new signed ctld returned an unexpected protocol version");
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -224,11 +225,9 @@ function helperEnvironment(): NodeJS.ProcessEnv {
   return environment;
 }
 
-async function protocolVersion(executable: string): Promise<number> {
-  const { stdout } = await execFile(executable, ["--protocol-version"], { env: helperEnvironment(), timeout: 5_000, maxBuffer: 1024 });
-  const version = Number(stdout.trim());
-  if (!/^\d+$/.test(stdout.trim()) || !Number.isInteger(version) || version > 65_535) throw new Error("signed ctld returned an invalid local protocol version");
-  return version;
+async function helperProtocols(executable: string): Promise<ProtocolInfo[]> {
+  const { stdout } = await execFile(executable, ["--component-info"], { env: helperEnvironment(), timeout: 5_000, maxBuffer: maxComponentMetadata });
+  return parseHelperComponent(stdout).protocols;
 }
 
 async function packageBundle(executable: string, bundle: string, config: SignedDaemonConfig): Promise<void> {

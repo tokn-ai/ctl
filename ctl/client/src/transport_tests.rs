@@ -411,6 +411,7 @@ async fn windows_openssh_reports_connection_failure() {
 async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
   timeout(TEST_TIMEOUT, async {
     let identity = ctl_proto::RemoteIdentity {
+      protocols: ctl_proto::agent_protocols(),
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
       build: None,
@@ -452,18 +453,38 @@ fn identified_fixture(json: &str) -> Command {
       write!(out, "\\{byte:03o}").unwrap();
       out
     });
+  let offer = serde_json::to_vec(&ctl_proto::identity_protocol_offer()).unwrap();
+  let offer_frame = u32::try_from(offer.len())
+    .unwrap()
+    .to_be_bytes()
+    .into_iter()
+    .chain(offer)
+    .fold(String::new(), |mut out, byte| {
+      write!(out, "\\{byte:03o}").unwrap();
+      out
+    });
+  let selection = serde_json::to_vec(
+    &serde_json::json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION}),
+  )
+  .unwrap();
   let mut command = fixture(
-    "if [ -n \"$CTL_TEST_CHILD_PID\" ]; then printf '%s' \"$$\" > \"$CTL_TEST_CHILD_PID\"; fi; printf '%s' \"$CTL_TEST_STARTUP_NOISE\"; if [ -n \"$CTL_TEST_AUTHENTICATION_MARKER\" ]; then printf 'ctl-ssh-auth-v1\n'; fi; printf '%s\n' \"$CTL_TEST_IDENTITY_MARKER\"; printf '%b' \"$CTL_TEST_IDENTITY_SIZE\"; printf '%s' \"$CTL_TEST_IDENTITY_JSON\"; if [ -n \"$CTL_TEST_SERVICE_INPUT\" ]; then exec cat > \"$CTL_TEST_SERVICE_INPUT\"; fi; exec cat",
+    "if [ -n \"$CTL_TEST_CHILD_PID\" ]; then printf '%s' \"$$\" > \"$CTL_TEST_CHILD_PID\"; fi; printf '%s' \"$CTL_TEST_STARTUP_NOISE\"; if [ -n \"$CTL_TEST_AUTHENTICATION_MARKER\" ]; then printf 'ctl-ssh-auth-v1\n'; fi; printf '%s\n' \"$CTL_TEST_IDENTITY_MARKER\"; if [ \"$CTL_TEST_IDENTITY_MARKER\" = ctl-ssh-identity ]; then printf '%b' \"$CTL_TEST_PROTOCOL_OFFER\"; dd bs=1 count=\"$CTL_TEST_SELECTION_BYTES\" >/dev/null 2>/dev/null; if [ -n \"$CTL_TEST_DAEMON_FAILURE\" ]; then printf 'fixture companion daemon failed\\n' >&2; exit 1; fi; fi; printf '%b' \"$CTL_TEST_IDENTITY_SIZE\"; printf '%s' \"$CTL_TEST_IDENTITY_JSON\"; if [ -n \"$CTL_TEST_SERVICE_INPUT\" ]; then exec cat > \"$CTL_TEST_SERVICE_INPUT\"; fi; exec cat",
     "identified-transport.ps1",
   );
   command
+    .env("CTL_TEST_PROTOCOL_OFFER", offer_frame)
+    .env(
+      "CTL_TEST_SELECTION_BYTES",
+      (selection.len() + 4).to_string(),
+    )
     .env("CTL_TEST_IDENTITY_SIZE", size)
     .env("CTL_TEST_IDENTITY_JSON", json)
-    .env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v3")
+    .env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-identity")
     .env("CTL_TEST_STARTUP_NOISE", "")
     .env("CTL_TEST_AUTHENTICATION_MARKER", "")
     .env("CTL_TEST_CHILD_PID", "")
-    .env("CTL_TEST_SERVICE_INPUT", "");
+    .env("CTL_TEST_SERVICE_INPUT", "")
+    .env("CTL_TEST_DAEMON_FAILURE", "");
   command
 }
 
@@ -513,9 +534,51 @@ async fn legacy_inspection_rejects_invalid_and_oversized_metadata() {
 }
 
 #[tokio::test]
+async fn legacy_v3_identity_is_inspected_without_claiming_a_published_contract() {
+  let json = serde_json::json!({
+    "remote_id": uuid::Uuid::new_v4().to_string(),
+    "agent_version": "0.1.0",
+    "ctmux_restart_supported": true,
+  });
+  let mut command = identified_fixture(&json.to_string());
+  command.env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v3");
+  let identity = timeout(TEST_TIMEOUT, inspect_legacy_ssh_command(command))
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(identity.remote_id, json["remote_id"]);
+  assert_eq!(identity.protocols, []);
+  assert!(identity.ctmux_restart_supported);
+}
+
+#[tokio::test]
+async fn identified_service_startup_failure_retains_agent_diagnostics() {
+  let json = serde_json::json!({
+    "remote_id": uuid::Uuid::new_v4().to_string(),
+    "agent_version": "0.1.0",
+    "protocols": ctl_proto::agent_protocols(),
+  });
+  let mut command = identified_fixture(&json.to_string());
+  command.env("CTL_TEST_DAEMON_FAILURE", "true");
+  let error = timeout(
+    TEST_TIMEOUT,
+    start_ssh_transport_identified(command, true, false, ready(())),
+  )
+  .await
+  .unwrap()
+  .err()
+  .unwrap();
+  assert!(
+    error
+      .to_string()
+      .contains("fixture companion daemon failed")
+  );
+}
+
+#[tokio::test]
 async fn legacy_inspection_rejects_other_reserved_markers() {
   timeout(TEST_TIMEOUT, async {
-    for marker in ["ctl-ssh-v3", "ctl-ssh-v99", "ctl-ssh-nf"] {
+    for marker in ["ctl-ssh-v99", "ctl-ssh-nf"] {
       let mut command = identified_fixture("{}");
       command.env("CTL_TEST_IDENTITY_MARKER", marker);
       assert!(matches!(
@@ -525,7 +588,7 @@ async fn legacy_inspection_rejects_other_reserved_markers() {
     }
   })
   .await
-  .expect("only v2 is permitted for legacy inspection");
+  .expect("only known unpublished markers are permitted for legacy inspection");
 }
 
 #[cfg(unix)]

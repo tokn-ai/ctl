@@ -23,6 +23,147 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 // unit tests and other crates fully parallel.
 static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[tokio::test]
+async fn published_contract_handshakes_select_explicit_shared_versions() -> TestResult {
+  use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
+  use ctmux_ipc::{LocalControlClientMessage, LocalControlServerMessage};
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 4096, 1024);
+  let future = ProtocolVersion::new(1, 1, 15);
+  let mut stream = connect_when_ready(&socket).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::Handshake {
+      protocol: ProtocolOffer::new(15, future, &[PROTOCOL_VERSION, future]),
+      client_name: "future-client".into(),
+      client_version: "test".into(),
+    },
+  )
+  .await?;
+  let ServerMessage::HandshakeAccepted {
+    protocol_version,
+    protocols,
+    ..
+  } = required_message(&mut stream).await?
+  else {
+    panic!("handshake was rejected");
+  };
+  assert_eq!(protocol_version, PROTOCOL_VERSION);
+  assert!(protocols.contains(&ctmux_proto::protocol_info()));
+  write_frame(&mut stream, &ClientMessage::ListSessions).await?;
+  assert_eq!(
+    required_message(&mut stream).await?,
+    ServerMessage::SessionList {
+      sessions: Vec::new()
+    }
+  );
+
+  let mut control = connect_when_ready(&control_socket_path(&socket)?).await?;
+  ctmux_ipc::write_local_control_frame(
+    &mut control,
+    &LocalControlClientMessage::Handshake {
+      protocol: ProtocolOffer::new(
+        15,
+        future,
+        &[ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION, future],
+      ),
+    },
+  )
+  .await?;
+  let reply =
+    ctmux_ipc::read_local_control_frame::<_, LocalControlServerMessage>(&mut control).await?;
+  assert!(
+    matches!(reply, Some(LocalControlServerMessage::HandshakeAccepted { protocol_version, .. })
+    if protocol_version == ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION)
+  );
+  daemon.abort();
+  let _result = daemon.await;
+  Ok(())
+}
+
+#[tokio::test]
+async fn unpublished_or_incompatible_contracts_are_rejected() -> TestResult {
+  use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
+  use ctmux_ipc::{LocalControlClientMessage, LocalControlErrorCode, LocalControlServerMessage};
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 4096, 1024);
+  for unsupported in [
+    ProtocolVersion::new(1, 0, 14),
+    ProtocolVersion::new(2, 0, 14),
+  ] {
+    let mut stream = connect_when_ready(&socket).await?;
+    write_frame(
+      &mut stream,
+      &ClientMessage::Handshake {
+        protocol: ProtocolOffer::new(14, unsupported, &[unsupported]),
+        client_name: "incompatible-client".into(),
+        client_version: "test".into(),
+      },
+    )
+    .await?;
+    assert!(matches!(
+      required_message(&mut stream).await?,
+      ServerMessage::Error {
+        code: ErrorCode::ProtocolVersionMismatch,
+        ..
+      }
+    ));
+    assert!(read_frame::<_, ServerMessage>(&mut stream).await?.is_none());
+
+    let mut control = connect_when_ready(&control_socket_path(&socket)?).await?;
+    ctmux_ipc::write_local_control_frame(
+      &mut control,
+      &LocalControlClientMessage::Handshake {
+        protocol: ProtocolOffer::new(14, unsupported, &[unsupported]),
+      },
+    )
+    .await?;
+    assert!(matches!(
+      ctmux_ipc::read_local_control_frame::<_, LocalControlServerMessage>(&mut control).await?,
+      Some(LocalControlServerMessage::Error {
+        code: LocalControlErrorCode::ProtocolVersionMismatch,
+        ..
+      })
+    ));
+  }
+  // Historical integer builds never advertised a published contract.
+  for payload in [
+    serde_json::json!({"type":"handshake", "protocol_version":13, "client_name":"old", "client_version":"test"}),
+    serde_json::json!({"type":"handshake", "client_name":"missing", "client_version":"test"}),
+  ] {
+    let mut stream = connect_when_ready(&socket).await?;
+    write_frame(&mut stream, &payload).await?;
+    assert!(
+      timeout(
+        Duration::from_secs(1),
+        read_frame::<_, ServerMessage>(&mut stream)
+      )
+      .await??
+      .is_none()
+    );
+  }
+  for payload in [
+    serde_json::json!({"type":"handshake", "protocol_version":1}),
+    serde_json::json!({"type":"handshake"}),
+  ] {
+    let mut control = connect_when_ready(&control_socket_path(&socket)?).await?;
+    ctmux_ipc::write_local_control_frame(&mut control, &payload).await?;
+    assert!(
+      timeout(
+        Duration::from_secs(1),
+        ctmux_ipc::read_local_control_frame::<_, LocalControlServerMessage>(&mut control)
+      )
+      .await??
+      .is_none()
+    );
+  }
+  daemon.abort();
+  let _result = daemon.await;
+  Ok(())
+}
+
 async fn pty_test_lock() -> MutexGuard<'static, ()> {
   PTY_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await
 }
@@ -2035,7 +2176,7 @@ async fn handshake(stream: &mut UnixStream) -> TestResult {
   write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: PROTOCOL_VERSION,
+      protocol: ctmux_proto::protocol_offer(),
       client_name: "integration-test".into(),
       client_version: env!("CARGO_PKG_VERSION").into(),
     },

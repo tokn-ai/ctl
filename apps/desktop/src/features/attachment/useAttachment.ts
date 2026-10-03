@@ -7,6 +7,7 @@ import {
   detachAttachment,
   openAttachment,
   releaseAttachmentLease,
+  requestAttachmentCheckpoint,
   resizeAttachment,
   sendInput,
   sessionCache,
@@ -122,6 +123,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const generationRef = useRef(0);
   const eventTailRef = useRef(Promise.resolve());
   const appliedSequenceRef = useRef<string | null>(null);
+  const historySnapshotRef = useRef<{ snapshot_id: string; source_gap: boolean } | null>(null);
   const pendingShellStateRef = useRef<ShellStateSummary | null>(null);
   const inputLeaseOwnedRef = useRef(false);
   const layoutLeaseOwnedRef = useRef(false);
@@ -367,6 +369,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       lifecycleRecoveryStateRef.current =
         interruptedAttachmentState(stateRef.current) ?? INITIAL_STATE;
       clearRecoveryTimer();
+      historySnapshotRef.current = null;
+      rendererRef.current?.cancelHistory?.();
       generationRef.current += 1;
       openingAbortRef.current?.abort();
       inputLeaseOwnedRef.current = false;
@@ -438,13 +442,18 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
             return { ...current, session: { ...current.session, last_seen_at_ms: event.last_seen_at_ms } };
           });
           break;
-        case "checkpoint":
+        case "checkpoint": {
+          const snapshot = event.history_manifest
+            ? { snapshot_id: event.history_manifest.snapshot_id, source_gap: event.history_gap }
+            : null;
+          historySnapshotRef.current = snapshot;
           await renderer.restoreCheckpoint(
             event.checkpoint.terminal_size,
             event.history.lines,
             decodeBase64(event.checkpoint.payload_base64),
             decodeBase64(event.checkpoint.input_prefix_base64),
             event.checkpoint.sequence,
+            event.history_manifest?.snapshot_id ?? null,
           );
           if (!isCurrent()) {
             return;
@@ -459,7 +468,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           );
           setState((current) => ({
             ...current,
-            history_gap: current.history_gap || event.history_gap,
+            history_gap: event.history_gap || BigInt(event.history_manifest?.first_line ?? "0") > 0n,
             session: current.session
               ? {
                   ...current.session,
@@ -469,8 +478,37 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
               : current.session,
           }));
           break;
+        }
+        case "history_synced": {
+          const snapshot = historySnapshotRef.current;
+          if (!snapshot || snapshot.snapshot_id !== event.snapshot_id) break;
+          if (event.history.sequence !== event.checkpoint.sequence ||
+            !sequenceAtLeast(appliedSequenceRef.current, event.checkpoint.sequence)) break;
+          // Background history never joins the ordered acknowledgement tail.
+          // The presenter publishes it only after replay reaches its live head.
+          void renderer.syncHistory?.({
+            terminal_size: event.checkpoint.terminal_size,
+            rows: event.rows,
+            payload: decodeBase64(event.checkpoint.payload_base64),
+            input_prefix: decodeBase64(event.checkpoint.input_prefix_base64),
+            sequence: event.checkpoint.sequence,
+            snapshot_id: event.snapshot_id,
+            scrollback_limit: event.scrollback_limit,
+          }).then((applied) => {
+            if (snapshot !== historySnapshotRef.current || generation !== generationRef.current) return;
+            if (applied && (isCurrent() || stateRef.current.phase === "ended")) {
+              setState((current) => ({ ...current, history_gap: snapshot.source_gap || event.history_gap }));
+            } else if (!applied && isCurrent()) {
+              // A busy terminal can outrun the bounded replay window. Keep
+              // its current screen and retry history from a fresh checkpoint.
+              setState((current) => ({ ...current, history_gap: true }));
+              void requestAttachmentCheckpoint({ attachment_id: event.attachment_id }).catch(() => undefined);
+            }
+          }).catch(() => undefined);
+          break;
+        }
         case "output":
-          await renderer.write(decodeBase64(event.data_base64), event.sequence_end);
+          await renderer.write(decodeBase64(event.data_base64), event.sequence_end, event.sequence_start);
           if (!isCurrent()) {
             return;
           }
@@ -481,6 +519,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           publishAppliedSequence(event.sequence_end);
           break;
         case "pty_geometry_changed":
+          historySnapshotRef.current = null;
           await renderer.resize(event.terminal_size);
           if (!isCurrent()) {
             return;
@@ -583,7 +622,13 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           setState((current) => transitionAttachment(current, { type: "ended", exit_code: event.exit_code }));
           break;
         case "attachment_exited":
-          if (event.next_sequence === null) renderer.invalidateResumeSequence();
+          // A normal exit stops new output; already received history can
+          // finish staging and fill the final screen's scrollback.
+          if (stateRef.current.phase !== "ended") {
+            historySnapshotRef.current = null;
+            renderer.cancelHistory?.();
+            if (event.next_sequence === null) renderer.invalidateResumeSequence();
+          }
           const resumeResize =
             event.reason === "connection_closed" && resizeWithWindowRef.current;
           if (event.reason !== "connection_closed") {
@@ -602,6 +647,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           }));
           break;
         case "attachment_error":
+          historySnapshotRef.current = null;
+          renderer.cancelHistory?.();
           renderer.invalidateResumeSequence();
           activeAttachmentRef.current = null;
           channelRef.current = null;
@@ -837,6 +884,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     ): Promise<void> => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
+      historySnapshotRef.current = null;
+      rendererRef.current?.cancelHistory?.();
       openingAbortRef.current?.abort();
       inputLeaseOwnedRef.current = false;
       layoutLeaseOwnedRef.current = false;
@@ -897,6 +946,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       const attachmentId = activeAttachmentRef.current;
       let transitionGeneration = generationRef.current;
       if (attachmentId) {
+        historySnapshotRef.current = null;
+        rendererRef.current?.cancelHistory?.();
         generationRef.current += 1;
         transitionGeneration = generationRef.current;
         activeAttachmentRef.current = null;
@@ -1044,6 +1095,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     }
 
     resetRecovery();
+    historySnapshotRef.current = null;
+    rendererRef.current?.cancelHistory?.();
     generationRef.current += 1;
     openingAbortRef.current?.abort();
     connectionQueueRef.current?.cancelPending();
@@ -1057,6 +1110,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     resetRecovery();
     const generation = generationRef.current + 1;
     generationRef.current = generation;
+    historySnapshotRef.current = null;
+    rendererRef.current?.cancelHistory?.();
     openingAbortRef.current?.abort();
     inputLeaseOwnedRef.current = false;
     layoutLeaseOwnedRef.current = false;
@@ -1092,6 +1147,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   const resetAfterDaemonRestart = useCallback(() => {
     abortManualReconnect();
     resetRecovery();
+    historySnapshotRef.current = null;
+    rendererRef.current?.cancelHistory?.();
     generationRef.current += 1;
     openingAbortRef.current?.abort();
     inputLeaseOwnedRef.current = false;

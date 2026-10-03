@@ -1,10 +1,13 @@
 pub mod archive;
 pub mod cache;
+pub mod history;
+mod history_sync;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 pub use ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use ctmux_proto::{
   ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, ServerMessage, SessionInfo,
-  ShellState, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, read_frame, write_frame,
+  ShellState, TerminalCheckpoint, TerminalHistoryManifest, TerminalHistoryRow,
+  TerminalHistorySnapshot, TerminalSize, read_frame, write_frame,
 };
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal};
@@ -62,6 +65,7 @@ pub struct AttachedSession {
   pub history_gap: bool,
   pub checkpoint: Option<TerminalCheckpoint>,
   pub history: Option<TerminalHistorySnapshot>,
+  pub history_manifest: Option<TerminalHistoryManifest>,
   pub terminal_size_mismatch: bool,
   pub input_lease: LeaseStatus,
   pub layout_lease: LeaseStatus,
@@ -265,6 +269,18 @@ pub enum AttachmentEvent {
   Checkpoint {
     checkpoint: TerminalCheckpoint,
     history: TerminalHistorySnapshot,
+    history_manifest: Option<TerminalHistoryManifest>,
+    history_gap: bool,
+  },
+  /// A complete history transfer at an earlier live checkpoint. A presenter
+  /// must catch its history model up before publishing it, never restore this
+  /// checkpoint directly into the active screen.
+  HistorySynced {
+    snapshot_id: String,
+    checkpoint: TerminalCheckpoint,
+    history: TerminalHistorySnapshot,
+    rows: Vec<TerminalHistoryRow>,
+    scrollback_limit: u64,
     history_gap: bool,
   },
   Output {
@@ -460,6 +476,7 @@ enum AttachmentCommand {
   Resize { terminal_size: TerminalSize },
   AcquireLease { lease: LeaseKind },
   ReleaseLease { lease: LeaseKind },
+  RequestCheckpoint,
   Detach,
 }
 
@@ -496,6 +513,8 @@ pub enum AttachmentCommandError {
   InputLeaseRequired,
   #[error("this attachment does not own the PTY layout lease")]
   LayoutLeaseRequired,
+  #[error("checkpoint recovery requires ctmux contract 1.1.14")]
+  CheckpointRecoveryUnavailable,
   #[error("attachment controller is no longer running")]
   Closed,
 }
@@ -518,6 +537,7 @@ pub enum AttachmentAcknowledgementError {
 /// ordered presentation event and updates its renderer-applied resume state.
 #[derive(Debug, Clone)]
 pub struct AttachmentControl {
+  protocol_version: ctl_core::protocol::ProtocolVersion,
   commands: mpsc::Sender<AttachmentCommand>,
   acknowledgements: mpsc::Sender<PresentationAcknowledgement>,
   state: AttachmentState,
@@ -581,6 +601,17 @@ impl AttachmentControl {
   /// Returns an error when the controller has already stopped.
   pub async fn detach(&self) -> Result<(), AttachmentCommandError> {
     self.send(AttachmentCommand::Detach).await
+  }
+
+  /// Requests an authoritative recovery boundary without changing leases.
+  ///
+  /// # Errors
+  /// Returns an error when this attachment has already closed.
+  pub async fn request_checkpoint(&self) -> Result<(), AttachmentCommandError> {
+    if self.protocol_version == ctmux_proto::CONTRACT_V1_0_13 {
+      return Err(AttachmentCommandError::CheckpointRecoveryUnavailable);
+    }
+    self.send(AttachmentCommand::RequestCheckpoint).await
   }
 
   /// Acknowledges that the renderer applied an `output` event through this
@@ -734,11 +765,22 @@ pub struct AttachmentController<S> {
   commands: Option<mpsc::Receiver<AttachmentCommand>>,
   acknowledgements: Option<mpsc::Receiver<PresentationAcknowledgement>>,
   events: mpsc::Sender<AttachmentEvent>,
-  initial_checkpoint: Option<(TerminalCheckpoint, TerminalHistorySnapshot, bool)>,
+  initial_checkpoint: Option<CheckpointDelivery>,
+  history_transfer: Option<history_sync::HistoryTransfer>,
+  pending_history: Option<AttachmentEvent>,
+  history_started: bool,
+  history_requests: Option<watch::Sender<Option<ClientMessage>>>,
   /// A renderer may continue to present raw bytes after declaring a geometry
   /// incompatible, but it cannot resume safely until a checkpoint is applied.
   renderer_requires_checkpoint: bool,
   pending_presentations: VecDeque<PendingPresentation>,
+}
+
+struct CheckpointDelivery {
+  checkpoint: TerminalCheckpoint,
+  history: TerminalHistorySnapshot,
+  history_manifest: Option<TerminalHistoryManifest>,
+  history_gap: bool,
 }
 
 /// Performs the versioned `ctmux` handshake over any bidirectional stream.
@@ -932,6 +974,7 @@ where
     history_gap,
     checkpoint,
     history,
+    history_manifest,
     terminal_size_mismatch,
     input_lease,
     layout_lease,
@@ -951,6 +994,7 @@ where
       history_gap,
       checkpoint,
       history: history.map(|history| *history),
+      history_manifest: history_manifest.map(|manifest| *manifest),
       terminal_size_mismatch,
       input_lease,
       layout_lease,
@@ -1006,13 +1050,37 @@ impl<S> AttachmentController<S> {
       .checkpoint
       .as_ref()
       .zip(attached.history.as_ref())
-      .map(|(checkpoint, history)| (checkpoint.clone(), history.clone(), attached.history_gap));
+      .map(|(checkpoint, history)| CheckpointDelivery {
+        checkpoint: checkpoint.clone(),
+        history: history.clone(),
+        history_manifest: attached.history_manifest.clone(),
+        history_gap: attached.history_gap,
+      });
+    let history_transfer = attached
+      .history_manifest
+      .clone()
+      .map(|manifest| {
+        history_sync::HistoryTransfer::new(
+          manifest,
+          attached
+            .checkpoint
+            .clone()
+            .ok_or(ClientError::CheckpointHistoryPresenceMismatch)?,
+          attached
+            .history
+            .clone()
+            .ok_or(ClientError::CheckpointHistoryPresenceMismatch)?,
+          attached.history_gap,
+        )
+      })
+      .transpose()?;
     let renderer_requires_checkpoint =
       !options.renderer_starts_compatible || attached.checkpoint.is_some();
     if renderer_requires_checkpoint {
       state.set_resume_sequence(None);
     }
     let control = AttachmentControl {
+      protocol_version: attached.handshake_info.protocol_version,
       commands: command_sender,
       acknowledgements: acknowledgement_sender,
       state: state.clone(),
@@ -1028,6 +1096,10 @@ impl<S> AttachmentController<S> {
         acknowledgements: Some(acknowledgements),
         events,
         initial_checkpoint,
+        history_transfer,
+        pending_history: None,
+        history_started: false,
+        history_requests: None,
         renderer_requires_checkpoint,
         pending_presentations: VecDeque::new(),
       },
@@ -1078,6 +1150,8 @@ impl<S> AttachmentController<S> {
     let (incoming_sender, incoming_receiver) = mpsc::channel(self.options.event_queue_capacity);
     let (writer_status_sender, writer_status_receiver) = mpsc::unbounded_channel();
     let (presentation_progress_sender, presentation_progress_receiver) = watch::channel(None);
+    let (history_request_sender, history_request_receiver) = watch::channel(None);
+    self.history_requests = Some(history_request_sender);
     let peer_activity = Arc::new(Mutex::new(Instant::now()));
     let reader = read_server_messages(reader, incoming_sender, Arc::clone(&peer_activity));
     let peer_silence = wait_for_peer_silence(peer_activity, self.liveness.peer_timeout);
@@ -1090,6 +1164,7 @@ impl<S> AttachmentController<S> {
       AttachmentWriterChannels {
         commands,
         presentation_progress: presentation_progress_receiver,
+        history_requests: history_request_receiver,
         statuses: writer_status_sender,
       },
     );
@@ -1141,7 +1216,13 @@ impl<S> AttachmentController<S> {
     presentation_progress: watch::Sender<Option<u64>>,
     mut writer_statuses: mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<AttachExit, ClientError> {
-    if let Some((checkpoint, history, history_gap)) = self.initial_checkpoint.take() {
+    if let Some(CheckpointDelivery {
+      checkpoint,
+      history,
+      history_manifest,
+      history_gap,
+    }) = self.initial_checkpoint.take()
+    {
       let queued = self.enqueue_presentation(PendingPresentation::Checkpoint {
         sequence: checkpoint.sequence,
       });
@@ -1154,6 +1235,7 @@ impl<S> AttachmentController<S> {
           AttachmentEvent::Checkpoint {
             checkpoint,
             history,
+            history_manifest,
             history_gap,
           },
           &mut writer_statuses,
@@ -1170,6 +1252,9 @@ impl<S> AttachmentController<S> {
     loop {
       let presentation_capacity_available =
         self.pending_presentations.len() < self.options.event_queue_capacity;
+      let event_sender = self.events.clone();
+      let event_capacity_available = event_sender.capacity() > 0;
+      let history_pending = self.pending_history.is_some();
       tokio::select! {
         error = writer_failure(&mut writer_statuses) => return Err(error),
         acknowledgement = acknowledgements.recv(), if acknowledgements_open => {
@@ -1179,12 +1264,16 @@ impl<S> AttachmentController<S> {
                 self.accept_presentation_acknowledgement_request(acknowledgement)?
               {
                 presentation_progress.send_replace(Some(applied_sequence));
+                if !self.history_started && self.history_transfer.as_ref().is_some_and(|transfer| transfer.sequence() <= applied_sequence) {
+                  self.history_started = true;
+                  self.advance_history_transfer()?;
+                }
               }
             }
             None => acknowledgements_open = false,
           }
         }
-        incoming_message = incoming.recv(), if presentation_capacity_available => {
+        incoming_message = incoming.recv(), if presentation_capacity_available && event_capacity_available && !history_pending => {
           match incoming_message {
             Some(IncomingServerMessage::Message(message)) => {
               match self.process_server_message(*message, &mut writer_statuses).await? {
@@ -1198,6 +1287,14 @@ impl<S> AttachmentController<S> {
               return Ok(self.finish(AttachExitReason::ConnectionClosed));
             }
             Some(IncomingServerMessage::Fatal(error)) => return Err(error),
+          }
+        }
+        // Wait for channel capacity without blocking acknowledgement handling.
+        // History completion never participates in the presentation ledger.
+        permit = event_sender.reserve(), if history_pending || !event_capacity_available => {
+          let Ok(permit) = permit else { return Ok(self.finish(AttachExitReason::Detached)); };
+          if let Some(history) = self.pending_history.take() {
+            permit.send(history);
           }
         }
       }
@@ -1222,11 +1319,28 @@ impl<S> AttachmentController<S> {
       ServerMessage::Checkpoint {
         checkpoint,
         history,
+        history_manifest,
         history_gap,
       } => {
         self
-          .process_checkpoint(checkpoint, *history, history_gap, writer_statuses)
+          .process_checkpoint(
+            checkpoint,
+            *history,
+            history_manifest.map(|manifest| *manifest),
+            history_gap,
+            writer_statuses,
+          )
           .await
+      }
+      ServerMessage::HistoryPage {
+        snapshot_id,
+        offset,
+        data,
+        next_offset,
+      } => self.process_history_page(&snapshot_id, offset, &data, next_offset),
+      ServerMessage::HistorySnapshotExpired { snapshot_id } => {
+        self.expire_history_transfer(&snapshot_id);
+        Ok(ControllerAction::Continue)
       }
       ServerMessage::PtyGeometryChanged {
         terminal_size,
@@ -1301,10 +1415,25 @@ impl<S> AttachmentController<S> {
     &mut self,
     checkpoint: TerminalCheckpoint,
     history: TerminalHistorySnapshot,
+    history_manifest: Option<TerminalHistoryManifest>,
     history_gap: bool,
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     self.accept_checkpoint(&checkpoint, &history)?;
+    self.history_transfer = history_manifest
+      .clone()
+      .map(|manifest| {
+        history_sync::HistoryTransfer::new(
+          manifest,
+          checkpoint.clone(),
+          history.clone(),
+          history_gap,
+        )
+      })
+      .transpose()?;
+    self.history_started = false;
+    self.pending_history = None;
+    self.queue_history_request(None);
     let queued = self.enqueue_presentation(PendingPresentation::Checkpoint {
       sequence: checkpoint.sequence,
     });
@@ -1317,11 +1446,75 @@ impl<S> AttachmentController<S> {
         AttachmentEvent::Checkpoint {
           checkpoint,
           history,
+          history_manifest,
           history_gap,
         },
         writer_statuses,
       )
       .await
+  }
+
+  fn queue_history_request(&self, message: Option<ClientMessage>) {
+    if let Some(requests) = &self.history_requests {
+      requests.send_replace(message);
+    }
+  }
+
+  fn advance_history_transfer(&mut self) -> Result<(), ClientError> {
+    if self
+      .history_transfer
+      .as_ref()
+      .is_some_and(history_sync::HistoryTransfer::is_complete)
+    {
+      let transfer = self
+        .history_transfer
+        .take()
+        .expect("complete history transfer exists");
+      self.queue_history_request(None);
+      self.pending_history = Some(transfer.finish()?);
+    } else {
+      self.queue_history_request(
+        self
+          .history_transfer
+          .as_ref()
+          .map(history_sync::HistoryTransfer::request),
+      );
+    }
+    Ok(())
+  }
+
+  fn process_history_page(
+    &mut self,
+    snapshot_id: &str,
+    offset: u64,
+    data: &[u8],
+    next_offset: Option<u64>,
+  ) -> Result<ControllerAction, ClientError> {
+    let Some(transfer) = self
+      .history_transfer
+      .as_mut()
+      .filter(|transfer| transfer.snapshot_id() == snapshot_id)
+    else {
+      // A checkpoint may replace a transfer while its previous request is in
+      // flight. Those pages never become part of the new projection.
+      return Ok(ControllerAction::Continue);
+    };
+    transfer.accept_page(offset, data, next_offset)?;
+    self.advance_history_transfer()?;
+    Ok(ControllerAction::Continue)
+  }
+
+  fn expire_history_transfer(&mut self, snapshot_id: &str) {
+    if self
+      .history_transfer
+      .as_ref()
+      .is_some_and(|transfer| transfer.snapshot_id() == snapshot_id)
+    {
+      self.history_transfer = None;
+      self.history_started = false;
+      self.pending_history = None;
+      self.queue_history_request(Some(ClientMessage::RequestCheckpoint));
+    }
   }
 
   async fn process_lease_status(
@@ -1452,6 +1645,10 @@ impl<S> AttachmentController<S> {
     if observed_sequence < self.state.received_sequence() {
       return Ok(ControllerAction::Continue);
     }
+    self.history_transfer = None;
+    self.history_started = false;
+    self.pending_history = None;
+    self.queue_history_request(None);
     let expected_sequence = self.state.received_sequence();
     if observed_sequence != expected_sequence {
       return Err(ClientError::GeometryAheadOfOutput {
@@ -1656,6 +1853,7 @@ fn presentation_acknowledgement_name(acknowledgement: PresentationAck) -> &'stat
 struct AttachmentWriterChannels {
   commands: mpsc::Receiver<AttachmentCommand>,
   presentation_progress: watch::Receiver<Option<u64>>,
+  history_requests: watch::Receiver<Option<ClientMessage>>,
   statuses: mpsc::UnboundedSender<WriterStatus>,
 }
 
@@ -1689,6 +1887,7 @@ async fn drive_attachment_writer<W>(
   heartbeats.set_missed_tick_behavior(MissedTickBehavior::Delay);
   let mut heartbeat_nonce = 0_u64;
   let mut presentation_progress_open = true;
+  let mut history_requests_open = true;
   let mut resize_after_layout_reacquire = options.reacquire_layout_lease
     && options.resize_after_layout_reacquire.is_some()
     && !state.lease_status(LeaseKind::Layout).owned_by_client;
@@ -1751,6 +1950,20 @@ async fn drive_attachment_writer<W>(
           }
         }
       }
+      changed = channels.history_requests.changed(), if history_requests_open => {
+        if changed.is_err() {
+          history_requests_open = false;
+          continue;
+        }
+        let message = channels.history_requests.borrow_and_update().clone();
+        if let Some(message) = message {
+          match send_attachment_message(&mut writer, &message).await {
+            Ok(true) => {}
+            Ok(false) => break WriterStatus::ConnectionClosed,
+            Err(error) => break WriterStatus::Fatal(error),
+          }
+        }
+      }
     }
   };
   let detach_sent = matches!(status, WriterStatus::DetachSent);
@@ -1792,6 +2005,7 @@ where
     AttachmentCommand::Resize { terminal_size } => ClientMessage::Resize { terminal_size },
     AttachmentCommand::AcquireLease { lease } => ClientMessage::AcquireLease { lease },
     AttachmentCommand::ReleaseLease { lease } => ClientMessage::ReleaseLease { lease },
+    AttachmentCommand::RequestCheckpoint => ClientMessage::RequestCheckpoint,
     AttachmentCommand::Detach => unreachable!("detach exits before command conversion"),
   };
   send_attachment_message(writer, &message).await
@@ -2160,6 +2374,7 @@ async fn present_interactive_events(
       AttachmentEvent::Checkpoint {
         checkpoint,
         history: _,
+        history_manifest: _,
         history_gap,
       } => {
         if history_gap {
@@ -2208,6 +2423,7 @@ async fn present_interactive_events(
         eprintln!("\r\n[{} lease is {owner}]", lease_name(lease));
       }
       AttachmentEvent::ShellStateChanged { .. }
+      | AttachmentEvent::HistorySynced { .. }
       | AttachmentEvent::HeartbeatAck { .. }
       | AttachmentEvent::Exited { .. } => {}
       AttachmentEvent::ServerError { message, .. } => eprintln!("\r\n[ctmux: {message}]"),
@@ -2310,6 +2526,8 @@ pub enum ClientError {
     checkpoint_sequence: u64,
     history_sequence: u64,
   },
+  #[error("invalid history snapshot: {0}")]
+  InvalidHistorySnapshot(String),
   #[error(
     "initial checkpoint sequence {checkpoint_sequence} does not match replay start {replay_from}"
   )]
@@ -2393,8 +2611,12 @@ mod tests {
   #[tokio::test]
   async fn handshake_preserves_latest_contract_separately_from_selection() {
     let latest = ctl_core::protocol::ProtocolVersion::new(1, 1, 15);
-    let advertised =
-      ctl_core::component::ProtocolInfo::new("ctmux", 15, latest, &[PROTOCOL_VERSION, latest]);
+    let advertised = ctl_core::component::ProtocolInfo::new(
+      "ctmux",
+      15,
+      latest,
+      &[ctmux_proto::CONTRACT_V1_0_13, PROTOCOL_VERSION, latest],
+    );
     let info = protocol_reply(PROTOCOL_VERSION, vec![advertised.clone()])
       .await
       .unwrap();
@@ -2419,6 +2641,36 @@ mod tests {
       protocol_reply(PROTOCOL_VERSION, Vec::new()).await,
       Err(ClientError::UnexpectedResponse { .. })
     ));
+  }
+
+  #[tokio::test]
+  async fn older_contract_selects_inline_history_without_sending_new_recovery_commands() {
+    let old = ctmux_proto::CONTRACT_V1_0_13;
+    let advertisement = ctl_core::component::ProtocolInfo::new("ctmux", 13, old, &[old]);
+    assert_eq!(
+      protocol_reply(old, vec![advertisement])
+        .await
+        .unwrap()
+        .protocol_version,
+      old
+    );
+    let (client, mut peer) = tokio::io::duplex(4096);
+    let mut attached = attached_session(0, None, ShellState::default());
+    attached.handshake_info.protocol_version = old;
+    let (_controller, control, _events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    assert_eq!(
+      control.request_checkpoint().await,
+      Err(AttachmentCommandError::CheckpointRecoveryUnavailable)
+    );
+    assert!(
+      tokio::time::timeout(
+        Duration::from_millis(10),
+        read_frame::<_, ClientMessage>(&mut peer)
+      )
+      .await
+      .is_err()
+    );
   }
 
   /// Hold readable final frames until a renderer acknowledgement encounters
@@ -2650,6 +2902,7 @@ mod tests {
           next_sequence: 0,
           replay_from: 0,
           history_gap: false,
+          history_manifest: None,
           checkpoint: None,
           history: None,
           terminal_size_mismatch: false,
@@ -2956,6 +3209,7 @@ mod tests {
         checkpoint: checkpoint.clone(),
         history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: true,
+        history_manifest: None,
       },
     )
     .await
@@ -2966,6 +3220,7 @@ mod tests {
         checkpoint: checkpoint.clone(),
         history: terminal_history(checkpoint.sequence),
         history_gap: true,
+        history_manifest: None,
       })
     );
     assert_eq!(state.received_sequence(), 10);
@@ -3004,6 +3259,7 @@ mod tests {
         checkpoint: checkpoint.clone(),
         history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: true,
+        history_manifest: None,
       },
     )
     .await
@@ -3014,6 +3270,7 @@ mod tests {
         checkpoint: checkpoint.clone(),
         history: terminal_history(checkpoint.sequence),
         history_gap: true,
+        history_manifest: None,
       })
     );
     control
@@ -3208,6 +3465,7 @@ mod tests {
         checkpoint: checkpoint.clone(),
         history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: false,
+        history_manifest: None,
       },
     )
     .await
@@ -3241,6 +3499,7 @@ mod tests {
         checkpoint: checkpoint.clone(),
         history: Box::new(terminal_history(checkpoint.sequence)),
         history_gap: false,
+        history_manifest: None,
       },
     )
     .await
@@ -3258,6 +3517,321 @@ mod tests {
     drop(daemon);
     let exit = runner.await.unwrap().unwrap();
     assert_eq!(exit.next_sequence, Some(checkpoint.sequence));
+  }
+
+  fn paged_attachment(
+    sequence: u64,
+    snapshot_id: &str,
+    rows: &[TerminalHistoryRow],
+  ) -> (AttachedSession, Vec<u8>) {
+    let (manifest, checkpoint, history, bytes) =
+      history_sync::tests::fixture(sequence, snapshot_id, rows);
+    let mut attached = attached_session(sequence, Some(checkpoint), ShellState::default());
+    attached.history = Some(history);
+    attached.history_manifest = Some(manifest);
+    (attached, bytes)
+  }
+
+  async fn next_client_message(stream: &mut tokio::io::DuplexStream) -> ClientMessage {
+    tokio::time::timeout(Duration::from_secs(1), read_frame(stream))
+      .await
+      .expect("controller did not send its next message")
+      .unwrap()
+      .unwrap()
+  }
+
+  async fn next_attachment_event(events: &mut AttachmentEvents) -> AttachmentEvent {
+    tokio::time::timeout(Duration::from_secs(1), events.recv())
+      .await
+      .expect("controller did not deliver its next event")
+      .unwrap()
+  }
+
+  async fn expect_history_request(
+    stream: &mut tokio::io::DuplexStream,
+    snapshot_id: &str,
+    sequence: u64,
+  ) {
+    assert_eq!(
+      next_client_message(stream).await,
+      ClientMessage::PresentationApplied { sequence }
+    );
+    assert!(matches!(next_client_message(stream).await,
+      ClientMessage::HistoryRequest { snapshot_id: actual, offset: 0, .. } if actual == snapshot_id));
+  }
+
+  #[tokio::test]
+  async fn history_waits_for_checkpoint_ack_and_never_advances_the_live_cursor() {
+    let rows = [TerminalHistoryRow {
+      text: "retained".into(),
+      wrapped: false,
+    }];
+    let (attached, bytes) = paged_attachment(5, "initial", &rows);
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(controller.run());
+    assert!(matches!(
+      next_attachment_event(&mut events).await,
+      AttachmentEvent::Checkpoint { .. }
+    ));
+    assert!(
+      tokio::time::timeout(
+        Duration::from_millis(10),
+        read_frame::<_, ClientMessage>(&mut daemon)
+      )
+      .await
+      .is_err()
+    );
+    control.acknowledge_checkpoint(5).await.unwrap();
+    expect_history_request(&mut daemon, "initial", 5).await;
+
+    write_frame(
+      &mut daemon,
+      &ServerMessage::Output {
+        sequence_start: 5,
+        sequence_end: 8,
+        data: b"new".to_vec(),
+      },
+    )
+    .await
+    .unwrap();
+    write_frame(
+      &mut daemon,
+      &ServerMessage::HistoryPage {
+        snapshot_id: "initial".into(),
+        offset: 0,
+        data: bytes,
+        next_offset: None,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      next_attachment_event(&mut events).await,
+      AttachmentEvent::Output {
+        sequence_end: 8,
+        ..
+      }
+    ));
+    control.acknowledge_output(8).await.unwrap();
+    assert!(matches!(next_attachment_event(&mut events).await,
+      AttachmentEvent::HistorySynced { checkpoint, rows: actual, .. } if checkpoint.sequence == 5 && actual == rows));
+    assert_eq!(control.state().received_sequence(), 8);
+    assert_eq!(control.state().resume_sequence(), Some(8));
+    drop(daemon);
+    assert_eq!(runner.await.unwrap().unwrap().next_sequence, Some(8));
+  }
+
+  #[tokio::test]
+  async fn late_pages_and_expiration_cannot_cancel_a_replacing_history_snapshot() {
+    let old_rows = [TerminalHistoryRow {
+      text: "old".into(),
+      wrapped: false,
+    }];
+    let new_rows = [TerminalHistoryRow {
+      text: "new".into(),
+      wrapped: false,
+    }];
+    let (attached, _) = paged_attachment(5, "old", &old_rows);
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(controller.run());
+    assert!(matches!(
+      next_attachment_event(&mut events).await,
+      AttachmentEvent::Checkpoint { .. }
+    ));
+    control.acknowledge_checkpoint(5).await.unwrap();
+    expect_history_request(&mut daemon, "old", 5).await;
+
+    let (manifest, checkpoint, history, bytes) = history_sync::tests::fixture(5, "new", &new_rows);
+    write_frame(
+      &mut daemon,
+      &ServerMessage::Checkpoint {
+        checkpoint,
+        history: Box::new(history),
+        history_manifest: Some(Box::new(manifest)),
+        history_gap: false,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(next_attachment_event(&mut events).await,
+      AttachmentEvent::Checkpoint { history_manifest: Some(manifest), .. } if manifest.snapshot_id == "new"));
+    control.acknowledge_checkpoint(5).await.unwrap();
+    expect_history_request(&mut daemon, "new", 5).await;
+    // A malformed obsolete page must be ignored by identity before decoding.
+    write_frame(
+      &mut daemon,
+      &ServerMessage::HistoryPage {
+        snapshot_id: "old".into(),
+        offset: 99,
+        data: vec![0xff],
+        next_offset: None,
+      },
+    )
+    .await
+    .unwrap();
+    write_frame(
+      &mut daemon,
+      &ServerMessage::HistorySnapshotExpired {
+        snapshot_id: "old".into(),
+      },
+    )
+    .await
+    .unwrap();
+    write_frame(
+      &mut daemon,
+      &ServerMessage::HistoryPage {
+        snapshot_id: "new".into(),
+        offset: 0,
+        data: bytes,
+        next_offset: None,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(next_attachment_event(&mut events).await,
+      AttachmentEvent::HistorySynced { snapshot_id, rows, .. } if snapshot_id == "new" && rows == new_rows));
+    assert!(
+      tokio::time::timeout(
+        Duration::from_millis(10),
+        read_frame::<_, ClientMessage>(&mut daemon)
+      )
+      .await
+      .is_err(),
+      "obsolete expiration requested another checkpoint"
+    );
+    drop(daemon);
+    runner.await.unwrap().unwrap();
+  }
+
+  #[tokio::test]
+  async fn current_history_expiration_requests_a_fresh_checkpoint_without_a_lease() {
+    let rows = [TerminalHistoryRow {
+      text: "retained".into(),
+      wrapped: false,
+    }];
+    let (attached, _) = paged_attachment(5, "expired", &rows);
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(controller.run());
+    assert!(matches!(
+      next_attachment_event(&mut events).await,
+      AttachmentEvent::Checkpoint { .. }
+    ));
+    control.acknowledge_checkpoint(5).await.unwrap();
+    expect_history_request(&mut daemon, "expired", 5).await;
+    write_frame(
+      &mut daemon,
+      &ServerMessage::HistorySnapshotExpired {
+        snapshot_id: "expired".into(),
+      },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      next_client_message(&mut daemon).await,
+      ClientMessage::RequestCheckpoint
+    );
+    assert!(!control.state().leases().input.owned_by_client);
+    assert!(!control.state().leases().layout.owned_by_client);
+
+    let (manifest, checkpoint, history, bytes) = history_sync::tests::fixture(5, "fresh", &rows);
+    write_frame(
+      &mut daemon,
+      &ServerMessage::Checkpoint {
+        checkpoint,
+        history: Box::new(history),
+        history_manifest: Some(Box::new(manifest)),
+        history_gap: false,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      next_attachment_event(&mut events).await,
+      AttachmentEvent::Checkpoint { .. }
+    ));
+    control.acknowledge_checkpoint(5).await.unwrap();
+    expect_history_request(&mut daemon, "fresh", 5).await;
+    write_frame(
+      &mut daemon,
+      &ServerMessage::HistoryPage {
+        snapshot_id: "fresh".into(),
+        offset: 0,
+        data: bytes,
+        next_offset: None,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(next_attachment_event(&mut events).await,
+      AttachmentEvent::HistorySynced { snapshot_id, .. } if snapshot_id == "fresh"));
+    drop(daemon);
+    runner.await.unwrap().unwrap();
+  }
+
+  #[tokio::test]
+  async fn a_full_advisory_queue_keeps_checkpoint_ack_live_and_history_precedes_exit() {
+    let (attached, _) = paged_attachment(5, "empty", &[]);
+    let (client, mut daemon) = tokio::io::duplex(4096);
+    let options = AttachmentControllerOptions {
+      event_queue_capacity: 2,
+      ..controller_options()
+    };
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, options).unwrap();
+    let runner = tokio::spawn(controller.run());
+    assert!(matches!(
+      next_attachment_event(&mut events).await,
+      AttachmentEvent::Checkpoint { .. }
+    ));
+    for nonce in 1..=2 {
+      write_frame(&mut daemon, &ServerMessage::HeartbeatAck { nonce })
+        .await
+        .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+      while events.receiver.len() != 2 {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("advisory events did not fill the bounded queue");
+    tokio::time::timeout(Duration::from_secs(1), control.acknowledge_checkpoint(5))
+      .await
+      .expect("full advisory queue blocked the checkpoint acknowledgement")
+      .unwrap();
+    // A final stream event is already readable while completed empty history
+    // waits for the same full channel. Completion must survive normal exit.
+    write_frame(
+      &mut daemon,
+      &ServerMessage::SessionEnded {
+        session_id: "session-id".into(),
+        exit_code: Some(0),
+      },
+    )
+    .await
+    .unwrap();
+    for nonce in 1..=2 {
+      assert_eq!(
+        next_attachment_event(&mut events).await,
+        AttachmentEvent::HeartbeatAck { nonce }
+      );
+    }
+    assert!(matches!(next_attachment_event(&mut events).await,
+      AttachmentEvent::HistorySynced { snapshot_id, rows, .. } if snapshot_id == "empty" && rows.is_empty()));
+    assert!(matches!(
+      next_attachment_event(&mut events).await,
+      AttachmentEvent::SessionEnded { .. }
+    ));
+    assert_eq!(
+      runner.await.unwrap().unwrap().reason,
+      AttachExitReason::SessionEnded { exit_code: Some(0) }
+    );
   }
 
   #[tokio::test]
@@ -3635,6 +4209,7 @@ mod tests {
       session: session_info(),
       replay_from,
       history_gap: false,
+      history_manifest: None,
       checkpoint,
       history,
       terminal_size_mismatch: false,

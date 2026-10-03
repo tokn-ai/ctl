@@ -13,6 +13,7 @@ publish = ["crates-io"]
 
 [dependencies]
 serde_json.workspace = true
+sha2.workspace = true
 ctl-core.workspace = true
 clap.workspace = true
 avt.workspace = true

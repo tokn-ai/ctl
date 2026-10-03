@@ -6,7 +6,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ctmux_client::{AttachExit, AttachExitReason, AttachedSession, AttachmentControl};
 use ctmux_proto::{
   ErrorCode, LeaseKind, LeaseStatus, PromptPhase, SessionInfo, SessionStatus, ShellState,
-  ShellType, TerminalCheckpoint, TerminalHistorySnapshot, TerminalSize, TuiHint,
+  ShellType, TerminalCheckpoint, TerminalHistoryManifest, TerminalHistoryRow,
+  TerminalHistorySnapshot, TerminalSize, TuiHint,
 };
 use serde::{Deserialize, Serialize};
 
@@ -493,6 +494,39 @@ impl From<TerminalHistorySnapshot> for TerminalHistorySnapshotDto {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalHistoryManifestDto {
+  pub snapshot_id: String,
+  pub sequence: String,
+  pub generation: String,
+  pub revision: String,
+  pub total_rows: String,
+  pub total_bytes: String,
+  pub total_lines: String,
+  pub first_line: String,
+  pub truncated: bool,
+  pub content_hash: String,
+  pub scrollback_limit: String,
+}
+
+impl From<TerminalHistoryManifest> for TerminalHistoryManifestDto {
+  fn from(value: TerminalHistoryManifest) -> Self {
+    Self {
+      snapshot_id: value.snapshot_id,
+      sequence: value.sequence.to_string(),
+      generation: value.generation.to_string(),
+      revision: value.revision.to_string(),
+      total_rows: value.total_rows.to_string(),
+      total_bytes: value.total_bytes.to_string(),
+      total_lines: value.total_lines.to_string(),
+      first_line: value.first_line.to_string(),
+      truncated: value.truncated,
+      content_hash: value.content_hash,
+      scrollback_limit: value.scrollback_limit.to_string(),
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationAcknowledgement {
   Checkpoint { sequence: u64 },
@@ -533,6 +567,17 @@ pub enum AttachmentEventDto {
     event_id: String,
     checkpoint: TerminalCheckpointDto,
     history: TerminalHistorySnapshotDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_manifest: Option<TerminalHistoryManifestDto>,
+    history_gap: bool,
+  },
+  HistorySynced {
+    attachment_id: String,
+    snapshot_id: String,
+    checkpoint: TerminalCheckpointDto,
+    history: TerminalHistorySnapshotDto,
+    rows: Vec<TerminalHistoryRow>,
+    scrollback_limit: String,
     history_gap: bool,
   },
   Output {
@@ -587,6 +632,7 @@ impl AttachmentEventDto {
     event_id: String,
     checkpoint: TerminalCheckpoint,
     history: TerminalHistorySnapshot,
+    history_manifest: Option<TerminalHistoryManifest>,
     history_gap: bool,
   ) -> Self {
     Self::Checkpoint {
@@ -594,6 +640,7 @@ impl AttachmentEventDto {
       event_id,
       checkpoint: checkpoint.into(),
       history: history.into(),
+      history_manifest: history_manifest.map(Into::into),
       history_gap,
     }
   }
@@ -989,6 +1036,40 @@ mod tests {
     assert_eq!(json["generation"], (u64::MAX - 1).to_string());
     assert_eq!(json["revision"], (u64::MAX - 2).to_string());
     assert_eq!(json["retained_bytes"], (u64::MAX - 3).to_string());
+  }
+
+  #[test]
+  fn history_manifest_preserves_offsets_and_snapshot_identity() {
+    let dto = TerminalHistoryManifestDto::from(TerminalHistoryManifest {
+      snapshot_id: "snapshot-at-same-sequence-after-resize".into(),
+      sequence: u64::MAX,
+      generation: u64::MAX,
+      revision: u64::MAX,
+      total_rows: u64::MAX,
+      total_bytes: u64::MAX,
+      total_lines: u64::MAX,
+      first_line: u64::MAX,
+      scrollback_limit: u64::MAX,
+      truncated: true,
+      content_hash: "a".repeat(64),
+    });
+    let json = serde_json::to_value(dto).unwrap();
+    for field in [
+      "sequence",
+      "generation",
+      "revision",
+      "total_rows",
+      "total_bytes",
+      "total_lines",
+      "first_line",
+      "scrollback_limit",
+    ] {
+      assert_eq!(json[field], u64::MAX.to_string(), "{field}");
+    }
+    assert_eq!(
+      json["snapshot_id"],
+      "snapshot-at-same-sequence-after-resize"
+    );
   }
 
   #[test]

@@ -841,24 +841,31 @@ resize the user's terminal.
 
 ### Authoritative history and client presentation
 
-The daemon owns two bounded terminal representations: a mutable live emulator
-and normalized complete logical lines above its grid. Raw PTY output remains the
-ordered delta and short replay journal. At every checkpoint boundary, the
-daemon snapshots history and live state together; subsequent raw output evolves
-both server and client emulators from that boundary.
+The daemon's bounded terminal emulator owns the current screen and primary
+scrollback. Raw PTY output remains the ordered delta and short replay journal.
+At a checkpoint boundary, the daemon freezes physical scrollback rows together
+with live state and a small recent logical tail. The client presents the screen
+and recent tail immediately, then fetches the frozen rows in the background.
 
 Historical lines have already interpreted terminal controls, merge soft wraps,
 and exclude alternate-screen output. Version 1 stores text only; style runs are
 deliberately deferred. `RIS` and erase-saved-lines start a new generation. A
-resize may move the live/history boundary, so version 1 sends a full history
-replacement rather than stable incremental line IDs.
+resize may move the live/history boundary, so every geometry change replaces the
+checkpoint and history snapshot. Snapshot IDs distinguish replacements even at
+the same raw byte sequence. Page offsets and a SHA-256 hash verify each frozen
+window without stable line IDs or text-overlap guesses.
 
 Selection ranges, search indexes, viewport position, and any retention beyond
 the daemon bound remain client-local presentation data. Scrolling never becomes
-a daemon viewport command. Applying a checkpoint recreates the GUI renderer,
-seeds its paired history above the grid, restores the live payload, and only
-then applies output deltas. If `history_gap` is true, the UI marks the missing
-oldest portion even though the live screen is authoritative.
+a daemon viewport command. The active local history projects the bounded remote
+window. A completed transfer is reconstructed off-view, replayed through newer
+raw output, and published only at the current presentation boundary. It never
+rewinds the live renderer or resume cursor. Resizing or clearing invalidates
+older jobs; losing a coherent replay baseline requests a fresh checkpoint.
+The UI shows missing or incomplete history explicitly. Desktop disk persistence
+runs in order behind a bounded queue so slow storage cannot hold up live
+presentation. Legacy local archives remain readable and are preserved when a
+new bounded projection replaces them.
 
 ### GUI foundation acceptance tests
 

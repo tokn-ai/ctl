@@ -350,10 +350,9 @@ mod tests {
       .protocols
       .push(ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION));
     let mut actual = expected.clone();
-    actual.protocols[0].version =
-      ctl_core::protocol::ProtocolVersion::new(1, 0, ctmux_proto::PROTOCOL_BUILD - 1);
+    actual.protocols[0].version = ctl_core::protocol::ProtocolVersion::new(2, 0, 1);
     actual.protocols[0].supported_versions = vec![actual.protocols[0].version];
-    actual.protocols[0].build = ctmux_proto::PROTOCOL_BUILD - 1;
+    actual.protocols[0].build = 1;
     let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
     row.running = Some(actual);
     row.available = Some(expected);

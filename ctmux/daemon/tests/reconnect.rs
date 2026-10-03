@@ -35,7 +35,11 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
   write_frame(
     &mut stream,
     &ClientMessage::Handshake {
-      protocol: ProtocolOffer::new(15, future, &[PROTOCOL_VERSION, future]),
+      protocol: ProtocolOffer::new(
+        15,
+        future,
+        &[ctmux_proto::CONTRACT_V1_0_13, PROTOCOL_VERSION, future],
+      ),
       client_name: "future-client".into(),
       client_version: "test".into(),
     },
@@ -79,6 +83,68 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
   );
   daemon.abort();
   let _result = daemon.await;
+  Ok(())
+}
+
+#[tokio::test]
+async fn first_published_contract_keeps_complete_inline_history() -> TestResult {
+  use ctl_core::protocol::ProtocolOffer;
+  let _guard = PTY_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(&socket, "legacy-history",
+    "i=0; while [ $i -lt 150 ]; do printf 'line-%03d\\n' \"$i\"; i=$((i + 1)); done; printf 'ready\\n'; IFS= read -r line"
+  ).await?;
+  let (mut owner, _) = attach_session(&socket, &session.session_id, None, true, true).await?;
+  read_output_until(&mut owner, b"ready").await?;
+  let mut legacy = connect_when_ready(&socket).await?;
+  let old = ctmux_proto::CONTRACT_V1_0_13;
+  write_frame(
+    &mut legacy,
+    &ClientMessage::Handshake {
+      protocol: ProtocolOffer::new(13, old, &[old]),
+      client_name: "legacy".into(),
+      client_version: "test".into(),
+    },
+  )
+  .await?;
+  assert!(
+    matches!(required_message(&mut legacy).await?, ServerMessage::HandshakeAccepted { protocol_version, .. } if protocol_version == old)
+  );
+  write_frame(
+    &mut legacy,
+    &ClientMessage::AttachSession {
+      session: session.session_id.clone(),
+      resume_from: None,
+      terminal_size: TerminalSize::default(),
+      request_input_lease: false,
+      request_layout_lease: false,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+    },
+  )
+  .await?;
+  let ServerMessage::Attached {
+    history: Some(history),
+    checkpoint: Some(checkpoint),
+    history_manifest,
+    ..
+  } = raw_message(&mut legacy).await?
+  else {
+    return Err("legacy attach did not receive inline history".into());
+  };
+  assert!(history_manifest.is_none());
+  assert!(history.lines.len() > 64);
+  assert!(history.lines.iter().any(|line| line == "line-000"));
+  acknowledge_output(&mut legacy, checkpoint.sequence).await?;
+  write_frame(&mut legacy, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut legacy).await?;
+  drop(legacy);
+  kill_shell_session(&socket, &session.session_id).await?;
+  drop(owner);
+  daemon.abort();
   Ok(())
 }
 
@@ -187,12 +253,12 @@ async fn session_survives_client_disconnect_and_resumes_from_sequence() -> TestR
     matches!(
       first_attached,
       ServerMessage::Attached {
-        replay_from: 0,
+        checkpoint: Some(_),
         history_gap: false,
         ..
       },
     ),
-    "expected an initial replay from zero, received {first_attached:?}"
+    "expected an authoritative initial checkpoint, received {first_attached:?}"
   );
   let (first_output, resume_sequence) = read_output_until(&mut first_attach, b"before").await?;
   assert!(contains_bytes(&first_output, b"before"));
@@ -363,6 +429,244 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
     .map_err(|_| "ctmuxd did not exit after checkpoint test")?;
   daemon_result??;
   Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frozen_history_pages_survive_exit_and_geometry_replaces_the_snapshot() -> TestResult {
+  use sha2::{Digest as _, Sha256};
+
+  let _test_guard = pty_test_lock().await;
+  let test_directory = TestDirectory::new();
+  let socket_path = test_directory.path.join("ctmux.sock");
+  let daemon =
+    spawn_daemon_with_liveness(&socket_path, 64 * 1024, 4 * 1024, Duration::from_secs(5));
+  let session = create_shell_session(
+    &socket_path, "history-pages",
+    "i=0; while [ $i -lt 250 ]; do printf 'line-%03d\\n' \"$i\"; i=$((i + 1)); done; printf 'ready\\n'; IFS= read -r line",
+  ).await?;
+  let (mut owner, _) = attach_session(&socket_path, &session.session_id, None, true, true).await?;
+  read_output_until(&mut owner, b"ready").await?;
+
+  // This reader deliberately owns neither control lease and downloads no
+  // history implicitly, so its frozen window is observable on the wire.
+  let (mut viewer, attached) = attach_raw_viewer(&socket_path, &session.session_id).await?;
+  let ServerMessage::Attached {
+    checkpoint: Some(checkpoint),
+    history: Some(recent),
+    history_manifest: Some(initial),
+    input_lease,
+    layout_lease,
+    ..
+  } = attached
+  else {
+    return Err("expected current screen and paged history manifest".into());
+  };
+  assert!(!input_lease.owned_by_client && !layout_lease.owned_by_client);
+  assert!(initial.total_lines > 64);
+  assert!(recent.lines.len() <= 64);
+  assert_eq!(
+    initial.first_line + recent.lines.len() as u64,
+    initial.total_lines
+  );
+  assert_eq!(initial.sequence, checkpoint.sequence);
+  assert!(contains_bytes(&checkpoint.payload, b"ready"));
+  acknowledge_output(&mut viewer, checkpoint.sequence).await?;
+
+  write_frame(
+    &mut viewer,
+    &ClientMessage::HistoryRequest {
+      snapshot_id: initial.snapshot_id.clone(),
+      offset: 0,
+      max_bytes: 101,
+    },
+  )
+  .await?;
+  let first_page = raw_history_page(&mut viewer).await?;
+  assert!(
+    matches!(first_page, ServerMessage::HistoryPage { offset: 0, ref data,
+    next_offset: Some(101), .. } if data.len() == 101)
+  );
+  heartbeat(&mut viewer, 71).await?;
+
+  let resized = terminal_size(100, 30);
+  write_frame(
+    &mut owner,
+    &ClientMessage::Resize {
+      terminal_size: resized.clone(),
+    },
+  )
+  .await?;
+  let (geometry_checkpoint, geometry_manifest) = raw_checkpoint(&mut viewer).await?;
+  assert_eq!(geometry_checkpoint.terminal_size, resized);
+  assert_eq!(geometry_checkpoint.sequence, checkpoint.sequence);
+  assert_ne!(geometry_manifest.snapshot_id, initial.snapshot_id);
+  acknowledge_output(&mut viewer, geometry_checkpoint.sequence).await?;
+  write_frame(
+    &mut viewer,
+    &ClientMessage::HistoryRequest {
+      snapshot_id: initial.snapshot_id.clone(),
+      offset: 101,
+      max_bytes: 101,
+    },
+  )
+  .await?;
+  expect_history_expired(&mut viewer, &initial.snapshot_id).await?;
+
+  // Recovery requests need no lease and produce a fresh identity even when
+  // no output has changed. This also proves the replacement cannot be
+  // mistaken for the older window solely because its byte sequence is equal.
+  write_frame(&mut viewer, &ClientMessage::RequestCheckpoint).await?;
+  let (fresh_checkpoint, manifest) = raw_checkpoint(&mut viewer).await?;
+  assert_eq!(fresh_checkpoint.sequence, geometry_checkpoint.sequence);
+  assert_ne!(manifest.snapshot_id, geometry_manifest.snapshot_id);
+  acknowledge_output(&mut viewer, fresh_checkpoint.sequence).await?;
+  write_frame(&mut owner, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut owner).await?;
+  drop(owner);
+  kill_shell_session(&socket_path, &session.session_id).await?;
+
+  // Exit must not discard the pending pinned history. Finish that transfer
+  // before accepting SessionEnded; pages may split JSON strings and UTF-8.
+  let bytes = read_history_bytes(&mut viewer, &manifest, 127).await?;
+  assert_eq!(bytes.len() as u64, manifest.total_bytes);
+  assert_eq!(
+    format!("{:x}", Sha256::digest(&bytes)),
+    manifest.content_hash
+  );
+  let rows: Vec<ctmux_proto::TerminalHistoryRow> = bytes
+    .split(|byte| *byte == b'\n')
+    .filter(|row| !row.is_empty())
+    .map(serde_json::from_slice)
+    .collect::<Result<_, _>>()?;
+  assert_eq!(rows.len() as u64, manifest.total_rows);
+  let lines = ctmux_proto::normalize_history_rows(&rows);
+  assert_eq!(lines.len() as u64, manifest.total_lines);
+  assert_eq!(lines.first().map(String::as_str), Some("line-000"));
+  wait_for_session_end(&mut viewer).await?;
+  drop(viewer);
+  wait_for_daemon_exit(daemon, "ctmuxd did not exit after history transfer").await
+}
+
+async fn attach_raw_viewer(
+  socket_path: &Path,
+  session: &str,
+) -> TestResult<(UnixStream, ServerMessage)> {
+  let mut stream = connect_when_ready(socket_path).await?;
+  handshake(&mut stream).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::AttachSession {
+      session: session.into(),
+      resume_from: None,
+      terminal_size: TerminalSize::default(),
+      request_input_lease: false,
+      request_layout_lease: false,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+    },
+  )
+  .await?;
+  let attached = raw_message(&mut stream).await?;
+  Ok((stream, attached))
+}
+
+async fn read_history_bytes(
+  stream: &mut UnixStream,
+  manifest: &ctmux_proto::TerminalHistoryManifest,
+  max_bytes: u64,
+) -> TestResult<Vec<u8>> {
+  let mut bytes = Vec::new();
+  let mut offset = 0;
+  loop {
+    write_frame(
+      stream,
+      &ClientMessage::HistoryRequest {
+        snapshot_id: manifest.snapshot_id.clone(),
+        offset,
+        max_bytes,
+      },
+    )
+    .await?;
+    let (page_offset, data, next_offset) = loop {
+      match raw_message(stream).await? {
+        ServerMessage::HistoryPage {
+          snapshot_id,
+          offset,
+          data,
+          next_offset,
+        } => {
+          assert_eq!(snapshot_id, manifest.snapshot_id);
+          break (offset, data, next_offset);
+        }
+        ServerMessage::Output { sequence_end, .. } => {
+          acknowledge_output(stream, sequence_end).await?;
+        }
+        ServerMessage::ShellStateChanged { .. } => {}
+        other => {
+          return Err(format!("history was interrupted before completion: {other:?}").into());
+        }
+      }
+    };
+    assert_eq!(page_offset, offset);
+    assert!(data.len() as u64 <= max_bytes);
+    bytes.extend(data);
+    let Some(next) = next_offset else {
+      break;
+    };
+    offset = next;
+  }
+  Ok(bytes)
+}
+
+async fn expect_history_expired(stream: &mut UnixStream, expected: &str) -> TestResult {
+  loop {
+    match raw_message(stream).await? {
+      ServerMessage::HistorySnapshotExpired { snapshot_id } => {
+        assert_eq!(snapshot_id, expected);
+        return Ok(());
+      }
+      ServerMessage::ShellStateChanged { .. } => {}
+      other => {
+        return Err(format!("expected scoped history expiration, received {other:?}").into());
+      }
+    }
+  }
+}
+
+async fn raw_history_page(stream: &mut UnixStream) -> TestResult<ServerMessage> {
+  loop {
+    match raw_message(stream).await? {
+      message @ ServerMessage::HistoryPage { .. } => return Ok(message),
+      ServerMessage::Output { sequence_end, .. } => {
+        acknowledge_output(stream, sequence_end).await?;
+      }
+      ServerMessage::ShellStateChanged { .. } => {}
+      other => return Err(format!("expected history page, received {other:?}").into()),
+    }
+  }
+}
+
+async fn raw_checkpoint(
+  stream: &mut UnixStream,
+) -> TestResult<(
+  ctmux_proto::TerminalCheckpoint,
+  ctmux_proto::TerminalHistoryManifest,
+)> {
+  loop {
+    match raw_message(stream).await? {
+      ServerMessage::Checkpoint {
+        checkpoint,
+        history_manifest: Some(manifest),
+        ..
+      } => return Ok((checkpoint, *manifest)),
+      ServerMessage::Output { sequence_end, .. } => {
+        acknowledge_output(stream, sequence_end).await?;
+      }
+      ServerMessage::ShellStateChanged { .. } => {}
+      other => return Err(format!("expected replacing checkpoint, received {other:?}").into()),
+    }
+  }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2192,11 +2496,57 @@ async fn handshake(stream: &mut UnixStream) -> TestResult {
   Ok(())
 }
 
-async fn required_message(stream: &mut UnixStream) -> TestResult<ServerMessage> {
+async fn raw_message(stream: &mut UnixStream) -> TestResult<ServerMessage> {
   timeout(Duration::from_secs(3), read_frame(stream))
     .await
     .map_err(|_| "timed out waiting for ctmuxd")??
     .ok_or_else(|| "ctmuxd closed the connection unexpectedly".into())
+}
+
+async fn required_message(stream: &mut UnixStream) -> TestResult<ServerMessage> {
+  loop {
+    let message = raw_message(stream).await?;
+    match &message {
+      ServerMessage::Attached {
+        history_manifest: Some(manifest),
+        ..
+      }
+      | ServerMessage::Checkpoint {
+        history_manifest: Some(manifest),
+        ..
+      } if manifest.total_bytes > 0 => {
+        write_if_connected(
+          stream,
+          &ClientMessage::HistoryRequest {
+            snapshot_id: manifest.snapshot_id.clone(),
+            offset: 0,
+            max_bytes: ctmux_proto::MAX_HISTORY_PAGE_BYTES as u64,
+          },
+        )
+        .await?;
+      }
+      ServerMessage::HistoryPage {
+        snapshot_id,
+        next_offset,
+        ..
+      } => {
+        if let Some(offset) = next_offset {
+          write_if_connected(
+            stream,
+            &ClientMessage::HistoryRequest {
+              snapshot_id: snapshot_id.clone(),
+              offset: *offset,
+              max_bytes: ctmux_proto::MAX_HISTORY_PAGE_BYTES as u64,
+            },
+          )
+          .await?;
+        }
+        continue;
+      }
+      _ => {}
+    }
+    return Ok(message);
+  }
 }
 
 // Helpers that consume presentation frames behave like an active renderer.
@@ -2216,12 +2566,18 @@ async fn presented_message(stream: &mut UnixStream) -> TestResult<ServerMessage>
 // The daemon may close after queuing final output and SessionEnded. A late
 // acknowledgement must not stop us from draining those buffered messages.
 async fn acknowledge_output(stream: &mut UnixStream, sequence: u64) -> TestResult {
-  match write_frame(stream, &ClientMessage::PresentationApplied { sequence }).await {
+  write_if_connected(stream, &ClientMessage::PresentationApplied { sequence }).await
+}
+
+async fn write_if_connected(stream: &mut UnixStream, message: &ClientMessage) -> TestResult {
+  match write_frame(stream, message).await {
     Ok(()) => Ok(()),
     Err(ctmux_proto::CodecError::Io(error))
       if matches!(
         error.kind(),
-        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        std::io::ErrorKind::BrokenPipe
+          | std::io::ErrorKind::ConnectionReset
+          | std::io::ErrorKind::NotConnected
       ) =>
     {
       Ok(())
@@ -2293,6 +2649,10 @@ async fn checkpoint_output_waits_for_remaining_marker_bytes() -> TestResult {
 }
 
 async fn read_output_until(stream: &mut UnixStream, expected: &[u8]) -> TestResult<(Vec<u8>, u64)> {
+  // The initial screen may already contain the marker in Attached. Request
+  // its authoritative current presentation instead of relying on the shell
+  // racing the initial attachment with another raw output frame.
+  write_if_connected(stream, &ClientMessage::RequestCheckpoint).await?;
   read_output_until_from(stream, expected, Vec::new(), 0).await
 }
 

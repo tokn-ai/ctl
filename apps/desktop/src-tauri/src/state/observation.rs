@@ -97,6 +97,7 @@ mod tests {
           lines: Vec::new(),
         },
         history_gap: false,
+        history_manifest: None,
       },
     ];
     for event in events {

@@ -6,7 +6,7 @@ import type { AttachmentRenderer } from "../terminal/XtermRenderer";
 import { useAttachment } from "./useAttachment";
 
 const api = vi.hoisted(() => ({
-  openAttachment: vi.fn(), acknowledgeAttachmentEvent: vi.fn(), detachAttachment: vi.fn(),
+  openAttachment: vi.fn(), acknowledgeAttachmentEvent: vi.fn(), detachAttachment: vi.fn(), requestAttachmentCheckpoint: vi.fn(),
   acquireAttachmentLease: vi.fn(), releaseAttachmentLease: vi.fn(), resizeAttachment: vi.fn(),
   sendInput: vi.fn(), sessionCache: vi.fn(),
 }));
@@ -32,6 +32,7 @@ beforeEach(() => {
   };
   api.sessionCache.mockResolvedValue({ kind: "loaded", cache: null });
   api.detachAttachment.mockResolvedValue(undefined);
+  api.requestAttachmentCheckpoint.mockResolvedValue(undefined);
   api.acknowledgeAttachmentEvent.mockResolvedValue(undefined);
   api.openAttachment.mockImplementation(async (request: OpenAttachmentRequest, on_event: (event: AttachmentEvent) => void) => {
     const attachment_id = `attachment-${channels.length}`;

@@ -120,6 +120,7 @@ pub fn run() {
       commands::acquire_attachment_lease,
       commands::release_attachment_lease,
       commands::acknowledge_attachment_event,
+      commands::request_attachment_checkpoint,
       commands::detach_attachment,
     ])
     .run(tauri::generate_context!())

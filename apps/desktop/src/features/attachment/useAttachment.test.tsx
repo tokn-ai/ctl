@@ -6,6 +6,7 @@ import type { Terminal as HeadlessTerminal } from "@xterm/headless";
 import type {
   AttachmentEvent,
   CheckpointEvent,
+  HistorySyncedEvent,
   OpenAttachmentRequest,
   SessionSummary,
 } from "../../lib/types";
@@ -37,6 +38,9 @@ vi.mock("@xterm/xterm", async () => {
         const terminal = new Terminal({ ...options, allowProposedApi: true });
         const dispose = vi.fn(() => terminal.dispose());
         return {
+          get buffer() { return terminal.buffer; },
+          get cols() { return terminal.cols; },
+          get rows() { return terminal.rows; },
           write: (data: Uint8Array, callback: () => void) => terminal.write(data, callback),
           resize: (columns: number, rows: number) => terminal.resize(columns, rows),
           dispose,
@@ -63,6 +67,7 @@ const api = vi.hoisted(() => ({
   openAttachment: vi.fn(),
   acknowledgeAttachmentEvent: vi.fn(),
   detachAttachment: vi.fn(),
+  requestAttachmentCheckpoint: vi.fn(),
   acquireAttachmentLease: vi.fn(),
   releaseAttachmentLease: vi.fn(),
   resizeAttachment: vi.fn(),
@@ -94,7 +99,7 @@ function checkpoint(attachment_id: string, text: string, sequence = "0"): Checkp
   return {
     event_type: "checkpoint",
     attachment_id,
-    event_id: `checkpoint-${attachment_id}`,
+    event_id: `checkpoint-${attachment_id}-${sequence}`,
     checkpoint: {
       format: "vt",
       format_version: 1,
@@ -117,9 +122,26 @@ function checkpoint(attachment_id: string, text: string, sequence = "0"): Checkp
   };
 }
 
+function syncedHistory(initial: CheckpointEvent): HistorySyncedEvent {
+  return {
+    event_type: "history_synced", attachment_id: initial.attachment_id,
+    snapshot_id: "snapshot", checkpoint: initial.checkpoint,
+    history: { ...initial.history, lines: ["older history"] },
+    rows: [{ text: "older history", wrapped: false }], scrollback_limit: "10000", history_gap: false,
+  };
+}
+
+function withHistoryManifest(initial: CheckpointEvent): CheckpointEvent {
+  return { ...initial, history_manifest: {
+    snapshot_id: "snapshot", sequence: initial.checkpoint.sequence, generation: "0", revision: "0",
+    total_rows: "1", total_bytes: "1", total_lines: "1", first_line: "0", truncated: false,
+    content_hash: "synthetic", scrollback_limit: "10000",
+  } };
+}
+
 function visibleTerminal() {
   return [...xterm.instances].reverse().find((instance) =>
-    instance.container.isConnected && !instance.container.hidden,
+    instance.container.isConnected && !(instance.container.closest(".terminal-session") as HTMLElement | null)?.hidden,
   )!;
 }
 
@@ -146,6 +168,7 @@ beforeEach(() => {
   renderer = new XtermRenderer(container, () => undefined, size);
   api.sessionCache.mockResolvedValue({ kind: "loaded", cache: null });
   api.detachAttachment.mockResolvedValue(undefined);
+  api.requestAttachmentCheckpoint.mockResolvedValue(undefined);
   api.acknowledgeAttachmentEvent.mockResolvedValue(undefined);
   api.openAttachment.mockImplementation(async (
     request: OpenAttachmentRequest,
@@ -184,6 +207,105 @@ afterEach(async () => {
   renderer.dispose();
   container.remove();
   await Promise.resolve();
+});
+
+describe("background history presentation", () => {
+  it.each([false, true])("marks an incomplete preview until matching history is ready (source gap=%s)", async (source_gap) => {
+    let finish!: (applied: boolean) => void;
+    vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "live"));
+    initial.history_manifest!.first_line = "1";
+    initial.history_gap = source_gap;
+    await emit(initial);
+    await waitFor(() => expect(result.current.state.history_gap).toBe(true));
+    await emit(syncedHistory(initial));
+    await act(async () => { finish(true); });
+    expect(result.current.state.history_gap).toBe(source_gap);
+    expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it("requests a fresh checkpoint when current history cannot catch up", async () => {
+    vi.spyOn(renderer, "syncHistory").mockResolvedValue(false);
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "live"));
+    await emit(initial);
+    await emit(syncedHistory(initial));
+    expect(api.requestAttachmentCheckpoint).toHaveBeenCalledExactlyOnceWith({ attachment_id: initial.attachment_id });
+    expect(result.current.state.history_gap).toBe(true);
+    expect(result.current.state.phase).toBe("attached");
+  });
+
+  it("ignores an old history failure after a replacement checkpoint", async () => {
+    let finish!: (applied: boolean) => void;
+    vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "live"));
+    await emit(initial);
+    await emit(syncedHistory(initial));
+    const replacement = withHistoryManifest(checkpoint(initial.attachment_id, "replacement"));
+    replacement.history_manifest!.snapshot_id = "replacement";
+    await emit(replacement);
+    await act(async () => { finish(false); });
+    expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
+    expect(result.current.state.history_gap).toBe(false);
+  });
+
+  it("finishes received history after a normal process exit", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "final screen"));
+    initial.history_manifest!.first_line = "1";
+    await emit(initial);
+    await emit(syncedHistory(initial));
+    await emit({ event_type: "session_ended", attachment_id: initial.attachment_id, session_id: first.session_id, exit_code: 0 });
+    await emit({ event_type: "attachment_exited", attachment_id: initial.attachment_id, reason: "session_ended", next_sequence: "0", received_sequence: "0", exit_code: 0 });
+    await waitFor(() => expect(visibleTerminal().terminal.buffer.normal.getLine(0)?.translateToString(true)).toBe("older history"));
+    expect(result.current.state.phase).toBe("ended");
+    await waitFor(() => expect(result.current.state.history_gap).toBe(false));
+    expect(api.requestAttachmentCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it("keeps applying and acknowledging live output while older history is staged", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "live"));
+    await emit(initial);
+    await emit({ event_type: "output", attachment_id: initial.attachment_id, event_id: "live-6", sequence_start: "0", sequence_end: "6", data_base64: btoa(" newer") });
+    const acknowledgements = api.acknowledgeAttachmentEvent.mock.calls.length;
+    await emit(syncedHistory(initial));
+    await emit({ event_type: "output", attachment_id: initial.attachment_id, event_id: "live-7", sequence_start: "6", sequence_end: "7", data_base64: btoa("!") });
+    expect(result.current.state.applied_sequence).toBe("7");
+    expect(renderer.resumeSequence()).toBe("7");
+    expect(api.acknowledgeAttachmentEvent).toHaveBeenCalledTimes(acknowledgements + 1);
+    await waitFor(() => expect(visibleTerminal().terminal.buffer.normal.getLine(0)?.translateToString(true)).toBe("older history"));
+    const terminal = visibleTerminal().terminal;
+    expect(line(terminal, terminal.buffer.active.baseY)).toBe("live newer!");
+    expect(renderer.resumeSequence()).toBe("7");
+    expect(result.current.state.applied_sequence).toBe("7");
+  });
+
+  it("does not put a pending history transfer on the acknowledgement tail and cancels it on detach", async () => {
+    let finish!: (applied: boolean) => void;
+    const syncing = vi.spyOn(renderer, "syncHistory").mockReturnValue(new Promise<boolean>((resolve) => { finish = resolve; }));
+    const cancel = vi.spyOn(renderer, "cancelHistory");
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
+    const initial = withHistoryManifest(checkpoint(result.current.state.attachment_id!, "live"));
+    await emit(initial);
+    await emit(syncedHistory(initial));
+    expect(syncing).toHaveBeenCalledOnce();
+    await emit({ event_type: "output", attachment_id: initial.attachment_id, event_id: "live-1", sequence_start: "0", sequence_end: "1", data_base64: btoa("!") });
+    expect(result.current.state.applied_sequence).toBe("1");
+    cancel.mockClear();
+    await act(async () => { await result.current.detach(); });
+    expect(cancel).toHaveBeenCalledOnce();
+    await act(async () => { finish(true); });
+    expect(result.current.state.phase).toBe("idle");
+  });
 });
 
 describe("explicit SSH reconnect preparation", () => {

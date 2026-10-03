@@ -618,6 +618,10 @@ Linked routes expand in place, with at most eight total hops. Cycles and missing
 host/method references are rejected; remove dependent links before deleting a
 referenced host or method. A VPN inherited from a linked method runs locally when
 it is first in the expanded route, or on the SSH host immediately before it.
+If that SSH host's agent does not support VPN control, the desktop offers
+**Update components on HOST**. It updates the VPN execution host through its
+preceding route, verifies its saved account identity before uploading, and retries
+the original destination connection.
 
 ### Shells, commands, and file copies
 

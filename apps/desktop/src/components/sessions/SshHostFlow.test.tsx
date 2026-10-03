@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
 import { SshHostFlow } from "./SshHostFlow";
+import { resolveVpnRouteStep } from "../../features/workspace/sshRoute";
 import {
   cancelSshProbe,
   forgetSshCredentials,
@@ -25,6 +26,25 @@ const tailscaleDevice: TailscaleDevice = {
   node_id: "n123", name: "Builder", dns_name: "builder.tailnet.ts.net",
   addresses: ["100.64.0.2"], online: true, os: "linux",
 };
+const installedBundle = { app_version: "0.1.0", bundle_id: "0.1.0-dev.0123456789ab",
+  git_revision: "0123456789abcdef0123456789abcdef01234567", target_triple: "x86_64-unknown-linux-musl" };
+
+function remoteVpnRecoveryFixture() {
+  const edge = { kind: "ssh" as const, gateway_id: "edge", name: "Office edge", destination: "edge.example", mode: "native_only" as const };
+  const remote_vpn = resolveVpnRouteStep({ vpn_connection_id: vpn.connection_id });
+  const owner_info = { remote_id: "3c9e56f3-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.0.1" };
+  const jump = { kind: "ssh" as const, gateway_id: "host:jump:office", name: "Jump host", destination: "jump-alias",
+    hostname: "10.0.0.7", user: "alice", mode: "automatic" as const, remote_info: owner_info };
+  const target: SshConnectionTarget = { kind: "ssh", host_id: "build", host_name: "Build", destination: "build-alias",
+    remote_info: { ...remoteInfo, agent_version: "0.0.1" }, vpn_connection_id: "local-vpn",
+    gateway_route: [{ host_id: "removed-source", method_id: "removed-method", mode: "automatic" }],
+    gateways: [edge, remote_vpn, jump, remote_vpn] };
+  const owner: SshConnectionTarget = { kind: "ssh", destination: "jump-alias", ssh_config_alias: "jump-alias",
+    hostname: "10.0.0.7", user: "alice", remote_info: owner_info, use_ssh_config_master: false,
+    gateways: [resolveVpnRouteStep({ vpn_connection_id: "local-vpn" }), edge, remote_vpn] };
+  const failure = { code: "remote_vpn_components_update_required", message: "Jump host requires updated remote VPN components.", vpn_route_index: 2 };
+  return { target, owner, failure };
+}
 
 vi.mock("../../lib/tauri", () => ({
   probeSshHost: vi.fn(),
@@ -1494,6 +1514,112 @@ describe("SSH host quick-input flow", () => {
       expect.any(Function),
     );
     expect(probeSshHost).toHaveBeenCalledTimes(2);
+  });
+
+  it("updates the failing VPN's SSH owner while preserving destination identity and reconnect callbacks", async () => {
+    const { target, owner, failure } = remoteVpnRecoveryFixture();
+    const candidate = { ...target, remote_info: remoteInfo };
+    vi.mocked(probeSshHost).mockRejectedValueOnce(failure).mockResolvedValueOnce(remoteInfo);
+    vi.mocked(installRemoteAgent).mockResolvedValueOnce(installedBundle);
+    const onVerified = vi.fn(async () => null);
+    const onConnected = vi.fn();
+    const onConnectionChange = vi.fn();
+    const onClose = vi.fn();
+    render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} autoConnect expectedIdentity={remoteInfo}
+      onVerified={onVerified} onConnected={onConnected} onConnectionChange={onConnectionChange} onClose={onClose} /></StrictMode>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
+    await waitFor(() => expect(onConnected).toHaveBeenCalledExactlyOnceWith(candidate));
+    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(owner, expect.any(String), expect.any(Function), expect.any(Function));
+    expect(probeSshHost).toHaveBeenNthCalledWith(1, candidate, expect.any(String), expect.any(Function));
+    expect(probeSshHost).toHaveBeenNthCalledWith(2, candidate, expect.any(String), expect.any(Function));
+    expect(onVerified).toHaveBeenCalledExactlyOnceWith(candidate, remoteInfo);
+    for (const [changed] of onConnectionChange.mock.calls) expect(changed).toEqual(candidate);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(forgetSshCredentials).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed owner installation on that same owner before reconnecting the destination", async () => {
+    const { target, owner, failure } = remoteVpnRecoveryFixture();
+    vi.mocked(probeSshHost).mockRejectedValueOnce(failure).mockResolvedValueOnce(remoteInfo);
+    vi.mocked(installRemoteAgent).mockRejectedValueOnce({ code: "remote_agent_install_stalled", message: "Owner bundle transfer stalled." })
+      .mockResolvedValueOnce(installedBundle);
+    const onConnected = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
+      onVerified={async () => null} onConnected={onConnected} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
+    expect(await screen.findByText("Owner bundle transfer stalled.")).toBeTruthy();
+    expect(probeSshHost).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("option", { name: "Install remote components" })).toBeNull();
+    await user.click(screen.getByRole("option", { name: /^Update components on Jump host/ }));
+    await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
+    expect(installRemoteAgent).toHaveBeenNthCalledWith(1, owner, expect.any(String), expect.any(Function), expect.any(Function));
+    expect(installRemoteAgent).toHaveBeenNthCalledWith(2, owner, expect.any(String), expect.any(Function), expect.any(Function));
+    expect(probeSshHost).toHaveBeenNthCalledWith(2, target, expect.any(String), expect.any(Function));
+  });
+
+  it("guides prefix VPN sign-in after an owner update fails and clears that owner on a fresh connection", async () => {
+    const { target, owner, failure } = remoteVpnRecoveryFixture();
+    vi.mocked(probeSshHost).mockRejectedValueOnce(failure)
+      .mockRejectedValueOnce({ code: "ssh_failed", message: "The destination is unreachable." });
+    vi.mocked(installRemoteAgent).mockRejectedValueOnce({
+      code: "remote_vpn_sign_in_required", message: "The preceding SSH host's VPN requires sign-in.",
+    });
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
+    expect(await screen.findByText("The preceding SSH host's VPN requires sign-in.")).toBeTruthy();
+    expect(screen.getByText("Sign in to the VPN on its SSH host. Open this connection route and check the remote VPN status to sign in, then choose Connect to continue.")).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^Update components on Jump host/ })).toBeTruthy();
+    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(owner, expect.any(String), expect.any(Function), expect.any(Function));
+    await user.click(screen.getByRole("option", { name: "Connect" }));
+    expect(await screen.findByText("The destination is unreachable.")).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Update components on/ })).toBeNull();
+    expect(screen.queryByText(/Sign in to the VPN on its SSH host/)).toBeNull();
+    expect(probeSshHost).toHaveBeenNthCalledWith(2, target, expect.any(String), expect.any(Function));
+    expect(installRemoteAgent).toHaveBeenCalledOnce();
+  });
+
+  it("cancels owner installation without retrying the destination or forgetting saved hop credentials", async () => {
+    const { target, owner, failure } = remoteVpnRecoveryFixture();
+    vi.mocked(probeSshHost).mockRejectedValueOnce(failure);
+    let complete_install!: (bundle: typeof installedBundle) => void;
+    vi.mocked(installRemoteAgent).mockImplementationOnce(() => new Promise((resolve) => { complete_install = resolve; }));
+    const onConnected = vi.fn();
+    const onVerified = vi.fn(async () => null);
+    const onConnectionChange = vi.fn();
+    const onClose = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onVerified={onVerified}
+      onConnected={onConnected} onConnectionChange={onConnectionChange} onClose={onClose} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
+    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(owner, expect.any(String), expect.any(Function), expect.any(Function));
+    const attempt = vi.mocked(installRemoteAgent).mock.lastCall![1];
+    await user.keyboard("{Escape}");
+    expect(cancelSshProbe).toHaveBeenCalledWith(attempt);
+    expect(onConnectionChange).toHaveBeenLastCalledWith(target, "cancelled");
+    await act(async () => { complete_install(installedBundle); });
+    expect(probeSshHost).toHaveBeenCalledOnce();
+    expect(onVerified).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(forgetSshCredentials).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: "remote_vpn_components_update_required", vpn_route_index: undefined },
+    { code: "remote_vpn_components_update_required", vpn_route_index: "2" },
+    { code: "remote_vpn_components_update_required", vpn_route_index: 0 },
+    { code: "remote_vpn_components_update_required", vpn_route_index: 99 },
+    { code: "ssh_failed", vpn_route_index: 2 },
+  ])("does not offer an owner update for untrusted route metadata (%j)", async (metadata) => {
+    const { target } = remoteVpnRecoveryFixture();
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ ...metadata, message: "Connection unavailable." });
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onClose={vi.fn()} />);
+    expect(await screen.findByText("Connection unavailable.")).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Update components on/ })).toBeNull();
+    expect(installRemoteAgent).not.toHaveBeenCalled();
   });
 
   it("shows the current file, receiver progress, speed, and installation stages", async () => {

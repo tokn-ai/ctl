@@ -145,9 +145,10 @@ pub(crate) async fn ensure_for_host(
   if !target.is_local() {
     crate::ssh_auth::check_route_support(&target.to_ssh_target()?).await?;
   }
-  for route in target.vpn_route()? {
+  for (vpn_route_index, route) in target.vpn_route()?.into_iter().enumerate() {
     let directory = directory(app)?;
     let connection_id = route.connection_id;
+    let owner_destination = route.owner.as_ref().map(|owner| owner.destination.clone());
     let remote_owner = route.owner.is_some();
     let status = if let Some(owner) = route.owner {
       let control_path = crate::ssh_auth::ensure_target_master(owner.clone(), prompts).await?;
@@ -178,7 +179,7 @@ pub(crate) async fn ensure_for_host(
           "The host's saved VPN no longer exists. Choose another connection in the host settings."
             .into();
       }
-      error
+      remote::route_error(error, vpn_route_index, owner_destination.as_deref())
     })?;
     if remote_owner {
       remote::require_connected(&status)?;

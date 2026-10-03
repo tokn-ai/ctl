@@ -246,6 +246,19 @@ describe("GatewayRouteDialog", () => {
     expect(screen.queryByRole("button", { name: "Disconnect VPN" })).toBeNull();
   });
 
+  it("shows structured remote VPN update errors in the route editor", async () => {
+    vi.mocked(vpnStatus).mockRejectedValueOnce({
+      code: "remote_vpn_components_update_required",
+      message: "The SSH host that runs this VPN needs updated remote components.",
+    });
+    render(<GatewayRouteDialog target={{ kind: "ssh", destination: "build", gateway_route: [
+      { gateway_id: gateway.gateway_id, mode: "automatic" }, { vpn_connection_id: vpn.connection_id },
+    ] }} vpn_connections={[vpn]} gateways={[gateway]} targets={[]} onSave={vi.fn()} onClose={vi.fn()} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Check VPN status" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("The SSH host that runs this VPN needs updated remote components.");
+    expect(screen.getByText("Status unavailable on Office edge")).toBeTruthy();
+  });
+
   it("shows healthy selected VPN evidence alongside incomplete inventory warnings", async () => {
     vi.mocked(vpnStatus).mockResolvedValueOnce({ supports_multiple: true, connections: [{
       connection_id: vpn.connection_id, state: "connected", running: true,

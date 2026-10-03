@@ -7,6 +7,7 @@ import { resolveSshGateways, tailscaleTarget } from "../../features/workspace/wo
 import { vpnRouteDetail } from "../../features/vpn/status";
 import { hasVpnRoute, localVpnConnectionId } from "../../features/workspace/sshRoute";
 import { sameSshEndpoint } from "../../features/workspace/remoteRecovery";
+import { remoteVpnUpdateOwner } from "../../features/workspace/remoteVpnRecovery";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
@@ -175,6 +176,7 @@ export function SshHostFlow({
   const [error, setError] = useState<string | null>(null);
   const [needs_vpn_sign_in, setNeedsVpnSignIn] = useState(false);
   const [needs_remote_vpn_sign_in, setNeedsRemoteVpnSignIn] = useState(false);
+  const [vpn_update_owner, setVpnUpdateOwner] = useState<ReturnType<typeof remoteVpnUpdateOwner>>(null);
   const [opening_vpn_sign_in, setOpeningVpnSignIn] = useState(false);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
@@ -247,6 +249,7 @@ export function SshHostFlow({
     setCanInstallAgent(false);
     setNeedsVpnSignIn(false);
     setNeedsRemoteVpnSignIn(false);
+    setVpnUpdateOwner(null);
     setNeedsDaemonRestart(false);
     setPrompt(null);
     setStep("progress");
@@ -317,6 +320,7 @@ export function SshHostFlow({
       setError(errorMessage(failure));
       setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
       setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
+      setVpnUpdateOwner(remoteVpnUpdateOwner(candidate, failure));
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       const code = errorCode(failure);
       const update = code === "ctl_agent_identity_unsupported" || code === "protocol_version_mismatch";
@@ -332,10 +336,10 @@ export function SshHostFlow({
     }
   }
 
-  async function installAgent(candidate: ConnectionTarget) {
+  async function installAgent(candidate: ConnectionTarget, reconnect_candidate = candidate) {
     cancelAttempt();
-    candidateRef.current = candidate;
-    onConnectionChange?.(candidate, "connecting");
+    candidateRef.current = reconnect_candidate;
+    onConnectionChange?.(reconnect_candidate, "connecting");
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
     setError(null);
@@ -356,7 +360,7 @@ export function SshHostFlow({
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
       componentsUpdatedRef.current = candidate;
-      await connect(candidate);
+      await connect(reconnect_candidate);
     } catch (failure) {
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
@@ -364,8 +368,10 @@ export function SshHostFlow({
       setError(errorMessage(failure));
       setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
       setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
-      setCanInstallAgent(errorCode(failure) !== "vpn_sign_in_required" && errorCode(failure) !== "remote_vpn_sign_in_required");
-      onConnectionChange?.(candidate, "error", errorMessage(failure));
+      if (candidate === reconnect_candidate) {
+        setCanInstallAgent(errorCode(failure) !== "vpn_sign_in_required" && errorCode(failure) !== "remote_vpn_sign_in_required");
+      }
+      onConnectionChange?.(reconnect_candidate, "error", errorMessage(failure));
       setStep("retry");
     }
   }
@@ -844,6 +850,8 @@ export function SshHostFlow({
         ? "Sign in to the VPN on its SSH host. Open this connection route and check the remote VPN status to sign in, then choose Connect to continue."
         : needs_vpn_sign_in
         ? "Sign in to Tailscale with your browser, then choose Connect to continue. You can also manage this connection from the VPN page."
+        : vpn_update_owner
+        ? `The VPN execution host ${vpn_update_owner.name} needs updated components. Update that SSH host, then ctl will retry this connection through its VPN. Running sessions are preserved.`
         : needsDaemonRestart
           ? "The bundled components were installed, but the running ctmux daemon is still incompatible. Choose Force restart to end its existing terminal sessions, or Connect to check again. The update has not stopped running sessions."
           : (step === "retry" || step === "update") && canInstallAgent
@@ -854,13 +862,15 @@ export function SshHostFlow({
       mode = opening_vpn_sign_in ? { kind: "progress", message: "Opening sign-in in your browser…" } : {
         kind: "pick",
         choices: [
+          ...(vpn_update_owner ? [{ id: "update_vpn_host", label: `Update components on ${vpn_update_owner.name}`,
+            detail: "Install the bundled components on the SSH host that runs this VPN." }] : []),
           ...(needs_vpn_sign_in ? [{ id: "vpn_sign_in", label: "Sign in to Tailscale" }] : []),
           ...((step === "retry" || step === "update") && canInstallAgent
             ? [
                 {
                   id: "install_agent",
                   label: needsUpdate ? "Update remote components" : "Install remote components",
-                  detail: "Install the bundled ctl-agent, ctmuxd, and ctl-taskd for this user.",
+                  detail: "Install the bundled ctl-agent, ctld, ctmuxd, and ctl-taskd for this user.",
                 },
               ]
             : []),
@@ -882,7 +892,7 @@ export function SshHostFlow({
       mode = { kind: "progress" };
       break;
     case "installing":
-      title = "Installing remote components";
+      title = vpn_update_owner ? `Updating components on ${vpn_update_owner.name}` : "Installing remote components";
       mode = remoteInstallProgressMode(install_progress);
       break;
     case "progress":
@@ -1065,6 +1075,8 @@ export function SshHostFlow({
         } finally {
           if (!closedRef.current) setOpeningVpnSignIn(false);
         }
+      } else if (value === "update_vpn_host" && vpn_update_owner) {
+        void installAgent(vpn_update_owner.target, candidateRef.current);
       } else if (value === "restart_ctmux") setStep("restart_confirm");
       else if (value === "install_agent") void installAgent(candidateRef.current);
       else void connect(candidateRef.current);

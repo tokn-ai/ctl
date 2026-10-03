@@ -100,8 +100,29 @@ pub(super) fn runtime_error(error: ctl_ipc::remote_vpn::Error) -> CommandErrorDt
       "remote_identity_mismatch",
       "The SSH gateway's remote identity changed. Reconnect and verify the gateway before starting its VPN.",
     ),
+    ctl_ipc::remote_vpn::Error::UnsupportedAgent
+    | ctl_ipc::remote_vpn::Error::UnsupportedProtocol => CommandErrorDto::new(
+      "remote_vpn_components_update_required",
+      "The SSH host that runs this VPN needs updated remote components. Update that host, then retry the connection.",
+    ),
     error => CommandErrorDto::new("remote_vpn_failed", error.to_string()),
   }
+}
+
+pub(super) fn route_error(
+  mut error: CommandErrorDto,
+  vpn_route_index: usize,
+  owner_destination: Option<&str>,
+) -> CommandErrorDto {
+  if error.code == "remote_vpn_components_update_required"
+    && let Some(owner) = owner_destination
+  {
+    error.message = format!(
+      "The SSH host {owner} that runs this VPN needs updated remote components. Update that host, then retry the connection."
+    );
+    error = error.with_vpn_route_index(vpn_route_index);
+  }
+  error
 }
 
 #[cfg(test)]
@@ -150,6 +171,52 @@ mod tests {
       runtime_error(ctl_ipc::remote_vpn::Error::IdentityMismatch).code,
       "remote_identity_mismatch"
     );
+  }
+
+  #[test]
+  fn only_typed_capability_failures_request_a_component_update() {
+    for error in [
+      ctl_ipc::remote_vpn::Error::UnsupportedAgent,
+      ctl_ipc::remote_vpn::Error::UnsupportedProtocol,
+    ] {
+      let error = runtime_error(error);
+      assert_eq!(error.code, "remote_vpn_components_update_required");
+      assert_eq!(error.vpn_route_index, None);
+    }
+    for error in [
+      ctl_ipc::remote_vpn::Error::SshFailed,
+      ctl_ipc::remote_vpn::Error::Timeout,
+      ctl_ipc::remote_vpn::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "SSH permission denied",
+      )),
+      ctl_ipc::remote_vpn::Error::UnexpectedResponse,
+    ] {
+      let error = runtime_error(error);
+      assert_eq!(error.code, "remote_vpn_failed");
+      assert_eq!(error.vpn_route_index, None);
+    }
+    assert_eq!(
+      runtime_error(ctl_ipc::remote_vpn::Error::IdentityMismatch).code,
+      "remote_identity_mismatch"
+    );
+  }
+
+  #[test]
+  fn repair_context_identifies_the_vpn_order_and_its_execution_owner() {
+    let error = route_error(
+      runtime_error(ctl_ipc::remote_vpn::Error::UnsupportedAgent),
+      2,
+      Some("jump-b"),
+    );
+    assert_eq!(error.vpn_route_index, Some(2));
+    assert!(error.message.contains("SSH host jump-b"));
+    let identity = runtime_error(ctl_ipc::remote_vpn::Error::IdentityMismatch);
+    assert_eq!(route_error(identity.clone(), 2, Some("jump-b")), identity);
+    let missing = CommandErrorDto::new("vpn_connection_not_found", "Profile missing.");
+    assert_eq!(route_error(missing.clone(), 2, Some("jump-b")), missing);
+    let unsupported = runtime_error(ctl_ipc::remote_vpn::Error::UnsupportedAgent);
+    assert_eq!(route_error(unsupported.clone(), 0, None), unsupported);
   }
 
   #[test]

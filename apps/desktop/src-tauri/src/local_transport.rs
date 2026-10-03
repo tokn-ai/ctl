@@ -297,7 +297,7 @@ fn restart_preflight_failure(error: impl std::fmt::Display) -> CommandErrorDto {
 
 #[cfg(unix)]
 fn restart_transition_error(error: CommandErrorDto) -> CommandErrorDto {
-  let CommandErrorDto { code, message } = error;
+  let CommandErrorDto { code, message, .. } = error;
   CommandErrorDto::new(
     "daemon_restart_transition_failed",
     format!(

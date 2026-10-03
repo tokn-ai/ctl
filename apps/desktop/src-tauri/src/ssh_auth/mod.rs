@@ -6,6 +6,7 @@ pub(crate) use broker::existing_master;
 pub(crate) use broker::{check_route_support, ensure_target_master};
 pub mod commands;
 mod connection;
+mod install_identity;
 mod verification;
 
 use std::collections::HashMap;
@@ -235,7 +236,9 @@ pub async fn install_agent(
   let install = async {
     crate::vpn::ensure_for_host(&app, &target, &context).await?;
     let control_path = broker::ensure_master(&target, &context).await?;
-    let interaction = SshInteraction::Multiplexed { control_path };
+    let interaction = SshInteraction::Multiplexed {
+      control_path: control_path.clone(),
+    };
     let ConnectionTarget::Ssh {
       destination,
       options,
@@ -246,14 +249,16 @@ pub async fn install_agent(
         "Select a remote SSH host.",
       ));
     };
-    crate::remote_agent::install(
-      &app,
-      &destination,
-      &options,
-      &interaction,
-      on_progress,
-      || !attempt.responses.lock().unwrap().is_empty(),
-    )
+    install_identity::upload(&target, &destination, &options, &control_path, || {
+      crate::remote_agent::install(
+        &app,
+        &destination,
+        &options,
+        &interaction,
+        on_progress,
+        || !attempt.responses.lock().unwrap().is_empty(),
+      )
+    })
     .await
   };
   let result = tokio::select! {

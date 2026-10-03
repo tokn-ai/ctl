@@ -2,6 +2,7 @@ import { vpnNeedsSignIn, vpnRouteDetail } from "../../features/vpn/status";
 import { isHostRouteStep, isVpnRouteStep, orderedSshRoute, resolvedVpnExecutionTarget } from "../../features/workspace/sshRoute";
 import { resolveSshGateways } from "../../features/workspace/workspaceModel";
 import { openVpnSignIn, stopVpn, vpnStatus } from "../../lib/tauri";
+import { errorMessage } from "../../lib/errors";
 import { useMemo, useState } from "react";
 import type {
   SshConnectionTarget,
@@ -249,7 +250,7 @@ export function GatewayRouteDialog({
       if (onlyVpn) await onSave(draftGateways, [], onlyVpn);
       else await onSave(draftGateways, route);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(errorMessage(failure));
       setSaving(false);
     }
   }
@@ -688,7 +689,7 @@ function RemoteVpnControls({ connection, owner, owner_label }: {
         setChecked(true);
       }
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(errorMessage(failure));
       if (action !== "sign_in") {
         setUnavailable(true);
         setChecked(true);

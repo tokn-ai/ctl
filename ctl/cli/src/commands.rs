@@ -162,18 +162,7 @@ async fn run_shell(
   let attach_if_exists = session.is_some();
   let session =
     ctmux_cli::new_session(connector, session, Vec::new(), cwd, attach_if_exists).await?;
-  ctmux_cli::run(
-    ctmux_cli::Command::Attach {
-      session: Some(session.session_id),
-      target: None,
-      raw: true,
-      resume_from: None,
-      read_only: false,
-      resize: false,
-    },
-    connector,
-  )
-  .await?;
+  ctmux_cli::run_tui(connector, Some(session.session_id), false).await?;
   Ok(0)
 }
 

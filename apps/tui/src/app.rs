@@ -1,11 +1,14 @@
 use crate::{
   Result,
-  copy::{Action as CopyAction, CopyMode},
+  copy::{Action as CopyAction, BottomBehavior, CopyMode},
   input::{self, Prefix},
   pane::{Pane, identity},
-  render::{Frame, Renderer},
+  render::{Frame, Renderer, pane_at},
+  transport::{LocalTransport, Transport},
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+  Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use ctmux_proto::{
   ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
   ViewInfo,
@@ -25,7 +28,8 @@ enum Overlay {
   ArchiveTerminals(Box<ctmux_client::archive::SessionArchive>, usize),
 }
 
-pub struct App {
+pub struct App<'a> {
+  pub transport: Option<&'a dyn Transport>,
   socket: PathBuf,
   archive_directory: Option<PathBuf>,
   read_only: bool,
@@ -50,9 +54,10 @@ pub struct App {
   layout_owner: Option<String>,
 }
 
-impl App {
+impl App<'_> {
   pub fn new(socket: PathBuf, read_only: bool, prefix: Prefix) -> Self {
     Self {
+      transport: None,
       archive_directory: cfg!(test).then(|| socket.with_extension("client-archives")),
       socket,
       read_only,
@@ -89,10 +94,18 @@ impl App {
 
   async fn request(&self, message: ClientMessage) -> Result<ServerMessage> {
     timeout(Duration::from_secs(5), async {
-      let stream = ctmux_ipc::connect_or_start_daemon(&self.socket).await?;
+      let local = LocalTransport(self.socket.clone());
+      let stream = self.transport.unwrap_or(&local).connect().await?;
       Ok(ctmux_client::request(stream, &identity(), message).await?)
     })
     .await?
+  }
+
+  fn archive_key(&self) -> String {
+    self.transport.map_or_else(
+      || self.socket.to_string_lossy().into_owned(),
+      Transport::archive_key,
+    )
   }
 
   pub async fn start(&mut self, selected: Option<String>) -> Result<()> {
@@ -134,7 +147,7 @@ impl App {
         .archive_store()?
         .list()?
         .into_iter()
-        .filter(|archive| archive.host_key == self.socket.to_string_lossy())
+        .filter(|archive| archive.host_key == self.archive_key())
         .collect(),
     )
   }
@@ -181,7 +194,7 @@ impl App {
         },
         |session| session.name.clone(),
       ),
-      host_key: self.socket.to_string_lossy().into_owned(),
+      host_key: self.archive_key(),
       archived_at_ms: 0,
       expires_at_ms: 0,
       terminals,
@@ -368,10 +381,11 @@ impl App {
         .values()
         .any(|pane| pane.connected && pane.control.state().leases().layout.owned_by_client)
         && ids.first() == Some(id);
+      let local = LocalTransport(self.socket.clone());
       let opened = timeout(
         Duration::from_secs(5),
         Pane::open(
-          &self.socket,
+          self.transport.unwrap_or(&local),
           id,
           self.canvas_size(),
           self.read_only,
@@ -502,6 +516,57 @@ impl App {
 
   async fn event(&mut self, event: Event) -> Result<bool> {
     match event {
+      Event::Mouse(mouse)
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+          && self.copy_mode.is_none()
+          && matches!(self.overlay, Overlay::None) =>
+      {
+        self.focus_at(mouse.column, mouse.row);
+      }
+      Event::Mouse(mouse)
+        if matches!(
+          mouse.kind,
+          MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && !self.prefix_pending
+          && mouse.row < self.size.1.saturating_sub(1)
+          && mouse.column < self.size.0
+          && (self.copy_mode.is_some() || matches!(self.overlay, Overlay::None)) =>
+      {
+        let up = mouse.kind == MouseEventKind::ScrollUp;
+        if self.copy_mode.is_none()
+          && matches!(self.overlay, Overlay::None)
+          && !self.focus_at(mouse.column, mouse.row)
+        {
+          return Ok(false);
+        }
+        if self.copy_mode.is_none() && up {
+          self.command(KeyCode::Char('[')).await?;
+          if let Some(mode) = &mut self.copy_mode {
+            mode.bottom_behavior = BottomBehavior::ReturnToLive;
+          }
+        }
+        if let Some(mode) = &mut self.copy_mode {
+          let height = usize::from(self.size.1.saturating_sub(1));
+          mode.fit(usize::from(self.size.0), height);
+          if matches!(mode.scroll(up, 5, height), CopyAction::Close) {
+            self.copy_mode = None;
+          }
+        }
+      }
+      Event::Key(key)
+        if key.kind != KeyEventKind::Release
+          && key.code == KeyCode::PageUp
+          && key.modifiers == KeyModifiers::SHIFT
+          && self.copy_mode.is_none()
+          && matches!(self.overlay, Overlay::None) =>
+      {
+        self.command(KeyCode::Char('[')).await?;
+        if let Some(mode) = &mut self.copy_mode {
+          let height = usize::from(self.size.1.saturating_sub(1));
+          mode.fit(usize::from(self.size.0), height);
+          mode.scroll(true, height, height);
+        }
+      }
       Event::Key(key) if key.kind != KeyEventKind::Release => return self.key(key).await,
       Event::Resize(columns, rows) => {
         self.size = (columns, rows);
@@ -517,6 +582,16 @@ impl App {
       _ => {}
     }
     Ok(false)
+  }
+
+  fn focus_at(&mut self, column: u16, row: u16) -> bool {
+    if let Some(view) = &self.view
+      && let Some(id) = pane_at(view, &self.panes, &self.focused, self.size, (column, row))
+    {
+      self.focused = id.to_owned();
+      return true;
+    }
+    false
   }
 
   async fn paste(&self, text: String) -> Result<()> {
@@ -544,7 +619,7 @@ impl App {
 
   async fn key(&mut self, key: KeyEvent) -> Result<bool> {
     if let Some(mode) = &mut self.copy_mode {
-      match mode.key(key, usize::from(self.size.1.saturating_sub(2))) {
+      match mode.key(key, usize::from(self.size.1.saturating_sub(1))) {
         CopyAction::Stay => {}
         CopyAction::Close => self.copy_mode = None,
         CopyAction::Copy(text) => {
@@ -634,6 +709,16 @@ impl App {
         if let Some(pane) = self.panes.get(&self.focused) {
           let mut mode = CopyMode::new(pane.model.copy_lines());
           mode.history_gap = pane.history_gap();
+          self.copy_mode = Some(mode);
+        }
+      }
+      KeyCode::PageUp => {
+        if let Some(pane) = self.panes.get(&self.focused) {
+          let mut mode = CopyMode::new(pane.model.copy_lines());
+          mode.history_gap = pane.history_gap();
+          let height = usize::from(self.size.1.saturating_sub(1));
+          mode.fit(usize::from(self.size.0), height);
+          mode.scroll(true, height, height);
           self.copy_mode = Some(mode);
         }
       }
@@ -838,6 +923,11 @@ impl App {
 
   fn draw(&mut self) -> Result<()> {
     let mut frame = Frame::new(self.size.0, self.size.1);
+    let copy_connection = if matches!(self.overlay, Overlay::ArchiveTerminals(..)) {
+      "archive".to_owned()
+    } else {
+      self.connection_history_status()
+    };
     if let Some(mode) = &mut self.copy_mode {
       mode.fit(
         usize::from(self.size.0),
@@ -845,7 +935,12 @@ impl App {
       );
       frame.copy_mode(mode);
       if self.size.1 > 0 {
-        frame.text(0, self.size.1 - 1, &mode.status(), true);
+        frame.text(
+          0,
+          self.size.1 - 1,
+          &format!(" {copy_connection} | {}", mode.status()),
+          true,
+        );
       }
       self.renderer.draw(frame)?;
       return Ok(());
@@ -891,10 +986,13 @@ impl App {
       return format!("{ended} — press any key to close pane");
     }
     if self.prefix_pending {
-      return "PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help".into();
+      return format!(
+        " {} | PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help",
+        self.connection_history_status()
+      );
     }
     if Instant::now() < self.message_until {
-      return self.message.clone();
+      return format!(" {} | {}", self.connection_history_status(), self.message);
     }
     let name = self
       .view
@@ -918,19 +1016,10 @@ impl App {
       .panes
       .values()
       .any(|pane| pane.connected && pane.control.state().leases().layout.owned_by_client);
-    let connected = self
-      .panes
-      .get(&self.focused)
-      .is_some_and(|pane| pane.connected);
     format!(
-      " ctmux [{name}] pane {index} | {} | {} | {} ? help | {}/{} sessions ",
-      if !connected {
-        "reconnecting"
-      } else if input {
-        "input"
-      } else {
-        "view only"
-      },
+      " {} | ctmux [{name}] pane {index} | {} | {} | {} ? help | {}/{} sessions ",
+      self.connection_history_status(),
+      if input { "input" } else { "view only" },
       if layout {
         "resize owner"
       } else {
@@ -939,6 +1028,23 @@ impl App {
       self.prefix.label,
       self.session_index() + usize::from(!self.sessions.is_empty()),
       self.sessions.len()
+    )
+  }
+
+  fn connection_status(&self) -> &'static str {
+    match self.panes.get(&self.focused) {
+      Some(pane) if pane.ended.is_some() => "ended",
+      Some(pane) if pane.connected => "connected",
+      Some(_) => "reconnecting",
+      None => "no connection",
+    }
+  }
+
+  fn connection_history_status(&self) -> String {
+    let connection = self.connection_status();
+    self.panes.get(&self.focused).map_or_else(
+      || connection.to_owned(),
+      |pane| format!("{connection} | {}", pane.history_status()),
     )
   }
 

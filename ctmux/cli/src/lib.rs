@@ -8,6 +8,7 @@ use ctmux_proto::CommandSpec;
 
 pub use commands::{
   CommandError, ConnectFuture, Connector, LocalConnector, new_session, resolve_session, run,
+  run_tui,
 };
 
 /// Canonical ctmux commands, independent of how the daemon is reached.

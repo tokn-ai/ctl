@@ -42,7 +42,9 @@ original behavior: open the first session, or create one when none exist.
 `ctmux attach --raw NAME` (and `attach --from SEQUENCE`) uses the original
 single-terminal presenter with Ctrl+] detach. `ctl ctmux` also retains its
 transport-based presenter and detached creation behavior, including over SSH.
-For the local TUI on a remote machine, SSH there and run `ctmux`.
+`ctl shell` uses this same TUI over its selected local or SSH connection, with
+the banner, pane controls, reconnect handling, and history browser. Use
+**Ctrl+B d** to detach. `ctl shell --plain` opens an ordinary shell.
 
 Migration: standalone `ctmux new` now attaches by default. Scripts that used it
 to create background sessions must add `-d`.
@@ -64,6 +66,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `r` | Redraw the terminal |
 | `A` | Browse retained session archives |
 | `[` | Browse history and select text in copy mode |
+| Page Up | Open history one page back |
 | `]` | Paste the local copy buffer into the active pane |
 | `I` | Take or release the active pane's input lease |
 | `R` | Take or release the view's resize lease |
@@ -81,6 +84,13 @@ keys, modified arrows, function keys, Unicode input, and bracketed paste.
 
 ## Scrollback and copy mode
 
+The bottom status row shows the focused pane's connection and history state:
+`connected` or `reconnecting`, and `history syncing`, `history ready`, or
+`history incomplete`. Ready means the retained window is available, not that
+the remote keeps unlimited history. The row stays outside the PTY grid and
+scrollback. Copy mode keeps its frozen history and selection while connection
+status updates; reopening copy mode picks up newly synchronized history.
+
 Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's primary
 screen and retained scrollback. The snapshot fills the terminal temporarily;
 all panes continue processing and acknowledging output in the background.
@@ -90,14 +100,26 @@ also works in a read-only attachment. If local retention evicts rows, the older
 checkpoint prefix is dropped too, keeping the displayed history contiguous.
 
 - Arrows or `h/j/k/l` move; Page Up/Down move a page.
+- Mouse wheel or trackpad scrolling focuses the pane under the pointer and opens
+  history, moving five rows per event. Scrolling back to the bottom returns to
+  live output unless a selection is active. Keyboard-opened history stays open.
+  Shift+Page Up also opens history; ordinary Page Up in the live view goes to
+  the running program. Esc or `q` returns to live output.
 - `g` / `G` jump to the first / last line; Home/End or `0` / `$` move within a line.
 - `/` searches forward, `?` backward; Enter runs a case-sensitive literal search.
   `n` repeats and `N` reverses direction, wrapping at the history boundary.
-- Space or `v` anchors a selection; Enter or `y` copies and exits.
+- Emacs copy keys follow tmux: Ctrl+Space starts a selection, Ctrl+G clears it,
+  Alt+W or Ctrl+W copies and exits, and Ctrl+C cancels. Ctrl+B/F/P/N moves the
+  cursor, Ctrl+A/E moves within a line, Alt+V pages up, and Ctrl+V or Space pages
+  down. Alt+`<`/`>` jumps to the top/bottom; Ctrl+R/S opens backward/forward search.
+- Existing vi shortcuts remain: `h/j/k/l`, `g/G`, `v` to select, and `y` or Enter
+  to copy. Space follows the Emacs default and pages down.
 - Esc or `q` returns to the live view. Esc while entering a search cancels the prompt.
 
 Logical lines remain intact; long lines scroll horizontally with the cursor.
 Selection adds newlines only between logical lines, without terminal padding.
+Click a live pane to focus it. Dividers and the fixed status row are excluded
+from pane hit testing, including when a shared canvas is larger than the window.
 New output, reconnects, and resizing do not change the frozen selection.
 Keyboard input and host paste are consumed locally while copy mode is open.
 

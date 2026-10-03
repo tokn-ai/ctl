@@ -78,7 +78,7 @@ describe("GatewayRouteDialog", () => {
     render(<GatewayRouteDialog target={{ kind: "ssh", destination: "build" }} hosts={[keyed]}
       gateways={[]} targets={[]} onSave={vi.fn()} onClose={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Add Jump host as hop" })).toHaveProperty("disabled", true);
-    expect(screen.getByRole("status").textContent).toContain("SSH-hop key files are not supported yet");
+    expect(screen.getByRole("status").textContent).toContain("Private key files are not supported for linked SSH hops");
     await userEvent.setup().selectOptions(screen.getByLabelText("Connection method for Jump host"), "direct");
     expect(screen.getByRole("button", { name: "Add Jump host as hop" })).toHaveProperty("disabled", false);
   });

@@ -29,11 +29,11 @@ export function useComponentVersions(visible: boolean, on_restarted: (preflight:
     return () => { mounted.current = false; generation.current += 1; };
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (host_id?: string) => {
     const request_generation = ++generation.current;
     setLoading(true);
     try {
-      const next = await getComponentVersions();
+      const next = await getComponentVersions(host_id);
       if (!mounted.current || request_generation !== generation.current) return;
       setSnapshot(next);
       setCheckedAt(Date.now());

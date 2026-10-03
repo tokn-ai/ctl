@@ -86,10 +86,13 @@ export interface ComponentVersionRow {
   label: string;
   location: "local" | "remote";
   host_id: string | null;
-  observation: "running" | "bundled" | "last_observed";
+  observation: "running" | "bundled" | "last_observed" | "installed" | "not_checked" | "legacy";
   status: ComponentVersionStatus;
   running: ComponentVersionInfo | null;
   available: ComponentVersionInfo | null;
+  installed?: ComponentVersionInfo | null;
+  restart_required?: boolean;
+  legacy_protocols?: { name: string; version: number }[];
   /** Protocols compiled into the app; the available executable may itself be stale. */
   required_protocols?: ComponentProtocolVersion[];
   restart_supported: boolean;

@@ -2092,6 +2092,7 @@ function TerminalWorkbench() {
               }}
             />
             <AboutPage
+              remote_targets={connectionTargets}
               visible={utility_page === "about"}
               on_close={() => { setUtilityPage(null); requestAnimationFrame(() => renderer?.focus()); }}
               on_dialog_change={setAboutDialogOpen}

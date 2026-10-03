@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { getComponentVersions, preflightComponentAction, executeComponentAction, acknowledgeComponentReconnect } from "./tauri";
+import { getComponentVersions, preflightComponentAction, executeComponentAction, acknowledgeComponentReconnect, probeSshHost } from "./tauri";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: ipc.invoke, Channel: class {} }));
@@ -15,4 +15,10 @@ it("keeps version observations read-only and restarts only with the native prefl
   const results = [{ attachment_id: "old", replacement_attachment_id: "new", error: null }];
   await acknowledgeComponentReconnect("action", results);
   expect(ipc.invoke).toHaveBeenLastCalledWith("ack_component_reconnect", { request: { action_id: "action", results } });
+});
+
+it("requests explicit component inspection independently of terminal probing", async () => {
+  const target = { kind: "ssh" as const, destination: "saved" };
+  await probeSshHost(target, "check", vi.fn(), true);
+  expect(ipc.invoke).toHaveBeenLastCalledWith("probe_ssh_host", { request: { target, attempt_id: "check", components_only: true }, on_prompt: expect.any(Object) });
 });

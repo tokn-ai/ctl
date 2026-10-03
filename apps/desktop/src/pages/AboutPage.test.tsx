@@ -25,6 +25,33 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("About page", () => {
+  it("shows installed remote builds without treating this app's reference as an installation", async () => {
+    const next = structuredClone(snapshot);
+    next.components[2] = { ...next.components[2], component: "ctmuxd", label: "ctmuxd — Saved host", installed: current, running: null,
+      legacy_protocols: [{ name: "ctmux_control", version: 1 }, { name: "ctmux", version: 13 }], restart_required: true, status: "incompatible" };
+    api.versions.mockResolvedValue(next);
+    render(<AboutPage {...props()} />);
+    const row = (await screen.findByText("ctmuxd — Saved host")).closest("tr")!;
+    expect(screen.getAllByRole("columnheader", { name: "Installed" })).toHaveLength(2);
+    expect(screen.getAllByRole("columnheader", { name: "Running" })).toHaveLength(2);
+    expect(within(row).getByText("Restart required")).toBeTruthy();
+    expect(within(row).getByText(/Control legacy 1.*Session legacy 13/)).toBeTruthy();
+    expect(within(row).getByTitle(/Build: current/).textContent).toContain("abcdef12");
+    expect(within(row).queryByText(/1\.0\.13/)).toBeNull();
+  });
+
+  it("keeps failed saved hosts manageable without an active terminal transport", async () => {
+    const next = structuredClone(snapshot);
+    next.components[2] = { ...next.components[2], component_id: "remote:saved:dev:ctl_agent", observation: "not_checked", running: null, installed: null, status: "unavailable", error: "SSH account is not connected." };
+    api.versions.mockResolvedValue(next);
+    render(<AboutPage {...props()} remote_targets={[{ kind: "ssh", host_id: "dev", destination: "dev" }]} />);
+    expect(await screen.findByRole("button", { name: "Update components ctl-agent — Development" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Check host ctl-agent — Development" })).toBeTruthy();
+    expect(screen.getByText("Not checked")).toBeTruthy();
+    expect(api.preflight).not.toHaveBeenCalled();
+    expect(api.restart).not.toHaveBeenCalled();
+  });
+
   it("offers native-approved actions per component and uses reconnect impact without a destructive label", async () => {
     const rows = structuredClone(snapshot);
     rows.components[2].action = "reconnect";
@@ -149,8 +176,8 @@ describe("About page", () => {
     const row = (await screen.findByText("ctld (SSH)")).closest("tr")!;
     expect(within(row).getByTitle(/SSH and VPN broker/)).toBeTruthy();
     expect(within(row).getByTitle("ctld IPC: not reported (requires 1.0.12)").textContent).toBe("IPC ?");
-    expect(within(row).getByTitle(/Build: running-build/).textContent).toBe("0.1.0");
-    expect(within(row).getByTitle(/Build: current/).textContent).toBe("0.1.0");
+    expect(within(row).getByTitle(/Build: running-build/).textContent).toBe("0.1.0abcdef12");
+    expect(within(row).getByTitle(/Build: current/).textContent).toBe("0.1.0abcdef12");
   });
 
   it("compares running protocols with app requirements even when the available binary is also stale", async () => {

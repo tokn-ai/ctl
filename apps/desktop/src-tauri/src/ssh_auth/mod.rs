@@ -164,6 +164,7 @@ pub async fn probe(
   target: ConnectionTargetDto,
   channel: Channel<SshPromptDto>,
   restart_check: bool,
+  components_only: bool,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
@@ -186,6 +187,24 @@ pub async fn probe(
   let context = PromptContext { attempt, channel };
   let establish = async {
     crate::vpn::ensure_for_host(&app, &target, &context).await?;
+    if components_only {
+      let control_path = broker::ensure_master(&target, &context).await?;
+      let ConnectionTarget::Ssh {
+        destination,
+        options,
+      } = target.to_core()
+      else {
+        return Err(CommandErrorDto::new(
+          "invalid_ssh_target",
+          "Select an SSH host.",
+        ));
+      };
+      let identity = ctl_client::maintenance::inspect_agent(&destination, &options, &control_path)
+        .await
+        .map_err(CommandErrorDto::backend)?;
+      target.verify_remote_identity(&identity)?;
+      return Ok(identity);
+    }
     let (stream, identity) = connect_with(&target, Some(context)).await?;
     if restart_check {
       require_restart_support(&identity)?;
@@ -249,17 +268,33 @@ pub async fn install_agent(
         "Select a remote SSH host.",
       ));
     };
-    install_identity::upload(&target, &destination, &options, &control_path, || {
-      crate::remote_agent::install(
-        &app,
-        &destination,
-        &options,
-        &interaction,
-        on_progress,
-        || !attempt.responses.lock().unwrap().is_empty(),
-      )
-    })
-    .await
+    let installed =
+      install_identity::upload(&target, &destination, &options, &control_path, || {
+        crate::remote_agent::install(
+          &app,
+          &destination,
+          &options,
+          &interaction,
+          on_progress,
+          || !attempt.responses.lock().unwrap().is_empty(),
+        )
+      })
+      .await?;
+    // A new unpinned account has no identity file until its first connection.
+    // Saved accounts were verified before upload and must verify activation too.
+    if matches!(
+      &target,
+      ConnectionTargetDto::Ssh {
+        remote_info: Some(_),
+        ..
+      }
+    ) {
+      let identity = ctl_client::maintenance::inspect_agent(&destination, &options, &control_path)
+        .await.map_err(|error| CommandErrorDto::new("remote_install_verification_failed", format!("Components were installed, but their active installation could not be verified. Running sessions were preserved. Check Components before retrying: {error}")))?;
+      target.verify_remote_identity(&identity)?;
+      install_identity::verify_installed(&installed, &identity)?;
+    }
+    Ok(installed)
   };
   let result = tokio::select! {
     result = install => result,

@@ -5,6 +5,7 @@
 //! `--service task`) and owns no terminal, task, or reconnect state. Identified
 //! connections read an account-owned ID that survives component upgrades.
 
+pub mod components;
 pub mod identity;
 pub mod listeners;
 pub mod maintenance;

@@ -34,6 +34,8 @@ enum Command {
   Listeners,
   /// Print installed agent identity without opening or starting a service.
   Inspect,
+  /// Inspect installed companions and existing owners without opening a service.
+  InspectComponents,
   /// Manage this account's VPNs or open a TCP stream through a selected VPN.
   Vpn,
   /// End all ctmux sessions and start the installed daemon after explicit confirmation.
@@ -110,6 +112,23 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
       )
       .await?;
       println!("{}", serde_json::to_string(&result)?);
+    }
+    Command::InspectComponents => {
+      let identity = tokio::task::spawn_blocking(ctl_agent::identity::inspect)
+        .await
+        .map_err(std::io::Error::other)??;
+      let directory = env::current_exe()?
+        .canonicalize()?
+        .parent()
+        .ok_or_else(|| std::io::Error::other("Missing agent directory"))?
+        .to_path_buf();
+      ctl_agent::components::serve(
+        &mut tokio::io::stdin(),
+        &mut tokio::io::stdout(),
+        &directory,
+        &identity.remote_id,
+      )
+      .await?;
     }
     Command::Inspect => {
       let identity = tokio::task::spawn_blocking(ctl_agent::identity::inspect)
@@ -258,7 +277,12 @@ mod tests {
         .unwrap(),
       Command::RestartCtmux
     ));
-    for operation in ["restart-ctmux", "prepare-ctmux-restart", "inspect"] {
+    for operation in [
+      "restart-ctmux",
+      "prepare-ctmux-restart",
+      "inspect",
+      "inspect-components",
+    ] {
       assert!(Arguments::try_parse_from(["ctl-agent", operation]).is_ok());
       for argument in ["--socket", "--pid", "--command", "--service"] {
         assert!(Arguments::try_parse_from(["ctl-agent", operation, argument, "anything"]).is_err());

@@ -17,9 +17,14 @@ serde.workspace = true
 serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, optional = true }
 
 [features]
-executable = ["dep:serde_json", "dep:sha2", "dep:tokio"]
+executable = ["dep:serde_json", "dep:sha2", "dep:tokio", "bundles"]
+bundles = ["dep:serde_json", "dep:sha2", "dep:uuid", "dep:rustix"]
 
 [build-dependencies]
 sha2.workspace = true

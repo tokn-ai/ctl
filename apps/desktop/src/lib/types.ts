@@ -1104,3 +1104,30 @@ export type SessionCacheAction =
 export type SessionCacheResponse =
   | { kind: "loaded"; cache: CachedSessionPresentation | null }
   | { kind: "archived" };
+
+
+export type ComponentBundlePurpose = "local" | "upload";
+export type ComponentBundlePhase = "verifying" | "selecting";
+export interface ComponentBundle {
+  bundle_id: string;
+  target_triple: string;
+  source: "ci" | "release" | "local";
+  app_version: string;
+  git_revision: string | null;
+  dirty: boolean;
+  compatible: boolean;
+  local_use: "selected" | "available" | "unavailable";
+  upload_use: "selected" | "available" | "unavailable";
+}
+export interface ComponentBundlesSnapshot {
+  bundles: ComponentBundle[];
+  errors: string[];
+}
+export interface ComponentBundleSelection {
+  bundle_id: string;
+  target_triple: string;
+  purpose: ComponentBundlePurpose;
+}
+export interface ComponentBundleSelectionResult extends ComponentBundleSelection {
+  services_preserved: boolean;
+}

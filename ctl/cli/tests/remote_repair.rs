@@ -113,10 +113,6 @@ esac
     fixture
   }
 
-  fn matching_bundle(&self, build: &ctl_core::component::ComponentBuildInfo) -> String {
-    self.bundle(build, None)
-  }
-
   fn compatible_bundle(&self, build: &ctl_core::component::ComponentBuildInfo) -> String {
     let protocol = |name: &str, build: u16| {
       let version = format!("1.0.{build}");
@@ -675,13 +671,11 @@ async fn compatible_older_cached_components_repair_a_development_cli_and_preserv
 }
 
 async fn verify_successful_repair(cached: bool) {
-  let build = ctl_core::component::build_info();
-  if build.dirty || build.source_revision.is_none() {
-    eprintln!("the legacy exact-source repair fixture requires a clean source build");
-    return;
-  }
+  let mut build = ctl_core::component::build_info();
+  build.dirty = false;
+  build.source_revision.get_or_insert_with(|| "a".repeat(40));
   let fixture = Fixture::new(EXPECTED_ID);
-  let bundle_id = fixture.matching_bundle(&build);
+  let bundle_id = fixture.compatible_bundle(&build);
   if cached {
     let target = "x86_64-unknown-linux-musl";
     let bundle =
@@ -731,10 +725,25 @@ fn assert_successful_repair(
   assert!(fixture.0.join("platform").exists());
   assert!(fixture.0.join("upload").exists());
   let base = fixture.0.join("home/.tokn/ctl");
+  let selected = ctl_core::bundles::Store::new(&fixture.0.join("home"))
+    .selected(
+      ctl_core::bundles::Purpose::Upload,
+      "x86_64-unknown-linux-musl",
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(
+    selected.manifest.distribution_id.as_deref(),
+    Some(bundle_id)
+  );
   assert_eq!(
     fs::read_link(base.join("current")).unwrap(),
-    PathBuf::from(format!("versions/{bundle_id}"))
+    PathBuf::from(format!(
+      "components/bundles/x86_64-unknown-linux-musl/{}",
+      selected.manifest.bundle_id
+    ))
   );
+  assert!(!base.join("versions").exists());
   assert_eq!(
     fs::read_to_string(base.join("remote-id")).unwrap(),
     EXPECTED_ID

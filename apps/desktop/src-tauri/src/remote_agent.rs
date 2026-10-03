@@ -146,6 +146,43 @@ async fn read_verified_bundle(
 ) -> CommandResult<VerifiedBundle> {
   let target_triple = target_triple.to_owned();
   let expected = expected_bundle_build();
+  #[cfg(unix)]
+  {
+    let home = dirs::home_dir().ok_or_else(bundle_unavailable)?;
+    let selected = tokio::task::spawn_blocking(move || {
+      let store = ctl_core::bundles::Store::new(&home);
+      if let Some(bundle) = store
+        .selected(ctl_core::bundles::Purpose::Upload, &target_triple)
+        .map_err(CommandErrorDto::backend)?
+      {
+        return Ok((home, bundle, false));
+      }
+      let bundle = read_verified_bundle_sync(&directories, &target_triple, &expected)?;
+      let source = if bundle.bundle_id == bundle.app_version {
+        ctl_core::bundles::Source::Release
+      } else {
+        ctl_core::bundles::Source::Ci
+      };
+      let imported = ctl_client::components::import_remote(&home, &bundle, &target_triple, source)
+        .map_err(bundle_error)?;
+      Ok::<_, CommandErrorDto>((home, imported, true))
+    })
+    .await
+    .map_err(CommandErrorDto::backend)??;
+    let bundle = if selected.2 {
+      ctl_client::components::initialize_upload(&selected.0, &selected.1)
+        .await
+        .map_err(CommandErrorDto::backend)?
+    } else {
+      selected.1
+    };
+    tokio::task::spawn_blocking(move || {
+      ctl_client::components::upload_bundle(&bundle).map_err(CommandErrorDto::backend)
+    })
+    .await
+    .map_err(CommandErrorDto::backend)?
+  }
+  #[cfg(not(unix))]
   tokio::task::spawn_blocking(move || {
     read_verified_bundle_sync(&directories, &target_triple, &expected)
   })
@@ -158,7 +195,7 @@ fn read_verified_bundle_sync(
   target_triple: &str,
   expected: &ComponentBuildInfo,
 ) -> CommandResult<VerifiedBundle> {
-  remote_bundle::read_verified_bundle(directories, target_triple, expected)
+  remote_bundle::read_reusable_bundle(directories, target_triple, expected)
     .map_err(bundle_error)?
     .ok_or_else(bundle_unavailable)
 }
@@ -286,7 +323,7 @@ mod tests {
   }
 
   #[test]
-  fn rejects_stale_or_uncommitted_component_bundles() {
+  fn legacy_bundles_require_an_exact_clean_client() {
     let directory = Directory::new();
     directory.install(&manifest(b"trusted archive"), b"trusted archive");
     assert!(
@@ -308,7 +345,7 @@ mod tests {
         &build(&source, dirty),
       )
       .unwrap_err();
-      assert_eq!(error.code, "remote_agent_bundle_stale");
+      assert_eq!(error.code, "remote_agent_bundle_unavailable");
       assert!(error.message.contains("pnpm agents:sync"));
     }
   }
@@ -402,7 +439,7 @@ mod tests {
   }
 
   #[test]
-  fn rejects_a_stale_development_bundle_before_a_valid_packaged_copy() {
+  fn skips_a_stale_legacy_development_copy_before_a_valid_packaged_copy() {
     let stale = Directory::new();
     let valid = Directory::new();
     let mut outdated = manifest(b"trusted archive");
@@ -423,9 +460,9 @@ mod tests {
         TARGET,
         &build(REVISION, false)
       )
-      .unwrap_err()
-      .code,
-      "remote_agent_bundle_stale"
+      .unwrap()
+      .git_revision,
+      REVISION
     );
   }
 }

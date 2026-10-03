@@ -1,5 +1,6 @@
 //! Read-only component diagnostics and owner-bound, confirmed maintenance.
 
+pub(crate) mod bundles;
 mod inventory;
 mod local;
 mod models;

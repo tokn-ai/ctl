@@ -1,7 +1,6 @@
 //! Matching local, published, or existing CI remote component bundles.
 
 use std::ffi::OsStr;
-use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -18,44 +17,95 @@ use super::Error;
 #[path = "bundle/artifact.rs"]
 mod artifact;
 
-#[path = "bundle/cache.rs"]
-mod cache;
-
 const REPOSITORY: &str = "github.com/tokn-ai/ctl";
 const MAX_GH_OUTPUT: u64 = 128 * 1024;
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) async fn matching_bundle(target: &str) -> Result<VerifiedBundle, Error> {
+  #[cfg(unix)]
+  if let Some(home) = dirs::home_dir()
+    && let Some(selected) = selected_upload(&home, target).await?
+  {
+    return Ok(selected);
+  }
   let expected = ctl_core::component::build_info();
   let directories = bundle_directories()?;
   let explicit = std::env::var_os("CTL_REMOTE_BUNDLES_DIR").is_some();
-  let cache_root = dirs::home_dir().map(|home| home.join(".tokn/ctl/agent-bundles"));
-  matching_bundle_from(target, &expected, directories, explicit, cache_root, || {
-    download_bundle(target, &expected)
-  })
-  .await
+  let bundle = if let Some(bundle) = local_bundle(target, &expected, directories, explicit).await? {
+    bundle
+  } else {
+    let legacy = if let Some(home) = dirs::home_dir() {
+      let target = target.to_owned();
+      let expected = expected.clone();
+      tokio::task::spawn_blocking(move || {
+        remote_bundle::read_compatible_cached_bundle(
+          &home.join(".tokn/ctl/agent-bundles"),
+          &target,
+          &expected,
+        )
+      })
+      .await??
+    } else {
+      None
+    };
+    match legacy {
+      Some(bundle) => {
+        report_bundle(&bundle, "cached");
+        bundle
+      }
+      None => download_bundle(target, &expected).await?,
+    }
+  };
+  #[cfg(unix)]
+  if let Some(home) = dirs::home_dir() {
+    let source = if bundle.bundle_id == bundle.app_version {
+      ctl_core::bundles::Source::Release
+    } else {
+      ctl_core::bundles::Source::Ci
+    };
+    let target = target.to_owned();
+    let import_home = home.clone();
+    let imported = tokio::task::spawn_blocking(move || {
+      ctl_client::components::import_remote(&import_home, &bundle, &target, source)
+    })
+    .await??;
+    let selected = ctl_client::components::initialize_upload(&home, &imported).await?;
+    return Ok(
+      tokio::task::spawn_blocking(move || ctl_client::components::upload_bundle(&selected))
+        .await??,
+    );
+  }
+  Ok(bundle)
 }
 
-async fn matching_bundle_from<F, FF>(
+fn report_bundle(bundle: &VerifiedBundle, origin: &str) {
+  eprintln!(
+    "ctl: Using {origin} remote components {} ({})",
+    bundle.app_version,
+    &bundle.git_revision[..12]
+  );
+}
+
+#[cfg(unix)]
+async fn selected_upload(
+  home: &std::path::Path,
   target: &str,
-  expected: &ComponentBuildInfo,
-  directories: Vec<PathBuf>,
-  explicit: bool,
-  cache_root: Option<PathBuf>,
-  download: F,
-) -> Result<VerifiedBundle, Error>
-where
-  F: FnOnce() -> FF,
-  FF: Future<Output = Result<VerifiedBundle, Error>>,
-{
-  if let Some(bundle) = local_bundle(target, expected, directories, explicit).await? {
-    return Ok(bundle);
-  }
-  cache::get_or_download(cache_root, target, expected, || async {
-    require_clean_build(expected)?;
-    download().await
-  })
-  .await
+) -> Result<Option<VerifiedBundle>, Error> {
+  let home = home.to_owned();
+  let target = target.to_owned();
+  Ok(
+    tokio::task::spawn_blocking(move || {
+      ctl_core::bundles::Store::new(&home)
+        .selected(ctl_core::bundles::Purpose::Upload, &target)?
+        .map(|selected| {
+          let bundle = ctl_client::components::upload_bundle(&selected)?;
+          report_bundle(&bundle, "selected");
+          Ok::<_, io::Error>(bundle)
+        })
+        .transpose()
+    })
+    .await??,
+  )
 }
 
 async fn download_bundle(

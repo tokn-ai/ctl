@@ -14,7 +14,7 @@ publish = ["crates-io"]
 exclude = ["tests/forced_command.rs"]
 
 [dependencies]
-ctl-core.workspace = true
+ctl-core = { workspace = true, features = ["executable"] }
 dirs.workspace = true
 glob.workspace = true
 serde.workspace = true
@@ -40,7 +40,6 @@ serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 base64.workspace = true
-ctl-core = { workspace = true, features = ["executable"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

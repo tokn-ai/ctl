@@ -51,6 +51,10 @@ import type {
   VpnStatus,
   VpnSnapshot,
   ComponentVersionsSnapshot,
+  ComponentBundlesSnapshot,
+  ComponentBundleSelection,
+  ComponentBundleSelectionResult,
+  ComponentBundlePhase,
   ComponentActionPreflight,
   ComponentActionResult,
   ComponentReconnectResult,
@@ -72,6 +76,19 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
 
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
   return invoke("get_component_versions", host_id ? { host_id } : undefined);
+}
+
+export async function getComponentBundles(): Promise<ComponentBundlesSnapshot> {
+  return invoke("get_component_bundles");
+}
+
+export async function selectComponentBundle(
+  request: ComponentBundleSelection,
+  on_progress: (phase: ComponentBundlePhase) => void,
+): Promise<ComponentBundleSelectionResult> {
+  const channel = new Channel<ComponentBundlePhase>();
+  channel.onmessage = on_progress;
+  return invoke("select_component_bundle", { request, on_progress: channel });
 }
 
 export async function listSavedCredentials(targets: CredentialTarget[]): Promise<CredentialsSnapshot> {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ComponentBundlePanel } from "../components/about/ComponentBundlePanel";
 import { ComponentVersionTable, versionLabel } from "../components/about/ComponentVersionTable";
 import { QuickInput } from "../components/commands/QuickInput";
 import { Icon } from "../components/ui/Icon";
@@ -49,7 +50,8 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
         {model.notice ? <p className="about-notice" role="status">{model.notice}</p> : null}
         {component_notice ? <p className="about-notice" role="status">{component_notice}</p> : null}
         {model.loading && !model.snapshot ? <p role="status">Checking local components and saved hosts…</p> : null}
-        <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">This computer</h2><p className="about-muted">Installed shows the selected local helper. Update local components with the desktop app or rebuild the helpers, then restart separately.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
+        <ComponentBundlePanel visible={visible} on_selected={() => void model.refresh()} />
+        <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">This computer</h2><p className="about-muted">Installed shows the selected local build. Select a complete bundle above, then restart a running service separately.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
         <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">Remote hosts</h2><p className="about-muted">Refresh uses existing SSH connections, including hosts whose terminal daemon cannot reply. Check host can authenticate through its preferred route. Updating installs verified components and keeps sessions; Restart applies the installed terminal daemon after confirmation.</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {
           const target = remote_targets.find((target) => target.kind === "ssh" && target.host_id === host_id);
           if (target) { setComponentNotice(null); setComponentFlow({ target, mode }); }

@@ -16,6 +16,22 @@ mod tests;
 use serde::Serialize;
 use std::path::PathBuf;
 
+/// Verifies a complete signed helper package before its metadata is executed.
+/// The temporary verification work is discarded; selection and services are unchanged.
+///
+/// # Errors
+/// Rejects malformed receipts, invalid signatures, profiles or changed helper bytes.
+#[cfg(target_os = "macos")]
+pub async fn inspect_ctld_package(
+  home: &std::path::Path,
+  directory: &std::path::Path,
+  receipt: &[u8],
+) -> Result<ctl_core::component::ComponentInfo, Error> {
+  let manifest = manifest::Manifest::parse_installed(receipt, macos::release_target()?)?;
+  let session = install::Session::verification(home, directory, manifest)?;
+  Ok(macos::verify_helper(&session).await?.info)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SetupEvent {
   Manifest,

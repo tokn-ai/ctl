@@ -78,6 +78,19 @@ helpers from different product releases may be reused when their advertised
 contracts intersect the client's supported set. Verified replacement checks
 still pin the complete inspected binary and its metadata.
 
+Remote bundle schema 2 records the complete `--component-info` metadata for each
+shipped component. Standalone CLI repair can reuse a local or cached bundle from
+a different product release or source revision after verifying its own identity,
+target, archive and binary checksums, and agreement with the archived manifest.
+Eligibility requires explicit shared service contracts and compatible contracts
+between the gateway, task daemon, and ctmux daemon. Agent and task executable
+metadata includes their consumed companion contracts; running daemon diagnostics
+continue to describe the actual owner serving a connection. Reuse never restarts
+that owner. Schema-1 bundles lack compatibility advertisements and remain eligible
+only for the exact clean client revision. New downloads also retain exact-source
+selection; a dirty or unidentified development client can reuse a verified
+compatible bundle but cannot download an inferred matching build.
+
 ## Discovery and SSH framing
 
 The default ctld socket or Windows pipe is keyed by the protocol major, such as

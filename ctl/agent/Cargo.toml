@@ -19,16 +19,16 @@ uuid.workspace = true
 ctl-proto.workspace = true
 clap.workspace = true
 ctmux-ipc.workspace = true
+ctmux-proto.workspace = true
 ctl-task-ipc.workspace = true
+ctl-task-proto.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 ctl-client.workspace = true
 ctmux-client.workspace = true
-ctmux-proto.workspace = true
 ctmuxd.workspace = true
-ctl-task-proto.workspace = true
 ctl-taskd.workspace = true
 
 [lints]

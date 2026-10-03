@@ -12,7 +12,7 @@ use rustix::termios::LocalModes;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-const PROMPT: &str = "Install matching remote components";
+const PROMPT: &str = "Install compatible remote components";
 const EXPECTED_ID: &str = "fa5f874a-bd3c-4a41-9d8f-d584bd9c9a14";
 
 fn frame(value: &serde_json::Value) -> Vec<u8> {
@@ -114,11 +114,41 @@ esac
   }
 
   fn matching_bundle(&self, build: &ctl_core::component::ComponentBuildInfo) -> String {
+    self.bundle(build, None)
+  }
+
+  fn compatible_bundle(&self, build: &ctl_core::component::ComponentBuildInfo) -> String {
+    let protocol = |name: &str, build: u16| {
+      let version = format!("1.0.{build}");
+      json!({"name": name, "build": build, "version": version, "supported_versions": [version]})
+    };
+    let component = |protocols| json!({"build": build, "protocols": protocols});
+    let components = json!({
+      "ctl-agent": component(vec![
+        protocol("ctl_identity", 3), protocol("ctl_maintenance", 2),
+        protocol("ctmux", 13), protocol("ctmux_control", 1),
+        protocol("task", 4), protocol("task_control", 2),
+      ]),
+      "ctmuxd": component(vec![protocol("ctmux", 13), protocol("ctmux_control", 1)]),
+      "ctl-taskd": component(vec![
+        protocol("task", 4), protocol("task_control", 2),
+        protocol("ctmux", 13), protocol("ctmux_control", 1),
+      ]),
+    });
+    self.bundle(build, Some(&components))
+  }
+
+  fn bundle(
+    &self,
+    build: &ctl_core::component::ComponentBuildInfo,
+    components: Option<&serde_json::Value>,
+  ) -> String {
     let revision = build.source_revision.as_deref().unwrap();
     let bundle_id = format!("{}-dev.{}", build.version, &revision[..12]);
     let target = "x86_64-unknown-linux-musl";
-    let manifest = json!({
-      "schema_version": 1,
+    let schema_version = if components.is_some() { 2 } else { 1 };
+    let mut manifest = json!({
+      "schema_version": schema_version,
       "app_version": build.version,
       "bundle_id": bundle_id,
       "git_revision": revision,
@@ -127,11 +157,6 @@ esac
     let requests = self.repaired_transport(build, &bundle_id, target);
     let payload = self.0.join("payload");
     fs::create_dir(&payload).unwrap();
-    fs::write(
-      payload.join("manifest.json"),
-      serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
     // Record all client frames before returning the final response, so
     // dropping the one-shot transport cannot race the fixture's input capture.
     fs::write(
@@ -146,11 +171,32 @@ esac
     for binary in ["ctmuxd", "ctl-taskd"] {
       fs::write(payload.join(binary), b"#!/bin/sh\nexit 0\n").unwrap();
     }
+    let mut files = serde_json::Map::new();
+    for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+      fs::set_permissions(payload.join(binary), fs::Permissions::from_mode(0o700)).unwrap();
+      files.insert(
+        binary.into(),
+        json!(format!(
+          "{:x}",
+          Sha256::digest(fs::read(payload.join(binary)).unwrap())
+        )),
+      );
+    }
+    if let Some(components) = components {
+      manifest["files"] = json!(files);
+      manifest["components"] = components.clone();
+    }
+    fs::write(
+      payload.join("manifest.json"),
+      serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
     let archive = self.0.join(format!(
       "bundles/ctl-agent-bundle-{bundle_id}-{target}.tar.gz"
     ));
     let output = Command::new("tar")
-      .args(["-czf"])
+      .env("COPYFILE_DISABLE", "1")
+      .args(["--format=ustar", "-czf"])
       .arg(&archive)
       .arg("-C")
       .arg(&payload)
@@ -166,18 +212,19 @@ esac
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
     ] {
-      targets.insert(
-        target.into(),
-        json!({
-          "archive": format!("ctl-agent-bundle-{bundle_id}-{target}.tar.gz"),
-          "sha256": checksum,
-        }),
-      );
+      let mut entry = json!({
+        "archive": format!("ctl-agent-bundle-{bundle_id}-{target}.tar.gz"),
+        "sha256": checksum,
+      });
+      if let Some(components) = components {
+        entry["components"] = components.clone();
+      }
+      targets.insert(target.into(), entry);
     }
     fs::write(
       self.0.join("bundles/bundle-set.json"),
       serde_json::to_vec(&json!({
-        "schema_version": 1, "app_version": build.version,
+        "schema_version": schema_version, "app_version": build.version,
         "bundle_id": bundle_id, "git_revision": revision, "targets": targets,
       }))
       .unwrap(),
@@ -226,7 +273,7 @@ esac
     .unwrap();
     let handshake = json!({
       "type": "handshake", "protocol": ctmux_proto::protocol_offer(),
-      "client_name": "ctl", "client_version": build.version,
+      "client_name": "ctl", "client_version": env!("CARGO_PKG_VERSION"),
     });
     let selection = json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION});
     frame(&selection).len()
@@ -543,14 +590,13 @@ async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_b
     "{transcript}"
   );
   assert!(
-    transcript.contains("Preparing matching components for Linux x86_64"),
+    transcript.contains("Preparing compatible components for Linux x86_64"),
     "{transcript}"
   );
-  // Local workspaces may embed a dirty identity. Clean CI builds instead reach
-  // the explicitly selected invalid manifest; neither may upload or download.
+  // The explicit local manifest is validated even when this CLI has a dirty
+  // build identity, and invalid selected content cannot upload or download.
   assert!(
-    transcript.contains("requires a clean client")
-      || transcript.contains("invalid remote bundle-set JSON"),
+    transcript.contains("invalid remote bundle-set JSON"),
     "{transcript}"
   );
   assert!(fixture.0.join("platform").exists());
@@ -570,12 +616,57 @@ async fn accepted_repair_uses_the_managed_home_cache_and_retries_without_downloa
   verify_successful_repair(true).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatible_older_cached_components_repair_a_development_cli_and_preserve_identity() {
+  // Unlike legacy exact-source fixtures, this test must also exercise a CLI
+  // compiled from a dirty checkout or without a recorded source revision.
+  let build = ctl_core::component::ComponentBuildInfo {
+    version: "0.0.9".into(),
+    source_revision: Some("a".repeat(40)),
+    source_fingerprint: "a".repeat(64),
+    dirty: false,
+  };
+  assert_ne!(build.version, env!("CARGO_PKG_VERSION"));
+  let fixture = Fixture::new(EXPECTED_ID);
+  let bundle_id = fixture.compatible_bundle(&build);
+  let target = "x86_64-unknown-linux-musl";
+  let bundle =
+    ctl_client::remote_bundle::read_verified_bundle(&[fixture.0.join("bundles")], target, &build)
+      .unwrap()
+      .unwrap();
+  let cache = fixture.0.join("home/.tokn/ctl/agent-bundles");
+  ctl_client::remote_bundle::BundleCacheEntry::new(&cache, target, &build)
+    .unwrap()
+    .store(&bundle)
+    .unwrap();
+  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
+  let broker = fixture.broker();
+  let mut terminal =
+    Terminal::with_bundle_override(&fixture, &["-H", "work", "ctmux", "list"], false);
+  terminal.wait_for_prompt();
+  terminal.answer("y\r");
+  assert_successful_repair(&fixture, &bundle_id, &original, &mut terminal, true);
+  assert!(
+    terminal
+      .text()
+      .contains("Using cached remote components 0.0.9 (aaaaaaaaaaaa)"),
+    "{}",
+    terminal.text(),
+  );
+  assert!(
+    cache
+      .join("a".repeat(40))
+      .join(target)
+      .join("bundle-set.json")
+      .is_file()
+  );
+  broker.await.unwrap();
+}
+
 async fn verify_successful_repair(cached: bool) {
   let build = ctl_core::component::build_info();
   if build.dirty || build.source_revision.is_none() {
-    eprintln!(
-      "successful repair requires a clean source build; the dirty-build rejection test covers this checkout"
-    );
+    eprintln!("the legacy exact-source repair fixture requires a clean source build");
     return;
   }
   let fixture = Fixture::new(EXPECTED_ID);
@@ -601,6 +692,17 @@ async fn verify_successful_repair(cached: bool) {
     Terminal::with_bundle_override(&fixture, &["-H", "work", "ctmux", "list"], !cached);
   terminal.wait_for_prompt();
   terminal.answer("y\r");
+  assert_successful_repair(&fixture, &bundle_id, &original, &mut terminal, cached);
+  broker.await.unwrap();
+}
+
+fn assert_successful_repair(
+  fixture: &Fixture,
+  bundle_id: &str,
+  original: &[u8],
+  terminal: &mut Terminal,
+  cached: bool,
+) {
   assert!(terminal.finish().success(), "{}", terminal.text());
   let transcript = terminal.text();
   if cached {
@@ -653,10 +755,9 @@ async fn verify_successful_repair(cached: bool) {
     requests,
     [
       json!({"protocol_version": ctl_proto::IDENTITY_PROTOCOL_VERSION}),
-      json!({"type": "handshake", "protocol": ctmux_proto::protocol_offer(), "client_name": "ctl", "client_version": build.version}),
+      json!({"type": "handshake", "protocol": ctmux_proto::protocol_offer(), "client_name": "ctl", "client_version": env!("CARGO_PKG_VERSION")}),
       json!({"type": "list_sessions"}),
     ]
   );
   assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
-  broker.await.unwrap();
 }

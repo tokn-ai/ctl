@@ -102,9 +102,20 @@ async fn explicit_missing_or_stale_local_bundles_do_not_reach_download_fallback(
     serde_json::to_vec(&value).unwrap(),
   )
   .unwrap();
+  std::fs::write(
+    directory
+      .0
+      .join(value["targets"][TARGET]["archive"].as_str().unwrap()),
+    b"archive",
+  )
+  .unwrap();
   assert!(matches!(
     local_bundle(TARGET, &build(), vec![directory.0.clone()], false).await,
-    Err(Error::Bundle(remote_bundle::Error::Stale(_)))
+    Ok(None)
+  ));
+  assert!(matches!(
+    local_bundle(TARGET, &build(), vec![directory.0.clone()], true).await,
+    Err(Error::Bundle(remote_bundle::Error::NotAvailable(_)))
   ));
 }
 

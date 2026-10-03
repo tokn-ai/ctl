@@ -86,6 +86,140 @@ fn round_trip_preserves_manifest_and_reuses_the_exact_build() {
   fixture.assert_no_staging();
 }
 
+fn store_compatible(fixture: &Fixture, version: &str, revision: &str) -> VerifiedBundle {
+  let bundle = super::super::compatibility::tests::Fixture::new(version, revision).bundle();
+  let mut expected = build();
+  expected.version = version.into();
+  expected.source_revision = Some(revision.into());
+  BundleCacheEntry::new(&fixture.cache.root, TARGET, &expected)
+    .unwrap()
+    .store(&bundle)
+    .unwrap();
+  bundle
+}
+
+#[test]
+fn compatible_scan_prefers_exact_then_stable_revision_order_for_any_client_identity() {
+  let fixture = Fixture::new();
+  store_compatible(&fixture, "0.0.9", &"b".repeat(40));
+  store_compatible(&fixture, "0.0.8", &"a".repeat(40));
+  let load = |expected: &ComponentBuildInfo| {
+    read_compatible_cached_bundle(&fixture.cache.root, TARGET, expected)
+      .unwrap()
+      .unwrap()
+  };
+  assert_eq!(load(&build()).git_revision, "a".repeat(40));
+  fixture.cache.store(&Fixture::bundle()).unwrap();
+  assert_eq!(load(&build()).git_revision, REVISION);
+  for identity in 0..3 {
+    let mut expected = build();
+    match identity {
+      0 => expected.dirty = true,
+      1 => expected.source_revision = None,
+      _ => expected.source_revision = Some("a".repeat(64)),
+    }
+    let reused = load(&expected);
+    assert_eq!(reused.git_revision, "a".repeat(40));
+    assert_eq!(reused.app_version, "0.0.8");
+  }
+}
+
+#[test]
+fn compatible_scan_skips_damage_but_rechecks_immutable_revision_paths() {
+  let fixture = Fixture::new();
+  let first = store_compatible(&fixture, "0.0.8", &"a".repeat(40));
+  store_compatible(&fixture, "0.0.9", &"b".repeat(40));
+  fs::write(
+    fixture
+      .cache
+      .root
+      .join(&first.git_revision)
+      .join(TARGET)
+      .join(first.file_name),
+    b"changed archive",
+  )
+  .unwrap();
+  assert_eq!(
+    read_compatible_cached_bundle(&fixture.cache.root, TARGET, &build())
+      .unwrap()
+      .unwrap()
+      .git_revision,
+    "b".repeat(40)
+  );
+  fs::rename(
+    fixture.cache.root.join("b".repeat(40)),
+    fixture.cache.root.join("c".repeat(40)),
+  )
+  .unwrap();
+  assert!(
+    read_compatible_cached_bundle(&fixture.cache.root, TARGET, &build())
+      .unwrap()
+      .is_none()
+  );
+}
+
+#[test]
+fn schema1_cache_never_becomes_cross_release_or_dirty_client_eligible() {
+  let fixture = Fixture::new();
+  fixture.cache.store(&Fixture::bundle()).unwrap();
+  for identity in 0..3 {
+    let mut expected = build();
+    match identity {
+      0 => expected.version = "0.2.0".into(),
+      1 => expected.source_revision = Some("a".repeat(40)),
+      _ => expected.dirty = true,
+    }
+    assert!(
+      read_compatible_cached_bundle(&fixture.cache.root, TARGET, &expected)
+        .unwrap()
+        .is_none()
+    );
+  }
+}
+
+#[test]
+fn compatible_scan_rejects_unsafe_roots_without_creating_missing_paths() {
+  let fixture = Fixture::new();
+  let mut expected = build();
+  expected.source_revision = None;
+  let parent_path = fixture.cache.root.join("../cache");
+  for root in [Path::new(""), parent_path.as_path()] {
+    assert!(read_compatible_cached_bundle(root, TARGET, &expected).is_err());
+  }
+  assert!(
+    read_compatible_cached_bundle(&fixture.cache.root, TARGET, &expected)
+      .unwrap()
+      .is_none()
+  );
+  assert!(!fixture.cache.root.exists());
+}
+
+#[test]
+fn incompatible_cache_metadata_skips_unrelated_payload_reads() {
+  let fixture = Fixture::new();
+  let bundle = store_compatible(&fixture, "0.0.8", &"a".repeat(40));
+  let directory = fixture.cache.root.join(&bundle.git_revision).join(TARGET);
+  let mut metadata: serde_json::Value = serde_json::from_slice(&bundle.manifest).unwrap();
+  let protocol = &mut metadata["targets"][TARGET]["components"]["ctmuxd"]["protocols"][0];
+  let protocol_build = protocol["build"].as_u64().unwrap();
+  protocol["version"] = serde_json::json!(format!("2.0.{protocol_build}"));
+  protocol["supported_versions"] = serde_json::json!([format!("2.0.{protocol_build}")]);
+  fs::write(
+    directory.join(BUNDLE_SET_FILE),
+    serde_json::to_vec(&metadata).unwrap(),
+  )
+  .unwrap();
+  // A payload path that would fail safe regular-file reads must not be touched
+  // when its complete, intrinsically valid advertisements are ineligible.
+  fs::remove_file(directory.join(&bundle.file_name)).unwrap();
+  fs::create_dir(directory.join(bundle.file_name)).unwrap();
+  assert!(
+    read_compatible_cached_bundle(&fixture.cache.root, TARGET, &build())
+      .unwrap()
+      .is_none()
+  );
+}
+
 #[test]
 fn revisions_targets_and_versions_are_isolated() {
   let fixture = Fixture::new();

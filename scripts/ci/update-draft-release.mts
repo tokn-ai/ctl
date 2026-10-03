@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
+import { maxAgentManifestBytes, parseAgentBundleSet, readAgentFile, verifyAgentBundleTarget } from "../shared/agent-bundle.mts";
 
 const execFileAsync = promisify(execFile);
 const managedLabelPrefix = "ctmux-ci: ";
@@ -141,23 +142,14 @@ export async function validateReleaseBundle(
     }
   };
 
-  const bundleSet = await readJson(directory, "bundle-set.json");
-  if (
-    bundleSet.schema_version !== 1 ||
-    bundleSet.app_version !== identity.app_version ||
-    bundleSet.bundle_id !== identity.bundle_id ||
-    bundleSet.git_revision !== identity.git_revision ||
-    !record(bundleSet.targets) ||
-    Object.keys(bundleSet.targets).length !== remoteTargets.length
-  ) {
-    throw new Error("Remote bundle set does not match the expected build identity or targets");
-  }
+  const bundleSet = parseAgentBundleSet(await readAgentFile(join(directory, "bundle-set.json"), maxAgentManifestBytes), identity);
   addNames(["bundle-set.json"]);
   for (const target of remoteTargets) {
     const asset = bundleSet.targets[target];
     if (!record(asset) || asset.archive !== `ctl-agent-bundle-${identity.bundle_id}-${target}.tar.gz`) {
       throw new Error(`Invalid remote bundle for ${target}`);
     }
+    if (bundleSet.schema_version === 2) await verifyAgentBundleTarget(directory, identity, target, asset);
     addNames(await validateAsset(directory, asset.archive, asset.sha256));
   }
 

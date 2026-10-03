@@ -50,10 +50,7 @@ async fn main() {
 
 async fn run(arguments: Arguments) -> Result<(), MainError> {
   if arguments.component_info {
-    let info = ctl_core::component::ComponentInfo {
-      build: ctl_core::component::build_info(),
-      protocols: ctl_proto::agent_protocols(),
-    };
+    let info = ctl_agent::component_info();
     println!("{}", serde_json::to_string(&info)?);
     return Ok(());
   }

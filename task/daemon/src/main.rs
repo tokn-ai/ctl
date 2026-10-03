@@ -29,6 +29,9 @@ fn main() {
       protocols: vec![
         ctl_task_proto::protocol_info(),
         ctl_task_proto::control::protocol_info(),
+        // Interactive tasks consume these contracts from the ctmux owner.
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
       ],
     };
     println!(

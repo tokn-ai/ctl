@@ -29,6 +29,14 @@ architectures, and signed macOS
 desktop packages. Publishing that draft makes the helper available to
 `ctl setup` for that exact CLI version.
 
+Remote bundle schema 2 captures `--component-info` from each packaged executable,
+including explicit published protocol support and companion client contracts.
+The archived manifest binds those advertisements to binary checksums; assembly
+copies them into each target's bundle-set entry after verifying the archive and
+its identity. CLI cache reuse validates both documents and can select a compatible
+bundle across product releases. Signing and version selection for `ctld.app`
+remain separate from this remote bundle schema.
+
 ## Apple distribution credentials
 
 Configure these repository or organization secrets and variables:

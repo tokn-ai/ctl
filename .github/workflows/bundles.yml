@@ -95,6 +95,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Install musl toolchain
         if: runner.os == 'Linux'
         run: |
@@ -151,6 +156,11 @@ jobs:
           pattern: ctl-agent-bundle-*
           path: target/agent-components
           merge-multiple: true
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
 
       - name: Validate and assemble bundle set
         run: >-

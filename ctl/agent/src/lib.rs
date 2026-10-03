@@ -22,6 +22,23 @@ use tokio::time::{Instant, sleep};
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
 pub const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
 
+/// Contracts implemented or used by this gateway build, including companion
+/// inspection and maintenance. Running daemons advertise their own contracts.
+#[must_use]
+pub fn component_info() -> ctl_core::component::ComponentInfo {
+  let mut protocols = ctl_proto::agent_protocols();
+  protocols.extend([
+    ctmux_proto::protocol_info(),
+    ctmux_ipc::local_control_protocol_info(),
+    ctl_task_proto::protocol_info(),
+    ctl_task_proto::control::protocol_info(),
+  ]);
+  ctl_core::component::ComponentInfo {
+    build: ctl_core::component::build_info(),
+    protocols,
+  }
+}
+
 /// Services exposed by the SSH gateway. Local ctmux control is never exposed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Service {

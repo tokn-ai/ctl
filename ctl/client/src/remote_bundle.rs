@@ -1,9 +1,10 @@
 //! Trusted remote component bundles shared by desktop and standalone clients.
 
-use ctl_core::component::ComponentBuildInfo;
+use ctl_core::component::{ComponentBuildInfo, ComponentInfo};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -21,7 +22,8 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 ];
 
 mod cache;
-pub use cache::BundleCacheEntry;
+mod compatibility;
+pub use cache::{BundleCacheEntry, read_compatible_cached_bundle};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Platform {
@@ -94,6 +96,8 @@ pub struct BundleSet {
 struct BundleTarget {
   archive: String,
   sha256: String,
+  #[serde(default, deserialize_with = "compatibility::deserialize_components")]
+  components: Option<BTreeMap<String, ComponentInfo>>,
 }
 
 impl BundleSet {
@@ -103,6 +107,21 @@ impl BundleSet {
   /// Rejects oversized manifests, other versions, unsafe paths, missing targets,
   /// and malformed build identities or checksums.
   pub fn parse(bytes: &[u8], expected_version: &str) -> Result<Self, Error> {
+    let manifest = Self::parse_intrinsic(bytes)?;
+    if !safe_id(expected_version) || manifest.app_version != expected_version {
+      return Err(Error::Invalid(format!(
+        "remote bundle set targets version {}, not {expected_version}",
+        manifest.app_version
+      )));
+    }
+    Ok(manifest)
+  }
+
+  /// Validates the bundle's own immutable identity without selecting a client release.
+  ///
+  /// # Errors
+  /// Rejects malformed, unbounded, unsafe, or inconsistent bundle metadata.
+  pub fn parse_intrinsic(bytes: &[u8]) -> Result<Self, Error> {
     if bytes.len() > MAX_BUNDLE_SET_BYTES {
       return Err(Error::Invalid(
         "remote bundle-set manifest exceeds its size limit".into(),
@@ -110,16 +129,15 @@ impl BundleSet {
     }
     let manifest: Self = serde_json::from_slice(bytes)
       .map_err(|_| Error::Invalid("invalid remote bundle-set JSON".into()))?;
-    if manifest.schema_version != 1 {
+    if !matches!(manifest.schema_version, 1 | 2) {
       return Err(Error::Invalid(
         "unsupported remote bundle-set schema version".into(),
       ));
     }
-    if !safe_id(expected_version) || manifest.app_version != expected_version {
-      return Err(Error::Invalid(format!(
-        "remote bundle set targets version {}, not {expected_version}",
-        manifest.app_version
-      )));
+    if !safe_id(&manifest.app_version) {
+      return Err(Error::Invalid(
+        "invalid remote bundle product version".into(),
+      ));
     }
     if !safe_id(&manifest.bundle_id) {
       return Err(Error::Invalid("invalid remote bundle ID".into()));
@@ -152,6 +170,7 @@ impl BundleSet {
       ));
     }
     for (target, bundle) in &manifest.targets {
+      compatibility::validate_components(&manifest, bundle.components.as_ref())?;
       let expected_archive = format!("ctl-agent-bundle-{}-{target}.tar.gz", manifest.bundle_id);
       if bundle.archive != expected_archive
         || bundle.sha256.len() != 64
@@ -180,6 +199,21 @@ impl BundleSet {
       ));
     }
     Ok(())
+  }
+
+  /// Checks every client/service and internal companion edge by explicit contracts.
+  /// Schema-1 bundles have no advertisements and cannot be reused across builds.
+  ///
+  /// # Errors
+  /// Rejects unsupported targets or invalid schema-2 component advertisements.
+  pub fn is_compatible(&self, target: &str) -> Result<bool, Error> {
+    let entry = self.target(target)?;
+    Ok(
+      entry
+        .components
+        .as_ref()
+        .is_some_and(compatibility::compatible),
+    )
   }
 
   fn target(&self, target: &str) -> Result<&BundleTarget, Error> {
@@ -225,6 +259,9 @@ impl BundleSet {
     manifest: Vec<u8>,
   ) -> Result<VerifiedBundle, Error> {
     self.verify_archive_bytes(target, &archive)?;
+    if self.schema_version == 2 {
+      compatibility::verify_archive(self, target, &archive)?;
+    }
     let entry = self.target(target)?;
     Ok(VerifiedBundle {
       app_version: self.app_version.clone(),
@@ -289,6 +326,58 @@ pub fn read_verified_bundle(
       MAX_BUNDLE_BYTES,
     )?;
     return manifest.verify_archive(target, archive, bytes).map(Some);
+  }
+  Ok(None)
+}
+
+/// Reads valid schema-2 bundles compatible with this client, independent of release.
+/// Missing or valid incompatible candidates are skipped; malformed present inputs fail.
+///
+/// # Errors
+/// Rejects unsafe, malformed, or checksum-invalid candidate bundles.
+pub fn read_compatible_bundle(
+  directories: &[PathBuf],
+  target: &str,
+) -> Result<Option<VerifiedBundle>, Error> {
+  read_reusable(directories, target, None)
+}
+
+/// Reads compatible schema-2 bundles or an exact clean-client schema-1 bundle.
+///
+/// # Errors
+/// Rejects unsafe, malformed, or checksum-invalid candidate bundles.
+pub fn read_reusable_bundle(
+  directories: &[PathBuf],
+  target: &str,
+  expected: &ComponentBuildInfo,
+) -> Result<Option<VerifiedBundle>, Error> {
+  read_reusable(directories, target, Some(expected))
+}
+
+fn read_reusable(
+  directories: &[PathBuf],
+  target: &str,
+  expected: Option<&ComponentBuildInfo>,
+) -> Result<Option<VerifiedBundle>, Error> {
+  validate_target(target)?;
+  for directory in directories {
+    let bytes = match read_bounded_file(&directory.join(BUNDLE_SET_FILE), MAX_BUNDLE_SET_BYTES) {
+      Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
+      result => result?,
+    };
+    let manifest = BundleSet::parse_intrinsic(&bytes)?;
+    let reusable = if manifest.schema_version == 1 {
+      expected.is_some_and(|expected| manifest.verify_revision(expected).is_ok())
+    } else {
+      manifest.is_compatible(target)?
+    };
+    if reusable {
+      let archive = read_bounded_file(
+        &directory.join(manifest.archive_name(target)?),
+        MAX_BUNDLE_BYTES,
+      )?;
+      return manifest.verify_archive(target, archive, bytes).map(Some);
+    }
   }
   Ok(None)
 }
@@ -369,8 +458,45 @@ fn validate_target(target: &str) -> Result<(), Error> {
 }
 
 fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
-  let file = File::open(path)?;
-  if file.metadata()?.len() > maximum as u64 {
+  #[cfg(unix)]
+  let file = File::from(
+    rustix::fs::open(
+      path,
+      rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::CLOEXEC,
+      rustix::fs::Mode::empty(),
+    )
+    .map_err(io::Error::from)?,
+  );
+  #[cfg(not(unix))]
+  let file = {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+      use std::os::windows::fs::OpenOptionsExt as _;
+      options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    options.open(path)?
+  };
+  let metadata = file.metadata()?;
+  #[cfg(windows)]
+  {
+    use std::os::windows::fs::MetadataExt as _;
+    if metadata.file_attributes() & 0x0400 != 0 {
+      return Err(Error::Invalid(
+        "remote bundle files must not be reparse points".into(),
+      ));
+    }
+  }
+  if !metadata.is_file() {
+    return Err(Error::Invalid(
+      "remote bundle must contain regular files".into(),
+    ));
+  }
+  if metadata.len() > maximum as u64 {
     return Err(Error::Invalid(
       "remote bundle file exceeds its size limit".into(),
     ));

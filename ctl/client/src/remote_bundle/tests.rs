@@ -265,6 +265,90 @@ fn archive_checksum_is_verified_before_it_can_be_uploaded() {
 }
 
 #[test]
+fn reusable_local_sets_skip_stale_schema1_payloads_and_reuse_other_clean_releases() {
+  let old = Directory::new();
+  old.install(&manifest(b"archive"), b"archive");
+  std::fs::remove_file(
+    old.0.join(
+      manifest(b"archive")["targets"][TARGET]["archive"]
+        .as_str()
+        .unwrap(),
+    ),
+  )
+  .unwrap();
+  let compatible = Directory::new();
+  let bundle = compatibility::tests::Fixture::new("0.0.9", &"b".repeat(40)).bundle();
+  let metadata: Value = serde_json::from_slice(&bundle.manifest).unwrap();
+  compatible.install(&metadata, &bundle.archive);
+  for identity in 0..3 {
+    let mut expected = build();
+    match identity {
+      0 => expected.source_revision = Some("a".repeat(40)),
+      1 => expected.source_revision = None,
+      _ => expected.dirty = true,
+    }
+    let reused = read_reusable_bundle(&[old.0.clone(), compatible.0.clone()], TARGET, &expected)
+      .unwrap()
+      .unwrap();
+    assert_eq!(reused.git_revision, bundle.git_revision);
+    assert_eq!(reused.app_version, "0.0.9");
+    assert!(
+      read_reusable_bundle(std::slice::from_ref(&old.0), TARGET, &expected)
+        .unwrap()
+        .is_none()
+    );
+  }
+  // Exact schema-1 policy remains unchanged for callers that demand it.
+  assert!(read_verified_bundle(std::slice::from_ref(&old.0), TARGET, &build()).is_err());
+  assert!(
+    read_compatible_bundle(std::slice::from_ref(&old.0), TARGET)
+      .unwrap()
+      .is_none()
+  );
+}
+
+#[test]
+fn compatible_local_selection_prefilters_only_valid_ineligible_metadata() {
+  let directory = Directory::new();
+  let fixture = compatibility::tests::Fixture::new("0.0.9", &"b".repeat(40));
+  let mut metadata = fixture.outer.clone();
+  let protocol = &mut metadata["targets"][TARGET]["components"]["ctmuxd"]["protocols"][0];
+  let protocol_build = protocol["build"].as_u64().unwrap();
+  protocol["version"] = json!(format!("2.0.{protocol_build}"));
+  protocol["supported_versions"] = json!([format!("2.0.{protocol_build}")]);
+  std::fs::write(
+    directory.0.join(BUNDLE_SET_FILE),
+    serde_json::to_vec(&metadata).unwrap(),
+  )
+  .unwrap();
+  assert!(
+    read_reusable_bundle(std::slice::from_ref(&directory.0), TARGET, &build())
+      .unwrap()
+      .is_none()
+  );
+  metadata["targets"][TARGET]["components"]["ctmuxd"]["build"]["dirty"] = json!(true);
+  std::fs::write(
+    directory.0.join(BUNDLE_SET_FILE),
+    serde_json::to_vec(&metadata).unwrap(),
+  )
+  .unwrap();
+  assert!(matches!(
+    read_compatible_bundle(std::slice::from_ref(&directory.0), TARGET),
+    Err(Error::Invalid(_))
+  ));
+  // Eligible metadata never authorizes a missing or corrupted payload.
+  let bundle = fixture.bundle();
+  directory.install(
+    &serde_json::from_slice(&bundle.manifest).unwrap(),
+    b"corrupted archive",
+  );
+  assert!(matches!(
+    read_compatible_bundle(std::slice::from_ref(&directory.0), TARGET),
+    Err(Error::Invalid(_))
+  ));
+}
+
+#[test]
 fn missing_directories_are_skipped_but_present_invalid_sets_are_not() {
   let absent = Directory::new();
   let invalid = Directory::new();

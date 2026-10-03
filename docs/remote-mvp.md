@@ -136,8 +136,8 @@ before uploading; if that ID cannot be verified, repair stops. It reuses the
 selected authenticated SSH connection, including its VPN/gateway route. Piped
 commands and later reconnects never prompt or install automatically.
 
-Repair validates the bundle's checksums, version, and exact clean source
-revision. It looks for local bundles (`CTL_REMOTE_BUNDLES_DIR`, checkout resources
+Repair validates the bundle's checksums and its own product/source identity.
+It looks for reusable local bundles (`CTL_REMOTE_BUNDLES_DIR`, checkout resources
 in debug builds, resources beside the executable, or `~/.tokn/ctl/agent-bundles`),
 then its verified download cache, the matching official release, and an existing
 GitHub bundle artifact for that exact revision when `gh` is available. It never selects an
@@ -145,8 +145,17 @@ arbitrary latest build or starts a workflow. For source development, `pnpm
 agents:sync` from `apps/desktop` prepares bundles for a clean pushed commit.
 Downloaded manifests and target archives are stored in
 `~/.tokn/ctl/agent-bundles/<revision>/<target>/`, shared across remote hosts.
-Each reuse verifies the version, full source revision, and checksum before any
-network lookup, so a matching cached bundle works offline. Publication uses
+Schema-2 bundles include full component metadata for `ctl-agent`, `ctmuxd`, and
+`ctl-taskd`. Reuse verifies the archive, each binary checksum, target, clean source
+identity, and agreement between the outer and archived metadata. Every required
+client/service contract and companion dependency must have an explicit shared
+published version. Product releases and source revisions may differ from the
+CLI, and development clients can reuse verified compatible bundles. Exact-current
+source entries are checked first; other entries use stable revision order, which
+does not claim recency. Schema-1 bundles remain exact-clean-source-only. Network
+downloads still match the clean, identified client revision.
+These checks run before any network lookup, so a compatible cached bundle works
+offline. Publication uses
 private staging and atomic rename; cancelled downloads leave no partial cache
 entry. Damaged managed cache entries can be downloaded again. An invalid
 explicit `CTL_REMOTE_BUNDLES_DIR` still stops repair, and cache write errors warn

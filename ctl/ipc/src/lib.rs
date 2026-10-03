@@ -5,6 +5,8 @@ pub mod identities;
 pub mod lifecycle;
 pub mod managed;
 pub mod remote_vpn;
+#[cfg(unix)]
+pub mod stdio;
 pub mod vpn;
 mod vpn_config;
 pub use vpn_config::{VpnConnection, VpnProvider, VpnSettings};
@@ -312,7 +314,8 @@ pub fn vpn_owner_target(gateways: &[SshGateway], vpn_index: usize) -> Option<Ssh
   }
   let mut target = SshTarget {
     destination: owner.destination.clone(),
-    ssh_config_alias: None,
+    // A HostName override must retain the alias used when preparing this owner.
+    ssh_config_alias: owner.hostname.as_ref().map(|_| owner.destination.clone()),
     use_ssh_config_master: Some(false),
     hostname: owner.hostname.clone(),
     user: owner.user.clone(),
@@ -1285,6 +1288,43 @@ mod tests {
       }
       assert!(!invalid.has_valid_vpn_configuration(), "field {field}");
     }
+  }
+
+  #[test]
+  fn remote_vpn_owner_keeps_alias_overrides_and_its_exact_preceding_route() {
+    let gateway: SshGateway = serde_json::from_value(serde_json::json!({
+      "destination": "prior-hop", "hostname": null, "user": "bob", "port": 2220,
+      "identity_file": null, "mode": "automatic"
+    }))
+    .unwrap();
+    let mut owner = gateway.clone();
+    owner.destination = "saved-alias".into();
+    owner.hostname = Some("10.0.0.7".into());
+    owner.user = Some("alice".into());
+    let vpn = SshGateway {
+      kind: GatewayKind::Vpn,
+      vpn: Some(VpnGateway {
+        connection_id: "work".into(),
+        socket_path: std::env::temp_dir().join("unused.sock"),
+        expected_remote_id: None,
+      }),
+      destination: "work".into(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      mode: SshGatewayMode::Automatic,
+    };
+    let route = [gateway.clone(), owner, vpn];
+    let target = vpn_owner_target(&route, 2).unwrap();
+    assert_eq!(target.destination, "saved-alias");
+    assert_eq!(target.ssh_config_alias.as_deref(), Some("saved-alias"));
+    assert_eq!(target.hostname.as_deref(), Some("10.0.0.7"));
+    assert_eq!(target.user.as_deref(), Some("alice"));
+    assert_eq!(target.port, Some(2220));
+    assert_eq!(target.gateways, [gateway]);
+    assert!(!target.uses_ssh_config_master());
+    assert_eq!(target.use_ssh_config_master, Some(false));
   }
 
   #[test]

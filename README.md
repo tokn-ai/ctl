@@ -626,6 +626,13 @@ If that SSH host's agent does not support VPN control, the desktop offers
 preceding route, verifies its saved account identity before uploading, and retries
 the original destination connection.
 
+VPN traffic reuses that SSH host's authenticated connection. If its connection
+has closed, reconnect the route to authenticate the SSH host again. A terminal
+handshake that closes after account verification reports the final destination;
+it does not establish a protocol mismatch. Component updates preserve running
+daemons, so an older daemon may still need a manual restart when its sessions
+can be ended.
+
 ### Shells, commands, and file copies
 
 The native shell command creates a new persistent ctmux session by default.

@@ -24,7 +24,7 @@ zeroize.workspace = true
 url = "2.5.8"
 
 [target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+rustix = { workspace = true, features = ["net", "stdio"] }
 
 [target.'cfg(windows)'.dependencies]
 interprocess = { version = "2.4.4", features = ["tokio"] }

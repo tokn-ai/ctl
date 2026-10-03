@@ -173,16 +173,7 @@ impl ConnectionTargetDto {
         .enumerate()
         .filter_map(|(index, gateway)| {
           let vpn = gateway.vpn.as_ref()?;
-          let owner = ctl_ipc::vpn_owner_target(&target.gateways, index).map(|mut owner| {
-            // HostName overrides must keep the original OpenSSH alias lookup.
-            // The owner always uses a private master, even for an alias method.
-            if owner.hostname.is_some() {
-              owner.ssh_config_alias = Some(owner.destination.clone());
-              owner.use_ssh_config_master = Some(false);
-              owner.normalize_master_policy();
-            }
-            owner
-          });
+          let owner = ctl_ipc::vpn_owner_target(&target.gateways, index);
           Some(VpnRoute {
             connection_id: vpn.connection_id.clone(),
             owner,

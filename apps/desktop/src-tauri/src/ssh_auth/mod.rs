@@ -190,7 +190,7 @@ pub async fn probe(
     if restart_check {
       require_restart_support(&identity)?;
     } else {
-      verification::verify(stream).await?;
+      verification::verify(stream, target.label()).await?;
     }
     Ok(identity)
   };

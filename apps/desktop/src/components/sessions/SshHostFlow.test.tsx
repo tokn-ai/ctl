@@ -1254,6 +1254,18 @@ describe("SSH host quick-input flow", () => {
     expect(await screen.findByRole("option", { name: /Update remote components/ })).toBeTruthy();
   });
 
+  it("keeps a closed daemon handshake retryable without assuming components need updating", async () => {
+    const message = "SSH verified final-destination, but its terminal connection closed before the daemon replied.";
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "remote_ctmux_handshake_closed", message });
+    render(<SshHostFlow suggestions={[]} warning={null} target={{ kind: "ssh", destination: "final-destination" }}
+      autoConnect onClose={vi.fn()} />);
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Connect" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
+    expect(screen.queryByRole("option", { name: /Force restart/ })).toBeNull();
+    expect(installRemoteAgent).not.toHaveBeenCalled();
+  });
+
   it("discovers identities only on the identity step and connects with a selected path", async () => {
     vi.mocked(listSshIdentityFiles).mockResolvedValue({
       identity_files: [

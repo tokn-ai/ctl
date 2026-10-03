@@ -90,7 +90,7 @@ pub async fn probe(
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
   connection::remote_service(async {
     let (stream, identity) = connect_identified(&target).await?;
-    verification::verify(stream).await?;
+    verification::verify(stream, target.label()).await?;
     Ok(identity)
   })
   .await

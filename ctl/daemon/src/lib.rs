@@ -67,6 +67,7 @@ const REMOTE_LISTENERS_COMMAND: &str = concat!(
 
 #[derive(Default)]
 struct State {
+  socket_path: Option<PathBuf>,
   #[cfg(unix)]
   lifecycle: Option<lifecycle::Control>,
   attempts: Mutex<HashMap<String, Attempt>>,
@@ -294,6 +295,7 @@ pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
   let (lifecycle, mut restarts) = lifecycle::Control::new();
   let instance_id = lifecycle.instance_id.clone();
   let state = Arc::new(State {
+    socket_path: Some(guard.0.clone()),
     vpn_service: Some(vpn_service),
     lifecycle: Some(lifecycle),
     endpoint_registry: endpoint_registry::Registry::for_socket(&guard.0),
@@ -695,6 +697,10 @@ async fn ensure_master(
     &target,
     &endpoint,
     &token,
+    state
+      .socket_path
+      .as_deref()
+      .unwrap_or(&ctl_ipc::socket_path()),
     #[cfg(target_os = "macos")]
     Some(&identities),
   )?;
@@ -1593,6 +1599,7 @@ fn start_master(
   target: &SshTarget,
   endpoint: &MasterEndpoint,
   token: &str,
+  broker_socket: &Path,
   #[cfg(target_os = "macos")] identities: Option<&identity_connection::PreparedIdentities>,
 ) -> Result<Child, RequestError> {
   if endpoint.shared && endpoint.startup != SharedMasterStartup::Create {
@@ -1608,6 +1615,7 @@ fn start_master(
     identities,
   );
   command
+    .env("CTLD_SOCKET_PATH", broker_socket)
     .env("SSH_ASKPASS", current_executable)
     .env("SSH_ASKPASS_REQUIRE", "force")
     .env("DISPLAY", "ctld-askpass")

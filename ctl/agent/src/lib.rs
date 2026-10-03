@@ -9,7 +9,7 @@ pub mod identity;
 pub mod listeners;
 pub mod maintenance;
 pub mod restart;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 mod stdio;
 pub mod vpn;
 
@@ -104,7 +104,7 @@ impl ConnectConfig {
 pub async fn connect_stdio(config: &ConnectConfig) -> Result<(), AgentError> {
   #[cfg(unix)]
   {
-    let (reader, writer) = stdio::take().map_err(AgentError::Relay)?;
+    let (reader, writer) = ctl_ipc::stdio::take().map_err(AgentError::Relay)?;
     connect(reader, writer, config).await
   }
   #[cfg(not(unix))]

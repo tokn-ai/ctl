@@ -1,11 +1,15 @@
 //! OpenSSH `ProxyCommand` helper for ordered SSH, SOCKS5, and managed VPN routes.
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
-use ctl_ipc::{GatewayKind, SshGateway, VpnGateway, VpnState};
+use ctl_ipc::{
+  ClientMessage, GatewayKind, ServerMessage, SshGateway, SshTarget, VpnGateway, VpnState,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use zeroize::Zeroizing;
@@ -154,8 +158,9 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
       if !prefix.is_empty() {
         let owner = ctl_ipc::vpn_owner_target(gateways, gateways.len() - 1)
           .ok_or_else(|| io::Error::other("VPN must be first or follow an SSH host"))?;
+        let control_path = prepared_vpn_owner_master(&owner).await?;
         let client = ctl_ipc::remote_vpn::Client::new(owner, vpn.expected_remote_id.clone())
-          .with_proxy_executable(std::env::current_exe()?);
+          .with_control_path(control_path);
         return Ok(Box::new(
           client
             .open_connection(&vpn.connection_id, host, port)
@@ -169,6 +174,73 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
       Ok(stream)
     }
   }
+}
+
+/// Reuse only the owner's explicitly prepared connection on this helper's broker.
+/// A proxy carries target SSH bytes, so it cannot prompt or start another owner.
+async fn prepared_vpn_owner_master(owner: &SshTarget) -> io::Result<PathBuf> {
+  tokio::time::timeout(Duration::from_secs(15), async {
+    // CTLD_SOCKET_PATH is inherited from the broker that launched this helper.
+    // Querying MasterStatus also respects its disconnect policy and registry.
+    let mut broker = ctl_ipc::connect_existing().await.map_err(|error| {
+      io::Error::other(format!(
+        "Could not find the VPN SSH host's prepared connection: {error}"
+      ))
+    })?;
+    ctl_ipc::write_frame(
+      &mut broker,
+      &ClientMessage::Handshake {
+        protocol: ctl_ipc::protocol_offer(),
+      },
+    )
+    .await
+    .map_err(io::Error::other)?;
+    match ctl_ipc::read_frame::<_, ServerMessage>(&mut broker)
+      .await
+      .map_err(io::Error::other)?
+    {
+      Some(ServerMessage::HandshakeAccepted { protocol_version })
+        if ctl_ipc::protocol_offer().accepts(protocol_version)
+          && ctl_ipc::gateway_route_supported(&owner.gateways, protocol_version) => {}
+      Some(ServerMessage::Error { message, .. }) => return Err(io::Error::other(message)),
+      _ => {
+        return Err(io::Error::other(
+          "The VPN SSH host's broker returned an incompatible handshake",
+        ));
+      }
+    }
+    ctl_ipc::write_frame(
+      &mut broker,
+      &ClientMessage::MasterStatus {
+        target: owner.clone(),
+      },
+    )
+    .await
+    .map_err(io::Error::other)?;
+    match ctl_ipc::read_frame::<_, ServerMessage>(&mut broker)
+      .await
+      .map_err(io::Error::other)?
+    {
+      Some(ServerMessage::MasterReady { control_path }) if control_path.is_absolute() => {
+        Ok(control_path)
+      }
+      Some(ServerMessage::AuthenticationRequired) => Err(io::Error::new(
+        io::ErrorKind::NotConnected,
+        "The VPN SSH host needs authentication. Reconnect the host before using its VPN route.",
+      )),
+      Some(ServerMessage::Error { message, .. }) => Err(io::Error::other(message)),
+      _ => Err(io::Error::other(
+        "The VPN SSH host's broker closed or returned an invalid connection status",
+      )),
+    }
+  })
+  .await
+  .map_err(|_| {
+    io::Error::new(
+      io::ErrorKind::TimedOut,
+      "Checking the VPN SSH host's prepared connection timed out",
+    )
+  })?
 }
 
 async fn vpn_endpoint(vpn: &VpnGateway) -> io::Result<SocketAddr> {
@@ -349,19 +421,20 @@ pub async fn run(route: &str, host: &str, port: u16) -> io::Result<()> {
     return Err(io::Error::other("invalid proxy route"));
   }
   let mut stream = connect(&gateways, host, port).await?;
-  let mut stdio = StdioPipe {
-    input: tokio::io::stdin(),
-    output: tokio::io::stdout(),
-  };
+  #[cfg(unix)]
+  let (input, output) = ctl_ipc::stdio::take()?;
+  #[cfg(not(unix))]
+  let (input, output) = (tokio::io::stdin(), tokio::io::stdout());
+  let mut stdio = StdioPipe { input, output };
   tokio::io::copy_bidirectional(&mut stdio, &mut stream).await?;
   Ok(())
 }
 
-struct StdioPipe {
-  input: tokio::io::Stdin,
-  output: tokio::io::Stdout,
+struct StdioPipe<R, W> {
+  input: R,
+  output: W,
 }
-impl AsyncRead for StdioPipe {
+impl<R: AsyncRead + Unpin, W: Unpin> AsyncRead for StdioPipe<R, W> {
   fn poll_read(
     mut self: Pin<&mut Self>,
     context: &mut Context<'_>,
@@ -370,7 +443,7 @@ impl AsyncRead for StdioPipe {
     Pin::new(&mut self.input).poll_read(context, buffer)
   }
 }
-impl AsyncWrite for StdioPipe {
+impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for StdioPipe<R, W> {
   fn poll_write(
     mut self: Pin<&mut Self>,
     context: &mut Context<'_>,

@@ -4,6 +4,7 @@ use ctmux_client::{
   AttachmentEvent, AttachmentEvents, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES,
 };
 use ctmux_proto::TerminalSize;
+use std::collections::VecDeque;
 use std::path::Path;
 use tokio::task::JoinHandle;
 
@@ -15,6 +16,50 @@ pub struct Pane {
   events: AttachmentEvents,
   pub token: String,
   runner: Option<JoinHandle<()>>,
+  sequence: u64,
+  history_snapshot_id: Option<String>,
+  history_boundary: u64,
+  replay: VecDeque<ReplayChunk>,
+  replay_bytes: usize,
+  history_job: Option<JoinHandle<std::io::Result<PreparedHistory>>>,
+}
+
+const MAX_HISTORY_REPLAY_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone)]
+struct ReplayChunk {
+  start: u64,
+  end: u64,
+  data: Vec<u8>,
+}
+
+struct PreparedHistory {
+  snapshot_id: String,
+  sequence: u64,
+  vt: avt::Vt,
+  pending: Vec<u8>,
+  history_gap: bool,
+}
+
+fn replay_history(
+  mut prepared: PreparedHistory,
+  chunks: Vec<ReplayChunk>,
+) -> std::io::Result<PreparedHistory> {
+  for chunk in chunks {
+    if chunk.start != prepared.sequence {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "history replay has a gap",
+      ));
+    }
+    prepared.history_gap |= ctmux_client::history::feed_projection_with_evictions(
+      &mut prepared.vt,
+      &mut prepared.pending,
+      &chunk.data,
+    )?;
+    prepared.sequence = chunk.end;
+  }
+  Ok(prepared)
 }
 
 pub fn identity() -> ClientIdentity {
@@ -72,6 +117,12 @@ impl Pane {
       events,
       token,
       runner: Some(runner),
+      sequence: attached.replay_from,
+      history_snapshot_id: None,
+      history_boundary: attached.replay_from,
+      replay: VecDeque::new(),
+      replay_bytes: 0,
+      history_job: None,
     })
   }
 
@@ -87,51 +138,189 @@ impl Pane {
           break;
         }
       };
-      match event {
-        AttachmentEvent::Checkpoint {
-          checkpoint,
-          history,
-          ..
-        } => {
-          self.model.restore(&checkpoint);
-          self.model.set_history(history.lines);
-          self
-            .control
-            .acknowledge_checkpoint(checkpoint.sequence)
-            .await?;
-        }
-        AttachmentEvent::Output {
-          data, sequence_end, ..
-        } => {
-          let reply = self.model.feed(&data);
-          self.control.acknowledge_output(sequence_end).await?;
-          if !reply.is_empty() && self.control.state().leases().input.owned_by_client {
-            self.control.input(reply).await?;
-          }
-        }
-        AttachmentEvent::PtyGeometryChanged {
-          terminal_size,
-          observed_sequence,
-        } => {
-          self.model.resize(&terminal_size);
-          self.control.acknowledge_geometry(observed_sequence).await?;
-        }
-        AttachmentEvent::ServerError { message: error, .. } => message = Some(error),
-        AttachmentEvent::SessionEnded { exit_code, .. } => {
-          self.connected = false;
-          self.ended = Some(exit_code.map_or_else(
-            || "Terminal ended".into(),
-            |code| format!("Exited (code {code})"),
-          ));
-        }
-        AttachmentEvent::Exited { .. } => self.connected = false,
-        _ => {}
+      if let Some(notice) = self.apply_event(event).await? {
+        message = Some(notice);
       }
     }
+    self.publish_ready_history().await;
     Ok(message)
   }
 
+  async fn apply_event(&mut self, event: AttachmentEvent) -> Result<Option<String>> {
+    match event {
+      AttachmentEvent::Checkpoint {
+        checkpoint,
+        history,
+        history_manifest,
+        history_gap,
+      } => {
+        self.cancel_history();
+        self.sequence = checkpoint.sequence;
+        self.history_boundary = checkpoint.sequence;
+        self.history_snapshot_id = history_manifest.map(|manifest| manifest.snapshot_id);
+        self.model.restore(&checkpoint);
+        self.model.history_gap = history_gap || history.truncated;
+        self.model.set_history(history.lines);
+        self
+          .control
+          .acknowledge_checkpoint(checkpoint.sequence)
+          .await?;
+      }
+      AttachmentEvent::Output {
+        data,
+        sequence_start,
+        sequence_end,
+      } => {
+        let reply = self.model.feed(&data);
+        self.sequence = sequence_end;
+        if self.history_snapshot_id.is_some() {
+          self.replay_bytes += data.len();
+          self.replay.push_back(ReplayChunk {
+            start: sequence_start,
+            end: sequence_end,
+            data,
+          });
+          if self.replay_bytes > MAX_HISTORY_REPLAY_BYTES {
+            self.model.history_gap = true;
+            self.cancel_history();
+            let _ignored = self.control.request_checkpoint().await;
+          }
+        }
+        self.control.acknowledge_output(sequence_end).await?;
+        if !reply.is_empty() && self.control.state().leases().input.owned_by_client {
+          self.control.input(reply).await?;
+        }
+      }
+      AttachmentEvent::PtyGeometryChanged {
+        terminal_size,
+        observed_sequence,
+      } => {
+        self.cancel_history();
+        self.model.resize(&terminal_size);
+        self.control.acknowledge_geometry(observed_sequence).await?;
+      }
+      AttachmentEvent::HistorySynced {
+        snapshot_id,
+        checkpoint,
+        rows,
+        scrollback_limit,
+        history_gap,
+        ..
+      } => {
+        if self.history_snapshot_id.as_deref() != Some(snapshot_id.as_str())
+          || checkpoint.sequence != self.history_boundary
+        {
+          return Ok(None);
+        }
+        let chunks = self.replay.iter().cloned().collect();
+        if let Some(job) = self.history_job.take() {
+          job.abort();
+        }
+        self.history_job = Some(tokio::task::spawn_blocking(move || {
+          let vt = ctmux_client::history::restore_projection(&checkpoint, &rows, scrollback_limit)?;
+          replay_history(
+            PreparedHistory {
+              snapshot_id,
+              sequence: checkpoint.sequence,
+              vt,
+              pending: checkpoint.input_prefix,
+              history_gap,
+            },
+            chunks,
+          )
+        }));
+      }
+      AttachmentEvent::ServerError { message: error, .. } => return Ok(Some(error)),
+      AttachmentEvent::SessionEnded { exit_code, .. } => {
+        self.connected = false;
+        self.ended = Some(exit_code.map_or_else(
+          || "Terminal ended".into(),
+          |code| format!("Exited (code {code})"),
+        ));
+      }
+      AttachmentEvent::Exited { .. } => self.connected = false,
+      _ => {}
+    }
+    Ok(None)
+  }
+
+  async fn publish_ready_history(&mut self) {
+    if self
+      .history_job
+      .as_ref()
+      .is_some_and(tokio::task::JoinHandle::is_finished)
+    {
+      let job = self
+        .history_job
+        .take()
+        .expect("completed history job exists");
+      self.publish_history_result(job.await).await;
+    }
+  }
+
+  async fn publish_history_result(
+    &mut self,
+    result: std::result::Result<std::io::Result<PreparedHistory>, tokio::task::JoinError>,
+  ) {
+    match result {
+      Ok(Ok(prepared))
+        if self.history_snapshot_id.as_deref() == Some(prepared.snapshot_id.as_str()) =>
+      {
+        if prepared.sequence == self.sequence {
+          if !self.model.adopt_history_projection(
+            prepared.vt,
+            prepared.pending,
+            prepared.history_gap,
+          ) {
+            self.model.history_gap = true;
+            let _ignored = self.control.request_checkpoint().await;
+          }
+          self.cancel_history();
+        } else {
+          let chunks = self
+            .replay
+            .iter()
+            .filter(|chunk| chunk.start >= prepared.sequence)
+            .cloned()
+            .collect();
+          self.history_job = Some(tokio::task::spawn_blocking(move || {
+            replay_history(prepared, chunks)
+          }));
+        }
+      }
+      Ok(Ok(_)) => {}
+      _ => {
+        self.model.history_gap = true;
+        self.cancel_history();
+        let _ignored = self.control.request_checkpoint().await;
+      }
+    }
+  }
+
+  fn cancel_history(&mut self) {
+    self.history_snapshot_id = None;
+    self.replay.clear();
+    self.replay_bytes = 0;
+    if let Some(job) = self.history_job.take() {
+      job.abort();
+    }
+  }
+
+  pub fn history_gap(&self) -> bool {
+    self.model.history_gap || self.history_snapshot_id.is_some()
+  }
+
+  pub async fn finish_ended_history(&mut self) {
+    if self.ended.is_none() {
+      return;
+    }
+    while let Some(job) = self.history_job.take() {
+      self.publish_history_result(job.await).await;
+    }
+  }
+
   pub async fn close(&mut self) {
+    self.cancel_history();
     if self.connected {
       let _ = self.control.detach().await;
     }
@@ -147,6 +336,9 @@ impl Pane {
 
 impl Drop for Pane {
   fn drop(&mut self) {
+    if let Some(job) = &self.history_job {
+      job.abort();
+    }
     if let Some(runner) = &self.runner {
       runner.abort();
     }

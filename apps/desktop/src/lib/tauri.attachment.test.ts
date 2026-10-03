@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenAttachmentRequest, OpenAttachmentResponse } from "./types";
-import { openAttachment } from "./tauri";
+import { openAttachment, requestAttachmentCheckpoint } from "./tauri";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -20,6 +20,14 @@ const request: OpenAttachmentRequest = {
 beforeEach(() => { vi.resetAllMocks(); });
 
 describe("attachment IPC cancellation", () => {
+  it("requests a checkpoint for only the current attachment", async () => {
+    ipc.invoke.mockResolvedValue(undefined);
+    await requestAttachmentCheckpoint({ attachment_id: "current" });
+    expect(ipc.invoke).toHaveBeenCalledExactlyOnceWith("request_attachment_checkpoint", {
+      request: { attachment_id: "current" },
+    });
+  });
+
   it.each([true, false])("cancels before or after the opening notification (before=%s)", async (before) => {
     let reject_open!: (error: unknown) => void;
     let notify_opening!: (id: string) => void;

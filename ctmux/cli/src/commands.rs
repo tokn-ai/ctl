@@ -394,6 +394,7 @@ async fn kill_session<C: Connector>(connector: &C, session: &str) -> Result<(), 
                 terminal_id: terminal.terminal_id,
                 reason: "Session terminated".into(),
                 lines: Vec::new(),
+                history_gap: true,
               })
               .collect()
           }),

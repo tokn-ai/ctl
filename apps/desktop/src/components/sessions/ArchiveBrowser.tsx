@@ -15,10 +15,11 @@ export function ArchiveBrowser({ targets, on_close }: {
   const selected_archive = archives.find((archive) => JSON.stringify([archive.host_key, archive.session_id]) === selected?.archive_key);
   const selected_pane = selected_archive?.terminals.find((terminal) => terminal.terminal_id === selected?.terminal_id);
   const output_key = selected_archive && selected_pane ? JSON.stringify([selected_archive.host_key, selected_archive.session_id, selected_pane.terminal_id]) : null;
-  const [output, setOutput] = useState<{ key: string; lines: string[]; next_offset: string | null } | null>(null);
+  const [output, setOutput] = useState<{ key: string; lines: string[]; next_offset: string | null; history_gap: boolean } | null>(null);
   const [reading, setReading] = useState(false);
   const read_generation = useRef(0);
   const selected_lines = output?.key === output_key ? output.lines : selected_pane?.lines;
+  const history_gap = selected_pane?.history_gap || (output?.key === output_key && output.history_gap);
   const selected_text = selected_lines?.some((line) => line.trim().length > 0) ? selected_lines.join("\n") : null;
   const displayed_output = !selected_archive ? "Select an archived session."
     : selected_text !== null ? selected_text
@@ -52,7 +53,7 @@ export function ArchiveBrowser({ targets, on_close }: {
       .then((response) => {
         if (generation !== read_generation.current) return;
         if (response.kind !== "output") throw new Error("Unexpected archive output response");
-        setOutput({ key: output_key, lines: response.lines, next_offset: response.next_offset });
+        setOutput({ key: output_key, lines: response.lines, next_offset: response.next_offset, history_gap: response.history_gap });
       })
       .catch((failure) => { if (generation === read_generation.current) setError(errorMessage(failure)); })
       .finally(() => { if (generation === read_generation.current) setReading(false); });
@@ -68,7 +69,7 @@ export function ArchiveBrowser({ targets, on_close }: {
       .then((response) => {
         if (generation !== read_generation.current) return;
         if (response.kind !== "output") throw new Error("Unexpected archive output response");
-        setOutput((previous) => previous?.key === output_key ? { ...previous, lines: [...previous.lines, ...response.lines], next_offset: response.next_offset } : previous);
+        setOutput((previous) => previous?.key === output_key ? { ...previous, lines: [...previous.lines, ...response.lines], next_offset: response.next_offset, history_gap: previous.history_gap || response.history_gap } : previous);
       })
       .catch((failure) => { if (generation === read_generation.current) setError(errorMessage(failure)); })
       .finally(() => { if (generation === read_generation.current) setReading(false); });
@@ -79,6 +80,7 @@ export function ArchiveBrowser({ targets, on_close }: {
     {loading && <p role="status">Loading archive…</p>}
     {error && <p role="alert">{error}</p>}
     {!loading && !error && !archives.length && <p>No retained archives on this device.</p>}
+    {history_gap && <p role="status">Earlier output is unavailable. This archive contains the retained portion of the session.</p>}
     <div className="archive-browser-content">
       <nav aria-label="Retained sessions">{archives.map((archive) => {
         const target = targets.find((candidate) => targetKey(candidate) === archive.host_key);

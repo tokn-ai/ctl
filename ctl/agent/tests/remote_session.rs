@@ -89,16 +89,7 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
     attach_request.clone(),
   )
   .await?;
-  if let Some(checkpoint) = &attached.checkpoint {
-    write_frame(
-      &mut attachment,
-      &ClientMessage::PresentationApplied {
-        sequence: checkpoint.sequence,
-      },
-    )
-    .await?;
-  }
-  read_output_until(&mut attachment, b"ready").await?;
+  read_attached_output_until(&mut attachment, &attached, b"ready").await?;
 
   // This is the lifecycle of a broken SSH channel: its disposable `ctl-agent`
   // relay disappears, but the daemon-owned shell must remain alive.
@@ -126,15 +117,6 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
   )
   .await?;
   assert!(resumed_attachment.input_lease.owned_by_client);
-  if let Some(checkpoint) = &resumed_attachment.checkpoint {
-    write_frame(
-      &mut resumed,
-      &ClientMessage::PresentationApplied {
-        sequence: checkpoint.sequence,
-      },
-    )
-    .await?;
-  }
   write_frame(
     &mut resumed,
     &ClientMessage::Input {
@@ -142,7 +124,12 @@ async fn ssh_scoped_gateway_disconnect_does_not_end_the_remote_session() -> Test
     },
   )
   .await?;
-  read_output_until(&mut resumed, b"received:through-reconnect").await?;
+  read_attached_output_until(
+    &mut resumed,
+    &resumed_attachment,
+    b"received:through-reconnect",
+  )
+  .await?;
   wait_for_session_end(&mut resumed).await?;
   drop(resumed);
 
@@ -208,10 +195,38 @@ async fn wait_for_socket(socket: &Path) -> TestResult {
   }
 }
 
-async fn read_output_until(stream: &mut DuplexStream, marker: &[u8]) -> TestResult {
+async fn read_attached_output_until(
+  stream: &mut DuplexStream,
+  attached: &ctmux_client::AttachedSession,
+  marker: &[u8],
+) -> TestResult {
+  if let Some(checkpoint) = &attached.checkpoint {
+    acknowledge_output(stream, checkpoint.sequence).await?;
+  }
+  read_output_until(
+    stream,
+    marker,
+    attached
+      .checkpoint
+      .as_ref()
+      .map_or(&[], |checkpoint| checkpoint.payload.as_slice()),
+  )
+  .await
+}
+
+async fn read_output_until(
+  stream: &mut DuplexStream,
+  marker: &[u8],
+  initial_output: &[u8],
+) -> TestResult {
   let deadline = Instant::now() + TEST_TIMEOUT;
-  let mut output = Vec::new();
+  let mut output = initial_output.to_vec();
   loop {
+    // A fast child can already be represented by the authoritative screen.
+    // Readiness does not require the same bytes to arrive as a later delta.
+    if output.windows(marker.len()).any(|window| window == marker) {
+      return Ok(());
+    }
     let message = timeout(
       deadline.saturating_duration_since(Instant::now()),
       read_frame::<_, ServerMessage>(stream),
@@ -219,13 +234,66 @@ async fn read_output_until(stream: &mut DuplexStream, marker: &[u8]) -> TestResu
     .await
     .map_err(|_| "timed out waiting for terminal output")??
     .ok_or("attachment closed before terminal output arrived")?;
-    if let ServerMessage::Output { data, .. } = message {
-      output.extend_from_slice(&data);
-      if output.windows(marker.len()).any(|window| window == marker) {
-        return Ok(());
+    match message {
+      ServerMessage::Output {
+        data, sequence_end, ..
+      } => {
+        output.extend_from_slice(&data);
+        acknowledge_output(stream, sequence_end).await?;
       }
+      ServerMessage::Checkpoint { checkpoint, .. } => {
+        output = checkpoint.payload;
+        acknowledge_output(stream, checkpoint.sequence).await?;
+      }
+      _ => {}
     }
   }
+}
+
+// Final output and SessionEnded may already be buffered after the gateway
+// closes. A late acknowledgement must not prevent reading those frames.
+async fn acknowledge_output(stream: &mut DuplexStream, sequence: u64) -> TestResult {
+  match write_frame(stream, &ClientMessage::PresentationApplied { sequence }).await {
+    Ok(()) => Ok(()),
+    Err(ctmux_proto::CodecError::Io(error))
+      if matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+          | std::io::ErrorKind::ConnectionReset
+          | std::io::ErrorKind::NotConnected
+      ) =>
+    {
+      Ok(())
+    }
+    Err(error) => Err(error.into()),
+  }
+}
+
+#[tokio::test]
+async fn final_output_is_drained_after_the_gateway_closes() -> TestResult {
+  let (mut client, mut gateway) = tokio::io::duplex(1024);
+  write_frame(
+    &mut gateway,
+    &ServerMessage::Output {
+      sequence_start: 0,
+      sequence_end: 5,
+      data: b"final".to_vec(),
+    },
+  )
+  .await?;
+  write_frame(
+    &mut gateway,
+    &ServerMessage::SessionEnded {
+      session_id: "finished".into(),
+      exit_code: Some(0),
+    },
+  )
+  .await?;
+  drop(gateway);
+
+  read_output_until(&mut client, b"final", &[]).await?;
+  wait_for_session_end(&mut client).await?;
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -826,6 +826,25 @@ export interface TerminalHistorySnapshot {
   lines: string[];
 }
 
+export interface TerminalHistoryRow {
+  text: string;
+  wrapped: boolean;
+}
+
+export interface TerminalHistoryManifest {
+  snapshot_id: string;
+  sequence: Sequence;
+  generation: string;
+  revision: string;
+  total_rows: string;
+  total_bytes: string;
+  total_lines: string;
+  first_line: string;
+  truncated: boolean;
+  content_hash: string;
+  scrollback_limit: string;
+}
+
 interface AttachmentEventBase {
   attachment_id: string;
 }
@@ -838,6 +857,17 @@ export interface CheckpointEvent extends PresentationEventBase {
   event_type: "checkpoint";
   checkpoint: TerminalCheckpoint;
   history: TerminalHistorySnapshot;
+  history_manifest?: TerminalHistoryManifest;
+  history_gap: boolean;
+}
+
+export interface HistorySyncedEvent extends AttachmentEventBase {
+  event_type: "history_synced";
+  snapshot_id: string;
+  checkpoint: TerminalCheckpoint;
+  history: TerminalHistorySnapshot;
+  rows: TerminalHistoryRow[];
+  scrollback_limit: string;
   history_gap: boolean;
 }
 
@@ -903,6 +933,7 @@ export interface AttachmentErrorEvent extends AttachmentEventBase {
 
 export type AttachmentEvent =
   | CheckpointEvent
+  | HistorySyncedEvent
   | OutputEvent
   | PtyGeometryChangedEvent
   | LeaseStatusEvent
@@ -1040,6 +1071,7 @@ export interface ArchivedTerminalInfo {
   terminal_id: string;
   reason: string;
   lines: string[];
+  history_gap?: boolean;
 }
 export interface SessionArchive {
   session_id: string;
@@ -1054,7 +1086,7 @@ export type ArchiveAction =
   | { kind: "save"; archive: SessionArchive }
   | { kind: "delete"; host_key: string; session_id: string }
   | { kind: "read"; host_key: string; session_id: string; terminal_id: string; offset: string };
-export type ArchiveResponse = { kind: "list"; archives: SessionArchive[] } | { kind: "saved" } | { kind: "deleted" } | { kind: "output"; lines: string[]; next_offset: string | null };
+export type ArchiveResponse = { kind: "list"; archives: SessionArchive[] } | { kind: "saved" } | { kind: "deleted" } | { kind: "output"; lines: string[]; next_offset: string | null; history_gap: boolean };
 
 
 export interface CachedSessionPresentation {

@@ -1,14 +1,21 @@
 use ctmux_proto::{TerminalCheckpoint, TerminalSize};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StringControl {
+  None,
+  Active,
+  Escape,
+}
+
 /// A PTY-sized emulator. Host viewport changes never resize this model.
 pub struct Model {
   pub vt: avt::Vt,
   pub bracketed_paste: bool,
+  pub history_gap: bool,
   history: Vec<String>,
   pending: Vec<u8>,
   escape: String,
-  string_control: bool,
-  string_escape: bool,
+  string_control: StringControl,
 }
 
 impl Model {
@@ -22,11 +29,11 @@ impl Model {
         .scrollback_limit(2_000)
         .build(),
       bracketed_paste: false,
+      history_gap: false,
       history: Vec::new(),
       pending: Vec::new(),
       escape: String::new(),
-      string_control: false,
-      string_escape: false,
+      string_control: StringControl::None,
     }
   }
 
@@ -39,6 +46,22 @@ impl Model {
 
   pub fn set_history(&mut self, history: Vec<String>) {
     self.history = history;
+  }
+
+  pub fn adopt_history_projection(
+    &mut self,
+    vt: avt::Vt,
+    pending: Vec<u8>,
+    history_gap: bool,
+  ) -> bool {
+    if vt.dump() != self.vt.dump() || pending != self.pending {
+      return false;
+    }
+    self.vt = vt;
+    self.pending = pending;
+    self.history.clear();
+    self.history_gap = history_gap;
+    true
   }
 
   pub fn copy_lines(&self) -> Vec<String> {
@@ -56,12 +79,17 @@ impl Model {
       .is_some()
     {
       self.history.clear();
+      self.history_gap = true;
     }
   }
 
   pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
     self.pending.extend_from_slice(bytes);
     let mut replies = Vec::new();
+    // AVT collects evicted rows only during feed_str. Collect incrementally
+    // so a coalesced newline-heavy frame cannot allocate an unbounded grid.
+    let batch_limit = (16_384 / self.vt.size().0.max(1)).clamp(1, 256);
+    let mut batch = 0;
     loop {
       let (length, invalid) = match std::str::from_utf8(&self.pending) {
         Ok(_) => (self.pending.len(), None),
@@ -73,6 +101,11 @@ impl Model {
         for ch in text.chars() {
           self.vt.feed(ch);
           replies.extend(self.control(ch));
+          batch += 1;
+          if batch >= batch_limit {
+            self.collect_evictions();
+            batch = 0;
+          }
         }
       }
       if let Some(length) = invalid {
@@ -82,20 +115,29 @@ impl Model {
         break;
       }
     }
+    self.collect_evictions();
+    replies
+  }
+
+  fn collect_evictions(&mut self) {
     if self.vt.feed_str("").scrollback.next().is_some() {
       // Once local rows are evicted, the checkpoint's older history is no
       // longer contiguous with this buffer. Keep only the retained suffix.
       self.history.clear();
+      self.history_gap = true;
     }
-    replies
   }
 
   fn control(&mut self, ch: char) -> Vec<u8> {
-    if self.string_control {
-      if ch == '\x07' || (self.string_escape && ch == '\\') {
-        self.string_control = false;
-      }
-      self.string_escape = ch == '\x1b';
+    if self.string_control != StringControl::None {
+      self.string_control =
+        if ch == '\x07' || (self.string_control == StringControl::Escape && ch == '\\') {
+          StringControl::None
+        } else if ch == '\x1b' {
+          StringControl::Escape
+        } else {
+          StringControl::Active
+        };
       return Vec::new();
     }
     if ch == '\x1b' {
@@ -107,7 +149,7 @@ impl Model {
     }
     if self.escape == "\x1b" && matches!(ch, ']' | 'P' | '_' | '^') {
       self.escape.clear();
-      self.string_control = true;
+      self.string_control = StringControl::Active;
       return Vec::new();
     }
     self.escape.push(ch);
@@ -249,5 +291,41 @@ mod tests {
     assert!(model.bracketed_paste);
     model.feed(b"\x1b[?2004l");
     assert!(!model.bracketed_paste);
+  }
+
+  #[test]
+  fn history_publication_keeps_the_current_screen_and_rejects_stale_work() {
+    let size = TerminalSize {
+      columns: 12,
+      rows: 3,
+      ..TerminalSize::default()
+    };
+    let mut source = avt::Vt::builder().size(12, 3).scrollback_limit(10).build();
+    drop(source.feed_str("old\r\none\r\ntwo\r\ncurrent"));
+    let checkpoint = TerminalCheckpoint {
+      format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      sequence: 0,
+      terminal_size: size,
+      payload: source.dump().into_bytes(),
+      input_prefix: Vec::new(),
+    };
+    let rows = [ctmux_proto::TerminalHistoryRow {
+      text: "old".into(),
+      wrapped: false,
+    }];
+    let mut model = Model::new(&checkpoint.terminal_size);
+    model.restore(&checkpoint);
+    model.feed(b"-new");
+    let stale = ctmux_client::history::restore_projection(&checkpoint, &rows, 10).unwrap();
+    let current_dump = model.vt.dump();
+    assert!(!model.adopt_history_projection(stale, Vec::new(), false));
+    assert_eq!(model.vt.dump(), current_dump);
+    let mut caught_up = ctmux_client::history::restore_projection(&checkpoint, &rows, 10).unwrap();
+    drop(caught_up.feed_str("-new"));
+    assert!(model.adopt_history_projection(caught_up, Vec::new(), true));
+    assert_eq!(model.vt.dump(), current_dump);
+    assert!(model.copy_lines().join("\n").starts_with("old\none"));
+    assert!(model.history_gap);
   }
 }

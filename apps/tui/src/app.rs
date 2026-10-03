@@ -155,6 +155,7 @@ impl App {
             .or(self.ended.clone())
             .unwrap_or_default(),
           lines: pane.model.copy_lines(),
+          history_gap: pane.history_gap(),
         }),
     );
     if terminals.is_empty() {
@@ -162,6 +163,7 @@ impl App {
         terminal_id: self.selected_id.clone(),
         reason: self.ended.clone().unwrap_or_else(|| "Missing".into()),
         lines: Vec::new(),
+        history_gap: true,
       });
     }
     let session = self
@@ -559,6 +561,9 @@ impl App {
       return Ok(false);
     }
     if self.ended.is_some() {
+      for pane in self.panes.values_mut() {
+        pane.finish_ended_history().await;
+      }
       self.save_archive()?;
       return Ok(true);
     }
@@ -567,6 +572,9 @@ impl App {
       .get(&self.focused)
       .is_some_and(|pane| pane.ended.is_some())
     {
+      if let Some(pane) = self.panes.get_mut(&self.focused) {
+        pane.finish_ended_history().await;
+      }
       self.save_archive()?;
       if let Some(mut pane) = self.panes.remove(&self.focused) {
         self
@@ -575,6 +583,7 @@ impl App {
             terminal_id: self.focused.clone(),
             reason: pane.ended.clone().unwrap_or_default(),
             lines: pane.model.copy_lines(),
+            history_gap: pane.history_gap(),
           });
         pane.close().await;
       }
@@ -623,7 +632,9 @@ impl App {
       }
       KeyCode::Char('[') => {
         if let Some(pane) = self.panes.get(&self.focused) {
-          self.copy_mode = Some(CopyMode::new(pane.model.copy_lines()));
+          let mut mode = CopyMode::new(pane.model.copy_lines());
+          mode.history_gap = pane.history_gap();
+          self.copy_mode = Some(mode);
         }
       }
       KeyCode::Char(']') if !self.read_only => {
@@ -811,7 +822,9 @@ impl App {
         KeyCode::Down => *index = (*index + 1).min(archive.terminals.len().saturating_sub(1)),
         KeyCode::Enter => {
           if let Some(terminal) = archive.terminals.get(*index) {
-            self.copy_mode = Some(CopyMode::new(terminal.lines.clone()));
+            let mut mode = CopyMode::new(terminal.lines.clone());
+            mode.history_gap = terminal.history_gap;
+            self.copy_mode = Some(mode);
           }
         }
         KeyCode::Esc => self.overlay = Overlay::Archives(0),

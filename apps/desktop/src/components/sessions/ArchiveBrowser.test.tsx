@@ -31,14 +31,40 @@ it("shows local storage failures without pretending the inventory is empty", asy
 
 it("loads durable history in pages and appends the final current screen", async () => {
   mocks.request.mockResolvedValueOnce({ kind: "list", archives: [{ session_id: "root", host_key: "local", name: "durable", archived_at_ms: 1, expires_at_ms: 0, terminals: [{ terminal_id: "pane", reason: "Closed", lines: [] }] }] })
-    .mockResolvedValueOnce({ kind: "output", lines: ["first history"], next_offset: "42" })
-    .mockResolvedValueOnce({ kind: "output", lines: ["later history", "current screen"], next_offset: null });
+    .mockResolvedValueOnce({ kind: "output", lines: ["first history"], next_offset: "42", history_gap: false })
+    .mockResolvedValueOnce({ kind: "output", lines: ["later history", "current screen"], next_offset: null, history_gap: false });
   render(<ArchiveBrowser targets={[]} on_close={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: /durable/ }));
   fireEvent.click(await screen.findByRole("button", { name: "Load more output" }));
   await waitFor(() => expect(screen.getByLabelText("Archived terminal output").textContent).toBe("first history\nlater history\ncurrent screen"));
   expect(mocks.request).toHaveBeenLastCalledWith({ kind: "read", host_key: "local", session_id: "root", terminal_id: "pane", offset: "42" });
   expect(screen.queryByRole("button", { name: "Load more output" })).toBeNull();
+});
+
+it("shows a retained-history gap across archive pages and clears it for another archive", async () => {
+  const other = { ...retainedArchive(["complete inline output"]), session_id: "other", name: "complete shell" };
+  mocks.request.mockResolvedValueOnce({ kind: "list", archives: [retainedArchive([]), other] })
+    .mockResolvedValueOnce({ kind: "output", lines: ["retained tail"], next_offset: "42", history_gap: true })
+    .mockResolvedValueOnce({ kind: "output", lines: ["final screen"], next_offset: null, history_gap: false });
+  render(<ArchiveBrowser targets={[]} on_close={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: /retained shell/ }));
+  expect(await screen.findByText(/Earlier output is unavailable/)).toBeTruthy();
+  fireEvent.click(await screen.findByRole("button", { name: "Load more output" }));
+  await waitFor(() => expect(screen.getByLabelText("Archived terminal output").textContent).toBe("retained tail\nfinal screen"));
+  expect(screen.getByText(/Earlier output is unavailable/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /complete shell/ }));
+  expect(screen.queryByText(/Earlier output is unavailable/)).toBeNull();
+});
+
+it("shows a retained-history gap for inline archived output", async () => {
+  const archive = retainedArchive(["retained output"]);
+  archive.terminals[0].history_gap = true;
+  mocks.request.mockResolvedValueOnce({ kind: "list", archives: [archive] });
+  render(<ArchiveBrowser targets={[]} on_close={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: /retained shell/ }));
+  expect(screen.getByText(/Earlier output is unavailable/)).toBeTruthy();
+  expect(screen.getByLabelText("Archived terminal output").textContent).toBe("retained output");
+  expect(mocks.request).toHaveBeenCalledExactlyOnceWith({ kind: "list" });
 });
 
 it.each([{ lines: [""] }, { lines: ["", " \t", ""] }])("shows an empty message for inline output with only whitespace: $lines", async ({ lines }) => {
@@ -65,7 +91,7 @@ it("shows loading until a blank-only durable read has completed", async () => {
   render(<ArchiveBrowser targets={[]} on_close={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: /retained shell/ }));
   expect(screen.getByLabelText("Archived terminal output").textContent).toBe("Loading retained output…");
-  await act(async () => { resolve_read({ kind: "output", lines: ["", " \t", ""], next_offset: null }); });
+  await act(async () => { resolve_read({ kind: "output", lines: ["", " \t", ""], next_offset: null, history_gap: false }); });
   expect(screen.getByLabelText("Archived terminal output").textContent).toBe("No readable retained output is available.");
   expect(screen.queryByRole("button", { name: "Load more output" })).toBeNull();
 });
@@ -77,7 +103,7 @@ it.each([
   let resolve_read!: (response: ArchiveResponse) => void;
   const pending_read = new Promise<ArchiveResponse>((resolve) => { resolve_read = resolve; });
   mocks.request.mockResolvedValueOnce({ kind: "list", archives: [retainedArchive([])] })
-    .mockResolvedValueOnce({ kind: "output", lines: ["", " \t", ""], next_offset: "42" })
+    .mockResolvedValueOnce({ kind: "output", lines: ["", " \t", ""], next_offset: "42", history_gap: false })
     .mockReturnValueOnce(pending_read);
   render(<ArchiveBrowser targets={[]} on_close={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: /retained shell/ }));
@@ -86,7 +112,7 @@ it.each([
   fireEvent.click(load_more);
   expect(screen.getByLabelText("Archived terminal output").textContent).toBe("Loading retained output…");
   expect(screen.getByRole("button", { name: "Loading…" }).hasAttribute("disabled")).toBe(true);
-  await act(async () => { resolve_read({ kind: "output", lines: final_lines, next_offset: null }); });
+  await act(async () => { resolve_read({ kind: "output", lines: final_lines, next_offset: null, history_gap: false }); });
   expect(screen.getByLabelText("Archived terminal output").textContent).toBe(expected);
   expect(screen.queryByRole("button", { name: "Load more output" })).toBeNull();
 });

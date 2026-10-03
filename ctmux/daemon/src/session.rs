@@ -2349,7 +2349,7 @@ mod tests {
         wrapped: true,
       }]
     );
-    assert!(terminal.checkpoint_history.lines.is_empty());
+    assert_eq!(terminal.checkpoint_history.lines, Vec::<String>::new());
     feed_terminal_bytes(&mut terminal, b"\x1b[?1049l\r\nnext\r\nlast");
     refresh_checkpoint(&mut terminal);
     assert_eq!(terminal.checkpoint_history.lines[0], "abcdefghi");
@@ -2394,10 +2394,16 @@ mod tests {
     let mut terminal = terminal_state_with_size(8, 2, 1024);
     feed_terminal_bytes(&mut terminal, b"history\r\nprimary\r\nlive");
     refresh_checkpoint(&mut terminal);
-    assert!(!terminal.checkpoint_history_rows.is_empty());
+    assert_ne!(
+      terminal.checkpoint_history_rows,
+      Vec::<TerminalHistoryRow>::new()
+    );
     feed_terminal_bytes(&mut terminal, b"\x1b[3J");
     refresh_checkpoint(&mut terminal);
-    assert!(terminal.checkpoint_history_rows.is_empty());
+    assert_eq!(
+      terminal.checkpoint_history_rows,
+      Vec::<TerminalHistoryRow>::new()
+    );
     assert_eq!(terminal.checkpoint_history.generation, 1);
   }
 
@@ -2445,7 +2451,10 @@ mod tests {
         terminal.checkpoint_history.generation,
         previous_generation + 1
       );
-      assert!(terminal.checkpoint_history_rows.is_empty());
+      assert_eq!(
+        terminal.checkpoint_history_rows,
+        Vec::<TerminalHistoryRow>::new()
+      );
       assert_eq!(terminal.geometry_revision, 1);
       assert_eq!(
         terminal.last_geometry_change_sequence,
@@ -2471,7 +2480,10 @@ mod tests {
     refresh_checkpoint_after_output(&mut terminal, 1, u64::MAX);
     assert!(!terminal.primary_reflow_pending);
     assert_eq!(terminal.geometry_revision, 2);
-    assert!(terminal.checkpoint_history_rows.is_empty());
+    assert_eq!(
+      terminal.checkpoint_history_rows,
+      Vec::<TerminalHistoryRow>::new()
+    );
   }
 
   #[test]

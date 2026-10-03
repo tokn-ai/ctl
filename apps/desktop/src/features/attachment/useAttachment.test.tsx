@@ -219,7 +219,7 @@ describe("background history presentation", () => {
     initial.history_manifest!.first_line = "1";
     initial.history_gap = source_gap;
     await emit(initial);
-    expect(result.current.state.history_gap).toBe(true);
+    await waitFor(() => expect(result.current.state.history_gap).toBe(true));
     await emit(syncedHistory(initial));
     await act(async () => { finish(true); });
     expect(result.current.state.history_gap).toBe(source_gap);

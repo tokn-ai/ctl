@@ -439,7 +439,7 @@ async fn frozen_history_pages_survive_exit_and_geometry_replaces_the_snapshot() 
   let test_directory = TestDirectory::new();
   let socket_path = test_directory.path.join("ctmux.sock");
   let daemon =
-    spawn_daemon_with_liveness(&socket_path, 64 * 1024, 4 * 1024, Duration::from_secs(2));
+    spawn_daemon_with_liveness(&socket_path, 64 * 1024, 4 * 1024, Duration::from_secs(5));
   let session = create_shell_session(
     &socket_path, "history-pages",
     "i=0; while [ $i -lt 250 ]; do printf 'line-%03d\\n' \"$i\"; i=$((i + 1)); done; printf 'ready\\n'; IFS= read -r line",

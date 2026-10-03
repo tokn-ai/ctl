@@ -294,7 +294,7 @@ mod tests {
     let mut pending = checkpoint.input_prefix.clone();
     feed_projection(&mut restored, &mut pending, &[0xa9])?;
     drop(source.feed_str("é"));
-    assert!(pending.is_empty());
+    assert_eq!(pending, Vec::<u8>::new());
     assert_eq!(restored.text(), source.text());
     assert_eq!(restored.dump(), source.dump());
     Ok(())

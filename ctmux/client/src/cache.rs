@@ -1920,7 +1920,7 @@ mod tests {
       .apply(&fixture.identity, &resized_checkpoint)?;
     fixture.store.apply(&fixture.identity, &old_synced)?;
     fixture.store.apply(&fixture.identity, &resized_synced)?;
-    assert!(fixture.presentation()?.history.is_empty());
+    assert_eq!(fixture.presentation()?.history, Vec::<String>::new());
     assert_eq!(
       fixture.presentation()?.checkpoint.payload,
       source.dump().into_bytes()
@@ -1934,7 +1934,7 @@ mod tests {
       .apply(&fixture.identity, &cleared_checkpoint)?;
     fixture.store.apply(&fixture.identity, &resized_synced)?;
     fixture.store.apply(&fixture.identity, &cleared_synced)?;
-    assert!(fixture.presentation()?.history.is_empty());
+    assert_eq!(fixture.presentation()?.history, Vec::<String>::new());
     assert_eq!(fixture.current()?.history_manifest.unwrap().generation, 1);
     Ok(())
   }
@@ -1964,7 +1964,7 @@ mod tests {
     assert_eq!(after.checkpoint.sequence, before.checkpoint.sequence);
     assert_eq!(after.checkpoint.payload, before.checkpoint.payload);
     assert_eq!(after.checkpoint.payload, source.dump().into_bytes());
-    assert!(after.checkpoint.input_prefix.is_empty());
+    assert_eq!(after.checkpoint.input_prefix, Vec::<u8>::new());
     let rows = crate::history::projection_rows(source);
     let mut expected = ctmux_proto::normalize_history_rows(&rows);
     let prefix = crate::history::wrapped_history_prefix(&rows);

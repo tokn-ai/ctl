@@ -272,24 +272,23 @@ pub async fn open_attachment(
 ) -> CommandResult<OpenAttachmentResponseDto> {
   let attachment_id = uuid::Uuid::new_v4().to_string();
   let window_label = window.label().to_owned();
-  state
-    .open_attachment(
-      &window_label,
-      &attachment_id,
-      || {
-        on_opening
-          .send(attachment_id.clone())
-          .map_err(CommandErrorDto::backend)
-      },
-      open_reserved_attachment(
-        state.inner().clone(),
-        window_label.clone(),
-        attachment_id.clone(),
-        request,
-        on_event,
-      ),
-    )
-    .await
+  Box::pin(state.open_attachment(
+    &window_label,
+    &attachment_id,
+    || {
+      on_opening
+        .send(attachment_id.clone())
+        .map_err(CommandErrorDto::backend)
+    },
+    open_reserved_attachment(
+      state.inner().clone(),
+      window_label.clone(),
+      attachment_id.clone(),
+      request,
+      on_event,
+    ),
+  ))
+  .await
 }
 
 #[tauri::command]

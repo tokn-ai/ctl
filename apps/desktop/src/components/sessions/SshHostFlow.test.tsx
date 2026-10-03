@@ -700,6 +700,108 @@ describe("SSH host quick-input flow", () => {
     await waitFor(() => expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({ identity_file: "/custom/private-key" }), [], remoteInfo));
   });
 
+  it.each<{ name: string; endpoint: SshConnectionTarget; address: string }>([
+    { name: "SSH config alias with saved overrides", address: "", endpoint: {
+      kind: "ssh", destination: "build", ssh_config_alias: "build", user: "deploy", port: 2222,
+      identity_file: "~/.ssh/deploy", use_ssh_config_master: false,
+    } },
+    { name: "managed hostname matching a discovered alias", address: "   ", endpoint: {
+      kind: "ssh", destination: "managed-build", hostname: "build", user: "deploy", port: 2222,
+      identity_file: "~/.ssh/deploy",
+    } },
+    { name: "SSH config alias with a hostname override", address: "", endpoint: {
+      kind: "ssh", destination: "build", hostname: "10.0.0.8", ssh_config_alias: "build", user: "deploy", port: 2222,
+    } },
+    { name: "Tailscale node binding", address: "", endpoint: {
+      kind: "ssh", destination: "builder.tailnet.ts.net", hostname: "100.64.0.2", tailscale_node_id: "n123", user: "deploy",
+    } },
+  ])("defaults a blank Add connection address to the preferred $name without copying its route", async ({ endpoint, address }) => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={["build"]} warning={null} editing_host_id="saved-host" expectedIdentity={remoteInfo}
+      default_target={{ ...endpoint, host_id: "stale-host", method_id: "old-method", host_name: "Old name",
+        remote_info: { ...remoteInfo, remote_id: "untrusted-default" },
+        vpn_connection_id: "old-vpn", gateway_route: [{ gateway_id: "old-edge", mode: "automatic" }],
+        gateways: [{ kind: "ssh", gateway_id: "old-edge", name: "Old edge", destination: "edge.example", mode: "automatic" }] }}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    expect(screen.getByRole("dialog", { name: "Add connection method" })).toBeTruthy();
+    const input = screen.getByLabelText("SSH host or config alias");
+    expect(input).toHaveProperty("value", "");
+    expect(input.getAttribute("placeholder")).toMatch(/^Preferred: /u);
+    expect(screen.getByText("Leave blank to use the preferred connection's SSH endpoint and settings.")).toBeTruthy();
+    if (address) await user.type(input, address);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    const expected = { ...endpoint, host_id: "saved-host", gateway_route: [], remote_info: remoteInfo };
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(expected, expect.any(String), expect.any(Function));
+    expect(onSaveConnection).toHaveBeenCalledExactlyOnceWith(expected, [], remoteInfo);
+    expect(saveSshConfigHost).not.toHaveBeenCalled();
+  });
+
+  it("applies manual alias, key, and master overrides to the default managed endpoint", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null}
+      default_target={{ kind: "ssh", destination: "build", hostname: "10.0.0.8", user: "deploy", port: 2222,
+        identity_file: "~/.ssh/default", use_ssh_config_master: false }}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText("SSH alias (optional)"), "office-build");
+    await user.type(screen.getByLabelText("Identity file (optional)"), "~/.ssh/office");
+    await user.click(screen.getByRole("checkbox", { name: "Use SSH-config master" }));
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    const expected = { kind: "ssh", destination: "office-build", hostname: "10.0.0.8", user: "deploy", port: 2222,
+      identity_file: "~/.ssh/office", use_ssh_config_master: true, gateway_route: [] };
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(expected, expect.any(String), expect.any(Function));
+    expect(onSaveConnection).toHaveBeenCalledExactlyOnceWith(expected, [], remoteInfo);
+  });
+
+  it("uses an explicit Add connection address without inheriting the preferred provider or authentication settings", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={["build"]} warning={null}
+      default_target={{ kind: "ssh", destination: "build", ssh_config_alias: "build", tailscale_node_id: "n123",
+        user: "deploy", port: 2222, identity_file: "~/.ssh/default", use_ssh_config_master: true }}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText("SSH host or config alias"), "other.internal");
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    await waitFor(() => expect(onSaveConnection).toHaveBeenCalledOnce());
+    const expected = { kind: "ssh", destination: "other.internal", hostname: "other.internal", gateway_route: [] };
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(expected, expect.any(String), expect.any(Function));
+    expect(onSaveConnection).toHaveBeenCalledExactlyOnceWith(expected, [], remoteInfo);
+  });
+
+  it.each([undefined, { kind: "ssh" as const, destination: "editing-build", hostname: "10.0.0.8" }])(
+    "requires an address when adding without a default or clearing an existing method (%j)", async (initialTarget) => {
+      const onSaveConnection = vi.fn(async () => undefined);
+      const user = userEvent.setup();
+      render(<SshHostFlow suggestions={[]} warning={null} initialTarget={initialTarget}
+        default_target={initialTarget ? { kind: "ssh", destination: "preferred-build" } : undefined}
+        onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+      await user.clear(screen.getByLabelText("SSH host or config alias"));
+      await user.click(screen.getByRole("button", { name: "Verify and save" }));
+      expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Enter the SSH host or config alias.");
+      expect(probeSshHost).not.toHaveBeenCalled();
+      expect(onSaveConnection).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires an explicit address when the preferred endpoint is unavailable", async () => {
+    const onSaveConnection = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<SshHostFlow suggestions={[]} warning={null}
+      default_target={{ kind: "ssh", destination: "removed-build", unavailable: "This SSH endpoint is no longer available." }}
+      onSaveConnection={onSaveConnection} onClose={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Verify and save" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent",
+      "This SSH endpoint is no longer available. Enter an SSH host or config alias for this connection.");
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(onSaveConnection).not.toHaveBeenCalled();
+  });
+
   it("exports a direct alias only when explicitly selected and after successful verification", async () => {
     let finishProbe!: (value: typeof remoteInfo) => void;
     vi.mocked(probeSshHost).mockImplementationOnce(() => new Promise((resolve) => { finishProbe = resolve; }));

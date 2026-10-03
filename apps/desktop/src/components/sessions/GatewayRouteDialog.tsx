@@ -30,6 +30,9 @@ interface Props {
   vpn_error?: string | null;
   hostSetup?: {
     address: string;
+    default_address?: string;
+    default_alias?: string;
+    default_identity_file?: string;
     alias: string;
     identity_file: string;
     suggestions: readonly string[];
@@ -315,9 +318,13 @@ export function GatewayRouteDialog({
               list="routed-host-suggestions"
               value={hostSetup.address}
               onChange={(event) => hostSetup.onAddressChange(event.target.value)}
-              placeholder="operator@server.internal:2222"
+              placeholder={hostSetup.default_address ? `Preferred: ${hostSetup.default_address}` : "operator@server.internal:2222"}
+              aria-describedby={hostSetup.default_address ? "preferred-ssh-endpoint" : undefined}
             />
           </label>
+          {hostSetup.default_address ? <p id="preferred-ssh-endpoint">
+            Leave blank to use the preferred connection's SSH endpoint and settings.
+          </p> : null}
           <datalist id="routed-host-suggestions">
             {hostSetup.suggestions.map((suggestion) => (
               <option key={suggestion} value={suggestion} />
@@ -328,7 +335,7 @@ export function GatewayRouteDialog({
             <input
               value={hostSetup.alias}
               onChange={(event) => hostSetup.onAliasChange(event.target.value)}
-              placeholder="Defaults to the SSH host"
+              placeholder={hostSetup.default_alias ? `Defaults to ${hostSetup.default_alias}` : "Defaults to the SSH host"}
             />
           </label>
           <label>
@@ -338,7 +345,7 @@ export function GatewayRouteDialog({
               aria-label="Identity file (optional)"
               value={hostSetup.identity_file}
               onChange={(event) => hostSetup.onIdentityFileChange(event.target.value)}
-              placeholder="~/.ssh/id_ed25519"
+              placeholder={hostSetup.default_identity_file ?? "~/.ssh/id_ed25519"}
             />
             <datalist id="connection-identity-suggestions">
               {hostSetup.identity_files?.map((file) => <option key={file.path} value={file.path}>{file.display_path}</option>)}

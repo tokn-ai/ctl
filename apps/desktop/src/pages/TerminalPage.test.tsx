@@ -2215,6 +2215,64 @@ describe("workspace-backed terminal page", () => {
     expect(reloaded.hosts[1].connection_methods[1].use_ssh_config_master).toBe(false);
   });
 
+  it("uses the preferred endpoint for a blank new connection without copying its route or changing the active session", async () => {
+    const saved = snapshot();
+    const catalog = hostSnapshot();
+    const preferred = {
+      method_id: "preferred", name: "Office", ssh_config_alias: "office-build", use_ssh_config_master: false,
+      target: {
+        kind: "ssh" as const, destination: "office-build", hostname: "preferred.example", user: "deploy", port: 2222,
+        identity_file: "~/.ssh/deploy", gateway_route: [
+          { gateway_id: "office-jump", mode: "automatic" as const }, { vpn_connection_id: "office-vpn" },
+        ],
+      },
+    };
+    catalog.document.hosts[0].remote_info = remoteInfo;
+    catalog.document.hosts[0].connection_methods.push(preferred);
+    catalog.document.hosts[0].preferred_method_id = preferred.method_id;
+    catalog.document.ssh_gateways = [{ gateway_id: "office-jump", name: "Office jump", destination: "jump.example" }];
+    api.loadHosts.mockResolvedValue(catalog);
+    api.loadWorkspace.mockResolvedValue(saved);
+    const known = restoreWorkspace(saved.document, hostSnapshot().document).sessions[0];
+    Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
+    render(<TerminalPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Host settings for test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
+    fireEvent.change(screen.getByLabelText("Method name"), { target: { value: "Direct" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    const address = screen.getByLabelText("SSH host or config alias");
+    expect(address).toHaveProperty("value", "");
+    expect(address.getAttribute("placeholder")).toContain("preferred.example");
+    fireEvent.change(address, { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and save" }));
+    await screen.findByRole("dialog", { name: "Host settings · test" });
+
+    expect(api.probeSshHost).toHaveBeenCalledOnce();
+    const probed = api.probeSshHost.mock.calls[0][0] as ConnectionTarget;
+    expect(probed).toMatchObject({
+      kind: "ssh", host_id: "test-id", destination: "office-build", hostname: "preferred.example", user: "deploy", port: 2222,
+      identity_file: "~/.ssh/deploy", ssh_config_alias: "office-build", use_ssh_config_master: false, remote_info: remoteInfo,
+    });
+    expect(probed.kind === "ssh" ? probed.gateway_route ?? [] : null).toEqual([]);
+    expect(probed.kind === "ssh" ? probed.gateways ?? [] : null).toEqual([]);
+    expect(probed).not.toHaveProperty("vpn_connection_id");
+    const host = (api.updateHosts.mock.calls.slice(-1)[0][1] as HostCatalogDocument).hosts[0];
+    expect(host.preferred_method_id).toBe("preferred");
+    expect(host.connection_methods).toEqual([
+      catalog.document.hosts[0].connection_methods[0], preferred,
+      {
+        method_id: expect.any(String), name: "Direct", ssh_config_alias: "office-build", use_ssh_config_master: false,
+        target: { kind: "ssh", destination: "office-build", hostname: "preferred.example", user: "deploy", port: 2222,
+          identity_file: "~/.ssh/deploy" },
+      },
+    ]);
+    const persisted = api.updateWorkspace.mock.calls.slice(-1)[0][1] as WorkspaceDocument;
+    expect(persisted.sessions).toEqual(saved.document.sessions);
+    expect(persisted.active_tab).toEqual({ kind: "session", host_id: "test-id", session_id: "known-id" });
+    expect(attachment.connect).not.toHaveBeenCalled();
+    expect(attachment.detach).not.toHaveBeenCalled();
+  });
+
   it("retries a failed new-host save without adding duplicate hosts", async () => {
     render(<TerminalPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Add host" }));

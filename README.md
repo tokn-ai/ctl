@@ -613,6 +613,9 @@ Use `host method` to manage alternate routes. The preferred method cannot
 be removed until another is selected. Catalog edits use the desktop's lock,
 atomic writes, and content revisions; a concurrent edit fails without
 replacing it. Reload an already-open desktop to see CLI changes.
+When adding a connection in the desktop, leave **SSH host or config alias** blank
+to reuse the preferred method's SSH endpoint and settings, then choose the new
+route separately. Enter an address to use a different endpoint.
 
 Linked routes expand in place, with at most eight total hops. Cycles and missing
 host/method references are rejected; remove dependent links before deleting a

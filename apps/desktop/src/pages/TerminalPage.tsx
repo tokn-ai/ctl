@@ -136,6 +136,7 @@ interface MethodDraft {
   method_id: string | null;
   method_name: string;
   initial_target?: SshConnectionTarget;
+  default_target?: SshConnectionTarget;
 }
 
 interface HostFlow {
@@ -524,6 +525,7 @@ function TerminalWorkbench() {
   const methodHost = workspace.hosts.find((host) => host.host_id === methodDraft?.host_id);
 
   function editMethod(host: WorkspaceHost, method?: WorkspaceConnectionMethod) {
+    const preferred = host.connection_methods.find((item) => item.method_id === host.preferred_method_id);
     setHostSettingsId(null);
     setMethodDraft({
       host_id: host.host_id,
@@ -531,6 +533,7 @@ function TerminalWorkbench() {
       method_id: method?.method_id ?? null,
       method_name: method?.name ?? "SSH",
       initial_target: method ? { ...method.target, ...connectionMethodOptions(method) } : undefined,
+      default_target: !method && preferred ? { ...preferred.target, ...connectionMethodOptions(preferred) } : undefined,
     });
     setMethodNameOpen(!method);
   }
@@ -2258,6 +2261,7 @@ function TerminalWorkbench() {
             vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
             vpn_error={vpn.catalog_error ?? vpn.status_error}
             initialTarget={methodDraft.initial_target}
+            default_target={methodDraft.default_target}
             expectedIdentity={methodHost ? expectedHostIdentity(methodHost) : undefined}
             onSaveConnection={saveConnection}
             onConnectionChange={(target, state, message) => {

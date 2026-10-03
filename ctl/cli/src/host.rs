@@ -1,4 +1,6 @@
+mod create;
 mod edit;
+mod questionnaire;
 mod status;
 
 use ctl_client::hosts::{self, HostCatalogDocument, HostError, WorkspaceHost};
@@ -25,17 +27,8 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
-  /// Save a host with its first SSH connection method, without connecting.
-  Add {
-    name: String,
-    destination: String,
-    #[arg(long, default_value = "SSH")]
-    method_name: String,
-    #[command(flatten)]
-    options: ConnectionOptions,
-    #[arg(long)]
-    json: bool,
-  },
+  /// Create a saved host interactively, or supply NAME and DESTINATION for scripts.
+  Create(create::Arguments),
   /// Rename a host or update its selected (by default preferred) method.
   Update {
     #[arg(id = "saved_host", value_name = "HOST")]
@@ -124,6 +117,10 @@ pub enum MethodCommand {
 
 pub async fn run(command: Command, method: Option<&str>) -> Result<(), Error> {
   let path = crate::target::catalog_path()?;
+  if let Command::Create(arguments) = command {
+    reject_method(method)?;
+    return create::run(arguments, path).await;
+  }
   let snapshot = hosts::storage::load(&path)?;
   match command {
     Command::List { json } => {
@@ -147,17 +144,21 @@ pub async fn run(command: Command, method: Option<&str>) -> Result<(), Error> {
       let mut document = snapshot.document;
       let (host, json) = edit::apply(&mut document, command, method)?;
       hosts::storage::update(&path, snapshot.revision.as_deref(), document)?;
-      if json {
-        println!("{}", serde_json::to_string_pretty(&host)?);
-      } else {
-        println!(
-          "{}",
-          crate::table::format(["ID", "HOST"], [[host.host_id, host.name]])
-        );
-      }
-      Ok(())
+      display_saved(host, json)
     }
   }
+}
+
+fn display_saved(host: WorkspaceHost, json: bool) -> Result<(), Error> {
+  if json {
+    println!("{}", serde_json::to_string_pretty(&host)?);
+  } else {
+    println!(
+      "{}",
+      crate::table::format(["ID", "HOST"], [[host.host_id, host.name]])
+    );
+  }
+  Ok(())
 }
 
 fn reject_method(method: Option<&str>) -> Result<(), Error> {
@@ -183,7 +184,7 @@ fn host_index(catalog: &HostCatalogDocument, selector: &str) -> Result<usize, Er
     .filter(|(_, host)| host.name == selector);
   let Some((index, _)) = matches.next() else {
     return Err(Error::Usage(format!(
-      "No saved host matches {selector:?}. Use ctl host add to save it."
+      "No saved host matches {selector:?}. Use ctl host create to save it."
     )));
   };
   if matches.next().is_some() {
@@ -235,6 +236,14 @@ pub enum Error {
   #[cfg(unix)]
   #[error(transparent)]
   Vpn(#[from] crate::target::Error),
+  #[error(
+    "An interactive terminal is required for `ctl host create` when NAME or DESTINATION is omitted. Supply both for scripts."
+  )]
+  TerminalRequired,
+  #[error("The host questionnaire stopped unexpectedly.")]
+  QuestionnaireWorkerStopped,
+  #[error("Could not complete the host questionnaire: {0}")]
+  Questionnaire(#[from] std::io::Error),
   #[error("{0}")]
   Usage(String),
 }

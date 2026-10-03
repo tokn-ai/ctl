@@ -102,6 +102,7 @@ the existing `--vpn PROFILE_ID` option still selects a local VPN before the rout
 
 ```sh
 ctl --help
+ctl host create
 ctl host list
 ctl vpn create
 ctl vpn list
@@ -110,6 +111,12 @@ ctl vpn stop NAME_OR_ID
 ctl skill
 ctl skill --list
 ```
+
+`host create` opens a questionnaire and saves a host definition without
+connecting or saving credentials. For scripts, use
+`ctl host create NAME DESTINATION` with connection flags. With `--json`, prompts
+use stderr and the saved host JSON is written to stdout. `host method add` adds an alternate
+connection method to an existing host.
 
 `vpn create` opens a questionnaire and saves an OpenConnect or Tailscale profile
 without starting a daemon or container. Password input is masked. `vpn list`

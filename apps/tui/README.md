@@ -66,6 +66,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `r` | Redraw the terminal |
 | `A` | Browse retained session archives |
 | `[` | Browse history and select text in copy mode |
+| Page Up | Open history one page back |
 | `]` | Paste the local copy buffer into the active pane |
 | `I` | Take or release the active pane's input lease |
 | `R` | Take or release the view's resize lease |
@@ -99,17 +100,26 @@ also works in a read-only attachment. If local retention evicts rows, the older
 checkpoint prefix is dropped too, keeping the displayed history contiguous.
 
 - Arrows or `h/j/k/l` move; Page Up/Down move a page.
-- Mouse wheel or trackpad scrolling opens history and moves its viewport.
+- Mouse wheel or trackpad scrolling focuses the pane under the pointer and opens
+  history, moving five rows per event. Scrolling back to the bottom returns to
+  live output unless a selection is active. Keyboard-opened history stays open.
   Shift+Page Up also opens history; ordinary Page Up in the live view goes to
   the running program. Esc or `q` returns to live output.
 - `g` / `G` jump to the first / last line; Home/End or `0` / `$` move within a line.
 - `/` searches forward, `?` backward; Enter runs a case-sensitive literal search.
   `n` repeats and `N` reverses direction, wrapping at the history boundary.
-- Space or `v` anchors a selection; Enter or `y` copies and exits.
+- Emacs copy keys follow tmux: Ctrl+Space starts a selection, Ctrl+G clears it,
+  Alt+W or Ctrl+W copies and exits, and Ctrl+C cancels. Ctrl+B/F/P/N moves the
+  cursor, Ctrl+A/E moves within a line, Alt+V pages up, and Ctrl+V or Space pages
+  down. Alt+`<`/`>` jumps to the top/bottom; Ctrl+R/S opens backward/forward search.
+- Existing vi shortcuts remain: `h/j/k/l`, `g/G`, `v` to select, and `y` or Enter
+  to copy. Space follows the Emacs default and pages down.
 - Esc or `q` returns to the live view. Esc while entering a search cancels the prompt.
 
 Logical lines remain intact; long lines scroll horizontally with the cursor.
 Selection adds newlines only between logical lines, without terminal padding.
+Click a live pane to focus it. Dividers and the fixed status row are excluded
+from pane hit testing, including when a shared canvas is larger than the window.
 New output, reconnects, and resizing do not change the frozen selection.
 Keyboard input and host paste are consumed locally while copy mode is open.
 

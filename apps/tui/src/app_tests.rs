@@ -71,7 +71,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
   let mode = app.copy_mode.as_ref().unwrap();
   assert_eq!(
     mode.top,
-    mode.lines.len().saturating_sub(9).saturating_sub(3)
+    mode.lines.len().saturating_sub(9).saturating_sub(5)
   );
   let snapshot = mode.lines.clone();
   let top = mode.top;
@@ -83,10 +83,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
   assert_eq!(app.copy_mode.as_ref().unwrap().lines, snapshot);
   assert_eq!(app.copy_mode.as_ref().unwrap().top, top);
   app.event(wheel(MouseEventKind::ScrollDown)).await?;
-  assert_eq!(app.copy_mode.as_ref().unwrap().top, top + 3);
-  app
-    .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-    .await?;
+  assert!(app.copy_mode.is_none());
   app
     .event(Event::Key(KeyEvent::new(
       KeyCode::PageUp,
@@ -398,6 +395,27 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
   assert_ne!(app.focused, focused);
   app.command(KeyCode::Char('o')).await?;
   assert_eq!(app.focused, focused);
+  let rect = app
+    .view
+    .as_ref()
+    .unwrap()
+    .panes
+    .iter()
+    .find(|pane| pane.terminal_id != focused)
+    .unwrap()
+    .clone();
+  app
+    .event(Event::Mouse(crossterm::event::MouseEvent {
+      kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+      column: rect.left,
+      row: rect.top,
+      modifiers: KeyModifiers::NONE,
+    }))
+    .await?;
+  assert_eq!(app.focused, rect.terminal_id);
+  app.focus_at(0, app.size.1 - 1);
+  assert_eq!(app.focused, rect.terminal_id);
+  app.focused = focused;
   let owner = app
     .panes
     .values()
@@ -410,6 +428,12 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
       .any(|pane| pane.control.state().leases().layout.owned_by_client),
     owner
   );
+  app.command(KeyCode::PageUp).await?;
+  assert!(app.copy_mode.is_some());
+  app
+    .key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+    .await?;
+  assert!(app.copy_mode.is_none());
   Ok(())
 }
 

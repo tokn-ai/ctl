@@ -1,12 +1,14 @@
 use crate::{
   Result,
-  copy::{Action as CopyAction, CopyMode},
+  copy::{Action as CopyAction, BottomBehavior, CopyMode},
   input::{self, Prefix},
   pane::{Pane, identity},
-  render::{Frame, Renderer},
+  render::{Frame, Renderer, pane_at},
   transport::{LocalTransport, Transport},
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+  Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use ctmux_proto::{
   ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
   ViewInfo,
@@ -515,20 +517,40 @@ impl App<'_> {
   async fn event(&mut self, event: Event) -> Result<bool> {
     match event {
       Event::Mouse(mouse)
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+          && self.copy_mode.is_none()
+          && matches!(self.overlay, Overlay::None) =>
+      {
+        self.focus_at(mouse.column, mouse.row);
+      }
+      Event::Mouse(mouse)
         if matches!(
           mouse.kind,
           MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
         ) && !self.prefix_pending
+          && mouse.row < self.size.1.saturating_sub(1)
+          && mouse.column < self.size.0
           && (self.copy_mode.is_some() || matches!(self.overlay, Overlay::None)) =>
       {
         let up = mouse.kind == MouseEventKind::ScrollUp;
+        if self.copy_mode.is_none()
+          && matches!(self.overlay, Overlay::None)
+          && !self.focus_at(mouse.column, mouse.row)
+        {
+          return Ok(false);
+        }
         if self.copy_mode.is_none() && up {
           self.command(KeyCode::Char('[')).await?;
+          if let Some(mode) = &mut self.copy_mode {
+            mode.bottom_behavior = BottomBehavior::ReturnToLive;
+          }
         }
         if let Some(mode) = &mut self.copy_mode {
           let height = usize::from(self.size.1.saturating_sub(1));
           mode.fit(usize::from(self.size.0), height);
-          mode.scroll(up, 3, height);
+          if matches!(mode.scroll(up, 5, height), CopyAction::Close) {
+            self.copy_mode = None;
+          }
         }
       }
       Event::Key(key)
@@ -562,6 +584,16 @@ impl App<'_> {
     Ok(false)
   }
 
+  fn focus_at(&mut self, column: u16, row: u16) -> bool {
+    if let Some(view) = &self.view
+      && let Some(id) = pane_at(view, &self.panes, &self.focused, self.size, (column, row))
+    {
+      self.focused = id.to_owned();
+      return true;
+    }
+    false
+  }
+
   async fn paste(&self, text: String) -> Result<()> {
     if let Some(pane) = self.panes.get(&self.focused) {
       let data = if pane.model.bracketed_paste {
@@ -587,7 +619,7 @@ impl App<'_> {
 
   async fn key(&mut self, key: KeyEvent) -> Result<bool> {
     if let Some(mode) = &mut self.copy_mode {
-      match mode.key(key, usize::from(self.size.1.saturating_sub(2))) {
+      match mode.key(key, usize::from(self.size.1.saturating_sub(1))) {
         CopyAction::Stay => {}
         CopyAction::Close => self.copy_mode = None,
         CopyAction::Copy(text) => {
@@ -677,6 +709,16 @@ impl App<'_> {
         if let Some(pane) = self.panes.get(&self.focused) {
           let mut mode = CopyMode::new(pane.model.copy_lines());
           mode.history_gap = pane.history_gap();
+          self.copy_mode = Some(mode);
+        }
+      }
+      KeyCode::PageUp => {
+        if let Some(pane) = self.panes.get(&self.focused) {
+          let mut mode = CopyMode::new(pane.model.copy_lines());
+          mode.history_gap = pane.history_gap();
+          let height = usize::from(self.size.1.saturating_sub(1));
+          mode.fit(usize::from(self.size.0), height);
+          mode.scroll(true, height, height);
           self.copy_mode = Some(mode);
         }
       }

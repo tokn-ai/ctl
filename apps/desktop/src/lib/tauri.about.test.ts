@@ -8,6 +8,8 @@ beforeEach(() => vi.resetAllMocks());
 it("keeps version observations read-only and restarts only with the native preflight token", async () => {
   await getComponentVersions();
   expect(ipc.invoke).toHaveBeenLastCalledWith("get_component_versions", undefined);
+  await getComponentVersions("selected-host");
+  expect(ipc.invoke).toHaveBeenLastCalledWith("get_component_versions", { host_id: "selected-host" });
   await preflightComponentAction("ctld-selected-owner");
   expect(ipc.invoke).toHaveBeenLastCalledWith("preflight_component_action", { request: { component_id: "ctld-selected-owner" } });
   await executeComponentAction("native-preflight-token");

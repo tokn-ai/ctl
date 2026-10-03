@@ -11,7 +11,7 @@ pub use models::ComponentVersionsSnapshot;
 
 use models::{ComponentVersionInfo, ComponentVersionRow, ProtocolVersion, VersionStatus};
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_component_versions(
   app: tauri::AppHandle,
   state: tauri::State<'_, crate::state::AppState>,

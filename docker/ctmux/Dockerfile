@@ -6,11 +6,12 @@ WORKDIR /workspace
 COPY . .
 RUN --mount=type=cache,id=ctmux-cargo-registry,target=/usr/local/cargo/registry \
   --mount=type=cache,id=ctmux-cargo-target,target=/workspace/target \
-  cargo build --locked --release -p ctl-agent -p ctl-cli -p ctmuxd -p ctl-taskd \
+  cargo build --locked --release -p ctl-agent -p ctl-cli -p ctmuxd -p ctl-taskd -p ctld \
   && install -D -m 0755 /workspace/target/release/ctl-agent /out/ctl-agent \
   && install -D -m 0755 /workspace/target/release/ctl /out/ctl \
   && install -D -m 0755 /workspace/target/release/ctmuxd /out/ctmuxd \
-  && install -D -m 0755 /workspace/target/release/ctl-taskd /out/ctl-taskd
+  && install -D -m 0755 /workspace/target/release/ctl-taskd /out/ctl-taskd \
+  && install -D -m 0755 /workspace/target/release/ctld /out/ctld
 
 FROM debian:bookworm-slim AS runtime
 
@@ -34,6 +35,7 @@ COPY --from=builder /out/ctl-agent /usr/local/bin/ctl-agent
 COPY --from=builder /out/ctl /usr/local/bin/ctl
 COPY --from=builder /out/ctmuxd /usr/local/bin/ctmuxd
 COPY --from=builder /out/ctl-taskd /usr/local/bin/ctl-taskd
+COPY --from=builder /out/ctld /usr/local/bin/ctld
 COPY docker/ctmux/entrypoint.sh /usr/local/libexec/ctmux-entrypoint
 COPY docker/ctmux/forced-command.sh /usr/local/libexec/ctmux-forced-command
 COPY docker/ctmux/sshd_config /etc/ssh/sshd_config
@@ -43,6 +45,7 @@ RUN chmod 0755 \
   /usr/local/bin/ctl \
   /usr/local/bin/ctmuxd \
   /usr/local/bin/ctl-taskd \
+  /usr/local/bin/ctld \
   /usr/local/libexec/ctmux-entrypoint \
   /usr/local/libexec/ctmux-forced-command
 

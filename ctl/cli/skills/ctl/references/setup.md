@@ -17,7 +17,9 @@ the user's request includes setup or the work requires an authorized setup.
 | Local interactive tasks | `ctl-taskd`, `ctmuxd` | Local machine |
 | Unix remote native commands / saved connections | `ctld` | SSH service |
 | Remote sessions/tasks | `ctld` on Unix client | `ctl-agent`, `ctmuxd` and/or `ctl-taskd` |
-| Managed ports / VPN | `ctld` on Unix client | SSH service for ports; local container engine for VPN |
+| Managed ports | `ctld` on Unix client | SSH service |
+| Local VPN | `ctld`, Docker or Podman | Local container engine |
+| Remote VPN | `ctld` on Unix client | SSH service, `ctl-agent`, `ctld`, Docker or Podman |
 
 Keep terminal/task companion versions aligned with the client. `CTLD_BIN`,
 `CTMUXD_BIN`, and `CTL_TASKD_BIN` select explicit daemon executables; an override names an
@@ -51,12 +53,12 @@ existing installation. On other Unix platforms, install `ctld` from Cargo
 alongside the CLI. Cargo compilation alone does not provide Apple's signing
 identity or the macOS Keychain entitlement.
 
-Shared discovery requires the native architecture, ctld protocol 12, lifecycle
-protocol 1, and one-shot helper API 1. It verifies the app's build identity against
+Shared discovery requires the native architecture, ctld protocol 13, lifecycle
+protocol 1, and one-shot helper API 2. It verifies the app's build identity against
 its own installation manifest; its release version and source fingerprint need
 not match the CLI's. Signed development apps retain provisioning expiry and
 certificate checks, use `development/<archive-sha256>/`, and update
-`selected/<target>-ctld12-lifecycle1-helper1` without changing release `current`.
+`selected/<target>-ctld13-lifecycle1-helper2` without changing release `current`.
 All standalone CLI builds, including ordinary Cargo builds, can reuse them.
 
 Official macOS CLI downloads embed their matching signed helper. They prepare

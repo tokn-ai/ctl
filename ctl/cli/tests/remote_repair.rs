@@ -143,7 +143,7 @@ esac
       ),
     )
     .unwrap();
-    for binary in ["ctmuxd", "ctl-taskd"] {
+    for binary in ["ctmuxd", "ctl-taskd", "ctld"] {
       fs::write(payload.join(binary), b"#!/bin/sh\nexit 0\n").unwrap();
     }
     let archive = self.0.join(format!(
@@ -154,7 +154,7 @@ esac
       .arg(&archive)
       .arg("-C")
       .arg(&payload)
-      .args(["ctl-agent", "ctmuxd", "ctl-taskd", "manifest.json"])
+      .args(["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "manifest.json"])
       .output()
       .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -626,13 +626,13 @@ async fn verify_successful_repair(cached: bool) {
     fs::read_to_string(base.join("remote-id")).unwrap(),
     EXPECTED_ID
   );
-  for file in ["ctl-agent", "ctmuxd", "ctl-taskd", "manifest.json"] {
+  for file in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "manifest.json"] {
     assert_eq!(
       fs::read(base.join("current").join(file)).unwrap(),
       fs::read(fixture.0.join("payload").join(file)).unwrap()
     );
   }
-  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
     assert_eq!(
       fs::metadata(base.join("current").join(binary))
         .unwrap()

@@ -1,3 +1,4 @@
+use ctl_core::protocol::ProtocolVersion;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -13,15 +14,17 @@ pub async fn ensure_master(
   target: &ConnectionTargetDto,
   context: &PromptContext,
 ) -> CommandResult<PathBuf> {
-  let mut stream = connect().await?;
-  ctl_ipc::write_frame(
-    &mut stream,
-    &ClientMessage::EnsureMaster {
-      target: broker_target(target)?,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::backend)?;
+  ensure_target_master(broker_target(target)?, context).await
+}
+
+pub(crate) async fn ensure_target_master(
+  target: SshTarget,
+  context: &PromptContext,
+) -> CommandResult<PathBuf> {
+  let mut stream = connect(&target).await?;
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::EnsureMaster { target })
+    .await
+    .map_err(CommandErrorDto::backend)?;
   loop {
     match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
       .await
@@ -66,17 +69,13 @@ pub async fn ensure_master(
 }
 
 pub async fn existing_master(target: &ConnectionTargetDto) -> CommandResult<PathBuf> {
-  let mut stream = connect_existing()
+  let target = broker_target(target)?;
+  let mut stream = connect_existing(&target)
     .await?
     .ok_or_else(authentication_required)?;
-  ctl_ipc::write_frame(
-    &mut stream,
-    &ClientMessage::MasterStatus {
-      target: broker_target(target)?,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::backend)?;
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::MasterStatus { target })
+    .await
+    .map_err(CommandErrorDto::backend)?;
   match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
@@ -95,7 +94,7 @@ pub async fn connection_status(
   target: &ConnectionTargetDto,
 ) -> CommandResult<SshConnectionStatusDto> {
   let target = broker_target(target)?;
-  let Some(mut stream) = connect_existing().await? else {
+  let Some(mut stream) = connect_existing(&target).await? else {
     return Ok(SshConnectionStatusDto::default());
   };
   ctl_ipc::write_frame(&mut stream, &ClientMessage::ConnectionStatus { target })
@@ -169,7 +168,7 @@ async fn disconnect_targets<F: std::future::Future<Output = CommandResult<()>>>(
 }
 
 async fn disconnect_master(target: SshTarget) -> CommandResult<()> {
-  let mut stream = connect().await?;
+  let mut stream = connect(&target).await?;
   ctl_ipc::write_frame(&mut stream, &ClientMessage::DisconnectMaster { target })
     .await
     .map_err(CommandErrorDto::backend)?;
@@ -187,15 +186,11 @@ async fn disconnect_master(target: SshTarget) -> CommandResult<()> {
 }
 
 pub async fn delete_credentials(target: &ConnectionTargetDto) -> CommandResult<()> {
-  let mut stream = connect().await?;
-  ctl_ipc::write_frame(
-    &mut stream,
-    &ClientMessage::DeleteCredentials {
-      target: broker_target(target)?,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::backend)?;
+  let target = broker_target(target)?;
+  let mut stream = connect(&target).await?;
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::DeleteCredentials { target })
+    .await
+    .map_err(CommandErrorDto::backend)?;
   match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
@@ -214,11 +209,12 @@ pub async fn configure_port_forward(
   forward: LocalPortForward,
   enabled: bool,
 ) -> CommandResult<PortForwardStatus> {
-  let mut stream = connect().await?;
+  let target = broker_target(target)?;
+  let mut stream = connect(&target).await?;
   ctl_ipc::write_frame(
     &mut stream,
     &ClientMessage::ConfigurePortForward {
-      target: broker_target(target)?,
+      target,
       forward,
       enabled,
     },
@@ -241,15 +237,11 @@ pub async fn configure_port_forward(
 pub async fn list_port_forwards(
   target: &ConnectionTargetDto,
 ) -> CommandResult<Vec<PortForwardStatus>> {
-  let mut stream = connect().await?;
-  ctl_ipc::write_frame(
-    &mut stream,
-    &ClientMessage::ListPortForwards {
-      target: broker_target(target)?,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::backend)?;
+  let target = broker_target(target)?;
+  let mut stream = connect(&target).await?;
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::ListPortForwards { target })
+    .await
+    .map_err(CommandErrorDto::backend)?;
   match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
@@ -266,17 +258,13 @@ pub async fn list_port_forwards(
 pub async fn list_remote_listeners(
   target: &ConnectionTargetDto,
 ) -> CommandResult<ctl_proto::TcpListenerCatalog> {
-  let mut stream = connect_existing()
+  let target = broker_target(target)?;
+  let mut stream = connect_existing(&target)
     .await?
     .ok_or_else(authentication_required)?;
-  ctl_ipc::write_frame(
-    &mut stream,
-    &ClientMessage::ListRemoteListeners {
-      target: broker_target(target)?,
-    },
-  )
-  .await
-  .map_err(CommandErrorDto::backend)?;
+  ctl_ipc::write_frame(&mut stream, &ClientMessage::ListRemoteListeners { target })
+    .await
+    .map_err(CommandErrorDto::backend)?;
   match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
     .await
     .map_err(CommandErrorDto::backend)?
@@ -291,15 +279,24 @@ pub async fn list_remote_listeners(
   }
 }
 
-async fn connect() -> CommandResult<ctl_ipc::Stream> {
+/// Preflight the complete chain before starting its VPN prerequisites.
+pub(crate) async fn check_route_support(target: &SshTarget) -> CommandResult<()> {
+  if ctl_ipc::has_remote_vpn(&target.gateways) {
+    connect(target).await?;
+  }
+  Ok(())
+}
+
+async fn connect(target: &SshTarget) -> CommandResult<ctl_ipc::Stream> {
   let mut stream = ctl_ipc::connect_or_start_daemon()
     .await
     .map_err(CommandErrorDto::backend)?;
-  handshake(&mut stream).await?;
+  let protocol = handshake(&mut stream).await?;
+  validate_route(target, protocol)?;
   Ok(stream)
 }
 
-async fn connect_existing() -> CommandResult<Option<ctl_ipc::Stream>> {
+async fn connect_existing(target: &SshTarget) -> CommandResult<Option<ctl_ipc::Stream>> {
   let mut stream = match ctl_ipc::connect_existing().await {
     Ok(stream) => stream,
     Err(ctl_ipc::ConnectError::Connect(error))
@@ -312,11 +309,25 @@ async fn connect_existing() -> CommandResult<Option<ctl_ipc::Stream>> {
     }
     Err(error) => return Err(CommandErrorDto::backend(error)),
   };
-  handshake(&mut stream).await?;
+  let protocol = handshake(&mut stream).await?;
+  validate_route(target, protocol)?;
   Ok(Some(stream))
 }
 
-async fn handshake<S>(stream: &mut S) -> CommandResult<()>
+fn validate_route(target: &SshTarget, protocol: ProtocolVersion) -> CommandResult<()> {
+  if ctl_ipc::gateway_route_supported(&target.gateways, protocol) {
+    Ok(())
+  } else {
+    Err(CommandErrorDto::new(
+      "ctld_protocol_feature_unsupported",
+      format!(
+        "Remote VPN routes require local protocol 1.1.13, but ctld selected {protocol}. Rebuild or update ctld to match the app, then restart ctld."
+      ),
+    ))
+  }
+}
+
+async fn handshake<S>(stream: &mut S) -> CommandResult<ProtocolVersion>
 where
   S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -335,7 +346,7 @@ where
     Some(ServerMessage::HandshakeAccepted { protocol_version })
       if ctl_ipc::protocol_offer().accepts(protocol_version) =>
     {
-      Ok(())
+      Ok(protocol_version)
     }
     Some(ServerMessage::HandshakeAccepted { protocol_version }) => Err(CommandErrorDto::new(
       "ctld_protocol_version_mismatch",
@@ -540,7 +551,7 @@ mod tests {
     assert!(!error.message.contains("second"));
   }
 
-  async fn handshake_reply(reply: Option<ServerMessage>) -> CommandResult<()> {
+  async fn handshake_reply(reply: Option<ServerMessage>) -> CommandResult<ProtocolVersion> {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let daemon = tokio::spawn(async move {
       assert!(matches!(
@@ -567,6 +578,34 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn historical_contract_retains_local_routes_and_rejects_remote_vpn_routes() {
+    let selected = handshake_reply(Some(ServerMessage::HandshakeAccepted {
+      protocol_version: ctl_ipc::CONTRACT_V1_0_12,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(selected, ctl_ipc::CONTRACT_V1_0_12);
+    let mut target = ConnectionTargetDto::ssh("office").to_ssh_target().unwrap();
+    validate_route(&target, selected).unwrap();
+    let ssh: ctl_ipc::SshGateway = serde_json::from_value(serde_json::json!({
+      "destination":"bastion", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic"
+    })).unwrap();
+    let vpn: ctl_ipc::SshGateway = serde_json::from_value(serde_json::json!({
+      "kind":"vpn", "destination":"work", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic",
+      "vpn":{"connection_id":"work", "socket_path":"/tmp/test-vpn.sock"}
+    })).unwrap();
+    target.gateways = vec![ssh.clone()];
+    validate_route(&target, selected).unwrap();
+    target.gateways = vec![vpn.clone(), ssh.clone()];
+    validate_route(&target, selected).unwrap();
+    target.gateways = vec![ssh, vpn];
+    let error = validate_route(&target, selected).unwrap_err();
+    assert_eq!(error.code, "ctld_protocol_feature_unsupported");
+    assert!(error.message.contains("1.1.13") && error.message.contains("1.0.12"));
+    validate_route(&target, ctl_ipc::CONTRACT_V1_1_13).unwrap();
+  }
+
+  #[tokio::test]
   async fn handshake_preserves_the_daemon_rejection() {
     let error = handshake_reply(Some(ServerMessage::Error {
       code: "ctld_protocol_version_mismatch".into(),
@@ -583,7 +622,7 @@ mod tests {
 
   #[tokio::test]
   async fn handshake_rejects_a_different_accepted_version() {
-    let old_version = ctl_core::protocol::ProtocolVersion::new(1, 0, ctl_ipc::PROTOCOL_BUILD - 1);
+    let old_version = ctl_core::protocol::ProtocolVersion::new(1, 0, 11);
     let error = handshake_reply(Some(ServerMessage::HandshakeAccepted {
       protocol_version: old_version,
     }))

@@ -428,3 +428,18 @@ fn known_helper_errors_preserve_actionable_categories_without_raw_messages() {
     "credentials_unsupported"
   );
 }
+#[test]
+fn credential_associations_accept_the_same_remote_vpn_routes_as_the_broker() {
+  let dto: crate::dto::ConnectionTargetDto = serde_json::from_value(serde_json::json!({
+    "kind": "ssh", "destination": "target.internal",
+    "gateways": [
+      {"kind":"ssh", "gateway_id":"jump", "name":"Jump", "destination":"jump", "mode":"automatic"},
+      {"kind":"vpn", "gateway_id":"vpn:work", "name":"Work", "destination":"work", "vpn_connection_id":"work", "mode":"automatic"}
+    ]
+  })).unwrap();
+  let mut target = dto.to_ssh_target().unwrap();
+  assert!(super::valid_target(&target));
+  target.gateways[0].kind = ctl_ipc::GatewayKind::Socks5;
+  target.gateways[0].port = Some(1080);
+  assert!(!super::valid_target(&target));
+}

@@ -2392,6 +2392,35 @@ describe("workspace-backed terminal page", () => {
     expect(api.killSession).not.toHaveBeenCalled();
   });
 
+  it("rejects removal of a linked hop before touching credentials, forwards, or sessions", async () => {
+    const catalog = hostSnapshot();
+    catalog.document.hosts[1].connection_methods[0].target.gateway_route = [
+      { host_id: "test-id", method_id: "default", mode: "automatic" },
+    ];
+    const saved = snapshot();
+    saved.document.port_forwards = [{
+      forward_id: "linked-forward", host_id: "test-id", name: "Web", enabled: true,
+      bind_address: "127.0.0.1", local_port: 8080, remote_host: "localhost", remote_port: 80,
+    }];
+    api.loadHosts.mockResolvedValue(catalog);
+    api.loadWorkspace.mockResolvedValue(saved);
+    const known = restoreWorkspace(saved.document, catalog.document).sessions[0];
+    Object.assign(attachment.state, { phase: "attached", session: known } satisfies Partial<AttachmentViewState>);
+    render(<TerminalPage />);
+    const remove = await screen.findByRole("button", { name: "Remove test" });
+    api.configurePortForward.mockClear();
+    const saved_before = api.updateWorkspace.mock.calls.length;
+    fireEvent.click(remove);
+    await screen.findByText("This host is used as a hop by unused. Edit those routes before removing it.");
+    expect(api.forgetSshCredentials).not.toHaveBeenCalled();
+    expect(api.configurePortForward).not.toHaveBeenCalled();
+    expect(attachment.detach).not.toHaveBeenCalled();
+    expect(api.updateHosts).not.toHaveBeenCalled();
+    expect(api.updateWorkspace).toHaveBeenCalledTimes(saved_before);
+    expect(screen.getByRole("button", { name: "Remove test" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "~/work on test" })).toBeTruthy();
+  });
+
   it("deletes an unshared credential scope once when removing its only host", async () => {
     render(<TerminalPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Remove test" }));

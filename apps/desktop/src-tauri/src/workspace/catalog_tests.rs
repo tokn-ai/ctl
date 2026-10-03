@@ -542,7 +542,7 @@ fn host_and_gateway_import_is_one_validated_batch() {
   else {
     panic!("ssh method")
   };
-  gateway_route.push(SshGatewayRouteStepDto {
+  gateway_route.push(SshGatewayRouteStepDto::Gateway {
     gateway_id: gateway.gateway_id.clone(),
     mode: SshGatewayModeDto::Automatic,
   });
@@ -554,6 +554,69 @@ fn host_and_gateway_import_is_one_validated_batch() {
     fixture.repository().load().unwrap().document.ssh_gateways,
     Vec::<WorkspaceSshGateway>::new()
   );
+}
+
+#[test]
+fn linked_host_hops_round_trip_and_referenced_removals_preserve_the_catalog() {
+  let fixture = Fixture::new();
+  let mut document = catalog();
+  let mut alternate = document.hosts[0].connection_methods[0].clone();
+  alternate.method_id = "alternate".into();
+  document.hosts[0].connection_methods.push(alternate);
+  let mut target = host();
+  target.host_id = "target".into();
+  target.name = "Target".into();
+  let ConnectionTargetDto::Ssh { gateway_route, .. } = &mut target.connection_methods[0].target
+  else {
+    panic!("ssh method")
+  };
+  gateway_route.push(SshGatewayRouteStepDto::Host {
+    host_id: document.hosts[0].host_id.clone(),
+    method_id: "default".into(),
+    mode: SshGatewayModeDto::Automatic,
+  });
+  document.hosts.push(target);
+  let saved = fixture
+    .repository()
+    .update_hosts(UpdateHostsRequest {
+      expected_revision: None,
+      document,
+    })
+    .unwrap();
+  assert_eq!(fixture.repository().load_hosts().unwrap(), saved);
+  let original = fs::read(fixture.0.join("hosts.json")).unwrap();
+
+  let mut removed_host = saved.document.clone();
+  removed_host.hosts.remove(0);
+  let mut removed_method = saved.document.clone();
+  removed_method.hosts[0].connection_methods.remove(0);
+  removed_method.hosts[0].preferred_method_id = Some("alternate".into());
+  let mut cycle = saved.document.clone();
+  let ConnectionTargetDto::Ssh { gateway_route, .. } =
+    &mut cycle.hosts[0].connection_methods[0].target
+  else {
+    panic!("ssh method")
+  };
+  gateway_route.push(SshGatewayRouteStepDto::Host {
+    host_id: "target".into(),
+    method_id: "default".into(),
+    mode: SshGatewayModeDto::Automatic,
+  });
+  for (document, code) in [
+    (removed_host, "host_hop_missing"),
+    (removed_method, "host_hop_method_missing"),
+    (cycle, "host_route_cycle"),
+  ] {
+    let error = fixture
+      .repository()
+      .update_hosts(UpdateHostsRequest {
+        expected_revision: saved.revision.clone(),
+        document,
+      })
+      .unwrap_err();
+    assert_eq!(error.code, code);
+    assert_eq!(fs::read(fixture.0.join("hosts.json")).unwrap(), original);
+  }
 }
 
 #[test]

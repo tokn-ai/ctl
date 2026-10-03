@@ -9,6 +9,9 @@ pub type CommandResult<T> = Result<T, CommandErrorDto>;
 pub struct CommandErrorDto {
   pub code: String,
   pub message: String,
+  /// VPN-order index in the attempted runtime route, including the legacy local VPN.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub vpn_route_index: Option<usize>,
 }
 
 impl CommandErrorDto {
@@ -16,7 +19,13 @@ impl CommandErrorDto {
     Self {
       code: code.into(),
       message: message.into(),
+      vpn_route_index: None,
     }
+  }
+
+  pub fn with_vpn_route_index(mut self, index: usize) -> Self {
+    self.vpn_route_index = Some(index);
+    self
   }
 
   pub fn backend(error: impl std::fmt::Display) -> Self {
@@ -104,6 +113,33 @@ impl From<ctl_client::hosts::HostError> for CommandErrorDto {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn ordinary_errors_keep_their_original_serialized_shape() {
+    let error = CommandErrorDto::new("ssh_authentication_required", "Authenticate this host.");
+    assert_eq!(
+      serde_json::to_value(error).unwrap(),
+      serde_json::json!({
+        "code": "ssh_authentication_required", "message": "Authenticate this host.",
+      })
+    );
+  }
+
+  #[test]
+  fn recovery_indices_survive_cloning_and_use_the_vpn_order_field() {
+    let error = CommandErrorDto::new(
+      "remote_vpn_components_update_required",
+      "Update the VPN's SSH host.",
+    )
+    .with_vpn_route_index(2);
+    assert_eq!(error.clone(), error);
+    assert_eq!(
+      serde_json::to_value(error).unwrap(),
+      serde_json::json!({
+        "code": "remote_vpn_components_update_required", "message": "Update the VPN's SSH host.", "vpn_route_index": 2,
+      })
+    );
+  }
 
   #[test]
   fn old_agents_offer_an_update_without_masking_authentication_failures() {

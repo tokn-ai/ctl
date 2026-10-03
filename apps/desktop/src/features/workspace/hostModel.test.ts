@@ -209,13 +209,15 @@ describe("host identity and connection methods", () => {
     expect(restoreWorkspace(saved, catalog).hosts[1]).toEqual({ ...catalog.hosts[0], source: "saved", expected_remote_info: remote_info });
   });
 
-  it("refuses a missing gateway instead of silently falling back to direct SSH", () => {
-    expect(() => hostTarget(host(), [], "gateway")).toThrow("gateway for this connection method is missing");
-    expect(() => restoreWorkspace({
+  it("keeps a missing gateway route unavailable while restoring the workspace", () => {
+    expect(hostTarget(host(), [], "gateway")).toMatchObject({ unavailable: expect.stringContaining("gateway for this connection method is missing") });
+    const restored = restoreWorkspace({
       ...document(),
       hosts: [{ ...host(), preferred_method_id: "gateway" }],
       ssh_gateways: [],
-    })).toThrow("gateway for this connection method is missing");
+    });
+    expect(restored.targets[1]).toMatchObject({ unavailable: expect.stringContaining("gateway for this connection method is missing") });
+    expect(restored.targets[1]).not.toHaveProperty("gateways");
   });
 
   it("rejects settings changes for a removed host", () => {

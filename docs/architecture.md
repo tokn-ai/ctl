@@ -8,7 +8,8 @@ The monorepo contains two products with independent responsibilities:
 
 The current milestones make `ctmux` usable through a desktop client that mixes
 local and SSH targets, and through `ctl` from an SSH-authorized remote client.
-The remote boundary exposes the fixed `ctmux` and `task` services; generic
+The remote boundary exposes the fixed `ctmux` and `task` services and narrow
+managed VPN operations; generic
 remote administration, files, port forwarding, and desktop control
 remain out of scope.
 
@@ -197,7 +198,7 @@ post-authentication activation share a serialized registry so a late old-master
 activation cannot recreate a moved or disabled forward. Listener ownership is
 tracked separately from displayed status, and a forward configured during
 master startup is not activated twice. The local `ctld` IPC protocol is version
-12. Incompatible clients and daemons require an update and explicit restart;
+13. Incompatible clients and daemons require an update and explicit restart;
 compatible running owners can be reused across builds.
 
 ### Component diagnostics and replacement
@@ -210,15 +211,16 @@ metadata through its local-control handshake, with a data-handshake fallback for
 legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
-ctld metadata reports the data protocol (`ctld`, version 12), lifecycle protocol
-(`ctld_lifecycle`, version 1), and one-shot helper API (`ctld_helper`, version 1).
+ctld metadata reports data contract `1.1.13` (and retained `1.0.12`), lifecycle
+contract `1.0.1`, and helper contract `1.1.2` (and retained `1.0.1`). Remote VPN
+routes are gated by the selected broker contract and the helper advertisement.
 The helper API covers credential, identity, askpass, and proxy helper modes.
 Standalone macOS CLI discovery first honors `CTLD_BIN`, then verifies a shared
 managed app selected for the native target and all three API versions. It falls
 back to its own bundled helper and then loose executable discovery when no
 compatible shared app is selected. The desktop keeps its own bundled helper
 first. Release and provisioned development installations use immutable caches
-and atomic `selected/<target>-ctld12-lifecycle1-helper1` links; development
+and atomic `selected/<target>-ctld1-lifecycle1-helper1` links; development
 selection leaves the release `current` link intact. Verification checks the
 selected app's signature, provisioning, and metadata against its own manifest,
 so different client release versions or source fingerprints do not prevent
@@ -287,8 +289,12 @@ connection uses untargeted stop directly. Scripts must specify a start selector;
 an untargeted stop requires zero or one local connection.
 List, stop, and remove never start a daemon. An absent daemon or incomplete engine
 inventory reports a discovery warning rather than a confident empty result. VPN
-commands reject `--host` and use
-the owner-only local IPC endpoint, selectable through `CTLD_SOCKET_PATH`.
+commands use the owner-only local IPC endpoint by default, selectable through
+`CTLD_SOCKET_PATH`. `ctl --host HOST vpn list/start/stop` selects that SSH
+account's VPN owner through `ctl-agent vpn`. Profiles stay local and startup
+sends settings over the identified SSH channel. Create and remove edit local
+profiles and reject remote targets. Remote list and stop do not start the remote
+daemon or a prerequisite VPN.
 
 `ctl vpn remove NAME_OR_ID` deletes a saved catalog entry after interactive
 confirmation, defaulting to No. It resolves an exact profile ID before a unique
@@ -391,20 +397,39 @@ result, while preserving their selected VPN ID.
 IPC 11 snapshots add `supported_providers`, defaulting to OpenConnect when absent,
 and `supports_tailscale_enrollment`, defaulting to false for older owners.
 The enrollment capability gates both setup and the identity-cleanup request.
-Tailscale starts check provider support on the selected owner before sending any
-profile settings. Additive status fields retain compatibility with clients that
+Tailscale starts check provider support on the selected owner before starting its
+container. Additive status fields retain compatibility with clients that
 only understand the existing stopped/starting/connected/stopping states.
 
-Host methods persist an optional `vpn_connection_id`, independent of the VPN's
-runtime port. Native mapping prepends a typed VPN hop containing that ID and the
-selected VPN owner's socket path. These stable values participate in broker,
-master, and credential identities. An explicit SSH probe, install, or restart
-starts the saved VPN through its existing per-ID coordinator before SSH begins.
+Host methods persist an ordered `gateway_route` of reusable gateway references,
+linked saved-host methods (`{"host_id":"HOST_ID","method_id":"METHOD_ID","mode":"automatic"}`),
+and VPN steps (`{"vpn_connection_id":"PROFILE_ID"}`), independent of runtime
+ports. Legacy methods retain their optional `vpn_connection_id` as a local first
+step. A linked host expands its selected method's current route followed by its
+SSH endpoint and pinned remote identity. Method IDs stay fixed when preferences
+change. Expansion rejects missing references, cycles, and routes exceeding eight
+hops. Linked methods with an explicit `identity_file` require moving that key
+setting into OpenSSH configuration before they can be used as hops. OpenSSH
+aliases are retained alongside hostname overrides so their key settings apply.
+A VPN at the start of the expanded route runs locally; one immediately after an SSH gateway runs
+under that gateway's account. Consecutive VPNs and a VPN immediately after a
+SOCKS proxy remain unsupported. Native mapping includes stable profile and
+execution-owner identity in broker, master, and credential identities. Explicit
+connection, install, and restart prepare VPNs in route order, authenticating each
+remote execution host through the exact preceding route before starting its VPN.
 Cancelling the host attempt stops waiting without cancelling shared VPN startup.
 Status, disconnect, and credential cleanup only map the stable route and never
 start the VPN. The proxy helper resolves the current connected SOCKS5 endpoint
 from the specified owner when opening a new transport, requires a loopback
-endpoint, and fails closed when the selected VPN is unavailable. VPN and SOCKS5
+endpoint, and fails closed when the selected VPN is unavailable. For remote VPN
+steps the helper opens `ctl-agent vpn` on the preceding SSH host, verifies its
+account identity, and requests a stream through that host's current VPN SOCKS
+endpoint. DNS resolution happens inside the remote VPN. No remote loopback port
+is treated as local and no local listener is needed. The agent accepts only
+bounded list, structured start, targeted stop, and selected-VPN TCP requests;
+it does not expose the full ctld broker. Remote bundles include `ctld` as the
+durable VPN owner. Closing an SSH channel leaves the remote VPN running until
+its interest is explicitly released. VPN, SOCKS5, and SSH hostname-override
 routes force a private master, preventing reuse of a direct SSH-config master.
 
 App-local settings become separate, validated OpenSSH arguments and cannot

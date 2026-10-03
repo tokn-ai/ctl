@@ -24,7 +24,7 @@ pub struct ConnectionOptions {
   /// Saved VPN connection ID.
   #[arg(long)]
   vpn: Option<String>,
-  /// Saved gateway ID, repeat in route order (automatic mode).
+  /// Gateway ID, `host:HOST_ID/METHOD_ID`, or `vpn:PROFILE_ID`; repeat in route order.
   #[arg(long)]
   gateway: Vec<String>,
   #[arg(long)]
@@ -127,16 +127,56 @@ impl ConnectionOptions {
       *gateway_route = self
         .gateway
         .iter()
-        .map(|id| SshGatewayRouteStepDto {
-          gateway_id: id.clone(),
-          mode: SshGatewayModeDto::Automatic,
-        })
-        .collect();
+        .map(|id| route_step(id))
+        .collect::<Result<_, _>>()?;
     }
     // Apply the same transport validation used before connecting, while all
     // changes still exist only in memory. Catalog validation checks route IDs.
     method.target.to_ssh_target()?;
     Ok(())
+  }
+}
+
+fn route_step(selector: &str) -> Result<SshGatewayRouteStepDto, Error> {
+  if let Some(connection_id) = selector.strip_prefix("vpn:") {
+    if connection_id.is_empty()
+      || connection_id.len() > 128
+      || connection_id
+        .chars()
+        .any(|value| value.is_control() || value.is_whitespace())
+    {
+      return Err(Error::Usage(
+        "Use vpn:PROFILE_ID with a valid saved VPN ID.".into(),
+      ));
+    }
+    Ok(SshGatewayRouteStepDto::Vpn {
+      vpn_connection_id: connection_id.into(),
+    })
+  } else if let Some(reference) = selector.strip_prefix("host:") {
+    let (host_id, method_id) = reference
+      .split_once('/')
+      .filter(|(host_id, method_id)| {
+        !host_id.is_empty()
+          && !method_id.is_empty()
+          && !reference
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+      })
+      .ok_or_else(|| {
+        Error::Usage(
+          "Use host:HOST_ID/METHOD_ID to select a saved host's connection method.".into(),
+        )
+      })?;
+    Ok(SshGatewayRouteStepDto::Host {
+      host_id: host_id.into(),
+      method_id: method_id.into(),
+      mode: SshGatewayModeDto::Automatic,
+    })
+  } else {
+    Ok(SshGatewayRouteStepDto::Gateway {
+      gateway_id: selector.into(),
+      mode: SshGatewayModeDto::Automatic,
+    })
   }
 }
 
@@ -333,4 +373,46 @@ fn edit_method(
     }
   };
   Ok((host.clone(), json))
+}
+
+#[cfg(test)]
+mod route_tests {
+  use super::*;
+
+  #[test]
+  fn route_selectors_preserve_ssh_and_vpn_order() {
+    let route = [
+      "bastion",
+      "vpn:office",
+      "host:jump/selected",
+      "inner",
+      "vpn:private",
+    ]
+    .map(route_step)
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(
+      serde_json::to_value(route).unwrap(),
+      serde_json::json!([
+        {"gateway_id": "bastion", "mode": "automatic"},
+        {"vpn_connection_id": "office"},
+        {"host_id": "jump", "method_id": "selected", "mode": "automatic"},
+        {"gateway_id": "inner", "mode": "automatic"},
+        {"vpn_connection_id": "private"}
+      ])
+    );
+    for selector in [
+      "vpn:",
+      "vpn:has whitespace",
+      "vpn:line\nfeed",
+      "host:",
+      "host:jump",
+      "host:/selected",
+      "host:jump/",
+      "host:jump/with space",
+    ] {
+      assert!(route_step(selector).is_err());
+    }
+  }
 }

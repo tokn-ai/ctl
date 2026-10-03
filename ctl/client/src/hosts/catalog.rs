@@ -49,6 +49,13 @@ impl HostCatalogDocument {
     {
       return Err(invalid());
     }
+    // Resolve every method before persisting, so linked hosts cannot introduce
+    // missing references, cycles, excessive depth, or invalid VPN owners.
+    for host in &self.hosts {
+      for method in &host.connection_methods {
+        super::resolve(self, &host.host_id, Some(&method.method_id))?;
+      }
+    }
     Ok(())
   }
 }

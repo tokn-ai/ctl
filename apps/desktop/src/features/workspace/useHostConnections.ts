@@ -57,25 +57,29 @@ async function observeSshMaster(target: SshConnectionTarget): Promise<SshConnect
 }
 
 /** Observe every saved method, including a previously selected runtime route. */
-export function hostConnectionTargets(host: WorkspaceHost, options: Pick<Options, "targets" | "gateways">) {
-  return hostConnectionCandidates(host, options).map((method) => {
-    if (!method.target) throw new Error(method.error ?? "This SSH method could not be resolved.");
-    return { target: method.target, name: method.name };
-  });
+type RouteOptions = Pick<Options, "targets" | "gateways"> & { hosts?: readonly WorkspaceHost[] };
+
+export function hostConnectionTargets(host: WorkspaceHost, options: RouteOptions) {
+  const candidates = hostConnectionCandidates(host, options);
+  const resolved = candidates.flatMap((method) => method.target ? [{ target: method.target, name: method.name }] : []);
+  if (!resolved.length && candidates.length) throw new Error(candidates[0].error ?? "This SSH method could not be resolved.");
+  return resolved;
 }
 
-function hostConnectionCandidates(host: WorkspaceHost, options: Pick<Options, "targets" | "gateways">) {
+function hostConnectionCandidates(host: WorkspaceHost, options: RouteOptions) {
   const methods: { target: SshConnectionTarget | null; name: string; error: string | null }[] = [];
   for (const method of host.connection_methods) {
     try {
-      const target = hostTarget(host, options.gateways, method.method_id);
-      if (target.kind === "ssh") methods.push({ target, name: method.name, error: null });
+      const target = hostTarget(host, options.gateways, method.method_id, options.hosts);
+      if (target.kind === "ssh") methods.push(target.unavailable
+        ? { target: null, name: method.name, error: target.unavailable }
+        : { target, name: method.name, error: null });
     } catch (failure) {
       methods.push({ target: null, name: method.name, error: errorMessage(failure) });
     }
   }
   for (const target of options.targets) {
-    if (target.kind !== "ssh" || target.host_id !== host.host_id ||
+    if (target.kind !== "ssh" || target.unavailable || target.host_id !== host.host_id ||
       methods.some((method) => method.target && sameSshEndpoint(method.target, target))) continue;
     methods.push({ target, name: "Previous connection", error: null });
   }

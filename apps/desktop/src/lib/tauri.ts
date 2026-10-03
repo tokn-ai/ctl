@@ -9,6 +9,7 @@ import type {
   AttachmentResizeRequest,
   CreateSessionRequest,
   ConnectionTarget,
+  SshConnectionTarget,
   KillSessionRequest,
   OpenAttachmentRequest,
   OpenAttachmentResponse,
@@ -131,8 +132,8 @@ export async function deleteVpnConnection(
   return invoke("delete_vpn_connection", { request: { expected_revision, connection_id } });
 }
 
-export async function connectVpn(connection_id: string): Promise<VpnStatus> {
-  return invoke("connect_vpn", { request: { connection_id } });
+export async function connectVpn(connection_id: string, target?: SshConnectionTarget): Promise<VpnStatus> {
+  return invoke("connect_vpn", { request: { connection_id, ...(target ? { target } : {}) } });
 }
 
 export async function beginVpnEnrollment(input: VpnEnrollmentInput): Promise<VpnEnrollmentSnapshot> {
@@ -151,16 +152,16 @@ export async function cancelVpnEnrollment(enrollment_id: string): Promise<void> 
   return invoke("cancel_vpn_enrollment", { request: { enrollment_id } });
 }
 
-export async function openVpnSignIn(vpn_id: string): Promise<void> {
-  return invoke("open_vpn_sign_in", { request: { vpn_id } });
+export async function openVpnSignIn(vpn_id: string, target?: SshConnectionTarget): Promise<void> {
+  return invoke("open_vpn_sign_in", { request: { vpn_id, ...(target ? { target } : {}) } });
 }
 
-export async function vpnStatus(): Promise<VpnSnapshot> {
-  return invoke("vpn_status");
+export async function vpnStatus(target?: SshConnectionTarget): Promise<VpnSnapshot> {
+  return target ? invoke("vpn_status", { target }) : invoke("vpn_status");
 }
 
-export async function stopVpn(vpn_id: string): Promise<VpnStatus> {
-  return invoke("stop_vpn", { request: { vpn_id } });
+export async function stopVpn(vpn_id: string, target?: SshConnectionTarget): Promise<VpnStatus> {
+  return invoke("stop_vpn", { request: { vpn_id, ...(target ? { target } : {}) } });
 }
 
 export async function updateHosts(

@@ -9,6 +9,9 @@ pub mod identity;
 pub mod listeners;
 pub mod maintenance;
 pub mod restart;
+#[cfg(unix)]
+mod stdio;
+pub mod vpn;
 
 use ctmux_ipc::Stream;
 use std::io;
@@ -21,6 +24,19 @@ use tokio::time::{Instant, sleep};
 
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(3);
 pub const SSH_TRANSPORT_PREFACE: &[u8] = b"ctl-ssh-v1\n";
+
+/// Complete published protocol map for this installed agent.
+#[must_use]
+pub fn agent_protocols() -> Vec<ctl_core::component::ProtocolInfo> {
+  let mut protocols = ctl_proto::agent_protocols();
+  protocols.push(ctl_core::component::ProtocolInfo::new(
+    "ctl_remote_vpn",
+    ctl_ipc::remote_vpn::PROTOCOL_BUILD,
+    ctl_ipc::remote_vpn::PROTOCOL_VERSION,
+    ctl_ipc::remote_vpn::SUPPORTED_PROTOCOL_VERSIONS,
+  ));
+  protocols
+}
 
 /// Services exposed by the SSH gateway. Local ctmux control is never exposed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -86,6 +102,12 @@ impl ConnectConfig {
 /// Returns an error when the daemon cannot be reached or either relay direction
 /// fails. Completion of either direction ends the entire disposable relay.
 pub async fn connect_stdio(config: &ConnectConfig) -> Result<(), AgentError> {
+  #[cfg(unix)]
+  {
+    let (reader, writer) = stdio::take().map_err(AgentError::Relay)?;
+    connect(reader, writer, config).await
+  }
+  #[cfg(not(unix))]
   connect(tokio::io::stdin(), tokio::io::stdout(), config).await
 }
 

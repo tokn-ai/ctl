@@ -73,10 +73,11 @@ left untouched. Set `CTMUXD_BIN` / `CTMUX_RUNTIME_DIR` for terminal overrides an
 The desktop bundle identifier is `dev.tokn-ai.ctl.ctmux`, and its signed connection
 helper uses `dev.tokn-ai.ctl.ctld`. Signing the helper requires a matching
 provisioning profile.
-Update clients, daemons, and remote agent bundles together. The renamed build
-uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protocol
-12, ctld lifecycle protocol 1, ctld one-shot helper API 1, remote identity
-protocol 3, and remote maintenance protocol 2.
+Product releases, internal protocol builds, and published contracts are separate.
+Current contracts include ctmux `1.0.13`, task `1.0.4`, ctld `1.1.13`, ctld
+helper `1.1.2`, and remote VPN `1.0.1`. Compatible builds retain earlier published
+contracts within each major. Remote VPN routes require the new broker and helper
+contracts and an updated remote bundle. See [protocol versioning](docs/protocol-versioning.md).
 
 ## Configuration and persistent state
 
@@ -150,7 +151,7 @@ Ordinary Cargo builds and `cargo install ctl-cli` also discover compatible share
 apps, including signed development installations; they contain no embedded helper.
 
 Selections live at
-`~/.tokn/ctl/components/ctld/selected/<target>-ctld12-lifecycle1-helper1`.
+`~/.tokn/ctl/components/ctld/selected/<target>-ctld1-lifecycle1-helper1`.
 Compatibility requires the native architecture and the `ctld`, `ctld_lifecycle`,
 and `ctld_helper` API versions. The helper's build identity must match its own
 manifest; it does not have to match the CLI's commit, fingerprint, or release
@@ -221,13 +222,14 @@ cargo install --path ctmux/daemon
 cargo install --path ctmux/cli
 ```
 
-For remote access, install `ctmuxd`, `ctl-taskd`, and `ctl-agent` together on the
+For remote access, install `ctmuxd`, `ctl-taskd`, `ctl-agent`, and `ctld` together on the
 controlled device:
 
 ```sh
 cargo install --path ctmux/daemon
 cargo install --path task/daemon
 cargo install --path ctl/agent
+cargo install --path ctl/daemon
 ```
 
 On a Linux client, install `ctl` and `ctld` together from the checkout:
@@ -600,10 +602,26 @@ Updates preserve host/method IDs and any pinned remote identity. Omitted
 settings stay unchanged; `--clear` accepts a comma-separated list of optional
 settings (see `ctl host update --help`). Use `--gateway ID` repeatedly to set an
 ordered route through existing saved gateways, or `--vpn ID` to select a saved
-VPN. Use `host method` to manage alternate routes. The preferred method cannot
+VPN. A gateway can also link to a saved host's selected method with
+`--gateway host:HOST_ID/METHOD_ID`. In the desktop connection route editor,
+choose a **Saved host**, choose its method, then add it as a hop. The link reuses
+that method's current route and SSH endpoint; it keeps the selected method even
+if the host's preferred method changes. An explicit hop key must be configured
+in OpenSSH rather than the method's `identity_file` setting.
+
+Use `host method` to manage alternate routes. The preferred method cannot
 be removed until another is selected. Catalog edits use the desktop's lock,
 atomic writes, and content revisions; a concurrent edit fails without
 replacing it. Reload an already-open desktop to see CLI changes.
+
+Linked routes expand in place, with at most eight total hops. Cycles and missing
+host/method references are rejected; remove dependent links before deleting a
+referenced host or method. A VPN inherited from a linked method runs locally when
+it is first in the expanded route, or on the SSH host immediately before it.
+If that SSH host's agent does not support VPN control, the desktop offers
+**Update components on HOST**. It updates the VPN execution host through its
+preceding route, verifies its saved account identity before uploading, and retries
+the original destination connection.
 
 ### Shells, commands, and file copies
 

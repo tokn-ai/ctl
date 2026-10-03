@@ -187,7 +187,7 @@ async fn desktop_operation_child() {
     }
     "passive" => {
       assert_eq!(
-        crate::vpn::vpn_status().await.unwrap().connections,
+        crate::vpn::vpn_status(None).await.unwrap().connections,
         Vec::<ctl_ipc::VpnStatus>::new()
       );
       assert!(matches!(
@@ -232,7 +232,7 @@ async fn desktop_operation_child() {
         .await
         .unwrap();
       };
-      let (snapshot, ()) = tokio::join!(crate::vpn::vpn_status(), owner);
+      let (snapshot, ()) = tokio::join!(crate::vpn::vpn_status(None), owner);
       assert_eq!(
         snapshot.unwrap().connections,
         Vec::<ctl_ipc::VpnStatus>::new()

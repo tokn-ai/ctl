@@ -3,9 +3,12 @@ set -eu
 
 identity=false
 authenticated=false
+operation=connect
+service=ctmux
 managed_prefix='PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; command -v ctl-agent >/dev/null 2>&1 || { printf '\''ctl-ssh-nf\n'\''; exit 127; };'
 authenticated_prefix='printf '\''ctl-ssh-auth-v1\n'\''; '"$managed_prefix"
 case "${SSH_ORIGINAL_COMMAND:-}" in
+  "exec ctl-agent vpn"|"$managed_prefix exec ctl-agent vpn") operation=vpn ;;
   "exec ctl-agent connect"|\
   'PATH="$HOME/.tokn/ctl/current:$PATH" exec ctl-agent connect'|\
   "$managed_prefix exec ctl-agent connect") service=ctmux ;;
@@ -21,7 +24,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   "$managed_prefix exec ctl-agent connect --service task --identity") service=task; identity=true ;;
   "$authenticated_prefix exec ctl-agent connect --service task --identity") service=task; identity=true; authenticated=true ;;
   *)
-    echo "ctmux container: only the fixed ctl-agent ctmux or task command is permitted" >&2
+    echo "ctmux container: only fixed ctl-agent ctmux, task, or vpn commands are permitted" >&2
     exit 126
     ;;
 esac
@@ -40,7 +43,7 @@ if [ ! -f /usr/local/bin/ctl-agent ] || [ ! -x /usr/local/bin/ctl-agent ]; then
   exit 127
 fi
 
-set -- connect
+set -- "$operation"
 if [ "$service" = task ]; then
   set -- "$@" --service task
 fi

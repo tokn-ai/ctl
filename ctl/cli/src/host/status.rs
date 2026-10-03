@@ -31,12 +31,10 @@ pub(super) async fn display(
   } else {
     catalog.hosts.iter().collect()
   };
-  let devices = if hosts.iter().any(|host| {
-    host
-      .connection_methods
-      .iter()
-      .any(|method| method.tailscale_node_id.is_some())
-  }) {
+  let devices = if hosts
+    .iter()
+    .any(|host| host_requires_tailscale(catalog, host))
+  {
     ctl_client::tailscale::discover_devices().await.devices
   } else {
     Vec::new()
@@ -211,7 +209,7 @@ pub(super) async fn connect(
     &host.host_id,
     Some(&host.connection_methods[index].method_id),
   )?;
-  if resolved.tailscale_node_id.is_some() {
+  if resolved.requires_tailscale() {
     resolved.resolve_tailscale(&ctl_client::tailscale::discover_devices().await.devices)?;
   }
   crate::target::ensure_vpn(&resolved.target).await?;
@@ -234,11 +232,7 @@ pub(super) async fn disconnect(
   let selected = method
     .map(|method| method_index(host, Some(method)))
     .transpose()?;
-  let devices = if host
-    .connection_methods
-    .iter()
-    .any(|method| method.tailscale_node_id.is_some())
-  {
+  let devices = if host_requires_tailscale(catalog, host) {
     ctl_client::tailscale::discover_devices().await.devices
   } else {
     Vec::new()
@@ -252,7 +246,7 @@ pub(super) async fn disconnect(
     let mut resolved = hosts::resolve(catalog, &host.host_id, Some(&method.method_id))?;
     // Stop the saved address too, including when device discovery is offline.
     targets.insert(resolved.target.to_ssh_target()?);
-    if resolved.tailscale_node_id.is_some() && resolved.resolve_tailscale(&devices).is_ok() {
+    if resolved.requires_tailscale() && resolved.resolve_tailscale(&devices).is_ok() {
       targets.insert(resolved.target.to_ssh_target()?);
     }
   }
@@ -269,4 +263,11 @@ pub(super) async fn disconnect(
   }
   println!("Disconnected {}", host.name);
   Ok(())
+}
+
+fn host_requires_tailscale(catalog: &HostCatalogDocument, host: &WorkspaceHost) -> bool {
+  host.connection_methods.iter().any(|method| {
+    hosts::resolve(catalog, &host.host_id, Some(&method.method_id))
+      .is_ok_and(|resolved| resolved.requires_tailscale())
+  })
 }

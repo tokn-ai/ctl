@@ -15,10 +15,38 @@ pub enum SshGatewayModeDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SshGatewayRouteStepDto {
-  pub gateway_id: String,
-  pub mode: SshGatewayModeDto,
+#[serde(untagged, deny_unknown_fields)]
+pub enum SshGatewayRouteStepDto {
+  Gateway {
+    gateway_id: String,
+    mode: SshGatewayModeDto,
+  },
+  Host {
+    host_id: String,
+    method_id: String,
+    mode: SshGatewayModeDto,
+  },
+  Vpn {
+    vpn_connection_id: String,
+  },
+}
+
+impl SshGatewayRouteStepDto {
+  #[must_use]
+  pub fn gateway_id(&self) -> Option<&str> {
+    match self {
+      Self::Gateway { gateway_id, .. } => Some(gateway_id),
+      Self::Host { .. } | Self::Vpn { .. } => None,
+    }
+  }
+
+  #[must_use]
+  pub fn vpn_connection_id(&self) -> Option<&str> {
+    match self {
+      Self::Vpn { vpn_connection_id } => Some(vpn_connection_id),
+      Self::Gateway { .. } | Self::Host { .. } => None,
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -26,6 +54,8 @@ pub struct SshGatewayRouteStepDto {
 pub struct SshGatewayDto {
   #[serde(default)]
   pub kind: ctl_ipc::GatewayKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub vpn_connection_id: Option<String>,
   pub gateway_id: String,
   pub name: String,
   pub destination: String,

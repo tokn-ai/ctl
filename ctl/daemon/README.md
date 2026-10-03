@@ -17,14 +17,15 @@ restarting the daemon.
 
 Standalone macOS CLI builds prefer a verified compatible shared `ctld.app` after
 an explicit `CTLD_BIN` override, before their own bundled or loose helper.
-Compatibility requires the native target, ctld protocol 12, lifecycle protocol
-1, and one-shot helper API 1; the installed helper's version and source
+Compatibility requires the native target and explicitly shared ctld, lifecycle,
+and helper contracts. Remote VPN routes require ctld `1.1.13` and helper `1.1.2`.
+The installed helper's version and source
 fingerprint need not match the CLI's. Its signature, provisioning, and build
 metadata are still checked against its own installation manifest.
 
 Signed development builds use the immutable
 `~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache and update
-`selected/<target>-ctld12-lifecycle1-helper1` while leaving release `current`
+`selected/<target>-ctld1-lifecycle1-helper1` while leaving release `current`
 unchanged. Ordinary Cargo CLI builds can reuse that selection. The desktop
 continues to prefer its own bundled helper. Source builds remain available for
 development and other Unix platforms.

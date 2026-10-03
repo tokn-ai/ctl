@@ -261,6 +261,8 @@ fn cli_requires_an_installed_sibling_and_ignores_taskd_bin_override() {
     .args(["connect", "--service", "task"])
     .env("CTL_TASKD_RUNTIME_DIR", &directory.0)
     .env("CTL_TASKD_BIN", &executable)
+    // Match SSH: output() otherwise supplies /dev/null, which Unix reactors cannot poll.
+    .stdin(std::process::Stdio::piped())
     .output()
     .unwrap();
   assert!(!output.status.success());

@@ -5,18 +5,24 @@ separate meanings. Product releases such as `0.1.0` identify shipped software;
 they do not imply a wire change. Each protocol has an independent integer build
 and an independent published `major.minor.build` version.
 
-- The build increases for internal protocol revisions. Some builds never ship.
-- The minor increases for compatible additions. The last number reuses the
-  build of the published contract, so gaps are intentional.
+- The patch/build increases when the protocol changes during development.
+  Some builds never ship, so gaps are intentional. Implementation changes that
+  leave the protocol unchanged do not require a new contract.
+- The minor identifies a release cycle. After the current contract is released
+  or frozen, the first protocol revision for the next cycle advances the minor
+  once and increments the build. Further revisions in that cycle increment only
+  the patch/build. Releasing freezes the final version without another bump.
 - The major increases for an explicitly announced breaking change. Every later
   implementation in one major must support **every earlier published contract**
   in that major, across minor versions. There is no rolling support window.
 
-For example, `1.0.13` is the first published ctmux contract. Build 14 may remain
-unpublished; `1.1.15` can be the next published contract. An implementation of
-`1.1.15` must also implement `1.0.13`. An announced `2.0.21` breaking release can
-drop major-1 support. The internal build counter does not reset with the major.
-These are project contract versions, not ordinary SemVer patch promises.
+For example, after ctld `1.0.12` is frozen, the next release cycle starts with
+`1.1.13`. Another development protocol change produces `1.1.14`. Releasing that
+cycle freezes `1.1.14`; the first protocol change for the following cycle produces
+`1.2.15`. An implementation of `1.1.14` must still implement the earlier published
+`1.0.12` contract. An announced `2.0.21` breaking release can drop major-1 support.
+The build counter does not reset with the minor or major. These are project
+contract versions, not ordinary SemVer patch promises.
 
 ## First published contracts
 
@@ -35,6 +41,17 @@ unpublished wire formats.
 | `task_control` | 2 | `1.0.2` |
 | `ctl_identity` | 3 | `1.0.3` |
 | `ctl_maintenance` | 2 | `1.0.2` |
+| `ctl_remote_vpn` | 1 | `1.0.1` |
+
+The remote VPN addition starts the next development cycle with ctld `1.1.13`
+(build 13) and helper `1.1.2` (build 2), retaining their frozen initial contracts.
+Further protocol changes before release increment only their patch/build.
+A broker channel selecting ctld `1.0.12` supports the original SSH and local VPN
+routes; remote VPN route steps
+require `1.1.13`. Proxy helpers must explicitly advertise helper `1.1.2` before
+remote VPN routes are passed to them. Other helper operations retain `1.0.1`
+behavior. The independent remote VPN channel negotiates `1.0.1` before identity
+and credentials, using a stable marker rather than changing the marker per build.
 
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
@@ -96,7 +113,7 @@ Unpublished v2/v3 agents remain eligible for the explicit repair offer. A
 read-only legacy identity probe verifies the pinned environment before upload;
 it sends no service requests and promises no legacy contract compatibility.
 
-## Publishing the next contract
+## Developing and releasing contracts
 
 Keep the named initial contract constants immutable. Increasing `PROTOCOL_BUILD`
 does not automatically publish another version: the advertised latest contract
@@ -104,11 +121,17 @@ and supported set are separate constants. Internal development must continue
 implementing the advertised contracts; a breaking prototype cannot claim an old
 contract simply because its major has not changed.
 
-Before publishing a compatible minor, add its named contract, retain every
+When the protocol changes, add its named development contract, retain every
 earlier published entry in that major, implement any required codec/behavior
-adapters, and gate new operations or fields by the negotiated contract. Tests
+adapters, and gate new operations or fields by the negotiated contract. Advance
+the minor only when opening a cycle after the previous contract is frozen;
+additional changes within the open cycle advance only the patch/build. Tests
 must exercise old-client/new-server and new-client/old-server behavior using
 historical messages, alongside unsupported selections and malformed offers.
 Do not advertise a contract until its implementation and compatibility tests
-exist. Resource bounds on metadata are transport constraints, never a policy
-allowing old contracts to be removed.
+exist.
+
+At release, freeze the final development contract and record the exact protocol
+map in the release metadata. Do not increment the minor again at this point.
+Resource bounds on metadata are transport constraints, never a policy allowing
+earlier published contracts to be removed.

@@ -28,7 +28,7 @@ or authentication. `-H`, `--method`, and `--remote-platform` are rejected for
 | Create, attach, inspect, split, or terminate persistent terminals | [ctl-session](../ctl-session/SKILL.md), `ctl skill ctl-session` |
 | Manage named background/interactive processes or save reusable recipes | [ctl-task](../ctl-task/SKILL.md), `ctl skill ctl-task` |
 | Expose a remote TCP service on local loopback | [ctl-port](../ctl-port/SKILL.md), `ctl skill ctl-port` |
-| Manage local OpenConnect or Tailscale containers | [ctl-vpn](../ctl-vpn/SKILL.md), `ctl skill ctl-vpn` |
+| Manage OpenConnect or Tailscale containers locally or over SSH | [ctl-vpn](../ctl-vpn/SKILL.md), `ctl skill ctl-vpn` |
 
 ## Target and command discovery
 
@@ -40,7 +40,8 @@ back to an OpenSSH alias or destination. Ambiguous saved names fail; use the ID.
 preferred method is used. A failed selected route does not choose another route.
 
 Host catalog commands take a positional host and reject `-H`. SSH/SCP also take
-their destination positionally. `ctl setup`, VPN management, and `ctl taskd restart` are local.
+their destination positionally. `ctl setup` and `ctl taskd restart` are local.
+VPN list/start/stop also accept `-H`; VPN profile create/remove remain local.
 
 Check `ctl --version`, `ctl --help`, and the relevant native subcommand's
 `--help` when availability or flags are uncertain. There is no global `--json`.

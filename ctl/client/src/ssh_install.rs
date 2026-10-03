@@ -171,6 +171,7 @@ async fn read_progress(
     RemoteInstallEvent::Checking {
       file_name: "ctl-taskd",
     },
+    RemoteInstallEvent::Checking { file_name: "ctld" },
     RemoteInstallEvent::Activating,
     RemoteInstallEvent::Complete,
   ];
@@ -227,6 +228,9 @@ fn parse_progress(line: &str) -> Option<RemoteInstallEvent> {
     "ctl-install-progress-v1 checking ctl-taskd\n" => Some(RemoteInstallEvent::Checking {
       file_name: "ctl-taskd",
     }),
+    "ctl-install-progress-v1 checking ctld\n" => {
+      Some(RemoteInstallEvent::Checking { file_name: "ctld" })
+    }
     _ => line
       .strip_prefix("ctl-install-progress-v1 receiving ")?
       .strip_suffix('\n')?

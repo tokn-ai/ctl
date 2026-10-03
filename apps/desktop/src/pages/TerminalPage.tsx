@@ -42,6 +42,7 @@ import {
 } from "../features/workspace/remoteRecovery";
 import { connectionMethodOptions, connectionSettings, expectedHostIdentity, hostFromTarget, hostTarget, isVirtualHost, projectedHostId, tailscaleHostId, promoteHost, updateHostSettings, workspaceSidebarTargets } from "../features/workspace/workspaceModel";
 import { removableHostCredentials } from "../features/workspace/hostCredentials";
+import { isHostRouteStep } from "../features/workspace/sshRoute";
 import { CommandPalette } from "../components/commands/CommandPalette";
 import { ArchiveBrowser } from "../components/sessions/ArchiveBrowser";
 import { SessionSidebar } from "../components/sessions/SessionSidebar";
@@ -511,12 +512,12 @@ function TerminalWorkbench() {
   const hostSuggestions = sshConfigHosts.map((host) => host.destination);
   // New connections use saved settings; live sessions retain their transport snapshots.
   const connectionTargets = useMemo(() => workspace.hosts.map((host) =>
-    hostTarget(host, workspace.ssh_gateways)), [workspace.hosts, workspace.ssh_gateways]);
+    hostTarget(host, workspace.ssh_gateways, undefined, workspace.hosts)), [workspace.hosts, workspace.ssh_gateways]);
   // A missing preferred route must not hide the host's working alternatives.
   const connectableHostKeys = new Set(workspace.hosts
     .filter((host) => host.host_id !== "local" && host.source !== "unavailable" &&
       host.connection_methods.some((method) => !method.target.unavailable))
-    .map((host) => targetKey(hostTarget(host, workspace.ssh_gateways))));
+    .map((host) => targetKey(hostTarget(host, workspace.ssh_gateways, undefined, workspace.hosts))));
   const connectableTargets = connectionTargets.filter((target): target is SshConnectionTarget =>
     target.kind === "ssh" && connectableHostKeys.has(targetKey(target)));
   const settingsHost = workspace.hosts.find((host) => host.host_id === hostSettingsId);
@@ -534,7 +535,7 @@ function TerminalWorkbench() {
     setMethodNameOpen(!method);
   }
 
-  async function saveNewHost(name: string, target: SshConnectionTarget, remote_info: RemoteIdentity) {
+  async function saveNewHost(name: string, target: SshConnectionTarget, remote_info: RemoteIdentity, gateways?: WorkspaceSshGateway[]) {
     const projected_id = target.tailscale_node_id
       ? tailscaleHostId(target.tailscale_node_id)
       : target.ssh_config_alias ? projectedHostId(target.ssh_config_alias) : null;
@@ -554,13 +555,20 @@ function TerminalWorkbench() {
           ? { ...method, ...connectionMethodOptions(target), target: connectionSettings(target) }
           : method),
     } : hostFromTarget({ ...target, host_id: undefined, remote_info }, name));
-    await workspace.replaceView((current) => projected
-      ? updateHostSettings(current, host)
-      : {
+    await workspace.replaceView((current) => {
+      const next = gateways ? {
         ...current,
-        hosts: [...current.hosts, host],
-        targets: [...current.targets, hostTarget(host, current.ssh_gateways)],
-      });
+        ssh_gateways: [...current.ssh_gateways, ...gateways.filter((gateway) =>
+          !current.ssh_gateways.some((saved) => saved.gateway_id === gateway.gateway_id))],
+      } : current;
+      return projected
+        ? updateHostSettings(next, host)
+        : {
+          ...next,
+          hosts: [...next.hosts, host],
+          targets: [...next.targets, hostTarget(host, next.ssh_gateways, undefined, [...next.hosts, host])],
+        };
+    });
   }
 
   async function saveConnection(
@@ -600,7 +608,7 @@ function TerminalWorkbench() {
       const next = existing ? updateHostSettings(latest, host) : {
         ...latest,
         hosts: [...latest.hosts, host],
-        targets: [...latest.targets, hostTarget(host, gateways)],
+        targets: [...latest.targets, hostTarget(host, gateways, undefined, [...latest.hosts, host])],
       };
       return { ...next, ssh_gateways: gateways };
     });
@@ -857,6 +865,12 @@ function TerminalWorkbench() {
     async (target: ConnectionTarget) => {
       if (target.kind === "local" || daemonRestartBlocksInteractions()) {
         return;
+      }
+      const dependents = workspace.viewRef.current.hosts.filter((host) =>
+        host.connection_methods.some((method) => method.target.gateway_route?.some((step) =>
+          isHostRouteStep(step) && step.host_id === target.host_id)));
+      if (dependents.length) {
+        throw new Error(`This host is used as a hop by ${dependents.map((host) => host.name).join(", ")}. Edit those routes before removing it.`);
       }
       for (const forward of workspace.port_forwards.filter(
         (item) => item.host_id === target.host_id && item.enabled,
@@ -2210,6 +2224,7 @@ function TerminalWorkbench() {
             discoveryLoading={workspace.discoveryLoading}
             warning={discoveryWarning}
             gateways={workspace.ssh_gateways}
+            hosts={workspace.hosts}
             vpn_connections={vpn.connections}
             vpn_statuses={vpn.statuses}
             vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
@@ -2236,6 +2251,8 @@ function TerminalWorkbench() {
             suggestions={hostSuggestions}
             warning={discoveryWarning}
             gateways={workspace.ssh_gateways}
+            hosts={workspace.hosts}
+            editing_host_id={methodDraft.host_id}
             vpn_connections={vpn.connections}
             vpn_statuses={vpn.statuses}
             vpn_loading={!vpn.catalog_loaded && vpn.catalog_loading}
@@ -2258,7 +2275,7 @@ function TerminalWorkbench() {
             onSave={saveHostSettings}
             onAddMethod={() => editMethod(settingsHost)}
             onEditMethod={(method) => editMethod(settingsHost, method)}
-            onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id), method.method_id)}
+            onConnect={(method) => connectHostMethod(hostTarget(settingsHost, workspace.ssh_gateways, method.method_id, workspace.hosts), method.method_id)}
             onClose={() => setHostSettingsId(null)}
           />
         ) : hostFlow !== null ? (
@@ -2272,6 +2289,7 @@ function TerminalWorkbench() {
               : undefined}
             selected_method_id={hostFlow.selected_method_id}
             gateways={workspace.ssh_gateways}
+            hosts={workspace.hosts}
             updateRequired={portForwardUpdateTarget !== null || hostFlow.update_required === true}
             onVerified={async (target, remote_info) => {
               const id = hostFlow.manual_reconnect_id;

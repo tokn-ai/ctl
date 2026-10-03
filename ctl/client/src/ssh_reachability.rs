@@ -119,10 +119,10 @@ fn preflight_route(gateways: &[SshGateway]) -> Result<(), SshReachability> {
       "The configured route has too many gateways to check.",
     ));
   }
-  for (index, gateway) in gateways.iter().enumerate() {
-    if !gateway.has_valid_vpn_configuration() {
-      return Err(unsupported("The configured VPN route is invalid."));
-    }
+  if !ctl_ipc::has_valid_gateway_route(gateways) {
+    return Err(unsupported("The configured VPN route is invalid."));
+  }
+  for gateway in gateways {
     match gateway.kind {
       GatewayKind::Ssh => {
         return Err(route_requires_connection(
@@ -139,11 +139,6 @@ fn preflight_route(gateways: &[SshGateway]) -> Result<(), SshReachability> {
         if !valid_host(host) || gateway.port == Some(0) {
           return Err(unsupported("The configured SOCKS5 endpoint is invalid."));
         }
-      }
-      GatewayKind::Vpn if index != 0 => {
-        return Err(unsupported(
-          "A managed VPN must be the first gateway in the route.",
-        ));
       }
       GatewayKind::Vpn => {}
     }

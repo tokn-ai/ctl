@@ -33,7 +33,7 @@ test "$received" -eq __ARCHIVE_BYTES__
 printf 'ctl-install-progress-v1 receiving %s\n' "$received"
 printf 'ctl-install-progress-v1 extracting\n'
 tar -xzf "$archive" -C "$payload"
-for binary in ctl-agent ctmuxd ctl-taskd; do
+for binary in ctl-agent ctmuxd ctl-taskd ctld; do
   printf 'ctl-install-progress-v1 checking %s\n' "$binary"
   test -f "$payload/$binary"
   test ! -L "$payload/$binary"
@@ -51,7 +51,7 @@ if [ -e "$destination" ] || [ -L "$destination" ]; then
   if [ ! -d "$destination" ] || [ -L "$destination" ]; then
     reject_existing_bundle 'installation type'
   fi
-  for binary in ctl-agent ctmuxd ctl-taskd; do
+  for binary in ctl-agent ctmuxd ctl-taskd ctld; do
     if [ ! -f "$destination/$binary" ] || [ -L "$destination/$binary" ] || \
       [ ! -x "$destination/$binary" ] || ! cmp -s "$payload/$binary" "$destination/$binary"; then
       reject_existing_bundle "$binary"
@@ -71,6 +71,7 @@ fi
 test -x "$destination/ctl-agent"
 test -x "$destination/ctmuxd"
 test -x "$destination/ctl-taskd"
+test -x "$destination/ctld"
 printf 'ctl-install-progress-v1 activating\n'
 ln -s "versions/__BUNDLE_ID__" "$link"
 case "$(uname -s)" in

@@ -4,7 +4,7 @@ use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 13;
+pub const PROTOCOL_VERSION: u16 = 14;
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
 ///
@@ -15,6 +15,8 @@ pub const TERMINAL_CHECKPOINT_FORMAT: &str = "ctmux_vt_state";
 pub const TERMINAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
 pub const TERMINAL_HISTORY_FORMAT: &str = "ctmux_logical_lines";
 pub const TERMINAL_HISTORY_FORMAT_VERSION: u16 = 1;
+pub const MAX_HISTORY_PAGE_BYTES: usize = 16 * 1024;
+pub const MAX_NORMALIZED_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum UTF-8 byte length of a shell-reported running-command summary.
 ///
 /// This is intentionally much smaller than the editable command-line bound:
@@ -81,9 +83,9 @@ impl TerminalCheckpoint {
 
 /// Bounded, normalized logical lines above an authoritative live checkpoint.
 ///
-/// Unlike raw PTY output, these lines no longer contain terminal controls and
-/// do not change within a history generation. A new generation replaces all
-/// older lines, such as after the application erases saved lines.
+/// These lines contain no terminal controls. Revisions replace the rolling
+/// window, including after resize. A new generation clears the previous window.
+/// With a manifest, `lines` is only the small recent tail at `first_line`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalHistorySnapshot {
   pub format: String,
@@ -102,6 +104,56 @@ impl TerminalHistorySnapshot {
   pub fn is_supported(&self) -> bool {
     self.format == TERMINAL_HISTORY_FORMAT && self.format_version == TERMINAL_HISTORY_FORMAT_VERSION
   }
+}
+
+/// A physical primary-scrollback row, preserving its continuation boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalHistoryRow {
+  pub text: String,
+  pub wrapped: bool,
+}
+
+/// Identifies one frozen, bounded history window paired with a live checkpoint.
+/// Canonical content is UTF-8 JSONL of `TerminalHistoryRow`, including a final
+/// newline. Byte pages can split rows and UTF-8 characters. SHA-256 checks this
+/// content; it is not a permanent line identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalHistoryManifest {
+  pub snapshot_id: String,
+  pub sequence: u64,
+  pub generation: u64,
+  pub revision: u64,
+  pub total_rows: u64,
+  pub total_bytes: u64,
+  pub total_lines: u64,
+  pub first_line: u64,
+  pub truncated: bool,
+  pub content_hash: String,
+  pub scrollback_limit: u64,
+}
+
+/// Normalize complete logical lines, excluding a wrapped prefix which still
+/// continues in the live grid. Keep the bounded window's newest complete lines.
+#[must_use]
+pub fn normalize_history_rows(rows: &[TerminalHistoryRow]) -> Vec<String> {
+  let mut lines = std::collections::VecDeque::new();
+  let mut pending = String::new();
+  let mut retained_bytes = 0;
+  for row in rows {
+    pending.push_str(&row.text);
+    if !row.wrapped {
+      let line = pending.trim_end().to_owned();
+      pending.clear();
+      retained_bytes += line.len() + 1;
+      lines.push_back(line);
+      while retained_bytes > MAX_NORMALIZED_HISTORY_BYTES {
+        if let Some(old) = lines.pop_front() {
+          retained_bytes -= old.len() + 1;
+        }
+      }
+    }
+  }
+  lines.into()
 }
 
 /// The shell program that most recently reported session awareness metadata.
@@ -600,6 +652,14 @@ pub enum ClientMessage {
   PresentationApplied {
     sequence: u64,
   },
+  /// Fetch one byte-bounded page from this attachment's pinned snapshot.
+  HistoryRequest {
+    snapshot_id: String,
+    offset: u64,
+    max_bytes: u64,
+  },
+  /// Recover a fresh checkpoint without acquiring an input or layout lease.
+  RequestCheckpoint,
   Detach,
 }
 
@@ -659,6 +719,7 @@ pub enum ServerMessage {
     history_gap: bool,
     checkpoint: Option<TerminalCheckpoint>,
     history: Option<Box<TerminalHistorySnapshot>>,
+    history_manifest: Option<Box<TerminalHistoryManifest>>,
     terminal_size_mismatch: bool,
     input_lease: LeaseStatus,
     layout_lease: LeaseStatus,
@@ -682,12 +743,13 @@ pub enum ServerMessage {
   ShellStateChanged {
     state: ShellState,
   },
-  /// Reports an authoritative PTY geometry transition to every attachment.
+  /// Reports a PTY geometry transition in presentation adapters.
   ///
   /// `observed_sequence` is the raw-output next offset at the transition.
-  /// The daemon sends this after every output byte below the offset and before
-  /// any output byte at or above it. This changes a terminal renderer's grid;
-  /// it neither grants layout ownership nor changes a client's viewport.
+  /// This changes a terminal renderer's grid; it neither grants layout
+  /// ownership nor changes a client's viewport. Version 14 daemon delivery
+  /// uses a replacing checkpoint instead, because reflow can depend on
+  /// history which a client has not downloaded yet.
   PtyGeometryChanged {
     terminal_size: TerminalSize,
     observed_sequence: u64,
@@ -695,7 +757,19 @@ pub enum ServerMessage {
   Checkpoint {
     checkpoint: TerminalCheckpoint,
     history: Box<TerminalHistorySnapshot>,
+    history_manifest: Option<Box<TerminalHistoryManifest>>,
     history_gap: bool,
+  },
+  HistoryPage {
+    snapshot_id: String,
+    offset: u64,
+    data: Vec<u8>,
+    next_offset: Option<u64>,
+  },
+  /// The requested transfer expired or was replaced. Its identity lets a
+  /// client ignore an obsolete failure after adopting a newer checkpoint.
+  HistorySnapshotExpired {
+    snapshot_id: String,
   },
   Output {
     sequence_start: u64,
@@ -839,6 +913,86 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn physical_history_normalization_preserves_blanks_and_omits_live_continuation() {
+    let rows = vec![
+      TerminalHistoryRow {
+        text: "abc".into(),
+        wrapped: true,
+      },
+      TerminalHistoryRow {
+        text: "def   ".into(),
+        wrapped: false,
+      },
+      TerminalHistoryRow {
+        text: "   ".into(),
+        wrapped: false,
+      },
+      TerminalHistoryRow {
+        text: "partial".into(),
+        wrapped: true,
+      },
+    ];
+    assert_eq!(normalize_history_rows(&rows), ["abcdef", ""]);
+  }
+
+  #[test]
+  fn physical_history_normalization_keeps_the_newest_bounded_window() {
+    let rows = vec![
+      TerminalHistoryRow {
+        text: "x".repeat(MAX_NORMALIZED_HISTORY_BYTES),
+        wrapped: false,
+      },
+      TerminalHistoryRow {
+        text: "tail".into(),
+        wrapped: false,
+      },
+    ];
+    assert_eq!(normalize_history_rows(&rows), ["tail"]);
+  }
+
+  #[test]
+  fn history_requests_and_byte_pages_round_trip_with_snake_case_fields() {
+    let request = ClientMessage::HistoryRequest {
+      snapshot_id: "snapshot".into(),
+      offset: 7,
+      max_bytes: 16,
+    };
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(encoded["type"], "history_request");
+    assert_eq!(
+      serde_json::from_value::<ClientMessage>(encoded).unwrap(),
+      request
+    );
+    let page = ServerMessage::HistoryPage {
+      snapshot_id: "snapshot".into(),
+      offset: 7,
+      data: vec![0xe7, 0x95],
+      next_offset: Some(9),
+    };
+    let encoded = serde_json::to_value(&page).unwrap();
+    assert_eq!(encoded["type"], "history_page");
+    assert_eq!(encoded["next_offset"], 9);
+    assert_eq!(
+      serde_json::from_value::<ServerMessage>(encoded).unwrap(),
+      page
+    );
+  }
+
+  #[test]
+  fn history_expiration_carries_the_obsolete_snapshot_identity() {
+    let message = ServerMessage::HistorySnapshotExpired {
+      snapshot_id: "obsolete".into(),
+    };
+    let encoded = serde_json::to_value(&message).unwrap();
+    assert_eq!(encoded["type"], "history_snapshot_expired");
+    assert_eq!(encoded["snapshot_id"], "obsolete");
+    assert_eq!(
+      serde_json::from_value::<ServerMessage>(encoded).unwrap(),
+      message
+    );
+  }
 
   #[tokio::test]
   async fn cancelled_fragmented_reads_preserve_framing_and_the_next_message() {
@@ -1121,7 +1275,7 @@ mod tests {
 
   #[test]
   fn terminal_history_snapshots_use_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 13);
+    assert_eq!(PROTOCOL_VERSION, 14);
   }
 
   #[test]

@@ -12,6 +12,8 @@ pub struct ArchivedPane {
   pub terminal_id: String,
   pub reason: String,
   pub lines: Vec<String>,
+  #[serde(default)]
+  pub history_gap: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +82,7 @@ impl ArchiveStore {
         {
           if pane.lines.is_empty() {
             pane.lines = old.lines;
+            pane.history_gap = old.history_gap;
           }
         } else {
           archive.terminals.push(old);
@@ -148,6 +151,18 @@ mod tests {
   use super::*;
 
   #[test]
+  fn legacy_panes_have_no_synthetic_gap_and_new_gaps_round_trip() {
+    let mut pane: ArchivedPane =
+      serde_json::from_str(r#"{"terminal_id":"old","reason":"ended","lines":["kept"]}"#).unwrap();
+    assert!(!pane.history_gap);
+    pane.history_gap = true;
+    let decoded: ArchivedPane =
+      serde_json::from_value(serde_json::to_value(&pane).unwrap()).unwrap();
+    assert!(decoded.history_gap);
+    assert_eq!(decoded.lines, ["kept"]);
+  }
+
+  #[test]
   fn local_records_survive_restart_are_host_scoped_and_require_deletion() -> io::Result<()> {
     let directory =
       std::env::temp_dir().join(format!("ctmux-client-archives-{}", uuid::Uuid::new_v4()));
@@ -162,6 +177,7 @@ mod tests {
         terminal_id: "pane".into(),
         reason: "Missing".into(),
         lines: vec!["final output".into()],
+        history_gap: false,
       }],
     };
     store.save(record.clone())?;

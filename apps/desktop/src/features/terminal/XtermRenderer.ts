@@ -8,6 +8,8 @@ import {
   TerminalPresenter,
   type ProposedDimensions,
   type TerminalAdapter,
+  type TerminalAdapterOptions,
+  type HistoryPresentation,
 } from "./TerminalPresenter";
 
 const DEFAULT_SCROLLBACK_LINES = 10_000;
@@ -123,12 +125,15 @@ export class XtermRenderer {
       resumeSequence: () => terminal().resume_from,
       invalidateResumeSequence: () => {
         const cached = terminal();
+        cached.presenter.cancelHistory();
         cached.resume_from = null;
         cached.presentation_version += 1;
       },
-      write: (data, sequence) => this.applyToTerminal(terminal(), sequence, (presenter) => presenter.write(data)),
-      restoreCheckpoint: (size, history, payload, prefix, sequence) =>
-        this.applyToTerminal(terminal(), sequence, (presenter) => presenter.restoreCheckpoint(size, history, payload, prefix)),
+      write: (data, sequence, sequence_start) => this.applyToTerminal(terminal(), sequence, (presenter) => presenter.write(data, sequence, sequence_start)),
+      restoreCheckpoint: (size, history, payload, prefix, sequence, snapshot_id) =>
+        this.applyToTerminal(terminal(), sequence, (presenter) => presenter.restoreCheckpoint(size, history, payload, prefix, sequence, snapshot_id)),
+      syncHistory: (snapshot) => terminal().presenter.syncHistory(snapshot),
+      cancelHistory: () => terminal().presenter.cancelHistory(),
       recreate: (size) => this.applyToTerminal(terminal(), null, (presenter) => presenter.recreate(size)),
       resize: (size) => {
         const cached = terminal();
@@ -196,6 +201,7 @@ export class XtermRenderer {
   }
 
   invalidateResumeSequence(): void {
+    this.active.presenter.cancelHistory();
     this.active.resume_from = null;
     this.active.presentation_version += 1;
   }
@@ -235,9 +241,9 @@ export class XtermRenderer {
     if (this.active.is_local) this.invalidateResumeSequence();
   }
 
-  write(data: Uint8Array, sequence_end: string): Promise<void> {
+  write(data: Uint8Array, sequence_end: string, sequence_start?: string): Promise<void> {
     return this.applyPresentation(sequence_end, (presenter) =>
-      presenter.write(data),
+      presenter.write(data, sequence_end, sequence_start),
     );
   }
 
@@ -247,11 +253,18 @@ export class XtermRenderer {
     payload: Uint8Array,
     inputPrefix: Uint8Array,
     sequence: string,
+    snapshot_id: string | null = null,
   ): Promise<void> {
     return this.applyPresentation(sequence, (presenter) =>
-      presenter.restoreCheckpoint(terminalSize, historyLines, payload, inputPrefix),
+      presenter.restoreCheckpoint(terminalSize, historyLines, payload, inputPrefix, sequence, snapshot_id),
     );
   }
+
+  syncHistory(snapshot: HistoryPresentation): Promise<boolean> {
+    return this.active.presenter.syncHistory(snapshot);
+  }
+
+  cancelHistory(): void { this.active.presenter.cancelHistory(); }
 
   recreate(terminalSize: TerminalSize): Promise<void> {
     return this.applyPresentation(null, (presenter) =>
@@ -331,7 +344,7 @@ export class XtermRenderer {
     return {
       container,
       presenter: new TerminalPresenter(
-        (size) => this.createAdapter(container, size),
+        (size, options) => this.createAdapter(container, size, options),
         terminalSize,
       ),
       owner_key: null,
@@ -370,9 +383,21 @@ export class XtermRenderer {
   private createAdapter(
     container: HTMLElement,
     terminalSize: TerminalSize,
+    options: TerminalAdapterOptions = {},
   ): TerminalAdapter {
-    container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
-    container.replaceChildren();
+    const mount = document.createElement("div");
+    mount.style.width = "100%";
+    mount.style.height = "100%";
+    const activate = (scrollback_offset = 0) => {
+      const restore_focus = container.contains(document.activeElement);
+      container.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
+      container.replaceChildren(mount);
+      const screen = mount.querySelector(".xterm-screen");
+      if (screen) this.cellObserver?.observe(screen);
+      if (scrollback_offset > 0) terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - scrollback_offset));
+      this.scheduleCellMeasurement();
+      if (restore_focus) terminal.focus();
+    };
     const terminal = new Terminal({
       cols: terminalSize.columns,
       rows: terminalSize.rows,
@@ -383,7 +408,7 @@ export class XtermRenderer {
       fontFamily: '"Berkeley Mono", "SFMono-Regular", Consolas, monospace',
       fontSize: 13,
       lineHeight: 1.18,
-      scrollback: DEFAULT_SCROLLBACK_LINES,
+      scrollback: options.scrollback_limit ?? DEFAULT_SCROLLBACK_LINES,
       theme: {
         background: "#1f1f1f",
         foreground: "#cccccc",
@@ -410,28 +435,41 @@ export class XtermRenderer {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(container);
-    const screen = container.querySelector(".xterm-screen");
-    if (screen) this.cellObserver?.observe(screen);
-    this.scheduleCellMeasurement();
+    terminal.open(mount);
+    if (!options.background) activate();
     terminal.onData((data) => {
-      if (this.active.container === container) this.onInput(encodeTerminalText(data));
+      if (this.active.container === container && mount.parentElement === container) this.onInput(encodeTerminalText(data));
     });
     terminal.onBinary((data) => {
-      if (this.active.container === container) this.onInput(encodeTerminalBinary(data));
+      if (this.active.container === container && mount.parentElement === container) this.onInput(encodeTerminalBinary(data));
     });
 
     return {
+      activate,
+      viewportOffset: () => terminal.buffer.active.baseY - terminal.buffer.active.viewportY,
+      copyPrimaryRows: () => {
+        const buffer = terminal.buffer.normal;
+        return Array.from({ length: terminal.rows }, (_, index) => {
+          const wrapped = buffer.getLine(buffer.baseY + index + 1)?.isWrapped ?? false;
+          // Erased cells still occupy columns in a wrapped row. Keep that
+          // padding so the next row starts at the original wrap boundary.
+          return { text: buffer.getLine(buffer.baseY + index)?.translateToString(!wrapped) ?? "", wrapped };
+        });
+      },
       copyLines: () => {
         const buffer = terminal.buffer.active;
         return Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)?.translateToString(true) ?? "");
       },
       write: (data, callback) => terminal.write(data, callback),
       resize: (columns, rows) => terminal.resize(columns, rows),
-      dispose: () => terminal.dispose(),
+      dispose: () => {
+        mount.querySelectorAll(".xterm-screen").forEach((screen) => this.cellObserver?.unobserve(screen));
+        terminal.dispose();
+        mount.remove();
+      },
       focus: () => terminal.focus(),
       cellDimensions: () => {
-        const screen = container.querySelector(".xterm-screen")?.getBoundingClientRect();
+        const screen = mount.querySelector(".xterm-screen")?.getBoundingClientRect();
         return screen && screen.width > 0 && screen.height > 0 ? { width: screen.width / terminal.cols, height: screen.height / terminal.rows } : null;
       },
       proposeDimensions: () => {
@@ -452,4 +490,4 @@ export type AttachmentRenderer = Pick<XtermRenderer,
   "activateSession" | "adoptSession" | "resumeSequence" | "invalidateResumeSequence" |
   "write" | "restoreCheckpoint" | "recreate" | "resize" |
   "proposeDimensions" | "observeDimensions" | "focus"
->;
+> & Partial<Pick<XtermRenderer, "syncHistory" | "cancelHistory">>;

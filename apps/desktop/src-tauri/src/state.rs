@@ -15,6 +15,7 @@ use crate::dto::{
 };
 use crate::error::{CommandErrorDto, CommandResult};
 
+mod cache_writer;
 mod observation;
 
 const PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT: std::time::Duration =
@@ -540,6 +541,10 @@ pub async fn forward_attachment_events(
 ) {
   tokio::pin!(controller);
 
+  let cache_writer = actor
+    .cache_identity
+    .clone()
+    .map(|identity| cache_writer::CacheWriter::new(identity, actor.control.clone()));
   let mut observations = observation::Observations::default();
   let mut bridge_error = None;
   let outcome = loop {
@@ -570,13 +575,15 @@ pub async fn forward_attachment_events(
           let _ignored = actor.control.detach().await;
           break controller.await;
         }
+        if let Some(cache_writer) = &cache_writer {
+          cache_writer.enqueue(&event);
+        }
         let forwarding = forward_event(&actor, &channel, event);
         tokio::pin!(forwarding);
         let forwarded = tokio::select! {
           result = &mut forwarding => result,
           outcome = &mut controller => {
-            // Keep transport heartbeats running during filesystem work, and
-            // finish a pending disk write before publishing actor closure.
+            // Finish publishing the already received event before closure.
             let _ignored = forwarding.await;
             break outcome;
           }
@@ -593,6 +600,15 @@ pub async fn forward_attachment_events(
 
   let require_checkpoint = actor.has_pending_presentation().await;
   actor.clear_pending().await;
+  if let Some(cache_writer) = cache_writer
+    && let Err(error) = cache_writer.finish().await
+  {
+    let _ignored = channel.send(AttachmentEventDto::ServerError {
+      attachment_id: actor.attachment_id.clone(),
+      code: "local_cache_failed".into(),
+      message: error.message,
+    });
+  }
   // A timeout/disconnect is not new contact. Flush only the last incoming time.
   let _ignored = publish_observation(&actor.attachment_id, &channel, observations.flush());
   if let Some(error) = bridge_error {
@@ -658,15 +674,11 @@ async fn forward_event(
   channel: &Channel<AttachmentEventDto>,
   event: AttachmentEvent,
 ) -> CommandResult<()> {
-  let event = if let Some(identity) = &actor.cache_identity {
-    crate::commands::cache::persist_event(identity.clone(), event).await?
-  } else {
-    event
-  };
   let event = match event {
     AttachmentEvent::Checkpoint {
       checkpoint,
       history,
+      history_manifest,
       history_gap,
     } => {
       let acknowledgement = PresentationAcknowledgement::Checkpoint {
@@ -678,9 +690,26 @@ async fn forward_event(
         event_id,
         checkpoint,
         history,
+        history_manifest,
         history_gap,
       )
     }
+    AttachmentEvent::HistorySynced {
+      snapshot_id,
+      checkpoint,
+      history,
+      rows,
+      scrollback_limit,
+      history_gap,
+    } => AttachmentEventDto::HistorySynced {
+      attachment_id: actor.attachment_id.clone(),
+      snapshot_id,
+      checkpoint: checkpoint.into(),
+      history: history.into(),
+      rows,
+      scrollback_limit: scrollback_limit.to_string(),
+      history_gap,
+    },
     AttachmentEvent::Output {
       sequence_start,
       sequence_end,

@@ -466,6 +466,20 @@ pub async fn acknowledge_attachment_event(
 }
 
 #[tauri::command]
+pub async fn request_attachment_checkpoint(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: AttachmentRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  actor
+    .control
+    .request_checkpoint()
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
 pub async fn detach_attachment(
   window: WebviewWindow,
   state: State<'_, AppState>,

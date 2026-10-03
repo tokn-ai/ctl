@@ -80,7 +80,7 @@ export class AttachmentNotifications {
     if (state.history_gap || state.phase === "attached" || state.phase === "ended") {
       this.store.report(`history:${key}`, state.history_gap ? {
         severity: "warning", title: "Earlier output unavailable", source,
-        message: "Earlier remote output is no longer contiguous. The live screen was restored from a checkpoint.",
+        message: "Some earlier output is unavailable in this view. Retained history may still be loading.",
       } : null);
     }
   }

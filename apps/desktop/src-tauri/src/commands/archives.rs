@@ -36,6 +36,7 @@ pub enum ArchiveResponse {
   Output {
     lines: Vec<String>,
     next_offset: Option<String>,
+    history_gap: bool,
   },
   Saved,
   Deleted,
@@ -75,9 +76,10 @@ pub async fn session_archive(request: ArchiveRequest) -> CommandResult<ArchiveRe
           Ok(ArchiveResponse::Output {
             lines: page.lines,
             next_offset: page.next_offset.map(|offset| offset.to_string()),
+            history_gap: page.history_gap,
           })
         } else {
-          let lines = store
+          let pane = store
             .list()?
             .into_iter()
             .find(|archive| archive.host_key == host_key && archive.session_id == session_id)
@@ -86,11 +88,15 @@ pub async fn session_archive(request: ArchiveRequest) -> CommandResult<ArchiveRe
                 .terminals
                 .into_iter()
                 .find(|pane| pane.terminal_id == terminal_id)
-            })
-            .map_or_else(Vec::new, |pane| pane.lines);
+            });
+          let (lines, history_gap) = pane.map_or_else(
+            || (Vec::new(), false),
+            |pane| (pane.lines, pane.history_gap),
+          );
           Ok(ArchiveResponse::Output {
             lines,
             next_offset: None,
+            history_gap,
           })
         }
       }

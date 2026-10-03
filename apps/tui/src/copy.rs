@@ -24,6 +24,7 @@ pub struct CopyMode {
   searching: bool,
   backwards: bool,
   pub notice: String,
+  pub history_gap: bool,
 }
 
 impl CopyMode {
@@ -45,6 +46,7 @@ impl CopyMode {
       searching: false,
       backwards: false,
       notice: String::new(),
+      history_gap: false,
     }
   }
 
@@ -208,9 +210,14 @@ impl CopyMode {
       return format!("{}{}", if self.backwards { '?' } else { '/' }, self.query);
     }
     format!(
-      " COPY {}/{} | arrows/PgUp/PgDn g/G | Space select, Enter copy | /? search n/N | q exit {}",
+      " COPY {}/{}{} | arrows/PgUp/PgDn g/G | Space select, Enter copy | /? search n/N | q exit {}",
       self.cursor.row + 1,
       self.lines.len(),
+      if self.history_gap {
+        " | History incomplete"
+      } else {
+        ""
+      },
       self.notice
     )
   }
@@ -219,6 +226,14 @@ impl CopyMode {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn missing_history_is_visible_without_changing_copied_lines() {
+    let mut mode = CopyMode::new(vec!["retained output".into()]);
+    mode.history_gap = true;
+    assert!(mode.status().starts_with(" COPY 1/1 | History incomplete"));
+    assert_eq!(mode.lines[0].iter().collect::<String>(), "retained output");
+  }
   fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
   }

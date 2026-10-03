@@ -8,9 +8,11 @@ use ctmux_ipc::{
   LocalControlServerMessage, read_local_control_frame, write_local_control_frame,
 };
 use ctmux_proto::{
-  ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, PROTOCOL_VERSION, ServerMessage,
-  ShellState, read_frame, write_frame,
+  ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, MAX_HISTORY_PAGE_BYTES,
+  PROTOCOL_VERSION, ServerMessage, ShellState, TerminalHistoryManifest, TerminalHistoryRow,
+  TerminalHistorySnapshot, normalize_history_rows, read_frame, write_frame,
 };
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,6 +44,10 @@ const INITIAL_ATTACHMENT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(5);
 const MAX_PRESENTATION_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 const MIN_OUTPUT_FRAME_CHARGE_BYTES: u64 = 4 * 1024;
 const MAX_OUTPUT_FRAME_BYTES: usize = 64 * 1024;
+const HISTORY_SNAPSHOT_IDLE_TTL: Duration = Duration::from_mins(2);
+const MAX_PINNED_HISTORY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RECENT_HISTORY_BYTES: usize = 16 * 1024;
+const MAX_RECENT_HISTORY_LINES: usize = 64;
 const LOCAL_CONTROL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 // A GUI retains an already-handshaken control stream while it waits for its
 // active attachment to detach (currently up to five seconds). Keep that
@@ -1177,6 +1183,19 @@ struct PreparedAttachment {
   shell_state_updates: watch::Receiver<ShellState>,
 }
 
+impl PreparedAttachment {
+  fn guard(&self, reconnect_grace: Duration) -> AttachmentGuard {
+    AttachmentGuard {
+      session: Arc::clone(&self.session),
+      attachment_token: self.attachment_token.clone(),
+      generation: self.attachment_generation,
+      reconnect_grace,
+      preserve_on_drop: self.resumed,
+      active: true,
+    }
+  }
+}
+
 fn prepare_attachment(
   session: Arc<Terminal>,
   request: &AttachParameters,
@@ -1248,25 +1267,18 @@ async fn handle_attach(
   attachment: PreparedAttachment,
   request: AttachParameters,
 ) -> Result<(), ConnectionError> {
+  let mut attachment_guard = attachment.guard(request.attachment_liveness_timeout);
   let PreparedAttachment {
     session,
     attachment_id,
     attachment_token,
-    attachment_generation,
+    attachment_generation: _,
     attachment_leases,
     superseded,
-    resumed,
+    resumed: _,
     events,
     shell_state_updates,
   } = attachment;
-  let mut attachment_guard = AttachmentGuard {
-    session: Arc::clone(&session),
-    attachment_token: attachment_token.clone(),
-    generation: attachment_generation,
-    reconnect_grace: request.attachment_liveness_timeout,
-    preserve_on_drop: resumed,
-    active: true,
-  };
   let initial_delivery_deadline = initial_attachment_delivery_deadline();
 
   if attachment_leases.layout.owned_by_client
@@ -1282,7 +1294,7 @@ async fn handle_attach(
     return Ok(());
   }
 
-  let Some(snapshot) = take_initial_snapshot(
+  let Some(mut snapshot) = take_initial_snapshot(
     &mut stream,
     Arc::clone(&session),
     request.resume_from,
@@ -1300,6 +1312,7 @@ async fn handle_attach(
   let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
   let sent_sequence = snapshot.journal.replay_from;
   let applied_sequence = snapshot.checkpoint.is_none().then_some(sent_sequence);
+  let pinned_history = pin_snapshot_history(&mut snapshot)?;
   let (reader, mut writer) = tokio::io::split(stream);
   match timeout_at(
     initial_delivery_deadline,
@@ -1310,6 +1323,9 @@ async fn handle_attach(
       attachment_leases,
       attachment_token,
       initial_shell_state.clone(),
+      pinned_history
+        .as_ref()
+        .map(|history| history.manifest.clone()),
     ),
   )
   .await
@@ -1334,6 +1350,9 @@ async fn handle_attach(
     request_command_line: request.request_command_line,
     request_running_command: request.request_running_command,
     superseded,
+    pinned_history,
+    pending_history: None,
+    pending_checkpoint: false,
   };
   let exit = drive_attachment(
     attachment,
@@ -1410,6 +1429,130 @@ struct LiveAttachment {
   request_command_line: bool,
   request_running_command: bool,
   superseded: watch::Receiver<u64>,
+  pinned_history: Option<PinnedHistory>,
+  pending_history: Option<HistoryRequest>,
+  pending_checkpoint: bool,
+}
+
+struct HistoryRequest {
+  snapshot_id: String,
+  offset: u64,
+  max_bytes: u64,
+}
+
+/// One bounded immutable transfer snapshot, not a persistent history log.
+struct PinnedHistory {
+  manifest: TerminalHistoryManifest,
+  data: Vec<u8>,
+  last_access: Instant,
+  served_end: usize,
+}
+
+impl PinnedHistory {
+  fn new(
+    history: &TerminalHistorySnapshot,
+    rows: &[TerminalHistoryRow],
+    scrollback_limit: u64,
+  ) -> Result<(Self, TerminalHistorySnapshot), ConnectionError> {
+    let mut data = Vec::new();
+    for row in rows {
+      serde_json::to_writer(&mut data, row).map_err(io::Error::other)?;
+      data.push(b'\n');
+      if data.len() > MAX_PINNED_HISTORY_BYTES {
+        return Err(
+          io::Error::new(
+            io::ErrorKind::InvalidData,
+            "history snapshot exceeds its byte bound",
+          )
+          .into(),
+        );
+      }
+    }
+    let lines = normalize_history_rows(rows);
+    let mut first_line = lines.len();
+    let mut recent_bytes = 0;
+    while first_line > 0 && lines.len() - first_line < MAX_RECENT_HISTORY_LINES {
+      let bytes = serde_json::to_vec(&lines[first_line - 1])
+        .map_err(io::Error::other)?
+        .len()
+        + 1;
+      if recent_bytes + bytes > MAX_RECENT_HISTORY_BYTES {
+        break;
+      }
+      recent_bytes += bytes;
+      first_line -= 1;
+    }
+    let manifest = TerminalHistoryManifest {
+      snapshot_id: uuid::Uuid::new_v4().to_string(),
+      sequence: history.sequence,
+      generation: history.generation,
+      revision: history.revision,
+      total_rows: rows.len() as u64,
+      total_bytes: data.len() as u64,
+      total_lines: lines.len() as u64,
+      first_line: first_line as u64,
+      truncated: history.truncated,
+      content_hash: format!("{:x}", Sha256::digest(&data)),
+      scrollback_limit,
+    };
+    let mut recent = history.clone();
+    recent.lines = lines[first_line..].to_vec();
+    Ok((
+      Self {
+        manifest,
+        data,
+        last_access: Instant::now(),
+        served_end: 0,
+      },
+      recent,
+    ))
+  }
+
+  fn expired(&self) -> bool {
+    self.last_access.elapsed() >= HISTORY_SNAPSHOT_IDLE_TTL
+  }
+
+  fn complete(&self) -> bool {
+    self.served_end == self.data.len()
+  }
+
+  fn page(&mut self, request: &HistoryRequest) -> Result<ServerMessage, ErrorCode> {
+    if self.expired() || request.snapshot_id != self.manifest.snapshot_id {
+      return Ok(ServerMessage::HistorySnapshotExpired {
+        snapshot_id: request.snapshot_id.clone(),
+      });
+    }
+    let offset = usize::try_from(request.offset).map_err(|_| ErrorCode::InvalidRequest)?;
+    if offset > self.data.len() || request.max_bytes == 0 {
+      return Err(ErrorCode::InvalidRequest);
+    }
+    let max_bytes = usize::try_from(request.max_bytes)
+      .unwrap_or(usize::MAX)
+      .min(MAX_HISTORY_PAGE_BYTES);
+    let end = offset.saturating_add(max_bytes).min(self.data.len());
+    if offset <= self.served_end {
+      self.served_end = self.served_end.max(end);
+    }
+    self.last_access = Instant::now();
+    Ok(ServerMessage::HistoryPage {
+      snapshot_id: self.manifest.snapshot_id.clone(),
+      offset: request.offset,
+      data: self.data[offset..end].to_vec(),
+      next_offset: (end < self.data.len()).then_some(end as u64),
+    })
+  }
+}
+
+fn pin_snapshot_history(
+  snapshot: &mut AttachSnapshot,
+) -> Result<Option<PinnedHistory>, ConnectionError> {
+  let Some(history) = snapshot.history.as_ref() else {
+    return Ok(None);
+  };
+  let rows = snapshot.history_rows.as_deref().unwrap_or_default();
+  let (pinned, recent) = PinnedHistory::new(history, rows, snapshot.scrollback_limit)?;
+  snapshot.history = Some(recent);
+  Ok(Some(pinned))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1444,6 +1587,14 @@ async fn drive_attachment(
     return Ok(AttachmentExit::Disconnected);
   }
   loop {
+    if driver
+      .attachment
+      .pinned_history
+      .as_ref()
+      .is_some_and(PinnedHistory::expired)
+    {
+      driver.attachment.pinned_history = None;
+    }
     // Give the terminal event queue bounded progress even when incoming
     // heartbeats are continuously ready. Process only one queued event here
     // so presentation acknowledgements still get a turn during heavy output.
@@ -1487,6 +1638,13 @@ async fn drive_attachment(
           return Ok(AttachmentExit::Detached);
         }
         if !driver.process_client_message(message).await? {
+          return Ok(AttachmentExit::Disconnected);
+        }
+      }
+      // Output gets a bounded turn above; control always precedes this small
+      // page. A continuous PTY producer must not starve history indefinitely.
+      () = std::future::ready(()), if driver.attachment.pending_history.is_some() => {
+        if !driver.send_available_output().await? || !driver.send_history_page().await? {
           return Ok(AttachmentExit::Disconnected);
         }
       }
@@ -1547,6 +1705,39 @@ impl AttachmentDriver {
       self.renew_liveness();
       return self.send_available_output().await;
     }
+    match message {
+      ClientMessage::RequestCheckpoint => {
+        self.attachment.pending_checkpoint = true;
+        self.renew_liveness();
+        return self.send_available_output().await;
+      }
+      ClientMessage::HistoryRequest {
+        snapshot_id,
+        offset,
+        max_bytes,
+      } => {
+        self.renew_liveness();
+        if self.attachment.pending_history.is_some() {
+          return write_before_deadline(
+            &mut self.attachment.writer,
+            &ServerMessage::Error {
+              code: ErrorCode::InvalidRequest,
+              message: "only one history page request may be pending".into(),
+            },
+            self.deadline,
+          )
+          .await
+          .map(|written| written.is_some());
+        }
+        self.attachment.pending_history = Some(HistoryRequest {
+          snapshot_id,
+          offset,
+          max_bytes,
+        });
+        return Ok(true);
+      }
+      _ => {}
+    }
     if renews_attachment_liveness(&message) {
       self.renew_liveness();
     }
@@ -1568,6 +1759,27 @@ impl AttachmentDriver {
     }
   }
 
+  async fn send_history_page(&mut self) -> Result<bool, ConnectionError> {
+    let Some(request) = self.attachment.pending_history.take() else {
+      return Ok(true);
+    };
+    let response = self.attachment.pinned_history.as_mut().map_or_else(
+      || {
+        Ok(ServerMessage::HistorySnapshotExpired {
+          snapshot_id: request.snapshot_id.clone(),
+        })
+      },
+      |history| history.page(&request),
+    );
+    let message = response.unwrap_or_else(|code| ServerMessage::Error {
+      message: "invalid history page offset or size".into(),
+      code,
+    });
+    write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
+      .await
+      .map(|written| written.is_some())
+  }
+
   fn renew_liveness(&mut self) {
     // Once the child exits, acknowledgements may drain its final output but
     // must not extend the deadline. Heartbeats alone cannot keep an ended
@@ -1582,6 +1794,14 @@ impl AttachmentDriver {
       return Ok(false);
     };
     if self.attachment.sent_sequence < ended.final_sequence {
+      return Ok(false);
+    }
+    if self
+      .attachment
+      .pinned_history
+      .as_ref()
+      .is_some_and(|history| !history.complete() && !history.expired())
+    {
       return Ok(false);
     }
 
@@ -1663,6 +1883,11 @@ impl AttachmentDriver {
     if self.attachment.applied_sequence.is_none() {
       return Ok(true);
     }
+    if self.attachment.pending_checkpoint && self.attachment.in_flight_output.is_empty() {
+      let snapshot = self.session.fresh_snapshot()?;
+      self.attachment.pending_checkpoint = false;
+      return self.send_checkpoint(snapshot).await;
+    }
 
     loop {
       let available_bytes = self
@@ -1673,7 +1898,7 @@ impl AttachmentDriver {
         return Ok(true);
       }
 
-      let snapshot = self.session.snapshot_for_delivery(
+      let mut snapshot = self.session.snapshot_for_delivery(
         Some(self.attachment.sent_sequence),
         self.attachment.checkpoint_geometry_revision,
       )?;
@@ -1681,25 +1906,8 @@ impl AttachmentDriver {
         if !self.attachment.in_flight_output.is_empty() {
           return Ok(true);
         }
-        let sequence = checkpoint.sequence;
-        let history = snapshot
-          .history
-          .expect("checkpoint delivery always carries paired terminal history");
-        let message = ServerMessage::Checkpoint {
-          checkpoint,
-          history: Box::new(history),
-          history_gap: snapshot.history_gap,
-        };
-        if write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
-          .await?
-          .is_none()
-        {
-          return Ok(false);
-        }
-        self.attachment.sent_sequence = sequence;
-        self.attachment.applied_sequence = None;
-        self.attachment.checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
-        return Ok(true);
+        snapshot.checkpoint = Some(checkpoint);
+        return self.send_checkpoint(snapshot).await;
       }
 
       let frame_limit = usize::try_from(available_bytes)
@@ -1735,6 +1943,42 @@ impl AttachmentDriver {
         charge_bytes,
       });
     }
+  }
+
+  async fn send_checkpoint(
+    &mut self,
+    mut snapshot: AttachSnapshot,
+  ) -> Result<bool, ConnectionError> {
+    let pinned_history = pin_snapshot_history(&mut snapshot)?;
+    let checkpoint = snapshot
+      .checkpoint
+      .expect("replacing snapshot has checkpoint");
+    let sequence = checkpoint.sequence;
+    let history = snapshot
+      .history
+      .expect("replacing snapshot has paired history");
+    let message = ServerMessage::Checkpoint {
+      checkpoint,
+      history: Box::new(history),
+      history_manifest: pinned_history
+        .as_ref()
+        .map(|history| Box::new(history.manifest.clone())),
+      history_gap: snapshot.history_gap,
+    };
+    if write_before_deadline(&mut self.attachment.writer, &message, self.deadline)
+      .await?
+      .is_none()
+    {
+      return Ok(false);
+    }
+    self.attachment.pinned_history = pinned_history;
+    // The new manifest invalidates the previous transfer. Do not let an
+    // obsolete queued request occupy the new snapshot's single page slot.
+    self.attachment.pending_history = None;
+    self.attachment.sent_sequence = sequence;
+    self.attachment.applied_sequence = None;
+    self.attachment.checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
+    Ok(true)
   }
 
   async fn process_session_event(
@@ -1811,16 +2055,10 @@ impl AttachmentDriver {
       return self.send_available_output().await;
     }
 
-    let message = ServerMessage::PtyGeometryChanged {
-      terminal_size,
-      observed_sequence,
-    };
-    let written =
-      write_before_deadline(&mut self.attachment.writer, &message, self.deadline).await?;
-    if written.is_some() {
-      self.attachment.checkpoint_geometry_revision = Some(geometry_revision);
-    }
-    Ok(written.is_some())
+    // Reflow may pull remote scrollback into the live grid. A renderer with
+    // only a recent tail cannot reproduce this by resizing its local grid.
+    let _ = terminal_size;
+    self.send_available_output().await
   }
 
   async fn process_shell_state_update(
@@ -1901,6 +2139,7 @@ async fn send_attached<W>(
   attachment_leases: ctmux_core::AttachmentLeases,
   attachment_token: String,
   shell_state: ShellState,
+  history_manifest: Option<TerminalHistoryManifest>,
 ) -> Result<(), ConnectionError>
 where
   W: tokio::io::AsyncWrite + Unpin,
@@ -1917,6 +2156,7 @@ where
       history_gap: snapshot.history_gap,
       checkpoint: snapshot.checkpoint,
       history: snapshot.history.map(Box::new),
+      history_manifest: history_manifest.map(Box::new),
       terminal_size_mismatch,
       input_lease: attachment_leases.input,
       layout_lease: attachment_leases.layout,
@@ -2013,6 +2253,8 @@ fn renews_attachment_liveness(message: &ClientMessage) -> bool {
       | ClientMessage::AcquireLease { .. }
       | ClientMessage::ReleaseLease { .. }
       | ClientMessage::Heartbeat { .. }
+      | ClientMessage::HistoryRequest { .. }
+      | ClientMessage::RequestCheckpoint
       | ClientMessage::Detach
   )
 }
@@ -2145,6 +2387,8 @@ where
 
 #[derive(Debug, Error)]
 enum ConnectionError {
+  #[error("history snapshot I/O failed: {0}")]
+  History(#[from] io::Error),
   #[error(transparent)]
   Codec(#[from] CodecError),
   #[error(transparent)]
@@ -2315,6 +2559,147 @@ mod tests {
   use ctmux_proto::{LeaseStatus, SessionStatus};
   use tokio::time::timeout;
 
+  fn history_fixture(rows: &[TerminalHistoryRow]) -> TerminalHistorySnapshot {
+    let lines = normalize_history_rows(rows);
+    TerminalHistorySnapshot {
+      format: ctmux_proto::TERMINAL_HISTORY_FORMAT.into(),
+      format_version: 1,
+      sequence: 42,
+      generation: 3,
+      revision: 7,
+      retained_bytes: lines.iter().map(|line| (line.len() + 1) as u64).sum(),
+      truncated: false,
+      lines,
+    }
+  }
+
+  #[test]
+  fn history_pages_are_byte_bounded_and_preserve_long_unicode_wrapped_rows() {
+    let rows = vec![
+      TerminalHistoryRow {
+        text: "界\"".repeat(20_000),
+        wrapped: true,
+      },
+      TerminalHistoryRow {
+        text: "tail   ".into(),
+        wrapped: false,
+      },
+      TerminalHistoryRow {
+        text: "partial".into(),
+        wrapped: true,
+      },
+    ];
+    let (mut pinned, recent) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    assert_eq!(pinned.manifest.total_rows, 3);
+    assert_eq!(pinned.manifest.total_lines, 1);
+    assert!(
+      recent.lines.is_empty(),
+      "a huge recent line must not block the screen frame"
+    );
+    let mut data = Vec::new();
+    let mut offset = 0;
+    loop {
+      let request = HistoryRequest {
+        snapshot_id: pinned.manifest.snapshot_id.clone(),
+        offset,
+        max_bytes: u64::MAX,
+      };
+      let ServerMessage::HistoryPage {
+        offset: actual,
+        data: page,
+        next_offset,
+        ..
+      } = pinned.page(&request).unwrap()
+      else {
+        panic!("expected history page")
+      };
+      assert_eq!(actual, offset);
+      assert!(page.len() <= MAX_HISTORY_PAGE_BYTES);
+      data.extend(page);
+      if let Some(next) = next_offset {
+        offset = next;
+      } else {
+        break;
+      }
+    }
+    assert!(pinned.complete());
+    assert_eq!(data.len() as u64, pinned.manifest.total_bytes);
+    assert_eq!(
+      format!("{:x}", Sha256::digest(&data)),
+      pinned.manifest.content_hash
+    );
+    let decoded: Vec<TerminalHistoryRow> = data
+      .split(|byte| *byte == b'\n')
+      .filter(|line| !line.is_empty())
+      .map(|line| serde_json::from_slice(line).unwrap())
+      .collect();
+    assert_eq!(decoded, rows);
+  }
+
+  #[test]
+  fn history_snapshot_renews_idle_expiry_and_rejects_stale_ids_and_bounds() {
+    let rows: Vec<_> = (0..100)
+      .map(|index| TerminalHistoryRow {
+        text: format!("line {index}"),
+        wrapped: false,
+      })
+      .collect();
+    let (mut pinned, recent) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    assert_eq!(recent.lines.len(), MAX_RECENT_HISTORY_LINES);
+    assert_eq!(pinned.manifest.first_line, 36);
+    let mut request = HistoryRequest {
+      snapshot_id: pinned.manifest.snapshot_id.clone(),
+      offset: 0,
+      max_bytes: 1,
+    };
+    pinned.last_access = Instant::now() - HISTORY_SNAPSHOT_IDLE_TTL / 2;
+    pinned.page(&request).unwrap();
+    assert!(pinned.last_access.elapsed() < Duration::from_secs(1));
+    request.offset = pinned.manifest.total_bytes + 1;
+    assert_eq!(
+      pinned.page(&request).unwrap_err(),
+      ErrorCode::InvalidRequest
+    );
+    request.offset = 0;
+    request.max_bytes = 0;
+    assert_eq!(
+      pinned.page(&request).unwrap_err(),
+      ErrorCode::InvalidRequest
+    );
+    request.max_bytes = 1;
+    request.snapshot_id = "replaced".into();
+    assert_eq!(
+      pinned.page(&request).unwrap(),
+      ServerMessage::HistorySnapshotExpired {
+        snapshot_id: request.snapshot_id.clone()
+      }
+    );
+    request.snapshot_id.clone_from(&pinned.manifest.snapshot_id);
+    pinned.last_access = Instant::now() - HISTORY_SNAPSHOT_IDLE_TTL;
+    assert_eq!(
+      pinned.page(&request).unwrap(),
+      ServerMessage::HistorySnapshotExpired {
+        snapshot_id: request.snapshot_id.clone()
+      }
+    );
+  }
+
+  #[test]
+  fn fetching_only_the_last_page_does_not_complete_history_drain() {
+    let rows = vec![TerminalHistoryRow {
+      text: "last".into(),
+      wrapped: false,
+    }];
+    let (mut pinned, _) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    let request = HistoryRequest {
+      snapshot_id: pinned.manifest.snapshot_id.clone(),
+      offset: pinned.manifest.total_bytes - 1,
+      max_bytes: 1,
+    };
+    pinned.page(&request).unwrap();
+    assert!(!pinned.complete());
+  }
+
   #[test]
   fn endpoint_startup_lock_is_exclusive_and_owner_only() {
     use rustix::fs::{FlockOperation, flock};
@@ -2390,6 +2775,8 @@ mod tests {
       },
       history_gap: false,
       history: None,
+      history_rows: None,
+      scrollback_limit: 10_000,
       shell_state: ShellState::default(),
     };
     let attachment_leases = ctmux_core::AttachmentLeases {
@@ -2413,6 +2800,7 @@ mod tests {
           attachment_leases,
           "test-token".into(),
           ShellState::default(),
+          None,
         ),
       )
       .await

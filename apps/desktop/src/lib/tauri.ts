@@ -486,6 +486,12 @@ export async function detachAttachment(
   await invoke("detach_attachment", { request });
 }
 
+export async function requestAttachmentCheckpoint(
+  request: AttachmentIdRequest,
+): Promise<void> {
+  await invoke("request_attachment_checkpoint", { request });
+}
+
 export async function setNativeWindowTitle(title: string): Promise<void> {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     return;

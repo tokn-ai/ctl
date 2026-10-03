@@ -1,7 +1,7 @@
-# ctmux protocol version 13
+# ctmux protocol version 14
 
 The protocol is independent of local IPC and future remote transport. Version
-11 uses length-prefixed JSON frames for debuggability. Each frame begins with a
+14 uses length-prefixed JSON frames for debuggability. Each frame begins with a
 four-byte unsigned big-endian payload length.
 
 The maximum encoded frame size is 8 MiB.
@@ -16,6 +16,11 @@ and layout leases. Protocol versions still match exactly during handshake.
 Version 8 adds renderer-applied presentation flow control. Version 9 pairs
 every terminal checkpoint with a bounded normalized-history snapshot captured
 at the same raw sequence.
+
+Version 14 sends a small recent history tail with the live screen, followed by
+client-requested byte pages from one pinned physical-history snapshot. Every
+geometry transition and saved-history clear replaces the authoritative screen
+and history manifest. History synchronization does not delay screen acknowledgement.
 
 ## Sessions, views, and terminals
 
@@ -117,9 +122,9 @@ attachment:
 
 - daemon to client: `attached` (including a complete `shell_state` snapshot),
   an optional checkpoint/history pair, replayed `output`, then live `output`,
-  `pty_geometry_changed`, and `shell_state_changed`;
+  replacing `checkpoint`, requested `history_page`, and `shell_state_changed`;
 - client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`,
-  `presentation_applied`, or `detach`;
+  `presentation_applied`, `history_request`, `request_checkpoint`, or `detach`;
 - daemon to client: `heartbeat_ack`, `detached` after an explicit detach is
   processed, and `session_ended` when the child exits.
 
@@ -149,8 +154,8 @@ by itself; daemon policy may redact it.
 
 The terminal size in `attached` is an authoritative PTY-layout fact, not an
 instruction to resize a client viewport. Later layout changes arrive as
-`pty_geometry_changed` stream messages so every attached renderer can update
-its grid without gaining layout ownership.
+replacing `checkpoint` stream messages so every attached renderer can adopt
+the authoritative reflow without gaining layout ownership.
 
 `get_shell_state` is a one-response command for a noninteractive current-state
 lookup. It returns `shell_state_response` with the resolved `session` and the
@@ -203,7 +208,8 @@ own reconnect cursor unset. Heartbeats, detach, input, and lease control remain
 independent of presentation credit.
 
 When the child exits, the daemon continues accepting presentation acknowledgements
-until all final output has been sent. It then sends the final shell state and
+and pinned history page requests until all final output and requested snapshot
+bytes have been sent. It then sends the final shell state and
 `session_ended`; the last output frame need not be acknowledged before closure.
 This drain keeps the attachment's existing liveness deadline fixed, so a renderer
 that stops applying output cannot retain an ended session indefinitely by sending
@@ -223,8 +229,8 @@ separate attachment-bound leases:
 - `input` requires the input lease, and `resize` requires the layout lease.
   An unauthorized command receives a structured error but does not terminate
   the shell session.
-- A successful resize that changes the PTY's geometry sends
-  `pty_geometry_changed` to every live attachment. It changes neither input
+- A successful resize that changes the PTY's geometry sends a replacing
+  `checkpoint` and new history manifest to every live attachment. It changes neither input
   ownership nor a client's viewport, scroll position, or selection.
 - Explicit detach and reconnect-grace expiry release any leases owned by that
   attachment. Transport EOF, write failure, and attachment-liveness expiry
@@ -378,49 +384,38 @@ An attaching client may provide `resume_from`:
 
 ## PTY geometry transitions
 
-`pty_geometry_changed` is an authoritative, absolute PTY-layout update:
+Every changed PTY geometry creates an authoritative checkpoint and paired new
+history manifest. This replaces the client grid rather than asking a renderer
+with incomplete history to reconstruct remote reflow. A resize does not grant
+input ownership or change another client's viewport.
 
-```text
-terminal_size:     columns, rows, and optional pixel dimensions
-observed_sequence: raw-output next offset at the transition
-```
+The daemon orders replacement after earlier raw output has been applied and
+before later output is sent. Several resizes can share a raw byte sequence;
+the daemon's internal replacement revision distinguishes these boundaries.
+Each replacement has a fresh `snapshot_id`, invalidating previous history jobs.
+The `pty_geometry_changed` variant remains in the protocol for presentation
+adapters, but version 14 daemon geometry delivery uses checkpoints.
 
-For a transition at `observed_sequence = S`, the daemon sends every raw output
-byte below `S`, then the geometry message, then any raw output byte at or above
-`S`. If several resize operations occur before another output byte, their
-messages share `S` and remain in daemon stream order. A renderer applies the
-absolute size in each message; repeating a same-size message is harmless.
+AVT defers reflow of a hidden primary buffer while alternate screen is active.
+If geometry changes there, returning to primary also replaces the checkpoint
+and history manifest, after the primary buffer adopts the current geometry.
 
-The message reports a PTY fact only. It never grants the layout lease, requests
-that another attachment resize, or controls a client's viewport. In particular,
-a narrow phone viewer receives the desktop session's geometry but does not
-change it.
-
-A presenter that cannot render at the announced grid must not advance its
-local reconnect cursor past the transition. It can continue to show best-effort
-output, but its next attach must omit `resume_from` so `ctmuxd` supplies a
-geometry-safe checkpoint.
-
-Geometry transitions are not raw VT bytes and the protocol deliberately does not
-add a second resume cursor for them. A caller may use `resume_from` only for a
-renderer that has processed the complete prior attachment stream, including
-geometry messages. If the requested raw position is at or before the most
-recent geometry boundary, `ctmuxd` sends a checkpoint instead of replaying raw
-output across that change. When the resize-boundary checkpoint remains usable,
-a request exactly at the boundary replays from that same offset without a
-history gap. If a checkpoint must advance past the requested raw position,
-`history_gap` is true even when those raw bytes are still retained; this makes
-the client mark its own local history as discontinuous rather than reconstruct
-a renderer with the wrong grid.
+A resume at or before the latest geometry or history-clear boundary receives a
+checkpoint. When its boundary remains replayable, the daemon uses that exact
+checkpoint; otherwise it replaces from a newer one and reports `history_gap`.
+A renderer that cannot adopt the authoritative checkpoint must leave its
+reconnect cursor unset.
 
 ## Checkpoints
 
 When a client has no previous sequence, its requested sequence is older than
 retained raw output, or the request crosses a PTY geometry boundary, `attached`
 includes a terminal checkpoint and a terminal-history snapshot with the same
-`sequence`. The client restores the history and live checkpoint, then processes
-output from `replay_from` forward. A checkpoint and history snapshot are invalid
-unless both are present and their sequences match.
+`sequence`. A fresh attachment captures the current screen rather than waiting
+for the periodic journal checkpoint. The client restores the live checkpoint
+and small recent history tail, then processes output from `replay_from` forward
+while fetching full history pages. A checkpoint and history snapshot are
+invalid unless both are present and their sequences match.
 
 `history_gap` means the restored presentation is not complete back to the
 client's requested position. It can be caused by bounded journal eviction, a
@@ -454,14 +449,14 @@ generation:      identity reset by RIS or erase-saved-lines
 revision:        monotonic snapshot revision within daemon memory
 retained_bytes:  normalized UTF-8 bytes retained, including line separators
 truncated:       whether older lines in this generation were evicted
-lines:           complete logical lines above the live grid
+lines:           recent completed logical lines at manifest.first_line
 ```
 
 History lines are the daemon emulator's normalized text after terminal controls
 have been interpreted. Soft-wrapped physical rows are merged into logical
 lines. Alternate-screen output is excluded. The snapshot is bounded by bytes,
-physical rows, and emulator cells; it is a full replacement, not an incremental
-patch. Version 1 does not preserve style runs in historical lines.
+physical rows, and emulator cells; its completed transfer is a full replacement,
+not an incremental patch. Version 1 does not preserve style runs in historical lines.
 
 The emulator strips trailing whitespace from each complete logical line before
 history storage; hard line breaks do not pad stored lines to the terminal width.
@@ -483,6 +478,67 @@ is sent with its paired history as a stream message and clients restore both
 before accepting later output. A recovery checkpoint also provides the current PTY geometry, so it
 supersedes any queued geometry transition it already covers. A client must
 reject a checkpoint or history format/version it does not support.
+
+## Paged history projection
+
+`attached` and `checkpoint` include `history_manifest` whenever they carry a
+checkpoint/history pair. Delta-only resumes omit all three. The manifest is:
+
+```text
+snapshot_id:     opaque ID of this attachment's frozen transfer snapshot
+sequence:        raw boundary shared with checkpoint and recent history
+generation:      saved-history clear/reset epoch
+revision:        rolling history window revision
+scrollback_limit: physical rows retained by the paired terminal emulator
+total_rows:      number of physical primary-scrollback rows
+total_bytes:     byte length of canonical JSONL
+total_lines:     completed normalized logical lines, after the 4 MiB cap
+first_line:      start index of the inline recent logical tail
+truncated:       earlier source history was discarded
+content_hash:    lowercase SHA-256 hex of all canonical JSONL bytes
+```
+
+Each canonical row is a compact JSON object with `text` and `wrapped`, followed
+by a newline. Text preserves physical row padding and wrapping. Rows above the
+live grid include a partial wrapped prefix which still continues on screen;
+normalization excludes that prefix from completed logical history. Alternate
+screen checkpoints retain the primary rows captured before switching buffers.
+When alternate-screen resize reduces the physical row budget, only the newest
+captured primary rows remain and `truncated` becomes true. Historical styling
+is not retained.
+
+The inline recent tail is bounded by 64 logical lines and 16 KiB of encoded
+line content. It does not imply that older history is missing. Clients display
+the screen immediately and acknowledge it independently of history transfer.
+
+`history_request { snapshot_id, offset, max_bytes }` is valid only on an
+attachment stream and requires no lease. `offset` is a JSONL byte offset;
+`max_bytes` must be nonzero and is capped at 16 KiB. The reply is
+`history_page { snapshot_id, offset, data, next_offset }`. Chunks may split JSON
+rows or UTF-8 characters; assemble them before decoding. `next_offset: null`
+marks the final chunk. Validate byte count, row count, and content hash before
+replacing the local projection. Snapshot-relative offsets are not permanent
+line identities, and hashes verify content rather than infer overlap.
+
+One snapshot, at most 16 MiB encoded, is pinned per attachment. Successful page
+access renews its two-minute idle expiry. A new checkpoint replaces the pin and
+cancels any queued request for its previous manifest; clients cancel that
+previous job when adopting the new checkpoint. Requests for expired or replaced
+IDs return `history_snapshot_expired { snapshot_id }`; ignore expiration for a
+job already superseded by another manifest. Invalid offsets or
+zero page sizes return `invalid_request`. At most one page request is pending.
+Small pages follow bounded output/control turns so neither screen delivery nor
+background history starves the other.
+
+`request_checkpoint` queues a fresh authoritative screen/history replacement
+without acquiring a lease. It waits for pending presentation credit and
+in-flight output acknowledgements while input and heartbeats remain responsive.
+Use it after expiry or loss of a coherent local replay baseline.
+
+Normal child exit retains its pinned history transfer until complete within
+the existing fixed drain deadline, then delivers `session_ended`. Explicit
+detach, transport loss, or deadline expiry can interrupt backfill; clients must
+show the incomplete-history state rather than treat the recent tail as complete.
 
 ## Deliberately deferred
 

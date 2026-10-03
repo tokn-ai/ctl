@@ -895,9 +895,15 @@ The desktop and TUI retain final terminal output after an exit or confirmed
 missing-session response. Press a key to dismiss the ended pane or session;
 transport outages continue to reconnect.
 
-Dismissed and deleted sessions are stored on the client device for seven days.
+Dismissed and deleted sessions are stored on the client device until deleted.
+The current screen and recent history appear first; older retained remote
+history downloads in the background. Local history mirrors the remote bounded
+window, and unavailable or incomplete history is marked visibly. Existing
+archives remain readable.
+
 Archives contain locally retained text; they remain available when the host is
 offline, and do not revive a process. Open **Archived** in the desktop Sessions
 sidebar, use **Ctrl+B A** in the TUI, or run `ctmux archives` followed by
 `ctmux archive SESSION_ID`. Desktop and TUI maintain separate local archives.
-No archive protocol or daemon upgrade is required.
+History synchronization requires protocol v14 on both client and daemon;
+reading existing local archives does not require a connection or upgrade.

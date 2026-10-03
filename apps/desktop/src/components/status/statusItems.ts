@@ -161,7 +161,7 @@ export function createStatusGroups(state: AttachmentViewState): StatusGroups {
     alerts.push(item(
       "history",
       "HISTORY GAP",
-      "Earlier output is no longer contiguous; the live screen was restored from a checkpoint.",
+      "Some earlier output is unavailable in this view. Retained history may still be loading.",
       { tone: "warning" },
     ));
   }

@@ -119,16 +119,59 @@ fn size() -> TerminalSize {
   }
 }
 async fn message(stream: &mut Stream) -> ServerMessage {
-  let message = timeout(Duration::from_secs(15), read_frame(stream))
-    .await
-    .expect("protocol timed out")
-    .unwrap()
-    .expect("unexpected EOF");
-  assert!(
-    !matches!(message, ServerMessage::Error { .. }),
-    "{message:?}"
-  );
-  message
+  loop {
+    let message = timeout(Duration::from_secs(15), read_frame(stream))
+      .await
+      .expect("protocol timed out")
+      .unwrap()
+      .expect("unexpected EOF");
+    assert!(
+      !matches!(message, ServerMessage::Error { .. }),
+      "{message:?}"
+    );
+    match &message {
+      ServerMessage::Attached {
+        history_manifest: Some(manifest),
+        ..
+      }
+      | ServerMessage::Checkpoint {
+        history_manifest: Some(manifest),
+        ..
+      } if manifest.total_bytes > 0 => {
+        write_frame(
+          stream,
+          &ClientMessage::HistoryRequest {
+            snapshot_id: manifest.snapshot_id.clone(),
+            offset: 0,
+            max_bytes: ctmux_proto::MAX_HISTORY_PAGE_BYTES as u64,
+          },
+        )
+        .await
+        .unwrap();
+      }
+      ServerMessage::HistoryPage {
+        snapshot_id,
+        next_offset,
+        ..
+      } => {
+        if let Some(offset) = next_offset {
+          write_frame(
+            stream,
+            &ClientMessage::HistoryRequest {
+              snapshot_id: snapshot_id.clone(),
+              offset: *offset,
+              max_bytes: ctmux_proto::MAX_HISTORY_PAGE_BYTES as u64,
+            },
+          )
+          .await
+          .unwrap();
+        }
+        continue;
+      }
+      _ => {}
+    }
+    return message;
+  }
 }
 async fn attached(stream: &mut Stream) -> String {
   let ServerMessage::Attached {

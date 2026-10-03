@@ -26,7 +26,9 @@ const REMOTE_COMMAND: &str = concat!(
   r#"command -v ctl-agent >/dev/null 2>&1 || { printf 'ctl-ssh-nf\n'; exit 127; }; "#,
   "exec ctl-agent vpn",
 );
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
+/// Shared startup budget for the SSH client and the remote agent's handshake.
+/// Established byte streams have no startup or idle deadline.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,7 +55,7 @@ pub async fn negotiate_contract(
 ) -> Result<ProtocolVersion, Error> {
   let offer: ProtocolOffer = crate::read_frame(reader)
     .await?
-    .ok_or(Error::UnsupportedProtocol)?;
+    .ok_or(Error::ConnectionClosed("protocol offer"))?;
   let selected = offer
     .negotiate(SUPPORTED_PROTOCOL_VERSIONS)
     .ok_or(Error::UnsupportedProtocol)?;
@@ -79,7 +81,7 @@ pub async fn accept_contract(
   crate::write_frame(writer, &offer).await?;
   let selection: ProtocolSelection = crate::read_frame(reader)
     .await?
-    .ok_or(Error::UnsupportedProtocol)?;
+    .ok_or(Error::ConnectionClosed("protocol selection"))?;
   if !offer.accepts(selection.protocol_version) {
     return Err(Error::UnsupportedProtocol);
   }
@@ -171,10 +173,33 @@ pub enum Error {
   UnsupportedProtocol,
   #[error("Remote VPN operation timed out")]
   Timeout,
+  #[error("remote VPN SSH channel closed during {0}")]
+  ConnectionClosed(&'static str),
   #[error("Unexpected remote VPN response")]
   UnexpectedResponse,
   #[error("Remote VPN SSH channel exited unsuccessfully")]
   SshFailed,
+  #[error("remote VPN SSH master disappeared; reconnect its owner")]
+  MasterUnavailable,
+}
+
+impl Error {
+  /// Whether a fresh channel may recover after a network interruption.
+  /// Identity, protocol, SSH authentication, and configuration errors are fatal.
+  #[must_use]
+  pub fn is_retryable_connection(&self) -> bool {
+    match self {
+      Self::Io(error) | Self::Codec(crate::CodecError::Io(error)) => {
+        ctl_core::connection::is_transient_io_error(error)
+      }
+      Self::Timeout | Self::ConnectionClosed(_) | Self::MasterUnavailable => true,
+      Self::Remote { code, .. } => matches!(
+        code.as_str(),
+        "request_timeout" | "vpn_connection_timeout" | "vpn_timeout"
+      ),
+      _ => false,
+    }
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -322,7 +347,17 @@ impl Client {
         {
           // Failed SSH setup must not offer a component update. Older agents
           // reject the VPN command with exit 2; missing agents send a marker.
-          return Err(Error::SshFailed);
+          return Err(
+            if self
+              .control_path
+              .as_ref()
+              .is_some_and(|path| path.try_exists().is_ok_and(|exists| !exists))
+            {
+              Error::MasterUnavailable
+            } else {
+              Error::SshFailed
+            },
+          );
         }
         return Err(error);
       }
@@ -459,7 +494,7 @@ async fn send_request(
     match crate::read_frame(stream).await? {
       Some(Response::Error { code, message }) => Err(Error::Remote { code, message }),
       Some(response) => Ok(response),
-      None => Err(Error::UnexpectedResponse),
+      None => Err(Error::ConnectionClosed("request response")),
     }
   })
   .await

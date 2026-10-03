@@ -1,5 +1,140 @@
 use super::*;
 
+#[test]
+fn recovery_retries_transport_interruptions_and_known_timeouts_only() {
+  for error in [
+    Error::Io(io::ErrorKind::UnexpectedEof.into()),
+    Error::Codec(crate::CodecError::Io(io::ErrorKind::ConnectionReset.into())),
+    Error::Timeout,
+    Error::MasterUnavailable,
+    Error::ConnectionClosed("protocol offer"),
+    Error::ConnectionClosed("request response"),
+    Error::Remote {
+      code: "request_timeout".into(),
+      message: "Remote VPN request timed out".into(),
+    },
+    Error::Remote {
+      code: "vpn_connection_timeout".into(),
+      message: "Remote VPN connection timed out".into(),
+    },
+  ] {
+    assert!(error.is_retryable_connection(), "{error}");
+  }
+  for error in [
+    Error::Io(io::ErrorKind::InvalidData.into()),
+    Error::Io(io::ErrorKind::PermissionDenied.into()),
+    Error::Io(io::ErrorKind::NotFound.into()),
+    Error::Codec(crate::CodecError::FrameTooLarge {
+      actual: usize::MAX,
+      maximum: crate::MAX_FRAME_SIZE,
+    }),
+    Error::Codec(crate::CodecError::Json(
+      serde_json::from_str::<Request>("invalid").err().unwrap(),
+    )),
+    Error::UnsupportedAgent,
+    Error::UnsupportedProtocol,
+    Error::IdentityMismatch,
+    Error::InvalidRequest("invalid destination".into()),
+    Error::UnexpectedResponse,
+    Error::SshFailed,
+    Error::Remote {
+      code: "invalid_request".into(),
+      message: "Invalid remote VPN request".into(),
+    },
+  ] {
+    assert!(!error.is_retryable_connection(), "{error}");
+  }
+}
+
+#[tokio::test]
+async fn a_closed_negotiation_channel_is_not_a_contract_mismatch() {
+  let error = negotiate_contract(&mut &[][..], &mut Vec::new())
+    .await
+    .unwrap_err();
+  assert!(matches!(error, Error::ConnectionClosed("protocol offer")));
+  assert!(error.is_retryable_connection());
+  let error = accept_contract(&mut &[][..], &mut Vec::new())
+    .await
+    .unwrap_err();
+  assert!(matches!(
+    error,
+    Error::ConnectionClosed("protocol selection")
+  ));
+  assert!(error.is_retryable_connection());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn negotiation_peer_child() {
+  use tokio::io::AsyncWriteExt as _;
+  let Some(mode) = std::env::var_os("CTL_REMOTE_VPN_NEGOTIATION_TEST") else {
+    return;
+  };
+  let (mut reader, mut writer) = crate::stdio::take().unwrap();
+  writer.write_all(PREFACE).await.unwrap();
+  accept_contract(&mut reader, &mut writer).await.unwrap();
+  if mode == "close_identity" {
+    return;
+  }
+  let identity = ctl_proto::RemoteIdentity {
+    remote_id: "a060a4f4-2225-4d3c-8c8b-c9c8c2b3bc69".into(),
+    agent_version: "0.1.0".into(),
+    build: None,
+    ctmux_restart_supported: false,
+    bundle: None,
+    protocols: ctl_proto::agent_protocols(),
+  };
+  ctl_proto::write_identity(&mut writer, &identity)
+    .await
+    .unwrap();
+  assert!(matches!(
+    crate::read_frame::<_, Request>(&mut reader).await.unwrap(),
+    Some(Request::List)
+  ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn channel_loss_after_selection_or_request_remains_recoverable() {
+  let target = SshTarget {
+    destination: "vpn-owner".into(),
+    ssh_config_alias: None,
+    use_ssh_config_master: None,
+    hostname: None,
+    user: None,
+    port: None,
+    identity_file: None,
+    gateways: vec![],
+  };
+  let client = Client::new(target, None);
+  for mode in ["close_identity", "close_response"] {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+      .args([
+        "--exact",
+        "remote_vpn::tests::negotiation_peer_child",
+        "--nocapture",
+      ])
+      .env("CTL_REMOTE_VPN_NEGOTIATION_TEST", mode);
+    let error = tokio::time::timeout(Duration::from_secs(5), async {
+      match client.open_command(command).await {
+        Err(error) => error,
+        Ok(mut stream) => send_request(&mut stream, &Request::List, Duration::from_secs(3))
+          .await
+          .unwrap_err(),
+      }
+    })
+    .await
+    .expect("the closed channel must be detected promptly");
+    if mode == "close_identity" {
+      assert!(matches!(error, Error::Io(ref io) if io.kind() == io::ErrorKind::UnexpectedEof));
+    } else {
+      assert!(matches!(error, Error::ConnectionClosed("request response")));
+    }
+    assert!(error.is_retryable_connection(), "{mode}: {error}");
+  }
+}
+
 #[tokio::test]
 async fn preface_discards_startup_noise_and_preserves_identity_and_stream_bytes() {
   let identity = ctl_proto::RemoteIdentity {
@@ -304,6 +439,47 @@ async fn failed_ssh_startup_is_not_reported_as_missing_vpn_support() {
       assert!(matches!(error, Error::UnsupportedAgent));
     }
   }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_disappeared_pinned_master_can_be_reprepared_after_failed_startup() {
+  let target = SshTarget {
+    destination: "vpn-owner".into(),
+    ssh_config_alias: None,
+    use_ssh_config_master: None,
+    hostname: None,
+    user: None,
+    port: None,
+    identity_file: None,
+    gateways: vec![],
+  };
+  let directory = std::env::temp_dir().join(format!(
+    "remote-vpn-master-{}-{}",
+    std::process::id(),
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos()
+  ));
+  std::fs::create_dir(&directory).unwrap();
+  let path = directory.join("control");
+  let client = Client::new(target, None).with_control_path(path.clone());
+  for present in [false, true] {
+    if present {
+      std::fs::write(&path, b"existing control endpoint").unwrap();
+    }
+    let mut command = Command::new("sh");
+    command.args(["-c", "exit 255"]);
+    let error = client.open_command(command).await.err().unwrap();
+    assert_eq!(error.is_retryable_connection(), !present);
+    if present {
+      assert!(matches!(error, Error::SshFailed));
+    } else {
+      assert!(matches!(error, Error::MasterUnavailable));
+    }
+  }
+  std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[cfg(unix)]

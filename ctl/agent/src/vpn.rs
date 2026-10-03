@@ -3,7 +3,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use ctl_ipc::remote_vpn::{PREFACE, Request, Response};
+use ctl_ipc::remote_vpn::{PREFACE, Request, Response, STARTUP_TIMEOUT};
 use ctl_ipc::{VpnSnapshot, VpnState};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -40,22 +40,25 @@ pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   client: &ctl_ipc::vpn::Client,
   identity: &ctl_proto::RemoteIdentity,
 ) -> io::Result<()> {
-  writer.write_all(PREFACE).await?;
-  writer.flush().await?;
-  tokio::time::timeout(
-    Duration::from_secs(15),
-    ctl_ipc::remote_vpn::accept_contract(reader, writer),
-  )
+  // Match the client's startup budget across every stage. A delayed SSH
+  // channel must not expire early or gain a fresh budget after negotiation.
+  let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+  tokio::time::timeout_at(deadline, async {
+    writer.write_all(PREFACE).await?;
+    writer.flush().await?;
+    ctl_ipc::remote_vpn::accept_contract(reader, writer)
+      .await
+      .map_err(io::Error::other)
+  })
   .await
-  .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Remote VPN negotiation timed out"))?
-  .map_err(io::Error::other)?;
-  ctl_proto::write_identity(writer, identity).await?;
-  writer.flush().await?;
-  let request = tokio::time::timeout(
-    Duration::from_secs(15),
-    ctl_ipc::read_frame::<_, Request>(reader),
-  )
-  .await;
+  .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Remote VPN negotiation timed out"))??;
+  tokio::time::timeout_at(deadline, async {
+    ctl_proto::write_identity(writer, identity).await?;
+    writer.flush().await
+  })
+  .await
+  .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Remote VPN identity timed out"))??;
+  let request = tokio::time::timeout_at(deadline, ctl_ipc::read_frame::<_, Request>(reader)).await;
   let request = match request {
     Ok(Ok(Some(request))) => request,
     Ok(Ok(None)) => return Ok(()),

@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{Value, json};
+use std::fs::File;
 
 pub(super) const VERSION: &str = "0.1.0";
 pub(super) const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";

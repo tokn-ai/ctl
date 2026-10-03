@@ -167,9 +167,15 @@ mod unix {
   async fn replacement_preflight_accepts_supported_contracts_below_advertised_latest() {
     let fixture = Fixture::new().await;
     let mut binary = DaemonBinaryInfo::current();
-    let newer = ProtocolVersion::new(1, 1, 13);
+    let newer = ProtocolVersion::new(
+      1,
+      crate::PROTOCOL_VERSION.minor + 1,
+      crate::PROTOCOL_BUILD + 1,
+    );
     binary.protocol_version = newer;
-    binary.protocols[0] = ProtocolInfo::new("ctld", 13, newer, &[crate::PROTOCOL_VERSION, newer]);
+    let mut supported = crate::SUPPORTED_PROTOCOL_VERSIONS.to_vec();
+    supported.push(newer);
+    binary.protocols[0] = ProtocolInfo::new("ctld", newer.build, newer, &supported);
     fixture.binary(&binary);
     let prepared = fixture.client().preflight_restart().await.unwrap();
     assert_eq!(prepared.available.info, binary);

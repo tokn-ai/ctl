@@ -3,8 +3,10 @@
 
 mod broker;
 pub(crate) use broker::existing_master;
+pub(crate) use broker::{check_route_support, ensure_target_master};
 pub mod commands;
 mod connection;
+mod install_identity;
 mod verification;
 
 use std::collections::HashMap;
@@ -37,7 +39,7 @@ struct Attempt {
 }
 
 #[derive(Clone)]
-struct PromptContext {
+pub(crate) struct PromptContext {
   attempt: Arc<Attempt>,
   channel: Channel<SshPromptDto>,
 }
@@ -183,7 +185,7 @@ pub async fn probe(
   let _guard = AttemptGuard(key);
   let context = PromptContext { attempt, channel };
   let establish = async {
-    crate::vpn::ensure_for_host(&app, &target).await?;
+    crate::vpn::ensure_for_host(&app, &target, &context).await?;
     let (stream, identity) = connect_with(&target, Some(context)).await?;
     if restart_check {
       require_restart_support(&identity)?;
@@ -232,9 +234,11 @@ pub async fn install_agent(
     channel,
   };
   let install = async {
-    crate::vpn::ensure_for_host(&app, &target).await?;
+    crate::vpn::ensure_for_host(&app, &target, &context).await?;
     let control_path = broker::ensure_master(&target, &context).await?;
-    let interaction = SshInteraction::Multiplexed { control_path };
+    let interaction = SshInteraction::Multiplexed {
+      control_path: control_path.clone(),
+    };
     let ConnectionTarget::Ssh {
       destination,
       options,
@@ -245,14 +249,16 @@ pub async fn install_agent(
         "Select a remote SSH host.",
       ));
     };
-    crate::remote_agent::install(
-      &app,
-      &destination,
-      &options,
-      &interaction,
-      on_progress,
-      || !attempt.responses.lock().unwrap().is_empty(),
-    )
+    install_identity::upload(&target, &destination, &options, &control_path, || {
+      crate::remote_agent::install(
+        &app,
+        &destination,
+        &options,
+        &interaction,
+        on_progress,
+        || !attempt.responses.lock().unwrap().is_empty(),
+      )
+    })
     .await
   };
   let result = tokio::select! {
@@ -301,7 +307,7 @@ pub async fn restart_ctmux(
   let context = PromptContext { attempt, channel };
   let restart = async {
     let prepare = async {
-      crate::vpn::ensure_for_host(&app, &target).await?;
+      crate::vpn::ensure_for_host(&app, &target, &context).await?;
       // Identity discovery does not perform a session-protocol handshake.
       let (stream, identity) = connect_with(&target, Some(context)).await?;
       require_restart_support(&identity)?;

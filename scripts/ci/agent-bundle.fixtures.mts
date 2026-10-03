@@ -8,15 +8,17 @@ export const agentIdentity: AgentBundleIdentity = {
 };
 
 export function componentFixture(names: string[], identity = agentIdentity): ComponentInfo {
-  const builds: Record<string, number> = { ctl_identity: 3, ctl_maintenance: 2, ctmux: 13, ctmux_control: 1, task: 4, task_control: 2 };
+  const builds: Record<string, number> = { ctl_identity: 3, ctl_maintenance: 2, ctl_remote_vpn: 1, ctld: 13, ctld_lifecycle: 1, ctld_helper: 1, ctmux: 13, ctmux_control: 1, task: 4, task_control: 2 };
   return { build: { version: identity.app_version, source_revision: identity.git_revision, source_fingerprint: "a".repeat(64), dirty: false },
-    protocols: names.map((name) => ({ name, build: builds[name], version: `1.0.${builds[name]}`, supported_versions: [`1.0.${builds[name]}`] })) };
+    protocols: names.map((name) => ({ name, build: builds[name], version: name === "ctld" ? "1.1.13" : `1.0.${builds[name]}`,
+      supported_versions: name === "ctld" ? ["1.0.12", "1.1.13"] : [`1.0.${builds[name]}`] })) };
 }
 
 export function componentMapFixture(identity = agentIdentity): AgentComponentMap {
-  return { "ctl-agent": componentFixture(["ctl_identity", "ctl_maintenance", "ctmux", "ctmux_control", "task", "task_control"], identity),
+  return { "ctl-agent": componentFixture(["ctl_identity", "ctl_maintenance", "ctl_remote_vpn", "ctld", "ctmux", "ctmux_control", "task", "task_control"], identity),
     ctmuxd: componentFixture(["ctmux", "ctmux_control"], identity),
-    "ctl-taskd": componentFixture(["task", "task_control", "ctmux", "ctmux_control"], identity) };
+    "ctl-taskd": componentFixture(["task", "task_control", "ctmux", "ctmux_control"], identity),
+    ctld: componentFixture(["ctld", "ctld_lifecycle", "ctld_helper"], identity) };
 }
 
 export interface TarFixtureEntry {

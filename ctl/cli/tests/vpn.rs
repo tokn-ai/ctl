@@ -855,7 +855,7 @@ async fn stop_without_an_id_reports_ambiguity_and_never_stops_all_connections() 
 }
 
 #[tokio::test]
-async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remote_commands_are_rejected()
+async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remote_profile_mutations_are_rejected()
  {
   let fixture = Fixture::new();
   for action in ["list", "stop"] {
@@ -883,12 +883,9 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
     }
     assert!(!fixture.socket().exists());
   }
-  for action in ["create", "list", "start", "stop", "remove"] {
+  for action in ["create", "remove"] {
     for json in [false, true] {
       let mut args = vec!["--host", "vpn-host", "vpn", action];
-      if action == "start" {
-        args.push("work-id");
-      }
       if json {
         args.push("--json");
       }

@@ -57,6 +57,7 @@ impl OwnerFixture {
       vpn: Some(VpnGateway {
         connection_id: "saved-vpn".into(),
         socket_path: self.path.clone(),
+        expected_remote_id: None,
       }),
       destination: "saved-vpn".into(),
       hostname: None,
@@ -184,13 +185,25 @@ fn vpn_endpoints_require_a_numeric_loopback_socks5h_address() {
 }
 
 #[tokio::test]
-async fn a_vpn_after_another_hop_is_rejected_before_contacting_its_owner() {
+async fn unavailable_inventory_does_not_reuse_a_cached_connected_endpoint() {
+  let mut status = connected("socks5h://127.0.0.1:1080");
+  status.status_unavailable = true;
+  let owner = OwnerFixture::new(vec![vec![status]]);
+  let vpn = owner.gateway().vpn.unwrap();
+  assert_eq!(
+    vpn_endpoint(&vpn).await.unwrap_err().to_string(),
+    "selected VPN is not connected"
+  );
+}
+
+#[tokio::test]
+async fn consecutive_vpns_are_rejected_before_contacting_their_owner() {
   let owner = OwnerFixture::new(vec![]);
   let gateway = owner.gateway();
   let Err(error) = connect(&[gateway.clone(), gateway], "target.internal", 2222).await else {
-    panic!("remote VPN hop must be rejected");
+    panic!("consecutive VPN hops must be rejected");
   };
-  assert!(error.to_string().contains("first, local gateway"));
+  assert!(error.to_string().contains("first or follow an SSH host"));
 }
 
 #[tokio::test]

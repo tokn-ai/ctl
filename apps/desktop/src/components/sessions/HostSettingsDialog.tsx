@@ -95,11 +95,11 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
         <div className="host-method-list">
           {draft.connection_methods.map((method) => {
             const preferred = method.method_id === draft.preferred_method_id;
-            const gateways = method.target.gateway_route?.length ?? 0;
+            const steps = method.target.gateway_route?.length ?? 0;
             const vpn = vpn_connections.find((connection) => connection.connection_id === method.target.vpn_connection_id);
             const route = method.target.vpn_connection_id
               ? `Via VPN · ${vpn?.name ?? "Unavailable saved VPN"}`
-              : gateways ? `Via ${gateways} gateway${gateways === 1 ? "" : "s"}` : "Direct SSH";
+              : steps ? `Via ${steps} route step${steps === 1 ? "" : "s"}` : "Direct SSH";
             return (
               <section className="host-method" key={method.method_id} aria-label={method.name}>
                 <div className="host-method-heading">

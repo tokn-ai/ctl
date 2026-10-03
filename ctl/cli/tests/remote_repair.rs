@@ -123,9 +123,19 @@ esac
       json!({"name": name, "build": build, "version": version, "supported_versions": [version]})
     };
     let component = |protocols| json!({"build": build, "protocols": protocols});
+    let ctld_protocols: Vec<serde_json::Value> = ctl_ipc::lifecycle::DaemonBinaryInfo::current()
+      .protocols
+      .into_iter()
+      .map(|protocol| json!(protocol))
+      .collect();
+    let consumed_ctld = ctld_protocols
+      .iter()
+      .find(|protocol| protocol["name"] == "ctld")
+      .unwrap();
     let components = json!({
       "ctl-agent": component(vec![
         protocol("ctl_identity", 3), protocol("ctl_maintenance", 2),
+        protocol("ctl_remote_vpn", 1), consumed_ctld.clone(),
         protocol("ctmux", 13), protocol("ctmux_control", 1),
         protocol("task", 4), protocol("task_control", 2),
       ]),
@@ -134,6 +144,7 @@ esac
         protocol("task", 4), protocol("task_control", 2),
         protocol("ctmux", 13), protocol("ctmux_control", 1),
       ]),
+      "ctld": component(ctld_protocols),
     });
     self.bundle(build, Some(&components))
   }
@@ -168,11 +179,11 @@ esac
       ),
     )
     .unwrap();
-    for binary in ["ctmuxd", "ctl-taskd"] {
+    for binary in ["ctmuxd", "ctl-taskd", "ctld"] {
       fs::write(payload.join(binary), b"#!/bin/sh\nexit 0\n").unwrap();
     }
     let mut files = serde_json::Map::new();
-    for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+    for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
       fs::set_permissions(payload.join(binary), fs::Permissions::from_mode(0o700)).unwrap();
       files.insert(
         binary.into(),
@@ -200,7 +211,7 @@ esac
       .arg(&archive)
       .arg("-C")
       .arg(&payload)
-      .args(["ctl-agent", "ctmuxd", "ctl-taskd", "manifest.json"])
+      .args(["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "manifest.json"])
       .output()
       .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -728,13 +739,13 @@ fn assert_successful_repair(
     fs::read_to_string(base.join("remote-id")).unwrap(),
     EXPECTED_ID
   );
-  for file in ["ctl-agent", "ctmuxd", "ctl-taskd", "manifest.json"] {
+  for file in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld", "manifest.json"] {
     assert_eq!(
       fs::read(base.join("current").join(file)).unwrap(),
       fs::read(fixture.0.join("payload").join(file)).unwrap()
     );
   }
-  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
     assert_eq!(
       fs::metadata(base.join("current").join(binary))
         .unwrap()

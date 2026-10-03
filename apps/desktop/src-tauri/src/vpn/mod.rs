@@ -4,6 +4,7 @@ mod client;
 mod coordinator;
 mod enrollment;
 mod models;
+mod remote;
 mod repository;
 mod sign_in;
 
@@ -134,48 +135,59 @@ pub(crate) fn owner_endpoint() -> (PathBuf, Result<Option<PathBuf>, ctl_ipc::Con
   )
 }
 
-pub(crate) fn valid_connection_id(connection_id: &str) -> bool {
-  !connection_id.is_empty()
-    && connection_id.len() <= 128
-    && !connection_id
-      .chars()
-      .any(|value| value.is_control() || value.is_whitespace())
-}
-
 /// Explicit host operations may start their saved VPN before authenticating SSH.
 /// Dropping a host attempt stops waiting but never stops a shared VPN startup.
 pub(crate) async fn ensure_for_host(
   app: &tauri::AppHandle,
   target: &crate::dto::ConnectionTargetDto,
+  prompts: &crate::ssh_auth::PromptContext,
 ) -> CommandResult<()> {
-  let crate::dto::ConnectionTargetDto::Ssh {
-    vpn_connection_id: Some(connection_id),
-    ..
-  } = target
-  else {
-    return Ok(());
-  };
-  if !valid_connection_id(connection_id) {
-    return Err(CommandErrorDto::new(
-      "invalid_vpn_route",
-      "Choose a saved VPN connection in the host settings.",
-    ));
+  if !target.is_local() {
+    crate::ssh_auth::check_route_support(&target.to_ssh_target()?).await?;
   }
-  let directory = directory(app)?;
-  let connection_id = connection_id.clone();
-  let status = await_shared_start(async move {
-    connect_saved(directory, ConnectVpnRequest { connection_id }).await
-  })
-  .await
-  .map_err(|mut error| {
-    if error.code == "vpn_connection_not_found" {
-      error.message =
-        "The host's saved VPN no longer exists. Choose another connection in the host settings."
-          .into();
+  for (vpn_route_index, route) in target.vpn_route()?.into_iter().enumerate() {
+    let directory = directory(app)?;
+    let connection_id = route.connection_id;
+    let owner_destination = route.owner.as_ref().map(|owner| owner.destination.clone());
+    let remote_owner = route.owner.is_some();
+    let status = if let Some(owner) = route.owner {
+      let control_path = crate::ssh_auth::ensure_target_master(owner.clone(), prompts).await?;
+      let key =
+        remote::coordinator_key(&owner, route.expected_remote_id.as_deref(), &connection_id)?;
+      let client = ctl_ipc::remote_vpn::Client::new(owner, route.expected_remote_id)
+        .with_control_path(control_path);
+      await_shared_start(async move {
+        remote::connect_saved(directory, connection_id, key, client).await
+      })
+      .await
+    } else {
+      await_shared_start(async move {
+        connect_saved(
+          directory,
+          ConnectVpnRequest {
+            connection_id,
+            target: None,
+          },
+        )
+        .await
+      })
+      .await
     }
-    error
-  })?;
-  require_connected(&status)
+    .map_err(|mut error| {
+      if error.code == "vpn_connection_not_found" {
+        error.message =
+          "The host's saved VPN no longer exists. Choose another connection in the host settings."
+            .into();
+      }
+      remote::route_error(error, vpn_route_index, owner_destination.as_deref())
+    })?;
+    if remote_owner {
+      remote::require_connected(&status)?;
+    } else {
+      require_connected(&status)?;
+    }
+  }
+  Ok(())
 }
 
 async fn await_shared_start<F>(start: F) -> CommandResult<VpnStatus>
@@ -257,6 +269,10 @@ pub async fn connect_vpn(
 }
 
 async fn connect_saved(directory: PathBuf, request: ConnectVpnRequest) -> CommandResult<VpnStatus> {
+  if let Some(target) = &request.target {
+    let (client, key) = remote::client_for_target(target, &request.connection_id).await?;
+    return remote::connect_saved(directory, request.connection_id, key, client).await;
+  }
   if !cfg!(unix) {
     return Err(runtime_error(ctl_ipc::vpn::VpnError::UnsupportedPlatform));
   }
@@ -319,12 +335,30 @@ where
 }
 
 #[tauri::command]
-pub async fn vpn_status() -> CommandResult<VpnSnapshot> {
+pub async fn vpn_status(
+  target: Option<crate::dto::ConnectionTargetDto>,
+) -> CommandResult<VpnSnapshot> {
+  if let Some(target) = target {
+    let (client, _) = remote::client_for_target(&target, "status").await?;
+    return client.list().await.map_err(remote::runtime_error);
+  }
   client::client().list().await.map_err(runtime_error)
 }
 
 #[tauri::command]
 pub async fn stop_vpn(request: StopVpnRequest) -> CommandResult<VpnStatus> {
+  if let Some(target) = &request.target {
+    let (client, key) = remote::client_for_target(target, &request.vpn_id).await?;
+    return COORDINATORS
+      .get(&key)
+      .stop(|| async {
+        client
+          .stop_id(&request.vpn_id)
+          .await
+          .map_err(remote::runtime_error)
+      })
+      .await;
+  }
   let coordinator = COORDINATORS.get(&request.vpn_id);
   coordinator
     .stop(|| async {
@@ -338,13 +372,13 @@ pub async fn stop_vpn(request: StopVpnRequest) -> CommandResult<VpnStatus> {
 
 #[tauri::command]
 pub async fn open_vpn_sign_in(request: OpenVpnSignInRequest) -> CommandResult<()> {
-  let snapshot = vpn_status().await?;
+  let snapshot = vpn_status(request.target).await?;
   sign_in::open(&snapshot, &request.vpn_id, sign_in::open_browser).await
 }
 
 async fn mutation_status() -> CommandResult<VpnSnapshot> {
   #[cfg(unix)]
-  return vpn_status().await;
+  return vpn_status(None).await;
   #[cfg(not(unix))]
   Ok(VpnSnapshot::default())
 }

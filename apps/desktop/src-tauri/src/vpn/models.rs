@@ -153,18 +153,21 @@ pub struct DeleteVpnConnectionRequest {
 #[serde(deny_unknown_fields)]
 pub struct ConnectVpnRequest {
   pub(super) connection_id: String,
+  pub(super) target: Option<crate::dto::ConnectionTargetDto>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StopVpnRequest {
   pub(super) vpn_id: String,
+  pub(super) target: Option<crate::dto::ConnectionTargetDto>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenVpnSignInRequest {
   pub(super) vpn_id: String,
+  pub(super) target: Option<crate::dto::ConnectionTargetDto>,
 }
 
 #[derive(Deserialize)]

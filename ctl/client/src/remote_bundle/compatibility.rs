@@ -10,9 +10,9 @@ use sha2::{Digest as _, Sha256};
 
 use super::{BundleSet, Error, MAX_BUNDLE_SET_BYTES};
 
-pub(super) const COMPONENTS: [&str; 3] = ["ctl-agent", "ctmuxd", "ctl-taskd"];
+pub(super) const COMPONENTS: [&str; 4] = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"];
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_EXPANDED_BYTES: u64 = 3 * MAX_BINARY_BYTES + MAX_BUNDLE_SET_BYTES as u64 + 1024 * 1024;
+const MAX_EXPANDED_BYTES: u64 = 4 * MAX_BINARY_BYTES + MAX_BUNDLE_SET_BYTES as u64 + 1024 * 1024;
 
 pub(super) fn deserialize_components<'de, D: serde::Deserializer<'de>>(
   deserializer: D,
@@ -22,7 +22,7 @@ pub(super) fn deserialize_components<'de, D: serde::Deserializer<'de>>(
     type Value = BTreeMap<String, ComponentInfo>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-      formatter.write_str("a uniquely named map of three component advertisements")
+      formatter.write_str("a uniquely named map of four component advertisements")
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
@@ -60,7 +60,7 @@ pub(super) fn validate_components(
       .any(|name| !components.contains_key(*name))
   {
     return Err(invalid(
-      "bundle metadata must identify exactly the three shipped components",
+      "bundle metadata must identify exactly the four shipped components",
     ));
   }
   for (name, info) in components {
@@ -77,6 +77,8 @@ pub(super) fn validate_components(
       "ctl-agent" => &[
         "ctl_identity",
         "ctl_maintenance",
+        "ctl_remote_vpn",
+        "ctld",
         "ctmux",
         "ctmux_control",
         "task",
@@ -84,6 +86,7 @@ pub(super) fn validate_components(
       ],
       "ctmuxd" => &["ctmux", "ctmux_control"],
       "ctl-taskd" => &["task", "task_control", "ctmux", "ctmux_control"],
+      "ctld" => &["ctld", "ctld_lifecycle", "ctld_helper"],
       _ => unreachable!("component names were checked above"),
     };
     if required
@@ -110,6 +113,22 @@ pub(super) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
       "ctl_maintenance",
       ctl_proto::maintenance::SUPPORTED_PROTOCOL_VERSIONS,
     ),
+    (
+      "ctl-agent",
+      "ctl_remote_vpn",
+      ctl_ipc::remote_vpn::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    ("ctld", "ctld", ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS),
+    (
+      "ctld",
+      "ctld_lifecycle",
+      ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
+    ),
+    (
+      "ctld",
+      "ctld_helper",
+      ctl_ipc::SUPPORTED_HELPER_API_VERSIONS,
+    ),
     ("ctmuxd", "ctmux", ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS),
     (
       "ctmuxd",
@@ -131,6 +150,7 @@ pub(super) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
     .iter()
     .all(|(component, name, supported)| intersects(components, component, name, supported))
     && [
+      ("ctl-agent", "ctld", "ctld"),
       ("ctl-agent", "ctmuxd", "ctmux"),
       ("ctl-agent", "ctmuxd", "ctmux_control"),
       ("ctl-agent", "ctl-taskd", "task"),

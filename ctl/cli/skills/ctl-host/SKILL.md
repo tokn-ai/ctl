@@ -53,7 +53,13 @@ ctl host update office --method VPN --clear vpn --json
 
 Method management uses positional method names or IDs, not `--method`. Add accepts `--prefer` to select the new method immediately. The preferred method is used for subsequent connections unless a command selects another method. Every method must reach the same host environment; editing an address does not clear a pinned identity.
 
-`--vpn ID` references a saved VPN profile, not a SOCKS port. `--gateway ID` references an existing saved gateway; repeat it in route order. Host commands do not create gateways or VPN profiles. `--clear gateways` removes the route. A method bound with `--tailscale-node-id ID` resolves that device's current address; unavailable discovery fails rather than using a stale address.
+`--vpn ID` references a saved VPN profile running locally before the route.
+`--gateway ID` references an existing saved gateway; repeat it in route order.
+Use `--gateway vpn:PROFILE_ID` to place a VPN in that route. A first VPN executes
+locally; a VPN immediately after an SSH step executes on that SSH host. Host
+commands do not create gateways or VPN profiles. `--clear gateways` removes the
+route. A method bound with `--tailscale-node-id ID` resolves that device's current
+address; unavailable discovery fails rather than using a stale address.
 
 ## Connect, disconnect, and remove
 
@@ -63,7 +69,13 @@ ctl host disconnect office --method VPN
 ctl host disconnect office
 ```
 
-Connect authenticates the preferred or selected method and starts its saved VPN if needed. It opens no shell and installs no remote component. Disconnect pauses only the selected method, or all the host's saved methods when omitted. Active channels may close; it does not terminate remote sessions or stop the VPN itself. Connect/disconnect require a Unix client; catalog editing is also available on Windows.
+Connect authenticates the preferred or selected method and prepares its VPNs in
+route order. Remote VPN startup requires updated remote components and a container
+engine on each execution host. It opens no shell and installs no remote component.
+Disconnect pauses only the selected method, or all the host's saved methods when
+omitted. Active channels may close; it does not terminate remote sessions or stop
+the VPN itself. Connect/disconnect require a Unix client; catalog editing is also
+available on Windows.
 
 For requested deletion, use `ctl host method remove HOST METHOD --json` or `ctl host remove HOST --json`. A preferred method cannot be removed until another is preferred. Removing a host deletes only its definition; active connections, remote sessions, credentials, and workspace references remain.
 

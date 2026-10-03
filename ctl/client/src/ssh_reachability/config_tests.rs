@@ -250,6 +250,7 @@ fn explicit_app_route_takes_precedence_over_config_proxy() {
     vpn: Some(ctl_ipc::VpnGateway {
       connection_id: "fixture".into(),
       socket_path: fixture.root.join("ctld.sock"),
+      expected_remote_id: None,
     }),
     destination: "fixture".into(),
     hostname: None,

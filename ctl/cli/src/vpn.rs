@@ -1,3 +1,4 @@
+use ctl_client::hosts::ConnectionTargetDto;
 use std::fmt::Write as _;
 mod inventory;
 pub(crate) mod profiles;
@@ -5,7 +6,7 @@ mod questionnaire;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
-  /// List saved VPN profiles and runtime status without starting ctld.
+  /// List saved VPN profiles and runtime status on the selected owner.
   List {
     /// Print machine-readable JSON without credentials.
     #[arg(long)]
@@ -44,48 +45,145 @@ pub enum Command {
   },
 }
 
-pub async fn run(command: Command) -> Result<(), Error> {
+pub(crate) enum RuntimeClient {
+  Local(ctl_ipc::vpn::Client),
+  Remote(ctl_ipc::remote_vpn::Client),
+}
+
+impl RuntimeClient {
+  async fn for_target(target: &ConnectionTargetDto, start_routes: bool) -> Result<Self, Error> {
+    if matches!(target, ConnectionTargetDto::Local) {
+      return Ok(Self::Local(ctl_ipc::vpn::Client::default()));
+    }
+    #[cfg(unix)]
+    {
+      if start_routes {
+        crate::target::ensure_vpn(target)
+          .await
+          .map_err(|error| Error::Preparation(Box::new(error)))?;
+      }
+      let owner = target.to_ssh_target()?;
+      let control_path = crate::ssh_broker::ensure_master(owner.clone()).await?;
+      let expected_remote_id = match target {
+        ConnectionTargetDto::Ssh { remote_info, .. } => remote_info
+          .as_ref()
+          .map(|identity| identity.remote_id.clone()),
+        ConnectionTargetDto::Local => None,
+      };
+      Ok(Self::Remote(
+        ctl_ipc::remote_vpn::Client::new(owner, expected_remote_id).with_control_path(control_path),
+      ))
+    }
+    #[cfg(not(unix))]
+    {
+      let _ = start_routes;
+      Err(Error::RemoteVpnUnsupported)
+    }
+  }
+
+  pub(crate) async fn list(&self) -> Result<ctl_ipc::VpnSnapshot, Error> {
+    match self {
+      Self::Local(client) => Ok(client.list().await?),
+      Self::Remote(client) => Ok(client.list().await?),
+    }
+  }
+
+  pub(crate) async fn start_connection(
+    &self,
+    connection: ctl_ipc::VpnConnection,
+  ) -> Result<ctl_ipc::VpnStatus, Error> {
+    match self {
+      Self::Local(client) => Ok(client.start_connection(connection).await?),
+      Self::Remote(client) => Ok(client.start_connection(connection).await?),
+    }
+  }
+
+  async fn stop_id(&self, connection_id: &str) -> Result<ctl_ipc::VpnStatus, Error> {
+    match self {
+      Self::Local(client) => Ok(client.stop_id(connection_id).await?),
+      Self::Remote(client) => Ok(client.stop_id(connection_id).await?),
+    }
+  }
+
+  async fn stop(&self) -> Result<ctl_ipc::VpnStatus, Error> {
+    match self {
+      Self::Local(client) => Ok(client.stop().await?),
+      Self::Remote(_) => {
+        let snapshot = self.list().await?;
+        let mut connections = snapshot.connections.iter().filter(|status| {
+          status.locally_connected != Some(false)
+            && (status.running || status.state != ctl_ipc::VpnState::Stopped)
+        });
+        let Some(connection) = connections.next() else {
+          if !snapshot.discovery_warnings.is_empty() {
+            return Err(Error::InventoryUnavailable);
+          }
+          return Ok(ctl_ipc::VpnStatus::default());
+        };
+        if connections.next().is_some() {
+          return Err(Error::AmbiguousStop);
+        }
+        let id = connection
+          .vpn_id
+          .as_deref()
+          .ok_or(Error::InventoryUnavailable)?;
+        self.stop_id(id).await
+      }
+    }
+  }
+}
+
+pub async fn run(command: Command, target: &ConnectionTargetDto) -> Result<(), Error> {
+  if matches!(command, Command::Create { .. } | Command::Remove { .. })
+    && !matches!(target, ConnectionTargetDto::Local)
+  {
+    return Err(Error::LocalProfilesOnly);
+  }
+  if let Command::Create { json } = command {
+    return create(json).await;
+  }
+  if let Command::Remove { profile, json } = command {
+    return remove(profile, json).await;
+  }
   let (status, json) = match command {
     Command::List { json } => {
-      list(json).await?;
+      let client = RuntimeClient::for_target(target, false).await?;
+      list(json, &client).await?;
       return Ok(());
     }
-    Command::Create { json } => {
-      create(json).await?;
-      return Ok(());
-    }
-    Command::Remove { profile, json } => {
-      remove(profile, json).await?;
-      return Ok(());
+    Command::Create { .. } | Command::Remove { .. } => {
+      unreachable!("profile operations handled above")
     }
     Command::Start { profile, json } => {
       let Some(connection) = worker(move || choose_saved(profile, "start")).await? else {
         return Ok(());
       };
-      (ctl_ipc::vpn::start_connection(connection).await?, json)
+      let client = RuntimeClient::for_target(target, true).await?;
+      (client.start_connection(connection).await?, json)
     }
     Command::Stop { profile, json } => {
+      let client = RuntimeClient::for_target(target, false).await?;
       let status = match profile {
         Some(profile) => {
           let id = worker(move || stop_id(profile)).await?;
-          ctl_ipc::vpn::stop_id(&id).await?
+          client.stop_id(&id).await?
         }
         None if questionnaire::available() => {
-          match stop_options().await? {
+          match stop_options(&client).await? {
             Some(options) => {
               let Some(id) = worker(move || questionnaire::pick("stop", options)).await? else {
                 return Ok(());
               };
-              ctl_ipc::vpn::stop_id(&id).await?
+              client.stop_id(&id).await?
             }
             // Legacy daemons cannot target a stop by ID. Their inventory is
             // limited to one local connection, so retain untargeted stop.
-            None => ctl_ipc::vpn::stop().await?,
+            None => client.stop().await?,
           }
         }
         // Preserve safe zero/one-connection behavior for scripts. The daemon
         // rejects an ambiguous untargeted stop rather than stopping all VPNs.
-        None => ctl_ipc::vpn::stop().await?,
+        None => client.stop().await?,
       };
       (status, json)
     }
@@ -271,8 +369,10 @@ fn stop_id(selector: String) -> Result<String, Error> {
   }
 }
 
-async fn stop_options() -> Result<Option<Vec<(String, String, String)>>, Error> {
-  let snapshot = ctl_ipc::vpn::list().await?;
+async fn stop_options(
+  client: &RuntimeClient,
+) -> Result<Option<Vec<(String, String, String)>>, Error> {
+  let snapshot = client.list().await?;
   let document = profiles::path().and_then(|path| profiles::load(&path)).ok();
   let entries = inventory::entries(document.as_ref(), &snapshot);
   let options: Vec<_> = snapshot
@@ -313,7 +413,7 @@ struct InventorySnapshot {
   profile_warnings: Vec<String>,
 }
 
-async fn list(json: bool) -> Result<(), Error> {
+async fn list(json: bool, client: &RuntimeClient) -> Result<(), Error> {
   let mut profile_warnings = Vec::new();
   let document = match profiles::path().and_then(|path| profiles::load(&path)) {
     Ok(document) => Some(document),
@@ -324,7 +424,8 @@ async fn list(json: bool) -> Result<(), Error> {
   };
   // Keep either source visible when the other cannot be observed. This query
   // never starts ctld or acquires an interest in a shared container.
-  let runtime = ctl_ipc::vpn::list()
+  let runtime = client
+    .list()
     .await
     .unwrap_or_else(|error| ctl_ipc::VpnSnapshot {
       discovery_warnings: vec![format!("Could not inspect VPN runtime status: {error}")],
@@ -518,6 +619,22 @@ fn display_value(value: Option<&str>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+  #[error("VPN profile creation and removal are local operations; omit --host.")]
+  LocalProfilesOnly,
+  #[error("Multiple remote VPN connections are active; specify a VPN name or ID to stop one.")]
+  AmbiguousStop,
+  #[cfg(not(unix))]
+  #[error("Remote VPN management requires a Unix client.")]
+  RemoteVpnUnsupported,
+  #[error(transparent)]
+  Host(#[from] ctl_client::hosts::HostError),
+  #[cfg(unix)]
+  #[error(transparent)]
+  Broker(#[from] crate::ssh_broker::Error),
+  #[error(transparent)]
+  Remote(#[from] ctl_ipc::remote_vpn::Error),
+  #[error(transparent)]
+  Preparation(Box<crate::target::Error>),
   #[error("An interactive terminal is required for `ctl vpn {0}`.")]
   TerminalRequired(&'static str),
   #[error("No saved VPN profiles.")]

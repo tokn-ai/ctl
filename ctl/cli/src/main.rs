@@ -93,7 +93,7 @@ enum Command {
     #[command(subcommand)]
     command: port::Command,
   },
-  /// Manage the local VPN and its SOCKS5 proxy through ctld.
+  /// Manage VPNs locally or on the selected SSH host.
   Vpn {
     #[command(subcommand)]
     command: vpn::Command,

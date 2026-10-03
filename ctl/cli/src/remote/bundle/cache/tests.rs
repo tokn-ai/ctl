@@ -12,9 +12,19 @@ fn protocol(name: &str, build: u16) -> Value {
 
 fn fixture(incompatible: bool) -> VerifiedBundle {
   let component = |protocols: Vec<Value>| json!({"build": build(), "protocols": protocols});
+  let ctld_protocols: Vec<Value> = ctl_ipc::lifecycle::DaemonBinaryInfo::current()
+    .protocols
+    .into_iter()
+    .map(|protocol| json!(protocol))
+    .collect();
+  let consumed_ctld = ctld_protocols
+    .iter()
+    .find(|protocol| protocol["name"] == "ctld")
+    .unwrap();
   let mut components = json!({
     "ctl-agent": component(vec![
       protocol("ctl_identity", 3), protocol("ctl_maintenance", 2),
+      protocol("ctl_remote_vpn", 1), consumed_ctld.clone(),
       protocol("ctmux", 13), protocol("ctmux_control", 1),
       protocol("task", 4), protocol("task_control", 2),
     ]),
@@ -23,6 +33,7 @@ fn fixture(incompatible: bool) -> VerifiedBundle {
       protocol("task", 4), protocol("task_control", 2),
       protocol("ctmux", 13), protocol("ctmux_control", 1),
     ]),
+    "ctld": component(ctld_protocols),
   });
   if incompatible {
     components["ctl-agent"]["protocols"][0] = json!({
@@ -33,6 +44,7 @@ fn fixture(incompatible: bool) -> VerifiedBundle {
     ("ctl-agent", b"agent".as_slice()),
     ("ctmuxd", b"ctmux".as_slice()),
     ("ctl-taskd", b"task".as_slice()),
+    ("ctld", b"daemon".as_slice()),
   ];
   let files: serde_json::Map<String, Value> = payloads
     .iter()

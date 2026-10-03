@@ -110,6 +110,7 @@ export function NewShellFlow({
         target={connecting}
         host={connecting.kind === "ssh" ? hosts?.find((host) => host.host_id === connecting.host_id) : undefined}
         gateways={gateways}
+        hosts={hosts}
         onConnectionChange={onConnectionChange}
         onVerified={onVerifyHost}
         onConnected={(verified) => {

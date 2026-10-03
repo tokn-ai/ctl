@@ -6,7 +6,7 @@ host verification, encryption, and user authentication.
 
 ## On the controlled device
 
-Build or install `ctmuxd`, `ctl-taskd`, and `ctl-agent` for the same OS user. They may
+Build or install `ctmuxd`, `ctl-taskd`, `ctl-agent`, and `ctld` for the same OS user. They may
 be installed together in the app-managed data directory or made available in
 the non-interactive SSH command environment. `ctl-agent` starts a
 sibling daemon on demand when the binaries are installed together; either daemon
@@ -97,7 +97,7 @@ the fingerprint above. Once `ctl-agent connect --identity` succeeds, choose **Op
 reusable managed `Host` block, or **This app only** to keep those settings in
 the app's native workspace file. The latter still invokes the system SSH client and does
 not store the key contents. An app with a synchronized bundle set can install a
-missing `ctl-agent`, `ctmuxd`, and `ctl-taskd` bundle under the remote user's
+missing `ctl-agent`, `ctmuxd`, `ctl-taskd`, and `ctld` bundle under the remote user's
 `~/.tokn/ctl/versions` directory and retry. `~/.tokn/ctl/current` selects the active
 bundle, and `~/.tokn/ctl/remote-id` stores the stable environment ID. Release
 bundles use the app version as their immutable

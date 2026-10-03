@@ -411,6 +411,7 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     .unwrap();
   let request = ConnectVpnRequest {
     connection_id: "connection-one".into(),
+    target: None,
   };
   let status = connect_with(fixture.0.clone(), request, |connection| async move {
     assert_eq!(password(&connection), "adapter-test-secret");
@@ -440,6 +441,7 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     fixture.0.clone(),
     ConnectVpnRequest {
       connection_id: "connection-one".into(),
+      target: None,
     },
     |_| async {
       Err(ctl_ipc::vpn::VpnError::Daemon {
@@ -456,6 +458,7 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     fixture.0.clone(),
     ConnectVpnRequest {
       connection_id: "missing".into(),
+      target: None,
     },
     |_| async { panic!("a missing connection must not contact the daemon") },
   )
@@ -740,4 +743,52 @@ fn shared_foreign_container_and_incomplete_inventory_protect_saved_profiles() {
     );
     assert_eq!(fixture.bytes(), bytes);
   }
+}
+
+#[test]
+fn recovery_indices_count_vpns_including_legacy_local_prerequisites() {
+  let target: crate::dto::ConnectionTargetDto = serde_json::from_value(json!({
+    "kind": "ssh", "destination": "build", "vpn_connection_id": "local",
+    "gateways": [
+      { "gateway_id": "first", "name": "First", "destination": "jump-a", "mode": "automatic" },
+      { "gateway_id": "vpn:work", "name": "Work", "kind": "vpn", "destination": "work", "vpn_connection_id": "work", "mode": "automatic" },
+      { "gateway_id": "second", "name": "Second", "destination": "jump-b", "mode": "automatic" },
+      { "gateway_id": "vpn:work", "name": "Work", "kind": "vpn", "destination": "work", "vpn_connection_id": "work", "mode": "automatic" },
+    ],
+  })).unwrap();
+  let routes = target.vpn_route().unwrap();
+  assert_eq!(routes.len(), 3);
+  assert!(routes[0].owner.is_none());
+  for (index, route) in routes.into_iter().enumerate().skip(1) {
+    let owner = route.owner.unwrap();
+    let error = remote::route_error(
+      remote::runtime_error(ctl_ipc::remote_vpn::Error::UnsupportedAgent),
+      index,
+      Some(&owner.destination),
+    );
+    assert_eq!(error.vpn_route_index, Some(index));
+    assert_eq!(
+      owner.destination,
+      if index == 1 { "jump-a" } else { "jump-b" }
+    );
+    assert!(error.message.contains(&owner.destination));
+  }
+}
+
+#[tokio::test]
+async fn shared_vpn_starts_preserve_route_recovery_metadata() {
+  let error = remote::route_error(
+    remote::runtime_error(ctl_ipc::remote_vpn::Error::UnsupportedAgent),
+    1,
+    Some("jump-a"),
+  );
+  let expected = error.clone();
+  let actual = await_shared_start(async move {
+    coordinator::Coordinator::new()
+      .connect(|_| async { Err(error) })
+      .await
+  })
+  .await
+  .unwrap_err();
+  assert_eq!(actual, expected);
 }

@@ -240,7 +240,7 @@ test("validates schema2 remote metadata against archive contents before publishi
   const verified = await validateReleaseBundle(identity, directory);
   assert.ok(verified.asset_names.includes("bundle-set.json"));
   const forged = structuredClone(manifest);
-  (forged.targets[remoteTargets[0]] as { components: ReturnType<typeof componentMapFixture> }).components.ctmuxd.build.source_fingerprint = "b".repeat(64);
+  (forged.targets[remoteTargets[0]] as { components: ReturnType<typeof componentMapFixture> }).components.ctld.build.source_fingerprint = "b".repeat(64);
   await writeFile(join(directory, "bundle-set.json"), JSON.stringify(forged));
   await assert.rejects(validateReleaseBundle(identity, directory), /metadata differs/);
 });

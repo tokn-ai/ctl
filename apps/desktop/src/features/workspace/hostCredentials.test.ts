@@ -69,4 +69,41 @@ describe("host credential cleanup", () => {
     view.hosts[3].connection_methods[0].target.vpn_connection_id = "other-vpn";
     expect(removableHostCredentials(view, "removed")).toHaveLength(1);
   });
+
+  it("retains credentials shared by the same remote VPN route and distinguishes profiles", () => {
+    const view = emptyWorkspaceView();
+    view.ssh_gateways = [gateway];
+    const target: SshConnectionTarget = { kind: "ssh", destination: "build", gateway_route: [
+      { gateway_id: gateway.gateway_id, mode: "native_only" }, { vpn_connection_id: "office" },
+    ] };
+    view.hosts.push(host("removed", target), host("kept", structuredClone(target)));
+    expect(removableHostCredentials(view, "removed")).toEqual([]);
+    view.hosts[2].connection_methods[0].target.gateway_route![1] = { vpn_connection_id: "different" };
+    expect(removableHostCredentials(view, "removed")).toHaveLength(1);
+  });
+
+  it("retains shared credentials when a legacy local VPN route is stored in ordered form", () => {
+    const view = emptyWorkspaceView();
+    view.ssh_gateways = [gateway];
+    view.hosts.push(host("removed", { kind: "ssh", destination: "build", vpn_connection_id: "office",
+      gateway_route: [{ gateway_id: gateway.gateway_id, mode: "native_only" }],
+    }), host("kept", { kind: "ssh", destination: "build", gateway_route: [
+      { vpn_connection_id: "office" }, { gateway_id: gateway.gateway_id, mode: "native_only" },
+    ] }));
+    expect(removableHostCredentials(view, "removed")).toEqual([]);
+    expect(removableHostCredentials(view, "kept")).toEqual([]);
+  });
+});
+
+it("protects a linked route shared by another host's historical runtime snapshot", () => {
+  const view = emptyWorkspaceView();
+  const jump = host("jump", { kind: "ssh", destination: "jump", gateway_route: [{ gateway_id: "edge", mode: "native_only" }] });
+  const removed = host("removed", { kind: "ssh", destination: "build", gateway_route: [{ host_id: "jump", method_id: "ssh", mode: "automatic" }] });
+  view.hosts.push(jump, removed);
+  view.ssh_gateways = [gateway];
+  const snapshot = hostTarget(removed, view.ssh_gateways, undefined, view.hosts) as SshConnectionTarget;
+  view.targets.push({ ...snapshot, host_id: "kept" });
+  expect(removableHostCredentials(view, "removed")).toEqual([]);
+  jump.connection_methods[0].target.destination = "new.jump";
+  expect(removableHostCredentials(view, "removed")).toEqual([expect.objectContaining({ gateways: [expect.anything(), expect.objectContaining({ destination: "new.jump" })] })]);
 });

@@ -367,6 +367,7 @@ async fn managed_vpn_uses_only_status_request_and_existing_socks_listener() {
     vpn: Some(VpnGateway {
       connection_id: "fixture-vpn".into(),
       socket_path: path.clone(),
+      expected_remote_id: None,
     }),
     hostname: None,
     user: None,
@@ -400,6 +401,7 @@ async fn missing_vpn_owner_is_not_started_and_cannot_fall_back_direct() {
     vpn: Some(VpnGateway {
       connection_id: "fixture-vpn".into(),
       socket_path: path.clone(),
+      expected_remote_id: None,
     }),
     hostname: None,
     user: None,

@@ -1,15 +1,26 @@
 ---
 name: ctl-vpn
-description: Create or remove saved VPN profiles, list their runtime state, and start or stop ctl-managed OpenConnect or Tailscale connections and local SOCKS5 endpoints, including pending Tailscale sign-in and shared ownership.
+description: Create or remove saved VPN profiles, list their runtime state, and start or stop ctl-managed OpenConnect or Tailscale connections locally or over SSH, including pending Tailscale sign-in and shared ownership.
 ---
 
 # ctl vpn
 
-Use `ctl vpn` locally on a Unix client. `-H` is rejected; these commands manage
-the local ctld's VPN interest, not a remote machine's VPN. Starting a VPN requires
-Docker or Podman to be running. Start launches the selected ctld if needed;
-create, list, stop, and remove do not. List reads the saved catalog and passively
-probes the selected daemon without acquiring or renewing heartbeat interest.
+Use `ctl vpn` on a Unix client. Add `--host GATEWAY` to list, start, or stop VPNs
+on an SSH host. Profiles and their secrets remain in the local catalog; remote
+start sends the selected settings over the authenticated SSH channel after
+checking the saved remote identity. Docker or Podman and updated ctl-agent/ctld
+components must be available where the VPN executes. Local start launches ctld
+if needed. Local list reads the saved catalog and passively probes the selected
+daemon without acquiring or renewing heartbeat interest. Remote list authenticates
+SSH but does not start the remote VPN service or VPNs. Remote start may prepare
+the selected host's preceding VPN route; list and stop use its existing route.
+Remote VPNs remain running after SSH disconnects until explicitly stopped.
+Create and remove are local profile operations and reject `--host`.
+
+Use `--gateway JUMP_ID --gateway vpn:PROFILE_ID` when saving an ordered host route.
+A VPN after an SSH gateway executes on that gateway. A first VPN step, or the
+legacy `--vpn PROFILE_ID` host option, executes locally. A VPN must be first or
+immediately after an SSH step.
 
 ## Create a saved profile
 
@@ -115,6 +126,8 @@ Unmatched saved profiles remain unavailable with these local-only owners.
 
 Use the connection's current `socks5h://127.0.0.1:PORT` endpoint. Ports are random
 and can change after recreation; do not assume port 1080 or reuse a cached port.
+For a remote VPN, this loopback endpoint belongs to the remote SSH host. An
+ordered ctl route reaches it through SSH; the port is not exposed locally.
 Keep `socks5h` when configuring applications so destination names resolve inside
 the container, including VPN DNS. Applications must explicitly use the proxy;
 ctl does not install host VPN routes. OpenConnect's proxy supports TCP and does

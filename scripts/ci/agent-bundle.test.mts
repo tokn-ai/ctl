@@ -56,12 +56,17 @@ test("metadata rejects mixed source builds, incomplete maps and invented or inco
     ["dirty build", (value) => { value.ctmuxd.build.dirty = true; }],
     ["other revision", (value) => { value.ctmuxd.build.source_revision = "b".repeat(40); }],
     ["other release", (value) => { value["ctl-taskd"].build.version = "0.2.0"; }],
+    ["missing remote control daemon", (value) => { Reflect.deleteProperty(value, "ctld"); }],
+    ["control daemon source mismatch", (value) => { value.ctld.build.source_revision = "b".repeat(40); }],
+    ["missing control helper contract", (value) => { value.ctld.protocols.pop(); }],
+    ["missing remote VPN contract", (value) => { value["ctl-agent"].protocols = value["ctl-agent"].protocols.filter((protocol) => protocol.name !== "ctl_remote_vpn"); }],
     ["missing companion contract", (value) => { value["ctl-agent"].protocols.pop(); }],
     ["duplicate contract", (value) => { value.ctmuxd.protocols.push(value.ctmuxd.protocols[0]); }],
     ["latest omitted", (value) => { value.ctmuxd.protocols[0].supported_versions = ["1.0.12"]; }],
     ["invented range", (value) => { value.ctmuxd.protocols[0].supported_versions.push("1.1.12"); }],
     ["companion mismatch", (value) => { value.ctmuxd.protocols[0] = { name: "ctmux", build: 14, version: "2.0.14", supported_versions: ["2.0.14"] }; }],
     ["task consumer mismatch", (value) => { value["ctl-taskd"].protocols[2] = { name: "ctmux", build: 14, version: "2.0.14", supported_versions: ["2.0.14"] }; }],
+    ["control daemon mismatch", (value) => { value.ctld.protocols[0] = { name: "ctld", build: 14, version: "2.0.14", supported_versions: ["2.0.14"] }; }],
   ];
   for (const [name, mutate] of cases) await t.test(name, () => {
     const components = componentMapFixture(); mutate(components);
@@ -69,7 +74,8 @@ test("metadata rejects mixed source builds, incomplete maps and invented or inco
   });
   const newer = componentMapFixture();
   for (const component of Object.values(newer)) {
-    const protocol = component.protocols.find((item) => item.name === "ctmux")!;
+    const protocol = component.protocols.find((item) => item.name === "ctmux");
+    if (!protocol) continue;
     protocol.build = 15; protocol.version = "1.1.15"; protocol.supported_versions.push("1.1.15");
   }
   assert.deepEqual(parseAgentComponents(newer, agentIdentity), newer);
@@ -82,13 +88,16 @@ test("archive inspection rejects corrupted, mixed and unsafe payloads even with 
     ["traversal", (entries) => { entries[0].name = "../ctl-agent"; }],
     ["symlink", (entries) => { entries[0].type = 50; }],
     ["missing member", (entries) => { entries.splice(1, 1); }],
+    ["missing control daemon", (entries) => { entries.splice(entries.findIndex((entry) => entry.name === "ctld"), 1); }],
     ["binary checksum", (entries) => { entries[1].bytes = Buffer.from("replaced binary"); }],
+    ["control daemon checksum", (entries) => { entries.find((entry) => entry.name === "ctld")!.bytes = Buffer.from("replaced control daemon"); }],
     ["non executable", (entries) => { entries[1].mode = 0o644; }],
     ["oversized binary", (entries) => { entries[1].declared_size = 128 * 1024 * 1024 + 1; }],
-    ["oversized manifest", (entries) => { entries[3].bytes = Buffer.alloc(64 * 1024 + 1, 32); }],
+    ["oversized manifest", (entries) => { entries.find((entry) => entry.name === "manifest.json")!.bytes = Buffer.alloc(64 * 1024 + 1, 32); }],
     ["wrong target", (entries) => {
-      const manifest = JSON.parse(entries[3].bytes.toString()); manifest.target_triple = agentTargets[1];
-      entries[3].bytes = Buffer.from(JSON.stringify(manifest));
+      const entry = entries.find((entry) => entry.name === "manifest.json")!;
+      const manifest = JSON.parse(entry.bytes.toString()); manifest.target_triple = agentTargets[1];
+      entry.bytes = Buffer.from(JSON.stringify(manifest));
     }],
   ];
   for (const [name, mutate] of cases) await t.test(name, async () => {
@@ -108,7 +117,7 @@ test("outer metadata must match the checksummed archive's complete metadata", as
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   await writeFile(join(root, archive), bytes);
   await writeFile(join(root, `${archive}.sha256`), `${sha256}  ${archive}\n`);
-  const components = componentMapFixture(); components.ctmuxd.build.source_fingerprint = "b".repeat(64);
+  const components = componentMapFixture(); components.ctld.build.source_fingerprint = "b".repeat(64);
   await assert.rejects(verifyAgentBundleTarget(root, agentIdentity, target, { archive, sha256, components }), /metadata differs/);
 });
 

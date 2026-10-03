@@ -26,13 +26,13 @@ fn deserialize_components<'de, D: serde::Deserializer<'de>>(
     type Value = BTreeMap<String, ComponentInfo>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-      formatter.write_str("a uniquely named map of the three bundled components")
+      formatter.write_str("a uniquely named map of the four bundled components")
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
       let mut components = BTreeMap::new();
       while let Some((name, component)) = map.next_entry::<String, ComponentInfo>()? {
-        if components.insert(name, component).is_some() || components.len() > 3 {
+        if components.insert(name, component).is_some() || components.len() > 4 {
           return Err(serde::de::Error::custom(
             "duplicate or excessive bundle components",
           ));
@@ -113,8 +113,8 @@ fn parse_manifest(bytes: &[u8], actual: &ComponentInfo) -> io::Result<BundleVers
     2 => {
       let components = manifest.components.as_ref().ok_or_else(invalid_manifest)?;
       let version = &manifest.version;
-      if components.len() != 3
-        || ["ctl-agent", "ctmuxd", "ctl-taskd"]
+      if components.len() != 4
+        || ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
           .iter()
           .any(|name| !components.contains_key(*name))
         || version.git_revision.len() != 40
@@ -137,6 +137,7 @@ fn parse_manifest(bytes: &[u8], actual: &ComponentInfo) -> io::Result<BundleVers
           "ctl-taskd",
           &["task", "task_control", "ctmux", "ctmux_control"][..],
         ),
+        ("ctld", &["ctld", "ctld_lifecycle", "ctld_helper"][..]),
       ] {
         if required.iter().any(|required| {
           !components[name]
@@ -239,6 +240,7 @@ mod tests {
         "ctl-agent": component,
         "ctmuxd": companion(vec![ctmux_proto::protocol_info(), ctmux_ipc::local_control_protocol_info()]),
         "ctl-taskd": companion(vec![ctl_task_proto::protocol_info(), ctl_task_proto::control::protocol_info(), ctmux_proto::protocol_info(), ctmux_ipc::local_control_protocol_info()]),
+        "ctld": companion(ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols),
       }
     })
   }
@@ -302,6 +304,18 @@ mod tests {
       .unwrap()
       .pop();
     cases.push(missing_companion_protocol);
+    let mut missing_vpn_daemon = valid.clone();
+    missing_vpn_daemon["components"]
+      .as_object_mut()
+      .unwrap()
+      .remove("ctld");
+    cases.push(missing_vpn_daemon);
+    let mut missing_vpn_daemon_protocol = valid.clone();
+    missing_vpn_daemon_protocol["components"]["ctld"]["protocols"]
+      .as_array_mut()
+      .unwrap()
+      .pop();
+    cases.push(missing_vpn_daemon_protocol);
     for manifest in cases {
       assert_eq!(
         parse_manifest(&serde_json::to_vec(&manifest).unwrap(), &component)
@@ -372,6 +386,16 @@ mod tests {
       fs::write(executable.with_file_name("manifest.json"), format!(r#"{{"schema_version":1,"app_version":"0.1.0","bundle_id":"{version}","git_revision":"{version}","target_triple":"aarch64-apple-darwin"}}"#)).unwrap();
       let identity = discover_at(&directory, &executable).unwrap();
       assert_eq!(identity.remote_id, ids[0]);
+      let remote_vpn = identity
+        .protocols
+        .iter()
+        .find(|protocol| protocol.name == "ctl_remote_vpn")
+        .unwrap();
+      assert_eq!(remote_vpn.version, ctl_ipc::remote_vpn::CONTRACT_V1_0_1);
+      assert_eq!(
+        remote_vpn.supported_versions,
+        [ctl_ipc::remote_vpn::CONTRACT_V1_0_1]
+      );
       assert_eq!(identity.bundle.unwrap().bundle_id, version);
     }
     fs::remove_dir_all(directory).unwrap();

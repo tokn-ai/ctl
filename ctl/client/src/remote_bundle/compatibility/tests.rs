@@ -27,6 +27,19 @@ impl Fixture {
       ctl_task_proto::control::protocol_info(),
     ];
     let mut agent = ctl_proto::agent_protocols();
+    agent.push(ProtocolInfo::new(
+      "ctl_remote_vpn",
+      ctl_ipc::remote_vpn::PROTOCOL_BUILD,
+      ctl_ipc::remote_vpn::PROTOCOL_VERSION,
+      ctl_ipc::remote_vpn::SUPPORTED_PROTOCOL_VERSIONS,
+    ));
+    let daemon = ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols;
+    agent.extend(
+      daemon
+        .iter()
+        .filter(|protocol| protocol.name == "ctld")
+        .cloned(),
+    );
     agent.extend(ctmux.clone());
     agent.extend(task.clone());
     let mut task_dependencies = task;
@@ -49,8 +62,15 @@ impl Fixture {
       (
         "ctl-taskd",
         ComponentInfo {
-          build,
+          build: build.clone(),
           protocols: task_dependencies,
+        },
+      ),
+      (
+        "ctld",
+        ComponentInfo {
+          build,
+          protocols: daemon,
         },
       ),
     ]);
@@ -198,6 +218,69 @@ fn schema2_provenance_and_advertisement_maps_are_intrinsically_validated() {
       "change {change}"
     );
   }
+}
+
+#[test]
+fn schema2_requires_all_four_clean_advertisements_and_verified_executables() {
+  for component in COMPONENTS {
+    let mut missing_metadata = Fixture::new(VERSION, REVISION);
+    missing_metadata.outer["targets"][TARGET]["components"]
+      .as_object_mut()
+      .unwrap()
+      .remove(component);
+    assert!(
+      BundleSet::parse_intrinsic(&serde_json::to_vec(&missing_metadata.outer).unwrap()).is_err()
+    );
+
+    let mut dirty = Fixture::new(VERSION, REVISION);
+    dirty.outer["targets"][TARGET]["components"][component]["build"]["dirty"] = json!(true);
+    assert!(BundleSet::parse_intrinsic(&serde_json::to_vec(&dirty.outer).unwrap()).is_err());
+
+    let mut missing_binary = Fixture::new(VERSION, REVISION);
+    missing_binary.files.remove(component);
+    assert!(missing_binary.verify().is_err(), "missing {component}");
+
+    let mut changed_binary = Fixture::new(VERSION, REVISION);
+    changed_binary.files.get_mut(component).unwrap().push(1);
+    assert!(changed_binary.verify().is_err(), "changed {component}");
+  }
+}
+
+#[test]
+fn remote_vpn_daemon_requires_the_agents_explicit_consumed_broker_contract() {
+  let fixture = Fixture::new("0.0.9", &"b".repeat(40));
+  let parsed = BundleSet::parse_intrinsic(&serde_json::to_vec(&fixture.outer).unwrap()).unwrap();
+  let mut components = parsed.target(TARGET).unwrap().components.clone().unwrap();
+  let broker = |info: &mut ComponentInfo, version| {
+    let advertised = info
+      .protocols
+      .iter_mut()
+      .find(|protocol| protocol.name == "ctld")
+      .unwrap();
+    *advertised = ProtocolInfo::new("ctld", ctl_ipc::PROTOCOL_BUILD, version, &[version]);
+  };
+  // Both broker releases remain supported by today's client, but the agent
+  // and its bundled daemon must also agree with one another explicitly.
+  broker(
+    components.get_mut("ctl-agent").unwrap(),
+    ctl_ipc::CONTRACT_V1_1_13,
+  );
+  broker(
+    components.get_mut("ctld").unwrap(),
+    ctl_ipc::CONTRACT_V1_0_12,
+  );
+  assert!(intersects(
+    &components,
+    "ctld",
+    "ctld",
+    ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS
+  ));
+  assert!(!compatible(&components));
+  broker(
+    components.get_mut("ctl-agent").unwrap(),
+    ctl_ipc::CONTRACT_V1_0_12,
+  );
+  assert!(compatible(&components));
 }
 
 #[test]

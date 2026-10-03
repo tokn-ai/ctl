@@ -4,6 +4,7 @@ pub mod credentials;
 pub mod identities;
 pub mod lifecycle;
 pub mod managed;
+pub mod remote_vpn;
 pub mod vpn;
 mod vpn_config;
 pub use vpn_config::{VpnConnection, VpnProvider, VpnSettings};
@@ -133,10 +134,11 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 12;
+pub const PROTOCOL_BUILD: u16 = 13;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_12;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_12];
+pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_13;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_12, CONTRACT_V1_1_13];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -149,10 +151,12 @@ pub fn protocol_offer() -> ProtocolOffer {
 
 /// Internal build of the one-shot credential, identity, askpass, and proxy APIs.
 /// Published helper contracts are independent of the broker and lifecycle APIs.
-pub const HELPER_API_BUILD: u16 = 1;
+pub const HELPER_API_BUILD: u16 = 2;
 pub const HELPER_API_CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
-pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_0_1;
-pub const SUPPORTED_HELPER_API_VERSIONS: &[ProtocolVersion] = &[HELPER_API_CONTRACT_V1_0_1];
+pub const HELPER_API_CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
+pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_1_2;
+pub const SUPPORTED_HELPER_API_VERSIONS: &[ProtocolVersion] =
+  &[HELPER_API_CONTRACT_V1_0_1, HELPER_API_CONTRACT_V1_1_2];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,12 +182,16 @@ impl GatewayKind {
   }
 }
 
-/// A stable reference to a saved VPN owned by a specific local daemon.
+/// A stable VPN reference. Its route position selects the execution host.
 /// The current SOCKS5 endpoint is deliberately resolved only when connecting.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VpnGateway {
   pub connection_id: String,
   pub socket_path: PathBuf,
+  /// Pin the preceding SSH host's account environment when it has been verified.
+  /// The socket path is used only for a first, local VPN step.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expected_remote_id: Option<String>,
 }
 
 // serde's skip_serializing_if callback must take a reference.
@@ -207,6 +215,12 @@ pub struct SshGateway {
 }
 
 impl SshGateway {
+  /// Native `ProxyJump` cannot apply a `HostName` override while keeping an alias.
+  #[must_use]
+  pub fn requires_proxy_command(&self) -> bool {
+    self.kind.requires_proxy_command() || self.hostname.is_some()
+  }
+
   /// VPN references cannot also contain a stale endpoint or SSH credentials.
   #[must_use]
   pub fn has_valid_vpn_configuration(&self) -> bool {
@@ -219,6 +233,10 @@ impl SshGateway {
             .chars()
             .any(|value| value.is_control() || value.is_whitespace())
           && vpn.socket_path.is_absolute()
+          && vpn
+            .expected_remote_id
+            .as_deref()
+            .is_none_or(ctl_proto::valid_remote_id)
           && self.destination == vpn.connection_id
           && self.hostname.is_none()
           && self.user.is_none()
@@ -247,6 +265,65 @@ pub struct SshTarget {
   pub gateways: Vec<SshGateway>,
 }
 
+/// VPN nesting is unchanged: a VPN is local first, or follows an SSH hop.
+#[must_use]
+pub fn has_valid_gateway_route(gateways: &[SshGateway]) -> bool {
+  gateways.len() <= 8
+    && gateways.iter().enumerate().all(|(index, gateway)| {
+      gateway.has_valid_vpn_configuration()
+        && (gateway.kind != GatewayKind::Vpn
+          || if index == 0 {
+            gateway
+              .vpn
+              .as_ref()
+              .is_none_or(|vpn| vpn.expected_remote_id.is_none())
+          } else {
+            gateways[index - 1].kind == GatewayKind::Ssh
+          })
+    })
+}
+
+/// Remote execution was added in the published broker contract 1.1.13.
+#[must_use]
+pub fn has_remote_vpn(gateways: &[SshGateway]) -> bool {
+  gateways
+    .iter()
+    .enumerate()
+    .any(|(index, gateway)| index != 0 && gateway.kind == GatewayKind::Vpn)
+}
+
+/// Old contracts retain local VPN routing; remote routes require explicit support.
+#[must_use]
+pub fn gateway_route_supported(gateways: &[SshGateway], protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol)
+    && (!has_remote_vpn(gateways) || protocol >= CONTRACT_V1_1_13)
+}
+
+/// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
+#[must_use]
+pub fn vpn_owner_target(gateways: &[SshGateway], vpn_index: usize) -> Option<SshTarget> {
+  if gateways.get(vpn_index)?.kind != GatewayKind::Vpn {
+    return None;
+  }
+  let owner_index = vpn_index.checked_sub(1)?;
+  let owner = gateways.get(owner_index)?;
+  if owner.kind != GatewayKind::Ssh {
+    return None;
+  }
+  let mut target = SshTarget {
+    destination: owner.destination.clone(),
+    ssh_config_alias: None,
+    use_ssh_config_master: Some(false),
+    hostname: owner.hostname.clone(),
+    user: owner.user.clone(),
+    port: owner.port,
+    identity_file: owner.identity_file.clone(),
+    gateways: gateways[..owner_index].to_vec(),
+  };
+  target.normalize_master_policy();
+  Some(target)
+}
+
 /// OpenSSH expands %h and %p after parsing this option. The route contains no secrets.
 ///
 /// # Errors
@@ -265,6 +342,9 @@ pub fn proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
 /// Returns daemon discovery or bundled-helper preparation failures.
 pub async fn prepare_proxy_command(gateways: &[SshGateway]) -> Result<String, ConnectError> {
   let executable = prepare_daemon_executable().await?;
+  if has_remote_vpn(gateways) {
+    check_remote_proxy_helper(&executable).await?;
+  }
   Ok(proxy_command_with_executable(gateways, &executable))
 }
 
@@ -292,10 +372,7 @@ impl SshTarget {
   /// An omitted preference preserves the connection method's original policy.
   #[must_use]
   pub fn uses_ssh_config_master(&self) -> bool {
-    !self
-      .gateways
-      .iter()
-      .any(|gateway| gateway.kind.requires_proxy_command())
+    !self.gateways.iter().any(SshGateway::requires_proxy_command)
       && self
         .use_ssh_config_master
         .unwrap_or(self.ssh_config_alias.is_some())
@@ -566,6 +643,13 @@ pub enum ConnectError {
     executable: PathBuf,
     expected: ProtocolVersion,
     reported: ProtocolVersion,
+  },
+  #[error(
+    "ctld helper at {executable} does not support remote VPN routes; update it to helper contract {required}"
+  )]
+  UnsupportedProxyRoute {
+    executable: PathBuf,
+    required: ProtocolVersion,
   },
 }
 
@@ -849,6 +933,24 @@ async fn check_daemon_protocol(
     });
   }
   Ok(())
+}
+
+async fn check_remote_proxy_helper(executable: &Path) -> Result<(), ConnectError> {
+  let metadata = query_daemon_metadata(executable, PROTOCOL_QUERY_TIMEOUT)
+    .await
+    .map_err(ConnectError::PrepareDaemon)?;
+  if metadata.protocols.iter().any(|protocol| {
+    protocol.name == "ctld_helper"
+      && protocol
+        .supported_versions
+        .contains(&HELPER_API_CONTRACT_V1_1_2)
+  }) {
+    return Ok(());
+  }
+  Err(ConnectError::UnsupportedProxyRoute {
+    executable: executable.to_path_buf(),
+    required: HELPER_API_CONTRACT_V1_1_2,
+  })
 }
 
 async fn query_daemon_metadata(
@@ -1155,6 +1257,7 @@ mod tests {
       vpn: Some(VpnGateway {
         connection_id: "saved-vpn".into(),
         socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
+        expected_remote_id: None,
       }),
       destination: "saved-vpn".into(),
       ..gateway
@@ -1279,6 +1382,40 @@ mod tests {
     assert!(path.to_string_lossy().starts_with(r"\\.\pipe\ctld-v1-"));
   }
 
+  #[test]
+  fn historical_local_vpn_routes_keep_their_contract_and_wire_shape() {
+    let local: SshGateway = serde_json::from_value(serde_json::json!({
+      "kind": "vpn",
+      "vpn": { "connection_id": "work", "socket_path": "/tmp/owner.sock" },
+      "destination": "work", "hostname": null, "user": null,
+      "port": null, "identity_file": null, "mode": "automatic"
+    }))
+    .unwrap();
+    assert!(has_valid_gateway_route(std::slice::from_ref(&local)));
+    assert!(gateway_route_supported(
+      std::slice::from_ref(&local),
+      CONTRACT_V1_0_12
+    ));
+    assert!(gateway_route_supported(
+      std::slice::from_ref(&local),
+      CONTRACT_V1_1_13
+    ));
+    let wire = serde_json::to_value(&local).unwrap();
+    assert!(wire["vpn"].get("expected_remote_id").is_none());
+    let mut ssh = local.clone();
+    ssh.kind = GatewayKind::Ssh;
+    ssh.vpn = None;
+    ssh.destination = "jump".into();
+    let remote = [ssh, local];
+    assert!(has_valid_gateway_route(&remote));
+    assert!(!gateway_route_supported(&remote, CONTRACT_V1_0_12));
+    assert!(gateway_route_supported(&remote, CONTRACT_V1_1_13));
+    assert_eq!(
+      protocol_offer().negotiate(&[CONTRACT_V1_0_12]),
+      Some(CONTRACT_V1_0_12)
+    );
+  }
+
   #[cfg(unix)]
   pub(crate) static SUBPROCESS_FIXTURE_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
@@ -1347,11 +1484,55 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
-  async fn protocol_probe_accepts_a_newer_helper_advertising_the_required_contract() {
-    let newer = ProtocolVersion::new(1, 1, 13);
+  async fn remote_proxy_routes_require_the_explicit_helper_contract() {
+    for (version, supported, accepted) in [
+      (
+        HELPER_API_CONTRACT_V1_0_1,
+        &[HELPER_API_CONTRACT_V1_0_1][..],
+        false,
+      ),
+      (HELPER_API_VERSION, SUPPORTED_HELPER_API_VERSIONS, true),
+    ] {
+      let metadata = serde_json::to_string(&ComponentInfo {
+        build: ctl_core::component::build_info(),
+        protocols: vec![ProtocolInfo::new(
+          "ctld_helper",
+          version.build,
+          version,
+          supported,
+        )],
+      })
+      .unwrap();
+      let fixture = ProtocolFixture::new(&format!("printf '%s\\n' '{metadata}'")).await;
+      assert_eq!(
+        check_remote_proxy_helper(&fixture.executable).await.is_ok(),
+        accepted
+      );
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn new_clients_can_still_select_the_original_broker_contract() {
     let fixture = ProtocolFixture::new(&format!(
       "printf '%s\\n' '{}'",
-      protocol_metadata(newer, &[PROTOCOL_VERSION, newer])
+      protocol_metadata(CONTRACT_V1_0_12, &[CONTRACT_V1_0_12])
+    ))
+    .await;
+    check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
+      .await
+      .unwrap();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn protocol_probe_accepts_a_newer_helper_advertising_the_required_contract() {
+    let newer = ProtocolVersion::new(1, PROTOCOL_VERSION.minor + 1, PROTOCOL_BUILD + 1);
+    let mut supported = SUPPORTED_PROTOCOL_VERSIONS.to_vec();
+    supported.push(newer);
+    let fixture = ProtocolFixture::new(&format!(
+      "printf '%s\\n' '{}'",
+      protocol_metadata(newer, &supported)
     ))
     .await;
     check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)

@@ -201,7 +201,7 @@ The full signed bundle is installed without `sudo`:
   versions/<version>-<target>/ctld.app/
   development/<archive-sha256>/ctld.app/
   current -> versions/<version>-<target>
-  selected/<target>-ctld12-lifecycle1-helper1 -> ../versions/<version>-<target>
+  selected/<target>-ctld1-lifecycle1-helper1 -> ../versions/<version>-<target>
 ```
 
 Remote-agent `~/.tokn/ctl/versions/` and `current` remain independent. An existing

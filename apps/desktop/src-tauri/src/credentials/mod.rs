@@ -186,15 +186,13 @@ fn valid_target(target: &ctl_ipc::SshTarget) -> bool {
     && target.ssh_config_alias.as_ref().is_none_or(|alias| {
       alias == &target.destination && !alias.starts_with('!') && !alias.contains(['*', '?'])
     })
-    && target.gateways.len() <= 8
-    && target.gateways.iter().enumerate().all(|(index, gateway)| {
-      gateway.has_valid_vpn_configuration()
-        && valid_text(&gateway.destination, 1024, false)
+    && ctl_ipc::has_valid_gateway_route(&target.gateways)
+    && target.gateways.iter().all(|gateway| {
+      valid_text(&gateway.destination, 1024, false)
         && optional(&gateway.hostname)
         && optional(&gateway.user)
         && path(&gateway.identity_file)
         && gateway.port != Some(0)
-        && (index == 0 || gateway.kind != ctl_ipc::GatewayKind::Vpn)
     })
     && serde_json::to_vec(target).is_ok_and(|bytes| bytes.len() <= 32 * 1024)
 }

@@ -10,10 +10,10 @@ export const agentTargets = [
   "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
   "x86_64-apple-darwin", "aarch64-apple-darwin",
 ] as const;
-export const agentComponents = ["ctl-agent", "ctmuxd", "ctl-taskd"] as const;
+export const agentComponents = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] as const;
 export const maxAgentManifestBytes = 64 * 1024;
 const maxArchiveBytes = 128 * 1024 * 1024;
-const maxUnpackedBytes = 3 * maxArchiveBytes + maxAgentManifestBytes + 1024 * 1024;
+const maxUnpackedBytes = agentComponents.length * maxArchiveBytes + maxAgentManifestBytes + 1024 * 1024;
 
 export interface AgentBundleIdentity {
   app_version: string;
@@ -58,9 +58,10 @@ export function parseAgentComponents(value: unknown, identity: AgentBundleIdenti
   const entries = record(value, "bundle components");
   exactKeys(entries, agentComponents, "bundle components");
   const required = {
-    "ctl-agent": ["ctl_identity", "ctl_maintenance", "ctmux", "ctmux_control", "task", "task_control"],
+    "ctl-agent": ["ctl_identity", "ctl_maintenance", "ctl_remote_vpn", "ctld", "ctmux", "ctmux_control", "task", "task_control"],
     ctmuxd: ["ctmux", "ctmux_control"],
     "ctl-taskd": ["task", "task_control", "ctmux", "ctmux_control"],
+    ctld: ["ctld", "ctld_lifecycle", "ctld_helper"],
   };
   const parsed = {} as AgentComponentMap;
   for (const name of agentComponents) {
@@ -73,7 +74,7 @@ export function parseAgentComponents(value: unknown, identity: AgentBundleIdenti
     }
     parsed[name] = component;
   }
-  for (const [name, protocols] of [["ctmuxd", ["ctmux", "ctmux_control"]], ["ctl-taskd", ["task", "task_control"]]] as const) {
+  for (const [name, protocols] of [["ctmuxd", ["ctmux", "ctmux_control"]], ["ctl-taskd", ["task", "task_control"]], ["ctld", ["ctld"]]] as const) {
     for (const protocol of protocols) {
       const client = parsed["ctl-agent"].protocols.find((entry) => entry.name === protocol)!;
       const server = parsed[name].protocols.find((entry) => entry.name === protocol)!;
@@ -198,7 +199,7 @@ export async function inspectAgentArchive(bytes: Buffer, identity: AgentBundleId
       }
     }
   }
-  if (current || padding || pending.length || endBlocks < 2 || seen.size !== 4) throw new Error("agent archive is truncated or incomplete");
+  if (current || padding || pending.length || endBlocks < 2 || seen.size !== agentComponents.length + 1) throw new Error("agent archive is truncated or incomplete");
   const manifest = parseAgentBundleManifest(Buffer.concat(manifestParts), identity, target);
   for (const name of agentComponents) {
     if (hashes.get(name) !== manifest.files[name]) throw new Error(`archive checksum mismatch for ${name}`);

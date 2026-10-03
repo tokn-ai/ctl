@@ -23,6 +23,7 @@ import type {
   RemoteIdentity,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
+import { expandSshRoute, hasVpnRoute, isHostRouteStep } from "./sshRoute";
 import { hasKnownTerminalSize, knownTerminalSize, observedAt } from "../sessions/sessionObservation";
 import {
   projectedTailscaleHost,
@@ -87,7 +88,7 @@ export function connectionMethodOptions(source: Pick<WorkspaceConnectionMethod,
 }
 
 export function usesSshConfigMaster(target: SshConnectionTarget): boolean {
-  return !target.vpn_connection_id && !target.gateways?.some((gateway) => gateway.kind === "socks5") &&
+  return !hasVpnRoute(target) && !target.gateways?.some((gateway) => gateway.kind === "socks5" || Boolean(gateway.hostname)) &&
     (target.use_ssh_config_master ?? Boolean(target.ssh_config_alias));
 }
 
@@ -134,6 +135,7 @@ export function hostTarget(
   host: WorkspaceHost,
   gateways: readonly WorkspaceSshGateway[],
   method_id = host.preferred_method_id,
+  hosts: readonly WorkspaceHost[] = [],
 ): ConnectionTarget {
   if (host.host_id === "local") return LOCAL_TARGET;
   const method = host.connection_methods.find((item) => item.method_id === method_id);
@@ -147,14 +149,19 @@ export function hostTarget(
     remote_info: expectedHostIdentity(host),
     unavailable: method.target.unavailable ?? "This host is no longer available. Restore its saved definition before connecting.",
   };
-  return resolveSshGateways({
+  const target: SshConnectionTarget = {
     ...connectionSettings(method.target),
     host_id: host.host_id,
     host_name: host.name,
     method_id: method.method_id,
     ...connectionMethodOptions(method),
     ...(expectedHostIdentity(host) ? { remote_info: expectedHostIdentity(host) } : {}),
-  }, gateways);
+  };
+  try {
+    return resolveSshGateways(target, gateways, hosts);
+  } catch (failure) {
+    return { ...target, unavailable: failure instanceof Error ? failure.message : "This connection route could not be resolved." };
+  }
 }
 
 export function expectedHostIdentity(host: WorkspaceHost): RemoteIdentity | undefined {
@@ -173,6 +180,7 @@ export function workspaceSidebarTargets(view: WorkspaceView): ConnectionTarget[]
     ...view.task_references.map((reference) => reference.host_id),
     ...view.task_tabs.map((tab) => tab.host_id),
     ...view.port_forwards.map((forward) => forward.host_id),
+    ...linkedHostIds(view.hosts),
   ]);
   const hosts = new Map(view.hosts.map((host) => [host.host_id, host]));
   return view.targets.filter((target) => {
@@ -252,6 +260,11 @@ function referencedHostIds(document: WorkspaceDocument): Set<string> {
   ]);
 }
 
+function linkedHostIds(hosts: readonly WorkspaceHost[]): string[] {
+  return hosts.flatMap((host) => host.connection_methods.flatMap((method) =>
+    (method.target.gateway_route ?? []).flatMap((step) => isHostRouteStep(step) ? [step.host_id] : [])));
+}
+
 function composeHosts(
   document: WorkspaceDocument,
   catalog: HostCatalogDocument | undefined,
@@ -260,6 +273,7 @@ function composeHosts(
 ): WorkspaceHost[] {
   const saved = catalog?.hosts ?? (document.hosts ?? []).map(normalizeWorkspaceHost);
   const referenced = referencedHostIds(document);
+  for (const host_id of linkedHostIds(saved)) referenced.add(host_id);
   const aliases = new Set(ssh_config_hosts.map((host) => host.destination));
   const devices = new Map(tailscale_devices.map((device) => [device.node_id, device]));
   const hosts = new Map<string, WorkspaceHost>([["local", hostFromTarget(LOCAL_TARGET)]]);
@@ -378,7 +392,7 @@ export function refreshHostCatalog(
     };
   });
   const targets = hosts.map((host) => {
-    const next = hostTarget(host, catalog.ssh_gateways);
+    const next = hostTarget(host, catalog.ssh_gateways, undefined, hosts);
     const previous = view.targets.find((target) => targetKey(target) === targetKey(next));
     if (next.kind !== "ssh" || previous?.kind !== "ssh") return next;
     // Missing aliases may return later. Their placeholder is never a usable transport.
@@ -423,16 +437,11 @@ export function updateHostSettings(view: WorkspaceView, host: WorkspaceHost): Wo
 export function resolveSshGateways(
   target: SshConnectionTarget,
   gateways: readonly WorkspaceSshGateway[],
+  hosts: readonly WorkspaceHost[] = [],
 ): SshConnectionTarget {
-  const byId = new Map(
-    gateways.map((gateway) => [gateway.gateway_id, gateway]),
-  );
   const { gateways: _current, ...persistedTarget } = target;
-  const resolved = (target.gateway_route ?? []).map((step) => {
-    const gateway = byId.get(step.gateway_id);
-    if (!gateway) throw new Error("A gateway for this connection method is missing. Edit the method before connecting.");
-    return { ...gateway, mode: step.mode };
-  });
+  const route = expandSshRoute(target, gateways, hosts);
+  const resolved = target.vpn_connection_id ? route.slice(1) : route;
   return resolved.length > 0
     ? { ...persistedTarget, gateways: resolved }
     : persistedTarget;
@@ -465,7 +474,7 @@ export function restoreWorkspace(
 ): WorkspaceView {
   const ssh_gateways = catalog?.ssh_gateways ?? document.ssh_gateways ?? [];
   const hosts = composeHosts(document, catalog, ssh_config_hosts, tailscale_devices);
-  const targets = hosts.map((host) => hostTarget(host, ssh_gateways));
+  const targets = hosts.map((host) => hostTarget(host, ssh_gateways, undefined, hosts));
   const targetsById = new Map(
     targets.map((target) => [
       target.kind === "local" ? "local" : target.host_id!,
@@ -575,6 +584,7 @@ export function workspaceDocument(
     ...sessions.map((session) => sessionReference(session).host_id),
     ...view.task_references.map((task) => task.host_id),
     ...view.port_forwards.map((forward) => forward.host_id),
+    ...linkedHostIds(view.hosts),
   ]);
   return {
     schema_version: 8,

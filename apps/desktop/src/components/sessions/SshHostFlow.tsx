@@ -5,7 +5,9 @@ import { GatewayRouteDialog } from "./GatewayRouteDialog";
 import { tailscaleDeviceDetail, VIRTUAL_SSH_GROUP, VIRTUAL_TAILSCALE_GROUP } from "./hostChoices";
 import { resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
 import { vpnRouteDetail } from "../../features/vpn/status";
+import { hasVpnRoute, localVpnConnectionId } from "../../features/workspace/sshRoute";
 import { sameSshEndpoint } from "../../features/workspace/remoteRecovery";
+import { remoteVpnUpdateOwner } from "../../features/workspace/remoteVpnRecovery";
 import { parseHostAddress } from "../../features/targets/hostAddress";
 import { useSshIdentityFiles } from "../../features/targets/useSshIdentityFiles";
 import {
@@ -34,6 +36,7 @@ import type {
   SshConnectionTarget,
   SshGatewayRouteStep,
   WorkspaceSshGateway,
+  WorkspaceHost,
   HostConnectionChange,
   TailscaleDevice,
   VpnConnection,
@@ -53,11 +56,13 @@ export interface SshHostFlowProps {
   complex?: boolean;
   /** Edit connection settings without entering the reconnect flow. */
   initialTarget?: SshConnectionTarget;
+  editing_host_id?: string | null;
   expectedIdentity?: RemoteIdentity;
   onSaveNewHost?(
     name: string,
     target: SshConnectionTarget,
     remote_info: RemoteIdentity,
+    gateways?: WorkspaceSshGateway[],
   ): Promise<void>;
   onSaveConnection?(
     target: SshConnectionTarget,
@@ -65,6 +70,7 @@ export interface SshHostFlowProps {
     remote_info: RemoteIdentity,
   ): Promise<void>;
   gateways?: readonly WorkspaceSshGateway[];
+  hosts?: readonly WorkspaceHost[];
   vpn_connections?: readonly VpnConnection[];
   vpn_statuses?: readonly VpnStatus[];
   vpn_loading?: boolean;
@@ -120,10 +126,12 @@ export function SshHostFlow({
   updateRequired = false,
   complex = false,
   initialTarget,
+  editing_host_id,
   expectedIdentity,
   onSaveNewHost,
   onSaveConnection,
   gateways = [],
+  hosts = [],
   vpn_connections = [],
   vpn_statuses = [],
   vpn_loading = false,
@@ -167,6 +175,8 @@ export function SshHostFlow({
   const [gatewayRoute, setGatewayRoute] = useState<SshGatewayRouteStep[]>(initialTarget?.gateway_route ?? []);
   const [error, setError] = useState<string | null>(null);
   const [needs_vpn_sign_in, setNeedsVpnSignIn] = useState(false);
+  const [needs_remote_vpn_sign_in, setNeedsRemoteVpnSignIn] = useState(false);
+  const [vpn_update_owner, setVpnUpdateOwner] = useState<ReturnType<typeof remoteVpnUpdateOwner>>(null);
   const [opening_vpn_sign_in, setOpeningVpnSignIn] = useState(false);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
@@ -237,6 +247,9 @@ export function SshHostFlow({
     attemptRef.current = attempt;
     setError(null);
     setCanInstallAgent(false);
+    setNeedsVpnSignIn(false);
+    setNeedsRemoteVpnSignIn(false);
+    setVpnUpdateOwner(null);
     setNeedsDaemonRestart(false);
     setPrompt(null);
     setStep("progress");
@@ -306,6 +319,8 @@ export function SshHostFlow({
       setPrompt(null);
       setError(errorMessage(failure));
       setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
+      setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
+      setVpnUpdateOwner(remoteVpnUpdateOwner(candidate, failure));
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       const code = errorCode(failure);
       const update = code === "ctl_agent_identity_unsupported" || code === "protocol_version_mismatch";
@@ -321,10 +336,10 @@ export function SshHostFlow({
     }
   }
 
-  async function installAgent(candidate: ConnectionTarget) {
+  async function installAgent(candidate: ConnectionTarget, reconnect_candidate = candidate) {
     cancelAttempt();
-    candidateRef.current = candidate;
-    onConnectionChange?.(candidate, "connecting");
+    candidateRef.current = reconnect_candidate;
+    onConnectionChange?.(reconnect_candidate, "connecting");
     const attempt = crypto.randomUUID();
     attemptRef.current = attempt;
     setError(null);
@@ -345,15 +360,18 @@ export function SshHostFlow({
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
       componentsUpdatedRef.current = candidate;
-      await connect(candidate);
+      await connect(reconnect_candidate);
     } catch (failure) {
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
       setPrompt(null);
       setError(errorMessage(failure));
       setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
-      setCanInstallAgent(errorCode(failure) !== "vpn_sign_in_required");
-      onConnectionChange?.(candidate, "error", errorMessage(failure));
+      setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
+      if (candidate === reconnect_candidate) {
+        setCanInstallAgent(errorCode(failure) !== "vpn_sign_in_required" && errorCode(failure) !== "remote_vpn_sign_in_required");
+      }
+      onConnectionChange?.(reconnect_candidate, "error", errorMessage(failure));
       setStep("retry");
     }
   }
@@ -373,6 +391,7 @@ export function SshHostFlow({
       setNeedsDaemonRestart(false);
       setError(errorMessage(failure));
       setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
+      setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
       setStep("retry");
     } finally {
       if (attemptRef.current === attempt) {
@@ -405,6 +424,7 @@ export function SshHostFlow({
       setPrompt(null);
       setError(errorMessage(failure));
       setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
+      setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
       onConnectionChange?.(candidate, "error", errorMessage(failure));
       setStep("retry");
     } finally {
@@ -422,18 +442,36 @@ export function SshHostFlow({
     if (candidate && (selected || onSaveNewHost && configuredRef.current) && next.identity_file) {
       candidate.identity_file = next.identity_file;
     }
-    if (candidate) void connect(resolveSshGateways({
-      ...candidate,
-      ...(vpnConnectionId ? { vpn_connection_id: vpnConnectionId, use_ssh_config_master: false } : {}),
-      ...(gatewayRoute.length ? { gateway_route: gatewayRoute } : {}),
-    }, draftGatewaysRef.current));
+    if (candidate) {
+      try {
+        void connect(resolveSshGateways({
+          ...candidate,
+          ...(vpnConnectionId ? { vpn_connection_id: vpnConnectionId, use_ssh_config_master: false } : {}),
+          ...(gatewayRoute.length ? { gateway_route: gatewayRoute } : {}),
+        }, draftGatewaysRef.current, hosts));
+      } catch (failure) {
+        setError(errorMessage(failure));
+      }
+    }
+  }
+
+  function selectedRouteChoice(): string {
+    if (vpnConnectionId) return `vpn:${vpnConnectionId}`;
+    if (!gatewayRoute.length) return "direct";
+    if (gatewayRoute.length !== 1) return "custom_route";
+    const step = gatewayRoute[0];
+    if ("gateway_id" in step) return `gateway:${step.gateway_id}`;
+    if ("host_id" in step) return `host:${JSON.stringify([step.host_id, step.method_id])}`;
+    return "custom_route";
   }
 
   async function saveNewHost(candidate: SshConnectionTarget, remote_info: RemoteIdentity) {
     setSaving(true);
     setError(null);
     try {
-      await onSaveNewHost?.(hostName, candidate, remote_info);
+      if (draftGatewaysRef.current.some((gateway) => !originalGatewayIds.current.includes(gateway.gateway_id))) {
+        await onSaveNewHost?.(hostName, candidate, remote_info, draftGatewaysRef.current);
+      } else await onSaveNewHost?.(hostName, candidate, remote_info);
       if (!closedRef.current) onClose();
     } catch (failure) {
       if (!closedRef.current) {
@@ -448,11 +486,13 @@ export function SshHostFlow({
   function routedHostCandidate(): SshConnectionTarget {
     return {
       ...routedHostSettings(),
+      ...(editing_host_id ? { host_id: editing_host_id } : {}),
       ...(sshConfigMaster !== undefined ? { use_ssh_config_master: sshConfigMaster } : {}),
     };
   }
 
   function routedHostSettings(): SshConnectionTarget {
+    const source = initialTarget ?? selectedProviderTargetRef.current;
     const destination = address.trim();
     const alias = hostAlias.trim();
     const identity_file = hostIdentityFile.trim();
@@ -461,10 +501,10 @@ export function SshHostFlow({
       throw new Error("Enter a valid identity-file path.");
     }
     const parsed = parseHostAddress(destination);
-    const unchangedAlias = initialTarget && !initialTarget.hostname && destination === initialTarget.destination;
+    const unchangedAlias = source && !source.hostname && destination === source.destination;
     const enteredAlias = parsed?.hostname ?? destination;
-    const configAlias = !initialTarget?.tailscale_node_id &&
-      (initialTarget?.ssh_config_alias === enteredAlias ||
+    const configAlias = !source?.tailscale_node_id &&
+      (source?.ssh_config_alias === enteredAlias ||
         !unchangedAlias && suggestions.includes(enteredAlias)) ? enteredAlias : null;
     if (configAlias || unchangedAlias) {
       const selectedAlias = configAlias ?? destination;
@@ -474,15 +514,15 @@ export function SshHostFlow({
       const target = configAlias ? configuredSshTarget(configAlias) : {
         kind: "ssh" as const,
         destination,
-        ...(initialTarget?.ssh_config_alias ? { ssh_config_alias: initialTarget.ssh_config_alias } : {}),
+        ...(source?.ssh_config_alias ? { ssh_config_alias: source.ssh_config_alias } : {}),
       };
       if (!target) throw new Error("Enter a valid SSH config host.");
-      const sameAlias = initialTarget && !initialTarget.hostname && selectedAlias === initialTarget.destination;
+      const sameAlias = source && !source.hostname && selectedAlias === source.destination;
       return {
         ...target,
         ...(sameAlias
-          ? { user: initialTarget.user, port: initialTarget.port,
-            ...(initialTarget.tailscale_node_id ? { tailscale_node_id: initialTarget.tailscale_node_id } : {}) }
+          ? { user: source.user, port: source.port,
+            ...(source.tailscale_node_id ? { tailscale_node_id: source.tailscale_node_id } : {}) }
           : {}),
         ...(parsed?.user ? { user: parsed.user } : {}),
         ...(parsed?.port ? { port: parsed.port } : {}),
@@ -504,11 +544,11 @@ export function SshHostFlow({
       identity_file: identity_file || null,
     });
     if (!target) throw new Error("Enter valid SSH host settings.");
-    if (initialTarget?.tailscale_node_id && parsed.hostname === (initialTarget.hostname ?? initialTarget.destination)) {
-      target.tailscale_node_id = initialTarget.tailscale_node_id;
+    if (source?.tailscale_node_id && parsed.hostname === (source.hostname ?? source.destination)) {
+      target.tailscale_node_id = source.tailscale_node_id;
     }
-    if (initialTarget?.ssh_config_alias === name && parsed.hostname === initialTarget.hostname) {
-      target.ssh_config_alias = initialTarget.ssh_config_alias;
+    if (source?.ssh_config_alias === name && parsed.hostname === source.hostname) {
+      target.ssh_config_alias = source.ssh_config_alias;
     }
     return target;
   }
@@ -566,12 +606,13 @@ export function SshHostFlow({
       <GatewayRouteDialog
         title={editingConnection ? initialTarget ? "Edit connection method" : "Add connection method" : undefined}
         submitLabel={editingConnection ? "Verify and save" : undefined}
-        target={{ kind: "ssh", destination: address.trim() || "New host", gateway_route: gatewayRoute, vpn_connection_id: vpnConnectionId }}
+        target={{ kind: "ssh", host_id: editing_host_id ?? initialTarget?.host_id, destination: address.trim() || "New host", gateway_route: gatewayRoute, vpn_connection_id: vpnConnectionId }}
         vpn_connections={vpn_connections}
         vpn_statuses={vpn_statuses}
         vpn_loading={vpn_loading}
         vpn_error={vpn_error}
         gateways={draftGateways}
+        hosts={hosts}
         targets={[]}
         hostSetup={{
           address,
@@ -608,6 +649,7 @@ export function SshHostFlow({
           void connect(resolveSshGateways(
             { ...candidate, gateway_route: nextRoute, ...(vpn_connection_id ? { vpn_connection_id, use_ssh_config_master: false } : {}) },
             nextGateways,
+            hosts,
           ));
         }}
         onClose={close}
@@ -688,9 +730,10 @@ export function SshHostFlow({
         (vpn_error ? `\nCould not load VPN connections: ${vpn_error}` : "");
       mode = {
         kind: "pick",
-        initial_choice_id: vpnConnectionId ? `vpn:${vpnConnectionId}` : gatewayRoute[0] ? `gateway:${gatewayRoute[0].gateway_id}` : "direct",
+        initial_choice_id: selectedRouteChoice(),
         choices: [
           { id: "direct", label: "Direct", detail: "Use SSH settings without an app VPN or gateway." },
+          ...(onSaveNewHost ? [{ id: "custom_route", label: "Build connection route…", detail: "Chain saved hosts, SSH gateways, and VPNs in connection order." }] : []),
           ...(onSaveNewHost ? vpn_connections.map((connection) => ({
             id: `vpn:${connection.connection_id}`,
             label: connection.name,
@@ -703,6 +746,13 @@ export function SshHostFlow({
             detail: gateway.kind === "socks5" ? "SOCKS5 gateway" : "SSH gateway",
             group: "Saved gateways",
           })) : []),
+          ...(onSaveNewHost ? hosts.filter((host) => host.host_id !== "local" && (!host.source || host.source === "saved"))
+            .flatMap((host) => host.connection_methods.map((method) => ({
+              id: `host:${JSON.stringify([host.host_id, method.method_id])}`,
+              label: host.name,
+              detail: `${method.name}${method.method_id === host.preferred_method_id ? " · Preferred" : ""} · Includes its saved route`,
+              group: "Saved hosts",
+            }))) : []),
         ],
       };
       onBack = back(selectedProviderTargetRef.current ? "ssh_user" : "name");
@@ -796,8 +846,12 @@ export function SshHostFlow({
         : step === "retry"
           ? "Could not connect"
           : "Connect host";
-      description = needs_vpn_sign_in
+      description = needs_remote_vpn_sign_in
+        ? "Sign in to the VPN on its SSH host. Open this connection route and check the remote VPN status to sign in, then choose Connect to continue."
+        : needs_vpn_sign_in
         ? "Sign in to Tailscale with your browser, then choose Connect to continue. You can also manage this connection from the VPN page."
+        : vpn_update_owner
+        ? `The VPN execution host ${vpn_update_owner.name} needs updated components. Update that SSH host, then ctl will retry this connection through its VPN. Running sessions are preserved.`
         : needsDaemonRestart
           ? "The bundled components were installed, but the running ctmux daemon is still incompatible. Choose Force restart to end its existing terminal sessions, or Connect to check again. The update has not stopped running sessions."
           : (step === "retry" || step === "update") && canInstallAgent
@@ -808,13 +862,15 @@ export function SshHostFlow({
       mode = opening_vpn_sign_in ? { kind: "progress", message: "Opening sign-in in your browser…" } : {
         kind: "pick",
         choices: [
+          ...(vpn_update_owner ? [{ id: "update_vpn_host", label: `Update components on ${vpn_update_owner.name}`,
+            detail: "Install the bundled components on the SSH host that runs this VPN." }] : []),
           ...(needs_vpn_sign_in ? [{ id: "vpn_sign_in", label: "Sign in to Tailscale" }] : []),
           ...((step === "retry" || step === "update") && canInstallAgent
             ? [
                 {
                   id: "install_agent",
                   label: needsUpdate ? "Update remote components" : "Install remote components",
-                  detail: "Install the bundled ctl-agent, ctmuxd, and ctl-taskd for this user.",
+                  detail: "Install the bundled ctl-agent, ctld, ctmuxd, and ctl-taskd for this user.",
                 },
               ]
             : []),
@@ -836,12 +892,12 @@ export function SshHostFlow({
       mode = { kind: "progress" };
       break;
     case "installing":
-      title = "Installing remote components";
+      title = vpn_update_owner ? `Updating components on ${vpn_update_owner.name}` : "Installing remote components";
       mode = remoteInstallProgressMode(install_progress);
       break;
     case "progress":
       title = "Connecting to host";
-      description = candidateRef.current?.kind === "ssh" && candidateRef.current.vpn_connection_id
+      description = candidateRef.current?.kind === "ssh" && hasVpnRoute(candidateRef.current)
         ? "Connecting the selected VPN if needed, then verifying the SSH connection and remote environment."
         : "Verifying the SSH connection and remote environment.";
       mode = { kind: "progress" };
@@ -944,10 +1000,34 @@ export function SshHostFlow({
         setStep("connect_through");
       }
     } else if (step === "connect_through") {
+      if (value === "custom_route") {
+        const selected = selectedProviderTargetRef.current;
+        if (selected) {
+          setAddress(targetAddress(selected));
+          setHostAlias(selected.hostname ? selected.destination : "");
+          setHostIdentityFile(selected.identity_file ?? "");
+        }
+        setStep("route");
+        return;
+      }
       const vpn = vpn_connections.find((connection) => value === `vpn:${connection.connection_id}`);
       const gateway = gateways.find((item) => value === `gateway:${item.gateway_id}`);
-      if (value !== "direct" && !vpn && !gateway) {
+      const host_step = hosts.flatMap((host) => host.connection_methods.map((method) => ({ host, method })))
+        .find(({ host, method }) => value === `host:${JSON.stringify([host.host_id, method.method_id])}`);
+      if (value !== "direct" && !vpn && !gateway && !host_step) {
         setError("This connection is no longer available. Choose another route.");
+        return;
+      }
+      if (host_step) {
+        const next: SshGatewayRouteStep[] = [{ host_id: host_step.host.host_id, method_id: host_step.method.method_id, mode: "automatic" }];
+        try {
+          resolveSshGateways({ kind: "ssh", destination: address, gateway_route: next }, gateways, hosts);
+          setVpnConnectionId(undefined);
+          setGatewayRoute(next);
+          setStep("auth");
+        } catch (failure) {
+          setError(errorMessage(failure));
+        }
         return;
       }
       setVpnConnectionId(vpn?.connection_id);
@@ -984,15 +1064,19 @@ export function SshHostFlow({
     ) {
       if (value === "vpn_sign_in") {
         const candidate = candidateRef.current;
-        if (candidate.kind !== "ssh" || !candidate.vpn_connection_id || opening_vpn_sign_in) return;
+        if (candidate.kind !== "ssh" || opening_vpn_sign_in) return;
+        const vpn_id = localVpnConnectionId(candidate);
+        if (!vpn_id) return;
         setOpeningVpnSignIn(true);
         try {
-          await openVpnSignIn(candidate.vpn_connection_id);
+          await openVpnSignIn(vpn_id);
         } catch (failure) {
           if (!closedRef.current) setError(errorMessage(failure));
         } finally {
           if (!closedRef.current) setOpeningVpnSignIn(false);
         }
+      } else if (value === "update_vpn_host" && vpn_update_owner) {
+        void installAgent(vpn_update_owner.target, candidateRef.current);
       } else if (value === "restart_ctmux") setStep("restart_confirm");
       else if (value === "install_agent") void installAgent(candidateRef.current);
       else void connect(candidateRef.current);

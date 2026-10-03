@@ -34,6 +34,8 @@ enum Command {
   Listeners,
   /// Print installed agent identity without opening or starting a service.
   Inspect,
+  /// Manage this account's VPNs or open a TCP stream through a selected VPN.
+  Vpn,
   /// End all ctmux sessions and start the installed daemon after explicit confirmation.
   RestartCtmux,
   /// Inspect the existing ctmux owner and wait for a separate confirmation frame.
@@ -115,6 +117,7 @@ async fn run(arguments: Arguments) -> Result<(), MainError> {
         .map_err(std::io::Error::other)??;
       println!("{}", serde_json::to_string(&identity)?);
     }
+    Command::Vpn => run_vpn().await?,
     Command::Listeners => {
       let catalog = tokio::task::spawn_blocking(ctl_agent::listeners::discover)
         .await
@@ -129,6 +132,18 @@ fn companion_binary(name: &str) -> Option<PathBuf> {
   let current = env::current_exe().ok()?;
   let sibling = current.with_file_name(format!("{name}{}", env::consts::EXE_SUFFIX));
   (sibling.is_absolute() && sibling.is_file()).then_some(sibling)
+}
+
+async fn run_vpn() -> Result<(), MainError> {
+  let identity = tokio::task::spawn_blocking(ctl_agent::identity::discover)
+    .await
+    .map_err(std::io::Error::other)??;
+  let mut client = ctl_ipc::vpn::Client::new(ctl_ipc::default_socket_path());
+  if let Some(executable) = companion_binary("ctld") {
+    client = client.with_daemon_executable(executable);
+  }
+  ctl_agent::vpn::serve_stdio(&client, &identity).await?;
+  Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -218,6 +233,19 @@ mod tests {
         Arguments::try_parse_from(std::iter::once("ctl-agent").chain(arguments.clone())).is_err(),
         "must reject {arguments:?}"
       );
+    }
+  }
+
+  #[test]
+  fn vpn_exposes_only_the_fixed_request_endpoint() {
+    assert!(matches!(
+      Arguments::try_parse_from(["ctl-agent", "vpn"])
+        .unwrap()
+        .command,
+      Some(Command::Vpn)
+    ));
+    for argument in ["--socket", "--ctld-bin", "--env-file", "sh"] {
+      assert!(Arguments::try_parse_from(["ctl-agent", "vpn", argument, "/tmp/untrusted"]).is_err());
     }
   }
 

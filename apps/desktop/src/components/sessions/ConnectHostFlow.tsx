@@ -37,7 +37,7 @@ export function ConnectHostFlow({
         unavailable = "This connection method is no longer saved on the host. Choose a current method from Host settings.";
       } else {
         try {
-          candidate = hostTarget(host, gateways, method_id);
+          candidate = hostTarget(host, gateways, method_id, props.hosts);
           if (candidate.kind === "ssh") unavailable = candidate.unavailable;
         } catch (failure) {
           unavailable = errorMessage(failure);

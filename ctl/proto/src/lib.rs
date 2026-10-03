@@ -91,13 +91,18 @@ pub struct BundleVersion {
   pub target_triple: String,
 }
 
+/// Canonical, non-nil account environment identity shared across route protocols.
+#[must_use]
+pub fn valid_remote_id(value: &str) -> bool {
+  uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+}
+
 impl RemoteIdentity {
   #[must_use]
   pub fn is_valid(&self) -> bool {
     let text =
       |value: &str| !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control);
-    uuid::Uuid::parse_str(&self.remote_id)
-      .is_ok_and(|id| !id.is_nil() && id.to_string() == self.remote_id)
+    valid_remote_id(&self.remote_id)
       && text(&self.agent_version)
       && self
         .build

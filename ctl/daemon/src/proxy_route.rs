@@ -19,7 +19,7 @@ mod vpn_tests;
 
 struct ChildPipe {
   child: Child,
-  stdin: ChildStdin,
+  stdin: Option<ChildStdin>,
   stdout: ChildStdout,
 }
 
@@ -39,13 +39,27 @@ impl AsyncWrite for ChildPipe {
     context: &mut Context<'_>,
     buffer: &[u8],
   ) -> Poll<io::Result<usize>> {
-    Pin::new(&mut self.stdin).poll_write(context, buffer)
+    match &mut self.stdin {
+      Some(input) => Pin::new(input).poll_write(context, buffer),
+      None => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+    }
   }
   fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-    Pin::new(&mut self.stdin).poll_flush(context)
+    match &mut self.stdin {
+      Some(input) => Pin::new(input).poll_flush(context),
+      None => Poll::Ready(Ok(())),
+    }
   }
   fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-    Pin::new(&mut self.stdin).poll_shutdown(context)
+    if let Some(input) = &mut self.stdin {
+      match Pin::new(input).poll_flush(context) {
+        Poll::Pending => return Poll::Pending,
+        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+        Poll::Ready(Ok(())) => {}
+      }
+    }
+    self.stdin.take();
+    Poll::Ready(Ok(()))
   }
 }
 
@@ -66,7 +80,7 @@ fn child_pipe(mut child: Child) -> io::Result<Stream> {
     .ok_or_else(|| io::Error::other("proxy stdout missing"))?;
   Ok(Box::new(ChildPipe {
     child,
-    stdin,
+    stdin: Some(stdin),
     stdout,
   }))
 }
@@ -96,9 +110,14 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
         .args(["-T", "-W", &host_port(host, port)])
         .args(["-o", "ControlPath=none"])
         .args(["-o", "ControlMaster=no"])
+        .args(["-o", "ControlPersist=no"])
+        .args(["-o", "ForkAfterAuthentication=no"])
+        .args(["-o", "StdinNull=no"])
         .args(["-o", "ClearAllForwardings=yes"])
         .args(["-o", "ForwardAgent=no"])
-        .args(["-o", "ForwardX11=no"]);
+        .args(["-o", "ForwardX11=no"])
+        .args(["-o", "PermitLocalCommand=no"])
+        .args(["-o", "RemoteCommand=none"]);
       if !prefix.is_empty() {
         let executable = std::env::current_exe()?;
         let proxy = ctl_ipc::proxy_command_with_executable(prefix, &executable);
@@ -110,9 +129,12 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
       if let Some(user) = &gateway.user {
         command.args(["-l", user]);
       }
+      if let Some(hostname) = &gateway.hostname {
+        command.arg("-o").arg(format!("HostName={hostname}"));
+      }
       command
         .arg("--")
-        .arg(endpoint)
+        .arg(&gateway.destination)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -125,13 +147,22 @@ async fn connect(gateways: &[SshGateway], host: &str, port: u16) -> io::Result<S
       Ok(stream)
     }
     GatewayKind::Vpn => {
-      if !prefix.is_empty() {
-        return Err(io::Error::other("VPN must be the first, local gateway"));
-      }
       let vpn = gateway
         .vpn
         .as_ref()
         .ok_or_else(|| io::Error::other("VPN gateway reference is missing"))?;
+      if !prefix.is_empty() {
+        let owner = ctl_ipc::vpn_owner_target(gateways, gateways.len() - 1)
+          .ok_or_else(|| io::Error::other("VPN must be first or follow an SSH host"))?;
+        let client = ctl_ipc::remote_vpn::Client::new(owner, vpn.expected_remote_id.clone())
+          .with_proxy_executable(std::env::current_exe()?);
+        return Ok(Box::new(
+          client
+            .open_connection(&vpn.connection_id, host, port)
+            .await
+            .map_err(io::Error::other)?,
+        ));
+      }
       let endpoint = vpn_endpoint(vpn).await?;
       let mut stream: Stream = Box::new(tokio::net::TcpStream::connect(endpoint).await?);
       socks_connect(&mut stream, gateway, host, port).await?;
@@ -152,7 +183,11 @@ async fn vpn_endpoint(vpn: &VpnGateway) -> io::Result<SocketAddr> {
   let status = matches
     .next()
     .ok_or_else(|| io::Error::other("selected VPN is not connected"))?;
-  if matches.next().is_some() || !status.running || status.state != VpnState::Connected {
+  if matches.next().is_some()
+    || !status.running
+    || status.state != VpnState::Connected
+    || status.status_unavailable
+  {
     return Err(io::Error::other("selected VPN is not connected"));
   }
   let endpoint = status
@@ -306,10 +341,8 @@ pub async fn run(route: &str, host: &str, port: u16) -> io::Result<()> {
     })
     .collect::<io::Result<Vec<_>>>()?;
   let gateways: Vec<SshGateway> = serde_json::from_slice(&bytes)?;
-  if gateways.len() > 8
-    || gateways.iter().enumerate().any(|(index, gateway)| {
-      super::invalid_gateway(gateway) || (index != 0 && gateway.kind == GatewayKind::Vpn)
-    })
+  if !ctl_ipc::has_valid_gateway_route(&gateways)
+    || gateways.iter().any(super::invalid_gateway)
     || port == 0
     || host.is_empty()
   {

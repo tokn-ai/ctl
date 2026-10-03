@@ -90,6 +90,117 @@ async fn unsupported_contracts_never_send_identity_or_open_the_vpn_daemon() {
 }
 
 #[cfg(unix)]
+fn negotiation_channel() -> (
+  tokio::io::DuplexStream,
+  tokio::task::JoinHandle<io::Result<()>>,
+) {
+  let socket = std::env::temp_dir().join(format!("cvn-{}.s", uuid::Uuid::new_v4().simple()));
+  let client =
+    ctl_ipc::vpn::Client::new(socket).with_daemon_executable("/does/not/exist/ctld".into());
+  let identity = identity();
+  let (channel, gateway) = tokio::io::duplex(4096);
+  let server = tokio::spawn(async move {
+    let (mut reader, mut writer) = tokio::io::split(gateway);
+    serve(&mut reader, &mut writer, &client, &identity).await
+  });
+  (channel, server)
+}
+
+#[cfg(unix)]
+async fn read_offer(reader: &mut (impl AsyncRead + Unpin)) {
+  let mut preface = [0; PREFACE.len()];
+  reader.read_exact(&mut preface).await.unwrap();
+  assert_eq!(preface, PREFACE);
+  let offer: ctl_core::protocol::ProtocolOffer =
+    ctl_ipc::read_frame(reader).await.unwrap().unwrap();
+  assert_eq!(offer, ctl_ipc::remote_vpn::protocol_offer());
+}
+
+#[cfg(unix)]
+async fn select_contract(writer: &mut (impl AsyncWrite + Unpin)) {
+  ctl_ipc::write_frame(
+    writer,
+    &ctl_ipc::remote_vpn::ProtocolSelection {
+      protocol_version: ctl_ipc::remote_vpn::PROTOCOL_VERSION,
+    },
+  )
+  .await
+  .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn delayed_selection_and_request_use_the_supported_startup_budget() {
+  let (mut channel, server) = negotiation_channel();
+  read_offer(&mut channel).await;
+  tokio::time::advance(Duration::from_secs(20)).await;
+  tokio::task::yield_now().await;
+  assert!(!server.is_finished());
+  select_contract(&mut channel).await;
+  assert!(
+    ctl_proto::read_identity(&mut channel)
+      .await
+      .unwrap()
+      .is_valid()
+  );
+  tokio::time::advance(Duration::from_secs(20)).await;
+  tokio::task::yield_now().await;
+  assert!(!server.is_finished());
+  ctl_ipc::write_frame(&mut channel, &Request::List)
+    .await
+    .unwrap();
+  assert!(matches!(
+    ctl_ipc::read_frame::<_, Response>(&mut channel)
+      .await
+      .unwrap(),
+    Some(Response::Snapshot { snapshot }) if snapshot.connections.is_empty()
+  ));
+  server.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_never_selects_a_contract_expires_without_identity() {
+  let (mut channel, server) = negotiation_channel();
+  read_offer(&mut channel).await;
+  tokio::time::advance(STARTUP_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap()).await;
+  tokio::task::yield_now().await;
+  assert!(!server.is_finished());
+  tokio::time::advance(Duration::from_secs(1)).await;
+  let error = server.await.unwrap().unwrap_err();
+  assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+  assert_eq!(error.to_string(), "Remote VPN negotiation timed out");
+  let mut remaining = Vec::new();
+  channel.read_to_end(&mut remaining).await.unwrap();
+  assert!(
+    remaining.is_empty(),
+    "identity requires a selected contract"
+  );
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn the_first_request_has_only_the_remaining_startup_budget() {
+  let (mut channel, server) = negotiation_channel();
+  read_offer(&mut channel).await;
+  tokio::time::advance(STARTUP_TIMEOUT.checked_sub(Duration::from_secs(5)).unwrap()).await;
+  select_contract(&mut channel).await;
+  ctl_proto::read_identity(&mut channel).await.unwrap();
+  tokio::time::advance(Duration::from_secs(4)).await;
+  tokio::task::yield_now().await;
+  assert!(!server.is_finished());
+  tokio::time::advance(Duration::from_secs(1)).await;
+  assert!(matches!(
+    ctl_ipc::read_frame::<_, Response>(&mut channel)
+      .await
+      .unwrap(),
+    Some(Response::Error { code, message })
+      if code == "request_timeout" && message == "Remote VPN request timed out"
+  ));
+  server.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn remote_connect_resolves_remote_status_preserves_hostname_and_relays_bytes() {
   let socket = std::env::temp_dir().join(format!(
@@ -233,6 +344,69 @@ async fn stdio_vpn_child() {
   serve_stdio(&ctl_ipc::vpn::Client::new(socket.into()), &identity())
     .await
     .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socketpair_stdio_negotiates_a_fragmented_selection_before_the_request() {
+  use std::os::fd::OwnedFd;
+  use std::process::Stdio;
+
+  let socket = std::env::temp_dir().join(format!("cvs-{}.s", uuid::Uuid::new_v4().simple()));
+  let (local, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+  let input: OwnedFd = local.try_clone().unwrap().into();
+  let output: OwnedFd = local.into();
+  let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+    .args(["--exact", "vpn::tests::stdio_vpn_child", "--nocapture"])
+    .env("CTL_AGENT_VPN_TEST_SOCKET", &socket)
+    .stdin(Stdio::from(input))
+    .stdout(Stdio::from(output))
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+  peer.set_nonblocking(true).unwrap();
+  let mut channel = tokio::net::UnixStream::from_std(peer).unwrap();
+  tokio::time::timeout(Duration::from_secs(3), async {
+    // The test harness banner precedes the protocol's owned standard output.
+    let mut banner = Vec::new();
+    while !banner.ends_with(PREFACE) {
+      banner.push(channel.read_u8().await.unwrap());
+      assert!(banner.len() < 1024);
+    }
+    let offer: ctl_core::protocol::ProtocolOffer =
+      ctl_ipc::read_frame(&mut channel).await.unwrap().unwrap();
+    assert_eq!(offer, ctl_ipc::remote_vpn::protocol_offer());
+    assert!(child.try_wait().unwrap().is_none());
+    let mut selection = Vec::new();
+    select_contract(&mut selection).await;
+    for byte in selection {
+      channel.write_all(&[byte]).await.unwrap();
+      tokio::task::yield_now().await;
+    }
+    assert!(
+      ctl_proto::read_identity(&mut channel)
+        .await
+        .unwrap()
+        .is_valid()
+    );
+    ctl_ipc::write_frame(&mut channel, &Request::List)
+      .await
+      .unwrap();
+    assert!(matches!(
+      ctl_ipc::read_frame::<_, Response>(&mut channel)
+        .await
+        .unwrap(),
+      Some(Response::Snapshot { snapshot }) if snapshot.connections.is_empty()
+    ));
+    let mut remaining = Vec::new();
+    channel.read_to_end(&mut remaining).await.unwrap();
+    assert_eq!(remaining, [] as [u8; 0]);
+    assert!(child.wait().await.unwrap().success());
+  })
+  .await
+  .expect("shared SSH descriptors must complete negotiation and the request");
+  assert!(!socket.exists());
 }
 
 #[cfg(unix)]

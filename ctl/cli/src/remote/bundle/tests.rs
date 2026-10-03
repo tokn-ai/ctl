@@ -155,6 +155,23 @@ pub(super) fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
 }
 
 #[cfg(unix)]
+pub(super) fn gh_fixture(directory: &std::path::Path, script: &str) -> PathBuf {
+  // Execute an immutable launcher: parallel forks can inherit a writable script
+  // descriptor and cause ETXTBSY on Linux, even after the writer closes it.
+  std::fs::write(directory.join("script.sh"), script).unwrap();
+  let program = directory.join("gh");
+  std::os::unix::fs::symlink(
+    concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/src/remote/bundle/fixtures/gh.sh"
+    ),
+    &program,
+  )
+  .unwrap();
+  program
+}
+
+#[cfg(unix)]
 struct FakeGh {
   directory: TemporaryDirectory,
   program: PathBuf,
@@ -163,7 +180,6 @@ struct FakeGh {
 #[cfg(unix)]
 impl FakeGh {
   fn new(runs: &Value, manifest: &Value, archive: &[u8]) -> Self {
-    use std::os::unix::fs::PermissionsExt as _;
     let directory = TemporaryDirectory::new().unwrap();
     let manifest = serde_json::to_vec(manifest).unwrap();
     let name = format!("ctl-agent-bundle-{VERSION}-{TARGET}.tar.gz");
@@ -182,15 +198,14 @@ impl FakeGh {
       serde_json::to_vec(runs).unwrap(),
     )
     .unwrap();
-    let program = directory.0.join("gh");
     let runs_path = quote(&directory.0.join("runs.json"));
     let metadata_path = quote(&directory.0.join("artifacts.json"));
     let payload_path = quote(&directory.0.join("payload.zip"));
     let log = quote(&directory.0.join("arguments"));
     let downloaded = quote(&directory.0.join("downloaded"));
-    std::fs::write(
-      &program,
-      format!(
+    let program = gh_fixture(
+      &directory.0,
+      &format!(
         r#"#!/bin/sh
 set -eu
 printf '%s\n' "$@" >> {log}
@@ -235,9 +250,7 @@ case "$1 $2" in
 esac
 "#
       ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     Self { directory, program }
   }
 }
@@ -297,17 +310,17 @@ async fn a_missing_successful_run_artifact_allows_a_verified_failed_run() {
 async fn artifact_checksum_and_revision_failures_are_not_accepted() {
   let candidates = json!([run(101, REVISION, "completed", Some("success"))]);
   let fake = FakeGh::new(&candidates, &bundle_manifest(b"trusted"), b"changed");
-  assert!(matches!(
-    download_artifact_bundle(TARGET, &build(), fake.program.as_os_str()).await,
-    Err(remote_bundle::Error::Invalid(_))
-  ));
+  let error = download_artifact_bundle(TARGET, &build(), fake.program.as_os_str())
+    .await
+    .unwrap_err();
+  assert!(matches!(error, remote_bundle::Error::Invalid(_)), "{error}");
   let mut manifest = bundle_manifest(b"archive");
   manifest["git_revision"] = json!("a".repeat(40));
   let fake = FakeGh::new(&candidates, &manifest, b"archive");
-  assert!(matches!(
-    download_artifact_bundle(TARGET, &build(), fake.program.as_os_str()).await,
-    Err(remote_bundle::Error::Stale(_))
-  ));
+  let error = download_artifact_bundle(TARGET, &build(), fake.program.as_os_str())
+    .await
+    .unwrap_err();
+  assert!(matches!(error, remote_bundle::Error::Stale(_)), "{error}");
 }
 
 #[cfg(unix)]
@@ -342,20 +355,37 @@ async fn unavailable_github_cli_has_a_specific_diagnostic() {
 #[cfg(unix)]
 #[tokio::test]
 async fn stalled_or_oversized_github_commands_are_terminated() {
-  use std::os::unix::fs::PermissionsExt as _;
   let directory = TemporaryDirectory::new().unwrap();
-  let program = directory.0.join("gh");
-  std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").unwrap();
-  std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let program = gh_fixture(&directory.0, "exec sleep 30\n");
   let error = run_gh(program.as_os_str(), &[], Duration::from_millis(100))
     .await
     .unwrap_err();
   assert!(error.to_string().contains("deadline"));
-  std::fs::write(&program, "#!/bin/sh\nexec /usr/bin/yes\n").unwrap();
+  std::fs::write(directory.0.join("script.sh"), "exec /usr/bin/yes\n").unwrap();
   let error = run_gh(program.as_os_str(), &[], Duration::from_secs(2))
     .await
     .unwrap_err();
   assert!(error.to_string().contains("size limit"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writable_fixture_scripts_do_not_prevent_command_execution() {
+  let directory = TemporaryDirectory::new().unwrap();
+  let program = gh_fixture(&directory.0, "printf '%s' \"$1\"\n");
+  // Deterministically model a writable descriptor inherited by another child.
+  let _writer = std::fs::OpenOptions::new()
+    .write(true)
+    .open(directory.0.join("script.sh"))
+    .unwrap();
+  let output = run_gh(
+    program.as_os_str(),
+    &[OsStr::new("fixture")],
+    Duration::from_secs(2),
+  )
+  .await
+  .unwrap();
+  assert_eq!(output, b"fixture");
 }
 
 fn verified_fixture_bundle(archive: &[u8]) -> VerifiedBundle {

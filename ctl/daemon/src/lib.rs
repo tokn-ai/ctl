@@ -17,6 +17,7 @@ mod port_forwarding;
 pub mod proxy_route;
 mod shared_forwarding;
 mod ssh_config_master;
+mod ssh_startup;
 mod tailscale;
 mod target_lifecycle;
 mod vpn_container;
@@ -262,6 +263,8 @@ enum RequestError {
   MasterTimeout,
   #[error("OpenSSH control master exited before becoming ready: {0}")]
   MasterFailed(String),
+  #[error("OpenSSH control master lost its connection before becoming ready: {0}")]
+  MasterConnectionFailed(String),
   #[error("could not observe the OpenSSH control master: {0}")]
   MasterObservationFailed(String),
   #[error("could not use SSH configuration: {0}")]
@@ -804,7 +807,7 @@ async fn wait_for_master(
       } else {
         String::new()
       };
-      return Err(RequestError::MasterFailed(if message.is_empty() {
+      return Err(ssh_startup::failure(if message.is_empty() {
         status.to_string()
       } else {
         message
@@ -893,6 +896,7 @@ impl RequestError {
       Self::StartMaster(_) => "ssh_start_failed",
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
+      Self::MasterConnectionFailed(_) => "ssh_connection_failed",
       Self::MasterObservationFailed(_) => "ssh_status_unknown",
       Self::SshConfig(_) => "ssh_config_error",
       Self::HostDisconnected => "ssh_host_disconnected",

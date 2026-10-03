@@ -1,12 +1,14 @@
 use super::{Arguments, Command, RemotePlatform};
 use ctl_client::{
-  ConnectionTarget, CoreError, TaskTransport, Transport, is_retryable_connection_error,
-  open_task_transport_with_interaction, open_transport_with_interaction,
+  ConnectionTarget, CoreError, TaskTransport, Transport, open_task_transport_with_interaction,
+  open_transport_with_interaction,
 };
 use ctmux_cli::{CommandError, ConnectFuture, Connector};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+
+mod reconnect;
 
 fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
   let error = match &arguments.command {
@@ -296,7 +298,7 @@ impl Connector for CtlConnector {
   }
 
   fn is_retryable(&self, error: &CtlConnectError) -> bool {
-    matches!(error, CtlConnectError::Core(error) if is_retryable_connection_error(error))
+    reconnect::is_retryable(error)
   }
 
   fn is_local(&self) -> bool {

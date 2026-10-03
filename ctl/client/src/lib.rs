@@ -882,6 +882,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     // This is a preface-read failure enriched with stderr; retain its previous
     // reconnect behavior (for example after a transient connection refusal).
     CoreError::SshStartup(_) => true,
+    CoreError::RemoteIdentity(source) => ctl_core::connection::is_transient_io_error(source),
     CoreError::LocalConnection(_)
     | CoreError::LocalTask(_)
     | CoreError::InvalidSshDestination(_)
@@ -899,8 +900,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::InvalidSshPreface(_)
     | CoreError::AgentNotFound
     | CoreError::IdentityUnsupported
-    | CoreError::UnsupportedSshProtocol { .. }
-    | CoreError::RemoteIdentity(_) => false,
+    | CoreError::UnsupportedSshProtocol { .. } => false,
   }
 }
 

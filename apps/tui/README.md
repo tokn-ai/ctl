@@ -81,6 +81,13 @@ keys, modified arrows, function keys, Unicode input, and bracketed paste.
 
 ## Scrollback and copy mode
 
+The bottom status row shows the focused pane's connection and history state:
+`connected` or `reconnecting`, and `history syncing`, `history ready`, or
+`history incomplete`. Ready means the retained window is available, not that
+the remote keeps unlimited history. The row stays outside the PTY grid and
+scrollback. Copy mode keeps its frozen history and selection while connection
+status updates; reopening copy mode picks up newly synchronized history.
+
 Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's primary
 screen and retained scrollback. The snapshot fills the terminal temporarily;
 all panes continue processing and acknowledging output in the background.

@@ -214,7 +214,7 @@ impl CopyMode {
       self.cursor.row + 1,
       self.lines.len(),
       if self.history_gap {
-        " | History incomplete"
+        " | Snapshot incomplete"
       } else {
         ""
       },
@@ -231,7 +231,7 @@ mod tests {
   fn missing_history_is_visible_without_changing_copied_lines() {
     let mut mode = CopyMode::new(vec!["retained output".into()]);
     mode.history_gap = true;
-    assert!(mode.status().starts_with(" COPY 1/1 | History incomplete"));
+    assert!(mode.status().starts_with(" COPY 1/1 | Snapshot incomplete"));
     assert_eq!(mode.lines[0].iter().collect::<String>(), "retained output");
   }
   fn key(code: KeyCode) -> KeyEvent {

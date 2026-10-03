@@ -310,6 +310,16 @@ impl Pane {
     self.model.history_gap || self.history_snapshot_id.is_some()
   }
 
+  pub fn history_status(&self) -> &'static str {
+    if self.history_snapshot_id.is_some() {
+      "history syncing"
+    } else if self.model.history_gap {
+      "history incomplete"
+    } else {
+      "history ready"
+    }
+  }
+
   pub async fn finish_ended_history(&mut self) {
     if self.ended.is_none() {
       return;

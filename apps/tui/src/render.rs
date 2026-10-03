@@ -483,6 +483,41 @@ mod tests {
   }
 
   #[test]
+  fn status_updates_leave_scrolled_copy_content_and_cursor_in_place() {
+    let mut mode = CopyMode::new((0..20).map(|row| format!("line-{row}")).collect());
+    mode.fit(40, 3);
+    assert!(mode.top > 0);
+    let mut before = Frame::new(40, 4);
+    before.copy_mode(&mode);
+    before.text(0, 3, " connected | COPY", true);
+
+    let mut host = avt::Vt::new(40, 4);
+    let mut output = Vec::new();
+    Renderer::default().write(&mut output, &before).unwrap();
+    host.feed_str(std::str::from_utf8(&output).unwrap());
+    let content = host.text()[..3].to_vec();
+    let cursor = host.cursor();
+
+    let mut after = Frame::new(40, 4);
+    after.copy_mode(&mode);
+    after.text(
+      0,
+      3,
+      " reconnecting | COPY | History incomplete | long help",
+      true,
+    );
+    let renderer = Renderer {
+      previous: Some(before),
+    };
+    output.clear();
+    renderer.write(&mut output, &after).unwrap();
+    host.feed_str(std::str::from_utf8(&output).unwrap());
+    assert_eq!(&host.text()[..3], content);
+    assert_eq!(host.cursor(), cursor);
+    assert!(host.text()[3].starts_with(" reconnecting"));
+  }
+
+  #[test]
   fn unchanged_frames_do_not_rewrite_cells() {
     let frame = Frame::new(10, 4);
     let renderer = Renderer {

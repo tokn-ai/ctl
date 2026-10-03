@@ -838,6 +838,11 @@ impl App {
 
   fn draw(&mut self) -> Result<()> {
     let mut frame = Frame::new(self.size.0, self.size.1);
+    let copy_connection = if matches!(self.overlay, Overlay::ArchiveTerminals(..)) {
+      "archive".to_owned()
+    } else {
+      self.connection_history_status()
+    };
     if let Some(mode) = &mut self.copy_mode {
       mode.fit(
         usize::from(self.size.0),
@@ -845,7 +850,12 @@ impl App {
       );
       frame.copy_mode(mode);
       if self.size.1 > 0 {
-        frame.text(0, self.size.1 - 1, &mode.status(), true);
+        frame.text(
+          0,
+          self.size.1 - 1,
+          &format!(" {copy_connection} | {}", mode.status()),
+          true,
+        );
       }
       self.renderer.draw(frame)?;
       return Ok(());
@@ -891,10 +901,13 @@ impl App {
       return format!("{ended} — press any key to close pane");
     }
     if self.prefix_pending {
-      return "PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help".into();
+      return format!(
+        " {} | PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help",
+        self.connection_history_status()
+      );
     }
     if Instant::now() < self.message_until {
-      return self.message.clone();
+      return format!(" {} | {}", self.connection_history_status(), self.message);
     }
     let name = self
       .view
@@ -918,19 +931,10 @@ impl App {
       .panes
       .values()
       .any(|pane| pane.connected && pane.control.state().leases().layout.owned_by_client);
-    let connected = self
-      .panes
-      .get(&self.focused)
-      .is_some_and(|pane| pane.connected);
     format!(
-      " ctmux [{name}] pane {index} | {} | {} | {} ? help | {}/{} sessions ",
-      if !connected {
-        "reconnecting"
-      } else if input {
-        "input"
-      } else {
-        "view only"
-      },
+      " {} | ctmux [{name}] pane {index} | {} | {} | {} ? help | {}/{} sessions ",
+      self.connection_history_status(),
+      if input { "input" } else { "view only" },
       if layout {
         "resize owner"
       } else {
@@ -939,6 +943,23 @@ impl App {
       self.prefix.label,
       self.session_index() + usize::from(!self.sessions.is_empty()),
       self.sessions.len()
+    )
+  }
+
+  fn connection_status(&self) -> &'static str {
+    match self.panes.get(&self.focused) {
+      Some(pane) if pane.ended.is_some() => "ended",
+      Some(pane) if pane.connected => "connected",
+      Some(_) => "reconnecting",
+      None => "no connection",
+    }
+  }
+
+  fn connection_history_status(&self) -> String {
+    let connection = self.connection_status();
+    self.panes.get(&self.focused).map_or_else(
+      || connection.to_owned(),
+      |pane| format!("{connection} | {}", pane.history_status()),
     )
   }
 

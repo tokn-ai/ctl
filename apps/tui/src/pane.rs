@@ -1,11 +1,10 @@
-use crate::{Result, model::Model};
+use crate::{Result, model::Model, transport::Transport};
 use ctmux_client::{
   AttachRequest, AttachmentControl, AttachmentController, AttachmentControllerOptions,
   AttachmentEvent, AttachmentEvents, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES,
 };
 use ctmux_proto::TerminalSize;
 use std::collections::VecDeque;
-use std::path::Path;
 use tokio::task::JoinHandle;
 
 pub struct Pane {
@@ -71,14 +70,14 @@ pub fn identity() -> ClientIdentity {
 
 impl Pane {
   pub async fn open(
-    socket: &Path,
+    transport: &dyn Transport,
     terminal_id: &str,
     size: TerminalSize,
     read_only: bool,
     layout: bool,
     token: Option<String>,
   ) -> Result<Self> {
-    let stream = ctmux_ipc::connect_or_start_daemon(socket).await?;
+    let stream = transport.connect().await?;
     let request = AttachRequest {
       session: terminal_id.into(),
       resume_from: None,
@@ -97,7 +96,7 @@ impl Pane {
     let (stream, attached) = match attached {
       Ok(attached) => attached,
       Err(ctmux_client::ClientError::Server { .. }) => {
-        let stream = ctmux_ipc::connect_or_start_daemon(socket).await?;
+        let stream = transport.connect().await?;
         ctmux_client::begin_attach(stream, &identity(), request).await?
       }
       Err(error) => return Err(error.into()),

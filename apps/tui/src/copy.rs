@@ -78,6 +78,18 @@ impl CopyMode {
     }
   }
 
+  pub fn scroll(&mut self, up: bool, rows: usize, height: usize) {
+    let relative = self.cursor.row.saturating_sub(self.top);
+    self.top = if up {
+      self.top.saturating_sub(rows)
+    } else {
+      self.top.saturating_add(rows)
+    }
+    .min(self.lines.len().saturating_sub(height.max(1)));
+    self.cursor.row = (self.top + relative).min(self.lines.len().saturating_sub(1));
+    self.cursor.column = self.cursor.column.min(self.line_len().saturating_sub(1));
+  }
+
   fn line_len(&self) -> usize {
     self.lines.get(self.cursor.row).map_or(0, Vec::len)
   }

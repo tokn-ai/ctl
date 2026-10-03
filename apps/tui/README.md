@@ -42,7 +42,9 @@ original behavior: open the first session, or create one when none exist.
 `ctmux attach --raw NAME` (and `attach --from SEQUENCE`) uses the original
 single-terminal presenter with Ctrl+] detach. `ctl ctmux` also retains its
 transport-based presenter and detached creation behavior, including over SSH.
-For the local TUI on a remote machine, SSH there and run `ctmux`.
+`ctl shell` uses this same TUI over its selected local or SSH connection, with
+the banner, pane controls, reconnect handling, and history browser. Use
+**Ctrl+B d** to detach. `ctl shell --plain` opens an ordinary shell.
 
 Migration: standalone `ctmux new` now attaches by default. Scripts that used it
 to create background sessions must add `-d`.
@@ -97,6 +99,9 @@ also works in a read-only attachment. If local retention evicts rows, the older
 checkpoint prefix is dropped too, keeping the displayed history contiguous.
 
 - Arrows or `h/j/k/l` move; Page Up/Down move a page.
+- Mouse wheel or trackpad scrolling opens history and moves its viewport.
+  Shift+Page Up also opens history; ordinary Page Up in the live view goes to
+  the running program. Esc or `q` returns to live output.
 - `g` / `G` jump to the first / last line; Home/End or `0` / `$` move within a line.
 - `/` searches forward, `?` backward; Enter runs a case-sensitive literal search.
   `n` repeats and `N` reverses direction, wrapping at the history boundary.

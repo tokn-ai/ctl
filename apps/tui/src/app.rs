@@ -4,8 +4,9 @@ use crate::{
   input::{self, Prefix},
   pane::{Pane, identity},
   render::{Frame, Renderer},
+  transport::{LocalTransport, Transport},
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ctmux_proto::{
   ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
   ViewInfo,
@@ -25,7 +26,8 @@ enum Overlay {
   ArchiveTerminals(Box<ctmux_client::archive::SessionArchive>, usize),
 }
 
-pub struct App {
+pub struct App<'a> {
+  pub transport: Option<&'a dyn Transport>,
   socket: PathBuf,
   archive_directory: Option<PathBuf>,
   read_only: bool,
@@ -50,9 +52,10 @@ pub struct App {
   layout_owner: Option<String>,
 }
 
-impl App {
+impl App<'_> {
   pub fn new(socket: PathBuf, read_only: bool, prefix: Prefix) -> Self {
     Self {
+      transport: None,
       archive_directory: cfg!(test).then(|| socket.with_extension("client-archives")),
       socket,
       read_only,
@@ -89,10 +92,18 @@ impl App {
 
   async fn request(&self, message: ClientMessage) -> Result<ServerMessage> {
     timeout(Duration::from_secs(5), async {
-      let stream = ctmux_ipc::connect_or_start_daemon(&self.socket).await?;
+      let local = LocalTransport(self.socket.clone());
+      let stream = self.transport.unwrap_or(&local).connect().await?;
       Ok(ctmux_client::request(stream, &identity(), message).await?)
     })
     .await?
+  }
+
+  fn archive_key(&self) -> String {
+    self.transport.map_or_else(
+      || self.socket.to_string_lossy().into_owned(),
+      Transport::archive_key,
+    )
   }
 
   pub async fn start(&mut self, selected: Option<String>) -> Result<()> {
@@ -134,7 +145,7 @@ impl App {
         .archive_store()?
         .list()?
         .into_iter()
-        .filter(|archive| archive.host_key == self.socket.to_string_lossy())
+        .filter(|archive| archive.host_key == self.archive_key())
         .collect(),
     )
   }
@@ -181,7 +192,7 @@ impl App {
         },
         |session| session.name.clone(),
       ),
-      host_key: self.socket.to_string_lossy().into_owned(),
+      host_key: self.archive_key(),
       archived_at_ms: 0,
       expires_at_ms: 0,
       terminals,
@@ -368,10 +379,11 @@ impl App {
         .values()
         .any(|pane| pane.connected && pane.control.state().leases().layout.owned_by_client)
         && ids.first() == Some(id);
+      let local = LocalTransport(self.socket.clone());
       let opened = timeout(
         Duration::from_secs(5),
         Pane::open(
-          &self.socket,
+          self.transport.unwrap_or(&local),
           id,
           self.canvas_size(),
           self.read_only,
@@ -502,6 +514,37 @@ impl App {
 
   async fn event(&mut self, event: Event) -> Result<bool> {
     match event {
+      Event::Mouse(mouse)
+        if matches!(
+          mouse.kind,
+          MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && !self.prefix_pending
+          && (self.copy_mode.is_some() || matches!(self.overlay, Overlay::None)) =>
+      {
+        let up = mouse.kind == MouseEventKind::ScrollUp;
+        if self.copy_mode.is_none() && up {
+          self.command(KeyCode::Char('[')).await?;
+        }
+        if let Some(mode) = &mut self.copy_mode {
+          let height = usize::from(self.size.1.saturating_sub(1));
+          mode.fit(usize::from(self.size.0), height);
+          mode.scroll(up, 3, height);
+        }
+      }
+      Event::Key(key)
+        if key.kind != KeyEventKind::Release
+          && key.code == KeyCode::PageUp
+          && key.modifiers == KeyModifiers::SHIFT
+          && self.copy_mode.is_none()
+          && matches!(self.overlay, Overlay::None) =>
+      {
+        self.command(KeyCode::Char('[')).await?;
+        if let Some(mode) = &mut self.copy_mode {
+          let height = usize::from(self.size.1.saturating_sub(1));
+          mode.fit(usize::from(self.size.0), height);
+          mode.scroll(true, height, height);
+        }
+      }
       Event::Key(key) if key.kind != KeyEventKind::Release => return self.key(key).await,
       Event::Resize(columns, rows) => {
         self.size = (columns, rows);

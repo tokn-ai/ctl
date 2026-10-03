@@ -64,7 +64,9 @@ export interface SaveIdentityPassphraseRequest {
 
 export interface ComponentProtocolVersion {
   name: string;
-  version: number;
+  build: number;
+  version: string;
+  supported_versions: string[];
 }
 
 export interface ComponentVersionInfo {

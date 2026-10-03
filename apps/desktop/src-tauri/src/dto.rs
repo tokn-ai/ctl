@@ -782,6 +782,7 @@ mod tests {
   #[test]
   fn identity_checks_pin_the_environment_but_not_its_version_or_credentials() {
     let identity = ctl_proto::RemoteIdentity {
+      protocols: ctl_proto::agent_protocols(),
       remote_id: uuid::Uuid::new_v4().to_string(),
       agent_version: "0.1.0".into(),
       build: None,

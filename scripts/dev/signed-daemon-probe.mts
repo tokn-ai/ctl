@@ -1,9 +1,11 @@
 import { lstat } from "node:fs/promises";
 import { createConnection } from "node:net";
 
+import { helperProtocol, lifecycleOffer, parseHelperComponent, type ProtocolInfo } from "../shared/protocol-contract.mts";
+
 const maxFrameSize = 64 * 1024;
 
-export async function inspectDaemon(socket_path: string, timeout_ms: number): Promise<number | undefined> {
+export async function inspectDaemon(socket_path: string, timeout_ms: number): Promise<ProtocolInfo | undefined> {
   try {
     const metadata = await lstat(socket_path);
     if (!metadata.isSocket() || metadata.uid !== process.getuid?.()) {
@@ -17,12 +19,12 @@ export async function inspectDaemon(socket_path: string, timeout_ms: number): Pr
     const connection = createConnection(socket_path);
     let received = Buffer.alloc(0);
     let finished = false;
-    const finish = (error?: Error, protocol_version?: number): void => {
+    const finish = (error?: Error, protocol?: ProtocolInfo): void => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
       connection.destroy();
-      if (error) reject(error); else resolve(protocol_version);
+      if (error) reject(error); else resolve(protocol);
     };
     // A deadline, not an idle timeout: a malformed owner cannot extend startup
     // indefinitely by sending one byte at a time.
@@ -35,7 +37,7 @@ export async function inspectDaemon(socket_path: string, timeout_ms: number): Pr
     });
     connection.once("end", () => finish(new Error("existing signed ctld closed without a valid lifecycle response; no daemon was changed")));
     connection.once("connect", () => {
-      const payload = Buffer.from(JSON.stringify({ type: "ctld_inspect", protocol_version: 1 }));
+      const payload = Buffer.from(JSON.stringify({ type: "ctld_inspect", protocol: lifecycleOffer }));
       const header = Buffer.alloc(4);
       header.writeUInt32BE(payload.length);
       connection.write(Buffer.concat([header, payload]));
@@ -55,11 +57,13 @@ export async function inspectDaemon(socket_path: string, timeout_ms: number): Pr
       if (received.length < length + 4) return;
       try {
         const response = JSON.parse(received.subarray(4, length + 4).toString("utf8"));
-        const protocol = response?.info?.binary?.protocol_version;
-        if (response?.type !== "ctld_info" || typeof response.info.instance_id !== "string" ||
-          response.info.instance_id.length === 0 || response.info.instance_id.length > 128 ||
-          response.info.binary.lifecycle_protocol_version !== 1 || !Number.isInteger(protocol) ||
-          protocol < 0 || protocol > 65_535) {
+        const protocols = parseHelperComponent(JSON.stringify(response?.info?.binary)).protocols;
+        const protocol = helperProtocol(protocols);
+        const lifecycle = helperProtocol(protocols, "ctld_lifecycle");
+        if (response?.type !== "ctld_info" || response.protocol_version !== lifecycleOffer.version ||
+          typeof response.info.instance_id !== "string" || response.info.instance_id.length === 0 || response.info.instance_id.length > 128 ||
+          response.info.binary.protocol_version !== protocol.version || response.info.binary.lifecycle_protocol_version !== lifecycle.version ||
+          !lifecycle.supported_versions.includes(lifecycleOffer.version)) {
           throw new Error("invalid response");
         }
         finish(undefined, protocol);

@@ -83,6 +83,11 @@ fn manifest() -> Value {
     "archive": format!("ctld-{VERSION}-{TARGET}.app.tar.gz"),
     "sha256": format!("{:x}", Sha256::digest(ARCHIVE)),
     "archive_size": ARCHIVE.len(),
+    "protocols": [
+      {"name":"ctld", "build":12, "version":"1.0.12", "supported_versions":["1.0.12"]},
+      {"name":"ctld_lifecycle", "build":1, "version":"1.0.1", "supported_versions":["1.0.1"]},
+      {"name":"ctld_helper", "build":1, "version":"1.0.1", "supported_versions":["1.0.1"]}
+    ],
   })
 }
 
@@ -300,4 +305,33 @@ fn fifo_payloads_are_rejected_without_waiting_for_a_writer() {
     );
     assert_eq!(fs::read_dir(&fixture.output).unwrap().count(), 0);
   }
+}
+
+#[test]
+fn protocol_advertisements_are_required_and_validated_before_staging() {
+  let current = manifest();
+  for protocols in [
+    json!([]),
+    json!([
+      current["protocols"][0].clone(),
+      current["protocols"][0].clone(),
+      current["protocols"][1].clone(),
+      current["protocols"][2].clone()
+    ]),
+    json!([
+      {"name":"ctld", "build":13, "version":"1.0.13", "supported_versions":["1.0.14"]},
+      current["protocols"][1].clone(), current["protocols"][2].clone()
+    ]),
+  ] {
+    let fixture = Fixture::new();
+    let mut invalid = manifest();
+    invalid["protocols"] = protocols;
+    fixture.write_manifest(&invalid);
+    fixture.reject();
+  }
+  let fixture = Fixture::new();
+  let mut invalid = manifest();
+  invalid.as_object_mut().unwrap().remove("protocols");
+  fixture.write_manifest(&invalid);
+  fixture.reject();
 }

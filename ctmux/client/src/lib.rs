@@ -5,8 +5,8 @@ mod history_sync;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 pub use ctmux_proto::DEFAULT_PRESENTATION_WINDOW_BYTES;
 use ctmux_proto::{
-  ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, PROTOCOL_VERSION, ServerMessage,
-  SessionInfo, ShellState, TerminalCheckpoint, TerminalHistoryManifest, TerminalHistoryRow,
+  ClientMessage, CodecError, ErrorCode, LeaseKind, LeaseStatus, ServerMessage, SessionInfo,
+  ShellState, TerminalCheckpoint, TerminalHistoryManifest, TerminalHistoryRow,
   TerminalHistorySnapshot, TerminalSize, read_frame, write_frame,
 };
 use std::collections::VecDeque;
@@ -162,7 +162,8 @@ pub struct AttachmentLiveness {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeInfo {
   pub server_version: String,
-  pub protocol_version: u16,
+  pub protocol_version: ctl_core::protocol::ProtocolVersion,
+  pub protocols: Vec<ctl_core::component::ProtocolInfo>,
   pub build: Option<ctl_core::component::ComponentBuildInfo>,
   pub attachment_liveness: AttachmentLiveness,
 }
@@ -512,6 +513,8 @@ pub enum AttachmentCommandError {
   InputLeaseRequired,
   #[error("this attachment does not own the PTY layout lease")]
   LayoutLeaseRequired,
+  #[error("checkpoint recovery requires ctmux contract 1.1.14")]
+  CheckpointRecoveryUnavailable,
   #[error("attachment controller is no longer running")]
   Closed,
 }
@@ -534,6 +537,7 @@ pub enum AttachmentAcknowledgementError {
 /// ordered presentation event and updates its renderer-applied resume state.
 #[derive(Debug, Clone)]
 pub struct AttachmentControl {
+  protocol_version: ctl_core::protocol::ProtocolVersion,
   commands: mpsc::Sender<AttachmentCommand>,
   acknowledgements: mpsc::Sender<PresentationAcknowledgement>,
   state: AttachmentState,
@@ -604,6 +608,9 @@ impl AttachmentControl {
   /// # Errors
   /// Returns an error when this attachment has already closed.
   pub async fn request_checkpoint(&self) -> Result<(), AttachmentCommandError> {
+    if self.protocol_version == ctmux_proto::CONTRACT_V1_0_13 {
+      return Err(AttachmentCommandError::CheckpointRecoveryUnavailable);
+    }
     self.send(AttachmentCommand::RequestCheckpoint).await
   }
 
@@ -793,7 +800,7 @@ where
   write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: PROTOCOL_VERSION,
+      protocol: ctmux_proto::protocol_offer(),
       client_name: identity.name.clone(),
       client_version: identity.version.clone(),
     },
@@ -803,16 +810,23 @@ where
   match read_response(stream).await? {
     ServerMessage::HandshakeAccepted {
       protocol_version,
+      protocols,
       server_version,
       build,
       heartbeat_interval_ms,
       attachment_liveness_timeout_ms,
       ..
-    } if protocol_version == PROTOCOL_VERSION => {
+    } if ctmux_proto::protocol_offer().accepts(protocol_version)
+      && ctl_core::component::protocols_are_valid(&protocols)
+      && protocols
+        .iter()
+        .any(|protocol| protocol.name == "ctmux" && protocol.supports(protocol_version)) =>
+    {
       attachment_liveness(heartbeat_interval_ms, attachment_liveness_timeout_ms).map(
         |attachment_liveness| HandshakeInfo {
           server_version,
           protocol_version,
+          protocols,
           build,
           attachment_liveness,
         },
@@ -1066,6 +1080,7 @@ impl<S> AttachmentController<S> {
       state.set_resume_sequence(None);
     }
     let control = AttachmentControl {
+      protocol_version: attached.handshake_info.protocol_version,
       commands: command_sender,
       acknowledgements: acknowledgement_sender,
       state: state.clone(),
@@ -2555,6 +2570,108 @@ pub enum ClientError {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use ctmux_proto::PROTOCOL_VERSION;
+
+  async fn protocol_reply(
+    selected: ctl_core::protocol::ProtocolVersion,
+    protocols: Vec<ctl_core::component::ProtocolInfo>,
+  ) -> Result<HandshakeInfo, ClientError> {
+    let (mut client, mut daemon) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+      assert!(
+        matches!(read_frame::<_, ClientMessage>(&mut daemon).await.unwrap(),
+        Some(ClientMessage::Handshake { protocol, .. }) if protocol == ctmux_proto::protocol_offer())
+      );
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HandshakeAccepted {
+          protocol_version: selected,
+          protocols,
+          server_version: "newer-server".into(),
+          build: None,
+          heartbeat_interval_ms: 1_000,
+          attachment_liveness_timeout_ms: 3_000,
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let result = handshake(
+      &mut client,
+      &ClientIdentity {
+        name: "protocol-test".into(),
+        version: "test".into(),
+      },
+    )
+    .await;
+    server.await.unwrap();
+    result
+  }
+
+  #[tokio::test]
+  async fn handshake_preserves_latest_contract_separately_from_selection() {
+    let latest = ctl_core::protocol::ProtocolVersion::new(1, 1, 15);
+    let advertised = ctl_core::component::ProtocolInfo::new(
+      "ctmux",
+      15,
+      latest,
+      &[ctmux_proto::CONTRACT_V1_0_13, PROTOCOL_VERSION, latest],
+    );
+    let info = protocol_reply(PROTOCOL_VERSION, vec![advertised.clone()])
+      .await
+      .unwrap();
+    assert_eq!(info.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(info.protocols, vec![advertised]);
+  }
+
+  #[tokio::test]
+  async fn handshake_rejects_unoffered_or_unadvertised_selection() {
+    let unoffered = ctl_core::protocol::ProtocolVersion::new(1, 0, 14);
+    let advertisement =
+      ctl_core::component::ProtocolInfo::new("ctmux", 14, unoffered, &[unoffered]);
+    assert!(matches!(
+      protocol_reply(unoffered, vec![advertisement.clone()]).await,
+      Err(ClientError::UnexpectedResponse { .. })
+    ));
+    assert!(matches!(
+      protocol_reply(PROTOCOL_VERSION, vec![advertisement]).await,
+      Err(ClientError::UnexpectedResponse { .. })
+    ));
+    assert!(matches!(
+      protocol_reply(PROTOCOL_VERSION, Vec::new()).await,
+      Err(ClientError::UnexpectedResponse { .. })
+    ));
+  }
+
+  #[tokio::test]
+  async fn older_contract_selects_inline_history_without_sending_new_recovery_commands() {
+    let old = ctmux_proto::CONTRACT_V1_0_13;
+    let advertisement = ctl_core::component::ProtocolInfo::new("ctmux", 13, old, &[old]);
+    assert_eq!(
+      protocol_reply(old, vec![advertisement])
+        .await
+        .unwrap()
+        .protocol_version,
+      old
+    );
+    let (client, mut peer) = tokio::io::duplex(4096);
+    let mut attached = attached_session(0, None, ShellState::default());
+    attached.handshake_info.protocol_version = old;
+    let (_controller, control, _events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    assert_eq!(
+      control.request_checkpoint().await,
+      Err(AttachmentCommandError::CheckpointRecoveryUnavailable)
+    );
+    assert!(
+      tokio::time::timeout(
+        Duration::from_millis(10),
+        read_frame::<_, ClientMessage>(&mut peer)
+      )
+      .await
+      .is_err()
+    );
+  }
 
   /// Hold readable final frames until a renderer acknowledgement encounters
   /// the peer's closed write side. This makes the half-close ordering exact.
@@ -2749,15 +2866,13 @@ mod tests {
       let handshake: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
       assert!(matches!(
         handshake,
-        ClientMessage::Handshake {
-          protocol_version: PROTOCOL_VERSION,
-          ..
-        }
+        ClientMessage::Handshake { protocol, .. } if protocol == ctmux_proto::protocol_offer()
       ));
       write_frame(
         &mut daemon,
         &ServerMessage::HandshakeAccepted {
           protocol_version: PROTOCOL_VERSION,
+          protocols: vec![ctmux_proto::protocol_info()],
           server_version: "test".into(),
           build: None,
           heartbeat_interval_ms: 1_000,
@@ -4019,15 +4134,13 @@ mod tests {
       let handshake: ClientMessage = read_frame(&mut daemon).await.unwrap().unwrap();
       assert!(matches!(
         handshake,
-        ClientMessage::Handshake {
-          protocol_version: PROTOCOL_VERSION,
-          ..
-        }
+        ClientMessage::Handshake { protocol, .. } if protocol == ctmux_proto::protocol_offer()
       ));
       write_frame(
         &mut daemon,
         &ServerMessage::HandshakeAccepted {
           protocol_version: PROTOCOL_VERSION,
+          protocols: vec![ctmux_proto::protocol_info()],
           server_version: "test".into(),
           build: None,
           heartbeat_interval_ms: 1_000,
@@ -4085,6 +4198,7 @@ mod tests {
       handshake_info: HandshakeInfo {
         server_version: "test".into(),
         protocol_version: PROTOCOL_VERSION,
+        protocols: vec![ctmux_proto::protocol_info()],
         build: None,
         attachment_liveness: AttachmentLiveness {
           heartbeat_interval: Duration::from_mins(1),

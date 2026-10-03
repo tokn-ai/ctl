@@ -1,17 +1,34 @@
-use ctl_core::component::ComponentBuildInfo;
+use ctl_core::component::{ComponentBuildInfo, ProtocolInfo};
+use ctl_core::protocol::ProtocolVersion as ContractVersion;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProtocolVersion {
   pub name: String,
-  pub version: u16,
+  pub build: u16,
+  pub version: ContractVersion,
+  pub supported_versions: Vec<ContractVersion>,
 }
 
 impl ProtocolVersion {
-  pub fn new(name: &str, version: u16) -> Self {
+  #[cfg(test)]
+  pub fn new(name: &str, version: ContractVersion) -> Self {
     Self {
       name: name.into(),
+      build: version.build,
       version,
+      supported_versions: vec![version],
+    }
+  }
+}
+
+impl From<ProtocolInfo> for ProtocolVersion {
+  fn from(info: ProtocolInfo) -> Self {
+    Self {
+      name: info.name,
+      build: info.build,
+      version: info.version,
+      supported_versions: info.supported_versions,
     }
   }
 }
@@ -32,10 +49,7 @@ impl ComponentVersionInfo {
       info
         .protocols
         .into_iter()
-        .map(|protocol| ProtocolVersion {
-          name: protocol.name,
-          version: protocol.version,
-        })
+        .map(ProtocolVersion::from)
         .collect(),
     )
   }
@@ -128,10 +142,13 @@ impl ComponentVersionRow {
     self.status = compare(self.running.as_ref(), Some(&expected_component_version()));
     if self.running.as_ref().is_some_and(|running| {
       running.protocols.iter().any(|protocol| {
-        self
-          .required_protocols
-          .iter()
-          .any(|expected| expected.name == protocol.name && expected.version != protocol.version)
+        self.required_protocols.iter().any(|expected| {
+          expected.name == protocol.name
+            && !expected
+              .supported_versions
+              .iter()
+              .any(|version| protocol.supported_versions.contains(version))
+        })
       })
     }) {
       self.status = VersionStatus::Incompatible;
@@ -167,21 +184,32 @@ fn expected_component_version() -> ComponentVersionInfo {
 }
 
 fn required_protocols(component: &str) -> Vec<ProtocolVersion> {
-  match component {
+  let infos = match component {
     "ctld" => vec![
-      ProtocolVersion::new("ctld", ctl_ipc::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctld_lifecycle", ctl_ipc::lifecycle::PROTOCOL_VERSION),
+      ProtocolInfo::new(
+        "ctld",
+        ctl_ipc::PROTOCOL_BUILD,
+        ctl_ipc::PROTOCOL_VERSION,
+        ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS,
+      ),
+      ProtocolInfo::new(
+        "ctld_lifecycle",
+        ctl_ipc::lifecycle::PROTOCOL_BUILD,
+        ctl_ipc::lifecycle::PROTOCOL_VERSION,
+        ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
+      ),
     ],
     "ctmuxd" => vec![
-      ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctmux_control", ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
+      ctmux_proto::protocol_info(),
+      ctmux_ipc::local_control_protocol_info(),
     ],
     "ctl-taskd" => vec![
-      ProtocolVersion::new("task", ctl_task_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("task_control", ctl_task_proto::control::PROTOCOL_VERSION),
+      ctl_task_proto::protocol_info(),
+      ctl_task_proto::control::protocol_info(),
     ],
     _ => Vec::new(),
-  }
+  };
+  infos.into_iter().map(ProtocolVersion::from).collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -322,10 +350,41 @@ mod tests {
       .protocols
       .push(ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION));
     let mut actual = expected.clone();
-    actual.protocols[0].version -= 1;
+    actual.protocols[0].version = ctl_core::protocol::ProtocolVersion::new(2, 0, 1);
+    actual.protocols[0].supported_versions = vec![actual.protocols[0].version];
+    actual.protocols[0].build = 1;
     let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
     row.running = Some(actual);
     row.available = Some(expected);
+    row.compare();
+    assert_eq!(row.status, VersionStatus::Incompatible);
+  }
+
+  #[test]
+  fn a_newer_minor_contract_is_compatible_when_it_retains_the_published_contract() {
+    let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
+    let mut running = expected_component_version();
+    let latest = ContractVersion::new(1, 1, 15);
+    running.protocols = vec![ProtocolVersion::from(ProtocolInfo::new(
+      "ctmux",
+      15,
+      latest,
+      &[ctmux_proto::PROTOCOL_VERSION, latest],
+    ))];
+    row.running = Some(running);
+    row.compare();
+    assert_eq!(row.status, VersionStatus::Current);
+  }
+
+  #[test]
+  fn the_same_major_without_an_implemented_shared_contract_is_incompatible() {
+    let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
+    let mut running = expected_component_version();
+    running.protocols = vec![ProtocolVersion::new(
+      "ctmux",
+      ContractVersion::new(1, 1, 15),
+    )];
+    row.running = Some(running);
     row.compare();
     assert_eq!(row.status, VersionStatus::Incompatible);
   }
@@ -339,7 +398,7 @@ mod tests {
     let mut available = info("0.2.0", Some("next"));
     available.protocols.push(ProtocolVersion::new(
       "ctmux",
-      ctmux_proto::PROTOCOL_VERSION + 1,
+      ctl_core::protocol::ProtocolVersion::new(1, 0, ctmux_proto::PROTOCOL_BUILD + 1),
     ));
     let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
     row.running = Some(running);
@@ -375,9 +434,10 @@ mod tests {
   fn required_protocol_is_preserved_when_running_and_available_helpers_are_both_old() {
     let mut row = ComponentVersionRow::local("ctld", "ctld");
     let mut old = info("0.1.0", Some("same-old-build"));
-    old
-      .protocols
-      .push(ProtocolVersion::new("ctld", ctl_ipc::PROTOCOL_VERSION - 1));
+    old.protocols.push(ProtocolVersion::new(
+      "ctld",
+      ctl_core::protocol::ProtocolVersion::new(1, 0, ctl_ipc::PROTOCOL_BUILD - 1),
+    ));
     row.running = Some(old.clone());
     row.available = Some(old);
     row.compare();
@@ -385,11 +445,16 @@ mod tests {
     let value = serde_json::to_value(&row).unwrap();
     assert_eq!(
       value["required_protocols"][0]["version"],
-      ctl_ipc::PROTOCOL_VERSION
+      serde_json::to_value(ctl_ipc::PROTOCOL_VERSION).unwrap()
     );
     assert_eq!(
       value["available"]["protocols"][0]["version"],
-      ctl_ipc::PROTOCOL_VERSION - 1
+      serde_json::to_value(ctl_core::protocol::ProtocolVersion::new(
+        1,
+        0,
+        ctl_ipc::PROTOCOL_BUILD - 1
+      ))
+      .unwrap()
     );
   }
 

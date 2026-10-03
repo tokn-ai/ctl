@@ -40,14 +40,8 @@ fn main() {
     let info = ctl_core::component::ComponentInfo {
       build: ctl_core::component::build_info(),
       protocols: vec![
-        ctl_core::component::ProtocolInfo {
-          name: "ctmux".into(),
-          version: ctmux_proto::PROTOCOL_VERSION,
-        },
-        ctl_core::component::ProtocolInfo {
-          name: "ctmux_control".into(),
-          version: ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
-        },
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
       ],
     };
     println!(

@@ -142,7 +142,7 @@ async fn prepare(
   maintenance::write(
     &mut stdin,
     &ClientMessage::PrepareCtmuxRestart {
-      protocol_version: maintenance::PROTOCOL_VERSION,
+      protocol: maintenance::protocol_offer(),
       expected_remote_id: expected_remote_id.into(),
     },
   )
@@ -152,7 +152,14 @@ async fn prepare(
     "The installed ctl-agent does not support prepared restart, or its channel closed. Update remote components, reconnect the host, and try again. Nothing was restarted.", false,
   ))?;
   let info = match response {
-    ServerMessage::Prepared { info } if valid_preparation(&info, expected_remote_id) => info,
+    ServerMessage::Prepared {
+      protocol_version,
+      info,
+    } if maintenance::protocol_offer().accepts(protocol_version)
+      && valid_preparation(&info, expected_remote_id) =>
+    {
+      info
+    }
     ServerMessage::Error { code, message, .. } => {
       return Err(MaintenanceError {
         code,
@@ -177,7 +184,18 @@ async fn prepare(
 
 fn valid_preparation(info: &CtmuxPreparation, expected_remote_id: &str) -> bool {
   info.remote_id == expected_remote_id
-    && info.available.build.is_valid()
+    && info.available.is_valid()
+    && ctl_core::component::protocols_are_valid(&info.running.protocols)
+    && info.running.protocols.iter().any(|protocol| {
+      protocol.name == "ctmux_control" && protocol.supports(info.running.control_protocol_version)
+    })
+    && info.running.protocol_version.is_none_or(|version| {
+      info
+        .running
+        .protocols
+        .iter()
+        .any(|protocol| protocol.name == "ctmux" && protocol.supports(version))
+    })
     && info
       .running
       .build
@@ -319,10 +337,13 @@ mod tests {
   fn preparation() -> CtmuxPreparation {
     serde_json::from_value(serde_json::json!({
       "remote_id": "owned-environment",
-      "running": {"build": null, "protocol_version": null, "control_protocol_version": 1},
+      "running": {"build": null, "protocol_version": null, "control_protocol_version": "1.0.1", "protocols": [ctmux_ipc::local_control_protocol_info()]},
       "available": {
         "build": {"version": "0.1.0", "source_revision": null, "source_fingerprint": "0".repeat(64), "dirty": false},
-        "protocols": [{"name": "ctmux", "version": 12}, {"name": "ctmux_control", "version": 1}]
+        "protocols": [
+          {"name": "ctmux", "build": 13, "version": "1.0.13", "supported_versions": ["1.0.13"]},
+          {"name": "ctmux_control", "build": 1, "version": "1.0.1", "supported_versions": ["1.0.1"]}
+        ]
       }
     })).unwrap()
   }
@@ -334,6 +355,7 @@ mod tests {
     maintenance::write(
       &mut frame,
       &ServerMessage::Prepared {
+        protocol_version: maintenance::PROTOCOL_VERSION,
         info: preparation(),
       },
     )

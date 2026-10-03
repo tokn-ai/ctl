@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use ctl_task_ipc::{Stream, socket_path};
 use ctl_task_proto::{
-  ClientMessage, ExecutionMode, PROTOCOL_VERSION, ServerMessage, TaskDefinition, TaskInfo,
-  read_frame, write_frame,
+  ClientMessage, ExecutionMode, ServerMessage, TaskDefinition, TaskInfo, read_frame, write_frame,
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -430,7 +429,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Result<
   request(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: PROTOCOL_VERSION,
+      protocol: ctl_task_proto::protocol_offer(),
       client_name: "ctl".into(),
     },
   )
@@ -474,8 +473,14 @@ async fn read_required<S: AsyncRead + Unpin>(
 
 fn expect_handshake(response: ServerMessage) -> Result<(), CommandError> {
   match response {
-    ServerMessage::HandshakeAccepted { protocol_version }
-      if protocol_version == PROTOCOL_VERSION =>
+    ServerMessage::HandshakeAccepted {
+      protocol_version,
+      protocols,
+    } if ctl_task_proto::protocol_offer().accepts(protocol_version)
+      && ctl_core::component::protocols_are_valid(&protocols)
+      && protocols
+        .iter()
+        .any(|protocol| protocol.name == "task" && protocol.supports(protocol_version)) =>
     {
       Ok(())
     }

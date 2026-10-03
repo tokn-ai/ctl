@@ -4,13 +4,14 @@ use crate::session::{
 };
 use ctmux_core::{JournalError, OutputChunk};
 use ctmux_ipc::{
-  LOCAL_CONTROL_PROTOCOL_VERSION, LocalControlClientMessage, LocalControlErrorCode,
+  LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS, LocalControlClientMessage, LocalControlErrorCode,
   LocalControlServerMessage, read_local_control_frame, write_local_control_frame,
 };
 use ctmux_proto::{
   ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, MAX_HISTORY_PAGE_BYTES,
-  PROTOCOL_VERSION, ServerMessage, ShellState, TerminalHistoryManifest, TerminalHistoryRow,
-  TerminalHistorySnapshot, normalize_history_rows, read_frame, write_frame,
+  PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ShellState,
+  TerminalHistoryManifest, TerminalHistoryRow, TerminalHistorySnapshot, normalize_history_rows,
+  read_frame, write_frame,
 };
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
@@ -531,7 +532,7 @@ async fn accept_local_control_handshake(stream: &mut Stream) -> Result<bool, Con
   else {
     return Ok(false);
   };
-  let LocalControlClientMessage::Handshake { protocol_version } = handshake else {
+  let LocalControlClientMessage::Handshake { protocol } = handshake else {
     send_local_control_error(
       stream,
       LocalControlErrorCode::InvalidRequest,
@@ -540,22 +541,27 @@ async fn accept_local_control_handshake(stream: &mut Stream) -> Result<bool, Con
     .await?;
     return Ok(false);
   };
-  if protocol_version != LOCAL_CONTROL_PROTOCOL_VERSION {
+  let Some(protocol_version) = protocol.negotiate(LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS) else {
     send_local_control_error(
       stream,
       LocalControlErrorCode::ProtocolVersionMismatch,
       &format!(
-        "local-control client requested version {protocol_version}; this daemon supports {LOCAL_CONTROL_PROTOCOL_VERSION}"
+        "local-control client offered {:?}; this daemon supports {LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS:?}",
+        protocol.supported_versions,
       ),
     )
     .await?;
     return Ok(false);
-  }
+  };
 
   write_local_control_frame(
     stream,
     &LocalControlServerMessage::HandshakeAccepted {
-      protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+      protocol_version,
+      protocols: vec![
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
+      ],
       restart_supported: true,
       build: Some(ctl_core::component::build_info()),
       data_protocol_version: Some(PROTOCOL_VERSION),
@@ -719,10 +725,7 @@ async fn handle_active_connection(
     return Ok(());
   };
 
-  let ClientMessage::Handshake {
-    protocol_version, ..
-  } = handshake
-  else {
+  let ClientMessage::Handshake { protocol, .. } = handshake else {
     send_error(
       &mut stream,
       ErrorCode::InvalidRequest,
@@ -732,22 +735,27 @@ async fn handle_active_connection(
     return Ok(());
   };
 
-  if protocol_version != PROTOCOL_VERSION {
+  let Some(protocol_version) = protocol.negotiate(SUPPORTED_PROTOCOL_VERSIONS) else {
     send_error(
       &mut stream,
       ErrorCode::ProtocolVersionMismatch,
       &format!(
-        "client requested protocol version {protocol_version}; this daemon supports {PROTOCOL_VERSION}"
+        "client offered protocol contracts {:?}; this daemon supports {SUPPORTED_PROTOCOL_VERSIONS:?}",
+        protocol.supported_versions,
       ),
     )
     .await?;
     return Ok(());
-  }
+  };
 
   write_frame(
     &mut stream,
     &ServerMessage::HandshakeAccepted {
-      protocol_version: PROTOCOL_VERSION,
+      protocol_version,
+      protocols: vec![
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
+      ],
       server_version: SERVER_VERSION.into(),
       build: Some(ctl_core::component::build_info()),
       heartbeat_interval_ms: attachment_liveness.heartbeat_interval_ms,
@@ -756,7 +764,14 @@ async fn handle_active_connection(
   )
   .await?;
 
-  handle_request(stream, sessions, restart, attachment_liveness.timeout).await
+  handle_request(
+    stream,
+    sessions,
+    restart,
+    attachment_liveness.timeout,
+    protocol_version,
+  )
+  .await
 }
 
 async fn handle_request(
@@ -764,6 +779,7 @@ async fn handle_request(
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   attachment_liveness_timeout: Duration,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<(), ConnectionError> {
   let Some(request) = read_frame::<_, ClientMessage>(&mut stream).await? else {
     return Ok(());
@@ -809,6 +825,7 @@ async fn handle_request(
       presentation_window_bytes,
     } => {
       let request = AttachParameters {
+        protocol_version,
         resume_from,
         client_terminal_size: terminal_size,
         request_input_lease,
@@ -830,6 +847,7 @@ async fn handle_request(
       presentation_window_bytes,
     } => {
       let request = AttachParameters {
+        protocol_version,
         resume_from,
         client_terminal_size: terminal_size,
         request_input_lease: false,
@@ -1136,6 +1154,7 @@ async fn handle_shell_state_request(
   reason = "each field is an independent attachment behavior negotiated by the protocol"
 )]
 struct AttachParameters {
+  protocol_version: ctl_core::protocol::ProtocolVersion,
   resume_from: Option<u64>,
   client_terminal_size: ctmux_proto::TerminalSize,
   request_input_lease: bool,
@@ -1312,7 +1331,7 @@ async fn handle_attach(
   let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
   let sent_sequence = snapshot.journal.replay_from;
   let applied_sequence = snapshot.checkpoint.is_none().then_some(sent_sequence);
-  let pinned_history = pin_snapshot_history(&mut snapshot)?;
+  let pinned_history = pin_snapshot_history(&mut snapshot, request.protocol_version)?;
   let (reader, mut writer) = tokio::io::split(stream);
   match timeout_at(
     initial_delivery_deadline,
@@ -1353,6 +1372,7 @@ async fn handle_attach(
     pinned_history,
     pending_history: None,
     pending_checkpoint: false,
+    protocol_version: request.protocol_version,
   };
   let exit = drive_attachment(
     attachment,
@@ -1414,6 +1434,7 @@ async fn take_initial_snapshot(
 }
 
 struct LiveAttachment {
+  protocol_version: ctl_core::protocol::ProtocolVersion,
   reader: FrameReader<OwnedReadHalf>,
   writer: OwnedWriteHalf,
   events: broadcast::Receiver<SessionEvent>,
@@ -1545,7 +1566,12 @@ impl PinnedHistory {
 
 fn pin_snapshot_history(
   snapshot: &mut AttachSnapshot,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<Option<PinnedHistory>, ConnectionError> {
+  if protocol_version == ctmux_proto::CONTRACT_V1_0_13 {
+    // Preserve the complete inline history for the first published contract.
+    return Ok(None);
+  }
   let Some(history) = snapshot.history.as_ref() else {
     return Ok(None);
   };
@@ -1706,6 +1732,20 @@ impl AttachmentDriver {
       return self.send_available_output().await;
     }
     match message {
+      ClientMessage::RequestCheckpoint | ClientMessage::HistoryRequest { .. }
+        if self.attachment.protocol_version == ctmux_proto::CONTRACT_V1_0_13 =>
+      {
+        return write_before_deadline(
+          &mut self.attachment.writer,
+          &ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: "paged history requires contract 1.1.14".into(),
+          },
+          self.deadline,
+        )
+        .await
+        .map(|written| written.is_some());
+      }
       ClientMessage::RequestCheckpoint => {
         self.attachment.pending_checkpoint = true;
         self.renew_liveness();
@@ -1949,7 +1989,7 @@ impl AttachmentDriver {
     &mut self,
     mut snapshot: AttachSnapshot,
   ) -> Result<bool, ConnectionError> {
-    let pinned_history = pin_snapshot_history(&mut snapshot)?;
+    let pinned_history = pin_snapshot_history(&mut snapshot, self.attachment.protocol_version)?;
     let checkpoint = snapshot
       .checkpoint
       .expect("replacing snapshot has checkpoint");

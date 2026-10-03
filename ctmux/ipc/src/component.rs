@@ -3,7 +3,7 @@ use super::{
   LocalControlClientMessage, LocalControlErrorCode, LocalControlServerMessage, connect,
   control_socket_path,
 };
-use ctl_core::component::ComponentBuildInfo;
+use ctl_core::component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo};
 use std::io;
 use std::path::Path;
 use std::time::Duration;
@@ -12,9 +12,10 @@ use std::time::Duration;
 pub struct ComponentStatus {
   pub restart_supported: bool,
   pub build: Option<ComponentBuildInfo>,
+  pub protocols: Vec<ProtocolInfo>,
   pub version: Option<String>,
-  pub protocol_version: Option<u16>,
-  pub control_protocol_version: Option<u16>,
+  pub protocol_version: Option<ctl_core::protocol::ProtocolVersion>,
+  pub control_protocol_version: Option<ctl_core::protocol::ProtocolVersion>,
   /// A typed rejection establishes incompatibility without reporting a version.
   pub protocol_mismatch: bool,
 }
@@ -39,7 +40,7 @@ async fn probe_control(path: &Path) -> io::Result<Option<ComponentStatus>> {
   super::write_local_control_frame(
     &mut stream,
     &LocalControlClientMessage::Handshake {
-      protocol_version: super::LOCAL_CONTROL_PROTOCOL_VERSION,
+      protocol: super::local_control_offer(),
     },
   )
   .await
@@ -50,18 +51,49 @@ async fn probe_control(path: &Path) -> io::Result<Option<ComponentStatus>> {
   {
     Some(LocalControlServerMessage::HandshakeAccepted {
       protocol_version,
+      protocols,
       restart_supported,
       build,
       data_protocol_version,
       ..
-    }) => Ok(Some(ComponentStatus {
-      restart_supported,
-      version: build.as_ref().map(|build| build.version.clone()),
-      build,
-      protocol_version: data_protocol_version,
-      control_protocol_version: Some(protocol_version),
-      protocol_mismatch: protocol_version != super::LOCAL_CONTROL_PROTOCOL_VERSION,
-    })),
+    }) => {
+      let metadata_valid = build.as_ref().is_none_or(|build| {
+        ComponentInfo {
+          build: build.clone(),
+          protocols: protocols.clone(),
+        }
+        .is_valid()
+      });
+      let compatible = metadata_valid
+        && ctl_core::component::protocols_are_valid(&protocols)
+        && super::local_control_offer().accepts(protocol_version)
+        && ctl_core::component::protocols_are_valid(&protocols)
+        && protocols
+          .iter()
+          .any(|protocol| protocol.name == "ctmux_control" && protocol.supports(protocol_version))
+        && data_protocol_version.is_none_or(|version| {
+          protocols
+            .iter()
+            .any(|protocol| protocol.name == "ctmux" && protocol.version == version)
+        })
+        && protocols
+          .iter()
+          .find(|protocol| protocol.name == "ctmux")
+          .is_none_or(|protocol| {
+            protocol
+              .negotiate(ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS)
+              .is_some()
+          });
+      Ok(Some(ComponentStatus {
+        restart_supported,
+        version: build.as_ref().map(|build| build.version.clone()),
+        build,
+        protocols,
+        protocol_version: data_protocol_version,
+        control_protocol_version: Some(protocol_version),
+        protocol_mismatch: !compatible,
+      }))
+    }
     Some(LocalControlServerMessage::Error {
       code: LocalControlErrorCode::ProtocolVersionMismatch,
       ..
@@ -91,7 +123,7 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
   ctmux_proto::write_frame(
     &mut stream,
     &ctmux_proto::ClientMessage::Handshake {
-      protocol_version: ctmux_proto::PROTOCOL_VERSION,
+      protocol: ctmux_proto::protocol_offer(),
       client_name: "ctmux-about".into(),
       client_version: env!("CARGO_PKG_VERSION").into(),
     },
@@ -104,19 +136,25 @@ async fn probe(path: &Path) -> io::Result<Option<ComponentStatus>> {
   {
     Some(ctmux_proto::ServerMessage::HandshakeAccepted {
       protocol_version,
+      protocols,
       server_version,
       build,
       ..
     }) => {
       let prior = control_status.unwrap_or_default();
+      let compatible = ctmux_proto::protocol_offer().accepts(protocol_version)
+        && ctl_core::component::protocols_are_valid(&protocols)
+        && protocols
+          .iter()
+          .any(|protocol| protocol.name == "ctmux" && protocol.supports(protocol_version));
       Ok(Some(ComponentStatus {
         restart_supported: prior.restart_supported,
         build: build.or(prior.build),
+        protocols,
         version: Some(server_version),
         protocol_version: Some(protocol_version),
         control_protocol_version: prior.control_protocol_version,
-        protocol_mismatch: prior.protocol_mismatch
-          || protocol_version != ctmux_proto::PROTOCOL_VERSION,
+        protocol_mismatch: prior.protocol_mismatch || !compatible,
       }))
     }
     Some(ctmux_proto::ServerMessage::Error {
@@ -144,6 +182,69 @@ mod tests {
   use tokio::net::UnixListener;
 
   #[tokio::test]
+  async fn newer_owner_is_compatible_when_it_advertises_the_local_contracts() {
+    use ctl_core::protocol::ProtocolVersion;
+    let path = std::env::temp_dir().join(format!("ctmux-about-shared-{}.sock", std::process::id()));
+    let control_path = control_socket_path(&path).unwrap();
+    let listener = UnixListener::bind(&control_path).unwrap();
+    let data_latest = ProtocolVersion::new(1, 1, 15);
+    let control_latest = ProtocolVersion::new(1, 1, 2);
+    let protocols = vec![
+      ProtocolInfo::new(
+        "ctmux",
+        15,
+        data_latest,
+        &[ctmux_proto::PROTOCOL_VERSION, data_latest],
+      ),
+      ProtocolInfo::new(
+        "ctmux_control",
+        2,
+        control_latest,
+        &[crate::LOCAL_CONTROL_PROTOCOL_VERSION, control_latest],
+      ),
+    ];
+    let advertised = protocols.clone();
+    let server = tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      assert!(matches!(
+        crate::read_local_control_frame::<_, LocalControlClientMessage>(&mut stream)
+          .await
+          .unwrap(),
+        Some(LocalControlClientMessage::Handshake { .. })
+      ));
+      crate::write_local_control_frame(
+        &mut stream,
+        &LocalControlServerMessage::HandshakeAccepted {
+          protocol_version: crate::LOCAL_CONTROL_PROTOCOL_VERSION,
+          protocols: advertised,
+          restart_supported: true,
+          build: Some(ctl_core::component::build_info()),
+          data_protocol_version: Some(data_latest),
+          managed_sessions_supported: true,
+        },
+      )
+      .await
+      .unwrap();
+      assert!(
+        crate::read_local_control_frame::<_, LocalControlClientMessage>(&mut stream)
+          .await
+          .unwrap()
+          .is_none()
+      );
+    });
+    let status = probe(&path).await.unwrap().unwrap();
+    assert!(!status.protocol_mismatch);
+    assert_eq!(status.protocol_version, Some(data_latest));
+    assert_eq!(
+      status.control_protocol_version,
+      Some(crate::LOCAL_CONTROL_PROTOCOL_VERSION)
+    );
+    assert_eq!(status.protocols, protocols);
+    server.await.unwrap();
+    std::fs::remove_file(control_path).unwrap();
+  }
+
+  #[tokio::test]
   async fn absent_probe_does_not_create_endpoints() {
     let path = std::env::temp_dir().join(format!("ctmux-about-{}.sock", std::process::id()));
     assert!(probe(&path).await.unwrap().is_none());
@@ -167,6 +268,7 @@ mod tests {
         &mut stream,
         &ctmux_proto::ServerMessage::HandshakeAccepted {
           protocol_version: ctmux_proto::PROTOCOL_VERSION,
+          protocols: vec![ctmux_proto::protocol_info()],
           server_version: "0.0.9".into(),
           build: None,
           heartbeat_interval_ms: 1000,

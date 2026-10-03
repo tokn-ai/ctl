@@ -13,32 +13,25 @@ use tokio::time::{Instant, timeout};
 use crate::{LocalControlClientMessage, LocalControlServerMessage, Stream};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
-/// Older control-v1 owners wait thirty seconds for the armed request.
+/// Leaves room within the owner's thirty-second armed request deadline.
 pub const CONFIRMATION_TTL: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningDaemon {
   pub build: Option<ComponentBuildInfo>,
-  pub protocol_version: Option<u16>,
-  pub control_protocol_version: u16,
+  pub protocols: Vec<ProtocolInfo>,
+  pub protocol_version: Option<ctl_core::protocol::ProtocolVersion>,
+  pub control_protocol_version: ctl_core::protocol::ProtocolVersion,
 }
 
 impl RunningDaemon {
   #[must_use]
   pub fn component_info(&self) -> Option<ComponentInfo> {
-    Some(ComponentInfo {
+    let info = ComponentInfo {
       build: self.build.clone()?,
-      protocols: vec![
-        ProtocolInfo {
-          name: "ctmux".into(),
-          version: self.protocol_version?,
-        },
-        ProtocolInfo {
-          name: "ctmux_control".into(),
-          version: self.control_protocol_version,
-        },
-      ],
-    })
+      protocols: self.protocols.clone(),
+    };
+    info.is_valid().then_some(info)
   }
 }
 
@@ -115,8 +108,11 @@ impl Client {
     let replacement = PreparedExecutable::prepare(
       executable,
       &[
-        ("ctmux", ctmux_proto::PROTOCOL_VERSION),
-        ("ctmux_control", crate::LOCAL_CONTROL_PROTOCOL_VERSION),
+        ("ctmux", ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS),
+        (
+          "ctmux_control",
+          crate::LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS,
+        ),
       ],
     )
     .await
@@ -273,7 +269,7 @@ async fn handshake(stream: &mut Stream) -> Result<RunningDaemon, LifecycleError>
     crate::write_local_control_frame(
       stream,
       &LocalControlClientMessage::Handshake {
-        protocol_version: crate::LOCAL_CONTROL_PROTOCOL_VERSION,
+        protocol: crate::local_control_offer(),
       },
     )
     .await
@@ -284,15 +280,29 @@ async fn handshake(stream: &mut Stream) -> Result<RunningDaemon, LifecycleError>
     {
       Some(LocalControlServerMessage::HandshakeAccepted {
         protocol_version,
+        protocols,
         restart_supported: true,
         build,
         data_protocol_version,
         ..
-      }) if protocol_version == crate::LOCAL_CONTROL_PROTOCOL_VERSION => Ok(RunningDaemon {
-        build,
-        protocol_version: data_protocol_version,
-        control_protocol_version: protocol_version,
-      }),
+      }) if crate::local_control_offer().accepts(protocol_version)
+        && ctl_core::component::protocols_are_valid(&protocols)
+        && protocols.iter().any(|protocol| {
+          protocol.name == "ctmux_control" && protocol.supports(protocol_version)
+        })
+        && data_protocol_version.is_none_or(|version| {
+          protocols
+            .iter()
+            .any(|protocol| protocol.name == "ctmux" && protocol.version == version)
+        }) =>
+      {
+        Ok(RunningDaemon {
+          build,
+          protocols,
+          protocol_version: data_protocol_version,
+          control_protocol_version: protocol_version,
+        })
+      }
       _ => Err(LifecycleError::new(
         "daemon_restart_unsupported",
         "The running ctmuxd does not support cooperative restart; stop it manually once to upgrade",

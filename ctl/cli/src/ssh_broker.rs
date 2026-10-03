@@ -84,13 +84,13 @@ async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), Error> {
   ctl_ipc::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: ctl_ipc::PROTOCOL_VERSION,
+      protocol: ctl_ipc::protocol_offer(),
     },
   )
   .await?;
   match ctl_ipc::read_frame::<_, ServerMessage>(stream).await? {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
-      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
+      if ctl_ipc::protocol_offer().accepts(protocol_version) =>
     {
       Ok(())
     }

@@ -70,7 +70,7 @@ async fn open(config: &ConnectConfig, request: ClientMessage) -> (DuplexStream, 
   write_frame(
     &mut client,
     &ClientMessage::Handshake {
-      protocol_version: PROTOCOL_VERSION,
+      protocol: ctl_task_proto::protocol_offer(),
       client_name: "ctl-agent-task-test".into(),
     },
   )
@@ -80,6 +80,10 @@ async fn open(config: &ConnectConfig, request: ClientMessage) -> (DuplexStream, 
     message(&mut client).await,
     ServerMessage::HandshakeAccepted {
       protocol_version: PROTOCOL_VERSION,
+      protocols: vec![
+        ctl_task_proto::protocol_info(),
+        ctl_task_proto::control::protocol_info()
+      ],
     }
   );
   write_frame(&mut client, &request).await.unwrap();
@@ -99,7 +103,11 @@ async fn reject_incompatible_handshake(config: &ConnectConfig) {
   write_frame(
     &mut wrong_version,
     &ClientMessage::Handshake {
-      protocol_version: PROTOCOL_VERSION + 1,
+      protocol: ctl_core::protocol::ProtocolOffer::new(
+        5,
+        ctl_core::protocol::ProtocolVersion::new(1, 0, 5),
+        &[ctl_core::protocol::ProtocolVersion::new(1, 0, 5)],
+      ),
       client_name: "invalid-version".into(),
     },
   )

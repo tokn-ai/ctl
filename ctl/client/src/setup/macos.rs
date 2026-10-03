@@ -143,6 +143,11 @@ pub(super) async fn verify_helper(session: &Session) -> Result<PreparedExecutabl
   // Execute metadata queries only after the selected Apple signature policy.
   let prepared = PreparedExecutable::prepare(executable, &[]).await?;
   verify_build_identity(&session.manifest, &prepared.info.build)?;
+  if !session.manifest.matches_protocols(&prepared.info.protocols) {
+    return Err(Error::Verification(
+      "helper protocols do not match its release manifest".into(),
+    ));
+  }
   prepared.verify().await?;
   Ok(prepared)
 }

@@ -15,6 +15,7 @@ import {
 } from "./build-ctl-bundle.mts";
 import type { CtldBundleManifest } from "./package-ctld-bundle.mts";
 
+const protocols = [{name:"ctld",build:12,version:"1.0.12",supported_versions:["1.0.12"]}, ...["ctld_lifecycle", "ctld_helper"].map((name) => ({name,build:1,version:"1.0.1",supported_versions:["1.0.1"]}))];
 const execute = promisify(execFile);
 const team = "ABC123DEF4";
 const fingerprint = "A".repeat(40);
@@ -95,7 +96,7 @@ async function fixture(t: TestContext): Promise<Fixture> {
     schema_version: 1, component: "ctld", app_version: options.app_version,
     bundle_id: options.app_version, git_revision: options.git_revision, target: options.target,
     bundle_identifier: helperIdentifier, team_identifier: team, signing_mode: "signed", notarized: true,
-    archive, sha256: createHash("sha256").update(bytes).digest("hex"), archive_size: bytes.length,
+    archive, sha256: createHash("sha256").update(bytes).digest("hex"), archive_size: bytes.length, protocols,
   };
   await writeFile(join(options.ctld_assets!, `ctld-${options.target}.json`), JSON.stringify(helperManifest));
   const cliExecutable = join(root, "cargo-ctl");
@@ -115,6 +116,7 @@ function artifact(name: string, executable: string): string {
 
 function fakeBuild(input: Fixture, options: {
   dirty?: boolean;
+  component_metadata?: unknown;
   git_revision?: string;
   cargo_version?: string;
   notarization_status?: string;
@@ -127,6 +129,9 @@ function fakeBuild(input: Fixture, options: {
   const provisioningProfile = profile();
   const run: BuildRunner = async (command, args, context) => {
     calls.push({ command, args, context });
+    if (args[0] === "--component-info") {
+      return { stdout: JSON.stringify(options.component_metadata ?? {build:{version:input.options.app_version,source_revision:input.options.git_revision,source_fingerprint:"a".repeat(64),dirty:false},protocols}), stderr:"" };
+    }
     if (command === "git") {
       return {
         stdout: args[0] === "rev-parse"
@@ -383,4 +388,14 @@ test("Cargo executable selection rejects missing and ambiguous non-test binary a
   assert.throws(() => binaryArtifact(`${artifact("ctl", "/tmp/first")}\n${artifact("ctl", "/tmp/second")}`, "ctl"), /one executable/);
   const ignored = JSON.stringify({ reason: "compiler-artifact", target: { name: "ctl", kind: ["bin"] }, profile: { test: true }, executable: "/tmp/test" });
   assert.equal(binaryArtifact(`${ignored}\n${artifact("ctl", "/tmp/actual")}`, "ctl"), "/tmp/actual");
+});
+
+
+test("a reused helper must advertise the manifest's actual protocols before embedding", async (context) => {
+  const input = await fixture(context);
+  const component_metadata = {build:{version:input.options.app_version,source_revision:input.options.git_revision,source_fingerprint:"a".repeat(64),dirty:false},protocols:protocols.map((protocol) => protocol.name === "ctld" ? {...protocol,build:13,version:"1.0.13",supported_versions:["1.0.13"]} : protocol)};
+  const build = fakeBuild(input, {component_metadata});
+  await assert.rejects(buildCtlBundle(input.options, build.run), /protocol advertisements/);
+  assert.equal(build.calls.some(({command,args}) => command === "cargo" && args[0] === "build"), false);
+  assert.deepEqual(await readdir(input.options.output_directory), []);
 });

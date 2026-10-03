@@ -2,8 +2,8 @@
 
 use ctl_client::SshTransport as Stream;
 use ctmux_proto::{
-  ClientMessage, CommandSpec, DEFAULT_PRESENTATION_WINDOW_BYTES, PROTOCOL_VERSION, ServerMessage,
-  TerminalSize, read_frame, write_frame,
+  ClientMessage, CommandSpec, DEFAULT_PRESENTATION_WINDOW_BYTES, ServerMessage, TerminalSize,
+  protocol_offer, read_frame, write_frame,
 };
 use std::time::Duration;
 use tokio::time::{Instant, timeout};
@@ -26,7 +26,7 @@ impl Gateway {
     write_frame(
       &mut stream,
       &ClientMessage::Handshake {
-        protocol_version: PROTOCOL_VERSION,
+        protocol: protocol_offer(),
         client_name: "windows-ssh-test".into(),
         client_version: "test".into(),
       },

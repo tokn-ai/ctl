@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { parseHelperProtocols, sameProtocols, type ProtocolInfo } from "../shared/protocol-contract.mts";
+
 const execFileAsync = promisify(execFile);
 const managedLabelPrefix = "ctmux-ci: ";
 const notesStart = "<!-- ctmux-ci:start -->";
@@ -210,6 +212,7 @@ export async function validateReleaseBundle(
     throw new Error("Version releases require signed macOS desktop packages");
   }
   let ctldTeam: string | undefined;
+  let ctldProtocols: ProtocolInfo[] | undefined;
   const ctldManifests = new Map<string, Record<string, unknown>>();
   if (ctldPresent || cliPresent || versionBuild) {
     for (const target of ctldTargets) {
@@ -228,6 +231,16 @@ export async function validateReleaseBundle(
       ) {
         throw new Error(`Invalid signed and notarized ctld manifest or build identity: ${manifestName}`);
       }
+      let protocols: ProtocolInfo[];
+      try {
+        protocols = parseHelperProtocols(manifest.protocols);
+      } catch {
+        throw new Error(`Invalid protocol advertisements in ctld manifest: ${manifestName}`);
+      }
+      if (ctldProtocols && !sameProtocols(ctldProtocols, protocols)) {
+        throw new Error("Standalone ctld targets must advertise the same published protocols");
+      }
+      ctldProtocols = protocols;
       if (ctldTeam !== undefined && manifest.team_identifier !== ctldTeam) {
         throw new Error("Standalone ctld targets must use the same Apple team identity");
       }

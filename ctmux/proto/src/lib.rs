@@ -1,10 +1,37 @@
+use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 mod layout;
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 14;
+/// Internal protocol build; incrementing this does not publish a new contract.
+pub const PROTOCOL_BUILD: u16 = 14;
+/// First published wire contract. Keep this identity immutable.
+pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
+/// Published compatible addition: paged history and checkpoint recovery.
+pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_14;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_13, CONTRACT_V1_1_14];
+
+#[must_use]
+pub fn protocol_offer() -> ProtocolOffer {
+  ProtocolOffer::new(
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
+
+#[must_use]
+pub fn protocol_info() -> ctl_core::component::ProtocolInfo {
+  ctl_core::component::ProtocolInfo::new(
+    "ctmux",
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 /// Default maximum raw terminal bytes sent beyond a renderer-applied cursor.
 ///
@@ -546,7 +573,7 @@ impl From<LegacyViewLayout> for ViewLayout {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
   Handshake {
-    protocol_version: u16,
+    protocol: ProtocolOffer,
     client_name: String,
     client_version: String,
   },
@@ -686,7 +713,8 @@ pub enum ErrorCode {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
   HandshakeAccepted {
-    protocol_version: u16,
+    protocol_version: ProtocolVersion,
+    protocols: Vec<ctl_core::component::ProtocolInfo>,
     server_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     build: Option<ctl_core::component::ComponentBuildInfo>,
@@ -1275,7 +1303,8 @@ mod tests {
 
   #[test]
   fn terminal_history_snapshots_use_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 14);
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 14));
+    assert_eq!(PROTOCOL_BUILD, 14);
   }
 
   #[test]

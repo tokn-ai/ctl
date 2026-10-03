@@ -15,6 +15,7 @@ import {
 
 const execute = promisify(execFile);
 const team = "ABC123DEF4";
+const protocols = [{name:"ctld",build:12,version:"1.0.12",supported_versions:["1.0.12"]}, ...["ctld_lifecycle", "ctld_helper"].map((name) => ({name,build:1,version:"1.0.1",supported_versions:["1.0.1"]}))];
 const identifier = "dev.tokn-ai.ctl.ctld";
 
 function profile(): Record<string, unknown> {
@@ -64,11 +65,17 @@ function fakeApple(options: {
   notarization_status?: string;
   signature_details?: string;
   fail_command?: string;
+  component_metadata?: unknown;
 } = {}): { run: ProcessRunner; calls: { command: string; args: string[] }[] } {
   const calls: { command: string; args: string[] }[] = [];
   const provisioningProfile = options.provisioning_profile ?? profile();
   const run: ProcessRunner = async (command, args) => {
     calls.push({ command, args });
+    if (args[0] === "--component-info") {
+      return { stdout: JSON.stringify(options.component_metadata ?? { build: {
+        version: "0.1.0", source_revision: "0123456789abcdef0123456789abcdef01234567", source_fingerprint: "a".repeat(64), dirty: false,
+      }, protocols }), stderr: "" };
+    }
     if (command === "lipo") {
       assert.equal(args.length, 3);
       assert.ok(args[0].endsWith("/Contents/MacOS/ctld"));
@@ -127,7 +134,7 @@ test("notarizes before archiving and validates the transported full bundle", asy
     git_revision: options.git_revision, target: options.target, bundle_identifier: identifier,
     team_identifier: team, signing_mode: "signed", notarized: true,
     archive: "ctld-0.1.0-aarch64-apple-darwin.app.tar.gz",
-    sha256: manifest.sha256, archive_size: manifest.archive_size,
+    sha256: manifest.sha256, archive_size: manifest.archive_size, protocols,
   });
   const archive = join(options.output_directory, manifest.archive);
   const bytes = await readFile(archive);
@@ -322,5 +329,20 @@ test("rejects unsupported targets, invalid identities, and absent notarization c
     const apple = fakeApple();
     await assert.rejects(packageCtldBundle({ ...options, ...changes }, apple.run));
     assert.deepEqual(apple.calls, []);
+  }
+});
+
+
+test("component source and protocol advertisements are verified before notarization", async (context) => {
+  for (const changed of [
+    {build:{version:"0.1.0",source_revision:"f".repeat(40),source_fingerprint:"a".repeat(64),dirty:false},protocols},
+    {build:{version:"0.1.0",source_revision:"0123456789abcdef0123456789abcdef01234567",source_fingerprint:"a".repeat(64),dirty:true},protocols},
+    {build:{version:"0.1.0",source_revision:"0123456789abcdef0123456789abcdef01234567",source_fingerprint:"a".repeat(64),dirty:false},protocols:[]},
+  ]) {
+    const options = await fixture(context);
+    const apple = fakeApple({component_metadata:changed});
+    await assert.rejects(packageCtldBundle(options, apple.run), /source identity|protocol/);
+    assert.equal(apple.calls.some(({command,args}) => command === "xcrun" && args[0] === "notarytool"), false);
+    assert.deepEqual(await readdir(options.output_directory), []);
   }
 });

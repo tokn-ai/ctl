@@ -16,6 +16,124 @@ struct TestDaemon {
   socket: PathBuf,
 }
 
+#[tokio::test]
+async fn published_contract_negotiates_an_explicit_shared_version() {
+  use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
+  use ctl_task_proto::control;
+  let daemon = TestDaemon::start().await;
+  let future = ProtocolVersion::new(1, 1, 6);
+  let mut stream = connect(&daemon.socket).await.unwrap();
+  write_frame(
+    &mut stream,
+    &ClientMessage::Handshake {
+      protocol: ProtocolOffer::new(6, future, &[PROTOCOL_VERSION, future]),
+      client_name: "future-client".into(),
+    },
+  )
+  .await
+  .unwrap();
+  let Some(ServerMessage::HandshakeAccepted {
+    protocol_version,
+    protocols,
+  }) = read_frame(&mut stream).await.unwrap()
+  else {
+    panic!("handshake was rejected");
+  };
+  assert_eq!(protocol_version, PROTOCOL_VERSION);
+  assert!(protocols.contains(&ctl_task_proto::protocol_info()));
+  write_frame(&mut stream, &ClientMessage::ListTasks)
+    .await
+    .unwrap();
+  assert_eq!(
+    read_frame::<_, ServerMessage>(&mut stream).await.unwrap(),
+    Some(ServerMessage::TaskList { tasks: Vec::new() })
+  );
+
+  let mut stream = connect(&daemon.socket).await.unwrap();
+  write_frame(
+    &mut stream,
+    &control::ClientMessage::ComponentStatus {
+      protocol: ProtocolOffer::new(6, future, &[control::PROTOCOL_VERSION, future]),
+    },
+  )
+  .await
+  .unwrap();
+  assert!(
+    matches!(read_frame::<_, control::ServerMessage>(&mut stream).await.unwrap(),
+    Some(control::ServerMessage::ComponentStatus { protocol_version, protocols, .. })
+      if protocol_version == control::PROTOCOL_VERSION && protocols.contains(&control::protocol_info()))
+  );
+
+  daemon.stop().await;
+}
+
+#[tokio::test]
+async fn published_contract_rejects_unpublished_or_missing_support() {
+  use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
+  use ctl_task_proto::control;
+  let daemon = TestDaemon::start().await;
+  for unsupported in [ProtocolVersion::new(1, 0, 5), ProtocolVersion::new(2, 0, 5)] {
+    let mut stream = connect(&daemon.socket).await.unwrap();
+    write_frame(
+      &mut stream,
+      &ClientMessage::Handshake {
+        protocol: ProtocolOffer::new(5, unsupported, &[unsupported]),
+        client_name: "incompatible-client".into(),
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      read_frame::<_, ServerMessage>(&mut stream).await.unwrap(),
+      Some(ServerMessage::Error {
+        code: ctl_task_proto::ErrorCode::ProtocolVersionMismatch,
+        ..
+      })
+    ));
+    let mut stream = connect(&daemon.socket).await.unwrap();
+    write_frame(
+      &mut stream,
+      &control::ClientMessage::ComponentStatus {
+        protocol: ProtocolOffer::new(5, unsupported, &[unsupported]),
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      read_frame::<_, control::ServerMessage>(&mut stream)
+        .await
+        .unwrap(),
+      Some(control::ServerMessage::Error { .. })
+    ));
+  }
+  for payload in [
+    serde_json::json!({"type":"handshake", "protocol_version":4, "client_name":"old"}),
+    serde_json::json!({"type":"handshake", "client_name":"missing"}),
+    serde_json::json!({"type":"restart_daemon", "protocol_version":2}),
+    serde_json::json!({"type":"restart_daemon"}),
+    serde_json::json!({"type":"component_status", "protocol_version":2}),
+    serde_json::json!({"type":"component_status"}),
+  ] {
+    let mut stream = connect(&daemon.socket).await.unwrap();
+    write_frame(&mut stream, &payload).await.unwrap();
+    assert!(
+      tokio::time::timeout(
+        Duration::from_secs(1),
+        read_frame::<_, ServerMessage>(&mut stream)
+      )
+      .await
+      .unwrap()
+      .unwrap()
+      .is_none()
+    );
+  }
+  assert_eq!(
+    daemon.request(ClientMessage::ListTasks).await,
+    ServerMessage::TaskList { tasks: Vec::new() }
+  );
+  daemon.stop().await;
+}
+
 impl TestDaemon {
   async fn start() -> Self {
     let unique = Uuid::new_v4().simple().to_string();
@@ -69,7 +187,7 @@ impl TestDaemon {
     write_frame(
       &mut stream,
       &ClientMessage::Handshake {
-        protocol_version: PROTOCOL_VERSION,
+        protocol: ctl_task_proto::protocol_offer(),
         client_name: "integration-test".into(),
       },
     )
@@ -443,7 +561,7 @@ async fn daemon_restart_refuses_active_tasks_and_releases_idle_state() {
   write_frame(
     &mut control_stream,
     &control::ClientMessage::RestartDaemon {
-      protocol_version: control::PROTOCOL_VERSION,
+      protocol: control::protocol_offer(),
     },
   )
   .await
@@ -475,7 +593,7 @@ async fn daemon_restart_refuses_active_tasks_and_releases_idle_state() {
   write_frame(
     &mut control_stream,
     &control::ClientMessage::RestartDaemon {
-      protocol_version: control::PROTOCOL_VERSION,
+      protocol: control::protocol_offer(),
     },
   )
   .await

@@ -116,9 +116,9 @@ fn missing_selection_never_creates_directories_or_scans_caches() {
     selection,
     directory.join("selected").join(format!(
       "{TARGET}-ctld{}-lifecycle{}-helper{}",
-      crate::PROTOCOL_VERSION,
-      crate::lifecycle::PROTOCOL_VERSION,
-      crate::HELPER_API_VERSION
+      crate::PROTOCOL_VERSION.major,
+      crate::lifecycle::PROTOCOL_VERSION.major,
+      crate::HELPER_API_VERSION.major
     ))
   );
   fixture.install("release");
@@ -197,8 +197,8 @@ fn entries_are_independent_by_target_and_required_apis() {
   let arm_selection = compatibility_link(&fixture, TARGET, "../versions/arm");
   let old_api_selection = arm_selection.with_file_name(format!(
     "{TARGET}-ctld{}-lifecycle{}-helper0",
-    crate::PROTOCOL_VERSION,
-    crate::lifecycle::PROTOCOL_VERSION
+    crate::PROTOCOL_VERSION.major,
+    crate::lifecycle::PROTOCOL_VERSION.major
   ));
   fs::rename(&arm_selection, &old_api_selection).unwrap();
   assert_eq!(

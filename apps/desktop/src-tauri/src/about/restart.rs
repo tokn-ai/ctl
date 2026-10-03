@@ -301,13 +301,10 @@ fn emit_local_reset(app: &tauri::AppHandle) {
 
 fn ctmux_version(info: &ctmux_ipc::lifecycle::RunningDaemon) -> ComponentVersionInfo {
   let protocols = info
-    .protocol_version
-    .map(|version| ProtocolVersion::new("ctmux", version))
+    .protocols
+    .clone()
     .into_iter()
-    .chain([ProtocolVersion::new(
-      "ctmux_control",
-      info.control_protocol_version,
-    )])
+    .map(ProtocolVersion::from)
     .collect();
   match info.build.clone() {
     Some(build) => ComponentVersionInfo::from_build(build, protocols),

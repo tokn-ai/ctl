@@ -49,15 +49,18 @@ pub async fn get_component_versions(
       .then(|| env!("CTMUX_SOURCE_REVISION").into()),
     source_fingerprint: None,
     dirty: None,
-    protocols: vec![
-      ProtocolVersion::new("ctld", ctl_ipc::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctld_lifecycle", ctl_ipc::lifecycle::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctmux_control", ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
-      ProtocolVersion::new("task", ctl_task_proto::PROTOCOL_VERSION),
-      ProtocolVersion::new("task_control", ctl_task_proto::control::PROTOCOL_VERSION),
-      ProtocolVersion::new("ctl_identity", ctl_proto::IDENTITY_PROTOCOL_VERSION),
-    ],
+    protocols: ctl_ipc::lifecycle::DaemonBinaryInfo::current()
+      .protocols
+      .into_iter()
+      .chain([
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
+        ctl_task_proto::protocol_info(),
+        ctl_task_proto::control::protocol_info(),
+      ])
+      .chain(ctl_proto::agent_protocols())
+      .map(ProtocolVersion::from)
+      .collect(),
   });
   app.detail = Some("Versions below describe running processes and available local helpers. Opening About does not start or update them.".into());
   Ok(ComponentVersionsSnapshot {

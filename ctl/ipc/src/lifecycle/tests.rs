@@ -40,16 +40,7 @@ mod unix {
     fn binary(&self, info: &DaemonBinaryInfo) {
       let metadata = ComponentInfo {
         build: info.build.clone(),
-        protocols: vec![
-          ctl_core::component::ProtocolInfo {
-            name: "ctld".into(),
-            version: info.protocol_version,
-          },
-          ctl_core::component::ProtocolInfo {
-            name: "ctld_lifecycle".into(),
-            version: info.lifecycle_protocol_version,
-          },
-        ],
+        protocols: info.protocols.clone(),
       };
       std::fs::write(
         &self.executable,
@@ -85,13 +76,17 @@ mod unix {
     let (mut stream, _) = listener.accept().await.unwrap();
     assert!(matches!(
       crate::read_frame::<_, Request>(&mut stream).await.unwrap(),
-      Some(Request::CtldInspect {
-        protocol_version: PROTOCOL_VERSION
-      })
+      Some(Request::CtldInspect { protocol }) if protocol.accepts(PROTOCOL_VERSION)
     ));
-    crate::write_frame(&mut stream, &Response::CtldInfo { info })
-      .await
-      .unwrap();
+    crate::write_frame(
+      &mut stream,
+      &Response::CtldInfo {
+        protocol_version: PROTOCOL_VERSION,
+        info,
+      },
+    )
+    .await
+    .unwrap();
     stream
   }
 
@@ -118,14 +113,12 @@ mod unix {
       crate::read_frame::<_, Request>(&mut stream).await.unwrap();
       drop(stream);
       let (mut stream, _) = listener.accept().await.unwrap();
-      crate::read_frame::<_, crate::ClientMessage>(&mut stream)
+      crate::read_frame::<_, serde_json::Value>(&mut stream)
         .await
         .unwrap();
       crate::write_frame(
         &mut stream,
-        &crate::ServerMessage::HandshakeAccepted {
-          protocol_version: crate::PROTOCOL_VERSION,
-        },
+        &serde_json::json!({ "type": "handshake_accepted", "protocol_version": crate::PROTOCOL_BUILD }),
       )
       .await
       .unwrap();
@@ -136,7 +129,7 @@ mod unix {
     assert_eq!(
       fixture.client().probe().await.unwrap(),
       DaemonStatus::Legacy {
-        protocol_version: Some(crate::PROTOCOL_VERSION)
+        protocol_version: Some(crate::PROTOCOL_BUILD)
       }
     );
     assert!(matches!(
@@ -150,7 +143,13 @@ mod unix {
   async fn incompatible_replacement_fails_before_contacting_the_owner() {
     let fixture = Fixture::new().await;
     let mut binary = DaemonBinaryInfo::current();
-    binary.protocol_version += 1;
+    binary.protocol_version = ProtocolVersion::new(1, 0, 13);
+    binary.protocols[0] = ProtocolInfo::new(
+      "ctld",
+      13,
+      binary.protocol_version,
+      &[binary.protocol_version],
+    );
     fixture.binary(&binary);
     let listener = UnixListener::bind(&fixture.socket).unwrap();
     assert!(matches!(
@@ -162,6 +161,54 @@ mod unix {
         .await
         .is_err()
     );
+  }
+
+  #[tokio::test]
+  async fn replacement_preflight_accepts_supported_contracts_below_advertised_latest() {
+    let fixture = Fixture::new().await;
+    let mut binary = DaemonBinaryInfo::current();
+    let newer = ProtocolVersion::new(1, 1, 13);
+    binary.protocol_version = newer;
+    binary.protocols[0] = ProtocolInfo::new("ctld", 13, newer, &[crate::PROTOCOL_VERSION, newer]);
+    fixture.binary(&binary);
+    let prepared = fixture.client().preflight_restart().await.unwrap();
+    assert_eq!(prepared.available.info, binary);
+    assert!(prepared.before.is_none());
+  }
+
+  #[tokio::test]
+  async fn lifecycle_inspection_validates_the_selected_contract_and_retains_advertisements() {
+    for compatible in [true, false] {
+      let (mut client, mut server) = crate::Stream::pair().unwrap();
+      let newer = ProtocolVersion::new(1, 1, 2);
+      let mut observed = info("newer");
+      observed.binary.lifecycle_protocol_version = newer;
+      observed.binary.protocols[1] =
+        ProtocolInfo::new("ctld_lifecycle", 2, newer, &[PROTOCOL_VERSION, newer]);
+      let expected = observed.clone();
+      let server = tokio::spawn(async move {
+        let request: Request = crate::read_frame(&mut server).await.unwrap().unwrap();
+        assert!(
+          matches!(request, Request::CtldInspect { protocol } if protocol.negotiate(&[PROTOCOL_VERSION, newer]) == Some(PROTOCOL_VERSION))
+        );
+        crate::write_frame(
+          &mut server,
+          &Response::CtldInfo {
+            protocol_version: if compatible { PROTOCOL_VERSION } else { newer },
+            info: observed,
+          },
+        )
+        .await
+        .unwrap();
+      });
+      let result = inspect(&mut client).await;
+      if compatible {
+        assert_eq!(result.unwrap(), expected);
+      } else {
+        assert!(matches!(result, Err(LifecycleError::Unsupported)));
+      }
+      server.await.unwrap();
+    }
   }
 
   #[tokio::test]
@@ -258,7 +305,13 @@ mod unix {
   #[tokio::test]
   async fn an_older_data_protocol_and_source_build_can_be_explicitly_restarted() {
     let mut before = info("old");
-    before.binary.protocol_version -= 1;
+    before.binary.protocol_version = ProtocolVersion::new(1, 0, 11);
+    before.binary.protocols[0] = ProtocolInfo::new(
+      "ctld",
+      11,
+      before.binary.protocol_version,
+      &[before.binary.protocol_version],
+    );
     before.binary.build.source_fingerprint = "a".repeat(64);
     assert_ne!(before.binary, DaemonBinaryInfo::current());
     replace_after_owner_release(before).await;

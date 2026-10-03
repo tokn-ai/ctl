@@ -36,11 +36,14 @@ zeroize.workspace = true
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
+ctl-proto.workspace = true
+ctmux-proto.workspace = true
 portable-pty.workspace = true
 unicode-width.workspace = true
 sha2.workspace = true
 
 [build-dependencies]
+ctl-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

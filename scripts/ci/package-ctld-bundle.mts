@@ -7,6 +7,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { maxComponentMetadata, verifyReleaseComponent, type ProtocolInfo } from "../shared/protocol-contract.mts";
+
 const execute = promisify(execFile);
 const bundleIdentifier = "dev.tokn-ai.ctl.ctld";
 const macTargets = new Map([
@@ -40,6 +42,7 @@ export interface CtldBundleManifest {
   archive: string;
   sha256: string;
   archive_size: number;
+  protocols: ProtocolInfo[];
 }
 
 export type ProcessRunner = (command: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
@@ -111,7 +114,12 @@ function signingRequirement(team: string): string {
 
 export async function packageCtldBundle(
   options: CtldBundleOptions,
-  run: ProcessRunner = async (command, args) => execute(command, args, { maxBuffer: 16 * 1024 * 1024 }),
+  run: ProcessRunner = async (command, args) => execute(command, args, {
+    maxBuffer: args[0] === "--component-info" ? maxComponentMetadata : 16 * 1024 * 1024,
+    timeout: args[0] === "--component-info" ? 5_000 : undefined,
+    env: { ...process.env, CTLD_ASKPASS: undefined, CTLD_ASKPASS_TOKEN: undefined,
+      CTLD_IDENTITY_ASKPASS: undefined, CTLD_IDENTITY_ASKPASS_SOCKET: undefined, CTLD_IDENTITY_ASKPASS_TOKEN: undefined },
+  }),
 ): Promise<CtldBundleManifest> {
   const architecture = macTargets.get(options.target);
   if (!architecture) {
@@ -202,6 +210,8 @@ export async function packageCtldBundle(
       throw new Error("ctld signed entitlements do not match its distribution profile");
     }
 
+    const component = verifyReleaseComponent((await run(binary, ["--component-info"])).stdout, options.app_version, options.git_revision);
+
     // Submit ZIP because Apple's notary service does not accept tar archives.
     // The final release archive is made after stapling so it carries the ticket.
     const submission = join(temporary, "ctld.zip");
@@ -257,6 +267,7 @@ export async function packageCtldBundle(
       archive,
       sha256: hash.digest("hex"),
       archive_size: archiveSize,
+      protocols: component.protocols,
     };
     await writeFile(join(options.output_directory, `${archive}.sha256`), `${manifest.sha256}  ${archive}\n`);
     await writeFile(join(options.output_directory, `ctld-${options.target}.json`), `${JSON.stringify(manifest, null, 2)}\n`);

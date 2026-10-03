@@ -13,7 +13,7 @@ const status_labels: Record<ComponentVersionStatus, string> = {
 
 const protocol_labels: Record<string, string> = {
   ctmux: "Session", ctmux_control: "Local control", task: "Task", task_control: "Task control",
-  ctld: "ctld IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Agent identity",
+  ctld: "ctld IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Agent identity", ctl_maintenance: "Remote maintenance", ctld_helper: "Helper API",
 };
 
 export function versionLabel(info: ComponentVersionInfo | null): string {
@@ -43,18 +43,19 @@ function statusLabel(row: ComponentVersionRow): string {
 
 const compact_protocol_labels: Record<string, string> = {
   ctmux: "Session", ctmux_control: "Control", task: "Task", task_control: "Control",
-  ctld: "IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Identity",
+  ctld: "IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Identity", ctl_maintenance: "Maintenance", ctld_helper: "Helper",
 };
 
 function Protocols({ row }: { row: ComponentVersionRow }) {
   const actual = row.running?.protocols ?? [];
   const required = row.required_protocols ?? row.available?.protocols ?? [];
   const observed = actual.map((protocol) => {
-    const expected = required.find((candidate) => candidate.name === protocol.name)?.version;
-    return `${protocol_labels[protocol.name] ?? protocol.name} ${protocol.version}${expected !== undefined ? ` (requires ${expected})` : ""}`;
+    const expected = required.find((candidate) => candidate.name === protocol.name);
+    const requirement = expected ? ` (requires ${expected.supported_versions.join(" or ")})` : "";
+    return `${protocol_labels[protocol.name] ?? protocol.name} ${protocol.version}${requirement}; build ${protocol.build}; supports ${protocol.supported_versions.join(", ")}`;
   });
   const missing = required.filter((protocol) => !actual.some((candidate) => candidate.name === protocol.name));
-  const detail = [...observed, ...missing.map((protocol) => `${protocol_labels[protocol.name] ?? protocol.name}: not reported (requires ${protocol.version})`)];
+  const detail = [...observed, ...missing.map((protocol) => `${protocol_labels[protocol.name] ?? protocol.name}: not reported (requires ${protocol.supported_versions.join(" or ")})`)];
   const summary = [
     ...actual.map((protocol) => `${compact_protocol_labels[protocol.name] ?? protocol.name} ${protocol.version}`),
     ...missing.map((protocol) => `${compact_protocol_labels[protocol.name] ?? protocol.name} ?`),

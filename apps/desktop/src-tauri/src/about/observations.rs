@@ -17,10 +17,13 @@ pub(crate) struct RemoteObservation {
 pub(super) fn rows(observations: Vec<RemoteObservation>) -> Vec<ComponentVersionRow> {
   let mut rows = BTreeMap::new();
   for observation in observations {
-    let agent_protocols = vec![ProtocolVersion::new(
-      "ctl_identity",
-      ctl_proto::IDENTITY_PROTOCOL_VERSION,
-    )];
+    let agent_protocols = observation
+      .identity
+      .protocols
+      .clone()
+      .into_iter()
+      .map(ProtocolVersion::from)
+      .collect::<Vec<_>>();
     let mut agent_info = ComponentVersionInfo::observed(
       observation.identity.agent_version.clone(),
       observation.identity.build.clone(),
@@ -39,15 +42,21 @@ pub(super) fn rows(observations: Vec<RemoteObservation>) -> Vec<ComponentVersion
       "ctl-agent",
       &observation,
       agent_info,
-      agent_protocols,
+      ctl_proto::agent_protocols()
+        .into_iter()
+        .map(ProtocolVersion::from)
+        .collect(),
     );
     let ctmux_info = ComponentVersionInfo::observed(
       observation.handshake.server_version.clone(),
       observation.handshake.build.clone(),
-      vec![ProtocolVersion::new(
-        "ctmux",
-        observation.handshake.protocol_version,
-      )],
+      observation
+        .handshake
+        .protocols
+        .clone()
+        .into_iter()
+        .map(ProtocolVersion::from)
+        .collect(),
     );
     insert(
       &mut rows,
@@ -55,7 +64,7 @@ pub(super) fn rows(observations: Vec<RemoteObservation>) -> Vec<ComponentVersion
       "ctmuxd",
       &observation,
       ctmux_info,
-      vec![ProtocolVersion::new("ctmux", ctmux_proto::PROTOCOL_VERSION)],
+      vec![ProtocolVersion::from(ctmux_proto::protocol_info())],
     );
   }
   rows.into_values().collect()
@@ -120,6 +129,7 @@ mod tests {
     let build = ctl_core::component::build_info();
     RemoteObservation {
       identity: ctl_proto::RemoteIdentity {
+        protocols: ctl_proto::agent_protocols(),
         remote_id: "4db8b2dd-f953-458a-9124-97449c22a71f".into(),
         agent_version: build.version.clone(),
         build: Some(build.clone()),
@@ -129,6 +139,7 @@ mod tests {
       handshake: ctmux_client::HandshakeInfo {
         server_version: build.version.clone(),
         protocol_version: ctmux_proto::PROTOCOL_VERSION,
+        protocols: vec![ctmux_proto::protocol_info()],
         build: Some(build),
         attachment_liveness: ctmux_client::AttachmentLiveness {
           heartbeat_interval: Duration::from_secs(1),

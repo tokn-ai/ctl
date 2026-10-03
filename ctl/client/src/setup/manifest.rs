@@ -1,4 +1,5 @@
 use super::Error;
+use ctl_core::component::ProtocolInfo;
 use serde::{Deserialize, Serialize};
 
 pub(super) const BUNDLE_IDENTIFIER: &str = "dev.tokn-ai.ctl.ctld";
@@ -21,6 +22,7 @@ pub(super) struct Manifest {
   pub archive: String,
   pub sha256: String,
   pub archive_size: u64,
+  pub protocols: Vec<ProtocolInfo>,
   #[serde(
     default,
     skip_serializing_if = "Option::is_none",
@@ -112,6 +114,10 @@ impl Manifest {
       || manifest.archive != format!("ctld-{version}-{target}.app.tar.gz")
       || manifest.archive_size == 0
       || manifest.archive_size > MAX_ARCHIVE_BYTES
+      || !valid_protocols(&manifest.protocols)
+      || ["ctld", "ctld_lifecycle", "ctld_helper"]
+        .iter()
+        .any(|name| !manifest.protocols.iter().any(|entry| entry.name == *name))
     {
       return Err(Error::InvalidRelease(
         "manifest identity, signature policy, or archive does not match this release".into(),
@@ -142,9 +148,18 @@ impl Manifest {
     Ok(manifest)
   }
 
+  pub fn matches_protocols(&self, actual: &[ProtocolInfo]) -> bool {
+    valid_protocols(&self.protocols)
+      && ctl_core::component::protocols_match(&self.protocols, actual)
+  }
+
   pub fn directory_name(&self) -> String {
     format!("{}-{}", self.app_version, self.target)
   }
+}
+
+fn valid_protocols(protocols: &[ProtocolInfo]) -> bool {
+  !protocols.is_empty() && ctl_core::component::protocols_are_valid(protocols)
 }
 
 #[cfg(test)]
@@ -163,6 +178,7 @@ pub(super) fn fixture() -> Manifest {
     archive: "ctld-0.1.0-aarch64-apple-darwin.app.tar.gz".into(),
     sha256: "b".repeat(64),
     archive_size: 1024,
+    protocols: ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols,
     development: None,
   }
 }
@@ -228,6 +244,72 @@ mod tests {
       )
       .is_err()
     );
+  }
+
+  #[test]
+  fn manifests_require_a_complete_valid_advertised_contract_map() {
+    let original = fixture();
+    let parse = |manifest: &Manifest| {
+      Manifest::parse_installed(&serde_json::to_vec(manifest).unwrap(), &manifest.target)
+    };
+    for index in 0..original.protocols.len() {
+      let mut missing = original.clone();
+      missing.protocols.remove(index);
+      assert!(parse(&missing).is_err());
+      let mut duplicate = original.clone();
+      duplicate.protocols.push(duplicate.protocols[index].clone());
+      assert!(parse(&duplicate).is_err());
+      let mut invalid = original.clone();
+      invalid.protocols[index].supported_versions.clear();
+      assert!(parse(&invalid).is_err());
+    }
+    let mut missing = serde_json::to_value(&original).unwrap();
+    missing.as_object_mut().unwrap().remove("protocols");
+    assert!(
+      Manifest::parse_installed(&serde_json::to_vec(&missing).unwrap(), &original.target).is_err()
+    );
+  }
+
+  #[test]
+  fn manifest_contract_map_must_match_all_executed_helper_advertisements() {
+    let manifest = fixture();
+    let mut actual = manifest.protocols.clone();
+    actual.reverse();
+    assert!(manifest.matches_protocols(&actual));
+    actual[0].build += 1;
+    assert!(!manifest.matches_protocols(&actual));
+    actual = manifest.protocols.clone();
+    let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, 13);
+    actual[0] = ProtocolInfo::new("ctld", 13, newer, &[ctl_ipc::PROTOCOL_VERSION, newer]);
+    assert!(!manifest.matches_protocols(&actual));
+    actual = manifest.protocols.clone();
+    actual.pop();
+    assert!(!manifest.matches_protocols(&actual));
+  }
+
+  #[test]
+  fn advertised_contract_sets_match_without_requiring_array_order() {
+    let mut manifest = fixture();
+    let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, 13);
+    manifest.protocols[0] =
+      ProtocolInfo::new("ctld", 13, newer, &[ctl_ipc::PROTOCOL_VERSION, newer]);
+    let mut actual = manifest.protocols.clone();
+    actual[0].supported_versions.reverse();
+    actual.reverse();
+    assert!(manifest.matches_protocols(&actual));
+
+    let ctld = actual
+      .iter_mut()
+      .find(|entry| entry.name == "ctld")
+      .unwrap();
+    ctld.supported_versions = vec![newer];
+    assert!(valid_protocols(&actual));
+    assert!(!manifest.matches_protocols(&actual));
+
+    actual = manifest.protocols.clone();
+    actual[0].supported_versions[0] = ctl_core::protocol::ProtocolVersion::new(1, 0, 11);
+    assert!(valid_protocols(&actual));
+    assert!(!manifest.matches_protocols(&actual));
   }
 
   #[test]

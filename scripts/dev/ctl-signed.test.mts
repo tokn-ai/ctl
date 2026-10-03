@@ -15,6 +15,7 @@ const identity = "A".repeat(40);
 const revision = "b".repeat(40);
 const source_fingerprint = "c".repeat(64);
 const target = "aarch64-apple-darwin";
+const protocols = [{name:"ctld",build:12,version:"1.0.12",supported_versions:["1.0.12"]}, ...["ctld_lifecycle", "ctld_helper"].map((name) => ({name,build:1,version:"1.0.1",supported_versions:["1.0.1"]}))];
 const signature = "\nfixture Apple Development signature";
 
 async function fixture(
@@ -86,7 +87,7 @@ async function fixture(
       return { stdout: JSON.stringify({ build: {
         version: "0.1.0", source_revision: revision,
         source_fingerprint: failure === "metadata" ? "malformed" : source_fingerprint, dirty: true,
-      }, protocols: [] }), stderr: "" };
+      }, protocols }), stderr: "" };
     }
     if (command === "/bin/sh") {
       if (failure === "helper-signing") throw new Error("fixture helper signing failed");
@@ -156,6 +157,7 @@ test("one native development build embeds a complete locally signed helper witho
   assert.equal(manifest.bundle_id, `dev.${manifest.sha256}`);
   assert.equal(manifest.git_revision, revision);
   assert.deepEqual(manifest.development, { source_fingerprint, dirty: true });
+  assert.deepEqual(manifest.protocols, protocols);
   assert.ok((await readFile(input.output, "utf8")).endsWith(signature));
   assert.deepEqual((await readdir(join(input.target_directory, "ctl-dev"))).sort(), ["cargo", "ctl"]);
   assert.equal(input.calls.some((call) => ["git", "xcrun", "spctl"].includes(call.command)), false);

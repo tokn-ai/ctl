@@ -168,6 +168,12 @@ fn repair_is_limited_to_known_old_or_missing_agents() {
   assert!(repair_reason(&legacy_error()).is_some());
   assert!(
     repair_reason(&CoreError::UnsupportedSshProtocol {
+      marker: "ctl-ssh-v3".into()
+    })
+    .is_some()
+  );
+  assert!(
+    repair_reason(&CoreError::UnsupportedSshProtocol {
       marker: "ctl-ssh-v4".into()
     })
     .is_none()

@@ -12,6 +12,7 @@ keywords = ["ctl", "tasks", "cli"]
 publish = ["crates-io"]
 
 [dependencies]
+ctl-core.workspace = true
 ctl-task-client.workspace = true
 ctmux-cli.workspace = true
 clap.workspace = true

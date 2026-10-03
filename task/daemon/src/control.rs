@@ -17,17 +17,41 @@ pub struct Request {
 
 // The caller holds the mutation lock through acceptance and connection drain.
 pub async fn accept_restart(mut request: Request, state: &State) -> Option<Stream> {
-  let control::ClientMessage::RestartDaemon { protocol_version } = request.request else {
+  let control::ClientMessage::RestartDaemon { protocol } = request.request else {
     return None;
   };
-  let response = if protocol_version != control::PROTOCOL_VERSION {
-    control::ServerMessage::Error {
-      message: format!(
-        "ctl-taskd control protocol version {} is required",
-        control::PROTOCOL_VERSION
-      ),
-    }
-  } else if state
+  let response =
+    if let Some(protocol_version) = protocol.negotiate(control::SUPPORTED_PROTOCOL_VERSIONS) {
+      restart_response(state, protocol_version).await
+    } else {
+      control::ServerMessage::Error {
+        message: format!(
+          "ctl-taskd supports control protocol contracts {:?}",
+          control::SUPPORTED_PROTOCOL_VERSIONS
+        ),
+      }
+    };
+  let accepted = matches!(response, control::ServerMessage::RestartAccepted { .. });
+  if matches!(
+    timeout(
+      Duration::from_secs(5),
+      write_frame(&mut request.stream, &response)
+    )
+    .await,
+    Ok(Ok(()))
+  ) && accepted
+  {
+    Some(request.stream)
+  } else {
+    None
+  }
+}
+
+async fn restart_response(
+  state: &State,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+) -> control::ServerMessage {
+  if state
     .tasks
     .lock()
     .await
@@ -42,6 +66,7 @@ pub async fn accept_restart(mut request: Request, state: &State) -> Option<Strea
     }
   } else {
     control::ServerMessage::RestartAccepted {
+      protocol_version,
       data_directory: state
         .persistence_path
         .parent()
@@ -49,19 +74,5 @@ pub async fn accept_restart(mut request: Request, state: &State) -> Option<Strea
         .to_owned(),
       ctmux_socket: state.ctmux_socket.clone(),
     }
-  };
-  let accepted = matches!(response, control::ServerMessage::RestartAccepted { .. });
-  if matches!(
-    timeout(
-      Duration::from_secs(5),
-      write_frame(&mut request.stream, &response)
-    )
-    .await,
-    Ok(Ok(()))
-  ) && accepted
-  {
-    Some(request.stream)
-  } else {
-    None
   }
 }

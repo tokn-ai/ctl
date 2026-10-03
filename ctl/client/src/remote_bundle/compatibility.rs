@@ -101,7 +101,7 @@ pub(super) fn validate_components(
   Ok(())
 }
 
-pub(super) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
+pub(crate) fn compatible(components: &BTreeMap<String, ComponentInfo>) -> bool {
   let required = [
     (
       "ctl-agent",
@@ -200,7 +200,7 @@ struct ArchiveManifest {
 }
 
 /// Parse flat regular tar entries without writing or executing foreign binaries.
-pub(super) fn verify_archive(
+pub(crate) fn verify_archive(
   manifest: &BundleSet,
   target: &str,
   bytes: &[u8],
@@ -335,4 +335,4 @@ fn invalid(message: &str) -> Error {
 }
 
 #[cfg(test)]
-pub(super) mod tests;
+pub(crate) mod tests;

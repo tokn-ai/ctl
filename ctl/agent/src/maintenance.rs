@@ -43,6 +43,7 @@ pub async fn prepare_ctmux_restart<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
           protocol_version: prepared.before.protocol_version,
           control_protocol_version: prepared.before.control_protocol_version,
           protocols: prepared.before.protocols.clone(),
+          legacy_protocols: prepared.before.legacy_protocols.clone(),
         },
         available: prepared.available.clone(),
       },
@@ -110,12 +111,19 @@ async fn prepare<R: AsyncRead + Unpin>(
     .clone()
     .filter(|path| path.is_absolute())
     .ok_or_else(|| io::Error::other("Install ctmuxd beside ctl-agent before restarting."))?;
-  ctmux_ipc::lifecycle::Client::new(config.ctmux_socket.clone())
+  let prepared = ctmux_ipc::lifecycle::Client::new(config.ctmux_socket.clone())
     .with_daemon_executable(executable)
     .preflight_restart()
     .await
-    .map(|prepared| (protocol_version, prepared))
-    .map_err(io::Error::other)
+    .map_err(io::Error::other)?;
+  if !prepared.before.legacy_protocols.is_empty()
+    && protocol_version != maintenance::CONTRACT_V1_0_3
+  {
+    return Err(io::Error::other(
+      "Legacy daemon maintenance requires contract 1.0.3; update the client first.",
+    ));
+  }
+  Ok((protocol_version, prepared))
 }
 
 async fn await_confirmation<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<()> {

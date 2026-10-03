@@ -52,6 +52,7 @@ enum Operation {
 
 #[tauri::command]
 pub async fn preflight_component_action(
+  app: tauri::AppHandle,
   window: tauri::WebviewWindow,
   state: tauri::State<'_, AppState>,
   request: PreflightRestartRequest,
@@ -59,7 +60,7 @@ pub async fn preflight_component_action(
   let _transition = TRANSITION
     .try_lock()
     .map_err(|_| transition_in_progress())?;
-  let prepared = prepare(state.inner(), &request.component_id).await?;
+  let prepared = prepare(&app, state.inner(), &request.component_id).await?;
   let response = prepared.response.clone();
   let token = response.action_token.clone();
   let mut pending = PREPARED.lock().await;
@@ -82,7 +83,11 @@ pub async fn preflight_component_action(
   Ok(response)
 }
 
-async fn prepare(state: &AppState, component_id: &str) -> CommandResult<PreparedAction> {
+async fn prepare(
+  app: &tauri::AppHandle,
+  state: &AppState,
+  component_id: &str,
+) -> CommandResult<PreparedAction> {
   let mut response = ComponentActionPreflight {
     action_token: uuid::Uuid::new_v4().to_string(),
     component_id: component_id.into(),
@@ -138,7 +143,7 @@ async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prepared
       }
     }
     id if id.starts_with("remote:") => {
-      let prepared = super::remote_actions::prepare(state, id).await?;
+      let prepared = super::remote_actions::prepare(app, state, id).await?;
       let preview = &prepared.preview;
       response.component_id.clone_from(&preview.component_id);
       response.component = preview.component;

@@ -150,10 +150,20 @@ async fn proxy_preparation_child() {
       .await
       .unwrap_err(),
   );
+  let valid_archive =
+    crate::remote_bundle::compatibility::tests::Fixture::new("0.1.0", &"a".repeat(40))
+      .bundle()
+      .archive;
   rejected(
-    install_ssh_unix_agent_interactive("fixture", &options, &SshInteraction::Inherit, "test", &[])
-      .await
-      .unwrap_err(),
+    install_ssh_unix_agent_interactive(
+      "fixture",
+      &options,
+      &SshInteraction::Inherit,
+      "test",
+      &valid_archive,
+    )
+    .await
+    .unwrap_err(),
   );
   assert_eq!(CALLS.load(Ordering::Relaxed), 5);
 }

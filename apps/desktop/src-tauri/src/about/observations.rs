@@ -96,6 +96,9 @@ fn insert(
       status: super::models::VersionStatus::Unknown,
       running: Some(running),
       required_protocols: expected_protocols.clone(),
+      installed: None,
+      restart_required: false,
+      legacy_protocols: Vec::new(),
       // The remote table explicitly labels this reference as "This app build".
       // Confirmed actions inspect the installed remote replacement separately.
       available: Some(ComponentVersionInfo::from_build(

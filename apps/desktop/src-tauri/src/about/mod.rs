@@ -1,5 +1,7 @@
 //! Read-only component diagnostics and owner-bound, confirmed maintenance.
 
+pub(crate) mod bundles;
+mod inventory;
 mod local;
 mod models;
 pub(crate) mod observations;
@@ -10,12 +12,14 @@ pub use models::ComponentVersionsSnapshot;
 
 use models::{ComponentVersionInfo, ComponentVersionRow, ProtocolVersion, VersionStatus};
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_component_versions(
+  app: tauri::AppHandle,
   state: tauri::State<'_, crate::state::AppState>,
+  host_id: Option<String>,
 ) -> crate::error::CommandResult<ComponentVersionsSnapshot> {
   let ctld_owners = local::owners();
-  let (ctld, ctmuxd, taskd, remote) = tokio::join!(
+  let (ctld, ctmuxd, taskd, remote, saved) = tokio::join!(
     async {
       let mut tasks = tokio::task::JoinSet::new();
       for owner in ctld_owners {
@@ -39,7 +43,27 @@ pub async fn get_component_versions(
     local::ctmuxd(),
     local::taskd(),
     state.remote_observations(),
+    inventory::rows(&app, host_id.as_deref()),
   );
+  let saved = saved?;
+  let mut active = observations::rows(remote);
+  for row in &mut active {
+    row.observation = "last_observed";
+    row.installed = saved
+      .iter()
+      .find(|saved| saved.host_id == row.host_id && saved.component == row.component)
+      .and_then(|saved| saved.installed.clone());
+    row.compare_installed();
+  }
+  active.retain(|row| {
+    row.component == "ctl_agent"
+      || !saved.iter().any(|saved| {
+        saved.host_id == row.host_id
+          && saved.component == row.component
+          && matches!(saved.observation, "running" | "legacy")
+          && saved.status != VersionStatus::Unavailable
+      })
+  });
   let mut app = ComponentVersionRow::local("ctmux", "ctmux");
   app.observation = "bundled";
   app.status = VersionStatus::Current;
@@ -62,12 +86,13 @@ pub async fn get_component_versions(
       .map(ProtocolVersion::from)
       .collect(),
   });
-  app.detail = Some("Versions below describe running processes and available local helpers. Opening About does not start or update them.".into());
+  app.detail = Some("Opening Components inspects existing owners and installed helpers without starting or updating services.".into());
   Ok(ComponentVersionsSnapshot {
     components: std::iter::once(app)
       .chain(ctld)
       .chain([ctmuxd, taskd])
-      .chain(observations::rows(remote))
+      .chain(saved)
+      .chain(active)
       .collect(),
   })
 }

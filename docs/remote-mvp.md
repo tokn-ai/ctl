@@ -136,30 +136,29 @@ before uploading; if that ID cannot be verified, repair stops. It reuses the
 selected authenticated SSH connection, including its VPN/gateway route. Piped
 commands and later reconnects never prompt or install automatically.
 
-Repair validates the bundle's checksums and its own product/source identity.
-It looks for reusable local bundles (`CTL_REMOTE_BUNDLES_DIR`, checkout resources
-in debug builds, resources beside the executable, or `~/.tokn/ctl/agent-bundles`),
-then its verified download cache, the matching official release, and an existing
-GitHub bundle artifact for that exact revision when `gh` is available. It never selects an
-arbitrary latest build or starts a workflow. For source development, `pnpm
-agents:sync` from `apps/desktop` prepares bundles for a clean pushed commit.
-Downloaded manifests and target archives are stored in
-`~/.tokn/ctl/agent-bundles/<revision>/<target>/`, shared across remote hosts.
-Schema-2 bundles include full component metadata for `ctl-agent`, `ctmuxd`, and
-`ctl-taskd`. Reuse verifies the archive, each binary checksum, target, clean source
-identity, and agreement between the outer and archived metadata. Every required
-client/service contract and companion dependency must have an explicit shared
-published version. Product releases and source revisions may differ from the
-CLI, and development clients can reuse verified compatible bundles. Exact-current
-source entries are checked first; other entries use stable revision order, which
-does not claim recency. Schema-1 bundles remain exact-clean-source-only. Network
-downloads still match the clean, identified client revision.
-These checks run before any network lookup, so a compatible cached bundle works
-offline. Publication uses
-private staging and atomic rename; cancelled downloads leave no partial cache
-entry. Damaged managed cache entries can be downloaded again. An invalid
-explicit `CTL_REMOTE_BUNDLES_DIR` still stops repair, and cache write errors warn
-without rejecting an otherwise verified bundle.
+Repair verifies the complete build and uses the explicit upload selection in
+`~/.tokn/ctl/components`. The selection is shared across remote hosts of that
+target and stays stable until Sync/Update changes it. If there is no selection,
+repair can initialize one from a verified schema-2 local resource bundle, an
+existing legacy cache, the matching official release, or an existing GitHub
+bundle artifact for the client revision. It never starts a workflow. Development
+`pnpm agents:sync` explicitly imports and selects all four CI targets.
+
+Each bundle contains `ctl-agent`, `ctmuxd`, `ctl-taskd`, and `ctld`. Import verifies
+archive and binary checksums, a common identified build, and agreement between
+the outer and archived advertisements. Client and companion contracts must have
+explicit shared published versions. The selected bundle may differ from the
+client's product version or source revision. CI artifact lookup still needs a
+clean, identified client revision; release reuse depends on advertised contracts.
+Legacy schema-1 artifacts cannot become a complete managed selection.
+
+Publication and selection use private staging and atomic rename. Corrupt or
+incompatible selections stop repair instead of changing the build automatically.
+Use `ctl components sync --from <directory> --target <target> --purpose upload`
+to select a verified replacement. `CTL_REMOTE_BUNDLES_DIR` supplies the initial
+candidate when no upload selection exists; it does not override a selection.
+See [Components and updates](component-updates.md) for layout and local use.
+
 Upload progress shows the archive, received bytes, speed, and installation
 stage; a healthy transfer has no overall time limit. Ctrl-C cancels repair.
 

@@ -4,6 +4,9 @@
 //! authentication, host verification, proxying, and connection multiplexing
 //! belong to the user's OpenSSH installation and configuration.
 
+#[cfg(unix)]
+pub mod components;
+
 use std::ffi::OsString;
 use std::future::{Future, ready};
 use std::io;
@@ -897,6 +900,7 @@ pub fn is_retryable_connection_error(error: &CoreError) -> bool {
     | CoreError::SshCommandFailed { .. }
     | CoreError::InvalidSshCommandOutput
     | CoreError::InvalidAgentBundleId(_)
+    | CoreError::InvalidComponentBundle(_)
     | CoreError::InvalidSshPreface(_)
     | CoreError::AgentNotFound
     | CoreError::IdentityUnsupported
@@ -1206,6 +1210,8 @@ pub enum CoreError {
   InvalidSshCommandOutput,
   #[error("invalid ctl-agent bundle id '{0}'")]
   InvalidAgentBundleId(String),
+  #[error("invalid complete component bundle: {0}")]
+  InvalidComponentBundle(String),
   #[error("could not read the ctl-agent transport marker from SSH: {0}")]
   ReadSshPreface(#[source] io::Error),
   #[error("SSH connection failed before ctl-agent was ready: {0}")]

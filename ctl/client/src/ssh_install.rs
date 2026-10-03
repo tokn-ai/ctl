@@ -71,7 +71,7 @@ pub async fn install_ssh_unix_agent_interactive_with_progress(
   if options.remote_platform != RemotePlatform::Unix {
     return Err(CoreError::InvalidSshOption("remote_platform".into()));
   }
-  let script = install_script(bundle_id, archive.len())?;
+  let script = installation_script(bundle_id, archive)?;
   let mut command = Command::new(SSH_PROGRAM);
   let extra = configure_ssh_interaction(&mut command, interaction);
   command
@@ -82,6 +82,14 @@ pub async fn install_ssh_unix_agent_interactive_with_progress(
 }
 
 fn install_script(bundle_id: &str, archive_bytes: usize) -> Result<String, CoreError> {
+  build_install_script(bundle_id, archive_bytes, None)
+}
+
+fn build_install_script(
+  bundle_id: &str,
+  archive_bytes: usize,
+  managed: Option<(&str, &str, &str)>,
+) -> Result<String, CoreError> {
   if bundle_id.is_empty()
     || bundle_id.len() > 128
     || !bundle_id
@@ -90,11 +98,39 @@ fn install_script(bundle_id: &str, archive_bytes: usize) -> Result<String, CoreE
   {
     return Err(CoreError::InvalidAgentBundleId(bundle_id.into()));
   }
+  let (target, store_id, digest) = managed.unwrap_or(("", "", ""));
   Ok(
     UNIX_INSTALL_COMMAND
       .replace("__BUNDLE_ID__", bundle_id)
-      .replace("__ARCHIVE_BYTES__", &archive_bytes.to_string()),
+      .replace("__ARCHIVE_BYTES__", &archive_bytes.to_string())
+      .replace("__MANAGED__", if managed.is_some() { "yes" } else { "no" })
+      .replace("__BUNDLE_TARGET__", target)
+      .replace("__STORE_ID__", store_id)
+      .replace("__ARCHIVE_SHA256__", digest),
   )
+}
+
+fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<String, CoreError> {
+  #[cfg(unix)]
+  if let Some(manifest) = crate::components::inspect_upload_archive(archive)
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?
+  {
+    use sha2::{Digest as _, Sha256};
+    let expected = manifest
+      .distribution_id
+      .as_ref()
+      .unwrap_or(&manifest.bundle_id);
+    if expected != bundle_id {
+      return Err(CoreError::InvalidAgentBundleId(bundle_id.into()));
+    }
+    let digest = format!("{:x}", Sha256::digest(archive));
+    return build_install_script(
+      bundle_id,
+      archive.len(),
+      Some((&manifest.target_triple, &manifest.bundle_id, &digest)),
+    );
+  }
+  install_script(bundle_id, archive.len())
 }
 
 async fn run_install_command(

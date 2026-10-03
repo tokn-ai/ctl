@@ -118,6 +118,54 @@ async function newHostDetails(user: ReturnType<typeof userEvent.setup>, selectDi
 }
 
 describe("SSH host quick-input flow", () => {
+  it("verifies a component update without attaching a terminal or restarting sessions", async () => {
+    vi.mocked(installRemoteAgent).mockResolvedValue(installedBundle);
+    const target = { kind: "ssh" as const, host_id: "saved", destination: "example", remote_info: remoteInfo };
+    const complete = vi.fn();
+    const close = vi.fn();
+    const connected = vi.fn();
+    const verified = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} component_mode="update"
+      on_components_complete={complete} onConnected={connected} onVerified={verified} onClose={close} />);
+    await userEvent.setup().click(screen.getByRole("option", { name: /Update remote components/ }));
+    await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(true));
+    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function), expect.any(Function));
+    expect(probeSshHost).not.toHaveBeenCalled();
+    expect(connected).not.toHaveBeenCalled();
+    expect(verified).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("checking components uses the passive account probe without recovery or terminal callbacks", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const target = { kind: "ssh" as const, destination: "example", remote_info: remoteInfo };
+    const complete = vi.fn();
+    const close = vi.fn();
+    const verified = vi.fn();
+    render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} component_mode="inspect" autoConnect
+      on_components_complete={complete} onVerified={verified} onClose={close} /></StrictMode>);
+    await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(false));
+    expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function), true);
+    expect(installRemoteAgent).not.toHaveBeenCalled();
+    expect(verified).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("checking after uncertain activation does not claim an update succeeded", async () => {
+    vi.mocked(installRemoteAgent).mockRejectedValue({ code: "remote_install_verification_failed", message: "Installed, but could not verify activation." });
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const complete = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} target={{ kind: "ssh", destination: "example" }} component_mode="update"
+      on_components_complete={complete} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("option", { name: /Update remote components/ }));
+    await screen.findByText("Installed, but could not verify activation.");
+    expect(complete).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("option", { name: "Check host" }));
+    await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(false));
+    expect(installRemoteAgent).toHaveBeenCalledOnce();
+  });
+
   it("defaults Connect through to Direct and preserves that choice when going back", async () => {
     vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const { user, save } = setupNewHost();

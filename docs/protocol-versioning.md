@@ -148,3 +148,12 @@ At release, freeze the final development contract and record the exact protocol
 map in the release metadata. Do not increment the minor again at this point.
 Resource bounds on metadata are transport constraints, never a policy allowing
 earlier published contracts to be removed.
+
+Component inspection adds development maintenance contract `1.0.3`, retaining
+`1.0.2` for published-owner restart preparation. The new contract supports a
+fixed `inspect_components` request and reports historical numeric ctmux control
+metadata separately from published protocols. Numeric-owner restart preparation
+is available only under `1.0.3`; it pins the successful historical control stream
+and requires the same separate confirmation as a published owner. This is an
+explicit maintenance bridge, not a claim that numeric session protocol 13
+implements published session contract `1.0.13`.

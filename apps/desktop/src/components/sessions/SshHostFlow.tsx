@@ -44,6 +44,9 @@ import type {
 } from "../../lib/types";
 
 export interface SshHostFlowProps {
+  /** Authenticate and inspect or update components without opening a terminal. */
+  component_mode?: "inspect" | "update";
+  on_components_complete?(updated: boolean): void;
   suggestions: readonly string[];
   tailscaleDevices?: readonly TailscaleDevice[];
   discoveryLoading?: boolean;
@@ -119,6 +122,8 @@ type Step =
 
 export function SshHostFlow({
   suggestions,
+  component_mode,
+  on_components_complete,
   tailscaleDevices = [],
   discoveryLoading = false,
   warning,
@@ -151,7 +156,7 @@ export function SshHostFlow({
   const availableTailscaleDevices = discoveryLoading ? [] : tailscaleDevices.filter((device) => device.online === true);
   const needsSshUser = target?.kind === "ssh" && Boolean(target.tailscale_node_id) && !target.remote_info && !target.user;
   const [step, setStep] = useState<Step>(() => {
-    if (updateRequired) return "update";
+    if (updateRequired || component_mode === "update") return "update";
     if (needsSshUser) return "ssh_user";
     if (target) return autoConnect ? "progress" : "reconnect";
     return complex || editingConnection ? "route" : "host";
@@ -184,11 +189,11 @@ export function SshHostFlow({
   const [opening_vpn_sign_in, setOpeningVpnSignIn] = useState(false);
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
-  const [canInstallAgent, setCanInstallAgent] = useState(updateRequired);
+  const [canInstallAgent, setCanInstallAgent] = useState(updateRequired || component_mode === "update");
   const [install_progress, setInstallProgress] = useState<RemoteAgentInstallProgress | null>(null);
   const attemptRef = useRef<string | null>(null);
   const identityRef = useRef<RemoteIdentity | null>(null);
-  const [needsUpdate, setNeedsUpdate] = useState(updateRequired);
+  const [needsUpdate, setNeedsUpdate] = useState(updateRequired || component_mode === "update");
   const restartingRef = useRef(false);
   const componentsUpdatedRef = useRef<ConnectionTarget | null>(null);
   const [needsDaemonRestart, setNeedsDaemonRestart] = useState(false);
@@ -258,16 +263,25 @@ export function SshHostFlow({
     setPrompt(null);
     setStep("progress");
     try {
-      const remote_info = await probeSshHost(candidate, attempt, (next) => {
+      const on_prompt = (next: SshPrompt) => {
         if (attemptRef.current === attempt && !closedRef.current)
           setPrompt(next);
-      });
+      };
+      const remote_info = component_mode
+        ? await probeSshHost(candidate, attempt, on_prompt, true)
+        : await probeSshHost(candidate, attempt, on_prompt);
       if (attemptRef.current !== attempt || closedRef.current) return;
       setPrompt(null);
       if (expectedIdentity && expectedIdentity.remote_id !== remote_info.remote_id) {
         throw new Error("This connection reaches a different remote environment. Choose a connection for this host and account.");
       }
       identityRef.current = remote_info;
+      if (component_mode) {
+        attemptRef.current = null;
+        on_components_complete?.(false);
+        onClose();
+        return;
+      }
       setSaving(true);
       if (onSaveNewHost && candidate.kind === "ssh") {
         attemptRef.current = null;
@@ -332,7 +346,7 @@ export function SshHostFlow({
         && sameSshEndpoint(candidate, componentsUpdatedRef.current);
       setNeedsUpdate(update);
       setNeedsDaemonRestart(restart);
-      setCanInstallAgent(!restart && (update || code === "ctl_agent_not_found"));
+      setCanInstallAgent(!restart && (component_mode !== undefined || update || code === "ctl_agent_not_found"));
       if (restart) await checkRestart(candidate);
       else setStep("retry");
     } finally {
@@ -364,7 +378,13 @@ export function SshHostFlow({
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
       componentsUpdatedRef.current = candidate;
-      await connect(reconnect_candidate);
+      if (component_mode && candidate === reconnect_candidate) {
+        on_components_complete?.(true);
+        onClose();
+        return;
+      }
+      if (component_mode === "update") await installAgent(reconnect_candidate);
+      else await connect(reconnect_candidate);
     } catch (failure) {
       if (attemptRef.current !== attempt || closedRef.current) return;
       attemptRef.current = null;
@@ -907,7 +927,7 @@ export function SshHostFlow({
               ]
             : []),
           ...(needsDaemonRestart ? [{ id: "restart_ctmux", label: "Force restart remote ctmux…" }] : []),
-          ...(step === "update" ? [] : [{ id: "retry", label: "Connect" }]),
+          ...(step === "update" ? [] : [{ id: "retry", label: component_mode ? "Check host" : "Connect" }]),
         ],
       };
       if (target && needsSshUser) onBack = back("ssh_user");
@@ -928,7 +948,7 @@ export function SshHostFlow({
       mode = remoteInstallProgressMode(install_progress);
       break;
     case "progress":
-      title = "Connecting to host";
+      title = component_mode ? "Checking host components" : "Connecting to host";
       description = candidateRef.current?.kind === "ssh" && hasVpnRoute(candidateRef.current)
         ? "Connecting the selected VPN if needed, then verifying the SSH connection and remote environment."
         : "Verifying the SSH connection and remote environment.";

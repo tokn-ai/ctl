@@ -1,5 +1,7 @@
 mod bundled;
 mod commands;
+#[cfg(unix)]
+mod components;
 mod connection;
 mod host;
 mod openssh;
@@ -49,6 +51,12 @@ enum RemotePlatform {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+  /// Inspect and explicitly sync complete component build bundles.
+  #[cfg(unix)]
+  Components {
+    #[command(subcommand)]
+    command: components::Command,
+  },
   /// Install and verify this CLI's signed macOS ctld helper, without restarting it.
   Setup(setup::Arguments),
   /// Print bundled agent skills and supporting guides without connecting.

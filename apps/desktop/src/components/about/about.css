@@ -33,7 +33,8 @@
 .about-version-table td > span, .about-component-name strong { display: block; overflow: hidden; text-overflow: ellipsis; }
 .about-component-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .about-component-name strong { min-width: 0; }
-.about-row-actions { display: flex; align-items: center; gap: 12px; }
+.about-row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.about-build-id { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
 .about-row-actions button { margin-left: auto; padding: 4px 8px; }
 .about-version-status { display: inline-block; padding: 3px 7px; border-radius: 3px; color: var(--muted); background: #2d2d2d; white-space: nowrap; }
 .about-status-current { color: #addda9; background: #213323; }
@@ -47,3 +48,10 @@
 .about-empty { padding: 18px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); }
 .about-footnote { margin-top: 28px !important; font-size: 11px; }
 @media (max-width: 1000px) { .about-page-header, .about-content { padding-left: 22px; padding-right: 22px; } }
+
+.about-bundle-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.about-bundle-heading h2 { margin: 0; }
+.about-bundle-table { width: 100%; min-width: 760px; border-collapse: collapse; text-align: left; }
+.about-bundle-table th, .about-bundle-table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.about-bundle-table small { display: block; margin-top: 4px; color: var(--muted); }
+.about-bundle-table code { font-size: 12px; }

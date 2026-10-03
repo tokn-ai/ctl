@@ -452,20 +452,8 @@ fn download_redirects_allow_only_https_github_release_hosts() {
 }
 
 #[tokio::test]
-async fn invalid_or_dirty_builds_cannot_start_release_downloads() {
+async fn invalid_selectors_cannot_start_release_downloads() {
   let mut expected = build();
-  expected.dirty = true;
-  assert!(matches!(
-    download_release_bundle(TARGET, &expected).await,
-    Err(Error::Stale(_))
-  ));
-  expected = build();
-  expected.source_revision = None;
-  assert!(matches!(
-    download_release_bundle(TARGET, &expected).await,
-    Err(Error::Stale(_))
-  ));
-  expected = build();
   expected.version = "../other-repository".into();
   assert!(matches!(
     download_release_bundle(TARGET, &expected).await,

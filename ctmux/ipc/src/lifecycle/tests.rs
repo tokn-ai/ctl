@@ -131,7 +131,11 @@ async fn changed_executable_and_expired_confirmation_preserve_owner() {
   server.await.unwrap();
 }
 
-async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, LifecycleError> {
+async fn replacement(
+  fixture: &Fixture,
+  valid: bool,
+  numeric: bool,
+) -> Result<RestartOutcome, LifecycleError> {
   let listener = fixture.listener();
   let control = crate::control_socket_path(&fixture.client.socket).unwrap();
   let socket = fixture.client.socket.clone();
@@ -141,8 +145,13 @@ async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, L
     info.build.source_fingerprint = "0".repeat(64);
   }
   let server = tokio::spawn(async move {
-    let (mut stream, _) = listener.accept().await.unwrap();
-    handshake_reply(&mut stream, None).await;
+    let mut stream = if numeric {
+      numeric_handshake_reply(&listener, true).await
+    } else {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      handshake_reply(&mut stream, None).await;
+      stream
+    };
     assert!(matches!(
       crate::read_local_control_frame::<_, LocalControlClientMessage>(&mut stream)
         .await
@@ -189,7 +198,7 @@ async fn replacement(fixture: &Fixture, valid: bool) -> Result<RestartOutcome, L
 #[tokio::test]
 async fn legacy_owner_is_replaced_with_the_verified_selected_build() {
   let fixture = Fixture::new().await;
-  let result = replacement(&fixture, true).await.unwrap();
+  let result = replacement(&fixture, true, false).await.unwrap();
   assert_eq!(result.after, fixture.info);
   assert_eq!(result.terminated_sessions, 2);
 }
@@ -197,7 +206,7 @@ async fn legacy_owner_is_replaced_with_the_verified_selected_build() {
 #[tokio::test]
 async fn wrong_successor_build_is_not_reported_as_success() {
   let fixture = Fixture::new().await;
-  let error = replacement(&fixture, false).await.unwrap_err();
+  let error = replacement(&fixture, false, false).await.unwrap_err();
   assert_eq!(error.code(), "ctmuxd_restart_verification_failed");
   assert!(error.may_have_stopped());
 }
@@ -215,5 +224,97 @@ async fn closed_pinned_owner_is_non_destructive() {
   let error = prepared.restart().await.unwrap_err();
   assert_eq!(error.code(), "ctmuxd_owner_changed");
   assert!(!error.may_have_stopped());
+  assert!(!fixture.root.join("spawned").exists());
+}
+
+async fn numeric_handshake_reply(listener: &UnixListener, restart_supported: bool) -> Stream {
+  let (mut stream, _) = listener.accept().await.unwrap();
+  let offer: serde_json::Value = crate::read_local_control_frame(&mut stream)
+    .await
+    .unwrap()
+    .unwrap();
+  assert!(offer.get("protocol").is_some());
+  drop(stream); // Historical owners close the unknown published envelope.
+  let (mut stream, _) = listener.accept().await.unwrap();
+  let offer: serde_json::Value = crate::read_local_control_frame(&mut stream)
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(
+    offer,
+    serde_json::json!({"type": "handshake", "protocol_version": 1})
+  );
+  crate::write_local_control_frame(
+    &mut stream,
+    &serde_json::json!({
+      "type": "handshake_accepted", "protocol_version": 1,
+      "data_protocol_version": 13, "build": ctl_core::component::build_info(),
+      "restart_supported": restart_supported,
+    }),
+  )
+  .await
+  .unwrap();
+  stream
+}
+
+#[tokio::test]
+async fn numeric_owner_observation_and_canceled_preflight_never_restart() {
+  let fixture = Fixture::new().await;
+  let listener = fixture.listener();
+  let server = tokio::spawn(async move {
+    for _ in 0..2 {
+      let mut stream = numeric_handshake_reply(&listener, true).await;
+      assert!(
+        crate::read_local_control_frame::<_, serde_json::Value>(&mut stream)
+          .await
+          .unwrap()
+          .is_none()
+      );
+    }
+  });
+  let observed = fixture.client.observe().await.unwrap().unwrap();
+  assert_eq!(observed.protocols, Vec::<ProtocolInfo>::new());
+  assert!(observed.protocol_version.is_none());
+  assert!(observed.control_protocol_version.is_none());
+  assert!(observed.component_info().is_none());
+  assert_eq!(observed.legacy_protocols[1].version, 13);
+  let prepared = fixture.client.preflight_restart().await.unwrap();
+  drop(prepared);
+  server.await.unwrap();
+  assert!(!fixture.root.join("spawned").exists());
+}
+
+#[tokio::test]
+async fn numeric_owner_can_only_be_restarted_on_its_prepared_stream() {
+  let fixture = Fixture::new().await;
+  let result = replacement(&fixture, true, true).await.unwrap();
+  assert_eq!(result.after, fixture.info);
+  assert_eq!(result.terminated_sessions, 2);
+}
+
+#[tokio::test]
+async fn numeric_owner_without_restart_capability_is_preserved() {
+  let fixture = Fixture::new().await;
+  let listener = fixture.listener();
+  let server = tokio::spawn(async move {
+    let mut stream = numeric_handshake_reply(&listener, false).await;
+    assert!(
+      crate::read_local_control_frame::<_, serde_json::Value>(&mut stream)
+        .await
+        .unwrap()
+        .is_none()
+    );
+  });
+  let error = fixture.client.preflight_restart().await.unwrap_err();
+  assert_eq!(error.code(), "daemon_restart_unsupported");
+  assert!(!error.may_have_stopped());
+  server.await.unwrap();
+  assert!(!fixture.root.join("spawned").exists());
+}
+
+#[tokio::test]
+async fn absent_observation_never_starts_the_selected_helper() {
+  let fixture = Fixture::new().await;
+  assert!(fixture.client.observe().await.unwrap().is_none());
   assert!(!fixture.root.join("spawned").exists());
 }

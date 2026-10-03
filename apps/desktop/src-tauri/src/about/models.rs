@@ -1,4 +1,4 @@
-use ctl_core::component::{ComponentBuildInfo, ProtocolInfo};
+use ctl_core::component::{ComponentBuildInfo, LegacyProtocolInfo, ProtocolInfo};
 use ctl_core::protocol::ProtocolVersion as ContractVersion;
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +111,9 @@ pub struct ComponentVersionRow {
   pub status: VersionStatus,
   pub running: Option<ComponentVersionInfo>,
   pub available: Option<ComponentVersionInfo>,
+  pub installed: Option<ComponentVersionInfo>,
+  pub restart_required: bool,
+  pub legacy_protocols: Vec<LegacyProtocolInfo>,
   pub required_protocols: Vec<ProtocolVersion>,
   pub restart_supported: bool,
   pub action: Option<ComponentAction>,
@@ -130,6 +133,9 @@ impl ComponentVersionRow {
       status: VersionStatus::Unknown,
       running: None,
       available: None,
+      installed: None,
+      restart_required: false,
+      legacy_protocols: Vec::new(),
       required_protocols: required_protocols(component),
       restart_supported: false,
       action: None,
@@ -139,6 +145,7 @@ impl ComponentVersionRow {
   }
 
   pub fn compare(&mut self) {
+    self.compare_installed();
     self.status = compare(self.running.as_ref(), Some(&expected_component_version()));
     if self.running.as_ref().is_some_and(|running| {
       running.protocols.iter().any(|protocol| {
@@ -153,6 +160,16 @@ impl ComponentVersionRow {
     }) {
       self.status = VersionStatus::Incompatible;
     }
+  }
+
+  pub fn compare_installed(&mut self) {
+    self.restart_required = (self.observation == "legacy" || !self.legacy_protocols.is_empty())
+      && self.installed.is_some()
+      || self.running.is_some()
+        && matches!(
+          compare(self.running.as_ref(), self.installed.as_ref()),
+          VersionStatus::Outdated | VersionStatus::Newer | VersionStatus::DifferentBuild
+        );
   }
 
   pub fn note_available_mismatch(&mut self) {

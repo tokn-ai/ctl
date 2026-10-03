@@ -140,6 +140,21 @@ pub fn daemon_executable() -> Result<PathBuf, ClientError> {
     return Ok(PathBuf::from(executable));
   }
   let current = env::current_exe().map_err(ClientError::CurrentExecutable)?;
+  #[cfg(unix)]
+  if let Some(executable) = ctl_core::bundles::selected_executable(
+    "ctl-taskd",
+    &[
+      ("task", ctl_task_proto::SUPPORTED_PROTOCOL_VERSIONS),
+      (
+        "task_control",
+        ctl_task_proto::control::SUPPORTED_PROTOCOL_VERSIONS,
+      ),
+    ],
+  )
+  .map_err(ClientError::CurrentExecutable)?
+  {
+    return Ok(executable);
+  }
   let sibling = current.with_file_name(format!("ctl-taskd{}", env::consts::EXE_SUFFIX));
   if sibling.is_file() {
     return Ok(sibling);

@@ -32,13 +32,16 @@ This is not a remote reachability check. Previously learned identity/version is 
 ## Save and update definitions
 
 ```sh
-ctl host add work 10.0.0.20 --user alice --json
-ctl host add lab lab-ssh-alias --ssh-config --json
+ctl host create
+ctl host create work 10.0.0.20 --user alice --json
+ctl host create lab lab-ssh-alias --ssh-config --json
 ctl host update work --name office --port 2222 --json
 ctl host update office --clear port --json
 ```
 
-Add saves one host with a first method named `SSH` by default; use `--method-name NAME` to choose another name. It does not connect or install remote components. `--ssh-config` marks the destination as an existing OpenSSH config alias; these operations do not edit SSH config.
+Create saves one host with a first method named `SSH` by default; use `--method-name NAME` to choose another name. It does not connect or install remote components. `--ssh-config` marks the destination as an existing OpenSSH config alias; these operations do not edit SSH config.
+
+Bare `ctl host create` opens a questionnaire in an interactive terminal. Pass both `NAME DESTINATION` and the required connection flags in scripts; omitted name or destination can be prompted for in a terminal. Prompts go to stderr, so `--json` leaves only the saved host JSON on stdout. Creation does not prompt for credentials. Root `host add` is no longer accepted; `host method add` still adds a method to an existing host.
 
 Update preserves host/method IDs and any pinned remote identity. Omitted fields remain unchanged. It edits the preferred method unless `--method NAME_OR_ID` selects another. Use `--clear` for optional fields rather than supplying empty strings, and do not set and clear the same field in one operation. Consult `ctl host update --help` for available fields and clear values.
 

@@ -123,7 +123,7 @@ fn apply_status(status: &mut MethodStatus, result: Result<&'static str, String>)
 
 fn print_rows(views: &[HostView<'_>]) {
   if views.is_empty() {
-    println!("No saved hosts. Add one with: ctl host add NAME DESTINATION");
+    println!("No saved hosts. Create one with: ctl host create");
     return;
   }
   let rows = views.iter().flat_map(|view| {

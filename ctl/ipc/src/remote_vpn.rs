@@ -314,7 +314,18 @@ impl Client {
       protocol_version: None,
     };
     let (protocol_version, identity) = tokio::time::timeout(STARTUP_TIMEOUT, async {
-      read_preface(&mut stream).await?;
+      if let Err(error) = read_preface(&mut stream).await {
+        if matches!(error, Error::UnsupportedAgent)
+          && let Some(waiter) = stream.waiter.as_mut()
+          && let Ok(Ok(Ok(status))) = tokio::time::timeout(Duration::from_secs(1), waiter).await
+          && status.code() == Some(255)
+        {
+          // Failed SSH setup must not offer a component update. Older agents
+          // reject the VPN command with exit 2; missing agents send a marker.
+          return Err(Error::SshFailed);
+        }
+        return Err(error);
+      }
       let input = stream.input.as_mut().expect("SSH input is present");
       let protocol_version = negotiate_contract(&mut stream.output, input).await?;
       let identity = ctl_proto::read_identity(&mut stream)

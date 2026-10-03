@@ -613,6 +613,9 @@ Use `host method` to manage alternate routes. The preferred method cannot
 be removed until another is selected. Catalog edits use the desktop's lock,
 atomic writes, and content revisions; a concurrent edit fails without
 replacing it. Reload an already-open desktop to see CLI changes.
+When adding a connection in the desktop, leave **SSH host or config alias** blank
+to reuse the preferred method's SSH endpoint and settings, then choose the new
+route separately. Enter an address to use a different endpoint.
 
 Linked routes expand in place, with at most eight total hops. Cycles and missing
 host/method references are rejected; remove dependent links before deleting a
@@ -622,6 +625,13 @@ If that SSH host's agent does not support VPN control, the desktop offers
 **Update components on HOST**. It updates the VPN execution host through its
 preceding route, verifies its saved account identity before uploading, and retries
 the original destination connection.
+
+VPN traffic reuses that SSH host's authenticated connection. If its connection
+has closed, reconnect the route to authenticate the SSH host again. A terminal
+handshake that closes after account verification reports the final destination;
+it does not establish a protocol mismatch. Component updates preserve running
+daemons, so an older daemon may still need a manual restart when its sessions
+can be ended.
 
 ### Shells, commands, and file copies
 

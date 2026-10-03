@@ -496,6 +496,7 @@ fn disappearing_reuse_only_masters_do_not_authorize_shared_startup() {
         &configured,
         &endpoint(startup),
         "unused-token",
+        &ctl_ipc::socket_path(),
         #[cfg(target_os = "macos")]
         None,
       ),

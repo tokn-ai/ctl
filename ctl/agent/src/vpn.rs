@@ -17,7 +17,7 @@ pub async fn serve_stdio(
 ) -> io::Result<()> {
   #[cfg(unix)]
   {
-    let (mut reader, mut writer) = crate::stdio::take()?;
+    let (mut reader, mut writer) = ctl_ipc::stdio::take()?;
     serve(&mut reader, &mut writer, client, identity).await
   }
   #[cfg(not(unix))]

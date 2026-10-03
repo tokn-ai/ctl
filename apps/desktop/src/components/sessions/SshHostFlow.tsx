@@ -3,7 +3,7 @@ import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
 import { remoteInstallProgressMode } from "./remoteInstallProgress";
 import { GatewayRouteDialog } from "./GatewayRouteDialog";
 import { tailscaleDeviceDetail, VIRTUAL_SSH_GROUP, VIRTUAL_TAILSCALE_GROUP } from "./hostChoices";
-import { resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
+import { connectionMethodOptions, connectionSettings, resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
 import { vpnRouteDetail } from "../../features/vpn/status";
 import { hasVpnRoute, localVpnConnectionId } from "../../features/workspace/sshRoute";
 import { sameSshEndpoint } from "../../features/workspace/remoteRecovery";
@@ -56,6 +56,8 @@ export interface SshHostFlowProps {
   complex?: boolean;
   /** Edit connection settings without entering the reconnect flow. */
   initialTarget?: SshConnectionTarget;
+  /** Reuse the preferred SSH endpoint when adding a method with no address. */
+  default_target?: SshConnectionTarget;
   editing_host_id?: string | null;
   expectedIdentity?: RemoteIdentity;
   onSaveNewHost?(
@@ -126,6 +128,7 @@ export function SshHostFlow({
   updateRequired = false,
   complex = false,
   initialTarget,
+  default_target,
   editing_host_id,
   expectedIdentity,
   onSaveNewHost,
@@ -144,6 +147,7 @@ export function SshHostFlow({
   onClose,
 }: SshHostFlowProps) {
   const editingConnection = Boolean(onSaveConnection);
+  const preferred_endpoint = editingConnection && !initialTarget ? default_target : undefined;
   const availableTailscaleDevices = discoveryLoading ? [] : tailscaleDevices.filter((device) => device.online === true);
   const needsSshUser = target?.kind === "ssh" && Boolean(target.tailscale_node_id) && !target.remote_info && !target.user;
   const [step, setStep] = useState<Step>(() => {
@@ -271,7 +275,7 @@ export function SshHostFlow({
         return;
       }
       if (onSaveConnection && candidate.kind === "ssh") {
-        if (exportToSshConfig && !initialTarget && candidate.hostname &&
+        if (exportToSshConfig && !initialTarget && candidate.hostname && !candidate.ssh_config_alias &&
           !candidate.gateway_route?.length && !candidate.vpn_connection_id && !suggestions.includes(candidate.destination)) {
           await saveSshConfigHost({
             alias: candidate.destination,
@@ -496,9 +500,29 @@ export function SshHostFlow({
     const destination = address.trim();
     const alias = hostAlias.trim();
     const identity_file = hostIdentityFile.trim();
-    if (!destination) throw new Error("Enter the SSH host or config alias.");
     if (identity_file && /[\x00-\x1f\x7f]/u.test(identity_file)) {
       throw new Error("Enter a valid identity-file path.");
+    }
+    if (!destination) {
+      if (!preferred_endpoint) throw new Error("Enter the SSH host or config alias.");
+      if (preferred_endpoint.unavailable) {
+        throw new Error(`${preferred_endpoint.unavailable} Enter an SSH host or config alias for this connection.`);
+      }
+      const { vpn_connection_id: _vpn, gateway_route: _route, ...endpoint } = connectionSettings(preferred_endpoint);
+      const candidate = { ...endpoint, ...connectionMethodOptions(preferred_endpoint) };
+      if (alias && alias !== candidate.destination) {
+        if (candidate.ssh_config_alias && !candidate.hostname) {
+          throw new Error("A saved SSH config host must keep its existing alias.");
+        }
+        if (!/^[a-zA-Z0-9_.:-]+$/u.test(alias) || alias.startsWith("-")) {
+          throw new Error("Enter a name without spaces or SSH patterns.");
+        }
+        candidate.hostname ??= candidate.destination;
+        candidate.destination = alias;
+        delete candidate.ssh_config_alias;
+      }
+      if (identity_file) candidate.identity_file = identity_file;
+      return candidate;
     }
     const parsed = parseHostAddress(destination);
     const unchangedAlias = source && !source.hostname && destination === source.destination;
@@ -599,14 +623,18 @@ export function SshHostFlow({
     );
 
   if (step === "route") {
+    let route_settings: SshConnectionTarget | null = null;
     let defaultSshConfigMaster = false;
-    try { defaultSshConfigMaster = Boolean(routedHostSettings().ssh_config_alias); }
+    try {
+      route_settings = routedHostSettings();
+      defaultSshConfigMaster = route_settings.use_ssh_config_master ?? Boolean(route_settings.ssh_config_alias);
+    }
     catch { /* Incomplete address entry has no provider default yet. */ }
     return (
       <GatewayRouteDialog
         title={editingConnection ? initialTarget ? "Edit connection method" : "Add connection method" : undefined}
         submitLabel={editingConnection ? "Verify and save" : undefined}
-        target={{ kind: "ssh", host_id: editing_host_id ?? initialTarget?.host_id, destination: address.trim() || "New host", gateway_route: gatewayRoute, vpn_connection_id: vpnConnectionId }}
+        target={{ kind: "ssh", host_id: editing_host_id ?? initialTarget?.host_id, destination: route_settings?.destination || address.trim() || preferred_endpoint?.destination || "New host", gateway_route: gatewayRoute, vpn_connection_id: vpnConnectionId }}
         vpn_connections={vpn_connections}
         vpn_statuses={vpn_statuses}
         vpn_loading={vpn_loading}
@@ -616,6 +644,9 @@ export function SshHostFlow({
         targets={[]}
         hostSetup={{
           address,
+          default_address: preferred_endpoint ? targetAddress(preferred_endpoint) : undefined,
+          default_alias: !address.trim() ? preferred_endpoint?.destination : undefined,
+          default_identity_file: !address.trim() ? preferred_endpoint?.identity_file : undefined,
           alias: hostAlias,
           identity_file: hostIdentityFile,
           suggestions,
@@ -629,7 +660,8 @@ export function SshHostFlow({
           },
           export_to_ssh_config: editingConnection && !initialTarget ? {
             checked: exportToSshConfig,
-            allowed: !suggestions.includes(address.trim()) && !suggestions.includes(hostAlias.trim()),
+            allowed: Boolean(route_settings?.hostname) && !route_settings?.ssh_config_alias &&
+              !suggestions.includes(route_settings?.destination ?? ""),
             onChange: setExportToSshConfig,
           } : undefined,
           onAddressChange: setAddress,

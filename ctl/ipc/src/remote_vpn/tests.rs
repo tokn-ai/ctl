@@ -282,6 +282,32 @@ async fn identity_mismatch_closes_the_child_before_a_profile_can_be_sent() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn failed_ssh_startup_is_not_reported_as_missing_vpn_support() {
+  let target = SshTarget {
+    destination: "vpn-owner".into(),
+    ssh_config_alias: None,
+    use_ssh_config_master: None,
+    hostname: None,
+    user: None,
+    port: None,
+    identity_file: None,
+    gateways: vec![],
+  };
+  let client = Client::new(target, None);
+  for (exit_code, ssh_failure) in [(255, true), (2, false)] {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(format!("exit {exit_code}"));
+    let error = client.open_command(command).await.err().unwrap();
+    if ssh_failure {
+      assert!(matches!(error, Error::SshFailed));
+    } else {
+      assert!(matches!(error, Error::UnsupportedAgent));
+    }
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn successful_setup_keeps_buffered_tcp_bytes_and_half_close_reaps_the_ssh_process() {
   use tokio::io::AsyncWriteExt as _;
   let directory = std::env::temp_dir().join(format!("remote-vpn-stream-{}", std::process::id()));

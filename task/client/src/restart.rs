@@ -1,10 +1,7 @@
-//! Prepared restart of an idle task owner, including older control-v1 owners.
+//! Prepared restart of an idle task owner over its published control contract.
 
 use super::{ClientError, daemon_executable, retryable, spawn_daemon, wait_for_endpoint};
-use ctl_core::{
-  component::{ComponentInfo, ProtocolInfo},
-  executable::PreparedExecutable,
-};
+use ctl_core::{component::ComponentInfo, executable::PreparedExecutable};
 use ctl_task_ipc::{Stream, connect};
 use ctl_task_proto::{control, read_frame, write_frame};
 use std::path::PathBuf;
@@ -77,8 +74,8 @@ impl Client {
     PreparedExecutable::prepare(
       selected,
       &[
-        ("task", ctl_task_proto::PROTOCOL_VERSION),
-        ("task_control", control::PROTOCOL_VERSION),
+        ("task", ctl_task_proto::SUPPORTED_PROTOCOL_VERSIONS),
+        ("task_control", control::SUPPORTED_PROTOCOL_VERSIONS),
       ],
     )
     .await
@@ -87,8 +84,8 @@ impl Client {
 
   /// Pins an existing owner without sending a mutating request or starting a daemon.
   ///
-  /// Older owners expect `RestartDaemon` as their first frame. Retain an unsent
-  /// stream so they remain upgradeable without a new diagnostics protocol.
+  /// Retains an unsent stream until confirmation because `RestartDaemon` is
+  /// the first request of a dedicated control connection.
   ///
   /// # Errors
   /// Rejects absent endpoints and unavailable/incompatible replacement helpers.
@@ -179,10 +176,11 @@ impl PreparedRestart {
     }
     let configuration = timeout(Duration::from_secs(5), async {
       write_frame(&mut self.stream, &control::ClientMessage::RestartDaemon {
-        protocol_version: control::PROTOCOL_VERSION,
+        protocol: control::protocol_offer(),
       }).await.map_err(|error| LifecycleError::new("taskd_restart_failed", error).destructive())?;
       match read_frame::<_, control::ServerMessage>(&mut self.stream).await {
-        Ok(Some(control::ServerMessage::RestartAccepted { data_directory, ctmux_socket })) => Ok((data_directory, ctmux_socket)),
+        Ok(Some(control::ServerMessage::RestartAccepted { protocol_version, data_directory, ctmux_socket }))
+          if control::protocol_offer().accepts(protocol_version) => Ok((data_directory, ctmux_socket)),
         Ok(Some(control::ServerMessage::Error { message })) => Err(LifecycleError::new("taskd_restart_rejected", message)),
         _ => Err(LifecycleError::new("taskd_restart_unsupported", "The task owner did not acknowledge cooperative restart; it may require a one-time manual stop").destructive()),
       }
@@ -236,7 +234,7 @@ async fn verify_successor(
     write_frame(
       &mut stream,
       &control::ClientMessage::ComponentStatus {
-        protocol_version: control::PROTOCOL_VERSION,
+        protocol: control::protocol_offer(),
       },
     )
     .await
@@ -247,22 +245,22 @@ async fn verify_successor(
     if let Some(control::ServerMessage::ComponentStatus {
       build,
       protocol_version,
+      data_protocol_version,
+      protocols,
     }) = response
     {
-      let after = ComponentInfo {
-        build,
-        protocols: vec![
-          ProtocolInfo {
-            name: "task".into(),
-            version: protocol_version,
-          },
-          ProtocolInfo {
-            name: "task_control".into(),
-            version: control::PROTOCOL_VERSION,
-          },
-        ],
-      };
-      if replacement.matches(&after) {
+      let after = ComponentInfo { build, protocols };
+      if control::protocol_offer().accepts(protocol_version)
+        && after
+          .protocols
+          .iter()
+          .any(|protocol| protocol.name == "task_control" && protocol.supports(protocol_version))
+        && after
+          .protocols
+          .iter()
+          .any(|protocol| protocol.name == "task" && protocol.version == data_protocol_version)
+        && replacement.matches(&after)
+      {
         return Ok(after);
       }
     }

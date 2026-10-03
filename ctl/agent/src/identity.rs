@@ -63,6 +63,7 @@ fn installed_identity(remote_id: String, executable: &Path) -> io::Result<Remote
     build: Some(ctl_core::component::build_info()),
     ctmux_restart_supported: true,
     bundle,
+    protocols: ctl_proto::agent_protocols(),
   };
   if !identity.is_valid() {
     return Err(io::Error::new(

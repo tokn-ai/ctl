@@ -1,3 +1,4 @@
+use ctl_core::component::{ProtocolInfo, protocols_are_valid};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::fs;
@@ -35,6 +36,7 @@ struct Manifest {
   archive: String,
   sha256: String,
   archive_size: u64,
+  protocols: Vec<ProtocolInfo>,
   #[serde(default, deserialize_with = "development_identity")]
   development: Option<Development>,
 }
@@ -76,6 +78,15 @@ pub fn stage(
     || !lower_hex(&manifest.sha256, 64)
     || manifest.archive_size == 0
     || manifest.archive_size > 128 * 1024 * 1024
+    || !protocols_are_valid(&manifest.protocols)
+    || ["ctld", "ctld_lifecycle", "ctld_helper"]
+      .iter()
+      .any(|name| {
+        !manifest
+          .protocols
+          .iter()
+          .any(|protocol| protocol.name == *name)
+      })
   {
     return Err(invalid("ctld payload does not match this CLI"));
   }

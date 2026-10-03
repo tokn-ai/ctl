@@ -193,10 +193,11 @@ ctl environment, not hardware: copying its data directory copies its identity, s
 independent cloned environments must receive separate IDs. Keep the identity file
 when moving or restoring the same environment.
 
-The opt-in `ctl-agent connect --identity` protocol emits `ctl-ssh-v3\n`, a big-endian
-32-bit JSON byte length (at most 8192), then the identity JSON, before service bytes.
-Normal CLI connections retain the `ctl-ssh-v1\n` protocol. Older agents require an
-update for desktop identity discovery. SSH remains responsible for authentication
+CLI and desktop service channels use `ctl-agent connect --identity`, which emits
+the stable `ctl-ssh-identity\n` marker, negotiates the identity contract, and then
+writes a big-endian 32-bit JSON byte length (at most 8192) and identity JSON before
+service bytes. Unpublished older agents require repair for contract negotiation.
+See [protocol versioning](protocol-versioning.md). SSH remains responsible for authentication
 and host-key verification; the UUID is not an authorization credential. Before
 starting the agent, the Unix wrapper emits `ctl-ssh-nf\n` when it is absent so
 installation does not depend on the remote shell's diagnostic language.

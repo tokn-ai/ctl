@@ -3,12 +3,13 @@
 The `ctl ctmux`, persistent `ctl shell`, and `ctl task` commands carry a versioned
 `ctmux-proto` or `ctl-task-proto` stream through an OpenSSH
 remote command. There is no separate network listener, TLS identity, pairing format,
-or outer application-authentication protocol. A fixed `ctl-ssh-v1` readiness
-marker precedes the raw stream so startup output cannot be mistaken for a
-service protocol frame. The selected service performs its own protocol handshake
-after this transport marker. Desktop connections append `--identity` and use
-`ctl-ssh-v3`, followed by bounded identity/version metadata before the service
-handshake. The remote generates its UUID in `~/.tokn/ctl/remote-id`; Unix bundles
+or outer application-authentication protocol. CLI and desktop service connections
+append `--identity` and use the stable `ctl-ssh-identity` framing marker,
+followed by a bounded contract offer, the client's selection, and environment
+identity before the selected service handshake. Raw connections without identity
+retain the fixed `ctl-ssh-v1` framing marker and negotiate the service directly.
+Startup output cannot be mistaken for protocol frames. See
+[published protocol contracts](protocol-versioning.md). The remote generates its UUID in `~/.tokn/ctl/remote-id`; Unix bundles
 live in `~/.tokn/ctl/versions` and are selected by `~/.tokn/ctl/current`. See
 [remote identity and recovery](ctmux-workspace.md#remote-identity-and-address-recovery).
 
@@ -27,11 +28,11 @@ ssh -T \
   -o PermitLocalCommand=no \
   -o RemoteCommand=none \
   -- <destination> \
-  'PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; command -v ctl-agent >/dev/null 2>&1 || { printf "ctl-ssh-nf\n"; exit 127; }; exec ctl-agent connect'
+  'PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; command -v ctl-agent >/dev/null 2>&1 || { printf "ctl-ssh-nf\n"; exit 127; }; exec ctl-agent connect --identity'
 ```
 
-With `--remote-platform windows`, the suffix is `ctl-agent.exe connect` instead
-of `exec ctl-agent connect`. This is an enumerated server-platform choice, independent
+With `--remote-platform windows`, the suffix is `ctl-agent.exe connect --identity` instead
+of `exec ctl-agent connect --identity`. This is an enumerated server-platform choice, independent
 of the client OS, and currently requires the Windows server's default cmd.exe
 shell. Both choices retain the same SSH options and binary protocol. Omitting
 `--remote-platform` preserves Unix behavior; the option requires `--host`.
@@ -41,8 +42,8 @@ fixed service suffix:
 
 | Domain | Unix remote command | Windows remote command |
 | --- | --- | --- |
-| ctmux | fixed PATH setup and presence check, then `exec ctl-agent connect` | `ctl-agent.exe connect` |
-| task | fixed PATH setup and presence check, then `exec ctl-agent connect --service task` | `ctl-agent.exe connect --service task` |
+| ctmux | fixed PATH setup and presence check, then `exec ctl-agent connect --identity` | `ctl-agent.exe connect --identity` |
+| task | fixed PATH setup and presence check, then `exec ctl-agent connect --service task --identity` | `ctl-agent.exe connect --service task --identity` |
 
 The service is an enum selected by the command domain. Neither a socket path nor
 an arbitrary service or shell command is accepted from the client.
@@ -93,8 +94,10 @@ replacement channel and uses the `ctmux-proto` attachment token described below.
 `ctl-agent connect` is a disposable, stateless process launched once per SSH
 channel. The default service connects to the fixed per-user `ctmuxd` data endpoint;
 `--service task` connects to the fixed per-user `ctl-taskd` endpoint. It starts only
-the selected absolute-path companion daemon when necessary, writes
-`ctl-ssh-v1\n` to stdout, then copies raw bytes in both directions:
+the selected absolute-path companion daemon when necessary. Without `--identity`,
+it writes `ctl-ssh-v1\n` to stdout after the daemon is ready, then copies raw bytes
+in both directions. With `--identity`, it negotiates the identity contract before
+starting the daemon and emits environment identity only after the daemon is ready:
 
 ```text
 SSH stdin  -> ctl-agent connect -> ctmuxd data endpoint
@@ -134,8 +137,8 @@ authentication callback does not count. Startup files should still send
 diagnostics to stderr.
 
 An unsupported `ctl-ssh-*` marker fails immediately with a component update
-instruction. In particular, the pre-rename `ctl-ssh-v2` agent must be replaced
-with current `ctl-agent`, `ctmuxd`, and `ctl-taskd` components; it cannot serve the
+instruction. The unpublished `ctl-ssh-v2` and `ctl-ssh-v3` agents must be replaced
+with current `ctl-agent`, `ctmuxd`, and `ctl-taskd` components; they cannot serve the
 current identified protocol. Missing readiness or excessive startup output
 includes a bounded, escaped stdout preview and available SSH stderr diagnostics.
 

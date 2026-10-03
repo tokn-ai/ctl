@@ -7,7 +7,7 @@ import { AboutPage } from "./AboutPage";
 const api = vi.hoisted(() => ({ versions: vi.fn(), preflight: vi.fn(), restart: vi.fn() }));
 vi.mock("../lib/tauri", () => ({ getComponentVersions: api.versions, preflightComponentAction: api.preflight, executeComponentAction: api.restart }));
 
-const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", version: 11 }] };
+const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcdef123456", source_fingerprint: "current", dirty: false, protocols: [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] }] };
 const snapshot: ComponentVersionsSnapshot = { components: [
   { component_id: "app", component: "ctmux", label: "ctmux", location: "local", host_id: null, observation: "bundled", status: "current", running: current, available: current, restart_supported: false, action: null, detail: null, error: null },
   { component_id: "owner-1", component: "ctld", label: "ctld (SSH)", location: "local", host_id: null, observation: "running", status: "different_build", running: { ...current, source_revision: "112233445566" }, available: current, restart_supported: true, action: "restart", detail: "SSH and VPN broker", error: null },
@@ -148,23 +148,23 @@ describe("About page", () => {
     render(<AboutPage {...props()} />);
     const row = (await screen.findByText("ctld (SSH)")).closest("tr")!;
     expect(within(row).getByTitle(/SSH and VPN broker/)).toBeTruthy();
-    expect(within(row).getByTitle("ctld IPC: not reported (requires 11)").textContent).toBe("IPC ?");
+    expect(within(row).getByTitle("ctld IPC: not reported (requires 1.0.12)").textContent).toBe("IPC ?");
     expect(within(row).getByTitle(/Build: running-build/).textContent).toBe("0.1.0");
     expect(within(row).getByTitle(/Build: current/).textContent).toBe("0.1.0");
   });
 
   it("compares running protocols with app requirements even when the available binary is also stale", async () => {
     const stale = structuredClone(snapshot);
-    stale.components[1].running = { ...current, protocols: [{ name: "ctld", version: 10 }] };
-    stale.components[1].available = { ...current, protocols: [{ name: "ctld", version: 10 }] };
-    stale.components[1].required_protocols = [{ name: "ctld", version: 11 }, { name: "ctld_lifecycle", version: 1 }];
+    stale.components[1].running = { ...current, protocols: [{ name: "ctld", build: 11, version: "1.0.11", supported_versions: ["1.0.11"] }] };
+    stale.components[1].available = { ...current, protocols: [{ name: "ctld", build: 11, version: "1.0.11", supported_versions: ["1.0.11"] }] };
+    stale.components[1].required_protocols = [{ name: "ctld", build: 12, version: "1.0.12", supported_versions: ["1.0.12"] }, { name: "ctld_lifecycle", build: 1, version: "1.0.1", supported_versions: ["1.0.1"] }];
     stale.components[1].status = "incompatible";
     api.versions.mockResolvedValue(stale);
     render(<AboutPage {...props()} />);
     const row = (await screen.findByText("ctld (SSH)")).closest("tr")!;
-    const protocols = within(row).getByText("IPC 10 · Lifecycle ?");
-    expect(protocols.title).toContain("ctld IPC 10 (requires 11)");
-    expect(protocols.title).toContain("Lifecycle: not reported (requires 1)");
+    const protocols = within(row).getByText("IPC 1.0.11 · Lifecycle ?");
+    expect(protocols.title).toContain("ctld IPC 1.0.11 (requires 1.0.12)");
+    expect(protocols.title).toContain("Lifecycle: not reported (requires 1.0.1)");
     expect(within(row).getByText("Protocol mismatch")).toBeTruthy();
   });
 

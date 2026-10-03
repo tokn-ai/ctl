@@ -1,5 +1,7 @@
 use super::*;
-use ctl_task_proto::{DesiredState, InteractiveRun, LogEvent, LogStream, RunInfo, RunState};
+use ctl_task_proto::{
+  DesiredState, InteractiveRun, LogEvent, LogStream, PROTOCOL_VERSION, RunInfo, RunState,
+};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use tokio::io::DuplexStream;
@@ -60,15 +62,13 @@ impl Connector for MockConnector {
       self.servers.lock().unwrap().push(tokio::spawn(async move {
         assert!(matches!(
           read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
-          Some(ClientMessage::Handshake {
-            protocol_version: PROTOCOL_VERSION,
-            ..
-          })
+          Some(ClientMessage::Handshake { protocol, .. }) if protocol == ctl_task_proto::protocol_offer()
         ));
         write_frame(
           &mut server,
           &ServerMessage::HandshakeAccepted {
             protocol_version: PROTOCOL_VERSION,
+          protocols: vec![ctl_task_proto::protocol_info()],
           },
         )
         .await

@@ -719,9 +719,11 @@ dependencies = [
  "ctl-client",
  "ctl-core",
  "ctl-ipc",
+ "ctl-proto",
  "ctl-task-cli",
  "ctl-task-client",
  "ctmux-cli",
+ "ctmux-proto",
  "dirs",
  "portable-pty",
  "rpassword",
@@ -820,6 +822,7 @@ name = "ctl-task-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ctl-core",
  "ctl-task-client",
  "ctl-task-ipc",
  "ctl-task-proto",

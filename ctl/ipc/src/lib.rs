@@ -8,6 +8,10 @@ pub mod vpn;
 mod vpn_config;
 pub use vpn_config::{VpnConnection, VpnProvider, VpnSettings};
 
+use ctl_core::component::ComponentInfo;
+#[cfg(test)]
+use ctl_core::component::ProtocolInfo;
+use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use std::env;
 use std::future::Future;
 use std::io;
@@ -33,6 +37,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const PROTOCOL_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_FRAME_SIZE: usize = 64 * 1024;
+const MAX_COMPONENT_INFO_BYTES: usize = 16 * 1024;
 
 /// Lazy discovery and preparation supplied by a daemon client.
 pub type DaemonExecutableFuture = Pin<Box<dyn Future<Output = io::Result<Option<PathBuf>>> + Send>>;
@@ -127,14 +132,27 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
   })
 }
 
-// Version 11 adds saved VPN connection requests and explicit lifecycle states.
-pub const PROTOCOL_VERSION: u16 = 12;
+/// Internal evolution counter; advancing it alone does not publish a contract.
+pub const PROTOCOL_BUILD: u16 = 12;
+pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_12;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_12];
 
-/// Version of the one-shot credential, identity, askpass, and proxy interfaces.
-/// Bump this whenever their arguments, environment variables, request/response
-/// formats, or behavior change incompatibly. Broker and lifecycle protocols are
-/// versioned independently.
-pub const HELPER_API_VERSION: u16 = 1;
+#[must_use]
+pub fn protocol_offer() -> ProtocolOffer {
+  ProtocolOffer::new(
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
+
+/// Internal build of the one-shot credential, identity, askpass, and proxy APIs.
+/// Published helper contracts are independent of the broker and lifecycle APIs.
+pub const HELPER_API_BUILD: u16 = 1;
+pub const HELPER_API_CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
+pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_0_1;
+pub const SUPPORTED_HELPER_API_VERSIONS: &[ProtocolVersion] = &[HELPER_API_CONTRACT_V1_0_1];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -408,7 +426,7 @@ pub enum PromptKind {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
   Handshake {
-    protocol_version: u16,
+    protocol: ProtocolOffer,
   },
   EnsureMaster {
     target: SshTarget,
@@ -465,7 +483,7 @@ pub enum ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
   HandshakeAccepted {
-    protocol_version: u16,
+    protocol_version: ProtocolVersion,
   },
   Prompt {
     prompt_id: String,
@@ -537,7 +555,7 @@ pub enum ConnectError {
   )]
   CheckDaemonProtocol {
     executable: PathBuf,
-    expected: u16,
+    expected: ProtocolVersion,
     source: io::Error,
   },
   #[error(
@@ -546,8 +564,8 @@ pub enum ConnectError {
   )]
   IncompatibleDaemon {
     executable: PathBuf,
-    expected: u16,
-    reported: u16,
+    expected: ProtocolVersion,
+    reported: ProtocolVersion,
   },
 }
 
@@ -558,7 +576,7 @@ pub fn socket_path() -> PathBuf {
     return PathBuf::from(path);
   }
   if let Some(directory) = env::var_os("CTLD_RUNTIME_DIR") {
-    return PathBuf::from(directory).join(format!("ctld-v{PROTOCOL_VERSION}.sock"));
+    return PathBuf::from(directory).join(format!("ctld-v{}.sock", PROTOCOL_VERSION.major));
   }
   default_socket_path()
 }
@@ -569,7 +587,7 @@ pub fn socket_path() -> PathBuf {
 pub fn default_socket_path() -> PathBuf {
   #[cfg(unix)]
   {
-    let socket_name = format!("ctld-v{PROTOCOL_VERSION}.sock");
+    let socket_name = format!("ctld-v{}.sock", PROTOCOL_VERSION.major);
     if let Some(directory) = env::var_os("XDG_RUNTIME_DIR") {
       return PathBuf::from(directory).join("ctld").join(socket_name);
     }
@@ -588,7 +606,7 @@ pub fn default_socket_path() -> PathBuf {
       .flat_map(u16::to_le_bytes)
       .collect();
     let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes);
-    PathBuf::from(format!(r"\\.\pipe\ctld-v{PROTOCOL_VERSION}-{id}"))
+    PathBuf::from(format!(r"\\.\pipe\ctld-v{}-{id}", PROTOCOL_VERSION.major))
   }
 }
 
@@ -804,51 +822,105 @@ async fn check_daemon_protocol(
   executable: &Path,
   query_timeout: Duration,
 ) -> Result<(), ConnectError> {
-  let mut command = tokio::process::Command::new(executable);
-  #[cfg(windows)]
-  command.creation_flags(0x0800_0000);
-  command
-    .arg("--protocol-version")
-    .env_remove("CTLD_ASKPASS")
-    .env_remove("CTLD_IDENTITY_ASKPASS")
-    .stdin(Stdio::null())
-    .kill_on_drop(true);
-  let reported = timeout(query_timeout, command.output())
+  let reported = query_daemon_metadata(executable, query_timeout)
     .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "--protocol-version timed out"))
-    .and_then(std::convert::identity)
-    .and_then(|output| {
-      if !output.status.success() {
-        return Err(io::Error::other(format!(
-          "--protocol-version failed with {}; this binary may predate protocol checks",
-          output.status
-        )));
-      }
-      parse_daemon_protocol(&output.stdout)
+    .and_then(|metadata| {
+      metadata
+        .protocols
+        .into_iter()
+        .find(|entry| entry.name == "ctld")
+        .ok_or_else(|| {
+          io::Error::new(
+            io::ErrorKind::InvalidData,
+            "--component-info omitted the ctld protocol",
+          )
+        })
     })
     .map_err(|source| ConnectError::CheckDaemonProtocol {
       executable: executable.to_path_buf(),
       expected: PROTOCOL_VERSION,
       source,
     })?;
-  if reported != PROTOCOL_VERSION {
+  if reported.negotiate(SUPPORTED_PROTOCOL_VERSIONS).is_none() {
     return Err(ConnectError::IncompatibleDaemon {
       executable: executable.to_path_buf(),
       expected: PROTOCOL_VERSION,
-      reported,
+      reported: reported.version,
     });
   }
   Ok(())
 }
 
-fn parse_daemon_protocol(stdout: &[u8]) -> io::Result<u16> {
-  std::str::from_utf8(stdout)
-    .ok()
-    .and_then(|output| output.trim().parse().ok())
+async fn query_daemon_metadata(
+  executable: &Path,
+  query_timeout: Duration,
+) -> io::Result<ComponentInfo> {
+  timeout(query_timeout, async {
+    let mut command = tokio::process::Command::new(executable);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let mut child = command
+      .arg("--component-info")
+      .env_remove("CTLD_ASKPASS")
+      .env_remove("CTLD_IDENTITY_ASKPASS")
+      .stdin(Stdio::null())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::null())
+      .kill_on_drop(true)
+      .spawn()?;
+    let mut output = Vec::new();
+    child
+      .stdout
+      .take()
+      .ok_or_else(|| io::Error::other("missing --component-info output"))?
+      .take(MAX_COMPONENT_INFO_BYTES as u64 + 1)
+      .read_to_end(&mut output)
+      .await?;
+    if output.len() > MAX_COMPONENT_INFO_BYTES {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "--component-info returned oversized metadata",
+      ));
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+      return Err(io::Error::other(format!(
+        "--component-info failed with {status}; this binary may predate published protocol checks"
+      )));
+    }
+    parse_daemon_metadata(&output)
+  })
+  .await
+  .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "--component-info timed out"))?
+}
+
+fn parse_daemon_metadata(stdout: &[u8]) -> io::Result<ComponentInfo> {
+  let invalid = || {
+    io::Error::new(
+      io::ErrorKind::InvalidData,
+      "--component-info did not report valid protocol metadata",
+    )
+  };
+  if stdout.len() > MAX_COMPONENT_INFO_BYTES {
+    return Err(invalid());
+  }
+  let metadata: ComponentInfo = serde_json::from_slice(stdout).map_err(|_| invalid())?;
+  if !metadata.is_valid() {
+    return Err(invalid());
+  }
+  Ok(metadata)
+}
+
+#[cfg(test)]
+fn parse_daemon_protocol(stdout: &[u8]) -> io::Result<ProtocolInfo> {
+  parse_daemon_metadata(stdout)?
+    .protocols
+    .into_iter()
+    .find(|entry| entry.name == "ctld")
     .ok_or_else(|| {
       io::Error::new(
         io::ErrorKind::InvalidData,
-        "--protocol-version did not report a numeric protocol version",
+        "--component-info omitted the ctld protocol",
       )
     })
 }
@@ -1172,15 +1244,39 @@ mod tests {
     }
   }
 
+  fn protocol_metadata(version: ProtocolVersion, supported: &[ProtocolVersion]) -> String {
+    serde_json::to_string(&ComponentInfo {
+      build: ctl_core::component::build_info(),
+      protocols: vec![ProtocolInfo::new("ctld", version.build, version, supported)],
+    })
+    .unwrap()
+  }
+
   #[test]
-  fn protocol_probe_requires_one_numeric_version() {
-    assert_eq!(parse_daemon_protocol(b"6\n").unwrap(), 6);
-    for output in [b"".as_slice(), b"ctld 0.1.0", b"6\n5\n", b"65536", b"\xff"] {
+  fn protocol_probe_requires_valid_published_metadata() {
+    let metadata = protocol_metadata(PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS);
+    assert_eq!(
+      parse_daemon_protocol(metadata.as_bytes()).unwrap().version,
+      PROTOCOL_VERSION
+    );
+    for output in [b"".as_slice(), b"ctld 0.1.0", b"12\n", b"65536", b"\xff"] {
       assert_eq!(
         parse_daemon_protocol(output).unwrap_err().kind(),
         io::ErrorKind::InvalidData
       );
     }
+    let mut info: ComponentInfo = serde_json::from_str(&metadata).unwrap();
+    info.protocols.push(info.protocols[0].clone());
+    assert!(parse_daemon_protocol(&serde_json::to_vec(&info).unwrap()).is_err());
+  }
+
+  #[test]
+  fn default_endpoint_uses_the_public_protocol_major() {
+    let path = default_socket_path();
+    #[cfg(unix)]
+    assert_eq!(path.file_name().unwrap(), "ctld-v1.sock");
+    #[cfg(windows)]
+    assert!(path.to_string_lossy().starts_with(r"\\.\pipe\ctld-v1-"));
   }
 
   #[cfg(unix)]
@@ -1217,7 +1313,7 @@ mod tests {
       let executable = directory.join("ctld");
       std::fs::write(
         &executable,
-        format!("#!/bin/sh\nset -eu\n[ \"$1\" = --protocol-version ]\n{body}\n"),
+        format!("#!/bin/sh\nset -eu\n[ \"$1\" = --component-info ]\n{body}\n"),
       )
       .unwrap();
       std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1239,7 +1335,25 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn protocol_probe_accepts_matching_helper() {
-    let fixture = ProtocolFixture::new(&format!("printf '%s\\n' {PROTOCOL_VERSION}")).await;
+    let fixture = ProtocolFixture::new(&format!(
+      "printf '%s\\n' '{}'",
+      protocol_metadata(PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS)
+    ))
+    .await;
+    check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
+      .await
+      .unwrap();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn protocol_probe_accepts_a_newer_helper_advertising_the_required_contract() {
+    let newer = ProtocolVersion::new(1, 1, 13);
+    let fixture = ProtocolFixture::new(&format!(
+      "printf '%s\\n' '{}'",
+      protocol_metadata(newer, &[PROTOCOL_VERSION, newer])
+    ))
+    .await;
     check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
       .await
       .unwrap();
@@ -1249,7 +1363,7 @@ mod tests {
   #[tokio::test]
   async fn protocol_probe_ignores_inherited_askpass_modes() {
     let fixture = ProtocolFixture::new(&format!(
-      "[ \"${{CTLD_ASKPASS:-}}\" != 1 ]\n[ \"${{CTLD_IDENTITY_ASKPASS:-}}\" != 1 ]\nprintf '%s\\n' {PROTOCOL_VERSION}"
+      "[ \"${{CTLD_ASKPASS:-}}\" != 1 ]\n[ \"${{CTLD_IDENTITY_ASKPASS:-}}\" != 1 ]\nprintf '%s\\n' '{}'", protocol_metadata(PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS)
     ))
     .await;
     let mut child = tokio::process::Command::new(env::current_exe().unwrap());
@@ -1286,8 +1400,12 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn protocol_probe_rejects_outdated_helper_with_selected_path() {
-    let previous_version = PROTOCOL_VERSION - 1;
-    let fixture = ProtocolFixture::new(&format!("printf '%s\\n' {previous_version}")).await;
+    let previous_version = ProtocolVersion::new(1, 0, 11);
+    let fixture = ProtocolFixture::new(&format!(
+      "printf '%s\\n' '{}'",
+      protocol_metadata(previous_version, &[previous_version])
+    ))
+    .await;
     let error = check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT)
       .await
       .unwrap_err();
@@ -1328,7 +1446,7 @@ mod tests {
         "fixture {body:?} expected {expected_kind:?}, got {error:?}"
       );
       assert!(
-        error.to_string().contains("--protocol-version"),
+        error.to_string().contains("--component-info"),
         "fixture {body:?} omitted the failed query from its diagnostic: {error:?}"
       );
     }
@@ -1353,6 +1471,22 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
+  async fn oversized_metadata_is_rejected_without_waiting_for_query_timeout() {
+    let fixture = ProtocolFixture::new("exec /usr/bin/yes metadata").await;
+    let error = timeout(
+      Duration::from_secs(1),
+      check_daemon_protocol(&fixture.executable, PROTOCOL_QUERY_TIMEOUT),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+      matches!(error, ConnectError::CheckDaemonProtocol { source, .. } if source.kind() == io::ErrorKind::InvalidData && source.to_string().contains("oversized"))
+    );
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
   async fn pinned_daemon_bootstrap_ignores_environment_and_preserves_existing_owners() {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1363,7 +1497,7 @@ mod tests {
       std::fs::write(
         &fixture.executable,
         format!(
-          "#!/bin/sh\nset -eu\nif [ \"$1\" = --protocol-version ]; then\n  if [ -n \"${{CTLD_PINNED_TEST_LINK:-}}\" ]; then\n    /bin/ln -s \"$CTLD_PINNED_TEST_NEXT\" \"$CTLD_PINNED_TEST_LINK.next\"\n    /bin/mv \"$CTLD_PINNED_TEST_LINK.next\" \"$CTLD_PINNED_TEST_LINK\"\n  fi\n  printf '%s\\n' {PROTOCOL_VERSION}\n  exit 0\nfi\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$CTLD_SOCKET_PATH\" \"$CTLD_BIN\" > \"$CTLD_PINNED_TEST_MARKER.tmp\"\n/bin/mv \"$CTLD_PINNED_TEST_MARKER.tmp\" \"$CTLD_PINNED_TEST_MARKER\"\n"
+          "#!/bin/sh\nset -eu\nif [ \"$1\" = --component-info ]; then\n  if [ -n \"${{CTLD_PINNED_TEST_LINK:-}}\" ]; then\n    /bin/ln -s \"$CTLD_PINNED_TEST_NEXT\" \"$CTLD_PINNED_TEST_LINK.next\"\n    /bin/mv \"$CTLD_PINNED_TEST_LINK.next\" \"$CTLD_PINNED_TEST_LINK\"\n  fi\n  printf '%s\\n' '{}'\n  exit 0\nfi\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$CTLD_SOCKET_PATH\" \"$CTLD_BIN\" > \"$CTLD_PINNED_TEST_MARKER.tmp\"\n/bin/mv \"$CTLD_PINNED_TEST_MARKER.tmp\" \"$CTLD_PINNED_TEST_MARKER\"\n", protocol_metadata(PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS)
         ),
       )
       .unwrap();

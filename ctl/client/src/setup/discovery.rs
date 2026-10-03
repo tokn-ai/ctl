@@ -20,19 +20,23 @@ pub(super) async fn discover(home: &Path) -> Result<Option<PathBuf>, Error> {
 }
 
 pub(super) fn compatible(info: &ComponentInfo) -> bool {
-  [
-    ("ctld", ctl_ipc::PROTOCOL_VERSION),
-    ("ctld_lifecycle", ctl_ipc::lifecycle::PROTOCOL_VERSION),
-    ("ctld_helper", ctl_ipc::HELPER_API_VERSION),
-  ]
-  .iter()
-  .all(|(name, required)| {
-    let mut entries = info.protocols.iter().filter(|entry| entry.name == *name);
-    entries
-      .next()
-      .is_some_and(|entry| entry.version == *required)
-      && entries.next().is_none()
-  })
+  info.is_valid()
+    && [
+      ("ctld", ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS),
+      (
+        "ctld_lifecycle",
+        ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
+      ),
+      ("ctld_helper", ctl_ipc::SUPPORTED_HELPER_API_VERSIONS),
+    ]
+    .iter()
+    .all(|(name, required)| {
+      let mut entries = info.protocols.iter().filter(|entry| entry.name == *name);
+      entries
+        .next()
+        .is_some_and(|entry| entry.negotiate(required).is_some())
+        && entries.next().is_none()
+    })
 }
 
 #[cfg(test)]
@@ -47,18 +51,24 @@ mod tests {
     ComponentInfo {
       build,
       protocols: vec![
-        ProtocolInfo {
-          name: "ctld".into(),
-          version: ctl_ipc::PROTOCOL_VERSION,
-        },
-        ProtocolInfo {
-          name: "ctld_lifecycle".into(),
-          version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
-        },
-        ProtocolInfo {
-          name: "ctld_helper".into(),
-          version: ctl_ipc::HELPER_API_VERSION,
-        },
+        ProtocolInfo::new(
+          "ctld",
+          ctl_ipc::PROTOCOL_BUILD,
+          ctl_ipc::PROTOCOL_VERSION,
+          ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS,
+        ),
+        ProtocolInfo::new(
+          "ctld_lifecycle",
+          ctl_ipc::lifecycle::PROTOCOL_BUILD,
+          ctl_ipc::lifecycle::PROTOCOL_VERSION,
+          ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
+        ),
+        ProtocolInfo::new(
+          "ctld_helper",
+          ctl_ipc::HELPER_API_BUILD,
+          ctl_ipc::HELPER_API_VERSION,
+          ctl_ipc::SUPPORTED_HELPER_API_VERSIONS,
+        ),
       ],
     }
   }
@@ -73,11 +83,33 @@ mod tests {
       missing.protocols.remove(index);
       assert!(!compatible(&missing));
       let mut different = info.clone();
-      different.protocols[index].version += 1;
+      let protocol = &mut different.protocols[index];
+      let version = ctl_core::protocol::ProtocolVersion::new(2, 0, protocol.build);
+      protocol.version = version;
+      protocol.supported_versions = vec![version];
       assert!(!compatible(&different));
       let mut duplicate = info.clone();
       duplicate.protocols.push(duplicate.protocols[index].clone());
       assert!(!compatible(&duplicate));
+    }
+  }
+
+  #[test]
+  fn newer_helpers_are_reused_only_for_explicitly_advertised_common_contracts() {
+    let mut info = info();
+    for protocol in &mut info.protocols {
+      let common = protocol.version;
+      let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, protocol.build + 1);
+      protocol.build += 1;
+      protocol.version = newer;
+      protocol.supported_versions = vec![common, newer];
+    }
+    assert!(compatible(&info));
+    for index in 0..info.protocols.len() {
+      let mut unsupported = info.clone();
+      unsupported.protocols[index].supported_versions.remove(0);
+      assert!(unsupported.is_valid());
+      assert!(!compatible(&unsupported));
     }
   }
 

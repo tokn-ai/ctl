@@ -1,7 +1,7 @@
 //! Reusable local ctl-taskd transport for CLI and desktop clients.
 pub mod restart;
 use ctl_task_ipc::{Stream, connect};
-use ctl_task_proto::{ClientMessage, PROTOCOL_VERSION, ServerMessage, read_frame, write_frame};
+use ctl_task_proto::{ClientMessage, ServerMessage, read_frame, write_frame};
 pub use restart::{PreparedRestart, preflight_restart, preflight_restart_at, restart_daemon};
 use std::{
   env, io,
@@ -10,6 +10,7 @@ use std::{
   time::Duration,
 };
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Instant, sleep, timeout};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -19,27 +20,39 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub async fn open(request: &ClientMessage) -> Result<Stream, ClientError> {
   timeout(Duration::from_secs(10), async {
     let mut stream = connect_or_start(&ctl_task_ipc::socket_path()).await?;
-    write_frame(
-      &mut stream,
-      &ClientMessage::Handshake {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "ctl-task-client".into(),
-      },
-    )
-    .await?;
-    match read_frame(&mut stream).await? {
-      Some(ServerMessage::HandshakeAccepted { protocol_version })
-        if protocol_version == PROTOCOL_VERSION => {}
-      Some(ServerMessage::Error { code, message }) => {
-        return Err(ClientError::Server { code, message });
-      }
-      _ => return Err(ClientError::UnexpectedResponse),
-    }
+    handshake(&mut stream).await?;
     write_frame(&mut stream, request).await?;
     Ok(stream)
   })
   .await
   .map_err(|_| ClientError::Timeout)?
+}
+
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Result<(), ClientError> {
+  let offer = ctl_task_proto::protocol_offer();
+  write_frame(
+    stream,
+    &ClientMessage::Handshake {
+      protocol: offer.clone(),
+      client_name: "ctl-task-client".into(),
+    },
+  )
+  .await?;
+  match read_frame(stream).await? {
+    Some(ServerMessage::HandshakeAccepted {
+      protocol_version,
+      protocols,
+    }) if offer.accepts(protocol_version)
+      && ctl_core::component::protocols_are_valid(&protocols)
+      && protocols
+        .iter()
+        .any(|protocol| protocol.name == "task" && protocol.supports(protocol_version)) =>
+    {
+      Ok(())
+    }
+    Some(ServerMessage::Error { code, message }) => Err(ClientError::Server { code, message }),
+    _ => Err(ClientError::UnexpectedResponse),
+  }
 }
 
 /// Exchanges one request and response.
@@ -168,4 +181,62 @@ pub enum ClientError {
     code: ctl_task_proto::ErrorCode,
     message: String,
   },
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ctl_core::{component::ProtocolInfo, protocol::ProtocolVersion};
+
+  async fn protocol_reply(
+    selected: ProtocolVersion,
+    protocols: Vec<ProtocolInfo>,
+  ) -> Result<(), ClientError> {
+    let (mut client, mut daemon) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+      assert!(
+        matches!(read_frame::<_, ClientMessage>(&mut daemon).await.unwrap(),
+        Some(ClientMessage::Handshake { protocol, .. }) if protocol == ctl_task_proto::protocol_offer())
+      );
+      write_frame(
+        &mut daemon,
+        &ServerMessage::HandshakeAccepted {
+          protocol_version: selected,
+          protocols,
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let result = handshake(&mut client).await;
+    server.await.unwrap();
+    result
+  }
+
+  #[tokio::test]
+  async fn handshake_accepts_shared_contract_but_rejects_unoffered_selection() {
+    let latest = ProtocolVersion::new(1, 1, 6);
+    let advertised = ProtocolInfo::new(
+      "task",
+      6,
+      latest,
+      &[ctl_task_proto::PROTOCOL_VERSION, latest],
+    );
+    protocol_reply(ctl_task_proto::PROTOCOL_VERSION, vec![advertised.clone()])
+      .await
+      .unwrap();
+    assert!(matches!(
+      protocol_reply(latest, vec![advertised]).await,
+      Err(ClientError::UnexpectedResponse)
+    ));
+    assert!(matches!(
+      protocol_reply(ctl_task_proto::PROTOCOL_VERSION, Vec::new()).await,
+      Err(ClientError::UnexpectedResponse)
+    ));
+    let unrelated = ProtocolInfo::new("task", 6, latest, &[latest]);
+    assert!(matches!(
+      protocol_reply(ctl_task_proto::PROTOCOL_VERSION, vec![unrelated]).await,
+      Err(ClientError::UnexpectedResponse)
+    ));
+  }
 }

@@ -32,7 +32,7 @@ impl Fixture {
         "printf '%s\\n' \"$@\" > \"$CTL_TEST_AGENT_ARGUMENTS\"\n",
         "preface=ctl-ssh-v1\n",
         "for argument do\n",
-        "  if [ \"$argument\" = --identity ]; then preface=ctl-ssh-v3; fi\n",
+        "  if [ \"$argument\" = --identity ]; then preface=ctl-ssh-identity; fi\n",
         "done\n",
         "printf '%s\\n' \"$preface\"\n",
       ),
@@ -86,7 +86,7 @@ fn authenticated_commands_emit_authentication_before_agent_identity() {
     );
     let output = fixture.run(&command);
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"ctl-ssh-auth-v1\nctl-ssh-v3\n");
+    assert_eq!(output.stdout, b"ctl-ssh-auth-v1\nctl-ssh-identity\n");
     let expected = if service.is_empty() {
       "connect\n--identity\n"
     } else {
@@ -109,10 +109,10 @@ fn ordinary_and_identified_commands_keep_their_original_framing() {
         let command = format!("{prefix}exec ctl-agent connect{service}{identity}");
         let output = fixture.run(&command);
         assert!(output.status.success(), "{output:?}");
-        let preface = if identity.is_empty() {
+        let preface: &[u8] = if identity.is_empty() {
           b"ctl-ssh-v1\n"
         } else {
-          b"ctl-ssh-v3\n"
+          b"ctl-ssh-identity\n"
         };
         assert_eq!(output.stdout, preface);
         let expected = format!(

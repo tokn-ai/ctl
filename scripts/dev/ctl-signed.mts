@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parseHelperComponent, type ProtocolInfo } from "../shared/protocol-contract.mts";
 import { binaryArtifact } from "../ci/build-ctl-bundle.mts";
 import {
   getCargoTargetDirectory, openProvisioningProject, prepareProvisioningProfile,
@@ -32,6 +33,7 @@ export interface DevelopmentHelperManifest {
   sha256: string;
   archive_size: number;
   development: { source_fingerprint: string; dirty: boolean };
+  protocols: ProtocolInfo[];
 }
 
 export interface DevelopmentBuildOptions {
@@ -40,23 +42,6 @@ export interface DevelopmentBuildOptions {
   home_directory?: string;
 }
 
-interface ComponentBuild {
-  version: string;
-  source_revision: string;
-  source_fingerprint: string;
-  dirty: boolean;
-}
-
-function componentBuild(stdout: string, version: string): ComponentBuild {
-  if (Buffer.byteLength(stdout) > 16 * 1024) throw new Error("ctld reported oversized component metadata");
-  const build = JSON.parse(stdout)?.build;
-  if (!build || build.version !== version || typeof build.source_revision !== "string" ||
-    !/^[a-f0-9]{40}$/.test(build.source_revision) || typeof build.source_fingerprint !== "string" ||
-    !/^[a-f0-9]{64}$/.test(build.source_fingerprint) || typeof build.dirty !== "boolean") {
-    throw new Error("locally compiled ctld has invalid source identity or version");
-  }
-  return build as ComponentBuild;
-}
 
 async function regularFile(path: string): Promise<void> {
   const info = await lstat(path);
@@ -114,7 +99,11 @@ export async function buildSignedDevelopmentCli(
       // Cargo may replace its output during another build; inspect and sign this same snapshot.
       await copyFile(original, artifact);
       await chmod(artifact, 0o755);
-      const build = componentBuild((await invoke(artifact, ["--component-info"], {}, false, 10_000)).stdout, helper_version);
+      const component = parseHelperComponent((await invoke(artifact, ["--component-info"], {}, false, 10_000)).stdout);
+      const build = component.build;
+      if (build.version !== helper_version || typeof build.source_revision !== "string" || !/^[a-f0-9]{40}$/.test(build.source_revision)) {
+        throw new Error("locally compiled ctld has invalid source identity or version");
+      }
       const app = join(temporary, "ctld.app");
       const identity_path = join(temporary, "signing-identity");
       console.log("Signing ctld with your provisioning profile…");
@@ -146,6 +135,7 @@ export async function buildSignedDevelopmentCli(
         team_identifier: team, signing_mode: "development", notarized: false,
         archive, sha256, archive_size: bytes.length,
         development: { source_fingerprint: build.source_fingerprint, dirty: build.dirty },
+        protocols: component.protocols,
       };
       await writeFile(join(payload, `ctld-${host}.json`), `${JSON.stringify(manifest, null, 2)}\n`);
       console.log("Building ctl with ctld embedded…");

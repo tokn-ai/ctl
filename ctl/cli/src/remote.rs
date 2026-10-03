@@ -82,6 +82,9 @@ fn repair_reason(error: &CoreError) -> Option<&'static str> {
     CoreError::UnsupportedSshProtocol { marker } if marker == "ctl-ssh-v2" => {
       Some("The remote ctl-agent uses the older rmux protocol.")
     }
+    CoreError::UnsupportedSshProtocol { marker } if marker == "ctl-ssh-v3" => {
+      Some("The remote ctl-agent predates published protocol contract negotiation.")
+    }
     _ => None,
   }
 }

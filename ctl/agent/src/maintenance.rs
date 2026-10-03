@@ -18,8 +18,7 @@ pub async fn prepare_ctmux_restart<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   config: &ConnectConfig,
   actual_remote_id: &str,
 ) -> io::Result<()> {
-  let prepared = prepare(reader, config, actual_remote_id).await;
-  let prepared = match prepared {
+  let (protocol_version, prepared) = match prepare(reader, config, actual_remote_id).await {
     Ok(prepared) => prepared,
     Err(error) => {
       return maintenance::write(
@@ -36,12 +35,14 @@ pub async fn prepare_ctmux_restart<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
   maintenance::write(
     writer,
     &ServerMessage::Prepared {
+      protocol_version,
       info: CtmuxPreparation {
         remote_id: actual_remote_id.into(),
         running: RunningCtmux {
           build: prepared.before.build.clone(),
           protocol_version: prepared.before.protocol_version,
           control_protocol_version: prepared.before.control_protocol_version,
+          protocols: prepared.before.protocols.clone(),
         },
         available: prepared.available.clone(),
       },
@@ -80,23 +81,25 @@ async fn prepare<R: AsyncRead + Unpin>(
   reader: &mut R,
   config: &ConnectConfig,
   actual_remote_id: &str,
-) -> io::Result<ctmux_ipc::lifecycle::PreparedRestart> {
+) -> io::Result<(
+  ctl_core::protocol::ProtocolVersion,
+  ctmux_ipc::lifecycle::PreparedRestart,
+)> {
   let request = tokio::time::timeout(Duration::from_secs(5), maintenance::read(reader))
     .await
     .map_err(|_| io::Error::other("Maintenance request timed out."))??;
-  match request {
+  let invalid_request = || {
+    io::Error::other("Remote identity or maintenance protocol changed; no restart was attempted.")
+  };
+  let protocol_version = match request {
     ClientMessage::PrepareCtmuxRestart {
-      protocol_version,
+      protocol,
       expected_remote_id,
-    } if protocol_version == maintenance::PROTOCOL_VERSION
-      && !expected_remote_id.is_empty()
-      && expected_remote_id == actual_remote_id => {}
-    _ => {
-      return Err(io::Error::other(
-        "Remote identity or maintenance protocol changed; no restart was attempted.",
-      ));
-    }
-  }
+    } if !expected_remote_id.is_empty() && expected_remote_id == actual_remote_id => protocol
+      .negotiate(maintenance::SUPPORTED_PROTOCOL_VERSIONS)
+      .ok_or_else(invalid_request)?,
+    _ => return Err(invalid_request()),
+  };
   if config.service != crate::Service::Ctmux {
     return Err(io::Error::other(
       "Only the account's ctmux owner can be restarted.",
@@ -111,6 +114,7 @@ async fn prepare<R: AsyncRead + Unpin>(
     .with_daemon_executable(executable)
     .preflight_restart()
     .await
+    .map(|prepared| (protocol_version, prepared))
     .map_err(io::Error::other)
 }
 
@@ -134,7 +138,7 @@ mod tests {
     maintenance::write(
       &mut bytes,
       &ClientMessage::PrepareCtmuxRestart {
-        protocol_version: maintenance::PROTOCOL_VERSION,
+        protocol: maintenance::protocol_offer(),
         expected_remote_id: "identity".into(),
       },
     )
@@ -149,7 +153,7 @@ mod tests {
     maintenance::write(
       &mut bytes,
       &ClientMessage::PrepareCtmuxRestart {
-        protocol_version: maintenance::PROTOCOL_VERSION,
+        protocol: maintenance::protocol_offer(),
         expected_remote_id: "wrong".into(),
       },
     )

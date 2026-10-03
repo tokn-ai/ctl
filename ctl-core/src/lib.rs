@@ -4,3 +4,4 @@ pub mod component;
 #[cfg(feature = "executable")]
 pub mod executable;
 pub mod paths;
+pub mod protocol;

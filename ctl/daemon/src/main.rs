@@ -12,6 +12,9 @@ struct Arguments {
   /// Print the local IPC protocol version and exit.
   #[arg(long)]
   protocol_version: bool,
+  /// Print the internal wire contract build and exit.
+  #[arg(long)]
+  protocol_build: bool,
 
   /// Manage saved credential metadata without starting or contacting ctld.
   #[arg(long, hide = true)]
@@ -69,20 +72,7 @@ fn main() {
   if arguments.component_info {
     let metadata = ctl_core::component::ComponentInfo {
       build: ctl_core::component::build_info(),
-      protocols: vec![
-        ctl_core::component::ProtocolInfo {
-          name: "ctld".into(),
-          version: ctl_ipc::PROTOCOL_VERSION,
-        },
-        ctl_core::component::ProtocolInfo {
-          name: "ctld_lifecycle".into(),
-          version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
-        },
-        ctl_core::component::ProtocolInfo {
-          name: "ctld_helper".into(),
-          version: ctl_ipc::HELPER_API_VERSION,
-        },
-      ],
+      protocols: ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols,
     };
     println!(
       "{}",
@@ -103,6 +93,10 @@ fn main() {
       eprintln!("ctld: {error}");
       std::process::exit(1);
     }
+    return;
+  }
+  if arguments.protocol_build {
+    println!("{}", ctl_ipc::PROTOCOL_BUILD);
     return;
   }
   if arguments.protocol_version {

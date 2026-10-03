@@ -28,14 +28,8 @@ impl Fixture {
     let info = ComponentInfo {
       build: ctl_core::component::build_info(),
       protocols: vec![
-        ProtocolInfo {
-          name: "ctmux".into(),
-          version: ctmux_proto::PROTOCOL_VERSION,
-        },
-        ProtocolInfo {
-          name: "ctmux_control".into(),
-          version: crate::LOCAL_CONTROL_PROTOCOL_VERSION,
-        },
+        ctmux_proto::protocol_info(),
+        crate::local_control_protocol_info(),
       ],
     };
     std::fs::write(&executable, format!("#!/bin/sh\nif [ \"$1\" = --component-info ]; then\nprintf '%s\\n' '{}'\nelse\nprintf '%s\\n' \"$@\" > '{}'\nfi\n", serde_json::to_string(&info).unwrap(), root.join("spawned").display())).unwrap();
@@ -71,6 +65,10 @@ async fn handshake_reply(stream: &mut Stream, info: Option<&ComponentInfo>) {
     stream,
     &LocalControlServerMessage::HandshakeAccepted {
       protocol_version: crate::LOCAL_CONTROL_PROTOCOL_VERSION,
+      protocols: info.map_or_else(
+        || vec![crate::local_control_protocol_info()],
+        |info| info.protocols.clone(),
+      ),
       restart_supported: true,
       managed_sessions_supported: false,
       build: info.map(|info| info.build.clone()),

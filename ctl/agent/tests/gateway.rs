@@ -47,6 +47,90 @@ async fn identified_gateway_emits_metadata_before_service_bytes() {
   gateway_round_trip(true).await;
 }
 
+fn identified_config(paths: &TestPaths) -> ctl_agent::ConnectConfig {
+  let mut config = ctl_agent::ConnectConfig::new(paths.ctmux_socket.clone());
+  config.identity = Some(ctl_proto::RemoteIdentity {
+    remote_id: Uuid::new_v4().to_string(),
+    agent_version: "0.1.0".into(),
+    build: None,
+    ctmux_restart_supported: false,
+    bundle: None,
+    protocols: ctl_proto::agent_protocols(),
+  });
+  config.ctmuxd_bin = Some(paths.root.join("missing-companion"));
+  config
+}
+
+#[tokio::test]
+async fn unsupported_identity_selection_never_opens_the_service_endpoint() {
+  let paths = TestPaths::new();
+  let listener = Listener::bind(&paths.ctmux_socket).unwrap();
+  let config = identified_config(&paths);
+  let (mut client, gateway) = tokio::io::duplex(4096);
+  let (reader, writer) = tokio::io::split(gateway);
+  let relay = tokio::spawn(async move { ctl_agent::connect(reader, writer, &config).await });
+  let mut preface = vec![0; ctl_proto::IDENTITY_PREFACE.len()];
+  client.read_exact(&mut preface).await.unwrap();
+  assert_eq!(preface, ctl_proto::IDENTITY_PREFACE);
+  let _: ctl_core::protocol::ProtocolOffer =
+    ctl_proto::maintenance::read(&mut client).await.unwrap();
+  ctl_proto::maintenance::write(
+    &mut client,
+    &serde_json::json!({"protocol_version": "1.1.15"}),
+  )
+  .await
+  .unwrap();
+  tokio::select! {
+    biased;
+    accepted = listener.accept() => {
+      drop(accepted);
+      panic!("unsupported identity selection opened the service endpoint");
+    }
+    result = timeout(TEST_TIMEOUT, relay) => {
+      assert!(matches!(result.unwrap().unwrap(), Err(ctl_agent::AgentError::Relay(_))));
+    }
+  }
+}
+
+#[tokio::test]
+async fn service_start_failure_never_emits_ready_identity_or_raw_marker() {
+  for identified in [false, true] {
+    let paths = TestPaths::new();
+    let mut config = identified_config(&paths);
+    if !identified {
+      config.identity = None;
+    }
+    let (mut client, gateway) = tokio::io::duplex(4096);
+    let (reader, writer) = tokio::io::split(gateway);
+    let relay = tokio::spawn(async move { ctl_agent::connect(reader, writer, &config).await });
+    if identified {
+      let mut marker = vec![0; ctl_proto::IDENTITY_PREFACE.len()];
+      client.read_exact(&mut marker).await.unwrap();
+      let (mut reader, mut writer) = tokio::io::split(&mut client);
+      ctl_proto::negotiate_identity_contract(&mut reader, &mut writer)
+        .await
+        .unwrap();
+    }
+    let mut output = Vec::new();
+    timeout(TEST_TIMEOUT, client.read_to_end(&mut output))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(
+      output,
+      [] as [u8; 0],
+      "failed startup emitted ready metadata/marker"
+    );
+    assert!(
+      timeout(TEST_TIMEOUT, relay)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_err()
+    );
+  }
+}
+
 async fn gateway_round_trip(identified: bool) {
   const PAYLOAD: &[u8] = b"\0raw ctmux payload\xff\n";
   let paths = TestPaths::new();
@@ -74,6 +158,7 @@ async fn gateway_round_trip(identified: bool) {
 
   let mut config = ctl_agent::ConnectConfig::new(paths.ctmux_socket.clone());
   let identity = ctl_proto::RemoteIdentity {
+    protocols: ctl_proto::agent_protocols(),
     remote_id: Uuid::new_v4().to_string(),
     agent_version: "0.1.0".into(),
     ctmux_restart_supported: false,
@@ -86,13 +171,26 @@ async fn gateway_round_trip(identified: bool) {
   let relay =
     tokio::spawn(async move { ctl_agent::connect(gateway_reader, gateway_writer, &config).await });
 
-  let mut preface = vec![0_u8; ctl_agent::SSH_TRANSPORT_PREFACE.len()];
+  let mut preface = vec![
+    0_u8;
+    if identified {
+      ctl_proto::IDENTITY_PREFACE.len()
+    } else {
+      ctl_agent::SSH_TRANSPORT_PREFACE.len()
+    }
+  ];
   client
     .read_exact(&mut preface)
     .await
     .expect("read transport preface");
   if identified {
     assert_eq!(preface, ctl_proto::IDENTITY_PREFACE);
+    {
+      let (mut reader, mut writer) = tokio::io::split(&mut client);
+      ctl_proto::negotiate_identity_contract(&mut reader, &mut writer)
+        .await
+        .unwrap();
+    }
     assert_eq!(
       ctl_proto::read_identity(&mut client).await.unwrap(),
       identity

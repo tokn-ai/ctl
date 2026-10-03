@@ -21,7 +21,7 @@ export const runMacosCommand: MacosCommandRunner = (command, args, context) =>
   new Promise((resolve, reject) => {
     const child = execFile(command, args, {
       cwd: context.cwd, env: context.env, timeout: context.timeout_ms,
-      maxBuffer: 32 * 1024 * 1024,
+      maxBuffer: args[0] === "--component-info" ? 16 * 1024 : 32 * 1024 * 1024,
     }, (error, stdout, stderr) => {
       if (error) reject(error);
       else resolve({ stdout, stderr });

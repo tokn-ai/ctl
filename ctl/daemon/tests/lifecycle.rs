@@ -40,12 +40,13 @@ async fn stop_owner(socket: &Path) {
   ctl_ipc::write_frame(
     &mut stream,
     &Request::CtldInspect {
-      protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
+      protocol: ctl_ipc::lifecycle::protocol_offer(),
     },
   )
   .await
   .unwrap();
-  let Some(Response::CtldInfo { info }) = ctl_ipc::read_frame(&mut stream).await.unwrap() else {
+  let Some(Response::CtldInfo { info, .. }) = ctl_ipc::read_frame(&mut stream).await.unwrap()
+  else {
     return;
   };
   ctl_ipc::write_frame(

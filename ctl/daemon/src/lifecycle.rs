@@ -42,15 +42,20 @@ pub(super) async fn handle(
       "lifecycle control is unavailable",
     ));
   };
-  if !matches!(request, Request::CtldInspect { protocol_version } if protocol_version == ctl_ipc::lifecycle::PROTOCOL_VERSION)
-  {
+  let protocol_version = match request {
+    Request::CtldInspect { protocol } => {
+      protocol.negotiate(ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS)
+    }
+    Request::CtldRestart { .. } => None,
+  };
+  let Some(protocol_version) = protocol_version else {
     return error(
       &mut stream,
       "ctld_lifecycle_incompatible",
       "A compatible lifecycle inspection must precede restart.",
     )
     .await;
-  }
+  };
   let active_vpn_count = if let Some(service) = &state.vpn_service {
     service
       .list()
@@ -71,7 +76,14 @@ pub(super) async fn handle(
     binary: DaemonBinaryInfo::current(),
     active_vpn_count: u32::try_from(active_vpn_count).unwrap_or(u32::MAX),
   };
-  ctl_ipc::write_frame(&mut stream, &Response::CtldInfo { info }).await?;
+  ctl_ipc::write_frame(
+    &mut stream,
+    &Response::CtldInfo {
+      protocol_version,
+      info,
+    },
+  )
+  .await?;
   // Native confirmation tokens expire after one minute; retain this exact
   // process connection long enough to confirm without reselecting an owner.
   let Ok(request) = timeout(
@@ -142,12 +154,13 @@ mod tests {
     ctl_ipc::write_frame(
       &mut client,
       &Request::CtldInspect {
-        protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
+        protocol: ctl_ipc::lifecycle::protocol_offer(),
       },
     )
     .await
     .unwrap();
-    let Some(Response::CtldInfo { info }) = ctl_ipc::read_frame(&mut client).await.unwrap() else {
+    let Some(Response::CtldInfo { info, .. }) = ctl_ipc::read_frame(&mut client).await.unwrap()
+    else {
       panic!("missing identity");
     };
     assert_eq!(info.instance_id, expected);
@@ -156,6 +169,50 @@ mod tests {
     drop(client);
     handler.await.unwrap().unwrap();
     assert!(restarts.try_recv().is_err());
+  }
+
+  #[tokio::test]
+  async fn lifecycle_inspection_selects_only_an_explicit_shared_contract() {
+    for compatible in [true, false] {
+      let (control, mut restarts) = Control::new();
+      let state = Arc::new(State {
+        lifecycle: Some(control),
+        ..State::default()
+      });
+      let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
+      let handler = tokio::spawn(super::super::handle_connection(server, state));
+      let current = ctl_ipc::lifecycle::PROTOCOL_VERSION;
+      let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, 2);
+      let supported = if compatible {
+        vec![current, newer]
+      } else {
+        vec![newer]
+      };
+      ctl_ipc::write_frame(
+        &mut client,
+        &Request::CtldInspect {
+          protocol: ctl_core::protocol::ProtocolOffer::new(2, newer, &supported),
+        },
+      )
+      .await
+      .unwrap();
+      let response = ctl_ipc::read_frame::<_, Response>(&mut client)
+        .await
+        .unwrap()
+        .unwrap();
+      if compatible {
+        assert!(
+          matches!(response, Response::CtldInfo { protocol_version, .. } if protocol_version == current)
+        );
+      } else {
+        assert!(
+          matches!(response, Response::CtldError { code, .. } if code == "ctld_lifecycle_incompatible")
+        );
+      }
+      drop(client);
+      handler.await.unwrap().unwrap();
+      assert!(restarts.try_recv().is_err());
+    }
   }
 
   #[tokio::test]
@@ -170,7 +227,7 @@ mod tests {
     ctl_ipc::write_frame(
       &mut client,
       &Request::CtldInspect {
-        protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
+        protocol: ctl_ipc::lifecycle::protocol_offer(),
       },
     )
     .await
@@ -206,7 +263,7 @@ mod tests {
     ctl_ipc::write_frame(
       &mut client,
       &Request::CtldInspect {
-        protocol_version: ctl_ipc::lifecycle::PROTOCOL_VERSION,
+        protocol: ctl_ipc::lifecycle::protocol_offer(),
       },
     )
     .await

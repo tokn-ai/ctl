@@ -28,9 +28,10 @@ KiB. Each connection has one handshake and may then request one operation.
 ```text
 client                                      local ctmuxd control endpoint
 ------                                      ----------------------------
-handshake { protocol_version: 1 }       ->
+handshake { protocol: { build: 1, version: "1.0.1", supported_versions: ["1.0.1"] } }       ->
        handshake_accepted {
-         protocol_version: 1,
+         protocol_version: "1.0.1",
+         protocols: [ /* actual build, latest and supported contracts */ ],
          restart_supported: true,
          managed_sessions_supported: true
        }                                  <-
@@ -44,7 +45,7 @@ Errors are structured as:
 error { code, message }
 ```
 
-Version 1 error codes are `invalid_request`, `protocol_version_mismatch`,
+Contract 1.0.1 error codes are `invalid_request`, `protocol_version_mismatch`,
 `restart_unsupported`, `restart_in_progress`, and `internal`.
 
 ## Coordinated restart semantics
@@ -118,7 +119,7 @@ restart ctmuxd to reset the limit. Tombstones alone do not prevent normal idle
 exit. ctl-taskd retains the backend endpoint in each run so changing its runtime
 configuration does not silently redirect recovery to another endpoint.
 
-The task CLI uses protocol version 4. On-disk task state remains schema version
+The task CLI uses published protocol `1.0.4`. On-disk task state remains schema version
 1 with optional interactive metadata; older background records are accepted.
 State replacement is atomic, with recovery designed for process crashes; no
 power-loss durability guarantee is added here. The latest completed result is
@@ -137,7 +138,7 @@ last-run results, the data directory, and the ctmux endpoint are retained.
 Remote ctl-taskd control is not supported yet.
 
 Lifecycle control uses version 2 independently of the task protocol. A framed
-`restart_daemon { protocol_version: 2 }` is sent as the first message on the
+`restart_daemon { protocol: { build: 2, version: "1.0.2", supported_versions: ["1.0.2"] } }` is sent as the first message on the
 local task endpoint without a task handshake. The daemon serializes acceptance
 with task mutations and responds with `restart_accepted { data_directory,
 ctmux_socket }`, or `error { message }`. After acceptance it drains client

@@ -190,13 +190,10 @@ fn unavailable() -> CommandErrorDto {
 
 fn running_protocols(info: &ctl_proto::maintenance::RunningCtmux) -> Vec<ProtocolVersion> {
   info
-    .protocol_version
-    .map(|version| ProtocolVersion::new("ctmux", version))
+    .protocols
+    .clone()
     .into_iter()
-    .chain(std::iter::once(ProtocolVersion::new(
-      "ctmux_control",
-      info.control_protocol_version,
-    )))
+    .map(ProtocolVersion::from)
     .collect()
 }
 
@@ -205,14 +202,23 @@ fn version(info: ctl_core::component::ComponentInfo) -> ComponentVersionInfo {
 }
 
 fn require_compatible_replacement(info: &ctl_core::component::ComponentInfo) -> CommandResult<()> {
-  for (name, version) in [
-    ("ctmux", ctmux_proto::PROTOCOL_VERSION),
-    ("ctmux_control", ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION),
+  if !info.is_valid() {
+    return Err(CommandErrorDto::new(
+      "remote_replacement_incompatible",
+      "The installed remote daemon reports invalid protocol metadata.",
+    ));
+  }
+  for (name, supported) in [
+    ("ctmux", ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS),
+    (
+      "ctmux_control",
+      ctmux_ipc::LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS,
+    ),
   ] {
     if !info
       .protocols
       .iter()
-      .any(|protocol| protocol.name == name && protocol.version == version)
+      .any(|protocol| protocol.name == name && protocol.negotiate(supported).is_some())
     {
       return Err(CommandErrorDto::new(
         "remote_replacement_incompatible",
@@ -227,10 +233,12 @@ fn agent_version(identity: &ctl_proto::RemoteIdentity) -> ComponentVersionInfo {
   ComponentVersionInfo::observed(
     identity.agent_version.clone(),
     identity.build.clone(),
-    vec![ProtocolVersion::new(
-      "ctl_identity",
-      ctl_proto::IDENTITY_PROTOCOL_VERSION,
-    )],
+    identity
+      .protocols
+      .clone()
+      .into_iter()
+      .map(ProtocolVersion::from)
+      .collect(),
   )
 }
 
@@ -295,18 +303,17 @@ mod tests {
     let mut info = ctl_core::component::ComponentInfo {
       build: ctl_core::component::build_info(),
       protocols: vec![
-        ctl_core::component::ProtocolInfo {
-          name: "ctmux".into(),
-          version: ctmux_proto::PROTOCOL_VERSION,
-        },
-        ctl_core::component::ProtocolInfo {
-          name: "ctmux_control".into(),
-          version: ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION,
-        },
+        ctmux_proto::protocol_info(),
+        ctmux_ipc::local_control_protocol_info(),
       ],
     };
     assert!(require_compatible_replacement(&info).is_ok());
-    info.protocols[0].version += 1;
+    info.protocols[0] = ctl_core::component::ProtocolInfo::new(
+      "ctmux",
+      15,
+      ctl_core::protocol::ProtocolVersion::new(1, 1, 15),
+      &[ctl_core::protocol::ProtocolVersion::new(1, 1, 15)],
+    );
     assert!(require_compatible_replacement(&info).is_err());
   }
 }

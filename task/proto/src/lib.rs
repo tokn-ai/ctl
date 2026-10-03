@@ -1,11 +1,36 @@
 pub mod control;
 
+use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 4;
+/// Internal protocol build; incrementing this does not publish a new contract.
+pub const PROTOCOL_BUILD: u16 = 4;
+/// First published wire contract. Keep this identity immutable.
+pub const CONTRACT_V1_0_4: ProtocolVersion = ProtocolVersion::new(1, 0, 4);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_4;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_4];
+
+#[must_use]
+pub fn protocol_offer() -> ProtocolOffer {
+  ProtocolOffer::new(
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
+
+#[must_use]
+pub fn protocol_info() -> ctl_core::component::ProtocolInfo {
+  ctl_core::component::ProtocolInfo::new(
+    "task",
+    PROTOCOL_BUILD,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +117,7 @@ pub struct LogEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
   Handshake {
-    protocol_version: u16,
+    protocol: ProtocolOffer,
     client_name: String,
   },
   CreateTask {
@@ -132,14 +157,30 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-  HandshakeAccepted { protocol_version: u16 },
-  TaskCreated { task: TaskInfo },
-  TaskList { tasks: Vec<TaskInfo> },
-  TaskStatus { task: TaskInfo },
-  TaskRemoved { task_id: String },
-  Log { event: LogEvent },
+  HandshakeAccepted {
+    protocol_version: ProtocolVersion,
+    protocols: Vec<ctl_core::component::ProtocolInfo>,
+  },
+  TaskCreated {
+    task: TaskInfo,
+  },
+  TaskList {
+    tasks: Vec<TaskInfo>,
+  },
+  TaskStatus {
+    task: TaskInfo,
+  },
+  TaskRemoved {
+    task_id: String,
+  },
+  Log {
+    event: LogEvent,
+  },
   LogsFinished,
-  Error { code: ErrorCode, message: String },
+  Error {
+    code: ErrorCode,
+    message: String,
+  },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -246,7 +246,10 @@ enum RequestError {
   #[error(
     "ctld requires local protocol {expected}, but the client requested {actual}. Update the client and ctld together, then restart ctld."
   )]
-  ProtocolVersionMismatch { expected: u16, actual: u16 },
+  ProtocolVersionMismatch {
+    expected: ctl_core::protocol::ProtocolVersion,
+    actual: ctl_core::protocol::ProtocolVersion,
+  },
   #[error("could not start the OpenSSH control master: {0}")]
   StartMaster(#[source] io::Error),
   #[error("OpenSSH control master timed out during authentication")]
@@ -544,13 +547,13 @@ async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), ctl_ipc::CodecErr
   ctl_ipc::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: ctl_ipc::PROTOCOL_VERSION,
+      protocol: ctl_ipc::protocol_offer(),
     },
   )
   .await?;
   match ctl_ipc::read_frame::<_, ServerMessage>(stream).await? {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
-      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
+      if ctl_ipc::protocol_offer().accepts(protocol_version) =>
     {
       Ok(())
     }
@@ -569,20 +572,18 @@ async fn accept_handshake(
   request: Option<ClientMessage>,
 ) -> Result<(), RequestError> {
   match request {
-    Some(ClientMessage::Handshake { protocol_version })
-      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
-    {
-      ctl_ipc::write_frame(
-        stream,
-        &ServerMessage::HandshakeAccepted { protocol_version },
-      )
-      .await?;
-      Ok(())
-    }
-    Some(ClientMessage::Handshake { protocol_version }) => {
+    Some(ClientMessage::Handshake { protocol }) => {
+      if let Some(protocol_version) = protocol.negotiate(ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS) {
+        ctl_ipc::write_frame(
+          stream,
+          &ServerMessage::HandshakeAccepted { protocol_version },
+        )
+        .await?;
+        return Ok(());
+      }
       let error = RequestError::ProtocolVersionMismatch {
         expected: ctl_ipc::PROTOCOL_VERSION,
-        actual: protocol_version,
+        actual: protocol.version,
       };
       ctl_ipc::write_frame(
         stream,
@@ -1980,7 +1981,7 @@ mod tests {
     ctl_ipc::write_frame(
       &mut client,
       &ClientMessage::Handshake {
-        protocol_version: ctl_ipc::PROTOCOL_VERSION,
+        protocol: ctl_ipc::protocol_offer(),
       },
     )
     .await
@@ -1995,14 +1996,38 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
-  async fn handshake_rejection_reports_both_protocol_versions() {
+  async fn handshake_selects_an_explicit_common_contract_below_the_client_latest() {
     let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(async move { handshake_server(&mut server).await });
-    let old_version = ctl_ipc::PROTOCOL_VERSION - 1;
+    let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, 13);
     ctl_ipc::write_frame(
       &mut client,
       &ClientMessage::Handshake {
-        protocol_version: old_version,
+        protocol: ctl_core::protocol::ProtocolOffer::new(
+          13,
+          newer,
+          &[ctl_ipc::PROTOCOL_VERSION, newer],
+        ),
+      },
+    )
+    .await
+    .unwrap();
+    assert!(
+      matches!(ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(), Some(ServerMessage::HandshakeAccepted { protocol_version }) if protocol_version == ctl_ipc::PROTOCOL_VERSION)
+    );
+    server.await.unwrap().unwrap();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn handshake_rejection_reports_both_protocol_versions() {
+    let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
+    let server = tokio::spawn(async move { handshake_server(&mut server).await });
+    let old_version = ctl_core::protocol::ProtocolVersion::new(1, 0, 11);
+    ctl_ipc::write_frame(
+      &mut client,
+      &ClientMessage::Handshake {
+        protocol: ctl_core::protocol::ProtocolOffer::new(11, old_version, &[old_version]),
       },
     )
     .await
@@ -2423,7 +2448,7 @@ mod tests {
     ctl_ipc::write_frame(
       &mut stream,
       &ClientMessage::Handshake {
-        protocol_version: ctl_ipc::PROTOCOL_VERSION,
+        protocol: ctl_ipc::protocol_offer(),
       },
     )
     .await

@@ -323,7 +323,7 @@ where
   ctl_ipc::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: ctl_ipc::PROTOCOL_VERSION,
+      protocol: ctl_ipc::protocol_offer(),
     },
   )
   .await
@@ -333,7 +333,7 @@ where
     .map_err(CommandErrorDto::backend)?
   {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
-      if protocol_version == ctl_ipc::PROTOCOL_VERSION =>
+      if ctl_ipc::protocol_offer().accepts(protocol_version) =>
     {
       Ok(())
     }
@@ -545,8 +545,8 @@ mod tests {
     let daemon = tokio::spawn(async move {
       assert!(matches!(
         ctl_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
-        Some(ClientMessage::Handshake { protocol_version })
-          if protocol_version == ctl_ipc::PROTOCOL_VERSION
+        Some(ClientMessage::Handshake { protocol })
+          if protocol.negotiate(ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS).is_some()
       ));
       if let Some(reply) = reply {
         ctl_ipc::write_frame(&mut server, &reply).await.unwrap();
@@ -583,7 +583,7 @@ mod tests {
 
   #[tokio::test]
   async fn handshake_rejects_a_different_accepted_version() {
-    let old_version = ctl_ipc::PROTOCOL_VERSION - 1;
+    let old_version = ctl_core::protocol::ProtocolVersion::new(1, 0, ctl_ipc::PROTOCOL_BUILD - 1);
     let error = handshake_reply(Some(ServerMessage::HandshakeAccepted {
       protocol_version: old_version,
     }))

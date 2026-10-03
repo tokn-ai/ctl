@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { packageCtldBundle, type CtldBundleManifest } from "./package-ctld-bundle.mts";
 
+import { maxComponentMetadata, parseHelperProtocols, sameProtocols, verifyReleaseComponent } from "../shared/protocol-contract.mts";
+
 const execute = promisify(execFile);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cliIdentifier = "dev.tokn-ai.ctl.cli";
@@ -87,6 +89,7 @@ async function readHelper(directory: string, options: BuildCtlOptions): Promise<
     manifest.archive_size > 128 * 1024 * 1024) {
     throw new Error("ctld payload must match the signed, immutable CLI release");
   }
+  manifest.protocols = parseHelperProtocols(manifest.protocols);
   const archive = join(directory, manifest.archive);
   await regularFile(archive);
   if ((await lstat(archive)).size !== manifest.archive_size ||
@@ -137,13 +140,20 @@ async function verifyReusedHelper(
     info.CFBundleShortVersionString !== manifest.app_version || info.CFBundleVersion !== manifest.app_version) {
     throw new Error("ctld signed bundle metadata does not match its release");
   }
+  const component = verifyReleaseComponent((await invoke(join(app, "Contents", "MacOS", "ctld"), ["--component-info"])).stdout, manifest.app_version, manifest.git_revision);
+  if (!sameProtocols(component.protocols, manifest.protocols)) {
+    throw new Error("ctld protocol advertisements do not match its release manifest");
+  }
 }
 
 /** Compile the helper before embedding its final signed app in the CLI. */
 export async function buildCtlBundle(
   options: BuildCtlOptions,
   run: BuildRunner = async (command, args, context) => {
-    const result = await execute(command, args, { ...context, maxBuffer: 32 * 1024 * 1024 });
+    const result = await execute(command, args, { ...context,
+      maxBuffer: args[0] === "--component-info" ? maxComponentMetadata : 32 * 1024 * 1024,
+      timeout: args[0] === "--component-info" ? 5_000 : undefined,
+    });
     if (result.stderr) process.stderr.write(result.stderr);
     return result;
   },
@@ -156,6 +166,8 @@ export async function buildCtlBundle(
   const env: NodeJS.ProcessEnv = {
     ...(options.env ?? process.env), CTL_BUNDLED_CTLD_DIR: undefined, CTL_BUNDLED_CTLD_MODE: undefined,
     CTLD_SIGNING_TIMESTAMP: undefined,
+    CTLD_ASKPASS: undefined, CTLD_ASKPASS_TOKEN: undefined,
+    CTLD_IDENTITY_ASKPASS: undefined, CTLD_IDENTITY_ASKPASS_SOCKET: undefined, CTLD_IDENTITY_ASKPASS_TOKEN: undefined,
   };
   for (const key of ["APPLE_API_KEY_PATH", "APPLE_API_KEY", "APPLE_API_ISSUER"]) {
     if (!env[key]) throw new Error(`signed CLI releases require ${key}`);

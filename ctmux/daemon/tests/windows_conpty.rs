@@ -48,7 +48,7 @@ impl Daemon {
     write_frame(
       &mut stream,
       &ClientMessage::Handshake {
-        protocol_version: PROTOCOL_VERSION,
+        protocol: ctmux_proto::protocol_offer(),
         client_name: "windows-test".into(),
         client_version: "test".into(),
       },

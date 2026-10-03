@@ -31,6 +31,7 @@ const remoteTargets = [
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ];
+const protocols = [{name:"ctld",build:12,version:"1.0.12",supported_versions:["1.0.12"]}, ...["ctld_lifecycle", "ctld_helper"].map((name) => ({name,build:1,version:"1.0.1",supported_versions:["1.0.1"]}))];
 const macTargets = ["x86_64-apple-darwin", "aarch64-apple-darwin"];
 
 async function writeAsset(directory: string, name: string, bytes: Buffer): Promise<{
@@ -92,7 +93,7 @@ async function ctldAssets(directory: string, buildIdentity: BundleIdentity = ide
     await writeFile(join(directory, `ctld-${target}.json`), JSON.stringify({
       schema_version: 1, component: "ctld", ...buildIdentity, target,
       bundle_identifier: "dev.tokn-ai.ctl.ctld", team_identifier: "ABC123DEF4",
-      signing_mode: "signed", notarized: true, archive, ...asset,
+      signing_mode: "signed", notarized: true, archive, ...asset, protocols,
     }));
   }
 }
@@ -597,4 +598,17 @@ test("rejects a manual attachment collision before uploading anything", async ()
     { id: 1, name: "manual.pdf", label: "" },
     { id: 2, name: "old.dmg", label: "ctmux-ci: old.dmg" },
   ], []), [{ id: 2, name: "old.dmg", label: "ctmux-ci: old.dmg" }]);
+});
+
+
+test("rejects missing, malformed, or inconsistent helper contract advertisements", async (t) => {
+  for (const advertised of [undefined, [], [{name:"ctld",build:12,version:12,supported_versions:[12]}], protocols.map((protocol) => protocol.name === "ctld" ? {...protocol,build:13,version:"1.0.13",supported_versions:["1.0.13"]} : protocol)]) {
+    const directory = await fixture(t);
+    await ctldAssets(directory);
+    const path = join(directory, "ctld-aarch64-apple-darwin.json");
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.protocols = advertised;
+    await writeFile(path, JSON.stringify(manifest));
+    await assert.rejects(validateReleaseBundle(identity, directory), /protocol/);
+  }
 });

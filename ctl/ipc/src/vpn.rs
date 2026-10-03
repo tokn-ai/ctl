@@ -389,13 +389,13 @@ where
   crate::write_frame(
     stream,
     &ClientMessage::Handshake {
-      protocol_version: crate::PROTOCOL_VERSION,
+      protocol: crate::protocol_offer(),
     },
   )
   .await?;
   match crate::read_frame::<_, ServerMessage>(stream).await? {
     Some(ServerMessage::HandshakeAccepted { protocol_version }) => {
-      if protocol_version != crate::PROTOCOL_VERSION {
+      if !crate::protocol_offer().accepts(protocol_version) {
         return Err(VpnError::ProtocolVersionMismatch {
           expected: crate::PROTOCOL_VERSION,
           actual: protocol_version,
@@ -449,7 +449,10 @@ pub enum VpnError {
   #[error(
     "ctld protocol mismatch: client requires {expected}, daemon accepted {actual}; update and restart ctld"
   )]
-  ProtocolVersionMismatch { expected: u16, actual: u16 },
+  ProtocolVersionMismatch {
+    expected: ctl_core::protocol::ProtocolVersion,
+    actual: ctl_core::protocol::ProtocolVersion,
+  },
   #[error("ctld error {code}: {message}")]
   Daemon { code: String, message: String },
   #[error("VPN request timed out; check its status before trying again")]

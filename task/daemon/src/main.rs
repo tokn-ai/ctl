@@ -27,14 +27,8 @@ fn main() {
     let info = ctl_core::component::ComponentInfo {
       build: ctl_core::component::build_info(),
       protocols: vec![
-        ctl_core::component::ProtocolInfo {
-          name: "task".into(),
-          version: ctl_task_proto::PROTOCOL_VERSION,
-        },
-        ctl_core::component::ProtocolInfo {
-          name: "task_control".into(),
-          version: ctl_task_proto::control::PROTOCOL_VERSION,
-        },
+        ctl_task_proto::protocol_info(),
+        ctl_task_proto::control::protocol_info(),
       ],
     };
     println!(

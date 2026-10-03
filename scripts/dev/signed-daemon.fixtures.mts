@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { TestContext } from "node:test";
+import type { ProtocolInfo } from "../shared/protocol-contract.mts";
 import { inspectDaemon } from "./signed-daemon-probe.mts";
 import { SignedDaemon, type SignedDaemonConfig } from "./signed-daemon.mts";
 
@@ -63,11 +64,22 @@ export function supervisor(data: Fixture): SignedDaemon {
   });
 }
 
-export async function writeHelper(data: Fixture, protocol_version: number, mode = "ready"): Promise<void> {
+export async function writeHelper(data: Fixture, protocol_build: number, mode = "ready", contract?: ProtocolInfo): Promise<void> {
   await writeFile(data.executable, `#!${process.execPath}
 const fs = require("node:fs");
 const net = require("node:net");
-const protocol_version = ${protocol_version};
+const protocol = ${JSON.stringify(contract ?? {name:"ctld",build:protocol_build,version:`1.0.${protocol_build}`,supported_versions:[`1.0.${protocol_build}`]})};
+const protocol_version = protocol.version;
+const protocols = [protocol, ...["ctld_lifecycle", "ctld_helper"].map((name) => ({name, build:1, version:"1.0.1", supported_versions:["1.0.1"]}))];
+const build = {version:"0.1.0",source_revision:"a".repeat(40),source_fingerprint:"b".repeat(64),dirty:false};
+if (process.argv.includes("--component-info")) {
+  console.log(JSON.stringify({build, protocols}));
+  process.exit(0);
+}
+if (process.argv.includes("--protocol-build")) {
+  console.log(protocol.build);
+  process.exit(0);
+}
 const mode = ${JSON.stringify(mode)};
 if (process.argv.includes("--protocol-version")) {
   console.log(protocol_version);
@@ -90,9 +102,9 @@ const server = net.createServer((connection) => {
     received = Buffer.concat([received, chunk]);
     if (received.length < 4 || received.length < received.readUInt32BE() + 4) return;
     const request = JSON.parse(received.subarray(4).toString());
-    const accepted = mode !== "mismatch" && request.type === "ctld_inspect" && request.protocol_version === 1;
+    const accepted = mode !== "mismatch" && request.type === "ctld_inspect" && request.protocol?.supported_versions?.includes("1.0.1");
     const payload = Buffer.from(JSON.stringify(accepted
-      ? { type: "ctld_info", info: { instance_id: "fixture-" + process.pid, binary: { protocol_version, lifecycle_protocol_version: 1 } } }
+      ? { type: "ctld_info", protocol_version: "1.0.1", info: { instance_id: "fixture-" + process.pid, binary: { build, protocol_version, lifecycle_protocol_version: "1.0.1", protocols } } }
       : { type: "error", message: "test protocol mismatch" }));
     const header = Buffer.alloc(4);
     header.writeUInt32BE(payload.length);
@@ -125,7 +137,7 @@ if (mode === "replacement_race") {
   await chmod(data.executable, 0o700);
 }
 
-export async function starts(data: Fixture): Promise<Array<{ pid: number; protocol_version: number; ctld_bin?: string }>> {
+export async function starts(data: Fixture): Promise<Array<{ pid: number; protocol_version: string; ctld_bin?: string }>> {
   try {
     return (await readFile(data.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   } catch (error) {
@@ -166,7 +178,7 @@ export async function startExternal(data: Fixture, executable = data.executable)
 
 export async function waitReady(data: Fixture, protocol_version: number): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (await inspectDaemon(data.supervisor.socket_path, 300) === protocol_version) return;
+    if ((await inspectDaemon(data.supervisor.socket_path, 300))?.version === `1.0.${protocol_version}`) return;
     await pause(10);
   }
   assert.fail("fixture daemon did not become ready");

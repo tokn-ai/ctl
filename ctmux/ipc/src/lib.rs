@@ -6,6 +6,7 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 #[cfg(windows)]
 pub use interprocess::local_socket::tokio::Stream;
 #[cfg(windows)]
@@ -42,7 +43,31 @@ const MAX_LOCAL_CONTROL_FRAME_SIZE: usize = 64 * 1024;
 /// This protocol is intentionally separate from `ctmux-proto`: `ctl-agent` relays
 /// only the ordinary data endpoint and must never expose daemon-global local
 /// maintenance operations to remote `ctmux_tunnel` clients.
-pub const LOCAL_CONTROL_PROTOCOL_VERSION: u16 = 1;
+pub const LOCAL_CONTROL_PROTOCOL_BUILD: u16 = 1;
+/// First published local-control wire contract. Keep this identity immutable.
+pub const LOCAL_CONTROL_CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
+pub const LOCAL_CONTROL_PROTOCOL_VERSION: ProtocolVersion = LOCAL_CONTROL_CONTRACT_V1_0_1;
+pub const LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
+  &[LOCAL_CONTROL_CONTRACT_V1_0_1];
+
+#[must_use]
+pub fn local_control_offer() -> ProtocolOffer {
+  ProtocolOffer::new(
+    LOCAL_CONTROL_PROTOCOL_BUILD,
+    LOCAL_CONTROL_PROTOCOL_VERSION,
+    LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
+
+#[must_use]
+pub fn local_control_protocol_info() -> ctl_core::component::ProtocolInfo {
+  ctl_core::component::ProtocolInfo::new(
+    "ctmux_control",
+    LOCAL_CONTROL_PROTOCOL_BUILD,
+    LOCAL_CONTROL_PROTOCOL_VERSION,
+    LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS,
+  )
+}
 
 #[must_use]
 pub fn socket_path() -> PathBuf {
@@ -100,7 +125,7 @@ pub fn runtime_directory() -> PathBuf {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalControlClientMessage {
   Handshake {
-    protocol_version: u16,
+    protocol: ProtocolOffer,
   },
   RestartDaemon,
   ManageSession {
@@ -120,12 +145,13 @@ pub enum LocalControlServerMessage {
     session: Option<ManagedSessionInfo>,
   },
   HandshakeAccepted {
-    protocol_version: u16,
+    protocol_version: ProtocolVersion,
+    protocols: Vec<ctl_core::component::ProtocolInfo>,
     restart_supported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     build: Option<ctl_core::component::ComponentBuildInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    data_protocol_version: Option<u16>,
+    data_protocol_version: Option<ProtocolVersion>,
     #[serde(default)]
     managed_sessions_supported: bool,
   },
@@ -294,7 +320,7 @@ where
   write_local_control_frame(
     stream,
     &LocalControlClientMessage::Handshake {
-      protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+      protocol: local_control_offer(),
     },
   )
   .await?;
@@ -302,13 +328,21 @@ where
   match read_local_control_frame(stream).await? {
     Some(LocalControlServerMessage::HandshakeAccepted {
       protocol_version,
+      protocols,
       restart_supported,
       managed_sessions_supported,
       ..
-    }) if protocol_version == LOCAL_CONTROL_PROTOCOL_VERSION => Ok(LocalControlCapabilities {
-      restart_supported,
-      managed_sessions_supported,
-    }),
+    }) if local_control_offer().accepts(protocol_version)
+      && ctl_core::component::protocols_are_valid(&protocols)
+      && protocols.iter().any(|protocol| {
+        protocol.name == "ctmux_control" && protocol.supports(protocol_version)
+      }) =>
+    {
+      Ok(LocalControlCapabilities {
+        restart_supported,
+        managed_sessions_supported,
+      })
+    }
     Some(LocalControlServerMessage::Error { code, message }) => {
       Err(LocalControlClientError::Server { code, message })
     }
@@ -740,7 +774,7 @@ mod tests {
   #[test]
   fn older_handshake_does_not_advertise_managed_sessions() {
     let response: LocalControlServerMessage = serde_json::from_str(
-      r#"{"type":"handshake_accepted","protocol_version":1,"restart_supported":true}"#,
+      r#"{"type":"handshake_accepted","protocol_version":"1.0.1","protocols":[{"name":"ctmux_control","build":1,"version":"1.0.1","supported_versions":["1.0.1"]}],"restart_supported":true}"#,
     )
     .unwrap();
     assert!(matches!(
@@ -764,13 +798,14 @@ mod tests {
       assert_eq!(
         handshake,
         LocalControlClientMessage::Handshake {
-          protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+          protocol: local_control_offer(),
         }
       );
       write_local_control_frame(
         &mut daemon,
         &LocalControlServerMessage::HandshakeAccepted {
           protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION,
+          protocols: vec![local_control_protocol_info()],
           restart_supported: false,
           build: None,
           data_protocol_version: None,

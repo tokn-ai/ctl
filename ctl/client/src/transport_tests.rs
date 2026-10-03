@@ -7,6 +7,31 @@ use tokio::time::timeout;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[test]
+fn remote_identity_transport_failures_retry_but_invalid_metadata_does_not() {
+  for kind in [
+    io::ErrorKind::UnexpectedEof,
+    io::ErrorKind::ConnectionReset,
+    io::ErrorKind::BrokenPipe,
+    io::ErrorKind::TimedOut,
+  ] {
+    assert!(is_retryable_connection_error(&CoreError::RemoteIdentity(
+      kind.into(),
+    )));
+  }
+  for kind in [
+    io::ErrorKind::InvalidData,
+    io::ErrorKind::InvalidInput,
+    io::ErrorKind::PermissionDenied,
+    io::ErrorKind::NotFound,
+    io::ErrorKind::Other,
+  ] {
+    assert!(!is_retryable_connection_error(&CoreError::RemoteIdentity(
+      kind.into(),
+    )));
+  }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn fresh_proxy_routes_propagate_preparation_failure_before_starting_ssh() {

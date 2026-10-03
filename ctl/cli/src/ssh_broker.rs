@@ -135,6 +135,7 @@ where
     {
       Ok(protocol_version)
     }
+    None => Err(Error::ConnectionClosed),
     _ => Err(Error::UnexpectedResponse),
   }
 }
@@ -207,6 +208,42 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn broker_closing_during_handshake_is_a_transport_failure() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let daemon = tokio::spawn(async move {
+      assert!(matches!(
+        ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+          .await
+          .unwrap(),
+        Some(ClientMessage::Handshake { .. })
+      ));
+    });
+    assert!(matches!(
+      handshake(&mut client).await,
+      Err(Error::ConnectionClosed)
+    ));
+    daemon.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn unexpected_handshake_response_remains_a_protocol_failure() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let daemon = tokio::spawn(async move {
+      ctl_ipc::read_frame::<_, ClientMessage>(&mut server)
+        .await
+        .unwrap();
+      ctl_ipc::write_frame(&mut server, &ServerMessage::AuthenticationRequired)
+        .await
+        .unwrap();
+    });
+    assert!(matches!(
+      handshake(&mut client).await,
+      Err(Error::UnexpectedResponse)
+    ));
+    daemon.await.unwrap();
+  }
 
   #[tokio::test]
   async fn negotiated_contract_retains_historical_routes_and_guards_remote_operations() {

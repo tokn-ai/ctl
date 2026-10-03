@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::super::tests::gh_fixture;
 use super::super::tests::{TARGET, build, bundle_manifest, zip_bytes};
 use super::*;
 use serde_json::json;
@@ -155,11 +157,8 @@ struct StreamGh {
 #[cfg(unix)]
 impl StreamGh {
   fn new(body: &str) -> Self {
-    use std::os::unix::fs::PermissionsExt as _;
     let directory = TemporaryDirectory::new().unwrap();
-    let program = directory.0.join("gh");
-    std::fs::write(&program, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let program = gh_fixture(&directory.0, &format!("set -eu\n{body}\n"));
     Self { directory, program }
   }
 }
@@ -197,26 +196,40 @@ async fn byte_progress_permits_a_healthy_download_beyond_five_minutes() {
 #[tokio::test]
 async fn idle_streams_and_processes_hanging_after_stdout_closes_are_killed() {
   use std::sync::atomic::{AtomicU64, Ordering};
-  for (body, expected) in [
-    ("exec sleep 30", "Transfer stalled"),
+  for (body, phase, expected) in [
+    (
+      "exec sleep 30",
+      RemoteInstallPhase::Transferring,
+      "Transfer stalled",
+    ),
     (
       "printf x; exec 1>&-; exec sleep 30",
+      RemoteInstallPhase::Checking,
       "component verification",
     ),
   ] {
     let fake = StreamGh::new(body);
     let base = Instant::now();
     let seconds = AtomicU64::new(0);
-    let error = stream_command(
-      fake.program.as_os_str(),
-      "fixed-endpoint",
-      &fake.directory.0.join("payload"),
-      1,
-      || base + Duration::from_secs(seconds.fetch_add(31, Ordering::SeqCst)),
-      Duration::from_millis(1),
-      |_| {},
+    let error = tokio::time::timeout(
+      Duration::from_secs(5),
+      stream_command(
+        fake.program.as_os_str(),
+        "fixed-endpoint",
+        &fake.directory.0.join("payload"),
+        1,
+        || base + Duration::from_secs(seconds.load(Ordering::SeqCst)),
+        Duration::from_millis(1),
+        |progress| {
+          // Reach the phase under test before advancing its idle deadline.
+          if progress.phase == phase {
+            seconds.fetch_add(31, Ordering::SeqCst);
+          }
+        },
+      ),
     )
     .await
+    .expect("GitHub command did not reach its idle deadline")
     .unwrap_err();
     assert!(error.to_string().contains(expected), "{error}");
   }

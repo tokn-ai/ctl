@@ -5,19 +5,19 @@ use ctl_client::hosts::{
 
 use super::{Command, Error, MethodCommand, host_index, method_index, reject_method};
 
-#[derive(Debug, Default, clap::Args)]
+#[derive(Debug, Default, Clone, clap::Args)]
 pub struct ConnectionOptions {
   #[arg(long)]
   hostname: Option<String>,
   #[arg(long)]
-  user: Option<String>,
+  pub(super) user: Option<String>,
   #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
-  port: Option<u16>,
+  pub(super) port: Option<u16>,
   #[arg(long)]
-  identity_file: Option<String>,
+  pub(super) identity_file: Option<String>,
   /// Treat the destination as an SSH config alias.
   #[arg(long)]
-  ssh_config: bool,
+  pub(super) ssh_config: bool,
   /// Opt in/out of the SSH config alias's own `ControlMaster`.
   #[arg(long, value_name = "BOOL")]
   use_ssh_config_master: Option<bool>,
@@ -31,11 +31,11 @@ pub struct ConnectionOptions {
   tailscale_node_id: Option<String>,
   /// Remove optional settings instead of replacing them; comma-separated.
   #[arg(long, value_enum, value_delimiter = ',')]
-  clear: Vec<Clear>,
+  pub(super) clear: Vec<Clear>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Clear {
+pub(super) enum Clear {
   Hostname,
   User,
   Port,
@@ -227,32 +227,6 @@ pub(super) fn apply(
   selected: Option<&str>,
 ) -> Result<(WorkspaceHost, bool), Error> {
   let result = match command {
-    Command::Add {
-      name,
-      destination,
-      method_name,
-      options,
-      json,
-    } => {
-      reject_method(selected)?;
-      unique_name(
-        &name,
-        document
-          .hosts
-          .iter()
-          .map(|host| (host.host_id.as_str(), host.name.as_str())),
-      )?;
-      let method = new_method(method_name, destination, &options)?;
-      let host = WorkspaceHost {
-        host_id: uuid::Uuid::new_v4().to_string(),
-        name,
-        preferred_method_id: Some(method.method_id.clone()),
-        connection_methods: vec![method],
-        remote_info: None,
-      };
-      document.hosts.push(host.clone());
-      (host, json)
-    }
     Command::Update {
       host,
       name,
@@ -291,6 +265,30 @@ pub(super) fn apply(
   };
   document.validate()?;
   Ok(result)
+}
+
+pub(super) fn create(
+  document: &mut HostCatalogDocument,
+  request: super::create::Request,
+) -> Result<WorkspaceHost, Error> {
+  unique_name(
+    &request.name,
+    document
+      .hosts
+      .iter()
+      .map(|host| (host.host_id.as_str(), host.name.as_str())),
+  )?;
+  let method = new_method(request.method_name, request.destination, &request.options)?;
+  let host = WorkspaceHost {
+    host_id: uuid::Uuid::new_v4().to_string(),
+    name: request.name,
+    preferred_method_id: Some(method.method_id.clone()),
+    connection_methods: vec![method],
+    remote_info: None,
+  };
+  document.hosts.push(host.clone());
+  document.validate()?;
+  Ok(host)
 }
 
 fn edit_method(

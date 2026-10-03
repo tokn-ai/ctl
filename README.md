@@ -558,7 +558,8 @@ the logical attachment and its leases for 30 seconds by default. An explicit
 ### Saved hosts and connection status
 
 ```sh
-ctl host add work 10.0.0.20 --user alice
+ctl host create
+ctl host create work 10.0.0.20 --user alice
 ctl host list
 ctl host show work --json
 ctl host status work
@@ -579,8 +580,15 @@ ctl host remove office
 `host` manages the same saved definitions as the desktop in
 `~/.tokn/ctl/hosts.json` (`CTL_HOSTS_PATH` overrides it). Select hosts and methods
 by name or stable ID. These management commands require saved hosts; to save an
-SSH config alias, use `ctl host add work my-ssh-alias --ssh-config`. `host list`
+SSH config alias, use `ctl host create work my-ssh-alias --ssh-config`. `host list`
 shows saved definitions only, not unsaved SSH config or Tailscale discoveries.
+
+`host create` opens a questionnaire when the name or destination is omitted in
+an interactive terminal. Scripts can pass `NAME DESTINATION` and connection
+flags directly. Creation saves the definition without connecting or saving
+credentials. With `--json`, the saved host is written to stdout and prompts go
+to stderr. Root `host add` has been removed; `host method add` still adds an
+alternate method to an existing host.
 
 `list`, `show`, and `status` observe existing ctld connections without starting
 a daemon, connecting, or starting a VPN. Status is per method: `connected`

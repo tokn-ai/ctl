@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -41,10 +41,10 @@ impl Fixture {
   fn bytes(&self) -> Vec<u8> {
     fs::read(self.0.join("hosts.json")).unwrap()
   }
-  fn add(&self) -> Value {
+  fn create(&self) -> Value {
     self.run(&[
       "host",
-      "add",
+      "create",
       "work",
       "10.0.0.20",
       "--user",
@@ -57,6 +57,103 @@ impl Drop for Fixture {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.0);
   }
+}
+
+#[test]
+fn removed_add_command_does_not_create_or_modify_the_catalog() {
+  for existing_catalog in [false, true] {
+    let fixture = Fixture::new();
+    let original = existing_catalog.then(|| {
+      fixture.create();
+      fixture.bytes()
+    });
+    let error = fixture.fails(&["host", "add", "other", "other", "--json"]);
+    assert!(error.contains("unrecognized subcommand"), "{error}");
+    assert!(error.contains("add"), "{error}");
+    if let Some(original) = original {
+      assert_eq!(fixture.bytes(), original);
+    } else {
+      assert!(!fixture.0.join("hosts.json").exists());
+      assert!(!fixture.0.join("workspace.lock").exists());
+    }
+  }
+}
+
+#[test]
+fn questionnaire_requires_a_terminal_without_mutating_the_catalog() {
+  for existing_catalog in [false, true] {
+    let fixture = Fixture::new();
+    let original = existing_catalog.then(|| {
+      fixture.create();
+      fixture.bytes()
+    });
+    for args in [vec!["host", "create"], vec!["host", "create", "--json"]] {
+      let output = fixture
+        .command(&args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+      assert!(!output.status.success(), "{output:?}");
+      assert!(output.stdout.is_empty(), "{output:?}");
+      let error = String::from_utf8_lossy(&output.stderr);
+      assert!(error.contains("interactive terminal"), "{error}");
+      if let Some(original) = &original {
+        assert_eq!(fixture.bytes(), *original);
+      } else {
+        assert!(!fixture.0.join("hosts.json").exists());
+        assert!(!fixture.0.join("workspace.lock").exists());
+      }
+      assert!(!fixture.0.join("ctld.sock").exists());
+    }
+  }
+}
+
+#[test]
+fn explicit_create_saves_ssh_config_settings_and_only_json_without_a_terminal() {
+  let fixture = Fixture::new();
+  let output = fixture
+    .command(&[
+      "host",
+      "create",
+      "work",
+      "work-ssh-alias",
+      "--method-name",
+      "Config",
+      "--ssh-config",
+      "--use-ssh-config-master",
+      "false",
+      "--hostname",
+      "10.0.0.20",
+      "--user",
+      "alice",
+      "--port",
+      "2222",
+      "--identity-file",
+      "/keys/key with space",
+      "--json",
+    ])
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
+  assert!(output.status.success(), "{output:?}");
+  assert!(output.stderr.is_empty(), "{output:?}");
+  let created: Value = serde_json::from_slice(&output.stdout).unwrap();
+  let method = &created["connection_methods"][0];
+  assert_eq!(created["name"], "work");
+  assert_eq!(created["preferred_method_id"], method["method_id"]);
+  assert_eq!(method["name"], "Config");
+  assert_eq!(method["ssh_config_alias"], "work-ssh-alias");
+  assert_eq!(method["use_ssh_config_master"], false);
+  assert_eq!(method["target"]["destination"], "work-ssh-alias");
+  assert_eq!(method["target"]["hostname"], "10.0.0.20");
+  assert_eq!(method["target"]["user"], "alice");
+  assert_eq!(method["target"]["port"], 2222);
+  assert_eq!(method["target"]["identity_file"], "/keys/key with space");
+  assert_eq!(
+    fixture.run(&["host", "show", "work", "--json"])["host"],
+    created
+  );
+  assert!(!fixture.0.join("ctld.sock").exists());
 }
 
 #[cfg(unix)]
@@ -82,7 +179,7 @@ fn default_catalog_round_trip_uses_ctl_root_and_ignores_former_locations() {
     serde_json::from_slice::<Value>(&output.stdout).unwrap()
   };
   assert_eq!(run(&["host", "list", "--json"]), json!([]));
-  let added = run(&["host", "add", "work", "10.0.0.20", "--json"]);
+  let added = run(&["host", "create", "work", "10.0.0.20", "--json"]);
   assert_eq!(run(&["host", "show", "work", "--json"])["host"], added);
   assert!(fixture.0.join(".tokn/ctl/hosts.json").is_file());
   assert_eq!(
@@ -128,7 +225,7 @@ fn global_task_catalog_round_trip_uses_ctl_root() {
 #[test]
 fn host_crud_preserves_identity_and_unselected_connection_settings() {
   let fixture = Fixture::new();
-  let added = fixture.add();
+  let added = fixture.create();
   let id = added["host_id"].as_str().unwrap();
   let identity = json!({"remote_id": "9dcefd7e-2b35-43d8-97d9-7508186dbac0", "agent_version": "0.1.0", "ctmux_restart_supported": false});
   let mut snapshot: Value = serde_json::from_slice(&fixture.bytes()).unwrap();
@@ -165,7 +262,7 @@ fn host_crud_preserves_identity_and_unselected_connection_settings() {
 #[test]
 fn methods_manage_preference_and_edit_only_the_selected_route() {
   let fixture = Fixture::new();
-  let first = fixture.add();
+  let first = fixture.create();
   let alternate = fixture.run(&[
     "host", "method", "add", "work", "VPN", "vpn-work", "--vpn", "company", "--prefer", "--json",
   ]);
@@ -222,10 +319,10 @@ fn methods_manage_preference_and_edit_only_the_selected_route() {
 #[test]
 fn invalid_changes_and_unknown_selectors_do_not_modify_catalog() {
   let fixture = Fixture::new();
-  fixture.add();
+  fixture.create();
   let original = fixture.bytes();
   for args in [
-    vec!["host", "add", "work", "other"],
+    vec!["host", "create", "work", "other"],
     vec!["host", "update", "missing", "--name", "test"],
     vec!["host", "update", "work", "--gateway", "missing"],
     vec!["host", "update", "work", "--port", "0"],
@@ -248,7 +345,7 @@ fn passive_reads_do_not_create_the_catalog_or_start_ctld() {
   assert_eq!(fixture.run(&["host", "list", "--json"]), json!([]));
   assert!(!fixture.0.join("hosts.json").exists());
   assert!(!fixture.0.join("workspace.lock").exists());
-  fixture.add();
+  fixture.create();
   let saved = fixture.bytes();
   let status = fixture.run(&["host", "status", "work", "--json"]);
   #[cfg(unix)]
@@ -262,7 +359,7 @@ fn passive_reads_do_not_create_the_catalog_or_start_ctld() {
 fn corrupt_catalog_and_pending_migrations_are_preserved() {
   let fixture = Fixture::new();
   fs::write(fixture.0.join("hosts.json"), b"broken").unwrap();
-  fixture.fails(&["host", "add", "work", "server"]);
+  fixture.fails(&["host", "create", "work", "server"]);
   assert_eq!(fixture.bytes(), b"broken");
   fs::remove_file(fixture.0.join("hosts.json")).unwrap();
   fs::write(
@@ -272,7 +369,7 @@ fn corrupt_catalog_and_pending_migrations_are_preserved() {
   .unwrap();
   assert!(
     fixture
-      .fails(&["host", "add", "work", "server"])
+      .fails(&["host", "create", "work", "server"])
       .contains("migrate")
   );
   assert!(!fixture.0.join("hosts.json").exists());
@@ -283,7 +380,7 @@ fn names_with_at_are_literal_and_stable_ids_disambiguate_existing_names() {
   let fixture = Fixture::new();
   let added = fixture.run(&[
     "host",
-    "add",
+    "create",
     "alice@work",
     "server",
     "--ssh-config",
@@ -317,7 +414,7 @@ fn names_with_at_are_literal_and_stable_ids_disambiguate_existing_names() {
 #[test]
 fn status_keeps_catalog_order_beyond_the_concurrency_limit() {
   let fixture = Fixture::new();
-  let host = fixture.add();
+  let host = fixture.create();
   let mut snapshot: Value = serde_json::from_slice(&fixture.bytes()).unwrap();
   for index in 1..12 {
     let mut host = host.clone();
@@ -377,7 +474,7 @@ mod unix {
   #[tokio::test]
   async fn status_reports_all_methods_without_ensure_master_and_keeps_errors_unknown() {
     let fixture = Fixture::new();
-    fixture.add();
+    fixture.create();
     fixture.run(&[
       "host", "method", "add", "work", "VPN", "vpn", "--vpn", "company", "--json",
     ]);
@@ -429,7 +526,7 @@ mod unix {
   #[tokio::test]
   async fn explicit_connect_and_disconnect_use_preferred_and_all_methods_respectively() {
     let fixture = Fixture::new();
-    fixture.add();
+    fixture.create();
     fixture.run(&[
       "host", "method", "add", "work", "Other", "other", "--prefer", "--json",
     ]);
@@ -477,7 +574,7 @@ mod unix {
   fn writes_are_private_and_do_not_follow_symlinks() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new();
-    fixture.add();
+    fixture.create();
     assert_eq!(
       fs::metadata(fixture.0.join("hosts.json"))
         .unwrap()
@@ -497,7 +594,7 @@ mod unix {
       fixture.0.join("hosts.json"),
     )
     .unwrap();
-    fixture.fails(&["host", "add", "other", "other"]);
+    fixture.fails(&["host", "create", "other", "other"]);
     assert_eq!(fs::read(fixture.0.join("original.json")).unwrap(), original);
   }
 }

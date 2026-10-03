@@ -18,8 +18,17 @@ struct TestDaemon {
 
 #[tokio::test]
 async fn published_contract_negotiates_an_explicit_shared_version() {
+  use ctl_core::component::{ComponentInfo, protocols_match};
   use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
   use ctl_task_proto::control;
+  let output = Command::new(env!("CARGO_BIN_EXE_ctl-taskd"))
+    .arg("--component-info")
+    .output()
+    .await
+    .unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let inspected: ComponentInfo = serde_json::from_slice(&output.stdout).unwrap();
+  assert!(inspected.is_valid());
   let daemon = TestDaemon::start().await;
   let future = ProtocolVersion::new(1, 1, 6);
   let mut stream = connect(&daemon.socket).await.unwrap();
@@ -40,7 +49,10 @@ async fn published_contract_negotiates_an_explicit_shared_version() {
     panic!("handshake was rejected");
   };
   assert_eq!(protocol_version, PROTOCOL_VERSION);
-  assert!(protocols.contains(&ctl_task_proto::protocol_info()));
+  assert!(
+    protocols_match(&protocols, &inspected.protocols),
+    "live task handshake metadata differs from executable metadata"
+  );
   write_frame(&mut stream, &ClientMessage::ListTasks)
     .await
     .unwrap();
@@ -58,10 +70,21 @@ async fn published_contract_negotiates_an_explicit_shared_version() {
   )
   .await
   .unwrap();
+  let Some(control::ServerMessage::ComponentStatus {
+    build,
+    protocol_version,
+    data_protocol_version,
+    protocols,
+  }) = read_frame(&mut stream).await.unwrap()
+  else {
+    panic!("component status was rejected");
+  };
+  assert_eq!(protocol_version, control::PROTOCOL_VERSION);
+  assert_eq!(data_protocol_version, PROTOCOL_VERSION);
+  assert_eq!(build, inspected.build);
   assert!(
-    matches!(read_frame::<_, control::ServerMessage>(&mut stream).await.unwrap(),
-    Some(control::ServerMessage::ComponentStatus { protocol_version, protocols, .. })
-      if protocol_version == control::PROTOCOL_VERSION && protocols.contains(&control::protocol_info()))
+    protocols_match(&protocols, &inspected.protocols),
+    "live control metadata differs from executable metadata"
   );
 
   daemon.stop().await;

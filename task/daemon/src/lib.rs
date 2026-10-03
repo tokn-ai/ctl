@@ -32,6 +32,21 @@ const STATE_SCHEMA_VERSION: u16 = 1;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LOG_BYTES_PER_RUN: usize = 4 * 1024 * 1024;
 
+/// Build identity and contracts implemented or consumed by this task daemon.
+/// Companion entries describe the contracts this executable can use.
+#[must_use]
+pub fn component_info() -> ctl_core::component::ComponentInfo {
+  ctl_core::component::ComponentInfo {
+    build: ctl_core::component::build_info(),
+    protocols: vec![
+      ctl_task_proto::protocol_info(),
+      ctl_task_proto::control::protocol_info(),
+      ctmux_proto::protocol_info(),
+      ctmux_ipc::local_control_protocol_info(),
+    ],
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
   pub socket_path: PathBuf,
@@ -647,14 +662,12 @@ async fn handle_connection(
       let response = if let Some(protocol_version) =
         protocol.negotiate(ctl_task_proto::control::SUPPORTED_PROTOCOL_VERSIONS)
       {
+        let info = component_info();
         ctl_task_proto::control::ServerMessage::ComponentStatus {
-          build: ctl_core::component::build_info(),
+          build: info.build,
           protocol_version,
           data_protocol_version: PROTOCOL_VERSION,
-          protocols: vec![
-            ctl_task_proto::protocol_info(),
-            ctl_task_proto::control::protocol_info(),
-          ],
+          protocols: info.protocols,
         }
       } else {
         ctl_task_proto::control::ServerMessage::Error {
@@ -702,10 +715,7 @@ async fn handle_connection(
     &mut stream,
     &ServerMessage::HandshakeAccepted {
       protocol_version,
-      protocols: vec![
-        ctl_task_proto::protocol_info(),
-        ctl_task_proto::control::protocol_info(),
-      ],
+      protocols: component_info().protocols,
     },
   )
   .await?;

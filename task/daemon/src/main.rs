@@ -24,16 +24,7 @@ struct Arguments {
 fn main() {
   let arguments = Arguments::parse();
   if arguments.component_info {
-    let info = ctl_core::component::ComponentInfo {
-      build: ctl_core::component::build_info(),
-      protocols: vec![
-        ctl_task_proto::protocol_info(),
-        ctl_task_proto::control::protocol_info(),
-        // Interactive tasks consume these contracts from the ctmux owner.
-        ctmux_proto::protocol_info(),
-        ctmux_ipc::local_control_protocol_info(),
-      ],
-    };
+    let info = ctl_taskd::component_info();
     println!(
       "{}",
       serde_json::to_string(&info).expect("component metadata serializes")

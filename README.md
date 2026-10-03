@@ -633,8 +633,11 @@ revision, reuses the chosen SSH route, and shows received bytes, speed, and
 installation stages. It preserves running daemons and can be cancelled with
 Ctrl-C. Piped commands and background reconnects never prompt. Local bundle
 sets can be selected with `CTL_REMOTE_BUNDLES_DIR`; otherwise the CLI checks
-its local resources, `~/.tokn/ctl/agent-bundles`, the matching official release,
-and existing exact-revision GitHub bundle artifacts when `gh` is installed.
+its local resources, `~/.tokn/ctl/agent-bundles`, and the verified download cache
+before the matching official release and existing exact-revision GitHub bundle
+artifacts when `gh` is installed. Downloads are cached under
+`~/.tokn/ctl/agent-bundles/<revision>/<target>/` for reuse across hosts; each reuse
+checks the version, source revision, and checksum without contacting GitHub.
 For source development, run `pnpm agents:sync` from `apps/desktop` at the same
 clean pushed revision before rebuilding. See [remote setup](docs/remote-mvp.md).
 

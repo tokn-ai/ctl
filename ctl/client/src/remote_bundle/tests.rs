@@ -1,11 +1,11 @@
 use super::*;
 use serde_json::{Value, json};
 
-const VERSION: &str = "0.1.0";
-const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-const TARGET: &str = "aarch64-apple-darwin";
+pub(super) const VERSION: &str = "0.1.0";
+pub(super) const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+pub(super) const TARGET: &str = "aarch64-apple-darwin";
 
-fn build() -> ComponentBuildInfo {
+pub(super) fn build() -> ComponentBuildInfo {
   ComponentBuildInfo {
     version: VERSION.into(),
     source_revision: Some(REVISION.into()),
@@ -14,7 +14,7 @@ fn build() -> ComponentBuildInfo {
   }
 }
 
-fn manifest(archive: &[u8]) -> Value {
+pub(super) fn manifest(archive: &[u8]) -> Value {
   let digest = format!("{:x}", Sha256::digest(archive));
   let targets = SUPPORTED_TARGETS
     .into_iter()
@@ -252,6 +252,7 @@ fn archive_checksum_is_verified_before_it_can_be_uploaded() {
   assert_eq!(found.archive, b"trusted archive");
   assert_eq!(found.app_version, VERSION);
   assert_eq!(found.git_revision, REVISION);
+  assert_eq!(found.manifest, serde_json::to_vec(&value).unwrap());
   assert_eq!(
     found.file_name,
     value["targets"][TARGET]["archive"].as_str().unwrap()

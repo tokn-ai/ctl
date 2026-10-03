@@ -99,8 +99,11 @@ connect HOST` authenticates SSH without installing components.
   installation. A clean source build needs exact-revision bundles: run `pnpm
   agents:sync` from `apps/desktop`, or set `CTL_REMOTE_BUNDLES_DIR` to that bundle
   set. The CLI may download an existing verified exact-revision bundle artifact
-  through `gh`; it never dispatches a workflow. A manually run `ctl-agent
-  connect` waits for protocol input; it is not a finite health-check command.
+  through `gh`; it never dispatches a workflow. Downloaded bundles are cached
+  under `~/.tokn/ctl/agent-bundles/<revision>/<target>/` and checked again on reuse,
+  so later repairs for the same build and platform can work offline. A manually
+  run `ctl-agent connect` waits for protocol input; it is not a finite
+  health-check command.
 - **Missing signed macOS helper:** for authorized local setup, run `ctl setup`.
   A missing release artifact requires the publisher to publish the matching
   signed release. Discovery can reuse another verified compatible installation;

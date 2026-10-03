@@ -139,10 +139,18 @@ commands and later reconnects never prompt or install automatically.
 Repair validates the bundle's checksums, version, and exact clean source
 revision. It looks for local bundles (`CTL_REMOTE_BUNDLES_DIR`, checkout resources
 in debug builds, resources beside the executable, or `~/.tokn/ctl/agent-bundles`),
-then the matching official release, then an existing GitHub bundle
-artifact for that exact revision when `gh` is available. It never selects an
+then its verified download cache, the matching official release, and an existing
+GitHub bundle artifact for that exact revision when `gh` is available. It never selects an
 arbitrary latest build or starts a workflow. For source development, `pnpm
 agents:sync` from `apps/desktop` prepares bundles for a clean pushed commit.
+Downloaded manifests and target archives are stored in
+`~/.tokn/ctl/agent-bundles/<revision>/<target>/`, shared across remote hosts.
+Each reuse verifies the version, full source revision, and checksum before any
+network lookup, so a matching cached bundle works offline. Publication uses
+private staging and atomic rename; cancelled downloads leave no partial cache
+entry. Damaged managed cache entries can be downloaded again. An invalid
+explicit `CTL_REMOTE_BUNDLES_DIR` still stops repair, and cache write errors warn
+without rejecting an otherwise verified bundle.
 Upload progress shows the archive, received bytes, speed, and installation
 stage; a healthy transfer has no overall time limit. Ctrl-C cancels repair.
 

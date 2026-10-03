@@ -336,6 +336,10 @@ impl Terminal {
   }
 
   fn with_args(fixture: &Fixture, args: &[&str]) -> Self {
+    Self::with_bundle_override(fixture, args, true)
+  }
+
+  fn with_bundle_override(fixture: &Fixture, args: &[&str], explicit: bool) -> Self {
     let pair = portable_pty::native_pty_system()
       .openpty(portable_pty::PtySize {
         rows: 40,
@@ -356,7 +360,11 @@ impl Terminal {
     command.env("CTL_HOSTS_PATH", fixture.0.join("hosts.json"));
     command.env("CTLD_SOCKET_PATH", fixture.0.join("ctld.sock"));
     command.env("CTLD_BIN", fixture.0.join("missing-ctld"));
-    command.env("CTL_REMOTE_BUNDLES_DIR", fixture.0.join("bundles"));
+    if explicit {
+      command.env("CTL_REMOTE_BUNDLES_DIR", fixture.0.join("bundles"));
+    } else {
+      command.env_remove("CTL_REMOTE_BUNDLES_DIR");
+    }
     command.env_remove("CTL_SCP_SSH_TRANSPORT");
     command.env_remove("CTLD_ASKPASS");
     let child = pair.slave.spawn_command(command).unwrap();
@@ -537,6 +545,15 @@ async fn accepted_repair_detects_platform_but_rejects_unverified_local_bundles_b
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_repair_activates_verified_components_and_retries_once() {
+  verify_successful_repair(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_repair_uses_the_managed_home_cache_and_retries_without_downloads() {
+  verify_successful_repair(true).await;
+}
+
+async fn verify_successful_repair(cached: bool) {
   let build = ctl_core::component::build_info();
   if build.dirty || build.source_revision.is_none() {
     eprintln!(
@@ -546,13 +563,35 @@ async fn accepted_repair_activates_verified_components_and_retries_once() {
   }
   let fixture = Fixture::new(EXPECTED_ID);
   let bundle_id = fixture.matching_bundle(&build);
+  if cached {
+    let target = "x86_64-unknown-linux-musl";
+    let bundle =
+      ctl_client::remote_bundle::read_verified_bundle(&[fixture.0.join("bundles")], target, &build)
+        .unwrap()
+        .unwrap();
+    ctl_client::remote_bundle::BundleCacheEntry::new(
+      &fixture.0.join("home/.tokn/ctl/agent-bundles"),
+      target,
+      &build,
+    )
+    .unwrap()
+    .store(&bundle)
+    .unwrap();
+  }
   let original = fs::read(fixture.0.join("hosts.json")).unwrap();
   let broker = fixture.broker();
-  let mut terminal = Terminal::with_args(&fixture, &["-H", "work", "ctmux", "list"]);
+  let mut terminal =
+    Terminal::with_bundle_override(&fixture, &["-H", "work", "ctmux", "list"], !cached);
   terminal.wait_for_prompt();
   terminal.answer("y\r");
   assert!(terminal.finish().success(), "{}", terminal.text());
   let transcript = terminal.text();
+  if cached {
+    assert!(
+      transcript.contains("Using cached remote components"),
+      "{transcript}"
+    );
+  }
   assert!(
     transcript.contains("Remote components installed. Retrying the connection."),
     "{transcript}"

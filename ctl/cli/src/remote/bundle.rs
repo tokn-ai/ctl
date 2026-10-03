@@ -1,6 +1,7 @@
 //! Matching local, published, or existing CI remote component bundles.
 
 use std::ffi::OsStr;
+use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -17,24 +18,53 @@ use super::Error;
 #[path = "bundle/artifact.rs"]
 mod artifact;
 
+#[path = "bundle/cache.rs"]
+mod cache;
+
 const REPOSITORY: &str = "github.com/tokn-ai/ctl";
 const MAX_GH_OUTPUT: u64 = 128 * 1024;
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) async fn matching_bundle(target: &str) -> Result<VerifiedBundle, Error> {
   let expected = ctl_core::component::build_info();
-  require_clean_build(&expected)?;
   let directories = bundle_directories()?;
   let explicit = std::env::var_os("CTL_REMOTE_BUNDLES_DIR").is_some();
-  if let Some(bundle) = local_bundle(target, &expected, directories, explicit).await? {
+  let cache_root = dirs::home_dir().map(|home| home.join(".tokn/ctl/agent-bundles"));
+  matching_bundle_from(target, &expected, directories, explicit, cache_root, || {
+    download_bundle(target, &expected)
+  })
+  .await
+}
+
+async fn matching_bundle_from<F, FF>(
+  target: &str,
+  expected: &ComponentBuildInfo,
+  directories: Vec<PathBuf>,
+  explicit: bool,
+  cache_root: Option<PathBuf>,
+  download: F,
+) -> Result<VerifiedBundle, Error>
+where
+  F: FnOnce() -> FF,
+  FF: Future<Output = Result<VerifiedBundle, Error>>,
+{
+  require_clean_build(expected)?;
+  if let Some(bundle) = local_bundle(target, expected, directories, explicit).await? {
     return Ok(bundle);
   }
+  cache::get_or_download(cache_root, target, expected, download).await
+}
+
+async fn download_bundle(
+  target: &str,
+  expected: &ComponentBuildInfo,
+) -> Result<VerifiedBundle, Error> {
   eprintln!("ctl: Downloading the matching official release bundle...");
-  match remote_bundle::download_release_bundle(target, &expected).await {
+  match remote_bundle::download_release_bundle(target, expected).await {
     Ok(bundle) => Ok(bundle),
     Err(release_error) if permits_artifact_fallback(&release_error) => {
       eprintln!("ctl: Looking for existing CI bundles at this source revision...");
-      download_artifact_bundle(target, &expected, OsStr::new("gh"))
+      download_artifact_bundle(target, expected, OsStr::new("gh"))
         .await
         .map_err(|artifact_error| unavailable_after_release(&release_error, &artifact_error).into())
     }

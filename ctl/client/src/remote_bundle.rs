@@ -20,6 +20,9 @@ const SUPPORTED_TARGETS: [&str; 4] = [
   "aarch64-apple-darwin",
 ];
 
+mod cache;
+pub use cache::BundleCacheEntry;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Platform {
   pub os: String,
@@ -199,25 +202,37 @@ impl BundleSet {
     Ok(&self.target(target)?.archive)
   }
 
-  fn verify_archive(&self, target: &str, archive: Vec<u8>) -> Result<VerifiedBundle, Error> {
+  fn verify_archive_bytes(&self, target: &str, archive: &[u8]) -> Result<(), Error> {
     let entry = self.target(target)?;
     if archive.len() > MAX_BUNDLE_BYTES {
       return Err(Error::Invalid(
         "remote component archive exceeds its size limit".into(),
       ));
     }
-    let actual = format!("{:x}", Sha256::digest(&archive));
+    let actual = format!("{:x}", Sha256::digest(archive));
     if !actual.eq_ignore_ascii_case(&entry.sha256) {
       return Err(Error::Invalid(
         "remote component archive failed checksum verification".into(),
       ));
     }
+    Ok(())
+  }
+
+  fn verify_archive(
+    &self,
+    target: &str,
+    archive: Vec<u8>,
+    manifest: Vec<u8>,
+  ) -> Result<VerifiedBundle, Error> {
+    self.verify_archive_bytes(target, &archive)?;
+    let entry = self.target(target)?;
     Ok(VerifiedBundle {
       app_version: self.app_version.clone(),
       bundle_id: self.bundle_id.clone(),
       git_revision: self.git_revision.clone(),
       archive,
       file_name: entry.archive.clone(),
+      manifest,
     })
   }
 }
@@ -229,6 +244,8 @@ pub struct VerifiedBundle {
   pub git_revision: String,
   pub archive: Vec<u8>,
   pub file_name: String,
+  /// The bounded, validated bundle-set document that authenticated this archive.
+  pub manifest: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -261,17 +278,17 @@ pub fn read_verified_bundle(
 ) -> Result<Option<VerifiedBundle>, Error> {
   validate_target(target)?;
   for directory in directories {
-    let manifest = match read_bounded_file(&directory.join(BUNDLE_SET_FILE), MAX_BUNDLE_SET_BYTES) {
+    let bytes = match read_bounded_file(&directory.join(BUNDLE_SET_FILE), MAX_BUNDLE_SET_BYTES) {
       Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
       result => result?,
     };
-    let manifest = BundleSet::parse(&manifest, &expected.version)?;
+    let manifest = BundleSet::parse(&bytes, &expected.version)?;
     manifest.verify_revision(expected)?;
     let archive = read_bounded_file(
       &directory.join(&manifest.target(target)?.archive),
       MAX_BUNDLE_BYTES,
     )?;
-    return manifest.verify_archive(target, archive).map(Some);
+    return manifest.verify_archive(target, archive, bytes).map(Some);
   }
   Ok(None)
 }
@@ -332,7 +349,7 @@ pub async fn download_release_bundle(
     MAX_BUNDLE_BYTES,
   )
   .await?;
-  manifest.verify_archive(target, archive)
+  manifest.verify_archive(target, archive, bytes)
 }
 
 fn safe_id(value: &str) -> bool {

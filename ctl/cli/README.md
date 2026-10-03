@@ -31,8 +31,14 @@ preserves running daemons. Ctrl-C cancels it; piped commands never prompt.
 Bundles must match the CLI's exact clean source revision. They can come from
 `CTL_REMOTE_BUNDLES_DIR`, local resources, `~/.tokn/ctl/agent-bundles`, the matching
 official release, or an existing verified GitHub bundle artifact (requires `gh`).
+Downloaded manifests and archives are cached at
+`~/.tokn/ctl/agent-bundles/<revision>/<target>/` and verified again before reuse.
+Matching cache entries work offline and can serve any host with that platform.
+Interrupted downloads never publish a partial entry; damaged cache entries are
+downloaded again. Explicit bundle overrides still reject invalid contents.
 Source developers can prepare their exact bundles with `pnpm agents:sync` from
-`apps/desktop`. Windows remote companions must be installed manually. On macOS, Touch ID-protected credential storage
+`apps/desktop`. Windows remote companions must be installed manually. On macOS,
+Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does
 not supply its Keychain entitlement. Setup selects the release matching this
 CLI's version and architecture and requires that release to be published.

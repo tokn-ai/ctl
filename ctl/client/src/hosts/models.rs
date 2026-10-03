@@ -147,6 +147,9 @@ impl WorkspaceConnectionMethod {
         super::SshGatewayRouteStepDto::Gateway { gateway_id, .. } => {
           gateway_ids.contains(gateway_id.as_str()) && route_ids.insert(gateway_id.as_str())
         }
+        super::SshGatewayRouteStepDto::Host { host_id, method_id, .. } => {
+          host_id != "local" && valid_workspace_text(host_id) && valid_workspace_text(method_id)
+        }
         super::SshGatewayRouteStepDto::Vpn { vpn_connection_id } => {
           super::valid_connection_id(vpn_connection_id)
         }

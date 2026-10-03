@@ -170,3 +170,24 @@ describe("SSH greeting observations", () => {
     expect(result.current.statuses.get("host-4")?.state).toBe("available");
   });
 });
+
+it("resolves linked hop settings from the current host context and invalidates their stale observation", async () => {
+  const routed = { ...host, connection_methods: [{ ...host.connection_methods[0], target: { ...host.connection_methods[0].target,
+    gateway_route: [{ host_id: "jump", method_id: "ssh", mode: "automatic" as const }],
+  } }] };
+  const jump: WorkspaceHost = { host_id: "jump", name: "Jump", preferred_method_id: "ssh",
+    connection_methods: [{ method_id: "ssh", name: "SSH", target: { kind: "ssh", destination: "old.jump" } }] };
+  const previous = deferred<SshReachability>();
+  const current = deferred<SshReachability>();
+  vi.mocked(sshReachability).mockReturnValueOnce(previous.promise).mockReturnValueOnce(current.promise);
+  const { result, rerender, initial } = setup({ hosts: [routed, jump] });
+  expect(sshReachability).toHaveBeenCalledWith(expect.objectContaining({ destination: host.connection_methods[0].target.destination,
+    gateways: [expect.objectContaining({ destination: "old.jump" })] }));
+  const changed = { ...jump, connection_methods: [{ ...jump.connection_methods[0], target: { kind: "ssh" as const, destination: "new.jump" } }] };
+  rerender({ ...initial, hosts: [routed, changed] });
+  expect(sshReachability).toHaveBeenCalledWith(expect.objectContaining({ gateways: [expect.objectContaining({ destination: "new.jump" })] }));
+  await act(async () => { previous.resolve(available); });
+  expect(result.current.statuses.get(host.host_id)?.state).toBe("checking");
+  await act(async () => { current.resolve({ state: "not_checked", reason: "route_requires_connection", message: "The hop requires a connection." }); });
+  expect(result.current.statuses.get(host.host_id)?.state).toBe("not_checked");
+});

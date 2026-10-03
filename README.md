@@ -602,10 +602,22 @@ Updates preserve host/method IDs and any pinned remote identity. Omitted
 settings stay unchanged; `--clear` accepts a comma-separated list of optional
 settings (see `ctl host update --help`). Use `--gateway ID` repeatedly to set an
 ordered route through existing saved gateways, or `--vpn ID` to select a saved
-VPN. Use `host method` to manage alternate routes. The preferred method cannot
+VPN. A gateway can also link to a saved host's selected method with
+`--gateway host:HOST_ID/METHOD_ID`. In the desktop connection route editor,
+choose a **Saved host**, choose its method, then add it as a hop. The link reuses
+that method's current route and SSH endpoint; it keeps the selected method even
+if the host's preferred method changes. An explicit hop key must be configured
+in OpenSSH rather than the method's `identity_file` setting.
+
+Use `host method` to manage alternate routes. The preferred method cannot
 be removed until another is selected. Catalog edits use the desktop's lock,
 atomic writes, and content revisions; a concurrent edit fails without
 replacing it. Reload an already-open desktop to see CLI changes.
+
+Linked routes expand in place, with at most eight total hops. Cycles and missing
+host/method references are rejected; remove dependent links before deleting a
+referenced host or method. A VPN inherited from a linked method runs locally when
+it is first in the expanded route, or on the SSH host immediately before it.
 
 ### Shells, commands, and file copies
 

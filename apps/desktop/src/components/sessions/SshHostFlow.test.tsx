@@ -14,7 +14,7 @@ import {
   respondSshPrompt,
   saveSshConfigHost,
 } from "../../lib/tauri";
-import type { RemoteAgentInstallProgress, SshConnectionTarget, SshPrompt, TailscaleDevice, VpnConnection } from "../../lib/types";
+import type { RemoteAgentInstallProgress, SshConnectionTarget, SshPrompt, TailscaleDevice, VpnConnection, WorkspaceHost } from "../../lib/types";
 
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
 const vpn: VpnConnection = {
@@ -162,6 +162,50 @@ describe("SSH host quick-input flow", () => {
       gateways: [{ ...gateway, mode: "automatic" }],
     }), remoteInfo));
     expect(vi.mocked(probeSshHost).mock.calls[0][0]).not.toHaveProperty("vpn_connection_id");
+  });
+
+  it("verifies and saves a linked host method with its inherited gateway route", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const gateway = { gateway_id: "edge", name: "Office edge", destination: "edge.example" };
+    const host: WorkspaceHost = { host_id: "jump", name: "Jump host", preferred_method_id: "office", remote_info: remoteInfo,
+      connection_methods: [{ method_id: "office", name: "Office network", target: { kind: "ssh", destination: "jump.internal", user: "alice",
+        gateway_route: [{ gateway_id: "edge", mode: "native_only" }] } }] };
+    const save = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={[]} warning={null} hosts={[host]} gateways={[gateway]}
+      onSaveNewHost={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await newHostDetails(user, false);
+    await user.click(screen.getByRole("option", { name: /Jump host.*Office network/ }));
+    await user.click(screen.getByRole("button", { name: "Previous step" }));
+    expect(screen.getByRole("option", { name: /Jump host.*Office network/ }).getAttribute("aria-selected")).toBe("true");
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith("Development server", expect.objectContaining({
+      gateway_route: [{ host_id: "jump", method_id: "office", mode: "automatic" }],
+      gateways: [{ ...gateway, mode: "native_only" }, { kind: "ssh", gateway_id: "host:jump:office", name: "Jump host",
+        destination: "jump.internal", user: "alice", remote_info: remoteInfo, mode: "automatic" }],
+    }), remoteInfo));
+  });
+
+  it("excludes the edited host from its route picker even when the initial target has no host ID", () => {
+    const host: WorkspaceHost = { host_id: "build", name: "Build", preferred_method_id: "default",
+      connection_methods: [{ method_id: "default", name: "SSH", target: { kind: "ssh", destination: "build.internal" } }] };
+    render(<SshHostFlow suggestions={[]} warning={null} hosts={[host]} editing_host_id="build"
+      initialTarget={{ kind: "ssh", destination: "build.internal" }} onSaveConnection={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Add Build as hop" })).toBeNull();
+  });
+
+  it("requires a private master when a linked hop overrides its SSH alias hostname", () => {
+    const host: WorkspaceHost = { host_id: "jump", name: "Jump host", preferred_method_id: "default",
+      connection_methods: [{ method_id: "default", name: "SSH", ssh_config_alias: "jump",
+        target: { kind: "ssh", destination: "jump", hostname: "10.0.0.10" } }] };
+    render(<SshHostFlow suggestions={["build", "jump"]} warning={null} hosts={[host]}
+      initialTarget={{ kind: "ssh", destination: "build", ssh_config_alias: "build", use_ssh_config_master: true,
+        gateway_route: [{ host_id: "jump", method_id: "default", mode: "automatic" }] }}
+      onSaveConnection={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByLabelText("Use SSH-config master")).toHaveProperty("disabled", true);
+    expect(screen.getByLabelText("Use SSH-config master")).toHaveProperty("checked", false);
+    expect(screen.getByText(/hostname override routes use a private SSH master/)).toBeTruthy();
   });
 
   it("builds a new host route through SSH and a VPN on that jump host", async () => {

@@ -118,6 +118,10 @@ pub struct SshGateway {
 }
 
 impl SshGateway {
+  fn requires_proxy_command(&self) -> bool {
+    self.kind.requires_proxy_command() || self.hostname.is_some()
+  }
+
   fn to_ipc(&self) -> ctl_ipc::SshGateway {
     ctl_ipc::SshGateway {
       kind: self.kind,
@@ -1058,7 +1062,7 @@ async fn prepare_ssh_base_arguments(
     && options
       .gateways
       .iter()
-      .any(|gateway| gateway.kind.requires_proxy_command())
+      .any(SshGateway::requires_proxy_command)
   {
     let gateways = options
       .gateways
@@ -1369,8 +1373,8 @@ mod tests {
         SshGateway {
           kind: ctl_ipc::GatewayKind::Ssh,
           vpn: None,
-          destination: "internal-alias".into(),
-          hostname: Some("2001:db8::2".into()),
+          destination: "2001:db8::2".into(),
+          hostname: None,
           user: Some("operator".into()),
           port: Some(2222),
           identity_file: None,
@@ -1386,6 +1390,37 @@ mod tests {
       .find(|pair| pair[0] == "-o" && pair[1].to_string_lossy().starts_with("ProxyJump="))
       .expect("native jump arguments");
     assert_eq!(jump[1], "ProxyJump=edge-alias,operator@[2001:db8::2]:2222");
+  }
+
+  #[test]
+  fn gateway_hostname_overrides_preserve_aliases_through_the_proxy_helper() {
+    let gateway = SshGateway {
+      kind: ctl_ipc::GatewayKind::Ssh,
+      vpn: None,
+      destination: "configured-key-alias".into(),
+      hostname: Some("100.64.0.2".into()),
+      user: Some("operator".into()),
+      port: Some(2222),
+      identity_file: None,
+      mode: SshGatewayMode::Automatic,
+    };
+    assert!(gateway.requires_proxy_command());
+    let proxy = ctl_ipc::proxy_command_with_executable(
+      &[gateway.to_ipc()],
+      std::path::Path::new("/test/ctld"),
+    );
+    let options = SshConnectionOptions {
+      gateways: vec![gateway],
+      ..SshConnectionOptions::default()
+    };
+    let arguments = ssh_base_arguments_with_proxy("target", &options, Some(proxy.clone()), true);
+    let expected_proxy = OsString::from(format!("ProxyCommand={proxy}"));
+    assert!(arguments.iter().any(|arg| arg == &expected_proxy));
+    assert!(
+      !arguments
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("ProxyJump="))
+    );
   }
 
   #[tokio::test]

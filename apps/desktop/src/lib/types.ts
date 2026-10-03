@@ -219,7 +219,7 @@ export interface SshConnectionTarget {
   identity_file?: string;
   /** Saved VPN profile, resolved to its current proxy before connecting. */
   vpn_connection_id?: string;
-  /** Persisted route references, resolved from workspace gateway records. */
+  /** Persisted route references, resolved from saved gateways and host methods. */
   gateway_route?: SshGatewayRouteStep[];
   /** Runtime-only gateway definitions passed to the native SSH boundary. */
   gateways?: ResolvedSshGateway[];
@@ -239,7 +239,13 @@ export interface VpnGatewayReference {
   vpn_connection_id: string;
 }
 
-export type SshGatewayRouteStep = SshGatewayReference | VpnGatewayReference;
+export interface HostGatewayReference {
+  host_id: string;
+  method_id: string;
+  mode: SshGatewayMode;
+}
+
+export type SshGatewayRouteStep = SshGatewayReference | VpnGatewayReference | HostGatewayReference;
 
 export interface WorkspaceSshGateway {
   kind?: "ssh" | "socks5";

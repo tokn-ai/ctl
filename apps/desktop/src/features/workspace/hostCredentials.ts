@@ -34,7 +34,7 @@ export function removableHostCredentials(
 ): SshConnectionTarget[] {
   const targets = [
     ...view.hosts.flatMap((host) => host.connection_methods.map((method) =>
-      hostTarget(host, view.ssh_gateways, method.method_id))),
+      hostTarget(host, view.ssh_gateways, method.method_id, view.hosts))),
     ...view.targets,
     ...view.sessions.map((session) => session.target),
     ...view.tabs.map((session) => session.target),

@@ -1,13 +1,17 @@
 use std::path::Path;
 
-use super::{
-  ConnectionTargetDto, HostCatalogDocument, HostError, SshGatewayDto, SshGatewayRouteStepDto,
-};
+use super::{ConnectionTargetDto, HostCatalogDocument, HostError};
+
+pub struct GatewayTailscaleBinding {
+  pub gateway_index: usize,
+  pub node_id: String,
+}
 
 pub struct ResolvedHost {
   pub host_id: Option<String>,
   pub target: ConnectionTargetDto,
   pub tailscale_node_id: Option<String>,
+  pub gateway_tailscale_bindings: Vec<GatewayTailscaleBinding>,
 }
 
 /// Read one atomic catalog snapshot. Invalid saved data must never cause a
@@ -58,6 +62,7 @@ pub fn resolve(
       host_id: None,
       target: ConnectionTargetDto::ssh(destination),
       tailscale_node_id: None,
+      gateway_tailscale_bindings: Vec::new(),
     });
   };
   let selected = method.or(host.preferred_method_id.as_deref());
@@ -80,13 +85,13 @@ pub fn resolve(
     ));
   }
   let method = methods[0];
+  let route = super::route::resolve(catalog, host, method)?;
   let mut target = method.target.clone();
   if let ConnectionTargetDto::Ssh {
     remote_info,
     ssh_config_alias,
     use_ssh_config_master,
     user: account,
-    gateway_route,
     gateways,
     ..
   } = &mut target
@@ -99,58 +104,15 @@ pub fn resolve(
       *account = Some(user.into());
       *remote_info = None;
     }
-    *gateways = gateway_route
-      .iter()
-      .map(|step| resolve_gateway_step(catalog, step))
-      .collect::<Result<Box<[_]>, HostError>>()?;
+    *gateways = route.gateways;
   }
   target.to_ssh_target()?;
   Ok(ResolvedHost {
     host_id: Some(host.host_id.clone()),
     target,
     tailscale_node_id: method.tailscale_node_id.clone(),
+    gateway_tailscale_bindings: route.tailscale_bindings,
   })
-}
-
-fn resolve_gateway_step(
-  catalog: &HostCatalogDocument,
-  step: &SshGatewayRouteStepDto,
-) -> Result<SshGatewayDto, HostError> {
-  match step {
-    SshGatewayRouteStepDto::Vpn { vpn_connection_id } => Ok(SshGatewayDto {
-      kind: ctl_ipc::GatewayKind::Vpn,
-      vpn_connection_id: Some(vpn_connection_id.clone()),
-      gateway_id: format!("vpn:{vpn_connection_id}"),
-      name: vpn_connection_id.clone(),
-      destination: vpn_connection_id.clone(),
-      hostname: None,
-      user: None,
-      port: None,
-      identity_file: None,
-      remote_info: None,
-      mode: super::SshGatewayModeDto::Automatic,
-    }),
-    SshGatewayRouteStepDto::Gateway { gateway_id, mode } => {
-      let gateway = catalog
-        .ssh_gateways
-        .iter()
-        .find(|item| item.gateway_id == *gateway_id)
-        .ok_or_else(|| HostError::new("gateway_missing", "A saved gateway is missing."))?;
-      Ok(SshGatewayDto {
-        kind: gateway.kind,
-        vpn_connection_id: None,
-        gateway_id: gateway.gateway_id.clone(),
-        name: gateway.name.clone(),
-        destination: gateway.destination.clone(),
-        hostname: gateway.hostname.clone(),
-        user: gateway.user.clone(),
-        port: gateway.port,
-        identity_file: gateway.identity_file.clone(),
-        remote_info: gateway.remote_info.clone(),
-        mode: *mode,
-      })
-    }
-  }
 }
 
 fn matching_hosts<'a>(
@@ -168,6 +130,12 @@ fn matching_hosts<'a>(
 }
 
 impl ResolvedHost {
+  /// Device discovery is needed for every bound endpoint in the expanded route.
+  #[must_use]
+  pub fn requires_tailscale(&self) -> bool {
+    self.tailscale_node_id.is_some() || !self.gateway_tailscale_bindings.is_empty()
+  }
+
   /// Refresh a saved device binding without falling back to its stale address.
   ///
   /// # Errors
@@ -176,30 +144,68 @@ impl ResolvedHost {
     &mut self,
     devices: &[crate::tailscale::TailscaleDevice],
   ) -> Result<(), HostError> {
-    let Some(id) = &self.tailscale_node_id else {
+    if !self.requires_tailscale() {
       return Ok(());
-    };
-    let device = devices.iter().find(|device| device.node_id == *id)
-      .ok_or_else(|| HostError::new("tailscale_unavailable", "The saved Tailscale device is unavailable. Check that Tailscale is running and signed in to the correct tailnet."))?;
-    let address = device
-      .addresses
+    }
+    // Resolve all devices before mutating any endpoint; a missing hop must not
+    // leave a partly refreshed route that could be used by a caller.
+    let endpoint = self
+      .tailscale_node_id
+      .as_deref()
+      .map(|id| tailscale_endpoint(devices, id))
+      .transpose()?;
+    let gateway_endpoints = self
+      .gateway_tailscale_bindings
       .iter()
-      .find(|address| address.parse::<std::net::IpAddr>().is_ok())
-      .ok_or_else(|| {
-        HostError::new(
-          "tailscale_unavailable",
-          "The saved Tailscale device has no usable address.",
-        )
-      })?;
+      .map(|binding| {
+        tailscale_endpoint(devices, &binding.node_id)
+          .map(|endpoint| (binding.gateway_index, endpoint))
+      })
+      .collect::<Result<Vec<_>, _>>()?;
     if let ConnectionTargetDto::Ssh {
       destination,
       hostname,
+      gateways,
       ..
     } = &mut self.target
     {
-      destination.clone_from(device.dns_name.as_ref().unwrap_or(address));
-      *hostname = Some(address.clone());
+      if let Some((name, address)) = endpoint {
+        *destination = name;
+        *hostname = Some(address);
+      }
+      for (index, (name, address)) in gateway_endpoints {
+        let gateway = gateways.get_mut(index).ok_or_else(|| {
+          HostError::new(
+            "host_hop_invalid",
+            "A Tailscale hop is missing from the resolved route.",
+          )
+        })?;
+        gateway.destination = name;
+        gateway.hostname = Some(address);
+      }
     }
     Ok(())
   }
+}
+
+fn tailscale_endpoint(
+  devices: &[crate::tailscale::TailscaleDevice],
+  id: &str,
+) -> Result<(String, String), HostError> {
+  let device = devices.iter().find(|device| device.node_id == id)
+    .ok_or_else(|| HostError::new("tailscale_unavailable", "The saved Tailscale device is unavailable. Check that Tailscale is running and signed in to the correct tailnet."))?;
+  let address = device
+    .addresses
+    .iter()
+    .find(|address| address.parse::<std::net::IpAddr>().is_ok())
+    .ok_or_else(|| {
+      HostError::new(
+        "tailscale_unavailable",
+        "The saved Tailscale device has no usable address.",
+      )
+    })?;
+  Ok((
+    device.dns_name.as_ref().unwrap_or(address).clone(),
+    address.clone(),
+  ))
 }

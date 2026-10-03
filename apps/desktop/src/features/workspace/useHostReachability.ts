@@ -91,7 +91,7 @@ export function useHostReachability(options: Options) {
     // current saved/projected methods may advertise a new connection as available.
     const methods = host.connection_methods.map((method): ProbeMethod => {
       try {
-        const target = hostTarget(host, options.gateways, method.method_id);
+        const target = hostTarget(host, options.gateways, method.method_id, options.hosts);
         return target.kind === "ssh" && !target.unavailable
           ? { name: method.name, target, error: null }
           : { name: method.name, target: null, error: target.kind === "ssh" ? target.unavailable ?? null : null };

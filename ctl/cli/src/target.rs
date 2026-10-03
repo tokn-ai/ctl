@@ -10,11 +10,12 @@ pub async fn resolve(host: Option<&str>, method: Option<&str>) -> Result<Resolve
       host_id: None,
       target: ConnectionTargetDto::Local,
       tailscale_node_id: None,
+      gateway_tailscale_bindings: Vec::new(),
     });
   };
   let path = catalog_path()?;
   let mut resolved = hosts::resolve(&hosts::load_catalog(&path)?, host, method)?;
-  if resolved.tailscale_node_id.is_some() {
+  if resolved.requires_tailscale() {
     resolved.resolve_tailscale(&ctl_client::tailscale::discover_devices().await.devices)?;
   }
   Ok(resolved)

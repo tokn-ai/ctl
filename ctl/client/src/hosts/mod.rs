@@ -2,8 +2,11 @@
 
 mod catalog;
 mod gateways;
+#[cfg(test)]
+mod host_hop_tests;
 mod models;
 mod resolver;
+mod route;
 pub mod storage;
 mod target;
 #[cfg(test)]
@@ -15,7 +18,7 @@ pub use vpn::SavedVpnDocument;
 pub use catalog::{HostCatalogDocument, HostCatalogSnapshot};
 pub use gateways::{WorkspaceSshGateway, validated_gateway_ids};
 pub use models::{WorkspaceConnectionMethod, WorkspaceHost};
-pub use resolver::{ResolvedHost, load_catalog, resolve};
+pub use resolver::{GatewayTailscaleBinding, ResolvedHost, load_catalog, resolve};
 pub use target::{ConnectionTargetDto, SshGatewayDto, SshGatewayModeDto, SshGatewayRouteStepDto};
 pub use transport::VpnRoute;
 

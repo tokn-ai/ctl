@@ -94,3 +94,16 @@ describe("host credential cleanup", () => {
     expect(removableHostCredentials(view, "kept")).toEqual([]);
   });
 });
+
+it("protects a linked route shared by another host's historical runtime snapshot", () => {
+  const view = emptyWorkspaceView();
+  const jump = host("jump", { kind: "ssh", destination: "jump", gateway_route: [{ gateway_id: "edge", mode: "native_only" }] });
+  const removed = host("removed", { kind: "ssh", destination: "build", gateway_route: [{ host_id: "jump", method_id: "ssh", mode: "automatic" }] });
+  view.hosts.push(jump, removed);
+  view.ssh_gateways = [gateway];
+  const snapshot = hostTarget(removed, view.ssh_gateways, undefined, view.hosts) as SshConnectionTarget;
+  view.targets.push({ ...snapshot, host_id: "kept" });
+  expect(removableHostCredentials(view, "removed")).toEqual([]);
+  jump.connection_methods[0].target.destination = "new.jump";
+  expect(removableHostCredentials(view, "removed")).toEqual([expect.objectContaining({ gateways: [expect.anything(), expect.objectContaining({ destination: "new.jump" })] })]);
+});

@@ -1,11 +1,13 @@
 import { vpnNeedsSignIn, vpnRouteDetail } from "../../features/vpn/status";
-import { isVpnRouteStep, orderedSshRoute, vpnExecutionTarget } from "../../features/workspace/sshRoute";
+import { isHostRouteStep, isVpnRouteStep, orderedSshRoute, resolvedVpnExecutionTarget } from "../../features/workspace/sshRoute";
+import { resolveSshGateways } from "../../features/workspace/workspaceModel";
 import { openVpnSignIn, stopVpn, vpnStatus } from "../../lib/tauri";
 import { useMemo, useState } from "react";
 import type {
   SshConnectionTarget,
   SshGatewayMode,
   SshGatewayRouteStep,
+  WorkspaceHost,
   WorkspaceSshGateway,
   SshIdentityFile,
   VpnConnection,
@@ -19,6 +21,7 @@ interface Props {
   submitLabel?: string;
   target: SshConnectionTarget;
   gateways: readonly WorkspaceSshGateway[];
+  hosts?: readonly WorkspaceHost[];
   targets: readonly SshConnectionTarget[];
   vpn_connections?: readonly VpnConnection[];
   vpn_statuses?: readonly VpnStatus[];
@@ -74,6 +77,7 @@ export function GatewayRouteDialog({
   submitLabel,
   target,
   gateways,
+  hosts = [],
   targets,
   vpn_connections = [],
   vpn_statuses = [],
@@ -92,25 +96,58 @@ export function GatewayRouteDialog({
   );
   const [route, setRoute] = useState<SshGatewayRouteStep[]>(() => orderedSshRoute(target));
   const onlyVpn = route.length === 1 && isVpnRouteStep(route[0]) ? route[0].vpn_connection_id : undefined;
-  const missingVpn = route.some((step) => isVpnRouteStep(step) &&
-    !vpn_connections.some((connection) => connection.connection_id === step.vpn_connection_id));
-  const privateMaster = route.some((step) => isVpnRouteStep(step) ||
-    draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5");
+  const [host_methods, setHostMethods] = useState<Record<string, string>>({});
+  const saved_hosts = hosts.filter((host) => host.host_id !== "local" && host.host_id !== target.host_id &&
+    (!host.source || host.source === "saved") && host.connection_methods.length > 0);
+  const resolved_route = resolveRoute(route);
+  const missingVpn = [...route.flatMap((step) => isVpnRouteStep(step) ? [step.vpn_connection_id] : []),
+    ...resolved_route.gateways.flatMap((gateway) => gateway.kind === "vpn" ? [gateway.vpn_connection_id] : [])]
+    .some((connection_id) => !vpn_connections.some((connection) => connection.connection_id === connection_id));
+  const privateMaster = resolved_route.gateways.some((gateway) => gateway.kind === "vpn" || gateway.kind === "socks5" || Boolean(gateway.hostname)) ||
+    route.some(isVpnRouteStep);
   const [editing, setEditing] = useState<GatewayDraft | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const usage = useMemo(() => gatewayUsage(targets), [targets]);
+  const usage_targets = useMemo(() => [...targets, ...hosts.flatMap((host) =>
+    host.connection_methods.map((method) => ({ ...method.target, host_id: host.host_id })))], [targets, hosts]);
+  const usage = useMemo(() => gatewayUsage(usage_targets, gateways, hosts), [usage_targets, gateways, hosts]);
   const otherUsage = useMemo(
-    () => gatewayUsage(targets.filter((item) => item.host_id !== target.host_id)),
-    [target.host_id, targets],
+    () => gatewayUsage(usage_targets.filter((item) => item.host_id !== target.host_id), gateways, hosts),
+    [target.host_id, usage_targets, gateways, hosts],
   );
-  const routeIds = new Set(route.flatMap((step) => isVpnRouteStep(step) ? [] : [step.gateway_id]));
+  const routeIds = new Set(route.flatMap((step) => "gateway_id" in step ? [step.gateway_id] : []));
+  const routeHostIds = new Set(route.flatMap((step) => isHostRouteStep(step) ? [step.host_id] : []));
   const existingIds = new Set(
     readonlyGatewayIds ?? gateways.map((gateway) => gateway.gateway_id),
   );
-  const lastStep = route[route.length - 1];
-  const canAddVpn = !lastStep || (!isVpnRouteStep(lastStep) &&
-    draftGateways.find((gateway) => gateway.gateway_id === lastStep.gateway_id)?.kind !== "socks5");
+  const lastGateway = resolved_route.gateways[resolved_route.gateways.length - 1];
+  const canAddVpn = !route.length || (!resolved_route.error && lastGateway?.kind !== "vpn" && lastGateway?.kind !== "socks5");
+
+  function resolveRoute(steps: SshGatewayRouteStep[]) {
+    try {
+      return {
+        gateways: resolveSshGateways({ ...target, vpn_connection_id: undefined, gateway_route: steps }, draftGateways, hosts).gateways ?? [],
+        error: null,
+      };
+    } catch (failure) {
+      return { gateways: [], error: failure instanceof Error ? failure.message : String(failure) };
+    }
+  }
+
+  function selectedHostMethod(host: WorkspaceHost): string {
+    return host_methods[host.host_id] ?? host.preferred_method_id ?? host.connection_methods[0].method_id;
+  }
+
+  function addHost(host: WorkspaceHost) {
+    const next = [...route, { host_id: host.host_id, method_id: selectedHostMethod(host), mode: "automatic" as const }];
+    const resolved = resolveRoute(next);
+    if (resolved.error) {
+      setError(resolved.error);
+      return;
+    }
+    setError(null);
+    setRoute(next);
+  }
 
   function addExisting(gateway: WorkspaceSshGateway) {
     if (routeIds.has(gateway.gateway_id) || route.length >= 8) return;
@@ -186,17 +223,21 @@ export function GatewayRouteDialog({
       return;
     }
     for (const [index, step] of route.entries()) {
-      if (!isVpnRouteStep(step) && !draftGateways.some((gateway) => gateway.gateway_id === step.gateway_id)) {
+      if ("gateway_id" in step && !draftGateways.some((gateway) => gateway.gateway_id === step.gateway_id)) {
         setError("A saved gateway is unavailable. Remove or replace it before saving.");
         return;
       }
       if (!isVpnRouteStep(step) || index === 0) continue;
       const preceding = route[index - 1];
-      if (isVpnRouteStep(preceding) ||
+      if (isVpnRouteStep(preceding) || "gateway_id" in preceding &&
         draftGateways.find((gateway) => gateway.gateway_id === preceding.gateway_id)?.kind === "socks5") {
         setError("A remote VPN must immediately follow an SSH gateway. Consecutive VPN steps are not supported.");
         return;
       }
+    }
+    if (resolved_route.error) {
+      setError(resolved_route.error);
+      return;
     }
     if (requireGateway && route.length === 0) {
       setError("Add at least one gateway to this route.");
@@ -317,7 +358,7 @@ export function GatewayRouteDialog({
               Use SSH-config master
               <small id="ssh-config-master-description">
                 {privateMaster
-                  ? "VPN and SOCKS5 routes use a private SSH master to preserve the selected route."
+                  ? "VPN, SOCKS5, and hostname override routes use a private SSH master to preserve the selected route."
                   : hostSetup.ssh_config_master.checked
                     ? "Use OpenSSH sharing settings, with an ctmux private master when sharing is not configured."
                     : "Use an ctmux private master for this connection."}
@@ -376,7 +417,7 @@ export function GatewayRouteDialog({
         {missingVpn ? <p className="quick-input-error" role="alert">The saved VPN is unavailable. Choose another connection before saving.</p> : null}
       </div>
       <p className="quick-input-description">
-        Add SSH gateways and VPNs in connection order. Each VPN starts when needed on the preceding SSH host, or on this computer when it is first. VPNs keep running until disconnected.
+        Add saved hosts, SSH gateways, and VPNs in connection order. Each VPN starts when needed on the preceding SSH host, or on this computer when it is first. VPNs keep running until disconnected.
       </p>
 
       <div className="gateway-route-path">
@@ -384,13 +425,10 @@ export function GatewayRouteDialog({
         {route.map((step, index) => {
           if (isVpnRouteStep(step)) {
             const vpn = vpn_connections.find((connection) => connection.connection_id === step.vpn_connection_id);
-            let previousSsh: WorkspaceSshGateway | undefined;
-            for (const preceding of route.slice(0, index)) {
-              if (isVpnRouteStep(preceding)) continue;
-              const gateway = draftGateways.find((item) => item.gateway_id === preceding.gateway_id);
-              if (gateway && gateway.kind !== "socks5") previousSsh = gateway;
-            }
-            const owner = vpnExecutionTarget(route, index, draftGateways);
+            const previousSsh = [...resolveRoute(route.slice(0, index)).gateways].reverse()
+              .find((gateway) => gateway.kind !== "vpn" && gateway.kind !== "socks5");
+            const execution = resolveRoute(route.slice(0, index + 1)).gateways;
+            const owner = resolvedVpnExecutionTarget(execution, execution.length - 1);
             const ownerLabel = previousSsh?.name ?? "This computer";
             const name = vpn?.name ?? "Unavailable saved VPN";
             return (
@@ -408,6 +446,64 @@ export function GatewayRouteDialog({
                 </div>
               </div>
             );
+          }
+          if (isHostRouteStep(step)) {
+            const host = hosts.find((candidate) => candidate.host_id === step.host_id);
+            const method = host?.connection_methods.find((candidate) => candidate.method_id === step.method_id);
+            const name = host?.name ?? "Unavailable saved host";
+            const prefix = resolveRoute(route.slice(0, index + 1));
+            const inherited_start = resolveRoute(route.slice(0, index)).gateways.length;
+            const inherited = prefix.gateways.slice(inherited_start, -1);
+            return <div className="gateway-route-step" key={`host:${index}:${step.host_id}`}>
+              <div className="gateway-route-connector" aria-hidden="true">↓</div>
+              <div className="gateway-route-card">
+                <div>
+                  <strong>{index + 1}. {name}</strong>
+                  <small>Saved host · {method?.name ?? "Unavailable connection method"}</small>
+                  {method ? <small>{endpointLabel({ ...method.target, gateway_id: step.host_id, name })}</small> : null}
+                  <small>Linked to this method. Changes to its settings update future connections.</small>
+                  {inherited.length ? <small>Via {inherited.map((gateway) => gateway.kind === "vpn"
+                    ? vpn_connections.find((connection) => connection.connection_id === gateway.vpn_connection_id)?.name ?? "Unavailable saved VPN"
+                    : gateway.name).join(" → ")}</small> : null}
+                  {prefix.error ? <small role="status">{prefix.error}</small> : null}
+                </div>
+                {inherited.map((gateway, inherited_index) => {
+                  if (gateway.kind !== "vpn") return null;
+                  const vpn = vpn_connections.find((connection) => connection.connection_id === gateway.vpn_connection_id);
+                  if (!vpn) return null;
+                  const expanded_index = inherited_start + inherited_index;
+                  const owner = resolvedVpnExecutionTarget(prefix.gateways, expanded_index);
+                  const owner_label = prefix.gateways[expanded_index - 1]?.name ?? "This computer";
+                  return <div className="gateway-inherited-vpn" key={`inherited-vpn:${expanded_index}`}>
+                    <small>{vpn.name} · Runs on {owner_label}</small>
+                    {owner ? <RemoteVpnControls key={JSON.stringify(owner)} connection={vpn} owner={owner} owner_label={owner_label} />
+                      : <small>{vpnRouteDetail(vpn, vpn_statuses)} · Manage from the VPN page</small>}
+                  </div>;
+                })}
+                <div className="gateway-route-controls">
+                  <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move ${name} up`}>↑</button>
+                  <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={`Move ${name} down`}>↓</button>
+                  <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${name} from route`}>Remove</button>
+                </div>
+                {host ? <label>
+                  {name} connection method
+                  <select value={step.method_id} onChange={(event) => setRoute((current) => current.map((item, itemIndex) =>
+                    itemIndex === index ? { ...step, method_id: event.target.value } : item))}>
+                    {!method ? <option value={step.method_id}>Unavailable connection method</option> : null}
+                    {host.connection_methods.map((candidate) => <option key={candidate.method_id} value={candidate.method_id}>{candidate.name}</option>)}
+                  </select>
+                </label> : null}
+                <label>
+                  Connection to next host
+                  <select value={step.mode} onChange={(event) => setRoute((current) => current.map((item, itemIndex) =>
+                    itemIndex === index ? { ...step, mode: event.target.value as SshGatewayMode } : item))}>
+                    <option value="automatic">Automatic · native forwarding</option>
+                    <option value="native_only">Native SSH forwarding only</option>
+                    <option value="agent_relay_only" disabled>Managed agent relay only · coming next</option>
+                  </select>
+                </label>
+              </div>
+            </div>;
           }
           const gateway = draftGateways.find(
             (item) => item.gateway_id === step.gateway_id,
@@ -450,7 +546,7 @@ export function GatewayRouteDialog({
                     value={step.mode}
                     onChange={(event) => setRoute((current) =>
                       current.map((item) =>
-                        !isVpnRouteStep(item) && item.gateway_id === step.gateway_id
+                        "gateway_id" in item && item.gateway_id === step.gateway_id
                           ? { ...item, mode: event.target.value as SshGatewayMode }
                           : item))}
                   >
@@ -467,6 +563,34 @@ export function GatewayRouteDialog({
         <RouteNode label={hostSetup?.address.trim() || target.destination} detail="Destination" />
       </div>
 
+      {saved_hosts.length ? <section className="gateway-library" aria-labelledby="host-library-heading">
+        <header><strong id="host-library-heading">Saved hosts</strong></header>
+        <p>Choose a host and connection method. Its saved route is included before this hop.</p>
+        <div className="gateway-library-list gateway-host-library">
+          {saved_hosts.map((host) => {
+            const method_id = selectedHostMethod(host);
+            const method = host.connection_methods.find((candidate) => candidate.method_id === method_id);
+            const reason = routeHostIds.has(host.host_id) ? null
+              : resolveRoute([...route, { host_id: host.host_id, method_id, mode: "automatic" }]).error;
+            return <div key={host.host_id}>
+              <span><strong>{host.name}</strong>{method ? <small>{endpointLabel({ ...method.target, gateway_id: host.host_id, name: host.name })}</small> : null}
+                {reason ? <small role="status">{reason}</small> : null}</span>
+              <label>
+                Connection method
+                <select aria-label={`Connection method for ${host.name}`} value={method_id}
+                  onChange={(event) => setHostMethods((current) => ({ ...current, [host.host_id]: event.target.value }))}>
+                  {host.connection_methods.map((candidate) => <option key={candidate.method_id} value={candidate.method_id}>
+                    {candidate.name}{candidate.method_id === host.preferred_method_id ? " · Preferred" : ""}
+                  </option>)}
+                </select>
+              </label>
+              <button type="button" aria-label={`Add ${host.name} as hop`} onClick={() => addHost(host)}
+                disabled={routeHostIds.has(host.host_id) || Boolean(reason)}>{routeHostIds.has(host.host_id) ? "Added" : "Add host"}</button>
+            </div>;
+          })}
+        </div>
+      </section> : null}
+
       <section className="gateway-library" aria-labelledby="gateway-library-heading">
         <header>
           <strong id="gateway-library-heading">Saved gateways</strong>
@@ -475,7 +599,7 @@ export function GatewayRouteDialog({
           </button>
         </header>
         {draftGateways.length === 0 ? (
-          <p>No saved gateways. Add one to build this route.</p>
+          <p>No saved gateways. Choose a saved host or add a gateway to build this route.</p>
         ) : (
           <div className="gateway-library-list">
             {draftGateways.map((gateway) => (
@@ -683,13 +807,25 @@ function sameEndpoint(left: WorkspaceSshGateway, right: WorkspaceSshGateway): bo
     left.identity_file === right.identity_file;
 }
 
-function gatewayUsage(targets: readonly SshConnectionTarget[]): Map<string, number> {
-  const usage = new Map<string, number>();
+function gatewayUsage(
+  targets: readonly SshConnectionTarget[],
+  gateways: readonly WorkspaceSshGateway[],
+  hosts: readonly WorkspaceHost[],
+): Map<string, number> {
+  const users = new Map<string, Set<string>>();
   for (const target of targets) {
-    for (const step of target.gateway_route ?? []) {
-      if (isVpnRouteStep(step)) continue;
-      usage.set(step.gateway_id, (usage.get(step.gateway_id) ?? 0) + 1);
+    let resolved = target.gateways ?? [];
+    try { resolved = resolveSshGateways(target, gateways, hosts).gateways ?? []; }
+    catch { /* Keep direct references and live snapshots for unavailable routes. */ }
+    const gateway_ids = new Set([
+      ...(target.gateway_route ?? []).flatMap((step) => "gateway_id" in step ? [step.gateway_id] : []),
+      ...resolved.flatMap((gateway) => gateway.kind !== "vpn" ? [gateway.gateway_id] : []),
+    ]);
+    for (const gateway_id of gateway_ids) {
+      const host_ids = users.get(gateway_id) ?? new Set<string>();
+      host_ids.add(target.host_id ?? target.destination);
+      users.set(gateway_id, host_ids);
     }
   }
-  return usage;
+  return new Map([...users].map(([gateway_id, host_ids]) => [gateway_id, host_ids.size]));
 }

@@ -36,3 +36,23 @@ it("preserves gateway key paths for an unavailable host without inventing a usab
   expect(hint.target.gateways?.[0].identity_file).toBe("/keys/jump");
   expect(hint.target.gateways?.[1]).toMatchObject({ kind: "vpn", vpn_connection_id: "office" });
 });
+
+it("uses each linked method's current complete route for credential scopes", () => {
+  const hop: WorkspaceHost = { host_id: "jump", name: "Jump", preferred_method_id: "ssh",
+    connection_methods: [{ method_id: "ssh", name: "SSH", target: { kind: "ssh", destination: "new.jump", gateway_route: [{ gateway_id: "edge", mode: "native_only" }] } }],
+    remote_info: { remote_id: "jump-account", agent_version: "1" } };
+  const host: WorkspaceHost = { host_id: "build", name: "Build", preferred_method_id: "ssh",
+    connection_methods: [{ method_id: "ssh", name: "SSH", target: { kind: "ssh", destination: "build", gateway_route: [
+      { host_id: "jump", method_id: "ssh", mode: "automatic" }, { vpn_connection_id: "office" },
+    ] } }] };
+  const targets = credentialTargets([hop, host], [{ gateway_id: "edge", name: "Edge", destination: "edge", identity_file: "/keys/edge" }]);
+  expect(targets[1].target.gateways).toEqual([
+    expect.objectContaining({ destination: "edge", identity_file: "/keys/edge" }),
+    expect.objectContaining({ destination: "new.jump", remote_info: hop.remote_info }),
+    expect.objectContaining({ kind: "vpn", vpn_connection_id: "office" }),
+  ]);
+  hop.connection_methods[0].target.identity_file = "/keys/unsupported-hop";
+  const invalid = credentialTargets([hop, host], [{ gateway_id: "edge", name: "Edge", destination: "edge", identity_file: "/keys/edge" }])[1];
+  expect(invalid.target.unavailable).toContain("private key file");
+  expect(invalid.target.gateways?.map((gateway) => gateway.identity_file)).toEqual(["/keys/edge", "/keys/unsupported-hop", undefined]);
+});

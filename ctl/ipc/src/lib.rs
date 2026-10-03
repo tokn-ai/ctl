@@ -215,6 +215,12 @@ pub struct SshGateway {
 }
 
 impl SshGateway {
+  /// Native `ProxyJump` cannot apply a `HostName` override while keeping an alias.
+  #[must_use]
+  pub fn requires_proxy_command(&self) -> bool {
+    self.kind.requires_proxy_command() || self.hostname.is_some()
+  }
+
   /// VPN references cannot also contain a stale endpoint or SSH credentials.
   #[must_use]
   pub fn has_valid_vpn_configuration(&self) -> bool {
@@ -366,10 +372,7 @@ impl SshTarget {
   /// An omitted preference preserves the connection method's original policy.
   #[must_use]
   pub fn uses_ssh_config_master(&self) -> bool {
-    !self
-      .gateways
-      .iter()
-      .any(|gateway| gateway.kind.requires_proxy_command())
+    !self.gateways.iter().any(SshGateway::requires_proxy_command)
       && self
         .use_ssh_config_master
         .unwrap_or(self.ssh_config_alias.is_some())

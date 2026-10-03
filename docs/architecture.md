@@ -401,10 +401,17 @@ Tailscale starts check provider support on the selected owner before starting it
 container. Additive status fields retain compatibility with clients that
 only understand the existing stopped/starting/connected/stopping states.
 
-Host methods persist an ordered `gateway_route` of reusable gateway references
+Host methods persist an ordered `gateway_route` of reusable gateway references,
+linked saved-host methods (`{"host_id":"HOST_ID","method_id":"METHOD_ID","mode":"automatic"}`),
 and VPN steps (`{"vpn_connection_id":"PROFILE_ID"}`), independent of runtime
 ports. Legacy methods retain their optional `vpn_connection_id` as a local first
-step. A VPN at the start runs locally; one immediately after an SSH gateway runs
+step. A linked host expands its selected method's current route followed by its
+SSH endpoint and pinned remote identity. Method IDs stay fixed when preferences
+change. Expansion rejects missing references, cycles, and routes exceeding eight
+hops. Linked methods with an explicit `identity_file` require moving that key
+setting into OpenSSH configuration before they can be used as hops. OpenSSH
+aliases are retained alongside hostname overrides so their key settings apply.
+A VPN at the start of the expanded route runs locally; one immediately after an SSH gateway runs
 under that gateway's account. Consecutive VPNs and a VPN immediately after a
 SOCKS proxy remain unsupported. Native mapping includes stable profile and
 execution-owner identity in broker, master, and credential identities. Explicit
@@ -422,7 +429,7 @@ is treated as local and no local listener is needed. The agent accepts only
 bounded list, structured start, targeted stop, and selected-VPN TCP requests;
 it does not expose the full ctld broker. Remote bundles include `ctld` as the
 durable VPN owner. Closing an SSH channel leaves the remote VPN running until
-its interest is explicitly released. VPN and SOCKS5
+its interest is explicitly released. VPN, SOCKS5, and SSH hostname-override
 routes force a private master, preventing reuse of a direct SSH-config master.
 
 App-local settings become separate, validated OpenSSH arguments and cannot

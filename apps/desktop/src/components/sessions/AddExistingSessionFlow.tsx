@@ -58,6 +58,7 @@ export function AddExistingSessionFlow(props: AddExistingSessionFlowProps) {
         target={target}
         host={props.hosts?.find((host) => host.host_id === target.host_id)}
         gateways={props.gateways}
+        hosts={props.hosts}
         selected_method_id={retryMethodId}
         onConnectionChange={props.onConnectionChange}
         onVerified={props.onVerifyHost}

@@ -79,7 +79,7 @@ pub async fn prepared_target_arguments(
   let proxy = if target
     .gateways
     .iter()
-    .any(|gateway| gateway.kind.requires_proxy_command())
+    .any(ctl_ipc::SshGateway::requires_proxy_command)
   {
     Some(ctl_ipc::prepare_proxy_command(&target.gateways).await?)
   } else {
@@ -116,7 +116,7 @@ fn target_arguments_with_proxy(
   if target
     .gateways
     .iter()
-    .any(|gateway| gateway.kind.requires_proxy_command())
+    .any(ctl_ipc::SshGateway::requires_proxy_command)
   {
     let proxy = match proxy {
       Some(proxy) => proxy,

@@ -49,39 +49,11 @@ impl HostCatalogDocument {
     {
       return Err(invalid());
     }
-    // A proxy can forward traffic but cannot host a managed VPN. Validate the
-    // execution context with the actual saved gateway kinds before persisting.
+    // Resolve every method before persisting, so linked hosts cannot introduce
+    // missing references, cycles, excessive depth, or invalid VPN owners.
     for host in &self.hosts {
       for method in &host.connection_methods {
-        let super::ConnectionTargetDto::Ssh {
-          gateway_route,
-          vpn_connection_id,
-          ..
-        } = &method.target
-        else {
-          return Err(invalid());
-        };
-        let mut previous = vpn_connection_id
-          .as_ref()
-          .map(|_| ctl_ipc::GatewayKind::Vpn);
-        for step in gateway_route {
-          previous = Some(match step {
-            super::SshGatewayRouteStepDto::Gateway { gateway_id, .. } => {
-              self
-                .ssh_gateways
-                .iter()
-                .find(|gateway| gateway.gateway_id == *gateway_id)
-                .ok_or_else(invalid)?
-                .kind
-            }
-            super::SshGatewayRouteStepDto::Vpn { .. } => {
-              if previous.is_some_and(|kind| kind != ctl_ipc::GatewayKind::Ssh) {
-                return Err(invalid());
-              }
-              ctl_ipc::GatewayKind::Vpn
-            }
-          });
-        }
+        super::resolve(self, &host.host_id, Some(&method.method_id))?;
       }
     }
     Ok(())

@@ -25,6 +25,8 @@ The host catalog contains:
   SSH `target`. Optional host-level `remote_info` contains the verified remote ID,
   agent version, and bundle metadata;
 - reusable `ssh_gateways`, referenced in order by a method's `gateway_route`.
+  Route steps may also reference a saved `host_id` and its selected `method_id`,
+  or a saved VPN profile. Host links reuse the method's current route and endpoint.
 
 The workspace contains:
 
@@ -56,6 +58,11 @@ exists on that host. Method IDs are unique within a host; destinations need not
 be globally unique. Method targets exclude runtime host metadata and resolved
 gateway copies. The app resolves gateway references and supplies the expected
 remote identity when connecting.
+
+Linked host routes are expanded before transport use. The catalog rejects cycles,
+missing hosts or methods, and expanded routes longer than eight hops. A referenced
+host or method cannot be removed until its dependent route links are removed.
+Existing sessions keep their original resolved transport snapshots.
 
 Schema 6 introduced reusable SSH gateways. Schema 5 adds the central Ports
 sidebar selection. It preserves the schema 4 port-forward definitions and

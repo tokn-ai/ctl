@@ -125,6 +125,7 @@
 }
 
 .gateway-route-card select,
+.gateway-host-library select,
 .gateway-form input,
 .gateway-form select {
   width: 100%;
@@ -133,6 +134,23 @@
   border: 1px solid var(--border);
   border-radius: 3px;
   background: var(--surface-2);
+}
+
+.gateway-host-library label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: 180px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.gateway-inherited-vpn {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
 .gateway-library {
@@ -205,6 +223,10 @@
 }
 
 @media (max-width: 640px) {
+  .gateway-host-library > div {
+    flex-wrap: wrap;
+  }
+
   .gateway-host-form {
     grid-template-columns: 1fr;
   }

@@ -21,6 +21,11 @@ pub enum SshGatewayRouteStepDto {
     gateway_id: String,
     mode: SshGatewayModeDto,
   },
+  Host {
+    host_id: String,
+    method_id: String,
+    mode: SshGatewayModeDto,
+  },
   Vpn {
     vpn_connection_id: String,
   },
@@ -31,7 +36,7 @@ impl SshGatewayRouteStepDto {
   pub fn gateway_id(&self) -> Option<&str> {
     match self {
       Self::Gateway { gateway_id, .. } => Some(gateway_id),
-      Self::Vpn { .. } => None,
+      Self::Host { .. } | Self::Vpn { .. } => None,
     }
   }
 
@@ -39,7 +44,7 @@ impl SshGatewayRouteStepDto {
   pub fn vpn_connection_id(&self) -> Option<&str> {
     match self {
       Self::Vpn { vpn_connection_id } => Some(vpn_connection_id),
-      Self::Gateway { .. } => None,
+      Self::Gateway { .. } | Self::Host { .. } => None,
     }
   }
 }

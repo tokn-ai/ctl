@@ -99,6 +99,37 @@ fn rejects_inconsistent_alias_metadata() {
   }
 }
 
+#[test]
+fn gateway_hostname_overrides_keep_the_alias_in_the_proxy_route() {
+  let mut routed = target(None);
+  routed.gateways.push(SshGateway {
+    kind: GatewayKind::Ssh,
+    vpn: None,
+    destination: "configured-key-alias".into(),
+    hostname: Some("100.64.0.2".into()),
+    user: Some("operator".into()),
+    port: Some(2222),
+    identity_file: None,
+    mode: SshGatewayMode::Automatic,
+  });
+  routed.use_ssh_config_master = Some(true);
+  assert!(!routed.uses_ssh_config_master());
+  let command = master_command(&routed, &MasterEndpoint::managed(&routed));
+  let executable = std::env::current_exe().unwrap();
+  let proxy = ctl_ipc::proxy_command_with_executable(&routed.gateways, &executable);
+  let args: Vec<_> = command
+    .as_std()
+    .get_args()
+    .map(|arg| arg.to_string_lossy())
+    .collect();
+  assert!(
+    args
+      .iter()
+      .any(|arg| arg == &format!("ProxyCommand={proxy}"))
+  );
+  assert!(!args.iter().any(|arg| arg.starts_with("ProxyJump=")));
+}
+
 #[tokio::test]
 async fn managed_methods_do_not_evaluate_ssh_configuration() {
   let managed = target(None);

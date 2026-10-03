@@ -1687,7 +1687,7 @@ fn append_target_arguments(command: &mut Command, target: &SshTarget) {
   if target
     .gateways
     .iter()
-    .any(|gateway| gateway.kind.requires_proxy_command())
+    .any(SshGateway::requires_proxy_command)
   {
     let proxy = std::env::current_exe().map_or_else(
       |_| "false".into(),

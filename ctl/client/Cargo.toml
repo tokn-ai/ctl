@@ -10,6 +10,8 @@ readme = "README.md"
 categories = ["network-programming"]
 keywords = ["ctl", "ssh", "client"]
 publish = ["crates-io"]
+# Repository deployment fixture; the Docker wrapper is not part of this crate.
+exclude = ["tests/forced_command.rs"]
 
 [dependencies]
 ctl-core.workspace = true
@@ -26,6 +28,7 @@ ctl-task-client.workspace = true
 ctl-task-ipc.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "system-proxy"] }
 
 [dev-dependencies]
 serde_json.workspace = true
@@ -35,7 +38,6 @@ tar = { version = "0.4.46", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 base64.workspace = true
 ctl-core = { workspace = true, features = ["executable"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "system-proxy"] }
 flate2 = "1.1.9"
 tar = { version = "0.4.46", default-features = false }
 

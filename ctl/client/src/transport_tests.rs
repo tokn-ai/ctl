@@ -121,7 +121,7 @@ async fn proxy_preparation_child() {
     .unwrap(),
   );
   rejected(
-    run_ssh_command_interactive("fixture", &options, &SshInteraction::Inherit, "true", &[])
+    ssh_command_interactive("fixture", &options, &SshInteraction::Inherit, "true")
       .await
       .unwrap_err(),
   );
@@ -292,7 +292,14 @@ fn fixture(unix: &str, windows_script: &str) -> Command {
 #[tokio::test]
 async fn transport_consumes_marker_and_preserves_binary_io() {
   timeout(TEST_TIMEOUT, async {
-    let command = fixture("printf 'ctl-ssh-v1\n'; cat", "echo-transport.ps1");
+    let mut command = fixture(
+      "printf '%s' \"$CTL_TEST_STARTUP_NOISE\"; printf 'ctl-ssh-v1\n'; cat",
+      "echo-transport.ps1",
+    );
+    command.env(
+      "CTL_TEST_STARTUP_NOISE",
+      "\u{1b}[32mWelcome\u{1b}[0m\nno final newline: ",
+    );
     let mut transport = start_ssh_transport(command).await.unwrap();
     let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
     transport.write_all(&payload).await.unwrap();
@@ -306,16 +313,17 @@ async fn transport_consumes_marker_and_preserves_binary_io() {
 }
 
 #[tokio::test]
-async fn startup_rejects_stdout_noise_and_retains_stderr() {
+async fn startup_reports_missing_markers_and_retains_stderr() {
   timeout(TEST_TIMEOUT, async {
     let noisy = fixture(
-      "printf 'unexpected startup output\n'",
+      "printf 'unexpected startup output\n'; printf 'remote wrapper failed\n' >&2",
       "noisy-transport.ps1",
     );
-    assert!(matches!(
-      start_ssh_transport(noisy).await,
-      Err(CoreError::InvalidSshPreface)
-    ));
+    let error = start_ssh_transport(noisy).await.err().unwrap();
+    assert!(matches!(error, CoreError::InvalidSshPreface(_)));
+    assert!(error.to_string().contains("unexpected startup output"));
+    assert!(error.to_string().contains("remote wrapper failed"));
+    assert!(!is_retryable_connection_error(&error));
     let failed = fixture(
       "printf 'Host key verification failed.\n' >&2; exit 255",
       "failed-transport.ps1",
@@ -327,6 +335,49 @@ async fn startup_rejects_stdout_noise_and_retains_stderr() {
   })
   .await
   .expect("startup failure handling timed out");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_startup_reaps_the_ssh_child_without_waiting_for_readiness() {
+  let path = std::env::temp_dir().join(format!("ctl-startup-pid-{}", uuid::Uuid::new_v4()));
+  let mut command = Command::new("sh");
+  command
+    .args([
+      "-c",
+      "printf '%s' \"$$\" > \"$CTL_TEST_CHILD_PID\"; printf 'banner'; read -r response",
+    ])
+    .env("CTL_TEST_CHILD_PID", &path);
+  let task = tokio::spawn(start_ssh_transport(command));
+  let pid = timeout(Duration::from_secs(5), async {
+    loop {
+      if let Ok(pid) = std::fs::read_to_string(&path)
+        && !pid.is_empty()
+      {
+        break pid;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("child did not start");
+  task.abort();
+  assert!(task.await.err().unwrap().is_cancelled());
+  timeout(Duration::from_secs(5), async {
+    while Command::new("kill")
+      .args(["-0", &pid])
+      .stderr(Stdio::null())
+      .status()
+      .await
+      .unwrap()
+      .success()
+    {
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("cancelled startup left its child running");
+  std::fs::remove_file(path).unwrap();
 }
 
 // Native Windows CI must also exercise the installed OpenSSH executable,
@@ -367,10 +418,18 @@ async fn identified_transport_consumes_metadata_and_preserves_binary_io() {
       bundle: None,
     };
     let json = serde_json::to_string(&identity).unwrap();
-    let command = identified_fixture(&json);
-    let mut transport = start_ssh_transport_identified(command, true, false, ready(()))
-      .await
-      .unwrap();
+    let mut command = identified_fixture(&json);
+    command
+      .env("CTL_TEST_STARTUP_NOISE", "Welcome\nwithout final newline: ")
+      .env("CTL_TEST_AUTHENTICATION_MARKER", "true");
+    let authenticated = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&authenticated);
+    let mut transport = start_ssh_transport_identified(command, true, true, async move {
+      observed.store(true, Ordering::SeqCst);
+    })
+    .await
+    .unwrap();
+    assert!(authenticated.load(Ordering::SeqCst));
     assert_eq!(transport.remote_identity.as_deref(), Some(&identity));
     let payload = [0, 255, 128, b'\r', b'\n', 27, 1, b'x'];
     transport.write_all(&payload).await.unwrap();
@@ -394,13 +453,174 @@ fn identified_fixture(json: &str) -> Command {
       out
     });
   let mut command = fixture(
-    "printf 'ctl-ssh-v3\n'; printf '%b' \"$CTL_TEST_IDENTITY_SIZE\"; printf '%s' \"$CTL_TEST_IDENTITY_JSON\"; cat",
+    "if [ -n \"$CTL_TEST_CHILD_PID\" ]; then printf '%s' \"$$\" > \"$CTL_TEST_CHILD_PID\"; fi; printf '%s' \"$CTL_TEST_STARTUP_NOISE\"; if [ -n \"$CTL_TEST_AUTHENTICATION_MARKER\" ]; then printf 'ctl-ssh-auth-v1\n'; fi; printf '%s\n' \"$CTL_TEST_IDENTITY_MARKER\"; printf '%b' \"$CTL_TEST_IDENTITY_SIZE\"; printf '%s' \"$CTL_TEST_IDENTITY_JSON\"; if [ -n \"$CTL_TEST_SERVICE_INPUT\" ]; then exec cat > \"$CTL_TEST_SERVICE_INPUT\"; fi; exec cat",
     "identified-transport.ps1",
   );
   command
     .env("CTL_TEST_IDENTITY_SIZE", size)
-    .env("CTL_TEST_IDENTITY_JSON", json);
+    .env("CTL_TEST_IDENTITY_JSON", json)
+    .env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v3")
+    .env("CTL_TEST_STARTUP_NOISE", "")
+    .env("CTL_TEST_AUTHENTICATION_MARKER", "")
+    .env("CTL_TEST_CHILD_PID", "")
+    .env("CTL_TEST_SERVICE_INPUT", "");
   command
+}
+
+#[tokio::test]
+async fn legacy_inspection_reads_only_identity_after_startup_noise() {
+  timeout(TEST_TIMEOUT, async {
+    let json = serde_json::json!({
+      "remote_id": uuid::Uuid::new_v4().to_string(),
+      "agent_version": "0.1.0",
+      "rmux_restart_supported": true,
+      "bundle": {
+        "app_version": "0.1.0",
+        "bundle_id": "0.1.0-dev.41d2f11",
+        "git_revision": "41d2f11",
+        "target_triple": "x86_64-unknown-linux-musl"
+      }
+    });
+    let mut command = identified_fixture(&json.to_string());
+    command.env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v2").env(
+      "CTL_TEST_STARTUP_NOISE",
+      "Welcome\nprofile without newline: ",
+    );
+    let identity = inspect_legacy_ssh_command(command).await.unwrap();
+    assert_eq!(identity.remote_id, json["remote_id"]);
+    assert_eq!(identity.bundle.unwrap().bundle_id, "0.1.0-dev.41d2f11");
+    assert!(!identity.ctmux_restart_supported);
+    assert!(identity.build.is_none());
+  })
+  .await
+  .expect("legacy inspection must close without waiting for service frames");
+}
+
+#[tokio::test]
+async fn legacy_inspection_rejects_invalid_and_oversized_metadata() {
+  timeout(TEST_TIMEOUT, async {
+    for json in ["{}".to_owned(), " ".repeat(8193)] {
+      let mut command = identified_fixture(&json);
+      command.env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v2");
+      assert!(matches!(
+        inspect_legacy_ssh_command(command).await,
+        Err(CoreError::RemoteIdentity(_))
+      ));
+    }
+  })
+  .await
+  .expect("invalid legacy metadata must terminate its producer");
+}
+
+#[tokio::test]
+async fn legacy_inspection_rejects_other_reserved_markers() {
+  timeout(TEST_TIMEOUT, async {
+    for marker in ["ctl-ssh-v3", "ctl-ssh-v99", "ctl-ssh-nf"] {
+      let mut command = identified_fixture("{}");
+      command.env("CTL_TEST_IDENTITY_MARKER", marker);
+      assert!(matches!(
+        inspect_legacy_ssh_command(command).await,
+        Err(CoreError::UnsupportedSshProtocol { marker: received }) if received == marker
+      ));
+    }
+  })
+  .await
+  .expect("only v2 is permitted for legacy inspection");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_inspection_reaps_its_child_without_sending_service_input() {
+  let directory = std::env::temp_dir().join(format!(
+    "ctl-legacy-inspection-{}",
+    uuid::Uuid::new_v4().simple()
+  ));
+  std::fs::create_dir(&directory).unwrap();
+  let json = serde_json::json!({
+    "remote_id": uuid::Uuid::new_v4().to_string(),
+    "agent_version": "0.1.0"
+  });
+  for (index, metadata) in [json.to_string(), "{}".into()].into_iter().enumerate() {
+    let pid_path = directory.join(format!("pid-{index}"));
+    let input_path = directory.join(format!("input-{index}"));
+    let mut command = identified_fixture(&metadata);
+    command
+      .env("CTL_TEST_IDENTITY_MARKER", "ctl-ssh-v2")
+      .env("CTL_TEST_CHILD_PID", &pid_path)
+      .env("CTL_TEST_SERVICE_INPUT", &input_path);
+    let result = timeout(TEST_TIMEOUT, inspect_legacy_ssh_command(command))
+      .await
+      .unwrap();
+    assert_eq!(result.is_ok(), index == 0);
+    let pid = std::fs::read_to_string(pid_path).unwrap();
+    assert!(
+      !Command::new("kill")
+        .args(["-0", &pid])
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .unwrap()
+        .success(),
+      "legacy metadata producer was not reaped"
+    );
+    // The producer can be killed before creating the sink. If it did create it,
+    // the compatibility probe must still have sent no service bytes.
+    if input_path.exists() {
+      assert_eq!(std::fs::read(input_path).unwrap(), [] as [u8; 0]);
+    }
+  }
+  std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_transport_versions_offer_an_update_instead_of_blaming_the_shell() {
+  timeout(TEST_TIMEOUT, async {
+    for marker in ["ctl-ssh-v2", "ctl-ssh-v99"] {
+      let mut command = fixture(
+        "printf '%s\n' \"$CTL_TEST_TRANSPORT_MARKER\"; cat",
+        "echo-transport.ps1",
+      );
+      command
+        .env("CTL_TEST_TRANSPORT_MARKER", marker)
+        .env("CTL_TEST_STARTUP_NOISE", "");
+      let error = start_ssh_transport_identified(command, true, false, ready(()))
+        .await
+        .err()
+        .unwrap();
+      assert!(matches!(&error, CoreError::UnsupportedSshProtocol { marker: received } if received == marker));
+      assert!(error.to_string().contains("update the remote components"));
+      assert!(!is_retryable_connection_error(&error));
+    }
+  })
+  .await
+  .expect("unsupported markers must fail before waiting for protocol input");
+}
+
+#[tokio::test]
+async fn authentication_hook_does_not_run_when_the_wrapper_skips_its_marker() {
+  let identity = serde_json::json!({
+    "remote_id": uuid::Uuid::new_v4().to_string(),
+    "agent_version": "0.1.0",
+  });
+  let command = identified_fixture(&identity.to_string());
+  let authenticated = Arc::new(AtomicBool::new(false));
+  let observed = Arc::clone(&authenticated);
+  let result = timeout(
+    TEST_TIMEOUT,
+    start_ssh_transport_identified(command, true, true, async move {
+      observed.store(true, Ordering::SeqCst);
+    }),
+  )
+  .await
+  .unwrap();
+  assert!(!authenticated.load(Ordering::SeqCst));
+  let error = result.err().unwrap();
+  assert!(matches!(error, CoreError::InvalidSshPreface(_)));
+  assert!(
+    error
+      .to_string()
+      .contains("skipped the SSH authentication marker")
+  );
 }
 
 #[tokio::test]
@@ -467,11 +687,45 @@ async fn fixed_command_closes_stdin_before_waiting_for_response() {
     b"{\"expected_remote_id\":\"test\"}".as_slice(),
   ] {
     let mut command = Command::new("sh");
-    command.args(["-c", "cat; printf '\nrequest-complete'"]);
-    let output = timeout(Duration::from_secs(2), run_fixed_command(command, input))
-      .await
-      .expect("command must receive EOF before the caller waits for output")
-      .expect("command should succeed");
+    command.args([
+      "-c",
+      "printf 'ctl-command-v1\n'; cat; printf '\nrequest-complete'",
+    ]);
+    let output = timeout(
+      Duration::from_secs(2),
+      run_marked_fixed_command(command, input, b"ctl-command-v1\n"),
+    )
+    .await
+    .expect("command must receive EOF before the caller waits for output")
+    .expect("command should succeed");
     assert_eq!(output, [input, b"\nrequest-complete"].concat());
   }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixed_command_strips_startup_noise_but_keeps_response_strict_and_reports_ssh_failures() {
+  for (marker, response) in [
+    ("ctl-platform-v1\n", "Linux\nx86_64\n"),
+    ("ctl-command-v1\n", "{\"terminated_sessions\":0}\n"),
+  ] {
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf 'banner without newline'; printf '%s%s' \"$CTL_TEST_MARKER\" \"$CTL_TEST_RESPONSE\""])
+      .env("CTL_TEST_MARKER", marker)
+      .env("CTL_TEST_RESPONSE", response);
+    let output = run_marked_fixed_command(command, &[], marker.as_bytes())
+      .await
+      .unwrap();
+    assert_eq!(output, response.as_bytes());
+  }
+  let mut failed = Command::new("sh");
+  failed.args([
+    "-c",
+    "printf 'Host key verification failed.\n' >&2; exit 255",
+  ]);
+  let error = run_marked_fixed_command(failed, &[], b"ctl-command-v1\n")
+    .await
+    .unwrap_err();
+  assert!(matches!(error, CoreError::SshCommandFailed { .. }));
+  assert!(error.to_string().contains("Host key verification failed."));
 }

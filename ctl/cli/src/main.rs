@@ -5,6 +5,7 @@ mod host;
 mod openssh;
 #[cfg(unix)]
 mod port;
+mod remote;
 mod setup;
 mod skill;
 #[cfg(unix)]

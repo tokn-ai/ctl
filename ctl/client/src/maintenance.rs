@@ -4,16 +4,18 @@ use std::{path::Path, process::Stdio, time::Duration};
 use ctl_proto::maintenance::{
   self, ClientMessage, CtmuxPreparation, CtmuxRestartCompleted, ServerMessage,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::{CoreError, RemotePlatform, SSH_PROGRAM, SshConnectionOptions, SshInteraction};
 
 const PREPARE_COMMAND: &str = concat!(
+  r#"printf 'ctl-maintenance-v1\n'; "#,
   r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent prepare-ctmux-restart",
 );
 const INSPECT_COMMAND: &str = concat!(
+  r#"printf 'ctl-command-v1\n'; "#,
   r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent inspect",
 );
@@ -22,7 +24,7 @@ pub struct PreparedRemoteCtmuxRestart {
   pub info: CtmuxPreparation,
   child: Child,
   stdin: ChildStdin,
-  stdout: ChildStdout,
+  stdout: BufReader<ChildStdout>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,9 +68,10 @@ pub async fn inspect_agent(
 ) -> Result<ctl_proto::RemoteIdentity, CoreError> {
   let output = tokio::time::timeout(
     Duration::from_secs(8),
-    crate::run_fixed_command(
+    crate::run_marked_fixed_command(
       command(destination, options, control_path, INSPECT_COMMAND)?,
       &[],
+      b"ctl-command-v1\n",
     ),
   )
   .await
@@ -126,10 +129,16 @@ async fn prepare(
     .stdin
     .take()
     .ok_or_else(|| failure("SSH input is unavailable.", false))?;
-  let mut stdout = child
-    .stdout
-    .take()
-    .ok_or_else(|| failure("SSH output is unavailable.", false))?;
+  let mut stdout = BufReader::new(
+    child
+      .stdout
+      .take()
+      .ok_or_else(|| failure("SSH output is unavailable.", false))?,
+  );
+  crate::ssh_startup::Preface::default()
+    .read_marker(&mut stdout, &[b"ctl-maintenance-v1\n"], b"ctl-maintenance-")
+    .await
+    .map_err(|error| failure(error, false))?;
   maintenance::write(
     &mut stdin,
     &ClientMessage::PrepareCtmuxRestart {
@@ -303,18 +312,106 @@ mod tests {
       assert_eq!(args.last().unwrap(), operation);
       assert!(!operation.contains("connect"));
     }
+    assert!(PREPARE_COMMAND.starts_with("printf 'ctl-maintenance-v1\\n'; "));
+    assert!(INSPECT_COMMAND.starts_with("printf 'ctl-command-v1\\n'; "));
   }
 
-  #[test]
-  fn prepared_identity_and_component_metadata_are_bound() {
-    let info: CtmuxPreparation = serde_json::from_value(serde_json::json!({
+  fn preparation() -> CtmuxPreparation {
+    serde_json::from_value(serde_json::json!({
       "remote_id": "owned-environment",
       "running": {"build": null, "protocol_version": null, "control_protocol_version": 1},
       "available": {
         "build": {"version": "0.1.0", "source_revision": null, "source_fingerprint": "0".repeat(64), "dirty": false},
         "protocols": [{"name": "ctmux", "version": 12}, {"name": "ctmux_control", "version": 1}]
       }
-    })).unwrap();
+    })).unwrap()
+  }
+
+  #[cfg(unix)]
+  async fn prepared_fixture(startup: &str, before_response: &str) -> Command {
+    use std::fmt::Write as _;
+    let mut frame = Vec::new();
+    maintenance::write(
+      &mut frame,
+      &ServerMessage::Prepared {
+        info: preparation(),
+      },
+    )
+    .await
+    .unwrap();
+    let encoded = frame.iter().fold(String::new(), |mut encoded, byte| {
+      write!(encoded, "\\{byte:03o}").unwrap();
+      encoded
+    });
+    let mut command = Command::new("sh");
+    command
+      .args([
+        "-c",
+        "printf '%s' \"$CTL_TEST_STARTUP\"; printf 'ctl-maintenance-v1\\n'; printf '%s' \"$CTL_TEST_BEFORE_RESPONSE\"; printf '%b' \"$CTL_TEST_PREPARED\"; cat >/dev/null",
+      ])
+      .env("CTL_TEST_STARTUP", startup)
+      .env("CTL_TEST_BEFORE_RESPONSE", before_response)
+      .env("CTL_TEST_PREPARED", encoded);
+    command
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn preparation_preserves_buffered_frames_after_shell_startup_output() {
+    let mut prepared = tokio::time::timeout(
+      Duration::from_secs(5),
+      prepare(
+        prepared_fixture("Welcome\n\x1b[32mloading profile\x1b[0m", "").await,
+        "owned-environment",
+      ),
+    )
+    .await
+    .expect("startup framing must preserve the buffered preparation response")
+    .unwrap();
+    assert_eq!(prepared.info.remote_id, "owned-environment");
+    assert_eq!(prepared.info.available, preparation().available);
+    require_waiting_for_confirmation(&mut prepared.stdout)
+      .await
+      .unwrap();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn preparation_rejects_noise_after_readiness_before_confirmation() {
+    let error = tokio::time::timeout(
+      Duration::from_secs(5),
+      prepare(
+        prepared_fixture("startup banner\n", "late startup output\n").await,
+        "owned-environment",
+      ),
+    )
+    .await
+    .unwrap()
+    .err()
+    .expect("bytes after readiness must remain strict maintenance frames");
+    assert!(!error.may_have_stopped);
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn unsupported_maintenance_markers_fail_before_confirmation() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf 'ctl-maintenance-v2\\n'; cat >/dev/null"]);
+    let error = tokio::time::timeout(
+      Duration::from_secs(5),
+      prepare(command, "owned-environment"),
+    )
+    .await
+    .unwrap()
+    .err()
+    .expect("unsupported readiness marker must fail without waiting for a frame");
+    assert!(!error.may_have_stopped);
+    assert!(error.message.contains("ctl-maintenance-v2"));
+  }
+
+  #[test]
+  fn prepared_identity_and_component_metadata_are_bound() {
+    let info = preparation();
     assert!(valid_preparation(&info, "owned-environment"));
     assert!(!valid_preparation(&info, "different-environment"));
     let mut invalid = info.clone();

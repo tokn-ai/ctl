@@ -36,15 +36,42 @@ tar -xzf "$archive" -C "$payload"
 for binary in ctl-agent ctmuxd ctl-taskd; do
   printf 'ctl-install-progress-v1 checking %s\n' "$binary"
   test -f "$payload/$binary"
+  test ! -L "$payload/$binary"
   chmod 700 "$payload/$binary"
 done
-printf 'ctl-install-progress-v1 activating\n'
-if [ ! -e "$destination" ]; then
+if [ -e "$payload/manifest.json" ] || [ -L "$payload/manifest.json" ]; then
+  test -f "$payload/manifest.json"
+  test ! -L "$payload/manifest.json"
+fi
+reject_existing_bundle() {
+  printf 'ctl install: bundle ID __BUNDLE_ID__ already exists with different %s; existing components were kept\n' "$1" >&2
+  exit 1
+}
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+  if [ ! -d "$destination" ] || [ -L "$destination" ]; then
+    reject_existing_bundle 'installation type'
+  fi
+  for binary in ctl-agent ctmuxd ctl-taskd; do
+    if [ ! -f "$destination/$binary" ] || [ -L "$destination/$binary" ] || \
+      [ ! -x "$destination/$binary" ] || ! cmp -s "$payload/$binary" "$destination/$binary"; then
+      reject_existing_bundle "$binary"
+    fi
+  done
+  if [ -e "$payload/manifest.json" ] || [ -e "$destination/manifest.json" ] || \
+    [ -L "$destination/manifest.json" ]; then
+    if [ ! -f "$payload/manifest.json" ] || [ ! -f "$destination/manifest.json" ] || \
+      [ -L "$destination/manifest.json" ] || \
+      ! cmp -s "$payload/manifest.json" "$destination/manifest.json"; then
+      reject_existing_bundle 'manifest.json'
+    fi
+  fi
+else
   mv "$payload" "$destination"
 fi
 test -x "$destination/ctl-agent"
 test -x "$destination/ctmuxd"
 test -x "$destination/ctl-taskd"
+printf 'ctl-install-progress-v1 activating\n'
 ln -s "versions/__BUNDLE_ID__" "$link"
 case "$(uname -s)" in
   Linux) mv -fT "$link" "$base/current" ;;

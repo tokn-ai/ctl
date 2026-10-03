@@ -626,6 +626,21 @@ The default target is local. Persistent remote shells require `ctl-agent` and
 `ctmuxd` on the destination, as with `ctl ctmux`; plain SSH operations need only
 the remote SSH service.
 
+Interactive Unix connections offer to install matching components when the
+remote agent is missing or uses the old `ctl-ssh-v2` protocol, then retry once.
+Repair verifies any saved machine ID and the bundle's exact clean source
+revision, reuses the chosen SSH route, and shows received bytes, speed, and
+installation stages. It preserves running daemons and can be cancelled with
+Ctrl-C. Piped commands and background reconnects never prompt. Local bundle
+sets can be selected with `CTL_REMOTE_BUNDLES_DIR`; otherwise the CLI checks
+its local resources, `~/.tokn/ctl/agent-bundles`, and the verified download cache
+before the matching official release and existing exact-revision GitHub bundle
+artifacts when `gh` is installed. Downloads are cached under
+`~/.tokn/ctl/agent-bundles/<revision>/<target>/` for reuse across hosts; each reuse
+checks the version, source revision, and checksum without contacting GitHub.
+For source development, run `pnpm agents:sync` from `apps/desktop` at the same
+clean pushed revision before rebuilding. See [remote setup](docs/remote-mvp.md).
+
 `ssh` and `scp` accept the system OpenSSH command syntax. A destination such as
 `work` selects the same saved ctl host used by `-H work`:
 

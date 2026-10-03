@@ -13,6 +13,12 @@ use crate::{
 
 const UNIX_INSTALL_COMMAND: &str = include_str!("ssh_install.sh");
 const MAX_PROGRESS_LINE_BYTES: u64 = 256;
+const INITIAL_PROGRESS_MARKER: &[u8] = b"ctl-install-progress-v1 receiving 0\n";
+
+mod progress;
+pub use progress::{
+  RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled, RemoteInstallWatchdog,
+};
 
 /// Receiver-confirmed installation progress from the fixed remote script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +148,17 @@ async fn read_progress(
   on_progress: &impl Fn(RemoteInstallEvent),
 ) -> io::Result<()> {
   let mut reader = BufReader::new(stdout);
+  let mut preface = crate::ssh_startup::Preface::default();
+  if let Err(error) = preface
+    .read_marker(&mut reader, &[INITIAL_PROGRESS_MARKER], b"ctl-install-")
+    .await
+  {
+    // Preserve the framing error, but keep draining so a verbose remote script
+    // cannot block on stdout while the caller waits for its exit diagnostics.
+    let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+    return Err(error);
+  }
+  on_progress(RemoteInstallEvent::Receiving { received_bytes: 0 });
   let mut received_bytes = 0;
   let stages = [
     RemoteInstallEvent::Extracting,

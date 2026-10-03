@@ -130,7 +130,7 @@ prefer its own bundled helper. Ordinary Cargo CLI builds also discover selected
 signed development apps.
 
 Selections use
-`~/.tokn/ctl/components/ctld/selected/<target>-ctld12-lifecycle1-helper1`.
+`~/.tokn/ctl/components/ctld/selected/<target>-ctld1-lifecycle1-helper1`.
 Discovery requires the native target and compatible `ctld`, `ctld_lifecycle`, and
 `ctld_helper` APIs. It checks the helper against its own installation manifest,
 without requiring its version or build fingerprint to equal the CLI's. Cached

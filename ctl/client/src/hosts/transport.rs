@@ -2,6 +2,13 @@ use super::{ConnectionTargetDto, HostError};
 use crate::{ConnectionTarget, SshConnectionOptions, SshGateway, SshGatewayMode};
 use std::path::PathBuf;
 
+/// A saved profile and the route prefix of its execution host.
+pub struct VpnRoute {
+  pub connection_id: String,
+  pub owner: Option<ctl_ipc::SshTarget>,
+  pub expected_remote_id: Option<String>,
+}
+
 impl ConnectionTargetDto {
   /// Shared route identity for broker operations and non-authenticating probes.
   ///
@@ -51,14 +58,10 @@ impl ConnectionTargetDto {
       identity_file: identity_file.as_ref().map(PathBuf::from),
       gateways: self.ssh_gateways(),
     };
-    if target
-      .gateways
-      .iter()
-      .any(|gateway| !gateway.has_valid_vpn_configuration())
-    {
+    if !ctl_ipc::has_valid_gateway_route(&target.gateways) {
       return Err(HostError::new(
         "invalid_vpn_route",
-        "Choose a saved VPN connection in the host settings.",
+        "A VPN must be first in the route or follow an SSH host. Choose a valid saved VPN connection.",
       ));
     }
     target.normalize_master_policy();
@@ -118,12 +121,27 @@ impl ConnectionTargetDto {
     else {
       return Vec::new();
     };
-    vpn_connection_id
+    let mut route: Vec<_> = vpn_connection_id
       .iter()
       .map(|connection_id| super::vpn_gateway(connection_id))
-      .chain(gateways.iter().map(|gateway| ctl_ipc::SshGateway {
+      .collect();
+    for (index, gateway) in gateways.iter().enumerate() {
+      let expected_remote_id = index
+        .checked_sub(1)
+        .and_then(|index| gateways.get(index))
+        .filter(|owner| owner.kind == ctl_ipc::GatewayKind::Ssh)
+        .and_then(|owner| owner.remote_info.as_ref())
+        .map(|identity| identity.remote_id.clone());
+      route.push(ctl_ipc::SshGateway {
         kind: gateway.kind,
-        vpn: None,
+        vpn: gateway
+          .vpn_connection_id
+          .as_ref()
+          .map(|connection_id| ctl_ipc::VpnGateway {
+            connection_id: connection_id.clone(),
+            socket_path: ctl_ipc::vpn::socket_path(),
+            expected_remote_id,
+          }),
         destination: gateway.destination.clone(),
         hostname: gateway.hostname.clone(),
         user: gateway.user.clone(),
@@ -134,8 +152,35 @@ impl ConnectionTargetDto {
           super::SshGatewayModeDto::NativeOnly => ctl_ipc::SshGatewayMode::NativeOnly,
           super::SshGatewayModeDto::AgentRelayOnly => ctl_ipc::SshGatewayMode::AgentRelayOnly,
         },
-      }))
-      .collect()
+      });
+    }
+    route
+  }
+
+  /// Collect VPNs in connection order, so each owner is reachable before startup.
+  ///
+  /// # Errors
+  /// Rejects malformed or unsupported routes without starting any VPN.
+  pub fn vpn_route(&self) -> Result<Vec<VpnRoute>, HostError> {
+    if self.is_local() {
+      return Ok(Vec::new());
+    }
+    let target = self.to_ssh_target()?;
+    Ok(
+      target
+        .gateways
+        .iter()
+        .enumerate()
+        .filter_map(|(index, gateway)| {
+          let vpn = gateway.vpn.as_ref()?;
+          Some(VpnRoute {
+            connection_id: vpn.connection_id.clone(),
+            owner: ctl_ipc::vpn_owner_target(&target.gateways, index),
+            expected_remote_id: vpn.expected_remote_id.clone(),
+          })
+        })
+        .collect(),
+    )
   }
 
   #[must_use]

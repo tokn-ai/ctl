@@ -57,7 +57,7 @@ staging_directory="$output_directory/staging-$target"
 archive="ctl-agent-bundle-$bundle_id-$target.tar.gz"
 
 mkdir -p "$staging_directory" "$output_directory"
-for binary in ctl-agent ctmuxd ctl-taskd; do
+for binary in ctl-agent ctmuxd ctl-taskd ctld; do
   if [ ! -x "$binary_directory/$binary" ]; then
     echo "missing release binary: $binary_directory/$binary" >&2
     exit 1
@@ -66,7 +66,7 @@ for binary in ctl-agent ctmuxd ctl-taskd; do
 done
 
 if command -v strip >/dev/null 2>&1; then
-  strip "$staging_directory/ctl-agent" "$staging_directory/ctmuxd" "$staging_directory/ctl-taskd"
+  strip "$staging_directory/ctl-agent" "$staging_directory/ctmuxd" "$staging_directory/ctl-taskd" "$staging_directory/ctld"
 fi
 
 checksum() {
@@ -80,6 +80,7 @@ checksum() {
 ctl_agent_sha256=$(checksum "$staging_directory/ctl-agent")
 ctmuxd_sha256=$(checksum "$staging_directory/ctmuxd")
 taskd_sha256=$(checksum "$staging_directory/ctl-taskd")
+ctld_sha256=$(checksum "$staging_directory/ctld")
 printf '%s\n' \
   '{' \
   '  "schema_version": 1,' \
@@ -90,12 +91,13 @@ printf '%s\n' \
   '  "files": {' \
   "    \"ctl-agent\": \"$ctl_agent_sha256\"," \
   "    \"ctmuxd\": \"$ctmuxd_sha256\"," \
-  "    \"ctl-taskd\": \"$taskd_sha256\"" \
+  "    \"ctl-taskd\": \"$taskd_sha256\"," \
+  "    \"ctld\": \"$ctld_sha256\"" \
   '  }' \
   '}' > "$staging_directory/manifest.json"
 
 tar -czf "$output_directory/$archive" -C "$staging_directory" \
-  ctl-agent ctmuxd ctl-taskd manifest.json
+  ctl-agent ctmuxd ctl-taskd ctld manifest.json
 archive_sha256=$(checksum "$output_directory/$archive")
 printf '%s  %s\n' "$archive_sha256" "$archive" > "$output_directory/$archive.sha256"
 rm -rf "$staging_directory"

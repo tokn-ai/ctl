@@ -24,7 +24,7 @@ pub struct ConnectionOptions {
   /// Saved VPN connection ID.
   #[arg(long)]
   vpn: Option<String>,
-  /// Saved gateway ID, repeat in route order (automatic mode).
+  /// Saved gateway ID or `vpn:PROFILE_ID`, repeat in route order.
   #[arg(long)]
   gateway: Vec<String>,
   #[arg(long)]
@@ -127,16 +127,36 @@ impl ConnectionOptions {
       *gateway_route = self
         .gateway
         .iter()
-        .map(|id| SshGatewayRouteStepDto {
-          gateway_id: id.clone(),
-          mode: SshGatewayModeDto::Automatic,
-        })
-        .collect();
+        .map(|id| route_step(id))
+        .collect::<Result<_, _>>()?;
     }
     // Apply the same transport validation used before connecting, while all
     // changes still exist only in memory. Catalog validation checks route IDs.
     method.target.to_ssh_target()?;
     Ok(())
+  }
+}
+
+fn route_step(selector: &str) -> Result<SshGatewayRouteStepDto, Error> {
+  if let Some(connection_id) = selector.strip_prefix("vpn:") {
+    if connection_id.is_empty()
+      || connection_id.len() > 128
+      || connection_id
+        .chars()
+        .any(|value| value.is_control() || value.is_whitespace())
+    {
+      return Err(Error::Usage(
+        "Use vpn:PROFILE_ID with a valid saved VPN ID.".into(),
+      ));
+    }
+    Ok(SshGatewayRouteStepDto::Vpn {
+      vpn_connection_id: connection_id.into(),
+    })
+  } else {
+    Ok(SshGatewayRouteStepDto::Gateway {
+      gateway_id: selector.into(),
+      mode: SshGatewayModeDto::Automatic,
+    })
   }
 }
 
@@ -333,4 +353,30 @@ fn edit_method(
     }
   };
   Ok((host.clone(), json))
+}
+
+#[cfg(test)]
+mod route_tests {
+  use super::*;
+
+  #[test]
+  fn route_selectors_preserve_ssh_and_vpn_order() {
+    let route = ["bastion", "vpn:office", "inner", "vpn:private"]
+      .map(route_step)
+      .into_iter()
+      .collect::<Result<Vec<_>, _>>()
+      .unwrap();
+    assert_eq!(
+      serde_json::to_value(route).unwrap(),
+      serde_json::json!([
+        {"gateway_id": "bastion", "mode": "automatic"},
+        {"vpn_connection_id": "office"},
+        {"gateway_id": "inner", "mode": "automatic"},
+        {"vpn_connection_id": "private"}
+      ])
+    );
+    for selector in ["vpn:", "vpn:has whitespace", "vpn:line\nfeed"] {
+      assert!(route_step(selector).is_err());
+    }
+  }
 }

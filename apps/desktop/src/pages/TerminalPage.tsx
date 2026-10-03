@@ -534,7 +534,7 @@ function TerminalWorkbench() {
     setMethodNameOpen(!method);
   }
 
-  async function saveNewHost(name: string, target: SshConnectionTarget, remote_info: RemoteIdentity) {
+  async function saveNewHost(name: string, target: SshConnectionTarget, remote_info: RemoteIdentity, gateways?: WorkspaceSshGateway[]) {
     const projected_id = target.tailscale_node_id
       ? tailscaleHostId(target.tailscale_node_id)
       : target.ssh_config_alias ? projectedHostId(target.ssh_config_alias) : null;
@@ -554,13 +554,20 @@ function TerminalWorkbench() {
           ? { ...method, ...connectionMethodOptions(target), target: connectionSettings(target) }
           : method),
     } : hostFromTarget({ ...target, host_id: undefined, remote_info }, name));
-    await workspace.replaceView((current) => projected
-      ? updateHostSettings(current, host)
-      : {
+    await workspace.replaceView((current) => {
+      const next = gateways ? {
         ...current,
-        hosts: [...current.hosts, host],
-        targets: [...current.targets, hostTarget(host, current.ssh_gateways)],
-      });
+        ssh_gateways: [...current.ssh_gateways, ...gateways.filter((gateway) =>
+          !current.ssh_gateways.some((saved) => saved.gateway_id === gateway.gateway_id))],
+      } : current;
+      return projected
+        ? updateHostSettings(next, host)
+        : {
+          ...next,
+          hosts: [...next.hosts, host],
+          targets: [...next.targets, hostTarget(host, next.ssh_gateways)],
+        };
+    });
   }
 
   async function saveConnection(

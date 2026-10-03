@@ -27,9 +27,12 @@ describe("credential host associations", () => {
 it("preserves gateway key paths for an unavailable host without inventing a usable route", () => {
   const host: WorkspaceHost = {
     host_id: "work", name: "Work", preferred_method_id: "remote",
-    connection_methods: [{ method_id: "remote", name: "Remote", target: { kind: "ssh", destination: "work.example", gateway_route: [{ gateway_id: "jump", mode: "automatic" }], unavailable: "Device unavailable" } }],
+    connection_methods: [{ method_id: "remote", name: "Remote", target: { kind: "ssh", destination: "work.example", gateway_route: [
+      { gateway_id: "jump", mode: "automatic" }, { vpn_connection_id: "office" },
+    ], unavailable: "Device unavailable" } }],
   };
   const [hint] = credentialTargets([host], [{ gateway_id: "jump", name: "Jump", destination: "jump.example", identity_file: "/keys/jump" }]);
   expect(hint.target.unavailable).toBe("Device unavailable");
   expect(hint.target.gateways?.[0].identity_file).toBe("/keys/jump");
+  expect(hint.target.gateways?.[1]).toMatchObject({ kind: "vpn", vpn_connection_id: "office" });
 });

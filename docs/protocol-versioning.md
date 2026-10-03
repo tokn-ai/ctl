@@ -35,6 +35,15 @@ unpublished wire formats.
 | `task_control` | 2 | `1.0.2` |
 | `ctl_identity` | 3 | `1.0.3` |
 | `ctl_maintenance` | 2 | `1.0.2` |
+| `ctl_remote_vpn` | 1 | `1.0.1` |
+
+The remote VPN addition publishes ctld `1.1.13` (build 13) and helper `1.1.2`
+(build 2), retaining their initial contracts. A broker channel selecting ctld
+`1.0.12` supports the original SSH and local VPN routes; remote VPN route steps
+require `1.1.13`. Proxy helpers must explicitly advertise helper `1.1.2` before
+remote VPN routes are passed to them. Other helper operations retain `1.0.1`
+behavior. The independent remote VPN channel negotiates `1.0.1` before identity
+and credentials, using a stable marker rather than changing the marker per build.
 
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.

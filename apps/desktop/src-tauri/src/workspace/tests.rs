@@ -452,7 +452,7 @@ fn gateway_routes_require_unique_saved_gateway_references() {
   if let ConnectionTargetDto::Ssh { gateway_route, .. } =
     &mut document.hosts[1].connection_methods[0].target
   {
-    gateway_route.push(crate::dto::SshGatewayRouteStepDto {
+    gateway_route.push(crate::dto::SshGatewayRouteStepDto::Gateway {
       gateway_id: "edge".into(),
       mode: SshGatewayModeDto::Automatic,
     });
@@ -471,7 +471,10 @@ fn gateway_routes_require_unique_saved_gateway_references() {
     &mut document.hosts[1].connection_methods[0].target
   {
     gateway_route.pop();
-    gateway_route[0].gateway_id = "missing".into();
+    gateway_route[0] = crate::dto::SshGatewayRouteStepDto::Gateway {
+      gateway_id: "missing".into(),
+      mode: SshGatewayModeDto::Automatic,
+    };
   }
   assert!(document.validate().is_err());
 }
@@ -973,7 +976,7 @@ fn v6_migration_preserves_identity_gateway_routes_and_port_ownership() {
     panic!("expected migrated SSH method");
   };
   assert!(remote_info.is_none());
-  assert_eq!(gateway_route[0].gateway_id, "edge");
+  assert_eq!(gateway_route[0].gateway_id(), Some("edge"));
   assert_eq!(loaded.document.port_forwards[0].host_id, "remote-id");
   assert_eq!(loaded.document.sessions, populated().sessions);
   assert_eq!(loaded.document.tabs, populated().tabs);

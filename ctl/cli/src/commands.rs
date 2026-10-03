@@ -24,15 +24,26 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
 pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   validate_local_command_target(&arguments)?;
   if arguments.host.is_some() {
-    if matches!(arguments.command, Command::Vpn { .. }) {
-      return Err(CliError::RemoteVpnUnsupported);
-    }
     if matches!(arguments.command, Command::Taskd { .. }) {
       return Err(CliError::RemoteTaskDaemonRestartUnsupported);
     }
     if matches!(arguments.command, Command::Ssh { .. } | Command::Scp { .. }) {
       return Err(CliError::CompatibilityHost);
     }
+  }
+  if matches!(
+    arguments.command,
+    Command::Vpn {
+      command: crate::vpn::Command::Create { .. } | crate::vpn::Command::Remove { .. }
+    }
+  ) && (arguments.host.is_some() || arguments.method.is_some())
+  {
+    return Err(crate::vpn::Error::LocalProfilesOnly.into());
+  }
+  if matches!(arguments.command, Command::Vpn { .. })
+    && matches!(arguments.remote_platform, Some(RemotePlatform::Windows))
+  {
+    return Err(CliError::RemoteVpnUnsupported);
   }
   match arguments.command {
     Command::Setup(setup_arguments) => {
@@ -127,10 +138,7 @@ async fn run_selected(
       ctl_task_cli::run_with_connector(command, connector).await?;
     }
     Command::Vpn { command } => {
-      if !connector.target.is_local() {
-        return Err(CliError::RemoteVpnUnsupported);
-      }
-      crate::vpn::run(command).await?;
+      crate::vpn::run(command, &connector.settings).await?;
     }
   }
   Ok(0)
@@ -381,7 +389,7 @@ pub enum CliError {
   CompatibilityHost,
   #[error("ctl shell requires a terminal; use ctl exec for commands or ctl ctmux new --detached.")]
   TerminalRequired,
-  #[error("VPN management is only supported locally; omit --host")]
+  #[error("Remote VPN execution currently requires a Unix host.")]
   RemoteVpnUnsupported,
   #[error(transparent)]
   Vpn(#[from] crate::vpn::Error),
@@ -414,15 +422,15 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn remote_vpn_commands_are_rejected_before_connecting() {
+  async fn remote_vpn_profile_mutations_are_rejected_before_connecting() {
     use clap::Parser;
 
-    for action in ["create", "start", "list", "stop", "remove"] {
+    for action in ["create", "remove"] {
       let arguments =
         Arguments::try_parse_from(["ctl", "--host", "vpn-server", "vpn", action]).unwrap();
       assert!(matches!(
         run(arguments).await,
-        Err(CliError::RemoteVpnUnsupported)
+        Err(CliError::Vpn(crate::vpn::Error::LocalProfilesOnly))
       ));
     }
   }

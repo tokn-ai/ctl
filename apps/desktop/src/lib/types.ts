@@ -230,10 +230,16 @@ export type SshGatewayMode =
   | "native_only"
   | "agent_relay_only";
 
-export interface SshGatewayRouteStep {
+export interface SshGatewayReference {
   gateway_id: string;
   mode: SshGatewayMode;
 }
+
+export interface VpnGatewayReference {
+  vpn_connection_id: string;
+}
+
+export type SshGatewayRouteStep = SshGatewayReference | VpnGatewayReference;
 
 export interface WorkspaceSshGateway {
   kind?: "ssh" | "socks5";
@@ -247,9 +253,25 @@ export interface WorkspaceSshGateway {
   remote_info?: RemoteIdentity;
 }
 
-export interface ResolvedSshGateway extends WorkspaceSshGateway {
+export interface ResolvedSshGatewayReference extends WorkspaceSshGateway {
   mode: SshGatewayMode;
 }
+
+export interface ResolvedVpnGateway {
+  kind: "vpn";
+  gateway_id: string;
+  name: string;
+  destination: string;
+  vpn_connection_id: string;
+  mode: "automatic";
+  hostname?: never;
+  user?: never;
+  port?: never;
+  identity_file?: never;
+  remote_info?: never;
+}
+
+export type ResolvedSshGateway = ResolvedSshGatewayReference | ResolvedVpnGateway;
 
 export type ConnectionTarget = { kind: "local" } | SshConnectionTarget;
 

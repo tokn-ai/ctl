@@ -73,10 +73,11 @@ left untouched. Set `CTMUXD_BIN` / `CTMUX_RUNTIME_DIR` for terminal overrides an
 The desktop bundle identifier is `dev.tokn-ai.ctl.ctmux`, and its signed connection
 helper uses `dev.tokn-ai.ctl.ctld`. Signing the helper requires a matching
 provisioning profile.
-Update clients, daemons, and remote agent bundles together. The renamed build
-uses ctmux protocol 13, task protocol 4, task lifecycle protocol 2, ctld protocol
-12, ctld lifecycle protocol 1, ctld one-shot helper API 1, remote identity
-protocol 3, and remote maintenance protocol 2.
+Product releases, internal protocol builds, and published contracts are separate.
+Current contracts include ctmux `1.0.13`, task `1.0.4`, ctld `1.1.13`, ctld
+helper `1.1.2`, and remote VPN `1.0.1`. Compatible builds retain earlier published
+contracts within each major. Remote VPN routes require the new broker and helper
+contracts and an updated remote bundle. See [protocol versioning](docs/protocol-versioning.md).
 
 ## Configuration and persistent state
 
@@ -150,7 +151,7 @@ Ordinary Cargo builds and `cargo install ctl-cli` also discover compatible share
 apps, including signed development installations; they contain no embedded helper.
 
 Selections live at
-`~/.tokn/ctl/components/ctld/selected/<target>-ctld12-lifecycle1-helper1`.
+`~/.tokn/ctl/components/ctld/selected/<target>-ctld1-lifecycle1-helper1`.
 Compatibility requires the native architecture and the `ctld`, `ctld_lifecycle`,
 and `ctld_helper` API versions. The helper's build identity must match its own
 manifest; it does not have to match the CLI's commit, fingerprint, or release
@@ -221,13 +222,14 @@ cargo install --path ctmux/daemon
 cargo install --path ctmux/cli
 ```
 
-For remote access, install `ctmuxd`, `ctl-taskd`, and `ctl-agent` together on the
+For remote access, install `ctmuxd`, `ctl-taskd`, `ctl-agent`, and `ctld` together on the
 controlled device:
 
 ```sh
 cargo install --path ctmux/daemon
 cargo install --path task/daemon
 cargo install --path ctl/agent
+cargo install --path ctl/daemon
 ```
 
 On a Linux client, install `ctl` and `ctld` together from the checkout:

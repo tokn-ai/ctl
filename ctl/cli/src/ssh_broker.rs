@@ -1,12 +1,14 @@
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 
+use ctl_core::protocol::ProtocolVersion;
 use ctl_ipc::{ClientMessage, PromptKind, ServerMessage, SshTarget};
 use zeroize::Zeroizing;
 
 pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
   let mut stream = ctl_ipc::connect_or_start_daemon().await?;
-  handshake(&mut stream).await?;
+  let protocol = handshake(&mut stream).await?;
+  validate_route(&target, protocol)?;
   ctl_ipc::write_frame(&mut stream, &ClientMessage::EnsureMaster { target }).await?;
   loop {
     match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
@@ -44,7 +46,8 @@ pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
 
 pub async fn request(message: ClientMessage) -> Result<ServerMessage, Error> {
   let mut stream = ctl_ipc::connect_or_start_daemon().await?;
-  handshake(&mut stream).await?;
+  let protocol = handshake(&mut stream).await?;
+  validate_request_contract(&message, protocol)?;
   ctl_ipc::write_frame(&mut stream, &message).await?;
   match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
     Some(ServerMessage::Error { code, message }) => Err(Error::Daemon { code, message }),
@@ -68,7 +71,8 @@ pub async fn request_existing(message: ClientMessage) -> Result<Option<ServerMes
       }
       Err(error) => return Err(error.into()),
     };
-    handshake(&mut stream).await?;
+    let protocol = handshake(&mut stream).await?;
+    validate_request_contract(&message, protocol)?;
     ctl_ipc::write_frame(&mut stream, &message).await?;
     let response = ctl_ipc::read_frame::<_, ServerMessage>(&mut stream)
       .await?
@@ -80,7 +84,44 @@ pub async fn request_existing(message: ClientMessage) -> Result<Option<ServerMes
     .map_err(|_| Error::StatusTimeout)?
 }
 
-async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), Error> {
+/// Check the complete route before starting any prerequisite VPNs or SSH masters.
+pub async fn check_route_support(target: &SshTarget) -> Result<(), Error> {
+  if !ctl_ipc::has_remote_vpn(&target.gateways) {
+    return Ok(());
+  }
+  let mut stream = ctl_ipc::connect_or_start_daemon().await?;
+  validate_route(target, handshake(&mut stream).await?)
+}
+
+fn validate_request_contract(
+  message: &ClientMessage,
+  protocol: ProtocolVersion,
+) -> Result<(), Error> {
+  match message {
+    ClientMessage::EnsureMaster { target }
+    | ClientMessage::MasterStatus { target }
+    | ClientMessage::ConnectionStatus { target }
+    | ClientMessage::DisconnectMaster { target }
+    | ClientMessage::DeleteCredentials { target }
+    | ClientMessage::ConfigurePortForward { target, .. }
+    | ClientMessage::ListPortForwards { target }
+    | ClientMessage::ListRemoteListeners { target } => validate_route(target, protocol),
+    _ => Ok(()),
+  }
+}
+
+fn validate_route(target: &SshTarget, protocol: ProtocolVersion) -> Result<(), Error> {
+  if ctl_ipc::gateway_route_supported(&target.gateways, protocol) {
+    Ok(())
+  } else {
+    Err(Error::UnsupportedGatewayRoute(protocol))
+  }
+}
+
+async fn handshake<S>(stream: &mut S) -> Result<ProtocolVersion, Error>
+where
+  S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
   ctl_ipc::write_frame(
     stream,
     &ClientMessage::Handshake {
@@ -92,7 +133,7 @@ async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), Error> {
     Some(ServerMessage::HandshakeAccepted { protocol_version })
       if ctl_ipc::protocol_offer().accepts(protocol_version) =>
     {
-      Ok(())
+      Ok(protocol_version)
     }
     _ => Err(Error::UnexpectedResponse),
   }
@@ -149,6 +190,10 @@ pub enum Error {
   ConnectionClosed,
   #[error("ctld returned an unexpected response")]
   UnexpectedResponse,
+  #[error(
+    "Remote VPN routes require local protocol 1.1.13, but ctld selected {0}. Rebuild or update ctld, then restart ctld."
+  )]
+  UnsupportedGatewayRoute(ProtocolVersion),
   #[error("ctld requires a new explicit SSH authentication attempt")]
   AuthenticationRequired,
   #[error("ctld error {code}: {message}")]
@@ -157,4 +202,69 @@ pub enum Error {
   Prompt(#[source] io::Error),
   #[error("the SSH prompt reader stopped unexpectedly")]
   PromptWorkerStopped,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn negotiated_contract_retains_historical_routes_and_guards_remote_operations() {
+    let mut target: SshTarget = serde_json::from_value(serde_json::json!({
+      "destination":"office", "hostname":null, "user":null, "port":null, "identity_file":null
+    }))
+    .unwrap();
+    let ssh = serde_json::json!({"destination":"bastion", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic"});
+    let vpn = serde_json::json!({"kind":"vpn", "destination":"work", "hostname":null, "user":null, "port":null, "identity_file":null, "mode":"automatic", "vpn":{"connection_id":"work", "socket_path":"/tmp/test-vpn.sock"}});
+    for selected in [ctl_ipc::CONTRACT_V1_0_12, ctl_ipc::CONTRACT_V1_1_13] {
+      let (mut client, mut server) = tokio::io::duplex(4096);
+      let daemon = tokio::spawn(async move {
+        assert!(
+          matches!(ctl_ipc::read_frame::<_, ClientMessage>(&mut server).await.unwrap(),
+          Some(ClientMessage::Handshake {protocol}) if protocol.accepts(selected))
+        );
+        ctl_ipc::write_frame(
+          &mut server,
+          &ServerMessage::HandshakeAccepted {
+            protocol_version: selected,
+          },
+        )
+        .await
+        .unwrap();
+      });
+      let protocol = handshake(&mut client).await.unwrap();
+      assert_eq!(protocol, selected);
+      daemon.await.unwrap();
+      for route in [
+        serde_json::json!([]),
+        serde_json::json!([ssh.clone()]),
+        serde_json::json!([vpn.clone(), ssh.clone()]),
+      ] {
+        target.gateways = serde_json::from_value(route).unwrap();
+        validate_request_contract(
+          &ClientMessage::MasterStatus {
+            target: target.clone(),
+          },
+          protocol,
+        )
+        .unwrap();
+      }
+      target.gateways =
+        serde_json::from_value(serde_json::json!([ssh.clone(), vpn.clone()])).unwrap();
+      let result = validate_request_contract(
+        &ClientMessage::EnsureMaster {
+          target: target.clone(),
+        },
+        protocol,
+      );
+      if selected == ctl_ipc::CONTRACT_V1_0_12 {
+        assert!(matches!(
+          result,
+          Err(Error::UnsupportedGatewayRoute(ctl_ipc::CONTRACT_V1_0_12))
+        ));
+      } else {
+        result.unwrap();
+      }
+    }
+  }
 }

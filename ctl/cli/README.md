@@ -24,7 +24,7 @@ share the CLI's binary directory; `ctl setup` installs the macOS helper under
 the full signed and notarized app bundle. It never restarts an existing daemon.
 
 For remote sessions and tasks, the controlled machine needs `ctl-agent`,
-`ctmuxd`, and `ctl-taskd`. Interactive Unix connections offer to repair missing
+`ctmuxd`, and `ctl-taskd`; remote VPNs also need `ctld`. Interactive Unix connections offer to repair missing
 or recognized older agents with a matching verified bundle, then retry once.
 Repair checks any saved machine ID first, shows upload progress and speed, and
 preserves running daemons. Ctrl-C cancels it; piped commands never prompt.
@@ -45,8 +45,9 @@ CLI's version and architecture and requires that release to be published.
 `CTLD_BIN` remains an explicit override. Otherwise a standalone macOS CLI prefers
 a verified compatible shared `ctld.app`, then its own bundled helper, then a
 nearby desktop bundle, sibling, or `PATH` executable. The desktop continues to
-prefer its own bundled helper. Shared apps must match the native architecture and ctld protocol 12,
-lifecycle protocol 1, and one-shot helper API 1. Their build identity is checked
+prefer its own bundled helper. Shared apps must match the native architecture and
+advertise a shared ctld, lifecycle, and helper contract. Remote VPN routes require
+ctld `1.1.13` and helper `1.1.2`. Their build identity is checked
 against their own installation manifest; their release version, commit, and
 fingerprint need not equal the CLI's.
 
@@ -71,10 +72,21 @@ The build discovers and refreshes the provisioning profile, signs and embeds
 `ctld.app`, and signs the CLI with the matching certificate. No notarization
 credentials are needed. Development helpers use a separate cache under
 `~/.tokn/ctl/components/ctld/development/` and leave release `current` unchanged.
-Installation updates `selected/<target>-ctld12-lifecycle1-helper1`, which all
+Installation updates `selected/<target>-ctld1-lifecycle1-helper1`, which all
 standalone CLI builds, including ordinary Cargo builds, can reuse after signature
 and provisioning verification. Rebuild if the profile expires; existing daemons
 require an explicit restart.
+
+VPN profiles remain in the local catalog. Use `ctl --host GATEWAY vpn start NAME_OR_ID`,
+`vpn list`, and `vpn stop NAME_OR_ID` to run and manage a profile on an SSH host.
+The gateway needs updated ctl-agent/ctld components and Docker or Podman. Its
+VPN SOCKS5 listener stays on remote loopback; traffic travels through SSH.
+Remote VPNs keep running until explicitly stopped, including after SSH disconnects.
+Profile creation and removal remain local operations.
+
+An ordered saved route can include `--gateway JUMP_ID --gateway vpn:PROFILE_ID`.
+The VPN executes on the preceding SSH gateway. A first VPN step executes locally;
+the existing `--vpn PROFILE_ID` option still selects a local VPN before the route.
 
 ## Use
 

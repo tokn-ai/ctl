@@ -432,13 +432,13 @@ mod tests {
   }
 
   #[test]
-  fn required_protocol_is_preserved_when_running_and_available_helpers_are_both_old() {
+  fn required_protocol_is_preserved_when_both_helpers_lack_a_supported_contract() {
     let mut row = ComponentVersionRow::local("ctld", "ctld");
+    let unsupported = ctl_core::protocol::ProtocolVersion::new(1, 0, 11);
     let mut old = info("0.1.0", Some("same-old-build"));
-    old.protocols.push(ProtocolVersion::new(
-      "ctld",
-      ctl_core::protocol::ProtocolVersion::new(1, 0, ctl_ipc::PROTOCOL_BUILD - 1),
-    ));
+    old
+      .protocols
+      .push(ProtocolVersion::new("ctld", unsupported));
     row.running = Some(old.clone());
     row.available = Some(old);
     row.compare();
@@ -450,12 +450,7 @@ mod tests {
     );
     assert_eq!(
       value["available"]["protocols"][0]["version"],
-      serde_json::to_value(ctl_core::protocol::ProtocolVersion::new(
-        1,
-        0,
-        ctl_ipc::PROTOCOL_BUILD - 1
-      ))
-      .unwrap()
+      serde_json::to_value(unsupported).unwrap()
     );
   }
 

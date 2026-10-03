@@ -69,4 +69,28 @@ describe("host credential cleanup", () => {
     view.hosts[3].connection_methods[0].target.vpn_connection_id = "other-vpn";
     expect(removableHostCredentials(view, "removed")).toHaveLength(1);
   });
+
+  it("retains credentials shared by the same remote VPN route and distinguishes profiles", () => {
+    const view = emptyWorkspaceView();
+    view.ssh_gateways = [gateway];
+    const target: SshConnectionTarget = { kind: "ssh", destination: "build", gateway_route: [
+      { gateway_id: gateway.gateway_id, mode: "native_only" }, { vpn_connection_id: "office" },
+    ] };
+    view.hosts.push(host("removed", target), host("kept", structuredClone(target)));
+    expect(removableHostCredentials(view, "removed")).toEqual([]);
+    view.hosts[2].connection_methods[0].target.gateway_route![1] = { vpn_connection_id: "different" };
+    expect(removableHostCredentials(view, "removed")).toHaveLength(1);
+  });
+
+  it("retains shared credentials when a legacy local VPN route is stored in ordered form", () => {
+    const view = emptyWorkspaceView();
+    view.ssh_gateways = [gateway];
+    view.hosts.push(host("removed", { kind: "ssh", destination: "build", vpn_connection_id: "office",
+      gateway_route: [{ gateway_id: gateway.gateway_id, mode: "native_only" }],
+    }), host("kept", { kind: "ssh", destination: "build", gateway_route: [
+      { vpn_connection_id: "office" }, { gateway_id: gateway.gateway_id, mode: "native_only" },
+    ] }));
+    expect(removableHostCredentials(view, "removed")).toEqual([]);
+    expect(removableHostCredentials(view, "kept")).toEqual([]);
+  });
 });

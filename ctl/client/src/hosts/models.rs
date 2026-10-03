@@ -143,9 +143,13 @@ impl WorkspaceConnectionMethod {
       && gateways.is_empty()
       && vpn_connection_id.as_deref().is_none_or(super::valid_connection_id)
       && gateway_route.len() + usize::from(vpn_connection_id.is_some()) <= 8
-      && gateway_route.iter().all(|step| {
-        gateway_ids.contains(step.gateway_id.as_str())
-          && route_ids.insert(step.gateway_id.as_str())
+      && gateway_route.iter().all(|step| match step {
+        super::SshGatewayRouteStepDto::Gateway { gateway_id, .. } => {
+          gateway_ids.contains(gateway_id.as_str()) && route_ids.insert(gateway_id.as_str())
+        }
+        super::SshGatewayRouteStepDto::Vpn { vpn_connection_id } => {
+          super::valid_connection_id(vpn_connection_id)
+        }
       })
   }
 }

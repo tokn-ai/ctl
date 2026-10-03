@@ -411,6 +411,7 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     .unwrap();
   let request = ConnectVpnRequest {
     connection_id: "connection-one".into(),
+    target: None,
   };
   let status = connect_with(fixture.0.clone(), request, |connection| async move {
     assert_eq!(password(&connection), "adapter-test-secret");
@@ -440,6 +441,7 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     fixture.0.clone(),
     ConnectVpnRequest {
       connection_id: "connection-one".into(),
+      target: None,
     },
     |_| async {
       Err(ctl_ipc::vpn::VpnError::Daemon {
@@ -456,6 +458,7 @@ async fn native_connect_adapter_loads_the_secret_and_preserves_structured_errors
     fixture.0.clone(),
     ConnectVpnRequest {
       connection_id: "missing".into(),
+      target: None,
     },
     |_| async { panic!("a missing connection must not contact the daemon") },
   )

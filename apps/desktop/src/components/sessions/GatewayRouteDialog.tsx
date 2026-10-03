@@ -1,4 +1,6 @@
-import { vpnRouteDetail } from "../../features/vpn/status";
+import { vpnNeedsSignIn, vpnRouteDetail } from "../../features/vpn/status";
+import { isVpnRouteStep, orderedSshRoute, vpnExecutionTarget } from "../../features/workspace/sshRoute";
+import { openVpnSignIn, stopVpn, vpnStatus } from "../../lib/tauri";
 import { useMemo, useState } from "react";
 import type {
   SshConnectionTarget,
@@ -88,13 +90,12 @@ export function GatewayRouteDialog({
   const [draftGateways, setDraftGateways] = useState<WorkspaceSshGateway[]>(
     () => gateways.map((gateway) => ({ ...gateway })),
   );
-  const [route, setRoute] = useState<SshGatewayRouteStep[]>(() => [
-    ...(target.gateway_route ?? []),
-  ]);
-  const [vpnConnectionId, setVpnConnectionId] = useState(target.vpn_connection_id);
-  const selectedVpn = vpn_connections.find((connection) => connection.connection_id === vpnConnectionId);
-  const missingVpn = Boolean(vpnConnectionId && !selectedVpn);
-  const privateMaster = Boolean(vpnConnectionId) || route.some((step) => draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5");
+  const [route, setRoute] = useState<SshGatewayRouteStep[]>(() => orderedSshRoute(target));
+  const onlyVpn = route.length === 1 && isVpnRouteStep(route[0]) ? route[0].vpn_connection_id : undefined;
+  const missingVpn = route.some((step) => isVpnRouteStep(step) &&
+    !vpn_connections.some((connection) => connection.connection_id === step.vpn_connection_id));
+  const privateMaster = route.some((step) => isVpnRouteStep(step) ||
+    draftGateways.find((gateway) => gateway.gateway_id === step.gateway_id)?.kind === "socks5");
   const [editing, setEditing] = useState<GatewayDraft | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,14 +104,16 @@ export function GatewayRouteDialog({
     () => gatewayUsage(targets.filter((item) => item.host_id !== target.host_id)),
     [target.host_id, targets],
   );
-  const routeIds = new Set(route.map((step) => step.gateway_id));
+  const routeIds = new Set(route.flatMap((step) => isVpnRouteStep(step) ? [] : [step.gateway_id]));
   const existingIds = new Set(
     readonlyGatewayIds ?? gateways.map((gateway) => gateway.gateway_id),
   );
+  const lastStep = route[route.length - 1];
+  const canAddVpn = !lastStep || (!isVpnRouteStep(lastStep) &&
+    draftGateways.find((gateway) => gateway.gateway_id === lastStep.gateway_id)?.kind !== "socks5");
 
   function addExisting(gateway: WorkspaceSshGateway) {
     if (routeIds.has(gateway.gateway_id) || route.length >= 8) return;
-    setVpnConnectionId(undefined);
     setRoute((current) => [
       ...current,
       { gateway_id: gateway.gateway_id, mode: "automatic" },
@@ -182,14 +185,27 @@ export function GatewayRouteDialog({
       setError("The saved VPN is unavailable. Choose another connection before saving.");
       return;
     }
-    if (requireGateway && route.length === 0 && !vpnConnectionId) {
+    for (const [index, step] of route.entries()) {
+      if (!isVpnRouteStep(step) && !draftGateways.some((gateway) => gateway.gateway_id === step.gateway_id)) {
+        setError("A saved gateway is unavailable. Remove or replace it before saving.");
+        return;
+      }
+      if (!isVpnRouteStep(step) || index === 0) continue;
+      const preceding = route[index - 1];
+      if (isVpnRouteStep(preceding) ||
+        draftGateways.find((gateway) => gateway.gateway_id === preceding.gateway_id)?.kind === "socks5") {
+        setError("A remote VPN must immediately follow an SSH gateway. Consecutive VPN steps are not supported.");
+        return;
+      }
+    }
+    if (requireGateway && route.length === 0) {
       setError("Add at least one gateway to this route.");
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      if (vpnConnectionId) await onSave(draftGateways, route, vpnConnectionId);
+      if (onlyVpn) await onSave(draftGateways, [], onlyVpn);
       else await onSave(draftGateways, route);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -313,12 +329,12 @@ export function GatewayRouteDialog({
               <input
                 type="checkbox"
                 aria-label="Also save to OpenSSH config"
-                checked={hostSetup.export_to_ssh_config.checked && route.length === 0 && !vpnConnectionId && hostSetup.export_to_ssh_config.allowed}
-                disabled={route.length > 0 || Boolean(vpnConnectionId) || !hostSetup.export_to_ssh_config.allowed}
+                checked={hostSetup.export_to_ssh_config.checked && route.length === 0 && hostSetup.export_to_ssh_config.allowed}
+                disabled={route.length > 0 || !hostSetup.export_to_ssh_config.allowed}
                 onChange={(event) => hostSetup.export_to_ssh_config?.onChange(event.target.checked)}
               />
               Also save to OpenSSH config
-              {route.length > 0 || vpnConnectionId || !hostSetup.export_to_ssh_config.allowed
+              {route.length > 0 || !hostSetup.export_to_ssh_config.allowed
                 ? <small>Available for a new direct SSH alias.</small>
                 : null}
             </label>
@@ -331,18 +347,18 @@ export function GatewayRouteDialog({
           Connect through
           <select
             aria-label="Connect through"
-            value={vpnConnectionId ? `vpn:${vpnConnectionId}` : route.length ? "gateway_route" : "direct"}
+            value={onlyVpn ? `vpn:${onlyVpn}` : route.length ? "gateway_route" : "direct"}
             onChange={(event) => {
               const value = event.target.value;
               setError(null);
               if (value === "gateway_route") return;
-              setVpnConnectionId(value.startsWith("vpn:") ? value.slice(4) : undefined);
-              setRoute(value.startsWith("gateway:") ? [{ gateway_id: value.slice(8), mode: "automatic" }] : []);
+              setRoute(value.startsWith("vpn:") ? [{ vpn_connection_id: value.slice(4) }]
+                : value.startsWith("gateway:") ? [{ gateway_id: value.slice(8), mode: "automatic" }] : []);
             }}
           >
             <option value="direct">Direct</option>
             {route.length ? <option value="gateway_route">Gateway route · {route.length} hop{route.length === 1 ? "" : "s"}</option> : null}
-            {missingVpn ? <option value={`vpn:${vpnConnectionId}`}>Unavailable saved VPN</option> : null}
+            {onlyVpn && missingVpn ? <option value={`vpn:${onlyVpn}`}>Unavailable saved VPN</option> : null}
             {vpn_connections.length ? <optgroup label="Saved VPNs">
               {vpn_connections.map((connection) => <option key={connection.connection_id} value={`vpn:${connection.connection_id}`}>
                 {connection.name} · {vpnRouteDetail(connection, vpn_statuses)}
@@ -360,22 +376,49 @@ export function GatewayRouteDialog({
         {missingVpn ? <p className="quick-input-error" role="alert">The saved VPN is unavailable. Choose another connection before saving.</p> : null}
       </div>
       <p className="quick-input-description">
-        {vpnConnectionId
-          ? "This VPN starts when needed. Disconnect it later from the VPN page."
-          : "Use existing SSH settings directly, or add gateways in the order used to reach the destination."}
+        Add SSH gateways and VPNs in connection order. Each VPN starts when needed on the preceding SSH host, or on this computer when it is first. VPNs keep running until disconnected.
       </p>
 
       <div className="gateway-route-path">
-        <RouteNode label="This Mac" detail="Start of route" />
-        {vpnConnectionId ? <>
-          <div className="gateway-route-connector" aria-hidden="true">↓</div>
-          <RouteNode label={selectedVpn?.name ?? "Unavailable saved VPN"} detail="VPN" />
-        </> : null}
+        <RouteNode label="This computer" detail="Start of route" />
         {route.map((step, index) => {
+          if (isVpnRouteStep(step)) {
+            const vpn = vpn_connections.find((connection) => connection.connection_id === step.vpn_connection_id);
+            let previousSsh: WorkspaceSshGateway | undefined;
+            for (const preceding of route.slice(0, index)) {
+              if (isVpnRouteStep(preceding)) continue;
+              const gateway = draftGateways.find((item) => item.gateway_id === preceding.gateway_id);
+              if (gateway && gateway.kind !== "socks5") previousSsh = gateway;
+            }
+            const owner = vpnExecutionTarget(route, index, draftGateways);
+            const ownerLabel = previousSsh?.name ?? "This computer";
+            const name = vpn?.name ?? "Unavailable saved VPN";
+            return (
+              <div className="gateway-route-step" key={`vpn:${index}:${step.vpn_connection_id}`}>
+                <div className="gateway-route-connector" aria-hidden="true">↓</div>
+                <div className="gateway-route-card">
+                  <div><strong>{index + 1}. {name}</strong><small>VPN · Runs on {ownerLabel}</small></div>
+                  <div className="gateway-route-controls">
+                    <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move ${name} up`}>↑</button>
+                    <button type="button" onClick={() => move(index, 1)} disabled={index === route.length - 1} aria-label={`Move ${name} down`}>↓</button>
+                    <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${name} from route`}>Remove</button>
+                  </div>
+                  {owner && vpn ? <RemoteVpnControls key={JSON.stringify(owner)} connection={vpn} owner={owner} owner_label={ownerLabel} />
+                    : index === 0 && vpn ? <small>{vpnRouteDetail(vpn, vpn_statuses)} · Manage from the VPN page</small> : null}
+                </div>
+              </div>
+            );
+          }
           const gateway = draftGateways.find(
             (item) => item.gateway_id === step.gateway_id,
           );
-          if (!gateway) return null;
+          if (!gateway) return <div className="gateway-route-step" key={step.gateway_id}>
+            <div className="gateway-route-connector" aria-hidden="true">↓</div>
+            <div className="gateway-route-card">
+              <strong>{index + 1}. Unavailable saved gateway</strong>
+              <button type="button" onClick={() => setRoute((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove unavailable gateway</button>
+            </div>
+          </div>;
           return (
             <div className="gateway-route-step" key={step.gateway_id}>
               <div className="gateway-route-connector" aria-hidden="true">↓</div>
@@ -395,7 +438,7 @@ export function GatewayRouteDialog({
                   <button
                     type="button"
                     onClick={() => setRoute((current) =>
-                      current.filter((item) => item.gateway_id !== step.gateway_id))}
+                      current.filter((_, itemIndex) => itemIndex !== index))}
                     aria-label={`Remove ${gateway.name} from route`}
                   >
                     Remove
@@ -407,7 +450,7 @@ export function GatewayRouteDialog({
                     value={step.mode}
                     onChange={(event) => setRoute((current) =>
                       current.map((item) =>
-                        item.gateway_id === step.gateway_id
+                        !isVpnRouteStep(item) && item.gateway_id === step.gateway_id
                           ? { ...item, mode: event.target.value as SshGatewayMode }
                           : item))}
                   >
@@ -424,7 +467,7 @@ export function GatewayRouteDialog({
         <RouteNode label={hostSetup?.address.trim() || target.destination} detail="Destination" />
       </div>
 
-      {!vpnConnectionId ? <section className="gateway-library" aria-labelledby="gateway-library-heading">
+      <section className="gateway-library" aria-labelledby="gateway-library-heading">
         <header>
           <strong id="gateway-library-heading">Saved gateways</strong>
           <button type="button" onClick={() => setEditing(emptyDraft())} disabled={route.length >= 8}>
@@ -461,12 +504,25 @@ export function GatewayRouteDialog({
             ))}
           </div>
         )}
+      </section>
+      {vpn_connections.length ? <section className="gateway-library" aria-labelledby="vpn-library-heading">
+        <header><strong id="vpn-library-heading">Saved VPNs</strong></header>
+        <div className="gateway-library-list">
+          {vpn_connections.map((connection) => <div key={connection.connection_id}>
+            <span><strong>{connection.name}</strong><small>Starts on the preceding SSH host</small></span>
+            <button type="button" aria-label={`Add ${connection.name} to route`}
+              onClick={() => setRoute((current) => [...current, { vpn_connection_id: connection.connection_id }])}
+              disabled={route.length >= 8 || !canAddVpn}>
+              Add VPN
+            </button>
+          </div>)}
+        </div>
       </section> : null}
 
       {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
       <footer className="gateway-dialog-actions">
         <button type="button" onClick={onClose} disabled={saving}>{closeLabel}</button>
-        <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || missingVpn || (requireGateway && route.length === 0 && !vpnConnectionId)}>
+        <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || missingVpn || (requireGateway && route.length === 0)}>
           {saving ? (hostSetup ? "Connecting…" : "Saving…") : (submitLabel ?? (hostSetup ? "Connect" : "Done"))}
         </button>
       </footer>
@@ -476,6 +532,58 @@ export function GatewayRouteDialog({
 
 function RouteNode({ label, detail }: { label: string; detail: string }) {
   return <div className="gateway-route-node"><strong>{label}</strong><small>{detail}</small></div>;
+}
+
+function RemoteVpnControls({ connection, owner, owner_label }: {
+  connection: VpnConnection;
+  owner: SshConnectionTarget;
+  owner_label: string;
+}) {
+  const [status, setStatus] = useState<VpnStatus | null>(null);
+  const [checked, setChecked] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [inventory_warnings, setInventoryWarnings] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function perform(action: "status" | "stop" | "sign_in") {
+    setBusy(true);
+    setError(null);
+    try {
+      if (action === "stop") {
+        setStatus(await stopVpn(status?.vpn_id ?? connection.connection_id, owner));
+        setUnavailable(false);
+      }
+      else if (action === "sign_in") await openVpnSignIn(status?.vpn_id ?? connection.connection_id, owner);
+      else {
+        const snapshot = await vpnStatus(owner);
+        const observed = snapshot.connections.find((item) => item.connection_id === connection.connection_id) ?? null;
+        const warnings = snapshot.discovery_warnings ?? [];
+        setStatus(observed);
+        setInventoryWarnings(warnings);
+        setUnavailable(!observed && warnings.length > 0);
+        setChecked(true);
+      }
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+      if (action !== "sign_in") {
+        setUnavailable(true);
+        setChecked(true);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+  return <div className="gateway-remote-vpn">
+    {checked ? <small>{unavailable || status?.status_unavailable ? "Status unavailable"
+      : status && status.state !== "stopped" ? vpnRouteDetail(connection, [status]) : "Stopped"} on {owner_label}</small> : null}
+    {inventory_warnings.length ? <p role="status">Remote VPN inventory is incomplete: {inventory_warnings.join(" ")}</p> : null}
+    <div className="gateway-route-controls">
+      <button type="button" disabled={busy} onClick={() => void perform("status")}>Check VPN status</button>
+      {status?.running ? <button type="button" disabled={busy || unavailable || status.status_unavailable} onClick={() => void perform("stop")}>Disconnect VPN</button> : null}
+      {vpnNeedsSignIn(status) ? <button type="button" disabled={busy || unavailable} onClick={() => void perform("sign_in")}>Sign in to VPN</button> : null}
+    </div>
+    {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
+  </div>;
 }
 
 function GatewayForm({
@@ -579,6 +687,7 @@ function gatewayUsage(targets: readonly SshConnectionTarget[]): Map<string, numb
   const usage = new Map<string, number>();
   for (const target of targets) {
     for (const step of target.gateway_route ?? []) {
+      if (isVpnRouteStep(step)) continue;
       usage.set(step.gateway_id, (usage.get(step.gateway_id) ?? 0) + 1);
     }
   }

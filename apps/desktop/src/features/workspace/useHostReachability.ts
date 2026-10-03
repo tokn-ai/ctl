@@ -11,6 +11,7 @@ import type {
   WorkspaceSshGateway,
 } from "../../lib/types";
 import { hostTarget } from "./workspaceModel";
+import { localVpnConnectionId } from "./sshRoute";
 
 export const HOST_REACHABILITY_INTERVAL_MS = 30_000;
 export const HOST_REACHABILITY_TIMEOUT_MS = 8_000;
@@ -98,7 +99,10 @@ export function useHostReachability(options: Options) {
         return { name: method.name, target: null, error: errorMessage(failure) };
       }
     });
-    const vpnIds = new Set(methods.flatMap(({ target }) => target?.vpn_connection_id ? [target.vpn_connection_id] : []));
+    const vpnIds = new Set(methods.flatMap(({ target }) => {
+      const vpn_id = target ? localVpnConnectionId(target) : undefined;
+      return vpn_id ? [vpn_id] : [];
+    }));
     // Poll timestamps and unrelated VPNs must not invalidate a valid result.
     const vpnRoutes = (options.vpn_statuses ?? []).filter((status) => status.connection_id && vpnIds.has(status.connection_id))
       .map(({ connection_id, vpn_id, state, running, endpoint, container_name }) => ({ connection_id, vpn_id, state, running, endpoint, container_name }))

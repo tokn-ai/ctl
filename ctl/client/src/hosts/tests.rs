@@ -115,3 +115,102 @@ fn stable_ids_win_over_display_names_and_literal_names_can_include_at_signs() {
     Some("host-1")
   );
 }
+
+fn mixed_catalog(route: &serde_json::Value) -> HostCatalogDocument {
+  serde_json::from_value(json!({
+    "schema_version": 1,
+    "hosts": [{
+      "host_id": "target", "name": "Target", "preferred_method_id": "mixed",
+      "connection_methods": [{"method_id": "mixed", "name": "Mixed", "target": {
+        "kind": "ssh", "destination": "target.internal", "gateway_route": route
+      }}]
+    }],
+    "ssh_gateways": [
+      {"gateway_id": "a", "name": "A", "destination": "jump-a", "user": "alice",
+        "remote_info": {"remote_id": "11111111-1111-4111-8111-111111111111", "agent_version": "0.1.0"}},
+      {"gateway_id": "b", "name": "B", "destination": "jump-b", "port": 2222,
+        "remote_info": {"remote_id": "22222222-2222-4222-8222-222222222222", "agent_version": "0.1.0"}},
+      {"gateway_id": "proxy", "name": "Proxy", "kind": "socks5", "destination": "proxy.internal", "port": 1080}
+    ]
+  })).unwrap()
+}
+
+#[test]
+fn ordered_vpns_follow_the_exact_ssh_execution_prefix_and_identity() {
+  let catalog = mixed_catalog(&json!([
+    {"vpn_connection_id": "local-vpn"},
+    {"gateway_id": "a", "mode": "automatic"},
+    {"vpn_connection_id": "shared-profile"},
+    {"gateway_id": "b", "mode": "automatic"},
+    {"vpn_connection_id": "shared-profile"}
+  ]));
+  catalog.validate().unwrap();
+  let target = resolve(&catalog, "target", None).unwrap().target;
+  let route = target.vpn_route().unwrap();
+  assert_eq!(route.len(), 3);
+  assert_eq!(route[0].connection_id, "local-vpn");
+  assert!(route[0].owner.is_none());
+  let first = route[1].owner.as_ref().unwrap();
+  assert_eq!(first.destination, "jump-a");
+  assert_eq!(first.user.as_deref(), Some("alice"));
+  assert_eq!(first.gateways.len(), 1);
+  assert_eq!(
+    first.gateways[0].vpn.as_ref().unwrap().connection_id,
+    "local-vpn"
+  );
+  assert_eq!(
+    route[1].expected_remote_id.as_deref(),
+    Some("11111111-1111-4111-8111-111111111111")
+  );
+  let second = route[2].owner.as_ref().unwrap();
+  assert_eq!(second.destination, "jump-b");
+  assert_eq!(second.port, Some(2222));
+  assert_eq!(second.gateways.len(), 3);
+  assert_eq!(
+    second.gateways[2].vpn.as_ref().unwrap().expected_remote_id,
+    route[1].expected_remote_id
+  );
+  assert_eq!(
+    route[2].expected_remote_id.as_deref(),
+    Some("22222222-2222-4222-8222-222222222222")
+  );
+  assert!(!target.to_ssh_target().unwrap().uses_ssh_config_master());
+}
+
+#[test]
+fn vpn_nesting_and_proxy_execution_are_rejected_without_changing_legacy_routes() {
+  for route in [
+    json!([{"vpn_connection_id": "a"}, {"vpn_connection_id": "b"}]),
+    json!([{"gateway_id": "proxy", "mode": "automatic"}, {"vpn_connection_id": "b"}]),
+  ] {
+    assert!(mixed_catalog(&route).validate().is_err());
+  }
+  catalog().validate().unwrap();
+  // An ambiguous step cannot silently drop either half of the route.
+  assert!(
+    serde_json::from_value::<SshGatewayRouteStepDto>(json!({
+      "gateway_id": "a", "mode": "automatic", "vpn_connection_id": "b"
+    }))
+    .is_err()
+  );
+}
+
+#[test]
+fn remote_vpn_runtime_dtos_reject_stale_endpoints_and_invalid_owner_pins() {
+  let catalog = mixed_catalog(&json!([
+    {"gateway_id": "a", "mode": "automatic"}, {"vpn_connection_id": "vpn"}
+  ]));
+  let mut target = resolve(&catalog, "target", None).unwrap().target;
+  let ConnectionTargetDto::Ssh { gateways, .. } = &mut target else {
+    panic!("SSH target")
+  };
+  gateways[1].port = Some(1080);
+  assert!(target.to_ssh_target().is_err());
+  let ConnectionTargetDto::Ssh { gateways, .. } = &mut target else {
+    panic!("SSH target")
+  };
+  gateways[1].port = None;
+  gateways[0].remote_info.as_mut().unwrap().remote_id =
+    "00000000-0000-0000-0000-000000000000".into();
+  assert!(target.to_ssh_target().is_err());
+}

@@ -1,5 +1,6 @@
-import type { CredentialTarget, WorkspaceHost, WorkspaceSshGateway } from "../../lib/types";
+import type { CredentialTarget, ResolvedSshGateway, WorkspaceHost, WorkspaceSshGateway } from "../../lib/types";
 import { hostTarget } from "../workspace/workspaceModel";
+import { isVpnRouteStep, resolveVpnRouteStep } from "../workspace/sshRoute";
 
 /** Keep file hints for unavailable hosts; only available routes match legacy credential scopes. */
 export function credentialTargets(
@@ -12,7 +13,8 @@ export function credentialTargets(
     if (!target.unavailable) return [{ name: host.name, target }];
     // Unavailable hosts bypass route resolution. Preserve known gateway key
     // paths for inventory without making the route connectable.
-    const resolved = (target.gateway_route ?? []).flatMap((step) => {
+    const resolved = (target.gateway_route ?? []).flatMap<ResolvedSshGateway>((step) => {
+      if (isVpnRouteStep(step)) return [resolveVpnRouteStep(step)];
       const gateway = gateways.find((candidate) => candidate.gateway_id === step.gateway_id);
       return gateway ? [{ ...gateway, mode: step.mode }] : [];
     });

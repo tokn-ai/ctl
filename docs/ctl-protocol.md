@@ -108,11 +108,31 @@ SSH stdout <- ctl-agent connect --service task <- ctl-taskd endpoint
 ```
 
 Completion or failure of either copy direction ends the relay and closes its
-local IPC stream. Diagnostics use stderr exclusively. The remote command accepts
+local IPC stream. Diagnostics use stderr exclusively. The connect command accepts
 no arbitrary local socket, forwarded address, or service outside the ctmux/task
 enum. The sibling owner-only `ctmuxd` maintenance endpoint is never exposed.
 Taskd accesses that endpoint locally for managed interactive-session lifecycle;
 the gateway itself cannot route to it.
+
+### Remote VPN requests
+
+`ctl-agent vpn` is a separate, narrow SSH command. It emits the stable `ctl-vpn\n`
+marker and a bounded published-contract offer. The client selects remote VPN
+contract `1.0.1`; the agent validates the selection before writing the bounded
+account identity. The client checks the saved owner identity before sending
+settings or credentials. A
+single length-prefixed JSON request selects `list`, `start` with a structured
+saved profile, `stop` with an exact runtime VPN ID, or `connect` with a saved
+profile ID and TCP destination. Responses use bounded JSON frames; successful
+`connect` switches to raw bidirectional bytes. DNS names are passed to the VPN's
+SOCKS listener and resolved remotely.
+
+The agent selects its account's fixed local ctld endpoint. List, stop, and
+connect never start ctld or a VPN; start may start the installed sibling ctld.
+The remote owner keeps the VPN running independently of the disposable SSH
+channel. VPN endpoints must be numeric loopback `socks5h` addresses, resolved
+fresh for each stream. Other broker operations and arbitrary socket paths are
+not exposed. The remote bundle includes ctld for this service.
 
 Before execution, the Unix wrapper checks the managed and legacy PATH. If
 `ctl-agent` is absent, it writes the fixed `ctl-ssh-nf\n` control marker to

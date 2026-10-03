@@ -25,6 +25,7 @@ mod vpn_service;
 #[cfg(test)]
 mod master_policy_tests;
 
+use ctl_core::protocol::ProtocolVersion;
 use ctl_ipc::{
   ClientMessage, GatewayKind, LocalPortForward, PromptKind, ServerMessage, SshGateway,
   SshGatewayMode, SshTarget,
@@ -250,6 +251,10 @@ enum RequestError {
     expected: ctl_core::protocol::ProtocolVersion,
     actual: ctl_core::protocol::ProtocolVersion,
   },
+  #[error(
+    "Remote VPN routes require local protocol 1.1.13, but this connection selected {0}. Update the client and ctld together, then restart ctld."
+  )]
+  UnsupportedGatewayRoute(ProtocolVersion),
   #[error("could not start the OpenSSH control master: {0}")]
   StartMaster(#[source] io::Error),
   #[error("OpenSSH control master timed out during authentication")]
@@ -415,47 +420,51 @@ async fn handle_connection(
     };
     return lifecycle::handle(stream, &state, request).await;
   };
-  accept_handshake(&mut stream, Some(*handshake)).await?;
+  let protocol = accept_handshake(&mut stream, Some(*handshake)).await?;
   let mut request = ctl_ipc::read_frame::<_, ClientMessage>(&mut stream)
     .await?
     .ok_or(RequestError::ClientClosed)?;
   normalize_request_target(&mut request);
-  let result = match request {
-    ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
-    ClientMessage::MasterStatus { target } => master_status(&mut stream, &state, &target).await,
-    ClientMessage::ConnectionStatus { target } => {
-      connection_status(&mut stream, &state, &target).await
+  let result = async {
+    validate_request_contract(&request, protocol)?;
+    match request {
+      ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
+      ClientMessage::MasterStatus { target } => master_status(&mut stream, &state, &target).await,
+      ClientMessage::ConnectionStatus { target } => {
+        connection_status(&mut stream, &state, &target).await
+      }
+      ClientMessage::DisconnectMaster { target } => {
+        disconnect_master(&mut stream, &state, &target).await
+      }
+      ClientMessage::DeleteCredentials { target } => delete_credentials(&mut stream, &target).await,
+      ClientMessage::ConfigurePortForward {
+        target,
+        forward,
+        enabled,
+      } => configure_port_forward(&mut stream, &state, target, forward, enabled).await,
+      ClientMessage::ListPortForwards { target } => {
+        list_port_forwards(&mut stream, &state, &target).await
+      }
+      ClientMessage::ListRemoteListeners { target } => {
+        list_remote_listeners(&mut stream, &state, &target).await
+      }
+      request @ (ClientMessage::StartVpn { .. }
+      | ClientMessage::StartVpnConnection { .. }
+      | ClientMessage::StopVpnById { .. }
+      | ClientMessage::ForgetTailscaleIdentity { .. }
+      | ClientMessage::StopVpn
+      | ClientMessage::VpnStatus) => handle_vpn_request(&mut stream, &state, request).await,
+      ClientMessage::Askpass {
+        token,
+        message,
+        confirm,
+      } => handle_askpass(&mut stream, &state, &token, message, confirm).await,
+      ClientMessage::Handshake { .. } | ClientMessage::PromptResponse { .. } => {
+        Err(RequestError::InvalidRequest("unexpected message"))
+      }
     }
-    ClientMessage::DisconnectMaster { target } => {
-      disconnect_master(&mut stream, &state, &target).await
-    }
-    ClientMessage::DeleteCredentials { target } => delete_credentials(&mut stream, &target).await,
-    ClientMessage::ConfigurePortForward {
-      target,
-      forward,
-      enabled,
-    } => configure_port_forward(&mut stream, &state, target, forward, enabled).await,
-    ClientMessage::ListPortForwards { target } => {
-      list_port_forwards(&mut stream, &state, &target).await
-    }
-    ClientMessage::ListRemoteListeners { target } => {
-      list_remote_listeners(&mut stream, &state, &target).await
-    }
-    request @ (ClientMessage::StartVpn { .. }
-    | ClientMessage::StartVpnConnection { .. }
-    | ClientMessage::StopVpnById { .. }
-    | ClientMessage::ForgetTailscaleIdentity { .. }
-    | ClientMessage::StopVpn
-    | ClientMessage::VpnStatus) => handle_vpn_request(&mut stream, &state, request).await,
-    ClientMessage::Askpass {
-      token,
-      message,
-      confirm,
-    } => handle_askpass(&mut stream, &state, &token, message, confirm).await,
-    ClientMessage::Handshake { .. } | ClientMessage::PromptResponse { .. } => {
-      Err(RequestError::InvalidRequest("unexpected message"))
-    }
-  };
+  }
+  .await;
   if let Err(error) = &result {
     let _ = ctl_ipc::write_frame(
       &mut stream,
@@ -467,6 +476,28 @@ async fn handle_connection(
     .await;
   }
   result
+}
+
+fn validate_request_contract(
+  request: &ClientMessage,
+  protocol: ProtocolVersion,
+) -> Result<(), RequestError> {
+  let (ClientMessage::EnsureMaster { target }
+  | ClientMessage::MasterStatus { target }
+  | ClientMessage::ConnectionStatus { target }
+  | ClientMessage::DisconnectMaster { target }
+  | ClientMessage::DeleteCredentials { target }
+  | ClientMessage::ConfigurePortForward { target, .. }
+  | ClientMessage::ListPortForwards { target }
+  | ClientMessage::ListRemoteListeners { target }) = request
+  else {
+    return Ok(());
+  };
+  if ctl_ipc::gateway_route_supported(&target.gateways, protocol) {
+    Ok(())
+  } else {
+    Err(RequestError::UnsupportedGatewayRoute(protocol))
+  }
 }
 
 async fn handle_vpn_request(
@@ -562,7 +593,7 @@ async fn handshake(stream: &mut ctl_ipc::Stream) -> Result<(), ctl_ipc::CodecErr
 }
 
 #[cfg(test)]
-async fn handshake_server(stream: &mut ctl_ipc::Stream) -> Result<(), RequestError> {
+async fn handshake_server(stream: &mut ctl_ipc::Stream) -> Result<ProtocolVersion, RequestError> {
   let request = ctl_ipc::read_frame::<_, ClientMessage>(stream).await?;
   accept_handshake(stream, request).await
 }
@@ -570,7 +601,7 @@ async fn handshake_server(stream: &mut ctl_ipc::Stream) -> Result<(), RequestErr
 async fn accept_handshake(
   stream: &mut ctl_ipc::Stream,
   request: Option<ClientMessage>,
-) -> Result<(), RequestError> {
+) -> Result<ProtocolVersion, RequestError> {
   match request {
     Some(ClientMessage::Handshake { protocol }) => {
       if let Some(protocol_version) = protocol.negotiate(ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS) {
@@ -579,7 +610,7 @@ async fn accept_handshake(
           &ServerMessage::HandshakeAccepted { protocol_version },
         )
         .await?;
-        return Ok(());
+        return Ok(protocol_version);
       }
       let error = RequestError::ProtocolVersionMismatch {
         expected: ctl_ipc::PROTOCOL_VERSION,
@@ -852,6 +883,7 @@ impl RequestError {
       Self::Codec(_) | Self::ClientClosed => "ctld_connection_error",
       Self::InvalidRequest(_) => "ctld_protocol_error",
       Self::ProtocolVersionMismatch { .. } => "ctld_protocol_version_mismatch",
+      Self::UnsupportedGatewayRoute(_) => "ctld_protocol_feature_unsupported",
       Self::StartMaster(_) => "ssh_start_failed",
       Self::MasterTimeout => "ssh_timeout",
       Self::MasterFailed(_) => "ssh_authentication_failed",
@@ -1776,10 +1808,8 @@ fn validate_target(target: &SshTarget) -> Result<(), RequestError> {
   {
     return Err(RequestError::InvalidRequest("invalid SSH target"));
   }
-  if target.gateways.len() > 8
-    || target.gateways.iter().enumerate().any(|(index, gateway)| {
-      invalid_gateway(gateway) || (index != 0 && gateway.kind == GatewayKind::Vpn)
-    })
+  if !ctl_ipc::has_valid_gateway_route(&target.gateways)
+    || target.gateways.iter().any(invalid_gateway)
   {
     return Err(RequestError::InvalidRequest("invalid SSH gateway route"));
   }
@@ -1999,12 +2029,12 @@ mod tests {
   async fn handshake_selects_an_explicit_common_contract_below_the_client_latest() {
     let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
     let server = tokio::spawn(async move { handshake_server(&mut server).await });
-    let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, 13);
+    let newer = ctl_core::protocol::ProtocolVersion::new(1, 2, ctl_ipc::PROTOCOL_BUILD + 1);
     ctl_ipc::write_frame(
       &mut client,
       &ClientMessage::Handshake {
         protocol: ctl_core::protocol::ProtocolOffer::new(
-          13,
+          ctl_ipc::PROTOCOL_BUILD + 1,
           newer,
           &[ctl_ipc::PROTOCOL_VERSION, newer],
         ),
@@ -2016,6 +2046,102 @@ mod tests {
       matches!(ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(), Some(ServerMessage::HandshakeAccepted { protocol_version }) if protocol_version == ctl_ipc::PROTOCOL_VERSION)
     );
     server.await.unwrap().unwrap();
+  }
+
+  #[cfg(unix)]
+  fn compatibility_gateway(kind: GatewayKind) -> SshGateway {
+    SshGateway {
+      kind,
+      vpn: (kind == GatewayKind::Vpn).then(|| ctl_ipc::VpnGateway {
+        connection_id: "work".into(),
+        socket_path: PathBuf::from("/tmp/test-vpn.sock"),
+        expected_remote_id: None,
+      }),
+      destination: if kind == GatewayKind::Vpn {
+        "work"
+      } else {
+        "bastion"
+      }
+      .into(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      mode: SshGatewayMode::Automatic,
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn negotiated_contract_guards_remote_routes_before_dispatch_and_retains_historical_routes()
+  {
+    let ssh = compatibility_gateway(GatewayKind::Ssh);
+    let vpn = compatibility_gateway(GatewayKind::Vpn);
+    for (protocol, gateways, supported) in [
+      (ctl_ipc::CONTRACT_V1_0_12, vec![], true),
+      (ctl_ipc::CONTRACT_V1_0_12, vec![ssh.clone()], true),
+      (
+        ctl_ipc::CONTRACT_V1_0_12,
+        vec![vpn.clone(), ssh.clone()],
+        true,
+      ),
+      (
+        ctl_ipc::CONTRACT_V1_0_12,
+        vec![ssh.clone(), vpn.clone()],
+        false,
+      ),
+      (ctl_ipc::CONTRACT_V1_1_13, vec![ssh, vpn], true),
+    ] {
+      let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
+      let state = Arc::new(State::default());
+      let server = tokio::spawn(handle_connection(server, state.clone()));
+      ctl_ipc::write_frame(
+        &mut client,
+        &ClientMessage::Handshake {
+          protocol: ctl_core::protocol::ProtocolOffer::new(protocol.build, protocol, &[protocol]),
+        },
+      )
+      .await
+      .unwrap();
+      assert!(
+        matches!(ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+        Some(ServerMessage::HandshakeAccepted {protocol_version}) if protocol_version == protocol)
+      );
+      ctl_ipc::write_frame(
+        &mut client,
+        &ClientMessage::MasterStatus {
+          target: SshTarget {
+            destination: format!("contract-test-{}", uuid::Uuid::new_v4()),
+            gateways,
+            ..target()
+          },
+        },
+      )
+      .await
+      .unwrap();
+      let response = ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
+        .await
+        .unwrap();
+      if supported {
+        assert!(matches!(
+          response,
+          Some(ServerMessage::AuthenticationRequired)
+        ));
+        server.await.unwrap().unwrap();
+      } else {
+        assert!(
+          matches!(response, Some(ServerMessage::Error {code, message})
+          if code == "ctld_protocol_feature_unsupported" && message.contains("1.1.13"))
+        );
+        assert!(
+          matches!(server.await.unwrap(), Err(RequestError::UnsupportedGatewayRoute(selected)) if selected == protocol)
+        );
+        assert!(
+          state.targets.lock().unwrap().is_empty(),
+          "unsupported routes must never enter target lifecycle"
+        );
+      }
+    }
   }
 
   #[cfg(unix)]

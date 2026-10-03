@@ -17,6 +17,7 @@ pub use gateways::{WorkspaceSshGateway, validated_gateway_ids};
 pub use models::{WorkspaceConnectionMethod, WorkspaceHost};
 pub use resolver::{ResolvedHost, load_catalog, resolve};
 pub use target::{ConnectionTargetDto, SshGatewayDto, SshGatewayModeDto, SshGatewayRouteStepDto};
+pub use transport::VpnRoute;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -54,6 +55,7 @@ pub fn vpn_gateway(connection_id: &str) -> ctl_ipc::SshGateway {
     vpn: Some(ctl_ipc::VpnGateway {
       connection_id: connection_id.into(),
       socket_path: ctl_ipc::vpn::socket_path(),
+      expected_remote_id: None,
     }),
     destination: connection_id.into(),
     hostname: None,

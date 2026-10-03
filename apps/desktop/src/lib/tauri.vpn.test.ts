@@ -38,6 +38,21 @@ describe("VPN native boundary", () => {
     await stopVpn("work");
     expect(ipc.invoke).toHaveBeenLastCalledWith("stop_vpn", { request: { vpn_id: "work" } });
   });
+
+  it("scopes remote VPN management to the SSH execution host", async () => {
+    const target = { kind: "ssh" as const, destination: "jump.example", user: "operator",
+      remote_info: { remote_id: "jump-account", agent_version: "1" },
+      gateways: [{ kind: "vpn" as const, gateway_id: "vpn:local", name: "local", destination: "local",
+        mode: "automatic" as const, vpn_connection_id: "local" }] };
+    await connectVpn("work", target);
+    expect(ipc.invoke).toHaveBeenLastCalledWith("connect_vpn", { request: { connection_id: "work", target } });
+    await vpnStatus(target);
+    expect(ipc.invoke).toHaveBeenLastCalledWith("vpn_status", { target });
+    await openVpnSignIn("work", target);
+    expect(ipc.invoke).toHaveBeenLastCalledWith("open_vpn_sign_in", { request: { vpn_id: "work", target } });
+    await stopVpn("work", target);
+    expect(ipc.invoke).toHaveBeenLastCalledWith("stop_vpn", { request: { vpn_id: "work", target } });
+  });
 });
 
 

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use super::{ConnectionTargetDto, HostCatalogDocument, HostError, SshGatewayDto};
+use super::{
+  ConnectionTargetDto, HostCatalogDocument, HostError, SshGatewayDto, SshGatewayRouteStepDto,
+};
 
 pub struct ResolvedHost {
   pub host_id: Option<String>,
@@ -99,32 +101,56 @@ pub fn resolve(
     }
     *gateways = gateway_route
       .iter()
-      .map(|step| {
-        let gateway = catalog
-          .ssh_gateways
-          .iter()
-          .find(|item| item.gateway_id == step.gateway_id)
-          .ok_or_else(|| HostError::new("gateway_missing", "A saved gateway is missing."))?;
-        Ok(SshGatewayDto {
-          kind: gateway.kind,
-          gateway_id: gateway.gateway_id.clone(),
-          name: gateway.name.clone(),
-          destination: gateway.destination.clone(),
-          hostname: gateway.hostname.clone(),
-          user: gateway.user.clone(),
-          port: gateway.port,
-          identity_file: gateway.identity_file.clone(),
-          remote_info: gateway.remote_info.clone(),
-          mode: step.mode,
-        })
-      })
+      .map(|step| resolve_gateway_step(catalog, step))
       .collect::<Result<Box<[_]>, HostError>>()?;
   }
+  target.to_ssh_target()?;
   Ok(ResolvedHost {
     host_id: Some(host.host_id.clone()),
     target,
     tailscale_node_id: method.tailscale_node_id.clone(),
   })
+}
+
+fn resolve_gateway_step(
+  catalog: &HostCatalogDocument,
+  step: &SshGatewayRouteStepDto,
+) -> Result<SshGatewayDto, HostError> {
+  match step {
+    SshGatewayRouteStepDto::Vpn { vpn_connection_id } => Ok(SshGatewayDto {
+      kind: ctl_ipc::GatewayKind::Vpn,
+      vpn_connection_id: Some(vpn_connection_id.clone()),
+      gateway_id: format!("vpn:{vpn_connection_id}"),
+      name: vpn_connection_id.clone(),
+      destination: vpn_connection_id.clone(),
+      hostname: None,
+      user: None,
+      port: None,
+      identity_file: None,
+      remote_info: None,
+      mode: super::SshGatewayModeDto::Automatic,
+    }),
+    SshGatewayRouteStepDto::Gateway { gateway_id, mode } => {
+      let gateway = catalog
+        .ssh_gateways
+        .iter()
+        .find(|item| item.gateway_id == *gateway_id)
+        .ok_or_else(|| HostError::new("gateway_missing", "A saved gateway is missing."))?;
+      Ok(SshGatewayDto {
+        kind: gateway.kind,
+        vpn_connection_id: None,
+        gateway_id: gateway.gateway_id.clone(),
+        name: gateway.name.clone(),
+        destination: gateway.destination.clone(),
+        hostname: gateway.hostname.clone(),
+        user: gateway.user.clone(),
+        port: gateway.port,
+        identity_file: gateway.identity_file.clone(),
+        remote_info: gateway.remote_info.clone(),
+        mode: *mode,
+      })
+    }
+  }
 }
 
 fn matching_hosts<'a>(

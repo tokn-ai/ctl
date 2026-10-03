@@ -1,11 +1,16 @@
 import type { ConnectionTarget, SshConnectionTarget } from "../../lib/types";
 import { hostTarget, type WorkspaceView } from "./workspaceModel";
+import { resolveVpnRouteStep } from "./sshRoute";
 
 /** Match ctld/keychain.rs: destination and route, including the stable VPN binding. */
 function credentialScope(target: SshConnectionTarget): string {
+  const route = [
+    ...(target.vpn_connection_id ? [resolveVpnRouteStep({ vpn_connection_id: target.vpn_connection_id })] : []),
+    ...(target.gateways ?? []),
+  ];
   return JSON.stringify([
     target.destination,
-    (target.gateways ?? []).map((gateway) => ({
+    route.map((gateway, index) => ({
       kind: gateway.kind ?? "ssh",
       destination: gateway.destination,
       hostname: gateway.hostname ?? null,
@@ -13,8 +18,11 @@ function credentialScope(target: SshConnectionTarget): string {
       port: gateway.port ?? null,
       identity_file: gateway.identity_file ?? null,
       mode: gateway.mode,
+      ...(gateway.kind === "vpn" ? {
+        vpn_connection_id: gateway.vpn_connection_id,
+        expected_remote_id: route[index - 1]?.kind !== "socks5" ? route[index - 1]?.remote_info?.remote_id ?? null : null,
+      } : {}),
     })),
-    target.vpn_connection_id ?? null,
   ]);
 }
 

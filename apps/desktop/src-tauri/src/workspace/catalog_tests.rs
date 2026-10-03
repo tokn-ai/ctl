@@ -542,7 +542,7 @@ fn host_and_gateway_import_is_one_validated_batch() {
   else {
     panic!("ssh method")
   };
-  gateway_route.push(SshGatewayRouteStepDto {
+  gateway_route.push(SshGatewayRouteStepDto::Gateway {
     gateway_id: gateway.gateway_id.clone(),
     mode: SshGatewayModeDto::Automatic,
   });

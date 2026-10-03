@@ -63,7 +63,7 @@ fn installed_identity(remote_id: String, executable: &Path) -> io::Result<Remote
     build: Some(ctl_core::component::build_info()),
     ctmux_restart_supported: true,
     bundle,
-    protocols: ctl_proto::agent_protocols(),
+    protocols: crate::agent_protocols(),
   };
   if !identity.is_valid() {
     return Err(io::Error::new(
@@ -158,6 +158,16 @@ mod tests {
       fs::write(executable.with_file_name("manifest.json"), format!(r#"{{"schema_version":1,"app_version":"0.1.0","bundle_id":"{version}","git_revision":"{version}","target_triple":"aarch64-apple-darwin"}}"#)).unwrap();
       let identity = discover_at(&directory, &executable).unwrap();
       assert_eq!(identity.remote_id, ids[0]);
+      let remote_vpn = identity
+        .protocols
+        .iter()
+        .find(|protocol| protocol.name == "ctl_remote_vpn")
+        .unwrap();
+      assert_eq!(remote_vpn.version, ctl_ipc::remote_vpn::CONTRACT_V1_0_1);
+      assert_eq!(
+        remote_vpn.supported_versions,
+        [ctl_ipc::remote_vpn::CONTRACT_V1_0_1]
+      );
       assert_eq!(identity.bundle.unwrap().bundle_id, version);
     }
     fs::remove_dir_all(directory).unwrap();

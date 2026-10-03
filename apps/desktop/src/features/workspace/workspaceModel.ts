@@ -23,6 +23,7 @@ import type {
   RemoteIdentity,
 } from "../../lib/types";
 import { LOCAL_TARGET, sessionKey, targetKey } from "../targets/targets";
+import { hasVpnRoute, isVpnRouteStep, resolveVpnRouteStep } from "./sshRoute";
 import { hasKnownTerminalSize, knownTerminalSize, observedAt } from "../sessions/sessionObservation";
 import {
   projectedTailscaleHost,
@@ -87,7 +88,7 @@ export function connectionMethodOptions(source: Pick<WorkspaceConnectionMethod,
 }
 
 export function usesSshConfigMaster(target: SshConnectionTarget): boolean {
-  return !target.vpn_connection_id && !target.gateways?.some((gateway) => gateway.kind === "socks5") &&
+  return !hasVpnRoute(target) && !target.gateways?.some((gateway) => gateway.kind === "socks5") &&
     (target.use_ssh_config_master ?? Boolean(target.ssh_config_alias));
 }
 
@@ -429,6 +430,7 @@ export function resolveSshGateways(
   );
   const { gateways: _current, ...persistedTarget } = target;
   const resolved = (target.gateway_route ?? []).map((step) => {
+    if (isVpnRouteStep(step)) return resolveVpnRouteStep(step);
     const gateway = byId.get(step.gateway_id);
     if (!gateway) throw new Error("A gateway for this connection method is missing. Edit the method before connecting.");
     return { ...gateway, mode: step.mode };

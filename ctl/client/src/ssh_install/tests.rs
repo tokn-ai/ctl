@@ -1,6 +1,6 @@
 use super::*;
 
-const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 extracting\nctl-install-progress-v1 checking ctl-agent\nctl-install-progress-v1 checking ctmuxd\nctl-install-progress-v1 checking ctl-taskd\nctl-install-progress-v1 activating\nctl-install-v1\n";
+const VALID_PROGRESS: &[u8] = b"ctl-install-progress-v1 receiving 0\nctl-install-progress-v1 receiving 5\nctl-install-progress-v1 receiving 10\nctl-install-progress-v1 extracting\nctl-install-progress-v1 checking ctl-agent\nctl-install-progress-v1 checking ctmuxd\nctl-install-progress-v1 checking ctl-taskd\nctl-install-progress-v1 checking ctld\nctl-install-progress-v1 activating\nctl-install-v1\n";
 
 #[test]
 fn bundle_ids_cannot_change_the_fixed_script_or_installation_path() {
@@ -67,7 +67,7 @@ async fn progress_accepts_startup_output_only_before_the_initial_marker() {
       Some(&RemoteInstallEvent::Receiving { received_bytes: 0 })
     );
     assert_eq!(events.last(), Some(&RemoteInstallEvent::Complete));
-    assert_eq!(events.len(), 9);
+    assert_eq!(events.len(), 10);
   }
 
   for late_noise in [
@@ -138,7 +138,7 @@ impl BundleFixture {
     ));
     let source = directory.join("source");
     std::fs::create_dir_all(&source).unwrap();
-    for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+    for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
       std::fs::write(source.join(binary), binary).unwrap();
     }
     let mut fixture = Self {
@@ -152,7 +152,7 @@ impl BundleFixture {
   fn rebuild_archive(&mut self) {
     let source = self.directory.join("source");
     let archive = self.directory.join("bundle.tar.gz");
-    let mut files = vec!["ctl-agent", "ctmuxd", "ctl-taskd"];
+    let mut files = vec!["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"];
     if source.join("manifest.json").exists() {
       files.push("manifest.json");
     }
@@ -289,12 +289,15 @@ async fn installer_reuses_identical_existing_components_without_replacing_files(
     }
     fixture.install("0.1.0-test").await.unwrap();
     let destination = fixture.directory.join("home/.tokn/ctl/versions/0.1.0-test");
-    let inodes: Vec<_> = ["ctl-agent", "ctmuxd", "ctl-taskd"]
+    let inodes: Vec<_> = ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
       .iter()
       .map(|binary| std::fs::metadata(destination.join(binary)).unwrap().ino())
       .collect();
     fixture.install("0.1.0-test").await.unwrap();
-    for (binary, inode) in ["ctl-agent", "ctmuxd", "ctl-taskd"].iter().zip(inodes) {
+    for (binary, inode) in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"]
+      .iter()
+      .zip(inodes)
+    {
       assert_eq!(
         std::fs::metadata(destination.join(binary)).unwrap().ino(),
         inode
@@ -319,7 +322,7 @@ async fn installer_reuses_identical_existing_components_without_replacing_files(
 async fn installer_rejects_differing_same_id_components_without_activation() {
   use std::os::unix::fs::MetadataExt as _;
   use std::sync::Mutex;
-  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
     let mut fixture = BundleFixture::new();
     fixture.install("0.1.0-test").await.unwrap();
     fixture.install("0.1.0-active").await.unwrap();
@@ -359,7 +362,7 @@ async fn installer_rejects_differing_same_id_components_without_activation() {
       std::fs::metadata(destination.join(binary)).unwrap().ino(),
       inode
     );
-    for component in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+    for component in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
       assert_eq!(
         std::fs::read_to_string(destination.join(component)).unwrap(),
         component
@@ -448,7 +451,7 @@ async fn installer_reports_receiver_progress_and_activates_executable_components
     std::fs::read_link(&current).unwrap(),
     std::path::PathBuf::from("versions/0.1.0-test")
   );
-  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd"] {
+  for binary in ["ctl-agent", "ctmuxd", "ctl-taskd", "ctld"] {
     assert!(events.contains(&RemoteInstallEvent::Checking { file_name: binary }));
     assert_eq!(
       std::fs::read_to_string(current.join(binary)).unwrap(),

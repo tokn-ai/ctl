@@ -279,8 +279,14 @@ mod tests {
     actual[0].build += 1;
     assert!(!manifest.matches_protocols(&actual));
     actual = manifest.protocols.clone();
-    let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, 13);
-    actual[0] = ProtocolInfo::new("ctld", 13, newer, &[ctl_ipc::PROTOCOL_VERSION, newer]);
+    let newer = ctl_core::protocol::ProtocolVersion::new(
+      1,
+      ctl_ipc::PROTOCOL_VERSION.minor + 1,
+      ctl_ipc::PROTOCOL_BUILD + 1,
+    );
+    let mut supported = ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.to_vec();
+    supported.push(newer);
+    actual[0] = ProtocolInfo::new("ctld", newer.build, newer, &supported);
     assert!(!manifest.matches_protocols(&actual));
     actual = manifest.protocols.clone();
     actual.pop();
@@ -290,9 +296,14 @@ mod tests {
   #[test]
   fn advertised_contract_sets_match_without_requiring_array_order() {
     let mut manifest = fixture();
-    let newer = ctl_core::protocol::ProtocolVersion::new(1, 1, 13);
-    manifest.protocols[0] =
-      ProtocolInfo::new("ctld", 13, newer, &[ctl_ipc::PROTOCOL_VERSION, newer]);
+    let newer = ctl_core::protocol::ProtocolVersion::new(
+      1,
+      ctl_ipc::PROTOCOL_VERSION.minor + 1,
+      ctl_ipc::PROTOCOL_BUILD + 1,
+    );
+    let mut supported = ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS.to_vec();
+    supported.push(newer);
+    manifest.protocols[0] = ProtocolInfo::new("ctld", newer.build, newer, &supported);
     let mut actual = manifest.protocols.clone();
     actual[0].supported_versions.reverse();
     actual.reverse();

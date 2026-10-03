@@ -13,6 +13,7 @@ publish = ["crates-io"]
 
 [dependencies]
 ctl-core.workspace = true
+ctl-ipc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
@@ -22,6 +23,9 @@ ctmux-ipc.workspace = true
 ctl-task-ipc.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["net", "stdio"] }
 
 [dev-dependencies]
 ctl-client.workspace = true

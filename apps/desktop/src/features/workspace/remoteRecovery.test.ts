@@ -221,6 +221,19 @@ describe("SSH endpoint comparison", () => {
     expect(sameSshEndpoint(vpn, { ...vpn, use_ssh_config_master: true })).toBe(true);
   });
 
+  it("distinguishes ordered VPN execution hosts and ignores incompatible master preferences", () => {
+    const remote: SshConnectionTarget = { kind: "ssh", destination: "build", ssh_config_alias: "build", gateway_route: [
+      { gateway_id: "edge", mode: "automatic" }, { vpn_connection_id: "office" },
+    ] };
+    expect(sameSshEndpoint(remote, { ...remote, use_ssh_config_master: true })).toBe(true);
+    expect(sameSshEndpoint(remote, { ...remote, gateway_route: [
+      { vpn_connection_id: "office" }, { gateway_id: "edge", mode: "automatic" },
+    ] })).toBe(false);
+    expect(sameSshEndpoint(remote, { ...remote, gateway_route: [
+      { gateway_id: "edge", mode: "automatic" }, { vpn_connection_id: "different" },
+    ] })).toBe(false);
+  });
+
   it.each([undefined, "build"])("compares the effective master policy for source %s", (ssh_config_alias) => {
     const target: SshConnectionTarget = { kind: "ssh", destination: "build", ssh_config_alias };
     const default_policy = Boolean(ssh_config_alias);

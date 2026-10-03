@@ -3,6 +3,7 @@
 
 mod broker;
 pub(crate) use broker::existing_master;
+pub(crate) use broker::{check_route_support, ensure_target_master};
 pub mod commands;
 mod connection;
 mod verification;
@@ -37,7 +38,7 @@ struct Attempt {
 }
 
 #[derive(Clone)]
-struct PromptContext {
+pub(crate) struct PromptContext {
   attempt: Arc<Attempt>,
   channel: Channel<SshPromptDto>,
 }
@@ -183,7 +184,7 @@ pub async fn probe(
   let _guard = AttemptGuard(key);
   let context = PromptContext { attempt, channel };
   let establish = async {
-    crate::vpn::ensure_for_host(&app, &target).await?;
+    crate::vpn::ensure_for_host(&app, &target, &context).await?;
     let (stream, identity) = connect_with(&target, Some(context)).await?;
     if restart_check {
       require_restart_support(&identity)?;
@@ -232,7 +233,7 @@ pub async fn install_agent(
     channel,
   };
   let install = async {
-    crate::vpn::ensure_for_host(&app, &target).await?;
+    crate::vpn::ensure_for_host(&app, &target, &context).await?;
     let control_path = broker::ensure_master(&target, &context).await?;
     let interaction = SshInteraction::Multiplexed { control_path };
     let ConnectionTarget::Ssh {
@@ -301,7 +302,7 @@ pub async fn restart_ctmux(
   let context = PromptContext { attempt, channel };
   let restart = async {
     let prepare = async {
-      crate::vpn::ensure_for_host(&app, &target).await?;
+      crate::vpn::ensure_for_host(&app, &target, &context).await?;
       // Identity discovery does not perform a session-protocol handshake.
       let (stream, identity) = connect_with(&target, Some(context)).await?;
       require_restart_support(&identity)?;

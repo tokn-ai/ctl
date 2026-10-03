@@ -909,12 +909,11 @@ fn validate_destination(destination: &str) -> Result<(), CoreError> {
 
 fn validate_ssh_target(destination: &str, options: &SshConnectionOptions) -> Result<(), CoreError> {
   validate_destination(destination)?;
-  for (index, gateway) in options.gateways.iter().enumerate() {
-    if !gateway.to_ipc().has_valid_vpn_configuration()
-      || (index != 0 && gateway.kind == ctl_ipc::GatewayKind::Vpn)
-    {
-      return Err(CoreError::InvalidSshOption("VPN gateway".into()));
-    }
+  let route: Vec<_> = options.gateways.iter().map(SshGateway::to_ipc).collect();
+  if !ctl_ipc::has_valid_gateway_route(&route) {
+    return Err(CoreError::InvalidSshOption("VPN gateway".into()));
+  }
+  for gateway in &options.gateways {
     validate_destination(&gateway.destination)?;
     if gateway.mode == SshGatewayMode::AgentRelayOnly {
       return Err(CoreError::InvalidSshOption(
@@ -1319,6 +1318,7 @@ mod tests {
       vpn: Some(ctl_ipc::VpnGateway {
         connection_id: "saved-vpn".into(),
         socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
+        expected_remote_id: None,
       }),
       destination: "saved-vpn".into(),
       hostname: None,

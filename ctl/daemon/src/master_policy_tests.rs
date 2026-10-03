@@ -116,6 +116,7 @@ async fn vpn_routes_force_a_private_master_and_use_stable_profile_identity() {
     vpn: Some(ctl_ipc::VpnGateway {
       connection_id: "saved-vpn".into(),
       socket_path: std::env::temp_dir().join("test-vpn-owner.sock"),
+      expected_remote_id: None,
     }),
     destination: "saved-vpn".into(),
     hostname: None,

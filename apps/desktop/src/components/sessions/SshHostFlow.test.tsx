@@ -164,6 +164,54 @@ describe("SSH host quick-input flow", () => {
     expect(vi.mocked(probeSshHost).mock.calls[0][0]).not.toHaveProperty("vpn_connection_id");
   });
 
+  it("builds a new host route through SSH and a VPN on that jump host", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const save = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={[]} warning={null} vpn_connections={[vpn]}
+      onSaveNewHost={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await newHostDetails(user, false);
+    await user.click(screen.getByRole("option", { name: /Build connection route/ }));
+    await user.click(screen.getByRole("button", { name: "+ New gateway" }));
+    await user.type(screen.getByLabelText("Name"), "Bastion");
+    await user.type(screen.getByLabelText("SSH destination / alias"), "bastion.example");
+    await user.click(screen.getByRole("button", { name: "Save gateway" }));
+    await user.click(screen.getByRole("button", { name: "Add Office VPN to route" }));
+    expect(screen.getByText("VPN · Runs on Bastion")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const [name, candidate, remote_info, gateways] = save.mock.calls[0] as unknown as [string, SshConnectionTarget, typeof remoteInfo, Array<{ gateway_id: string; destination: string }>];
+    expect(name).toBe("Development server");
+    expect(remote_info).toEqual(remoteInfo);
+    expect(gateways).toMatchObject([{ name: "Bastion", destination: "bastion.example" }]);
+    expect(candidate.gateway_route).toEqual([
+      { gateway_id: gateways[0].gateway_id, mode: "automatic" }, { vpn_connection_id: vpn.connection_id },
+    ]);
+    expect(candidate.gateways?.map((gateway) => gateway.kind ?? "ssh")).toEqual(["ssh", "vpn"]);
+    expect(candidate.vpn_connection_id).toBeUndefined();
+  });
+
+  it("retains a discovered provider binding when building an ordered route", async () => {
+    vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
+    const gateway = { gateway_id: "edge", name: "Office edge", destination: "edge.example" };
+    const save = vi.fn(async () => undefined);
+    render(<SshHostFlow suggestions={[]} warning={null} tailscaleDevices={[tailscaleDevice]}
+      vpn_connections={[vpn]} gateways={[gateway]} onSaveNewHost={save} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("option", { name: /Builder/ }));
+    await user.keyboard("{Enter}");
+    await user.type(screen.getByLabelText("SSH user"), "operator{Enter}");
+    await user.click(screen.getByRole("option", { name: /Build connection route/ }));
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(screen.getByRole("button", { name: "Add Office VPN to route" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save).toHaveBeenCalledWith("Builder", expect.objectContaining({
+      tailscale_node_id: tailscaleDevice.node_id, hostname: "100.64.0.2", user: "operator",
+      gateway_route: [{ gateway_id: "edge", mode: "automatic" }, { vpn_connection_id: vpn.connection_id }],
+    }), remoteInfo);
+  });
+
   it("shows VPN failures without attempting a direct connection", async () => {
     vi.mocked(probeSshHost).mockRejectedValue({ code: "vpn_failed", message: "Could not connect Office VPN" });
     const save = vi.fn();

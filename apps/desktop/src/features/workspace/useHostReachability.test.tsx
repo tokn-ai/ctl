@@ -143,6 +143,21 @@ describe("SSH greeting observations", () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
+  it("does not use local VPN state for a VPN running on a jump host", async () => {
+    const gateway = { gateway_id: "jump", name: "Jump", destination: "jump.example" };
+    const routed: WorkspaceHost = { ...host, connection_methods: [{ ...host.connection_methods[0], target: {
+      ...host.connection_methods[0].target, gateway_route: [
+        { gateway_id: gateway.gateway_id, mode: "automatic" }, { vpn_connection_id: "office" },
+      ],
+    } }] };
+    const vpn: VpnStatus = { connection_id: "office", state: "connected", running: true, endpoint: null, container_name: null };
+    const { initial, rerender, result } = setup({ hosts: [routed], gateways: [gateway], vpn_statuses: [vpn] });
+    await waitFor(() => expect(result.current.statuses.get(host.host_id)?.state).toBe("available"));
+    await act(async () => { rerender({ ...initial, vpn_statuses: [], vpn_status_stale: true }); });
+    expect(sshReachability).toHaveBeenCalledOnce();
+    expect(result.current.statuses.get(host.host_id)?.state).toBe("available");
+  });
+
   it("limits concurrency across methods and skips queued work for removed hosts", async () => {
     const pending = Array.from({ length: 4 }, () => deferred<SshReachability>());
     pending.forEach((item) => { vi.mocked(sshReachability).mockReturnValueOnce(item.promise); });

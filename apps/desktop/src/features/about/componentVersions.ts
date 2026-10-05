@@ -79,13 +79,25 @@ export interface ComponentHostFailure {
   component_ids: ReadonlySet<string>;
 }
 
+const inspection_prerequisites = new Set(["remote_component_inspection_unsupported", "ssh_authentication_required", "ssh_host_disconnected", "remote_identity_unverified"]);
+
+function hostConnected(rows: readonly ComponentVersionRow[]): boolean | null {
+  if (rows.some((row) => row.connected === true || row.observation === "last_observed")) return true;
+  return rows.some((row) => row.connected === false) ? false : null;
+}
+
 /** A failed SSH inspection belongs to the host, not each uninspected binary. */
 export function componentHostFailure(rows: readonly ComponentVersionRow[]): ComponentHostFailure | null {
   const errors = rows.filter((row) => row.location === "remote" && row.error);
   const shared = errors.filter((row) => row.observation === "not_checked" || errors.filter((candidate) => candidate.error === row.error).length > 1);
   if (!shared.length) return null;
+  const codes = new Set(shared.map((row) => row.error_code));
+  const message = codes.has("remote_component_inspection_unsupported") ? "Update the agent to check components."
+    : codes.has("remote_identity_unverified") ? "Check host to verify its account."
+    : hostConnected(rows) !== true && (codes.has("ssh_authentication_required") || codes.has("ssh_host_disconnected")) ? "Connect this host to check components."
+    : "Could not check components. Try Check host.";
   return {
-    message: "Could not check components. Reconnect and try again.",
+    message,
     detail: [...new Set(shared.map((row) => row.error))].join("\n"),
     component_ids: new Set(shared.map((row) => row.component_id)),
   };
@@ -121,11 +133,17 @@ export function componentHostStatuses(rows: readonly ComponentVersionRow[]): { l
   if (rows.some((row) => row.status === "different_build")) statuses.push({ label: "Different build", status: "different_build" });
   if (rows.some((row) => row.restart_required)) statuses.push({ label: "Restart required", status: "different_build" });
   else if (separate.some(({ views }) => buildsDiffer(views[0].info!, views[1].info!))) statuses.push({ label: "Running differs", status: "different_build" });
-  if (rows.some((row) => row.error || row.status === "unavailable" && row.observation !== "not_checked")) statuses.push({ label: "Unavailable", status: "unavailable" });
+  if (rows.some((row) => row.error_code === "remote_component_inspection_unsupported")) statuses.push({ label: "Update agent", status: "outdated" });
+  if (rows.some((row) => row.error_code === "remote_identity_unverified")) statuses.push({ label: "Verify account", status: "unknown" });
+  if (rows.some((row) => row.observation === "not_checked" && row.error && !inspection_prerequisites.has(row.error_code ?? ""))) statuses.push({ label: "Inspection failed", status: "unavailable" });
+  if (rows.some((row) => row.observation !== "not_checked" && (row.error || row.status === "unavailable"))) statuses.push({ label: "Unavailable", status: "unavailable" });
   if (rows.some((row) => row.observation === "not_checked")) statuses.push({ label: "Not checked", status: "unknown" });
-  if (statuses.length) return statuses;
-  if (rows.some((row) => row.status === "newer")) return [{ label: "Newer build", status: "newer" }];
-  if (rows.some((row) => row.status === "not_running")) return [{ label: "Not running", status: "not_running" }];
-  if (separate.length || builds.some(({ views }) => views.some((view) => !view.info)) || rows.some((row) => row.status === "unknown" && row.observation !== "installed") || !protocols.length || protocols.some((protocol) => protocol.status === "unknown")) return [{ label: "Unverified", status: "unknown" }];
-  return protocols.some((protocol) => protocol.status === "compatible") ? [{ label: "Compatible protocols", status: "outdated" }] : [{ label: "Current", status: "current" }];
+  const connected = hostConnected(rows);
+  const withConnection = (summary: typeof statuses) => connected === null ? summary
+    : [{ label: connected ? "Connected" : "Not connected", status: connected ? "current" : "unknown" }, ...summary];
+  if (statuses.length) return withConnection(statuses);
+  if (rows.some((row) => row.status === "newer")) return withConnection([{ label: "Newer build", status: "newer" }]);
+  if (rows.some((row) => row.status === "not_running")) return withConnection([{ label: "Not running", status: "not_running" }]);
+  if (separate.length || builds.some(({ views }) => views.some((view) => !view.info)) || rows.some((row) => row.status === "unknown" && row.observation !== "installed") || !protocols.length || protocols.some((protocol) => protocol.status === "unknown")) return withConnection([{ label: "Unverified", status: "unknown" }]);
+  return withConnection(protocols.some((protocol) => protocol.status === "compatible") ? [{ label: "Compatible protocols", status: "outdated" }] : [{ label: "Current", status: "current" }]);
 }

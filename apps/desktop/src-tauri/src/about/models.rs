@@ -121,6 +121,8 @@ pub struct ComponentVersionRow {
   pub action: Option<ComponentAction>,
   pub detail: Option<String>,
   pub error: Option<String>,
+  pub error_code: Option<String>,
+  pub connected: Option<bool>,
 }
 
 impl ComponentVersionRow {
@@ -145,6 +147,8 @@ impl ComponentVersionRow {
       action: None,
       detail: None,
       error: None,
+      error_code: None,
+      connected: None,
     }
   }
 

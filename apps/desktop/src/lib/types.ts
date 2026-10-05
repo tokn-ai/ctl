@@ -102,6 +102,9 @@ export interface ComponentVersionRow {
   action: ComponentActionKind | null;
   detail: string | null;
   error: string | null;
+  error_code?: string | null;
+  /** Existing SSH master or active terminal transport observed during this check. */
+  connected?: boolean | null;
 }
 
 export interface ComponentVersionsSnapshot {

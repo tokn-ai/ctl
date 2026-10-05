@@ -139,13 +139,52 @@ it("shows shared SSH failures once per host with a short message and retained di
   const rows = ["ctl_agent", "ctmuxd", "ctl-taskd"].map((component) => ({ ...row, component_id: component, component: component as ComponentVersionRow["component"], observation: "not_checked" as const, status: "unavailable" as const, running: null, installed: null, action: null, error }));
   render(<ComponentVersionTable {...props()} rows={rows} manageable_host_ids={["dev"]} on_manage_host={vi.fn()} />);
   expect(screen.getAllByRole("alert")).toHaveLength(1);
-  expect(screen.getByRole("alert").textContent).toBe("Could not check components. Reconnect and try again.");
+  expect(screen.getByRole("alert").textContent).toBe("Could not check components. Try Check host.");
   expect(screen.getByRole("alert").title).toBe(error);
   expand();
   expect(screen.getAllByRole("alert")).toHaveLength(1);
   expect(screen.getAllByTitle(error)).toHaveLength(1);
   expect(screen.queryByText(error)).toBeNull();
   expect(within(screen.getByRole("table", { name: "Development — SSH component versions" })).queryByText(/^Running/)).toBeNull();
+});
+
+it("keeps active connections visible when a separate inspection fails", () => {
+  const unchecked = { ...row, component_id: "saved", running: null, installed: null, observation: "not_checked" as const, status: "unavailable" as const, error: "unexpected end of file", action: null };
+  render(<ComponentVersionTable {...props()} rows={[unchecked, { ...row, component_id: "active", observation: "last_observed" }]} />);
+  const summary = within(screen.getByRole("button", { name: "Show components for Development — SSH" }).closest("tr")!);
+  expect(summary.getByText("Connected")).toBeTruthy();
+  expect(summary.getByText("Inspection failed")).toBeTruthy();
+  expect(summary.queryByText("Unavailable")).toBeNull();
+  expect(summary.getByRole("alert").textContent).not.toContain("Reconnect");
+  expand();
+  expect(screen.getByText("Active connection")).toBeTruthy();
+  expect(screen.getByText("Last observed + on disk")).toBeTruthy();
+});
+
+it("distinguishes an old agent from failed SSH and retains its checked installation", () => {
+  const agent = { ...row, component_id: "agent", component: "ctl_agent" as const, observation: "installed" as const, running: null, action: null, connected: true };
+  const unchecked = { ...row, running: null, installed: null, observation: "not_checked" as const, status: "unavailable" as const, action: null, connected: true, error_code: "remote_component_inspection_unsupported", error: "Maintenance 1.0.3 is required." };
+  render(<ComponentVersionTable {...props()} rows={[agent, unchecked]} />);
+  expect(screen.getByText("Connected")).toBeTruthy();
+  expect(screen.getByText("Update agent")).toBeTruthy();
+  expect(screen.queryByText("Unavailable")).toBeNull();
+  expect(screen.getByRole("alert").textContent).toBe("Update the agent to check components.");
+  expand();
+  const table = within(screen.getByRole("table", { name: "Development — SSH component versions" }));
+  expect(table.getByText("On disk · on demand")).toBeTruthy();
+  expect(table.getByText("Build same-build")).toBeTruthy();
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+});
+
+it.each([
+  ["ssh_authentication_required", false, "Not connected", "Connect this host to check components."],
+  ["remote_identity_unverified", true, "Connected", "Check host to verify its account."],
+] as const)("reports %s without blaming a working transport", (error_code, connected, label, message) => {
+  render(<ComponentVersionTable {...props()} rows={[{ ...row, running: null, installed: null, observation: "not_checked", status: "unavailable", action: null, error: "Inspection prerequisite missing", error_code, connected }]} />);
+  expect(screen.getByText(label)).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toBe(message);
+  expect(screen.queryByText("Unavailable")).toBeNull();
+  expect(screen.queryByText("Inspection failed")).toBeNull();
 });
 
 it.each([

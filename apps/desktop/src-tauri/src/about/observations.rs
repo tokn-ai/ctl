@@ -123,6 +123,8 @@ fn insert(
           .into(),
       ),
       error: None,
+      error_code: None,
+      connected: Some(true),
     };
     row.compare();
     row

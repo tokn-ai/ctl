@@ -147,6 +147,7 @@ pub(super) async fn rows(
       row.observation = "not_checked";
       row.status = VersionStatus::Unavailable;
       row.error = Some(error.message);
+      row.error_code = Some(error.code);
       rows.push(row);
     }
   }
@@ -157,13 +158,16 @@ pub(super) async fn rows(
 async fn inspect(selected: Selection) -> Vec<ComponentVersionRow> {
   let mut rows = empty_rows(&selected);
   let result = async {
+    let master = selected.master().await?;
+    for row in &mut rows {
+      row.connected = Some(true);
+    }
     let remote_id = selected.remote_id.as_deref().ok_or_else(|| {
       CommandErrorDto::new(
         "remote_identity_unverified",
         "Connect and verify this saved host's account before inspecting its components.",
       )
     })?;
-    let master = selected.master().await?;
     let ctl_client::ConnectionTarget::Ssh {
       destination,
       options,
@@ -174,44 +178,92 @@ async fn inspect(selected: Selection) -> Vec<ComponentVersionRow> {
         "Select an SSH host.",
       ));
     };
-    match ctl_client::maintenance::inspect_components(&destination, &options, &master, remote_id)
+    // Probe the installed agent, not the metadata cached on an older terminal
+    // channel. Published maintenance 1.0.2 cannot inspect companion owners.
+    let identity = ctl_client::maintenance::inspect_agent(&destination, &options, &master)
       .await
-    {
-      Ok(snapshot) => Ok(snapshot),
-      Err(error) => {
-        // Published older agents can report their own installation while lacking
-        // companion inspection. Never open a terminal as a capability fallback.
-        if let Ok(identity) =
-          ctl_client::maintenance::inspect_agent(&destination, &options, &master).await
-        {
-          selected.target.verify_remote_identity(&identity)?;
-          rows[0].installed = Some(ComponentVersionInfo::observed(
-            identity.agent_version,
-            identity.build,
-            identity.protocols.into_iter().map(Into::into).collect(),
-          ));
-        }
-        Err(CommandErrorDto::new(
-          error.code,
-          format!(
-            "Could not inspect companions or running owners. Check the connection and component inspection support before updating. {}",
-            error.message
-          ),
-        ))
-      }
-    }
+      .map_err(agent_inspection_error)?;
+    apply_agent(&mut rows[0], &selected, identity, remote_id)?;
+    ctl_client::maintenance::inspect_components(&destination, &options, &master, remote_id)
+      .await
+      .map_err(|error| CommandErrorDto::new(error.code, error.message))
   }
   .await;
   match result {
     Ok(snapshot) => apply(&mut rows, snapshot),
     Err(error) => {
-      for row in &mut rows {
-        row.detail = Some("Not checked. Refresh reuses an existing SSH connection and never starts a terminal, VPN, or daemon. Update components can authenticate using this host's preferred method.".into());
-        row.error = Some(error.message.clone());
-      }
+      apply_error(&mut rows, &error);
     }
   }
   rows
+}
+
+fn inspection_unsupported() -> CommandErrorDto {
+  CommandErrorDto::new(
+    "remote_component_inspection_unsupported",
+    "The installed agent does not support component inspection (maintenance contract 1.0.3). Update this host's components; existing sessions can stay running.",
+  )
+}
+
+fn agent_inspection_error(error: ctl_client::CoreError) -> CommandErrorDto {
+  match &error {
+    ctl_client::CoreError::SshCommandFailed { diagnostic, .. }
+      if diagnostic.contains("unrecognized subcommand 'inspect'") =>
+    {
+      inspection_unsupported()
+    }
+    _ => CommandErrorDto::backend(error),
+  }
+}
+
+fn apply_agent(
+  row: &mut ComponentVersionRow,
+  selected: &Selection,
+  identity: ctl_proto::RemoteIdentity,
+  remote_id: &str,
+) -> CommandResult<()> {
+  selected.target.verify_remote_identity(&identity)?;
+  if identity.remote_id != remote_id {
+    return Err(CommandErrorDto::new(
+      "remote_identity_mismatch",
+      "This connection reports a different remote account. Check the saved host before updating.",
+    ));
+  }
+  let supported = identity.protocols.iter().any(|protocol| {
+    protocol.name == "ctl_maintenance"
+      && protocol
+        .supported_versions
+        .contains(&ctl_proto::maintenance::CONTRACT_V1_0_3)
+  });
+  row.installed = Some(ComponentVersionInfo::observed(
+    identity.agent_version,
+    identity.build,
+    identity.protocols.into_iter().map(Into::into).collect(),
+  ));
+  row.observation = "installed";
+  row.status = VersionStatus::Unknown;
+  row.detail = Some("Checked the installed agent through the existing SSH connection.".into());
+  if !supported {
+    return Err(inspection_unsupported());
+  }
+  Ok(())
+}
+
+fn apply_error(rows: &mut [ComponentVersionRow], error: &CommandErrorDto) {
+  for row in rows
+    .iter_mut()
+    .filter(|row| row.observation == "not_checked")
+  {
+    if matches!(
+      error.code.as_str(),
+      "ssh_authentication_required" | "ssh_host_disconnected"
+    ) {
+      row.connected = Some(false);
+    }
+    row.detail = Some("Refresh reuses an existing SSH connection without starting services. Check host can authenticate and inspect this host.".into());
+    row.error = Some(error.message.clone());
+    row.error_code = Some(error.code.clone());
+  }
 }
 
 fn empty_rows(selected: &Selection) -> Vec<ComponentVersionRow> {
@@ -299,6 +351,101 @@ fn compatible(row: &ComponentVersionRow) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn selected() -> Selection {
+    Selection {
+      host_id: "saved".into(),
+      label: "Saved host".into(),
+      target: ConnectionTargetDto::ssh("saved"),
+      remote_id: Some("account".into()),
+    }
+  }
+
+  fn agent(inspection_supported: bool) -> ctl_proto::RemoteIdentity {
+    let mut protocols = ctl_proto::agent_protocols();
+    if !inspection_supported {
+      let maintenance = protocols
+        .iter_mut()
+        .find(|protocol| protocol.name == "ctl_maintenance")
+        .unwrap();
+      *maintenance = ctl_core::component::ProtocolInfo::new(
+        "ctl_maintenance",
+        2,
+        ctl_proto::maintenance::CONTRACT_V1_0_2,
+        &[ctl_proto::maintenance::CONTRACT_V1_0_2],
+      );
+    }
+    ctl_proto::RemoteIdentity {
+      remote_id: "account".into(),
+      agent_version: "0.1.0".into(),
+      build: Some(ctl_core::component::build_info()),
+      ctmux_restart_supported: true,
+      bundle: None,
+      protocols,
+    }
+  }
+
+  #[test]
+  fn old_installed_agents_stay_checked_while_companion_inspection_needs_an_update() {
+    let selected = selected();
+    let mut rows = empty_rows(&selected);
+    for row in &mut rows {
+      row.connected = Some(true);
+    }
+    let error = apply_agent(&mut rows[0], &selected, agent(false), "account").unwrap_err();
+    assert_eq!(error.code, "remote_component_inspection_unsupported");
+    apply_error(&mut rows, &error);
+    assert_eq!(rows[0].observation, "installed");
+    assert!(rows[0].installed.is_some());
+    assert!(rows[0].error.is_none());
+    assert!(rows[1..].iter().all(|row| row.connected == Some(true)
+      && row.error_code.as_deref() == Some("remote_component_inspection_unsupported")));
+    // An already installed compatible replacement permits inspection, even
+    // when the terminal's own agent still reports a previous build.
+    assert!(apply_agent(&mut rows[0], &selected, agent(true), "account").is_ok());
+  }
+
+  #[test]
+  fn an_unsupported_inspect_command_is_distinct_from_an_authentication_failure() {
+    for (diagnostic, code) in [
+      (
+        "error: unrecognized subcommand 'inspect'",
+        "remote_component_inspection_unsupported",
+      ),
+      ("Permission denied (publickey).", "backend_error"),
+    ] {
+      let error = agent_inspection_error(ctl_client::CoreError::SshCommandFailed {
+        status: "exit status: 2".into(),
+        diagnostic: diagnostic.into(),
+      });
+      assert_eq!(error.code, code);
+    }
+  }
+
+  #[test]
+  fn changed_remote_identity_cannot_become_a_checked_installation() {
+    let selected = selected();
+    let mut rows = empty_rows(&selected);
+    let error = apply_agent(&mut rows[0], &selected, agent(true), "different-account").unwrap_err();
+    assert_eq!(error.code, "remote_identity_mismatch");
+    assert!(rows[0].installed.is_none());
+    assert_eq!(rows[0].observation, "not_checked");
+  }
+
+  #[test]
+  fn missing_authentication_marks_unchecked_hosts_as_disconnected() {
+    let mut rows = empty_rows(&selected());
+    apply_error(
+      &mut rows,
+      &CommandErrorDto::new("ssh_authentication_required", "Authenticate SSH."),
+    );
+    assert!(rows.iter().all(|row| row.connected == Some(false)));
+    assert!(
+      rows
+        .iter()
+        .all(|row| row.observation == "not_checked" && row.installed.is_none())
+    );
+  }
 
   #[test]
   fn absent_and_legacy_owners_remain_distinct_from_installed_binaries() {

@@ -91,9 +91,10 @@ the remote keeps unlimited history. The row stays outside the PTY grid and
 scrollback. Copy mode keeps its frozen history and selection while connection
 status updates; reopening copy mode picks up newly synchronized history.
 
-Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's primary
-screen and retained scrollback. The snapshot fills the terminal temporarily;
-all panes continue processing and acknowledging output in the background.
+Press **Ctrl+B [** to inspect a frozen snapshot of the active pane's visible
+screen and its retained scrollback. The snapshot stays inside that pane; other
+panes remain visible and continue updating. Each pane keeps its own copy mode,
+so prefix commands can change focus without discarding a selection.
 It includes history supplied by the daemon on attachment/reconnection, plus up
 to 2,000 locally retained scrollback rows since the last checkpoint. Copy mode
 also works in a read-only attachment. If local retention evicts rows, the older
@@ -101,7 +102,7 @@ checkpoint prefix is dropped too, keeping the displayed history contiguous.
 
 - Arrows or `h/j/k/l` move; Page Up/Down move a page.
 - Mouse wheel or trackpad scrolling focuses the pane under the pointer and opens
-  history, moving five rows per event. Scrolling back to the bottom returns to
+  history when the application has not requested mouse reporting, moving five rows per event. Scrolling back to the bottom returns to
   live output unless a selection is active. Keyboard-opened history stays open.
   Shift+Page Up also opens history; ordinary Page Up in the live view goes to
   the running program. Esc or `q` returns to live output.
@@ -110,18 +111,30 @@ checkpoint prefix is dropped too, keeping the displayed history contiguous.
   `n` repeats and `N` reverses direction, wrapping at the history boundary.
 - Emacs copy keys follow tmux: Ctrl+Space starts a selection, Ctrl+G clears it,
   Alt+W or Ctrl+W copies and exits, and Ctrl+C cancels. Ctrl+B/F/P/N moves the
-  cursor, Ctrl+A/E moves within a line, Alt+V pages up, and Ctrl+V or Space pages
+  cursor (Ctrl+B remains the default prefix; a configurable prefix frees it),
+  Ctrl+A/E moves within a line, Alt+V pages up, and Ctrl+V or Space pages
   down. Alt+`<`/`>` jumps to the top/bottom; Ctrl+R/S opens backward/forward search.
 - Existing vi shortcuts remain: `h/j/k/l`, `g/G`, `v` to select, and `y` or Enter
   to copy. Space follows the Emacs default and pages down.
 - Esc or `q` returns to the live view. Esc while entering a search cancels the prompt.
 
-Logical lines remain intact; long lines scroll horizontally with the cursor.
-Selection adds newlines only between logical lines, without terminal padding.
-Click a live pane to focus it. Dividers and the fixed status row are excluded
+Live-pane snapshots preserve physical screen rows; copying and searching
+join soft wraps without adding newlines. Full-screen applications show their
+active alternate buffer without exposing the hidden shell screen. Archived logical lines scroll
+horizontally with the cursor. Click a live pane to focus it, or drag with the
+left button to select and copy on release. A drag stays with the pane where it
+started, even when the pointer crosses a divider. Dividers and the fixed status row are excluded
 from pane hit testing, including when a shared canvas is larger than the window.
 New output, reconnects, and resizing do not change the frozen selection.
-Keyboard input and host paste are consumed locally while copy mode is open.
+Keyboard input and host paste are consumed locally in the focused copy pane;
+prefix commands remain available to focus other panes, split, or detach.
+
+Applications that request mouse reporting receive pane-relative button, drag,
+wheel, or motion events according to their requested tracking mode. These
+reports require the pane's input lease. Shift requests local selection/history
+instead when the host terminal delivers the modified mouse event. Read-only
+clients always browse locally. Mouse and bracketed-paste modes survive daemon
+checkpoints and reconnects. Pixel-coordinate mouse reporting is not supported.
 
 Copied text is kept in this client's buffer. **Ctrl+B ]** pastes it using the
 active pane's input lease and bracketed-paste setting. Copy also requests the
@@ -151,8 +164,8 @@ and session lists refresh every two seconds and after local changes. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
-The first version does not include copy/scrollback mode, mouse input, pane
-dragging, extended keyboard protocols, or a command prompt. Rendering shares the
+Pane border dragging, zoom and resizing commands, extended keyboard protocols,
+and a command prompt remain unimplemented. Rendering shares the
 daemon's `avt` terminal emulation capabilities; it is not full tmux feature parity.
 
 ## Validate

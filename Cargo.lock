@@ -1057,6 +1057,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ctmux-client",
+ "ctmux-core",
  "ctmux-ipc",
  "ctmux-proto",
  "ctmuxd",

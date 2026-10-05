@@ -44,10 +44,9 @@ function protocolsMatch(left: readonly ComponentProtocolVersion[], right: readon
 }
 
 function buildsMatch(running: ComponentVersionInfo, installed: ComponentVersionInfo): boolean {
-  if (running.version !== installed.version || running.dirty !== installed.dirty || !protocolsMatch(running.protocols, installed.protocols)) return false;
-  if (running.source_revision && installed.source_revision && running.source_revision !== installed.source_revision) return false;
-  if (running.source_fingerprint && installed.source_fingerprint) return running.source_fingerprint === installed.source_fingerprint;
-  return running.source_revision !== null && running.source_revision === installed.source_revision && running.dirty === false;
+  return running.version === installed.version && running.dirty === installed.dirty
+    && running.source_revision === installed.source_revision && running.source_fingerprint === installed.source_fingerprint
+    && protocolsMatch(running.protocols, installed.protocols);
 }
 
 function buildsDiffer(running: ComponentVersionInfo, installed: ComponentVersionInfo): boolean {
@@ -61,14 +60,35 @@ export function componentBuildViews(row: ComponentVersionRow): ComponentBuildVie
   // available may instead describe this app, so it must never become "On disk".
   const installed = row.installed === undefined && row.location === "local" ? row.available : row.installed ?? null;
   if (row.observation === "installed") return [{ label: "On disk · on demand", info: installed, legacy: false }];
+  if (!row.running?.version || row.status === "not_running" || row.observation === "not_checked") {
+    return [{ label: "On disk", info: installed, legacy: false }];
+  }
   if (row.running && installed && buildsMatch(row.running, installed) && !row.legacy_protocols?.length) {
     return [{ label: row.observation === "last_observed" ? "Last observed + on disk" : "Running + on disk", info: row.running, legacy: false }];
   }
-  const running_label = row.observation === "not_checked" ? "Running · not checked" : row.status === "not_running" ? "Not running" : row.observation === "last_observed" ? "Running · last observed" : "Running";
+  const running_label = row.observation === "last_observed" ? "Running · last observed" : "Running";
   return [
     { label: running_label, info: row.running, legacy: true },
     { label: "On disk", info: installed, legacy: false },
   ];
+}
+
+export interface ComponentHostFailure {
+  message: string;
+  detail: string;
+  component_ids: ReadonlySet<string>;
+}
+
+/** A failed SSH inspection belongs to the host, not each uninspected binary. */
+export function componentHostFailure(rows: readonly ComponentVersionRow[]): ComponentHostFailure | null {
+  const errors = rows.filter((row) => row.location === "remote" && row.error);
+  const shared = errors.filter((row) => row.observation === "not_checked" || errors.filter((candidate) => candidate.error === row.error).length > 1);
+  if (!shared.length) return null;
+  return {
+    message: "Could not check components. Reconnect and try again.",
+    detail: [...new Set(shared.map((row) => row.error))].join("\n"),
+    component_ids: new Set(shared.map((row) => row.component_id)),
+  };
 }
 
 export function componentProtocolLines(row: ComponentVersionRow, view: ComponentBuildView): ProtocolLine[] {

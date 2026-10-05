@@ -19,15 +19,23 @@
 .about-section h2 { margin: 0 0 6px; color: #e5e5e5; font-size: 15px; font-weight: 600; }
 .about-section > p { margin-bottom: 14px; }
 .about-table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 5px; }
-.about-host-groups { display: flex; flex-direction: column; gap: 12px; }
-.about-host-group { border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
-.about-host-heading { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--surface-1); }
-.about-page .about-host-toggle { flex: 1; min-width: 0; justify-content: flex-start; flex-wrap: wrap; gap: 10px; padding: 4px; border: 0; background: transparent; text-align: left; white-space: normal; }
+.about-host-table { width: 100%; min-width: 780px; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
+.about-host-name-column { width: 28%; }
+.about-host-status-column { width: 47%; }
+.about-host-action-column { width: 25%; }
+.about-host-table > thead { color: var(--muted); background: var(--surface-1); }
+.about-host-table > thead th { padding: 10px 12px; font-weight: 500; border-bottom: 1px solid var(--border); }
+.about-host-row > th, .about-host-row > td { padding: 12px; vertical-align: middle; border-bottom: 1px solid var(--border); }
+.about-host-table > tbody:last-child > .about-host-row > th, .about-host-table > tbody:last-child > .about-host-row > td { border-bottom: 0; }
+.about-host-details > td { padding: 0; border-bottom: 1px solid var(--border); }
+.about-host-table > tbody:last-child > .about-host-details > td { border-bottom: 0; }
+.about-host-details .about-version-table { border-top: 1px solid var(--border); }
+.about-page .about-host-toggle { min-width: 0; width: 100%; justify-content: flex-start; gap: 10px; padding: 4px 0; border: 0; background: transparent; text-align: left; white-space: normal; }
 .about-host-toggle > svg { flex-shrink: 0; }
 .about-host-toggle > strong { overflow-wrap: anywhere; }
-.about-host-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.about-host-summary { display: flex; flex-wrap: wrap; gap: 6px; }
+.about-page .about-host-error { margin-top: 7px; color: var(--danger); font-size: 11px; }
 .about-host-actions { display: flex; flex-shrink: 0; gap: 6px; }
-.about-host-group .about-table-scroll { border: 0; border-top: 1px solid var(--border); border-radius: 0; }
 .about-version-table { width: 100%; min-width: 780px; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
 .about-component-column { width: 19%; }
 .about-version-column { width: 22%; }
@@ -71,7 +79,6 @@
 .about-empty { padding: 18px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); }
 .about-footnote { margin-top: 28px !important; font-size: 11px; }
 @media (max-width: 1000px) { .about-page-header, .about-content { padding-left: 22px; padding-right: 22px; } }
-@media (max-width: 700px) { .about-host-heading { align-items: flex-start; flex-direction: column; } .about-host-toggle { width: 100%; } .about-host-actions { padding-left: 4px; } }
 
 .about-bundle-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .about-bundle-heading h2 { margin: 0; }

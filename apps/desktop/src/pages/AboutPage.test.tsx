@@ -15,7 +15,7 @@ const snapshot: ComponentVersionsSnapshot = { components: [
 ] };
 const preflight: ComponentActionPreflight = { action_token: "native-owner-token", component_id: "owner-1", component: "ctld", location: "local", host_id: null, action: "restart", label: "ctld (SSH)", running: snapshot.components[1].running, available: current, impact: { ssh_connections: null, port_forwards: null, vpn_connections: 2, terminal_sessions: null, description: "Stops 2 managed VPN connections and may interrupt SSH connections and port forwards." } };
 async function expandGroups() {
-  await screen.findByRole("button", { name: "Show components for This computer" });
+  await screen.findByRole("table", { name: "This computer component versions" });
   for (const toggle of screen.getAllByRole("button", { name: /^Show components for / })) fireEvent.click(toggle);
 }
 
@@ -41,8 +41,8 @@ describe("About page", () => {
     const row = (await screen.findByTitle(/ctmuxd — Saved host/)).closest("tbody")!;
     expect(screen.getAllByRole("columnheader", { name: "State / build" })).toHaveLength(2);
     expect(within(row).getByText("Restart required")).toBeTruthy();
-    expect(within(row).getByLabelText("Local control legacy 1: Unverified")).toBeTruthy();
-    expect(within(row).getByLabelText("Session legacy 13: Unverified")).toBeTruthy();
+    expect(within(row).queryByRole("list", { name: "Running protocols" })).toBeNull();
+    expect(within(row).getByRole("list", { name: "On disk protocols" })).toBeTruthy();
     expect(within(row).getByTitle(/Build: current/).textContent).toContain("abcdef12");
     expect(within(row).queryByText(/1\.0\.13/)).toBeNull();
   });

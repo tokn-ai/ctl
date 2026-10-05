@@ -5,11 +5,14 @@ hosts. **Running** identifies the existing process; **On disk** identifies the
 selected executable. Build IDs distinguish development binaries that share a
 product version. Different builds do not establish which one is newer.
 
-Hosts start collapsed with a summary of outdated builds, protocol mismatches,
-and required restarts. Expand a host to see its components. Matching verified
-running and installed builds share one row; different or unverified builds show
-separate **Running** and **On disk** rows, including their build identities and
-protocols. Active-connection metadata remains labeled **Last observed**.
+Local components stay expanded. Remote hosts start as a compact table with
+summaries of outdated builds, protocol mismatches, and required restarts.
+Expand one remote host at a time to see its components. Matching reported
+running and installed builds share one row; different builds show separate
+**Running** and **On disk** rows. Unknown or stopped running builds are hidden,
+leaving the on-disk build and component status. Active-connection metadata
+remains labeled **Last observed**. Shared SSH inspection failures appear once
+on the host with a short message; hover it for the full diagnostic.
 
 Each protocol has its own line and status: a green tick for the app's current
 contract, a yellow tick for a different contract that shares an explicitly

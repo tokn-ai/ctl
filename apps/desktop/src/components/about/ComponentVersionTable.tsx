@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { componentBuildViews, componentHostStatuses, groupComponentHosts, type ComponentHostGroup } from "../../features/about/componentVersions";
+import { componentBuildViews, componentHostFailure, componentHostStatuses, groupComponentHosts, type ComponentHostGroup } from "../../features/about/componentVersions";
 import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
 import { Icon } from "../ui/Icon";
 import { ComponentProtocols } from "./ComponentProtocols";
@@ -58,11 +58,14 @@ interface Props {
   on_manage_host?(host_id: string, mode: "inspect" | "update"): void;
 }
 
-function ComponentRows({ row, busy_id, restarting, action_error, on_restart }: Pick<Props, "busy_id" | "restarting" | "action_error" | "on_restart"> & { row: ComponentVersionRow }) {
+type ActionProps = Pick<Props, "busy_id" | "restarting" | "action_error" | "on_restart">;
+
+function ComponentRows({ row, busy_id, restarting, action_error, on_restart, hide_probe_error }: ActionProps & { row: ComponentVersionRow; hide_probe_error: boolean }) {
   const action = row.action;
   const action_label = action === "reconnect" ? "Reconnect" : "Restart";
   const details = [row.label, row.observation === "last_observed" ? "Last observed" : null, row.detail].filter(Boolean).join("\n");
-  const errors = [row.error, action_error?.component_id === row.component_id ? action_error.message : null].filter(Boolean).join("\n");
+  const probe_error = hide_probe_error ? null : row.error;
+  const errors = [probe_error ? row.location === "remote" ? "Could not check this component." : probe_error : null, action_error?.component_id === row.component_id ? action_error.message : null].filter(Boolean).join("\n");
   const views = componentBuildViews(row);
   const label = row.location === "local" ? row.label : row.component === "ctl_agent" ? "ctl-agent" : row.component;
   return <tbody>{views.map((view, index) => <tr key={view.label} className={index === views.length - 1 ? "about-component-end" : "about-component-continuation"}>
@@ -70,7 +73,7 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart }: P
       <div className="about-component-name">
         <strong title={details}>{label}</strong>
         {row.observation === "last_observed" ? <small className="about-muted">Active connection</small> : null}
-        {errors ? <span className="about-row-error" role="alert" title={errors}>{errors}</span> : null}
+        {errors ? <span className="about-row-error" role="alert" title={[probe_error, errors].filter(Boolean).join("\n")}>{errors}</span> : null}
       </div>
     </th> : null}
     <td><span className="about-build-state">{view.label}</span><Version info={view.info} absent="Unknown" /></td>
@@ -84,41 +87,58 @@ function ComponentRows({ row, busy_id, restarting, action_error, on_restart }: P
   </tr>)}</tbody>;
 }
 
+function ComponentDetails({ group, ...actions }: ActionProps & { group: ComponentHostGroup }) {
+  const failure = componentHostFailure(group.rows);
+  return <table className="about-version-table" aria-label={`${group.label} component versions`}>
+    <colgroup><col className="about-component-column" /><col className="about-version-column" /><col className="about-protocol-column" /><col className="about-status-column" /></colgroup>
+    <thead><tr><th scope="col">Component</th><th scope="col">State / build</th><th scope="col">Protocols</th><th scope="col">Status / actions</th></tr></thead>
+    {group.rows.map((row) => <ComponentRows key={row.component_id} row={row} {...actions} hide_probe_error={failure?.component_ids.has(row.component_id) ?? false} />)}
+  </table>;
+}
+
+function HostStatus({ group, action_error }: Pick<Props, "action_error"> & { group: ComponentHostGroup }) {
+  const statuses = componentHostStatuses(group.rows);
+  const failure = componentHostFailure(group.rows);
+  const has_action_error = action_error && group.rows.some((row) => row.component_id === action_error.component_id);
+  return <>
+    <div className="about-host-summary">{statuses.map((status) => <span className={`about-version-status about-status-${status.status}`} key={status.label}>{status.label}</span>)}{has_action_error ? <span className="about-version-status about-status-incompatible">Action failed</span> : null}</div>
+    {failure ? <p className="about-host-error" role="alert" title={failure.detail}>{failure.message}</p> : null}
+  </>;
+}
+
 export function ComponentVersionTable({ rows, busy_id, restarting, action_error, on_restart, manageable_host_ids = [], on_manage_host }: Props) {
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [expanded, setExpanded] = useState<string | null>(null);
   const id = useId();
   const groups = groupComponentHosts(rows);
-  function toggle(group: ComponentHostGroup) {
-    setExpanded((previous) => {
-      const next = new Set(previous);
-      if (next.has(group.key)) next.delete(group.key);
-      else next.add(group.key);
-      return next;
-    });
-  }
-  return <div className="about-host-groups">{groups.map((group) => {
-    const open = expanded.has(group.key);
-    const table_id = `${id}-${encodeURIComponent(group.key)}`;
-    const statuses = componentHostStatuses(group.rows);
-    const has_action_error = action_error && group.rows.some((row) => row.component_id === action_error.component_id);
-    const manageable = group.host_id && manageable_host_ids.includes(group.host_id) && on_manage_host;
-    return <section className="about-host-group" key={group.key} aria-label={`${group.label} components`}>
-      <div className="about-host-heading">
-        <button type="button" className="about-host-toggle" onClick={() => toggle(group)} aria-expanded={open} aria-controls={table_id} aria-label={`${open ? "Hide" : "Show"} components for ${group.label}`}>
-          <Icon name={open ? "chevron_down" : "chevron_right"} />
-          <strong>{group.label}</strong>
-          <span className="about-host-summary">{statuses.map((status) => <span className={`about-version-status about-status-${status.status}`} key={status.label}>{status.label}</span>)}{has_action_error ? <span className="about-version-status about-status-incompatible">Action failed</span> : null}</span>
-        </button>
-        {manageable ? <div className="about-host-actions">
-          <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "inspect")} aria-label={`Check host ${group.label}`}>Check host</button>
-          <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "update")} aria-label={`Update components ${group.label}`}>Update…</button>
-        </div> : null}
-      </div>
-      <div id={table_id} hidden={!open} className="about-table-scroll"><table className="about-version-table" aria-label={`${group.label} component versions`}>
-        <colgroup><col className="about-component-column" /><col className="about-version-column" /><col className="about-protocol-column" /><col className="about-status-column" /></colgroup>
-        <thead><tr><th scope="col">Component</th><th scope="col">State / build</th><th scope="col">Protocols</th><th scope="col">Status / actions</th></tr></thead>
-        {group.rows.map((row) => <ComponentRows key={row.component_id} row={row} busy_id={busy_id} restarting={restarting} action_error={action_error} on_restart={on_restart} />)}
-      </table></div>
-    </section>;
-  })}</div>;
+  const local = groups.filter((group) => group.key === "local");
+  const remote = groups.filter((group) => group.key !== "local");
+  const actions = { busy_id, restarting, action_error, on_restart };
+  return <>
+    {local.map((group) => <section key={group.key} aria-label={`${group.label} components`}>
+      <div className="about-table-scroll"><ComponentDetails group={group} {...actions} /></div>
+    </section>)}
+    {remote.length ? <div className="about-table-scroll"><table className="about-host-table" aria-label="Remote component hosts">
+      <colgroup><col className="about-host-name-column" /><col className="about-host-status-column" /><col className="about-host-action-column" /></colgroup>
+      <thead><tr><th scope="col">Host</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+      {remote.map((group) => {
+        const open = expanded === group.key;
+        const table_id = `${id}-${encodeURIComponent(group.key)}`;
+        const manageable = group.host_id && manageable_host_ids.includes(group.host_id) && on_manage_host;
+        return <tbody key={group.key}>
+          <tr className="about-host-row">
+            <th scope="row"><button type="button" className="about-host-toggle" onClick={() => setExpanded((previous) => previous === group.key ? null : group.key)} aria-expanded={open} aria-controls={table_id} aria-label={`${open ? "Hide" : "Show"} components for ${group.label}`}>
+              <Icon name={open ? "chevron_down" : "chevron_right"} />
+              <strong>{group.label}</strong>
+            </button></th>
+            <td><HostStatus group={group} action_error={action_error} /></td>
+            <td>{manageable ? <div className="about-host-actions">
+              <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "inspect")} aria-label={`Check host ${group.label}`}>Check host</button>
+              <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "update")} aria-label={`Update components ${group.label}`}>Update…</button>
+            </div> : <span className="about-muted">—</span>}</td>
+          </tr>
+          <tr hidden={!open} className="about-host-details"><td colSpan={3}><div id={table_id}><ComponentDetails group={group} {...actions} /></div></td></tr>
+        </tbody>;
+      })}
+    </table></div> : null}
+  </>;
 }

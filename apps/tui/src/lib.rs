@@ -1,7 +1,9 @@
 //! Reusable local terminal UI, shared by ctmux and the legacy ctmux-tui launcher.
+mod actions;
 mod app;
 mod copy;
 mod input;
+mod keys;
 mod model;
 mod pane;
 mod render;

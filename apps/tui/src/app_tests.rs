@@ -1,4 +1,6 @@
 use super::*;
+use crate::actions::Action;
+use crate::keys::KeyState;
 use ctmux_proto::CommandSpec;
 use std::os::unix::fs::PermissionsExt;
 
@@ -245,7 +247,7 @@ async fn shared_canvas_input_viewer_reconnect_and_detach() -> Result<()> {
   owner.size = (100, 31);
   owner.resize().await?;
   wait_for_canvas(&mut owner, 100, 30).await?;
-  owner.focus(KeyCode::Left);
+  owner.focus(crate::actions::Direction::Left);
   assert_eq!(owner.focused, primary);
   assert_pane_sizes(&mut owner).await?;
 
@@ -395,13 +397,13 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
   let count = app.panes.len();
   app.select(&focused).await?;
   assert_eq!(app.focused, focused);
-  app.command(KeyCode::Char('s')).await?;
+  app.execute(Action::Sessions).await?;
   assert!(matches!(app.overlay, Overlay::Sessions(_)));
   assert_eq!(app.panes.len(), count);
   app.overlay = Overlay::None;
-  app.command(KeyCode::Char('o')).await?;
+  app.execute(Action::NextPane).await?;
   assert_ne!(app.focused, focused);
-  app.command(KeyCode::Char('o')).await?;
+  app.execute(Action::NextPane).await?;
   assert_eq!(app.focused, focused);
   let rect = app
     .view
@@ -435,7 +437,7 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
     .panes
     .values()
     .any(|pane| pane.control.state().leases().layout.owned_by_client);
-  app.command(KeyCode::Char('r')).await?;
+  app.execute(Action::Refresh).await?;
   assert_eq!(
     app
       .panes
@@ -443,7 +445,7 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
       .any(|pane| pane.control.state().leases().layout.owned_by_client),
     owner
   );
-  app.command(KeyCode::PageUp).await?;
+  app.execute(Action::History { page_back: true }).await?;
   assert!(app.active_copy().is_some());
   app
     .key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
@@ -453,7 +455,7 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
 }
 
 async fn assert_copy_mode(app: &mut App<'_>, primary: &str) -> Result<()> {
-  app.command(KeyCode::Char('[')).await?;
+  app.execute(Action::History { page_back: false }).await?;
   let snapshot = app.active_copy().unwrap().lines.clone();
   app.event(Event::Paste("IGNORED_PASTE\n".into())).await?;
   app.panes[primary]
@@ -477,7 +479,7 @@ async fn assert_copy_mode(app: &mut App<'_>, primary: &str) -> Result<()> {
     .await?;
   assert!(app.active_copy().is_none());
   app.copy_buffer = Some("BUFFER_PASTE\n".into());
-  app.command(KeyCode::Char(']')).await?;
+  app.execute(Action::Paste).await?;
   wait_for_text(app, primary, "echo:BUFFER_PASTE").await?;
   Ok(())
 }
@@ -662,6 +664,202 @@ async fn split_program(app: &mut App<'_>, program: &str) -> Result<String> {
   Ok(child)
 }
 
+async fn press(app: &mut App<'_>, code: KeyCode, modifiers: KeyModifiers) -> Result<bool> {
+  app.event(Event::Key(KeyEvent::new(code, modifiers))).await
+}
+
+async fn prefix(app: &mut App<'_>) -> Result<()> {
+  assert!(!press(app, KeyCode::Char('b'), KeyModifiers::CONTROL).await?);
+  assert!(matches!(app.keys, KeyState::Prefix));
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn modified_prefix_bindings_do_not_detach_or_change_pane_focus() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let primary = app.focused.clone();
+  let child = split_program(
+    &mut app,
+    "printf 'CHILD_READY\\n'; while IFS= read -r line; do printf 'child:%s\\n' \"$line\"; done",
+  )
+  .await?;
+  wait_for_text(&mut app, &child, "CHILD_READY").await?;
+
+  for (code, modifiers) in [
+    (KeyCode::Char('d'), KeyModifiers::CONTROL),
+    (KeyCode::Right, KeyModifiers::CONTROL),
+    (KeyCode::Right, KeyModifiers::ALT),
+    (KeyCode::Right, KeyModifiers::SHIFT),
+    (KeyCode::PageUp, KeyModifiers::SHIFT),
+  ] {
+    prefix(&mut app).await?;
+    assert!(!press(&mut app, code, modifiers).await?);
+    assert_eq!(app.focused, primary);
+    assert!(matches!(app.keys, KeyState::Root));
+    assert!(app.copies.is_empty());
+  }
+
+  press(&mut app, KeyCode::PageUp, KeyModifiers::SHIFT).await?;
+  assert!(app.copies.contains_key(&primary));
+  assert!(matches!(app.keys, KeyState::Root));
+  press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await?;
+  assert!(app.copies.is_empty());
+
+  app
+    .event(Event::Key(KeyEvent::new_with_kind(
+      KeyCode::Char('b'),
+      KeyModifiers::CONTROL,
+      KeyEventKind::Release,
+    )))
+    .await?;
+  assert!(matches!(app.keys, KeyState::Root));
+  prefix(&mut app).await?;
+  app
+    .event(Event::Key(KeyEvent::new_with_kind(
+      KeyCode::Right,
+      KeyModifiers::NONE,
+      KeyEventKind::Release,
+    )))
+    .await?;
+  assert!(matches!(app.keys, KeyState::Prefix));
+  assert_eq!(app.focused, primary);
+  press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await?;
+
+  // Terminals may report uppercase letters as a lowercase code plus SHIFT.
+  prefix(&mut app).await?;
+  press(&mut app, KeyCode::Char('a'), KeyModifiers::SHIFT).await?;
+  assert!(matches!(app.overlay, Overlay::Archives(_)));
+  assert!(matches!(app.keys, KeyState::Root));
+  press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await?;
+  prefix(&mut app).await?;
+  press(&mut app, KeyCode::Char('?'), KeyModifiers::SHIFT).await?;
+  assert!(matches!(app.overlay, Overlay::Help));
+  press(&mut app, KeyCode::Esc, KeyModifiers::NONE).await?;
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_pane_navigation_falls_through_to_input_and_can_be_reprefixed() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let primary = app.focused.clone();
+  let echo_child =
+    "printf 'CHILD_READY\\n'; while IFS= read -r line; do printf 'child:%s\\n' \"$line\"; done";
+  let child = split_program(&mut app, echo_child).await?;
+  app.focused.clone_from(&child);
+  let nested = split_program(&mut app, echo_child).await?;
+  wait_for_text(&mut app, &nested, "CHILD_READY").await?;
+  app.focused.clone_from(&primary);
+
+  prefix(&mut app).await?;
+  press(&mut app, KeyCode::Right, KeyModifiers::NONE).await?;
+  assert_eq!(app.focused, child);
+  assert!(matches!(app.keys, KeyState::Repeat { .. }));
+  app
+    .event(Event::Key(KeyEvent::new_with_kind(
+      KeyCode::Right,
+      KeyModifiers::NONE,
+      KeyEventKind::Repeat,
+    )))
+    .await?;
+  assert_eq!(app.focused, nested);
+  assert!(matches!(app.keys, KeyState::Repeat { .. }));
+
+  // Commands without a fresh prefix become ordinary input during repetition.
+  for ch in ['d', 'o', 'a'] {
+    app.keys = KeyState::Repeat {
+      until: Instant::now() + Duration::from_secs(1),
+    };
+    assert!(!press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE).await?);
+    assert_eq!(app.focused, nested);
+    assert!(matches!(app.keys, KeyState::Root));
+  }
+  press(&mut app, KeyCode::Enter, KeyModifiers::NONE).await?;
+  wait_for_text(&mut app, &nested, "child:doa").await?;
+
+  app.keys = KeyState::Repeat {
+    until: Instant::now() + Duration::from_secs(1),
+  };
+  prefix(&mut app).await?;
+  assert!(press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE).await?);
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_navigation_precedes_copy_keys_until_the_deadline_expires() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let primary = app.focused.clone();
+  let child = split_program(
+    &mut app,
+    "printf 'CHILD_READY\\n'; while IFS= read -r line; do printf 'child:%s\\n' \"$line\"; done",
+  )
+  .await?;
+  wait_for_text(&mut app, &child, "CHILD_READY").await?;
+  app
+    .copies
+    .insert(child.clone(), CopyMode::new(vec!["abcdef".into()]));
+
+  prefix(&mut app).await?;
+  press(&mut app, KeyCode::Right, KeyModifiers::NONE).await?;
+  assert_eq!(app.focused, child);
+  assert_eq!(app.active_copy().unwrap().cursor.column, 0);
+  press(&mut app, KeyCode::Left, KeyModifiers::NONE).await?;
+  assert_eq!(app.focused, primary);
+  press(&mut app, KeyCode::Right, KeyModifiers::NONE).await?;
+  assert_eq!(app.focused, child);
+  assert_eq!(app.active_copy().unwrap().cursor.column, 0);
+
+  app.keys = KeyState::Repeat {
+    until: Instant::now() - Duration::from_millis(1),
+  };
+  press(&mut app, KeyCode::Right, KeyModifiers::NONE).await?;
+  assert_eq!(app.focused, child);
+  assert_eq!(app.active_copy().unwrap().cursor.column, 1);
+  assert!(matches!(app.keys, KeyState::Root));
+
+  // A new prefix still works while a pane is in copy mode.
+  prefix(&mut app).await?;
+  press(&mut app, KeyCode::Left, KeyModifiers::NONE).await?;
+  assert_eq!(app.focused, primary);
+  assert!(app.copies.contains_key(&child));
+
+  let rect = app
+    .view
+    .as_ref()
+    .unwrap()
+    .panes
+    .iter()
+    .find(|rect| rect.terminal_id == child)
+    .unwrap()
+    .clone();
+  app
+    .event(mouse(MouseEventKind::Moved, rect.left + 1, rect.top))
+    .await?;
+  assert!(matches!(app.keys, KeyState::Repeat { .. }));
+  assert_eq!(app.focused, primary);
+  app
+    .event(mouse(MouseEventKind::ScrollUp, rect.left + 1, rect.top))
+    .await?;
+  assert!(matches!(app.keys, KeyState::Root));
+  assert_eq!(app.focused, child);
+  assert_eq!(app.active_copy().unwrap().cursor.column, 1);
+  press(&mut app, KeyCode::Left, KeyModifiers::NONE).await?;
+  assert_eq!(app.focused, child);
+  assert_eq!(app.active_copy().unwrap().cursor.column, 0);
+  app.detach().await;
+  Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn copy_stays_in_its_pane_while_other_panes_update_and_accept_input() -> Result<()> {
   let daemon = Daemon::start().await?;
@@ -681,7 +879,7 @@ async fn copy_stays_in_its_pane_while_other_panes_update_and_accept_input() -> R
     .input(b"BEFORE_COPY\n".to_vec())
     .await?;
   wait_for_text(&mut app, &primary, "echo:BEFORE_COPY").await?;
-  app.command(KeyCode::Char('[')).await?;
+  app.execute(Action::History { page_back: false }).await?;
   let frozen = app.copies[&primary].lines.clone();
   app.panes[&primary]
     .control
@@ -707,8 +905,9 @@ async fn copy_stays_in_its_pane_while_other_panes_update_and_accept_input() -> R
   assert_eq!(app.focused, child);
   assert!(app.active_copy().is_none());
   app.event(Event::Paste("LIVE_INPUT\n".into())).await?;
+  assert!(matches!(app.keys, KeyState::Root));
   wait_for_text(&mut app, &child, "child:LIVE_INPUT").await?;
-  app.command(KeyCode::Char('[')).await?;
+  app.execute(Action::History { page_back: false }).await?;
   assert_eq!(app.copies.len(), 2);
   app
     .key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
@@ -768,7 +967,7 @@ async fn mouse_routes_application_reports_and_local_drags_to_the_original_pane()
     .await?;
   assert!(!app.copies.contains_key(&child));
   // Keep delivery to the original pane, clamping a release over the left neighbour.
-  app.prefix_pending = true;
+  app.keys = KeyState::Prefix;
   app
     .event(mouse(
       MouseEventKind::Up(MouseButton::Left),
@@ -776,7 +975,7 @@ async fn mouse_routes_application_reports_and_local_drags_to_the_original_pane()
       app.size.1 - 1,
     ))
     .await?;
-  app.prefix_pending = false;
+  app.keys = KeyState::Root;
   wait_for_text(&mut app, &child, "REPORTS_DONE").await?;
   let received = app.panes[&child]
     .model
@@ -810,7 +1009,7 @@ async fn mouse_routes_application_reports_and_local_drags_to_the_original_pane()
   assert!(viewer.copies.contains_key(&child));
   viewer.detach().await;
   app.focused = primary.clone();
-  app.command(KeyCode::Char('[')).await?;
+  app.execute(Action::History { page_back: false }).await?;
   // Use known frozen text to verify cross-border drag release without forwarding.
   app
     .copies

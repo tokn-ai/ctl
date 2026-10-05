@@ -1,7 +1,9 @@
 use crate::{
   Result,
+  actions::{Action, Direction},
   copy::{Action as CopyAction, BottomBehavior, CopyMode},
   input::{self, Prefix},
+  keys::{Dispatch, KeyState},
   pane::{Pane, identity},
   render::{Frame, Renderer, pane_at, pane_position},
   transport::{LocalTransport, Transport},
@@ -53,7 +55,7 @@ pub struct App<'a> {
   read_only: bool,
   archive_only: bool,
   prefix: Prefix,
-  prefix_pending: bool,
+  keys: KeyState,
   sessions: Vec<SessionInfo>,
   archives: Vec<ctmux_client::archive::SessionArchive>,
   ended: Option<String>,
@@ -83,7 +85,7 @@ impl App<'_> {
       read_only,
       archive_only: false,
       prefix,
-      prefix_pending: false,
+      keys: KeyState::Root,
       sessions: Vec::new(),
       archives: Vec::new(),
       ended: None,
@@ -144,6 +146,7 @@ impl App<'_> {
   }
 
   pub fn open_archive(&mut self, session_id: &str) -> Result<()> {
+    self.keys = KeyState::Root;
     self.archive_only = true;
     self.archives = self.local_archives()?;
     let archive = self
@@ -314,7 +317,7 @@ impl App<'_> {
       .map_or_else(String::new, |pane| pane.terminal_id.clone());
     self.view = Some(view);
     self.overlay = Overlay::None;
-    self.prefix_pending = false;
+    self.keys = KeyState::Root;
     self.reconcile().await?;
     // The first attachment may have resized the shared canvas.
     self.refresh_view().await
@@ -556,32 +559,32 @@ impl App<'_> {
 
   async fn event(&mut self, event: Event) -> Result<bool> {
     match event {
-      Event::Mouse(mouse) => self.mouse(mouse).await?,
-      Event::Key(key)
-        if key.kind != KeyEventKind::Release
-          && key.code == KeyCode::PageUp
-          && key.modifiers == KeyModifiers::SHIFT
-          && self.active_copy().is_none()
-          && matches!(self.overlay, Overlay::None) =>
-      {
-        self.command(KeyCode::Char('[')).await?;
-        let (width, height) = self.copy_size(&CopyTarget::Pane(self.focused.clone()));
-        if let Some(mode) = self.copies.get_mut(&self.focused) {
-          mode.fit(width, height);
-          mode.scroll(true, height, height);
+      Event::Mouse(mouse) => {
+        if matches!(
+          mouse.kind,
+          MouseEventKind::Down(_)
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+        ) {
+          self.keys.cancel_repeat();
         }
+        self.mouse(mouse).await?;
       }
-      Event::Key(key) if key.kind != KeyEventKind::Release => return self.key(key).await,
+      Event::Key(key) => return self.key(key).await,
       Event::Resize(columns, rows) => {
         self.size = (columns, rows);
         self.resize().await?;
       }
-      Event::Paste(text)
+      Event::Paste(text) => {
+        self.keys.cancel_repeat();
         if self.active_copy().is_none()
           && matches!(self.overlay, Overlay::None)
-          && !self.prefix_pending =>
-      {
-        self.paste(text).await?;
+          && !self.keys.is_prefix()
+        {
+          self.paste(text).await?;
+        }
       }
       _ => {}
     }
@@ -778,7 +781,7 @@ impl App<'_> {
     {
       return self.captured_mouse(mouse, capture).await;
     }
-    if self.prefix_pending {
+    if self.keys.is_prefix() {
       return Ok(());
     }
     if mouse.column >= self.size.0 || mouse.row >= self.size.1.saturating_sub(1) {
@@ -896,7 +899,11 @@ impl App<'_> {
   }
 
   async fn key(&mut self, key: KeyEvent) -> Result<bool> {
+    if key.kind == KeyEventKind::Release {
+      return Ok(false);
+    }
     if self.archive_copy.is_some() {
+      self.keys.cancel_repeat();
       let target = CopyTarget::Archive;
       let (_, height) = self.copy_size(&target);
       let action = self
@@ -908,17 +915,24 @@ impl App<'_> {
       return Ok(false);
     }
     if matches!(self.overlay, Overlay::None) {
-      if self.prefix_pending {
-        self.prefix_pending = false;
-        if input::matches_prefix(key, &self.prefix) {
+      match self.keys.resolve(key, &self.prefix, Instant::now()) {
+        Dispatch::Ignore | Dispatch::Pending => return Ok(false),
+        Dispatch::Action(binding) => return self.execute(binding.action).await,
+        Dispatch::SendPrefix => {
           self.send_key(key).await?;
           return Ok(false);
         }
-        return self.command(key.code).await;
+        Dispatch::Unknown => {
+          self.notice(format!("{} ? for commands", self.prefix.label));
+          return Ok(false);
+        }
+        Dispatch::Forward => {}
       }
-      if input::matches_prefix(key, &self.prefix) {
-        self.prefix_pending = true;
-        return Ok(false);
+      if key.code == KeyCode::PageUp
+        && key.modifiers == KeyModifiers::SHIFT
+        && self.active_copy().is_none()
+      {
+        return self.execute(Action::History { page_back: true }).await;
       }
       let target = CopyTarget::Pane(self.focused.clone());
       let (_, height) = self.copy_size(&target);
@@ -927,6 +941,8 @@ impl App<'_> {
         self.copy_action(&target, action)?;
         return Ok(false);
       }
+    } else {
+      self.keys.cancel_repeat();
     }
     if self.ended.is_some() {
       for pane in self.panes.values_mut() {
@@ -980,13 +996,13 @@ impl App<'_> {
     Ok(())
   }
 
-  async fn command(&mut self, code: KeyCode) -> Result<bool> {
-    match code {
-      KeyCode::Char('A') => {
+  async fn execute(&mut self, action: Action) -> Result<bool> {
+    match action {
+      Action::Archives => {
         self.archives = self.local_archives()?;
         self.overlay = Overlay::Archives(0);
       }
-      KeyCode::Char('[') | KeyCode::PageUp => {
+      Action::History { page_back } => {
         self.release_mouse().await?;
         let id = self.focused.clone();
         if !self.copies.contains_key(&id)
@@ -994,14 +1010,15 @@ impl App<'_> {
         {
           self.copies.insert(id.clone(), mode);
         }
-        if code == KeyCode::PageUp {
-          let (_, height) = self.copy_size(&CopyTarget::Pane(id.clone()));
+        if page_back {
+          let (width, height) = self.copy_size(&CopyTarget::Pane(id.clone()));
           if let Some(mode) = self.copies.get_mut(&id) {
+            mode.fit(width, height);
             mode.scroll(true, height, height);
           }
         }
       }
-      KeyCode::Char(']') if !self.read_only => {
+      Action::Paste if !self.read_only => {
         if let Some(text) = self.copy_buffer.clone() {
           // Reuse the same lease checks and bracketed-paste encoding as a host paste.
           self.paste(text).await?;
@@ -1009,22 +1026,26 @@ impl App<'_> {
           self.notice("Copy buffer is empty".into());
         }
       }
-      KeyCode::Char('d') => return Ok(true),
-      KeyCode::Char('r') => self.renderer.invalidate(),
-      KeyCode::Char('o') => self.next_pane(),
-      KeyCode::Char('?') => self.overlay = Overlay::Help,
-      KeyCode::Char('s' | 'w') => self.overlay = Overlay::Sessions(self.session_index()),
-      KeyCode::Char('n') => self.next_session(1).await?,
-      KeyCode::Char('p') => self.next_session(-1).await?,
-      KeyCode::Char('c') if !self.read_only => self.create().await?,
-      KeyCode::Char('%') if !self.read_only => self.split(SplitAxis::Horizontal).await?,
-      KeyCode::Char('"') if !self.read_only => self.split(SplitAxis::Vertical).await?,
-      KeyCode::Char('x') if !self.read_only => self.overlay = Overlay::Kill(self.focused.clone()),
-      KeyCode::Char('I') if !self.read_only => self.toggle_lease(LeaseKind::Input).await?,
-      KeyCode::Char('R') if !self.read_only => self.toggle_lease(LeaseKind::Layout).await?,
-      KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => self.focus(code),
-      KeyCode::Esc => {}
-      _ => self.notice(format!("{} ? for commands", self.prefix.label)),
+      Action::Detach => return Ok(true),
+      Action::Refresh => self.renderer.invalidate(),
+      Action::NextPane => self.next_pane(),
+      Action::Help => self.overlay = Overlay::Help,
+      Action::Sessions => self.overlay = Overlay::Sessions(self.session_index()),
+      Action::NextSession => self.next_session(1).await?,
+      Action::PreviousSession => self.next_session(-1).await?,
+      Action::CreateSession if !self.read_only => self.create().await?,
+      Action::Split(axis) if !self.read_only => self.split(axis).await?,
+      Action::KillPane if !self.read_only => self.overlay = Overlay::Kill(self.focused.clone()),
+      Action::ToggleLease(lease) if !self.read_only => self.toggle_lease(lease).await?,
+      Action::Focus(direction) => self.focus(direction),
+      Action::Cancel => {}
+      Action::Paste
+      | Action::CreateSession
+      | Action::Split(_)
+      | Action::KillPane
+      | Action::ToggleLease(_) => {
+        self.notice("This attachment is read only".into());
+      }
     }
     Ok(false)
   }
@@ -1133,7 +1154,7 @@ impl App<'_> {
       .clone_from(&view.panes[(index + 1) % view.panes.len()].terminal_id);
   }
 
-  fn focus(&mut self, direction: KeyCode) {
+  fn focus(&mut self, direction: Direction) {
     let Some(view) = &self.view else {
       return;
     };
@@ -1248,7 +1269,7 @@ impl App<'_> {
     }
     if let Some(mode) = self.copies.get(&self.focused)
       && matches!(self.overlay, Overlay::None)
-      && !self.prefix_pending
+      && !self.keys.is_prefix()
     {
       return format!(" {} | {}", self.connection_history_status(), mode.status());
     }
@@ -1269,7 +1290,7 @@ impl App<'_> {
     {
       return format!("{ended} — press any key to close pane");
     }
-    if self.prefix_pending {
+    if self.keys.is_prefix() {
       return format!(
         " {} | PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help",
         self.connection_history_status()
@@ -1404,6 +1425,7 @@ impl App<'_> {
         format!("Commands after {} — any key closes help", self.prefix.label),
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    x: terminate (confirm)".into(),
+        "Focus arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),
@@ -1430,11 +1452,11 @@ fn session_not_found(error: &crate::Error) -> bool {
 fn adjacent(
   panes: &[ctmux_proto::PaneGeometry],
   focused: &str,
-  direction: KeyCode,
+  direction: Direction,
 ) -> Option<String> {
   let origin = panes.iter().find(|pane| pane.terminal_id == focused)?;
-  let horizontal = matches!(direction, KeyCode::Left | KeyCode::Right);
-  let sign = if matches!(direction, KeyCode::Right | KeyCode::Down) {
+  let horizontal = matches!(direction, Direction::Left | Direction::Right);
+  let sign = if matches!(direction, Direction::Right | Direction::Down) {
     1
   } else {
     -1

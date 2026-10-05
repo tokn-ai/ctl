@@ -68,7 +68,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
     })
   };
   app.event(wheel(MouseEventKind::ScrollUp)).await?;
-  let mode = app.copy_mode.as_ref().unwrap();
+  let mode = app.active_copy().unwrap();
   assert_eq!(
     mode.top,
     mode.lines.len().saturating_sub(9).saturating_sub(5)
@@ -80,17 +80,17 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
     .input(b"AFTER_SCROLL\n".to_vec())
     .await?;
   wait_for_text(&mut app, &primary, "echo:AFTER_SCROLL").await?;
-  assert_eq!(app.copy_mode.as_ref().unwrap().lines, snapshot);
-  assert_eq!(app.copy_mode.as_ref().unwrap().top, top);
+  assert_eq!(app.active_copy().unwrap().lines, snapshot);
+  assert_eq!(app.active_copy().unwrap().top, top);
   app.event(wheel(MouseEventKind::ScrollDown)).await?;
-  assert!(app.copy_mode.is_none());
+  assert!(app.active_copy().is_none());
   app
     .event(Event::Key(KeyEvent::new(
       KeyCode::PageUp,
       KeyModifiers::SHIFT,
     )))
     .await?;
-  assert!(app.copy_mode.is_some());
+  assert!(app.active_copy().is_some());
   app
     .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
     .await?;
@@ -189,7 +189,15 @@ async fn wait_for_text(app: &mut App<'_>, id: &str, text: &str) -> Result<()> {
   timeout(Duration::from_secs(5), async {
     loop {
       app.drain().await;
-      if app.panes[id].model.vt.text().join("\n").contains(text) {
+      if app.panes[id]
+        .model
+        .vt
+        .lines()
+        .map(avt::Line::text)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .contains(text)
+      {
         break;
       }
       tokio::time::sleep(Duration::from_millis(10)).await;
@@ -413,7 +421,14 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
     }))
     .await?;
   assert_eq!(app.focused, rect.terminal_id);
-  app.focus_at(0, app.size.1 - 1);
+  app
+    .event(Event::Mouse(MouseEvent {
+      kind: MouseEventKind::Down(MouseButton::Left),
+      column: 0,
+      row: app.size.1 - 1,
+      modifiers: KeyModifiers::NONE,
+    }))
+    .await?;
   assert_eq!(app.focused, rect.terminal_id);
   app.focused = focused;
   let owner = app
@@ -429,24 +444,24 @@ async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
     owner
   );
   app.command(KeyCode::PageUp).await?;
-  assert!(app.copy_mode.is_some());
+  assert!(app.active_copy().is_some());
   app
     .key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
     .await?;
-  assert!(app.copy_mode.is_none());
+  assert!(app.active_copy().is_none());
   Ok(())
 }
 
 async fn assert_copy_mode(app: &mut App<'_>, primary: &str) -> Result<()> {
   app.command(KeyCode::Char('[')).await?;
-  let snapshot = app.copy_mode.as_ref().unwrap().lines.clone();
+  let snapshot = app.active_copy().unwrap().lines.clone();
   app.event(Event::Paste("IGNORED_PASTE\n".into())).await?;
   app.panes[primary]
     .control
     .input(b"DURING_COPY\n".to_vec())
     .await?;
   wait_for_text(app, primary, "echo:DURING_COPY").await?;
-  assert_eq!(app.copy_mode.as_ref().unwrap().lines, snapshot);
+  assert_eq!(app.active_copy().unwrap().lines, snapshot);
   assert!(
     !app.panes[primary]
       .model
@@ -460,7 +475,7 @@ async fn assert_copy_mode(app: &mut App<'_>, primary: &str) -> Result<()> {
       crossterm::event::KeyModifiers::NONE,
     ))
     .await?;
-  assert!(app.copy_mode.is_none());
+  assert!(app.active_copy().is_none());
   app.copy_buffer = Some("BUFFER_PASTE\n".into());
   app.command(KeyCode::Char(']')).await?;
   wait_for_text(app, primary, "echo:BUFFER_PASTE").await?;
@@ -608,5 +623,253 @@ async fn archived_output_opens_without_a_daemon() -> Result<()> {
   assert!(!socket.exists());
   assert!(matches!(app.overlay, Overlay::ArchiveTerminals(..)));
   std::fs::remove_dir_all(directory)?;
+  Ok(())
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+  Event::Mouse(MouseEvent {
+    kind,
+    column,
+    row,
+    modifiers: KeyModifiers::NONE,
+  })
+}
+
+async fn split_program(app: &mut App<'_>, program: &str) -> Result<String> {
+  let ServerMessage::ViewSnapshot { view } = app
+    .request(ClientMessage::SplitTerminal {
+      terminal_id: app.focused.clone(),
+      axis: SplitAxis::Horizontal,
+      command: Some(CommandSpec {
+        program: "/bin/sh".into(),
+        arguments: vec!["-c".into(), program.into()],
+      }),
+      working_directory: None,
+      terminal_size: app.canvas_size(),
+    })
+    .await?
+  else {
+    return Err("expected split".into());
+  };
+  let child = view
+    .panes
+    .iter()
+    .find(|pane| !app.panes.contains_key(&pane.terminal_id))
+    .unwrap()
+    .terminal_id
+    .clone();
+  app.refresh_view().await?;
+  Ok(child)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn copy_stays_in_its_pane_while_other_panes_update_and_accept_input() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  app.size = (80, 10);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let primary = app.focused.clone();
+  let child = split_program(
+    &mut app,
+    "printf 'CHILD_READY\\n'; while IFS= read -r line; do printf 'child:%s\\n' \"$line\"; done",
+  )
+  .await?;
+  wait_for_text(&mut app, &child, "CHILD_READY").await?;
+  app.panes[&primary]
+    .control
+    .input(b"BEFORE_COPY\n".to_vec())
+    .await?;
+  wait_for_text(&mut app, &primary, "echo:BEFORE_COPY").await?;
+  app.command(KeyCode::Char('[')).await?;
+  let frozen = app.copies[&primary].lines.clone();
+  app.panes[&primary]
+    .control
+    .input(b"AFTER_COPY\n".to_vec())
+    .await?;
+  app.panes[&child]
+    .control
+    .input(b"LIVE_UPDATE\n".to_vec())
+    .await?;
+  wait_for_text(&mut app, &primary, "echo:AFTER_COPY").await?;
+  wait_for_text(&mut app, &child, "child:LIVE_UPDATE").await?;
+  let frame = app.frame().text_rows().join("\n");
+  assert!(frame.contains("echo:BEFORE_COPY"));
+  assert!(!frame.contains("echo:AFTER_COPY"));
+  assert!(frame.contains("child:LIVE_UPDATE"));
+  assert!(frame.contains("COPY"));
+  app
+    .key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+    .await?;
+  app
+    .key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+    .await?;
+  assert_eq!(app.focused, child);
+  assert!(app.active_copy().is_none());
+  app.event(Event::Paste("LIVE_INPUT\n".into())).await?;
+  wait_for_text(&mut app, &child, "child:LIVE_INPUT").await?;
+  app.command(KeyCode::Char('[')).await?;
+  assert_eq!(app.copies.len(), 2);
+  app
+    .key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+    .await?;
+  app
+    .key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+    .await?;
+  assert_eq!(app.copies[&primary].lines, frozen);
+  app.panes[&primary].control.detach().await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&primary].connected {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  app.refresh().await?;
+  assert!(app.panes[&primary].connected);
+  assert_eq!(app.copies[&primary].lines, frozen);
+  app
+    .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+    .await?;
+  assert!(!app.copies.contains_key(&primary));
+  assert!(app.copies.contains_key(&child));
+  app.select(&session).await?;
+  assert!(app.copies.is_empty());
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mouse_routes_application_reports_and_local_drags_to_the_original_pane() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  app.size = (80, 10);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let primary = app.focused.clone();
+  let child = split_program(&mut app, "stty -echo -icanon; printf 'HIDDEN_PRIMARY\\033[?1049h\\033[2J\\033[H\\033[?1002;1006hMOUSE_READY\\n'; dd bs=1 count=9 2>/dev/null | od -An -tx1; dd bs=1 count=9 2>/dev/null | od -An -tx1; printf 'REPORTS_DONE\\n'; sleep 30").await?;
+  wait_for_text(&mut app, &child, "MOUSE_READY").await?;
+  let rect = app
+    .view
+    .as_ref()
+    .unwrap()
+    .panes
+    .iter()
+    .find(|rect| rect.terminal_id == child)
+    .unwrap()
+    .clone();
+  // Pane-local (2,1) becomes the application's one-based (3,2).
+  app
+    .event(mouse(
+      MouseEventKind::Down(MouseButton::Left),
+      rect.left + 2,
+      rect.top + 1,
+    ))
+    .await?;
+  assert!(!app.copies.contains_key(&child));
+  // Keep delivery to the original pane, clamping a release over the left neighbour.
+  app.prefix_pending = true;
+  app
+    .event(mouse(
+      MouseEventKind::Up(MouseButton::Left),
+      0,
+      app.size.1 - 1,
+    ))
+    .await?;
+  app.prefix_pending = false;
+  wait_for_text(&mut app, &child, "REPORTS_DONE").await?;
+  let received = app.panes[&child]
+    .model
+    .vt
+    .lines()
+    .map(avt::Line::text)
+    .collect::<Vec<_>>()
+    .join("\n")
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
+  assert!(
+    received.contains("1b 5b 3c 30 3b 33 3b 32 4d"),
+    "{received}"
+  );
+  assert!(
+    received.contains("1b 5b 3c 30 3b 31 3b 39 6d"),
+    "{received}"
+  );
+  assert!(app.mouse_capture.is_none());
+  assert_alternate_screen_drag(&mut app, &child, rect.left).await?;
+  // Read-only attachments can browse history but must never send application input.
+  let mut viewer = daemon.app(true);
+  viewer.size = app.size;
+  viewer.start(Some(child.clone())).await?;
+  wait_for_text(&mut viewer, &child, "REPORTS_DONE").await?;
+  assert!(viewer.panes[&child].model.input_modes.mouse().enabled());
+  viewer
+    .event(mouse(MouseEventKind::ScrollUp, rect.left + 1, 1))
+    .await?;
+  assert!(viewer.copies.contains_key(&child));
+  viewer.detach().await;
+  app.focused = primary.clone();
+  app.command(KeyCode::Char('[')).await?;
+  // Use known frozen text to verify cross-border drag release without forwarding.
+  app
+    .copies
+    .insert(primary.clone(), CopyMode::new(vec!["abcdef".into()]));
+  app
+    .event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 0))
+    .await?;
+  app
+    .event(mouse(MouseEventKind::Drag(MouseButton::Left), 3, 0))
+    .await?;
+  app
+    .event(mouse(
+      MouseEventKind::Up(MouseButton::Left),
+      rect.left + 1,
+      0,
+    ))
+    .await?;
+  assert_eq!(app.copy_buffer.as_deref(), Some("bcdef"));
+  assert!(!app.copies.contains_key(&primary));
+  assert_eq!(app.focused, primary);
+  app.detach().await;
+  Ok(())
+}
+
+async fn assert_alternate_screen_drag(
+  app: &mut App<'_>,
+  child: &str,
+  pane_left: u16,
+) -> Result<()> {
+  // Shift drags select the visible alternate screen, not hidden primary text.
+  let visible = app.panes[child].model.vt.line(0).text();
+  let expected: String = visible.chars().take(5).collect();
+  for (kind, x) in [
+    (MouseEventKind::Down(MouseButton::Left), 0),
+    (MouseEventKind::Drag(MouseButton::Left), 3),
+    (MouseEventKind::Up(MouseButton::Left), 4),
+  ] {
+    app
+      .event(Event::Mouse(MouseEvent {
+        kind,
+        column: pane_left + x,
+        row: 0,
+        modifiers: KeyModifiers::SHIFT,
+      }))
+      .await?;
+    if matches!(kind, MouseEventKind::Drag(_)) {
+      let frozen = app.copies[child]
+        .lines
+        .iter()
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+      assert!(!frozen.contains("HIDDEN_PRIMARY"));
+      assert_eq!(
+        app.copies[child].lines[0].iter().collect::<String>(),
+        visible.trim_end()
+      );
+    }
+  }
+  assert_eq!(app.copy_buffer.as_deref(), Some(expected.as_str()));
   Ok(())
 }

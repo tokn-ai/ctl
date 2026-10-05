@@ -349,7 +349,7 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
   let session = create_shell_session(
     &socket_path,
     "checkpoint",
-    "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; printf '\\033[2J\\033[Hcheckpoint-ready'; IFS= read -r line",
+    "printf '\\033[?1002;1006;2004hxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; printf '\\033[2J\\033[Hcheckpoint-ready'; IFS= read -r line",
   )
   .await
   .map_err(|error| format!("checkpoint session was not created: {error}"))?;
@@ -376,6 +376,12 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
   )
   .await?;
   assert!(contains_bytes(&initial_output, b"checkpoint-ready"));
+  let mut initial_modes = ctmux_core::mouse::TerminalInputModes::default();
+  for ch in std::str::from_utf8(&initial_output)?.chars() {
+    initial_modes.feed(ch);
+  }
+  assert!(initial_modes.mouse().enabled());
+  assert!(initial_modes.bracketed_paste());
   write_frame(&mut first_attach, &ClientMessage::Detach).await?;
   wait_for_detached(&mut first_attach).await?;
   drop(first_attach);
@@ -398,6 +404,15 @@ async fn checkpoint_restores_terminal_state_after_journal_compaction() -> TestRe
   assert!(history.is_supported());
   assert_eq!(history.sequence, checkpoint.sequence);
 
+  let mut restored_modes = ctmux_core::mouse::TerminalInputModes::default();
+  for ch in std::str::from_utf8(&checkpoint.payload)?.chars() {
+    restored_modes.feed(ch);
+  }
+  assert_eq!(restored_modes.mouse(), initial_modes.mouse());
+  assert_eq!(
+    restored_modes.bracketed_paste(),
+    initial_modes.bracketed_paste()
+  );
   let mut restored_terminal = avt::Vt::new(80, 24);
   restored_terminal.feed_str(&String::from_utf8(checkpoint.payload)?);
   assert!(

@@ -147,9 +147,28 @@ impl SavedIdentity {
   }
 
   pub(crate) fn matches(&self, snapshot: &IdentitySnapshot) -> bool {
-    self.valid(&snapshot.identity_id)
-      && self.path == snapshot.path
-      && self.file_version == snapshot.file_version
+    self
+      .check_binding(
+        &snapshot.identity_id,
+        &snapshot.path,
+        &snapshot.file_version,
+      )
+      .is_ok()
+  }
+
+  pub(crate) fn check_binding(
+    &self,
+    identity_id: &str,
+    path: &str,
+    file_version: &str,
+  ) -> Result<(), IdentityError> {
+    if !self.valid(identity_id) || self.path != path {
+      return Err(IdentityError::ListFailed);
+    }
+    if self.file_version != file_version {
+      return Err(IdentityError::FileChanged);
+    }
+    Ok(())
   }
 }
 

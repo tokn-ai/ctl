@@ -46,12 +46,12 @@ fn fallback_warnings_require_a_prompt_for_one_prepared_encrypted_identity() {
     .fallback_warning(&prompt(&prepared.snapshots[0].path))
     .unwrap();
   assert!(warning.contains("Keychain access is unavailable"));
-  assert!(!warning.contains("No usable saved passphrase"));
+  assert!(!warning.contains("No saved passphrase"));
   assert!(
     prepared
       .fallback_warning(&prompt(&prepared.snapshots[1].path))
       .unwrap()
-      .contains("No usable saved passphrase")
+      .contains("No saved passphrase")
   );
   assert!(
     prepared
@@ -60,6 +60,26 @@ fn fallback_warnings_require_a_prompt_for_one_prepared_encrypted_identity() {
   );
   let ambiguous = &prepared.snapshots[0].path[..prepared.snapshots[0].path.len() - 1];
   assert!(prepared.fallback_warning(&prompt(ambiguous)).is_none());
+  for (error, message) in [
+    (
+      identities::IdentityError::FileChanged,
+      "The identity file changed",
+    ),
+    (
+      identities::IdentityError::ListFailed,
+      "Saved identity metadata could not be read",
+    ),
+  ] {
+    prepared.fallbacks.record(
+      &prepared.snapshots[0].identity_id,
+      fallback::Reason::Identity(error),
+    );
+    let warning = prepared
+      .fallback_warning(&prompt(&prepared.snapshots[0].path))
+      .unwrap();
+    assert!(warning.contains(message));
+    assert!(!warning.contains("No saved passphrase"));
+  }
   prepared.fallbacks.clear(&prepared.snapshots[0].identity_id);
   assert!(
     prepared

@@ -1,5 +1,5 @@
 use super::*;
-use ctl_ipc::credentials::CredentialKind as StoredKind;
+use ctl_ipc::credentials::{CredentialKind as StoredKind, legacy_scope_id, scope_id};
 #[cfg(unix)]
 use ctl_ipc::credentials::{Request, Response};
 
@@ -119,6 +119,49 @@ fn matching_uses_shared_scope_and_preserves_distinct_orphan_labels() {
   assert_eq!(result.credentials[0].name, "Saved SSH credential bbbbbbbb");
   assert!(!serialized.contains("scope_id"));
   assert!(!serialized.contains("key_name"));
+}
+
+#[test]
+fn vpn_credential_associations_match_stable_and_exact_legacy_routes() {
+  let vpn_target = |connection_id: &str| {
+    serde_json::from_value::<crate::dto::ConnectionTargetDto>(serde_json::json!({
+      "kind": "ssh", "destination": "target.internal",
+      "vpn_connection_id": connection_id
+    }))
+    .unwrap()
+  };
+  let work = vpn_target("work");
+  let personal = vpn_target("personal");
+  let work_target = work.to_ssh_target().unwrap();
+  let personal_target = personal.to_ssh_target().unwrap();
+  let (hosts, complete) = host_metadata(&[
+    NamedTarget {
+      name: "Work".into(),
+      target: work,
+    },
+    NamedTarget {
+      name: "Personal".into(),
+      target: personal,
+    },
+  ]);
+  assert!(complete);
+  assert_ne!(scope_id(&work_target), legacy_scope_id(&work_target));
+  for (target, name) in [(&work_target, "Work"), (&personal_target, "Personal")] {
+    for scope in [scope_id(target), legacy_scope_id(target)] {
+      let row = keychain_record(stored(&scope), &hosts);
+      assert_eq!(row.name, name);
+      assert_eq!(row.target.as_deref(), Some("target.internal"));
+    }
+  }
+
+  // Legacy labels are matched only for the actual route, never guessed sockets.
+  let mut other_socket = work_target.clone();
+  other_socket.gateways[0].vpn.as_mut().unwrap().socket_path =
+    "/different-runtime/ctld.sock".into();
+  assert_eq!(scope_id(&work_target), scope_id(&other_socket));
+  let orphan = keychain_record(stored(&legacy_scope_id(&other_socket)), &hosts);
+  assert_eq!(orphan.name, "Saved SSH credential bbbbbbbb");
+  assert!(orphan.detail.unwrap().contains("No saved host"));
 }
 
 #[test]

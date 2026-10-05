@@ -58,7 +58,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | --- | --- |
 | `%` | Split right |
 | `"` | Split below |
-| Arrow keys | Focus an adjacent pane |
+| Arrow keys | Focus an adjacent pane; repeat without a prefix for 500 ms |
 | `o` | Cycle to the next pane |
 | `c` | Create and select a session |
 | `n` / `p` | Next / previous session |
@@ -81,6 +81,12 @@ has no extra window layer. Uppercase `I` and `R` are ctmux-specific lease contro
 Press the prefix twice to send it to the active pane. Other keys, including
 Ctrl+C, are forwarded to the active PTY. The TUI supports conventional xterm
 keys, modified arrows, function keys, Unicode input, and bracketed paste.
+
+After a prefix plus an arrow, further plain arrows keep changing pane focus
+when pressed within 500 ms of the previous focus key. Any other key ends
+repetition and follows ordinary input handling, including copy mode keys.
+Commands such as detach and split always require a fresh prefix. Ctrl, Alt,
+and Shift remain part of the binding: modified arrows do not focus panes.
 
 ## Scrollback and copy mode
 

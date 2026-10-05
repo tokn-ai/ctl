@@ -1,4 +1,8 @@
+import { useId, useState } from "react";
+import { componentBuildViews, componentHostStatuses, groupComponentHosts, type ComponentHostGroup } from "../../features/about/componentVersions";
 import type { ComponentVersionInfo, ComponentVersionRow, ComponentVersionStatus } from "../../lib/types";
+import { Icon } from "../ui/Icon";
+import { ComponentProtocols } from "./ComponentProtocols";
 
 const status_labels: Record<ComponentVersionStatus, string> = {
   current: "Current",
@@ -9,11 +13,6 @@ const status_labels: Record<ComponentVersionStatus, string> = {
   unknown: "Unknown",
   not_running: "Not running",
   unavailable: "Unavailable",
-};
-
-const protocol_labels: Record<string, string> = {
-  ctmux: "Session", ctmux_control: "Local control", task: "Task", task_control: "Task control",
-  ctld: "ctld IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Agent identity", ctl_maintenance: "Remote maintenance", ctld_helper: "Helper API",
 };
 
 export function versionLabel(info: ComponentVersionInfo | null): string {
@@ -33,8 +32,12 @@ function versionDetails(info: ComponentVersionInfo | null, absent: string): stri
 }
 
 function Version({ info, absent }: { info: ComponentVersionInfo | null; absent: string }) {
-  const build = info?.source_revision?.slice(0, 8) ?? info?.source_fingerprint?.slice(0, 8);
-  return <span title={versionDetails(info, absent)}>{info?.version ?? absent}{build ? <small className="about-build-id">{build}{info?.dirty ? " · modified" : ""}</small> : null}</span>;
+  return <span className="about-build-version" title={versionDetails(info, absent)}>
+    {info?.version ?? absent}
+    {info?.source_revision ? <small className="about-build-id">Revision {info.source_revision.slice(0, 8)}</small> : null}
+    {info?.source_fingerprint ? <small className="about-build-id">Build {info.source_fingerprint.slice(0, 10)}</small> : null}
+    {info?.dirty ? <small className="about-build-id">Modified source</small> : null}
+  </span>;
 }
 
 function statusLabel(row: ComponentVersionRow): string {
@@ -43,30 +46,6 @@ function statusLabel(row: ComponentVersionRow): string {
   if (row.observation === "installed") return "On demand";
   if (row.status !== "unknown" || !row.running) return status_labels[row.status];
   return !row.running.source_revision && !row.running.source_fingerprint ? "Build not reported" : "Build unverified";
-}
-
-const compact_protocol_labels: Record<string, string> = {
-  ctmux: "Session", ctmux_control: "Control", task: "Task", task_control: "Control",
-  ctld: "IPC", ctld_lifecycle: "Lifecycle", ctl_identity: "Identity", ctl_maintenance: "Maintenance", ctld_helper: "Helper",
-};
-
-function Protocols({ row }: { row: ComponentVersionRow }) {
-  const actual = (row.observation === "installed" ? row.installed?.protocols : row.running?.protocols) ?? [];
-  const required = row.required_protocols ?? row.available?.protocols ?? [];
-  const observed = actual.map((protocol) => {
-    const expected = required.find((candidate) => candidate.name === protocol.name);
-    const requirement = expected ? ` (requires ${expected.supported_versions.join(" or ")})` : "";
-    return `${protocol_labels[protocol.name] ?? protocol.name} ${protocol.version}${requirement}; build ${protocol.build}; supports ${protocol.supported_versions.join(", ")}`;
-  });
-  const missing = required.filter((protocol) => !actual.some((candidate) => candidate.name === protocol.name));
-  const detail = [...observed, ...missing.map((protocol) => `${protocol_labels[protocol.name] ?? protocol.name}: not reported (requires ${protocol.supported_versions.join(" or ")})`)];
-  const legacy = row.legacy_protocols ?? [];
-  const summary = [
-    ...legacy.map((protocol) => `${compact_protocol_labels[protocol.name] ?? protocol.name} legacy ${protocol.version}`),
-    ...actual.map((protocol) => `${compact_protocol_labels[protocol.name] ?? protocol.name} ${protocol.version}`),
-    ...missing.map((protocol) => `${compact_protocol_labels[protocol.name] ?? protocol.name} ?`),
-  ].join(" · ");
-  return <span className="about-protocols" title={[...legacy.map((p) => `${p.name}: historical numeric protocol ${p.version}, not a published contract`), ...detail].join("\n") || "Protocols not reported"}>{summary || "Unknown"}</span>;
 }
 
 interface Props {
@@ -79,36 +58,67 @@ interface Props {
   on_manage_host?(host_id: string, mode: "inspect" | "update"): void;
 }
 
+function ComponentRows({ row, busy_id, restarting, action_error, on_restart }: Pick<Props, "busy_id" | "restarting" | "action_error" | "on_restart"> & { row: ComponentVersionRow }) {
+  const action = row.action;
+  const action_label = action === "reconnect" ? "Reconnect" : "Restart";
+  const details = [row.label, row.observation === "last_observed" ? "Last observed" : null, row.detail].filter(Boolean).join("\n");
+  const errors = [row.error, action_error?.component_id === row.component_id ? action_error.message : null].filter(Boolean).join("\n");
+  const views = componentBuildViews(row);
+  const label = row.location === "local" ? row.label : row.component === "ctl_agent" ? "ctl-agent" : row.component;
+  return <tbody>{views.map((view, index) => <tr key={view.label} className={index === views.length - 1 ? "about-component-end" : "about-component-continuation"}>
+    {index === 0 ? <th scope="rowgroup" rowSpan={views.length}>
+      <div className="about-component-name">
+        <strong title={details}>{label}</strong>
+        {row.observation === "last_observed" ? <small className="about-muted">Active connection</small> : null}
+        {errors ? <span className="about-row-error" role="alert" title={errors}>{errors}</span> : null}
+      </div>
+    </th> : null}
+    <td><span className="about-build-state">{view.label}</span><Version info={view.info} absent="Unknown" /></td>
+    <td><ComponentProtocols row={row} view={view} /></td>
+    {index === 0 ? <td rowSpan={views.length}><div className="about-row-actions">
+      <span className={`about-version-status about-status-${row.status}`}>{statusLabel(row)}</span>
+      {action ? <button type="button" onClick={() => on_restart(row.component_id)} disabled={busy_id !== null} aria-label={`${action_label} ${row.label}`}>
+        {busy_id === row.component_id ? restarting ? action === "reconnect" ? "Reconnecting…" : "Restarting…" : "Checking…" : action_label}
+      </button> : null}
+    </div></td> : null}
+  </tr>)}</tbody>;
+}
+
 export function ComponentVersionTable({ rows, busy_id, restarting, action_error, on_restart, manageable_host_ids = [], on_manage_host }: Props) {
-  return <div className="about-table-scroll"><table className="about-version-table">
-    <colgroup><col className="about-component-column" /><col className="about-version-column" /><col className="about-protocol-column" /><col className="about-version-column" /><col className="about-status-column" /></colgroup>
-    <thead><tr><th>Component</th><th>Running</th><th>Protocol</th><th>Installed</th><th>Status / actions</th></tr></thead>
-    <tbody>{rows.map((row) => {
-      const action = row.action;
-      const action_label = action === "reconnect" ? "Reconnect" : "Restart";
-      const details = [row.label, row.observation === "last_observed" ? "Last observed" : null, row.detail].filter(Boolean).join("\n");
-      const errors = [row.error, action_error?.component_id === row.component_id ? action_error.message : null].filter(Boolean).join("\n");
-      return <tr key={row.component_id}>
-        <th scope="row">
-          <div className="about-component-name">
-            <strong title={details}>{row.label}</strong>
-            {errors ? <span className="about-row-error" role="alert" title={errors}>{errors}</span> : null}
-          </div>
-        </th>
-        <td><Version info={row.running} absent={row.observation === "installed" ? "On demand" : row.status === "not_running" ? "Not running" : "Unknown"} /></td>
-        <td><Protocols row={row} /></td>
-        <td><Version info={row.installed === undefined && row.location === "local" ? row.available : row.installed ?? null} absent="Unknown" /></td>
-        <td><div className="about-row-actions">
-          <span className={`about-version-status about-status-${row.status}`}>{statusLabel(row)}</span>
-          {action ? <button type="button" onClick={() => on_restart(row.component_id)} disabled={busy_id !== null} aria-label={`${action_label} ${row.label}`}>
-            {busy_id === row.component_id ? restarting ? action === "reconnect" ? "Reconnecting…" : "Restarting…" : "Checking…" : action_label}
-          </button> : null}
-          {row.component === "ctl_agent" && row.host_id && manageable_host_ids.includes(row.host_id) && row.component_id.startsWith("remote:saved:") ? <>
-            <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host?.(row.host_id!, "inspect")} aria-label={`Check host ${row.label}`}>Check host</button>
-            <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host?.(row.host_id!, "update")} aria-label={`Update components ${row.label}`}>Update…</button>
-          </> : null}
-        </div></td>
-      </tr>;
-    })}</tbody>
-  </table></div>;
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const id = useId();
+  const groups = groupComponentHosts(rows);
+  function toggle(group: ComponentHostGroup) {
+    setExpanded((previous) => {
+      const next = new Set(previous);
+      if (next.has(group.key)) next.delete(group.key);
+      else next.add(group.key);
+      return next;
+    });
+  }
+  return <div className="about-host-groups">{groups.map((group) => {
+    const open = expanded.has(group.key);
+    const table_id = `${id}-${encodeURIComponent(group.key)}`;
+    const statuses = componentHostStatuses(group.rows);
+    const has_action_error = action_error && group.rows.some((row) => row.component_id === action_error.component_id);
+    const manageable = group.host_id && manageable_host_ids.includes(group.host_id) && on_manage_host;
+    return <section className="about-host-group" key={group.key} aria-label={`${group.label} components`}>
+      <div className="about-host-heading">
+        <button type="button" className="about-host-toggle" onClick={() => toggle(group)} aria-expanded={open} aria-controls={table_id} aria-label={`${open ? "Hide" : "Show"} components for ${group.label}`}>
+          <Icon name={open ? "chevron_down" : "chevron_right"} />
+          <strong>{group.label}</strong>
+          <span className="about-host-summary">{statuses.map((status) => <span className={`about-version-status about-status-${status.status}`} key={status.label}>{status.label}</span>)}{has_action_error ? <span className="about-version-status about-status-incompatible">Action failed</span> : null}</span>
+        </button>
+        {manageable ? <div className="about-host-actions">
+          <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "inspect")} aria-label={`Check host ${group.label}`}>Check host</button>
+          <button type="button" disabled={busy_id !== null} onClick={() => on_manage_host(group.host_id!, "update")} aria-label={`Update components ${group.label}`}>Update…</button>
+        </div> : null}
+      </div>
+      <div id={table_id} hidden={!open} className="about-table-scroll"><table className="about-version-table" aria-label={`${group.label} component versions`}>
+        <colgroup><col className="about-component-column" /><col className="about-version-column" /><col className="about-protocol-column" /><col className="about-status-column" /></colgroup>
+        <thead><tr><th scope="col">Component</th><th scope="col">State / build</th><th scope="col">Protocols</th><th scope="col">Status / actions</th></tr></thead>
+        {group.rows.map((row) => <ComponentRows key={row.component_id} row={row} busy_id={busy_id} restarting={restarting} action_error={action_error} on_restart={on_restart} />)}
+      </table></div>
+    </section>;
+  })}</div>;
 }

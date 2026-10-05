@@ -11,9 +11,14 @@ const current: ComponentVersionInfo = { version: "0.1.0", source_revision: "abcd
 const snapshot: ComponentVersionsSnapshot = { components: [
   { component_id: "app", component: "ctmux", label: "ctmux", location: "local", host_id: null, observation: "bundled", status: "current", running: current, available: current, restart_supported: false, action: null, detail: null, error: null },
   { component_id: "owner-1", component: "ctld", label: "ctld (SSH)", location: "local", host_id: null, observation: "running", status: "different_build", running: { ...current, source_revision: "112233445566" }, available: current, restart_supported: true, action: "restart", detail: "SSH and VPN broker", error: null },
-  { component_id: "remote-1", component: "ctl_agent", label: "ctl-agent — Development", location: "remote", host_id: "dev", observation: "last_observed", status: "unknown", running: { ...current, source_revision: null, source_fingerprint: null }, available: current, restart_supported: false, action: null, detail: null, error: null },
+  { component_id: "remote-1", component: "ctl_agent", label: "ctl-agent — Development", location: "remote", host_id: "dev", host_name: "Development", observation: "last_observed", status: "unknown", running: { ...current, source_revision: null, source_fingerprint: null }, available: current, restart_supported: false, action: null, detail: null, error: null },
 ] };
 const preflight: ComponentActionPreflight = { action_token: "native-owner-token", component_id: "owner-1", component: "ctld", location: "local", host_id: null, action: "restart", label: "ctld (SSH)", running: snapshot.components[1].running, available: current, impact: { ssh_connections: null, port_forwards: null, vpn_connections: 2, terminal_sessions: null, description: "Stops 2 managed VPN connections and may interrupt SSH connections and port forwards." } };
+async function expandGroups() {
+  await screen.findByRole("button", { name: "Show components for This computer" });
+  for (const toggle of screen.getAllByRole("button", { name: /^Show components for / })) fireEvent.click(toggle);
+}
+
 const props = () => ({ visible: true, on_close: vi.fn(), on_restarted: vi.fn(), on_dialog_change: vi.fn() });
 
 beforeEach(() => {
@@ -32,11 +37,12 @@ describe("About page", () => {
       legacy_protocols: [{ name: "ctmux_control", version: 1 }, { name: "ctmux", version: 13 }], restart_required: true, status: "incompatible" };
     api.versions.mockResolvedValue(next);
     render(<AboutPage {...props()} />);
-    const row = (await screen.findByText("ctmuxd — Saved host")).closest("tr")!;
-    expect(screen.getAllByRole("columnheader", { name: "Installed" })).toHaveLength(2);
-    expect(screen.getAllByRole("columnheader", { name: "Running" })).toHaveLength(2);
+    await expandGroups();
+    const row = (await screen.findByTitle(/ctmuxd — Saved host/)).closest("tbody")!;
+    expect(screen.getAllByRole("columnheader", { name: "State / build" })).toHaveLength(2);
     expect(within(row).getByText("Restart required")).toBeTruthy();
-    expect(within(row).getByText(/Control legacy 1.*Session legacy 13/)).toBeTruthy();
+    expect(within(row).getByLabelText("Local control legacy 1: Unverified")).toBeTruthy();
+    expect(within(row).getByLabelText("Session legacy 13: Unverified")).toBeTruthy();
     expect(within(row).getByTitle(/Build: current/).textContent).toContain("abcdef12");
     expect(within(row).queryByText(/1\.0\.13/)).toBeNull();
   });
@@ -46,9 +52,10 @@ describe("About page", () => {
     next.components[2] = { ...next.components[2], component_id: "remote:saved:dev:ctl_agent", observation: "not_checked", running: null, installed: null, status: "unavailable", error: "SSH account is not connected." };
     api.versions.mockResolvedValue(next);
     render(<AboutPage {...props()} remote_targets={[{ kind: "ssh", host_id: "dev", destination: "dev" }]} />);
-    expect(await screen.findByRole("button", { name: "Update components ctl-agent — Development" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Check host ctl-agent — Development" })).toBeTruthy();
-    expect(screen.getByText("Not checked")).toBeTruthy();
+    await expandGroups();
+    expect(await screen.findByRole("button", { name: "Update components Development" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Check host Development" })).toBeTruthy();
+    expect(screen.getAllByText("Not checked").length).toBeGreaterThan(0);
     expect(api.preflight).not.toHaveBeenCalled();
     expect(api.restart).not.toHaveBeenCalled();
   });
@@ -63,6 +70,7 @@ describe("About page", () => {
     api.preflight.mockResolvedValue(reconnect);
     const execute_action = vi.fn().mockResolvedValue({ detail: "Two terminal transports reconnected." });
     render(<AboutPage {...props()} execute_action={execute_action} />);
+    await expandGroups();
     expect(await screen.findByRole("button", { name: "Restart ctl-taskd" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Restart ctmux" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Reconnect ctl-agent — Development" }));
@@ -80,12 +88,13 @@ describe("About page", () => {
     legacy.components[2].running = { ...current, source_fingerprint: null };
     api.versions.mockResolvedValue(legacy);
     render(<AboutPage {...props()} />);
-    const legacy_row = (await screen.findByText("ctl-taskd")).closest("tr")!;
+    await expandGroups();
+    const legacy_row = (await screen.findByText("ctl-taskd")).closest("tbody")!;
     expect(within(legacy_row).getByText("Build not reported")).toBeTruthy();
     expect(screen.getByText("Build unverified")).toBeTruthy();
     legacy.components[1].status = "incompatible";
     fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
-    expect(await screen.findByText("Protocol mismatch")).toBeTruthy();
+    expect(await screen.findAllByText("Protocol mismatch")).toBeTruthy();
   });
 
   it("checks only when opened, and distinguishes observed build metadata from current versions", async () => {
@@ -93,8 +102,9 @@ describe("About page", () => {
     const page = render(<AboutPage {...options} visible={false} />);
     expect(api.versions).not.toHaveBeenCalled();
     page.rerender(<AboutPage {...options} />);
-    expect(await screen.findByText("Different build")).toBeTruthy();
-    expect(screen.getByTitle(/Last observed/).textContent).toBe("ctl-agent — Development");
+    await expandGroups();
+    expect(await screen.findAllByText("Different build")).toBeTruthy();
+    expect(screen.getByTitle(/Last observed/).textContent).toBe("ctl-agent");
     expect(screen.getByText("Build not reported")).toBeTruthy();
     expect(screen.queryByText("Outdated")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
@@ -108,14 +118,16 @@ describe("About page", () => {
     partial.components[1].running = null;
     api.versions.mockResolvedValue(partial);
     render(<AboutPage {...props()} />);
+    await expandGroups();
     expect(await screen.findByText("ctld timed out.")).toBeTruthy();
-    expect(screen.getByText("ctl-agent — Development")).toBeTruthy();
-    expect(screen.getByText("Unavailable")).toBeTruthy();
+    expect(screen.getByTitle(/ctl-agent — Development/)).toBeTruthy();
+    expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
   });
 
   it("preflights before confirming restart, then refreshes versions and connections", async () => {
     const options = props();
     render(<AboutPage {...options} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     expect(api.preflight).toHaveBeenCalledWith("owner-1");
@@ -131,6 +143,7 @@ describe("About page", () => {
 
   it("canceling the impact confirmation leaves the daemon untouched", async () => {
     render(<AboutPage {...props()} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -142,6 +155,7 @@ describe("About page", () => {
   it("shows preflight errors at their component without opening a confirmation", async () => {
     api.preflight.mockRejectedValue({ message: "Update ctld before it can restart cooperatively." });
     render(<AboutPage {...props()} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     expect(await screen.findByText("Update ctld before it can restart cooperatively.")).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -152,6 +166,7 @@ describe("About page", () => {
     api.restart.mockRejectedValue({ message: "Replacement readiness timed out." });
     const options = props();
     render(<AboutPage {...options} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
@@ -162,11 +177,12 @@ describe("About page", () => {
 
   it("retains the last successful snapshot when refresh fails", async () => {
     render(<AboutPage {...props()} />);
-    await screen.findByText("Different build");
+    await expandGroups();
+    await screen.findAllByText("Different build");
     api.versions.mockRejectedValue({ message: "Version service unavailable." });
     fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
     expect(await screen.findByText(/Showing the last successful check/)).toBeTruthy();
-    expect(screen.getByText("Different build")).toBeTruthy();
+    expect(screen.getAllByText("Different build").length).toBeGreaterThan(0);
   });
 
   it("shows required protocols and separate build identities when running metadata is incomplete", async () => {
@@ -174,11 +190,12 @@ describe("About page", () => {
     partial.components[1].running = { ...current, protocols: [], source_fingerprint: "running-build" };
     api.versions.mockResolvedValue(partial);
     render(<AboutPage {...props()} />);
-    const row = (await screen.findByText("ctld (SSH)")).closest("tr")!;
+    await expandGroups();
+    const row = (await screen.findByText("ctld (SSH)")).closest("tbody")!;
     expect(within(row).getByTitle(/SSH and VPN broker/)).toBeTruthy();
-    expect(within(row).getByTitle("ctld IPC: not reported (requires 1.0.12)").textContent).toBe("IPC ?");
-    expect(within(row).getByTitle(/Build: running-build/).textContent).toBe("0.1.0abcdef12");
-    expect(within(row).getByTitle(/Build: current/).textContent).toBe("0.1.0abcdef12");
+    expect(within(row).getByLabelText("ctld IPC Not reported: Unverified").title).toContain("Requires 1.0.12");
+    expect(within(row).getByTitle(/Build: running-build/).textContent).toContain("Build running-bu");
+    expect(within(row).getByTitle(/Build: current/).textContent).toContain("Build current");
   });
 
   it("compares running protocols with app requirements even when the available binary is also stale", async () => {
@@ -189,10 +206,11 @@ describe("About page", () => {
     stale.components[1].status = "incompatible";
     api.versions.mockResolvedValue(stale);
     render(<AboutPage {...props()} />);
-    const row = (await screen.findByText("ctld (SSH)")).closest("tr")!;
-    const protocols = within(row).getByText("IPC 1.0.11 · Lifecycle ?");
-    expect(protocols.title).toContain("ctld IPC 1.0.11 (requires 1.0.12)");
-    expect(protocols.title).toContain("Lifecycle: not reported (requires 1.0.1)");
+    await expandGroups();
+    const row = (await screen.findByText("ctld (SSH)")).closest("tbody")!;
+    const protocols = within(row).getByRole("list", { name: "Running + on disk protocols" });
+    expect(within(protocols).getByLabelText("ctld IPC 1.0.11: Incompatible").title).toContain("Requires 1.0.12");
+    expect(within(protocols).getByLabelText("Lifecycle Not reported: Unverified").title).toContain("Requires 1.0.1");
     expect(within(row).getByText("Protocol mismatch")).toBeTruthy();
   });
 
@@ -204,11 +222,11 @@ describe("About page", () => {
     await waitFor(() => expect(api.versions).toHaveBeenCalledOnce());
     page.rerender(<AboutPage {...options} visible={false} />);
     page.rerender(<AboutPage {...options} />);
-    await screen.findByText("Different build");
+    await screen.findAllByText("Different build");
     const old = structuredClone(snapshot);
     old.components[1].status = "outdated";
     await act(async () => { complete(old); });
-    expect(screen.getByText("Different build")).toBeTruthy();
+    expect(screen.getAllByText("Different build").length).toBeGreaterThan(0);
     expect(screen.queryByText("Outdated")).toBeNull();
   });
 
@@ -217,6 +235,7 @@ describe("About page", () => {
     api.preflight.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
     const page = render(<AboutPage {...options} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     await waitFor(() => expect(api.preflight).toHaveBeenCalledOnce());
     page.rerender(<AboutPage {...options} visible={false} />);
@@ -230,6 +249,7 @@ describe("About page", () => {
     api.preflight.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const options = props();
     const page = render(<AboutPage {...options} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     await waitFor(() => expect(api.preflight).toHaveBeenCalledOnce());
     page.rerender(<AboutPage {...options} visible={false} />);
@@ -245,12 +265,13 @@ describe("About page", () => {
     api.versions.mockResolvedValueOnce(structuredClone(snapshot)).mockRejectedValueOnce(new Error("Probe timed out."));
     const options = props();
     render(<AboutPage {...options} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));
     expect(await screen.findByText("ctld (SSH) restarted.")).toBeTruthy();
     expect(await screen.findByText(/Could not refresh versions: Probe timed out./)).toBeTruthy();
-    expect(screen.getByText("Different build")).toBeTruthy();
+    expect(screen.getAllByText("Different build").length).toBeGreaterThan(0);
     expect(options.on_restarted).toHaveBeenCalledOnce();
   });
 
@@ -259,6 +280,7 @@ describe("About page", () => {
     api.restart.mockReturnValue(new Promise((resolve) => { complete = resolve; }));
     const options = props();
     const page = render(<AboutPage {...options} />);
+    await expandGroups();
     fireEvent.click(await screen.findByRole("button", { name: "Restart ctld (SSH)" }));
     const dialog = await screen.findByRole("dialog", { name: "Restart ctld (SSH)" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Restart ctld" }));

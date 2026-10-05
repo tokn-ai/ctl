@@ -2507,7 +2507,7 @@ describe("workspace-backed terminal page", () => {
     );
     render(<TerminalPage />);
     await screen.findByRole("button", { name: "Connect host" });
-    expect(screen.getByText("unverified", { exact: false })).toBeTruthy();
+    expect(screen.getByText("unverified")).toBeTruthy();
     expect(api.listSessions).not.toHaveBeenCalled();
     expect(api.inspectKnownSessions).not.toHaveBeenCalled();
     expect(attachment.connect).not.toHaveBeenCalled();

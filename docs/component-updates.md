@@ -1,9 +1,22 @@
 # Components and updates
 
 Open **About ctmux** to inspect components on this computer and saved remote
-hosts. **Running** identifies the existing process; **Installed** identifies the
+hosts. **Running** identifies the existing process; **On disk** identifies the
 selected executable. Build IDs distinguish development binaries that share a
 product version. Different builds do not establish which one is newer.
+
+Hosts start collapsed with a summary of outdated builds, protocol mismatches,
+and required restarts. Expand a host to see its components. Matching verified
+running and installed builds share one row; different or unverified builds show
+separate **Running** and **On disk** rows, including their build identities and
+protocols. Active-connection metadata remains labeled **Last observed**.
+
+Each protocol has its own line and status: a green tick for the app's current
+contract, a yellow tick for a different contract that shares an explicitly
+supported version, and a red cross for no shared contract. Unreported protocols
+and historical numeric protocols have a neutral question mark. The tooltip
+shows the supported and required contracts; matching major versions alone do
+not imply compatibility.
 
 Refresh reuses existing authenticated SSH connections and checks service owners
 without attaching a terminal, starting a daemon or VPN, or installing files.

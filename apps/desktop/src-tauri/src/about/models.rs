@@ -107,6 +107,8 @@ pub struct ComponentVersionRow {
   pub label: String,
   pub location: &'static str,
   pub host_id: Option<String>,
+  pub host_key: Option<String>,
+  pub host_name: Option<String>,
   pub observation: &'static str,
   pub status: VersionStatus,
   pub running: Option<ComponentVersionInfo>,
@@ -129,6 +131,8 @@ impl ComponentVersionRow {
       label: label.into(),
       location: "local",
       host_id: None,
+      host_key: None,
+      host_name: None,
       observation: "running",
       status: VersionStatus::Unknown,
       running: None,
@@ -224,6 +228,7 @@ fn required_protocols(component: &str) -> Vec<ProtocolVersion> {
       ctl_task_proto::protocol_info(),
       ctl_task_proto::control::protocol_info(),
     ],
+    "ctl_agent" => ctl_proto::agent_protocols(),
     _ => Vec::new(),
   };
   infos.into_iter().map(ProtocolVersion::from).collect()
@@ -342,6 +347,17 @@ mod tests {
       source_fingerprint: fingerprint.map(str::to_owned),
       ..ComponentVersionInfo::default()
     }
+  }
+
+  #[test]
+  fn agent_rows_advertise_app_requirements_before_inspection() {
+    let row = ComponentVersionRow::local("ctl_agent", "ctl-agent");
+    let expected: Vec<_> = ctl_proto::agent_protocols()
+      .into_iter()
+      .map(ProtocolVersion::from)
+      .collect();
+    assert_ne!(expected, []);
+    assert_eq!(row.required_protocols, expected);
   }
 
   #[test]

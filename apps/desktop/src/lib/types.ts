@@ -86,6 +86,9 @@ export interface ComponentVersionRow {
   label: string;
   location: "local" | "remote";
   host_id: string | null;
+  /** Stable host grouping, including authenticated accounts without a saved host. */
+  host_key?: string | null;
+  host_name?: string | null;
   observation: "running" | "bundled" | "last_observed" | "installed" | "not_checked" | "legacy";
   status: ComponentVersionStatus;
   running: ComponentVersionInfo | null;

@@ -142,6 +142,8 @@ pub(super) async fn rows(
       row.component_id = format!("remote:saved:{}:ctl_agent", host.host_id);
       row.location = "remote";
       row.host_id = Some(host.host_id.clone());
+      row.host_key = Some(format!("saved:{}", host.host_id));
+      row.host_name = Some(host.name.clone());
       row.observation = "not_checked";
       row.status = VersionStatus::Unavailable;
       row.error = Some(error.message);
@@ -225,6 +227,8 @@ fn empty_rows(selected: &Selection) -> Vec<ComponentVersionRow> {
     row.component_id = selected.component_id(component);
     row.location = "remote";
     row.host_id = Some(selected.host_id.clone());
+    row.host_key = Some(format!("saved:{}", selected.host_id));
+    row.host_name = Some(selected.label.clone());
     row.observation = "not_checked";
     row.status = VersionStatus::Unavailable;
     row
@@ -305,6 +309,16 @@ mod tests {
       remote_id: Some("identity".into()),
     };
     let mut rows = empty_rows(&selected);
+    assert!(
+      rows
+        .iter()
+        .all(|row| row.host_key.as_deref() == Some("saved:saved"))
+    );
+    assert!(
+      rows
+        .iter()
+        .all(|row| row.host_name.as_deref() == Some("Saved host"))
+    );
     let installed = ctl_core::component::ComponentInfo {
       build: ctl_core::component::build_info(),
       protocols: vec![

@@ -51,11 +51,17 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
         {component_notice ? <p className="about-notice" role="status">{component_notice}</p> : null}
         {model.loading && !model.snapshot ? <p role="status">Checking local components and saved hosts…</p> : null}
         <ComponentBundlePanel visible={visible} on_selected={() => void model.refresh()} />
-        <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">This computer</h2><p className="about-muted">Installed shows the selected local build. Select a complete bundle above, then restart a running service separately.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
+        <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">Local components</h2><p className="about-muted">On disk shows the selected local build. Expand this computer to compare it with running services, then restart separately.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
         <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">Remote hosts</h2><p className="about-muted">Refresh uses existing SSH connections, including hosts whose terminal daemon cannot reply. Check host can authenticate through its preferred route. Updating installs verified components and keeps sessions; Restart applies the installed terminal daemon after confirmation.</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {
           const target = remote_targets.find((target) => target.kind === "ssh" && target.host_id === host_id);
           if (target) { setComponentNotice(null); setComponentFlow({ target, mode }); }
         }} manageable_host_ids={remote_targets.flatMap((target) => target.kind === "ssh" && target.host_id ? [target.host_id] : [])} /> : !model.loading ? <p className="about-empty">No saved or connected remote hosts.</p> : null}</section>
+        <div className="about-protocol-legend" aria-label="Protocol status legend">
+          <span className="about-protocol-current"><Icon name="check" size={14} />Current protocol</span>
+          <span className="about-protocol-compatible"><Icon name="check" size={14} />Compatible, different version</span>
+          <span className="about-protocol-incompatible"><Icon name="close" size={14} />Incompatible protocol</span>
+          <span className="about-muted">? Unreported or unverified</span>
+        </div>
         <p className="about-footnote">“Different build” means the source differs; it does not establish which build is newer. Unknown versions cannot be compared.</p>
       </div>
     </section>

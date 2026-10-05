@@ -163,7 +163,7 @@ it("keeps active connections visible when a separate inspection fails", () => {
 
 it("distinguishes an old agent from failed SSH and retains its checked installation", () => {
   const agent = { ...row, component_id: "agent", component: "ctl_agent" as const, observation: "installed" as const, running: null, action: null, connected: true };
-  const unchecked = { ...row, running: null, installed: null, observation: "not_checked" as const, status: "unavailable" as const, action: null, connected: true, error_code: "remote_component_inspection_unsupported", error: "Maintenance 1.0.3 is required." };
+  const unchecked = { ...row, running: null, installed: null, observation: "not_checked" as const, status: "unavailable" as const, action: null, connected: true, error_code: "remote_component_inspection_unsupported", error: "Maintenance 1.1.3 is required." };
   render(<ComponentVersionTable {...props()} rows={[agent, unchecked]} />);
   expect(screen.getByText("Connected")).toBeTruthy();
   expect(screen.getByText("Update agent")).toBeTruthy();

@@ -86,7 +86,7 @@ async fn inspect(
     ServerMessage::Components {
       protocol_version,
       snapshot,
-    } if protocol_version == maintenance::CONTRACT_V1_0_3
+    } if protocol_version == maintenance::CONTRACT_V1_1_3
       && valid_snapshot(&snapshot, expected_remote_id) =>
     {
       snapshot
@@ -294,7 +294,7 @@ async fn prepare(
     } if maintenance::protocol_offer().accepts(protocol_version)
       && valid_preparation(&info, expected_remote_id)
       && (info.running.legacy_protocols.is_empty()
-        || protocol_version == maintenance::CONTRACT_V1_0_3) =>
+        || protocol_version == maintenance::CONTRACT_V1_1_3) =>
     {
       info
     }

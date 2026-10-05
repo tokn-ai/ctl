@@ -8,9 +8,9 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 pub const PROTOCOL_BUILD: u16 = 3;
 pub const CONTRACT_V1_0_2: ProtocolVersion = ProtocolVersion::new(1, 0, 2);
-pub const CONTRACT_V1_0_3: ProtocolVersion = ProtocolVersion::new(1, 0, 3);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_3;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_2, CONTRACT_V1_0_3];
+pub const CONTRACT_V1_1_3: ProtocolVersion = ProtocolVersion::new(1, 1, 3);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_3;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_2, CONTRACT_V1_1_3];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -176,15 +176,22 @@ mod tests {
   use super::*;
 
   #[test]
-  fn component_inspection_retains_the_published_restart_contract() {
+  fn component_inspection_opens_a_new_cycle_and_retains_the_published_restart_contract() {
+    let initial = ProtocolVersion::new(1, 0, 2);
+    let next_cycle = ProtocolVersion::new(1, 1, 3);
+    let historical_offer: ProtocolOffer =
+      serde_json::from_str(r#"{"build":2,"version":"1.0.2","supported_versions":["1.0.2"]}"#)
+        .unwrap();
+    assert_eq!(protocol_offer().version, next_cycle);
     assert_eq!(
-      protocol_offer().negotiate(&[CONTRACT_V1_0_2]),
-      Some(CONTRACT_V1_0_2)
+      historical_offer.negotiate(SUPPORTED_PROTOCOL_VERSIONS),
+      Some(initial)
     );
     assert_eq!(
-      protocol_offer().negotiate(&[CONTRACT_V1_0_3]),
-      Some(CONTRACT_V1_0_3)
+      protocol_offer().negotiate(&historical_offer.supported_versions),
+      Some(initial)
     );
+    assert_eq!(protocol_offer().negotiate(&[next_cycle]), Some(next_cycle));
     let running = RunningCtmux {
       build: None,
       protocol_version: None,

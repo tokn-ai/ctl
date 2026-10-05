@@ -27,7 +27,7 @@ An offline saved host stays visible as **Not checked**, with unknown running
 versions. Saved identity metadata is never presented as a live process version.
 Connection status is separate from inspection support. A **Connected** host can
 show **Update agent** when its installed agent lacks maintenance contract
-`1.0.3`, which adds companion inspection. Select and upload a complete bundle
+`1.1.3`, which adds companion inspection. Select and upload a complete bundle
 that supports this contract; reconnecting the same older agent cannot add it.
 The installed agent's own build remains visible when it can be read. A connected
 host without a verified saved identity asks for **Check host** to verify its account.

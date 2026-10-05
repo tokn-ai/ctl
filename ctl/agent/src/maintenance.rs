@@ -117,10 +117,10 @@ async fn prepare<R: AsyncRead + Unpin>(
     .await
     .map_err(io::Error::other)?;
   if !prepared.before.legacy_protocols.is_empty()
-    && protocol_version != maintenance::CONTRACT_V1_0_3
+    && protocol_version != maintenance::CONTRACT_V1_1_3
   {
     return Err(io::Error::other(
-      "Legacy daemon maintenance requires contract 1.0.3; update the client first.",
+      "Legacy daemon maintenance requires contract 1.1.3; update the client first.",
     ));
   }
   Ok((protocol_version, prepared))

@@ -27,11 +27,11 @@ pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
       if !expected_remote_id.is_empty()
         && expected_remote_id == remote_id
         && protocol
-          .negotiate(&[maintenance::CONTRACT_V1_0_3])
+          .negotiate(&[maintenance::CONTRACT_V1_1_3])
           .is_some() =>
     {
       ServerMessage::Components {
-        protocol_version: maintenance::CONTRACT_V1_0_3,
+        protocol_version: maintenance::CONTRACT_V1_1_3,
         snapshot: inspect(directory, remote_id).await,
       }
     }
@@ -216,7 +216,7 @@ mod tests {
     else {
       panic!("Expected component inventory")
     };
-    assert_eq!(protocol_version, maintenance::CONTRACT_V1_0_3);
+    assert_eq!(protocol_version, maintenance::CONTRACT_V1_1_3);
     assert_eq!(snapshot.remote_id, "pinned");
     assert_eq!(snapshot.components.len(), 4);
     for row in snapshot.components {

@@ -201,7 +201,7 @@ async fn inspect(selected: Selection) -> Vec<ComponentVersionRow> {
 fn inspection_unsupported() -> CommandErrorDto {
   CommandErrorDto::new(
     "remote_component_inspection_unsupported",
-    "The installed agent does not support component inspection (maintenance contract 1.0.3). Update this host's components; existing sessions can stay running.",
+    "The installed agent does not support component inspection (maintenance contract 1.1.3). Update this host's components; existing sessions can stay running.",
   )
 }
 
@@ -233,7 +233,7 @@ fn apply_agent(
     protocol.name == "ctl_maintenance"
       && protocol
         .supported_versions
-        .contains(&ctl_proto::maintenance::CONTRACT_V1_0_3)
+        .contains(&ctl_proto::maintenance::CONTRACT_V1_1_3)
   });
   row.installed = Some(ComponentVersionInfo::observed(
     identity.agent_version,

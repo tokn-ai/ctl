@@ -53,6 +53,8 @@ pub fn run() {
     .on_window_event(cleanup_destroyed_window)
     .invoke_handler(tauri::generate_handler![
       about::get_component_versions,
+      about::bundles::get_component_bundles,
+      about::bundles::select_component_bundle,
       about::restart::preflight_component_action,
       about::restart::execute_component_action,
       about::remote_actions::reconnect::ack_component_reconnect,

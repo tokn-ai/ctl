@@ -1,6 +1,10 @@
 mod build_support;
 
 fn main() {
+  println!(
+    "cargo:rustc-env=COMPONENT_TARGET={}",
+    std::env::var("TARGET").unwrap()
+  );
   let manifest_dir = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
   let identity = build_support::read_identity(&manifest_dir);
   println!(

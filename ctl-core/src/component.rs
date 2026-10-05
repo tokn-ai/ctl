@@ -3,6 +3,14 @@
 use crate::protocol::{ProtocolVersion, negotiate_versions, valid_offer};
 use serde::{Deserialize, Serialize};
 
+/// Historical numeric protocols must not be treated as published contracts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyProtocolInfo {
+  pub name: String,
+  pub version: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolInfo {

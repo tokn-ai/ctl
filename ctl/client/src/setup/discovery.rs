@@ -6,6 +6,21 @@ use std::path::{Path, PathBuf};
 
 pub(super) async fn discover(home: &Path) -> Result<Option<PathBuf>, Error> {
   let target = macos::release_target()?;
+  if let Some(bundle) =
+    ctl_core::bundles::Store::new(home).selected(ctl_core::bundles::Purpose::Local, target)?
+  {
+    let files = bundle.read_files()?;
+    let receipt = files.get("ctld-package.json").ok_or_else(|| {
+      Error::Verification("selected bundle lacks its signed helper receipt".into())
+    })?;
+    let info = super::inspect_ctld_package(home, &bundle.directory, receipt).await?;
+    if !compatible(&info) || !bundle.manifest.same_component("ctld", &info) {
+      return Err(Error::Verification(
+        "selected bundle helper is incompatible or differs from its manifest".into(),
+      ));
+    }
+    return Ok(Some(bundle.directory.join("ctld.app/Contents/MacOS/ctld")));
+  }
   let Some(installation) = ctl_ipc::managed::resolve_compatible_installation(home, target)? else {
     return Ok(None);
   };

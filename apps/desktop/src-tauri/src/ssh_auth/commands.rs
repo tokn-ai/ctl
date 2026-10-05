@@ -13,6 +13,8 @@ pub struct ProbeRequest {
   attempt_id: String,
   #[serde(default)]
   restart_check: bool,
+  #[serde(default)]
+  components_only: bool,
 }
 #[derive(Deserialize)]
 pub struct ResponseRequest {
@@ -51,6 +53,7 @@ pub async fn probe_ssh_host(
     request.target,
     on_prompt,
     request.restart_check,
+    request.components_only,
   )
   .await
 }

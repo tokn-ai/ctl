@@ -86,16 +86,25 @@ export interface ComponentVersionRow {
   label: string;
   location: "local" | "remote";
   host_id: string | null;
-  observation: "running" | "bundled" | "last_observed";
+  /** Stable host grouping, including authenticated accounts without a saved host. */
+  host_key?: string | null;
+  host_name?: string | null;
+  observation: "running" | "bundled" | "last_observed" | "installed" | "not_checked" | "legacy";
   status: ComponentVersionStatus;
   running: ComponentVersionInfo | null;
   available: ComponentVersionInfo | null;
+  installed?: ComponentVersionInfo | null;
+  restart_required?: boolean;
+  legacy_protocols?: { name: string; version: number }[];
   /** Protocols compiled into the app; the available executable may itself be stale. */
   required_protocols?: ComponentProtocolVersion[];
   restart_supported: boolean;
   action: ComponentActionKind | null;
   detail: string | null;
   error: string | null;
+  error_code?: string | null;
+  /** Existing SSH master or active terminal transport observed during this check. */
+  connected?: boolean | null;
 }
 
 export interface ComponentVersionsSnapshot {
@@ -1101,3 +1110,30 @@ export type SessionCacheAction =
 export type SessionCacheResponse =
   | { kind: "loaded"; cache: CachedSessionPresentation | null }
   | { kind: "archived" };
+
+
+export type ComponentBundlePurpose = "local" | "upload";
+export type ComponentBundlePhase = "verifying" | "selecting";
+export interface ComponentBundle {
+  bundle_id: string;
+  target_triple: string;
+  source: "ci" | "release" | "local";
+  app_version: string;
+  git_revision: string | null;
+  dirty: boolean;
+  compatible: boolean;
+  local_use: "selected" | "available" | "unavailable";
+  upload_use: "selected" | "available" | "unavailable";
+}
+export interface ComponentBundlesSnapshot {
+  bundles: ComponentBundle[];
+  errors: string[];
+}
+export interface ComponentBundleSelection {
+  bundle_id: string;
+  target_triple: string;
+  purpose: ComponentBundlePurpose;
+}
+export interface ComponentBundleSelectionResult extends ComponentBundleSelection {
+  services_preserved: boolean;
+}

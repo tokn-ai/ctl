@@ -37,6 +37,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 
 [dev-dependencies]
 ctl-proto.workspace = true
+ctl-task-proto.workspace = true
+ctmux-ipc.workspace = true
 ctmux-proto.workspace = true
 portable-pty.workspace = true
 unicode-width.workspace = true

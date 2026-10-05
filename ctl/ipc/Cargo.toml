@@ -12,7 +12,7 @@ keywords = ["ctl", "ipc", "ssh"]
 publish = ["crates-io"]
 
 [dependencies]
-ctl-core.workspace = true
+ctl-core = { workspace = true, features = ["bundles"] }
 dirs.workspace = true
 ctl-proto.workspace = true
 serde.workspace = true

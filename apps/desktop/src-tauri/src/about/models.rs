@@ -1,4 +1,4 @@
-use ctl_core::component::{ComponentBuildInfo, ProtocolInfo};
+use ctl_core::component::{ComponentBuildInfo, LegacyProtocolInfo, ProtocolInfo};
 use ctl_core::protocol::ProtocolVersion as ContractVersion;
 use serde::{Deserialize, Serialize};
 
@@ -107,15 +107,22 @@ pub struct ComponentVersionRow {
   pub label: String,
   pub location: &'static str,
   pub host_id: Option<String>,
+  pub host_key: Option<String>,
+  pub host_name: Option<String>,
   pub observation: &'static str,
   pub status: VersionStatus,
   pub running: Option<ComponentVersionInfo>,
   pub available: Option<ComponentVersionInfo>,
+  pub installed: Option<ComponentVersionInfo>,
+  pub restart_required: bool,
+  pub legacy_protocols: Vec<LegacyProtocolInfo>,
   pub required_protocols: Vec<ProtocolVersion>,
   pub restart_supported: bool,
   pub action: Option<ComponentAction>,
   pub detail: Option<String>,
   pub error: Option<String>,
+  pub error_code: Option<String>,
+  pub connected: Option<bool>,
 }
 
 impl ComponentVersionRow {
@@ -126,19 +133,27 @@ impl ComponentVersionRow {
       label: label.into(),
       location: "local",
       host_id: None,
+      host_key: None,
+      host_name: None,
       observation: "running",
       status: VersionStatus::Unknown,
       running: None,
       available: None,
+      installed: None,
+      restart_required: false,
+      legacy_protocols: Vec::new(),
       required_protocols: required_protocols(component),
       restart_supported: false,
       action: None,
       detail: None,
       error: None,
+      error_code: None,
+      connected: None,
     }
   }
 
   pub fn compare(&mut self) {
+    self.compare_installed();
     self.status = compare(self.running.as_ref(), Some(&expected_component_version()));
     if self.running.as_ref().is_some_and(|running| {
       running.protocols.iter().any(|protocol| {
@@ -153,6 +168,16 @@ impl ComponentVersionRow {
     }) {
       self.status = VersionStatus::Incompatible;
     }
+  }
+
+  pub fn compare_installed(&mut self) {
+    self.restart_required = (self.observation == "legacy" || !self.legacy_protocols.is_empty())
+      && self.installed.is_some()
+      || self.running.is_some()
+        && matches!(
+          compare(self.running.as_ref(), self.installed.as_ref()),
+          VersionStatus::Outdated | VersionStatus::Newer | VersionStatus::DifferentBuild
+        );
   }
 
   pub fn note_available_mismatch(&mut self) {
@@ -207,6 +232,7 @@ fn required_protocols(component: &str) -> Vec<ProtocolVersion> {
       ctl_task_proto::protocol_info(),
       ctl_task_proto::control::protocol_info(),
     ],
+    "ctl_agent" => ctl_proto::agent_protocols(),
     _ => Vec::new(),
   };
   infos.into_iter().map(ProtocolVersion::from).collect()
@@ -325,6 +351,17 @@ mod tests {
       source_fingerprint: fingerprint.map(str::to_owned),
       ..ComponentVersionInfo::default()
     }
+  }
+
+  #[test]
+  fn agent_rows_advertise_app_requirements_before_inspection() {
+    let row = ComponentVersionRow::local("ctl_agent", "ctl-agent");
+    let expected: Vec<_> = ctl_proto::agent_protocols()
+      .into_iter()
+      .map(ProtocolVersion::from)
+      .collect();
+    assert_ne!(expected, []);
+    assert_eq!(row.required_protocols, expected);
   }
 
   #[test]

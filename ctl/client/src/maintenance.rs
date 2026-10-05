@@ -19,6 +19,142 @@ const INSPECT_COMMAND: &str = concat!(
   r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
   "exec ctl-agent inspect",
 );
+const COMPONENTS_COMMAND: &str = concat!(
+  r#"printf 'ctl-maintenance-v1\n'; "#,
+  r#"PATH="$HOME/.tokn/ctl/current:$PATH"; export PATH; "#,
+  "exec ctl-agent inspect-components",
+);
+
+/// Inspects installed companions and existing owners on a pinned SSH master.
+///
+/// # Errors
+/// Rejects missing capabilities, changed identity, and invalid component metadata.
+pub async fn inspect_components(
+  destination: &str,
+  options: &SshConnectionOptions,
+  control_path: &Path,
+  expected_remote_id: &str,
+) -> Result<maintenance::RemoteComponents, MaintenanceError> {
+  let command = command(destination, options, control_path, COMPONENTS_COMMAND)
+    .map_err(|error| failure(error, false))?;
+  tokio::time::timeout(
+    Duration::from_secs(10),
+    inspect(command, expected_remote_id),
+  )
+  .await
+  .map_err(|_| failure("Remote component inspection timed out.", false))?
+}
+
+async fn inspect(
+  mut command: Command,
+  expected_remote_id: &str,
+) -> Result<maintenance::RemoteComponents, MaintenanceError> {
+  command
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+  let mut child = command.spawn().map_err(|error| failure(error, false))?;
+  let mut stdin = child
+    .stdin
+    .take()
+    .ok_or_else(|| failure("Missing inspection input", false))?;
+  let mut stdout = BufReader::new(
+    child
+      .stdout
+      .take()
+      .ok_or_else(|| failure("Missing inspection output", false))?,
+  );
+  crate::ssh_startup::Preface::default()
+    .read_marker(&mut stdout, &[b"ctl-maintenance-v1\n"], b"ctl-maintenance-")
+    .await
+    .map_err(|error| failure(error, false))?;
+  maintenance::write(
+    &mut stdin,
+    &ClientMessage::InspectComponents {
+      protocol: maintenance::protocol_offer(),
+      expected_remote_id: expected_remote_id.into(),
+    },
+  )
+  .await
+  .map_err(|error| failure(error, false))?;
+  drop(stdin);
+  let response = maintenance::read(&mut stdout)
+    .await
+    .map_err(|error| failure(error, false))?;
+  let snapshot = match response {
+    ServerMessage::Components {
+      protocol_version,
+      snapshot,
+    } if protocol_version == maintenance::CONTRACT_V1_1_3
+      && valid_snapshot(&snapshot, expected_remote_id) =>
+    {
+      snapshot
+    }
+    ServerMessage::Error { code, message, .. } => {
+      return Err(MaintenanceError {
+        code,
+        message,
+        may_have_stopped: false,
+      });
+    }
+    _ => {
+      return Err(failure(
+        "Invalid component inspection or changed remote identity.",
+        false,
+      ));
+    }
+  };
+  if !child
+    .wait()
+    .await
+    .map_err(|error| failure(error, false))?
+    .success()
+  {
+    return Err(failure(
+      "Remote component inspection closed unsuccessfully.",
+      false,
+    ));
+  }
+  Ok(snapshot)
+}
+
+fn valid_snapshot(snapshot: &maintenance::RemoteComponents, remote_id: &str) -> bool {
+  use maintenance::{ComponentKind as Kind, ComponentState as State};
+  !remote_id.is_empty()
+    && snapshot.remote_id == remote_id
+    && snapshot.components.len() == 4
+    && [Kind::CtlAgent, Kind::Ctld, Kind::Ctmuxd, Kind::CtlTaskd]
+      .iter()
+      .all(|kind| {
+        snapshot
+          .components
+          .iter()
+          .filter(|row| row.component == *kind)
+          .count()
+          == 1
+      })
+    && snapshot.components.iter().all(|row| {
+      row
+        .installed
+        .as_ref()
+        .is_none_or(ctl_core::component::ComponentInfo::is_valid)
+        && row
+          .running
+          .as_ref()
+          .is_none_or(ctl_core::component::ComponentInfo::is_valid)
+        && row.error.as_ref().is_none_or(|error| error.len() <= 4096)
+        && match row.state {
+          State::Legacy => {
+            row.legacy_protocols.len() <= 2
+              && row.legacy_protocols.iter().all(|p| {
+                p.version > 0 && matches!(p.name.as_str(), "ctld" | "ctmux" | "ctmux_control")
+              })
+          }
+          _ => row.legacy_protocols.is_empty(),
+        }
+    })
+}
 
 pub struct PreparedRemoteCtmuxRestart {
   pub info: CtmuxPreparation,
@@ -156,7 +292,9 @@ async fn prepare(
       protocol_version,
       info,
     } if maintenance::protocol_offer().accepts(protocol_version)
-      && valid_preparation(&info, expected_remote_id) =>
+      && valid_preparation(&info, expected_remote_id)
+      && (info.running.legacy_protocols.is_empty()
+        || protocol_version == maintenance::CONTRACT_V1_1_3) =>
     {
       info
     }
@@ -186,9 +324,23 @@ fn valid_preparation(info: &CtmuxPreparation, expected_remote_id: &str) -> bool 
   info.remote_id == expected_remote_id
     && info.available.is_valid()
     && ctl_core::component::protocols_are_valid(&info.running.protocols)
-    && info.running.protocols.iter().any(|protocol| {
-      protocol.name == "ctmux_control" && protocol.supports(info.running.control_protocol_version)
-    })
+    && if info.running.legacy_protocols.is_empty() {
+      info
+        .running
+        .control_protocol_version
+        .is_some_and(|version| {
+          info
+            .running
+            .protocols
+            .iter()
+            .any(|protocol| protocol.name == "ctmux_control" && protocol.supports(version))
+        })
+    } else {
+      info.running.protocols.is_empty()
+        && info.running.control_protocol_version.is_none()
+        && info.running.protocol_version.is_none()
+        && maintenance::valid_legacy_ctmux(&info.running.legacy_protocols)
+    }
     && info.running.protocol_version.is_none_or(|version| {
       info
         .running
@@ -308,7 +460,7 @@ mod tests {
 
   #[test]
   fn maintenance_never_falls_back_to_authentication_or_arbitrary_commands() {
-    for operation in [PREPARE_COMMAND, INSPECT_COMMAND] {
+    for operation in [PREPARE_COMMAND, INSPECT_COMMAND, COMPONENTS_COMMAND] {
       let command = command(
         "fixture",
         &SshConnectionOptions::default(),
@@ -429,6 +581,66 @@ mod tests {
     .expect("unsupported readiness marker must fail without waiting for a frame");
     assert!(!error.may_have_stopped);
     assert!(error.message.contains("ctl-maintenance-v2"));
+  }
+
+  #[test]
+  fn numeric_control_evidence_is_separate_from_published_contracts() {
+    let mut info = preparation();
+    info.running.control_protocol_version = None;
+    info.running.protocols.clear();
+    info.running.legacy_protocols = vec![
+      maintenance::LegacyProtocolInfo {
+        name: "ctmux_control".into(),
+        version: 1,
+      },
+      maintenance::LegacyProtocolInfo {
+        name: "ctmux".into(),
+        version: 13,
+      },
+    ];
+    assert!(valid_preparation(&info, "owned-environment"));
+    info.running.control_protocol_version = Some(ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION);
+    assert!(!valid_preparation(&info, "owned-environment"));
+    info.running.control_protocol_version = None;
+    info.running.legacy_protocols[0].version = 2;
+    assert!(!valid_preparation(&info, "owned-environment"));
+  }
+
+  fn snapshot() -> maintenance::RemoteComponents {
+    maintenance::RemoteComponents {
+      remote_id: "owned-environment".into(),
+      components: [
+        maintenance::ComponentKind::CtlAgent,
+        maintenance::ComponentKind::Ctld,
+        maintenance::ComponentKind::Ctmuxd,
+        maintenance::ComponentKind::CtlTaskd,
+      ]
+      .into_iter()
+      .map(|component| maintenance::RemoteComponent {
+        component,
+        installed: None,
+        running: None,
+        state: maintenance::ComponentState::Unavailable,
+        restart_supported: false,
+        legacy_protocols: Vec::new(),
+        error: None,
+      })
+      .collect(),
+    }
+  }
+
+  #[test]
+  fn component_inventory_rejects_changed_identity_duplicate_rows_and_invalid_builds() {
+    let mut snapshot = snapshot();
+    assert!(valid_snapshot(&snapshot, "owned-environment"));
+    assert!(!valid_snapshot(&snapshot, "other-environment"));
+    snapshot.components[1].component = snapshot.components[0].component;
+    assert!(!valid_snapshot(&snapshot, "owned-environment"));
+    snapshot.components[1].component = maintenance::ComponentKind::Ctld;
+    let mut installed = preparation().available;
+    installed.build.source_fingerprint = "invalid".into();
+    snapshot.components[2].installed = Some(installed);
+    assert!(!valid_snapshot(&snapshot, "owned-environment"));
   }
 
   #[test]

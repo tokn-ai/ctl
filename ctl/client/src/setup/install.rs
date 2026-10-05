@@ -14,6 +14,7 @@ pub(super) struct Session {
   pub manifest: Manifest,
   pub reused: bool,
   _lock: SetupLock,
+  verification_app: Option<PathBuf>,
 }
 
 struct SetupLock(File);
@@ -78,6 +79,7 @@ impl Session {
       manifest,
       reused: false,
       _lock: lock,
+      verification_app: None,
     };
     fs::DirBuilder::new()
       .mode(0o700)
@@ -140,12 +142,33 @@ impl Session {
     &self.work
   }
 
+  #[cfg(target_os = "macos")]
+  pub fn verification(home: &Path, directory: &Path, manifest: Manifest) -> Result<Self, Error> {
+    let root = ctl_ipc::managed::ensure_component_directory(home)?;
+    let lock = SetupLock::acquire(&root)?;
+    let work = root.join(format!(".setup-{}", uuid::Uuid::new_v4()));
+    fs::DirBuilder::new().mode(0o700).create(&work)?;
+    Ok(Self {
+      home: home.to_owned(),
+      root,
+      work,
+      destination: directory.to_owned(),
+      manifest,
+      reused: true,
+      _lock: lock,
+      verification_app: Some(directory.join("ctld.app")),
+    })
+  }
+
   fn payload(&self) -> PathBuf {
     self.work.join("payload")
   }
 
   #[cfg(target_os = "macos")]
   pub fn app(&self) -> PathBuf {
+    if let Some(app) = &self.verification_app {
+      return app.clone();
+    }
     if self.reused {
       self.destination.join("ctld.app")
     } else {
@@ -154,6 +177,15 @@ impl Session {
   }
 
   pub fn executable(&self) -> Result<PathBuf, Error> {
+    if let Some(app) = &self.verification_app {
+      let executable = app.join("Contents/MacOS/ctld");
+      if !fs::symlink_metadata(&executable)?.is_file() {
+        return Err(Error::Verification(
+          "helper executable is not a regular file".into(),
+        ));
+      }
+      return Ok(executable);
+    }
     let candidate = if self.reused {
       self.destination.clone()
     } else {
@@ -174,6 +206,11 @@ impl Session {
 
   // Called only after platform signature checks and the bounded metadata query.
   pub fn activate(self) -> Result<SetupOutcome, Error> {
+    if self.verification_app.is_some() {
+      return Err(Error::Verification(
+        "a passive package verification cannot activate a helper".into(),
+      ));
+    }
     if self.manifest.development.is_none() {
       ctl_ipc::managed::validate_current_selection(&self.home)?;
     }

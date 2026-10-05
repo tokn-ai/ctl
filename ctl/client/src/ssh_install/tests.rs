@@ -502,3 +502,130 @@ async fn early_remote_failure_preserves_diagnostics_instead_of_broken_pipe() {
     matches!(result, Err(CoreError::SshCommandFailed { diagnostic, .. }) if diagnostic.contains("Permission denied"))
   );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_installer_uses_the_shared_store_and_preserves_selection_on_damage() {
+  use crate::components;
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::{Source, Store};
+  use std::os::unix::fs::MetadataExt as _;
+  let fixture = BundleFixture::new();
+  let import_home = fixture.directory.join("import-home");
+  std::fs::create_dir(&import_home).unwrap();
+  let bundle = components::import_remote(
+    &import_home,
+    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
+    "aarch64-apple-darwin",
+    Source::Ci,
+  )
+  .unwrap();
+  let upload = components::upload_bundle(&bundle).unwrap();
+  let script = installation_script(&upload.bundle_id, &upload.archive).unwrap();
+  let home = fixture.directory.join("home");
+  let command = || {
+    let mut command = Command::new("sh");
+    command.args(["-c", &script]).env("HOME", &home);
+    command
+  };
+  run_install_command(command(), &upload.archive, |_| {})
+    .await
+    .unwrap();
+  let current = home.join(".tokn/ctl/current");
+  let expected = std::path::PathBuf::from(format!(
+    "components/bundles/aarch64-apple-darwin/{}",
+    bundle.manifest.bundle_id
+  ));
+  assert_eq!(std::fs::read_link(&current).unwrap(), expected);
+  assert!(!home.join(".tokn/ctl/versions").exists());
+  let destination = home.join(".tokn/ctl").join(&expected);
+  let inode = std::fs::metadata(destination.join("ctl-agent"))
+    .unwrap()
+    .ino();
+  run_install_command(command(), &upload.archive, |_| {})
+    .await
+    .unwrap();
+  assert_eq!(
+    std::fs::metadata(destination.join("ctl-agent"))
+      .unwrap()
+      .ino(),
+    inode
+  );
+  assert_eq!(
+    Store::new(&home)
+      .get("aarch64-apple-darwin", &bundle.manifest.bundle_id)
+      .unwrap()
+      .manifest,
+    bundle.manifest
+  );
+  let mut damaged = upload.archive.clone();
+  damaged[0] ^= 1;
+  assert!(
+    run_install_command(command(), &damaged, |_| {})
+      .await
+      .is_err()
+  );
+  assert_eq!(std::fs::read_link(&current).unwrap(), expected);
+  assert!(!home.join(".tokn/ctl/components/.sync-lock").exists());
+  assert!(
+    !std::fs::read_dir(destination.parent().unwrap())
+      .unwrap()
+      .any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".install-"))
+  );
+  std::fs::write(destination.join("bundle.json"), b"modified manifest").unwrap();
+  assert!(
+    run_install_command(command(), &upload.archive, |_| {})
+      .await
+      .is_err()
+  );
+  assert_eq!(std::fs::read_link(&current).unwrap(), expected);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_installer_rejects_symlinked_storage_and_an_active_sync() {
+  use crate::components;
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::Source;
+  let fixture = BundleFixture::new();
+  let home = fixture.directory.join("home");
+  std::fs::create_dir(&home).unwrap();
+  let bundle = components::import_remote(
+    &home,
+    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
+    "aarch64-apple-darwin",
+    Source::Ci,
+  )
+  .unwrap();
+  let upload = components::upload_bundle(&bundle).unwrap();
+  let script = installation_script(&upload.bundle_id, &upload.archive).unwrap();
+  let command = || {
+    let mut command = Command::new("sh");
+    command.args(["-c", &script]).env("HOME", &home);
+    command
+  };
+  let lock = home.join(".tokn/ctl/components/.sync-lock");
+  std::fs::create_dir(&lock).unwrap();
+  assert!(
+    matches!(run_install_command(command(), &upload.archive, |_| {}).await,
+    Err(CoreError::SshCommandFailed { diagnostic, .. }) if diagnostic.contains("another component sync"))
+  );
+  assert!(
+    lock.exists(),
+    "a competing sync cannot remove the lock owner's directory"
+  );
+  std::fs::remove_dir(lock).unwrap();
+  let tokn = home.join(".tokn");
+  std::fs::rename(&tokn, home.join("real-tokn")).unwrap();
+  std::os::unix::fs::symlink(home.join("real-tokn"), &tokn).unwrap();
+  assert!(
+    run_install_command(command(), &upload.archive, |_| {})
+      .await
+      .is_err()
+  );
+  assert!(!home.join("real-tokn/ctl/current").exists());
+}

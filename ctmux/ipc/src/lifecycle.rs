@@ -1,7 +1,7 @@
 //! Prepared cooperative restart of one selected ctmuxd owner.
 
 use ctl_core::{
-  component::{ComponentBuildInfo, ComponentInfo, ProtocolInfo},
+  component::{ComponentBuildInfo, ComponentInfo, LegacyProtocolInfo, ProtocolInfo},
   executable::PreparedExecutable,
 };
 use serde::{Deserialize, Serialize};
@@ -21,12 +21,17 @@ pub struct RunningDaemon {
   pub build: Option<ComponentBuildInfo>,
   pub protocols: Vec<ProtocolInfo>,
   pub protocol_version: Option<ctl_core::protocol::ProtocolVersion>,
-  pub control_protocol_version: ctl_core::protocol::ProtocolVersion,
+  pub control_protocol_version: Option<ctl_core::protocol::ProtocolVersion>,
+  pub legacy_protocols: Vec<LegacyProtocolInfo>,
+  pub restart_supported: bool,
 }
 
 impl RunningDaemon {
   #[must_use]
   pub fn component_info(&self) -> Option<ComponentInfo> {
+    if !self.legacy_protocols.is_empty() {
+      return None;
+    }
     let info = ComponentInfo {
       build: self.build.clone()?,
       protocols: self.protocols.clone(),
@@ -95,6 +100,26 @@ impl Client {
     self
   }
 
+  /// Observes the existing owner without starting a daemon or preparing a restart.
+  ///
+  /// # Errors
+  /// Returns errors for inaccessible or unrecognized owners.
+  pub async fn observe(&self) -> Result<Option<RunningDaemon>, LifecycleError> {
+    let control = crate::control_socket_path(&self.socket)
+      .map_err(|error| LifecycleError::new("ctmuxd_observation_failed", error))?;
+    match query_owner(&control).await? {
+      Some((_, info)) => Ok(Some(info)),
+      None => match crate::connect_existing_daemon(&self.socket).await {
+        Err(error) if error.is_endpoint_unavailable() => Ok(None),
+        Err(error) => Err(LifecycleError::new("ctmuxd_observation_failed", error)),
+        Ok(_) => Err(LifecycleError::new(
+          "daemon_restart_unsupported",
+          "The running ctmuxd has no supported control endpoint",
+        )),
+      },
+    }
+  }
+
   /// Pins an existing cooperative owner and checks its replacement without mutation.
   ///
   /// # Errors
@@ -119,15 +144,18 @@ impl Client {
     .map_err(|error| LifecycleError::new("ctmuxd_replacement_unavailable", error))?;
     let control = crate::control_socket_path(&self.socket)
       .map_err(|error| LifecycleError::new("daemon_restart_unsupported", error))?;
-    let mut stream = crate::connect_existing_daemon(&control)
-      .await
-      .map_err(|error| {
-        LifecycleError::new(
-          "daemon_restart_unsupported",
-          format!("The selected ctmuxd cannot be restarted cooperatively: {error}"),
-        )
-      })?;
-    let before = handshake(&mut stream).await?;
+    let (stream, before) = query_owner(&control).await?.ok_or_else(|| {
+      LifecycleError::new(
+        "daemon_restart_unsupported",
+        "The selected ctmuxd control owner is not running",
+      )
+    })?;
+    if !before.restart_supported {
+      return Err(LifecycleError::new(
+        "daemon_restart_unsupported",
+        "The selected ctmuxd does not support cooperative restart",
+      ));
+    }
     Ok(PreparedRestart {
       available: replacement.info.clone(),
       before,
@@ -281,7 +309,7 @@ async fn handshake(stream: &mut Stream) -> Result<RunningDaemon, LifecycleError>
       Some(LocalControlServerMessage::HandshakeAccepted {
         protocol_version,
         protocols,
-        restart_supported: true,
+        restart_supported,
         build,
         data_protocol_version,
         ..
@@ -300,7 +328,9 @@ async fn handshake(stream: &mut Stream) -> Result<RunningDaemon, LifecycleError>
           build,
           protocols,
           protocol_version: data_protocol_version,
-          control_protocol_version: protocol_version,
+          control_protocol_version: Some(protocol_version),
+          legacy_protocols: Vec::new(),
+          restart_supported,
         })
       }
       _ => Err(LifecycleError::new(
@@ -316,6 +346,90 @@ async fn handshake(stream: &mut Stream) -> Result<RunningDaemon, LifecycleError>
       "ctmuxd did not answer the restart capability query",
     )
   })?
+}
+
+async fn query_owner(
+  control: &std::path::Path,
+) -> Result<Option<(Stream, RunningDaemon)>, LifecycleError> {
+  let connect_error = |error| LifecycleError::new("ctmuxd_observation_failed", error);
+  let mut stream = match crate::connect_existing_daemon(control).await {
+    Ok(stream) => stream,
+    Err(error) if error.is_endpoint_unavailable() => return Ok(None),
+    Err(error) => return Err(connect_error(error)),
+  };
+  match handshake(&mut stream).await {
+    Ok(info) => Ok(Some((stream, info))),
+    Err(published_error) => {
+      drop(stream);
+      // Numeric owners reject the published offer before returning a response.
+      // A new read-only handshake establishes their actual historical protocol.
+      let mut stream = crate::connect_existing_daemon(control)
+        .await
+        .map_err(connect_error)?;
+      match legacy_handshake(&mut stream).await {
+        Ok(info) => Ok(Some((stream, info))),
+        Err(_) => Err(published_error),
+      }
+    }
+  }
+}
+
+async fn legacy_handshake(stream: &mut Stream) -> Result<RunningDaemon, LifecycleError> {
+  #[derive(Deserialize)]
+  struct LegacyResponse {
+    r#type: String,
+    protocol_version: u16,
+    restart_supported: bool,
+    build: Option<ComponentBuildInfo>,
+    data_protocol_version: Option<u16>,
+  }
+  timeout(QUERY_TIMEOUT, async {
+    crate::write_local_control_frame(
+      stream,
+      &serde_json::json!({
+        "type": "handshake", "protocol_version": 1,
+      }),
+    )
+    .await
+    .map_err(|error| LifecycleError::new("daemon_restart_unsupported", error))?;
+    let response: LegacyResponse = crate::read_local_control_frame(stream)
+      .await
+      .map_err(|error| LifecycleError::new("daemon_restart_unsupported", error))?
+      .ok_or_else(|| LifecycleError::new("daemon_restart_unsupported", "Legacy owner closed"))?;
+    if response.r#type != "handshake_accepted"
+      || response.protocol_version != 1
+      || response.data_protocol_version == Some(0)
+      || response
+        .build
+        .as_ref()
+        .is_some_and(|build| !build.is_valid())
+    {
+      return Err(LifecycleError::new(
+        "daemon_restart_unsupported",
+        "Invalid legacy owner metadata",
+      ));
+    }
+    let mut legacy_protocols = vec![LegacyProtocolInfo {
+      name: "ctmux_control".into(),
+      version: 1,
+    }];
+    if let Some(version) = response.data_protocol_version {
+      legacy_protocols.push(LegacyProtocolInfo {
+        name: "ctmux".into(),
+        version,
+      });
+    }
+    Ok(RunningDaemon {
+      build: response.build,
+      protocols: Vec::new(),
+      protocol_version: None,
+      control_protocol_version: None,
+      legacy_protocols,
+      restart_supported: response.restart_supported,
+    })
+  })
+  .await
+  .map_err(|_| LifecycleError::new("daemon_restart_unsupported", "Legacy owner did not respond"))?
 }
 
 #[cfg(all(test, unix))]

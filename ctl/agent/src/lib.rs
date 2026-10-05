@@ -9,6 +9,7 @@ pub mod components;
 pub mod identity;
 pub mod listeners;
 pub mod maintenance;
+mod relay;
 pub mod restart;
 #[cfg(all(test, unix))]
 mod stdio;
@@ -122,7 +123,8 @@ impl ConnectConfig {
 /// # Errors
 ///
 /// Returns an error when the daemon cannot be reached or either relay direction
-/// fails. Completion of either direction ends the entire disposable relay.
+/// fails. SSH input EOF ends the disposable relay immediately. If a late write
+/// meets the daemon's closed input, pending daemon output gets a bounded drain.
 pub async fn connect_stdio(config: &ConnectConfig) -> Result<(), AgentError> {
   #[cfg(unix)]
   {
@@ -181,20 +183,10 @@ where
       .map_err(AgentError::Relay)?;
   }
   client_writer.flush().await.map_err(AgentError::Relay)?;
-  let (mut daemon_reader, mut daemon_writer) = tokio::io::split(daemon);
-  let client_to_daemon = tokio::io::copy(&mut client_reader, &mut daemon_writer);
-  let daemon_to_client = tokio::io::copy(&mut daemon_reader, &mut client_writer);
-  tokio::pin!(client_to_daemon, daemon_to_client);
-
-  tokio::select! {
-    result = &mut client_to_daemon => {
-      result.map_err(AgentError::Relay)?;
-    }
-    result = &mut daemon_to_client => {
-      result.map_err(AgentError::Relay)?;
-    }
-  }
-  Ok(())
+  let (daemon_reader, daemon_writer) = tokio::io::split(daemon);
+  relay::copy(client_reader, client_writer, daemon_reader, daemon_writer)
+    .await
+    .map_err(AgentError::Relay)
 }
 
 async fn connect_existing_daemon(config: &ConnectConfig) -> Result<Stream, AgentError> {

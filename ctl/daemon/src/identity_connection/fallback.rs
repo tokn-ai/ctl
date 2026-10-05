@@ -18,7 +18,10 @@ pub(super) enum Reason {
 impl Reason {
   pub(super) fn warning(self) -> String {
     let reason = match self {
-      Self::NotSaved => "No usable saved passphrase was found for this identity file.".into(),
+      Self::NotSaved => "No saved passphrase was found for this identity file.".into(),
+      Self::Identity(IdentityError::FileChanged) => {
+        "The identity file changed. Its saved passphrase cannot be reused automatically.".into()
+      }
       Self::Identity(error) => error.to_string(),
       Self::PublicHintUnavailable => {
         "The saved passphrase cannot be used automatically because the identity's public key could not be verified.".into()

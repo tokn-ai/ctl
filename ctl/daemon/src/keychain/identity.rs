@@ -15,16 +15,31 @@ pub(crate) fn saved_metadata(
 ) -> Result<Option<SavedIdentity>, IdentityError> {
   let metadata = index::identity_metadata(&snapshot.identity_id)
     .map_err(|error| map_error(error, IdentityError::ListFailed))?;
-  let Some(metadata) = metadata.filter(|metadata| metadata.matches(snapshot)) else {
-    return Ok(None);
-  };
   // The readable index establishes an unlocked context. An exact protected
   // match is present, but its value and binding still need authenticated read
   // and local verification later, when signing is actually requested.
-  match ctl_keychain_client::exists(SERVICE, &snapshot.identity_id) {
-    Ok(Presence::Present | Presence::Protected) => Ok(Some(metadata)),
-    Ok(Presence::Missing) => Ok(None),
-    Err(error) => Err(map_error(error.into(), IdentityError::ListFailed)),
+  let presence = ctl_keychain_client::exists(SERVICE, &snapshot.identity_id)
+    .map_err(|error| map_error(error.into(), IdentityError::ListFailed))?;
+  let Some(metadata) = present_metadata(metadata, presence)? else {
+    return Ok(None);
+  };
+  metadata.check_binding(
+    &snapshot.identity_id,
+    &snapshot.path,
+    &snapshot.file_version,
+  )?;
+  Ok(Some(metadata))
+}
+
+fn present_metadata(
+  metadata: Option<SavedIdentity>,
+  presence: Presence,
+) -> Result<Option<SavedIdentity>, IdentityError> {
+  match presence {
+    Presence::Missing => Ok(None),
+    // An existing secret without valid readable metadata is not an unsaved key.
+    // Preserve native authentication without retrieving the protected secret.
+    Presence::Present | Presence::Protected => metadata.map(Some).ok_or(IdentityError::ListFailed),
   }
 }
 
@@ -63,9 +78,7 @@ pub(crate) fn load(
   };
   // Both the protected binding and secret come from this exact same query.
   // A sidecar is display metadata and never authorizes reuse of a secret.
-  if !binding_matches(&record.attributes, snapshot) {
-    return Ok(None);
-  }
+  check_binding(&record.attributes, snapshot)?;
   super::secret_string(record)
     .map(Some)
     .map_err(|error| map_error(error, IdentityError::KeychainUnavailable))
@@ -89,8 +102,11 @@ fn with_authentication<T, Guard>(
   query()
 }
 
-fn binding_matches(attributes: &HashMap<String, String>, snapshot: &IdentitySnapshot) -> bool {
-  protected_binding_matches(
+fn check_binding(
+  attributes: &HashMap<String, String>,
+  snapshot: &IdentitySnapshot,
+) -> Result<(), IdentityError> {
+  check_protected_binding(
     attributes,
     &snapshot.identity_id,
     &snapshot.path,
@@ -98,30 +114,24 @@ fn binding_matches(attributes: &HashMap<String, String>, snapshot: &IdentitySnap
   )
 }
 
-fn protected_binding_matches(
+fn check_protected_binding(
   attributes: &HashMap<String, String>,
   identity_id: &str,
   path: &str,
   file_version: &str,
-) -> bool {
-  let Some(comment) = attributes
+) -> Result<(), IdentityError> {
+  if attributes.get("acct").map(String::as_str) != Some(identity_id)
+    || attributes.get("svce").map(String::as_str) != Some(SERVICE)
+  {
+    return Err(IdentityError::ListFailed);
+  }
+  let comment = attributes
     .get("icmt")
     .filter(|value| value.len() <= MAX_COMMENT_BYTES)
-  else {
-    return false;
-  };
-  let Ok(metadata) = serde_json::from_str::<SavedIdentity>(comment) else {
-    return false;
-  };
-  metadata.valid(identity_id)
-    && metadata.path == path
-    && metadata.file_version == file_version
-    && attributes
-      .get("acct")
-      .is_some_and(|account| account == identity_id)
-    && attributes
-      .get("svce")
-      .is_some_and(|service| service == SERVICE)
+    .ok_or(IdentityError::ListFailed)?;
+  let metadata: SavedIdentity =
+    serde_json::from_str(comment).map_err(|_| IdentityError::ListFailed)?;
+  metadata.check_binding(identity_id, path, file_version)
 }
 
 pub(crate) fn save(
@@ -328,29 +338,28 @@ mod tests {
   #[test]
   fn only_exact_protected_binding_authorizes_using_returned_secret() {
     let (id, metadata, values) = attributes();
-    assert!(protected_binding_matches(
-      &values,
-      &id,
-      &metadata.path,
-      &metadata.file_version
+    assert!(check_protected_binding(&values, &id, &metadata.path, &metadata.file_version).is_ok());
+    assert!(matches!(
+      check_protected_binding(&values, &id, &metadata.path, &"b".repeat(64)),
+      Err(IdentityError::FileChanged)
     ));
-    assert!(!protected_binding_matches(
-      &values,
-      &id,
-      &metadata.path,
-      &"b".repeat(64)
+    assert!(matches!(
+      check_protected_binding(
+        &values,
+        &id,
+        "/fixture/replaced-key",
+        &metadata.file_version
+      ),
+      Err(IdentityError::ListFailed)
     ));
-    assert!(!protected_binding_matches(
-      &values,
-      &id,
-      "/fixture/replaced-key",
-      &metadata.file_version
-    ));
-    assert!(!protected_binding_matches(
-      &values,
-      &"b".repeat(64),
-      &metadata.path,
-      &metadata.file_version
+    assert!(matches!(
+      check_protected_binding(
+        &values,
+        &"b".repeat(64),
+        &metadata.path,
+        &metadata.file_version
+      ),
+      Err(IdentityError::ListFailed)
     ));
   }
 
@@ -358,20 +367,38 @@ mod tests {
   fn wrong_namespace_or_malformed_metadata_is_not_reused() {
     let (id, metadata, mut values) = attributes();
     values.insert("svce".into(), "another-service".into());
-    assert!(!protected_binding_matches(
-      &values,
-      &id,
-      &metadata.path,
-      &metadata.file_version
+    assert!(matches!(
+      check_protected_binding(&values, &id, &metadata.path, &metadata.file_version),
+      Err(IdentityError::ListFailed)
     ));
     values.insert("svce".into(), SERVICE.into());
     values.insert("icmt".into(), "not metadata".into());
-    assert!(!protected_binding_matches(
-      &values,
-      &id,
-      &metadata.path,
-      &metadata.file_version
+    assert!(matches!(
+      check_protected_binding(&values, &id, &metadata.path, &metadata.file_version),
+      Err(IdentityError::ListFailed)
     ));
+  }
+
+  #[test]
+  fn present_protected_entries_without_readable_metadata_are_not_reported_as_unsaved() {
+    let (_, metadata, _) = attributes();
+    for presence in [Presence::Present, Presence::Protected] {
+      assert!(matches!(
+        present_metadata(None, presence),
+        Err(IdentityError::ListFailed)
+      ));
+      assert!(
+        present_metadata(Some(metadata.clone()), presence)
+          .unwrap()
+          .is_some()
+      );
+    }
+    assert!(present_metadata(None, Presence::Missing).unwrap().is_none());
+    assert!(
+      present_metadata(Some(metadata), Presence::Missing)
+        .unwrap()
+        .is_none()
+    );
   }
 
   #[test]
@@ -382,12 +409,15 @@ mod tests {
     assert!(comment.len() <= MAX_COMMENT_BYTES);
     assert!(metadata.public_key.is_none());
     values.insert("icmt".into(), comment);
-    assert!(protected_binding_matches(
-      &values,
-      &identity_id,
-      &metadata.path,
-      &metadata.file_version
-    ));
+    assert!(
+      check_protected_binding(
+        &values,
+        &identity_id,
+        &metadata.path,
+        &metadata.file_version
+      )
+      .is_ok()
+    );
   }
 
   #[test]
@@ -411,11 +441,14 @@ mod tests {
     assert!(!comment.contains("public_key"));
     assert!(metadata.public_key.is_some());
     values.insert("icmt".into(), comment);
-    assert!(protected_binding_matches(
-      &values,
-      &identity_id,
-      &metadata.path,
-      &metadata.file_version
-    ));
+    assert!(
+      check_protected_binding(
+        &values,
+        &identity_id,
+        &metadata.path,
+        &metadata.file_version
+      )
+      .is_ok()
+    );
   }
 }

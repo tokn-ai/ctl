@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ctl_ipc::credentials::{Inventory, StoredCredential, scope_id};
+use ctl_ipc::credentials::{Inventory, StoredCredential, lookup_scope_ids};
 #[cfg(target_os = "macos")]
 use ctl_ipc::credentials::{Request, Response};
 
@@ -151,9 +151,8 @@ fn host_metadata(targets: &[NamedTarget]) -> (BTreeMap<String, HostMetadata>, bo
       complete = false;
       continue;
     }
-    let metadata = hosts
-      .entry(scope_id(&target))
-      .or_insert_with(|| HostMetadata {
+    for scope in lookup_scope_ids(&target) {
+      let metadata = hosts.entry(scope).or_insert_with(|| HostMetadata {
         names: BTreeSet::new(),
         target: target
           .hostname
@@ -161,7 +160,8 @@ fn host_metadata(targets: &[NamedTarget]) -> (BTreeMap<String, HostMetadata>, bo
           .unwrap_or_else(|| target.destination.clone()),
         account: target.user.clone(),
       });
-    metadata.names.insert(named.name.clone());
+      metadata.names.insert(named.name.clone());
+    }
   }
   (hosts, complete)
 }

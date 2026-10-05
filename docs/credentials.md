@@ -52,11 +52,23 @@ credential rows; they are not silently treated as verified identity entries.
   in the same app access group. Inventory queries explicitly forbid authentication
   UI and never request password data. An inaccessible Keychain is reported as
   unavailable rather than empty.
+- Desktop and CLI signed helpers use the same Keychain credential namespace.
+  VPN password lookup uses the destination and logical gateway route, including
+  the VPN profile and any remote machine trust pin. The local daemon socket is
+  excluded, so separate desktop and CLI daemons can reuse the same saved item.
+  Unpinned and pinned remote accounts, and different pins, remain distinct;
+  learning or changing a remote trust pin can require saving the password again.
 - Older SSH entries contain hashed identifiers without readable metadata. The
   app associates them with currently configured host routes when possible;
   otherwise they remain **Saved SSH credential** entries with a short identifier.
   Their password/passphrase subtype is not guessed. New saves include nonsecret
-  metadata while retaining the existing credential identity and access policy.
+  metadata while retaining the existing access policy. Non-VPN credential
+  identifiers are unchanged. VPN lookups try the shared identifier first, then
+  the exact old identifier for the current route. Saving a replacement removes
+  that exact legacy copy, and host-wide cleanup and never-save preferences also
+  account for both identifiers. An old VPN item saved through a different daemon
+  socket may need to be saved once using an updated helper before sharing works;
+  its opaque identifier does not establish a safe association with another route.
 - OpenConnect password rows come from saved VPN profiles. Their storage location
   is the private VPN settings file, not Keychain. The native response excludes
   the password and strips user information, paths, and query parameters from the
@@ -93,6 +105,12 @@ credential, ctld checks its current Keychain access without reading a password
 or displaying authentication UI. If access is unavailable, it completes the
 connection without a save offer or an extra passphrase import.
 
+A saved passphrase bound to older key-file contents is reported as a changed
+file, not a missing passphrase. If a protected entry exists but its metadata or
+binding cannot be read or validated, ctld reports a metadata error and asks for
+manual entry without reusing that secret. Both helpers require the same canonical
+key-file path and exact file contents before reusing a saved identity passphrase.
+
 Creation and modification dates are Keychain metadata, not a record of the last
 login. Missing dates are shown as not recorded. Source errors do not hide rows
 successfully read from another source, and a failed refresh marks retained rows
@@ -104,6 +122,12 @@ as the previous result.
 It does not disconnect SSH sessions or change the host's save-credential policy.
 The credential may be requested again when a new connection needs it. This is
 separate from the existing host-wide credential cleanup.
+
+Older VPN copies saved under other daemon sockets remain separate credential
+rows. Forgetting a shared item does not remove those other rows; an older copy
+can still be reused by its original route. Forget each unwanted copy explicitly.
+Host-wide cleanup removes the shared scope and the current route's exact legacy
+scope, leaving unknown historical copies untouched.
 
 VPN rows use **Manage VPN** to open existing VPN settings and sign-in controls.
 They do not remove a saved connection as a side effect of credential inspection.

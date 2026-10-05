@@ -283,6 +283,29 @@ impl Frame {
   }
 }
 
+pub fn pane_at<'a>(
+  view: &'a ViewInfo,
+  panes: &BTreeMap<String, Pane>,
+  focused: &str,
+  size: (u16, u16),
+  position: (u16, u16),
+) -> Option<&'a str> {
+  let height = size.1.saturating_sub(1);
+  if position.0 >= size.0 || position.1 >= height {
+    return None;
+  }
+  let offset = viewport_offset(view, panes.get(focused), focused, size.0, height);
+  let x = position.0.checked_add(offset.0)?;
+  let y = position.1.checked_add(offset.1)?;
+  view
+    .panes
+    .iter()
+    .find(|pane| {
+      x >= pane.left && x - pane.left < pane.columns && y >= pane.top && y - pane.top < pane.rows
+    })
+    .map(|pane| pane.terminal_id.as_str())
+}
+
 fn viewport_offset(
   view: &ViewInfo,
   pane: Option<&Pane>,
@@ -460,6 +483,12 @@ mod tests {
     assert_eq!(frame.cells[4050].ch, ' ');
     frame.text(0, 40, "status", true);
     assert!(frame.cells[4099].pen.is_inverse());
+    let panes = BTreeMap::new();
+    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (49, 0)), Some("a"));
+    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (50, 0)), None);
+    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (51, 0)), Some("b"));
+    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (51, 40)), None);
+    assert_eq!(pane_at(&view, &panes, "b", (10, 5), (9, 0)), Some("b"));
   }
 
   #[test]
@@ -467,7 +496,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut mode = CopyMode::new(vec!["a界b".into()]);
     mode.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), 2);
-    mode.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), 2);
+    mode.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE), 2);
     let mut frame = Frame::new(4, 3);
     frame.copy_mode(&mode);
     assert_eq!(frame.cells[1].ch, '界');
@@ -480,6 +509,41 @@ mod tests {
     clipped.copy_mode(&mode);
     assert_eq!(clipped.cells[0].ch, ' ');
     assert_eq!(clipped.cells[1].ch, 'b');
+  }
+
+  #[test]
+  fn status_updates_leave_scrolled_copy_content_and_cursor_in_place() {
+    let mut mode = CopyMode::new((0..20).map(|row| format!("line-{row}")).collect());
+    mode.fit(40, 3);
+    assert!(mode.top > 0);
+    let mut before = Frame::new(40, 4);
+    before.copy_mode(&mode);
+    before.text(0, 3, " connected | COPY", true);
+
+    let mut host = avt::Vt::new(40, 4);
+    let mut output = Vec::new();
+    Renderer::default().write(&mut output, &before).unwrap();
+    host.feed_str(std::str::from_utf8(&output).unwrap());
+    let content = host.text()[..3].to_vec();
+    let cursor = host.cursor();
+
+    let mut after = Frame::new(40, 4);
+    after.copy_mode(&mode);
+    after.text(
+      0,
+      3,
+      " reconnecting | COPY | History incomplete | long help",
+      true,
+    );
+    let renderer = Renderer {
+      previous: Some(before),
+    };
+    output.clear();
+    renderer.write(&mut output, &after).unwrap();
+    host.feed_str(std::str::from_utf8(&output).unwrap());
+    assert_eq!(&host.text()[..3], content);
+    assert_eq!(host.cursor(), cursor);
+    assert!(host.text()[3].starts_with(" reconnecting"));
   }
 
   #[test]

@@ -13,6 +13,12 @@ pub enum Action {
   Copy(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BottomBehavior {
+  Stay,
+  ReturnToLive,
+}
+
 /// Immutable logical lines: output and checkpoint replacement cannot move a selection.
 pub struct CopyMode {
   pub lines: Vec<Vec<char>>,
@@ -25,6 +31,7 @@ pub struct CopyMode {
   backwards: bool,
   pub notice: String,
   pub history_gap: bool,
+  pub bottom_behavior: BottomBehavior,
 }
 
 impl CopyMode {
@@ -47,6 +54,7 @@ impl CopyMode {
       backwards: false,
       notice: String::new(),
       history_gap: false,
+      bottom_behavior: BottomBehavior::Stay,
     }
   }
 
@@ -76,6 +84,27 @@ impl CopyMode {
     if column + 2 > self.left + width.max(2) {
       self.left = column + 2 - width.max(2);
     }
+  }
+
+  pub fn scroll(&mut self, up: bool, rows: usize, height: usize) -> Action {
+    let relative = self.cursor.row.saturating_sub(self.top);
+    self.top = if up {
+      self.top.saturating_sub(rows)
+    } else {
+      self.top.saturating_add(rows)
+    }
+    .min(self.lines.len().saturating_sub(height.max(1)));
+    self.cursor.row = (self.top + relative).min(self.lines.len().saturating_sub(1));
+    self.cursor.column = self.cursor.column.min(self.line_len().saturating_sub(1));
+    if !up
+      && self.bottom_behavior == BottomBehavior::ReturnToLive
+      && self.anchor.is_none()
+      && !self.searching
+      && self.top == self.lines.len().saturating_sub(height.max(1))
+    {
+      return Action::Close;
+    }
+    Action::Stay
   }
 
   fn line_len(&self) -> usize {
@@ -133,7 +162,40 @@ impl CopyMode {
       return Action::Stay;
     }
     self.notice.clear();
-    match key.code {
+    let code = if key.modifiers.contains(KeyModifiers::CONTROL) {
+      match key.code {
+        KeyCode::Char('c') => return Action::Close,
+        KeyCode::Char('g') => {
+          self.anchor = None;
+          return Action::Stay;
+        }
+        KeyCode::Char('b') => KeyCode::Left,
+        KeyCode::Char('f') => KeyCode::Right,
+        KeyCode::Char('p') => KeyCode::Up,
+        KeyCode::Char('n') => KeyCode::Down,
+        KeyCode::Char('a') => KeyCode::Home,
+        KeyCode::Char('e') => KeyCode::End,
+        KeyCode::Char('v') => KeyCode::PageDown,
+        KeyCode::Char(' ' | '@') | KeyCode::Null => KeyCode::Char(' '),
+        KeyCode::Char('w') => KeyCode::Enter,
+        KeyCode::Char('r') => KeyCode::Char('?'),
+        KeyCode::Char('s') => KeyCode::Char('/'),
+        _ => return Action::Stay,
+      }
+    } else if key.modifiers.contains(KeyModifiers::ALT) {
+      match key.code {
+        KeyCode::Char('v') => KeyCode::PageUp,
+        KeyCode::Char('w') => KeyCode::Enter,
+        KeyCode::Char('<') => KeyCode::Char('g'),
+        KeyCode::Char('>') => KeyCode::Char('G'),
+        _ => return Action::Stay,
+      }
+    } else if key.code == KeyCode::Char(' ') {
+      KeyCode::PageDown
+    } else {
+      key.code
+    };
+    match code {
       KeyCode::Esc | KeyCode::Char('q') => return Action::Close,
       KeyCode::Up | KeyCode::Char('k') => self.cursor.row = self.cursor.row.saturating_sub(1),
       KeyCode::Down | KeyCode::Char('j') => self.cursor.row = self.cursor.row.saturating_add(1),
@@ -154,10 +216,10 @@ impl CopyMode {
         if let Some(text) = self.selection() {
           return Action::Copy(text);
         }
-        self.notice = "Space starts a selection".into();
+        self.notice = "Ctrl+Space or v starts a selection".into();
       }
       KeyCode::Char('/' | '?') => {
-        self.backwards = key.code == KeyCode::Char('?');
+        self.backwards = code == KeyCode::Char('?');
         self.searching = true;
         self.query.clear();
       }
@@ -210,11 +272,11 @@ impl CopyMode {
       return format!("{}{}", if self.backwards { '?' } else { '/' }, self.query);
     }
     format!(
-      " COPY {}/{}{} | arrows/PgUp/PgDn g/G | Space select, Enter copy | /? search n/N | q exit {}",
+      " COPY {}/{}{} | arrows/PgUp/PgDn | Ctrl+Space select, Alt+w copy | v/y vi | /? search | q exit {}",
       self.cursor.row + 1,
       self.lines.len(),
       if self.history_gap {
-        " | History incomplete"
+        " | Snapshot incomplete"
       } else {
         ""
       },
@@ -228,10 +290,45 @@ mod tests {
   use super::*;
 
   #[test]
+  fn emacs_selection_copy_and_space_paging_keep_vi_aliases_available() {
+    let mut mode = CopyMode::new(vec!["abc".into(), "next".into(), "last".into()]);
+    mode.key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::ALT), 2);
+    mode.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL), 2);
+    mode.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), 2);
+    let Action::Copy(text) = mode.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT), 2)
+    else {
+      panic!("Alt+w must copy the selected text");
+    };
+    assert_eq!(text, "ab");
+    mode.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), 2);
+    assert!(mode.anchor.is_none());
+    mode.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), 2);
+    assert_eq!(mode.cursor.row, 2);
+    assert!(mode.anchor.is_none());
+    mode.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE), 2);
+    assert!(mode.anchor.is_some());
+  }
+
+  #[test]
+  fn wheel_mode_exits_at_live_output_but_selection_and_keyboard_modes_stay() {
+    let mut mode = CopyMode::new((0..20).map(|row| row.to_string()).collect());
+    mode.fit(20, 5);
+    mode.bottom_behavior = BottomBehavior::ReturnToLive;
+    assert!(matches!(mode.scroll(true, 5, 5), Action::Stay));
+    assert_eq!(mode.top, 10);
+    mode.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE), 5);
+    assert!(matches!(mode.scroll(false, 5, 5), Action::Stay));
+    mode.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), 5);
+    assert!(matches!(mode.scroll(false, 5, 5), Action::Close));
+    mode.bottom_behavior = BottomBehavior::Stay;
+    assert!(matches!(mode.scroll(false, 5, 5), Action::Stay));
+  }
+
+  #[test]
   fn missing_history_is_visible_without_changing_copied_lines() {
     let mut mode = CopyMode::new(vec!["retained output".into()]);
     mode.history_gap = true;
-    assert!(mode.status().starts_with(" COPY 1/1 | History incomplete"));
+    assert!(mode.status().starts_with(" COPY 1/1 | Snapshot incomplete"));
     assert_eq!(mode.lines[0].iter().collect::<String>(), "retained output");
   }
   fn key(code: KeyCode) -> KeyEvent {
@@ -244,7 +341,7 @@ mod tests {
     mode.key(key(KeyCode::Char('g')), 10);
     mode.key(key(KeyCode::Right), 10);
     assert_eq!(mode.cursor_column(), 1);
-    mode.key(key(KeyCode::Char(' ')), 10);
+    mode.key(key(KeyCode::Char('v')), 10);
     mode.key(key(KeyCode::Down), 10);
     let Action::Copy(text) = mode.key(key(KeyCode::Enter), 10) else {
       panic!("copy");

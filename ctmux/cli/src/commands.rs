@@ -43,6 +43,35 @@ pub trait Connector {
   fn status_prefix(&self) -> &'static str;
 }
 
+struct TuiTransport<'a, C>(&'a C);
+
+impl<C: Connector + Sync> ctmux_tui::Transport for TuiTransport<'_, C> {
+  fn connect(&self) -> ctmux_tui::ConnectFuture<'_> {
+    Box::pin(async move {
+      let stream = self.0.connect().await?;
+      Ok(Box::new(stream) as ctmux_tui::Stream)
+    })
+  }
+
+  fn archive_key(&self) -> String {
+    self.0.archive_key()
+  }
+}
+
+/// Open the shared terminal UI over the connector, including SSH.
+///
+/// # Errors
+/// Returns transport, protocol, or terminal presentation errors.
+pub async fn run_tui<C: Connector + Sync>(
+  connector: &C,
+  session: Option<String>,
+  read_only: bool,
+) -> Result<(), CommandError> {
+  ctmux_tui::run_with_transport(&TuiTransport(connector), session, read_only)
+    .await
+    .map_err(CommandError::Tui)
+}
+
 /// Connector used by the standalone local `ctmux` executable.
 #[derive(Debug, Clone)]
 pub struct LocalConnector {
@@ -628,6 +657,8 @@ fn connection_error(error: impl Error + Send + Sync + 'static) -> CommandError {
 
 #[derive(Debug, Error)]
 pub enum CommandError {
+  #[error("terminal UI failed: {0}")]
+  Tui(#[source] Box<dyn Error + Send + Sync>),
   #[error("local archive failed: {0}")]
   Archive(#[from] io::Error),
   #[error("no running session; create one with ctmux new")]

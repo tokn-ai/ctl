@@ -6,6 +6,9 @@ mod model;
 mod pane;
 mod render;
 mod terminal;
+mod transport;
+
+pub use transport::{ConnectFuture, Duplex, Stream, Transport};
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -54,10 +57,33 @@ pub async fn run(options: Options) -> Result<()> {
     options.read_only,
     input::parse_prefix(&options.prefix)?,
   );
-  let started = if let Some(id) = options.archive {
+  run_app(&mut app, options.archive, options.session).await
+}
+
+/// Run the same terminal UI over a caller-supplied local or remote transport.
+///
+/// # Errors
+/// Returns connection, protocol, or terminal I/O errors.
+pub async fn run_with_transport(
+  transport: &dyn Transport,
+  session: Option<String>,
+  read_only: bool,
+) -> Result<()> {
+  ensure_terminal()?;
+  let mut app = app::App::new(PathBuf::new(), read_only, input::parse_prefix("Ctrl+b")?);
+  app.transport = Some(transport);
+  run_app(&mut app, None, session).await
+}
+
+async fn run_app(
+  app: &mut app::App<'_>,
+  archive: Option<String>,
+  session: Option<String>,
+) -> Result<()> {
+  let started = if let Some(id) = archive {
     app.open_archive(&id)
   } else {
-    app.start(options.session).await
+    app.start(session).await
   };
   if let Err(error) = started {
     app.detach().await;

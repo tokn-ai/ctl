@@ -655,6 +655,11 @@ ctl -H work exec -- uname -a
 ctl -H work exec -- sh -c 'printf "%s\n" "$HOME"'
 ```
 
+Persistent `ctl shell` uses the shared ctmux TUI over local or SSH connections.
+Its bottom banner shows connection and history status. Mouse wheel or trackpad
+scrolling opens retained history; Esc returns to live output, and Ctrl+B d
+detaches. The banner stays outside scrollback.
+
 `--plain` opens an ordinary shell. `exec` runs once without allocating a PTY,
 streams stdin/stdout/stderr, and returns the command's exit status. Unix exec
 arguments are quoted individually; explicitly invoke `sh -c` for shell syntax.

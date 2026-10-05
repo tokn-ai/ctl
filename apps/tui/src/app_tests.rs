@@ -2,6 +2,120 @@ use super::*;
 use ctmux_proto::CommandSpec;
 use std::os::unix::fs::PermissionsExt;
 
+struct RelayTransport {
+  socket: PathBuf,
+  connections: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::Transport for RelayTransport {
+  fn connect(&self) -> crate::ConnectFuture<'_> {
+    Box::pin(async move {
+      let mut daemon = tokio::net::UnixStream::connect(&self.socket).await?;
+      self
+        .connections
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      let (client, mut relay) = tokio::io::duplex(4096);
+      tokio::spawn(async move {
+        let _ = tokio::io::copy_bidirectional(&mut daemon, &mut relay).await;
+      });
+      Ok(Box::new(client) as crate::Stream)
+    })
+  }
+
+  fn archive_key(&self) -> String {
+    "remote-fixture".into()
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()> {
+  use crossterm::event::{MouseEvent, MouseEventKind};
+  use std::fmt::Write as _;
+  let daemon = Daemon::start().await?;
+  let transport = RelayTransport {
+    socket: daemon.directory.join("ctmux.sock"),
+    connections: std::sync::atomic::AtomicUsize::new(0),
+  };
+  // Every operation must use the supplied transport, never this absent socket.
+  let mut app = App::new(
+    daemon.directory.join("unused.sock"),
+    false,
+    input::parse_prefix("Ctrl+b")?,
+  );
+  app.transport = Some(&transport);
+  app.size = (80, 10);
+  let session = create_shell(&app).await?;
+  app.start(Some(session.clone())).await?;
+  let primary = app.focused.clone();
+  app.panes[&primary]
+    .control
+    .input(
+      (0..40)
+        .fold(String::new(), |mut text, row| {
+          writeln!(text, "line-{row}").unwrap();
+          text
+        })
+        .into_bytes(),
+    )
+    .await?;
+  wait_for_text(&mut app, &primary, "echo:line-39").await?;
+  let wheel = |kind| {
+    Event::Mouse(MouseEvent {
+      kind,
+      column: 1,
+      row: 1,
+      modifiers: KeyModifiers::NONE,
+    })
+  };
+  app.event(wheel(MouseEventKind::ScrollUp)).await?;
+  let mode = app.copy_mode.as_ref().unwrap();
+  assert_eq!(
+    mode.top,
+    mode.lines.len().saturating_sub(9).saturating_sub(5)
+  );
+  let snapshot = mode.lines.clone();
+  let top = mode.top;
+  app.panes[&primary]
+    .control
+    .input(b"AFTER_SCROLL\n".to_vec())
+    .await?;
+  wait_for_text(&mut app, &primary, "echo:AFTER_SCROLL").await?;
+  assert_eq!(app.copy_mode.as_ref().unwrap().lines, snapshot);
+  assert_eq!(app.copy_mode.as_ref().unwrap().top, top);
+  app.event(wheel(MouseEventKind::ScrollDown)).await?;
+  assert!(app.copy_mode.is_none());
+  app
+    .event(Event::Key(KeyEvent::new(
+      KeyCode::PageUp,
+      KeyModifiers::SHIFT,
+    )))
+    .await?;
+  assert!(app.copy_mode.is_some());
+  app
+    .key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+    .await?;
+  app.panes[&primary].control.detach().await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&primary].connected {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  assert!(app.status().contains("reconnecting"));
+  app.refresh().await?;
+  assert!(app.panes[&primary].connected);
+  assert!(
+    transport
+      .connections
+      .load(std::sync::atomic::Ordering::Relaxed)
+      > 3
+  );
+  assert_eq!(app.archive_key(), "remote-fixture");
+  app.detach().await;
+  Ok(())
+}
+
 struct Daemon {
   directory: PathBuf,
   task: tokio::task::JoinHandle<std::result::Result<(), ctmuxd::DaemonError>>,
@@ -32,7 +146,7 @@ impl Daemon {
     Ok(daemon)
   }
 
-  fn app(&self, read_only: bool) -> App {
+  fn app(&self, read_only: bool) -> App<'_> {
     let mut app = App::new(
       self.directory.join("ctmux.sock"),
       read_only,
@@ -50,7 +164,7 @@ impl Drop for Daemon {
   }
 }
 
-async fn create_shell(app: &App) -> Result<String> {
+async fn create_shell(app: &App<'_>) -> Result<String> {
   let ServerMessage::SessionCreated { session } = app
     .request(ClientMessage::CreateSession {
       name: None,
@@ -71,7 +185,7 @@ async fn create_shell(app: &App) -> Result<String> {
   Ok(session.session_id)
 }
 
-async fn wait_for_text(app: &mut App, id: &str, text: &str) -> Result<()> {
+async fn wait_for_text(app: &mut App<'_>, id: &str, text: &str) -> Result<()> {
   timeout(Duration::from_secs(5), async {
     loop {
       app.drain().await;
@@ -174,7 +288,7 @@ async fn assert_viewer_does_not_resize(daemon: &Daemon, session: &str) -> Result
   Ok(())
 }
 
-async fn wait_for_canvas(app: &mut App, columns: u16, rows: u16) -> Result<()> {
+async fn wait_for_canvas(app: &mut App<'_>, columns: u16, rows: u16) -> Result<()> {
   timeout(Duration::from_secs(5), async {
     loop {
       app.drain().await;
@@ -189,7 +303,7 @@ async fn wait_for_canvas(app: &mut App, columns: u16, rows: u16) -> Result<()> {
   .await?
 }
 
-async fn assert_pane_sizes(app: &mut App) -> Result<()> {
+async fn assert_pane_sizes(app: &mut App<'_>) -> Result<()> {
   timeout(Duration::from_secs(5), async {
     loop {
       app.drain().await;
@@ -206,7 +320,7 @@ async fn assert_pane_sizes(app: &mut App) -> Result<()> {
   Ok(())
 }
 
-async fn wait_for_lease(app: &mut App, lease: LeaseKind, expected: bool) -> Result<()> {
+async fn wait_for_lease(app: &mut App<'_>, lease: LeaseKind, expected: bool) -> Result<()> {
   timeout(Duration::from_secs(5), async {
     loop {
       app.drain().await;
@@ -225,7 +339,7 @@ async fn wait_for_lease(app: &mut App, lease: LeaseKind, expected: bool) -> Resu
   Ok(())
 }
 
-async fn assert_lease_handoff(daemon: &Daemon, owner: &mut App, session: &str) -> Result<()> {
+async fn assert_lease_handoff(daemon: &Daemon, owner: &mut App<'_>, session: &str) -> Result<()> {
   let mut other = daemon.app(false);
   other.size = (60, 20);
   other.start(Some(session.into())).await?;
@@ -268,7 +382,7 @@ async fn assert_lease_handoff(daemon: &Daemon, owner: &mut App, session: &str) -
   Ok(())
 }
 
-async fn assert_tmux_shortcuts(app: &mut App) -> Result<()> {
+async fn assert_tmux_shortcuts(app: &mut App<'_>) -> Result<()> {
   let focused = app.focused.clone();
   let count = app.panes.len();
   app.select(&focused).await?;
@@ -281,6 +395,27 @@ async fn assert_tmux_shortcuts(app: &mut App) -> Result<()> {
   assert_ne!(app.focused, focused);
   app.command(KeyCode::Char('o')).await?;
   assert_eq!(app.focused, focused);
+  let rect = app
+    .view
+    .as_ref()
+    .unwrap()
+    .panes
+    .iter()
+    .find(|pane| pane.terminal_id != focused)
+    .unwrap()
+    .clone();
+  app
+    .event(Event::Mouse(crossterm::event::MouseEvent {
+      kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+      column: rect.left,
+      row: rect.top,
+      modifiers: KeyModifiers::NONE,
+    }))
+    .await?;
+  assert_eq!(app.focused, rect.terminal_id);
+  app.focus_at(0, app.size.1 - 1);
+  assert_eq!(app.focused, rect.terminal_id);
+  app.focused = focused;
   let owner = app
     .panes
     .values()
@@ -293,10 +428,16 @@ async fn assert_tmux_shortcuts(app: &mut App) -> Result<()> {
       .any(|pane| pane.control.state().leases().layout.owned_by_client),
     owner
   );
+  app.command(KeyCode::PageUp).await?;
+  assert!(app.copy_mode.is_some());
+  app
+    .key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+    .await?;
+  assert!(app.copy_mode.is_none());
   Ok(())
 }
 
-async fn assert_copy_mode(app: &mut App, primary: &str) -> Result<()> {
+async fn assert_copy_mode(app: &mut App<'_>, primary: &str) -> Result<()> {
   app.command(KeyCode::Char('[')).await?;
   let snapshot = app.copy_mode.as_ref().unwrap().lines.clone();
   app.event(Event::Paste("IGNORED_PASTE\n".into())).await?;
@@ -326,7 +467,7 @@ async fn assert_copy_mode(app: &mut App, primary: &str) -> Result<()> {
   Ok(())
 }
 
-async fn split_exit_shell(app: &mut App) -> Result<String> {
+async fn split_exit_shell(app: &mut App<'_>) -> Result<String> {
   // This fixture tests dismissal, not the runner's login shell startup. Wait
   // for a known program to be ready before asking it to produce final output.
   let ServerMessage::ViewSnapshot { view } = app

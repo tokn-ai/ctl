@@ -1,7 +1,10 @@
 use base64::Engine as _;
 use crossterm::{
   cursor::{Hide, Show},
-  event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
+  event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+  },
   execute,
   style::{Attribute, ResetColor, SetAttribute},
   terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
@@ -33,6 +36,7 @@ impl Terminal {
       EnterAlternateScreen,
       DisableLineWrap,
       EnableBracketedPaste,
+      EnableMouseCapture,
       Hide
     )?;
     let (sender, receiver) = mpsc::channel(128);
@@ -106,6 +110,7 @@ impl Drop for Terminal {
       ResetColor,
       Show,
       DisableBracketedPaste,
+      DisableMouseCapture,
       EnableLineWrap,
       LeaveAlternateScreen
     );

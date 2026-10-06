@@ -79,6 +79,7 @@ pub struct Terminal {
   events: broadcast::Sender<SessionEvent>,
   lifecycle: Mutex<SessionLifecycle>,
   shell_state_publisher: ShellStatePublisher,
+  view_updates: watch::Sender<Option<ctmux_proto::ViewInfo>>,
   #[cfg(unix)]
   shell_reporter: Mutex<Option<ShellReporter>>,
   process_observation_enabled: AtomicBool,
@@ -386,6 +387,10 @@ impl Terminal {
   /// they cannot evict raw PTY output from the bounded attachment broadcast.
   pub fn subscribe_shell_state(&self) -> watch::Receiver<ShellState> {
     self.shell_state_publisher.subscribe()
+  }
+
+  pub fn subscribe_view(&self) -> watch::Receiver<Option<ctmux_proto::ViewInfo>> {
+    self.view_updates.subscribe()
   }
 
   /// Returns the latest state without live command metadata.
@@ -728,6 +733,101 @@ impl Terminal {
       u16::try_from(minimum.1).map_err(|_| SessionControlError::Pty("view is too tall".into()))?,
     );
     registry.resize_view(&owner, terminal_size)
+  }
+
+  /// Changes view zoom under the same attachment lease that owns PTY resize.
+  pub fn set_view_zoom(
+    &self,
+    attachment_id: &str,
+    terminal_id: Option<String>,
+  ) -> Result<ctmux_proto::ViewInfo, SessionControlError> {
+    let manager = self
+      .manager
+      .upgrade()
+      .ok_or_else(|| SessionControlError::InvalidView("view has closed".into()))?;
+    let mut registry = lock(&manager.registry);
+    let owner = lock(&self.owner).session_id.clone();
+    let root = registry
+      .sessions
+      .get(&owner)
+      .ok_or_else(|| SessionControlError::InvalidView("view has closed".into()))?;
+    if !root
+      .view
+      .leases
+      .status(attachment_id, LeaseKind::Layout)
+      .owned_by_client
+    {
+      return Err(SessionControlError::LayoutLeaseRequired);
+    }
+    if root.closing {
+      return Err(SessionControlError::InvalidView(
+        "session is terminating".into(),
+      ));
+    }
+    if let Some(id) = &terminal_id {
+      if !root.view.layout.terminal_ids().contains(id) {
+        return Err(SessionControlError::InvalidView(
+          "zoom terminal must belong to the attached view".into(),
+        ));
+      }
+      if !matches!(
+        *lock(&registry.terminals[id].lifecycle),
+        SessionLifecycle::Running
+      ) {
+        return Err(SessionControlError::InvalidView(
+          "zoom terminal has ended".into(),
+        ));
+      }
+    }
+    if root.view.zoomed_terminal_id == terminal_id {
+      return registry
+        .view_info(&owner)
+        .map_err(|error| SessionControlError::InvalidView(error.to_string()));
+    }
+    let old_zoom = root.view.zoomed_terminal_id.clone();
+    let old_revision = root.view.revision;
+    if let Some(previous) = &old_zoom
+      && terminal_id.is_some()
+    {
+      let pane = root
+        .view
+        .layout
+        .pane_geometry(&root.view.canvas_size)
+        .map_err(SessionControlError::InvalidView)?
+        .into_iter()
+        .find(|pane| &pane.terminal_id == previous)
+        .expect("zoom target belongs to its saved layout");
+      registry.terminals[previous]
+        .resize_pty(topology::pane_size(&root.view.canvas_size, &pane))?;
+    }
+    registry
+      .sessions
+      .get_mut(&owner)
+      .expect("validated view")
+      .view
+      .zoomed_terminal_id = terminal_id;
+    registry
+      .sessions
+      .get_mut(&owner)
+      .expect("validated view")
+      .view
+      .revision += 1;
+    if let Err(error) = registry.reflow_view(&owner) {
+      let view = &mut registry
+        .sessions
+        .get_mut(&owner)
+        .expect("validated view")
+        .view;
+      view.zoomed_terminal_id = old_zoom;
+      view.revision = old_revision;
+      // A retarget may already have restored the previous pane before the new
+      // PTY resize failed. Restore its authoritative geometry as well.
+      let _restore = registry.reflow_view(&owner);
+      return Err(error);
+    }
+    registry
+      .view_info(&owner)
+      .map_err(|error| SessionControlError::InvalidView(error.to_string()))
   }
 
   fn resize_pty(&self, terminal_size: TerminalSize) -> Result<(), SessionControlError> {
@@ -1200,6 +1300,7 @@ impl SessionManager {
       events,
       lifecycle: Mutex::new(SessionLifecycle::Running),
       shell_state_publisher: ShellStatePublisher::new(shell_state),
+      view_updates: watch::channel(None).0,
       #[cfg(unix)]
       shell_reporter: Mutex::new(Some(shell_reporter)),
       process_observation_enabled: AtomicBool::new(process_inspector.is_some()),
@@ -1455,6 +1556,7 @@ impl NameReservation {
         .get_mut(&owner.session_id)
         .expect("terminal owner exists");
       root.view.layout = layout;
+      root.view.zoomed_terminal_id = None;
       root.view.revision += 1;
       *lock(&session.owner) = owner.clone();
       registry.terminals.insert(session_id, session);
@@ -1475,6 +1577,7 @@ impl NameReservation {
           id: owner.view_id,
           revision: 0,
           canvas_size: session.info().terminal_size,
+          zoomed_terminal_id: None,
           leases: AttachmentLeaseRegistry::default(),
           layout: ctmux_proto::ViewLayout::Terminal {
             terminal_id: session_id.clone(),
@@ -1563,6 +1666,8 @@ pub enum SessionManagerError {
 
 #[derive(Debug, Error)]
 pub enum SessionControlError {
+  #[error("invalid view operation: {0}")]
+  InvalidView(String),
   #[error("this attachment does not own the session input lease")]
   InputLeaseRequired,
   #[error("this attachment does not own the session layout lease")]

@@ -30,13 +30,13 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
   let directory = TestDirectory::new();
   let socket = directory.path.join("ctmux.sock");
   let daemon = spawn_daemon(&socket, 4096, 1024);
-  let future = ProtocolVersion::new(1, 1, 15);
+  let future = ProtocolVersion::new(1, 1, 16);
   let mut stream = connect_when_ready(&socket).await?;
   write_frame(
     &mut stream,
     &ClientMessage::Handshake {
       protocol: ProtocolOffer::new(
-        15,
+        16,
         future,
         &[ctmux_proto::CONTRACT_V1_0_13, PROTOCOL_VERSION, future],
       ),
@@ -68,7 +68,7 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
     &mut control,
     &LocalControlClientMessage::Handshake {
       protocol: ProtocolOffer::new(
-        15,
+        16,
         future,
         &[ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION, future],
       ),
@@ -617,7 +617,7 @@ async fn read_history_bytes(
         ServerMessage::Output { sequence_end, .. } => {
           acknowledge_output(stream, sequence_end).await?;
         }
-        ServerMessage::ShellStateChanged { .. } => {}
+        ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
         other => {
           return Err(format!("history was interrupted before completion: {other:?}").into());
         }
@@ -641,7 +641,7 @@ async fn expect_history_expired(stream: &mut UnixStream, expected: &str) -> Test
         assert_eq!(snapshot_id, expected);
         return Ok(());
       }
-      ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
       other => {
         return Err(format!("expected scoped history expiration, received {other:?}").into());
       }
@@ -656,7 +656,7 @@ async fn raw_history_page(stream: &mut UnixStream) -> TestResult<ServerMessage> 
       ServerMessage::Output { sequence_end, .. } => {
         acknowledge_output(stream, sequence_end).await?;
       }
-      ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
       other => return Err(format!("expected history page, received {other:?}").into()),
     }
   }
@@ -678,7 +678,7 @@ async fn raw_checkpoint(
       ServerMessage::Output { sequence_end, .. } => {
         acknowledge_output(stream, sequence_end).await?;
       }
-      ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
       other => return Err(format!("expected replacing checkpoint, received {other:?}").into()),
     }
   }
@@ -750,7 +750,7 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
       ServerMessage::Output { .. } => {
         return Err("daemon exceeded presentation credit before renderer progress".into());
       }
-      ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
       message => {
         return Err(format!("unexpected message before heartbeat ACK: {message:?}").into());
       }
@@ -2211,7 +2211,8 @@ async fn wait_for_tui_hint(stream: &mut UnixStream, expected: ctmux_proto::TuiHi
   loop {
     match presented_message(stream).await? {
       ServerMessage::ShellStateChanged { state } if state.tui_hint == expected => return Ok(()),
-      ServerMessage::ShellStateChanged { .. }
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
@@ -2235,7 +2236,8 @@ async fn wait_for_unredacted_command_line(
       {
         return Ok(state);
       }
-      ServerMessage::ShellStateChanged { .. }
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
@@ -2259,7 +2261,8 @@ async fn wait_for_visible_running_command(
       {
         return Ok(state);
       }
-      ServerMessage::ShellStateChanged { .. }
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
@@ -2283,7 +2286,8 @@ async fn wait_for_redacted_running_command(
       {
         return Ok(state);
       }
-      ServerMessage::ShellStateChanged { .. }
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
@@ -2352,6 +2356,7 @@ async fn heartbeat(stream: &mut UnixStream, nonce: u64) -> TestResult {
       }
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
@@ -2373,6 +2378,7 @@ async fn lease_status_response(
       }
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
       response => return Err(format!("expected lease status, received {response:?}").into()),
@@ -2406,6 +2412,7 @@ async fn expect_error(stream: &mut UnixStream, expected_code: ErrorCode) -> Test
       }
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
       response => return Err(format!("expected error response, received {response:?}").into()),
@@ -2422,7 +2429,9 @@ async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult<Vec<u8>> {
       ServerMessage::SessionEnded { .. } => return Ok(output),
       ServerMessage::Output { data, .. } => output.extend(data),
       ServerMessage::Checkpoint { checkpoint, .. } => output = checkpoint.payload,
-      ServerMessage::ShellStateChanged { .. } | ServerMessage::PtyGeometryChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
         return Err(format!("expected output or session end, received {response:?}").into());
       }
@@ -2442,6 +2451,7 @@ async fn wait_for_session_end_or_connection_close(stream: &mut UnixStream) -> Te
       ServerMessage::SessionEnded { .. } => return Ok(()),
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
       response => {
@@ -2698,7 +2708,9 @@ async fn read_output_until_from(
           return Ok((output, checkpoint.sequence));
         }
       }
-      ServerMessage::ShellStateChanged { .. } | ServerMessage::PtyGeometryChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
     }
   }
@@ -2726,7 +2738,8 @@ async fn read_output_until_with_first_sequence(
           ));
         }
       }
-      ServerMessage::ShellStateChanged { .. }
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::PtyGeometryChanged { .. } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
@@ -2753,6 +2766,7 @@ async fn wait_for_geometry_change(
         return Ok(checkpoint.sequence);
       }
       ServerMessage::Output { .. }
+      | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Checkpoint { .. } => {}
       message => return Err(format!("expected geometry change, received {message:?}").into()),
@@ -3219,4 +3233,501 @@ async fn assert_minimum_canvas(
     terminal_size(5, 1)
   );
   Ok(())
+}
+
+async fn set_view_zoom(
+  socket: &Path,
+  session_id: &str,
+  stream: &mut UnixStream,
+  terminal_id: Option<&str>,
+) -> TestResult<ctmux_proto::ViewInfo> {
+  let current = topology_view(socket, session_id).await?;
+  let minimum_revision =
+    current.revision + u64::from(current.zoomed_terminal_id.as_deref() != terminal_id);
+  write_frame(
+    stream,
+    &ClientMessage::SetViewZoom {
+      terminal_id: terminal_id.map(str::to_owned),
+    },
+  )
+  .await?;
+  wait_for_view_zoom_at_revision(stream, terminal_id, minimum_revision).await
+}
+
+async fn wait_for_view_zoom(
+  stream: &mut UnixStream,
+  terminal_id: Option<&str>,
+) -> TestResult<ctmux_proto::ViewInfo> {
+  wait_for_view_zoom_at_revision(stream, terminal_id, 0).await
+}
+
+async fn wait_for_view_zoom_at_revision(
+  stream: &mut UnixStream,
+  terminal_id: Option<&str>,
+  minimum_revision: u64,
+) -> TestResult<ctmux_proto::ViewInfo> {
+  loop {
+    match presented_message(stream).await? {
+      ServerMessage::ViewSnapshot { view }
+        if view.revision >= minimum_revision
+          && view.zoomed_terminal_id.as_deref() == terminal_id =>
+      {
+        return Ok(view);
+      }
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Output { .. } => {}
+      other => return Err(format!("expected view zoom update, got {other:?}").into()),
+    }
+  }
+}
+
+fn assert_terminal_size(view: &ctmux_proto::ViewInfo, id: &str, columns: u16, rows: u16) {
+  assert_eq!(
+    view
+      .terminals
+      .iter()
+      .find(|terminal| terminal.terminal_id == id)
+      .unwrap()
+      .terminal_size,
+    terminal_size(columns, rows)
+  );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn view_zoom_requires_layout_ownership_and_preserves_hidden_terminals() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "zoom",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  let saved = split_topology_shell(&socket, &root).await?;
+  let second_id = saved.terminals[1].terminal_id.clone();
+  let foreign = create_shell_session(&socket, "other-view", "IFS= read -r line").await?;
+  let (mut first, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let (mut second, _) = attach_session(&socket, &second_id, None, true, true).await?;
+  write_frame(
+    &mut second,
+    &ClientMessage::SetViewZoom {
+      terminal_id: Some(second_id.clone()),
+    },
+  )
+  .await?;
+  expect_error(&mut second, ErrorCode::LayoutLeaseRequired).await?;
+  write_frame(
+    &mut first,
+    &ClientMessage::SetViewZoom {
+      terminal_id: Some(foreign.terminal_id.clone()),
+    },
+  )
+  .await?;
+  expect_error(&mut first, ErrorCode::InvalidRequest).await?;
+  let zoomed = set_view_zoom(
+    &socket,
+    &root.session_id,
+    &mut first,
+    Some(&root.terminal_id),
+  )
+  .await?;
+  assert_eq!(zoomed.panes, saved.panes);
+  assert_eq!(zoomed.layout, saved.layout);
+  assert_eq!(zoomed.terminals.len(), 2);
+  assert_eq!(zoomed.visible_panes().len(), 1);
+  assert_terminal_size(&zoomed, &root.terminal_id, 80, 24);
+  assert_terminal_size(&zoomed, &second_id, 39, 24);
+  // The observer receives zoom immediately through attached metadata, without
+  // polling GetView or acquiring the owner's layout lease.
+  let observer = wait_for_view_zoom(&mut second, Some(&root.terminal_id)).await?;
+  assert_eq!(observer.revision, zoomed.revision);
+  write_frame(
+    &mut first,
+    &ClientMessage::Resize {
+      terminal_size: terminal_size(100, 30),
+    },
+  )
+  .await?;
+  wait_for_geometry_change(&mut first, &terminal_size(100, 30)).await?;
+  let resized = topology_view(&socket, &root.session_id).await?;
+  assert_eq!(resized.canvas_size, terminal_size(100, 30));
+  assert_terminal_size(&resized, &root.terminal_id, 100, 30);
+  assert_terminal_size(&resized, &second_id, 39, 24);
+  write_frame(
+    &mut second,
+    &ClientMessage::Input {
+      data: b"hidden-is-running\n".to_vec(),
+    },
+  )
+  .await?;
+  read_output_until(&mut second, b"child:hidden-is-running").await?;
+  let retargeted = set_view_zoom(&socket, &root.session_id, &mut first, Some(&second_id)).await?;
+  assert_terminal_size(&retargeted, &root.terminal_id, 50, 30);
+  assert_terminal_size(&retargeted, &second_id, 100, 30);
+  let restored = set_view_zoom(&socket, &root.session_id, &mut first, None).await?;
+  assert_eq!(restored.layout, saved.layout);
+  assert_terminal_size(&restored, &root.terminal_id, 50, 30);
+  assert_terminal_size(&restored, &second_id, 49, 30);
+  kill_shell_session(&socket, &foreign.session_id).await?;
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(first);
+  drop(second);
+  wait_for_daemon_exit(daemon, "zoom daemon did not exit").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn view_zoom_survives_attachment_resume_and_clears_when_target_exits() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "zoom-resume",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  let saved = split_topology_shell(&socket, &root).await?;
+  let second_id = saved.terminals[1].terminal_id.clone();
+  let (mut child, _) = attach_session(&socket, &second_id, None, true, false).await?;
+  let (mut owner, attached) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let ServerMessage::Attached {
+    attachment_token, ..
+  } = attached
+  else {
+    panic!("expected attached");
+  };
+  set_view_zoom(&socket, &root.session_id, &mut owner, Some(&second_id)).await?;
+  drop(owner);
+  let (mut resumed, _) =
+    resume_attachment(&socket, &root.terminal_id, &attachment_token, None).await?;
+  let current = topology_view(&socket, &root.session_id).await?;
+  assert_eq!(
+    current.zoomed_terminal_id.as_deref(),
+    Some(second_id.as_str())
+  );
+  assert_eq!(current.panes, saved.panes);
+  // EOF at an empty canonical input line makes the fixture finish naturally.
+  write_frame(&mut child, &ClientMessage::Input { data: vec![4] }).await?;
+  wait_for_session_end(&mut child).await?;
+  wait_for_single_terminal(&socket, &root.session_id).await?;
+  wait_for_view_zoom(&mut resumed, None).await?;
+  let cleared = topology_view(&socket, &root.session_id).await?;
+  assert_eq!(cleared.terminals.len(), 1);
+  assert_terminal_size(&cleared, &root.terminal_id, 80, 24);
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(resumed);
+  drop(child);
+  wait_for_daemon_exit(daemon, "zoom resume daemon did not exit").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_contracts_omit_zoom_and_reject_zoom_mutations() -> TestResult {
+  use ctl_core::protocol::ProtocolOffer;
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(&socket, "zoom-compat", "IFS= read -r line").await?;
+  let saved = split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  set_view_zoom(
+    &socket,
+    &root.session_id,
+    &mut owner,
+    Some(&root.terminal_id),
+  )
+  .await?;
+  for contract in [ctmux_proto::CONTRACT_V1_0_13, ctmux_proto::CONTRACT_V1_1_14] {
+    let mut old = connect_when_ready(&socket).await?;
+    write_frame(
+      &mut old,
+      &ClientMessage::Handshake {
+        protocol: ProtocolOffer::new(contract.build, contract, &[contract]),
+        client_name: "historical".into(),
+        client_version: "test".into(),
+      },
+    )
+    .await?;
+    assert!(matches!(required_message(&mut old).await?,
+      ServerMessage::HandshakeAccepted { protocol_version, .. } if protocol_version == contract));
+    write_frame(
+      &mut old,
+      &ClientMessage::GetView {
+        session: root.session_id.clone(),
+      },
+    )
+    .await?;
+    let raw: serde_json::Value = timeout(Duration::from_secs(3), read_frame(&mut old))
+      .await??
+      .unwrap();
+    assert!(raw["view"].get("zoomed_terminal_id").is_none());
+    let ServerMessage::ViewSnapshot { view } = serde_json::from_value(raw)? else {
+      panic!("expected view");
+    };
+    assert_eq!(view.panes, saved.panes);
+    assert_eq!(view.terminals.len(), 2);
+    let mut old = connect_when_ready(&socket).await?;
+    write_frame(
+      &mut old,
+      &ClientMessage::Handshake {
+        protocol: ProtocolOffer::new(contract.build, contract, &[contract]),
+        client_name: "historical-attached".into(),
+        client_version: "test".into(),
+      },
+    )
+    .await?;
+    required_message(&mut old).await?;
+    write_frame(
+      &mut old,
+      &ClientMessage::AttachSession {
+        session: root.terminal_id.clone(),
+        resume_from: None,
+        terminal_size: TerminalSize::default(),
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line: false,
+        request_running_command: false,
+        presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+      },
+    )
+    .await?;
+    let attached = required_message(&mut old).await?;
+    if let ServerMessage::Attached {
+      checkpoint: Some(checkpoint),
+      ..
+    } = &attached
+    {
+      acknowledge_output(&mut old, checkpoint.sequence).await?;
+    }
+    write_frame(&mut old, &ClientMessage::SetViewZoom { terminal_id: None }).await?;
+    expect_error(&mut old, ErrorCode::InvalidRequest).await?;
+    assert_eq!(
+      topology_view(&socket, &root.session_id)
+        .await?
+        .zoomed_terminal_id
+        .as_deref(),
+      Some(root.terminal_id.as_str())
+    );
+    write_frame(&mut old, &ClientMessage::Detach).await?;
+    wait_for_detached(&mut old).await?;
+  }
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "zoom compatibility daemon did not exit").await
+}
+
+fn assert_unzoomed_geometry(view: &ctmux_proto::ViewInfo) {
+  assert_eq!(view.zoomed_terminal_id, None);
+  for pane in &view.panes {
+    assert_terminal_size(view, &pane.terminal_id, pane.columns, pane.rows);
+  }
+}
+
+async fn assert_zoom_cleared_by_layout_changes(
+  socket: &Path,
+  owner: &mut UnixStream,
+  root: &SessionInfo,
+) -> TestResult<ctmux_proto::ViewInfo> {
+  set_view_zoom(socket, &root.session_id, owner, Some(&root.terminal_id)).await?;
+  let split = split_topology_shell(socket, root).await?;
+  assert_unzoomed_geometry(&split);
+  let current = set_view_zoom(
+    socket,
+    &root.session_id,
+    owner,
+    Some(&split.terminals[2].terminal_id),
+  )
+  .await?;
+  let updated = topology_request(
+    socket,
+    ClientMessage::UpdateView {
+      session: root.session_id.clone(),
+      expected_revision: current.revision,
+      layout: current.layout,
+    },
+  )
+  .await?;
+  let ServerMessage::ViewSnapshot { view } = updated else {
+    panic!("expected updated view");
+  };
+  assert_unzoomed_geometry(&view);
+  Ok(view)
+}
+
+async fn assert_zoom_cleared_by_membership_moves(
+  socket: &Path,
+  owner: &mut UnixStream,
+  root: &SessionInfo,
+  view: &ctmux_proto::ViewInfo,
+) -> TestResult {
+  let moved_id = &view.terminals[2].terminal_id;
+  set_view_zoom(socket, &root.session_id, owner, Some(moved_id)).await?;
+  let promoted = topology_request(
+    socket,
+    ClientMessage::PromoteTerminal {
+      terminal_id: moved_id.clone(),
+      name: Some("zoom-promoted".into()),
+    },
+  )
+  .await?;
+  let ServerMessage::ViewSnapshot { view: promoted } = promoted else {
+    panic!("expected promoted view");
+  };
+  assert_unzoomed_geometry(&promoted);
+  assert_unzoomed_geometry(&topology_view(socket, &root.session_id).await?);
+  set_view_zoom(socket, &root.session_id, owner, Some(&root.terminal_id)).await?;
+  let merged = topology_request(
+    socket,
+    ClientMessage::MergeSessions {
+      source: promoted.session_id,
+      destination: root.session_id.clone(),
+    },
+  )
+  .await?;
+  let ServerMessage::ViewSnapshot { view: merged } = merged else {
+    panic!("expected merged view");
+  };
+  assert_unzoomed_geometry(&merged);
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn topology_edits_clear_zoom_before_reflowing_saved_layout() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "zoom-topology",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let view = assert_zoom_cleared_by_layout_changes(&socket, &mut owner, &root).await?;
+  assert_zoom_cleared_by_membership_moves(&socket, &mut owner, &root, &view).await?;
+  set_view_zoom(
+    &socket,
+    &root.session_id,
+    &mut owner,
+    Some(&root.terminal_id),
+  )
+  .await?;
+  // Removing any hidden pane also restores the surviving split geometry.
+  let response = topology_request(
+    &socket,
+    ClientMessage::KillTerminal {
+      terminal_id: view.terminals[1].terminal_id.clone(),
+    },
+  )
+  .await?;
+  assert_eq!(response, ServerMessage::Success);
+  let removed = wait_for_view_zoom(&mut owner, None).await?;
+  assert_eq!(removed.terminals.len(), 2);
+  assert_unzoomed_geometry(&removed);
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "zoom topology daemon did not exit").await
+}
+
+fn encoded_heartbeat(nonce: u64) -> TestResult<Vec<u8>> {
+  let payload = serde_json::to_vec(&ClientMessage::Heartbeat { nonce })?;
+  let mut frame = u32::try_from(payload.len())?.to_be_bytes().to_vec();
+  frame.extend(payload);
+  Ok(frame)
+}
+
+async fn fill_ready_control_queue(writer: &tokio::net::unix::OwnedWriteHalf) -> TestResult<usize> {
+  // Far more than the Unix socket's queue capacity. Keep the producer paused
+  // once full; the completed input-frame count is an exact wire barrier.
+  let frame = encoded_heartbeat(1)?;
+  let bytes = frame.repeat(100_000);
+  writer.writable().await?;
+  let mut written = 0;
+  while written < bytes.len() {
+    match writer.try_write(&bytes[written..]) {
+      Ok(0) => return Err("observer control queue closed".into()),
+      Ok(count) => written += count,
+      Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        let complete_frames = written / frame.len();
+        assert!(
+          complete_frames > 1,
+          "queue must contain ready control frames"
+        );
+        return Ok(complete_frames);
+      }
+      Err(error) => return Err(error.into()),
+    }
+  }
+  Err("observer control queue never reached backpressure".into())
+}
+
+async fn assert_view_precedes_control_barrier(
+  reader: &mut tokio::net::unix::OwnedReadHalf,
+  terminal_id: &str,
+  queued_frames: usize,
+) -> TestResult {
+  let mut acknowledged_frames = 0;
+  loop {
+    let message = timeout(
+      Duration::from_secs(3),
+      read_frame::<_, ServerMessage>(reader),
+    )
+    .await
+    .map_err(|_| "view update starved behind ready control traffic")??
+    .ok_or("observer closed before receiving shared zoom")?;
+    match message {
+      ServerMessage::ViewSnapshot { view }
+        if view.zoomed_terminal_id.as_deref() == Some(terminal_id) =>
+      {
+        return Ok(());
+      }
+      ServerMessage::HeartbeatAck { nonce: 1 } => {
+        acknowledged_frames += 1;
+        if acknowledged_frames >= queued_frames {
+          return Err("view update waited until all ready control traffic drained".into());
+        }
+      }
+      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
+      other => return Err(format!("unexpected observer frame: {other:?}").into()),
+    }
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_view_zoom_progresses_while_control_messages_remain_ready() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(&socket, "zoom-control-fairness", "IFS= read -r line").await?;
+  let saved = split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let (mut observer, _) =
+    attach_session(&socket, &saved.terminals[1].terminal_id, None, false, false).await?;
+  heartbeat(&mut observer, 99).await?;
+  let (mut reader, writer) = observer.into_split();
+  let queued_frames = fill_ready_control_queue(&writer).await?;
+  set_view_zoom(
+    &socket,
+    &root.session_id,
+    &mut owner,
+    Some(&root.terminal_id),
+  )
+  .await?;
+  let result =
+    assert_view_precedes_control_barrier(&mut reader, &root.terminal_id, queued_frames).await;
+  drop(writer);
+  drop(reader);
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "zoom fairness daemon did not exit").await?;
+  result
 }

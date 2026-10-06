@@ -448,7 +448,14 @@ impl AttachmentActor {
       pending.claim(event_id)?
     };
 
-    let result = acknowledgement.apply(&self.control).await;
+    let result = match acknowledgement.apply(&self.control).await {
+      // The controller can finish after queuing final presentation/Ended
+      // events. This exact pending event still proves local rendering; there
+      // is simply no transport left to acknowledge. Rejected acknowledgements
+      // continue to fail instead of accepting an invalid presentation order.
+      Err(AttachmentAcknowledgementError::Closed) => Ok(()),
+      result => result,
+    };
     let mut pending = self.pending.lock().await;
     let still_current = pending
       .as_ref()
@@ -584,7 +591,9 @@ pub async fn forward_attachment_events(
           result = &mut forwarding => result,
           outcome = &mut controller => {
             // Finish publishing the already received event before closure.
-            let _ignored = forwarding.await;
+            if let Err(error) = forwarding.await {
+              bridge_error = Some(error);
+            }
             break outcome;
           }
         };
@@ -598,7 +607,26 @@ pub async fn forward_attachment_events(
     }
   };
 
-  let require_checkpoint = actor.has_pending_presentation().await;
+  let mut require_checkpoint = actor.has_pending_presentation().await;
+  if bridge_error.is_none() {
+    // A completed controller has already queued all final frames. Keep the
+    // actor available for their renderer acknowledgements and deliver Ended
+    // before publishing closure. The remote resume cursor cannot account for
+    // these locally completed presentations, so abnormal reconnects still
+    // require a checkpoint.
+    match forward_buffered_events(
+      &actor,
+      &mut events,
+      &channel,
+      cache_writer.as_ref(),
+      &mut observations,
+    )
+    .await
+    {
+      Ok(rendered_after_close) => require_checkpoint |= rendered_after_close,
+      Err(error) => bridge_error = Some(error),
+    }
+  }
   actor.clear_pending().await;
   if let Some(cache_writer) = cache_writer
     && let Err(error) = cache_writer.finish().await
@@ -611,6 +639,20 @@ pub async fn forward_attachment_events(
   }
   // A timeout/disconnect is not new contact. Flush only the last incoming time.
   let _ignored = publish_observation(&actor.attachment_id, &channel, observations.flush());
+  publish_attachment_outcome(&actor, &channel, outcome, bridge_error, require_checkpoint);
+  state
+    .release(&actor.window_label, &actor.attachment_id)
+    .await;
+  actor.mark_closed();
+}
+
+fn publish_attachment_outcome(
+  actor: &AttachmentActor,
+  channel: &Channel<AttachmentEventDto>,
+  outcome: Result<ctmux_client::AttachExit, ctmux_client::ClientError>,
+  bridge_error: Option<CommandErrorDto>,
+  require_checkpoint: bool,
+) {
   if let Some(error) = bridge_error {
     let _ignored = channel.send(AttachmentEventDto::attachment_error(
       &actor.attachment_id,
@@ -635,10 +677,45 @@ pub async fn forward_attachment_events(
       }
     }
   }
-  state
-    .release(&actor.window_label, &actor.attachment_id)
-    .await;
-  actor.mark_closed();
+}
+
+async fn forward_buffered_events(
+  actor: &AttachmentActor,
+  events: &mut AttachmentEvents,
+  channel: &Channel<AttachmentEventDto>,
+  cache_writer: Option<&cache_writer::CacheWriter>,
+  observations: &mut observation::Observations,
+) -> CommandResult<bool> {
+  let mut rendered_after_close = false;
+  loop {
+    if actor.has_pending_presentation().await {
+      timeout(
+        PRESENTATION_ACKNOWLEDGEMENT_TIMEOUT,
+        actor.wait_until_presentation_applied(),
+      )
+      .await
+      .map_err(|_| {
+        CommandErrorDto::new(
+          "presentation_acknowledgement_timeout",
+          "the terminal renderer did not acknowledge its final event within 30 seconds",
+        )
+      })?;
+    }
+    let Ok(event) = events.try_recv() else {
+      return Ok(rendered_after_close);
+    };
+    rendered_after_close |= matches!(
+      event,
+      AttachmentEvent::Checkpoint { .. }
+        | AttachmentEvent::Output { .. }
+        | AttachmentEvent::PtyGeometryChanged { .. }
+    );
+    observe_event(observations, &actor.attachment_id, channel, &event)?;
+    if let Some(cache_writer) = cache_writer {
+      cache_writer.enqueue(&event);
+    }
+    forward_event(actor, channel, event).await?;
+  }
 }
 
 fn observe_event(
@@ -738,6 +815,10 @@ async fn forward_event(
         observed_sequence,
       )
     }
+    AttachmentEvent::ViewChanged { view } => AttachmentEventDto::ViewChanged {
+      attachment_id: actor.attachment_id.clone(),
+      view: view.into(),
+    },
     AttachmentEvent::LeaseStatus { lease, status } => {
       AttachmentEventDto::lease_status(&actor.attachment_id, lease, status)
     }
@@ -762,6 +843,200 @@ async fn forward_event(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  async fn buffered_test_attachment() -> (
+    tokio::io::DuplexStream,
+    tokio::io::DuplexStream,
+    ctmux_client::AttachedSession,
+  ) {
+    use ctmux_client::{
+      AttachRequest, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES, begin_attach,
+    };
+    use ctmux_proto::{
+      ClientMessage, LeaseStatus, ServerMessage, ShellState, TerminalSize, read_frame, write_frame,
+    };
+    let (client, mut peer) = tokio::io::duplex(16 * 1024);
+    let server = async {
+      assert!(matches!(
+        read_frame::<_, ClientMessage>(&mut peer).await.unwrap(),
+        Some(ClientMessage::Handshake { .. })
+      ));
+      write_frame(
+        &mut peer,
+        &ServerMessage::HandshakeAccepted {
+          protocol_version: ctmux_proto::PROTOCOL_VERSION,
+          protocols: vec![ctmux_proto::protocol_info()],
+          server_version: "test".into(),
+          build: None,
+          heartbeat_interval_ms: 60_000,
+          attachment_liveness_timeout_ms: 180_000,
+        },
+      )
+      .await
+      .unwrap();
+      assert!(matches!(
+        read_frame::<_, ClientMessage>(&mut peer).await.unwrap(),
+        Some(ClientMessage::AttachSession { .. })
+      ));
+      write_frame(
+        &mut peer,
+        &ServerMessage::Attached {
+          attachment_token: "token".into(),
+          session: ctmux_proto::SessionInfo {
+            session_id: "session".into(),
+            terminal_id: "terminal".into(),
+            view_id: "view".into(),
+            name: "test".into(),
+            status: ctmux_proto::SessionStatus::Running,
+            created_at_ms: 0,
+            next_sequence: 0,
+            terminal_size: TerminalSize::default(),
+          },
+          earliest_sequence: 0,
+          next_sequence: 0,
+          replay_from: 0,
+          history_gap: false,
+          history_manifest: None,
+          checkpoint: None,
+          history: None,
+          terminal_size_mismatch: false,
+          input_lease: LeaseStatus {
+            held: false,
+            owned_by_client: false,
+          },
+          layout_lease: LeaseStatus {
+            held: false,
+            owned_by_client: false,
+          },
+          shell_state: ShellState::default(),
+        },
+      )
+      .await
+      .unwrap();
+      peer
+    };
+    let identity = ClientIdentity {
+      name: "desktop-test".into(),
+      version: "test".into(),
+    };
+    let opening = begin_attach(
+      client,
+      &identity,
+      AttachRequest {
+        session: "session".into(),
+        resume_from: Some(0),
+        terminal_size: TerminalSize::default(),
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line: false,
+        request_running_command: false,
+        presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+      },
+    );
+    let (opened, peer) = tokio::join!(opening, server);
+    let (client, attached) = opened.unwrap();
+    (client, peer, attached)
+  }
+
+  #[tokio::test]
+  async fn completed_controller_drains_final_frames_before_attachment_closure() {
+    use ctmux_client::{AttachmentController, AttachmentControllerOptions};
+    use ctmux_proto::{ServerMessage, write_frame};
+    for natural_exit in [true, false] {
+      let (client, mut peer, attached) = buffered_test_attachment().await;
+      for (sequence_start, data) in [(0, b"last".to_vec()), (4, b" tail".to_vec())] {
+        write_frame(
+          &mut peer,
+          &ServerMessage::Output {
+            sequence_start,
+            sequence_end: sequence_start + data.len() as u64,
+            data,
+          },
+        )
+        .await
+        .unwrap();
+      }
+      if natural_exit {
+        write_frame(
+          &mut peer,
+          &ServerMessage::SessionEnded {
+            session_id: "session".into(),
+            exit_code: Some(7),
+          },
+        )
+        .await
+        .unwrap();
+      }
+      drop(peer);
+      let (controller, control, events) =
+        AttachmentController::new(client, &attached, AttachmentControllerOptions::default())
+          .unwrap();
+      // Complete the transport before any frontend frame is acknowledged.
+      let exit = controller.run().await.unwrap();
+      let actor = Arc::new(AttachmentActor::new(
+        "owner".into(),
+        "main".into(),
+        ConnectionTargetDto::Local,
+        control,
+      ));
+      let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+      let channel = Channel::new(move |body| {
+        sender
+          .send(body.deserialize::<serde_json::Value>().unwrap())
+          .unwrap();
+        Ok(())
+      });
+      let renderer_actor = Arc::clone(&actor);
+      let rendering = async move {
+        let mut delivered = Vec::new();
+        while let Some(event) = receiver.recv().await {
+          if let Some(event_id) = event["event_id"].as_str() {
+            let stale = renderer_actor.acknowledge("wrong-event").await.unwrap_err();
+            assert_eq!(stale.code, "stale_presentation_event");
+            renderer_actor.acknowledge(event_id).await.unwrap();
+          }
+          delivered.push(event);
+        }
+        delivered
+      };
+      let forwarding = forward_attachment_events(
+        AppState::default(),
+        Arc::clone(&actor),
+        events,
+        channel,
+        async { Ok(exit) },
+      );
+      let ((), delivered) = timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(forwarding, rendering)
+      })
+      .await
+      .expect("final renderer frames did not drain");
+      let types: Vec<_> = delivered
+        .iter()
+        .map(|event| event["event_type"].as_str().unwrap())
+        .collect();
+      assert_eq!(types.iter().filter(|kind| **kind == "output").count(), 2);
+      assert!(!types.contains(&"attachment_error"));
+      if natural_exit {
+        assert!(
+          types
+            .iter()
+            .position(|kind| *kind == "session_ended")
+            .unwrap()
+            < types
+              .iter()
+              .position(|kind| *kind == "attachment_exited")
+              .unwrap()
+        );
+        assert_eq!(delivered.last().unwrap()["reason"], "session_ended");
+      } else {
+        assert_eq!(delivered.last().unwrap()["reason"], "connection_closed");
+        assert!(delivered.last().unwrap()["next_sequence"].is_null());
+      }
+      assert!(!actor.has_pending_presentation().await);
+      assert!(actor.closed.load(Ordering::Acquire));
+    }
+  }
 
   #[test]
   fn quiet_heartbeat_publishes_an_observation_without_a_presentation_event() {

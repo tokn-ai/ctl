@@ -122,6 +122,92 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
   Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_zoom_preserves_hidden_attachments_and_frozen_selections() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut owner = daemon.app(false);
+  let session = create_shell(&owner).await?;
+  owner.start(Some(session.clone())).await?;
+  let first = owner.focused.clone();
+  let view = daemon
+    .split_echo(&first, SplitAxis::Horizontal, "second", owner.canvas_size())
+    .await?;
+  let second = view
+    .terminals
+    .iter()
+    .find(|terminal| terminal.terminal_id != first)
+    .unwrap()
+    .terminal_id
+    .clone();
+  owner.refresh().await?;
+  wait_for_text(&mut owner, &second, "second:ready").await?;
+  owner.panes[&first]
+    .control
+    .input(b"BEFORE_ZOOM\n".to_vec())
+    .await?;
+  wait_for_text(&mut owner, &first, "echo:BEFORE_ZOOM").await?;
+  owner.execute(Action::History { page_back: false }).await?;
+  owner
+    .key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+    .await?;
+  let frozen = owner.copies[&first].lines.clone();
+  let cursor = owner.copies[&first].cursor;
+  assert!(owner.copies[&first].selected(cursor));
+  let tokens: BTreeMap<_, _> = owner
+    .panes
+    .iter()
+    .map(|(id, pane)| (id.clone(), pane.token.clone()))
+    .collect();
+
+  owner.execute(Action::NextPane).await?;
+  assert_eq!(owner.focused, second);
+  owner.execute(Action::ToggleZoom).await?;
+  assert_eq!(
+    owner.view.as_ref().unwrap().zoomed_terminal_id.as_ref(),
+    Some(&second)
+  );
+  assert_eq!(owner.panes.len(), 2);
+  owner.panes[&first]
+    .control
+    .input(b"WHILE_HIDDEN\n".to_vec())
+    .await?;
+  wait_for_text(&mut owner, &first, "echo:WHILE_HIDDEN").await?;
+  assert_eq!(owner.copies[&first].lines, frozen);
+  assert!(owner.copies[&first].selected(cursor));
+  assert!(owner.status().contains("ZOOM"));
+
+  let mut observer = daemon.app(true);
+  observer.start(Some(session)).await?;
+  assert_eq!(observer.focused, second);
+  let error = observer.execute(Action::ToggleZoom).await.unwrap_err();
+  assert!(error.to_string().contains("Resize lease required"));
+  assert_eq!(
+    observer.view.as_ref().unwrap().zoomed_terminal_id.as_ref(),
+    Some(&second)
+  );
+
+  // Normal focus navigation restores the shared split before changing focus.
+  owner.execute(Action::NextPane).await?;
+  assert_eq!(owner.focused, first);
+  assert!(owner.view.as_ref().unwrap().zoomed_terminal_id.is_none());
+  assert_eq!(owner.copies[&first].lines, frozen);
+  assert!(owner.copies[&first].selected(cursor));
+  for (id, token) in tokens {
+    assert_eq!(owner.panes[&id].token, token);
+    assert!(
+      owner.panes[&id]
+        .control
+        .state()
+        .leases()
+        .input
+        .owned_by_client
+    );
+  }
+  observer.detach().await;
+  owner.detach().await;
+  Ok(())
+}
+
 impl Daemon {
   fn app(&self, read_only: bool) -> App<'_> {
     let mut app = App::new(
@@ -498,6 +584,18 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
     .control
     .input(b"finish\n".to_vec())
     .await?;
+  // Deliberately leave final presentation events buffered until their
+  // controller has stopped. Closed acknowledgements must not discard the
+  // remaining output or replace the real exit code with a missing-pane notice.
+  timeout(
+    Duration::from_secs(5),
+    app
+      .panes
+      .get_mut(&child)
+      .unwrap()
+      .wait_for_controller_exit(),
+  )
+  .await?;
   timeout(Duration::from_secs(5), async {
     while app.panes[&child].ended.is_none() {
       app.drain().await;
@@ -518,7 +616,9 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
       .model
       .copy_lines()
       .join("\n")
-      .contains("FINAL_CHILD")
+      .contains("FINAL_CHILD"),
+    "ended={:?}",
+    app.panes[&child].ended
   );
   assert!(app.status().contains("code 7"));
   assert!(
@@ -576,6 +676,123 @@ async fn ended_panes_and_confirmed_missing_sessions_wait_for_dismissal() -> Resu
       ))
       .await?
   );
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zoom_ack_preserves_ended_sibling_copy_state_until_archival() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let primary = app.focused.clone();
+  let child = split_exit_shell(&mut app).await?;
+  app.execute(Action::History { page_back: false }).await?;
+  app
+    .key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+    .await?;
+  let frozen = app.copies[&child].lines.clone();
+  let cursor = app.copies[&child].cursor;
+  let token = app.panes[&child].token.clone();
+  assert!(app.copies[&child].selected(cursor));
+  app.focused.clone_from(&primary);
+  app.panes[&child]
+    .control
+    .input(b"finish\n".to_vec())
+    .await?;
+  timeout(
+    Duration::from_secs(5),
+    app
+      .panes
+      .get_mut(&child)
+      .unwrap()
+      .wait_for_controller_exit(),
+  )
+  .await?;
+  timeout(Duration::from_secs(5), async {
+    while app.panes[&child].ended.is_none() {
+      app.drain().await;
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await?;
+  assert_eq!(app.focused, primary);
+  assert!(
+    app.panes[&child]
+      .model
+      .copy_lines()
+      .join("\n")
+      .contains("FINAL_CHILD")
+  );
+
+  // The canonical acknowledgement omits the ended sibling. Zoom must keep
+  // that client's retained model and selection until normal dismissal.
+  for zoomed in [true, false] {
+    app.execute(Action::ToggleZoom).await?;
+    assert_eq!(
+      app.view.as_ref().unwrap().zoomed_terminal_id.is_some(),
+      zoomed
+    );
+    assert_eq!(app.panes.len(), 2);
+    assert_eq!(app.panes[&child].token, token);
+    assert_eq!(app.copies[&child].lines, frozen);
+    assert!(app.copies[&child].selected(cursor));
+    assert!(
+      app.panes[&child]
+        .model
+        .copy_lines()
+        .join("\n")
+        .contains("FINAL_CHILD")
+    );
+  }
+  app.focused.clone_from(&child);
+  // Copy mode remains usable; leaving it precedes the normal ended-pane key.
+  app
+    .key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+    .await?;
+  assert!(app.panes.contains_key(&child));
+  assert!(
+    !app
+      .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+      .await?
+  );
+  assert_eq!(app.panes.len(), 1);
+  assert_eq!(app.focused, primary);
+  assert!(app.local_archives()?.iter().any(|archive| {
+    archive
+      .terminals
+      .iter()
+      .any(|pane| pane.terminal_id == child && pane.lines.join("\n").contains("FINAL_CHILD"))
+  }));
+  app.detach().await;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_view_revision_cannot_hide_a_current_view_zoom_update() -> Result<()> {
+  let daemon = Daemon::start().await?;
+  let mut app = daemon.app(false);
+  let session = create_shell(&app).await?;
+  app.start(Some(session)).await?;
+  let primary = app.focused.clone();
+  let child = split_exit_shell(&mut app).await?;
+  let mut current = app.view.as_ref().unwrap().clone();
+  current.revision += 1;
+  current.zoomed_terminal_id = Some(primary.clone());
+  let mut foreign = current.clone();
+  foreign.view_id = format!("foreign-{}", foreign.view_id);
+  foreign.session_id = "foreign-session".into();
+  foreign.revision += 100;
+  foreign.zoomed_terminal_id = Some(child.clone());
+  // A promoted terminal can begin receiving another view's snapshots. Its
+  // larger revision must be rejected before selecting the newest candidate.
+  app.panes.get_mut(&primary).unwrap().view_update = Some(current.clone());
+  app.panes.get_mut(&child).unwrap().view_update = Some(foreign);
+  app.drain().await;
+  assert_eq!(app.view.as_ref(), Some(&current));
+  assert_eq!(app.focused, primary);
+  assert_eq!(app.panes.len(), 2);
   app.detach().await;
   Ok(())
 }

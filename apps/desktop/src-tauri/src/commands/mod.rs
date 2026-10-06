@@ -22,8 +22,9 @@ use crate::dto::{
   AttachmentRequestDto, ConnectionTargetDto, CreateSessionRequestDto, KillSessionRequestDto,
   OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentRequestDto,
   RestartLocalDaemonResponseDto, SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto,
-  SendInputRequestDto, SessionDto, SessionListDto, ShellStateDto, SshConfigHostCatalogDto,
-  SshConfigHostDto, TargetRequestDto, decode_input, observation_timestamp_ms, parse_sequence,
+  SendInputRequestDto, SessionDto, SessionListDto, SetAttachmentViewZoomRequestDto, ShellStateDto,
+  SshConfigHostCatalogDto, SshConfigHostDto, TargetRequestDto, decode_input,
+  observation_timestamp_ms, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -422,6 +423,26 @@ pub async fn resize_attachment(
   actor
     .control
     .resize(terminal_size)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn set_attachment_view_zoom(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: SetAttachmentViewZoomRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  if !actor.control.supports_view_zoom() {
+    return Err(CommandErrorDto::new(
+      "view_zoom_unsupported",
+      "This server does not support pane zoom. Upgrade ctmuxd to use it.",
+    ));
+  }
+  actor
+    .control
+    .set_view_zoom(request.terminal_id)
     .await
     .map_err(CommandErrorDto::backend)
 }

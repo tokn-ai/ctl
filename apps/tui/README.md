@@ -60,6 +60,7 @@ The default prefix is **Ctrl+B**. Change it with `--prefix Ctrl+a` or
 | `"` | Split below |
 | Arrow keys | Focus an adjacent pane; repeat without a prefix for 500 ms |
 | `o` | Cycle to the next pane |
+| `z` | Zoom/unzoom the focused pane; requires the view resize lease |
 | `c` | Create and select a session |
 | `n` / `p` | Next / previous session |
 | `s` / `w` | Session picker; arrows select, Enter opens, Esc cancels |
@@ -157,6 +158,18 @@ the active pane's cursor when the shared canvas is larger than their terminal.
 Input ownership is independent for each pane. Lease requests never displace
 another client.
 
+**Ctrl+B z** toggles shared pane zoom. The daemon resizes that pane to the full
+canvas above the status row and preserves the split layout. Hidden panes keep
+running with their attachments, input leases, and copy selections. Unzoom restores
+the split geometry for the current canvas. Focus navigation unzooms first; a
+client without the resize lease cannot change shared zoom. Splitting or changing
+the layout clears zoom, and exiting the zoomed pane clears zoom. Its final
+screen remains visible until dismissed, as with other ended panes.
+Zoom survives detach and reconnect, and the status row shows `ZOOM`.
+
+Zoom requires negotiated ctmux contract `1.1.15`. Older daemons remain usable
+with their existing split controls; attempting zoom reports that it is unavailable.
+
 Each pane has its own bounded VT emulator. The renderer uses authoritative pane
 rectangles and the server's reserved separator cells, without taking rows or
 columns away from PTYs for borders. It handles colors, attributes, wide cells,
@@ -170,7 +183,7 @@ and session lists refresh every two seconds and after local changes. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
-Pane border dragging, zoom and resizing commands, extended keyboard protocols,
+Pane border dragging, pane resizing commands, extended keyboard protocols,
 and a command prompt remain unimplemented. Rendering shares the
 daemon's `avt` terminal emulation capabilities; it is not full tmux feature parity.
 

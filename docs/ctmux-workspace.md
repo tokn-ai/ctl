@@ -344,7 +344,7 @@ With a terminal focused, press the prefix then:
 | --- | --- |
 | V / S | Split right / below |
 | Arrow | Focus the adjacent visible pane |
-| Z | Zoom/unzoom the focused pane locally |
+| Z | Zoom/unzoom the focused pane in the shared view; requires resize ownership |
 | M, then arrows | Swap the focused pane with neighbors in the shared layout |
 | ! | Move the pane to a new session |
 | N / P | Next / previous session tab |
@@ -356,7 +356,7 @@ input lease. Escape cancels the pending sequence or move mode; Enter also exits
 move mode. Unknown keys cancel a pending sequence without sending partial input.
 A floating hint overlay shows bindings without changing the terminal dimensions.
 Dialogs, nonterminal inputs, composition, and window blur do not retain a pending
-prefix. Pane focus and zoom preserve existing renderers, while moves use the
+prefix. Pane focus and shared zoom preserve existing renderers, while moves use the
 server view revision to reject concurrent layout conflicts. This pass controls
 existing panes and session tabs; split ratios and tmux-style windows within a
 session are not introduced here.

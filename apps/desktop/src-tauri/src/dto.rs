@@ -433,6 +433,12 @@ pub struct ResizeAttachmentRequestDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SetAttachmentViewZoomRequestDto {
+  pub attachment_id: String,
+  pub terminal_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AttachmentLeaseRequestDto {
   pub attachment_id: String,
   pub lease: LeaseKindDto,
@@ -558,6 +564,10 @@ pub enum AttachmentExitReasonDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum AttachmentEventDto {
+  ViewChanged {
+    attachment_id: String,
+    view: crate::commands::views::ViewDto,
+  },
   SessionObserved {
     attachment_id: String,
     last_seen_at_ms: u64,

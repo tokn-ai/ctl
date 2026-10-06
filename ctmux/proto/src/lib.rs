@@ -6,13 +6,16 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 14;
+pub const PROTOCOL_BUILD: u16 = 15;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_14;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_13, CONTRACT_V1_1_14];
+/// Server-owned view zoom with attachment layout ownership.
+pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_15;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
+  &[CONTRACT_V1_0_13, CONTRACT_V1_1_14, CONTRACT_V1_1_15];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -497,9 +500,35 @@ pub struct ViewInfo {
   pub session_id: String,
   pub revision: u64,
   pub canvas_size: TerminalSize,
+  /// Saved split geometry and complete membership, including hidden panes.
   pub panes: Vec<PaneGeometry>,
+  /// One visible terminal expanded to the canvas without changing the layout.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub zoomed_terminal_id: Option<String>,
   pub layout: ViewLayout,
   pub terminals: Vec<TerminalInfo>,
+}
+
+impl ViewInfo {
+  /// Effective visible geometry. The saved layout remains in `panes`.
+  #[must_use]
+  pub fn visible_panes(&self) -> Vec<PaneGeometry> {
+    if let Some(terminal_id) = &self.zoomed_terminal_id
+      && self
+        .panes
+        .iter()
+        .any(|pane| &pane.terminal_id == terminal_id)
+    {
+      return vec![PaneGeometry {
+        terminal_id: terminal_id.clone(),
+        left: 0,
+        top: 0,
+        columns: self.canvas_size.columns,
+        rows: self.canvas_size.rows,
+      }];
+    }
+    self.panes.clone()
+  }
 }
 
 /// Cell coordinates within a view. Split dividers occupy one unallocated cell.
@@ -600,6 +629,11 @@ pub enum ClientMessage {
     session: String,
     expected_revision: u64,
     layout: ViewLayout,
+  },
+  /// Attached-only zoom mutation requiring this attachment's layout lease.
+  /// `None` restores the saved split geometry.
+  SetViewZoom {
+    terminal_id: Option<String>,
   },
   PromoteTerminal {
     terminal_id: String,
@@ -1302,9 +1336,80 @@ mod tests {
   }
 
   #[test]
-  fn terminal_history_snapshots_use_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 14));
-    assert_eq!(PROTOCOL_BUILD, 14);
+  fn view_zoom_uses_current_protocol_version() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 15));
+    assert_eq!(PROTOCOL_BUILD, 15);
+  }
+
+  #[test]
+  fn view_zoom_preserves_membership_and_saved_geometry() {
+    let canvas_size = TerminalSize::default();
+    let layout = ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
+      children: vec![
+        ViewLayout::Terminal {
+          terminal_id: "first".into(),
+        },
+        ViewLayout::Terminal {
+          terminal_id: "second".into(),
+        },
+      ],
+    };
+    let mut view = ViewInfo {
+      session_name: "work".into(),
+      session_id: "session".into(),
+      view_id: "view".into(),
+      revision: 0,
+      panes: layout.pane_geometry(&canvas_size).unwrap(),
+      canvas_size,
+      zoomed_terminal_id: None,
+      layout,
+      terminals: Vec::new(),
+    };
+    let saved = view.panes.clone();
+    let old = serde_json::to_value(&view).unwrap();
+    assert!(old.get("zoomed_terminal_id").is_none());
+    let decoded: ViewInfo = serde_json::from_value(old).unwrap();
+    assert_eq!(decoded.zoomed_terminal_id, None);
+    view.zoomed_terminal_id = Some("second".into());
+    assert_eq!(view.panes, saved);
+    assert_eq!(
+      view.visible_panes(),
+      vec![PaneGeometry {
+        terminal_id: "second".into(),
+        left: 0,
+        top: 0,
+        columns: 80,
+        rows: 24,
+      }]
+    );
+    assert_eq!(
+      serde_json::to_value(&view).unwrap()["zoomed_terminal_id"],
+      "second"
+    );
+    view.zoomed_terminal_id = None;
+    assert_eq!(view.visible_panes(), saved);
+  }
+
+  #[test]
+  fn view_zoom_mutation_uses_stable_fields() {
+    let encoded = serde_json::to_value(ClientMessage::SetViewZoom {
+      terminal_id: Some("second".into()),
+    })
+    .unwrap();
+    assert_eq!(
+      encoded,
+      serde_json::json!({
+        "type": "set_view_zoom",
+        "terminal_id": "second",
+      })
+    );
+    let clear: ClientMessage = serde_json::from_value(serde_json::json!({
+      "type": "set_view_zoom",
+      "terminal_id": null,
+    }))
+    .unwrap();
+    assert_eq!(clear, ClientMessage::SetViewZoom { terminal_id: None });
   }
 
   #[test]

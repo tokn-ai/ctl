@@ -53,6 +53,12 @@ remote VPN routes are passed to them. Other helper operations retain `1.0.1`
 behavior. The independent remote VPN channel negotiates `1.0.1` before identity
 and credentials, using a stable marker rather than changing the marker per build.
 
+Shared ctmux pane zoom advances its open development cycle from `1.1.14` to
+`1.1.15` (build 15), retaining `1.0.13` and `1.1.14`. Zoom commands and shared
+zoom fields/events require the negotiated `1.1.15` contract. Older clients keep
+the ordinary split layout and new clients report zoom unavailable on older
+daemons.
+
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
 

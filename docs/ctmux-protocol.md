@@ -1,4 +1,4 @@
-# ctmux published protocol 1.1.14
+# ctmux published protocol 1.1.15
 
 The protocol is independent of local IPC and future remote transport. Internal build
 11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -487,7 +487,7 @@ reject a checkpoint or history format/version it does not support.
 
 Contract `1.0.13` remains supported with complete inline history and no paged
 manifest. Paged messages and lease-free checkpoint recovery are sent only when
-`1.1.14` is selected. The internal protocol build is 14.
+`1.1.14` or later is selected. Paged history was introduced in internal build 14.
 
 `attached` and `checkpoint` include `history_manifest` whenever they carry a
 checkpoint/history pair. Delta-only resumes omit all three. The manifest is:
@@ -555,3 +555,35 @@ show the incomplete-history state rather than treat the recent tail as complete.
 - durable command-line visibility and authorization policy;
 - process restart policies and generations;
 - Windows named-pipe transport.
+
+## Shared pane zoom (published contract 1.1.15)
+
+Internal build 15 adds the attached `set_view_zoom { terminal_id }` operation.
+A terminal ID zooms that member of the attachment's view; `null` restores the
+saved split layout. The attachment must own that view's layout lease. Input
+ownership is independent, and zoom never takes another client's lease. Invalid
+targets and denied ownership produce nonfatal control errors.
+
+`view_snapshot` adds optional `zoomed_terminal_id`. The saved `layout` and
+`panes` retain every terminal and its ordinary split rectangle; `terminals`
+reports each actual PTY size. When zoomed, clients render only that terminal at
+`(0, 0)` with the full `canvas_size`. Membership always comes from `terminals`,
+so hiding a pane does not close its attachment or discard copy state.
+
+Zoom enlarges the selected PTY; hidden PTYs retain their dimensions until
+unzoom. A canvas resize while zoomed resizes the selected PTY. Unzoom reflows
+the saved splits into the current canvas. Layout/membership mutations clear
+zoom before reflow, and exit of the zoomed terminal clears zoom. Detach and
+reconnect retain shared zoom. Geometry checkpoints continue to replace live
+screen/history boundaries; frozen local copy selections remain independent.
+
+The mutation is acknowledged with a `view_snapshot` on its attachment stream.
+New-contract attached clients also receive coalesced view snapshots after shared
+geometry/zoom changes. Clients use view revisions to discard stale updates.
+
+Contracts `1.0.13` and `1.1.14` remain implemented. Their snapshots omit the zoom
+field and their attachment streams do not receive unsolicited view snapshots.
+They retain the ordinary split grid and all terminal membership; while a newer
+owner has zoomed a PTY, older viewers clip that PTY's output to its split region.
+They cannot request zoom. New clients disable zoom after negotiating an older
+contract.

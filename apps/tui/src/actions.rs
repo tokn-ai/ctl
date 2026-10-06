@@ -14,6 +14,7 @@ pub enum Action {
   Split(SplitAxis),
   Focus(Direction),
   NextPane,
+  ToggleZoom,
   CreateSession,
   NextSession,
   PreviousSession,
@@ -62,6 +63,7 @@ pub fn resolve(key: KeyEvent) -> Option<Binding> {
     KeyCode::Left => Action::Focus(Direction::Left),
     KeyCode::Right => Action::Focus(Direction::Right),
     KeyCode::Char('o') => Action::NextPane,
+    KeyCode::Char('z') => Action::ToggleZoom,
     KeyCode::Char('c') => Action::CreateSession,
     KeyCode::Char('n') => Action::NextSession,
     KeyCode::Char('p') => Action::PreviousSession,
@@ -101,6 +103,7 @@ mod tests {
       (KeyCode::Char('%'), Action::Split(SplitAxis::Horizontal)),
       (KeyCode::Char('"'), Action::Split(SplitAxis::Vertical)),
       (KeyCode::Char('o'), Action::NextPane),
+      (KeyCode::Char('z'), Action::ToggleZoom),
       (KeyCode::Char('c'), Action::CreateSession),
       (KeyCode::Char('n'), Action::NextSession),
       (KeyCode::Char('p'), Action::PreviousSession),
@@ -128,7 +131,7 @@ mod tests {
         "{code:?}"
       );
     }
-    assert_eq!(resolve(key(KeyCode::Char('z'), KeyModifiers::NONE)), None);
+    assert_eq!(resolve(key(KeyCode::Char('u'), KeyModifiers::NONE)), None);
   }
 
   #[test]

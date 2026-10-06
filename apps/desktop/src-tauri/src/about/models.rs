@@ -401,10 +401,10 @@ mod tests {
   fn a_newer_minor_contract_is_compatible_when_it_retains_the_published_contract() {
     let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
     let mut running = expected_component_version();
-    let latest = ContractVersion::new(1, 1, 15);
+    let latest = ContractVersion::new(1, 1, 16);
     running.protocols = vec![ProtocolVersion::from(ProtocolInfo::new(
       "ctmux",
-      15,
+      16,
       latest,
       &[ctmux_proto::PROTOCOL_VERSION, latest],
     ))];
@@ -419,7 +419,7 @@ mod tests {
     let mut running = expected_component_version();
     running.protocols = vec![ProtocolVersion::new(
       "ctmux",
-      ContractVersion::new(1, 1, 15),
+      ContractVersion::new(1, 1, 16),
     )];
     row.running = Some(running);
     row.compare();

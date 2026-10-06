@@ -292,6 +292,10 @@ pub enum AttachmentEvent {
     terminal_size: TerminalSize,
     observed_sequence: u64,
   },
+  /// Latest server-owned view, including saved geometry and zoom state.
+  ViewChanged {
+    view: ctmux_proto::ViewInfo,
+  },
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
@@ -474,6 +478,7 @@ impl AttachmentState {
 enum AttachmentCommand {
   Input { data: Vec<u8> },
   Resize { terminal_size: TerminalSize },
+  SetViewZoom { terminal_id: Option<String> },
   AcquireLease { lease: LeaseKind },
   ReleaseLease { lease: LeaseKind },
   RequestCheckpoint,
@@ -515,6 +520,8 @@ pub enum AttachmentCommandError {
   LayoutLeaseRequired,
   #[error("checkpoint recovery requires ctmux contract 1.1.14")]
   CheckpointRecoveryUnavailable,
+  #[error("view zoom requires ctmux contract 1.1.15")]
+  ViewZoomUnavailable,
   #[error("attachment controller is no longer running")]
   Closed,
 }
@@ -574,6 +581,32 @@ impl AttachmentControl {
       return Err(AttachmentCommandError::LayoutLeaseRequired);
     }
     self.send(AttachmentCommand::Resize { terminal_size }).await
+  }
+
+  /// Whether the negotiated contract supports server-owned view zoom.
+  #[must_use]
+  pub fn supports_view_zoom(&self) -> bool {
+    self.protocol_version == ctmux_proto::CONTRACT_V1_1_15
+  }
+
+  /// Queues view zoom or restores the split layout with `None`.
+  ///
+  /// # Errors
+  /// Returns an error when the contract lacks zoom, layout is not owned, or
+  /// the controller has stopped. The daemon validates terminal membership.
+  pub async fn set_view_zoom(
+    &self,
+    terminal_id: Option<String>,
+  ) -> Result<(), AttachmentCommandError> {
+    if !self.supports_view_zoom() {
+      return Err(AttachmentCommandError::ViewZoomUnavailable);
+    }
+    if !self.state.lease_status(LeaseKind::Layout).owned_by_client {
+      return Err(AttachmentCommandError::LayoutLeaseRequired);
+    }
+    self
+      .send(AttachmentCommand::SetViewZoom { terminal_id })
+      .await
   }
 
   /// Asks the daemon to acquire an unheld input or layout lease.
@@ -759,6 +792,7 @@ impl AttachmentEvents {
 /// `ctl` byte stream use exactly the same attachment semantics.
 pub struct AttachmentController<S> {
   stream: Option<S>,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
   state: AttachmentState,
   liveness: AttachmentLiveness,
   options: AttachmentControllerOptions,
@@ -1089,6 +1123,7 @@ impl<S> AttachmentController<S> {
     Ok((
       Self {
         stream: Some(stream),
+        protocol_version: attached.handshake_info.protocol_version,
         state,
         liveness: attached.liveness,
         options,
@@ -1350,6 +1385,13 @@ impl<S> AttachmentController<S> {
           .accept_geometry_change(terminal_size, observed_sequence, writer_statuses)
           .await
       }
+      ServerMessage::ViewSnapshot { view }
+        if self.protocol_version == ctmux_proto::CONTRACT_V1_1_15 =>
+      {
+        self
+          .emit_event(AttachmentEvent::ViewChanged { view }, writer_statuses)
+          .await
+      }
       ServerMessage::LeaseStatus { lease, status } => {
         self
           .process_lease_status(lease, status, writer_statuses)
@@ -1581,6 +1623,14 @@ impl<S> AttachmentController<S> {
     let lease = match code {
       ErrorCode::InputLeaseRequired => LeaseKind::Input,
       ErrorCode::LayoutLeaseRequired => LeaseKind::Layout,
+      ErrorCode::InvalidRequest if self.protocol_version == ctmux_proto::CONTRACT_V1_1_15 => {
+        return self
+          .emit_event(
+            AttachmentEvent::ServerError { code, message },
+            writer_statuses,
+          )
+          .await;
+      }
       _ => return Err(ClientError::Server { code, message }),
     };
     self.state.mark_lease_not_owned(lease);
@@ -2003,6 +2053,7 @@ where
   let message = match command {
     AttachmentCommand::Input { data } => ClientMessage::Input { data },
     AttachmentCommand::Resize { terminal_size } => ClientMessage::Resize { terminal_size },
+    AttachmentCommand::SetViewZoom { terminal_id } => ClientMessage::SetViewZoom { terminal_id },
     AttachmentCommand::AcquireLease { lease } => ClientMessage::AcquireLease { lease },
     AttachmentCommand::ReleaseLease { lease } => ClientMessage::ReleaseLease { lease },
     AttachmentCommand::RequestCheckpoint => ClientMessage::RequestCheckpoint,
@@ -2423,6 +2474,7 @@ async fn present_interactive_events(
         eprintln!("\r\n[{} lease is {owner}]", lease_name(lease));
       }
       AttachmentEvent::ShellStateChanged { .. }
+      | AttachmentEvent::ViewChanged { .. }
       | AttachmentEvent::HistorySynced { .. }
       | AttachmentEvent::HeartbeatAck { .. }
       | AttachmentEvent::Exited { .. } => {}
@@ -2610,10 +2662,10 @@ mod tests {
 
   #[tokio::test]
   async fn handshake_preserves_latest_contract_separately_from_selection() {
-    let latest = ctl_core::protocol::ProtocolVersion::new(1, 1, 15);
+    let latest = ctl_core::protocol::ProtocolVersion::new(1, 1, 16);
     let advertised = ctl_core::component::ProtocolInfo::new(
       "ctmux",
-      15,
+      16,
       latest,
       &[ctmux_proto::CONTRACT_V1_0_13, PROTOCOL_VERSION, latest],
     );
@@ -2670,6 +2722,122 @@ mod tests {
       )
       .await
       .is_err()
+    );
+  }
+
+  #[tokio::test]
+  async fn view_zoom_is_gated_by_contract_and_layout_ownership() {
+    for contract in [ctmux_proto::CONTRACT_V1_0_13, ctmux_proto::CONTRACT_V1_1_14] {
+      let (client, mut peer) = tokio::io::duplex(4096);
+      let mut attached = attached_session(0, None, ShellState::default());
+      attached.handshake_info.protocol_version = contract;
+      attached.layout_lease = LeaseStatus {
+        held: true,
+        owned_by_client: true,
+      };
+      let (_controller, control, _events) =
+        AttachmentController::new(client, &attached, controller_options()).unwrap();
+      assert!(!control.supports_view_zoom());
+      assert_eq!(
+        control.set_view_zoom(Some("terminal".into())).await,
+        Err(AttachmentCommandError::ViewZoomUnavailable)
+      );
+      assert!(
+        tokio::time::timeout(
+          Duration::from_millis(10),
+          read_frame::<_, ClientMessage>(&mut peer)
+        )
+        .await
+        .is_err()
+      );
+    }
+    let (client, _peer) = tokio::io::duplex(4096);
+    let attached = attached_session(0, None, ShellState::default());
+    let (_controller, control, _events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    assert!(control.supports_view_zoom());
+    assert_eq!(
+      control.set_view_zoom(None).await,
+      Err(AttachmentCommandError::LayoutLeaseRequired)
+    );
+  }
+
+  #[tokio::test]
+  async fn view_zoom_acknowledgements_and_rejections_keep_attachment_running() {
+    let (client, mut peer) = tokio::io::duplex(4096);
+    let mut attached = attached_session(0, None, ShellState::default());
+    attached.layout_lease = LeaseStatus {
+      held: true,
+      owned_by_client: true,
+    };
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(async move { controller.run().await });
+    control
+      .set_view_zoom(Some("terminal".into()))
+      .await
+      .unwrap();
+    assert_eq!(
+      read_frame::<_, ClientMessage>(&mut peer).await.unwrap(),
+      Some(ClientMessage::SetViewZoom {
+        terminal_id: Some("terminal".into())
+      })
+    );
+    let view = ctmux_proto::ViewInfo {
+      session_name: "work".into(),
+      session_id: "session".into(),
+      view_id: "view".into(),
+      revision: 1,
+      canvas_size: TerminalSize::default(),
+      panes: Vec::new(),
+      zoomed_terminal_id: Some("terminal".into()),
+      layout: ctmux_proto::ViewLayout::Terminal {
+        terminal_id: "terminal".into(),
+      },
+      terminals: Vec::new(),
+    };
+    write_frame(
+      &mut peer,
+      &ServerMessage::ViewSnapshot { view: view.clone() },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+      events.recv().await,
+      Some(AttachmentEvent::ViewChanged { view })
+    );
+    write_frame(
+      &mut peer,
+      &ServerMessage::Error {
+        code: ErrorCode::InvalidRequest,
+        message: "invalid zoom target".into(),
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      events.recv().await,
+      Some(AttachmentEvent::ServerError {
+        code: ErrorCode::InvalidRequest,
+        ..
+      })
+    ));
+    control.set_view_zoom(None).await.unwrap();
+    assert_eq!(
+      read_frame::<_, ClientMessage>(&mut peer).await.unwrap(),
+      Some(ClientMessage::SetViewZoom { terminal_id: None })
+    );
+    control.detach().await.unwrap();
+    assert_eq!(
+      read_frame::<_, ClientMessage>(&mut peer).await.unwrap(),
+      Some(ClientMessage::Detach)
+    );
+    write_frame(&mut peer, &ServerMessage::Detached)
+      .await
+      .unwrap();
+    assert_eq!(
+      runner.await.unwrap().unwrap().reason,
+      AttachExitReason::Detached
     );
   }
 

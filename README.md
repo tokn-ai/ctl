@@ -203,7 +203,9 @@ cargo build -p ctmux-cli -p ctmuxd
 cargo run -p ctmux-cli
 ```
 
-Use Ctrl+B then `?` for help, `%` to split right, and `d` to detach.
+Use Ctrl+B then `?` for help, `%` to split right, `z` to zoom/unzoom the
+focused pane, and `d` to detach. Shared zoom requires the view resize lease
+and ctmux contract `1.1.15`.
 See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
 
 For the Windows local CLI and daemon slice:

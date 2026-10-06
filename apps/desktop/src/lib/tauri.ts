@@ -7,6 +7,7 @@ import type {
   AttachmentInputRequest,
   AttachmentLeaseRequest,
   AttachmentResizeRequest,
+  AttachmentViewZoomRequest,
   CreateSessionRequest,
   ConnectionTarget,
   SshConnectionTarget,
@@ -485,6 +486,12 @@ export async function acquireAttachmentLease(
   request: AttachmentLeaseRequest,
 ): Promise<void> {
   await invoke("acquire_attachment_lease", { request });
+}
+
+export async function setAttachmentViewZoom(
+  request: AttachmentViewZoomRequest,
+): Promise<void> {
+  await invoke("set_attachment_view_zoom", { request });
 }
 
 export async function releaseAttachmentLease(

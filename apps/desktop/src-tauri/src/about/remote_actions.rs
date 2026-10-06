@@ -376,9 +376,9 @@ mod tests {
     assert!(require_compatible_replacement(&info).is_ok());
     info.protocols[0] = ctl_core::component::ProtocolInfo::new(
       "ctmux",
-      15,
-      ctl_core::protocol::ProtocolVersion::new(1, 1, 15),
-      &[ctl_core::protocol::ProtocolVersion::new(1, 1, 15)],
+      16,
+      ctl_core::protocol::ProtocolVersion::new(1, 1, 16),
+      &[ctl_core::protocol::ProtocolVersion::new(1, 1, 16)],
     );
     assert!(require_compatible_replacement(&info).is_err());
   }

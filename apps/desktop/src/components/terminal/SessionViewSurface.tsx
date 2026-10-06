@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useAttachment } from "../../features/attachment/useAttachment";
+import { setSessionViewZoom, subscribeSessionViews } from "../../features/attachment/componentActions";
 import { useAttachmentNotifications } from "../../features/notifications/useAttachmentNotifications";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
 import { adjacentPane, swapPanes, viewDividers } from "../../features/terminal/viewLayout";
@@ -48,7 +49,6 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
     return () => { stop(); renderer.setViewport(null); };
   }, [renderer, viewport]);
   const [focused_id, setFocusedId] = useState<string | null>(null);
-  const [zoomed_id, setZoomedId] = useState<string | null>(null);
   const pane_elements = useRef(new Map<string, HTMLDivElement>());
   const pane_toggle_inputs = useRef(new Map<string, () => Promise<void>>());
   const pane_inputs = useRef(new Map<string, (data: Uint8Array) => void>());
@@ -75,6 +75,12 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
   }, [open_session_keys]);
   const view_ref = useRef(view);
   view_ref.current = view?.session_id === session?.session_id ? view : session ? cached_views.get(sessionKey(session))?.view ?? null : null;
+  const storeView = (next: SessionView | null) => {
+    const previous = view_ref.current;
+    if (next && previous?.view_id === next.view_id && BigInt(next.revision) < BigInt(previous.revision)) return;
+    view_ref.current = next;
+    setView(next);
+  };
   const [error, setError] = useState<string | null>(null);
   const [action_error, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -97,8 +103,30 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
     setError(null);
     setActionError(null);
     setFocusedId(null);
-    setZoomedId(null);
   }, [key]);
+
+  useEffect(() => subscribeSessionViews((event) => {
+    const next = event.view;
+    if (!next || event.session.session_id !== next.session_id) return;
+    const owner_key = sessionKey(event.session);
+    if (session_ref.current && owner_key === sessionKey(session_ref.current)) {
+      ++sequence.current;
+      const previous = view_ref.current;
+      if (previous?.view_id === next.view_id && BigInt(next.revision) < BigInt(previous.revision)) return;
+      const removed = previous?.terminals.filter((terminal) => !next.terminals.some((candidate) => candidate.terminal_id === terminal.terminal_id)) ?? [];
+      if (previous && removed.length) {
+        setEndedIds((previous) => new Set([...previous, ...removed.map((terminal) => terminal.terminal_id)]));
+        // Keep exited panes and their final screen until the user dismisses them.
+        storeView({ ...previous, revision: next.revision, zoomed_terminal_id: next.zoomed_terminal_id });
+      } else storeView(next);
+    } else {
+      setCachedViews((previous) => {
+        const cached = previous.get(owner_key);
+        if (!cached || (cached.view.view_id === next.view_id && BigInt(next.revision) < BigInt(cached.view.revision))) return previous;
+        return new Map(previous).set(owner_key, { ...cached, view: next });
+      });
+    }
+  }), []);
 
   useEffect(() => {
     const current = ++generation.current;
@@ -115,7 +143,7 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
         const removed = view_ref.current?.terminals.filter((terminal) => !next?.terminals.some((candidate) => candidate.terminal_id === terminal.terminal_id)) ?? [];
         if (removed.length) {
           setEndedIds((previous) => new Set([...previous, ...removed.map((terminal) => terminal.terminal_id)]));
-        } else setView(next);
+        } else storeView(next);
         setError(null);
 
       } catch (failure) {
@@ -141,7 +169,7 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
     const current = generation.current;
     const request = ++sequence.current;
     void sessionView(session.target, { kind: "get", session_id: session.session_id }).then((next) => {
-      if (generation.current === current && sequence.current === request) setView(next);
+      if (generation.current === current && sequence.current === request) storeView(next);
     }).catch(() => { /* The periodic refresh reports connectivity errors. */ });
   }, [primary_size, connected, key]);
 
@@ -155,7 +183,7 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
       const next = await sessionView(session.target, { kind: "get", session_id: session.session_id });
       if (!next?.terminals.length) { surface.on_dismiss?.(); return; }
       setEndedIds((previous) => new Set([...previous].filter((terminal) => terminal !== id)));
-      setView(next);
+      storeView(next);
       if (id === session.terminal_id || !next.terminals.some((terminal) => terminal.terminal_id === session.terminal_id)) {
         const first = next.terminals[0];
         await pane_detachers.current.get(first.terminal_id)?.();
@@ -184,12 +212,10 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
       }
       if (current === generation.current) {
         ++sequence.current;
-        // Both toolbar and prefix splits must reveal the newly created pane.
-        if (action.kind === "split") setZoomedId(null);
-        if (next?.session_id === session.session_id) setView(next);
+        if (next?.session_id === session.session_id) storeView(next);
         else {
           const refreshed = await sessionView(session.target, { kind: "get", session_id: session.session_id });
-          if (current === generation.current) setView(refreshed);
+          if (current === generation.current) storeView(refreshed);
         }
       }
     } catch (failure) {
@@ -203,7 +229,39 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
   const current_view = view?.session_id === session?.session_id ? view : cached_views.get(key)?.view ?? null;
   const primary_id = session?.terminal_id;
   const panes = current_view?.panes.map((pane) => ({ terminal_id: pane.terminal_id, left: pane.left, top: pane.top, width: pane.columns, height: pane.rows, visible: true })) ?? [];
-  const focused = panes.some((pane) => pane.terminal_id === focused_id && pane.visible) ? focused_id! : panes.find((pane) => pane.visible)?.terminal_id ?? primary_id;
+  const active_zoom = panes.some((pane) => pane.terminal_id === current_view?.zoomed_terminal_id) ? current_view!.zoomed_terminal_id : null;
+  const focused = active_zoom ?? (panes.some((pane) => pane.terminal_id === focused_id && pane.visible) ? focused_id! : panes.find((pane) => pane.visible)?.terminal_id ?? primary_id);
+  useEffect(() => {
+    if (!active_zoom) return;
+    setFocusedId(active_zoom);
+    requestAnimationFrame(() => pane_elements.current.get(active_zoom)?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
+  }, [active_zoom, key]);
+
+  async function changeZoom(terminal_id: string | null): Promise<SessionView | null> {
+    const baseline = view_ref.current;
+    if (!session || !baseline || busy_ref.current) return null;
+    const current = generation.current;
+    busy_ref.current = true;
+    ++sequence.current;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const next = await setSessionViewZoom(session, terminal_id, baseline);
+      if (current !== generation.current) return null;
+      ++sequence.current;
+      storeView(next);
+      // Another view update can overtake the owner's acknowledgement.
+      // Focus/layout actions must use the latest confirmed revision as well.
+      const confirmed = view_ref.current;
+      return confirmed?.zoomed_terminal_id === terminal_id ? confirmed : null;
+    } catch (failure) {
+      if (current === generation.current) setActionError(errorMessage(failure));
+      return null;
+    } finally {
+      busy_ref.current = false;
+      setBusy(false);
+    }
+  }
   const focused_ended = ended_ids.has(focused ?? "") || (focused === primary_id && primary_ended.current);
   const can_split = connected && Boolean(current_view && focused) && !busy && ended_ids.size === 0 && !primary_ended.current;
   const split_focused = useRef<(axis: "horizontal" | "vertical") => Promise<void>>(async () => {});
@@ -240,14 +298,17 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
       if (action.startsWith("pane.focus_") || action.startsWith("pane.move_")) {
         const neighbor = adjacentPane(panes, focused, action.slice(action.lastIndexOf("_") + 1));
         if (!neighbor) return;
-        if (action.startsWith("pane.move_")) {
-          void mutate({ kind: "update", session_id: session!.session_id, expected_revision: current_view.revision, layout: swapPanes(current_view.layout, focused, neighbor) });
-        } else {
-          setZoomedId(null);
-          setFocusedId(neighbor);
-          requestAnimationFrame(() => pane_elements.current.get(neighbor)?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
-        }
-      } else if (action === "pane.zoom") setZoomedId((previous) => previous === focused ? null : focused);
+        void (async () => {
+          const next = active_zoom ? await changeZoom(null) : current_view;
+          if (!next) return;
+          if (action.startsWith("pane.move_")) {
+            await mutate({ kind: "update", session_id: session!.session_id, expected_revision: next.revision, layout: swapPanes(next.layout, focused, neighbor) });
+          } else {
+            setFocusedId(neighbor);
+            requestAnimationFrame(() => pane_elements.current.get(neighbor)?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
+          }
+        })();
+      } else if (action === "pane.zoom") void changeZoom(active_zoom ? null : focused);
       else if (action === "pane.split_right" || action === "pane.split_below") {
         void split_focused.current(action === "pane.split_right" ? "horizontal" : "vertical");
       } else if (action === "pane.promote") void mutate({ kind: "promote", terminal_id: focused, name: null });
@@ -263,12 +324,12 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
   const takeover_id = current_view && primary_id && !primary_rect
     ? current_view.terminals[0]?.terminal_id
     : null;
-  const active_zoom = panes.some((pane) => pane.terminal_id === zoomed_id && pane.visible) ? zoomed_id : null;
   primary_input.current.enabled = input_enabled && !takeover_id && (!active_zoom || active_zoom === primary_id);
   const paneStyle = (rect: typeof primary_rect) => rect ? {
     left: active_zoom ? 0 : rect.left * cell.width,
     top: active_zoom ? 0 : rect.top * cell.height,
-    width: rect.width * cell.width, height: rect.height * cell.height,
+    width: (active_zoom && rect.terminal_id === active_zoom ? current_view!.canvas_size.columns : rect.width) * cell.width,
+    height: (active_zoom && rect.terminal_id === active_zoom ? current_view!.canvas_size.rows : rect.height) * cell.height,
     visibility: rect.visible && (!active_zoom || rect.terminal_id === active_zoom) ? "visible" as const : "hidden" as const,
   } : { inset: 0 };
 
@@ -312,7 +373,7 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
         style={{ left: Math.round(divider.left * cell.width), top: Math.round(divider.top * cell.height), width: divider.vertical ? 1 : divider.length * cell.width, height: divider.vertical ? divider.length * cell.height : 1 }}
       />)}
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
-        <TerminalSurface {...surface} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
+        <TerminalSurface {...surface} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>
       {[...rendered_views].flatMap(([owner_key, cached]) => {
         const visible = owner_key === key;
@@ -348,7 +409,7 @@ function AdditionalTerminal({ visible, input_enabled, on_ended, on_dismiss, conf
   const on_ended_ref = useRef(on_ended);
   on_ended_ref.current = on_ended;
   const ended_message = attachment.state.phase === "ended" ? attachment.state.message ?? "Terminal exited"
-    : confirmed_missing || attachment.state.error_code === "session_not_found" ? "Terminal no longer exists" : null;
+    : (confirmed_missing && attachment.state.phase !== "attached") || attachment.state.error_code === "session_not_found" ? "Terminal no longer exists" : null;
   useEffect(() => { if (ended_message && visible) on_ended_ref.current(); }, [ended_message, visible]);
   const actions = useRef(attachment);
   actions.current = attachment;

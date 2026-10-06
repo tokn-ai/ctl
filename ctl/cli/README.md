@@ -52,7 +52,9 @@ Touch ID-protected credential storage
 requires the signed, provisioned `ctld` helper; Cargo installation alone does
 not supply its Keychain entitlement. Setup selects the release matching this
 CLI's version and architecture and requires that release to be published.
-`CTLD_BIN` remains an explicit override. Otherwise a standalone macOS CLI prefers
+`CTLD_BIN` remains an explicit override. Ordinary macOS debug builds first prefer
+the provisioned signed helper for their checkout, and signed development CLI
+builds prefer their matching embedded helper. Shared discovery then prefers
 a verified compatible shared `ctld.app`, then its own bundled helper, then a
 nearby desktop bundle, sibling, or `PATH` executable. The desktop continues to
 prefer its own bundled helper. Shared apps must match the native architecture and
@@ -74,18 +76,23 @@ For local macOS development, use the shared Xcode provisioning flow from a check
 ```sh
 node scripts/dev/ctl-signed.mts --provision
 # Choose your team in Xcode and build the provisioning target once.
-node scripts/dev/ctl-signed.mts
-target/ctl-dev/ctl --help
+node scripts/dev/ctl-signed.mts --helper-only
+cargo run -p ctl-cli -- passwords
 ```
 
-The build discovers and refreshes the provisioning profile, signs and embeds
-`ctld.app`, and signs the CLI with the matching certificate. No notarization
-credentials are needed. Development helpers use a separate cache under
-`~/.tokn/ctl/components/ctld/development/` and leave release `current` unchanged.
-Installation updates `selected/<target>-ctld1-lifecycle1-helper1`, which all
-standalone CLI builds, including ordinary Cargo builds, can reuse after signature
-and provisioning verification. Rebuild if the profile expires; existing daemons
-require an explicit restart.
+The command discovers and refreshes the provisioning profile, signs `ctld.app`,
+and publishes it under Cargo's configured target directory. An unsigned
+`target/debug/ctl` verifies and reuses that helper before shared installations.
+Its selection belongs to the checkout, including with a shared target directory,
+and does not depend on the current working directory. Repeat the command after
+helper changes or profile expiry; CLI edits need only a normal Cargo rebuild.
+No notarization credentials are needed, and shared selections stay unchanged.
+
+Running `node scripts/dev/ctl-signed.mts` also embeds the helper in a signed CLI
+at `target/ctl-dev/ctl`. Its automatic preparation uses a separate immutable
+cache under `~/.tokn/ctl/components/ctld/development/`. Explicit
+`target/ctl-dev/ctl setup` selects it for other standalone builds while leaving
+release `current` unchanged. Existing daemons require an explicit restart.
 
 VPN profiles remain in the local catalog. Use `ctl --host GATEWAY vpn start NAME_OR_ID`,
 `vpn list`, and `vpn stop NAME_OR_ID` to run and manage a profile on an SSH host.

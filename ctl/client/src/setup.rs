@@ -2,6 +2,8 @@
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod archive;
+#[cfg(any(target_os = "macos", all(test, unix)))]
+mod development;
 #[cfg(target_os = "macos")]
 mod discovery;
 #[cfg(any(target_os = "macos", all(test, unix)))]
@@ -74,6 +76,67 @@ pub async fn discover_compatible_ctld() -> Result<Option<PathBuf>, Error> {
   }
   #[cfg(not(target_os = "macos"))]
   Ok(None)
+}
+
+/// Discovers a verified shared helper that explicitly implements one helper
+/// contract in addition to the client's general daemon compatibility needs.
+/// A compatible managed helper without that contract is left selected and
+/// returns `None`, allowing the caller to prepare its own bundled helper.
+///
+/// # Errors
+/// Rejects unsafe selections and failed trust checks. An explicitly selected
+/// local bundle without the required contract is rejected instead of bypassed.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "discovery retains its asynchronous API on other platforms"
+  )
+)]
+pub async fn discover_ctld_for_helper_contract(
+  required: ctl_core::protocol::ProtocolVersion,
+) -> Result<Option<PathBuf>, Error> {
+  #[cfg(target_os = "macos")]
+  {
+    let home = dirs::home_dir().ok_or(Error::HomeDirectory)?;
+    discovery::discover_for_helper_contract(&home, required).await
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = required;
+    Ok(None)
+  }
+}
+
+/// Discovers a signed development helper provisioned for one checkout without
+/// changing any shared selection. The checkpoint is that checkout's private
+/// directory under `ctl-dev/helpers`, keyed by its canonical repository path.
+/// Supply the canonical repository path recorded at build time; the source
+/// checkout does not need to remain accessible when this function runs.
+/// A missing selection or valid incompatible helper returns `None`.
+///
+/// # Errors
+/// Rejects foreign checkout or target selections, unsafe paths, malformed
+/// development receipts, and failed Apple signature or provisioning checks.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "discovery retains its asynchronous API on other platforms"
+  )
+)]
+pub async fn discover_development_ctld(
+  checkpoint: &std::path::Path,
+  repository_root: &std::path::Path,
+  required: Option<ctl_core::protocol::ProtocolVersion>,
+) -> Result<Option<PathBuf>, Error> {
+  #[cfg(target_os = "macos")]
+  return development::discover(checkpoint, repository_root, required).await;
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = (checkpoint, repository_root, required);
+    Ok(None)
+  }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -168,6 +231,35 @@ pub async fn install_bundled_development_ctld(
 ) -> Result<SetupOutcome, Error> {
   #[cfg(target_os = "macos")]
   return macos::install_bundled_development(manifest, archive, on_progress).await;
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = (manifest, archive, on_progress);
+    Err(Error::UnsupportedPlatform)
+  }
+}
+
+/// Caches and pins a signed helper embedded in a development CLI without
+/// changing the shared selection or starting any daemon. Verification follows
+/// the same development signature, profile, source and protocol requirements
+/// as explicit installation.
+///
+/// # Errors
+/// Rejects unsupported platforms, mismatched development metadata, untrusted
+/// installation paths, invalid archives, and failed signature or profile checks.
+#[cfg_attr(
+  not(target_os = "macos"),
+  expect(
+    clippy::unused_async,
+    reason = "unsupported platforms retain the asynchronous API"
+  )
+)]
+pub async fn prepare_bundled_development_ctld(
+  manifest: &'static [u8],
+  archive: &'static [u8],
+  on_progress: impl Fn(SetupEvent) + Send + Sync,
+) -> Result<SetupOutcome, Error> {
+  #[cfg(target_os = "macos")]
+  return macos::prepare_bundled_development(manifest, archive, on_progress).await;
   #[cfg(not(target_os = "macos"))]
   {
     let _ = (manifest, archive, on_progress);

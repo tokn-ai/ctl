@@ -2,9 +2,24 @@
 
 use super::{Error, install::Session, macos};
 use ctl_core::component::ComponentInfo;
+use ctl_core::protocol::ProtocolVersion;
 use std::path::{Path, PathBuf};
 
 pub(super) async fn discover(home: &Path) -> Result<Option<PathBuf>, Error> {
+  discover_required(home, None).await
+}
+
+pub(super) async fn discover_for_helper_contract(
+  home: &Path,
+  required: ProtocolVersion,
+) -> Result<Option<PathBuf>, Error> {
+  discover_required(home, Some(required)).await
+}
+
+async fn discover_required(
+  home: &Path,
+  required: Option<ProtocolVersion>,
+) -> Result<Option<PathBuf>, Error> {
   let target = macos::release_target()?;
   if let Some(bundle) =
     ctl_core::bundles::Store::new(home).selected(ctl_core::bundles::Purpose::Local, target)?
@@ -19,6 +34,13 @@ pub(super) async fn discover(home: &Path) -> Result<Option<PathBuf>, Error> {
         "selected bundle helper is incompatible or differs from its manifest".into(),
       ));
     }
+    if let Some(required) = required
+      && !compatible_for_helper_contract(&info, Some(required))
+    {
+      return Err(Error::Verification(format!(
+        "selected bundle helper does not advertise required ctld_helper contract {required}; provision and select a bundle that supports it"
+      )));
+    }
     return Ok(Some(bundle.directory.join("ctld.app/Contents/MacOS/ctld")));
   }
   let Some(installation) = ctl_ipc::managed::resolve_compatible_installation(home, target)? else {
@@ -26,12 +48,25 @@ pub(super) async fn discover(home: &Path) -> Result<Option<PathBuf>, Error> {
   };
   let session = Session::open_installed(home, target, &installation)?;
   let prepared = macos::verify_helper(&session).await?;
-  if !compatible(&prepared.info) {
+  if !compatible_for_helper_contract(&prepared.info, required) {
     return Ok(None);
   }
   // The path is pinned to an immutable cache entry, independent of a concurrent
   // change to the shared selection. Discovery never activates or restarts it.
   Ok(Some(prepared.path))
+}
+
+pub(super) fn compatible_for_helper_contract(
+  info: &ComponentInfo,
+  required: Option<ProtocolVersion>,
+) -> bool {
+  compatible(info)
+    && required.is_none_or(|required| {
+      info
+        .protocols
+        .iter()
+        .any(|entry| entry.name == "ctld_helper" && entry.supports(required))
+    })
 }
 
 pub(super) fn compatible(info: &ComponentInfo) -> bool {
@@ -88,6 +123,73 @@ mod tests {
     }
   }
 
+  fn with_helper_contracts(
+    latest: ProtocolVersion,
+    supported: &[ProtocolVersion],
+  ) -> ComponentInfo {
+    let mut info = info();
+    let helper = info
+      .protocols
+      .iter_mut()
+      .find(|entry| entry.name == "ctld_helper")
+      .unwrap();
+    *helper = ProtocolInfo::new("ctld_helper", latest.build, latest, supported);
+    assert!(info.is_valid());
+    info
+  }
+
+  #[test]
+  fn helper_operations_require_the_exact_advertised_contract() {
+    let old = ctl_ipc::HELPER_API_CONTRACT_V1_0_1;
+    let required = ctl_ipc::HELPER_API_CONTRACT_V1_1_3;
+    let newer = ProtocolVersion::new(1, 1, ctl_ipc::HELPER_API_BUILD + 1);
+    let cases: &[(ProtocolVersion, &[ProtocolVersion], bool, bool)] = &[
+      (old, &[old], true, false),
+      (required, &[old, required], true, true),
+      (newer, &[old, required, newer], true, true),
+      (newer, &[old, newer], true, false),
+      (newer, &[newer], false, false),
+    ];
+    for (latest, supported, generally_compatible, operation_compatible) in cases {
+      let info = with_helper_contracts(*latest, supported);
+      assert_eq!(
+        compatible_for_helper_contract(&info, None),
+        *generally_compatible,
+        "latest {latest}, contracts {supported:?}"
+      );
+      assert_eq!(
+        compatible_for_helper_contract(&info, Some(required)),
+        *operation_compatible,
+        "latest {latest}, contracts {supported:?}"
+      );
+      assert_eq!(
+        compatible_for_helper_contract(&info, Some(old)),
+        *generally_compatible,
+        "latest {latest}, contracts {supported:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn operation_support_does_not_override_other_compatibility_requirements() {
+    let required = ctl_ipc::HELPER_API_CONTRACT_V1_1_3;
+    let mut missing = info();
+    assert!(compatible_for_helper_contract(&missing, Some(required)));
+    missing
+      .protocols
+      .retain(|entry| entry.name != "ctld_lifecycle");
+    assert!(!compatible_for_helper_contract(&missing, Some(required)));
+    let mut duplicate = info();
+    let helper = duplicate
+      .protocols
+      .iter()
+      .find(|entry| entry.name == "ctld_helper")
+      .unwrap()
+      .clone();
+    duplicate.protocols.push(helper);
+    assert!(!compatible_for_helper_contract(&duplicate, Some(required)));
+  }
+
   #[test]
   fn compatible_apis_allow_a_different_client_release_and_source_build() {
     let info = info();
@@ -132,6 +234,12 @@ mod tests {
   async fn missing_selection_does_not_create_an_installation() {
     let home = super::super::tests::Home::new();
     assert!(discover(&home.0).await.unwrap().is_none());
+    assert!(
+      discover_for_helper_contract(&home.0, ctl_ipc::HELPER_API_VERSION)
+        .await
+        .unwrap()
+        .is_none()
+    );
     assert!(!home.0.join(".tokn").exists());
   }
 
@@ -160,6 +268,10 @@ mod tests {
     .unwrap();
     assert!(matches!(
       discover(&home.0).await,
+      Err(Error::Verification(_))
+    ));
+    assert!(matches!(
+      discover_for_helper_contract(&home.0, ctl_ipc::HELPER_API_VERSION).await,
       Err(Error::Verification(_))
     ));
     assert!(!executed.exists());

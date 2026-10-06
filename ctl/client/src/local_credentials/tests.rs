@@ -1,10 +1,41 @@
 use super::*;
 
 fn command(script: &str) -> Command {
+  command_with_contract(
+    script,
+    ctl_ipc::HELPER_API_VERSION,
+    ctl_ipc::SUPPORTED_HELPER_API_VERSIONS,
+  )
+}
+
+fn metadata(version: ProtocolVersion, supported: &[ProtocolVersion]) -> String {
+  serde_json::to_string(&ctl_core::component::ComponentInfo {
+    build: ctl_core::component::build_info(),
+    protocols: vec![ctl_core::component::ProtocolInfo::new(
+      "ctld_helper",
+      version.build,
+      version,
+      supported,
+    )],
+  })
+  .unwrap()
+}
+
+fn command_with_contract(
+  script: &str,
+  version: ProtocolVersion,
+  supported: &[ProtocolVersion],
+) -> Command {
   let mut command = Command::new("/bin/sh");
-  command.args(["-c", script, "credential-fixture"]);
+  let script = format!(
+    r#"if [ "$1" = --component-info ]; then printf '%s' "$CTL_HELPER_FIXTURE_METADATA"; exit 0; fi; {script}"#,
+  );
+  command.args(["-c", &script, "credential-fixture"]);
+  command.env("CTL_HELPER_FIXTURE_METADATA", metadata(version, supported));
   command
 }
+
+mod preflight;
 
 #[tokio::test]
 async fn helper_receives_fixed_argument_and_eof_without_askpass_context() {

@@ -1,9 +1,17 @@
 use ctl_client::setup::{self, SetupEvent, SetupOutcome};
+use ctl_core::protocol::ProtocolVersion;
+use std::future::Future;
+use std::path::PathBuf;
+
+mod local;
 
 // Ordinary Cargo builds embed no payload, so neither mode is constructed there.
-#[expect(
-  dead_code,
-  reason = "signing mode is selected by the embedded build payload"
+#[cfg_attr(
+  not(test),
+  expect(
+    dead_code,
+    reason = "signing mode is selected by the embedded build payload"
+  )
 )]
 #[derive(Clone, Copy)]
 enum BundleMode {
@@ -37,13 +45,20 @@ impl EmbeddedBundle {
 include!(concat!(env!("OUT_DIR"), "/bundled_ctld.rs"));
 
 pub fn register() -> std::io::Result<()> {
-  ctl_ipc::register_standalone_daemon_executable_provider(|| Box::pin(prepare()))
+  let register = if is_development() {
+    ctl_ipc::register_development_daemon_executable_provider
+  } else if local::enabled() {
+    ctl_ipc::register_preferred_contract_daemon_executable_provider
+  } else {
+    ctl_ipc::register_contract_daemon_executable_provider
+  };
+  register(|required| Box::pin(prepare(required)))
 }
 
-async fn prepare() -> std::io::Result<Option<std::path::PathBuf>> {
+async fn prepare(required: Option<ProtocolVersion>) -> std::io::Result<Option<PathBuf>> {
   let mut waiting = false;
   loop {
-    match prepare_once().await {
+    match prepare_once(required).await {
       Ok(executable) => return Ok(executable),
       Err(setup::Error::Busy) => {
         // Another CLI may be selecting or preparing a shared installation. The
@@ -60,21 +75,60 @@ async fn prepare() -> std::io::Result<Option<std::path::PathBuf>> {
   }
 }
 
-async fn prepare_once() -> Result<Option<std::path::PathBuf>, setup::Error> {
-  if let Some(executable) = setup::discover_compatible_ctld().await? {
+async fn prepare_once(required: Option<ProtocolVersion>) -> Result<Option<PathBuf>, setup::Error> {
+  let shared = async {
+    match required {
+      Some(required) => setup::discover_ctld_for_helper_contract(required).await,
+      None => setup::discover_compatible_ctld().await,
+    }
+  };
+  select_helper(
+    BUNDLED_CTLD,
+    local::discover(required),
+    shared,
+    |bundle| async move {
+      let on_progress = |event| {
+        if matches!(event, SetupEvent::Extracting) {
+          eprintln!("Preparing bundled ctld...");
+        }
+      };
+      let outcome = match bundle.mode {
+        BundleMode::Development => {
+          setup::prepare_bundled_development_ctld(bundle.manifest, bundle.archive, on_progress)
+            .await?
+        }
+        BundleMode::Signed => bundle.install(on_progress).await?,
+      };
+      Ok(outcome.executable)
+    },
+  )
+  .await
+}
+
+async fn select_helper<F>(
+  bundle: Option<EmbeddedBundle>,
+  local: impl Future<Output = Result<Option<PathBuf>, setup::Error>>,
+  shared: impl Future<Output = Result<Option<PathBuf>, setup::Error>>,
+  prepare: impl FnOnce(EmbeddedBundle) -> F,
+) -> Result<Option<PathBuf>, setup::Error>
+where
+  F: Future<Output = Result<PathBuf, setup::Error>>,
+{
+  if let Some(bundle) = bundle.filter(|bundle| matches!(bundle.mode, BundleMode::Development)) {
+    return prepare(bundle).await.map(Some);
+  }
+  if bundle.is_none()
+    && let Some(executable) = local.await?
+  {
     return Ok(Some(executable));
   }
-  let Some(bundle) = BUNDLED_CTLD else {
-    return Ok(None);
-  };
-  let outcome = bundle
-    .install(|event| {
-      if matches!(event, SetupEvent::Extracting) {
-        eprintln!("Preparing bundled ctld...");
-      }
-    })
-    .await?;
-  Ok(Some(outcome.executable))
+  if let Some(executable) = shared.await? {
+    return Ok(Some(executable));
+  }
+  match bundle {
+    Some(bundle) => prepare(bundle).await.map(Some),
+    None => Ok(None),
+  }
 }
 
 pub async fn install(
@@ -90,3 +144,6 @@ pub async fn install(
 pub fn is_development() -> bool {
   BUNDLED_CTLD.is_some_and(|bundle| matches!(bundle.mode, BundleMode::Development))
 }
+
+#[cfg(test)]
+mod tests;

@@ -169,6 +169,60 @@ fn development_installs_reuse_digest_cache_without_replacing_production_selectio
 }
 
 #[test]
+fn automatic_development_preparation_preserves_shared_selection_even_on_reuse() {
+  let home = Home::new();
+  let production = compressed(&contents(None));
+  let release = release(&production);
+  Session::begin(&home.0, release.clone())
+    .unwrap()
+    .unpack(&production)
+    .unwrap()
+    .activate()
+    .unwrap();
+  let root = ctl_ipc::managed::component_directory(&home.0);
+  let selected = ctl_ipc::managed::compatible_selection(&home.0, &release.target).unwrap();
+  let shared = fs::read_link(&selected).unwrap();
+  let current = fs::read_link(root.join("current")).unwrap();
+  let (bytes, manifest) = development_bundle();
+  let first = Session::begin(&home.0, manifest.clone())
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .cache()
+    .unwrap();
+  let session = Session::begin(&home.0, manifest).unwrap();
+  assert!(session.reused);
+  let second = session.cache().unwrap();
+  assert_eq!(first.executable, second.executable);
+  assert!(second.reused);
+  assert_eq!(fs::read_link(&selected).unwrap(), shared);
+  assert_eq!(fs::read_link(root.join("current")).unwrap(), current);
+}
+
+#[test]
+fn private_development_cache_does_not_consult_or_repair_other_selections() {
+  let home = Home::new();
+  let (bytes, manifest) = development_bundle();
+  let root = ctl_ipc::managed::ensure_component_directory(&home.0).unwrap();
+  let selected = ctl_ipc::managed::compatible_selection(&home.0, &manifest.target).unwrap();
+  fs::create_dir_all(selected.parent().unwrap()).unwrap();
+  fs::write(&selected, b"unrelated invalid selection").unwrap();
+  symlink("../outside", root.join("current")).unwrap();
+  let result = Session::begin(&home.0, manifest)
+    .unwrap()
+    .unpack(&bytes)
+    .unwrap()
+    .cache()
+    .unwrap();
+  assert!(result.executable.is_file());
+  assert_eq!(fs::read(&selected).unwrap(), b"unrelated invalid selection");
+  assert_eq!(
+    fs::read_link(root.join("current")).unwrap(),
+    PathBuf::from("../outside")
+  );
+}
+
+#[test]
 fn development_bundle_can_omit_the_staple_but_release_policy_still_requires_it() {
   let (bytes, development) = development_bundle();
   let home = Home::new();

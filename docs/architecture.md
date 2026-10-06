@@ -212,13 +212,26 @@ legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
 ctld metadata reports data contract `1.1.13` (and retained `1.0.12`), lifecycle
-contract `1.0.1`, and helper contract `1.1.3` (and retained `1.0.1` and `1.1.2`). Remote VPN
+contract `1.0.1`, and helper contract `1.1.4` (and retained `1.0.1`, `1.1.2`, and `1.1.3`). Remote VPN
 routes are gated by the selected broker contract and the helper advertisement.
 The helper API covers credential, identity, askpass, and proxy helper modes.
-Standalone macOS CLI discovery first honors `CTLD_BIN`, then verifies a shared
+Standalone macOS CLI discovery first honors `CTLD_BIN`. Signed development builds
+then verify and cache their matching embedded helper without changing the shared
+selection; explicit setup remains able to select it for other CLIs. Ordinary
+macOS debug Cargo builds first verify the provisioned helper selected under
+their target directory for their canonical checkout identity. Build provenance
+keeps discovery independent of the current directory and isolates worktrees
+sharing a target directory. Missing or valid incompatible local helpers permit
+shared discovery; malformed or untrusted local selections fail verification.
+Release builds and Cargo builds without a local helper verify a shared
 managed app selected for the native target and all three API versions. It falls
 back to its own bundled helper and then loose executable discovery when no
-compatible shared app is selected. The desktop keeps its own bundled helper
+compatible shared app supporting the operation is selected. Credential helper
+operations require their exact advertised contract before request bytes are sent:
+`1.0.1` for initial operations, `1.1.3` for clearing, and `1.1.4` for discovery.
+`CTLD_BIN` remains authoritative for every build; shared discovery also
+preserve explicit complete selections.
+The desktop keeps its own bundled helper
 first. Release and provisioned development installations use immutable caches
 and atomic `selected/<target>-ctld1-lifecycle1-helper1` links; development
 selection leaves the release `current` link intact. Verification checks the

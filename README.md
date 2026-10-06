@@ -133,7 +133,9 @@ daemon. `ctl setup --json`
 prints the installed version, executable path, and whether the installation was
 reused.
 
-`CTLD_BIN` selects an explicit executable. Without that override, a standalone
+`CTLD_BIN` selects an explicit executable. Ordinary macOS debug CLI builds prefer
+this checkout's provisioned signed helper; signed development CLI builds prefer
+their own matching embedded helper. Without a development helper, a standalone
 macOS CLI prefers a verified, compatible managed `ctld.app`, then its own bundled
 helper, then a nearby desktop bundle, sibling executable, or `PATH`. The desktop
 continues to prefer its own bundled helper. On other Unix platforms, install
@@ -156,10 +158,15 @@ Compatibility requires the native architecture and the `ctld`, `ctld_lifecycle`,
 and `ctld_helper` API versions. The helper's build identity must match its own
 manifest; it does not have to match the CLI's commit, fingerprint, or release
 version. Discovery verifies the selected app instead of choosing a cache entry
-by its directory name or modification time. Unsafe or invalid selected
+by its directory name or modification time. Credential operations also require
+their explicit helper contract: initial operations use `1.0.1`, clearing uses
+`1.1.3`, and exhaustive discovery uses `1.1.4`. A valid shared helper lacking that
+contract can fall back to a verified embedded release helper. `CTLD_BIN` remains
+authoritative for every build; shared discovery also retains explicit
+complete component selections and reports missing capabilities. Unsafe or invalid selected
 installations produce a verification error.
 
-For a signed macOS CLI from a local checkout, provision once with the same
+For macOS CLI development, provision once with the same
 Xcode project used by Tauri:
 
 ```sh
@@ -167,29 +174,41 @@ node scripts/dev/ctl-signed.mts --provision
 ```
 
 In Xcode, select the `ctld-provisioning` target, choose your team under
-**Signing & Capabilities**, and build once. Then build and use the CLI:
+**Signing & Capabilities**, and build once. Then prepare the signed helper and
+use the ordinary Cargo CLI:
 
 ```sh
-node scripts/dev/ctl-signed.mts
-target/ctl-dev/ctl --help
+node scripts/dev/ctl-signed.mts --helper-only
+cargo run -p ctl-cli -- passwords
+# Or: cargo build -p ctl-cli && target/debug/ctl passwords
 ```
 
 The build discovers your profile and matching Keychain certificate, refreshing
-the profile through Xcode when needed. It compiles and signs `ctld.app`, embeds
-it inside the signed CLI, and supports uncommitted source changes. No signing
+the profile through Xcode when needed. It compiles and signs `ctld.app` and
+publishes an immutable helper under
+`target/ctl-dev/helpers/<checkout-id>/build-<archive-sha256>/`. Debug CLI builds
+discover its verified selection using their build location and checkout identity,
+independently of the current working directory. The CLI can remain unsigned.
+Repeat the helper-only command after changing daemon code or its contracts;
+ordinary CLI edits need only a Cargo rebuild. No signing
 environment variables or notarization credentials are required. The output
 follows Cargo's configured target directory.
+
+For a self-contained signed development CLI, run `node scripts/dev/ctl-signed.mts`
+and use `target/ctl-dev/ctl`. This also publishes the checkout helper for Cargo builds.
 
 Development signing explicitly disables timestamps, so it does not depend on
 Apple's timestamp service. Distributable releases still require secure timestamps.
 
-The CLI prepares its helper when needed; `target/ctl-dev/ctl setup` also installs
-it explicitly. Development helpers live under
+The signed development CLI always prepares and pins the helper embedded by that
+checkout's build, ahead of shared or nearby desktop helpers. Development helpers live under
 `~/.tokn/ctl/components/ctld/development/<archive-sha256>/ctld.app`. They retain
-their signature and provisioning checks, use a separate immutable cache, and
-update the shared selection for their architecture and APIs while leaving the
-release `current` symlink intact. All standalone CLI builds can reuse that
-selection. Expired profiles require rebuilding. Existing compatible daemons keep
+their signature and provisioning checks and use a separate immutable cache.
+Automatic preparation leaves shared selections unchanged. Checkout helper
+selections are isolated even when worktrees share a Cargo target directory.
+`target/ctl-dev/ctl setup` explicitly selects this helper for other standalone
+CLI builds while leaving the release `current` symlink intact.
+Expired profiles require rebuilding. Existing compatible daemons keep
 running until you explicitly restart them.
 
 ```sh

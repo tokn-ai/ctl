@@ -7,6 +7,20 @@ const MAX_REPLAY_CHUNKS = 256;
 const MAX_HISTORY_ROWS = 10_000;
 const encoder = new TextEncoder();
 const home = encoder.encode("\u001b[0m\u001b[H");
+// CAN cancels a partial escape sequence and flushes any partial UTF-8 before
+// RIS resets both the parser and terminal. The public JS reset leaves those
+// input states intact, so it cannot safely replace a streamed checkpoint.
+const reset = encoder.encode("\u0018\u001bc");
+
+function concatenate(chunks: Uint8Array[]): Uint8Array {
+  const bytes = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return bytes;
+}
 
 export interface ProposedDimensions {
   columns: number;
@@ -14,6 +28,7 @@ export interface ProposedDimensions {
 }
 
 export interface TerminalAdapter {
+  refresh?(): void;
   copyLines?(): string[];
   copyPrimaryRows?(): TerminalHistoryRow[];
   activate?(scrollback_offset?: number): void;
@@ -84,6 +99,7 @@ function sameGeometry(left: TerminalSize, right: TerminalSize): boolean {
 export class TerminalPresenter {
   copyLines(): Promise<string[]> { return this.operationTail.then(() => this.adapter.copyLines?.() ?? []); }
   cellDimensions() { return this.adapter.cellDimensions?.() ?? null; }
+  refresh(): void { this.adapter.refresh?.(); }
   private adapter: TerminalAdapter;
   private operationTail = Promise.resolve();
   private disposed = false;
@@ -119,19 +135,20 @@ export class TerminalPresenter {
     this.cancelHistory();
     const generation = this.generation;
     return this.enqueue(async () => {
-      this.adapter.dispose();
+      const viewport_offset = this.adapter.viewportOffset?.() ?? 0;
       this.terminalSize = terminalSize;
-      this.adapter = this.factory(terminalSize);
+      this.adapter.resize(terminalSize.columns, terminalSize.rows);
       this.sequence = BigInt(sequence);
       this.checkpointSequence = this.sequence;
       this.snapshotId = generation === this.generation ? snapshot_id : null;
       const recent = recentHistory(historyLines);
+      const chunks = [reset];
       if (recent.length) {
-        await this.writeBytes(this.adapter, encoder.encode(`${recent.map(literalRow).join("\r\n")}\r\n${"\r\n".repeat(Math.max(0, terminalSize.rows - 1))}`));
+        chunks.push(encoder.encode(`${recent.map(literalRow).join("\r\n")}\r\n${"\r\n".repeat(Math.max(0, terminalSize.rows - 1))}`));
       }
-      await this.writeBytes(this.adapter, home);
-      await this.writeBytes(this.adapter, payload);
-      await this.writeBytes(this.adapter, inputPrefix);
+      chunks.push(home, payload, inputPrefix);
+      await this.writeBytes(this.adapter, concatenate(chunks));
+      if (viewport_offset > 0) this.adapter.activate?.(viewport_offset);
       // Older daemons and disk previews supply normalized history directly.
       // Their bulk history uses the same off-view staging path.
       if (generation === this.generation && recent.length < historyLines.length && snapshot_id === null) {

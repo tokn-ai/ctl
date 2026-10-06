@@ -47,6 +47,7 @@ vi.mock("@xterm/xterm", async () => {
           get rows() { return terminal.rows; },
           write: (data: Uint8Array, callback: () => void) => terminal.write(data, callback),
           resize: (columns: number, rows: number) => terminal.resize(columns, rows),
+          refresh: () => undefined,
           dispose,
           open: (container: HTMLElement) => {
             input = document.createElement("textarea");
@@ -148,9 +149,10 @@ function withHistoryManifest(initial: CheckpointEvent): CheckpointEvent {
 }
 
 function visibleTerminal() {
-  return [...xterm.instances].reverse().find((instance) =>
-    instance.container.isConnected && !(instance.container.closest(".terminal-session") as HTMLElement | null)?.hidden,
-  )!;
+  return [...xterm.instances].reverse().find((instance) => {
+    const session = instance.container.closest<HTMLElement>(".terminal-session");
+    return instance.container.isConnected && session && !session.hidden;
+  })!;
 }
 
 function line(terminal: HeadlessTerminal, row = 0) {
@@ -160,10 +162,13 @@ function line(terminal: HeadlessTerminal, row = 0) {
 async function emit(event: AttachmentEvent) {
   await act(async () => { channels.get(event.attachment_id)!(event); });
   if ("event_id" in event) {
-    await waitFor(() => expect(api.acknowledgeAttachmentEvent).toHaveBeenCalledWith({
-      attachment_id: event.attachment_id,
-      event_id: event.event_id,
-    }));
+    // The ACK call precedes applied-state publication; flush its continuation.
+    await act(async () => {
+      await waitFor(() => expect(api.acknowledgeAttachmentEvent).toHaveBeenCalledWith({
+        attachment_id: event.attachment_id,
+        event_id: event.event_id,
+      }));
+    });
   }
 }
 
@@ -344,6 +349,7 @@ describe("divider ownership through live attachments", () => {
     expect(api.resizeAttachmentDivider).not.toHaveBeenCalled();
     expectStableAttachments();
     fireEvent.pointerMove(handle, { pointerId: 1, clientX: 364, clientY: 100 });
+    await waitFor(() => expect(api.resizeAttachmentDivider).toHaveBeenCalledTimes(1));
     expect(api.resizeAttachmentDivider).toHaveBeenCalledExactlyOnceWith({ attachment_id: owner_id,
       request_id: expect.any(String), view_id: first.view_id, expected_revision: "1", split_path: [], boundary: 0, position: 45 });
     expect(screen.getByTestId("divider-geometry").textContent).toBe("40");
@@ -1436,7 +1442,7 @@ describe("opened session cache", () => {
     });
   });
 
-  it("replaces a cached buffer when the server requires a checkpoint", async () => {
+  it("resets a cached buffer in place when the server requires a checkpoint", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first, { terminal_id: first.terminal_id }); });
     await emit(checkpoint(result.current.state.attachment_id!, "old"));
@@ -1447,7 +1453,8 @@ describe("opened session cache", () => {
     replacement.history_gap = true;
     await emit(replacement);
     expect(line(visibleTerminal().terminal)).toBe("fresh");
-    expect(saved.dispose).toHaveBeenCalledOnce();
+    expect(visibleTerminal()).toBe(saved);
+    expect(saved.dispose).not.toHaveBeenCalled();
     expect(result.current.state.history_gap).toBe(true);
     expect(renderer.resumeSequence()).toBe("20");
   });

@@ -76,6 +76,7 @@ describe("session compositor", () => {
     const handle = screen.getByRole("separator");
     fireEvent.pointerDown(handle, { button: 0, clientX: 324, clientY: 100 });
     fireEvent.pointerMove(handle, { clientX: 364, clientY: 100 });
+    await waitFor(() => expect(mocks.divider).toHaveBeenCalledTimes(1));
     expect(mocks.divider).toHaveBeenCalledExactlyOnceWith({ view_id: "view", expected_revision: "1", split_path: [], boundary: 0, position: 45 }, expect.any(String));
     expect(inputs[1].closest<HTMLElement>(".view-pane")?.style.left).toBe("328px");
     expect(document.activeElement).toBe(inputs[1]);
@@ -105,6 +106,7 @@ describe("session compositor", () => {
     const handle = screen.getByRole("separator");
     fireEvent.pointerDown(handle, { button: 0, clientX: 324 });
     fireEvent.pointerMove(handle, { clientX: 332 });
+    await waitFor(() => expect(mocks.divider).toHaveBeenCalledTimes(1));
     fireEvent.pointerMove(handle, { clientX: 340 });
     const request_id = mocks.divider.mock.lastCall![1];
     await act(async () => {
@@ -132,6 +134,7 @@ describe("session compositor", () => {
     expect(new_handle.getAttribute("aria-orientation")).toBe("horizontal");
     fireEvent.pointerDown(new_handle, { button: 0, clientX: 100, clientY: 200 });
     fireEvent.pointerMove(new_handle, { clientX: 100, clientY: 216 });
+    await waitFor(() => expect(mocks.divider).toHaveBeenCalledTimes(1));
     expect(mocks.divider).toHaveBeenCalledExactlyOnceWith({ view_id: "view", expected_revision: "2", split_path: [], boundary: 0, position: 13 }, expect.any(String));
     await act(async () => publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id: mocks.divider.mock.lastCall![1], view: { ...vertical, revision: "3" }, error: null }));
   });
@@ -144,6 +147,7 @@ describe("session compositor", () => {
     const handle = screen.getByRole("separator");
     fireEvent.pointerDown(handle, { button: 0, clientX: 324 });
     fireEvent.pointerMove(handle, { clientX: 332 });
+    await waitFor(() => expect(mocks.divider).toHaveBeenCalledTimes(1));
     fireEvent.pointerMove(handle, { clientX: 340 });
     if (ending === "secondary") mocks.attachment_state = { ...initialAttachmentState(), session: { ...session, terminal_id: "b" }, phase: "ended" };
     mounted.rerender(<SessionViewSurface {...actions} phase={ending === "primary" ? "ended" : ending === "disconnect" ? "reconnecting" : "attached"} />);

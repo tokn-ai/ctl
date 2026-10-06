@@ -30,6 +30,7 @@ interface Drag {
   latest_position: number;
   pending: number | null;
   running: boolean;
+  frame: number | null;
 }
 
 function currentView(options: Options): SessionView | null {
@@ -63,9 +64,16 @@ export function useDividerDrag(options: Options) {
     }
   }
 
+  function cancelFrame(worker: Drag) {
+    if (worker.frame !== null) cancelAnimationFrame(worker.frame);
+    worker.frame = null;
+  }
+
   function finish(worker: Drag) {
     if (drag.current !== worker) return;
     drag.current = null;
+    cancelFrame(worker);
+    worker.pending = null;
     release(worker);
     setPreview(null);
     if (in_flight.current !== worker) latest.current.on_busy(false);
@@ -103,7 +111,7 @@ export function useDividerDrag(options: Options) {
     worker.running = true;
     in_flight.current = worker;
     try {
-      while (drag.current === worker && worker.pending !== null) {
+      while (drag.current === worker && worker.pending !== null && worker.frame === null) {
         const position = worker.pending;
         worker.pending = null;
         const next = await resizeSessionDivider(worker.session, {
@@ -129,7 +137,7 @@ export function useDividerDrag(options: Options) {
       worker.running = false;
       const owns_flight = in_flight.current === worker;
       if (owns_flight) in_flight.current = null;
-      if (drag.current === worker && worker.pointer_id === null && worker.pending === null) finish(worker);
+      if (drag.current === worker && worker.pointer_id === null && worker.pending === null && worker.frame === null) finish(worker);
       else if (owns_flight && !drag.current) latest.current.on_busy(false);
     }
   }
@@ -146,7 +154,7 @@ export function useDividerDrag(options: Options) {
     const position = Math.floor(divider.vertical ? divider.left : divider.top);
     const worker: Drag = {
       divider, baseline: view, session, signature: signature(latest.current), element,
-      pointer_id: null, coordinate: 0, initial_position: position, latest_position: position, pending: null, running: false,
+      pointer_id: null, coordinate: 0, initial_position: position, latest_position: position, pending: null, running: false, frame: null,
     };
     drag.current = worker;
     latest.current.on_error(null);
@@ -154,22 +162,36 @@ export function useDividerDrag(options: Options) {
     return worker;
   }
 
-  function schedule(worker: Drag, position: number) {
+  function flush(worker: Drag) {
+    cancelFrame(worker);
+    if (drag.current !== worker || worker.pending === null) return;
+    setPreview({ path: worker.divider.path, position: worker.pending });
+    void drain(worker);
+  }
+
+  function schedule(worker: Drag, position: number, by_frame = false) {
     if (drag.current !== worker || !sessionLayoutOwned(worker.session)) { finish(worker); return; }
     const extent = worker.divider.vertical ? worker.baseline.canvas_size.columns : worker.baseline.canvas_size.rows;
     const target = Math.max(0, Math.min(extent - 1, position));
     if (target === worker.latest_position) return;
     worker.latest_position = target;
     worker.pending = target;
-    setPreview({ path: worker.divider.path, position: target });
-    void drain(worker);
+    if (!by_frame) { flush(worker); return; }
+    if (worker.frame !== null) return;
+    // Pointer devices can emit many moves between paints. Preview and send
+    // only the latest target for that frame, still serializing exact ACKs.
+    const frame = requestAnimationFrame(() => {
+      if (worker.frame !== frame) return;
+      flush(worker);
+    });
+    worker.frame = frame;
   }
 
   function move(event: PointerEvent<HTMLElement>, worker: Drag) {
     const cell = latest.current.cell;
     const coordinate = worker.divider.vertical ? event.clientX : event.clientY;
     const size = worker.divider.vertical ? cell.width : cell.height;
-    schedule(worker, worker.initial_position + Math.round((coordinate - worker.coordinate) / size));
+    schedule(worker, worker.initial_position + Math.round((coordinate - worker.coordinate) / size), true);
   }
 
   function handlers(divider: ViewDivider) {
@@ -197,6 +219,8 @@ export function useDividerDrag(options: Options) {
         event.preventDefault();
         move(event, worker);
         release(worker);
+        // Releasing before the next paint must still deliver the final cell.
+        flush(worker);
         if (!worker.running && worker.pending === null) finish(worker);
       },
       onPointerCancel: (event: PointerEvent<HTMLElement>) => {

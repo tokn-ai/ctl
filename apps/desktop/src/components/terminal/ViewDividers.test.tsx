@@ -35,6 +35,8 @@ const errors = vi.fn();
 const stops: (() => void)[] = [];
 let owned = true;
 let captured: WeakMap<HTMLElement, number>;
+let frames: Map<number, FrameRequestCallback>;
+let next_frame: number;
 
 function Fixture({ view = initial, cell = { width: 8, height: 16 }, enabled = true, current_session = session }: {
   view?: SessionView; cell?: { width: number; height: number }; enabled?: boolean; current_session?: SessionSummary;
@@ -60,7 +62,15 @@ function down(handle = screen.getByRole("separator"), x = 324, y = 100) {
   fireEvent.pointerDown(handle, { pointerId: 1, button: 0, clientX: x, clientY: y });
   return handle;
 }
-function move(handle: HTMLElement, x: number, y = 100) { fireEvent.pointerMove(handle, { pointerId: 1, clientX: x, clientY: y }); }
+function paint() {
+  const ready = [...frames];
+  frames.clear();
+  act(() => { for (const [, callback] of ready) callback(0); });
+}
+function move(handle: HTMLElement, x: number, y = 100, paint_now = true) {
+  fireEvent.pointerMove(handle, { pointerId: 1, clientX: x, clientY: y });
+  if (paint_now) paint();
+}
 async function acknowledge(view: SessionView, index = resize.mock.calls.length - 1) {
   await act(async () => publishPaneResizeResult({ session, attachment_id: "owner", request_id: resize.mock.calls[index][1], view, error: null }));
 }
@@ -68,6 +78,14 @@ async function acknowledge(view: SessionView, index = resize.mock.calls.length -
 beforeEach(() => {
   owned = true;
   captured = new WeakMap();
+  frames = new Map();
+  next_frame = 0;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = ++next_frame;
+    frames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
   vi.stubGlobal("PointerEvent", TestPointerEvent);
   Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value(this: HTMLElement, pointer_id: number) { captured.set(this, pointer_id); } });
   Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true, value(this: HTMLElement, pointer_id: number) { return captured.get(this) === pointer_id; } });
@@ -85,6 +103,79 @@ afterEach(() => {
 });
 
 describe("GUI divider dragging", () => {
+  it("coalesces pointer moves and preview updates into one target per paint", async () => {
+    render(<Fixture />);
+    const handle = down();
+    move(handle, 332, 100, false);
+    move(handle, 340, 100, false);
+    move(handle, 348, 100, false);
+    expect(resize).not.toHaveBeenCalled();
+    expect(document.querySelector(".view-divider-preview")).toBeNull();
+    expect(frames.size).toBe(1);
+    paint();
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(resize.mock.calls[0][0]).toMatchObject({ position: 43 });
+    expect(document.querySelector<HTMLElement>(".view-divider-preview")!.style.left).toBe("348px");
+    move(handle, 356, 100, false);
+    move(handle, 364, 100, false);
+    paint();
+    expect(resize).toHaveBeenCalledTimes(1);
+    await acknowledge(resized(43));
+    expect(resize).toHaveBeenCalledTimes(2);
+    expect(resize.mock.calls[1][0]).toMatchObject({ position: 45, expected_revision: "2" });
+    await acknowledge(resized(45, "3"));
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 364, clientY: 100 });
+    expect(screen.getByTestId("busy").textContent).toBe("false");
+  });
+
+  it("waits for the next paint when an acknowledgement arrives before queued pointer motion", async () => {
+    render(<Fixture />);
+    const handle = down();
+    move(handle, 332);
+    move(handle, 348, 100, false);
+    await acknowledge(resized(41));
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(frames.size).toBe(1);
+    paint();
+    expect(resize).toHaveBeenCalledTimes(2);
+    expect(resize.mock.calls[1][0]).toMatchObject({ position: 43, expected_revision: "2" });
+    await acknowledge(resized(43, "3"));
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 348, clientY: 100 });
+    expect(screen.getByTestId("busy").textContent).toBe("false");
+  });
+
+  it("flushes mouseup before the next paint without losing its final target", async () => {
+    render(<Fixture />);
+    const handle = down();
+    move(handle, 332, 100, false);
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 348, clientY: 100 });
+    fireEvent.lostPointerCapture(handle, { pointerId: 1 });
+    expect(frames.size).toBe(0);
+    expect(captured.has(handle)).toBe(false);
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(resize.mock.calls[0][0]).toMatchObject({ position: 43 });
+    expect(screen.getByTestId("busy").textContent).toBe("true");
+    await acknowledge(resized(43));
+    expect(screen.getByTestId("busy").textContent).toBe("false");
+    paint();
+    expect(resize).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["escape", "unmount", "lease"])("discards an unsent frame on %s and fences cancelled callbacks", async (reason) => {
+    const mounted = render(<Fixture />);
+    const handle = down();
+    move(handle, 332, 100, false);
+    const callback = [...frames.values()][0];
+    if (reason === "escape") fireEvent.keyDown(window, { key: "Escape" });
+    if (reason === "unmount") mounted.unmount();
+    if (reason === "lease") { owned = false; await act(async () => publishLayoutOwnerChange()); }
+    expect(frames.size).toBe(0);
+    act(() => callback(0));
+    expect(resize).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    if (reason !== "unmount") expect(screen.getByTestId("busy").textContent).toBe("false");
+  });
+
   it("captures the pointer, snaps without a grab jump, and renders only confirmed geometry", async () => {
     render(<Fixture />);
     const handle = down(undefined, 321);

@@ -192,9 +192,9 @@ screen, covering modifier handling, repeated pane navigation, paste, copy mode,
 mouse scrolling, the bottom status row, resize, detach, and host terminal loss.
 These tests need permission to bind local Unix sockets and open PTYs.
 
-The reusable harness lives in `tests/support`: `TestDaemon` owns an isolated
-daemon and controlled shell fixtures; `Tui` drives the host PTY; `Screen` is a
-snapshot parsed from captured ANSI output. `Tui::spawn` accepts a command for
+The reusable test framework lives in `tests/support`: `TestDaemon` owns an
+isolated daemon and controlled shell fixtures; `Tui` drives the host PTY; `Screen`
+is a snapshot parsed from captured ANSI output. `Tui::spawn` accepts a command for
 testing other launchers. New cases belong in `tests/cases` and are registered in
 `terminal_process.rs`.
 

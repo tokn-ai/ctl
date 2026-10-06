@@ -17,7 +17,7 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
-function harness(send: (terminalSize: TerminalSize) => Promise<void>) {
+function createTestCoordinator(send: (terminalSize: TerminalSize) => Promise<void>) {
   const pump = new ResizePump(
     async (resize) => send(resize.terminal_size),
     () => undefined,
@@ -42,7 +42,7 @@ describe("ResizeCoordinator", () => {
   it("cancels a stale resize when the viewport returns to authoritative size", async () => {
     vi.useFakeTimers();
     const sent: TerminalSize[] = [];
-    const coordinator = harness(async (size) => {
+    const coordinator = createTestCoordinator(async (size) => {
       sent.push(size);
     });
     const original = terminalSize(80, 24);
@@ -63,7 +63,7 @@ describe("ResizeCoordinator", () => {
     const firstPending = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const coordinator = harness(async (size) => {
+    const coordinator = createTestCoordinator(async (size) => {
       sent.push(size);
       if (sent.length === 1) {
         await firstPending;
@@ -88,7 +88,7 @@ describe("ResizeCoordinator", () => {
   it("reconciles after checkpoint recovery changes authoritative geometry", async () => {
     vi.useFakeTimers();
     const sent: TerminalSize[] = [];
-    const coordinator = harness(async (size) => {
+    const coordinator = createTestCoordinator(async (size) => {
       sent.push(size);
     });
     const desired = terminalSize(80, 24);

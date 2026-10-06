@@ -1077,11 +1077,11 @@ describe("durable terminal previews", () => {
 describe("opened session channels", () => {
   it("keeps the selected scoped tab visible when its cache disappears during reconnect", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<Harness />);
+    render(<TestComponent />);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     await emit(checkpoint("attachment-0", "old screen", "5"));
@@ -1104,11 +1104,11 @@ describe("opened session channels", () => {
 
   it("keeps a moved background pane's live cache in its opened tab across tab switches and retention", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<Harness />);
+    render(<TestComponent />);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     await emit(checkpoint("attachment-0", "first screen", "5"));
@@ -1146,11 +1146,11 @@ describe("opened session channels", () => {
 
   it("reconnects a background root stream without clearing its screen or changing the visible tab", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<Harness />);
+    render(<TestComponent />);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     await emit(checkpoint("attachment-0", "first screen", "5"));
@@ -1176,11 +1176,11 @@ describe("opened session channels", () => {
 
   it("keeps receiving background output and switches without reopening either channel", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<Harness />);
+    render(<TestComponent />);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     await emit(checkpoint("attachment-0", "first"));
@@ -1211,11 +1211,11 @@ describe("opened session channels", () => {
 
   it("preserves a recovered session's cache when returning to its tab", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<Harness />);
+    render(<TestComponent />);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     await act(async () => { await attachments.reconnect(); });
@@ -1231,11 +1231,11 @@ describe("opened session channels", () => {
 
   it("archives a removed interactive session after detaching its channel", async () => {
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<Harness />);
+    render(<TestComponent />);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     api.sessionCache.mockImplementation(async (action) => {
@@ -1250,7 +1250,7 @@ describe("opened session channels", () => {
   it("reports an archive failure after the final attachment is removed", async () => {
     const store = new NotificationStore();
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       useWorkbenchNotifications(store, {
         workspace_error: null, workspace_ready: true, keybindings_error: null, session_error: null,
@@ -1259,7 +1259,7 @@ describe("opened session channels", () => {
       });
       return <>{attachments.controllers}</>;
     }
-    render(<NotificationProvider store={store}><Harness /></NotificationProvider>);
+    render(<NotificationProvider store={store}><TestComponent /></NotificationProvider>);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     api.sessionCache.mockImplementation(async (action) => {
@@ -1276,11 +1276,11 @@ describe("opened session channels", () => {
   it("reports failures from a background session's real attachment controller", async () => {
     const store = new NotificationStore();
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<NotificationProvider store={store}><Harness /></NotificationProvider>);
+    render(<NotificationProvider store={store}><TestComponent /></NotificationProvider>);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     const background_id = attachments.state.attachment_id!;
@@ -1297,11 +1297,11 @@ describe("opened session channels", () => {
   it("reports identical failures from explicit retries outside the notification card", async () => {
     const store = new NotificationStore();
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<NotificationProvider store={store}><Harness /></NotificationProvider>);
+    render(<NotificationProvider store={store}><TestComponent /></NotificationProvider>);
     act(() => { void attachments.connect(first); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     const attachment_id = attachments.state.attachment_id!;
@@ -1322,11 +1322,11 @@ describe("opened session channels", () => {
       return result;
     });
     let attachments!: ReturnType<typeof useSessionAttachments>;
-    function Harness() {
+    function TestComponent() {
       attachments = useSessionAttachments(renderer);
       return <>{attachments.controllers}</>;
     }
-    render(<Harness />);
+    render(<TestComponent />);
     act(() => { void attachments.connect(remote); });
     await waitFor(() => expect(attachments.state.phase).toBe("attached"));
     act(() => { void attachments.connect(second); });

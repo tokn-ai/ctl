@@ -368,7 +368,7 @@ async fn socketpair_stdio_negotiates_a_fragmented_selection_before_the_request()
   peer.set_nonblocking(true).unwrap();
   let mut channel = tokio::net::UnixStream::from_std(peer).unwrap();
   tokio::time::timeout(Duration::from_secs(3), async {
-    // The test harness banner precedes the protocol's owned standard output.
+    // The test runner banner precedes the protocol's owned standard output.
     let mut banner = Vec::new();
     while !banner.ends_with(PREFACE) {
       banner.push(channel.read_u8().await.unwrap());
@@ -442,7 +442,7 @@ async fn stdio_vpn_delivers_target_eof_before_client_finishes_uploading() {
     .unwrap();
   let mut input = child.stdin.take().unwrap();
   let mut output = child.stdout.take().unwrap();
-  // The child test harness prints a banner before the process takes stdio.
+  // The child test runner prints a banner before the process takes stdio.
   let mut banner = Vec::new();
   while !banner.ends_with(PREFACE) {
     banner.push(output.read_u8().await.unwrap());

@@ -1065,6 +1065,8 @@ dependencies = [
  "ctmux-ipc",
  "ctmux-proto",
  "ctmuxd",
+ "filedescriptor",
+ "nix 0.29.0",
  "portable-pty",
  "tokio",
  "unicode-width 0.1.14",

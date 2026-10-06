@@ -178,13 +178,32 @@ daemon's `avt` terminal emulation capabilities; it is not full tmux feature pari
 
 ```sh
 cargo test -p ctmux-tui
+cargo test -p ctmux-tui --test terminal_process
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-The Unix integration test uses a temporary daemon and real PTYs to check
-separate pane output, shared sizing, read-only viewing, reconnect, and lease
-release on detach. It needs permission to bind a local Unix socket.
+Fast tests check the key state machine, pane models, and renderer. Daemon-backed
+handler tests check shared sizing, read-only viewing, reconnect, and input leases.
+
+`terminal_process` launches the real `ctmux-tui` binary inside a host PTY on
+Linux and macOS. It sends terminal bytes through crossterm and checks the rendered
+screen, covering modifier handling, repeated pane navigation, paste, copy mode,
+mouse scrolling, the bottom status row, resize, detach, and host terminal loss.
+These tests need permission to bind local Unix sockets and open PTYs.
+
+The reusable test framework lives in `tests/support`: `TestDaemon` owns an
+isolated daemon and controlled shell fixtures; `Tui` drives the host PTY; `Screen`
+is a snapshot parsed from captured ANSI output. `Tui::spawn` accepts a command for
+testing other launchers. New cases belong in `tests/cases` and are registered in
+`terminal_process.rs`.
+
+Wait for observable screen conditions with `wait_screen` rather than fixed
+startup delays. Failures report child status, the visible screen, and a bounded
+raw transcript. Each fixture has private sockets and storage; teardown closes
+the TUI and cooperatively stops its daemon and shell processes, including during
+test unwinding. Exact repeat deadlines stay in the fast key-state tests; process
+tests check repetition with batched keys and expiry with scheduling slack.
 
 ## Exited sessions and archives
 

@@ -102,8 +102,12 @@ ctl components update --hosts work --from /path/to/bundle-set --json
 
 `--from` supplies a complete build directory or archive. Use `--local-build` for
 four native binaries; local macOS full updates also require `--ctld-package`.
-Otherwise updates use the pinned selection for each target. `components list`,
-`sync`, and `select` manage the store and its selections. See the
+Otherwise updates use the pinned selection for each target. `components list`
+shows included and stored complete builds across all targets, with availability
+and local/upload selections. Use `--target <triple>` to filter or `--json` for
+manifests, availability, selections, and inspection errors. Listing never imports
+or selects a build. `components sync` imports a build; `components select` can
+choose a listed stored or included build. See the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md)
 for source formats, cancellation, and per-host results.
 

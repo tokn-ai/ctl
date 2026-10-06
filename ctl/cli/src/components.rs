@@ -1,8 +1,9 @@
 use clap::{Subcommand, ValueEnum};
-use ctl_core::bundles::{Purpose, Source, Store};
+use ctl_core::bundles::{Purpose, Source};
 use std::io;
 use std::path::PathBuf;
 
+mod list;
 mod update;
 pub use update::UpdatePackage;
 
@@ -58,8 +59,9 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
-  /// List complete stored builds and explicit selections without connecting.
+  /// List included and stored complete builds and selections without connecting.
   List {
+    /// Filter by target; defaults to all supported targets.
     #[arg(long)]
     target: Option<String>,
     #[arg(long)]
@@ -85,7 +87,7 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
-  /// Select a previously imported complete build; never restart a service.
+  /// Select a stored or included complete build; never restart a service.
   Select {
     bundle_id: String,
     #[arg(long)]
@@ -102,7 +104,6 @@ pub async fn run(
   platform: Option<crate::RemotePlatform>,
 ) -> io::Result<()> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
-  let store = Store::new(&home);
   match command {
     Command::Update {
       hosts,
@@ -138,13 +139,8 @@ pub async fn run(
       .await;
     }
     Command::List { target, json } => {
-      list(
-        &store,
-        target
-          .as_deref()
-          .unwrap_or_else(|| ctl_core::paths::native_target()),
-        json,
-      )?;
+      let directories = crate::remote::update_bundle_directories()?;
+      list::run(&home, target.as_deref(), &directories, json).await?;
     }
     command @ Command::Sync { .. } => sync(&home, command).await?,
     Command::Select {
@@ -153,7 +149,16 @@ pub async fn run(
       purpose,
     } => {
       let target = target.unwrap_or_else(|| default_target(purpose, false));
-      let bundle = store.get(&target, &bundle_id)?;
+      let directories = crate::remote::update_bundle_directories()?;
+      let bundle = {
+        let home = home.clone();
+        let id = bundle_id.clone();
+        tokio::task::spawn_blocking(move || {
+          ctl_client::components::inventory::load_selection(&home, &directories, &target, &id)
+        })
+        .await
+        .map_err(io::Error::other)??
+      };
       ctl_client::components::select(&home, purpose.into(), &bundle).await?;
       println!("Selected {bundle_id} for {purpose:?}; running services were preserved.");
     }
@@ -230,37 +235,4 @@ fn default_target(purpose: Usage, local_build: bool) -> String {
   } else {
     native.into()
   }
-}
-
-fn list(store: &Store, target: &str, json: bool) -> io::Result<()> {
-  let local = store
-    .selected(Purpose::Local, target)?
-    .map(|bundle| bundle.manifest.bundle_id);
-  let upload = store
-    .selected(Purpose::Upload, target)?
-    .map(|bundle| bundle.manifest.bundle_id);
-  let bundles = store.list(target)?;
-  if json {
-    println!("{}", serde_json::to_string(&serde_json::json!({"target_triple":target,"selected_local":local,"selected_upload":upload,"bundles":bundles.iter().map(|bundle| &bundle.manifest).collect::<Vec<_>>()})).map_err(io::Error::other)?);
-  } else {
-    for bundle in bundles {
-      let id = &bundle.manifest.bundle_id;
-      println!(
-        "{id} {:?} {}{}{}",
-        bundle.manifest.source,
-        bundle.manifest.components["ctl-agent"].build.version,
-        if local.as_ref() == Some(id) {
-          " [local]"
-        } else {
-          ""
-        },
-        if upload.as_ref() == Some(id) {
-          " [upload]"
-        } else {
-          ""
-        }
-      );
-    }
-  }
-  Ok(())
 }

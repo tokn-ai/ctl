@@ -1,5 +1,7 @@
 //! Explicit complete-bundle import, selection and packaging for either purpose.
 
+pub mod inventory;
+
 use ctl_core::bundles::{
   Bundle, COMPONENTS, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose, Source, Store,
 };

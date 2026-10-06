@@ -120,10 +120,20 @@ reports an error instead of silently choosing another build.
 Import a downloaded CI/release bundle-set directory explicitly:
 
 ```sh
+ctl components list
 ctl components sync --from /path/to/bundle-set --target x86_64-unknown-linux-musl --purpose upload --source ci
 ctl components list --target x86_64-unknown-linux-musl --json
 ctl components select <content-id> --target x86_64-unknown-linux-musl --purpose upload
 ```
+
+`ctl components list` includes packaged builds and imported builds across all
+supported targets. It labels included/stored availability and local/upload
+selections, deduplicates identical builds, and reports a clear message when none
+are available. `--target` filters the inventory. `--json` retains complete
+manifests in `bundles` and adds `availability`, per-target `selections`, and
+inspection `errors`; `target_triple` is null for an unfiltered inventory.
+Listing is read-only. Selecting a listed included build imports its exact
+verified content before changing the requested selection.
 
 `pnpm agents:sync` also imports and selects all four CI upload targets in this
 shared store, after copying the verified resources needed to package the desktop.

@@ -1,9 +1,10 @@
 use crate::{Result, model::Model, transport::Transport};
 use ctmux_client::{
-  AttachRequest, AttachmentControl, AttachmentController, AttachmentControllerOptions,
-  AttachmentEvent, AttachmentEvents, ClientIdentity, DEFAULT_PRESENTATION_WINDOW_BYTES,
+  AttachRequest, AttachmentAcknowledgementError, AttachmentControl, AttachmentController,
+  AttachmentControllerOptions, AttachmentEvent, AttachmentEvents, ClientIdentity,
+  DEFAULT_PRESENTATION_WINDOW_BYTES,
 };
-use ctmux_proto::TerminalSize;
+use ctmux_proto::{TerminalSize, ViewInfo};
 use std::collections::VecDeque;
 use tokio::task::JoinHandle;
 
@@ -12,6 +13,7 @@ pub struct Pane {
   pub control: AttachmentControl,
   pub connected: bool,
   pub ended: Option<String>,
+  pub view_update: Option<ViewInfo>,
   events: AttachmentEvents,
   pub token: String,
   runner: Option<JoinHandle<()>>,
@@ -24,6 +26,18 @@ pub struct Pane {
 }
 
 const MAX_HISTORY_REPLAY_BYTES: usize = 4 * 1024 * 1024;
+
+fn accept_buffered_ack(
+  result: std::result::Result<(), AttachmentAcknowledgementError>,
+) -> Result<()> {
+  // The controller can queue final presentation events and SessionEnded
+  // before the renderer drains them. A closed acknowledgement endpoint must
+  // not discard those events or their final screen; ordering errors still fail.
+  match result {
+    Ok(()) | Err(AttachmentAcknowledgementError::Closed) => Ok(()),
+    Err(error) => Err(error.into()),
+  }
+}
 
 #[derive(Clone)]
 struct ReplayChunk {
@@ -69,6 +83,13 @@ pub fn identity() -> ClientIdentity {
 }
 
 impl Pane {
+  #[cfg(test)]
+  pub(crate) async fn wait_for_controller_exit(&mut self) {
+    if let Some(runner) = self.runner.take() {
+      runner.await.expect("attachment controller task panicked");
+    }
+  }
+
   pub async fn open(
     transport: &dyn Transport,
     terminal_id: &str,
@@ -113,6 +134,7 @@ impl Pane {
       control,
       connected: true,
       ended: None,
+      view_update: None,
       events,
       token,
       runner: Some(runner),
@@ -160,10 +182,12 @@ impl Pane {
         self.model.restore(&checkpoint);
         self.model.history_gap = history_gap || history.truncated;
         self.model.set_history(history.lines);
-        self
-          .control
-          .acknowledge_checkpoint(checkpoint.sequence)
-          .await?;
+        accept_buffered_ack(
+          self
+            .control
+            .acknowledge_checkpoint(checkpoint.sequence)
+            .await,
+        )?;
       }
       AttachmentEvent::Output {
         data,
@@ -185,10 +209,8 @@ impl Pane {
             let _ignored = self.control.request_checkpoint().await;
           }
         }
-        self.control.acknowledge_output(sequence_end).await?;
-        if !reply.is_empty() && self.control.state().leases().input.owned_by_client {
-          self.control.input(reply).await?;
-        }
+        accept_buffered_ack(self.control.acknowledge_output(sequence_end).await)?;
+        self.reply_to_terminal(reply).await?;
       }
       AttachmentEvent::PtyGeometryChanged {
         terminal_size,
@@ -196,7 +218,7 @@ impl Pane {
       } => {
         self.cancel_history();
         self.model.resize(&terminal_size);
-        self.control.acknowledge_geometry(observed_sequence).await?;
+        accept_buffered_ack(self.control.acknowledge_geometry(observed_sequence).await)?;
       }
       AttachmentEvent::HistorySynced {
         snapshot_id,
@@ -229,6 +251,7 @@ impl Pane {
           )
         }));
       }
+      AttachmentEvent::ViewChanged { view } => self.queue_view_update(view),
       AttachmentEvent::ServerError { message: error, .. } => return Ok(Some(error)),
       AttachmentEvent::SessionEnded { exit_code, .. } => {
         self.connected = false;
@@ -241,6 +264,29 @@ impl Pane {
       _ => {}
     }
     Ok(None)
+  }
+
+  async fn reply_to_terminal(&self, reply: Vec<u8>) -> Result<()> {
+    if !reply.is_empty() && self.control.state().leases().input.owned_by_client {
+      // Final output may request a terminal reply after the reader has
+      // already queued SessionEnded and closed its command endpoint.
+      if let Err(error) = self.control.input(reply).await
+        && error != ctmux_client::AttachmentCommandError::Closed
+      {
+        return Err(error.into());
+      }
+    }
+    Ok(())
+  }
+
+  fn queue_view_update(&mut self, view: ViewInfo) {
+    if self
+      .view_update
+      .as_ref()
+      .is_none_or(|pending| view.revision >= pending.revision)
+    {
+      self.view_update = Some(view);
+    }
   }
 
   async fn publish_ready_history(&mut self) {

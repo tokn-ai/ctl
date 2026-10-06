@@ -807,6 +807,10 @@ export interface AttachmentResizeRequest extends AttachmentIdRequest {
   terminal_size: TerminalSize;
 }
 
+export interface AttachmentViewZoomRequest extends AttachmentIdRequest {
+  terminal_id: string | null;
+}
+
 export interface AttachmentLeaseRequest extends AttachmentIdRequest {
   lease: LeaseKind;
 }
@@ -899,6 +903,11 @@ export interface LeaseStatusEvent extends AttachmentEventBase {
   status: LeaseStatus;
 }
 
+export interface ViewChangedEvent extends AttachmentEventBase {
+  event_type: "view_changed";
+  view: SessionView;
+}
+
 export interface ShellStateChangedEvent extends AttachmentEventBase {
   event_type: "shell_state_changed";
   shell_state: ShellStateSummary;
@@ -946,6 +955,7 @@ export type AttachmentEvent =
   | OutputEvent
   | PtyGeometryChangedEvent
   | LeaseStatusEvent
+  | ViewChangedEvent
   | ShellStateChangedEvent
   | SessionObservedEvent
   | ServerErrorEvent
@@ -1063,6 +1073,7 @@ export interface SessionView {
   view_id: string;
   revision: string;
   canvas_size: TerminalSize;
+  zoomed_terminal_id: string | null;
   panes: { terminal_id: string; left: number; top: number; columns: number; rows: number }[];
   layout: ViewLayout;
   terminals: { terminal_id: string; name: string; next_sequence: Sequence; terminal_size: TerminalSize }[];

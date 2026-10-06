@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentViewState, SessionSummary, SessionView } from "../../lib/types";
 import { sessionKey } from "../../features/targets/targets";
 import { SessionViewSurface } from "./SessionViewSurface";
@@ -11,8 +11,9 @@ import { initialAttachmentState } from "../../features/attachment/attachmentStat
 import { NotificationProvider, useNotificationEnvironment } from "../../features/notifications/NotificationContext";
 import { NotificationStore } from "../../features/notifications/NotificationStore";
 import type { AttachmentNotifications } from "../../features/notifications/AttachmentNotifications";
+import { publishSessionView, registerAttachmentControl } from "../../features/attachment/componentActions";
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), detach: vi.fn(), input: vi.fn(), attachment_state: null as AttachmentViewState | null, mounted_inputs: [] as ((data: Uint8Array) => void)[] }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), zoom: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), detach: vi.fn(), input: vi.fn(), attachment_state: null as AttachmentViewState | null, mounted_inputs: [] as ((data: Uint8Array) => void)[] }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
 vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () => ({
   state: mocks.attachment_state ?? { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
@@ -34,11 +35,22 @@ vi.mock("./TerminalSurface", async () => {
 
 const session: SessionSummary = { target: { kind: "local" }, session_id: "root", view_id: "view", terminal_id: "a", name: "Root", status: "running", next_sequence: "0", terminal_size: { columns: 80, rows: 24, pixel_width: null, pixel_height: null } };
 const terminal = (terminal_id: string) => ({ terminal_id, name: terminal_id, terminal_size: session.terminal_size, next_sequence: "0" });
-const initial: SessionView = { session_id: "root", session_name: "Root", view_id: "view", revision: "0", canvas_size: session.terminal_size, panes: [{ terminal_id: "a", left: 0, top: 0, columns: 80, rows: 24 }], layout: { kind: "terminal", terminal_id: "a" }, terminals: [terminal("a")] };
+const initial: SessionView = { session_id: "root", session_name: "Root", view_id: "view", revision: "0", canvas_size: session.terminal_size, zoomed_terminal_id: null, panes: [{ terminal_id: "a", left: 0, top: 0, columns: 80, rows: 24 }], layout: { kind: "terminal", terminal_id: "a" }, terminals: [terminal("a")] };
 const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "a", left: 0, top: 0, columns: 40, rows: 24 }, { terminal_id: "b", left: 41, top: 0, columns: 39, rows: 24 }], layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] }, terminals: [terminal("a"), terminal("b")] };
 const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
+let stop_control: () => void;
+beforeEach(() => {
+  mocks.zoom.mockImplementation(async (terminal_id: string | null) => {
+    publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: terminal_id ? "2" : "3", zoomed_terminal_id: terminal_id } });
+  });
+  stop_control = registerAttachmentControl({
+    attachmentId: () => "primary-owner", session: () => session,
+    layoutOwned: () => true, setViewZoom: mocks.zoom,
+    reconnect: async () => null, reset: () => {},
+  });
+});
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers(); });
+afterEach(() => { cleanup(); stop_control(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers(); });
 
 describe("session compositor", () => {
   it("reports hidden split-pane failures with a targeted retry and keeps them in history after close", async () => {
@@ -308,7 +320,7 @@ describe("session compositor", () => {
     act(() => second.focus());
     fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
     fireEvent.keyDown(second, { key: "z", code: "KeyZ" });
-    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    await waitFor(() => expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden"));
     fireEvent.click(screen.getByRole("button", { name: label }));
     await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(3));
     expect(mocks.request).toHaveBeenLastCalledWith(session.target, expect.objectContaining({ kind: "split", terminal_id: "b", axis }));
@@ -324,11 +336,14 @@ describe("session compositor", () => {
     let finish_detach!: () => void;
     mocks.detach.mockImplementationOnce(() => new Promise<void>((resolve) => { finish_detach = resolve; }));
     const actions = props();
-    await act(async () => { render(<SessionViewSurface {...actions} />); });
+    let mounted!: ReturnType<typeof render>;
+    await act(async () => { mounted = render(<SessionViewSurface {...actions} />); });
     expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
     await act(async () => { vi.advanceTimersByTime(2000); });
     expect(mocks.detach).not.toHaveBeenCalled();
     expect(screen.getAllByTestId("terminal-surface")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Dismiss ended pane" })).toBeNull();
+    mounted.rerender(<SessionViewSurface {...actions} phase="ended" />);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Dismiss ended pane" })); });
     expect(mocks.detach).toHaveBeenCalled();
     expect(actions.on_select_terminal).not.toHaveBeenCalled();
@@ -365,7 +380,7 @@ describe("session compositor", () => {
     expect(mocks.unmount).not.toHaveBeenCalled();
   });
 
-  it("zooms and moves panes through revision-checked layouts without remounting", async () => {
+  it("zooms through the resize owner and moves panes through revision-checked layouts without remounting", async () => {
     mocks.request.mockResolvedValue(split);
     render(<SessionViewSurface {...props()} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "other" }} />);
     await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
@@ -373,15 +388,123 @@ describe("session compositor", () => {
     act(() => first.focus());
     const prefix = () => fireEvent.keyDown(first, { key: "b", code: "KeyB", ctrlKey: true });
     prefix(); fireEvent.keyDown(first, { key: "z", code: "KeyZ" });
-    expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    await waitFor(() => expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden"));
+    expect(mocks.zoom).toHaveBeenLastCalledWith("a");
+    expect(first.closest<HTMLElement>(".view-pane")?.style.width).toBe("640px");
+    expect(first.closest<HTMLElement>(".view-pane")?.style.height).toBe("384px");
     prefix(); fireEvent.keyDown(first, { key: "z", code: "KeyZ" });
-    expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible");
+    await waitFor(() => expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible"));
+    expect(mocks.zoom).toHaveBeenLastCalledWith(null);
+    expect(first.closest<HTMLElement>(".view-pane")?.style.width).toBe("320px");
     prefix(); fireEvent.keyDown(first, { key: "m", code: "KeyM" });
     fireEvent.keyDown(first, { key: "ArrowRight", code: "ArrowRight" });
     await waitFor(() => expect(mocks.request).toHaveBeenLastCalledWith(session.target, {
-      kind: "update", session_id: "root", expected_revision: "1",
+      kind: "update", session_id: "root", expected_revision: "3",
       layout: { kind: "split", axis: "horizontal", children: [{ kind: "terminal", terminal_id: "b" }, { kind: "terminal", terminal_id: "a" }] },
     }));
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
+
+  it("renders shared zoom at full canvas size, selects the zoomed pane, and keeps hidden terminals mounted", async () => {
+    mocks.request.mockResolvedValue({ ...split, zoomed_terminal_id: "b" });
+    const actions = props();
+    render(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    await waitFor(() => expect(document.activeElement).toBe(second));
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    expect(second.closest<HTMLElement>(".view-pane")?.style).toMatchObject({ left: "0px", top: "0px", width: "640px", height: "384px", visibility: "visible" });
+    mocks.mounted_inputs[0](new Uint8Array([97]));
+    mocks.mounted_inputs[1](new Uint8Array([98]));
+    expect(actions.onInput).not.toHaveBeenCalled();
+    expect(mocks.input).toHaveBeenCalledExactlyOnceWith(new Uint8Array([98]));
+    act(() => publishSessionView({ session, attachment_id: "primary-owner", view: split }));
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible");
+    expect(second.closest<HTMLElement>(".view-pane")?.style).toMatchObject({ left: "328px", width: "312px" });
+    expect(mocks.mount).toHaveBeenCalledTimes(2);
+    expect(mocks.unmount).not.toHaveBeenCalled();
+    expect(mocks.detach).not.toHaveBeenCalled();
+  });
+
+  it("waits for shared unzoom before changing focus", async () => {
+    mocks.request.mockResolvedValue({ ...split, zoomed_terminal_id: "b" });
+    mocks.zoom.mockResolvedValue(undefined);
+    render(<SessionViewSurface {...props()} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "other" }} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    await waitFor(() => expect(document.activeElement).toBe(second));
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(second, { key: "ArrowLeft", code: "ArrowLeft" });
+    expect(mocks.zoom).toHaveBeenCalledExactlyOnceWith(null);
+    expect(document.activeElement).toBe(second);
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    act(() => publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: "9" } }));
+    await waitFor(() => expect(document.activeElement).toBe(first));
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible");
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
+
+  it("shows unsupported-server failures without applying local zoom", async () => {
+    mocks.request.mockResolvedValue(split);
+    mocks.zoom.mockRejectedValue(new Error("This server does not support pane zoom. Upgrade ctmuxd to use it."));
+    render(<SessionViewSurface {...props()} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "other" }} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    act(() => first.focus());
+    fireEvent.keyDown(first, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(first, { key: "z", code: "KeyZ" });
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("does not support pane zoom"));
+    expect(second.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("visible");
+    expect(first.closest<HTMLElement>(".view-pane")?.style.width).toBe("320px");
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
+
+  it("ignores older view broadcasts from another pane attachment", async () => {
+    mocks.request.mockResolvedValue(split);
+    render(<SessionViewSurface {...props()} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    act(() => {
+      publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: "9007199254740994", zoomed_terminal_id: "b" } });
+      publishSessionView({ session, attachment_id: "secondary", view: { ...split, revision: "9007199254740993" } });
+    });
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    expect(second.closest<HTMLElement>(".view-pane")?.style.width).toBe("640px");
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
+
+  it("keeps shared zoom and focus when resize ownership is unavailable", async () => {
+    stop_control();
+    mocks.request.mockResolvedValue({ ...split, zoomed_terminal_id: "b" });
+    render(<SessionViewSurface {...props()} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "other" }} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    await waitFor(() => expect(document.activeElement).toBe(second));
+    fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(second, { key: "ArrowLeft", code: "ArrowLeft" });
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Take resize control"));
+    expect(mocks.zoom).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(second);
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+  });
+
+  it("keeps a newer shared zoom that overtakes the owner's unzoom acknowledgement", async () => {
+    mocks.request.mockResolvedValue({ ...split, zoomed_terminal_id: "b" });
+    mocks.zoom.mockImplementation(async () => {
+      publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: "9" } });
+      publishSessionView({ session, attachment_id: "secondary", view: { ...split, revision: "10", zoomed_terminal_id: "b" } });
+    });
+    render(<SessionViewSurface {...props()} prefix_settings={{ document: { schema_version: 1, overrides: [] }, bindings: new Map(), platform: "other" }} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const [first, second] = screen.getAllByLabelText("Terminal input");
+    await waitFor(() => expect(document.activeElement).toBe(second));
+    await act(async () => {
+      fireEvent.keyDown(second, { key: "b", code: "KeyB", ctrlKey: true });
+      fireEvent.keyDown(second, { key: "ArrowLeft", code: "ArrowLeft" });
+    });
+    expect(document.activeElement).toBe(second);
+    expect(first.closest<HTMLElement>(".view-pane")?.style.visibility).toBe("hidden");
+    expect(second.closest<HTMLElement>(".view-pane")?.style.width).toBe("640px");
     expect(mocks.unmount).not.toHaveBeenCalled();
   });
 

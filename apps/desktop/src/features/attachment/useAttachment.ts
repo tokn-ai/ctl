@@ -11,6 +11,7 @@ import {
   resizeAttachment,
   sendInput,
   sessionCache,
+  setAttachmentViewZoom,
 } from "../../lib/tauri";
 import { errorCode, errorMessage } from "../../lib/errors";
 import type {
@@ -34,7 +35,7 @@ import {
   interruptedAttachmentState,
   reconnectSequenceAfterError,
 } from "./attachmentRecovery";
-import { registerAttachmentControl } from "./componentActions";
+import { publishSessionView, registerAttachmentControl } from "./componentActions";
 import { initialAttachmentState, transitionAttachment, type ConnectionIntent } from "./attachmentState";
 import { ConnectionIntentQueue } from "./ConnectionIntentQueue";
 import { InputPump } from "./InputPump";
@@ -435,6 +436,11 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       }
 
       switch (event.event_type) {
+        case "view_changed": {
+          const session = stateRef.current.session;
+          if (session) publishSessionView({ session, attachment_id: event.attachment_id, view: event.view });
+          break;
+        }
         case "session_observed":
           setState((current) => {
             if (!current.session || observedAt(event) === null ||
@@ -610,6 +616,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           publishShellState(event.shell_state);
           break;
         case "server_error":
+          if (stateRef.current.session) publishSessionView({ session: stateRef.current.session, attachment_id: event.attachment_id, error: event.message });
           setState((current) => ({ ...current, message: event.message }));
           break;
         case "session_ended":
@@ -1170,6 +1177,14 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
   useEffect(() => registerAttachmentControl({
     attachmentId: () => activeAttachmentRef.current,
     session: () => stateRef.current.session,
+    layoutOwned: () => stateRef.current.phase === "attached" && layoutLeaseOwnedRef.current,
+    setViewZoom: async (terminal_id) => {
+      const attachment_id = activeAttachmentRef.current;
+      if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {
+        throw new Error("Take resize control to zoom panes.");
+      }
+      await setAttachmentViewZoom({ attachment_id, terminal_id });
+    },
     reconnect: async (expected_id) => {
       if (activeAttachmentRef.current !== expected_id) return null;
       abortManualReconnect();

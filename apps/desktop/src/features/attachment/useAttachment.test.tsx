@@ -9,12 +9,13 @@ import type {
   HistorySyncedEvent,
   OpenAttachmentRequest,
   SessionSummary,
+  SessionView,
 } from "../../lib/types";
 import { sessionKey } from "../targets/targets";
 import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
-import { reconnectComponentAttachments, resetComponentAttachments } from "./componentActions";
+import { reconnectComponentAttachments, resetComponentAttachments, setSessionViewZoom } from "./componentActions";
 import { NotificationProvider } from "../notifications/NotificationContext";
 import { NotificationStore } from "../notifications/NotificationStore";
 import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
@@ -71,6 +72,7 @@ const api = vi.hoisted(() => ({
   acquireAttachmentLease: vi.fn(),
   releaseAttachmentLease: vi.fn(),
   resizeAttachment: vi.fn(),
+  setAttachmentViewZoom: vi.fn(),
   sendInput: vi.fn(),
   sessionCache: vi.fn(),
   sshConnectionStatus: vi.fn(),
@@ -210,6 +212,26 @@ afterEach(async () => {
 });
 
 describe("background history presentation", () => {
+  it("dispatches shared zoom over the owned attachment and resolves on its view event", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { resize_with_window: true }); });
+    const attachment_id = result.current.state.attachment_id!;
+    await emit({ event_type: "lease_status", attachment_id, lease: "layout", status: { held: true, owned_by_client: true } });
+    api.setAttachmentViewZoom.mockResolvedValue(undefined);
+    const view: SessionView = {
+      session_id: first.session_id, session_name: first.name, view_id: first.view_id!, revision: "2",
+      canvas_size: size, zoomed_terminal_id: first.terminal_id!,
+      panes: [{ terminal_id: first.terminal_id!, left: 0, top: 0, columns: 80, rows: 24 }],
+      layout: { kind: "terminal", terminal_id: first.terminal_id! }, terminals: [],
+    };
+    const changing = setSessionViewZoom(first, first.terminal_id!, { ...view, revision: "1", zoomed_terminal_id: null });
+    expect(api.setAttachmentViewZoom).toHaveBeenCalledExactlyOnceWith({ attachment_id, terminal_id: first.terminal_id });
+    await emit({ event_type: "view_changed", attachment_id, view });
+    expect(await changing).toEqual(view);
+    expect(result.current.state.phase).toBe("attached");
+    expect(api.acknowledgeAttachmentEvent).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("marks an incomplete preview until matching history is ready (source gap=%s)", async (source_gap) => {
     let finish!: (applied: boolean) => void;
     vi.spyOn(renderer, "syncHistory").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));

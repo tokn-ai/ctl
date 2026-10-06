@@ -18,6 +18,7 @@ pub(super) struct View {
   pub revision: u64,
   pub layout: ViewLayout,
   pub canvas_size: ctmux_proto::TerminalSize,
+  pub zoomed_terminal_id: Option<String>,
   pub leases: ctmux_core::AttachmentLeaseRegistry,
 }
 
@@ -92,25 +93,24 @@ impl SessionRegistry {
     size: ctmux_proto::TerminalSize,
   ) -> Result<(), super::SessionControlError> {
     let root = &self.sessions[id];
-    let panes = root
-      .view
-      .layout
-      .pane_geometry(&size)
-      .map_err(super::SessionControlError::Pty)?;
+    let panes = if let Some(terminal_id) = &root.view.zoomed_terminal_id {
+      vec![ctmux_proto::PaneGeometry {
+        terminal_id: terminal_id.clone(),
+        left: 0,
+        top: 0,
+        columns: size.columns,
+        rows: size.rows,
+      }]
+    } else {
+      root
+        .view
+        .layout
+        .pane_geometry(&size)
+        .map_err(super::SessionControlError::Pty)?
+    };
     for pane in panes {
       if let Some(terminal) = self.terminals.get(&pane.terminal_id) {
-        terminal.resize_pty(ctmux_proto::TerminalSize {
-          columns: pane.columns,
-          rows: pane.rows,
-          pixel_width: u16::try_from(
-            (u32::from(size.pixel_width) * u32::from(pane.columns)) / u32::from(size.columns),
-          )
-          .expect("pane is bounded by canvas"),
-          pixel_height: u16::try_from(
-            (u32::from(size.pixel_height) * u32::from(pane.rows)) / u32::from(size.rows),
-          )
-          .expect("pane is bounded by canvas"),
-        })?;
+        terminal.resize_pty(pane_size(&size, &pane))?;
       }
     }
     let root = self.sessions.get_mut(id).expect("view exists");
@@ -118,7 +118,27 @@ impl SessionRegistry {
       root.view.canvas_size = size;
       root.view.revision += 1;
     }
+    self.publish_view(id);
     Ok(())
+  }
+
+  pub(super) fn publish_view(&self, id: &str) {
+    let Ok(view) = self.view_info(id) else {
+      return;
+    };
+    for terminal in &view.terminals {
+      if let Some(terminal) = self.terminals.get(&terminal.terminal_id) {
+        terminal.view_updates.send_if_modified(|current| {
+          if current.as_ref().is_some_and(|previous| {
+            previous.view_id == view.view_id && previous.revision == view.revision
+          }) {
+            return false;
+          }
+          *current = Some(view.clone());
+          true
+        });
+      }
+    }
   }
 
   pub(super) fn reflow_view(&mut self, id: &str) -> Result<(), super::SessionControlError> {
@@ -176,7 +196,7 @@ impl SessionRegistry {
       })
   }
 
-  fn view_info(&self, selector: &str) -> Result<ViewInfo, SessionManagerError> {
+  pub(super) fn view_info(&self, selector: &str) -> Result<ViewInfo, SessionManagerError> {
     let session = self.root(selector)?;
     let terminals = session
       .view
@@ -201,6 +221,7 @@ impl SessionRegistry {
       view_id: session.view.id.clone(),
       revision: session.view.revision,
       canvas_size: session.view.canvas_size.clone(),
+      zoomed_terminal_id: session.view.zoomed_terminal_id.clone(),
       panes: session
         .view
         .layout
@@ -225,6 +246,7 @@ impl SessionRegistry {
             .release_attachment(&record.attachment_id);
         }
         session.view.layout = layout;
+        session.view.zoomed_terminal_id = None;
         session.view.revision += 1;
       } else {
         self.sessions.remove(&owner_id);
@@ -274,6 +296,7 @@ impl SessionManager {
     let id = root.id.clone();
     let root = registry.sessions.get_mut(&id).expect("validated root");
     root.view.layout = layout;
+    root.view.zoomed_terminal_id = None;
     root.view.revision += 1;
     registry
       .reflow_view(&id)
@@ -335,6 +358,7 @@ impl SessionManager {
           id: owner.view_id,
           revision: 0,
           canvas_size: terminal.info().terminal_size,
+          zoomed_terminal_id: None,
           leases: ctmux_core::AttachmentLeaseRegistry::default(),
           layout: ViewLayout::Terminal {
             terminal_id: terminal_id.into(),
@@ -344,6 +368,7 @@ impl SessionManager {
     );
     registry.pending_names.remove(&reservation.name);
     reservation.active = false;
+    registry.publish_view(&owner.session_id);
     registry.view_info(&owner.session_id)
   }
 
@@ -409,6 +434,7 @@ impl SessionManager {
     };
     let moved_ids = source.view.layout.terminal_ids();
     destination.view.layout = merged_layout;
+    destination.view.zoomed_terminal_id = None;
     destination.view.revision += 1;
     for id in moved_ids {
       *lock(&registry.terminals[&id].owner) = owner.clone();
@@ -464,5 +490,23 @@ pub(super) fn validate_layout(
       }
       Ok(())
     }
+  }
+}
+
+pub(super) fn pane_size(
+  canvas: &ctmux_proto::TerminalSize,
+  pane: &ctmux_proto::PaneGeometry,
+) -> ctmux_proto::TerminalSize {
+  ctmux_proto::TerminalSize {
+    columns: pane.columns,
+    rows: pane.rows,
+    pixel_width: u16::try_from(
+      (u32::from(canvas.pixel_width) * u32::from(pane.columns)) / u32::from(canvas.columns),
+    )
+    .expect("pane is bounded by canvas"),
+    pixel_height: u16::try_from(
+      (u32::from(canvas.pixel_height) * u32::from(pane.rows)) / u32::from(canvas.rows),
+    )
+    .expect("pane is bounded by canvas"),
   }
 }

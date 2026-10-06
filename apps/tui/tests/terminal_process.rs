@@ -5,6 +5,8 @@ mod cleanup;
 mod support;
 #[path = "cases/workflows.rs"]
 mod workflows;
+#[path = "cases/zoom.rs"]
+mod zoom;
 
 use ctmux_proto::{ClientMessage, ServerMessage, SessionStatus, TerminalSize};
 use portable_pty::CommandBuilder;

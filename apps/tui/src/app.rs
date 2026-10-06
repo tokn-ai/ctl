@@ -277,7 +277,10 @@ impl App<'_> {
             .await
           {
             Ok(ServerMessage::ViewSnapshot { view })
-              if view.panes.iter().any(|pane| pane.terminal_id == selector) =>
+              if view
+                .terminals
+                .iter()
+                .any(|pane| pane.terminal_id == selector) =>
             {
               return Ok(view);
             }
@@ -310,10 +313,10 @@ impl App<'_> {
     self.selected_id.clone_from(&view.session_id);
     self.detach().await;
     self.focused = view
-      .panes
+      .terminals
       .iter()
       .find(|pane| pane.terminal_id == session)
-      .or_else(|| view.panes.first())
+      .or_else(|| view.terminals.first())
       .map_or_else(String::new, |pane| pane.terminal_id.clone());
     self.view = Some(view);
     self.overlay = Overlay::None;
@@ -372,7 +375,7 @@ impl App<'_> {
       return Ok(());
     };
     let ids: Vec<_> = view
-      .panes
+      .terminals
       .iter()
       .map(|pane| pane.terminal_id.clone())
       .collect();
@@ -403,6 +406,9 @@ impl App<'_> {
     }
     if !ids.contains(&self.focused) {
       self.focused = ids.first().cloned().unwrap_or_default();
+    }
+    if let Some(zoomed) = &view.zoomed_terminal_id {
+      self.focused.clone_from(zoomed);
     }
     for id in &ids {
       if self
@@ -490,6 +496,8 @@ impl App<'_> {
 
   async fn drain(&mut self) {
     let mut notices = Vec::new();
+    let mut view_update: Option<ViewInfo> = None;
+    let current = self.view.as_ref();
     for pane in self.panes.values_mut() {
       // A closed transport may still have a final SessionEnded event queued.
       match pane.drain().await {
@@ -500,6 +508,23 @@ impl App<'_> {
           notices.push(format!("Disconnected: {error}; retrying"));
         }
       }
+      if let Some(view) = pane.view_update.take()
+        && current.is_some_and(|current| {
+          current.session_id == view.session_id
+            && current.view_id == view.view_id
+            && view.revision >= current.revision
+        })
+        && view_update
+          .as_ref()
+          .is_none_or(|pending| view.revision >= pending.revision)
+      {
+        view_update = Some(view);
+      }
+    }
+    if let Some(view) = view_update
+      && let Err(error) = self.adopt_view(view).await
+    {
+      notices.push(error.to_string());
     }
     let owner = self
       .panes
@@ -515,6 +540,39 @@ impl App<'_> {
     for message in notices {
       self.notice(message);
     }
+  }
+
+  async fn adopt_view(&mut self, view: ViewInfo) -> Result<()> {
+    let Some(current) = &self.view else {
+      return Ok(());
+    };
+    if current.session_id != view.session_id
+      || current.view_id != view.view_id
+      || view.revision < current.revision
+    {
+      return Ok(());
+    }
+    if current.zoomed_terminal_id != view.zoomed_terminal_id {
+      self.release_mouse().await?;
+    }
+    let missing = self.panes.keys().any(|id| {
+      !view
+        .terminals
+        .iter()
+        .any(|terminal| terminal.terminal_id == *id)
+    });
+    if missing {
+      // Topology metadata can arrive before a sibling's final output/Ended
+      // event. Both broadcasts and command acknowledgements must preserve its
+      // controller, copy state, and final screen until dismissal archives it.
+      if let Some(current) = &mut self.view {
+        current.revision = view.revision;
+        current.zoomed_terminal_id = view.zoomed_terminal_id;
+      }
+    } else {
+      self.view = Some(view);
+    }
+    self.reconcile().await
   }
 
   async fn refresh(&mut self) -> Result<()> {
@@ -607,10 +665,12 @@ impl App<'_> {
 
   fn copy_size(&self, target: &CopyTarget) -> (usize, usize) {
     if let CopyTarget::Pane(id) = target
-      && let Some(rect) = self
-        .view
-        .as_ref()
-        .and_then(|view| view.panes.iter().find(|rect| &rect.terminal_id == id))
+      && let Some(rect) = self.view.as_ref().and_then(|view| {
+        view
+          .visible_panes()
+          .into_iter()
+          .find(|rect| &rect.terminal_id == id)
+      })
     {
       return (usize::from(rect.columns), usize::from(rect.rows));
     }
@@ -1028,7 +1088,19 @@ impl App<'_> {
       }
       Action::Detach => return Ok(true),
       Action::Refresh => self.renderer.invalidate(),
-      Action::NextPane => self.next_pane(),
+      Action::NextPane => {
+        self.unzoom().await?;
+        self.next_pane();
+      }
+      Action::ToggleZoom => {
+        let target = self.view.as_ref().and_then(|view| {
+          view
+            .zoomed_terminal_id
+            .is_none()
+            .then(|| self.focused.clone())
+        });
+        self.set_zoom(target).await?;
+      }
       Action::Help => self.overlay = Overlay::Help,
       Action::Sessions => self.overlay = Overlay::Sessions(self.session_index()),
       Action::NextSession => self.next_session(1).await?,
@@ -1037,7 +1109,10 @@ impl App<'_> {
       Action::Split(axis) if !self.read_only => self.split(axis).await?,
       Action::KillPane if !self.read_only => self.overlay = Overlay::Kill(self.focused.clone()),
       Action::ToggleLease(lease) if !self.read_only => self.toggle_lease(lease).await?,
-      Action::Focus(direction) => self.focus(direction),
+      Action::Focus(direction) => {
+        self.unzoom().await?;
+        self.focus(direction);
+      }
       Action::Cancel => {}
       Action::Paste
       | Action::CreateSession
@@ -1048,6 +1123,61 @@ impl App<'_> {
       }
     }
     Ok(false)
+  }
+
+  async fn set_zoom(&mut self, target: Option<String>) -> Result<()> {
+    self.release_mouse().await?;
+    let owner = self
+      .panes
+      .iter()
+      .find(|(_, pane)| pane.connected && pane.control.state().leases().layout.owned_by_client)
+      .map(|(id, _)| id.clone())
+      .ok_or("Resize lease required to change pane zoom")?;
+    let current = self.view.as_ref().ok_or("No session to zoom")?;
+    let session_id = current.session_id.clone();
+    let view_id = current.view_id.clone();
+    let revision = current.revision;
+    let changes_zoom = current.zoomed_terminal_id != target;
+    self.panes[&owner]
+      .control
+      .set_view_zoom(target.clone())
+      .await?;
+    // Commands enter an ordered local queue. Only the daemon's snapshot confirms
+    // the mutation, so do not change focus or geometry optimistically.
+    let view = timeout(Duration::from_secs(5), async {
+      loop {
+        let pane = self.panes.get_mut(&owner).ok_or("Zoom attachment closed")?;
+        if let Some(error) = pane.drain().await? {
+          return Err::<ViewInfo, crate::Error>(error.into());
+        }
+        if let Some(view) = pane.view_update.take()
+          && view.session_id == session_id
+          && view.view_id == view_id
+          && view.revision >= revision
+          && (!changes_zoom || view.revision > revision)
+          && view.zoomed_terminal_id == target
+        {
+          return Ok(view);
+        }
+        if !pane.connected {
+          return Err("Disconnected while changing pane zoom".into());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+      }
+    })
+    .await??;
+    self.adopt_view(view).await
+  }
+
+  async fn unzoom(&mut self) -> Result<()> {
+    if self
+      .view
+      .as_ref()
+      .is_some_and(|view| view.zoomed_terminal_id.is_some())
+    {
+      self.set_zoom(None).await?;
+    }
+    Ok(())
   }
 
   async fn toggle_lease(&mut self, lease: LeaseKind) -> Result<()> {
@@ -1230,7 +1360,7 @@ impl App<'_> {
       );
       frame.copy_mode(mode);
     } else if let Some(view) = &self.view {
-      for rect in &view.panes {
+      for rect in view.visible_panes() {
         if let Some(mode) = self.copies.get_mut(&rect.terminal_id) {
           mode.fit(usize::from(rect.columns), usize::from(rect.rows));
         }
@@ -1347,10 +1477,19 @@ impl App<'_> {
 
   fn connection_history_status(&self) -> String {
     let connection = self.connection_status();
-    self.panes.get(&self.focused).map_or_else(
+    let status = self.panes.get(&self.focused).map_or_else(
       || connection.to_owned(),
       |pane| format!("{connection} | {}", pane.history_status()),
-    )
+    );
+    if self
+      .view
+      .as_ref()
+      .is_some_and(|view| view.zoomed_terminal_id.is_some())
+    {
+      format!("{status} | ZOOM")
+    } else {
+      status
+    }
   }
 
   fn overlay_lines(&self) -> Vec<String> {
@@ -1424,7 +1563,7 @@ impl App<'_> {
       Overlay::Help => vec![
         format!("Commands after {} — any key closes help", self.prefix.label),
         "%: split right    \": split below".into(),
-        "Arrows: focus pane    o: next pane    x: terminate (confirm)".into(),
+        "Arrows: focus pane    o: next pane    z: zoom    x: terminate (confirm)".into(),
         "Focus arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),

@@ -870,7 +870,9 @@ async fn handle_request(
     ClientMessage::KillSession { session } => {
       handle_kill_session_request(&mut stream, &sessions, &session).await?;
     }
-    request => return handle_view_request(stream, sessions, restart, request).await,
+    request => {
+      return handle_view_request(stream, sessions, restart, request, protocol_version).await;
+    }
   }
 
   Ok(())
@@ -881,10 +883,11 @@ async fn handle_view_request(
   sessions: SessionManager,
   restart: Arc<RestartCoordinator>,
   request: ClientMessage,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<(), ConnectionError> {
   match request {
     ClientMessage::GetView { session } => {
-      write_view_result(&mut stream, sessions.view(&session)).await?;
+      write_view_result(&mut stream, sessions.view(&session), protocol_version).await?;
     }
     ClientMessage::UpdateView {
       session,
@@ -895,12 +898,12 @@ async fn handle_view_request(
         sessions.update_view(&session, expected_revision, layout)
       })
       .await?;
-      write_view_result(&mut stream, result).await?;
+      write_view_result(&mut stream, result, protocol_version).await?;
     }
     ClientMessage::PromoteTerminal { terminal_id, name } => {
       let result =
         tokio::task::spawn_blocking(move || sessions.promote_terminal(&terminal_id, name)).await?;
-      write_view_result(&mut stream, result).await?;
+      write_view_result(&mut stream, result, protocol_version).await?;
     }
     ClientMessage::MergeSessions {
       source,
@@ -908,7 +911,7 @@ async fn handle_view_request(
     } => {
       let result =
         tokio::task::spawn_blocking(move || sessions.merge_sessions(&source, &destination)).await?;
-      write_view_result(&mut stream, result).await?;
+      write_view_result(&mut stream, result, protocol_version).await?;
     }
     ClientMessage::SplitTerminal {
       terminal_id,
@@ -936,7 +939,7 @@ async fn handle_view_request(
           })
       })
       .await?;
-      write_view_result(&mut stream, result).await?;
+      write_view_result(&mut stream, result, protocol_version).await?;
     }
     ClientMessage::KillTerminal { terminal_id } => match sessions.resolve(&terminal_id) {
       Ok(terminal) if terminal.info().terminal_id == terminal_id => match terminal.kill() {
@@ -968,9 +971,15 @@ async fn handle_view_request(
 async fn write_view_result(
   stream: &mut Stream,
   result: Result<ctmux_proto::ViewInfo, SessionManagerError>,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<(), CodecError> {
   match result {
-    Ok(view) => write_frame(stream, &ServerMessage::ViewSnapshot { view }).await,
+    Ok(mut view) => {
+      if protocol_version != ctmux_proto::CONTRACT_V1_1_15 {
+        view.zoomed_terminal_id = None;
+      }
+      write_frame(stream, &ServerMessage::ViewSnapshot { view }).await
+    }
     Err(error) => send_session_manager_error(stream, &error).await,
   }
 }
@@ -1200,6 +1209,7 @@ struct PreparedAttachment {
   resumed: bool,
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
+  view_updates: watch::Receiver<Option<ctmux_proto::ViewInfo>>,
 }
 
 impl PreparedAttachment {
@@ -1268,6 +1278,10 @@ fn prepared_attachment(
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
 ) -> PreparedAttachment {
+  let mut view_updates = session.subscribe_view();
+  // Deliver the current view even when this attachment does not resize it.
+  // Subscription precedes initial PTY work, so later mutations cannot be lost.
+  view_updates.mark_changed();
   PreparedAttachment {
     session,
     attachment_id: registration.attachment_id,
@@ -1278,6 +1292,7 @@ fn prepared_attachment(
     resumed,
     events,
     shell_state_updates,
+    view_updates,
   }
 }
 
@@ -1291,12 +1306,12 @@ async fn handle_attach(
     session,
     attachment_id,
     attachment_token,
-    attachment_generation: _,
     attachment_leases,
     superseded,
-    resumed: _,
     events,
     shell_state_updates,
+    view_updates,
+    ..
   } = attachment;
   let initial_delivery_deadline = initial_attachment_delivery_deadline();
 
@@ -1359,6 +1374,7 @@ async fn handle_attach(
     writer,
     events,
     shell_state_updates,
+    view_updates,
     sent_sequence,
     checkpoint_geometry_revision,
     shell_state_revision: initial_shell_state.revision,
@@ -1439,6 +1455,7 @@ struct LiveAttachment {
   writer: OwnedWriteHalf,
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
+  view_updates: watch::Receiver<Option<ctmux_proto::ViewInfo>>,
   sent_sequence: u64,
   /// Internal ordering for geometry changes represented by the last checkpoint.
   checkpoint_geometry_revision: Option<u64>,
@@ -1637,6 +1654,19 @@ async fn drive_attachment(
     {
       return Ok(AttachmentExit::Disconnected);
     }
+    // Like terminal events, shared view metadata gets one bounded turn even
+    // while presentation acknowledgements or history requests stay ready.
+    if driver.attachment.protocol_version == ctmux_proto::CONTRACT_V1_1_15
+      && driver.pending_session_end.is_none()
+      && driver
+        .attachment
+        .view_updates
+        .has_changed()
+        .unwrap_or(false)
+      && !driver.send_view_update().await?
+    {
+      return Ok(AttachmentExit::Disconnected);
+    }
     if driver.send_session_end_if_drained().await? {
       return Ok(AttachmentExit::Disconnected);
     }
@@ -1688,6 +1718,11 @@ async fn drive_attachment(
           return Ok(AttachmentExit::Disconnected);
         }
       }
+      changed = driver.attachment.view_updates.changed(), if driver.attachment.protocol_version == ctmux_proto::CONTRACT_V1_1_15 && driver.pending_session_end.is_none() => {
+        if changed.is_err() || !driver.send_view_update().await? {
+          return Ok(AttachmentExit::Disconnected);
+        }
+      }
     }
   }
 }
@@ -1708,6 +1743,20 @@ struct PendingSessionEnd {
 }
 
 impl AttachmentDriver {
+  async fn send_view_update(&mut self) -> Result<bool, ConnectionError> {
+    let view = self.attachment.view_updates.borrow_and_update().clone();
+    let Some(view) = view else {
+      return Ok(true);
+    };
+    write_before_deadline(
+      &mut self.attachment.writer,
+      &ServerMessage::ViewSnapshot { view },
+      self.deadline,
+    )
+    .await
+    .map(|written| written.is_some())
+  }
+
   async fn process_client_message(
     &mut self,
     message: ClientMessage,
@@ -1789,6 +1838,7 @@ impl AttachmentDriver {
         &self.attachment_id,
         self.attachment.request_command_line,
         self.attachment.request_running_command,
+        self.attachment.protocol_version,
         message,
       ),
     )
@@ -2221,6 +2271,7 @@ async fn process_attach_input<W>(
   attachment_id: &str,
   request_command_line: bool,
   request_running_command: bool,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
   message: ClientMessage,
 ) -> Result<bool, ConnectionError>
 where
@@ -2241,6 +2292,25 @@ where
         tokio::task::spawn_blocking(move || session.resize(&attachment_id, terminal_size)).await?;
       if let Err(error) = result {
         send_control_error(writer, &error).await?;
+      }
+    }
+    ClientMessage::SetViewZoom { terminal_id } => {
+      if protocol_version == ctmux_proto::CONTRACT_V1_1_15 {
+        let attachment_id = attachment_id.to_owned();
+        let result =
+          tokio::task::spawn_blocking(move || session.set_view_zoom(&attachment_id, terminal_id))
+            .await?;
+        match result {
+          Ok(view) => write_frame(writer, &ServerMessage::ViewSnapshot { view }).await?,
+          Err(error) => send_control_error(writer, &error).await?,
+        }
+      } else {
+        send_error(
+          writer,
+          ErrorCode::InvalidRequest,
+          "view zoom requires contract 1.1.15",
+        )
+        .await?;
       }
     }
     ClientMessage::AcquireLease { lease } => {
@@ -2277,7 +2347,7 @@ where
       send_error(
         writer,
         ErrorCode::InvalidRequest,
-        "only input, resize, lease control, and detach are valid while attached",
+        "only input, resize, zoom, lease control, and detach are valid while attached",
       )
       .await?;
     }
@@ -2290,6 +2360,7 @@ fn renews_attachment_liveness(message: &ClientMessage) -> bool {
     message,
     ClientMessage::Input { .. }
       | ClientMessage::Resize { .. }
+      | ClientMessage::SetViewZoom { .. }
       | ClientMessage::AcquireLease { .. }
       | ClientMessage::ReleaseLease { .. }
       | ClientMessage::Heartbeat { .. }
@@ -2404,6 +2475,7 @@ where
   W: tokio::io::AsyncWrite + Unpin,
 {
   let code = match error {
+    SessionControlError::InvalidView(_) => ErrorCode::InvalidRequest,
     SessionControlError::InputLeaseRequired => ErrorCode::InputLeaseRequired,
     SessionControlError::LayoutLeaseRequired => ErrorCode::LayoutLeaseRequired,
     SessionControlError::Io(_) | SessionControlError::Pty(_) => ErrorCode::Internal,

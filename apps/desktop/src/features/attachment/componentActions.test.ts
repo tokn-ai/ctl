@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ComponentSessionsReset, SessionSummary } from "../../lib/types";
-import { componentResetMatches, reconnectComponentAttachments, registerAttachmentControl, resetComponentAttachments } from "./componentActions";
+import type { ComponentSessionsReset, SessionSummary, SessionView } from "../../lib/types";
+import { componentResetMatches, publishSessionView, reconnectComponentAttachments, registerAttachmentControl, resetComponentAttachments, setSessionViewZoom } from "./componentActions";
 
 const stops: (() => void)[] = [];
 afterEach(() => { for (const stop of stops.splice(0)) stop(); });
@@ -9,12 +9,52 @@ const session = (host_id?: string, remote_id?: string): SessionSummary => ({
   session_id: "shared-session-id", name: "shell", status: "running", terminal_size: { rows: 24, columns: 80, pixel_width: null, pixel_height: null }, next_sequence: "0",
 });
 function register(id: string, current: SessionSummary) {
-  const control = { attachmentId: () => id, session: () => current, reconnect: vi.fn(async (): Promise<string | null> => `${id}-replacement`), reset: vi.fn() };
+  const control = { attachmentId: () => id, session: () => current, reconnect: vi.fn(async (): Promise<string | null> => `${id}-replacement`), reset: vi.fn(), layoutOwned: vi.fn(() => false), setViewZoom: vi.fn(async (_terminal_id: string | null) => {}) };
   stops.push(registerAttachmentControl(control));
   return control;
 }
+const baseline = { view_id: "view", revision: "1", zoomed_terminal_id: null };
 
 describe("component attachment actions", () => {
+  it("sends zoom through the session resize owner and waits for its matching acknowledgement", async () => {
+    const root = register("root", session());
+    const focused = register("focused", { ...session(), terminal_id: "secondary" });
+    const unrelated = register("unrelated", session("other"));
+    root.layoutOwned.mockReturnValue(true);
+    unrelated.layoutOwned.mockReturnValue(true);
+    const view: SessionView = {
+      session_id: session().session_id, session_name: "shell", view_id: "view", revision: "2",
+      canvas_size: session().terminal_size, zoomed_terminal_id: "secondary",
+      layout: { kind: "terminal", terminal_id: "secondary" }, panes: [], terminals: [],
+    };
+    let confirmed = false;
+    const changing = setSessionViewZoom(session(), "secondary", baseline).then((result) => { confirmed = true; return result; });
+    expect(root.setViewZoom).toHaveBeenCalledExactlyOnceWith("secondary");
+    expect(focused.setViewZoom).not.toHaveBeenCalled();
+    expect(unrelated.setViewZoom).not.toHaveBeenCalled();
+    publishSessionView({ session: session(), attachment_id: "focused", view });
+    publishSessionView({ session: session(), attachment_id: "root", view: { ...view, zoomed_terminal_id: null } });
+    // A delayed matching state from this owner's queue cannot confirm a new command.
+    publishSessionView({ session: session(), attachment_id: "root", view: { ...view, revision: "0" } });
+    publishSessionView({ session: session(), attachment_id: "root", view: { ...view, revision: "1" } });
+    await Promise.resolve();
+    expect(confirmed).toBe(false);
+    publishSessionView({ session: session(), attachment_id: "root", view });
+    expect(await changing).toEqual(view);
+  });
+
+  it("reports missing resize ownership, unsupported servers, and server rejection", async () => {
+    const root = register("root", session());
+    await expect(setSessionViewZoom(session(), "secondary", baseline)).rejects.toThrow("Take resize control");
+    expect(root.setViewZoom).not.toHaveBeenCalled();
+    root.layoutOwned.mockReturnValue(true);
+    root.setViewZoom.mockRejectedValueOnce(new Error("This server does not support pane zoom."));
+    await expect(setSessionViewZoom(session(), "secondary", baseline)).rejects.toThrow("does not support");
+    const changing = setSessionViewZoom(session(), "secondary", baseline);
+    publishSessionView({ session: session(), attachment_id: "root", error: "Another client controls the layout." });
+    await expect(changing).rejects.toThrow("Another client controls");
+  });
+
   it("reconnects exact root, background, and split-pane IDs once without touching other transports", async () => {
     const root = register("root", session("one"));
     const background = register("background", session("one"));

@@ -118,7 +118,7 @@ impl Frame {
     );
     // Only cells not covered by a pane become dividers; no border reduces PTY space.
     let mut covered = vec![false; usize::from(self.columns) * usize::from(height)];
-    for rect in &view.panes {
+    for rect in &view.visible_panes() {
       let pane = panes.get(&rect.terminal_id);
       let copy = copies.get(&rect.terminal_id);
       let lines: Vec<_> = pane.map_or_else(Vec::new, |pane| pane.model.vt.view().collect());
@@ -388,6 +388,9 @@ pub fn pane_at<'a>(
   );
   let x = position.0.checked_add(offset.0)?;
   let y = position.1.checked_add(offset.1)?;
+  if let Some(zoomed) = view.zoomed_terminal_id.as_deref() {
+    return (x < view.canvas_size.columns && y < view.canvas_size.rows).then_some(zoomed);
+  }
   view
     .panes
     .iter()
@@ -407,7 +410,10 @@ pub fn pane_position(
   target: &str,
   position: (u16, u16),
 ) -> Option<(u16, u16)> {
-  let rect = view.panes.iter().find(|rect| rect.terminal_id == target)?;
+  let rect = view
+    .visible_panes()
+    .into_iter()
+    .find(|rect| rect.terminal_id == target)?;
   let offset = viewport_offset(
     view,
     panes.get(focused),
@@ -438,7 +444,11 @@ fn viewport_offset(
   width: u16,
   height: u16,
 ) -> (u16, u16) {
-  let Some(rect) = view.panes.iter().find(|rect| rect.terminal_id == focused) else {
+  let Some(rect) = view
+    .visible_panes()
+    .into_iter()
+    .find(|rect| rect.terminal_id == focused)
+  else {
     return (0, 0);
   };
   let cursor = pane.map(|pane| pane.model.vt.cursor());
@@ -598,6 +608,7 @@ mod tests {
       session_name: "test".into(),
       view_id: "v".into(),
       revision: 0,
+      zoomed_terminal_id: None,
       panes: layout.pane_geometry(&canvas_size).unwrap(),
       layout,
       canvas_size,
@@ -683,6 +694,7 @@ mod tests {
       session_name: "test".into(),
       view_id: "v".into(),
       revision: 0,
+      zoomed_terminal_id: None,
       panes: layout.pane_geometry(&canvas_size).unwrap(),
       layout,
       canvas_size,
@@ -750,6 +762,56 @@ mod tests {
     assert_eq!(&host.text()[..3], content);
     assert_eq!(host.cursor(), cursor);
     assert!(host.text()[3].starts_with(" reconnecting"));
+  }
+
+  #[test]
+  fn zoom_hit_testing_excludes_hidden_panes_and_the_status_row() {
+    use ctmux_proto::{SplitAxis, TerminalSize, ViewLayout};
+    let layout = ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
+      children: vec![
+        ViewLayout::Terminal {
+          terminal_id: "a".into(),
+        },
+        ViewLayout::Terminal {
+          terminal_id: "b".into(),
+        },
+      ],
+    };
+    let canvas_size = TerminalSize {
+      columns: 20,
+      rows: 4,
+      ..TerminalSize::default()
+    };
+    let view = ViewInfo {
+      session_id: "s".into(),
+      session_name: "test".into(),
+      view_id: "v".into(),
+      revision: 1,
+      zoomed_terminal_id: Some("b".into()),
+      panes: layout.pane_geometry(&canvas_size).unwrap(),
+      layout,
+      canvas_size,
+      terminals: Vec::new(),
+    };
+    let panes = BTreeMap::new();
+    let copies = BTreeMap::new();
+    // The old divider and the hidden pane's old area now belong to b.
+    for position in [(0, 0), (10, 0), (19, 3)] {
+      assert_eq!(
+        pane_at(&view, &panes, &copies, "b", (20, 5), position),
+        Some("b")
+      );
+    }
+    assert_eq!(pane_at(&view, &panes, &copies, "b", (20, 5), (0, 4)), None);
+    assert_eq!(
+      pane_position(&view, &panes, &copies, "b", (20, 5), "a", (0, 0)),
+      None
+    );
+    assert_eq!(
+      pane_position(&view, &panes, &copies, "b", (20, 5), "b", (19, 3)),
+      Some((19, 3))
+    );
   }
 
   #[test]

@@ -13,6 +13,10 @@ mod reconnect;
 fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
   let error = match &arguments.command {
     #[cfg(unix)]
+    Command::Components {
+      command: crate::components::Command::Update { .. },
+    } => return Ok(()),
+    #[cfg(unix)]
     Command::Components { .. } => CliError::ComponentsTarget,
     Command::Setup(_) => CliError::SetupTarget,
     Command::Skill(_) => CliError::SkillTarget,
@@ -53,9 +57,14 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
   match arguments.command {
     #[cfg(unix)]
     Command::Components { command } => {
-      crate::components::run(command)
-        .await
-        .map_err(CliError::Components)?;
+      crate::components::run(
+        command,
+        arguments.host.as_deref(),
+        arguments.method.as_deref(),
+        arguments.remote_platform,
+      )
+      .await
+      .map_err(CliError::Components)?;
       return Ok(0);
     }
     Command::Setup(setup_arguments) => {
@@ -430,6 +439,66 @@ pub enum CliError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[test]
+  fn component_updates_accept_batch_targets_and_only_supported_package_choices() {
+    use clap::Parser;
+    let arguments = Arguments::try_parse_from([
+      "ctl",
+      "--host",
+      "work",
+      "--method",
+      "vpn",
+      "components",
+      "update",
+      "--hosts",
+      "jump-a,jump-b",
+      "--local",
+      "--package",
+      "ctl-agent",
+      "--from",
+      "build",
+      "--local-build",
+      "--ctld-package",
+      "package",
+      "--json",
+    ])
+    .unwrap();
+    assert!(validate_local_command_target(&arguments).is_ok());
+    let Command::Components {
+      command:
+        crate::components::Command::Update {
+          hosts,
+          local,
+          package,
+          from,
+          local_build,
+          ctld_package,
+          json,
+        },
+    } = arguments.command
+    else {
+      panic!("expected a component update")
+    };
+    assert_eq!(hosts, ["jump-a", "jump-b"]);
+    assert!(local && local_build && json);
+    assert!(matches!(
+      package,
+      crate::components::UpdatePackage::CtlAgent
+    ));
+    assert_eq!(from, Some(PathBuf::from("build")));
+    assert_eq!(ctld_package, Some(PathBuf::from("package")));
+    for flags in [
+      vec!["--package", "ctmuxd"],
+      vec!["--local-build"],
+      vec!["--from", "build", "--ctld-package", "package"],
+    ] {
+      assert!(
+        Arguments::try_parse_from([vec!["ctl", "components", "update"], flags].concat()).is_err()
+      );
+    }
+  }
 
   #[cfg(unix)]
   #[tokio::test]

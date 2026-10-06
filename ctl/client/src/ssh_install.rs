@@ -12,6 +12,8 @@ use crate::{
 };
 
 const UNIX_INSTALL_COMMAND: &str = include_str!("ssh_install.sh");
+#[cfg(unix)]
+const AGENT_INSTALL_COMMAND: &str = include_str!("ssh_agent_install.sh");
 const MAX_PROGRESS_LINE_BYTES: u64 = 256;
 const INITIAL_PROGRESS_MARKER: &[u8] = b"ctl-install-progress-v1 receiving 0\n";
 
@@ -28,6 +30,88 @@ pub enum RemoteInstallEvent {
   Checking { file_name: &'static str },
   Activating,
   Complete,
+}
+
+/// Installs only a verified agent, retaining the active companion paths.
+///
+/// # Errors
+/// Rejects invalid bytes, unsafe paths, SSH failures or invalid progress.
+#[cfg(unix)]
+pub async fn install_ssh_agent_only_with_progress(
+  destination: &str,
+  options: &SshConnectionOptions,
+  interaction: &SshInteraction,
+  archive: &[u8],
+  on_progress: impl Fn(RemoteInstallEvent) + Send + Sync,
+) -> Result<(), CoreError> {
+  validate_ssh_target(destination, options)?;
+  if options.remote_platform != RemotePlatform::Unix {
+    return Err(CoreError::InvalidSshOption("remote_platform".into()));
+  }
+  let script = agent_script(archive, None)?;
+  let mut command = Command::new(SSH_PROGRAM);
+  let extra = configure_ssh_interaction(&mut command, interaction);
+  command
+    .args(extra)
+    .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
+    .arg(script);
+  run_package_install(command, archive, true, on_progress).await
+}
+
+#[cfg(unix)]
+pub(crate) async fn install_local_agent(
+  home: &std::path::Path,
+  companions: Option<&std::path::Path>,
+  archive: &[u8],
+) -> Result<(), CoreError> {
+  let script = agent_script(archive, companions)?;
+  let mut command = Command::new("sh");
+  command.args(["-c", &script]).env("HOME", home);
+  run_package_install(command, archive, true, |_| {}).await
+}
+
+#[cfg(unix)]
+pub(crate) async fn install_local_bundle(
+  home: &std::path::Path,
+  bundle: &ctl_core::bundles::Bundle,
+) -> Result<(), CoreError> {
+  let bundle = bundle.clone();
+  let upload = tokio::task::spawn_blocking(move || crate::components::package_bundle(&bundle))
+    .await
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+  let script = installation_script(&upload.bundle_id, &upload.archive)?;
+  let mut command = Command::new("sh");
+  command.args(["-c", &script]).env("HOME", home);
+  run_install_command(command, &upload.archive, |_| {}).await
+}
+
+#[cfg(unix)]
+fn agent_script(archive: &[u8], companions: Option<&std::path::Path>) -> Result<String, CoreError> {
+  use sha2::{Digest as _, Sha256};
+  let source = crate::component_update::inspect_agent_archive(archive)
+    .map_err(|error| CoreError::InvalidComponentBundle(error.to_string()))?;
+  let companions = companions.map_or_else(
+    || Ok(String::new()),
+    |path| {
+      path
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(CoreError::InvalidSshOption("companion_directory".into()))
+    },
+  )?;
+  let quoted = format!("'{}'", companions.replace('\'', "'\\''"));
+  Ok(
+    AGENT_INSTALL_COMMAND
+      .replace("__BUNDLE_TARGET__", &source.source_bundle.target_triple)
+      .replace("__STORE_ID__", &source.source_bundle.bundle_id)
+      .replace("__ARCHIVE_BYTES__", &archive.len().to_string())
+      .replace(
+        "__ARCHIVE_SHA256__",
+        &format!("{:x}", Sha256::digest(archive)),
+      )
+      .replace("__COMPANION_DIRECTORY__", &quoted),
+  )
 }
 
 /// Installs a trusted bundle into the fixed per-user Unix location.
@@ -134,8 +218,17 @@ fn installation_script(bundle_id: &str, archive: &[u8]) -> Result<String, CoreEr
 }
 
 async fn run_install_command(
+  command: Command,
+  archive: &[u8],
+  on_progress: impl Fn(RemoteInstallEvent),
+) -> Result<(), CoreError> {
+  run_package_install(command, archive, false, on_progress).await
+}
+
+async fn run_package_install(
   mut command: Command,
   archive: &[u8],
+  agent_only: bool,
   on_progress: impl Fn(RemoteInstallEvent),
 ) -> Result<(), CoreError> {
   command
@@ -154,7 +247,7 @@ async fn run_install_command(
   };
   let (write, progress, stderr, status) = tokio::join!(
     write,
-    read_progress(stdout, archive.len() as u64, &on_progress),
+    read_package_progress(stdout, archive.len() as u64, agent_only, &on_progress),
     read_bounded_output(&mut stderr),
     child.wait(),
   );
@@ -178,9 +271,19 @@ async fn run_install_command(
   Ok(())
 }
 
+#[cfg(test)]
 async fn read_progress(
   stdout: impl AsyncRead + Unpin,
   total_bytes: u64,
+  on_progress: &impl Fn(RemoteInstallEvent),
+) -> io::Result<()> {
+  read_package_progress(stdout, total_bytes, false, on_progress).await
+}
+
+async fn read_package_progress(
+  stdout: impl AsyncRead + Unpin,
+  total_bytes: u64,
+  agent_only: bool,
   on_progress: &impl Fn(RemoteInstallEvent),
 ) -> io::Result<()> {
   let mut reader = BufReader::new(stdout);
@@ -211,6 +314,12 @@ async fn read_progress(
     RemoteInstallEvent::Activating,
     RemoteInstallEvent::Complete,
   ];
+  let agent_stages = [stages[0], stages[1], stages[5], stages[6]];
+  let stages = if agent_only {
+    &agent_stages[..]
+  } else {
+    &stages[..]
+  };
   let mut next_stage = 0;
   let mut invalid = false;
   loop {

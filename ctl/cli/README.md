@@ -87,6 +87,26 @@ standalone CLI builds, including ordinary Cargo builds, can reuse after signatur
 and provisioning verification. Rebuild if the profile expires; existing daemons
 require an explicit restart.
 
+Use `ctl components update` for an explicit update. It defaults to this computer;
+`--hosts work,jump-a` updates several saved hosts through their preferred routes,
+and `--local` includes this computer in that batch. `--package ctl-agent` retains
+the installed daemons; the default `--package full-bundle` installs all four
+components from one compatible complete build. Updates preserve running services
+and sessions; restart or reconnect separately.
+
+```sh
+ctl components update --hosts work,jump-a --package ctl-agent
+ctl --host work --method vpn components update
+ctl components update --hosts work --from /path/to/bundle-set --json
+```
+
+`--from` supplies a complete build directory or archive. Use `--local-build` for
+four native binaries; local macOS full updates also require `--ctld-package`.
+Otherwise updates use the pinned selection for each target. `components list`,
+`sync`, and `select` manage the store and its selections. See the
+[component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md)
+for source formats, cancellation, and per-host results.
+
 VPN profiles remain in the local catalog. Use `ctl --host GATEWAY vpn start NAME_OR_ID`,
 `vpn list`, and `vpn stop NAME_OR_ID` to run and manage a profile on an SSH host.
 The gateway needs updated ctl-agent/ctld components and Docker or Podman. Its

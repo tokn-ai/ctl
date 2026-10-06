@@ -21,6 +21,7 @@ clap.workspace = true
 cliclack = "0.5.6"
 comfy-table.workspace = true
 ctl-client.workspace = true
+ctl-proto.workspace = true
 ctl-ipc.workspace = true
 dirs.workspace = true
 serde.workspace = true
@@ -37,7 +38,6 @@ zeroize.workspace = true
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
-ctl-proto.workspace = true
 ctl-task-proto.workspace = true
 ctmux-ipc.workspace = true
 ctmux-proto.workspace = true

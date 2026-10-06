@@ -8,14 +8,15 @@ import { resolveVpnRouteStep } from "../../features/workspace/sshRoute";
 import {
   cancelSshProbe,
   forgetSshCredentials,
-  installRemoteAgent,
+  updateComponents,
+  cancelComponentUpdate,
   listSshIdentityFiles,
   openVpnSignIn,
   probeSshHost,
   respondSshPrompt,
   saveSshConfigHost,
 } from "../../lib/tauri";
-import type { RemoteAgentInstallProgress, SshConnectionTarget, SshPrompt, TailscaleDevice, VpnConnection, WorkspaceHost } from "../../lib/types";
+import type { ComponentUpdateHostResult, ComponentUpdateProgress, SshConnectionTarget, SshPrompt, TailscaleDevice, VpnConnection, WorkspaceHost } from "../../lib/types";
 
 const remoteInfo = { remote_id: "ad6a8b53-bae0-45ce-8f09-5cb084a6c843", agent_version: "0.1.0" };
 const vpn: VpnConnection = {
@@ -28,6 +29,15 @@ const tailscaleDevice: TailscaleDevice = {
 };
 const installedBundle = { app_version: "0.1.0", bundle_id: "0.1.0-dev.0123456789ab",
   git_revision: "0123456789abcdef0123456789abcdef01234567", target_triple: "x86_64-unknown-linux-musl" };
+
+const installed: ComponentUpdateHostResult[] = [{ host_index: 0, state: "complete", result: {
+  package: "full_bundle", bundle_id: installedBundle.bundle_id, target_triple: installedBundle.target_triple, services_preserved: true,
+}, error: null }];
+async function installAndReconnect(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Update" }));
+  await user.click(await screen.findByRole("button", { name: "Done" }));
+  await user.click(screen.getByRole("option", { name: "Connect" }));
+}
 
 function remoteVpnRecoveryFixture() {
   const edge = { kind: "ssh" as const, gateway_id: "edge", name: "Office edge", destination: "edge.example", mode: "native_only" as const };
@@ -51,7 +61,8 @@ vi.mock("../../lib/tauri", () => ({
   cancelSshProbe: vi.fn(async () => undefined),
   respondSshPrompt: vi.fn(async () => undefined),
   forgetSshCredentials: vi.fn(async () => undefined),
-  installRemoteAgent: vi.fn(),
+  updateComponents: vi.fn(),
+  cancelComponentUpdate: vi.fn(async () => undefined),
   listSshIdentityFiles: vi.fn(),
   openVpnSignIn: vi.fn(async () => undefined),
   saveSshConfigHost: vi.fn(),
@@ -59,6 +70,8 @@ vi.mock("../../lib/tauri", () => ({
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(probeSshHost).mockReset();
+  vi.mocked(updateComponents).mockReset();
   vi.mocked(listSshIdentityFiles).mockResolvedValue({
     identity_files: [],
     warnings: [],
@@ -119,20 +132,22 @@ async function newHostDetails(user: ReturnType<typeof userEvent.setup>, selectDi
 
 describe("SSH host quick-input flow", () => {
   it("verifies a component update without attaching a terminal or restarting sessions", async () => {
-    vi.mocked(installRemoteAgent).mockResolvedValue(installedBundle);
+    vi.mocked(updateComponents).mockResolvedValue(installed);
     const target = { kind: "ssh" as const, host_id: "saved", destination: "example", remote_info: remoteInfo };
-    const complete = vi.fn();
-    const close = vi.fn();
-    const connected = vi.fn();
-    const verified = vi.fn();
+    const complete = vi.fn(), close = vi.fn(), connected = vi.fn(), verified = vi.fn();
     render(<SshHostFlow suggestions={[]} warning={null} target={target} component_mode="update"
       on_components_complete={complete} onConnected={connected} onVerified={verified} onClose={close} />);
-    await userEvent.setup().click(screen.getByRole("option", { name: /Update remote components/ }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("option", { name: /Update remote components/ }));
+    expect((screen.getByRole("checkbox", { name: "example" }) as HTMLInputElement).checked).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Update" }));
     await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(true));
-    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function), expect.any(Function));
+    expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [target], options: { package: "full_bundle", source: { kind: "selected" } } }), expect.any(Function), expect.any(Function));
     expect(probeSshHost).not.toHaveBeenCalled();
     expect(connected).not.toHaveBeenCalled();
     expect(verified).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Done" }));
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -146,24 +161,25 @@ describe("SSH host quick-input flow", () => {
       on_components_complete={complete} onVerified={verified} onClose={close} /></StrictMode>);
     await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(false));
     expect(probeSshHost).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), expect.any(Function), true);
-    expect(installRemoteAgent).not.toHaveBeenCalled();
+    expect(updateComponents).not.toHaveBeenCalled();
     expect(verified).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
   });
 
   it("checking after uncertain activation does not claim an update succeeded", async () => {
-    vi.mocked(installRemoteAgent).mockRejectedValue({ code: "remote_install_verification_failed", message: "Installed, but could not verify activation." });
+    vi.mocked(updateComponents).mockResolvedValue([{ host_index: 0, state: "failed", result: null, error: "Installed, but could not verify activation." }]);
     vi.mocked(probeSshHost).mockResolvedValue(remoteInfo);
     const complete = vi.fn();
-    render(<SshHostFlow suggestions={[]} warning={null} target={{ kind: "ssh", destination: "example" }} component_mode="update"
-      on_components_complete={complete} onClose={vi.fn()} />);
+    render(<SshHostFlow suggestions={[]} warning={null} target={{ kind: "ssh", destination: "example" }} component_mode="update" on_components_complete={complete} onClose={vi.fn()} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("option", { name: /Update remote components/ }));
+    await user.click(screen.getByRole("button", { name: "Update" }));
     await screen.findByText("Installed, but could not verify activation.");
     expect(complete).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Done" }));
     await user.click(screen.getByRole("option", { name: "Check host" }));
     await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(false));
-    expect(installRemoteAgent).toHaveBeenCalledOnce();
+    expect(updateComponents).toHaveBeenCalledOnce();
   });
 
   it("defaults Connect through to Direct and preserves that choice when going back", async () => {
@@ -688,24 +704,16 @@ describe("SSH host quick-input flow", () => {
     expect(saveSshConfigHost).not.toHaveBeenCalled();
   });
 
-  it("installs missing remote components then saves the original named host", async () => {
-    vi.mocked(probeSshHost)
-      .mockRejectedValueOnce({ code: "ctl_agent_not_found", message: "Install required" })
-      .mockResolvedValueOnce(remoteInfo);
-    vi.mocked(installRemoteAgent).mockResolvedValue({
-      app_version: "0.1.0",
-      bundle_id: "0.1.0-dev.0123456789ab",
-      git_revision: "0123456789abcdef0123456789abcdef01234567",
-      target_triple: "x86_64-unknown-linux-musl",
-    });
+  it("installs missing remote components then saves the original named host after explicit reconnect", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "ctl_agent_not_found", message: "Install required" }).mockResolvedValueOnce(remoteInfo);
+    vi.mocked(updateComponents).mockResolvedValue(installed);
     const { user, save, close } = setupNewHost();
     await newHostDetails(user);
     await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
-    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({
-      hostname: "127.0.0.1", user: "ctmux", port: 2222,
-    }), remoteInfo));
-    expect(installRemoteAgent).toHaveBeenCalledOnce();
+    await installAndReconnect(user);
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith("Development server", expect.objectContaining({ hostname: "127.0.0.1", user: "ctmux", port: 2222 }), remoteInfo));
+    expect(updateComponents).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(saveSshConfigHost).not.toHaveBeenCalled();
   });
@@ -1311,7 +1319,7 @@ describe("SSH host quick-input flow", () => {
     expect(screen.getByRole("option", { name: "Connect" })).toBeTruthy();
     expect(screen.queryByRole("option", { name: /Update remote components/ })).toBeNull();
     expect(screen.queryByRole("option", { name: /Force restart/ })).toBeNull();
-    expect(installRemoteAgent).not.toHaveBeenCalled();
+    expect(updateComponents).not.toHaveBeenCalled();
   });
 
   it("discovers identities only on the identity step and connects with a selected path", async () => {
@@ -1647,34 +1655,16 @@ describe("SSH host quick-input flow", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  it("installs a missing remote agent bundle and retries the connection", async () => {
-    vi.mocked(probeSshHost)
-      .mockRejectedValueOnce({
-        code: "ctl_agent_not_found",
-        message: "ctl-agent: command not found",
-      })
-      .mockResolvedValueOnce(remoteInfo);
-    vi.mocked(installRemoteAgent).mockResolvedValue({
-      app_version: "0.1.0",
-      bundle_id: "0.1.0-dev.0123456789ab",
-      git_revision: "0123456789abcdef0123456789abcdef01234567",
-      target_triple: "x86_64-unknown-linux-musl",
-    });
+  it("installs a missing remote agent bundle and waits for explicit reconnect", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "ctl_agent_not_found", message: "Missing" }).mockResolvedValueOnce(remoteInfo);
+    vi.mocked(updateComponents).mockResolvedValue(installed);
     const { user } = setup();
     await details(user);
-    await user.click(
-      screen.getByRole("option", { name: /SSH config \/ agent/ }),
-    );
-    await user.click(
-      await screen.findByRole("option", { name: /Install remote components/ }),
-    );
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
+    await installAndReconnect(user);
     await screen.findByRole("dialog", { name: "Save host" });
-    expect(installRemoteAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: "ctmux-test" }),
-      expect.any(String),
-      expect.any(Function),
-      expect.any(Function),
-    );
+    expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [expect.objectContaining({ destination: "ctmux-test" })] }), expect.any(Function), expect.any(Function));
     expect(probeSshHost).toHaveBeenCalledTimes(2);
   });
 
@@ -1682,21 +1672,20 @@ describe("SSH host quick-input flow", () => {
     const { target, owner, failure } = remoteVpnRecoveryFixture();
     const candidate = { ...target, remote_info: remoteInfo };
     vi.mocked(probeSshHost).mockRejectedValueOnce(failure).mockResolvedValueOnce(remoteInfo);
-    vi.mocked(installRemoteAgent).mockResolvedValueOnce(installedBundle);
-    const onVerified = vi.fn(async () => null);
-    const onConnected = vi.fn();
-    const onConnectionChange = vi.fn();
-    const onClose = vi.fn();
-    render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} autoConnect expectedIdentity={remoteInfo}
-      onVerified={onVerified} onConnected={onConnected} onConnectionChange={onConnectionChange} onClose={onClose} /></StrictMode>);
+    vi.mocked(updateComponents).mockResolvedValueOnce(installed);
+    const onVerified = vi.fn(async () => null), onConnected = vi.fn(), onClose = vi.fn();
+    render(<StrictMode><SshHostFlow suggestions={[]} warning={null} target={target} autoConnect expectedIdentity={remoteInfo} onVerified={onVerified} onConnected={onConnected} onClose={onClose} /></StrictMode>);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    await screen.findByRole("button", { name: "Done" });
+    expect(probeSshHost).toHaveBeenCalledOnce();
+    expect(onConnected).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    await user.click(screen.getByRole("option", { name: "Connect" }));
     await waitFor(() => expect(onConnected).toHaveBeenCalledExactlyOnceWith(candidate));
-    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(owner, expect.any(String), expect.any(Function), expect.any(Function));
-    expect(probeSshHost).toHaveBeenNthCalledWith(1, candidate, expect.any(String), expect.any(Function));
-    expect(probeSshHost).toHaveBeenNthCalledWith(2, candidate, expect.any(String), expect.any(Function));
+    expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [owner] }), expect.any(Function), expect.any(Function));
     expect(onVerified).toHaveBeenCalledExactlyOnceWith(candidate, remoteInfo);
-    for (const [changed] of onConnectionChange.mock.calls) expect(changed).toEqual(candidate);
     expect(onClose).toHaveBeenCalledOnce();
     expect(forgetSshCredentials).not.toHaveBeenCalled();
   });
@@ -1704,67 +1693,58 @@ describe("SSH host quick-input flow", () => {
   it("retries a failed owner installation on that same owner before reconnecting the destination", async () => {
     const { target, owner, failure } = remoteVpnRecoveryFixture();
     vi.mocked(probeSshHost).mockRejectedValueOnce(failure).mockResolvedValueOnce(remoteInfo);
-    vi.mocked(installRemoteAgent).mockRejectedValueOnce({ code: "remote_agent_install_stalled", message: "Owner bundle transfer stalled." })
-      .mockResolvedValueOnce(installedBundle);
+    vi.mocked(updateComponents).mockResolvedValueOnce([{ host_index: 0, state: "failed", result: null, error: "Owner bundle transfer stalled." }]).mockResolvedValueOnce(installed);
     const onConnected = vi.fn();
-    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect
-      onVerified={async () => null} onConnected={onConnected} onClose={vi.fn()} />);
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onVerified={async () => null} onConnected={onConnected} onClose={vi.fn()} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
-    expect(await screen.findByText("Owner bundle transfer stalled.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    await screen.findByText("Owner bundle transfer stalled.");
     expect(probeSshHost).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("option", { name: "Install remote components" })).toBeNull();
-    await user.click(screen.getByRole("option", { name: /^Update components on Jump host/ }));
+    await user.click(screen.getByRole("button", { name: "Retry failed hosts…" }));
+    await installAndReconnect(user);
     await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
-    expect(installRemoteAgent).toHaveBeenNthCalledWith(1, owner, expect.any(String), expect.any(Function), expect.any(Function));
-    expect(installRemoteAgent).toHaveBeenNthCalledWith(2, owner, expect.any(String), expect.any(Function), expect.any(Function));
+    for (const [request] of vi.mocked(updateComponents).mock.calls) expect(request.targets).toEqual([owner]);
     expect(probeSshHost).toHaveBeenNthCalledWith(2, target, expect.any(String), expect.any(Function));
   });
 
-  it("guides prefix VPN sign-in after an owner update fails and clears that owner on a fresh connection", async () => {
+  it("reports a prefix VPN sign-in failure without retrying the destination automatically", async () => {
     const { target, owner, failure } = remoteVpnRecoveryFixture();
-    vi.mocked(probeSshHost).mockRejectedValueOnce(failure)
-      .mockRejectedValueOnce({ code: "ssh_failed", message: "The destination is unreachable." });
-    vi.mocked(installRemoteAgent).mockRejectedValueOnce({
-      code: "remote_vpn_sign_in_required", message: "The preceding SSH host's VPN requires sign-in.",
-    });
+    vi.mocked(probeSshHost).mockRejectedValueOnce(failure).mockRejectedValueOnce({ code: "ssh_failed", message: "The destination is unreachable." });
+    vi.mocked(updateComponents).mockResolvedValueOnce([{ host_index: 0, state: "failed", result: null, error: "The preceding SSH host's VPN requires sign-in." }]);
     render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onClose={vi.fn()} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
-    expect(await screen.findByText("The preceding SSH host's VPN requires sign-in.")).toBeTruthy();
-    expect(screen.getByText("Sign in to the VPN on its SSH host. Open this connection route and check the remote VPN status to sign in, then choose Connect to continue.")).toBeTruthy();
-    expect(screen.getByRole("option", { name: /^Update components on Jump host/ })).toBeTruthy();
-    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(owner, expect.any(String), expect.any(Function), expect.any(Function));
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    await screen.findByText("The preceding SSH host's VPN requires sign-in.");
+    expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [owner] }), expect.any(Function), expect.any(Function));
+    expect(probeSshHost).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Done" }));
     await user.click(screen.getByRole("option", { name: "Connect" }));
-    expect(await screen.findByText("The destination is unreachable.")).toBeTruthy();
+    await screen.findByText("The destination is unreachable.");
     expect(screen.queryByRole("option", { name: /Update components on/ })).toBeNull();
-    expect(screen.queryByText(/Sign in to the VPN on its SSH host/)).toBeNull();
-    expect(probeSshHost).toHaveBeenNthCalledWith(2, target, expect.any(String), expect.any(Function));
-    expect(installRemoteAgent).toHaveBeenCalledOnce();
+    expect(updateComponents).toHaveBeenCalledOnce();
   });
 
   it("cancels owner installation without retrying the destination or forgetting saved hop credentials", async () => {
     const { target, owner, failure } = remoteVpnRecoveryFixture();
     vi.mocked(probeSshHost).mockRejectedValueOnce(failure);
-    let complete_install!: (bundle: typeof installedBundle) => void;
-    vi.mocked(installRemoteAgent).mockImplementationOnce(() => new Promise((resolve) => { complete_install = resolve; }));
-    const onConnected = vi.fn();
-    const onVerified = vi.fn(async () => null);
-    const onConnectionChange = vi.fn();
-    const onClose = vi.fn();
-    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onVerified={onVerified}
-      onConnected={onConnected} onConnectionChange={onConnectionChange} onClose={onClose} />);
+    let finish!: (results: ComponentUpdateHostResult[]) => void;
+    vi.mocked(updateComponents).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const onConnected = vi.fn(), onClose = vi.fn();
+    render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onConnected={onConnected} onClose={onClose} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("option", { name: /^Update components on Jump host/ }));
-    expect(installRemoteAgent).toHaveBeenCalledExactlyOnceWith(owner, expect.any(String), expect.any(Function), expect.any(Function));
-    const attempt = vi.mocked(installRemoteAgent).mock.lastCall![1];
-    await user.keyboard("{Escape}");
-    expect(cancelSshProbe).toHaveBeenCalledWith(attempt);
-    expect(onConnectionChange).toHaveBeenLastCalledWith(target, "cancelled");
-    await act(async () => { complete_install(installedBundle); });
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    expect(updateComponents).toHaveBeenCalledWith(expect.objectContaining({ targets: [owner] }), expect.any(Function), expect.any(Function));
+    const attempt = vi.mocked(updateComponents).mock.lastCall![0].attempt_id;
+    await user.click(screen.getByRole("button", { name: "Stop update" }));
+    expect(cancelComponentUpdate).toHaveBeenCalledWith(attempt);
+    await act(async () => finish([{ host_index: 0, state: "cancelled", result: null, error: null }]));
+    await user.click(screen.getByRole("button", { name: "Done" }));
     expect(probeSshHost).toHaveBeenCalledOnce();
-    expect(onVerified).not.toHaveBeenCalled();
     expect(onConnected).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledOnce();
     expect(forgetSshCredentials).not.toHaveBeenCalled();
   });
@@ -1781,73 +1761,41 @@ describe("SSH host quick-input flow", () => {
     render(<SshHostFlow suggestions={[]} warning={null} target={target} autoConnect onClose={vi.fn()} />);
     expect(await screen.findByText("Connection unavailable.")).toBeTruthy();
     expect(screen.queryByRole("option", { name: /Update components on/ })).toBeNull();
-    expect(installRemoteAgent).not.toHaveBeenCalled();
+    expect(updateComponents).not.toHaveBeenCalled();
   });
 
-  it("shows the current file, receiver progress, speed, and installation stages", async () => {
-    vi.mocked(probeSshHost).mockRejectedValueOnce({
-      code: "ctl_agent_not_found",
-      message: "ctl-agent: command not found",
-    });
-    let report!: (progress: RemoteAgentInstallProgress) => void;
-    vi.mocked(installRemoteAgent).mockImplementation((_target, _attempt, _prompt, progress) => {
-      report = progress;
-      return new Promise(() => undefined);
-    });
-    const { user, close } = setup();
-    await details(user);
-    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
-    await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
-    const bar = screen.getByRole("progressbar", { name: "Remote component transfer" });
-    expect(bar.hasAttribute("value")).toBe(false);
-    expect(screen.getByRole("status").textContent).toContain("Detecting remote");
-    const progress: RemoteAgentInstallProgress = {
-      phase: "transferring",
-      file_name: "ctl-agent-bundle-linux.tar.gz",
-      transferred_bytes: 2 * 1024 * 1024,
-      total_bytes: 8 * 1024 * 1024,
-      bytes_per_second: 256 * 1024,
-    };
-    act(() => report(progress));
-    expect(screen.getByRole("status").textContent).toBe("Sending ctl-agent-bundle-linux.tar.gz…");
-    expect(bar.getAttribute("value")).toBe(String(progress.transferred_bytes));
-    expect(bar.getAttribute("max")).toBe(String(progress.total_bytes));
-    expect(screen.getByText("2 MiB / 8 MiB · 25% · 256 KiB/s")).toBeTruthy();
-    act(() => report({ ...progress, phase: "extracting", transferred_bytes: progress.total_bytes, bytes_per_second: 0 }));
-    expect(screen.getByRole("status").textContent).toContain("Extracting ctl-agent-bundle-linux.tar.gz");
-    expect(screen.getByText("8 MiB / 8 MiB · 100% · Transfer complete")).toBeTruthy();
-    act(() => report({ ...progress, phase: "checking", file_name: "ctmuxd", transferred_bytes: progress.total_bytes }));
-    expect(screen.getByRole("status").textContent).toBe("Checking ctmuxd…");
-    const attempt_id = vi.mocked(installRemoteAgent).mock.lastCall![1];
-    await user.keyboard("{Escape}");
-    expect(close).toHaveBeenCalledOnce();
-    expect(cancelSshProbe).toHaveBeenCalledWith(attempt_id);
-    act(() => report({ ...progress, phase: "activating" }));
-    expect(screen.getByRole("status").textContent).toBe("Checking ctmuxd…");
-  });
-
-  it("clears transfer progress on retry and ignores events from the failed attempt", async () => {
+  it("shows update progress in the shared dialog without opening a terminal", async () => {
     vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "ctl_agent_not_found", message: "Missing" });
-    const reporters: ((progress: RemoteAgentInstallProgress) => void)[] = [];
-    let reject_install!: (failure: unknown) => void;
-    vi.mocked(installRemoteAgent).mockImplementation((_target, _attempt, _prompt, progress) => {
-      reporters.push(progress);
-      return new Promise((_resolve, reject) => { reject_install = reject; });
-    });
+    let report!: (progress: ComponentUpdateProgress) => void;
+    vi.mocked(updateComponents).mockImplementation((_request, _prompt, progress) => { report = progress; return new Promise(() => undefined); });
     const { user } = setup();
     await details(user);
     await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
     await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
-    const progress: RemoteAgentInstallProgress = {
-      phase: "transferring", file_name: "old.tar.gz", transferred_bytes: 10, total_bytes: 20, bytes_per_second: 5,
-    };
-    act(() => reporters[0](progress));
-    await act(async () => reject_install({ code: "remote_agent_install_stalled", message: "Transfer stalled while sending old.tar.gz" }));
-    expect(screen.getByRole("alert").textContent).toContain("Transfer stalled");
-    await user.click(screen.getByRole("option", { name: /Install remote components/ }));
-    expect(screen.getByRole("progressbar").hasAttribute("value")).toBe(false);
-    act(() => reporters[0](progress));
-    expect(screen.getByRole("status").textContent).toContain("Detecting remote");
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    act(() => report({ host_index: 0, state: "updating", progress: { phase: "transferring", file_name: "bundle.tar.gz", transferred_bytes: 2 * 1024 * 1024, total_bytes: 8 * 1024 * 1024, bytes_per_second: 256 * 1024 } }));
+    expect(screen.getByRole("progressbar").getAttribute("value")).toBe(String(2 * 1024 * 1024));
+    expect(screen.getByText("2 MiB / 8 MiB · 25% · 256 KiB/s")).toBeTruthy();
+    expect(screen.getByText("Sending bundle.tar.gz…")).toBeTruthy();
+    expect(probeSshHost).toHaveBeenCalledOnce();
+  });
+
+  it("clears transfer progress on retry and ignores events from the failed attempt", async () => {
+    vi.mocked(probeSshHost).mockRejectedValueOnce({ code: "ctl_agent_not_found", message: "Missing" });
+    const reporters: ((progress: ComponentUpdateProgress) => void)[] = [];
+    let fail!: (failure: unknown) => void;
+    vi.mocked(updateComponents).mockImplementation((_request, _prompt, progress) => { reporters.push(progress); return new Promise((_resolve, reject) => { fail = reject; }); });
+    const { user } = setup();
+    await details(user);
+    await user.click(screen.getByRole("option", { name: /SSH config \/ agent/ }));
+    await user.click(await screen.findByRole("option", { name: /Install remote components/ }));
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    const old: ComponentUpdateProgress = { host_index: 0, state: "updating", progress: { phase: "transferring", file_name: "old.tar.gz", transferred_bytes: 10, total_bytes: 20, bytes_per_second: 5 } };
+    act(() => reporters[0](old));
+    await act(async () => fail(new Error("Transfer stalled")));
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    act(() => reporters[0](old));
     expect(screen.queryByText(/Sending old.tar.gz/)).toBeNull();
   });
+
 });

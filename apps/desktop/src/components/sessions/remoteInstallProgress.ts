@@ -9,7 +9,7 @@ const STAGES: Record<RemoteAgentInstallProgress["phase"], string> = {
   extracting: "Extracting",
   checking: "Checking",
   activating: "Activating the installed components…",
-  complete: "Installation complete. Connecting to the host…",
+  complete: "Installation complete. Running services were preserved.",
 };
 
 function formatBytes(bytes: number): string {

@@ -4,9 +4,10 @@ import { ComponentBundlePanel } from "../components/about/ComponentBundlePanel";
 import { ComponentVersionTable, versionLabel } from "../components/about/ComponentVersionTable";
 import { QuickInput } from "../components/commands/QuickInput";
 import { Icon } from "../components/ui/Icon";
+import { UpdateComponentsDialog } from "../components/components/UpdateComponentsDialog";
 import { SshHostFlow } from "../components/sessions/SshHostFlow";
 import { useComponentVersions } from "../features/about/useComponentVersions";
-import type { ComponentActionPreflight, ComponentActionResult, ConnectionTarget } from "../lib/types";
+import type { ComponentActionPreflight, ComponentActionResult, ComponentUpdateContext, ConnectionTarget } from "../lib/types";
 import "../components/about/about.css";
 
 interface Props {
@@ -26,10 +27,11 @@ function actionDescription(preflight: ComponentActionPreflight): string {
 export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, execute_action, remote_targets = [] }: Props) {
   const model = useComponentVersions(visible, on_restarted, execute_action);
   const [component_flow, setComponentFlow] = useState<{ target: ConnectionTarget; mode: "inspect" | "update" } | null>(null);
+  const [update_context, setUpdateContext] = useState<ComponentUpdateContext | null>(null);
   const [component_notice, setComponentNotice] = useState<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { if (visible) heading.current?.focus(); }, [visible]);
-  const has_dialog = model.preflight !== null || component_flow !== null;
+  const has_dialog = model.preflight !== null || component_flow !== null || update_context !== null;
   useEffect(() => { on_dialog_change(has_dialog); }, [has_dialog, on_dialog_change]);
   const app = model.snapshot?.components.find((row) => row.component === "ctmux");
   const local = model.snapshot?.components.filter((row) => row.location === "local" && row.component !== "ctmux") ?? [];
@@ -44,7 +46,7 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
       </header>
       <div className="about-content">
         <div className="about-app-card"><Icon name="terminal" size={36} /><div><strong>ctmux</strong><p>{app ? versionLabel(app.running) : model.loading ? "Checking app version…" : "Version unavailable"}</p><small>Desktop application</small></div></div>
-        <div className="about-refresh-row"><p>{model.checked_at === null ? "Component versions have not been checked." : `Last checked ${new Date(model.checked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`}</p><button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}><Icon name="refresh" />{model.loading ? "Checking…" : "Refresh versions"}</button></div>
+        <div className="about-refresh-row"><button type="button" onClick={() => setUpdateContext({})}>Update components…</button><p>{model.checked_at === null ? "Component versions have not been checked." : `Last checked ${new Date(model.checked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`}</p><button type="button" onClick={() => void model.refresh()} disabled={model.loading || model.busy_id !== null}><Icon name="refresh" />{model.loading ? "Checking…" : "Refresh versions"}</button></div>
         {model.error ? <p className="about-error" role="alert">Could not refresh versions: {model.error}{model.snapshot ? " Showing the last successful check." : ""}</p> : null}
         {model.action_error && !model.snapshot?.components.some((row) => row.component_id === model.action_error!.component_id) ? <p className="about-error" role="alert">{model.action_error.message}</p> : null}
         {model.notice ? <p className="about-notice" role="status">{model.notice}</p> : null}
@@ -54,7 +56,7 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
         <section className="about-section" aria-labelledby="about-local"><h2 id="about-local">Local components</h2><p className="about-muted">On disk shows the selected local build. Restart separately to apply it to a running service.</p>{local.length ? <ComponentVersionTable rows={local} {...table_props} /> : !model.loading ? <p className="about-muted">Local component versions are unavailable.</p> : null}</section>
         <section className="about-section" aria-labelledby="about-remote"><h2 id="about-remote">Remote hosts</h2><p className="about-muted">Expand a host to compare its components. Check host authenticates through its preferred route. Updating installs verified components and keeps sessions; restart separately after confirmation.</p>{remote.length ? <ComponentVersionTable rows={remote} {...table_props} on_manage_host={(host_id, mode) => {
           const target = remote_targets.find((target) => target.kind === "ssh" && target.host_id === host_id);
-          if (target) { setComponentNotice(null); setComponentFlow({ target, mode }); }
+          if (target) { setComponentNotice(null); if (mode === "update") setUpdateContext({ targets: [target] }); else setComponentFlow({ target, mode }); }
         }} manageable_host_ids={remote_targets.flatMap((target) => target.kind === "ssh" && target.host_id ? [target.host_id] : [])} /> : !model.loading ? <p className="about-empty">No saved or connected remote hosts.</p> : null}</section>
         <div className="about-protocol-legend" aria-label="Protocol status legend">
           <span className="about-protocol-current"><Icon name="check" size={14} />Current protocol</span>
@@ -66,6 +68,10 @@ export function AboutPage({ visible, on_close, on_restarted, on_dialog_change, e
       </div>
     </section>
     {model.preflight ? createPortal(<QuickInput title={`${model.preflight.action === "reconnect" ? "Reconnect" : "Restart"} ${model.preflight.label}`} description={actionDescription(model.preflight)} mode={{ kind: "confirm", confirm_label: `${model.preflight.action === "reconnect" ? "Reconnect" : "Restart"} ${model.preflight.component === "ctl_agent" ? "ctl-agent" : model.preflight.component}`, destructive: model.preflight.action === "restart" }} onCancel={model.cancelRestart} onSubmit={model.confirmRestart} />, document.body) : null}
+    {update_context ? createPortal(<UpdateComponentsDialog targets={remote_targets} context={update_context} on_updated={(results) => {
+      setComponentNotice(`${results.filter((result) => result.state === "complete").length} hosts updated. Running services were preserved; restart separately where required.`);
+      void model.refresh();
+    }} on_close={() => setUpdateContext(null)} />, document.body) : null}
     {component_flow ? <SshHostFlow suggestions={[]} warning={null} target={component_flow.target} component_mode={component_flow.mode} autoConnect={component_flow.mode === "inspect"} updateRequired={component_flow.mode === "update"} on_components_complete={(updated) => {
       setComponentNotice(updated ? "Verified components installed. Running sessions were preserved. Restart separately where required." : "SSH account verified. Refreshing component status.");
       void model.refresh(component_flow.target.kind === "ssh" ? component_flow.target.host_id : undefined);

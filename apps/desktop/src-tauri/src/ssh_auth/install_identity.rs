@@ -11,8 +11,13 @@ use crate::error::{CommandErrorDto, CommandResult};
 pub(super) fn verify_installed(
   installed: &crate::dto::RemoteAgentInstallResultDto,
   identity: &ctl_proto::RemoteIdentity,
+  agent_only: Option<&ctl_core::component::ComponentInfo>,
 ) -> CommandResult<()> {
-  if identity.bundle.as_ref().is_some_and(|bundle| {
+  if let Some(agent) = agent_only {
+    if ctl_client::component_update::agent_matches(agent, identity) {
+      return Ok(());
+    }
+  } else if identity.bundle.as_ref().is_some_and(|bundle| {
     bundle.bundle_id == installed.bundle_id
       && bundle.git_revision == installed.git_revision
       && bundle.target_triple == installed.target_triple
@@ -90,16 +95,41 @@ mod tests {
       target_triple: "x86_64-unknown-linux-musl".into(),
     };
     let mut observed = identity("11111111-1111-4111-8111-111111111111");
-    assert!(verify_installed(&installed, &observed).is_err());
+    assert!(verify_installed(&installed, &observed, None).is_err());
     observed.bundle = Some(Box::new(ctl_proto::BundleVersion {
       app_version: installed.app_version.clone(),
       bundle_id: installed.bundle_id.clone(),
       git_revision: installed.git_revision.clone(),
       target_triple: installed.target_triple.clone(),
     }));
-    assert!(verify_installed(&installed, &observed).is_ok());
+    assert!(verify_installed(&installed, &observed, None).is_ok());
     observed.bundle.as_mut().unwrap().bundle_id = "a-different-installation".into();
-    assert!(verify_installed(&installed, &observed).is_err());
+    assert!(verify_installed(&installed, &observed, None).is_err());
+  }
+
+  #[test]
+  fn agent_only_verifies_compiled_metadata_without_requiring_a_new_source_receipt() {
+    let expected = ctl_core::component::ComponentInfo {
+      build: ctl_core::component::build_info(),
+      protocols: ctl_proto::agent_protocols(),
+    };
+    let installed = crate::dto::RemoteAgentInstallResultDto {
+      app_version: expected.build.version.clone(),
+      bundle_id: "source-bundle".into(),
+      git_revision: expected.build.source_revision.clone().unwrap_or_default(),
+      target_triple: ctl_core::paths::native_target().into(),
+    };
+    let mut observed = identity("11111111-1111-4111-8111-111111111111");
+    observed.agent_version.clone_from(&expected.build.version);
+    observed.build = Some(expected.build.clone());
+    observed.protocols.clone_from(&expected.protocols);
+    assert!(observed.bundle.is_none());
+    assert!(verify_installed(&installed, &observed, Some(&expected)).is_ok());
+    observed.build.as_mut().unwrap().source_fingerprint = "f".repeat(64);
+    assert!(verify_installed(&installed, &observed, Some(&expected)).is_err());
+    observed.build = Some(expected.build.clone());
+    observed.protocols.pop();
+    assert!(verify_installed(&installed, &observed, Some(&expected)).is_err());
   }
 
   fn identity(remote_id: &str) -> ctl_proto::RemoteIdentity {

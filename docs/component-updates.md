@@ -42,6 +42,53 @@ source (CI, release, or local build), target, component contracts, and SHA-256
 checksums. ctl checks both client compatibility and the contracts between the
 components. Foreign-target binaries are never executed during import.
 
+## Update components
+
+Use **Update components…** in the command palette, About, or a saved host's
+settings. Context actions preselect the host; the dialog can include this
+computer and several saved SSH hosts. Choose one of two packages:
+
+- **ctl-agent only** installs the agent and keeps the installed daemons.
+- **Full bundle** installs `ctl-agent`, `ctld`, `ctmuxd`, and `ctl-taskd` from one
+  verified complete build.
+
+Both choices take their binaries from a complete compatible build. The default
+uses each target's pinned selection. **Provided build files** accepts a stored
+bundle directory or archive, a CI/release bundle-set directory, or an explicitly
+chosen native build directory. Publisher archives need their matching
+`bundle-set.json` beside them. A bundle-set directory can supply different target
+artifacts for a batch; a single-target build cannot be uploaded to another target.
+Native builds must contain all four binaries; local macOS full updates also need
+the signed helper package described below. Supplied upload builds do not change
+the pinned upload selection. A local full update selects that build for future
+local service launches.
+
+The CLI uses the same package verification and installation policy:
+
+```sh
+# No host flags means this computer.
+ctl components update
+ctl components update --hosts work,jump-a --local --package ctl-agent
+ctl --host work --method vpn components update --package full-bundle
+ctl components update --hosts work,jump-a --from /path/to/bundle-set --json
+ctl components update --local --from target/debug --local-build --ctld-package /path/to/ctld-package
+```
+
+Saved hosts use their preferred connection method and existing route. `--host`
+also accepts an SSH alias or destination; `--method` applies to that one host.
+The app reports progress and authentication prompts per host. A failed host
+does not undo earlier successes or skip later hosts; the dialog can retry just
+the failed hosts. CLI JSON contains each host's result, and any failure gives a
+nonzero exit status. Stop/Ctrl-C skips remaining hosts. If activation raced with
+cancellation, refresh status before retrying.
+
+Updates preserve running services and sessions. **Restart** remains a separate
+confirmed action, and **Reconnect** applies an installed agent to existing SSH
+channels. An agent-only update cannot upgrade a daemon's contracts. Agent-only
+installations live under `~/.tokn/ctl/components/agents/<target>/`, record their
+complete source in `agent-source.json`, and link retained daemons to their
+previous immutable locations. They do not claim to contain the complete bundle.
+
 ```
 ~/.tokn/ctl/components/
   bundles/<target>/<content-id>/bundle.json
@@ -111,7 +158,7 @@ For a saved remote host:
 
 1. Use **Check host** to authenticate through its preferred connection method
    and route, then refresh component status. This does not open a terminal.
-2. Use **Update…** to install the verified remote bundle for this account. ctl
+2. Use **Update…** to open the shared updater for this account. ctl
    verifies the saved account before uploading, activates an immutable bundle,
    and verifies that the installed agent reports the selected bundle afterward.
    A compatible cached development bundle may differ from the desktop's source
@@ -126,8 +173,8 @@ an older agent process until **Reconnect** applies the installed agent; remote
 terminal sessions survive that reconnect. The inspection agent itself is an
 on-demand process, not evidence that existing channels were updated.
 
-For this computer, select a complete local build in Bundles, then use the separate
-confirmed restart actions. With no selection, existing desktop/helper discovery
+For this computer, use **Update components…** or select a complete local build
+in Bundles, then use the separate confirmed restart actions. With no selection, existing desktop/helper discovery
 continues. Explicit executable environment overrides retain their diagnostic use. Remote broker and task-daemon
 status is displayed alongside the terminal daemon; their remote restart actions
 are not exposed. A legacy owner without cooperative restart support requires a

@@ -29,8 +29,11 @@ pub struct BundleSummary {
   git_revision: Option<String>,
   dirty: bool,
   compatible: bool,
+  included: bool,
   local_use: BundleUse,
   upload_use: BundleUse,
+  local_unavailable_reason: Option<&'static str>,
+  upload_unavailable_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,14 +78,17 @@ pub struct SelectionResult {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn get_component_bundles() -> CommandResult<BundleSnapshot> {
+pub async fn get_component_bundles(app: tauri::AppHandle) -> CommandResult<BundleSnapshot> {
   #[cfg(unix)]
   {
     let home = home()?;
-    tokio::task::spawn_blocking(move || snapshot(&home))
+    let directories = crate::remote_agent::bundle_directories(&app)?;
+    tokio::task::spawn_blocking(move || snapshot(&home, &directories))
       .await
       .map_err(CommandErrorDto::backend)
   }
+  #[cfg(not(unix))]
+  let _ = app;
   #[cfg(not(unix))]
   Ok(BundleSnapshot {
     errors: vec!["Component bundle selection requires a Unix host.".into()],
@@ -92,23 +98,25 @@ pub async fn get_component_bundles() -> CommandResult<BundleSnapshot> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn select_component_bundle(
+  app: tauri::AppHandle,
   request: SelectionRequest,
   on_progress: Channel<SelectionPhase>,
 ) -> CommandResult<SelectionResult> {
   #[cfg(unix)]
   {
-    use ctl_core::bundles::{Purpose, Store};
+    use ctl_core::bundles::Purpose;
     let home = home()?;
     let purpose = match request.purpose {
       BundlePurpose::Local => Purpose::Local,
       BundlePurpose::Upload => Purpose::Upload,
     };
+    let directories = crate::remote_agent::bundle_directories(&app)?;
     let _ = on_progress.send(SelectionPhase::Verifying);
     let bundle = {
       let home = home.clone();
       let target = request.target_triple.clone();
       let id = request.bundle_id.clone();
-      tokio::task::spawn_blocking(move || Store::new(&home).get(&target, &id))
+      tokio::task::spawn_blocking(move || load_selection(&home, &directories, &target, &id))
         .await
         .map_err(CommandErrorDto::backend)?
         .map_err(selection_error)?
@@ -134,7 +142,7 @@ pub async fn select_component_bundle(
   }
   #[cfg(not(unix))]
   {
-    let _ = (request, on_progress);
+    let _ = (app, request, on_progress);
     Err(CommandErrorDto::new(
       "component_bundles_unsupported",
       "Component bundle selection requires a Unix host.",
@@ -154,11 +162,80 @@ fn selection_error(error: impl std::fmt::Display) -> CommandErrorDto {
 }
 
 #[cfg(unix)]
-fn snapshot(home: &std::path::Path) -> BundleSnapshot {
-  use ctl_core::bundles::{Purpose, Source, Store};
-  let native = ctl_core::paths::native_target();
+fn snapshot(home: &std::path::Path, directories: &[std::path::PathBuf]) -> BundleSnapshot {
+  snapshot_with(home, |target| {
+    included_bundle(directories, target).map(|bundle| bundle.map(|bundle| bundle.manifest))
+  })
+}
+
+#[cfg(unix)]
+struct IncludedBundle {
+  archive: ctl_client::remote_bundle::VerifiedBundle,
+  manifest: ctl_core::bundles::Manifest,
+}
+
+#[cfg(unix)]
+fn included_bundle(
+  directories: &[std::path::PathBuf],
+  target: &str,
+) -> Result<Option<IncludedBundle>, ctl_client::remote_bundle::Error> {
+  use ctl_core::bundles::Source;
+  if !ctl_client::components::upload_target(target) {
+    return Ok(None);
+  }
+  let Some(bundle) = ctl_client::remote_bundle::read_compatible_bundle(directories, target)? else {
+    return Ok(None);
+  };
+  let source = if bundle.bundle_id == bundle.app_version {
+    Source::Release
+  } else {
+    Source::Ci
+  };
+  let manifest = ctl_client::components::inspect_remote(&bundle, target, source)?;
+  Ok(Some(IncludedBundle {
+    archive: bundle,
+    manifest,
+  }))
+}
+
+#[cfg(unix)]
+fn load_selection(
+  home: &std::path::Path,
+  directories: &[std::path::PathBuf],
+  target: &str,
+  id: &str,
+) -> std::io::Result<ctl_core::bundles::Bundle> {
+  use ctl_core::bundles::Store;
+  match Store::new(home).get(target, id) {
+    Ok(bundle) => return Ok(bundle),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    Err(error) => return Err(error),
+  }
+  let included = included_bundle(directories, target)
+    .map_err(std::io::Error::other)?
+    .filter(|bundle| bundle.manifest.bundle_id == id)
+    .ok_or_else(|| {
+      std::io::Error::other(
+        "This included build changed or is unavailable. Refresh bundles and choose again.",
+      )
+    })?;
+  ctl_client::components::import_remote(home, &included.archive, target, included.manifest.source)
+    .map_err(std::io::Error::other)
+}
+
+#[cfg(unix)]
+fn snapshot_with(
+  home: &std::path::Path,
+  mut included: impl FnMut(
+    &str,
+  ) -> Result<
+    Option<ctl_core::bundles::Manifest>,
+    ctl_client::remote_bundle::Error,
+  >,
+) -> BundleSnapshot {
+  use ctl_core::bundles::{Purpose, Store};
   let targets: std::collections::BTreeSet<_> = [
-    native,
+    ctl_core::paths::native_target(),
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-gnu",
@@ -171,7 +248,7 @@ fn snapshot(home: &std::path::Path) -> BundleSnapshot {
   let store = Store::new(home);
   let mut snapshot = BundleSnapshot::default();
   for target in targets {
-    let selected = |purpose| match store.selected(purpose, target) {
+    let mut selected = |purpose| match store.selected(purpose, target) {
       Ok(bundle) => bundle.map(|bundle| bundle.manifest.bundle_id),
       Err(error) => {
         snapshot
@@ -180,69 +257,91 @@ fn snapshot(home: &std::path::Path) -> BundleSnapshot {
         None
       }
     };
-    let mut selected = selected;
     let local = selected(Purpose::Local);
     let upload = selected(Purpose::Upload);
-    let bundles = match store.list(target) {
-      Ok(bundles) => bundles,
-      Err(error) => {
-        snapshot.errors.push(format!("{target}: {error}"));
-        continue;
+    match store.list(target) {
+      Ok(bundles) => snapshot.bundles.extend(
+        bundles
+          .iter()
+          .map(|bundle| summary(&bundle.manifest, local.as_deref(), upload.as_deref(), false)),
+      ),
+      Err(error) => snapshot.errors.push(format!("{target}: {error}")),
+    }
+    match included(target) {
+      Ok(Some(manifest)) => {
+        if let Some(stored) = snapshot
+          .bundles
+          .iter_mut()
+          .find(|bundle| bundle.target_triple == target && bundle.bundle_id == manifest.bundle_id)
+        {
+          stored.included = true;
+        } else {
+          snapshot.bundles.push(summary(
+            &manifest,
+            local.as_deref(),
+            upload.as_deref(),
+            true,
+          ));
+        }
       }
-    };
-    for bundle in bundles {
-      let manifest = bundle.manifest;
-      let build = &manifest.components["ctl-agent"].build;
-      let compatible = ctl_client::components::compatible(&manifest.components);
-      let signed_package = !cfg!(target_os = "macos")
-        || (manifest.files.contains_key("ctld.app/Contents/MacOS/ctld")
-          && manifest.files.contains_key("ctld-package.json"));
-      snapshot.bundles.push(BundleSummary {
-        local_use: BundleUse::status(
-          local.as_deref() == Some(&manifest.bundle_id),
-          compatible && ctl_core::bundles::local_target(target) && signed_package,
-        ),
-        upload_use: BundleUse::status(
-          upload.as_deref() == Some(&manifest.bundle_id),
-          compatible && ctl_client::components::upload_target(target),
-        ),
-        compatible,
-        app_version: build.version.clone(),
-        git_revision: build.source_revision.clone(),
-        dirty: build.dirty,
-        source: match manifest.source {
-          Source::Ci => "ci",
-          Source::Release => "release",
-          Source::Local => "local",
-        },
-        bundle_id: manifest.bundle_id,
-        target_triple: manifest.target_triple,
-      });
+      Ok(None) => {}
+      Err(error) => snapshot
+        .errors
+        .push(format!("Included {target} bundle: {error}")),
     }
   }
   snapshot
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn absent_store_is_passive_and_selection_fields_are_snake_case() {
-    let home = std::env::temp_dir().join(format!("ctmux-bundle-snapshot-{}", uuid::Uuid::new_v4()));
-    let value = serde_json::to_value(snapshot(&home)).unwrap();
-    assert_eq!(value, serde_json::json!({"bundles": [], "errors": []}));
-    assert!(!home.exists());
-    let request: SelectionRequest = serde_json::from_value(serde_json::json!({
-      "bundle_id": "id", "target_triple": "target", "purpose": "upload"
-    }))
-    .unwrap();
-    assert!(matches!(request.purpose, BundlePurpose::Upload));
-    assert!(
-      serde_json::from_value::<SelectionRequest>(serde_json::json!({
-        "bundleId": "id", "targetTriple": "target", "purpose": "upload"
-      }))
-      .is_err()
-    );
+#[cfg(unix)]
+fn summary(
+  manifest: &ctl_core::bundles::Manifest,
+  local: Option<&str>,
+  upload: Option<&str>,
+  included: bool,
+) -> BundleSummary {
+  use ctl_core::bundles::Source;
+  let target = &manifest.target_triple;
+  let build = &manifest.components["ctl-agent"].build;
+  let compatible = ctl_client::components::compatible(&manifest.components);
+  let signed_package = !cfg!(target_os = "macos")
+    || (manifest.files.contains_key("ctld.app/Contents/MacOS/ctld")
+      && manifest.files.contains_key("ctld-package.json"));
+  let local_reason = if !compatible {
+    Some("Incompatible with this app")
+  } else if !ctl_core::bundles::local_target(target) {
+    Some("For another platform")
+  } else if !signed_package {
+    Some("Requires a signed macOS helper package")
+  } else {
+    None
+  };
+  let upload_reason = if !compatible {
+    Some("Incompatible with this app")
+  } else if !ctl_client::components::upload_target(target) {
+    Some("This target does not support remote uploads")
+  } else {
+    None
+  };
+  BundleSummary {
+    local_use: BundleUse::status(local == Some(&manifest.bundle_id), local_reason.is_none()),
+    upload_use: BundleUse::status(upload == Some(&manifest.bundle_id), upload_reason.is_none()),
+    local_unavailable_reason: local_reason,
+    upload_unavailable_reason: upload_reason,
+    compatible,
+    included,
+    app_version: build.version.clone(),
+    git_revision: build.source_revision.clone(),
+    dirty: build.dirty,
+    source: match manifest.source {
+      Source::Ci => "ci",
+      Source::Release => "release",
+      Source::Local => "local",
+    },
+    bundle_id: manifest.bundle_id.clone(),
+    target_triple: target.clone(),
   }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

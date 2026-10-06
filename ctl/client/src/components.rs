@@ -19,6 +19,33 @@ pub fn import_remote(
   target: &str,
   source: Source,
 ) -> Result<Bundle, crate::remote_bundle::Error> {
+  let payload = remote_payload(bundle, target, source)?;
+  Ok(Store::new(home).publish(&payload.manifest, &payload.files)?)
+}
+
+/// Inspects a complete archive without importing, selecting or executing it.
+/// Its content identity is the same one used by a later explicit import.
+///
+/// # Errors
+/// Rejects incompatible, incomplete, modified or schema-1 bundles.
+pub fn inspect_remote(
+  bundle: &crate::remote_bundle::VerifiedBundle,
+  target: &str,
+  source: Source,
+) -> Result<Manifest, crate::remote_bundle::Error> {
+  remote_payload(bundle, target, source).map(|payload| payload.manifest)
+}
+
+struct RemotePayload {
+  manifest: Manifest,
+  files: BTreeMap<String, Vec<u8>>,
+}
+
+fn remote_payload(
+  bundle: &crate::remote_bundle::VerifiedBundle,
+  target: &str,
+  source: Source,
+) -> Result<RemotePayload, crate::remote_bundle::Error> {
   let outer = crate::remote_bundle::BundleSet::parse_intrinsic(&bundle.manifest)?;
   if !outer.is_compatible(target)? {
     return Err(crate::remote_bundle::Error::NotAvailable(
@@ -47,7 +74,7 @@ pub fn import_remote(
   }
   let manifest =
     Manifest::new(target, source, components, &files)?.with_distribution_id(&bundle.bundle_id)?;
-  Ok(Store::new(home).publish(&manifest, &files)?)
+  Ok(RemotePayload { manifest, files })
 }
 
 /// Snapshots an explicitly chosen native local build. The complete signed macOS

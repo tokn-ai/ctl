@@ -48,6 +48,20 @@ async fn compatible_different_build_is_imported_without_selecting_or_running_it(
 }
 
 #[test]
+fn inspecting_an_included_archive_has_the_same_identity_as_importing_it() {
+  let home = Home::new();
+  let candidate = Fixture::new("0.0.9", &"b".repeat(40)).bundle();
+  let target = "aarch64-apple-darwin";
+  let inspected = inspect_remote(&candidate, target, Source::Release).unwrap();
+  assert!(!home.0.join(".tokn").exists());
+  let imported = import_remote(&home.0, &candidate, target, Source::Release).unwrap();
+  assert_eq!(inspected, imported.manifest);
+  let mut changed = candidate;
+  changed.archive[0] ^= 1;
+  assert!(inspect_remote(&changed, target, Source::Release).is_err());
+}
+
+#[test]
 fn corrupted_artifact_does_not_publish_a_bundle() {
   let home = Home::new();
   let mut candidate = Fixture::new("0.0.9", &"b".repeat(40)).bundle();

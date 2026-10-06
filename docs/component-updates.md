@@ -53,9 +53,14 @@ components. Foreign-target binaries are never executed during import.
 One complete bundle is selected for local services. The local profile uses the
 native target on macOS and the architecture’s portable musl target on Linux,
 so GNU and musl clients share the same selection. Each remote upload target
-has its own complete selection. **About → Bundles** lists verified stored builds
-and offers **Use locally** and **Use for uploads** where supported. Changing a
-selection verifies the complete build and atomically updates its profile.
+has its own complete selection. **About → Bundles** lists verified complete builds
+included with the app alongside stored builds, without importing or selecting
+anything during inspection. Identical included and stored builds share one row.
+Separate local-service and remote-upload columns show supported choices and
+explain unavailable uses, such as a missing signed macOS helper package.
+Choosing an included build verifies and imports that exact content identity
+before selecting it. Changing a selection verifies the complete build and
+atomically updates its profile.
 It preserves running services and sessions. New service launches and explicit
 remote updates use that selection; restart and reconnect remain separate actions.
 

@@ -8,6 +8,8 @@ import type {
   AttachmentLeaseRequest,
   AttachmentResizeRequest,
   ConnectionTarget,
+  ComponentBundleSelection,
+  ComponentBundlePhase,
   CreateSessionRequest,
   HostCatalogDocument,
   HostCatalogSnapshot,
@@ -41,7 +43,7 @@ import {
   previewTargets,
   previewWorkspace,
 } from "./fixtures";
-import { previewComponentVersions } from "./aboutFixtures";
+import { previewComponentVersions, previewComponentBundles } from "./aboutFixtures";
 import { previewCredentials, previewIdentityFiles } from "./credentialsFixtures";
 
 // This entry is intentionally absent from index.html and the production build.
@@ -77,6 +79,7 @@ if (credentials_param === "import") {
   });
 }
 let component_versions = previewComponentVersions();
+let component_bundles = previewComponentBundles();
 if (about_param === "partial") {
   const daemon = component_versions.components.find((row) => row.component === "ctmuxd")!;
   daemon.running = null;
@@ -85,9 +88,10 @@ if (about_param === "partial") {
 }
 if (about_param === "legacy") {
   const daemon = component_versions.components.find((row) => row.component === "ctl-taskd")!;
-  daemon.running = { version: null, source_revision: null, source_fingerprint: null, dirty: null, protocols: [{ name: "task", version: 3 }] };
+  daemon.running = { version: null, source_revision: null, source_fingerprint: null, dirty: null, protocols: [] };
   daemon.status = "unknown";
-  daemon.detail = "The running daemon reports its protocol but no build identity.";
+  daemon.legacy_protocols = [{ name: "task", version: 3 }];
+  daemon.detail = "The running daemon reports its historical protocol but no build identity.";
   const agent = component_versions.components.find((row) => row.component === "ctl_agent")!;
   agent.running = { ...agent.running!, source_fingerprint: null };
   agent.status = "unknown";
@@ -225,6 +229,21 @@ mockIPC((command, payload) => {
       const file = identity_files.identity_files.find((item) => item.identity_id === identity_id);
       if (file) file.passphrase_state = file.encrypted ? "not_saved" : "not_required";
       return;
+    }
+    case "get_component_bundles":
+      return structuredClone(component_bundles);
+    case "select_component_bundle": {
+      const selection = request<ComponentBundleSelection>(payload);
+      const bundle = component_bundles.bundles.find((item) => item.bundle_id === selection.bundle_id && item.target_triple === selection.target_triple);
+      const field = selection.purpose === "local" ? "local_use" : "upload_use";
+      if (!bundle || bundle[field] === "unavailable") throw new Error("This build cannot be selected for that use.");
+      channel<ComponentBundlePhase>(payload, "on_progress").onmessage("verifying");
+      channel<ComponentBundlePhase>(payload, "on_progress").onmessage("selecting");
+      component_bundles = { ...component_bundles, bundles: component_bundles.bundles.map((item) => {
+        const same_profile = selection.purpose === "local" ? item.local_use !== "unavailable" : item.target_triple === selection.target_triple;
+        return same_profile ? { ...item, [field]: item.bundle_id === bundle.bundle_id ? "selected" : item[field] === "selected" ? "available" : item[field] } : item;
+      }) };
+      return { ...selection, services_preserved: true };
     }
     case "get_component_versions":
       return structuredClone(component_versions);

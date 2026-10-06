@@ -841,14 +841,13 @@ struct ConnectionAuthentication {
 }
 
 impl ConnectionAuthentication {
+  #[cfg(target_os = "macos")]
   async fn prepare(
     state: &State,
     target: &SshTarget,
     interactive: bool,
   ) -> Result<Self, RequestError> {
-    #[cfg(target_os = "macos")]
     let approval_scope = keychain::approval_scope::snapshot(target).await;
-    #[cfg(target_os = "macos")]
     let authorization = {
       let approvals = state.approvals.clone();
       let prefix = format!("{}:", target_key(target));
@@ -861,44 +860,55 @@ impl ConnectionAuthentication {
       .await
       .map_err(|_| RequestError::InvalidRequest("keychain worker stopped"))?
     };
-    #[cfg(target_os = "macos")]
     let guard = authorization.guard();
-    #[cfg(target_os = "macos")]
     let identities =
       identity_connection::PreparedIdentities::prepare(target, authorization.clone()).await;
-    #[cfg(not(target_os = "macos"))]
-    let _ = (state, target);
     Ok(Self {
       interactive,
       attempted_stored: HashSet::new(),
       captured: HashMap::new(),
-      #[cfg(target_os = "macos")]
       approval_scope,
-      #[cfg(target_os = "macos")]
       authorization,
-      #[cfg(target_os = "macos")]
       _guard: guard,
-      #[cfg(target_os = "macos")]
       identities,
     })
   }
 
+  #[cfg(target_os = "macos")]
   async fn finish(
     &mut self,
     stream: &mut ctl_ipc::Stream,
     target: &SshTarget,
   ) -> Result<(), RequestError> {
-    #[cfg(target_os = "macos")]
-    {
-      self.identities.authentication_finished();
-      if self.interactive {
-        handle_save_offer(stream, target, &mut self.captured, &mut self.identities).await?;
-      }
+    self.identities.authentication_finished();
+    if self.interactive {
+      handle_save_offer(stream, target, &mut self.captured, &mut self.identities).await?;
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (stream, target);
     self.captured.clear();
     Ok(())
+  }
+
+  #[cfg(not(target_os = "macos"))]
+  fn prepare(
+    _state: &State,
+    _target: &SshTarget,
+    interactive: bool,
+  ) -> std::future::Ready<Result<Self, RequestError>> {
+    std::future::ready(Ok(Self {
+      interactive,
+      attempted_stored: HashSet::new(),
+      captured: HashMap::new(),
+    }))
+  }
+
+  #[cfg(not(target_os = "macos"))]
+  fn finish(
+    &mut self,
+    _stream: &mut ctl_ipc::Stream,
+    _target: &SshTarget,
+  ) -> std::future::Ready<Result<(), RequestError>> {
+    self.captured.clear();
+    std::future::ready(Ok(()))
   }
 
   #[cfg(target_os = "macos")]

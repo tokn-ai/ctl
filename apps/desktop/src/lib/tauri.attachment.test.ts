@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenAttachmentRequest, OpenAttachmentResponse } from "./types";
-import { openAttachment, resizeAttachmentPane, requestAttachmentCheckpoint } from "./tauri";
+import { openAttachment, resizeAttachmentDivider, resizeAttachmentPane, requestAttachmentCheckpoint } from "./tauri";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -20,6 +20,12 @@ const request: OpenAttachmentRequest = {
 beforeEach(() => { vi.resetAllMocks(); });
 
 describe("attachment IPC cancellation", () => {
+  it("queues an exact divider target and lossless revision through the owning attachment", async () => {
+    const request = { attachment_id: "owner", request_id: "operation", view_id: "view",
+      expected_revision: "18446744073709551615", split_path: [0, 2], boundary: 1, position: 60 };
+    await resizeAttachmentDivider(request);
+    expect(ipc.invoke).toHaveBeenCalledExactlyOnceWith("resize_attachment_divider", { request });
+  });
   it("queues a correlated pane resize through only the owning attachment", async () => {
     const request = { attachment_id: "owner", request_id: "operation", terminal_id: "secondary", direction: "left" as const, amount: 5 };
     await resizeAttachmentPane(request);

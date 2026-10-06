@@ -10,6 +10,7 @@ import {
   requestAttachmentCheckpoint,
   resizeAttachment,
   resizeAttachmentPane,
+  resizeAttachmentDivider,
   sendInput,
   sessionCache,
   setAttachmentViewZoom,
@@ -36,7 +37,7 @@ import {
   interruptedAttachmentState,
   reconnectSequenceAfterError,
 } from "./attachmentRecovery";
-import { publishPaneResizeResult, publishSessionView, registerAttachmentControl } from "./componentActions";
+import { publishLayoutOwnerChange, publishPaneResizeResult, publishSessionView, registerAttachmentControl } from "./componentActions";
 import { initialAttachmentState, transitionAttachment, type ConnectionIntent } from "./attachmentState";
 import { ConnectionIntentQueue } from "./ConnectionIntentQueue";
 import { InputPump } from "./InputPump";
@@ -1204,6 +1205,13 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     attachmentId: () => activeAttachmentRef.current,
     session: () => stateRef.current.session,
     layoutOwned: () => stateRef.current.phase === "attached" && layoutLeaseOwnedRef.current,
+    resizeDivider: async (divider, request_id) => {
+      const attachment_id = activeAttachmentRef.current;
+      if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {
+        throw new Error("Take resize control to resize panes.");
+      }
+      await resizeAttachmentDivider({ attachment_id, request_id, ...divider });
+    },
     resizePane: async (terminal_id, direction, amount, request_id) => {
       const attachment_id = activeAttachmentRef.current;
       if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {
@@ -1227,6 +1235,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     },
     reset: resetAfterDaemonRestart,
   }), [abortManualReconnect, reconnectCurrent, resetAfterDaemonRestart]);
+
+  useEffect(() => { publishLayoutOwnerChange(); }, [state.phase, state.attachment_id, state.layout_lease.owned_by_client]);
 
   const handleInput = useCallback((data: Uint8Array) => {
     if (!inputLeaseOwnedRef.current || !activeAttachmentRef.current) {

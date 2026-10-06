@@ -584,6 +584,16 @@ pub enum ResizeDirection {
   Down,
 }
 
+/// Exact split divider target and absolute gap-cell position within its canvas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DividerResize {
+  pub view_id: String,
+  pub expected_revision: u64,
+  pub split_path: Vec<u16>,
+  pub boundary: u16,
+  pub position: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", from = "LegacyViewLayout")]
 pub enum ViewLayout {
@@ -682,6 +692,12 @@ pub enum ClientMessage {
     terminal_id: String,
     direction: ResizeDirection,
     amount: u16,
+  },
+  /// Attached-only pointer resize of an exact divider in a previously observed view.
+  ResizeDivider {
+    request_id: String,
+    #[serde(flatten)]
+    divider: DividerResize,
   },
   PromoteTerminal {
     terminal_id: String,
@@ -1506,6 +1522,29 @@ mod tests {
       })
     );
     assert_eq!(reply, serde_json::from_value(value).unwrap());
+  }
+
+  #[test]
+  fn exact_divider_resize_has_flat_snake_case_identity_revision_and_cell_position() {
+    let request = ClientMessage::ResizeDivider {
+      request_id: "drag-1".into(),
+      divider: DividerResize {
+        view_id: "view".into(),
+        expected_revision: 9,
+        split_path: vec![1, 0],
+        boundary: 2,
+        position: 64,
+      },
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "type": "resize_divider", "request_id": "drag-1", "view_id": "view", "expected_revision": 9,
+        "split_path": [1, 0], "boundary": 2, "position": 64,
+      })
+    );
+    assert_eq!(request, serde_json::from_value(value).unwrap());
   }
 
   #[test]

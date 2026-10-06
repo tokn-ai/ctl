@@ -2325,25 +2325,8 @@ where
       )
       .await?;
     }
-    ClientMessage::ResizePane {
-      request_id,
-      terminal_id,
-      direction,
-      amount,
-    } => {
-      process_pane_resize(
-        writer,
-        session,
-        attachment_id,
-        protocol_version,
-        PaneResizeRequest {
-          request_id,
-          terminal_id,
-          direction,
-          amount,
-        },
-      )
-      .await?;
+    request @ (ClientMessage::ResizePane { .. } | ClientMessage::ResizeDivider { .. }) => {
+      process_pane_resize(writer, session, attachment_id, protocol_version, request).await?;
     }
     ClientMessage::AcquireLease { lease } => {
       let already_owned_input =
@@ -2426,9 +2409,16 @@ where
 
 struct PaneResizeRequest {
   request_id: String,
-  terminal_id: String,
-  direction: ctmux_proto::ResizeDirection,
-  amount: u16,
+  action: PaneResizeAction,
+}
+
+enum PaneResizeAction {
+  Pane {
+    terminal_id: String,
+    direction: ctmux_proto::ResizeDirection,
+    amount: u16,
+  },
+  Divider(ctmux_proto::DividerResize),
 }
 
 async fn process_pane_resize<W>(
@@ -2436,11 +2426,42 @@ async fn process_pane_resize<W>(
   session: Arc<Terminal>,
   attachment_id: &str,
   protocol_version: ctl_core::protocol::ProtocolVersion,
-  request: PaneResizeRequest,
+  request: ClientMessage,
 ) -> Result<(), ConnectionError>
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
+  let request = match request {
+    ClientMessage::ResizePane {
+      request_id,
+      terminal_id,
+      direction,
+      amount,
+    } => PaneResizeRequest {
+      request_id,
+      action: PaneResizeAction::Pane {
+        terminal_id,
+        direction,
+        amount,
+      },
+    },
+    ClientMessage::ResizeDivider {
+      request_id,
+      divider,
+    } => PaneResizeRequest {
+      request_id,
+      action: PaneResizeAction::Divider(divider),
+    },
+    _ => {
+      send_error(
+        writer,
+        ErrorCode::InvalidRequest,
+        "expected pane or divider resize",
+      )
+      .await?;
+      return Ok(());
+    }
+  };
   if !ctmux_proto::supports_pane_resize(protocol_version) {
     send_error(
       writer,
@@ -2459,13 +2480,13 @@ where
     }
   } else {
     let attachment_id = attachment_id.to_owned();
-    let result = tokio::task::spawn_blocking(move || {
-      session.resize_pane(
-        &attachment_id,
-        &request.terminal_id,
-        request.direction,
-        request.amount,
-      )
+    let result = tokio::task::spawn_blocking(move || match request.action {
+      PaneResizeAction::Pane {
+        terminal_id,
+        direction,
+        amount,
+      } => session.resize_pane(&attachment_id, &terminal_id, direction, amount),
+      PaneResizeAction::Divider(divider) => session.resize_divider(&attachment_id, &divider),
     })
     .await?;
     match result {
@@ -2496,6 +2517,7 @@ fn renews_attachment_liveness(message: &ClientMessage) -> bool {
       | ClientMessage::Resize { .. }
       | ClientMessage::SetViewZoom { .. }
       | ClientMessage::ResizePane { .. }
+      | ClientMessage::ResizeDivider { .. }
       | ClientMessage::AcquireLease { .. }
       | ClientMessage::ReleaseLease { .. }
       | ClientMessage::Heartbeat { .. }

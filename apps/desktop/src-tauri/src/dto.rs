@@ -433,6 +433,32 @@ pub struct ResizeAttachmentRequestDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ResizeAttachmentDividerRequestDto {
+  pub attachment_id: String,
+  pub request_id: String,
+  pub view_id: String,
+  pub expected_revision: String,
+  pub split_path: Vec<u16>,
+  pub boundary: u16,
+  pub position: u16,
+}
+
+impl ResizeAttachmentDividerRequestDto {
+  pub fn divider(&self) -> CommandResult<ctmux_proto::DividerResize> {
+    Ok(ctmux_proto::DividerResize {
+      view_id: self.view_id.clone(),
+      expected_revision: self
+        .expected_revision
+        .parse()
+        .map_err(CommandErrorDto::backend)?,
+      split_path: self.split_path.clone(),
+      boundary: self.boundary,
+      position: self.position,
+    })
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ResizeAttachmentPaneRequestDto {
   pub attachment_id: String,
   pub request_id: String,
@@ -1195,6 +1221,59 @@ mod tests {
 #[cfg(test)]
 mod pane_resize_tests {
   use super::*;
+
+  fn divider_request() -> serde_json::Value {
+    serde_json::json!({
+      "attachment_id": "owner", "request_id": "operation", "view_id": "view",
+      "expected_revision": u64::MAX.to_string(), "split_path": [0, u16::MAX],
+      "boundary": 0, "position": u16::MAX,
+    })
+  }
+
+  #[test]
+  fn divider_request_preserves_string_revision_and_exact_split_path() {
+    let request: ResizeAttachmentDividerRequestDto =
+      serde_json::from_value(divider_request()).unwrap();
+    assert_eq!(request.attachment_id, "owner");
+    assert_eq!(request.request_id, "operation");
+    assert_eq!(
+      request.divider().unwrap(),
+      ctmux_proto::DividerResize {
+        view_id: "view".into(),
+        expected_revision: u64::MAX,
+        split_path: vec![0, u16::MAX],
+        boundary: 0,
+        position: u16::MAX,
+      }
+    );
+  }
+
+  #[test]
+  fn divider_request_rejects_invalid_or_out_of_range_revisions() {
+    for revision in ["-1", "invalid", "18446744073709551616"] {
+      let mut value = divider_request();
+      value["expected_revision"] = revision.into();
+      let request: ResizeAttachmentDividerRequestDto = serde_json::from_value(value).unwrap();
+      assert!(request.divider().is_err());
+    }
+    let mut value = divider_request();
+    value["expected_revision"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<ResizeAttachmentDividerRequestDto>(value).is_err());
+  }
+
+  #[test]
+  fn divider_request_bounds_split_indices_boundary_and_position() {
+    for (field, value) in [
+      ("split_path", serde_json::json!([65536])),
+      ("split_path", serde_json::json!([-1])),
+      ("boundary", serde_json::json!(65536)),
+      ("position", serde_json::json!(65536)),
+    ] {
+      let mut request = divider_request();
+      request[field] = value;
+      assert!(serde_json::from_value::<ResizeAttachmentDividerRequestDto>(request).is_err());
+    }
+  }
 
   #[test]
   fn resize_request_uses_stable_snake_case_fields_and_bounded_amount() {

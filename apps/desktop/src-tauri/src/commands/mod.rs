@@ -20,11 +20,11 @@ use tokio::time::timeout;
 use crate::dto::{
   AcknowledgeAttachmentEventRequestDto, AttachmentEventDto, AttachmentLeaseRequestDto,
   AttachmentRequestDto, ConnectionTargetDto, CreateSessionRequestDto, KillSessionRequestDto,
-  OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentPaneRequestDto,
-  ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto, SaveSshConfigHostRequestDto,
-  SaveSshConfigHostResponseDto, SendInputRequestDto, SessionDto, SessionListDto,
-  SetAttachmentViewZoomRequestDto, ShellStateDto, SshConfigHostCatalogDto, SshConfigHostDto,
-  TargetRequestDto, decode_input, observation_timestamp_ms, parse_sequence,
+  OpenAttachmentRequestDto, OpenAttachmentResponseDto, ResizeAttachmentDividerRequestDto,
+  ResizeAttachmentPaneRequestDto, ResizeAttachmentRequestDto, RestartLocalDaemonResponseDto,
+  SaveSshConfigHostRequestDto, SaveSshConfigHostResponseDto, SendInputRequestDto, SessionDto,
+  SessionListDto, SetAttachmentViewZoomRequestDto, ShellStateDto, SshConfigHostCatalogDto,
+  SshConfigHostDto, TargetRequestDto, decode_input, observation_timestamp_ms, parse_sequence,
 };
 use crate::error::{CommandErrorDto, CommandResult};
 use crate::local_transport;
@@ -423,6 +423,26 @@ pub async fn resize_attachment(
   actor
     .control
     .resize(terminal_size)
+    .await
+    .map_err(CommandErrorDto::backend)
+}
+
+#[tauri::command]
+pub async fn resize_attachment_divider(
+  window: WebviewWindow,
+  state: State<'_, AppState>,
+  request: ResizeAttachmentDividerRequestDto,
+) -> CommandResult<()> {
+  let actor = state.actor(window.label(), &request.attachment_id).await?;
+  if !actor.control.supports_pane_resize() {
+    return Err(CommandErrorDto::new(
+      "pane_resize_unsupported",
+      "This server does not support divider resizing. Upgrade ctmuxd to use it.",
+    ));
+  }
+  actor
+    .control
+    .resize_divider(request.divider()?, request.request_id)
     .await
     .map_err(CommandErrorDto::backend)
 }

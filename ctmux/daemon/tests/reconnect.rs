@@ -3264,6 +3264,13 @@ async fn resize_pane_with_id(
     },
   )
   .await?;
+  wait_for_resize_result(stream, &request_id).await
+}
+
+async fn wait_for_resize_result(
+  stream: &mut UnixStream,
+  request_id: &str,
+) -> TestResult<ctmux_proto::PaneResizeOutcome> {
   loop {
     match presented_message(stream).await? {
       ServerMessage::PaneResizeResult {
@@ -3280,6 +3287,170 @@ async fn resize_pane_with_id(
       other => return Err(format!("expected correlated pane resize result, got {other:?}").into()),
     }
   }
+}
+
+async fn resize_divider_result(
+  stream: &mut UnixStream,
+  view: &ctmux_proto::ViewInfo,
+  split_path: &[u16],
+  boundary: u16,
+  position: u16,
+) -> TestResult<ctmux_proto::PaneResizeOutcome> {
+  let request_id = Uuid::new_v4().to_string();
+  write_frame(
+    stream,
+    &ClientMessage::ResizeDivider {
+      request_id: request_id.clone(),
+      divider: ctmux_proto::DividerResize {
+        view_id: view.view_id.clone(),
+        expected_revision: view.revision,
+        split_path: split_path.to_vec(),
+        boundary,
+        position,
+      },
+    },
+  )
+  .await?;
+  wait_for_resize_result(stream, &request_id).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn divider_drag_moves_exact_outer_split_and_preserves_zoom_on_noop_or_error() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "mouse-divider",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  let first_split = split_topology_shell(&socket, &root).await?;
+  let outer_second = first_split.terminals[1].terminal_id.clone();
+  split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let (mut observer, _) = attach_session(&socket, &outer_second, None, true, true).await?;
+  let baseline = topology_view(&socket, &root.session_id).await?;
+  assert_resize_rejected(
+    resize_divider_result(&mut observer, &baseline, &[], 0, 60).await?,
+    &ErrorCode::LayoutLeaseRequired,
+  );
+  assert_eq!(topology_view(&socket, &root.session_id).await?, baseline);
+  let resized = applied_resize(resize_divider_result(&mut owner, &baseline, &[], 0, 60).await?);
+  assert_eq!(
+    resized
+      .panes
+      .iter()
+      .map(|pane| pane.columns)
+      .collect::<Vec<_>>(),
+    [30, 29, 19]
+  );
+  assert_eq!(resized.panes[2].left, 61);
+  assert_eq!(resized.revision, baseline.revision + 1);
+  assert_unzoomed_geometry(&resized);
+  let shared_view = wait_for_view_zoom_at_revision(&mut observer, None, resized.revision).await?;
+  assert_eq!(shared_view.layout, resized.layout);
+  let zoomed = set_view_zoom(
+    &socket,
+    &root.session_id,
+    &mut owner,
+    Some(&root.terminal_id),
+  )
+  .await?;
+  assert_invalid_divider_keeps_view(&socket, &mut owner, &zoomed).await?;
+  assert_eq!(
+    applied_resize(resize_divider_result(&mut owner, &zoomed, &[], 0, 60).await?),
+    zoomed
+  );
+  let clamped = applied_resize(resize_divider_result(&mut owner, &zoomed, &[], 0, u16::MAX).await?);
+  assert_eq!(clamped.panes[2].columns, 2);
+  assert_unzoomed_geometry(&clamped);
+  let restored = applied_resize(resize_divider_result(&mut owner, &clamped, &[], 0, 60).await?);
+  assert_eq!(restored.panes, resized.panes);
+  write_frame(
+    &mut owner,
+    &ClientMessage::Input {
+      data: b"typing-after-divider-errors\n".to_vec(),
+    },
+  )
+  .await?;
+  read_output_until(&mut owner, b"typing-after-divider-errors").await?;
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  drop(observer);
+  wait_for_daemon_exit(daemon, "divider drag daemon did not exit").await
+}
+
+async fn assert_invalid_divider_keeps_view(
+  socket: &Path,
+  owner: &mut UnixStream,
+  view: &ctmux_proto::ViewInfo,
+) -> TestResult {
+  let mut stale_revision = view.clone();
+  stale_revision.revision -= 1;
+  assert_resize_rejected(
+    resize_divider_result(owner, &stale_revision, &[], 0, 50).await?,
+    &ErrorCode::InvalidRequest,
+  );
+  let mut wrong_view = view.clone();
+  wrong_view.view_id = "another-view".into();
+  assert_resize_rejected(
+    resize_divider_result(owner, &wrong_view, &[], 0, 50).await?,
+    &ErrorCode::InvalidRequest,
+  );
+  for (path, boundary) in [
+    (vec![99], 0),
+    (vec![0, 0], 0),
+    (vec![0; 17], 0),
+    (vec![], 1),
+  ] {
+    assert_resize_rejected(
+      resize_divider_result(owner, view, &path, boundary, 50).await?,
+      &ErrorCode::InvalidRequest,
+    );
+  }
+  assert_eq!(topology_view(socket, &view.session_id).await?, *view);
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn divider_drag_rejects_transferred_view_even_when_revision_matches() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(&socket, "divider-move", "IFS= read -r line").await?;
+  let original = topology_view(&socket, &root.session_id).await?;
+  split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let ServerMessage::ViewSnapshot { view: moved } = topology_request(
+    &socket,
+    ClientMessage::PromoteTerminal {
+      terminal_id: root.terminal_id.clone(),
+      name: Some("divider-moved".into()),
+    },
+  )
+  .await?
+  else {
+    panic!("promoted view expected");
+  };
+  assert_ne!(original.view_id, moved.view_id);
+  assert_eq!(original.revision, moved.revision);
+  assert!(
+    acquire_lease(&mut owner, LeaseKind::Layout)
+      .await?
+      .owned_by_client
+  );
+  assert_resize_rejected(
+    resize_divider_result(&mut owner, &original, &[], 0, 70).await?,
+    &ErrorCode::InvalidRequest,
+  );
+  assert_eq!(topology_view(&socket, &moved.session_id).await?, moved);
+  kill_shell_session(&socket, &root.session_id).await?;
+  kill_shell_session(&socket, &moved.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "divider move daemon did not exit").await
 }
 
 fn applied_resize(outcome: ctmux_proto::PaneResizeOutcome) -> ctmux_proto::ViewInfo {
@@ -3603,6 +3774,21 @@ async fn assert_legacy_pane_resize_unavailable(
       terminal_id: root.terminal_id.clone(),
       direction: ctmux_proto::ResizeDirection::Right,
       amount: 5,
+    },
+  )
+  .await?;
+  expect_error(&mut stream, ErrorCode::InvalidRequest).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::ResizeDivider {
+      request_id: "old-divider".into(),
+      divider: ctmux_proto::DividerResize {
+        view_id: root.view_id.clone(),
+        expected_revision: 0,
+        split_path: Vec::new(),
+        boundary: 0,
+        position: 50,
+      },
     },
   )
   .await?;

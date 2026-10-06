@@ -103,6 +103,36 @@ impl LayoutExt for ViewLayout {
 }
 
 impl SessionRegistry {
+  pub(super) fn capture_view_geometry(
+    &self,
+    id: &str,
+  ) -> Vec<(Arc<Terminal>, ctmux_proto::TerminalSize)> {
+    self.sessions[id]
+      .view
+      .layout
+      .terminal_ids()
+      .iter()
+      .map(|id| {
+        let terminal = Arc::clone(&self.terminals[id]);
+        let size = terminal.info().terminal_size;
+        (terminal, size)
+      })
+      .collect()
+  }
+
+  pub(super) fn restore_view_geometry(
+    &self,
+    id: &str,
+    geometry: &[(Arc<Terminal>, ctmux_proto::TerminalSize)],
+  ) {
+    // Continue after a failed PTY: later hidden panes may already have adopted
+    // tentative unzoom geometry and also need their original dimensions back.
+    for (terminal, size) in geometry {
+      let _restore = terminal.resize_pty(size.clone());
+    }
+    self.publish_view(id);
+  }
+
   pub(super) fn resize_view(
     &mut self,
     id: &str,

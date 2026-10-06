@@ -496,6 +496,10 @@ enum AttachmentCommand {
     amount: u16,
     request_id: String,
   },
+  ResizeDivider {
+    divider: ctmux_proto::DividerResize,
+    request_id: String,
+  },
   AcquireLease {
     lease: LeaseKind,
   },
@@ -665,6 +669,33 @@ impl AttachmentControl {
         terminal_id,
         direction,
         amount,
+        request_id,
+      })
+      .await
+  }
+
+  /// Queues movement of a specific split divider to an absolute canvas cell.
+  ///
+  /// The daemon validates the view identity, revision, and split path before
+  /// moving adjacent subtrees. Results use the existing correlated resize event.
+  ///
+  /// # Errors
+  /// Returns an error when the contract lacks resizing, layout is not owned,
+  /// or the controller has stopped. Stale views are rejected by the daemon.
+  pub async fn resize_divider(
+    &self,
+    divider: ctmux_proto::DividerResize,
+    request_id: String,
+  ) -> Result<(), AttachmentCommandError> {
+    if !self.supports_pane_resize() {
+      return Err(AttachmentCommandError::PaneResizeUnavailable);
+    }
+    if !self.state.lease_status(LeaseKind::Layout).owned_by_client {
+      return Err(AttachmentCommandError::LayoutLeaseRequired);
+    }
+    self
+      .send(AttachmentCommand::ResizeDivider {
+        divider,
         request_id,
       })
       .await
@@ -2160,6 +2191,13 @@ where
       amount,
       request_id,
     },
+    AttachmentCommand::ResizeDivider {
+      divider,
+      request_id,
+    } => ClientMessage::ResizeDivider {
+      divider,
+      request_id,
+    },
     AttachmentCommand::AcquireLease { lease } => ClientMessage::AcquireLease { lease },
     AttachmentCommand::ReleaseLease { lease } => ClientMessage::ReleaseLease { lease },
     AttachmentCommand::RequestCheckpoint => ClientMessage::RequestCheckpoint,
@@ -2980,6 +3018,12 @@ mod tests {
           .await,
         Err(AttachmentCommandError::PaneResizeUnavailable)
       );
+      assert_eq!(
+        control
+          .resize_divider(divider_request(), "old-divider".into())
+          .await,
+        Err(AttachmentCommandError::PaneResizeUnavailable)
+      );
     }
     let (client, _peer) = tokio::io::duplex(4096);
     let attached = attached_session(0, None, ShellState::default());
@@ -2997,6 +3041,85 @@ mod tests {
         )
         .await,
       Err(AttachmentCommandError::LayoutLeaseRequired)
+    );
+    assert_eq!(
+      control
+        .resize_divider(divider_request(), "unowned-divider".into())
+        .await,
+      Err(AttachmentCommandError::LayoutLeaseRequired)
+    );
+  }
+
+  fn divider_request() -> ctmux_proto::DividerResize {
+    ctmux_proto::DividerResize {
+      view_id: "view".into(),
+      expected_revision: 9,
+      split_path: vec![0],
+      boundary: 1,
+      position: 32,
+    }
+  }
+
+  #[tokio::test]
+  async fn divider_commands_preserve_exact_targets_and_correlate_nonfatal_errors() {
+    let (client, mut peer) = tokio::io::duplex(4096);
+    let mut attached = attached_session(0, None, ShellState::default());
+    attached.layout_lease = LeaseStatus {
+      held: true,
+      owned_by_client: true,
+    };
+    let (controller, control, mut events) =
+      AttachmentController::new(client, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(async move { controller.run().await });
+    for (id, code) in [
+      ("stale", ErrorCode::InvalidRequest),
+      ("lease-lost", ErrorCode::LayoutLeaseRequired),
+    ] {
+      let divider = divider_request();
+      control
+        .resize_divider(divider.clone(), id.into())
+        .await
+        .unwrap();
+      assert_eq!(
+        read_frame::<_, ClientMessage>(&mut peer).await.unwrap(),
+        Some(ClientMessage::ResizeDivider {
+          divider,
+          request_id: id.into()
+        })
+      );
+      let outcome = ctmux_proto::PaneResizeOutcome::Rejected {
+        code,
+        message: "divider changed".into(),
+      };
+      write_frame(
+        &mut peer,
+        &ServerMessage::PaneResizeResult {
+          request_id: id.into(),
+          outcome: outcome.clone(),
+        },
+      )
+      .await
+      .unwrap();
+      assert_eq!(
+        events.recv().await,
+        Some(AttachmentEvent::PaneResizeResult {
+          request_id: id.into(),
+          outcome
+        })
+      );
+    }
+    assert!(!control.state().leases().layout.owned_by_client);
+    control.detach().await.unwrap();
+    assert_eq!(
+      read_frame::<_, ClientMessage>(&mut peer).await.unwrap(),
+      Some(ClientMessage::Detach)
+    );
+    write_frame(&mut peer, &ServerMessage::Detached)
+      .await
+      .unwrap();
+    assert_eq!(
+      runner.await.unwrap().unwrap().reason,
+      AttachExitReason::Detached
     );
   }
 

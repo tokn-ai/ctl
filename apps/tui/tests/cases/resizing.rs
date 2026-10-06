@@ -1,6 +1,11 @@
 use crate::support::{Result, Screen, TestDaemon, TestProxy, Tui};
+use ctmux_client::{
+  AttachRequest, AttachmentControl, AttachmentController, AttachmentControllerOptions,
+  AttachmentEvent, AttachmentEvents, ClientIdentity,
+};
 use ctmux_proto::{
-  ClientMessage, CommandSpec, PaneGeometry, ServerMessage, SplitAxis, TerminalSize, ViewInfo,
+  ClientMessage, CommandSpec, DividerResize, PaneGeometry, PaneResizeOutcome, ServerMessage,
+  SplitAxis, TerminalSize, ViewInfo,
 };
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
@@ -321,6 +326,170 @@ async fn resized_layout_survives_transport_recovery_and_accepts_more_resize_keys
   detach(&mut tui).await?;
   drop(tui);
   drop(proxy);
+  daemon.shutdown().await?;
+  Ok(())
+}
+
+async fn divider_result(
+  control: &AttachmentControl,
+  events: &mut AttachmentEvents,
+  expected: &str,
+) -> Result<ViewInfo> {
+  tokio::time::timeout(Duration::from_secs(5), async {
+    loop {
+      match events
+        .recv()
+        .await
+        .ok_or("divider owner stopped before acknowledgement")?
+      {
+        AttachmentEvent::Checkpoint { checkpoint, .. } => {
+          control.acknowledge_checkpoint(checkpoint.sequence).await?;
+        }
+        AttachmentEvent::Output { sequence_end, .. } => {
+          control.acknowledge_output(sequence_end).await?;
+        }
+        AttachmentEvent::PtyGeometryChanged {
+          observed_sequence, ..
+        } => control.acknowledge_geometry(observed_sequence).await?,
+        AttachmentEvent::PaneResizeResult {
+          request_id,
+          outcome,
+        } if request_id == expected => {
+          return match outcome {
+            PaneResizeOutcome::Applied { view } => Ok(*view),
+            PaneResizeOutcome::Rejected { message, .. } => Err(message.into()),
+          };
+        }
+        AttachmentEvent::ServerError { message, .. } => return Err(message.into()),
+        _ => {}
+      }
+    }
+  })
+  .await?
+}
+
+type LayoutOwner = (
+  AttachmentControl,
+  AttachmentEvents,
+  tokio::task::JoinHandle<std::result::Result<ctmux_client::AttachExit, ctmux_client::ClientError>>,
+);
+
+async fn layout_owner(daemon: &TestDaemon, session: &str) -> Result<LayoutOwner> {
+  let (stream, attached) = ctmux_client::begin_attach(
+    ctmux_ipc::connect_or_start_daemon(&daemon.socket).await?,
+    &ClientIdentity {
+      name: "divider-owner".into(),
+      version: "test".into(),
+    },
+    AttachRequest {
+      session: session.into(),
+      resume_from: None,
+      terminal_size: canvas(),
+      request_input_lease: false,
+      request_layout_lease: true,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes: ctmux_client::DEFAULT_PRESENTATION_WINDOW_BYTES,
+    },
+  )
+  .await?;
+  assert!(attached.layout_lease.owned_by_client);
+  let (controller, control, events) =
+    AttachmentController::new(stream, &attached, AttachmentControllerOptions::default())?;
+  let runner = tokio::spawn(async move { controller.run().await });
+  Ok((control, events, runner))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_client_moves_the_exact_outer_divider_and_the_tui_renders_shared_geometry()
+-> Result<()> {
+  let mut daemon = TestDaemon::start().await?;
+  let (session, first, second) = fixture(&daemon, "outer-divider").await?;
+  let third = split(&daemon, &session, &first, SplitAxis::Horizontal, "third").await?;
+  let original = view(&daemon, &session).await?;
+  let (control, mut events, runner) = layout_owner(&daemon, &session).await?;
+  let mut tui = Tui::start(&daemon, &session, COLUMNS, ROWS).await?;
+  tui
+    .wait_screen(
+      "same-axis nested panes share another client's layout",
+      |screen| {
+        screen.contains("first:ready")
+          && screen.contains("second:ready")
+          && screen.contains("third:ready")
+          && footer(screen).contains("shared size")
+      },
+    )
+    .await?;
+  // The first terminal's nearest horizontal divider is the inner split. The
+  // GUI-selected root boundary must instead move the entire left subtree.
+  let position = pane(&original, &second).left + 9;
+  control
+    .resize_divider(
+      DividerResize {
+        view_id: original.view_id.clone(),
+        expected_revision: original.revision,
+        split_path: Vec::new(),
+        boundary: 0,
+        position,
+      },
+      "outer-drag".into(),
+    )
+    .await?;
+  let changed = divider_result(&control, &mut events, "outer-drag").await?;
+  assert_eq!(pane(&changed, &second).left, position + 1);
+  assert_eq!(
+    pane(&changed, &first).columns,
+    pane(&original, &first).columns + 5
+  );
+  assert_eq!(
+    pane(&changed, &third).columns,
+    pane(&original, &third).columns + 5
+  );
+  assert_eq!(
+    pane(&changed, &second).columns,
+    pane(&original, &second).columns - 10
+  );
+  let shown = tui
+    .wait_screen("outer divider moves in the attached TUI", |screen| {
+      screen.rows[..usize::from(ROWS - 1)]
+        .iter()
+        .all(|row| row.chars().nth(usize::from(position)) == Some('│'))
+        && !footer(screen).contains('│')
+    })
+    .await?;
+  assert!(
+    shown.contains("first:ready")
+      && shown.contains("third:ready")
+      && shown.contains("second:ready")
+  );
+  actual_size(&mut tui, "first", "cross-client", pane(&changed, &first)).await?;
+  control.detach().await?;
+  assert!(matches!(
+    runner.await??.reason,
+    ctmux_client::AttachExitReason::Detached
+  ));
+  tui.send(b"\x02R")?;
+  tui
+    .wait_screen(
+      "TUI explicitly acquires the released resize lease",
+      |screen| footer(screen).contains("resize owner"),
+    )
+    .await?;
+  tui.send(b"\x02\x1b[1;5C")?;
+  let keyboard = wait_view(&daemon, &session, |view| {
+    pane(view, &first).columns == pane(&changed, &first).columns + 1
+  })
+  .await?;
+  assert_eq!(pane(&keyboard, &second), pane(&changed, &second));
+  actual_size(
+    &mut tui,
+    "first",
+    "keys-after-drag",
+    pane(&keyboard, &first),
+  )
+  .await?;
+  detach(&mut tui).await?;
+  drop(tui);
   daemon.shutdown().await?;
   Ok(())
 }

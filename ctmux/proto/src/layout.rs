@@ -133,6 +133,98 @@ impl ViewLayout {
     )
   }
 
+  /// Moves an exact divider to an absolute canvas gap-cell coordinate.
+  ///
+  /// # Errors
+  /// Rejects invalid paths/boundaries or an insufficient canvas before mutation.
+  pub fn resize_divider(
+    &mut self,
+    split_path: &[u16],
+    boundary: u16,
+    position: u16,
+    size: &TerminalSize,
+  ) -> Result<bool, String> {
+    if split_path.len() > 16 {
+      return Err("divider split path exceeds 16 levels".into());
+    }
+    self.pane_geometry(size)?;
+    self.place_divider(
+      split_path,
+      usize::from(boundary),
+      position,
+      LayoutBounds {
+        left: 0,
+        top: 0,
+        columns: size.columns,
+        rows: size.rows,
+      },
+    )
+  }
+
+  fn place_divider(
+    &mut self,
+    split_path: &[u16],
+    boundary: usize,
+    position: u16,
+    bounds: LayoutBounds,
+  ) -> Result<bool, String> {
+    let Self::Split {
+      axis,
+      children,
+      weights,
+    } = self
+    else {
+      return Err("divider path must target a split".into());
+    };
+    let horizontal = *axis == SplitAxis::Horizontal;
+    let extents = split_extents(
+      *axis,
+      children,
+      weights,
+      if horizontal {
+        bounds.columns
+      } else {
+        bounds.rows
+      },
+    )?;
+    if let Some((&index, remaining)) = split_path.split_first() {
+      let index = usize::from(index);
+      let extent = *extents
+        .get(index)
+        .ok_or("divider split path child is absent")?;
+      let offset = extents[..index].iter().sum::<u16>()
+        + u16::try_from(index).map_err(|_| "invalid divider path")?;
+      let child_bounds = if horizontal {
+        LayoutBounds {
+          left: bounds.left + offset,
+          columns: extent,
+          ..bounds
+        }
+      } else {
+        LayoutBounds {
+          top: bounds.top + offset,
+          rows: extent,
+          ..bounds
+        }
+      };
+      return children[index].place_divider(remaining, boundary, position, child_bounds);
+    }
+    if boundary + 1 >= children.len() {
+      return Err("divider boundary is absent from split".into());
+    }
+    let current = (if horizontal { bounds.left } else { bounds.top })
+      + extents[..=boundary].iter().sum::<u16>()
+      + u16::try_from(boundary).map_err(|_| "invalid divider boundary")?;
+    move_boundary(
+      *axis,
+      children,
+      weights,
+      extents,
+      boundary,
+      i64::from(position) - i64::from(current),
+    )
+  }
+
   /// Removes fields unavailable to contracts before proportional pane sizing.
   pub fn clear_weights(&mut self) {
     if let Self::Split {
@@ -185,7 +277,7 @@ impl ViewLayout {
       .ok_or("resize terminal is absent from split")?;
     let horizontal = *axis == SplitAxis::Horizontal;
     let length = if horizontal { columns } else { rows };
-    let mut extents = split_extents(*axis, children, weights, length)?;
+    let extents = split_extents(*axis, children, weights, length)?;
     let child_columns = if horizontal {
       extents[selected]
     } else {
@@ -202,29 +294,52 @@ impl ViewLayout {
       return Ok(None);
     }
     let boundary = selected.min(children.len() - 2);
-    let minimum = |child: &Self| {
-      let (columns, rows) = child.minimum_size();
-      if horizontal { columns } else { rows }
-    };
-    let left = i64::from(extents[boundary]);
-    let right = i64::from(extents[boundary + 1]);
     let delta = if matches!(direction, ResizeDirection::Right | ResizeDirection::Down) {
       i64::from(amount)
     } else {
       -i64::from(amount)
     };
-    let delta = delta.clamp(
-      i64::from(minimum(&children[boundary])) - left,
-      right - i64::from(minimum(&children[boundary + 1])),
-    );
-    if delta == 0 {
-      return Ok(Some(false));
-    }
-    extents[boundary] = u16::try_from(left + delta).map_err(|_| "invalid pane extent")?;
-    extents[boundary + 1] = u16::try_from(right - delta).map_err(|_| "invalid pane extent")?;
-    *weights = extents.into_iter().map(u32::from).collect();
-    Ok(Some(true))
+    move_boundary(*axis, children, weights, extents, boundary, delta).map(Some)
   }
+}
+
+#[derive(Clone, Copy)]
+struct LayoutBounds {
+  left: u16,
+  top: u16,
+  columns: u16,
+  rows: u16,
+}
+
+fn move_boundary(
+  axis: SplitAxis,
+  children: &[ViewLayout],
+  weights: &mut Vec<u32>,
+  mut extents: Vec<u16>,
+  boundary: usize,
+  delta: i64,
+) -> Result<bool, String> {
+  let minimum = |child: &ViewLayout| {
+    let (columns, rows) = child.minimum_size();
+    if axis == SplitAxis::Horizontal {
+      columns
+    } else {
+      rows
+    }
+  };
+  let left = i64::from(extents[boundary]);
+  let right = i64::from(extents[boundary + 1]);
+  let delta = delta.clamp(
+    i64::from(minimum(&children[boundary])) - left,
+    right - i64::from(minimum(&children[boundary + 1])),
+  );
+  if delta == 0 {
+    return Ok(false);
+  }
+  extents[boundary] = u16::try_from(left + delta).map_err(|_| "invalid pane extent")?;
+  extents[boundary + 1] = u16::try_from(right - delta).map_err(|_| "invalid pane extent")?;
+  *weights = extents.into_iter().map(u32::from).collect();
+  Ok(true)
 }
 
 fn split_extents(
@@ -538,6 +653,103 @@ mod tests {
         .is_none()
     );
     assert_eq!(layout, horizontal(&["a", "b"], &[]));
+  }
+
+  #[test]
+  fn exact_divider_targets_outer_parallel_splits_and_nested_canvas_offsets() {
+    let canvas = size(101, 20);
+    let mut layout = ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
+      children: vec![horizontal(&["a", "b"], &[]), horizontal(&["c", "d"], &[])],
+      weights: Vec::new(),
+    };
+    assert!(layout.resize_divider(&[1], 0, 80, &canvas).unwrap());
+    let panes = layout.pane_geometry(&canvas).unwrap();
+    assert_eq!(
+      panes.iter().map(|pane| pane.columns).collect::<Vec<_>>(),
+      [25, 24, 29, 20]
+    );
+    assert_eq!(panes[3].left, 81);
+    assert!(layout.resize_divider(&[], 0, 60, &canvas).unwrap());
+    let panes = layout.pane_geometry(&canvas).unwrap();
+    assert_eq!(
+      panes.iter().map(|pane| pane.columns).collect::<Vec<_>>(),
+      [30, 29, 24, 15]
+    );
+    assert_eq!(panes[2].left, 61);
+    assert!(matches!(&layout, ViewLayout::Split { children, .. }
+      if matches!(&children[1], ViewLayout::Split { weights, .. } if weights == &[29, 20])));
+  }
+
+  #[test]
+  fn absolute_divider_targets_coalesce_and_recover_from_clamping_without_drift() {
+    let canvas = size(101, 20);
+    let original = ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
+      children: vec![horizontal(&["a", "b"], &[]), horizontal(&["c", "d"], &[])],
+      weights: Vec::new(),
+    };
+    let mut sequential = original.clone();
+    for position in [51, 55, 60, 65] {
+      sequential
+        .resize_divider(&[], 0, position, &canvas)
+        .unwrap();
+    }
+    let mut coalesced = original;
+    coalesced.resize_divider(&[], 0, 65, &canvas).unwrap();
+    assert_eq!(sequential, coalesced);
+    sequential
+      .resize_divider(&[], 0, u16::MAX, &canvas)
+      .unwrap();
+    let panes = sequential.pane_geometry(&canvas).unwrap();
+    assert_eq!(panes[2].columns + panes[3].columns + 1, 5);
+    sequential.resize_divider(&[], 0, 65, &canvas).unwrap();
+    assert_eq!(sequential, coalesced);
+    assert!(!sequential.resize_divider(&[], 0, 65, &canvas).unwrap());
+    assert_eq!(sequential, coalesced);
+    for (path, boundary) in [
+      (vec![2], 0),
+      (vec![0, 0], 0),
+      (vec![0; 17], 0),
+      (vec![], 1),
+      (vec![], u16::MAX),
+    ] {
+      assert!(
+        sequential
+          .resize_divider(&path, boundary, 70, &canvas)
+          .is_err()
+      );
+      assert_eq!(sequential, coalesced);
+    }
+  }
+
+  #[test]
+  fn nested_vertical_divider_uses_its_absolute_canvas_row() {
+    let canvas = size(80, 41);
+    let mut layout = ViewLayout::Split {
+      axis: SplitAxis::Vertical,
+      children: vec![
+        leaf("above"),
+        ViewLayout::Split {
+          axis: SplitAxis::Vertical,
+          children: vec![leaf("middle"), leaf("below")],
+          weights: Vec::new(),
+        },
+      ],
+      weights: Vec::new(),
+    };
+    layout.resize_divider(&[1], 0, 35, &canvas).unwrap();
+    let panes = layout.pane_geometry(&canvas).unwrap();
+    assert_eq!(
+      (
+        panes[0].rows,
+        panes[1].top,
+        panes[1].rows,
+        panes[2].top,
+        panes[2].rows
+      ),
+      (20, 21, 14, 36, 5)
+    );
   }
 
   #[test]

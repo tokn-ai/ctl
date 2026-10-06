@@ -809,6 +809,18 @@ export interface AttachmentResizeRequest extends AttachmentIdRequest {
 
 export type ResizeDirection = "left" | "right" | "up" | "down";
 
+export interface DividerResize {
+  view_id: string;
+  expected_revision: string;
+  split_path: number[];
+  boundary: number;
+  position: number;
+}
+
+export interface AttachmentDividerResizeRequest extends AttachmentIdRequest, DividerResize {
+  request_id: string;
+}
+
 export interface AttachmentPaneResizeRequest extends AttachmentIdRequest {
   request_id: string;
   terminal_id: string;

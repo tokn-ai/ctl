@@ -13,7 +13,7 @@ import { NotificationStore } from "../../features/notifications/NotificationStor
 import type { AttachmentNotifications } from "../../features/notifications/AttachmentNotifications";
 import { publishPaneResizeResult, publishSessionView, registerAttachmentControl } from "../../features/attachment/componentActions";
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), zoom: vi.fn(), resize: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), detach: vi.fn(), input: vi.fn(), attachment_state: null as AttachmentViewState | null, mounted_inputs: [] as ((data: Uint8Array) => void)[] }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), zoom: vi.fn(), resize: vi.fn(), divider: vi.fn(), mount: vi.fn(), unmount: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), detach: vi.fn(), input: vi.fn(), attachment_state: null as AttachmentViewState | null, mounted_inputs: [] as ((data: Uint8Array) => void)[] }));
 vi.mock("../../lib/tauri", () => ({ sessionView: mocks.request }));
 vi.mock("../../features/attachment/useAttachment", () => ({ useAttachment: () => ({
   state: mocks.attachment_state ?? { phase: "attached", applied_sequence: "0", input_lease: { owned_by_client: true } },
@@ -40,6 +40,8 @@ const split: SessionView = { ...initial, revision: "1", panes: [{ terminal_id: "
 const props = () => ({ session, on_promoted: vi.fn(), on_select_terminal: vi.fn(), phase: "attached" as const, hasSession: true, has_cached_content: true, onInput: vi.fn(), onReady: vi.fn() });
 let stop_control: () => void;
 beforeEach(() => {
+  vi.stubGlobal("PointerEvent", class extends MouseEvent { readonly pointerId = 1; readonly isPrimary = true; });
+  Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value() {} });
   mocks.zoom.mockImplementation(async (terminal_id: string | null) => {
     publishSessionView({ session, attachment_id: "primary-owner", view: { ...split, revision: terminal_id ? "2" : "3", zoomed_terminal_id: terminal_id } });
   });
@@ -49,16 +51,106 @@ beforeEach(() => {
       panes: [{ ...split.panes[0], columns: 53 }, { ...split.panes[1], left: 54, columns: 26 }],
     }, error: null });
   });
+  mocks.divider.mockImplementation(async () => {});
   stop_control = registerAttachmentControl({
     attachmentId: () => "primary-owner", session: () => session,
-    layoutOwned: () => true, setViewZoom: mocks.zoom, resizePane: mocks.resize,
+    layoutOwned: () => true, setViewZoom: mocks.zoom, resizePane: mocks.resize, resizeDivider: mocks.divider,
     reconnect: async () => null, reset: () => {},
   });
 });
 
-afterEach(() => { cleanup(); stop_control(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers(); });
+afterEach(() => { cleanup(); stop_control(); Reflect.deleteProperty(HTMLElement.prototype, "setPointerCapture"); vi.unstubAllGlobals(); vi.clearAllMocks(); mocks.attachment_state = null; mocks.mounted_inputs = []; vi.useRealTimers(); });
 
 describe("session compositor", () => {
+  it("drags the server divider without remounting panes or blocking terminal input, and keeps keyboard resize serialized after Escape", async () => {
+    mocks.request.mockResolvedValue(split);
+    const actions = props();
+    const prefix_settings = { document: { schema_version: 1 as const, overrides: [] }, bindings: new Map(), platform: "other" as const };
+    render(<SessionViewSurface {...actions} prefix_settings={prefix_settings} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const inputs = screen.getAllByLabelText("Terminal input");
+    act(() => inputs[1].focus());
+    const handle = screen.getByRole("separator");
+    fireEvent.pointerDown(handle, { button: 0, clientX: 324, clientY: 100 });
+    fireEvent.pointerMove(handle, { clientX: 364, clientY: 100 });
+    expect(mocks.divider).toHaveBeenCalledExactlyOnceWith({ view_id: "view", expected_revision: "1", split_path: [], boundary: 0, position: 45 }, expect.any(String));
+    expect(inputs[1].closest<HTMLElement>(".view-pane")?.style.left).toBe("328px");
+    expect(document.activeElement).toBe(inputs[1]);
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(inputs[1], { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(inputs[1], { key: "ArrowRight", ctrlKey: true });
+    expect(mocks.resize).not.toHaveBeenCalled();
+    const input = new Uint8Array([120]);
+    act(() => mocks.mounted_inputs[0](input));
+    expect(actions.onInput).toHaveBeenCalledExactlyOnceWith(input);
+    const request_id = mocks.divider.mock.lastCall![1];
+    const next: SessionView = { ...split, revision: "2", layout: { kind: "split", axis: "horizontal", weights: [45, 34], children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] },
+      panes: [{ ...split.panes[0], columns: 45 }, { ...split.panes[1], left: 46, columns: 34 }] };
+    await act(async () => publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id, view: next, error: null }));
+    expect(inputs[1].closest<HTMLElement>(".view-pane")?.style.left).toBe("368px");
+    expect(screen.getAllByLabelText("Terminal input")).toEqual(inputs);
+    expect(document.activeElement).toBe(inputs[1]);
+    expect(mocks.mount).toHaveBeenCalledTimes(2);
+    expect(mocks.unmount).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("reads a synchronous newer view before React renders a batched observer update and divider ACK", async () => {
+    mocks.request.mockResolvedValue(split);
+    render(<SessionViewSurface {...props()} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const handle = screen.getByRole("separator");
+    fireEvent.pointerDown(handle, { button: 0, clientX: 324 });
+    fireEvent.pointerMove(handle, { clientX: 332 });
+    fireEvent.pointerMove(handle, { clientX: 340 });
+    const request_id = mocks.divider.mock.lastCall![1];
+    await act(async () => {
+      publishSessionView({ session, attachment_id: "observer", view: { ...split, revision: "9" } });
+      publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id, view: { ...split, revision: "2" }, error: null });
+    });
+    expect(mocks.divider).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Split right" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("rejects a drag on an old rendered handle when topology changes in the same batch", async () => {
+    mocks.request.mockResolvedValue(split);
+    render(<SessionViewSurface {...props()} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const old_handle = screen.getByRole("separator");
+    const vertical: SessionView = { ...split, revision: "2", layout: { kind: "split", axis: "vertical", children: [{ kind: "terminal", terminal_id: "a" }, { kind: "terminal", terminal_id: "b" }] },
+      panes: [{ ...split.panes[0], columns: 80, rows: 12 }, { ...split.panes[1], left: 0, top: 13, columns: 80, rows: 11 }] };
+    await act(async () => {
+      publishSessionView({ session, attachment_id: "observer", view: vertical });
+      fireEvent.pointerDown(old_handle, { button: 0, clientX: 324, clientY: 100 });
+      fireEvent.pointerMove(old_handle, { clientX: 332, clientY: 100 });
+    });
+    expect(mocks.divider).not.toHaveBeenCalled();
+    const new_handle = screen.getByRole("separator");
+    expect(new_handle.getAttribute("aria-orientation")).toBe("horizontal");
+    fireEvent.pointerDown(new_handle, { button: 0, clientX: 100, clientY: 200 });
+    fireEvent.pointerMove(new_handle, { clientX: 100, clientY: 216 });
+    expect(mocks.divider).toHaveBeenCalledExactlyOnceWith({ view_id: "view", expected_revision: "2", split_path: [], boundary: 0, position: 13 }, expect.any(String));
+    await act(async () => publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id: mocks.divider.mock.lastCall![1], view: { ...vertical, revision: "3" }, error: null }));
+  });
+
+  it.each(["primary", "secondary", "disconnect"])("cancels pointer work on %s ending or interruption and drops its pending target", async (ending) => {
+    mocks.request.mockResolvedValue(split);
+    const actions = props();
+    const mounted = render(<SessionViewSurface {...actions} />);
+    await waitFor(() => expect(screen.getAllByLabelText("Terminal input")).toHaveLength(2));
+    const handle = screen.getByRole("separator");
+    fireEvent.pointerDown(handle, { button: 0, clientX: 324 });
+    fireEvent.pointerMove(handle, { clientX: 332 });
+    fireEvent.pointerMove(handle, { clientX: 340 });
+    if (ending === "secondary") mocks.attachment_state = { ...initialAttachmentState(), session: { ...session, terminal_id: "b" }, phase: "ended" };
+    mounted.rerender(<SessionViewSurface {...actions} phase={ending === "primary" ? "ended" : ending === "disconnect" ? "reconnecting" : "attached"} />);
+    const request_id = mocks.divider.mock.lastCall![1];
+    await act(async () => publishPaneResizeResult({ session, attachment_id: "primary-owner", request_id, view: null,
+      error: { code: "session_not_found", message: "The terminal ended during resize." } }));
+    expect(mocks.divider).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(mocks.unmount).not.toHaveBeenCalled();
+  });
   it("resizes focused secondary panes through ownership and renders weighted server geometry without remounting", async () => {
     mocks.request.mockResolvedValue(split);
     const commands = vi.fn();
@@ -135,7 +227,7 @@ describe("session compositor", () => {
     mocks.resize.mockImplementation(async () => {});
     const resize_other = vi.fn(async () => {});
     const stop_other = registerAttachmentControl({ attachmentId: () => "other-owner", session: () => other_session,
-      layoutOwned: () => true, setViewZoom: async () => {}, resizePane: resize_other, reconnect: async () => null, reset: () => {} });
+      layoutOwned: () => true, setViewZoom: async () => {}, resizePane: resize_other, resizeDivider: vi.fn(async () => {}), reconnect: async () => null, reset: () => {} });
     try {
       const prefix_settings = { document: { schema_version: 1 as const, overrides: [] }, bindings: new Map(), platform: "other" as const };
       const actions = props();

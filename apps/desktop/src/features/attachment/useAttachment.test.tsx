@@ -15,7 +15,7 @@ import { sessionKey } from "../targets/targets";
 import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
-import { reconnectComponentAttachments, resetComponentAttachments, resizeSessionPane, setSessionViewZoom } from "./componentActions";
+import { reconnectComponentAttachments, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, setSessionViewZoom } from "./componentActions";
 import { NotificationProvider } from "../notifications/NotificationContext";
 import { NotificationStore } from "../notifications/NotificationStore";
 import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
@@ -73,6 +73,7 @@ const api = vi.hoisted(() => ({
   releaseAttachmentLease: vi.fn(),
   resizeAttachment: vi.fn(),
   resizeAttachmentPane: vi.fn(),
+  resizeAttachmentDivider: vi.fn(),
   setAttachmentViewZoom: vi.fn(),
   sendInput: vi.fn(),
   sessionCache: vi.fn(),
@@ -213,6 +214,23 @@ afterEach(async () => {
 });
 
 describe("background history presentation", () => {
+  it("queues a lossless exact divider command and handles correlated stale-view rejection without ending the attachment", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { resize_with_window: true }); });
+    const attachment_id = result.current.state.attachment_id!;
+    await emit({ event_type: "lease_status", attachment_id, lease: "layout", status: { held: true, owned_by_client: true } });
+    const divider = { view_id: first.view_id!, expected_revision: "18446744073709551615", split_path: [0, 2], boundary: 1, position: 60 };
+    const resizing = resizeSessionDivider(first, divider);
+    const request = api.resizeAttachmentDivider.mock.lastCall![0];
+    expect(request).toEqual({ attachment_id, request_id: expect.any(String), ...divider });
+    const failure = expect(resizing).rejects.toThrow("view changed; reload before dragging a divider");
+    await emit({ event_type: "pane_resize_result", attachment_id, request_id: request.request_id,
+      view: null, error: { code: "invalid_request", message: "view changed; reload before dragging a divider" } });
+    await failure;
+    expect(result.current.state.phase).toBe("attached");
+    expect(result.current.state.layout_lease.owned_by_client).toBe(true);
+    expect(api.resizeAttachmentPane).not.toHaveBeenCalled();
+  });
   it("keeps pane resize acknowledgements correlated and nonfatal through the live attachment", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first, { resize_with_window: true }); });

@@ -1,4 +1,4 @@
-import type { ComponentReconnectResult, ComponentSessionsReset, ResizeDirection, SessionSummary, SessionView } from "../../lib/types";
+import type { ComponentReconnectResult, ComponentSessionsReset, DividerResize, ResizeDirection, SessionSummary, SessionView } from "../../lib/types";
 import { sameSession } from "../targets/targets";
 
 interface AttachmentControl {
@@ -8,6 +8,7 @@ interface AttachmentControl {
   reset(): void;
   layoutOwned(): boolean;
   setViewZoom(terminal_id: string | null): Promise<void>;
+  resizeDivider(divider: DividerResize, request_id: string): Promise<void>;
   resizePane(terminal_id: string, direction: ResizeDirection, amount: number, request_id: string): Promise<void>;
 }
 
@@ -20,6 +21,21 @@ type SessionViewChange = {
   attachment_id: string;
 } & ({ view: SessionView; error?: never } | { error: string; view?: never });
 const view_listeners = new Set<(event: SessionViewChange) => void>();
+
+const owner_listeners = new Set<() => void>();
+export function subscribeLayoutOwners(listener: () => void): () => void {
+  owner_listeners.add(listener);
+  return () => { owner_listeners.delete(listener); };
+}
+export function publishLayoutOwnerChange(): void {
+  for (const listener of owner_listeners) listener();
+}
+export function sessionLayoutOwned(session: SessionSummary | null): boolean {
+  return Boolean(session && layoutOwner(session));
+}
+function layoutOwner(session: SessionSummary): AttachmentControl | undefined {
+  return [...controls].find((control) => control.attachmentId() && sameSession(control.session(), session) && control.layoutOwned());
+}
 
 export function subscribeSessionViews(listener: (event: SessionViewChange) => void): () => void {
   view_listeners.add(listener);
@@ -90,10 +106,19 @@ export async function resizeSessionPane(
   direction: ResizeDirection,
   amount: number,
 ): Promise<SessionView> {
-  const owner = [...controls].find((control) =>
-    control.attachmentId() && sameSession(control.session(), session) && control.layoutOwned(),
-  );
-  if (!owner) throw new Error("Take resize control to resize panes.");
+  return confirmResize(session, (owner, request_id) => owner.resizePane(terminal_id, direction, amount, request_id));
+}
+
+export async function resizeSessionDivider(session: SessionSummary, divider: DividerResize): Promise<SessionView> {
+  return confirmResize(session, (owner, request_id) => owner.resizeDivider(divider, request_id));
+}
+
+function confirmResize(
+  session: SessionSummary,
+  send: (owner: AttachmentControl, request_id: string) => Promise<void>,
+): Promise<SessionView> {
+  const owner = layoutOwner(session);
+  if (!owner) return Promise.reject(new Error("Take resize control to resize panes."));
   const attachment_id = owner.attachmentId()!;
   const request_id = crypto.randomUUID();
   return new Promise<SessionView>((resolve, reject) => {
@@ -114,14 +139,15 @@ export async function resizeSessionPane(
     resize_listeners.add(listener);
     const timer = setTimeout(() => finish(null, new Error("The server did not confirm the pane resize. Reconnect and try again.")), 5000);
     try {
-      void owner.resizePane(terminal_id, direction, amount, request_id).catch((failure) => finish(null, failure));
+      void send(owner, request_id).catch((failure) => finish(null, failure));
     } catch (failure) { finish(null, failure); }
   });
 }
 
 export function registerAttachmentControl(control: AttachmentControl): () => void {
   controls.add(control);
-  return () => { controls.delete(control); };
+  publishLayoutOwnerChange();
+  return () => { controls.delete(control); publishLayoutOwnerChange(); };
 }
 
 export async function reconnectComponentAttachments(attachment_ids: readonly string[]): Promise<ComponentReconnectResult[]> {

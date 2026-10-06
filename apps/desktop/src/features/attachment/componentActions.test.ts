@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ComponentSessionsReset, SessionSummary, SessionView } from "../../lib/types";
-import { componentResetMatches, publishPaneResizeResult, publishSessionView, reconnectComponentAttachments, registerAttachmentControl, resetComponentAttachments, resizeSessionPane, setSessionViewZoom } from "./componentActions";
+import type { ComponentSessionsReset, DividerResize, SessionSummary, SessionView } from "../../lib/types";
+import { componentResetMatches, publishPaneResizeResult, publishSessionView, reconnectComponentAttachments, registerAttachmentControl, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, setSessionViewZoom } from "./componentActions";
 
 const stops: (() => void)[] = [];
 afterEach(() => { for (const stop of stops.splice(0)) stop(); });
@@ -9,13 +9,31 @@ const session = (host_id?: string, remote_id?: string): SessionSummary => ({
   session_id: "shared-session-id", name: "shell", status: "running", terminal_size: { rows: 24, columns: 80, pixel_width: null, pixel_height: null }, next_sequence: "0",
 });
 function register(id: string, current: SessionSummary) {
-  const control = { attachmentId: () => id, session: () => current, reconnect: vi.fn(async (): Promise<string | null> => `${id}-replacement`), reset: vi.fn(), layoutOwned: vi.fn(() => false), setViewZoom: vi.fn(async (_terminal_id: string | null) => {}), resizePane: vi.fn(async (_terminal_id: string, _direction: string, _amount: number, _request_id: string) => {}) };
+  const control = { resizeDivider: vi.fn(async (_divider: DividerResize, _request_id: string) => {}), attachmentId: () => id, session: () => current, reconnect: vi.fn(async (): Promise<string | null> => `${id}-replacement`), reset: vi.fn(), layoutOwned: vi.fn(() => false), setViewZoom: vi.fn(async (_terminal_id: string | null) => {}), resizePane: vi.fn(async (_terminal_id: string, _direction: string, _amount: number, _request_id: string) => {}) };
   stops.push(registerAttachmentControl(control));
   return control;
 }
 const baseline = { view_id: "view", revision: "1", zoomed_terminal_id: null };
 
 describe("component attachment actions", () => {
+  it("routes an exact divider through a secondary layout owner and waits for the matching operation", async () => {
+    const root = register("root", session());
+    const secondary = register("secondary", { ...session(), terminal_id: "secondary" });
+    secondary.layoutOwned.mockReturnValue(true);
+    const divider = { view_id: "view", expected_revision: "1", split_path: [0], boundary: 2, position: 60 };
+    const view: SessionView = { ...baseline, session_id: session().session_id, session_name: "shell", canvas_size: session().terminal_size,
+      layout: { kind: "terminal", terminal_id: "secondary" }, panes: [], terminals: [] };
+    let completed = false;
+    const pending = resizeSessionDivider(session(), divider).then((view) => { completed = true; return view; });
+    expect(root.resizeDivider).not.toHaveBeenCalled();
+    expect(secondary.resizeDivider).toHaveBeenCalledExactlyOnceWith(divider, expect.any(String));
+    const request_id = secondary.resizeDivider.mock.calls[0][1];
+    publishPaneResizeResult({ session: session(), attachment_id: "root", request_id, view, error: null });
+    publishPaneResizeResult({ session: session(), attachment_id: "secondary", request_id: "other-operation", view, error: null });
+    await Promise.resolve(); expect(completed).toBe(false);
+    publishPaneResizeResult({ session: session(), attachment_id: "secondary", request_id, view, error: null });
+    expect(await pending).toEqual(view);
+  });
   it("resizes through the actual owner and confirms only its exact operation, including no-ops", async () => {
     const root = register("root", session());
     const focused = register("focused", { ...session(), terminal_id: "secondary" });

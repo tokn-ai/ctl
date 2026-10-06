@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   AttachmentAckRequest,
   AttachmentEvent,
+  AttachmentDividerResizeRequest,
   AttachmentIdRequest,
   AttachmentInputRequest,
   AttachmentLeaseRequest,
@@ -487,6 +488,12 @@ export async function acquireAttachmentLease(
   request: AttachmentLeaseRequest,
 ): Promise<void> {
   await invoke("acquire_attachment_lease", { request });
+}
+
+export async function resizeAttachmentDivider(
+  request: AttachmentDividerResizeRequest,
+): Promise<void> {
+  await invoke("resize_attachment_divider", { request });
 }
 
 export async function resizeAttachmentPane(

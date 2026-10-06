@@ -5,7 +5,7 @@ import { useAttachment } from "../../features/attachment/useAttachment";
 import { resizeSessionPane, setSessionViewZoom, subscribeSessionViews } from "../../features/attachment/componentActions";
 import { useAttachmentNotifications } from "../../features/notifications/useAttachmentNotifications";
 import { attachmentPhaseLabel } from "../../features/attachment/attachmentState";
-import { adjacentPane, swapPanes, viewDividers } from "../../features/terminal/viewLayout";
+import { adjacentPane, swapPanes } from "../../features/terminal/viewLayout";
 import type { XtermRenderer } from "../../features/terminal/XtermRenderer";
 import { sessionKey } from "../../features/targets/targets";
 import { errorCode, errorMessage } from "../../lib/errors";
@@ -13,6 +13,7 @@ import { sessionView } from "../../lib/tauri";
 import type { ResizeDirection, SessionSummary, SessionView, ShellStateSummary, ViewAction } from "../../lib/types";
 import { terminalPaneTitle } from "../../lib/shellState";
 import { TerminalSurface } from "./TerminalSurface";
+import { ViewDividers } from "./ViewDividers";
 import "./sessionView.css";
 import { resolvePrefix, prefixActionMode, PREFIX_ACTIONS } from "../../features/commands/prefixKeymap";
 import { useTerminalPrefix } from "../../features/commands/useTerminalPrefix";
@@ -427,10 +428,12 @@ export function SessionViewSurface({ session, open_session_keys, shell_state, re
     </div>
     <div className="view-viewport" ref={setViewport}>
     <div className="view-panes" style={current_view ? { width: current_view.canvas_size.columns * cell.width, height: current_view.canvas_size.rows * cell.height } : session ? { width: session.terminal_size.columns * cell.width, height: session.terminal_size.rows * cell.height } : { width: "100%", height: "100%" }}>
-      {current_view && !active_zoom && viewDividers(current_view.layout, panes).map((divider) => <div
-        key={divider.path} className="view-divider" aria-hidden="true"
-        style={{ left: Math.round(divider.left * cell.width), top: Math.round(divider.top * cell.height), width: divider.vertical ? 1 : divider.length * cell.width, height: divider.vertical ? divider.length * cell.height : 1 }}
-      />)}
+      <ViewDividers session={session} view={current_view} cell={cell}
+        enabled={connected && !active_zoom && !primary_ended.current && !ended_ids.size && input_enabled}
+        current_view={() => view_ref.current}
+        can_begin={() => !busy_ref.current}
+        on_busy={(next) => { busy_ref.current = next; setBusy(next); if (next) { ++sequence.current; prefix.cancel(); } }}
+        on_error={setActionError} on_confirm={(next) => { ++sequence.current; storeView(next); }} />
       <div className="view-pane" data-active={focused === primary_id} ref={paneRef(primary_id)} onFocusCapture={() => setFocusedId(primary_id ?? null)} style={{ ...paneStyle(primary_rect), ...(takeover_id ? { visibility: "hidden" } : {}) }}>
         <TerminalSurface {...surface} onInput={handlePrimaryInput} ended_message={surface.ended_message ?? (surface.phase === "ended" ? "Terminal exited" : surface.phase !== "attached" && ended_ids.has(primary_id ?? "") ? "Terminal no longer exists" : null)} on_dismiss={() => void dismissPane(primary_id)} />
       </div>

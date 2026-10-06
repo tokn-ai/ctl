@@ -743,6 +743,66 @@ impl Terminal {
     direction: ctmux_proto::ResizeDirection,
     amount: u16,
   ) -> Result<ctmux_proto::ViewInfo, SessionControlError> {
+    self.resize_layout(attachment_id, |view, registry| {
+      if !view
+        .layout
+        .terminal_ids()
+        .iter()
+        .any(|id| id == terminal_id)
+      {
+        return Err(SessionControlError::InvalidView(
+          "resize terminal must belong to the attached view".into(),
+        ));
+      }
+      if !matches!(
+        *lock(&registry.terminals[terminal_id].lifecycle),
+        SessionLifecycle::Running
+      ) {
+        return Err(SessionControlError::InvalidView(
+          "resize terminal has ended".into(),
+        ));
+      }
+      let mut layout = view.layout.clone();
+      let changed = layout
+        .resize_pane(terminal_id, direction, amount, &view.canvas_size)
+        .map_err(SessionControlError::InvalidView)?;
+      Ok((layout, changed))
+    })
+  }
+
+  /// Moves an exact divider only while the observed view identity/revision still holds.
+  pub fn resize_divider(
+    &self,
+    attachment_id: &str,
+    divider: &ctmux_proto::DividerResize,
+  ) -> Result<ctmux_proto::ViewInfo, SessionControlError> {
+    self.resize_layout(attachment_id, |view, _registry| {
+      if view.id != divider.view_id || view.revision != divider.expected_revision {
+        return Err(SessionControlError::InvalidView(
+          "view changed; reload before dragging a divider".into(),
+        ));
+      }
+      let mut layout = view.layout.clone();
+      let changed = layout
+        .resize_divider(
+          &divider.split_path,
+          divider.boundary,
+          divider.position,
+          &view.canvas_size,
+        )
+        .map_err(SessionControlError::InvalidView)?;
+      Ok((layout, changed))
+    })
+  }
+
+  fn resize_layout(
+    &self,
+    attachment_id: &str,
+    change: impl FnOnce(
+      &View,
+      &SessionRegistry,
+    ) -> Result<(ctmux_proto::ViewLayout, bool), SessionControlError>,
+  ) -> Result<ctmux_proto::ViewInfo, SessionControlError> {
     let manager = self
       .manager
       .upgrade()
@@ -766,29 +826,7 @@ impl Terminal {
         "session is terminating".into(),
       ));
     }
-    if !root
-      .view
-      .layout
-      .terminal_ids()
-      .iter()
-      .any(|id| id == terminal_id)
-    {
-      return Err(SessionControlError::InvalidView(
-        "resize terminal must belong to the attached view".into(),
-      ));
-    }
-    if !matches!(
-      *lock(&registry.terminals[terminal_id].lifecycle),
-      SessionLifecycle::Running
-    ) {
-      return Err(SessionControlError::InvalidView(
-        "resize terminal has ended".into(),
-      ));
-    }
-    let mut layout = root.view.layout.clone();
-    let changed = layout
-      .resize_pane(terminal_id, direction, amount, &root.view.canvas_size)
-      .map_err(SessionControlError::InvalidView)?;
+    let (layout, changed) = change(&root.view, &registry)?;
     if !changed {
       return registry
         .view_info(&owner)
@@ -797,6 +835,7 @@ impl Terminal {
     let old_layout = root.view.layout.clone();
     let old_zoom = root.view.zoomed_terminal_id.clone();
     let old_revision = root.view.revision;
+    let previous_geometry = registry.capture_view_geometry(&owner);
     let view = &mut registry
       .sessions
       .get_mut(&owner)
@@ -814,7 +853,7 @@ impl Terminal {
       view.layout = old_layout;
       view.zoomed_terminal_id = old_zoom;
       view.revision = old_revision;
-      let _restore = registry.reflow_view(&owner);
+      registry.restore_view_geometry(&owner, &previous_geometry);
       return Err(error);
     }
     registry
@@ -873,6 +912,7 @@ impl Terminal {
     }
     let old_zoom = root.view.zoomed_terminal_id.clone();
     let old_revision = root.view.revision;
+    let previous_geometry = registry.capture_view_geometry(&owner);
     if let Some(previous) = &old_zoom
       && terminal_id.is_some()
     {
@@ -907,9 +947,7 @@ impl Terminal {
         .view;
       view.zoomed_terminal_id = old_zoom;
       view.revision = old_revision;
-      // A retarget may already have restored the previous pane before the new
-      // PTY resize failed. Restore its authoritative geometry as well.
-      let _restore = registry.reflow_view(&owner);
+      registry.restore_view_geometry(&owner, &previous_geometry);
       return Err(error);
     }
     registry
@@ -2390,12 +2428,23 @@ mod tests {
         .split_terminal(
           root.id.clone(),
           ctmux_proto::SplitAxis::Horizontal,
+          Some(command.clone()),
+          None,
+          TerminalSize::default(),
+        )
+        .unwrap();
+      fixture.terminals.push(secondary.clone());
+      let third = fixture
+        .manager
+        .split_terminal(
+          secondary.id.clone(),
+          ctmux_proto::SplitAxis::Vertical,
           Some(command),
           None,
           TerminalSize::default(),
         )
         .unwrap();
-      fixture.terminals.push(secondary);
+      fixture.terminals.push(third);
       fixture
     }
   }
@@ -2416,6 +2465,8 @@ mod tests {
     let fixture = PtyViewFixture::new();
     let root = &fixture.terminals[0];
     let secondary = &fixture.terminals[1];
+    let third = &fixture.terminals[2];
+    let secondary_size = secondary.info().terminal_size;
     let attachment = root.create_attachment(true, true);
     root
       .set_view_zoom(&attachment.attachment_id, Some(root.id.clone()))
@@ -2423,17 +2474,50 @@ mod tests {
     let before = fixture.manager.view(&root.info().session_id).unwrap();
     // Keep the live PTY handle outside its terminal so the child stays running,
     // but fail its geometry request after the first sibling has already resized.
-    let master = lock(&secondary.master).take();
+    let master = lock(&third.master).take();
     let result = root.resize_pane(
       &attachment.attachment_id,
       &root.id,
       ctmux_proto::ResizeDirection::Right,
       5,
     );
-    *lock(&secondary.master) = master;
+    *lock(&third.master) = master;
     assert!(matches!(result, Err(SessionControlError::Pty(_))));
     assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
     assert_eq!(root.info().terminal_size, TerminalSize::default());
+    assert_eq!(secondary.info().terminal_size, secondary_size);
+    let master = lock(&third.master).take();
+    let result = root.resize_divider(
+      &attachment.attachment_id,
+      &ctmux_proto::DividerResize {
+        view_id: before.view_id.clone(),
+        expected_revision: before.revision,
+        split_path: Vec::new(),
+        boundary: 0,
+        position: 45,
+      },
+    );
+    *lock(&third.master) = master;
+    assert!(matches!(result, Err(SessionControlError::Pty(_))));
+    assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+    assert_eq!(root.info().terminal_size, TerminalSize::default());
+    assert_eq!(secondary.info().terminal_size, secondary_size);
+    root
+      .resize(
+        &attachment.attachment_id,
+        TerminalSize {
+          columns: 100,
+          ..TerminalSize::default()
+        },
+      )
+      .unwrap();
+    let before = fixture.manager.view(&root.info().session_id).unwrap();
+    let master = lock(&third.master).take();
+    let result = root.set_view_zoom(&attachment.attachment_id, None);
+    *lock(&third.master) = master;
+    assert!(matches!(result, Err(SessionControlError::Pty(_))));
+    assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
+    assert_eq!(secondary.info().terminal_size, secondary_size);
   }
 
   #[test]

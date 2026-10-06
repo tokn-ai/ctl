@@ -129,7 +129,8 @@ attachment:
 - daemon to client: `attached` (including a complete `shell_state` snapshot),
   an optional checkpoint/history pair, replayed `output`, then live `output`,
   replacing `checkpoint`, requested `history_page`, and `shell_state_changed`;
-- client to daemon: `input`, `resize`, lease acquire/release, `heartbeat`,
+- client to daemon: `input`, `resize`, `set_view_zoom`, `resize_pane`,
+  `resize_divider`, lease acquire/release, `heartbeat`,
   `presentation_applied`, `history_request`, `request_checkpoint`, or `detach`;
 - daemon to client: `heartbeat_ack`, `detached` after an explicit detach is
   processed, and `session_ended` when the child exits.
@@ -592,7 +593,8 @@ contract.
 
 ## Shared pane sizing (published contract 1.1.16)
 
-Internal build 16 adds split `weights` and the attached request
+Internal build 16 adds split `weights` and the attached `resize_pane` and
+`resize_divider` requests. Keyboard resizing uses
 `resize_pane { request_id, terminal_id, direction, amount }`. Weights are relative
 positive integers; an omitted or empty list retains the historical equal split.
 A nonempty list must match the number of children. For example:
@@ -648,8 +650,32 @@ One-shot `update_view` remains an arrangement operation, not a resize path. Upda
 with matching split axes and child counts preserve the existing positional weights,
 including updates from clients that cannot send them. Changing explicit weights or
 restructuring a weighted node ambiguously is rejected; clients must use the attached
-resize operation to change proportions. This prevents arrangement updates from
+resize operations to change proportions. This prevents arrangement updates from
 bypassing resize ownership or silently restoring equal sizes.
+
+Mouse dragging uses `resize_divider { request_id, view_id, expected_revision,
+split_path, boundary, position }` on the layout-owner attachment. The same
+`pane_resize_result` acknowledges it. `split_path` is a list of child indices
+from the layout root to a split; an empty path selects the root split. `boundary`
+selects the gap after that split's child, from zero through `children.length - 2`.
+The path is limited to the existing 16-level nesting bound. View identity and
+revision must match before mutation; this also prevents a moved attachment from
+editing a different view whose revision happens to match.
+
+`position` is the absolute canvas cell coordinate of the gap: x for a horizontal
+split, y for a vertical split. It identifies the gap cell, not its visual center
+at an additional half cell. The daemon clamps movement at adjacent subtree
+minimum sizes and preserves other sibling extents. An unchanged position returns
+the current view and retains zoom; actual movement uses the same atomic reflow
+and rollback as keyboard resizing. Invalid paths, boundaries, stale snapshots,
+and denied ownership are nonfatal rejections.
+
+Clients serialize drag requests with at most one in flight and coalesce pending
+motion into the latest absolute position. They advance the expected revision
+from correlated confirmations. Changed topology, canvas, view identity, or zoom
+cancels the gesture; clients must not retry an old path against a new topology.
+All pane geometry remains daemon-confirmed. A local pointer preview does not
+resize PTYs or alter another client's rendering.
 
 The divider directions and default Ctrl-arrow/Alt-arrow increments follow tmux's
 [resize command](https://github.com/tmux/tmux/blob/master/cmd-resize-pane.c) and

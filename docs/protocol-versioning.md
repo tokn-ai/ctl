@@ -72,7 +72,9 @@ daemons.
 
 Shared pane sizing advances ctmux from `1.1.15` (build 15) to `1.1.16`
 (build 16), retaining `1.0.13`, `1.1.14`, and `1.1.15`. Weighted split layouts
-and attached divider resize requests require `1.1.16`. Earlier clients receive
+and attached pane/divider resize requests require `1.1.16`. The explicit divider
+operation carries view identity, expected revision, split path, boundary index,
+and an absolute cell position for mouse dragging. Earlier clients receive
 the authoritative pane rectangles with weights omitted; compatible arrangement
 updates preserve existing proportions, and ambiguous weighted restructures are
 rejected. New clients disable divider resizing when an earlier contract is selected.

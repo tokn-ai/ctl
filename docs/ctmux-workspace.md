@@ -286,7 +286,19 @@ The daemon retains resized proportions in its shared layout, so the TUI and
 desktop render the same unequal rectangles. Resizing uses the actual layout-owner
 attachment, independently of which pane has focus or owns input. It requires
 ctmux contract `1.1.16`; earlier clients keep the authoritative rectangles.
-Divider dragging remains deferred.
+Drag a divider with the primary mouse button to resize adjacent panes. Vertical
+dividers move horizontally; horizontal dividers move vertically. The pointer
+snaps to terminal cells, and the daemon clamps movement at subtree minimum sizes.
+The existing line has a wider hit area without changing PTY dimensions. Resizing
+does not move focus or remount terminal renderers.
+
+Dragging requires the view's resize lease. The toolbar's **Resize with window**
+control (shown as **Fixed size** when inactive and **Auto resize** when active)
+requests that lease; it cannot displace another owner. A drag stops on Escape,
+pointer cancellation, window blur, disconnection, lease loss, pane exit, zoom,
+or a changed layout/canvas. Mouse release keeps the final requested position;
+already confirmed movement remains applied. Each confirmed resize is visible
+to desktop and TUI clients sharing the view.
 
  Local startup attachment is a
 one-shot intent and uses the normal connection/error handling once the renderer

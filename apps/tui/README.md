@@ -187,6 +187,9 @@ and desktop see the same rectangles; canvas changes, detach, and reconnect
 retain the proportions. Daemon restart still ends these in-memory views.
 Clients selecting an earlier contract can view unequal panes and rearrange
 compatible layouts without resetting proportions, but cannot resize dividers.
+Desktop users can drag the shared dividers with the mouse; the TUI receives the
+same confirmed geometry. TUI resizing uses the keyboard bindings above. If this
+client does not own resize, **Ctrl+B R** requests the available view lease.
 
 Each pane has its own bounded VT emulator. The renderer uses authoritative pane
 rectangles and the server's reserved separator cells, without taking rows or
@@ -211,7 +214,7 @@ authentication is required, detach and reconnect to answer the prompt. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
-Pane border dragging, extended keyboard protocols,
+TUI pane border dragging, extended keyboard protocols,
 and a command prompt remain unimplemented. Rendering shares the
 daemon's `avt` terminal emulation capabilities; it is not full tmux feature parity.
 

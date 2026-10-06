@@ -715,6 +715,7 @@ dependencies = [
 name = "ctl-cli"
 version = "0.1.0"
 dependencies = [
+ "avt",
  "clap",
  "cliclack",
  "comfy-table",
@@ -726,10 +727,14 @@ dependencies = [
  "ctl-task-client",
  "ctl-task-proto",
  "ctmux-cli",
+ "ctmux-client",
  "ctmux-ipc",
  "ctmux-proto",
+ "ctmuxd",
  "dirs",
+ "filedescriptor",
  "flate2",
+ "nix 0.29.0",
  "portable-pty",
  "rpassword",
  "rustix",

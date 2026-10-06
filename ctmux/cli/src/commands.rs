@@ -32,6 +32,9 @@ pub trait Connector {
 
   fn connect(&self) -> ConnectFuture<'_, Self::Stream, Self::Error>;
 
+  /// Suspend direct host-terminal interaction while the shared TUI owns it.
+  fn set_terminal_ui_active(&self, _active: bool) {}
+
   fn is_retryable(&self, error: &Self::Error) -> bool;
   fn is_local(&self) -> bool;
   fn label(&self) -> &str;
@@ -55,6 +58,10 @@ impl<C: Connector + Sync> ctmux_tui::Transport for TuiTransport<'_, C> {
 
   fn archive_key(&self) -> String {
     self.0.archive_key()
+  }
+
+  fn set_terminal_ui_active(&self, active: bool) {
+    self.0.set_terminal_ui_active(active);
   }
 }
 

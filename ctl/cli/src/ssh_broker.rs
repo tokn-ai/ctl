@@ -6,34 +6,79 @@ use ctl_ipc::{ClientMessage, PromptKind, ServerMessage, SshTarget};
 use zeroize::Zeroizing;
 
 pub async fn ensure_master(target: SshTarget) -> Result<PathBuf, Error> {
+  ensure_master_with_interaction(target, true).await
+}
+
+/// Reuse or reconnect SSH without competing for a terminal already owned by a UI.
+pub async fn ensure_master_with_interaction(
+  target: SshTarget,
+  interactive: bool,
+) -> Result<PathBuf, Error> {
   let mut stream = ctl_ipc::connect_or_start_daemon().await?;
-  let protocol = handshake(&mut stream).await?;
+  ensure_master_on(&mut stream, target, interactive, interactive_prompt).await
+}
+
+async fn interactive_prompt(
+  kind: PromptKind,
+  message: String,
+  warning: Option<String>,
+) -> Result<Option<Zeroizing<String>>, Error> {
+  tokio::task::spawn_blocking(move || {
+    if let Some(warning) = warning {
+      eprintln!("Warning: {warning}");
+    }
+    prompt(kind, &message)
+  })
+  .await
+  .map_err(|_| Error::PromptWorkerStopped)?
+}
+
+async fn ensure_master_on<S, F, P>(
+  stream: &mut S,
+  target: SshTarget,
+  interactive: bool,
+  mut ask: F,
+) -> Result<PathBuf, Error>
+where
+  S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+  F: FnMut(PromptKind, String, Option<String>) -> P,
+  P: std::future::Future<Output = Result<Option<Zeroizing<String>>, Error>>,
+{
+  let protocol = handshake(stream).await?;
   validate_route(&target, protocol)?;
-  ctl_ipc::write_frame(&mut stream, &ClientMessage::EnsureMaster { target }).await?;
+  ctl_ipc::write_frame(stream, &ClientMessage::EnsureMaster { target }).await?;
   loop {
-    match ctl_ipc::read_frame::<_, ServerMessage>(&mut stream).await? {
+    match ctl_ipc::read_frame::<_, ServerMessage>(stream).await? {
       Some(ServerMessage::Prompt {
         prompt_id,
         kind,
         message,
         warning,
       }) => {
-        let response = tokio::task::spawn_blocking(move || {
-          if let Some(warning) = warning {
-            eprintln!("Warning: {warning}");
+        let authentication_required =
+          !interactive && matches!(kind, PromptKind::Secret | PromptKind::Confirm);
+        let response = if interactive {
+          ask(kind, message, warning).await?
+        } else {
+          match kind {
+            PromptKind::Secret | PromptKind::Confirm => None,
+            // Saving a credential is optional after authentication. Declining
+            // the offer leaves its existing save policy and live master intact.
+            PromptKind::CredentialSave => Some(Zeroizing::new("no".into())),
+            PromptKind::CredentialSaveError => Some(Zeroizing::new("confirm".into())),
           }
-          prompt(kind, &message)
-        })
-        .await
-        .map_err(|_| Error::PromptWorkerStopped)??;
+        };
         ctl_ipc::write_frame(
-          &mut stream,
+          stream,
           &ClientMessage::PromptResponse {
             prompt_id,
             response,
           },
         )
         .await?;
+        if authentication_required {
+          return Err(Error::AuthenticationRequired);
+        }
       }
       Some(ServerMessage::MasterReady { control_path }) => return Ok(control_path),
       Some(ServerMessage::AuthenticationRequired) => return Err(Error::AuthenticationRequired),
@@ -195,7 +240,9 @@ pub enum Error {
     "Remote VPN routes require local protocol 1.1.13, but ctld selected {0}. Rebuild or update ctld, then restart ctld."
   )]
   UnsupportedGatewayRoute(ProtocolVersion),
-  #[error("ctld requires a new explicit SSH authentication attempt")]
+  #[error(
+    "SSH authentication is required. Detach and reconnect to answer the authentication prompt."
+  )]
   AuthenticationRequired,
   #[error("ctld error {code}: {message}")]
   Daemon { code: String, message: String },
@@ -208,6 +255,166 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn fixture_target() -> SshTarget {
+    ctl_client::hosts::ConnectionTargetDto::ssh("fixture")
+      .to_ssh_target()
+      .unwrap()
+  }
+
+  async fn accept_master_request(server: &mut tokio::io::DuplexStream) {
+    let Some(ClientMessage::Handshake { protocol }) =
+      ctl_ipc::read_frame::<_, ClientMessage>(server)
+        .await
+        .unwrap()
+    else {
+      panic!("expected broker handshake");
+    };
+    assert!(protocol.accepts(ctl_ipc::PROTOCOL_VERSION));
+    ctl_ipc::write_frame(
+      server,
+      &ServerMessage::HandshakeAccepted {
+        protocol_version: ctl_ipc::PROTOCOL_VERSION,
+      },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      ctl_ipc::read_frame::<_, ClientMessage>(server).await.unwrap(),
+      Some(ClientMessage::EnsureMaster { target }) if target == fixture_target()
+    ));
+  }
+
+  async fn send_prompt(
+    server: &mut tokio::io::DuplexStream,
+    kind: PromptKind,
+  ) -> Option<Zeroizing<String>> {
+    ctl_ipc::write_frame(
+      server,
+      &ServerMessage::Prompt {
+        prompt_id: "fixture-prompt".into(),
+        kind,
+        message: "fixture message".into(),
+        warning: Some("fixture warning".into()),
+      },
+    )
+    .await
+    .unwrap();
+    match ctl_ipc::read_frame::<_, ClientMessage>(server)
+      .await
+      .unwrap()
+    {
+      Some(ClientMessage::PromptResponse {
+        prompt_id,
+        response,
+      }) if prompt_id == "fixture-prompt" => response,
+      _ => panic!("expected matching prompt response"),
+    }
+  }
+
+  #[tokio::test]
+  async fn headless_retries_cancel_authentication_without_starting_a_terminal_reader() {
+    let mut calls = 0;
+    for _ in 0..5 {
+      for kind in [PromptKind::Secret, PromptKind::Confirm] {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let daemon = tokio::spawn(async move {
+          accept_master_request(&mut server).await;
+          assert!(send_prompt(&mut server, kind).await.is_none());
+        });
+        let result = tokio::time::timeout(
+          std::time::Duration::from_secs(1),
+          ensure_master_on(&mut client, fixture_target(), false, |_, _, _| {
+            calls += 1;
+            std::future::ready(Ok(None))
+          }),
+        )
+        .await
+        .expect("headless authentication must finish without waiting for terminal input");
+        assert!(matches!(result, Err(Error::AuthenticationRequired)));
+        daemon.await.unwrap();
+      }
+    }
+    assert_eq!(
+      calls, 0,
+      "headless retries must never invoke terminal prompts"
+    );
+  }
+
+  #[tokio::test]
+  async fn headless_credential_notifications_preserve_a_successful_master() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let daemon = tokio::spawn(async move {
+      accept_master_request(&mut server).await;
+      assert_eq!(
+        send_prompt(&mut server, PromptKind::CredentialSave)
+          .await
+          .as_deref()
+          .map(String::as_str),
+        Some("no")
+      );
+      assert_eq!(
+        send_prompt(&mut server, PromptKind::CredentialSaveError)
+          .await
+          .as_deref()
+          .map(String::as_str),
+        Some("confirm")
+      );
+      ctl_ipc::write_frame(
+        &mut server,
+        &ServerMessage::MasterReady {
+          control_path: PathBuf::from("/tmp/fixture-control"),
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let result = ensure_master_on(&mut client, fixture_target(), false, |_, _, _| {
+      std::future::ready(Err(Error::PromptWorkerStopped))
+    })
+    .await
+    .unwrap();
+    assert_eq!(result, PathBuf::from("/tmp/fixture-control"));
+    daemon.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn interactive_master_requests_still_forward_the_prompt_and_warning() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let daemon = tokio::spawn(async move {
+      accept_master_request(&mut server).await;
+      assert_eq!(
+        send_prompt(&mut server, PromptKind::Confirm)
+          .await
+          .as_deref()
+          .map(String::as_str),
+        Some("yes")
+      );
+      ctl_ipc::write_frame(
+        &mut server,
+        &ServerMessage::MasterReady {
+          control_path: PathBuf::from("/tmp/fixture-control"),
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let result = ensure_master_on(
+      &mut client,
+      fixture_target(),
+      true,
+      |kind, message, warning| {
+        assert_eq!(kind, PromptKind::Confirm);
+        assert_eq!(message, "fixture message");
+        assert_eq!(warning.as_deref(), Some("fixture warning"));
+        std::future::ready(Ok(Some(Zeroizing::new("yes".into()))))
+      },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, PathBuf::from("/tmp/fixture-control"));
+    daemon.await.unwrap();
+  }
 
   #[tokio::test]
   async fn broker_closing_during_handshake_is_a_transport_failure() {

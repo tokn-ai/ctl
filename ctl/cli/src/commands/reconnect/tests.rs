@@ -10,6 +10,7 @@ fn retryable(error: &CtlConnectError) -> bool {
     target: ctl_client::ConnectionTarget::ssh("work"),
     settings: ctl_client::hosts::ConnectionTargetDto::ssh("work"),
     recovery: std::sync::Arc::default(),
+    terminal_ui_active: std::sync::Arc::default(),
   };
   connector.is_retryable(error)
 }

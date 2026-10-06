@@ -119,6 +119,17 @@ impl Capture {
     }
   }
 
+  pub fn transcript_contains(&self, bytes: &[u8]) -> bool {
+    bytes.is_empty()
+      || self
+        .transcript
+        .iter()
+        .copied()
+        .collect::<Vec<_>>()
+        .windows(bytes.len())
+        .any(|window| window == bytes)
+  }
+
   pub fn diagnostic(&self) -> String {
     let mut result = self.snapshot().diagnostic();
     writeln!(

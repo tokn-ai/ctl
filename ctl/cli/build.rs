@@ -1,6 +1,15 @@
 mod bundle_build;
 
 fn main() {
+  println!("cargo:rustc-check-cfg=cfg(ctl_repository_tui_tests)");
+  let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+  let terminal_fixtures = manifest.join("../../apps/tui/tests/support/mod.rs");
+  // Repository tests reuse the TUI's process fixtures. Published crates do not
+  // contain these external files; their broker unit tests remain self-contained.
+  if terminal_fixtures.is_file() {
+    println!("cargo:rustc-cfg=ctl_repository_tui_tests");
+    println!("cargo:rerun-if-changed={}", terminal_fixtures.display());
+  }
   println!("cargo:rerun-if-env-changed=CTL_BUNDLED_CTLD_DIR");
   println!("cargo:rerun-if-env-changed=CTL_BUNDLED_CTLD_MODE");
   println!("cargo:rerun-if-changed=build.rs");

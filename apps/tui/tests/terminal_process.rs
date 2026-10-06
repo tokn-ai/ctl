@@ -2,6 +2,8 @@
 
 #[path = "cases/cleanup.rs"]
 mod cleanup;
+#[path = "cases/reconnect.rs"]
+mod reconnect;
 mod support;
 #[path = "cases/workflows.rs"]
 mod workflows;
@@ -77,5 +79,6 @@ async fn stopped_process_reports_output_without_accepting_it_as_a_live_screen() 
   assert!(diagnostic.contains("missing live frame"), "{diagnostic}");
   assert!(diagnostic.contains("fixture-crash"), "{diagnostic}");
   assert!(diagnostic.contains("raw transcript"), "{diagnostic}");
+  assert!(tui.transcript_contains(b"fixture-crash"));
   Ok(())
 }

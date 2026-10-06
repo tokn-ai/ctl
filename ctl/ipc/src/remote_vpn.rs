@@ -3,13 +3,14 @@ use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -29,6 +30,7 @@ const REMOTE_COMMAND: &str = concat!(
 /// Shared startup budget for the SSH client and the remote agent's handshake.
 /// Established byte streams have no startup or idle deadline.
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
+const MAX_DIAGNOSTICS: usize = 8192;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,6 +183,12 @@ pub enum Error {
   SshFailed,
   #[error("remote VPN SSH master disappeared; reconnect its owner")]
   MasterUnavailable,
+  #[error("{source}: {diagnostics}")]
+  SshDiagnostics {
+    #[source]
+    source: Box<Self>,
+    diagnostics: String,
+  },
 }
 
 impl Error {
@@ -193,6 +201,7 @@ impl Error {
         ctl_core::connection::is_transient_io_error(error)
       }
       Self::Timeout | Self::ConnectionClosed(_) | Self::MasterUnavailable => true,
+      Self::SshDiagnostics { source, .. } => source.is_retryable_connection(),
       Self::Remote { code, .. } => matches!(
         code.as_str(),
         "request_timeout" | "vpn_connection_timeout" | "vpn_timeout"
@@ -208,6 +217,7 @@ pub struct Client {
   expected_remote_id: Option<String>,
   control_path: Option<PathBuf>,
   proxy_executable: Option<PathBuf>,
+  terminal_interaction: bool,
 }
 
 impl Client {
@@ -218,6 +228,7 @@ impl Client {
       expected_remote_id,
       control_path: None,
       proxy_executable: None,
+      terminal_interaction: true,
     }
   }
 
@@ -232,6 +243,14 @@ impl Client {
   #[must_use]
   pub fn with_proxy_executable(mut self, executable: PathBuf) -> Self {
     self.proxy_executable = Some(executable);
+    self
+  }
+
+  /// Keep authentication and SSH diagnostics away from a UI-owned terminal.
+  /// Headless failures retain bounded diagnostics in the returned error.
+  #[must_use]
+  pub fn with_terminal_interaction(mut self, interactive: bool) -> Self {
+    self.terminal_interaction = interactive;
     self
   }
 
@@ -312,7 +331,11 @@ impl Client {
     command
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
-      .stderr(Stdio::inherit())
+      .stderr(if self.terminal_interaction {
+        Stdio::inherit()
+      } else {
+        Stdio::piped()
+      })
       .kill_on_drop(true);
     let mut child = command.spawn()?;
     let input = child
@@ -323,6 +346,7 @@ impl Client {
       .stdout
       .take()
       .ok_or_else(|| io::Error::other("SSH stdout is missing"))?;
+    let diagnostics = child.stderr.take().map(Diagnostics::start);
     let (cancel, cancelled) = oneshot::channel();
     let waiter = tokio::spawn(async move {
       tokio::select! {
@@ -337,12 +361,12 @@ impl Client {
       waiter: Some(waiter),
       identity: None,
       protocol_version: None,
+      diagnostics,
     };
-    let (protocol_version, identity) = tokio::time::timeout(STARTUP_TIMEOUT, async {
+    let negotiated = tokio::time::timeout(STARTUP_TIMEOUT, async {
       if let Err(error) = read_preface(&mut stream).await {
         if matches!(error, Error::UnsupportedAgent)
-          && let Some(waiter) = stream.waiter.as_mut()
-          && let Ok(Ok(Ok(status))) = tokio::time::timeout(Duration::from_secs(1), waiter).await
+          && let Some(Ok(status)) = stream.wait(Duration::from_secs(1)).await
           && status.code() == Some(255)
         {
           // Failed SSH setup must not offer a component update. Older agents
@@ -369,14 +393,22 @@ impl Client {
       Ok::<_, Error>((protocol_version, identity))
     })
     .await
-    .map_err(|_| Error::Timeout)??;
+    .map_err(|_| Error::Timeout)
+    .and_then(std::convert::identity);
+    let (protocol_version, identity) = match negotiated {
+      Ok(negotiated) => negotiated,
+      Err(error) => {
+        stream.terminate().await;
+        return Err(stream.with_diagnostics(error).await);
+      }
+    };
     if self
       .expected_remote_id
       .as_ref()
       .is_some_and(|expected| expected != &identity.remote_id)
     {
       stream.terminate().await;
-      return Err(Error::IdentityMismatch);
+      return Err(stream.with_diagnostics(Error::IdentityMismatch).await);
     }
     stream.identity = Some(identity);
     stream.protocol_version = Some(protocol_version);
@@ -423,6 +455,9 @@ impl Client {
         "-o",
         "ControlPersist=no",
       ]);
+      if !self.terminal_interaction {
+        command.args(["-o", "BatchMode=yes"]);
+      }
       if !self.target.gateways.is_empty() {
         let proxy = if let Some(executable) = &self.proxy_executable {
           crate::proxy_command_with_executable(&self.target.gateways, executable)
@@ -538,6 +573,7 @@ pub struct RemoteStream {
   waiter: Option<JoinHandle<io::Result<ExitStatus>>>,
   identity: Option<ctl_proto::RemoteIdentity>,
   protocol_version: Option<ProtocolVersion>,
+  diagnostics: Option<Diagnostics>,
 }
 
 impl RemoteStream {
@@ -568,24 +604,113 @@ impl RemoteStream {
     if let Some(cancel) = self.cancel.take() {
       let _ = cancel.send(());
     }
-    if let Some(waiter) = self.waiter.take() {
-      let _ = tokio::time::timeout(Duration::from_secs(3), waiter).await;
+    let _ = self.wait(Duration::from_secs(3)).await;
+  }
+
+  async fn wait(&mut self, deadline: Duration) -> Option<io::Result<ExitStatus>> {
+    let waiter = self.waiter.as_mut()?;
+    match tokio::time::timeout(deadline, waiter).await {
+      Ok(result) => {
+        self.waiter = None;
+        Some(
+          result
+            .map_err(io::Error::other)
+            .and_then(std::convert::identity),
+        )
+      }
+      Err(_) => None,
+    }
+  }
+
+  async fn with_diagnostics(&mut self, error: Error) -> Error {
+    let Some(diagnostics) = self.diagnostics.as_mut() else {
+      return error;
+    };
+    let diagnostics = diagnostics.finish().await;
+    if diagnostics.is_empty() {
+      error
+    } else {
+      Error::SshDiagnostics {
+        source: Box::new(error),
+        diagnostics,
+      }
     }
   }
 
   async fn finish(mut self) -> Result<(), Error> {
     self.input.take();
-    let waiter = self.waiter.take().expect("SSH waiter is present");
-    match tokio::time::timeout(Duration::from_secs(5), waiter).await {
-      Ok(result) => {
-        let status = result.map_err(io::Error::other)??;
+    match self.wait(Duration::from_secs(5)).await {
+      Some(result) => {
+        let status = result?;
         if status.success() {
           Ok(())
         } else {
-          Err(Error::SshFailed)
+          Err(self.with_diagnostics(Error::SshFailed).await)
         }
       }
-      Err(_) => Err(Error::Timeout),
+      None => Err(self.with_diagnostics(Error::Timeout).await),
+    }
+  }
+}
+
+/// Drain for the channel's whole lifetime, retaining only a bounded prefix.
+/// Dropping a cancelled startup or live stream also cancels its drain task.
+struct Diagnostics {
+  bytes: Arc<Mutex<Vec<u8>>>,
+  task: Option<JoinHandle<()>>,
+}
+
+impl Diagnostics {
+  fn start(mut stderr: ChildStderr) -> Self {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let retained = Arc::clone(&bytes);
+    let task = tokio::spawn(async move {
+      let mut buffer = [0; 4096];
+      while let Ok(count) = stderr.read(&mut buffer).await {
+        if count == 0 {
+          break;
+        }
+        let mut bytes = retained
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let keep = count.min(MAX_DIAGNOSTICS.saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&buffer[..keep]);
+      }
+    });
+    Self {
+      bytes,
+      task: Some(task),
+    }
+  }
+
+  async fn finish(&mut self) -> String {
+    if let Some(task) = self.task.as_mut() {
+      let timed_out = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .is_err();
+      if let Some(task) = self.task.take()
+        && timed_out
+      {
+        task.abort();
+      }
+    }
+    let bytes = self
+      .bytes
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    String::from_utf8_lossy(&bytes)
+      .chars()
+      .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+      .collect::<String>()
+      .trim()
+      .to_owned()
+  }
+}
+
+impl Drop for Diagnostics {
+  fn drop(&mut self) {
+    if let Some(task) = &self.task {
+      task.abort();
     }
   }
 }

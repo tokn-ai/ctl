@@ -30,9 +30,21 @@ pub struct Tui {
 
 impl Tui {
   pub async fn start(daemon: &TestDaemon, session: &str, columns: u16, rows: u16) -> Result<Self> {
-    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ctmux-tui"));
+    Self::start_socket(daemon, &daemon.socket, session, columns, rows).await
+  }
+
+  pub async fn start_socket(
+    daemon: &TestDaemon,
+    socket: &std::path::Path,
+    session: &str,
+    columns: u16,
+    rows: u16,
+  ) -> Result<Self> {
+    let program = option_env!("CARGO_BIN_EXE_ctmux-tui")
+      .ok_or("ctmux-tui binary is required for this launcher")?;
+    let mut command = CommandBuilder::new(program);
     command.args(["--socket"]);
-    command.arg(&daemon.socket);
+    command.arg(socket);
     command.arg(session);
     // Only the child sees this home and environment. Archives and shell startup
     // files cannot read or alter the developer's normal state.
@@ -46,7 +58,9 @@ impl Tui {
     let mut tui = Self::spawn(command, columns, rows)?;
     tui
       .wait_screen("initial connected screen", |screen| {
-        screen.row(usize::from(rows) - 1).contains("connected")
+        screen
+          .row(usize::from(rows) - 1)
+          .starts_with(" connected |")
       })
       .await?;
     Ok(tui)
@@ -99,6 +113,11 @@ impl Tui {
     lock(&self.capture).snapshot()
   }
 
+  /// Inspect retained host output even if a later redraw erased it from view.
+  pub fn transcript_contains(&self, bytes: &[u8]) -> bool {
+    lock(&self.capture).transcript_contains(bytes)
+  }
+
   pub fn process_id(&self) -> Option<u32> {
     self.child.process_id()
   }
@@ -132,7 +151,18 @@ impl Tui {
     description: &str,
     predicate: impl Fn(&Screen) -> bool,
   ) -> Result<Screen> {
-    let deadline = Instant::now() + WAIT_LIMIT;
+    self
+      .wait_screen_for(WAIT_LIMIT, description, predicate)
+      .await
+  }
+
+  pub async fn wait_screen_for(
+    &mut self,
+    duration: Duration,
+    description: &str,
+    predicate: impl Fn(&Screen) -> bool,
+  ) -> Result<Screen> {
+    let deadline = Instant::now() + duration;
     loop {
       let changed = Arc::clone(&self.changed);
       let notified = changed.notified();

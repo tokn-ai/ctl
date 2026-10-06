@@ -70,6 +70,13 @@ async fn negotiation_peer_child() {
   let Some(mode) = std::env::var_os("CTL_REMOTE_VPN_NEGOTIATION_TEST") else {
     return;
   };
+  if mode == "noisy_startup" {
+    noisy_diagnostics();
+    std::process::exit(255);
+  }
+  if mode == "hold_diagnostics" {
+    std::future::pending::<()>().await;
+  }
   let (mut reader, mut writer) = crate::stdio::take().unwrap();
   writer.write_all(PREFACE).await.unwrap();
   accept_contract(&mut reader, &mut writer).await.unwrap();
@@ -91,6 +98,154 @@ async fn negotiation_peer_child() {
     crate::read_frame::<_, Request>(&mut reader).await.unwrap(),
     Some(Request::List)
   ));
+  if mode == "noisy_live" {
+    noisy_diagnostics();
+    crate::write_frame(&mut writer, &Response::Connected)
+      .await
+      .unwrap();
+  }
+}
+
+#[cfg(unix)]
+fn noisy_diagnostics() {
+  use std::io::Write as _;
+  let mut stderr = std::io::stderr().lock();
+  stderr.write_all(b"\x1b[2JVPN_SSH_DIAGNOSTIC\n").unwrap();
+  // Larger than a pipe's capacity: retaining only a prefix must still drain
+  // the whole stream, during startup and after a live channel is returned.
+  for _ in 0..256 {
+    stderr.write_all(&[b'x'; 4096]).unwrap();
+  }
+}
+
+#[cfg(unix)]
+fn negotiation_command(mode: &str) -> Command {
+  let mut command = Command::new(std::env::current_exe().unwrap());
+  command
+    .args([
+      "--exact",
+      "remote_vpn::tests::negotiation_peer_child",
+      "--nocapture",
+    ])
+    .env("CTL_REMOTE_VPN_NEGOTIATION_TEST", mode);
+  command
+}
+
+#[cfg(unix)]
+fn fixture_target() -> SshTarget {
+  SshTarget {
+    destination: "vpn-owner".into(),
+    ssh_config_alias: None,
+    use_ssh_config_master: None,
+    hostname: None,
+    user: None,
+    port: None,
+    identity_file: None,
+    gateways: vec![],
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_startup_captures_bounded_diagnostics_and_preserves_recovery_policy() {
+  for pinned in [false, true] {
+    let mut client = Client::new(fixture_target(), None).with_terminal_interaction(false);
+    if pinned {
+      client = client.with_control_path("/does/not/exist/vpn-test-master".into());
+    }
+    let error = tokio::time::timeout(
+      Duration::from_secs(5),
+      client.open_command(negotiation_command("noisy_startup")),
+    )
+    .await
+    .expect("noisy SSH stderr must not fill its pipe and block startup")
+    .err()
+    .expect("the fixture SSH process exits unsuccessfully");
+    assert_eq!(error.is_retryable_connection(), pinned);
+    let Error::SshDiagnostics {
+      source,
+      diagnostics,
+    } = error
+    else {
+      panic!("SSH stderr must be returned through the caller's error");
+    };
+    assert!(diagnostics.contains("VPN_SSH_DIAGNOSTIC"));
+    assert!(diagnostics.len() <= MAX_DIAGNOSTICS);
+    assert!(!diagnostics.contains('\x1b'));
+    if pinned {
+      assert!(matches!(*source, Error::MasterUnavailable));
+    } else {
+      assert!(matches!(*source, Error::SshFailed));
+    }
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_live_channels_continue_draining_after_the_diagnostic_limit() {
+  let client = Client::new(fixture_target(), None).with_terminal_interaction(false);
+  tokio::time::timeout(Duration::from_secs(5), async {
+    let mut stream = client
+      .open_command(negotiation_command("noisy_live"))
+      .await
+      .unwrap();
+    assert!(matches!(
+      send_request(&mut stream, &Request::List, Duration::from_secs(3))
+        .await
+        .unwrap(),
+      Response::Connected
+    ));
+    let retained = Arc::clone(&stream.diagnostics.as_ref().unwrap().bytes);
+    stream.finish().await.unwrap();
+    assert_eq!(retained.lock().unwrap().len(), MAX_DIAGNOSTICS);
+  })
+  .await
+  .expect("live SSH stderr must stay drained after the captured prefix is full");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_clients_disable_ssh_terminal_authentication_without_a_master() {
+  let command = Client::new(fixture_target(), None)
+    .with_terminal_interaction(false)
+    .command()
+    .await
+    .unwrap();
+  assert!(
+    command
+      .as_std()
+      .get_args()
+      .any(|argument| argument == "BatchMode=yes")
+  );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_diagnostic_collection_keeps_the_drain_owned_until_drop() {
+  let mut command = negotiation_command("hold_diagnostics");
+  command
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  let mut child = command.spawn().unwrap();
+  let mut diagnostics = Diagnostics::start(child.stderr.take().unwrap());
+  let drain = diagnostics.task.as_ref().unwrap().abort_handle();
+  assert!(
+    tokio::time::timeout(Duration::from_millis(50), diagnostics.finish())
+      .await
+      .is_err(),
+    "the fixture keeps stderr open while collection is cancelled"
+  );
+  drop(diagnostics);
+  tokio::time::timeout(Duration::from_secs(1), async {
+    while !drain.is_finished() {
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .expect("dropping cancelled diagnostics must abort its pending drain task");
+  child.kill().await.unwrap();
 }
 
 #[cfg(unix)]

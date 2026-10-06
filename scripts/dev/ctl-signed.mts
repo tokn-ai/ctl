@@ -210,7 +210,7 @@ async function main(): Promise<void> {
   if (process.platform !== "darwin") throw new Error("signed helper development is only available on macOS");
   const args = process.argv.slice(2);
   if (args.length > 1 || (args.length === 1 && !["--provision", "--helper-only"].includes(args[0]!))) {
-    throw new Error("usage: node scripts/dev/ctl-signed.mts [--provision | --helper-only]");
+    throw new Error("usage: pnpm provision | pnpm helper:signed | pnpm ctl:signed");
   }
   if (args[0] === "--provision") {
     await openProvisioningProject({ repository_root, target_directory: await getCargoTargetDirectory(repository_root) });

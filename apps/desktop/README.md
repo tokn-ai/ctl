@@ -125,12 +125,11 @@ See the [OpenConnect guide](../../docker/openconnect/README.md) or
 
 ## Develop
 
-From the repository root, install the frontend dependencies and start Tauri:
+From the repository root, install the workspace dependencies and start Tauri:
 
 ```sh
-cd apps/desktop
 pnpm install
-pnpm tauri dev
+pnpm desktop:dev
 ```
 
 On macOS and Linux, Tauri builds `ctld`, `ctmuxd`, and `ctl-taskd` before every native
@@ -140,6 +139,9 @@ development startup. `pnpm dev` starts only the frontend; `pnpm daemons:build`
 rebuilds local daemons separately. Ordinary development does not replace an
 already running daemon; `ctld` uses protocol-specific sockets, and rejects an
 incompatible helper executable before starting it.
+
+All commands below run from the repository root. Use `pnpm --filter ctmux-app`
+for app-only package commands; shared tooling lives in the root package.
 
 Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
@@ -367,7 +369,7 @@ Keychain rejects credential storage and ctmux reports the signing error instead
 of silently weakening the access policy.
 
 For local Touch ID testing with any Apple Account, first run
-`pnpm tauri:dev:provision`. In the Xcode project it opens, select the
+`pnpm provision`. In the Xcode project it opens, select the
 `ctld-provisioning` target, choose your Personal Team under **Signing &
 Capabilities**, and build once. This Xcode project is copied under `target/`,
 so the local team selection does not modify tracked files. Free Personal Team
@@ -375,12 +377,12 @@ profiles expire after seven days; after initial setup the signed-development
 launcher asks Xcode to refresh an expired profile automatically.
 
 The standalone CLI shares this provisioning project and profile discovery.
-From the repository root, `node scripts/dev/ctl-signed.mts --helper-only` prepares
+From the repository root, `pnpm helper:signed` prepares
 a signed helper that ordinary unsigned Cargo debug CLI builds can reuse.
-Without that flag, it also builds a signed CLI with `ctld.app` embedded; see the
+`pnpm ctl:signed` builds a signed CLI with `ctld.app` embedded; see the
 [CLI development instructions](../../README.md#build).
 
-Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
+Then run `pnpm desktop:dev:signed`. The launcher searches Xcode's downloaded
 profiles and `~/Library/Application Support/ctmux/signing/ctld.provisionprofile`,
 selects the newest unexpired profile for `dev.tokn-ai.ctl.ctld`, discovers its
 matching signing certificate in the login Keychain, and selects a private,
@@ -411,10 +413,10 @@ explicitly disables timestamps, so Apple's timestamp service is not needed
 for this development flow.
 
 Tauri arguments, such as `--release`, can be passed through
-`pnpm tauri:dev:signed --release`.
+`pnpm desktop:dev:signed --release`.
 Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
 failed build, following Tauri's behavior.
-Ordinary `pnpm tauri dev` keeps the desktop's bundled helper first, then discovers
+Ordinary `pnpm desktop:dev` keeps the desktop's bundled helper first, then discovers
 a compatible, verified `ctld.app` selected under `~/.tokn/ctl`, including signed
 development installations. Without one it falls back to a loose, unsigned daemon
 and cannot store Touch ID-protected credentials. Installing a signed helper does
@@ -569,12 +571,14 @@ session row actions appear on hover or keyboard focus. The keyboard icon at the
 bottom of the activity bar opens shortcut configuration. Closing a tab keeps its
 session running; **Terminate session** is the separate destructive action.
 
-For a browser preview with sample data, run `pnpm exec vite --host 127.0.0.1`
+For a browser preview with sample data, run `pnpm desktop:preview`
 and open `http://127.0.0.1:1430/preview.html`. This development-only entry renders
 the actual UI using in-memory Tauri mocks. It cannot execute terminal commands
 or open SSH connections. See [preview details](dev/README.md).
 
 ## Verify
+
+From the repository root:
 
 ```sh
 pnpm check

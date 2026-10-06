@@ -308,7 +308,7 @@ checkpoint; no old attachment token or keyboard input is replayed.
 Run the frontend suite and native persistence/transport tests:
 
 ```sh
-pnpm --dir apps/desktop test
+pnpm test:frontend
 cargo test -p ctmux-app -p ctl-agent
 ```
 

@@ -45,7 +45,7 @@ async function main(): Promise<void> {
   try {
     const profile = await prepareProvisioningProfile({
       repository_root: repositoryRoot, target_directory: targetDirectory,
-      provision_command: "pnpm tauri:dev:provision",
+      provision_command: "pnpm provision",
     });
     const tauriConfig = JSON.parse(
       await readFile(path.join(appDirectory, "src-tauri/tauri.conf.json"), "utf8"),

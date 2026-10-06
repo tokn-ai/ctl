@@ -94,12 +94,12 @@ checksum before changing release attachments.
 
 ## Build a CLI with ctld embedded
 
-For local macOS development, use the shared Tauri provisioning flow:
+For local macOS development, run the shared provisioning commands from the repository root:
 
 ```sh
-node scripts/dev/ctl-signed.mts --provision
+pnpm provision
 # In Xcode, choose your team in Signing & Capabilities and build once.
-node scripts/dev/ctl-signed.mts --helper-only
+pnpm helper:signed
 cargo run -p ctl-cli -- passwords
 ```
 
@@ -114,7 +114,7 @@ independently of the current directory. Worktrees sharing a target directory hav
 separate selections. Repeat this preparation after helper changes; ordinary CLI
 edits need only a Cargo rebuild.
 
-Without `--helper-only`, the command also embeds the helper in `ctl`, signs the
+`pnpm ctl:signed` also embeds the helper in `ctl`, signs the
 CLI, and atomically replaces `target/ctl-dev/ctl`. It allows local source changes
 and needs no notarization credentials. Its manifest binds the helper's revision,
 source fingerprint, and dirty flag. Embedded development preparation uses

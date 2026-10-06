@@ -103,6 +103,33 @@ runtime sockets continue to use private OS-specific runtime directories.
 Remote identity and component bundles already use this root as `remote-id`,
 `versions/`, and `current`.
 
+## Repository commands
+
+Use Node 24 or newer and the pinned pnpm version from `package.json`.
+Run `pnpm install` at the repository root. The pnpm workspace includes
+`apps/desktop` and uses one root lockfile; repository scripts are checked and
+run from the root.
+
+| Command | Purpose |
+| --- | --- |
+| `pnpm provision` | Open the shared macOS Xcode provisioning project |
+| `pnpm helper:signed` | Build and select this checkout's signed ctld helper for Cargo development |
+| `pnpm ctl:signed` | Build a signed CLI with that helper embedded |
+| `pnpm desktop:dev` | Start native Tauri development |
+| `pnpm desktop:dev:signed` | Start macOS desktop development with its signed helper |
+| `pnpm desktop:build` | Build native desktop packages |
+| `pnpm dev` / `pnpm build` | Start / build the frontend |
+| `pnpm desktop:preview` | Start the browser preview with sample data |
+| `pnpm daemons:build` | Build local Rust daemons |
+| `pnpm agents:sync` | Fetch verified remote component bundles for the current commit |
+| `pnpm check` | Check frontend and repository-script types |
+| `pnpm test` | Run repository-script and frontend tests |
+
+`pnpm test:frontend`, `pnpm test:dev`, and `pnpm test:ci` run individual suites.
+Arguments pass through, for example `pnpm desktop:dev:signed --release` or
+`pnpm agents:sync --main`. Signing commands keep their existing selection and
+restart behavior: preparing a helper never restarts an existing daemon.
+
 ## Build
 
 Rust 1.97 or newer is required. The Rust packages use the MIT license.
@@ -170,7 +197,7 @@ For macOS CLI development, provision once with the same
 Xcode project used by Tauri:
 
 ```sh
-node scripts/dev/ctl-signed.mts --provision
+pnpm provision
 ```
 
 In Xcode, select the `ctld-provisioning` target, choose your team under
@@ -178,7 +205,7 @@ In Xcode, select the `ctld-provisioning` target, choose your team under
 use the ordinary Cargo CLI:
 
 ```sh
-node scripts/dev/ctl-signed.mts --helper-only
+pnpm helper:signed
 cargo run -p ctl-cli -- passwords
 # Or: cargo build -p ctl-cli && target/debug/ctl passwords
 ```
@@ -194,7 +221,7 @@ ordinary CLI edits need only a Cargo rebuild. No signing
 environment variables or notarization credentials are required. The output
 follows Cargo's configured target directory.
 
-For a self-contained signed development CLI, run `node scripts/dev/ctl-signed.mts`
+For a self-contained signed development CLI, run `pnpm ctl:signed`
 and use `target/ctl-dev/ctl`. This also publishes the checkout helper for Cargo builds.
 
 Development signing explicitly disables timestamps, so it does not depend on
@@ -271,15 +298,13 @@ cargo install --path task/daemon
 cargo install --path ctl/cli
 ```
 
-The desktop app uses pnpm and Tauri 2. Build its local daemons into the shared
-Cargo target directory before starting it so the app can auto-start the
-sibling executables:
+The desktop app uses pnpm and Tauri 2. Start it from the repository root;
+native development builds its local daemons into the shared Cargo target
+directory so the app can auto-start the sibling executables:
 
 ```sh
-cargo build -p ctld -p ctmuxd -p ctl-taskd
-cd apps/desktop
 pnpm install
-pnpm tauri dev
+pnpm desktop:dev
 ```
 
 Tauri development starts even without remote install bundles and prints the
@@ -726,7 +751,7 @@ development clients. The exact current source cache is preferred; other compatib
 entries use stable revision order. Older schema-1 bundles and new downloads still
 require the exact clean client source. Installing a cached bundle leaves running
 daemon owners in place; ordinary connections negotiate with those owners.
-For source development, run `pnpm agents:sync` from `apps/desktop` at the same
+For source development, run `pnpm agents:sync` from the repository root at the same
 clean pushed revision before rebuilding. See [remote setup](docs/remote-mvp.md).
 
 `ssh` and `scp` accept the system OpenSSH command syntax. A destination such as

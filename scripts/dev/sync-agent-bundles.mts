@@ -181,7 +181,7 @@ async function checkBundles(repoRoot: string): Promise<void> {
   const revision = git(["rev-parse", "HEAD"], repoRoot);
   if (!existsSync(join(destination, BUNDLE_SET_FILE))) {
     console.warn("Remote install bundles have not been synchronized for development.");
-    console.warn("Run `pnpm agents:sync` from apps/desktop when testing remote installation.");
+    console.warn("Run `pnpm agents:sync` from the repository root when testing remote installation.");
     return;
   }
   try {
@@ -189,7 +189,7 @@ async function checkBundles(repoRoot: string): Promise<void> {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(`Remote install bundles are not current: ${detail}`);
-    console.warn("Run `pnpm agents:sync` from apps/desktop when testing remote installation.");
+    console.warn("Run `pnpm agents:sync` from the repository root when testing remote installation.");
   }
 }
 

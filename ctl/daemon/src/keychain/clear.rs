@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use ctl_ipc::credentials::ClearCounts;
-use ctl_keychain_client::{Authentication, Query, Record};
+use ctl_keychain_client::{Authentication, Record};
 
 use super::{Error, identity, index, invalid_metadata};
 use crate::credential_metadata::{self, SERVICE_PREFIX};
@@ -34,12 +34,8 @@ struct Keychain;
 
 impl Store for Keychain {
   fn scan(&mut self) -> Result<Vec<Record>, Error> {
-    ctl_keychain_client::search(&Query {
-      service: None,
-      account: None,
-      limit: MAX_ITEMS + 1,
-      secret: false,
-      authentication: Authentication::Allow { reason: REASON },
+    ctl_keychain_client::scan_attributes(Authentication::Allow { reason: REASON }, |service| {
+      service.starts_with(SERVICE_PREFIX) || service == identity::SERVICE
     })
     .map_err(Into::into)
   }

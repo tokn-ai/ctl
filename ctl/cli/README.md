@@ -128,17 +128,21 @@ credentials, and identity-file passphrases through the selected signed helper.
 IDs alongside names, accounts, targets or key paths, and state. Use the printed
 ID, a full ID from JSON, a unique full-ID prefix, or an exact unique name with
 `show` and `remove`. `--json` is available for all four actions and retains full
-IDs; listing and showing do not unlock secrets or start a daemon. Incomplete
-metadata is reported explicitly, so an empty partial list does not claim no
-credentials are saved.
+IDs. Listing and showing discover owned items directly from Keychain attributes
+without reading secret values or starting a daemon. Keychain can request
+authentication to complete discovery. Entries with missing or malformed metadata
+remain visible with an `unknown` state; `show` explains what could not be checked.
+Discovery completeness is separate from metadata quality. A failed scan reports
+its specific reason, and an empty partial list does not claim no credentials are
+saved. No metadata import command is needed.
 
 `passwords remove` opens a picker when its selector is omitted and removes one
-saved secret after interactive confirmation. `passwords clear` previews known
+saved secret after interactive confirmation. `passwords clear` previews discovered
 entries and, after confirmation, clears all owned SSH credentials and identity
-passphrases, including legacy copies absent from the metadata list. Clear
-requires ctld helper contract `1.1.3`; update the selected signed helper if an
-older helper rejects it. Both actions require an interactive terminal and have
-no `--yes` bypass. They retain private key files, hosts, VPN profiles, running
+passphrases, including legacy copies. All password commands require ctld helper
+contract `1.1.4` for authoritative discovery; update the selected signed helper
+if an older helper rejects it. Both removal actions require an interactive
+terminal and have no `--yes` bypass. They retain private key files, hosts, VPN profiles, running
 connections, and never-save preferences. These commands manage the local macOS
 Keychain, so omit `--host`, `--method`, and `--remote-platform`.
 

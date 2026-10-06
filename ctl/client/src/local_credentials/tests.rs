@@ -111,6 +111,55 @@ async fn old_helpers_never_receive_interactive_inventory_fallback() {
 }
 
 #[tokio::test]
+async fn discovery_uses_its_authoritative_operation_and_reports_access_failures() {
+  let fixture = command(
+    r#"request=$(cat); test "$request" = '{"type":"discover"}' || exit 1; printf '%s' '{"type":"discovered","inventory":{"entries":[],"complete":true,"warnings":[]}}'"#,
+  );
+  assert_eq!(
+    exchange_credentials(
+      fixture,
+      credentials::Request::Discover {},
+      Duration::from_secs(2)
+    )
+    .await
+    .unwrap(),
+    credentials::Response::Discovered {
+      inventory: credentials::Discovery {
+        entries: Vec::new(),
+        complete: true,
+        warnings: Vec::new()
+      },
+    },
+  );
+  for (code, expected) in [
+    (
+      "credential_request_invalid",
+      "credential_helper_unsupported",
+    ),
+    ("credential_store_locked", "credential_store_locked"),
+    ("credential_discovery_limit", "credential_discovery_limit"),
+    ("credential_discovery_failed", "credential_discovery_failed"),
+    (
+      "credential_discovery_conflict",
+      "credential_discovery_conflict",
+    ),
+  ] {
+    let fixture = command(&format!(
+      r#"request=$(cat); test "$request" = '{{"type":"discover"}}' || exit 1; printf '%s' '{{"type":"error","code":"{code}","message":"private-fixture-canary"}}'"#,
+    ));
+    let error = exchange_credentials(
+      fixture,
+      credentials::Request::Discover {},
+      Duration::from_secs(2),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, expected);
+    assert!(!error.message.contains("canary"));
+  }
+}
+
+#[tokio::test]
 async fn helper_errors_and_stderr_are_sanitized() {
   let fixture = command(
     r#"cat >/dev/null; printf '%s' 'stderr-private-fixture-canary' >&2; printf '%s' '{"type":"error","code":"credential_store_locked","message":"helper-private-fixture-canary"}'; exit 2"#,

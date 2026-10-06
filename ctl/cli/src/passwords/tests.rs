@@ -1,33 +1,9 @@
 use super::*;
 
 fn snapshot() -> Snapshot {
-  inventory::build(
-    credentials::Inventory {
-      credentials: vec![credentials::StoredCredential {
-        credential_id: format!("{}:{}", "a".repeat(64), "b".repeat(64)),
-        scope_id: "a".repeat(64),
-        name: "SSH password · work".into(),
-        kind: credentials::CredentialKind::SshPassword,
-        target: Some("work".into()),
-        account: Some("alice".into()),
-        key_name: None,
-        created_at_ms: Some(1),
-        updated_at_ms: Some(2),
-      }],
-      complete: true,
-      warning: None,
-      metadata_import_required: false,
-    },
-    identities::Inventory {
-      identity_files: Vec::new(),
-      complete: true,
-      file_discovery_complete: true,
-      warning: None,
-      keychain_available: true,
-      keychain_error: None,
-      metadata_import_required: false,
-    },
-  )
+  inventory::build(inventory::fixtures::discovery(vec![
+    inventory::fixtures::password(&"b".repeat(64), "SSH password · work"),
+  ]))
 }
 
 #[test]

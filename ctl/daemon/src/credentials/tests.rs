@@ -13,6 +13,7 @@ fn invalid_and_oversized_requests_never_reach_keychain() {
     b"not json".to_vec(),
     br#"{"type":"list","password":"fixture-secret"}"#.to_vec(),
     br#"{"type":"clear","password":"fixture-secret"}"#.to_vec(),
+    br#"{"type":"discover","password":"fixture-secret"}"#.to_vec(),
     vec![b'x'; MAX_REQUEST_BYTES + 1],
   ] {
     let response = run_fixture(&input, |_| panic!("invalid request reached storage"));
@@ -38,6 +39,31 @@ fn clear_is_dispatched_once_and_returns_counts_without_credentials() {
       identity_count: 2,
     }
   );
+}
+
+#[test]
+fn discovery_is_dispatched_once_and_never_truncates_a_successful_inventory() {
+  let response = run_fixture(br#"{"type":"discover"}"#, |request| {
+    assert_eq!(request, &Request::Discover {});
+    Response::Discovered {
+      inventory: ctl_ipc::credentials::Discovery {
+        entries: Vec::new(),
+        complete: true,
+        warnings: Vec::new(),
+      },
+    }
+  });
+  assert!(matches!(response, Response::Discovered { inventory } if inventory.complete));
+  let output = encode_response(Response::Discovered {
+    inventory: ctl_ipc::credentials::Discovery {
+      entries: Vec::new(),
+      complete: true,
+      warnings: vec!["x".repeat(MAX_RESPONSE_BYTES)],
+    },
+  })
+  .unwrap();
+  let response: Response = serde_json::from_slice(&output).unwrap();
+  assert!(matches!(response, Response::Error { code, .. } if code == "credential_discovery_limit"));
 }
 
 #[test]
@@ -118,6 +144,14 @@ fn keychain_errors_do_not_appear_as_a_successful_empty_inventory() {
     (-25_308, "credential_store_locked"),
     (-128, "credential_store_locked"),
     (-50, "credential_list_failed"),
+    (
+      ctl_keychain_client::ATTRIBUTE_SCAN_LIMIT,
+      "credential_discovery_limit",
+    ),
+    (
+      ctl_keychain_client::ATTRIBUTE_SCAN_CONFLICT,
+      "credential_discovery_conflict",
+    ),
   ] {
     let failure = crate::keychain::Error(security_framework::base::Error::from_code(status));
     let response = keychain_error(failure, "credential_list_failed");
@@ -145,5 +179,8 @@ fn unsupported_platform_does_not_claim_to_have_an_empty_keychain() {
   );
   assert!(
     matches!(handle(&Request::Clear {}), Response::Error { code, .. } if code == "credential_store_unsupported")
+  );
+  assert!(
+    matches!(handle(&Request::Discover {}), Response::Error { code, .. } if code == "credential_store_unsupported")
   );
 }

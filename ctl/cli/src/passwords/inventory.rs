@@ -7,7 +7,6 @@ mod references;
 pub(super) struct Snapshot {
   pub entries: Vec<Entry>,
   pub complete: bool,
-  pub metadata_import_required: bool,
   pub warnings: Vec<String>,
 }
 
@@ -70,6 +69,7 @@ enum Source {
 pub(super) enum State {
   Saved,
   FileChanged,
+  Unknown,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -78,53 +78,25 @@ pub(super) enum Removal<'a> {
   Identity(&'a str),
 }
 
-pub(super) fn build(
-  credentials: credentials::Inventory,
-  identities: identities::Inventory,
-) -> Snapshot {
-  let metadata_import_required =
-    credentials.metadata_import_required || identities.metadata_import_required;
-  let complete = credentials.complete
-    && identities.complete
-    && identities.file_discovery_complete
-    && identities.keychain_available
-    && !metadata_import_required;
+pub(super) fn build(discovery: credentials::Discovery) -> Snapshot {
   let mut warnings = Vec::new();
-  if !identities.keychain_available && identities.warning.is_none() {
-    warnings
-      .push("Keychain access is unavailable; saved key passphrases could not be checked.".into());
-  }
-  for warning in [credentials.warning, identities.warning]
-    .into_iter()
-    .flatten()
-  {
-    if !warnings.contains(&warning) {
+  for warning in discovery.warnings {
+    if !warning.trim().is_empty() && !warnings.contains(&warning) {
       warnings.push(warning);
     }
   }
-  if metadata_import_required {
-    warnings.push(
-      "Saved metadata is incomplete. Older saved credentials may not appear in this list.".into(),
-    );
-  } else if !complete && warnings.is_empty() {
-    warnings.push("Some saved credential metadata could not be checked.".into());
+  if !discovery.complete && warnings.is_empty() {
+    warnings.push("Saved password discovery did not finish; some entries may be missing.".into());
   }
-  let mut entries: Vec<_> = credentials
-    .credentials
+  let mut entries: Vec<_> = discovery
+    .entries
     .into_iter()
-    .map(Entry::credential)
+    .map(Entry::discovered)
     .collect();
-  entries.extend(
-    identities
-      .identity_files
-      .into_iter()
-      .filter_map(Entry::identity),
-  );
   entries.sort_by(|left, right| left.id.cmp(&right.id));
   Snapshot {
     entries,
-    complete,
-    metadata_import_required,
+    complete: discovery.complete,
     warnings,
   }
 }
@@ -223,67 +195,52 @@ fn selected<'a>(entries: &[&'a Entry], selector: &str) -> Result<&'a Entry, Stri
 }
 
 impl Entry {
-  fn credential(record: credentials::StoredCredential) -> Self {
-    let id = format!("password:{}", record.credential_id);
-    let reference = references::key(&id, Source::Credential);
+  fn discovered(record: credentials::SavedPassword) -> Self {
+    let (source, prefix) = match record.source {
+      credentials::PasswordSource::Credential => (Source::Credential, "password"),
+      credentials::PasswordSource::Identity => (Source::Identity, "identity"),
+    };
+    let id = format!("{prefix}:{}", record.id);
+    let reference = references::key(&id, source);
+    let scope_id = if source == Source::Credential {
+      record.id.split_once(':').and_then(|(scope, account)| {
+        [scope, account]
+          .into_iter()
+          .all(|component| {
+            component.len() == 64 && component.bytes().all(|byte| byte.is_ascii_hexdigit())
+          })
+          .then(|| scope.into())
+      })
+    } else {
+      None
+    };
     Self {
       id,
       reference,
       name: record.name,
       kind: record.kind,
-      source: Source::Credential,
-      state: State::Saved,
-      scope_id: Some(record.scope_id),
+      source,
+      state: match record.state {
+        credentials::PasswordState::Saved => State::Saved,
+        credentials::PasswordState::FileChanged => State::FileChanged,
+        credentials::PasswordState::Unknown => State::Unknown,
+      },
+      scope_id,
       target: record.target,
       account: record.account,
       key_name: record.key_name,
-      path: None,
-      display_path: None,
-      file_version: None,
-      key_type: None,
-      fingerprint: None,
-      encrypted: None,
-      file_state: None,
-      detail: None,
-      created_at_ms: record.created_at_ms,
-      updated_at_ms: record.updated_at_ms,
-      stored_id: record.credential_id,
-    }
-  }
-
-  fn identity(record: identities::IdentityFile) -> Option<Self> {
-    let state = match record.passphrase_state {
-      identities::PassphraseState::Saved => State::Saved,
-      identities::PassphraseState::FileChanged => State::FileChanged,
-      // Discovery alone cannot establish that an unknown or unsaved key has a
-      // stored secret. Avoid exposing ordinary identity files as passwords.
-      _ => return None,
-    };
-    let id = format!("identity:{}", record.identity_id);
-    let reference = references::key(&id, Source::Identity);
-    Some(Self {
-      id,
-      reference,
-      name: record.display_path.clone(),
-      kind: credentials::CredentialKind::SshKeyPassphrase,
-      source: Source::Identity,
-      state,
-      scope_id: None,
-      target: None,
-      account: None,
-      key_name: None,
-      path: Some(record.path),
-      display_path: Some(record.display_path),
+      path: record.path,
+      display_path: record.display_path,
       file_version: record.file_version,
       key_type: record.key_type,
       fingerprint: record.fingerprint,
       encrypted: record.encrypted,
-      file_state: Some(record.file_state),
+      file_state: record.file_state,
       detail: record.detail,
-      created_at_ms: None,
-      updated_at_ms: None,
-      stored_id: record.identity_id,
-    })
+      created_at_ms: record.created_at_ms,
+      updated_at_ms: record.updated_at_ms,
+      stored_id: record.id,
+    }
   }
 
   pub fn removal(&self) -> Removal<'_> {
@@ -357,6 +314,7 @@ impl Entry {
     match self.state {
       State::Saved => "saved",
       State::FileChanged => "file changed",
+      State::Unknown => "unknown",
     }
   }
 }
@@ -376,3 +334,6 @@ fn file_state_label(state: identities::FileState) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) mod fixtures;

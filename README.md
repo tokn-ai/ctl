@@ -645,6 +645,10 @@ can be ended.
 
 On macOS, `ctl passwords` lists saved SSH credentials and key passphrases.
 `ctl passwords show ID` displays metadata only; both support `--json`.
+Listing discovers the actual saved Keychain entries without reading secret values
+and refreshes their metadata cache. Keychain authorization may be requested.
+Missing or invalid metadata remains visible as an unknown entry with a reason;
+access failures and inventory limits are reported explicitly.
 Human-readable tables use compact `p-` and `k-` IDs alongside names, accounts,
 targets or key paths, and state. Use the printed ID with `show` or `remove`;
 full IDs remain available in JSON, and unique full-ID prefixes or exact unique
@@ -652,7 +656,7 @@ names are also accepted.
 `ctl passwords remove ID` confirms removal of one saved entry, or opens a picker
 when no ID is given. `ctl passwords clear` previews known entries and confirms
 clearing all owned SSH passwords and passphrases, including unindexed older
-copies. Clear requires helper contract `1.1.3`. Removal requires an interactive
+copies. These commands require helper contract `1.1.4`. Removal requires an interactive
 terminal and preserves key files, host/VPN settings, and never-save preferences.
 See [saved credentials](docs/credentials.md) for the shared store's behavior.
 

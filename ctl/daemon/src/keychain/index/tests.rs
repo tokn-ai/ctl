@@ -277,9 +277,51 @@ fn partial_import_recovers_valid_rows_beside_malformed_owned_items() {
 }
 
 #[test]
-fn truncated_import_can_never_commit_a_complete_marker() {
+fn unrelated_items_do_not_consume_the_owned_import_budget() {
   let records = (0..=MAX_ITEMS)
     .map(|_| record("unrelated", "item", "{}"))
     .collect();
-  assert!(!imported_records(records).complete);
+  assert!(imported_records(records).complete);
+}
+
+#[test]
+fn source_projection_retains_credentials_beyond_the_legacy_converter_page() {
+  let service = format!("{SERVICE_PREFIX}{}", "a".repeat(64));
+  let records = (0..=credential_metadata::MAX_SEARCH_ITEMS)
+    .map(|index| {
+      record(
+        &service,
+        &format!("{index:064x}"),
+        r#"{"version":1,"kind":"ssh_password","target":"synthetic","account":"alice","key_name":null}"#,
+      )
+    })
+    .collect::<Vec<_>>();
+  let imported = imported_sources(&records);
+  assert!(imported.complete);
+  assert_eq!(imported.credentials.len(), records.len());
+}
+
+#[test]
+fn unknown_description_does_not_prevent_indexing_a_valid_source_selector() {
+  let service = format!("{SERVICE_PREFIX}{}", "a".repeat(64));
+  let imported = imported_records(vec![record(&service, &"b".repeat(64), "{}")]);
+  assert!(imported.complete);
+  assert_eq!(imported.credentials.len(), 1);
+  assert_eq!(
+    imported.credentials[0].credential_id,
+    format!("{}:{}", "a".repeat(64), "b".repeat(64))
+  );
+}
+
+#[test]
+fn conflicting_source_selectors_cannot_claim_a_complete_cache() {
+  let service = format!("{SERVICE_PREFIX}{}", "a".repeat(64));
+  let comment =
+    r#"{"version":1,"kind":"ssh_password","target":"synthetic","account":"alice","key_name":null}"#;
+  let imported = imported_records(vec![
+    record(&service, &"b".repeat(64), comment),
+    record(&service, &"b".repeat(64), comment),
+  ]);
+  assert!(!imported.complete);
+  assert_eq!(imported.credentials.len(), 1);
 }

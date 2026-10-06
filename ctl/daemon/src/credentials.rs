@@ -56,6 +56,12 @@ fn encode_response(mut response: Response) -> io::Result<Vec<u8>> {
         inventory.complete = false;
         inventory.warning = Some(crate::credential_metadata::TRUNCATED_WARNING.into());
       }
+      Response::Discovered { .. } => {
+        response = error(
+          "credential_discovery_limit",
+          "The saved credential inventory exceeds the helper response size limit.",
+        );
+      }
       _ => {
         return Err(io::Error::other(
           "credential helper response exceeds its size limit",
@@ -91,6 +97,10 @@ fn handle(request: &Request) -> Response {
       Request::ImportMetadata => match crate::keychain::import_metadata() {
         Ok(()) => Response::Imported,
         Err(failure) => keychain_error(failure, "credential_import_failed"),
+      },
+      Request::Discover {} => match crate::keychain::discover() {
+        Ok(inventory) => Response::Discovered { inventory },
+        Err(failure) => keychain_error(failure, "credential_discovery_failed"),
       },
       Request::Forget { credential_id } => match crate::keychain::forget(credential_id) {
         Ok(()) => Response::Forgotten,
@@ -135,6 +145,16 @@ fn keychain_error(failure: crate::keychain::Error, fallback: &str) -> Response {
     error(
       "credential_store_locked",
       "Keychain access is locked or was not allowed.",
+    )
+  } else if failure.is_scan_limit() {
+    error(
+      "credential_discovery_limit",
+      "There are too many owned Keychain entries to discover within the inventory limit.",
+    )
+  } else if failure.is_scan_conflict() {
+    error(
+      "credential_discovery_conflict",
+      "Saved Keychain entries have duplicate identifiers and could not be listed safely.",
     )
   } else {
     error(

@@ -13,7 +13,7 @@ use inventory::{Choice, Entry, Removal, Snapshot};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
-  /// List saved SSH passwords and identity passphrases without unlocking them.
+  /// Discover saved SSH passwords and identity passphrases without reading secrets.
   List,
   /// Show a saved entry's metadata, without revealing its secret.
   Show {
@@ -130,48 +130,10 @@ async fn run_inner(command: Command, json: bool) -> Result<(), Error> {
 }
 
 async fn read_inventory() -> Result<Snapshot, Error> {
-  let (credentials, identities) = tokio::join!(
-    helper::request_credentials(credentials::Request::ListMetadata),
-    helper::request_identity(identities::Request::ListMetadata { paths: Vec::new() }),
-  );
-  let credentials = match credentials {
-    Ok(credentials::Response::Inventory { inventory }) => Ok(inventory),
-    Ok(_) => Err(Error::UnexpectedResponse),
-    Err(error) => Err(Error::Helper(error)),
-  };
-  let identities = match identities {
-    Ok(identities::Response::Inventory { inventory }) => Ok(inventory),
-    Ok(_) => Err(Error::UnexpectedResponse),
-    Err(error) => Err(Error::Helper(error)),
-  };
-  if credentials.is_err() && identities.is_err() {
-    return Err(credentials.expect_err("both inventory sources failed"));
+  match helper::request_credentials(credentials::Request::Discover {}).await? {
+    credentials::Response::Discovered { inventory } => Ok(inventory::build(inventory)),
+    _ => Err(Error::UnexpectedResponse),
   }
-  let mut warnings = Vec::new();
-  let credentials = credentials.unwrap_or_else(|error| {
-    warnings.push(format!("SSH password metadata: {error}"));
-    credentials::Inventory {
-      credentials: Vec::new(),
-      complete: false,
-      warning: None,
-      metadata_import_required: false,
-    }
-  });
-  let identities = identities.unwrap_or_else(|error| {
-    warnings.push(format!("Key passphrase metadata: {error}"));
-    identities::Inventory {
-      identity_files: Vec::new(),
-      complete: false,
-      file_discovery_complete: false,
-      warning: None,
-      keychain_available: false,
-      keychain_error: None,
-      metadata_import_required: false,
-    }
-  });
-  let mut snapshot = inventory::build(credentials, identities);
-  snapshot.warnings.extend(warnings);
-  Ok(snapshot)
 }
 
 async fn remove(entry: &Entry) -> Result<(), Error> {

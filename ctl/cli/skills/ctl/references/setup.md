@@ -61,8 +61,9 @@ not match the CLI's. Signed development apps retain provisioning expiry and
 certificate checks, use `development/<archive-sha256>/`, and update
 `selected/<target>-ctld1-lifecycle1-helper1` without changing release `current`.
 All standalone CLI builds, including ordinary Cargo builds, can reuse them.
-`ctl passwords clear` requires helper contract `1.1.3`; list/show can reuse
-helpers advertising `1.1.2`.
+`ctl passwords` commands require helper contract `1.1.4` for authoritative
+attribute-only discovery. Listing may request Keychain authorization; no manual
+metadata-import step is needed. Older helpers must be updated or rebuilt.
 
 Official macOS CLI downloads embed their matching signed helper. They prepare
 it locally when no compatible shared app is selected and a command starts a

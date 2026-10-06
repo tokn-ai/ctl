@@ -206,12 +206,26 @@ pub(crate) fn forget(identity_id: &str) -> Result<(), IdentityError> {
   {
     return Err(IdentityError::InvalidRequest);
   }
-  let (_, entries, _) =
-    index::list().map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
-  let metadata = entries
-    .get(identity_id)
-    .ok_or(IdentityError::InvalidRequest)?;
-  let reason = purpose::identity("Remove the saved", &metadata.path, None);
+  super::availability().map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
+  let presence = ctl_keychain_client::exists(SERVICE, identity_id)
+    .map_err(|error| map_error(error.into(), IdentityError::ForgetFailed))?;
+  if presence == Presence::Missing {
+    return Err(IdentityError::InvalidRequest);
+  }
+  // Unknown metadata must not hide an owned secret from explicit exact-item
+  // removal. Authentication and the validated namespace still protect deletion.
+  let cached = index::list()
+    .ok()
+    .and_then(|(_, mut entries, _)| entries.remove(identity_id));
+  let reason = cached.as_ref().map_or_else(
+    || {
+      format!(
+        "Remove saved SSH key passphrase {} from Keychain",
+        &identity_id[..12]
+      )
+    },
+    |metadata| purpose::identity("Remove the saved", &metadata.path, None),
+  );
   let pending =
     index::begin_mutation().map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
   ctl_keychain_client::delete(

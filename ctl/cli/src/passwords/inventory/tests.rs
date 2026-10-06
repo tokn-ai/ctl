@@ -1,80 +1,24 @@
 use super::*;
-use credentials::{CredentialKind, StoredCredential};
-use identities::{FileState, IdentityFile, PassphraseState};
-
-fn password(account: &str, name: &str) -> StoredCredential {
-  StoredCredential {
-    credential_id: format!("{}:{}", "a".repeat(64), account),
-    scope_id: "a".repeat(64),
-    name: name.into(),
-    kind: CredentialKind::SshPassword,
-    target: Some("alice@example.test".into()),
-    account: Some("alice".into()),
-    key_name: None,
-    created_at_ms: Some(1),
-    updated_at_ms: Some(2),
-  }
-}
-
-fn identity(id: &str, passphrase_state: PassphraseState) -> IdentityFile {
-  IdentityFile {
-    identity_id: id.into(),
-    path: "/home/alice/.ssh/id_ed25519".into(),
-    display_path: "~/.ssh/id_ed25519".into(),
-    file_version: Some("version".into()),
-    key_type: Some("ssh-ed25519".into()),
-    fingerprint: Some("SHA256:public-fingerprint".into()),
-    encrypted: Some(true),
-    file_state: FileState::Ready,
-    passphrase_state,
-    detail: None,
-  }
-}
-
-fn inventories(
-  credentials: Vec<StoredCredential>,
-  identity_files: Vec<IdentityFile>,
-) -> (credentials::Inventory, identities::Inventory) {
-  (
-    credentials::Inventory {
-      credentials,
-      complete: true,
-      warning: None,
-      metadata_import_required: false,
-    },
-    identities::Inventory {
-      identity_files,
-      complete: true,
-      file_discovery_complete: true,
-      warning: None,
-      keychain_available: true,
-      keychain_error: None,
-      metadata_import_required: false,
-    },
-  )
-}
+use credentials::{CredentialKind, PasswordState};
+use fixtures::{discovery, identity, password};
+use identities::FileState;
 
 #[test]
 fn lists_stored_passwords_and_passphrases_with_authoritative_ids() {
   let password = password(&"b".repeat(64), "Work password");
-  let credential_id = password.credential_id.clone();
+  let credential_id = password.id.clone();
   let identity_id = "c".repeat(64);
-  let mut changed = identity(&"d".repeat(64), PassphraseState::FileChanged);
-  changed.path = "/home/alice/.ssh/removed".into();
-  changed.display_path = "~/.ssh/removed".into();
-  changed.file_state = FileState::Missing;
+  let mut changed = identity(&"d".repeat(64), PasswordState::FileChanged);
+  changed.path = Some("/home/alice/.ssh/removed".into());
+  changed.display_path = Some("~/.ssh/removed".into());
+  changed.name = "~/.ssh/removed".into();
+  changed.file_state = Some(FileState::Missing);
   changed.file_version = None;
-  let (credentials, identities) = inventories(
-    vec![password],
-    vec![
-      identity(&identity_id, PassphraseState::Saved),
-      changed,
-      identity(&"e".repeat(64), PassphraseState::NotSaved),
-      identity(&"f".repeat(64), PassphraseState::NotRequired),
-      identity(&"0".repeat(64), PassphraseState::Unknown),
-    ],
-  );
-  let snapshot = build(credentials, identities);
+  let snapshot = build(discovery(vec![
+    password,
+    identity(&identity_id, PasswordState::Saved),
+    changed,
+  ]));
   assert!(snapshot.complete);
   assert_eq!(snapshot.entries.len(), 3);
   let stored_password = snapshot.select("Work password").unwrap();
@@ -96,8 +40,7 @@ fn lists_stored_passwords_and_passphrases_with_authoritative_ids() {
 fn legacy_credentials_are_distinguished_from_verified_identity_passphrases() {
   let mut legacy = password(&"b".repeat(64), "Legacy key passphrase");
   legacy.kind = CredentialKind::SshKeyPassphrase;
-  let (credentials, identities) = inventories(vec![legacy], Vec::new());
-  let snapshot = build(credentials, identities);
+  let snapshot = build(discovery(vec![legacy]));
   let entry = &snapshot.entries[0];
   assert_eq!(entry.kind_label(), "Legacy passphrase");
   assert!(matches!(entry.removal(), Removal::Credential(_)));
@@ -105,55 +48,81 @@ fn legacy_credentials_are_distinguished_from_verified_identity_passphrases() {
 }
 
 #[test]
-fn legacy_metadata_requirement_prevents_complete_empty_inventory() {
-  let (mut credentials, identities) = inventories(Vec::new(), Vec::new());
-  credentials.metadata_import_required = true;
-  let snapshot = build(credentials, identities);
-  assert!(!snapshot.complete);
-  assert!(snapshot.metadata_import_required);
-  assert!(snapshot.render_list().contains("inventory is incomplete"));
-  assert!(
-    snapshot
-      .warnings
-      .iter()
-      .any(|warning| warning.contains("Older saved credentials"))
-  );
+fn complete_discovery_is_independent_of_missing_or_malformed_metadata() {
+  let mut unknown = identity("malformed-stored-id", PasswordState::Unknown);
+  unknown.name = "Unknown saved key passphrase".into();
+  unknown.path = None;
+  unknown.display_path = None;
+  unknown.file_state = None;
+  unknown.detail = Some("Saved key metadata could not be decoded.".into());
+  let snapshot = build(discovery(vec![unknown]));
+  assert!(snapshot.complete);
+  assert_eq!(snapshot.entries.len(), 1);
+  let entry = &snapshot.entries[0];
+  assert_eq!(entry.state, State::Unknown);
+  assert_eq!(entry.id, "identity:malformed-stored-id");
+  assert_eq!(entry.removal(), Removal::Identity("malformed-stored-id"));
+  assert_eq!(snapshot.select(&snapshot.short_id(entry)).unwrap(), entry);
+  assert!(snapshot.render_list().contains("unknown"));
+  assert!(snapshot.render_show(entry).contains("could not be decoded"));
+  assert_eq!(snapshot.warnings, Vec::<String>::new());
   let value = serde_json::to_value(&snapshot).unwrap();
-  assert_eq!(value["complete"], false);
-  assert_eq!(value["metadata_import_required"], true);
+  assert_eq!(value["complete"], true);
+  assert_eq!(value["entries"][0]["state"], "unknown");
+  assert!(value.get("metadata_import_required").is_none());
 }
 
 #[test]
-fn retains_source_warnings_and_keychain_unavailability() {
-  let (mut credentials, mut identities) = inventories(Vec::new(), Vec::new());
-  credentials.complete = false;
-  credentials.warning = Some("Password metadata was unavailable.".into());
-  identities.keychain_available = false;
-  identities.keychain_error = Some("keychain_unavailable".into());
-  let snapshot = build(credentials, identities);
+fn unknown_password_metadata_retains_its_raw_id_for_helper_validation() {
+  let mut unknown = password("invalid-account-id", "Unknown SSH credential");
+  unknown.state = PasswordState::Unknown;
+  unknown.account = None;
+  unknown.target = None;
+  unknown.detail = Some("Stored credential account metadata is malformed.".into());
+  let raw_id = unknown.id.clone();
+  let snapshot = build(discovery(vec![unknown]));
+  let entry = &snapshot.entries[0];
+  assert_eq!(entry.state, State::Unknown);
+  assert_eq!(entry.removal(), Removal::Credential(&raw_id));
+  assert!(snapshot.render_show(entry).contains("malformed"));
+  assert!(entry.scope_id.is_none());
+  assert_eq!(snapshot.choices().len(), 1);
+}
+
+#[test]
+fn retains_specific_discovery_warnings_without_duplicate_or_generic_messages() {
+  let mut inventory = discovery(Vec::new());
+  inventory.complete = false;
+  inventory.warnings = vec![
+    "Keychain access was denied while scanning saved passwords.".into(),
+    "Keychain access was denied while scanning saved passwords.".into(),
+    String::new(),
+    "  ".into(),
+  ];
+  let snapshot = build(inventory);
   assert!(!snapshot.complete);
-  assert_eq!(snapshot.warnings.len(), 2);
-  assert!(
-    snapshot
-      .warnings
-      .iter()
-      .any(|warning| warning.contains("Keychain access"))
-  );
-  assert!(
-    snapshot
-      .warnings
-      .iter()
-      .any(|warning| warning.contains("Password metadata"))
-  );
+  assert_eq!(snapshot.warnings.len(), 1);
+  assert!(snapshot.warnings[0].contains("access was denied"));
+  assert!(snapshot.render_list().contains("inventory is incomplete"));
+}
+
+#[test]
+fn incomplete_discovery_with_no_reason_has_one_fallback_warning() {
+  let mut inventory = discovery(Vec::new());
+  inventory.complete = false;
+  inventory.warnings = vec!["  ".into()];
+  let snapshot = build(inventory);
+  assert!(!snapshot.complete);
+  assert_eq!(snapshot.warnings.len(), 1);
+  assert!(snapshot.warnings[0].contains("discovery did not finish"));
 }
 
 #[test]
 fn selects_unique_names_and_id_prefixes_but_rejects_ambiguous_or_blank_input() {
   let first = password(&"b".repeat(64), "Repeated name");
   let second = password(&"c".repeat(64), "Repeated name");
-  let first_id = format!("password:{}", first.credential_id);
-  let (credentials, identities) = inventories(vec![first, second], Vec::new());
-  let snapshot = build(credentials, identities);
+  let first_id = format!("password:{}", first.id);
+  let snapshot = build(discovery(vec![first, second]));
   assert_eq!(snapshot.select(&first_id).unwrap().id, first_id);
   assert_eq!(
     snapshot.select(&first_id[..first_id.len() - 4]).unwrap().id,
@@ -184,21 +153,26 @@ fn selects_unique_names_and_id_prefixes_but_rejects_ambiguous_or_blank_input() {
 #[test]
 fn exact_authoritative_id_wins_over_another_entry_name() {
   let first = password(&"b".repeat(64), "First");
-  let first_id = format!("password:{}", first.credential_id);
+  let first_id = format!("password:{}", first.id);
   let second = password(&"c".repeat(64), &first_id);
-  let (credentials, identities) = inventories(vec![first, second], Vec::new());
-  let snapshot = build(credentials, identities);
+  let snapshot = build(discovery(vec![first, second]));
   assert_eq!(snapshot.select(&first_id).unwrap().name, "First");
 }
 
 #[test]
 fn serialization_exposes_only_public_metadata_in_snake_case() {
-  let (credentials, identities) = inventories(
-    vec![password(&"b".repeat(64), "Work password")],
-    vec![identity(&"c".repeat(64), PassphraseState::Saved)],
-  );
-  let snapshot = build(credentials, identities);
+  let snapshot = build(discovery(vec![
+    password(&"b".repeat(64), "Work password"),
+    identity(&"c".repeat(64), PasswordState::Saved),
+  ]));
   let value = serde_json::to_value(&snapshot).unwrap();
+  let password = value["entries"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|entry| entry["source"] == "credential")
+    .unwrap();
+  assert_eq!(password["scope_id"], "a".repeat(64));
   for entry in value["entries"].as_array().unwrap() {
     let fields = entry.as_object().unwrap();
     for field in fields.keys() {
@@ -223,11 +197,10 @@ fn serialization_exposes_only_public_metadata_in_snake_case() {
 
 #[test]
 fn human_output_and_selector_errors_escape_terminal_control_sequences() {
-  let (credentials, identities) = inventories(
-    vec![password(&"b".repeat(64), "Bad\nname\u{1b}[2J\u{202e}")],
-    Vec::new(),
-  );
-  let snapshot = build(credentials, identities);
+  let snapshot = build(discovery(vec![password(
+    &"b".repeat(64),
+    "Bad\nname\u{1b}[2J\u{202e}",
+  )]));
   for output in [
     snapshot.render_list(),
     snapshot.render_show(&snapshot.entries[0]),
@@ -242,8 +215,7 @@ fn human_output_and_selector_errors_escape_terminal_control_sequences() {
 
 #[test]
 fn complete_empty_inventory_is_distinct_from_an_incomplete_one() {
-  let (credentials, identities) = inventories(Vec::new(), Vec::new());
-  let snapshot = build(credentials, identities);
+  let snapshot = build(discovery(Vec::new()));
   assert_eq!(snapshot.render_list(), "No saved passwords.");
   assert_eq!(snapshot.warnings, Vec::<String>::new());
 }

@@ -1,8 +1,11 @@
 # Saved credentials
 
 The CLI exposes the local SSH store with `ctl passwords` (or `list`), `show`,
-`remove`, and `clear`. All support `--json`; list/show display metadata without
-unlocking stored secrets. Human-readable tables show compact `p-` and `k-` IDs
+`remove`, and `clear`. All support `--json`; list/show discover the saved SSH
+items directly from Keychain attributes without reading password or passphrase
+values. macOS may request authentication to access protected attributes. The
+CLI refreshes its metadata cache automatically; no import command is required.
+Human-readable tables show compact `p-` and `k-` IDs
 with names, accounts, targets or key paths, and state. Show and remove accept
 these printed IDs, full IDs from JSON, unique full-ID prefixes, or exact unique
 names. Remove opens a picker when its selector is omitted. Removal and clear
@@ -10,6 +13,21 @@ require interactive confirmation. Clear removes all owned SSH passwords and
 identity passphrases, including unindexed older copies, while retaining key
 files, host definitions, VPN profiles, and never-save preferences. It requires
 helper contract `1.1.3`; older helpers reject it before performing any operation.
+
+Discovery requires helper contract `1.1.4`; older helpers reject its new request
+before starting any interactive inventory. A successful CLI list includes every
+owned item returned by the complete source
+scan, independently of whether its descriptive metadata can be decoded. Missing
+or invalid metadata produces an **Unknown** row with an explanation rather than
+hiding the saved item. Changed, missing, or unreadable identity files remain
+listed with their current state. Invalid stored identifiers cannot be selected
+for individual removal; clear retains its exact-selector validation rather than
+guessing their identity. Denied or unavailable Keychain access, duplicate stored
+identifiers, an owned item limit of 8192, and a response exceeding the helper's
+bounded output are reported as failures rather than a complete empty or truncated
+list. Unrelated Keychain entries do not consume that item limit. If discovery
+succeeds but its display cache cannot be refreshed, the complete source inventory
+is returned with one cache-specific warning.
 
 Open **Credentials** from the sidebar or command palette to inspect credentials
 managed by ctmux and local SSH identity files. The page displays names, credential
@@ -60,8 +78,9 @@ credential rows; they are not silently treated as verified identity entries.
 
 - SSH passwords and SSH key passphrases are stored in the macOS protected
   Keychain. Display metadata lives in separate, non-biometric Keychain records
-  in the same app access group. Inventory queries explicitly forbid authentication
-  UI and never request password data. An inaccessible Keychain is reported as
+  in the same app access group. Passive desktop inventory queries explicitly
+  forbid authentication UI; user-requested CLI discovery may authorize attribute
+  access. Neither requests password data. An inaccessible Keychain is reported as
   unavailable rather than empty.
 - Desktop and CLI signed helpers use the same Keychain credential namespace.
   VPN password lookup uses the destination and logical gateway route, including
@@ -88,7 +107,7 @@ credential rows; they are not silently treated as verified identity entries.
   container volume. A saved connection alone does not prove that sign-in state
   still exists; these rows explicitly leave that state unverified.
 
-**Import saved credential metadata** is an explicit action for entries saved
+In the desktop app, **Import saved credential metadata** is an explicit action for entries saved
 before this metadata index existed. It requests Touch ID to read their names and
 attributes, then writes metadata records without changing the protected secrets.
 An interrupted or incomplete import remains available to retry. Until import

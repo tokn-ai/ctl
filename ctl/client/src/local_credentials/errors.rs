@@ -85,6 +85,18 @@ pub fn credential_error(code: &str) -> Error {
       "credential_not_found",
       "This saved credential no longer exists. Refresh the list.",
     ),
+    "credential_discovery_limit" => Error::new(
+      "credential_discovery_limit",
+      "The saved credential inventory exceeds its item or response size limit; a complete list could not be returned.",
+    ),
+    "credential_discovery_failed" => Error::new(
+      "credential_discovery_failed",
+      "Keychain could not finish discovering saved SSH credentials. Check access and try again.",
+    ),
+    "credential_discovery_conflict" => Error::new(
+      "credential_discovery_conflict",
+      "Saved Keychain entries have duplicate identifiers. A complete list could not be returned safely; check the duplicate entries in Keychain Access.",
+    ),
     _ => Error::new(
       "credentials_unavailable",
       "Could not access saved SSH credentials. Check Keychain access and try again.",

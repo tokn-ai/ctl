@@ -54,18 +54,21 @@ Do not invent commands for features described only in proposals.
 ## Saved SSH passwords
 
 On macOS, `ctl passwords` or `ctl passwords list` lists saved SSH credentials and
-identity-file passphrases. `ctl passwords show ID` shows metadata only; neither
-command unlocks secrets. Human-readable tables use compact `p-` and `k-` IDs
+identity-file passphrases directly from Keychain. `ctl passwords show ID` shows
+metadata only; neither command reads secret values. Listing may request Keychain
+authorization and automatically refreshes the metadata cache. Unknown metadata
+remains visible, and access or inventory-limit failures are explicit.
+Human-readable tables use compact `p-` and `k-` IDs
 with names, accounts, targets or key paths, and state. Use the printed ID with
 `show` or `remove`; `--json` retains full IDs for machine-readable metadata. An
-incomplete list is reported explicitly because older unindexed credentials may
-be absent.
+incomplete discovery is reported explicitly; cache completion markers do not
+determine which saved entries are listed.
 
 `ctl passwords remove ID` removes one saved entry after terminal confirmation;
 omit the ID to choose an entry interactively. A full ID from JSON, a unique
 full-ID prefix, or an exact unique name also works. `ctl passwords clear` previews
 known entries and clears all owned SSH credentials and passphrases after confirmation,
-including unindexed older copies. Clear requires helper contract `1.1.3`. Both
+including unindexed older copies. These commands require helper contract `1.1.4`. Both
 actions preserve key files, host/VPN settings, and never-save preferences, and
 require an interactive terminal. These commands have no create, update, import,
 reveal, or copy action; omit `-H`, `--method`, and `--remote-platform`.

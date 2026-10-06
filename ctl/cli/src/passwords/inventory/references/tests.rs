@@ -1,36 +1,14 @@
 use super::*;
 use crate::passwords::inventory::Removal;
-use ctl_ipc::credentials::{CredentialKind, StoredCredential};
-use ctl_ipc::identities::{FileState, IdentityFile, PassphraseState};
+use crate::passwords::inventory::fixtures;
+use ctl_ipc::credentials::PasswordState;
 
 fn password(account: &str, name: &str) -> Entry {
-  Entry::credential(StoredCredential {
-    credential_id: format!("{}:{account}", "a".repeat(64)),
-    scope_id: "a".repeat(64),
-    name: name.into(),
-    kind: CredentialKind::SshPassword,
-    target: Some("alice@example.test".into()),
-    account: Some("alice".into()),
-    key_name: None,
-    created_at_ms: None,
-    updated_at_ms: None,
-  })
+  Entry::discovered(fixtures::password(account, name))
 }
 
 fn identity() -> Entry {
-  Entry::identity(IdentityFile {
-    identity_id: "b".repeat(64),
-    path: "/home/alice/.ssh/id_ed25519".into(),
-    display_path: "~/.ssh/id_ed25519".into(),
-    file_version: Some("version".into()),
-    key_type: Some("ssh-ed25519".into()),
-    fingerprint: Some("SHA256:public-fingerprint".into()),
-    encrypted: Some(true),
-    file_state: FileState::Ready,
-    passphrase_state: PassphraseState::Saved,
-    detail: None,
-  })
-  .unwrap()
+  Entry::discovered(fixtures::identity(&"b".repeat(64), PasswordState::Saved))
 }
 
 #[test]

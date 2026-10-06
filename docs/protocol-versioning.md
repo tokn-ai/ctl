@@ -49,6 +49,13 @@ During that same development cycle, helper `1.1.3` (build 3) adds explicit
 clearing of saved SSH credentials and identity passphrases. It retains support
 for both `1.0.1` and `1.1.2`; clients using the new clear operation require the
 updated helper.
+Helper `1.1.4` (build 4) adds the `discover` credential request and `discovered`
+response for authoritative, attribute-only saved-password discovery. Its entries
+include saved SSH credentials and identity passphrases, retain identifiable
+items with unknown metadata, and report scan completeness and specific warnings
+separately. No secret values are returned. Discovery requires `1.1.4`; helpers
+implementing earlier contracts reject the new request. Existing requests and
+responses are unchanged, and `1.0.1`, `1.1.2`, and `1.1.3` remain supported.
 Further protocol changes before release increment only their patch/build.
 A broker channel selecting ctld `1.0.12` supports the original SSH and local VPN
 routes; remote VPN route steps

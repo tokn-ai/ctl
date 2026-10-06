@@ -87,6 +87,7 @@ async fn exchange_credentials(
     credentials::Request::ListMetadata
       | credentials::Request::ImportMetadata
       | credentials::Request::Clear {}
+      | credentials::Request::Discover {}
   );
   let bytes = Zeroizing::new(serde_json::to_vec(&request).map_err(|_| errors::invalid_response())?);
   if bytes.len() > credentials::MAX_REQUEST_BYTES {

@@ -1,15 +1,21 @@
 //! A small owned interface to the macOS Data Protection Keychain.
 //!
 //! All Core Foundation ownership and Security FFI stays in one audited module.
-//! Metadata callers must explicitly forbid authentication; returning attributes
-//! alone does not prevent macOS from evaluating an item's biometric ACL.
+//! Passive metadata callers explicitly forbid authentication. User-requested
+//! discovery may authorize attribute access without requesting secret data.
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod native;
 
 #[cfg(target_os = "macos")]
-pub use native::{check_availability, delete, exists, search, upsert};
+pub use native::{check_availability, delete, exists, scan_attributes, search, upsert};
+
+/// Application-local error: the owned inventory exceeds the discovery budget.
+pub const ATTRIBUTE_SCAN_LIMIT: i32 = -1_000_002;
+/// Owned source items have duplicate selectors and cannot be identified safely.
+pub const ATTRIBUTE_SCAN_CONFLICT: i32 = -1_000_003;
+pub const MAX_ATTRIBUTE_SCAN_ITEMS: usize = 8192;
 
 use std::collections::HashMap;
 use zeroize::Zeroizing;

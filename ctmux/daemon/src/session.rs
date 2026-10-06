@@ -1,5 +1,6 @@
 mod topology;
 
+use crate::history_snapshot::PhysicalHistory;
 use crate::process_monitor::ProcessMonitor;
 #[cfg(unix)]
 use crate::shell_reporter::{ShellReport, ShellReporter, ShellReporterError};
@@ -12,7 +13,6 @@ use ctmux_proto::{
   SessionStatus, ShellProcessState, ShellState, TERMINAL_CHECKPOINT_FORMAT,
   TERMINAL_CHECKPOINT_FORMAT_VERSION, TERMINAL_HISTORY_FORMAT, TERMINAL_HISTORY_FORMAT_VERSION,
   TerminalCheckpoint, TerminalHistoryRow, TerminalHistorySnapshot, TerminalSize, TuiHint,
-  normalize_history_rows,
 };
 #[cfg(unix)]
 use portable_pty::ChildKiller;
@@ -114,11 +114,11 @@ struct TerminalState {
   history_clear_pending: bool,
   history_alternate_screen: bool,
   primary_reflow_pending: bool,
-  primary_history_rows: Vec<TerminalHistoryRow>,
+  primary_history_rows: Arc<PhysicalHistory>,
   history: TerminalHistory,
   /// History captured at exactly the same raw-output boundary as `checkpoint`.
   checkpoint_history: TerminalHistorySnapshot,
-  checkpoint_history_rows: Vec<TerminalHistoryRow>,
+  checkpoint_history_rows: Arc<PhysicalHistory>,
   pending_input: Vec<u8>,
   journal: OutputJournal,
   checkpoint: TerminalCheckpoint,
@@ -166,9 +166,9 @@ impl TerminalState {
       history_clear_pending: false,
       history_alternate_screen: false,
       primary_reflow_pending: false,
-      primary_history_rows: Vec::new(),
+      primary_history_rows: Arc::default(),
       checkpoint_history: history.snapshot(0),
-      checkpoint_history_rows: Vec::new(),
+      checkpoint_history_rows: Arc::default(),
       history,
       pending_input: Vec::new(),
       journal: OutputJournal::new(journal_capacity_bytes),
@@ -207,23 +207,25 @@ impl TerminalHistory {
     }
   }
 
-  fn replace(&mut self, lines: Vec<String>, source_truncated: bool) {
+  fn replace(&mut self, lines: &[String], source_truncated: bool) {
     let mut retained_bytes = lines.iter().map(|line| line.len() + 1).sum::<usize>();
-    let mut lines = VecDeque::from(lines);
+    let mut first_line = 0;
     let mut truncated = self.truncated || source_truncated;
     while retained_bytes > self.capacity_bytes {
-      let Some(line) = lines.pop_front() else {
-        retained_bytes = 0;
-        break;
-      };
+      let line = &lines[first_line];
+      first_line += 1;
       retained_bytes = retained_bytes.saturating_sub(line.len() + 1);
       truncated = true;
     }
+    let retained = &lines[first_line..];
 
-    if self.lines == lines && self.truncated == truncated {
+    let lines_changed = self.lines.iter().ne(retained);
+    if !lines_changed && self.truncated == truncated {
       return;
     }
-    self.lines = lines;
+    if lines_changed {
+      self.lines = retained.iter().cloned().collect();
+    }
     self.retained_bytes = retained_bytes;
     self.truncated = truncated;
     self.revision = self
@@ -265,7 +267,7 @@ impl TerminalHistory {
 struct GeometryCheckpoint {
   checkpoint: TerminalCheckpoint,
   history: TerminalHistorySnapshot,
-  history_rows: Vec<TerminalHistoryRow>,
+  history_rows: Arc<PhysicalHistory>,
   geometry_revision: u64,
 }
 
@@ -283,7 +285,7 @@ pub struct AttachSnapshot {
   /// Normalized logical lines that are completely outside the live grid.
   /// Present whenever the attachment also receives a replacing checkpoint.
   pub history: Option<TerminalHistorySnapshot>,
-  pub history_rows: Option<Vec<TerminalHistoryRow>>,
+  pub(crate) history_rows: Option<Arc<PhysicalHistory>>,
   pub scrollback_limit: u64,
   /// The internal, unredacted state observed atomically with the journal.
   /// Callers must apply their own attachment visibility policy before sending
@@ -2205,10 +2207,11 @@ fn refresh_history(terminal: &mut TerminalState) {
     let limit = terminal_scrollback_rows(&terminal.terminal_size);
     if terminal.primary_history_rows.len() > limit {
       let evicted = terminal.primary_history_rows.len() - limit;
-      terminal.primary_history_rows.drain(..evicted);
+      let rows = terminal.primary_history_rows[evicted..].to_vec();
+      PhysicalHistory::replace(&mut terminal.primary_history_rows, rows);
       terminal
         .history
-        .replace(normalize_history_rows(&terminal.primary_history_rows), true);
+        .replace(terminal.primary_history_rows.lines(), true);
     }
     return;
   }
@@ -2235,9 +2238,10 @@ fn refresh_history(terminal: &mut TerminalState) {
       wrapped: unwrapper.push(line).is_none(),
     })
     .collect();
-  let lines = normalize_history_rows(&rows);
-  terminal.primary_history_rows = rows;
-  terminal.history.replace(lines, source_truncated);
+  PhysicalHistory::replace(&mut terminal.primary_history_rows, rows);
+  terminal
+    .history
+    .replace(terminal.primary_history_rows.lines(), source_truncated);
 }
 
 fn terminal_emulator(terminal_size: &TerminalSize) -> avt::Vt {
@@ -2357,7 +2361,7 @@ fn feed_terminal_character(terminal: &mut TerminalState, ch: char) -> Option<Tui
     return tui_hint;
   };
   terminal.history.clear();
-  terminal.primary_history_rows.clear();
+  PhysicalHistory::replace(&mut terminal.primary_history_rows, Vec::new());
   if terminal_already_reset {
     terminal.history_alternate_screen = false;
     terminal.history_clear_pending = false;
@@ -2837,8 +2841,8 @@ mod tests {
     feed_terminal_bytes(&mut terminal, b"abcdefghi\x1b[?1049hUI");
     refresh_checkpoint(&mut terminal);
     assert_eq!(
-      terminal.checkpoint_history_rows,
-      vec![TerminalHistoryRow {
+      &terminal.checkpoint_history_rows[..],
+      &[TerminalHistoryRow {
         text: "abc".into(),
         wrapped: true,
       }]
@@ -2886,17 +2890,50 @@ mod tests {
     let mut terminal = terminal_state_with_size(8, 2, 1024);
     feed_terminal_bytes(&mut terminal, b"history\r\nprimary\r\nlive");
     refresh_checkpoint(&mut terminal);
-    assert_ne!(
-      terminal.checkpoint_history_rows,
-      Vec::<TerminalHistoryRow>::new()
-    );
+    assert!(!terminal.checkpoint_history_rows.is_empty());
+    let captured = Arc::clone(&terminal.checkpoint_history_rows);
+    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
     feed_terminal_bytes(&mut terminal, b"\x1b[3J");
     refresh_checkpoint(&mut terminal);
-    assert_eq!(
-      terminal.checkpoint_history_rows,
-      Vec::<TerminalHistoryRow>::new()
-    );
+    assert!(terminal.checkpoint_history_rows.is_empty());
     assert_eq!(terminal.checkpoint_history.generation, 1);
+    assert!(!Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    assert_ne!(
+      terminal
+        .checkpoint_history_rows
+        .encoded()
+        .unwrap()
+        .content_hash,
+      captured.encoded().unwrap().content_hash
+    );
+    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
+  }
+
+  #[test]
+  fn physical_history_cache_changes_for_reflow_even_when_logical_revision_does_not() {
+    let mut terminal = terminal_state_with_size(4, 2, 1024);
+    feed_terminal_bytes(&mut terminal, b"abcdefghijkl\r\none\r\ntwo");
+    refresh_checkpoint(&mut terminal);
+    let captured = Arc::clone(&terminal.checkpoint_history_rows);
+    let captured_history = terminal.checkpoint_history.clone();
+    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
+    refresh_checkpoint(&mut terminal);
+    assert!(Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    terminal.terminal.resize(6, 2);
+    terminal.terminal_size.columns = 6;
+    refresh_checkpoint(&mut terminal);
+    assert_eq!(terminal.checkpoint_history.lines, captured_history.lines);
+    assert_eq!(
+      terminal.checkpoint_history.revision,
+      captured_history.revision
+    );
+    assert!(!Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    let changed = terminal.checkpoint_history_rows.encoded().unwrap();
+    assert_ne!(
+      changed.content_hash,
+      captured.encoded().unwrap().content_hash
+    );
+    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
   }
 
   #[test]
@@ -2905,6 +2942,8 @@ mod tests {
     feed_terminal_bytes(&mut terminal, "row\r\n".repeat(300).as_bytes());
     feed_terminal_bytes(&mut terminal, b"\x1b[?1049hUI");
     assert!(terminal.primary_history_rows.len() > 250);
+    let captured = Arc::clone(&terminal.primary_history_rows);
+    let captured_bytes = Arc::clone(&captured.encoded().unwrap().data);
     terminal.terminal.resize(4000, 2);
     terminal.terminal_size.columns = 4000;
     refresh_checkpoint(&mut terminal);
@@ -2912,6 +2951,16 @@ mod tests {
     assert_eq!(terminal.checkpoint_history_rows.len(), 250);
     assert!(terminal.checkpoint_history.truncated);
     assert_eq!(terminal.checkpoint_history.generation, 0);
+    assert!(!Arc::ptr_eq(&terminal.checkpoint_history_rows, &captured));
+    assert_ne!(
+      terminal
+        .checkpoint_history_rows
+        .encoded()
+        .unwrap()
+        .content_hash,
+      captured.encoded().unwrap().content_hash
+    );
+    assert_eq!(&*captured_bytes, &*captured.encoded().unwrap().data);
     assert!(
       terminal
         .checkpoint_history_rows
@@ -2943,10 +2992,7 @@ mod tests {
         terminal.checkpoint_history.generation,
         previous_generation + 1
       );
-      assert_eq!(
-        terminal.checkpoint_history_rows,
-        Vec::<TerminalHistoryRow>::new()
-      );
+      assert!(terminal.checkpoint_history_rows.is_empty());
       assert_eq!(terminal.geometry_revision, 1);
       assert_eq!(
         terminal.last_geometry_change_sequence,
@@ -2972,10 +3018,7 @@ mod tests {
     refresh_checkpoint_after_output(&mut terminal, 1, u64::MAX);
     assert!(!terminal.primary_reflow_pending);
     assert_eq!(terminal.geometry_revision, 2);
-    assert_eq!(
-      terminal.checkpoint_history_rows,
-      Vec::<TerminalHistoryRow>::new()
-    );
+    assert!(terminal.checkpoint_history_rows.is_empty());
   }
 
   #[test]
@@ -3016,13 +3059,13 @@ mod tests {
   fn bounded_history_discards_whole_oldest_lines() {
     let mut history = TerminalHistory::new(8);
 
-    history.replace(vec!["one".into(), "two".into(), "three".into()], false);
+    history.replace(&["one".into(), "two".into(), "three".into()], false);
     let first = history.snapshot(0);
     assert_eq!(first.lines, vec!["three"]);
     assert_eq!(first.retained_bytes, 6);
     assert!(first.truncated);
 
-    history.replace(vec!["three".into()], false);
+    history.replace(&["three".into()], false);
     assert_eq!(history.snapshot(0), first);
 
     history.clear();
@@ -3312,10 +3355,10 @@ mod tests {
       history_clear_pending: false,
       history_alternate_screen: false,
       primary_reflow_pending: false,
-      primary_history_rows: Vec::new(),
+      primary_history_rows: Arc::default(),
       history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES),
       checkpoint_history: TerminalHistory::new(TERMINAL_HISTORY_CAPACITY_BYTES).snapshot(0),
-      checkpoint_history_rows: Vec::new(),
+      checkpoint_history_rows: Arc::default(),
       pending_input: checkpoint.input_prefix.clone(),
       journal: OutputJournal::new(1024),
       terminal_size: checkpoint.terminal_size.clone(),

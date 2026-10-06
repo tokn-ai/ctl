@@ -1,3 +1,4 @@
+use crate::history_snapshot::PhysicalHistory;
 use crate::session::{
   AttachSnapshot, AttachmentRegistration, SessionControlError, SessionEvent, SessionManager,
   SessionManagerError, Terminal,
@@ -10,10 +11,8 @@ use ctmux_ipc::{
 use ctmux_proto::{
   ClientMessage, CodecError, ErrorCode, FrameReader, LeaseKind, MAX_HISTORY_PAGE_BYTES,
   PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerMessage, ShellState,
-  TerminalHistoryManifest, TerminalHistoryRow, TerminalHistorySnapshot, normalize_history_rows,
-  read_frame, write_frame,
+  TerminalHistoryManifest, TerminalHistorySnapshot, read_frame, write_frame,
 };
-use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -46,7 +45,6 @@ const MAX_PRESENTATION_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 const MIN_OUTPUT_FRAME_CHARGE_BYTES: u64 = 4 * 1024;
 const MAX_OUTPUT_FRAME_BYTES: usize = 64 * 1024;
 const HISTORY_SNAPSHOT_IDLE_TTL: Duration = Duration::from_mins(2);
-const MAX_PINNED_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECENT_HISTORY_BYTES: usize = 16 * 1024;
 const MAX_RECENT_HISTORY_LINES: usize = 64;
 const LOCAL_CONTROL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1523,7 +1521,7 @@ struct HistoryRequest {
 /// One bounded immutable transfer snapshot, not a persistent history log.
 struct PinnedHistory {
   manifest: TerminalHistoryManifest,
-  data: Vec<u8>,
+  data: Arc<Vec<u8>>,
   last_access: Instant,
   served_end: usize,
 }
@@ -1531,24 +1529,12 @@ struct PinnedHistory {
 impl PinnedHistory {
   fn new(
     history: &TerminalHistorySnapshot,
-    rows: &[TerminalHistoryRow],
+    rows: &PhysicalHistory,
     scrollback_limit: u64,
   ) -> Result<(Self, TerminalHistorySnapshot), ConnectionError> {
-    let mut data = Vec::new();
-    for row in rows {
-      serde_json::to_writer(&mut data, row).map_err(io::Error::other)?;
-      data.push(b'\n');
-      if data.len() > MAX_PINNED_HISTORY_BYTES {
-        return Err(
-          io::Error::new(
-            io::ErrorKind::InvalidData,
-            "history snapshot exceeds its byte bound",
-          )
-          .into(),
-        );
-      }
-    }
-    let lines = normalize_history_rows(rows);
+    let encoded = rows.encoded()?;
+    let data = Arc::clone(&encoded.data);
+    let lines = rows.lines();
     let mut first_line = lines.len();
     let mut recent_bytes = 0;
     while first_line > 0 && lines.len() - first_line < MAX_RECENT_HISTORY_LINES {
@@ -1572,11 +1558,19 @@ impl PinnedHistory {
       total_lines: lines.len() as u64,
       first_line: first_line as u64,
       truncated: history.truncated,
-      content_hash: format!("{:x}", Sha256::digest(&data)),
+      content_hash: encoded.content_hash.clone(),
       scrollback_limit,
     };
-    let mut recent = history.clone();
-    recent.lines = lines[first_line..].to_vec();
+    let recent = TerminalHistorySnapshot {
+      format: history.format.clone(),
+      format_version: history.format_version,
+      sequence: history.sequence,
+      generation: history.generation,
+      revision: history.revision,
+      retained_bytes: history.retained_bytes,
+      truncated: history.truncated,
+      lines: lines[first_line..].to_vec(),
+    };
     Ok((
       Self {
         manifest,
@@ -1634,7 +1628,8 @@ fn pin_snapshot_history(
   let Some(history) = snapshot.history.as_ref() else {
     return Ok(None);
   };
-  let rows = snapshot.history_rows.as_deref().unwrap_or_default();
+  let empty = PhysicalHistory::default();
+  let rows = snapshot.history_rows.as_deref().unwrap_or(&empty);
   let (pinned, recent) = PinnedHistory::new(history, rows, snapshot.scrollback_limit)?;
   snapshot.history = Some(recent);
   Ok(Some(pinned))
@@ -2915,7 +2910,8 @@ impl Drop for SocketGuard {
 mod tests {
   use super::*;
   use ctmux_core::JournalSnapshot;
-  use ctmux_proto::{LeaseStatus, SessionStatus};
+  use ctmux_proto::{LeaseStatus, SessionStatus, TerminalHistoryRow, normalize_history_rows};
+  use sha2::{Digest, Sha256};
   use tokio::time::timeout;
 
   fn history_fixture(rows: &[TerminalHistoryRow]) -> TerminalHistorySnapshot {
@@ -2929,6 +2925,46 @@ mod tests {
       retained_bytes: lines.iter().map(|line| (line.len() + 1) as u64).sum(),
       truncated: false,
       lines,
+    }
+  }
+
+  #[test]
+  fn cached_history_body_keeps_transfer_metadata_and_progress_independent() {
+    for rows in [
+      Vec::new(),
+      vec![TerminalHistoryRow {
+        text: "unchanged".into(),
+        wrapped: false,
+      }],
+    ] {
+      let physical = PhysicalHistory::new(rows.clone());
+      let original_history = history_fixture(&rows);
+      let (mut old, _) = PinnedHistory::new(&original_history, &physical, 10_000).unwrap();
+      let mut new_history = original_history.clone();
+      new_history.sequence += 1;
+      new_history.generation += 1;
+      new_history.revision += 1;
+      new_history.truncated = true;
+      let (new, _) = PinnedHistory::new(&new_history, &physical, 250).unwrap();
+      assert!(Arc::ptr_eq(&old.data, &new.data));
+      assert_eq!(old.manifest.content_hash, new.manifest.content_hash);
+      assert_ne!(old.manifest.snapshot_id, new.manifest.snapshot_id);
+      assert_eq!(new.manifest.sequence, new_history.sequence);
+      assert_eq!(new.manifest.generation, new_history.generation);
+      assert_eq!(new.manifest.revision, new_history.revision);
+      assert!(new.manifest.truncated);
+      assert_eq!(new.manifest.scrollback_limit, 250);
+      old
+        .page(&HistoryRequest {
+          snapshot_id: old.manifest.snapshot_id.clone(),
+          offset: 0,
+          max_bytes: 5,
+        })
+        .unwrap();
+      assert_eq!(new.served_end, 0);
+      old.last_access = Instant::now() - HISTORY_SNAPSHOT_IDLE_TTL;
+      assert!(old.expired());
+      assert!(!new.expired());
     }
   }
 
@@ -2948,7 +2984,9 @@ mod tests {
         wrapped: true,
       },
     ];
-    let (mut pinned, recent) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    let physical = PhysicalHistory::new(rows.clone());
+    let (mut pinned, recent) =
+      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
     assert_eq!(pinned.manifest.total_rows, 3);
     assert_eq!(pinned.manifest.total_lines, 1);
     assert!(
@@ -3003,7 +3041,9 @@ mod tests {
         wrapped: false,
       })
       .collect();
-    let (mut pinned, recent) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    let physical = PhysicalHistory::new(rows.clone());
+    let (mut pinned, recent) =
+      PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
     assert_eq!(recent.lines.len(), MAX_RECENT_HISTORY_LINES);
     assert_eq!(pinned.manifest.first_line, 36);
     let mut request = HistoryRequest {
@@ -3049,7 +3089,8 @@ mod tests {
       text: "last".into(),
       wrapped: false,
     }];
-    let (mut pinned, _) = PinnedHistory::new(&history_fixture(&rows), &rows, 10_000).unwrap();
+    let physical = PhysicalHistory::new(rows.clone());
+    let (mut pinned, _) = PinnedHistory::new(&history_fixture(&rows), &physical, 10_000).unwrap();
     let request = HistoryRequest {
       snapshot_id: pinned.manifest.snapshot_id.clone(),
       offset: pinned.manifest.total_bytes - 1,

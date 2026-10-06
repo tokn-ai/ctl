@@ -13,6 +13,7 @@ name = "ctmux_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+ctl-core = { workspace = true, features = ["development"] }
 tauri-build = { version = "2", features = [] }
 
 [dependencies]

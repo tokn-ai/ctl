@@ -51,5 +51,16 @@ fn main() {
   ])
   .is_none_or(|status| !status.is_empty());
   println!("cargo:rustc-env=CTMUX_COMPONENTS_DIRTY={dirty}");
+  let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+  let output = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+  let development = ctl_core::development::context(
+    &manifest,
+    std::path::Path::new("apps/desktop/src-tauri"),
+    &output,
+    &std::env::var("TARGET").unwrap(),
+  )
+  .expect("could not determine local development helper provenance");
+  ctl_core::development::write(&output, development.as_ref())
+    .expect("could not write local development helper provenance");
   tauri_build::build();
 }

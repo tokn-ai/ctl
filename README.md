@@ -113,8 +113,7 @@ run from the root.
 | Command | Purpose |
 | --- | --- |
 | `pnpm provision` | Open the shared macOS Xcode provisioning project |
-| `pnpm helper:signed` | Build and select this checkout's signed ctld helper for Cargo development |
-| `pnpm ctl:signed` | Build a signed CLI with that helper embedded |
+| `pnpm ctld:signed` | Build and select one signed ctld component for CLI and GUI development |
 | `pnpm desktop:dev` | Start native Tauri development |
 | `pnpm desktop:dev:signed` | Start macOS desktop development with its signed helper |
 | `pnpm desktop:build` | Build native desktop packages |
@@ -161,11 +160,10 @@ prints the installed version, executable path, and whether the installation was
 reused.
 
 `CTLD_BIN` selects an explicit executable. Ordinary macOS debug CLI builds prefer
-this checkout's provisioned signed helper; signed development CLI builds prefer
-their own matching embedded helper. Without a development helper, a standalone
-macOS CLI prefers a verified, compatible managed `ctld.app`, then its own bundled
-helper, then a nearby desktop bundle, sibling executable, or `PATH`. The desktop
-continues to prefer its own bundled helper. On other Unix platforms, install
+this checkout's provisioned signed helper, as do debug desktop builds. Without a
+development helper, a standalone macOS CLI prefers a verified, compatible managed `ctld.app`, then its own bundled
+helper, then a nearby desktop bundle, sibling executable, or `PATH`.
+Packaged desktop releases continue to prefer their own bundled helper. On other Unix platforms, install
 `ctld` from Cargo alongside the CLI; `ctl setup` is a macOS-only command. Source-built macOS
 `ctld` remains useful for development but does not acquire our Apple signing
 identity or Keychain entitlement through Cargo.
@@ -193,7 +191,7 @@ authoritative for every build; shared discovery also retains explicit
 complete component selections and reports missing capabilities. Unsafe or invalid selected
 installations produce a verification error.
 
-For macOS CLI development, provision once with the same
+For macOS CLI and GUI development, provision once with the same
 Xcode project used by Tauri:
 
 ```sh
@@ -201,42 +199,37 @@ pnpm provision
 ```
 
 In Xcode, select the `ctld-provisioning` target, choose your team under
-**Signing & Capabilities**, and build once. Then prepare the signed helper and
-use the ordinary Cargo CLI:
+**Signing & Capabilities**, and build once. Then prepare the signed component
+and start either consumer:
 
 ```sh
-pnpm helper:signed
+pnpm ctld:signed
 cargo run -p ctl-cli -- passwords
 # Or: cargo build -p ctl-cli && target/debug/ctl passwords
+pnpm desktop:dev
 ```
 
 The build discovers your profile and matching Keychain certificate, refreshing
 the profile through Xcode when needed. It compiles and signs `ctld.app` and
-publishes an immutable helper under
-`target/ctl-dev/helpers/<checkout-id>/build-<archive-sha256>/`. Debug CLI builds
-discover its verified selection using their build location and checkout identity,
-independently of the current working directory. The CLI can remain unsigned.
-Repeat the helper-only command after changing daemon code or its contracts;
+publishes the complete signed app and verification receipt under
+`target/ctl-dev/helpers/<checkout-id>/build-<archive-sha256>/`. Debug CLI and GUI
+builds discover the same verified selection using their build location and checkout
+identity,
+independently of the current working directory. The CLI and GUI can remain unsigned.
+Repeat `pnpm ctld:signed` after changing daemon code or its contracts;
 ordinary CLI edits need only a Cargo rebuild. No signing
 environment variables or notarization credentials are required. The output
 follows Cargo's configured target directory.
 
-For a self-contained signed development CLI, run `pnpm ctl:signed`
-and use `target/ctl-dev/ctl`. This also publishes the checkout helper for Cargo builds.
-
 Development signing explicitly disables timestamps, so it does not depend on
 Apple's timestamp service. Distributable releases still require secure timestamps.
 
-The signed development CLI always prepares and pins the helper embedded by that
-checkout's build, ahead of shared or nearby desktop helpers. Development helpers live under
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/ctld.app`. They retain
-their signature and provisioning checks and use a separate immutable cache.
-Automatic preparation leaves shared selections unchanged. Checkout helper
-selections are isolated even when worktrees share a Cargo target directory.
-`target/ctl-dev/ctl setup` explicitly selects this helper for other standalone
-CLI builds while leaving the release `current` symlink intact.
-Expired profiles require rebuilding. Existing compatible daemons keep
-running until you explicitly restart them.
+Checkout helper selections remain separate from shared production selections,
+even when worktrees share a Cargo target directory. The CLI and GUI both verify
+the helper's signature, provisioning profile, receipt, and compatible contracts
+before using it. Expired profiles require rebuilding. Component preparation
+preserves existing daemons and sessions; restart explicitly when ready to use a
+new build.
 
 ```sh
 cargo build --workspace

@@ -18,6 +18,36 @@ mod tests;
 use serde::Serialize;
 use std::path::PathBuf;
 
+/// Build-time provenance shared by debug CLI and desktop helper consumers.
+pub struct DevelopmentContext {
+  pub repository_root: &'static str,
+  pub checkpoints: &'static [&'static str],
+}
+
+impl DevelopmentContext {
+  /// Resolves this checkout's verified helper without changing shared selections.
+  ///
+  /// # Errors
+  /// Rejects unsafe checkpoints, invalid receipts, and failed signature checks.
+  pub async fn discover(
+    &self,
+    required: Option<ctl_core::protocol::ProtocolVersion>,
+  ) -> Result<Option<PathBuf>, Error> {
+    for checkpoint in self.checkpoints {
+      if let Some(executable) = discover_development_ctld(
+        std::path::Path::new(checkpoint),
+        std::path::Path::new(self.repository_root),
+        required,
+      )
+      .await?
+      {
+        return Ok(Some(executable));
+      }
+    }
+    Ok(None)
+  }
+}
+
 /// Verifies a complete signed helper package before its metadata is executed.
 /// The temporary verification work is discarded; selection and services are unchanged.
 ///

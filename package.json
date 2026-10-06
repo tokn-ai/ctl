@@ -21,9 +21,8 @@
     "desktop:dev:signed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/tauri-signed.mts",
     "desktop:build": "pnpm --filter ctmux-app tauri build",
     "desktop:preview": "pnpm --filter ctmux-app exec vite --host 127.0.0.1",
-    "provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctl-signed.mts --provision",
-    "helper:signed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctl-signed.mts --helper-only",
-    "ctl:signed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctl-signed.mts",
+    "provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts --provision",
+    "ctld:signed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts",
     "daemons:build": "cargo build --locked -p ctld -p ctmuxd -p ctl-taskd",
     "agents:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts --check",
     "agents:sync": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts"

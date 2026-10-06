@@ -1,5 +1,6 @@
-#[path = "../development_build.rs"]
-mod development_build;
+#![cfg(feature = "development")]
+
+use ctl_core::development as development_build;
 
 use sha2::{Digest as _, Sha256};
 use std::path::{Path, PathBuf};
@@ -50,7 +51,7 @@ fn implicit_target_directory_is_captured_without_runtime_working_directory() {
   let fixture = Fixture::new();
   let manifest = fixture.manifest("checkout");
   let output = fixture.output("custom-target");
-  let context = development_build::context(&manifest, &output, TARGET)
+  let context = development_build::context(&manifest, Path::new("ctl/cli"), &output, TARGET)
     .unwrap()
     .unwrap();
   let repository = fixture.0.join("checkout").canonicalize().unwrap();
@@ -70,7 +71,7 @@ fn explicit_target_layout_keeps_native_target_and_base_candidates() {
   let fixture = Fixture::new();
   let manifest = fixture.manifest("checkout");
   let output = fixture.output(&format!("custom-target/{TARGET}"));
-  let context = development_build::context(&manifest, &output, TARGET)
+  let context = development_build::context(&manifest, Path::new("ctl/cli"), &output, TARGET)
     .unwrap()
     .unwrap();
   let target = fixture.0.join("custom-target").canonicalize().unwrap();
@@ -84,15 +85,38 @@ fn explicit_target_layout_keeps_native_target_and_base_candidates() {
 }
 
 #[test]
+fn cli_and_gui_builds_share_one_checkout_selection() {
+  let fixture = Fixture::new();
+  let cli_manifest = fixture.manifest("checkout");
+  let gui_manifest = fixture.0.join("checkout/apps/desktop/src-tauri");
+  std::fs::create_dir_all(&gui_manifest).unwrap();
+  std::fs::write(gui_manifest.join("Cargo.toml"), "[package]\n").unwrap();
+  let output = fixture.output("shared-target");
+  let cli = development_build::context(&cli_manifest, Path::new("ctl/cli"), &output, TARGET)
+    .unwrap()
+    .unwrap();
+  let gui = development_build::context(
+    &gui_manifest,
+    Path::new("apps/desktop/src-tauri"),
+    &output,
+    TARGET,
+  )
+  .unwrap()
+  .unwrap();
+  assert_eq!(cli.repository_root, gui.repository_root);
+  assert_eq!(cli.checkpoints, gui.checkpoints);
+}
+
+#[test]
 fn checkouts_sharing_a_target_directory_have_distinct_checkpoints() {
   let fixture = Fixture::new();
   let first = fixture.manifest("first-worktree");
   let second = fixture.manifest("second-worktree");
   let output = fixture.output("shared-target");
-  let first = development_build::context(&first, &output, TARGET)
+  let first = development_build::context(&first, Path::new("ctl/cli"), &output, TARGET)
     .unwrap()
     .unwrap();
-  let second = development_build::context(&second, &output, TARGET)
+  let second = development_build::context(&second, Path::new("ctl/cli"), &output, TARGET)
     .unwrap()
     .unwrap();
   assert_ne!(first.repository_root, second.repository_root);
@@ -105,15 +129,20 @@ fn non_macos_and_packaged_sources_emit_no_checkout_provenance() {
   let manifest = fixture.manifest("checkout");
   let output = fixture.output("target");
   assert!(
-    development_build::context(&manifest, &output, "x86_64-unknown-linux-gnu")
-      .unwrap()
-      .is_none()
+    development_build::context(
+      &manifest,
+      Path::new("ctl/cli"),
+      &output,
+      "x86_64-unknown-linux-gnu"
+    )
+    .unwrap()
+    .is_none()
   );
   let packaged = fixture.0.join("registry/ctl-cli-0.1.0");
   std::fs::create_dir_all(&packaged).unwrap();
   std::fs::write(packaged.join("Cargo.toml"), "[package]\n").unwrap();
   assert!(
-    development_build::context(&packaged, &output, TARGET)
+    development_build::context(&packaged, Path::new("ctl/cli"), &output, TARGET)
       .unwrap()
       .is_none()
   );

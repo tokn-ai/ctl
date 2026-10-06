@@ -2,12 +2,7 @@
 
 use ctl_client::setup;
 use ctl_core::protocol::ProtocolVersion;
-use std::path::{Path, PathBuf};
-
-struct DevelopmentContext {
-  repository_root: &'static str,
-  checkpoints: &'static [&'static str],
-}
+use std::path::PathBuf;
 
 include!(concat!(env!("OUT_DIR"), "/development_ctld.rs"));
 
@@ -21,16 +16,5 @@ pub(super) async fn discover(
   let Some(context) = &LOCAL_DEVELOPMENT else {
     return Ok(None);
   };
-  for checkpoint in context.checkpoints {
-    if let Some(executable) = setup::discover_development_ctld(
-      Path::new(checkpoint),
-      Path::new(context.repository_root),
-      required,
-    )
-    .await?
-    {
-      return Ok(Some(executable));
-    }
-  }
-  Ok(None)
+  context.discover(required).await
 }

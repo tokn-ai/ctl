@@ -46,7 +46,8 @@ test("packages actual executable metadata and assembles all targets without exec
   assert.equal(set.schema_version, 2);
   const parsed = parseAgentBundleSet(await readFile(join(output, "bundle-set.json")), agentIdentity);
   for (const target of agentTargets) {
-    assert.deepEqual((await verifyAgentBundleTarget(output, agentIdentity, target, parsed.targets[target]))?.components, components);
+    // Development sync passes the complete catalog, which extends the build identity.
+    assert.deepEqual((await verifyAgentBundleTarget(output, parsed, target, parsed.targets[target]))?.components, components);
   }
   assert.ok((await readdir(input)).every((name) => !name.startsWith(".package-")));
 });

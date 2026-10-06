@@ -102,7 +102,7 @@ fn parse_platform(output: &str) -> CommandResult<Platform> {
   })
 }
 
-fn bundle_directories(app: &AppHandle) -> CommandResult<Vec<PathBuf>> {
+pub(crate) fn bundle_directories(app: &AppHandle) -> CommandResult<Vec<PathBuf>> {
   let relative = PathBuf::from("resources").join("agent-bundles");
   let packaged = app
     .path()

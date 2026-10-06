@@ -33,6 +33,8 @@ sample component versions. Each daemon has its own **Restart** action, while
 remote ctl-agent rows offer **Reconnect**. These confirmations and completion
 states only change memory. Restarting ctl-taskd is refused while sample tasks are
 running; stop the task in the Tasks view to try a successful restart.
+Bundles includes fictional app archives and a stored local build, with separate
+local-service and upload choices. Selecting one updates only the sample state.
 Add `?about=partial` to show one
 unavailable component while other versions remain visible, or
 `?about=restart-error` to exercise a failed restart and subsequent refresh.

@@ -1133,8 +1133,11 @@ export interface ComponentBundle {
   git_revision: string | null;
   dirty: boolean;
   compatible: boolean;
+  included: boolean;
   local_use: "selected" | "available" | "unavailable";
   upload_use: "selected" | "available" | "unavailable";
+  local_unavailable_reason: string | null;
+  upload_unavailable_reason: string | null;
 }
 export interface ComponentBundlesSnapshot {
   bundles: ComponentBundle[];

@@ -132,19 +132,16 @@ pub fn supervise(
   mut shutdown_requested: watch::Receiver<bool>,
 ) {
   tokio::spawn(async move {
+    // Service callers own presentation, including full-screen terminal UIs.
+    // A failed child is observed through its service stream; this cleanup task
+    // must never write directly to the caller's terminal.
     tokio::select! {
-      result = child.wait() => {
-        if let Err(error) = result {
-          eprintln!("ctl: could not wait for ssh: {error}");
-        }
-      }
+      _ = child.wait() => {}
       changed = shutdown_requested.changed() => {
         if changed.is_ok() && *shutdown_requested.borrow() {
           let _ignored = child.start_kill();
         }
-        if let Err(error) = child.wait().await {
-          eprintln!("ctl: could not reap ssh: {error}");
-        }
+        let _ignored = child.wait().await;
       }
     }
     drop(diagnostics);

@@ -5,10 +5,15 @@ use ctl_client::{
 };
 use ctmux_cli::{CommandError, ConnectFuture, Connector};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+  Arc,
+  atomic::{AtomicBool, Ordering},
+};
 use thiserror::Error;
 
 mod reconnect;
+#[cfg(all(test, unix, ctl_repository_tui_tests))]
+mod tui_tests;
 
 fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
   let error = match &arguments.command {
@@ -104,6 +109,7 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     target,
     settings: resolved.target,
     recovery: Arc::default(),
+    terminal_ui_active: Arc::default(),
   };
   let operation = run_selected(arguments.command, &connector, platform);
   tokio::select! {
@@ -189,6 +195,7 @@ struct CtlConnector {
   target: ConnectionTarget,
   settings: ctl_client::hosts::ConnectionTargetDto,
   recovery: Arc<crate::remote::Recovery>,
+  terminal_ui_active: Arc<AtomicBool>,
 }
 
 impl CtlConnector {
@@ -243,6 +250,7 @@ impl CtlConnector {
     Self {
       settings: self.settings.clone(),
       recovery: Arc::clone(&self.recovery),
+      terminal_ui_active: Arc::clone(&self.terminal_ui_active),
       target: match &self.target {
         ConnectionTarget::Local { .. } => ConnectionTarget::Local {
           socket_path: ctmux_socket,
@@ -259,7 +267,11 @@ impl ctl_task_cli::Connector for CtlConnector {
 
   fn connect_task(&self) -> ctl_task_cli::ConnectFuture<'_, TaskTransport, CtlConnectError> {
     Box::pin(async {
-      let interaction = ssh_interaction(&self.settings).await?;
+      let interaction = ssh_interaction(
+        &self.settings,
+        !self.terminal_ui_active.load(Ordering::Acquire),
+      )
+      .await?;
       if let Some(stream) = self
         .identified_remote(&interaction, ctl_client::RemoteService::Task)
         .await?
@@ -292,7 +304,11 @@ impl Connector for CtlConnector {
 
   fn connect(&self) -> ConnectFuture<'_, Transport, CtlConnectError> {
     Box::pin(async {
-      let interaction = ssh_interaction(&self.settings).await?;
+      let interaction = ssh_interaction(
+        &self.settings,
+        !self.terminal_ui_active.load(Ordering::Acquire),
+      )
+      .await?;
       if let Some(stream) = self
         .identified_remote(&interaction, ctl_client::RemoteService::Ctmux)
         .await?
@@ -307,6 +323,10 @@ impl Connector for CtlConnector {
 
   fn is_retryable(&self, error: &CtlConnectError) -> bool {
     reconnect::is_retryable(error)
+  }
+
+  fn set_terminal_ui_active(&self, active: bool) {
+    self.terminal_ui_active.store(active, Ordering::Release);
   }
 
   fn is_local(&self) -> bool {
@@ -337,20 +357,27 @@ impl Connector for CtlConnector {
 #[cfg(unix)]
 async fn ssh_interaction(
   target: &ctl_client::hosts::ConnectionTargetDto,
+  interactive: bool,
 ) -> Result<ctl_client::SshInteraction, CtlConnectError> {
   if target.is_local() {
     return Ok(ctl_client::SshInteraction::Inherit);
   }
-  crate::target::ensure_vpn(target).await?;
-  let control_path = crate::ssh_broker::ensure_master(target.to_ssh_target()?).await?;
+  crate::target::ensure_vpn_with_interaction(target, interactive).await?;
+  let control_path =
+    crate::ssh_broker::ensure_master_with_interaction(target.to_ssh_target()?, interactive).await?;
   Ok(ctl_client::SshInteraction::Multiplexed { control_path })
 }
 
 #[cfg(not(unix))]
 async fn ssh_interaction(
   _target: &ctl_client::hosts::ConnectionTargetDto,
+  interactive: bool,
 ) -> Result<ctl_client::SshInteraction, CtlConnectError> {
-  Ok(ctl_client::SshInteraction::Inherit)
+  Ok(if interactive {
+    ctl_client::SshInteraction::Inherit
+  } else {
+    ctl_client::SshInteraction::Batch
+  })
 }
 
 #[derive(Debug, Error)]
@@ -553,6 +580,7 @@ mod tests {
       target: target.clone(),
       settings: ctl_client::hosts::ConnectionTargetDto::ssh("task-server"),
       recovery: Arc::default(),
+      terminal_ui_active: Arc::default(),
     };
     let attachment = connector.for_interactive_session(PathBuf::from("/remote/ctmux.sock"));
     assert_eq!(attachment.target, target);
@@ -564,6 +592,7 @@ mod tests {
     let connector = CtlConnector {
       settings: ctl_client::hosts::ConnectionTargetDto::Local,
       recovery: Arc::default(),
+      terminal_ui_active: Arc::default(),
       target: ConnectionTarget::Local {
         socket_path: PathBuf::from("/default/ctmux.sock"),
       },

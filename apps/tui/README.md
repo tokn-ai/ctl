@@ -178,8 +178,18 @@ reset the emulator before replay, and split UTF-8 bytes survive chunk boundaries
 
 An attachment controller handles heartbeats, backpressure and ordered rendering
 acknowledgements. A disconnected pane reconnects using its attachment token and
-a fresh checkpoint; if the token expired, it opens a new attachment. Topology
-and session lists refresh every two seconds and after local changes. Detaching
+a fresh checkpoint; if the token expired, it opens a new attachment with the
+user's current input and layout lease preferences. Releasing a lease remains in
+effect across reconnects. The last screen stays visible until the replacement
+attachment supplies its checkpoint, and copy-mode selections remain frozen.
+
+Reconnects and periodic topology/session refreshes run beside rendering and
+input handling, so stalled background requests do not block local controls.
+Switching sessions or detaching cancels pending recovery work. Topology and session lists
+refresh every two seconds and after local changes. While the TUI owns the host
+terminal, `ctl` connection preparation displays errors through the TUI rather
+than printing progress or asking for authentication in the terminal. If SSH
+authentication is required, detach and reconnect to answer the prompt. Detaching
 releases leases without terminating the session. Normal exit, errors, and Unix
 termination/hangup signals restore the host terminal mode and alternate screen.
 
@@ -203,12 +213,17 @@ handler tests check shared sizing, read-only viewing, reconnect, and input lease
 Linux and macOS. It sends terminal bytes through crossterm and checks the rendered
 screen, covering modifier handling, repeated pane navigation, paste, copy mode,
 mouse scrolling, the bottom status row, resize, detach, and host terminal loss.
+Reconnect cases cut live streams repeatedly, stall metadata requests, expire
+resume tokens, and check controls, actual shell input, and released leases.
 These tests need permission to bind local Unix sockets and open PTYs.
 
 The reusable test framework lives in `tests/support`: `TestDaemon` owns an
 isolated daemon and controlled shell fixtures; `Tui` drives the host PTY; `Screen`
 is a snapshot parsed from captured ANSI output. `Tui::spawn` accepts a command for
-testing other launchers. New cases belong in `tests/cases` and are registered in
+testing other launchers. `TestProxy` cuts or holds selected connections at wire
+barriers while forwarding the others. The `ctl-cli` tests reuse these fixtures
+to exercise SSH authentication retries inside the real TUI. New cases belong in
+`tests/cases` and are registered in
 `terminal_process.rs`.
 
 Wait for observable screen conditions with `wait_screen` rather than fixed

@@ -4,9 +4,47 @@ use ctmux_client::{
   AttachmentControllerOptions, AttachmentEvent, AttachmentEvents, ClientIdentity,
   DEFAULT_PRESENTATION_WINDOW_BYTES,
 };
-use ctmux_proto::{TerminalSize, ViewInfo};
+use ctmux_proto::{ErrorCode, LeaseKind, TerminalSize, ViewInfo};
 use std::collections::VecDeque;
 use tokio::task::JoinHandle;
+
+/// Fresh-attachment preferences and explicit changes made before reconnect.
+#[derive(Clone, Copy)]
+pub struct ReconnectLeases {
+  pub input: bool,
+  pub layout: bool,
+  input_change: Option<bool>,
+  layout_change: Option<bool>,
+}
+
+impl ReconnectLeases {
+  pub const fn new(input: bool, layout: bool) -> Self {
+    Self {
+      input,
+      layout,
+      input_change: None,
+      layout_change: None,
+    }
+  }
+
+  pub const fn requested(self, lease: LeaseKind) -> bool {
+    match lease {
+      LeaseKind::Input => self.input,
+      LeaseKind::Layout => self.layout,
+    }
+  }
+
+  const fn explicit_change(self, lease: LeaseKind) -> Option<bool> {
+    match lease {
+      LeaseKind::Input => self.input_change,
+      LeaseKind::Layout => self.layout_change,
+    }
+  }
+
+  pub fn intended_ownership(self, lease: LeaseKind, observed: bool) -> bool {
+    self.explicit_change(lease).unwrap_or(observed)
+  }
+}
 
 pub struct Pane {
   pub model: Model,
@@ -16,7 +54,9 @@ pub struct Pane {
   pub view_update: Option<ViewInfo>,
   events: AttachmentEvents,
   pub token: String,
+  pub reconnect_leases: ReconnectLeases,
   runner: Option<JoinHandle<()>>,
+  checkpoint_ready: bool,
   sequence: u64,
   history_snapshot_id: Option<String>,
   history_boundary: u64,
@@ -94,8 +134,7 @@ impl Pane {
     transport: &dyn Transport,
     terminal_id: &str,
     size: TerminalSize,
-    read_only: bool,
-    layout: bool,
+    leases: ReconnectLeases,
     token: Option<String>,
   ) -> Result<Self> {
     let stream = transport.connect().await?;
@@ -103,12 +142,13 @@ impl Pane {
       session: terminal_id.into(),
       resume_from: None,
       terminal_size: size,
-      request_input_lease: !read_only,
-      request_layout_lease: layout && !read_only,
+      request_input_lease: leases.input,
+      request_layout_lease: leases.layout,
       request_command_line: false,
       request_running_command: false,
       presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
     };
+    let resuming = token.is_some();
     let attached = if let Some(token) = token {
       ctmux_client::resume_attach(stream, &identity(), token, request.clone()).await
     } else {
@@ -116,7 +156,10 @@ impl Pane {
     };
     let (stream, attached) = match attached {
       Ok(attached) => attached,
-      Err(ctmux_client::ClientError::Server { .. }) => {
+      Err(ctmux_client::ClientError::Server {
+        code: ErrorCode::AttachmentResumeRejected,
+        ..
+      }) if resuming => {
         let stream = transport.connect().await?;
         ctmux_client::begin_attach(stream, &identity(), request).await?
       }
@@ -129,7 +172,7 @@ impl Pane {
     let runner = tokio::spawn(async move {
       let _ = controller.run().await;
     });
-    Ok(Self {
+    let mut pane = Self {
       model,
       control,
       connected: true,
@@ -137,14 +180,80 @@ impl Pane {
       view_update: None,
       events,
       token,
+      reconnect_leases: leases,
       runner: Some(runner),
+      checkpoint_ready: false,
       sequence: attached.replay_from,
       history_snapshot_id: None,
       history_boundary: attached.replay_from,
       replay: VecDeque::new(),
       replay_bytes: 0,
       history_job: None,
-    })
+    };
+    pane.prepare_reconnect().await?;
+    Ok(pane)
+  }
+
+  async fn prepare_reconnect(&mut self) -> Result<()> {
+    // ResumeAttachment preserves server leases; its AttachRequest flags are
+    // intentionally ignored. Apply explicit changes queued while disconnected
+    // before exposing the replacement controller to foreground input.
+    for lease in [LeaseKind::Input, LeaseKind::Layout] {
+      let status = self.lease_status(lease);
+      if !self.reconnect_leases.requested(lease) && status.owned_by_client {
+        self.control.release_lease(lease).await?;
+      } else if self.reconnect_leases.explicit_change(lease) == Some(true) && !status.held {
+        self.control.acquire_lease(lease).await?;
+      }
+    }
+    while !self.checkpoint_ready || self.lease_intent_pending() {
+      if let Some(error) = self.drain().await? {
+        return Err(error.into());
+      }
+      if !self.connected {
+        if self.checkpoint_ready && self.ended.is_some() {
+          break;
+        }
+        return Err("Disconnected before receiving terminal checkpoint".into());
+      }
+      if !self.checkpoint_ready || self.lease_intent_pending() {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+      }
+    }
+    self.reconnect_leases.input_change = None;
+    self.reconnect_leases.layout_change = None;
+    Ok(())
+  }
+
+  fn lease_intent_pending(&self) -> bool {
+    [LeaseKind::Input, LeaseKind::Layout]
+      .into_iter()
+      .any(|lease| {
+        let status = self.lease_status(lease);
+        (!self.reconnect_leases.requested(lease) && status.owned_by_client)
+          || (self.reconnect_leases.explicit_change(lease) == Some(true) && !status.held)
+      })
+  }
+
+  fn lease_status(&self, lease: LeaseKind) -> ctmux_proto::LeaseStatus {
+    let leases = self.control.state().leases();
+    match lease {
+      LeaseKind::Input => leases.input,
+      LeaseKind::Layout => leases.layout,
+    }
+  }
+
+  pub fn request_lease(&mut self, lease: LeaseKind, requested: bool) {
+    match lease {
+      LeaseKind::Input => {
+        self.reconnect_leases.input = requested;
+        self.reconnect_leases.input_change = Some(requested);
+      }
+      LeaseKind::Layout => {
+        self.reconnect_leases.layout = requested;
+        self.reconnect_leases.layout_change = Some(requested);
+      }
+    }
   }
 
   pub async fn drain(&mut self) -> Result<Option<String>> {
@@ -180,6 +289,7 @@ impl Pane {
         self.history_boundary = checkpoint.sequence;
         self.history_snapshot_id = history_manifest.map(|manifest| manifest.snapshot_id);
         self.model.restore(&checkpoint);
+        self.checkpoint_ready = true;
         self.model.history_gap = history_gap || history.truncated;
         self.model.set_history(history.lines);
         accept_buffered_ack(

@@ -4,7 +4,8 @@ use crate::{
   copy::{Action as CopyAction, BottomBehavior, CopyMode},
   input::{self, Prefix},
   keys::{Dispatch, KeyState},
-  pane::{Pane, identity},
+  maintenance::{Maintenance, Reconnect, Snapshot},
+  pane::{Pane, ReconnectLeases, identity},
   render::{Frame, Renderer, pane_at, pane_position},
   transport::{LocalTransport, Transport},
 };
@@ -74,6 +75,8 @@ pub struct App<'a> {
   message_until: Instant,
   renderer: Renderer,
   layout_owner: Option<String>,
+  maintenance: Maintenance<'a>,
+  runtime: bool,
 }
 
 impl App<'_> {
@@ -104,6 +107,8 @@ impl App<'_> {
       message_until: Instant::now(),
       renderer: Renderer::default(),
       layout_owner: None,
+      maintenance: Maintenance::default(),
+      runtime: false,
     }
   }
 
@@ -295,6 +300,7 @@ impl App<'_> {
   }
 
   async fn select(&mut self, session: &str) -> Result<()> {
+    self.maintenance.cancel();
     self.release_mouse().await?;
     self.copies.clear();
     self.archive_copy = None;
@@ -379,6 +385,7 @@ impl App<'_> {
       .iter()
       .map(|pane| pane.terminal_id.clone())
       .collect();
+    self.maintenance.retain_panes(&ids);
     let removed: Vec<_> = self
       .panes
       .keys()
@@ -410,6 +417,10 @@ impl App<'_> {
     if let Some(zoomed) = &view.zoomed_terminal_id {
       self.focused.clone_from(zoomed);
     }
+    if self.runtime {
+      self.schedule_reconnects(&ids);
+      return Ok(());
+    }
     for id in &ids {
       if self
         .panes
@@ -418,18 +429,10 @@ impl App<'_> {
       {
         continue;
       }
-      let token = if let Some(old) = self.panes.get_mut(id) {
-        let token = old.token.clone();
+      let request = self.reconnect_request(id, &ids);
+      if let Some(old) = self.panes.get_mut(id) {
         old.close().await;
-        Some(token)
-      } else {
-        None
-      };
-      let layout = !self
-        .panes
-        .values()
-        .any(|pane| pane.connected && pane.control.state().leases().layout.owned_by_client)
-        && ids.first() == Some(id);
+      }
       let local = LocalTransport(self.socket.clone());
       let opened = timeout(
         Duration::from_secs(5),
@@ -437,9 +440,8 @@ impl App<'_> {
           self.transport.unwrap_or(&local),
           id,
           self.canvas_size(),
-          self.read_only,
-          layout,
-          token,
+          request.leases,
+          request.token,
         ),
       )
       .await?;
@@ -462,6 +464,7 @@ impl App<'_> {
   }
 
   pub async fn detach(&mut self) {
+    self.maintenance.cancel();
     let panes = std::mem::take(&mut self.panes);
     for (_, mut pane) in panes {
       pane.close().await;
@@ -469,6 +472,14 @@ impl App<'_> {
   }
 
   pub async fn run(&mut self, mut events: mpsc::Receiver<io::Result<Event>>) -> Result<()> {
+    self.runtime = true;
+    let result = self.run_loop(&mut events).await;
+    self.runtime = false;
+    self.maintenance.cancel();
+    result
+  }
+
+  async fn run_loop(&mut self, events: &mut mpsc::Receiver<io::Result<Event>>) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refreshed = Instant::now();
@@ -484,14 +495,137 @@ impl App<'_> {
         }
         _ = tick.tick() => {
           self.drain().await;
+          self.poll_maintenance().await;
           if !self.archive_only && refreshed.elapsed() >= Duration::from_secs(2) {
-            if let Err(error) = self.refresh().await { self.notice(error.to_string()); }
+            self.schedule_refresh();
             refreshed = Instant::now();
           }
           self.draw()?;
         }
       }
     }
+  }
+
+  fn schedule_refresh(&mut self) {
+    if self.ended.is_some() || self.archive_only {
+      return;
+    }
+    if !self.panes.is_empty() && self.panes.values().all(|pane| pane.ended.is_some()) {
+      self.mark_session_ended();
+      return;
+    }
+    self.maintenance.refresh(
+      self.transport,
+      self.socket.clone(),
+      self.view.as_ref().map(|view| view.session_id.clone()),
+    );
+  }
+
+  fn schedule_reconnects(&mut self, ids: &[String]) {
+    for id in ids {
+      let old = self.panes.get(id);
+      if old.is_some_and(|pane| pane.connected || pane.ended.is_some()) {
+        continue;
+      }
+      self.maintenance.reconnect(
+        self.transport,
+        self.socket.clone(),
+        self.reconnect_request(id, ids),
+      );
+    }
+  }
+
+  fn reconnect_request(&self, id: &str, ids: &[String]) -> Reconnect {
+    let old = self.panes.get(id);
+    Reconnect {
+      terminal_id: id.into(),
+      size: self.canvas_size(),
+      leases: old.map_or_else(
+        || {
+          ReconnectLeases::new(
+            !self.read_only,
+            !self.read_only
+              && ids.first().is_some_and(|first| first == id)
+              && !self.panes.values().any(|pane| pane.reconnect_leases.layout),
+          )
+        },
+        |pane| pane.reconnect_leases,
+      ),
+      token: old.map(|pane| pane.token.clone()),
+    }
+  }
+
+  async fn poll_maintenance(&mut self) {
+    let ready = self.maintenance.poll().await;
+    if let Some(snapshot) = ready.snapshot {
+      match snapshot {
+        Ok(snapshot) => {
+          if let Err(error) = self.adopt_snapshot(snapshot).await {
+            self.notice(error.to_string());
+          }
+        }
+        Err(error) => self.notice(format!("Disconnected: {error}; retrying")),
+      }
+    }
+    for (id, opened) in ready.panes {
+      match opened {
+        Ok(pane)
+          if self.ended.is_none()
+            && self
+              .panes
+              .get(&id)
+              .is_none_or(|current| current.ended.is_none())
+            && self.view.as_ref().is_some_and(|view| {
+              view
+                .terminals
+                .iter()
+                .any(|terminal| terminal.terminal_id == id)
+            }) =>
+        {
+          self.panes.insert(id, pane);
+        }
+        Ok(_) => {}
+        Err(error) if session_not_found(&error) => {
+          if let Some(pane) = self.panes.get_mut(&id) {
+            pane.ended = Some("Terminal no longer exists".into());
+          }
+        }
+        Err(error) => self.notice(format!("Disconnected: {error}; retrying")),
+      }
+    }
+    if let Some(view) = &self.view {
+      let ids = view
+        .terminals
+        .iter()
+        .map(|pane| pane.terminal_id.clone())
+        .collect::<Vec<_>>();
+      self.schedule_reconnects(&ids);
+    }
+  }
+
+  async fn adopt_snapshot(&mut self, snapshot: Snapshot) -> Result<()> {
+    self.sessions = snapshot.sessions;
+    if self.panes.values().any(|pane| pane.ended.is_some()) {
+      return Ok(());
+    }
+    if let Some(view) = snapshot.view {
+      // A sibling can publish a newer topology/zoom while GetView is pending.
+      self.adopt_view(view).await
+    } else {
+      if self.view.is_some() {
+        self.mark_session_ended();
+      }
+      Ok(())
+    }
+  }
+
+  fn mark_session_ended(&mut self) {
+    let outcome = self
+      .panes
+      .get(&self.focused)
+      .and_then(|pane| pane.ended.as_deref())
+      .unwrap_or("Session no longer exists");
+    self.ended = Some(format!("{outcome} — press any key to exit"));
   }
 
   async fn drain(&mut self) {
@@ -1188,7 +1322,15 @@ impl App<'_> {
       .find(|(_, pane)| {
         let leases = pane.control.state().leases();
         match lease {
-          LeaseKind::Layout => leases.layout.owned_by_client,
+          LeaseKind::Layout => {
+            if pane.connected {
+              leases.layout.owned_by_client
+            } else {
+              pane
+                .reconnect_leases
+                .intended_ownership(lease, leases.layout.owned_by_client)
+            }
+          }
           LeaseKind::Input => false,
         }
       })
@@ -1197,17 +1339,40 @@ impl App<'_> {
       owner.as_ref().unwrap_or(&self.focused)
     } else {
       &self.focused
-    };
-    if let Some(pane) = self.panes.get(id) {
+    }
+    .clone();
+    if let Some(pane) = self.panes.get(&id) {
       let leases = pane.control.state().leases();
-      let held_by_client = match lease {
+      let observed = match lease {
         LeaseKind::Input => leases.input.owned_by_client,
         LeaseKind::Layout => leases.layout.owned_by_client,
       };
-      if held_by_client {
-        pane.control.release_lease(lease).await?;
+      let held_by_client = if pane.connected {
+        observed
       } else {
-        pane.control.acquire_lease(lease).await?;
+        pane.reconnect_leases.intended_ownership(lease, observed)
+      };
+      let control = pane.control.clone();
+      let connected = pane.connected;
+      // A release is also the user's reconnect preference. Keep that intent
+      // even when a disconnected command queue can no longer accept it.
+      if lease == LeaseKind::Layout {
+        for pane in self.panes.values_mut() {
+          pane.request_lease(lease, false);
+        }
+      }
+      if let Some(pane) = self.panes.get_mut(&id) {
+        pane.request_lease(lease, !held_by_client);
+      }
+      self.maintenance.cancel_reconnects();
+      if !connected {
+        // Reconnect preparation applies this intent to the resumed controller.
+        return Ok(());
+      }
+      if held_by_client {
+        control.release_lease(lease).await?;
+      } else {
+        control.acquire_lease(lease).await?;
       }
     }
     Ok(())

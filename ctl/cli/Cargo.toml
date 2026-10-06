@@ -60,6 +60,11 @@ rustix.workspace = true
 rustix.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
+avt.workspace = true
+ctmux-client.workspace = true
+ctmuxd.workspace = true
+filedescriptor = "0.8.3"
+nix = { workspace = true, features = ["signal"] }
 rustix = { workspace = true, features = ["termios"] }
 
 [lints]

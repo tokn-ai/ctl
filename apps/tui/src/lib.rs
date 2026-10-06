@@ -4,6 +4,7 @@ mod app;
 mod copy;
 mod input;
 mod keys;
+mod maintenance;
 mod model;
 mod pane;
 mod render;
@@ -91,6 +92,7 @@ async fn run_app(
     app.detach().await;
     return Err(error);
   }
+  let _interaction = TerminalInteraction::new(app.transport);
   let mut terminal = match terminal::Terminal::enter() {
     Ok(terminal) => terminal,
     Err(error) => {
@@ -106,6 +108,25 @@ async fn run_app(
   app.detach().await;
   drop(terminal);
   result
+}
+
+struct TerminalInteraction<'a>(Option<&'a dyn Transport>);
+
+impl<'a> TerminalInteraction<'a> {
+  fn new(transport: Option<&'a dyn Transport>) -> Self {
+    if let Some(transport) = transport {
+      transport.set_terminal_ui_active(true);
+    }
+    Self(transport)
+  }
+}
+
+impl Drop for TerminalInteraction<'_> {
+  fn drop(&mut self) {
+    if let Some(transport) = self.0 {
+      transport.set_terminal_ui_active(false);
+    }
+  }
 }
 
 async fn shutdown_signal() -> Result<()> {

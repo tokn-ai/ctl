@@ -35,6 +35,14 @@ pub fn catalog_path() -> Result<PathBuf, HostError> {
 }
 
 pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
+  ensure_vpn_with_interaction(target, true).await
+}
+
+/// Restore prerequisites while keeping UI-owned terminal input and output exclusive.
+pub async fn ensure_vpn_with_interaction(
+  target: &ConnectionTargetDto,
+  interactive: bool,
+) -> Result<(), Error> {
   #[cfg(unix)]
   if !target.is_local() {
     crate::ssh_broker::check_route_support(&target.to_ssh_target()?).await?;
@@ -44,10 +52,12 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
     let client = if let Some(owner) = route.owner {
       #[cfg(unix)]
       {
-        let control_path = crate::ssh_broker::ensure_master(owner.clone()).await?;
+        let control_path =
+          crate::ssh_broker::ensure_master_with_interaction(owner.clone(), interactive).await?;
         crate::vpn::RuntimeClient::Remote(
           ctl_ipc::remote_vpn::Client::new(owner, route.expected_remote_id)
-            .with_control_path(control_path),
+            .with_control_path(control_path)
+            .with_terminal_interaction(interactive),
         )
       }
       #[cfg(not(unix))]
@@ -76,12 +86,18 @@ pub async fn ensure_vpn(target: &ConnectionTargetDto) -> Result<(), Error> {
       .into_iter()
       .find(|connection| connection.connection_id == route.connection_id)
       .ok_or(Error::MissingVpn)?;
-    eprintln!("Connecting VPN {}…", connection.name);
+    if interactive {
+      eprintln!("Connecting VPN {}…", connection.name);
+    }
     let status = client.start_connection(connection).await?;
     if status.state != ctl_ipc::VpnState::Connected || !status.running || status.endpoint.is_none()
     {
       if let Some(url) = status.auth_url {
-        eprintln!("Sign in to the VPN: {url}");
+        if interactive {
+          eprintln!("Sign in to the VPN: {url}");
+        } else {
+          return Err(Error::VpnAuthenticationRequired(url));
+        }
       }
       return Err(Error::VpnUnavailable);
     }
@@ -111,4 +127,6 @@ pub enum Error {
   Profile(#[from] crate::vpn::profiles::Error),
   #[error("The selected VPN is not connected. Complete sign-in and retry.")]
   VpnUnavailable,
+  #[error("The selected VPN requires sign-in at {0}. Complete sign-in and reconnect.")]
+  VpnAuthenticationRequired(String),
 }

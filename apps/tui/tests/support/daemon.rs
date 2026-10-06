@@ -27,6 +27,19 @@ pub struct TestDaemon {
 
 impl TestDaemon {
   pub async fn start() -> Result<Self> {
+    Self::start_with_config(ctmuxd::DaemonConfig::default()).await
+  }
+
+  /// Choose a bounded reconnect lifetime for token-expiry and ownership cases.
+  pub async fn start_with_liveness(attachment_liveness_timeout: Duration) -> Result<Self> {
+    Self::start_with_config(ctmuxd::DaemonConfig {
+      attachment_liveness_timeout,
+      ..Default::default()
+    })
+    .await
+  }
+
+  async fn start_with_config(mut config: ctmuxd::DaemonConfig) -> Result<Self> {
     // Keep paths short enough for macOS's Unix-domain socket limit.
     let directory =
       std::env::temp_dir().join(format!("ctui-{}", &uuid::Uuid::new_v4().to_string()[..8]));
@@ -36,7 +49,8 @@ impl TestDaemon {
       return Err(error.into());
     }
     let socket = directory.join("ctmux.sock");
-    let daemon_socket = socket.clone();
+    config.socket_path.clone_from(&socket);
+    config.startup_idle_timeout = Duration::from_secs(60);
     let (sender, completed) = mpsc::channel();
     let task = match thread::Builder::new()
       .name("tui-fixture-daemon".into())
@@ -47,11 +61,7 @@ impl TestDaemon {
           .map_err(|error| error.to_string())
           .and_then(|runtime| {
             let result = runtime
-              .block_on(ctmuxd::run(ctmuxd::DaemonConfig {
-                socket_path: daemon_socket,
-                startup_idle_timeout: Duration::from_secs(60),
-                ..Default::default()
-              }))
+              .block_on(ctmuxd::run(config))
               .map_err(|error| error.to_string());
             runtime.shutdown_timeout(Duration::from_secs(1));
             result

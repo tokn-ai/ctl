@@ -14,7 +14,7 @@ export function ComponentProtocols({ row, view }: { row: ComponentVersionRow; vi
     const label = protocol_labels[protocol.name] ?? protocol.name;
     const status = status_labels[protocol.status];
     return <li key={protocol.name} className={`about-protocol-line about-protocol-${protocol.status}`} title={protocol.detail} aria-label={`${label} ${protocol.version}: ${status}`}>
-      {protocol.status === "unknown" ? <span className="about-protocol-unknown" aria-hidden="true">?</span> : <Icon name={protocol.status === "incompatible" ? "close" : "check"} size={14} />}
+      <span className="about-protocol-marker" aria-hidden="true">{protocol.status === "unknown" ? "?" : <Icon name={protocol.status === "incompatible" ? "close" : "check"} size={14} />}</span>
       <span className="about-protocol-name">{label}</span><code>{protocol.version}</code><span className="about-protocol-state">{status}</span>
     </li>;
   })}</ul> : <span className="about-muted">Protocols not reported</span>;

@@ -208,22 +208,9 @@ fn expected_component_version() -> ComponentVersionInfo {
   ComponentVersionInfo::from_build(ctl_core::component::build_info(), Vec::new())
 }
 
-fn required_protocols(component: &str) -> Vec<ProtocolVersion> {
+pub(super) fn required_protocols(component: &str) -> Vec<ProtocolVersion> {
   let infos = match component {
-    "ctld" => vec![
-      ProtocolInfo::new(
-        "ctld",
-        ctl_ipc::PROTOCOL_BUILD,
-        ctl_ipc::PROTOCOL_VERSION,
-        ctl_ipc::SUPPORTED_PROTOCOL_VERSIONS,
-      ),
-      ProtocolInfo::new(
-        "ctld_lifecycle",
-        ctl_ipc::lifecycle::PROTOCOL_BUILD,
-        ctl_ipc::lifecycle::PROTOCOL_VERSION,
-        ctl_ipc::lifecycle::SUPPORTED_PROTOCOL_VERSIONS,
-      ),
-    ],
+    "ctld" => ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols,
     "ctmuxd" => vec![
       ctmux_proto::protocol_info(),
       ctmux_ipc::local_control_protocol_info(),
@@ -231,6 +218,8 @@ fn required_protocols(component: &str) -> Vec<ProtocolVersion> {
     "ctl-taskd" => vec![
       ctl_task_proto::protocol_info(),
       ctl_task_proto::control::protocol_info(),
+      ctmux_proto::protocol_info(),
+      ctmux_ipc::local_control_protocol_info(),
     ],
     "ctl_agent" => ctl_proto::agent_protocols(),
     _ => Vec::new(),
@@ -362,6 +351,33 @@ mod tests {
       .collect();
     assert_ne!(expected, []);
     assert_eq!(row.required_protocols, expected);
+  }
+
+  #[test]
+  fn helper_and_task_companion_contracts_are_verified_independently_of_build_identity() {
+    for (component, protocol_name) in [
+      ("ctld", "ctld_helper"),
+      ("ctl-taskd", "ctmux"),
+      ("ctl-taskd", "ctmux_control"),
+    ] {
+      let mut row = ComponentVersionRow::local(component, component);
+      let mut running = expected_component_version();
+      running.protocols = row.required_protocols.clone();
+      row.running = Some(running);
+      row.compare();
+      assert_eq!(row.status, VersionStatus::Current);
+      let protocol = row
+        .running
+        .as_mut()
+        .unwrap()
+        .protocols
+        .iter_mut()
+        .find(|protocol| protocol.name == protocol_name)
+        .expect("Known helper and companion contracts must have app requirements");
+      *protocol = ProtocolVersion::new(protocol_name, ContractVersion::new(2, 0, 1));
+      row.compare();
+      assert_eq!(row.status, VersionStatus::Incompatible);
+    }
   }
 
   #[test]

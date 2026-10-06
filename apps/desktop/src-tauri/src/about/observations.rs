@@ -42,10 +42,6 @@ pub(super) fn rows(observations: Vec<RemoteObservation>) -> Vec<ComponentVersion
       "ctl-agent",
       &observation,
       agent_info,
-      ctl_proto::agent_protocols()
-        .into_iter()
-        .map(ProtocolVersion::from)
-        .collect(),
     );
     let ctmux_info = ComponentVersionInfo::observed(
       observation.handshake.server_version.clone(),
@@ -58,14 +54,7 @@ pub(super) fn rows(observations: Vec<RemoteObservation>) -> Vec<ComponentVersion
         .map(ProtocolVersion::from)
         .collect(),
     );
-    insert(
-      &mut rows,
-      "ctmuxd",
-      "ctmuxd",
-      &observation,
-      ctmux_info,
-      vec![ProtocolVersion::from(ctmux_proto::protocol_info())],
-    );
+    insert(&mut rows, "ctmuxd", "ctmuxd", &observation, ctmux_info);
   }
   rows.into_values().collect()
 }
@@ -76,8 +65,8 @@ fn insert(
   label: &str,
   observation: &RemoteObservation,
   running: ComponentVersionInfo,
-  expected_protocols: Vec<ProtocolVersion>,
 ) {
+  let expected_protocols = super::models::required_protocols(component);
   // Preserve different simultaneously attached builds on one environment;
   // duplicate panes for the same build collapse to one diagnostic row.
   let mut hash = Sha256::new();
@@ -215,6 +204,35 @@ mod tests {
         && row.observation == "running"
         && row.action.is_some())
     );
+  }
+
+  #[test]
+  fn active_remote_companion_protocols_use_the_same_app_requirements_as_inspected_rows() {
+    let mut observation = observation();
+    observation
+      .handshake
+      .protocols
+      .push(ctmux_ipc::local_control_protocol_info());
+    let mut result = rows(vec![observation]);
+    let row = result
+      .iter_mut()
+      .find(|row| row.component == "ctmuxd")
+      .unwrap();
+    assert_eq!(row.status, VersionStatus::Current);
+    let protocol = row
+      .running
+      .as_mut()
+      .unwrap()
+      .protocols
+      .iter_mut()
+      .find(|protocol| protocol.name == "ctmux_control")
+      .unwrap();
+    *protocol = ProtocolVersion::new(
+      "ctmux_control",
+      ctl_core::protocol::ProtocolVersion::new(2, 0, 1),
+    );
+    row.compare();
+    assert_eq!(row.status, VersionStatus::Incompatible);
   }
 
   #[test]

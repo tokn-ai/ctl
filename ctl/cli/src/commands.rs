@@ -12,6 +12,8 @@ mod reconnect;
 
 fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> {
   let error = match &arguments.command {
+    #[cfg(unix)]
+    Command::Components { .. } => CliError::ComponentsTarget,
     Command::Setup(_) => CliError::SetupTarget,
     Command::Skill(_) => CliError::SkillTarget,
     Command::Passwords { .. } => CliError::PasswordsTarget,
@@ -49,6 +51,13 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
     return Err(CliError::RemoteVpnUnsupported);
   }
   match arguments.command {
+    #[cfg(unix)]
+    Command::Components { command } => {
+      crate::components::run(command)
+        .await
+        .map_err(CliError::Components)?;
+      return Ok(0);
+    }
     Command::Setup(setup_arguments) => {
       crate::setup::run(setup_arguments).await?;
       return Ok(0);
@@ -129,6 +138,10 @@ async fn run_selected(
     | Command::Ssh { .. }
     | Command::Scp { .. } => {
       unreachable!("commands dispatched before target resolution")
+    }
+    #[cfg(unix)]
+    Command::Components { .. } => {
+      unreachable!("component store commands run before target resolution")
     }
     Command::Ctmux { command } => {
       ctmux_cli::run(command, connector).await?;
@@ -357,6 +370,14 @@ enum CtlConnectError {
 
 #[derive(Debug, Error)]
 pub enum CliError {
+  #[cfg(unix)]
+  #[error(
+    "Components manage the local bundle store; omit --host, --method, and --remote-platform."
+  )]
+  ComponentsTarget,
+  #[cfg(unix)]
+  #[error("Component sync failed: {0}")]
+  Components(std::io::Error),
   #[error("Remote repair cancelled.")]
   RepairCancelled,
   #[error("Could not listen for cancellation: {0}")]
@@ -409,6 +430,51 @@ pub enum CliError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn component_store_commands_reject_connection_targets_before_io() {
+    use clap::Parser;
+    for flags in [
+      &["--host", "remote"][..],
+      &["--method", "route"][..],
+      &["--host", "remote", "--remote-platform", "unix"][..],
+    ] {
+      let mut args = vec!["ctl"];
+      args.extend_from_slice(flags);
+      args.extend(["components", "list"]);
+      let arguments = Arguments::try_parse_from(args).unwrap();
+      assert!(matches!(
+        run(arguments).await,
+        Err(CliError::ComponentsTarget)
+      ));
+    }
+    assert!(
+      Arguments::try_parse_from([
+        "ctl",
+        "components",
+        "sync",
+        "--from",
+        "build",
+        "--ctld-package",
+        "package"
+      ])
+      .is_err()
+    );
+    assert!(
+      Arguments::try_parse_from([
+        "ctl",
+        "components",
+        "sync",
+        "--from",
+        "build",
+        "--local-build",
+        "--source",
+        "ci"
+      ])
+      .is_err()
+    );
+  }
 
   #[tokio::test]
   async fn passwords_reject_remote_flags_before_preparing_helpers_or_connecting() {

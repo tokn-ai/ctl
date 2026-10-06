@@ -31,6 +31,7 @@ pub struct PreparedRemoteAction {
   actors: Vec<Arc<AttachmentActor>>,
   remote_id: String,
   operation: Operation,
+  selection: Option<super::inventory::Selection>,
 }
 
 enum Operation {
@@ -43,7 +44,14 @@ pub struct RemoteActionOutcome {
   pub detail: String,
 }
 
-pub async fn prepare(state: &AppState, component_id: &str) -> CommandResult<PreparedRemoteAction> {
+pub async fn prepare(
+  app: &tauri::AppHandle,
+  state: &AppState,
+  component_id: &str,
+) -> CommandResult<PreparedRemoteAction> {
+  if component_id.starts_with("remote:saved:") {
+    return prepare_saved(app, state, component_id).await;
+  }
   let active = state.remote_actors().await;
   let actors: Vec<_> = active
     .into_iter()
@@ -123,6 +131,56 @@ pub async fn prepare(state: &AppState, component_id: &str) -> CommandResult<Prep
     actors,
     remote_id,
     operation,
+    selection: None,
+  })
+}
+
+async fn prepare_saved(
+  app: &tauri::AppHandle,
+  state: &AppState,
+  component_id: &str,
+) -> CommandResult<PreparedRemoteAction> {
+  let selected = super::inventory::selection(app, component_id).await?;
+  let remote_id = selected.remote_id.clone().ok_or_else(unavailable)?;
+  let master = selected.master().await?;
+  let ctl_client::ConnectionTarget::Ssh {
+    destination,
+    options,
+  } = selected.target.to_core()
+  else {
+    return Err(unavailable());
+  };
+  let prepared =
+    ctl_client::maintenance::prepare_ctmux_restart(&destination, &options, &master, &remote_id)
+      .await
+      .map_err(|error| CommandErrorDto::new(error.code, error.message))?;
+  require_compatible_replacement(&prepared.info.available)?;
+  let running = &prepared.info.running;
+  let running = match &running.build {
+    Some(build) => ComponentVersionInfo::from_build(build.clone(), running_protocols(running)),
+    None => ComponentVersionInfo {
+      protocols: running_protocols(running),
+      ..ComponentVersionInfo::default()
+    },
+  };
+  let actors: Vec<_> = state
+    .remote_actors()
+    .await
+    .into_iter()
+    .filter(|actor| {
+      actor
+        .remote_observation
+        .as_ref()
+        .is_some_and(|info| info.identity.remote_id == remote_id)
+    })
+    .collect();
+  Ok(PreparedRemoteAction {
+    preview: RemoteActionPreview {
+      component_id: component_id.into(), label: format!("ctmuxd — {}", selected.label), component: "ctmuxd", host_id: Some(selected.host_id.clone()), action: ComponentAction::Restart,
+      running: Some(running), available: Some(version(prepared.info.available.clone())), attachment_count: u32::try_from(actors.len()).unwrap_or(u32::MAX),
+      detail: "Ends every terminal session owned by this remote account, including sessions in other windows and clients. Applies the installed daemon without installing components.".into(),
+    },
+    actors, remote_id, operation: Operation::Restart(Box::new(prepared)), selection: Some(selected),
   })
 }
 
@@ -132,6 +190,11 @@ impl PreparedRemoteAction {
     app: &tauri::AppHandle,
     state: &AppState,
   ) -> CommandResult<RemoteActionOutcome> {
+    if let Some(selected) = &self.selection
+      && super::inventory::selection(app, &self.preview.component_id).await? != *selected
+    {
+      return Err(unavailable());
+    }
     let active = state.remote_actors().await;
     if !self
       .actors
@@ -293,8 +356,11 @@ mod tests {
   #[tokio::test]
   async fn absent_rows_cannot_choose_an_arbitrary_host_or_command() {
     for id in ["remote:ctmuxd:invented", "ssh:anything", "/tmp/owner.sock"] {
-      let result = prepare(&AppState::default(), id).await;
-      assert_eq!(result.err().unwrap().code, "remote_component_changed");
+      assert!(
+        observations::rows(Vec::new())
+          .into_iter()
+          .all(|row| row.component_id != id)
+      );
     }
   }
 

@@ -1,4 +1,5 @@
-use ctmux_proto::{TerminalCheckpoint, TerminalSize};
+use ctmux_core::mouse::TerminalInputModes;
+use ctmux_proto::{TerminalCheckpoint, TerminalHistoryRow, TerminalSize};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StringControl {
@@ -12,6 +13,9 @@ pub struct Model {
   pub vt: avt::Vt,
   pub bracketed_paste: bool,
   pub history_gap: bool,
+  pub input_modes: TerminalInputModes,
+  buffer_parser: avt::parser::Parser,
+  buffer_state: avt::terminal::Terminal,
   history: Vec<String>,
   pending: Vec<u8>,
   escape: String,
@@ -30,6 +34,9 @@ impl Model {
         .build(),
       bracketed_paste: false,
       history_gap: false,
+      input_modes: TerminalInputModes::default(),
+      buffer_parser: avt::parser::Parser::default(),
+      buffer_state: avt::terminal::Terminal::new((2, 1), Some(0)),
       history: Vec::new(),
       pending: Vec::new(),
       escape: String::new(),
@@ -70,6 +77,36 @@ impl Model {
     lines
   }
 
+  /// Freeze the active buffer without reflowing its physical screen rows.
+  ///
+  /// Legacy history is logical text preceding the primary buffer. It must
+  /// never appear behind the independent alternate screen of a full-screen app.
+  pub fn copy_snapshot(&self) -> (Vec<String>, Vec<TerminalHistoryRow>) {
+    let prefix = if self.buffer_state.active_buffer_type() == avt::terminal::BufferType::Primary {
+      self.history.clone()
+    } else {
+      Vec::new()
+    };
+    let mut unwrapper = avt::util::TextUnwrapper::new();
+    let rows = self
+      .vt
+      .lines()
+      .map(|line| {
+        let wrapped = unwrapper.push(line).is_none();
+        let text = line.text();
+        TerminalHistoryRow {
+          text: if wrapped {
+            text
+          } else {
+            text.trim_end_matches(' ').to_owned()
+          },
+          wrapped,
+        }
+      })
+      .collect();
+    (prefix, rows)
+  }
+
   pub fn resize(&mut self, size: &TerminalSize) {
     if self
       .vt
@@ -100,6 +137,9 @@ impl Model {
           String::from_utf8(self.pending.drain(..length).collect()).expect("validated UTF-8");
         for ch in text.chars() {
           self.vt.feed(ch);
+          self.observe_buffer(ch);
+          self.input_modes.feed(ch);
+          self.bracketed_paste = self.input_modes.bracketed_paste();
           replies.extend(self.control(ch));
           batch += 1;
           if batch >= batch_limit {
@@ -111,6 +151,9 @@ impl Model {
       if let Some(length) = invalid {
         self.pending.drain(..length);
         self.vt.feed('\u{fffd}');
+        self.observe_buffer('\u{fffd}');
+        self.input_modes.feed('\u{fffd}');
+        self.bracketed_paste = self.input_modes.bracketed_paste();
       } else {
         break;
       }
@@ -125,6 +168,21 @@ impl Model {
       // longer contiguous with this buffer. Keep only the retained suffix.
       self.history.clear();
       self.history_gap = true;
+    }
+  }
+
+  fn observe_buffer(&mut self, ch: char) {
+    use avt::parser::{EdScope, Function};
+    match self.buffer_parser.feed(ch) {
+      Some(function @ (Function::Decset(_) | Function::Decrst(_))) => {
+        self.buffer_state.execute(function);
+      }
+      Some(function @ Function::Ris) => {
+        self.buffer_state.execute(function);
+        self.history.clear();
+      }
+      Some(Function::Ed(EdScope::SavedLines)) => self.history.clear(),
+      _ => {}
     }
   }
 
@@ -165,9 +223,6 @@ impl Model {
     }
     let sequence = std::mem::take(&mut self.escape);
     match sequence.as_str() {
-      "\x1b[3J" => self.history.clear(),
-      "\x1b[?2004h" => self.bracketed_paste = true,
-      "\x1b[?2004l" => self.bracketed_paste = false,
       "\x1b[5n" => return b"\x1b[0n".to_vec(),
       "\x1b[6n" => {
         let cursor = self.vt.cursor();
@@ -246,6 +301,101 @@ mod tests {
   }
 
   #[test]
+  fn copy_snapshot_preserves_physical_wraps_screen_padding_and_cursor_rows() {
+    let mut model = Model::new(&TerminalSize {
+      columns: 4,
+      rows: 3,
+      ..TerminalSize::default()
+    });
+    model.set_history(vec!["older logical history".into()]);
+    model.feed(b"ab  c\r\n");
+    let (prefix, rows) = model.copy_snapshot();
+    assert_eq!(prefix, ["older logical history"]);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+      rows[0],
+      TerminalHistoryRow {
+        text: "ab  ".into(),
+        wrapped: true
+      }
+    );
+    assert_eq!(
+      rows[1],
+      TerminalHistoryRow {
+        text: "c".into(),
+        wrapped: false
+      }
+    );
+    assert_eq!(
+      rows[2],
+      TerminalHistoryRow {
+        text: String::new(),
+        wrapped: false
+      }
+    );
+    assert_eq!(model.vt.cursor().row, 2);
+  }
+
+  #[test]
+  fn alternate_copy_uses_active_screen_and_omits_primary_history() {
+    let mut model = model();
+    model.set_history(vec!["saved primary history".into()]);
+    model.feed(b"primary\x1b[?1049h\x1b[2;1Halternate");
+    let (prefix, rows) = model.copy_snapshot();
+    assert_eq!(prefix, Vec::<String>::new());
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].text, "");
+    assert_eq!(rows[1].text, "alternate");
+    assert_eq!(rows[2].text, "");
+    assert!(model.copy_lines().join("\n").contains("primary"));
+    model.feed(b"\x1b[?1049l");
+    let (prefix, rows) = model.copy_snapshot();
+    assert_eq!(prefix, ["saved primary history"]);
+    assert_eq!(rows[0].text, "primary");
+  }
+
+  #[test]
+  fn buffer_tracking_handles_aliases_combined_modes_fragments_and_reset() {
+    for mode in [47, 1047, 1049] {
+      let mut model = model();
+      model.set_history(vec!["primary prefix".into()]);
+      model.feed(format!("\x1b[?25;{mode}").as_bytes());
+      assert_eq!(model.copy_snapshot().0, ["primary prefix"]);
+      model.feed(b"h");
+      assert_eq!(model.copy_snapshot().0, Vec::<String>::new());
+      model.feed(b"\x1bc");
+      model.set_history(vec!["new primary prefix".into()]);
+      assert_eq!(model.copy_snapshot().0, ["new primary prefix"]);
+    }
+  }
+
+  #[test]
+  fn checkpoint_restoration_keeps_the_active_alternate_copy_screen() {
+    let mut source = model();
+    source.feed(b"primary\x1b[?1049h\x1b[3;1Hbottom");
+    let mut restored = model();
+    restored.restore(&TerminalCheckpoint {
+      format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      sequence: 1,
+      terminal_size: TerminalSize {
+        columns: 12,
+        rows: 3,
+        ..TerminalSize::default()
+      },
+      payload: source.vt.dump().into_bytes(),
+      input_prefix: Vec::new(),
+    });
+    restored.set_history(vec!["primary history".into()]);
+    let (prefix, rows) = restored.copy_snapshot();
+    assert_eq!(prefix, Vec::<String>::new());
+    assert_eq!(rows[2].text, "bottom");
+    assert_eq!(restored.vt.cursor().row, 2);
+    restored.feed(b"\x1b[?1049l");
+    assert_eq!(restored.copy_snapshot().0, ["primary history"]);
+  }
+
+  #[test]
   fn history_survives_live_output_and_checkpoint_replacement_without_duplication() {
     let mut model = model();
     model.set_history(vec!["before-attach".into()]);
@@ -287,10 +437,84 @@ mod tests {
     assert_eq!(model.feed(b"ab\x1b[6n"), b"\x1b[1;3R");
     model.feed(b"\x1b[?2004h");
     assert!(model.bracketed_paste);
-    model.feed(b"\x1b]0;\x1b[?2004l\x07");
+    model.feed(b"\x1b]0;[?2004l\x07");
     assert!(model.bracketed_paste);
     model.feed(b"\x1b[?2004l");
     assert!(!model.bracketed_paste);
+  }
+
+  #[test]
+  fn input_modes_follow_combined_fragmented_controls_and_checkpoint_restore() {
+    use ctmux_core::mouse::{MouseEncoding, MouseTracking};
+    let mut model = model();
+    model.feed(b"\x1b[?1002;100");
+    model.feed(b"6;2004h");
+    assert_eq!(model.input_modes.mouse().tracking(), MouseTracking::Drag);
+    assert_eq!(model.input_modes.mouse().encoding(), MouseEncoding::Sgr);
+    assert!(model.bracketed_paste);
+    let mut payload = model.input_modes.restore_sequences();
+    payload.push_str(&model.vt.dump());
+    model.restore(&TerminalCheckpoint {
+      format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+      format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+      sequence: 1,
+      terminal_size: TerminalSize {
+        columns: 12,
+        rows: 3,
+        pixel_width: 0,
+        pixel_height: 0,
+      },
+      payload: payload.into_bytes(),
+      input_prefix: Vec::new(),
+    });
+    assert_eq!(model.input_modes.mouse().tracking(), MouseTracking::Drag);
+    assert!(model.bracketed_paste);
+    model.feed(b"\x1bc");
+    assert!(!model.input_modes.mouse().enabled());
+    assert!(!model.bracketed_paste);
+  }
+
+  #[test]
+  fn checkpoint_parser_prefix_completes_mouse_modes_after_restore() {
+    use ctmux_core::mouse::MouseEncoding;
+    for prefix in ["\x1b[?100", "\x1b]title\x1b[?100", "\x1bPdata\u{9b}?100"] {
+      let mut source = model();
+      source.feed(b"\x1b[?1002h");
+      source.feed(prefix.as_bytes());
+      let mut payload = source.input_modes.restore_sequences();
+      payload.push_str(&source.vt.dump());
+      let mut restored = model();
+      restored.restore(&TerminalCheckpoint {
+        format: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT.into(),
+        format_version: ctmux_proto::TERMINAL_CHECKPOINT_FORMAT_VERSION,
+        sequence: 1,
+        terminal_size: TerminalSize {
+          columns: 12,
+          rows: 3,
+          pixel_width: 0,
+          pixel_height: 0,
+        },
+        payload: payload.into_bytes(),
+        input_prefix: Vec::new(),
+      });
+      assert_eq!(
+        restored.input_modes.mouse().encoding(),
+        MouseEncoding::Legacy
+      );
+      source.feed(b"6h");
+      restored.feed(b"6h");
+      assert_eq!(restored.input_modes.mouse().encoding(), MouseEncoding::Sgr);
+      assert_eq!(restored.input_modes.mouse(), source.input_modes.mouse());
+      assert_eq!(restored.vt.dump(), source.vt.dump());
+    }
+  }
+
+  #[test]
+  fn invalid_utf8_cancels_an_incomplete_mouse_control_like_the_screen_parser() {
+    let mut model = model();
+    model.feed(b"\x1b[?100\xff2h");
+    assert!(!model.input_modes.mouse().enabled());
+    assert!(model.vt.text()[0].starts_with("2h"));
   }
 
   #[test]

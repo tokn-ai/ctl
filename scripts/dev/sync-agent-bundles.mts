@@ -28,7 +28,7 @@ interface WorkflowRun {
 
 type BundleSet = AgentBundleSet;
 
-function run(
+function runCommand(
   command: string,
   args: string[],
   cwd: string,
@@ -52,11 +52,11 @@ function run(
 }
 
 function git(args: string[], cwd: string): string {
-  return run("git", args, cwd);
+  return runCommand("git", args, cwd);
 }
 
 function gh(args: string[], cwd: string, inherit = false): string {
-  return run("gh", args, cwd, inherit);
+  return runCommand("gh", args, cwd, inherit);
 }
 
 function parseRuns(json: string): WorkflowRun[] {
@@ -304,6 +304,11 @@ async function syncBundles(repoRoot: string, useMain: boolean): Promise<void> {
       "apps/desktop/src-tauri/resources/agent-bundles",
     );
     installBundleSet(temporaryDirectory, destination, manifest);
+    for (const target of SUPPORTED_TARGETS) {
+      runCommand("cargo", ["run", "--locked", "--manifest-path", join(repoRoot, "Cargo.toml"),
+        "-p", "ctl-cli", "--", "components", "sync", "--from", destination,
+        "--target", target, "--purpose", "upload", "--source", "ci"], repoRoot, true);
+    }
     console.log(
       `Installed ${manifest.bundle_id} from run ${run.databaseId} into ${resolve(destination)}`,
     );

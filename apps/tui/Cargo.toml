@@ -17,6 +17,7 @@ base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 ctmux-client.workspace = true
+ctmux-core.workspace = true
 ctmux-ipc.workspace = true
 ctmux-proto.workspace = true
 tokio.workspace = true

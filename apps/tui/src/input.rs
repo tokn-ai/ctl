@@ -1,4 +1,5 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ctmux_core::mouse::{MouseEncoding, MouseModes, MouseTracking};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prefix {
@@ -114,6 +115,74 @@ pub fn encode(key: KeyEvent, application_cursor: bool) -> Vec<u8> {
   data
 }
 
+/// Encode an application mouse event with zero-based, pane-local coordinates.
+///
+/// Tracking determines which events are sent, independently of the requested
+/// wire representation. Pixel reports need pixel dimensions unavailable here.
+pub fn encode_mouse(event: MouseEvent, modes: MouseModes) -> Option<Vec<u8>> {
+  let tracking = modes.tracking();
+  if tracking == MouseTracking::None || modes.encoding() == MouseEncoding::SgrPixels {
+    return None;
+  }
+  let release = matches!(event.kind, MouseEventKind::Up(_));
+  let button = |button| match button {
+    MouseButton::Left => 0,
+    MouseButton::Middle => 1,
+    MouseButton::Right => 2,
+  };
+  let mut code: u8 = match event.kind {
+    MouseEventKind::Down(value) | MouseEventKind::Up(value) => button(value),
+    MouseEventKind::Drag(value) if matches!(tracking, MouseTracking::Drag | MouseTracking::Any) => {
+      32 + button(value)
+    }
+    MouseEventKind::Moved if tracking == MouseTracking::Any => 35,
+    MouseEventKind::ScrollUp => 64,
+    MouseEventKind::ScrollDown => 65,
+    MouseEventKind::ScrollLeft => 66,
+    MouseEventKind::ScrollRight => 67,
+    _ => return None,
+  };
+  if release && modes.encoding() != MouseEncoding::Sgr {
+    // Legacy protocols identify a release without specifying its button.
+    code = 3;
+  }
+  code += 4 * u8::from(event.modifiers.contains(KeyModifiers::SHIFT))
+    + 8 * u8::from(event.modifiers.contains(KeyModifiers::ALT))
+    + 16 * u8::from(event.modifiers.contains(KeyModifiers::CONTROL));
+  let column = u32::from(event.column) + 1;
+  let row = u32::from(event.row) + 1;
+  match modes.encoding() {
+    MouseEncoding::Sgr => {
+      let final_byte = if release { 'm' } else { 'M' };
+      Some(format!("\x1b[<{code};{column};{row}{final_byte}").into_bytes())
+    }
+    MouseEncoding::Urxvt => Some(format!("\x1b[{};{column};{row}M", code + 32).into_bytes()),
+    MouseEncoding::Utf8 => {
+      // The UTF-8 extension is limited to two-byte parameters (U+07FF).
+      if column + 32 > 2047 || row + 32 > 2047 {
+        return None;
+      }
+      let mut data = String::from("\x1b[M");
+      for value in [u32::from(code) + 32, column + 32, row + 32] {
+        data.push(char::from_u32(value)?);
+      }
+      Some(data.into_bytes())
+    }
+    MouseEncoding::Legacy => {
+      // Match tmux's handling of positions outside the legacy 223-cell range.
+      Some(vec![
+        27,
+        b'[',
+        b'M',
+        code + 32,
+        u8::try_from((column + 32).min(255)).ok()?,
+        u8::try_from((row + 32).min(255)).ok()?,
+      ])
+    }
+    MouseEncoding::SgrPixels => None,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -151,5 +220,80 @@ mod tests {
     ));
     assert!(parse_prefix("Ctrl+ab").is_err());
     assert!(parse_prefix("Ctrl+界").is_err());
+  }
+
+  fn mouse_modes(output: &str) -> MouseModes {
+    let mut modes = ctmux_core::mouse::TerminalInputModes::default();
+    for ch in output.chars() {
+      modes.feed(ch);
+    }
+    modes.mouse()
+  }
+
+  fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+      kind,
+      column,
+      row,
+      modifiers: KeyModifiers::NONE,
+    }
+  }
+
+  #[test]
+  fn mouse_tracking_filters_motion_without_losing_buttons_or_wheels() {
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), 2, 3);
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 2, 3);
+    let moved = mouse(MouseEventKind::Moved, 2, 3);
+    let wheel = mouse(MouseEventKind::ScrollDown, 2, 3);
+    assert_eq!(encode_mouse(down, MouseModes::default()), None);
+    let buttons = mouse_modes("\x1b[?1000;1006h");
+    assert_eq!(encode_mouse(down, buttons).unwrap(), b"\x1b[<0;3;4M");
+    assert_eq!(encode_mouse(drag, buttons), None);
+    assert_eq!(encode_mouse(moved, buttons), None);
+    assert_eq!(encode_mouse(wheel, buttons).unwrap(), b"\x1b[<65;3;4M");
+    let dragging = mouse_modes("\x1b[?1002;1006h");
+    assert_eq!(encode_mouse(drag, dragging).unwrap(), b"\x1b[<32;3;4M");
+    assert_eq!(encode_mouse(moved, dragging), None);
+    let any = mouse_modes("\x1b[?1003;1006h");
+    assert_eq!(encode_mouse(moved, any).unwrap(), b"\x1b[<35;3;4M");
+  }
+
+  #[test]
+  fn sgr_preserves_released_button_modifiers_and_large_coordinates() {
+    let modes = mouse_modes("\x1b[?1002;1006h");
+    let mut event = mouse(MouseEventKind::Up(MouseButton::Right), 400, 65_535);
+    event.modifiers = KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL;
+    assert_eq!(encode_mouse(event, modes).unwrap(), b"\x1b[<30;401;65536m");
+    event.kind = MouseEventKind::Drag(MouseButton::Middle);
+    assert_eq!(encode_mouse(event, modes).unwrap(), b"\x1b[<61;401;65536M");
+    event.kind = MouseEventKind::ScrollLeft;
+    assert_eq!(encode_mouse(event, modes).unwrap(), b"\x1b[<94;401;65536M");
+  }
+
+  #[test]
+  fn legacy_release_and_coordinates_match_the_supported_byte_range() {
+    let modes = mouse_modes("\x1b[?1000h");
+    let mut event = mouse(MouseEventKind::Up(MouseButton::Right), 222, 300);
+    event.modifiers = KeyModifiers::CONTROL;
+    assert_eq!(
+      encode_mouse(event, modes).unwrap(),
+      [27, b'[', b'M', 51, 255, 255]
+    );
+    event = mouse(MouseEventKind::Down(MouseButton::Middle), 0, 0);
+    assert_eq!(encode_mouse(event, modes).unwrap(), b"\x1b[M!!!");
+  }
+
+  #[test]
+  fn extended_protocols_are_encoded_without_silently_using_legacy_bytes() {
+    let mut event = mouse(MouseEventKind::Down(MouseButton::Left), 100, 2014);
+    let utf8 = mouse_modes("\x1b[?1000;1005h");
+    let expected = format!("\x1b[M {}{}", '\u{85}', '\u{7ff}');
+    assert_eq!(encode_mouse(event, utf8).unwrap(), expected.as_bytes());
+    event.row = 2015;
+    assert_eq!(encode_mouse(event, utf8), None);
+    let urxvt = mouse_modes("\x1b[?1000;1015h");
+    assert_eq!(encode_mouse(event, urxvt).unwrap(), b"\x1b[32;101;2016M");
+    let pixels = mouse_modes("\x1b[?1000;1006;1016h");
+    assert_eq!(encode_mouse(event, pixels), None);
   }
 }

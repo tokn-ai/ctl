@@ -16,3 +16,9 @@ pub fn directory() -> io::Result<PathBuf> {
       )
     })
 }
+
+/// Rust target of these compiled components, including the Linux ABI.
+#[must_use]
+pub fn native_target() -> &'static str {
+  env!("COMPONENT_TARGET")
+}

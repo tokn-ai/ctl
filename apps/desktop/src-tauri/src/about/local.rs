@@ -129,7 +129,15 @@ pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
     }
     Ok(DaemonStatus::Legacy { protocol_version }) => {
       row.running = Some(ComponentVersionInfo::default());
-      row.compare();
+      row.observation = "legacy";
+      row.status = VersionStatus::Incompatible;
+      row.legacy_protocols = protocol_version
+        .map(|version| ctl_core::component::LegacyProtocolInfo {
+          name: "ctld".into(),
+          version,
+        })
+        .into_iter()
+        .collect();
       row.detail = Some(protocol_version.map_or_else(
         || "This running ctld predates published contracts and safe restart. Restart it manually to upgrade.".into(),
         |build| format!("This running ctld uses unpublished protocol build {build} and predates safe restart. Restart it manually to upgrade."),
@@ -146,6 +154,8 @@ pub(super) async fn ctld(mut owner: Owner) -> ComponentVersionRow {
       append_error(&mut row, error.to_string());
     }
   }
+  row.installed = row.available.clone();
+  row.compare_installed();
   row.note_available_mismatch();
   row.note_unreported_build();
   with_purpose(row, "Connection broker for SSH, port forwards, and VPNs.")
@@ -168,7 +178,8 @@ fn append_error(row: &mut ComponentVersionRow, error: String) {
 
 pub(super) async fn ctmuxd() -> ComponentVersionRow {
   let mut row = ComponentVersionRow::local("ctmuxd", "ctmuxd");
-  let (running, available) = tokio::join!(ctmux_ipc::component_status(), async {
+  let client = ctmux_ipc::lifecycle::Client::new(ctmux_ipc::socket_path());
+  let (running, available) = tokio::join!(client.observe(), async {
     read_binary(
       ctmux_ipc::daemon_executable().map_err(|error| error.to_string())?,
       "ctmuxd",
@@ -188,14 +199,15 @@ pub(super) async fn ctmuxd() -> ComponentVersionRow {
       row.running = Some(match info.build {
         Some(build) => ComponentVersionInfo::from_build(build, protocols),
         None => ComponentVersionInfo {
-          version: info.version,
           protocols,
           ..ComponentVersionInfo::default()
         },
       });
       row.compare();
-      if info.protocol_mismatch {
+      row.legacy_protocols = info.legacy_protocols;
+      if !row.legacy_protocols.is_empty() {
         row.status = VersionStatus::Incompatible;
+        row.restart_required = true;
         row.detail = Some("The running ctmuxd does not support this app's protocol requirements. Update or restart the daemon with a matching helper.".into());
       }
     }
@@ -205,6 +217,8 @@ pub(super) async fn ctmuxd() -> ComponentVersionRow {
       append_error(&mut row, error.to_string());
     }
   }
+  row.installed = row.available.clone();
+  row.compare_installed();
   row.note_available_mismatch();
   row.note_unreported_build();
   with_purpose(row, "Terminal sessions.")
@@ -250,6 +264,8 @@ pub(super) async fn taskd() -> ComponentVersionRow {
       append_error(&mut row, error.to_string());
     }
   }
+  row.installed = row.available.clone();
+  row.compare_installed();
   row.note_available_mismatch();
   row.note_unreported_build();
   with_purpose(row, "Task execution.")

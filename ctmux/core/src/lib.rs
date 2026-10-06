@@ -1,3 +1,5 @@
+pub mod mouse;
+
 use ctmux_proto::{LeaseKind, LeaseStatus, ServerMessage};
 use std::collections::VecDeque;
 use thiserror::Error;

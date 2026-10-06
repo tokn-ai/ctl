@@ -17,6 +17,21 @@ pub struct PreparedExecutable {
   digest: Vec<u8>,
 }
 
+/// Reads a selected installed helper's bounded metadata without starting its service.
+///
+/// # Errors
+/// Rejects missing helpers, invalid metadata, or a changing selection.
+pub async fn inspect(selected: &Path) -> io::Result<ComponentInfo> {
+  let path = resolve(selected)?;
+  let info = metadata(&path).await?;
+  if !info.is_valid() || resolve(selected)? != path {
+    return Err(io::Error::other(
+      "Invalid or changing installed component metadata",
+    ));
+  }
+  Ok(info)
+}
+
 impl PreparedExecutable {
   /// Resolves and verifies a replacement without starting its daemon service.
   ///

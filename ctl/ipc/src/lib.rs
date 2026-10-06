@@ -1072,6 +1072,27 @@ async fn prepare_default_daemon(
   home: Option<&Path>,
   provider: Option<&DaemonProvider>,
 ) -> Result<PathBuf, ConnectError> {
+  #[cfg(unix)]
+  if let Some(executable) = selected_bundle_daemon(home)? {
+    #[cfg(target_os = "macos")]
+    {
+      let provider = provider.ok_or_else(|| {
+        ConnectError::PrepareDaemon(io::Error::other(
+          "selected macOS bundles require a verifying helper provider",
+        ))
+      })?;
+      let _preparing = provider.preparing.lock().await;
+      let verified = (provider.callback)()
+        .await
+        .map_err(ConnectError::PrepareDaemon)?;
+      if verified.as_ref() != Some(&executable) {
+        return Err(ConnectError::PrepareDaemon(io::Error::other(
+          "selected helper changed during verification",
+        )));
+      }
+    }
+    return Ok(executable);
+  }
   #[cfg(target_os = "macos")]
   {
     if !shared_first(provider)
@@ -1111,6 +1132,10 @@ async fn prepare_default_daemon(
 /// Returns an error if the current executable path cannot be determined or a
 /// managed macOS installation is invalid.
 pub fn default_daemon_executable() -> Result<PathBuf, ConnectError> {
+  #[cfg(unix)]
+  if let Some(executable) = selected_bundle_daemon(dirs::home_dir().as_deref())? {
+    return Ok(executable);
+  }
   let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
   #[cfg(target_os = "macos")]
   {
@@ -1133,6 +1158,23 @@ fn prepared_daemon(provider: Option<&DaemonProvider>) -> Option<PathBuf> {
   provider
     .and_then(|provider| provider.executable.get())
     .cloned()
+}
+
+#[cfg(unix)]
+fn selected_bundle_daemon(home: Option<&Path>) -> Result<Option<PathBuf>, ConnectError> {
+  let Some(home) = home else {
+    return Ok(None);
+  };
+  ctl_core::bundles::selected_executable_at(
+    home,
+    "ctld",
+    &[
+      ("ctld", SUPPORTED_PROTOCOL_VERSIONS),
+      ("ctld_lifecycle", lifecycle::SUPPORTED_PROTOCOL_VERSIONS),
+      ("ctld_helper", SUPPORTED_HELPER_API_VERSIONS),
+    ],
+  )
+  .map_err(ConnectError::PrepareDaemon)
 }
 
 #[cfg(target_os = "macos")]

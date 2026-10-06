@@ -623,6 +623,18 @@ pub fn daemon_executable() -> Result<PathBuf, ConnectError> {
   }
 
   let current_executable = env::current_exe().map_err(ConnectError::CurrentExecutable)?;
+  #[cfg(unix)]
+  if let Some(executable) = ctl_core::bundles::selected_executable(
+    "ctmuxd",
+    &[
+      ("ctmux", ctmux_proto::SUPPORTED_PROTOCOL_VERSIONS),
+      ("ctmux_control", LOCAL_CONTROL_SUPPORTED_PROTOCOL_VERSIONS),
+    ],
+  )
+  .map_err(ConnectError::CurrentExecutable)?
+  {
+    return Ok(executable);
+  }
   let sibling = current_executable.with_file_name(format!("ctmuxd{}", env::consts::EXE_SUFFIX));
   if sibling.is_file() {
     return Ok(sibling);

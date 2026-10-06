@@ -83,6 +83,8 @@ fn insert(
   let mut hash = Sha256::new();
   hash.update(observation.identity.remote_id.as_bytes());
   hash.update([0]);
+  hash.update(observation.host_id.as_deref().unwrap_or("").as_bytes());
+  hash.update([0]);
   hash.update(serde_json::to_vec(&running).expect("version metadata serializes"));
   let id = format!("remote:{component}:{:x}", hash.finalize());
   rows.entry(id.clone()).or_insert_with(|| {
@@ -92,10 +94,18 @@ fn insert(
       label: format!("{label} — {}", observation.label),
       location: "remote",
       host_id: observation.host_id.clone(),
+      host_key: Some(match &observation.host_id {
+        Some(host_id) => format!("saved:{host_id}"),
+        None => format!("account:{}", observation.identity.remote_id),
+      }),
+      host_name: Some(observation.label.clone()),
       observation: "running",
       status: super::models::VersionStatus::Unknown,
       running: Some(running),
       required_protocols: expected_protocols.clone(),
+      installed: None,
+      restart_required: false,
+      legacy_protocols: Vec::new(),
       // The remote table explicitly labels this reference as "This app build".
       // Confirmed actions inspect the installed remote replacement separately.
       available: Some(ComponentVersionInfo::from_build(
@@ -113,6 +123,8 @@ fn insert(
           .into(),
       ),
       error: None,
+      error_code: None,
+      connected: Some(true),
     };
     row.compare();
     row
@@ -149,6 +161,32 @@ mod tests {
       label: "Test environment".into(),
       host_id: Some("test-host".into()),
     }
+  }
+
+  #[test]
+  fn host_groups_use_saved_identity_or_authenticated_account_not_display_names() {
+    let saved = observation();
+    let mut alias = saved.clone();
+    alias.host_id = Some("another-saved-host".into());
+    let mut unsaved = saved.clone();
+    unsaved.host_id = None;
+    let mut another_account = unsaved.clone();
+    another_account.identity.remote_id = "another-account".into();
+    let result = rows(vec![saved, alias, unsaved, another_account]);
+    assert_eq!(result.len(), 8);
+    let keys: std::collections::BTreeSet<_> = result
+      .iter()
+      .map(|row| row.host_key.as_deref().unwrap())
+      .collect();
+    assert_eq!(keys.len(), 4);
+    assert!(keys.contains("saved:test-host"));
+    assert!(keys.contains("saved:another-saved-host"));
+    assert!(keys.contains("account:another-account"));
+    assert!(
+      result
+        .iter()
+        .all(|row| row.host_name.as_deref() == Some("Test environment"))
+    );
   }
 
   #[test]

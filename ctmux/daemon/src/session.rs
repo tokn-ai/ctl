@@ -5,7 +5,7 @@ use crate::process_monitor::ProcessMonitor;
 use crate::shell_reporter::{ShellReport, ShellReporter, ShellReporterError};
 use ctmux_core::{
   AttachmentLeaseRegistry, AttachmentLeases, JournalError, JournalSnapshot, OutputJournal,
-  validate_session_name,
+  mouse::TerminalInputModes, validate_session_name,
 };
 use ctmux_proto::{
   CommandSpec, CwdSource, ForegroundProcess, LeaseKind, LeaseStatus, PromptPhase, SessionInfo,
@@ -107,6 +107,7 @@ enum SessionLifecycle {
 
 struct TerminalState {
   terminal: avt::Vt,
+  input_modes: TerminalInputModes,
   history_control_parser: avt::parser::Parser,
   history_clear_pending: bool,
   history_alternate_screen: bool,
@@ -158,6 +159,7 @@ impl TerminalState {
     let history = TerminalHistory::new(history_capacity_bytes);
     let mut state = Self {
       terminal: terminal_emulator(&terminal_size),
+      input_modes: TerminalInputModes::default(),
       history_control_parser: avt::parser::Parser::new(),
       history_clear_pending: false,
       history_alternate_screen: false,
@@ -1920,12 +1922,17 @@ fn refresh_checkpoint_after_output(
 
 fn refresh_checkpoint(terminal: &mut TerminalState) {
   refresh_history(terminal);
+  // AVT does not retain application mouse or bracketed-paste modes. Restore
+  // them before its dump, which ends with a potentially incomplete parser
+  // prefix that must remain the final bytes of the checkpoint payload.
+  let mut payload = terminal.input_modes.restore_sequences();
+  payload.push_str(&terminal.terminal.dump());
   terminal.checkpoint = TerminalCheckpoint {
     format: TERMINAL_CHECKPOINT_FORMAT.into(),
     format_version: TERMINAL_CHECKPOINT_FORMAT_VERSION,
     sequence: terminal.journal.next_sequence(),
     terminal_size: terminal.terminal_size.clone(),
-    payload: terminal.terminal.dump().into_bytes(),
+    payload: payload.into_bytes(),
     input_prefix: terminal.pending_input.clone(),
   };
   terminal.checkpoint_history = terminal.history.snapshot(terminal.checkpoint.sequence);
@@ -2058,6 +2065,7 @@ fn feed_terminal_text(terminal: &mut TerminalState, text: &str) -> Option<TuiHin
 fn feed_terminal_character(terminal: &mut TerminalState, ch: char) -> Option<TuiHint> {
   use avt::parser::{EdScope, Function};
 
+  terminal.input_modes.feed(ch);
   let mut encoded = [0; 4];
   let tui_hint = terminal
     .alternate_screen
@@ -2227,6 +2235,33 @@ mod tests {
   }
 
   #[test]
+  fn checkpoint_preserves_application_input_modes_and_partial_mode_sequence() {
+    let mut source = terminal_state();
+    feed_terminal_bytes(&mut source, b"ready\x1b[?1002;2004h\x1b[?1006");
+    refresh_checkpoint(&mut source);
+    let checkpoint = source.checkpoint.clone();
+    let mut restored = terminal_state_from_checkpoint(checkpoint);
+    assert_eq!(restored.terminal.dump(), source.terminal.dump());
+    assert_eq!(restored.input_modes.mouse(), source.input_modes.mouse());
+    assert!(restored.input_modes.bracketed_paste());
+
+    // AVT encodes the partial CSI as a C1 control in its dump. The restored
+    // mode observer must finish the same sequence when its final byte arrives.
+    feed_terminal_bytes(&mut source, b"h\r\nnext");
+    feed_terminal_bytes(&mut restored, b"h\r\nnext");
+    assert_eq!(restored.terminal.dump(), source.terminal.dump());
+    assert_eq!(restored.input_modes.mouse(), source.input_modes.mouse());
+    assert!(restored.input_modes.bracketed_paste());
+
+    feed_terminal_bytes(&mut source, b"\x1b[?1002;1006;2004l");
+    refresh_checkpoint(&mut source);
+    let restored = terminal_state_from_checkpoint(source.checkpoint.clone());
+    assert_eq!(restored.input_modes.mouse(), source.input_modes.mouse());
+    assert!(!restored.input_modes.mouse().enabled());
+    assert!(!restored.input_modes.bracketed_paste());
+  }
+
+  #[test]
   fn checkpoint_preserves_an_incomplete_utf8_character() {
     let mut source = terminal_state();
     feed_terminal_bytes(&mut source, &[0xe6]);
@@ -2380,10 +2415,8 @@ mod tests {
     );
     assert_ne!(terminal.checkpoint_history_rows, before_return);
     assert_eq!(terminal.checkpoint.sequence, data.len() as u64);
-    assert_eq!(
-      terminal.checkpoint.payload,
-      terminal.terminal.dump().into_bytes()
-    );
+    let restored = terminal_state_from_checkpoint(terminal.checkpoint.clone());
+    assert_eq!(restored.terminal.dump(), terminal.terminal.dump());
     let retained = terminal.last_geometry_checkpoint.as_ref().unwrap();
     assert_eq!(retained.history_rows, terminal.checkpoint_history_rows);
     assert_eq!(retained.geometry_revision, terminal.geometry_revision);
@@ -2809,8 +2842,13 @@ mod tests {
     let payload = String::from_utf8(checkpoint.payload.clone())
       .expect("checkpoint payload is generated from a UTF-8 VT dump");
     terminal.feed_str(&payload);
+    let mut input_modes = TerminalInputModes::default();
+    for ch in payload.chars() {
+      input_modes.feed(ch);
+    }
     TerminalState {
       terminal,
+      input_modes,
       history_control_parser: avt::parser::Parser::new(),
       history_clear_pending: false,
       history_alternate_screen: false,

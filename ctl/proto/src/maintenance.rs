@@ -1,14 +1,16 @@
 //! Fixed, confirmation-bound maintenance over an already authenticated SSH channel.
+pub use ctl_core::component::LegacyProtocolInfo;
 use ctl_core::component::{ComponentBuildInfo, ComponentInfo};
 use ctl_core::protocol::{ProtocolOffer, ProtocolVersion};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-pub const PROTOCOL_BUILD: u16 = 2;
+pub const PROTOCOL_BUILD: u16 = 3;
 pub const CONTRACT_V1_0_2: ProtocolVersion = ProtocolVersion::new(1, 0, 2);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_0_2;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_2];
+pub const CONTRACT_V1_1_3: ProtocolVersion = ProtocolVersion::new(1, 1, 3);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_3;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_2, CONTRACT_V1_1_3];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -23,6 +25,10 @@ const MAX_FRAME_BYTES: usize = 16 * 1024;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
+  InspectComponents {
+    protocol: ProtocolOffer,
+    expected_remote_id: String,
+  },
   PrepareCtmuxRestart {
     protocol: ProtocolOffer,
     expected_remote_id: String,
@@ -34,8 +40,62 @@ pub enum ClientMessage {
 pub struct RunningCtmux {
   pub build: Option<ComponentBuildInfo>,
   pub protocol_version: Option<ProtocolVersion>,
-  pub control_protocol_version: ProtocolVersion,
+  pub control_protocol_version: Option<ProtocolVersion>,
   pub protocols: Vec<ctl_core::component::ProtocolInfo>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub legacy_protocols: Vec<LegacyProtocolInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentKind {
+  CtlAgent,
+  Ctld,
+  Ctmuxd,
+  CtlTaskd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentState {
+  Running,
+  NotRunning,
+  Legacy,
+  Unavailable,
+  OnDemand,
+}
+
+/// Recognizes the fixed historical control handshake without assigning it a
+/// published contract. Numeric control 1 uses the cooperative restart request.
+#[must_use]
+pub fn valid_legacy_ctmux(protocols: &[LegacyProtocolInfo]) -> bool {
+  (1..=2).contains(&protocols.len())
+    && protocols
+      .iter()
+      .filter(|p| p.name == "ctmux_control" && p.version == 1)
+      .count()
+      == 1
+    && protocols.iter().all(|p| {
+      (p.name == "ctmux_control" && p.version == 1) || (p.name == "ctmux" && p.version > 0)
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteComponent {
+  pub component: ComponentKind,
+  pub installed: Option<ComponentInfo>,
+  pub running: Option<ComponentInfo>,
+  pub state: ComponentState,
+  pub restart_supported: bool,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub legacy_protocols: Vec<LegacyProtocolInfo>,
+  pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteComponents {
+  pub remote_id: String,
+  pub components: Vec<RemoteComponent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +114,10 @@ pub struct CtmuxRestartCompleted {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+  Components {
+    protocol_version: ProtocolVersion,
+    snapshot: RemoteComponents,
+  },
   Prepared {
     protocol_version: ProtocolVersion,
     info: CtmuxPreparation,
@@ -110,6 +174,35 @@ pub async fn write<W: AsyncWrite + Unpin, T: Serialize>(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn component_inspection_opens_a_new_cycle_and_retains_the_published_restart_contract() {
+    let initial = ProtocolVersion::new(1, 0, 2);
+    let next_cycle = ProtocolVersion::new(1, 1, 3);
+    let historical_offer: ProtocolOffer =
+      serde_json::from_str(r#"{"build":2,"version":"1.0.2","supported_versions":["1.0.2"]}"#)
+        .unwrap();
+    assert_eq!(protocol_offer().version, next_cycle);
+    assert_eq!(
+      historical_offer.negotiate(SUPPORTED_PROTOCOL_VERSIONS),
+      Some(initial)
+    );
+    assert_eq!(
+      protocol_offer().negotiate(&historical_offer.supported_versions),
+      Some(initial)
+    );
+    assert_eq!(protocol_offer().negotiate(&[next_cycle]), Some(next_cycle));
+    let running = RunningCtmux {
+      build: None,
+      protocol_version: None,
+      control_protocol_version: Some(ProtocolVersion::new(1, 0, 1)),
+      protocols: Vec::new(),
+      legacy_protocols: Vec::new(),
+    };
+    let json = serde_json::to_value(&running).unwrap();
+    assert_eq!(json["control_protocol_version"], "1.0.1");
+    assert!(json.get("legacy_protocols").is_none());
+  }
 
   #[tokio::test]
   async fn rejects_unbounded_frames_and_arbitrary_operations() {

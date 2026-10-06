@@ -388,350 +388,90 @@ async fn writable_fixture_scripts_do_not_prevent_command_execution() {
   assert_eq!(output, b"fixture");
 }
 
-fn verified_fixture_bundle(archive: &[u8]) -> VerifiedBundle {
-  let directory = TemporaryDirectory::new().unwrap();
-  std::fs::write(
-    directory.0.join("bundle-set.json"),
-    serde_json::to_vec(&bundle_manifest(archive)).unwrap(),
-  )
-  .unwrap();
-  std::fs::write(
-    directory
-      .0
-      .join(format!("ctl-agent-bundle-{VERSION}-{TARGET}.tar.gz")),
-    archive,
-  )
-  .unwrap();
-  remote_bundle::read_verified_bundle(std::slice::from_ref(&directory.0), TARGET, &build())
-    .unwrap()
-    .unwrap()
-}
-
-fn cache_directory(root: &std::path::Path) -> PathBuf {
-  root.join(REVISION).join(TARGET)
-}
-
-fn offline_fixture_error() -> Error {
-  remote_bundle::Error::Download("fixture network is offline".into()).into()
-}
-
-#[tokio::test]
-async fn verified_download_is_cached_and_the_next_call_never_invokes_download() {
-  use std::cell::Cell;
-
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.join("cache");
-  let downloads = Cell::new(0);
-  let first = matching_bundle_from(TARGET, &build(), vec![], false, Some(root.clone()), || {
-    downloads.set(downloads.get() + 1);
-    std::future::ready(Ok(verified_fixture_bundle(b"trusted archive")))
-  })
-  .await
-  .unwrap();
-  let second = matching_bundle_from(TARGET, &build(), vec![], false, Some(root.clone()), || {
-    downloads.set(downloads.get() + 1);
-    std::future::ready(Err(offline_fixture_error()))
-  })
-  .await
-  .unwrap();
-  assert_eq!(downloads.get(), 1);
-  assert_eq!(first.archive, b"trusted archive");
-  assert_eq!(second.archive, first.archive);
-  assert_eq!(second.git_revision, REVISION);
-  let entry = cache_directory(&root);
-  let manifest: Value =
-    serde_json::from_slice(&std::fs::read(entry.join("bundle-set.json")).unwrap()).unwrap();
-  assert_eq!(manifest, bundle_manifest(b"trusted archive"));
-  assert_eq!(
-    std::fs::read(entry.join(second.file_name)).unwrap(),
-    second.archive
-  );
-}
-
 #[cfg(unix)]
 #[tokio::test]
-async fn an_actual_ci_artifact_download_is_reused_without_github_on_the_next_call() {
-  let candidates = json!([run(101, REVISION, "completed", Some("success"))]);
-  let fake = FakeGh::new(&candidates, &bundle_manifest(b"CI archive"), b"CI archive");
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.join("cache");
-  let expected = build();
-  let first = matching_bundle_from(
-    TARGET,
-    &expected,
-    vec![],
-    false,
-    Some(root.clone()),
-    || async {
-      download_artifact_bundle(TARGET, &expected, fake.program.as_os_str())
-        .await
-        .map_err(Error::from)
-    },
-  )
-  .await
-  .unwrap();
-  assert_eq!(first.archive, b"CI archive");
-  assert!(fake.directory.0.join("downloaded").exists());
-  let arguments = std::fs::read(fake.directory.0.join("arguments")).unwrap();
-  std::fs::remove_file(&fake.program).unwrap();
-  let second = matching_bundle_from(
-    TARGET,
-    &expected,
-    vec![],
-    false,
-    Some(root.clone()),
-    || async {
-      download_artifact_bundle(TARGET, &expected, fake.program.as_os_str())
-        .await
-        .map_err(Error::from)
-    },
-  )
-  .await
-  .unwrap();
-  assert_eq!(second.archive, first.archive);
-  assert_eq!(
-    std::fs::read(fake.directory.0.join("arguments")).unwrap(),
-    arguments
-  );
-  let entry = cache_directory(&root);
-  let manifest: Value =
-    serde_json::from_slice(&std::fs::read(entry.join("bundle-set.json")).unwrap()).unwrap();
-  assert_eq!(manifest, bundle_manifest(b"CI archive"));
-  assert_eq!(
-    std::fs::read(entry.join(second.file_name)).unwrap(),
-    second.archive
-  );
-}
-
-#[tokio::test]
-async fn damaged_managed_cache_is_downloaded_again_and_replaced() {
-  use std::cell::Cell;
-
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.join("cache");
-  let downloads = Cell::new(0);
-  let download = || {
-    downloads.set(downloads.get() + 1);
-    std::future::ready(Ok(verified_fixture_bundle(b"trusted archive")))
-  };
-  matching_bundle_from(
-    TARGET,
-    &build(),
-    vec![],
-    false,
-    Some(root.clone()),
-    download,
-  )
-  .await
-  .unwrap();
-  for (index, file) in [
-    format!("ctl-agent-bundle-{VERSION}-{TARGET}.tar.gz"),
-    "bundle-set.json".into(),
-  ]
-  .into_iter()
-  .enumerate()
-  {
-    std::fs::write(cache_directory(&root).join(file), b"corrupt").unwrap();
-    let repaired = matching_bundle_from(
-      TARGET,
-      &build(),
-      vec![],
-      false,
-      Some(root.clone()),
-      download,
-    )
-    .await
-    .unwrap();
-    assert_eq!(downloads.get(), index + 2);
-    assert_eq!(repaired.archive, b"trusted archive");
-    let cached = matching_bundle_from(TARGET, &build(), vec![], false, Some(root.clone()), || {
-      std::future::ready(Err(offline_fixture_error()))
-    })
-    .await
-    .unwrap();
-    assert_eq!(cached.archive, repaired.archive);
-  }
-}
-
-#[tokio::test]
-async fn an_explicit_missing_or_invalid_override_cannot_fall_back_to_valid_cache() {
-  use std::cell::Cell;
-
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.join("cache");
-  let override_directory = directory.0.join("override");
-  std::fs::create_dir(&override_directory).unwrap();
-  matching_bundle_from(TARGET, &build(), vec![], false, Some(root.clone()), || {
-    std::future::ready(Ok(verified_fixture_bundle(b"trusted archive")))
-  })
-  .await
-  .unwrap();
-  let original_manifest = std::fs::read(cache_directory(&root).join("bundle-set.json")).unwrap();
-  for invalid in [false, true] {
-    if invalid {
-      std::fs::write(
-        override_directory.join("bundle-set.json"),
-        b"invalid override",
-      )
-      .unwrap();
-    }
-    let called = Cell::new(false);
-    let result = matching_bundle_from(
-      TARGET,
-      &build(),
-      vec![override_directory.clone()],
-      true,
-      Some(root.clone()),
-      || {
-        called.set(true);
-        std::future::ready(Err(offline_fixture_error()))
+async fn selected_complete_upload_build_stays_stable_and_damage_is_an_error() {
+  use ctl_core::bundles::{Manifest, Purpose, Source, Store};
+  use ctl_core::component::ComponentInfo;
+  let home = TemporaryDirectory::new().unwrap();
+  let store = Store::new(&home.0);
+  let ctmux = vec![
+    ctmux_proto::protocol_info(),
+    ctmux_ipc::local_control_protocol_info(),
+  ];
+  let task = vec![
+    ctl_task_proto::protocol_info(),
+    ctl_task_proto::control::protocol_info(),
+  ];
+  let ctld = ctl_ipc::lifecycle::DaemonBinaryInfo::current().protocols;
+  let mut agent = ctl_proto::agent_protocols();
+  agent.extend(ctmux.clone());
+  agent.extend(task.clone());
+  agent.extend(ctld.iter().filter(|p| p.name == "ctld").cloned());
+  agent.push(ctl_core::component::ProtocolInfo::new(
+    "ctl_remote_vpn",
+    ctl_ipc::remote_vpn::PROTOCOL_BUILD,
+    ctl_ipc::remote_vpn::PROTOCOL_VERSION,
+    ctl_ipc::remote_vpn::SUPPORTED_PROTOCOL_VERSIONS,
+  ));
+  let mut task = task;
+  task.extend(ctmux.clone());
+  let components = std::collections::BTreeMap::from([
+    (
+      "ctl-agent".into(),
+      ComponentInfo {
+        build: build(),
+        protocols: agent,
       },
-    )
-    .await;
-    assert!(!called.get());
-    if invalid {
-      assert!(matches!(
-        result,
-        Err(Error::Bundle(remote_bundle::Error::Invalid(_)))
-      ));
-    } else {
-      assert!(matches!(
-        result,
-        Err(Error::Bundle(remote_bundle::Error::NotAvailable(_)))
-      ));
-    }
-    assert_eq!(
-      std::fs::read(cache_directory(&root).join("bundle-set.json")).unwrap(),
-      original_manifest
-    );
-  }
-}
-
-#[tokio::test]
-async fn an_unusable_cache_path_does_not_reject_an_already_verified_download() {
-  let directory = TemporaryDirectory::new().unwrap();
-  let blocked = directory.0.join("cache");
-  std::fs::write(&blocked, b"existing file").unwrap();
-  let bundle = matching_bundle_from(
+    ),
+    (
+      "ctmuxd".into(),
+      ComponentInfo {
+        build: build(),
+        protocols: ctmux,
+      },
+    ),
+    (
+      "ctl-taskd".into(),
+      ComponentInfo {
+        build: build(),
+        protocols: task,
+      },
+    ),
+    (
+      "ctld".into(),
+      ComponentInfo {
+        build: build(),
+        protocols: ctld,
+      },
+    ),
+  ]);
+  assert!(selected_upload(&home.0, TARGET).await.unwrap().is_none());
+  let files = ctl_core::bundles::COMPONENTS
+    .into_iter()
+    .map(|name| (name.into(), name.as_bytes().to_vec()))
+    .collect();
+  let manifest = Manifest::new(TARGET, Source::Ci, components, &files).unwrap();
+  let first = store.publish(&manifest, &files).unwrap();
+  store.select(Purpose::Upload, &first).unwrap();
+  let mut changed = files;
+  changed.insert("ctmuxd".into(), b"new build".to_vec());
+  let manifest = Manifest::new(
     TARGET,
-    &build(),
-    vec![],
-    false,
-    Some(blocked.clone()),
-    || std::future::ready(Ok(verified_fixture_bundle(b"trusted archive"))),
+    Source::Ci,
+    first.manifest.components.clone(),
+    &changed,
   )
-  .await
   .unwrap();
-  assert_eq!(bundle.archive, b"trusted archive");
-  assert_eq!(std::fs::read(blocked).unwrap(), b"existing file");
-}
-
-#[tokio::test]
-async fn a_cache_publication_failure_keeps_the_verified_download_usable() {
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.clone();
-  let lock = root.join(REVISION).join(format!("{TARGET}.lock"));
-  let mut builder = std::fs::DirBuilder::new();
-  builder.recursive(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::DirBuilderExt as _;
-    builder.mode(0o700);
-  }
-  builder.create(&lock).unwrap();
-  std::fs::write(lock.join("sentinel"), b"existing directory").unwrap();
-  let bundle = matching_bundle_from(TARGET, &build(), vec![], false, Some(root.clone()), || {
-    std::future::ready(Ok(verified_fixture_bundle(b"trusted archive")))
-  })
-  .await
-  .unwrap();
-  assert_eq!(bundle.archive, b"trusted archive");
-  assert!(!cache_directory(&root).exists());
+  store.publish(&manifest, &changed).unwrap();
   assert_eq!(
-    std::fs::read(lock.join("sentinel")).unwrap(),
-    b"existing directory"
+    selected_upload(&home.0, TARGET)
+      .await
+      .unwrap()
+      .unwrap()
+      .bundle_id,
+    first.manifest.bundle_id
   );
-}
-
-#[tokio::test]
-async fn a_busy_cache_publication_lock_does_not_wait_or_unlock_the_other_publisher() {
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.clone();
-  let revision = root.join(REVISION);
-  let builder = std::fs::DirBuilder::new();
-  #[cfg(unix)]
-  let mut builder = builder;
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::DirBuilderExt as _;
-    builder.mode(0o700);
-  }
-  builder.create(&revision).unwrap();
-  let lock = revision.join(format!("{TARGET}.lock"));
-  let mut options = std::fs::OpenOptions::new();
-  options.read(true).write(true).create_new(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    options.mode(0o600);
-  }
-  let publisher = options.open(&lock).unwrap();
-  publisher.lock().unwrap();
-  let bundle = tokio::time::timeout(
-    Duration::from_secs(2),
-    matching_bundle_from(TARGET, &build(), vec![], false, Some(root.clone()), || {
-      std::future::ready(Ok(verified_fixture_bundle(b"trusted archive")))
-    }),
-  )
-  .await
-  .expect("an optional cache must not block on another publisher")
-  .unwrap();
-  assert_eq!(bundle.archive, b"trusted archive");
-  assert!(!cache_directory(&root).exists());
-  let contender = std::fs::OpenOptions::new()
-    .read(true)
-    .write(true)
-    .open(lock)
-    .unwrap();
-  assert!(matches!(
-    contender.try_lock(),
-    Err(std::fs::TryLockError::WouldBlock)
-  ));
-}
-
-#[tokio::test]
-async fn a_failed_download_does_not_publish_a_cache_entry() {
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.join("cache");
-  let result = matching_bundle_from(TARGET, &build(), vec![], false, Some(root.clone()), || {
-    std::future::ready(Err(offline_fixture_error()))
-  })
-  .await;
-  assert!(matches!(
-    result,
-    Err(Error::Bundle(remote_bundle::Error::Download(_)))
-  ));
-  assert!(!cache_directory(&root).exists());
-}
-
-#[tokio::test]
-async fn a_cancelled_download_does_not_publish_a_cache_entry() {
-  let directory = TemporaryDirectory::new().unwrap();
-  let root = directory.0.join("cache");
-  let entry = cache_directory(&root);
-  let started = std::sync::Arc::new(tokio::sync::Notify::new());
-  let notification = std::sync::Arc::clone(&started);
-  let task = tokio::spawn(async move {
-    matching_bundle_from(TARGET, &build(), vec![], false, Some(root), || async move {
-      notification.notify_one();
-      std::future::pending::<Result<VerifiedBundle, Error>>().await
-    })
-    .await
-  });
-  tokio::time::timeout(Duration::from_secs(2), started.notified())
-    .await
-    .unwrap();
-  task.abort();
-  assert!(task.await.unwrap_err().is_cancelled());
-  assert!(!entry.exists());
+  std::fs::write(first.directory.join("ctmuxd"), b"damaged selection").unwrap();
+  assert!(selected_upload(&home.0, TARGET).await.is_err());
 }

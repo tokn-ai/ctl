@@ -1,13 +1,15 @@
 use crate::{
   Result,
+  actions::{Action, Direction},
   copy::{Action as CopyAction, BottomBehavior, CopyMode},
   input::{self, Prefix},
+  keys::{Dispatch, KeyState},
   pane::{Pane, identity},
-  render::{Frame, Renderer, pane_at},
+  render::{Frame, Renderer, pane_at, pane_position},
   transport::{LocalTransport, Transport},
 };
 use crossterm::event::{
-  Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+  Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ctmux_proto::{
   ClientMessage, LeaseKind, ServerMessage, SessionInfo, SessionStatus, SplitAxis, TerminalSize,
@@ -28,6 +30,24 @@ enum Overlay {
   ArchiveTerminals(Box<ctmux_client::archive::SessionArchive>, usize),
 }
 
+#[derive(Clone)]
+enum CopyTarget {
+  Pane(String),
+  Archive,
+}
+
+enum MouseCapture {
+  Selection {
+    target: CopyTarget,
+    pending: Option<CopyMode>,
+  },
+  Application {
+    terminal_id: String,
+    button: MouseButton,
+    position: (usize, usize),
+  },
+}
+
 pub struct App<'a> {
   pub transport: Option<&'a dyn Transport>,
   socket: PathBuf,
@@ -35,7 +55,7 @@ pub struct App<'a> {
   read_only: bool,
   archive_only: bool,
   prefix: Prefix,
-  prefix_pending: bool,
+  keys: KeyState,
   sessions: Vec<SessionInfo>,
   archives: Vec<ctmux_client::archive::SessionArchive>,
   ended: Option<String>,
@@ -46,7 +66,9 @@ pub struct App<'a> {
   focused: String,
   size: (u16, u16),
   overlay: Overlay,
-  copy_mode: Option<CopyMode>,
+  copies: BTreeMap<String, CopyMode>,
+  archive_copy: Option<CopyMode>,
+  mouse_capture: Option<MouseCapture>,
   copy_buffer: Option<String>,
   message: String,
   message_until: Instant,
@@ -63,7 +85,7 @@ impl App<'_> {
       read_only,
       archive_only: false,
       prefix,
-      prefix_pending: false,
+      keys: KeyState::Root,
       sessions: Vec::new(),
       archives: Vec::new(),
       ended: None,
@@ -74,7 +96,9 @@ impl App<'_> {
       focused: String::new(),
       size: crossterm::terminal::size().unwrap_or((80, 24)),
       overlay: Overlay::None,
-      copy_mode: None,
+      copies: BTreeMap::new(),
+      archive_copy: None,
+      mouse_capture: None,
       copy_buffer: None,
       message: String::new(),
       message_until: Instant::now(),
@@ -122,6 +146,7 @@ impl App<'_> {
   }
 
   pub fn open_archive(&mut self, session_id: &str) -> Result<()> {
+    self.keys = KeyState::Root;
     self.archive_only = true;
     self.archives = self.local_archives()?;
     let archive = self
@@ -267,6 +292,10 @@ impl App<'_> {
   }
 
   async fn select(&mut self, session: &str) -> Result<()> {
+    self.release_mouse().await?;
+    self.copies.clear();
+    self.archive_copy = None;
+    self.mouse_capture = None;
     session.clone_into(&mut self.selected_id);
     let view = match self.find_view(session).await {
       Ok(view) => view,
@@ -288,7 +317,7 @@ impl App<'_> {
       .map_or_else(String::new, |pane| pane.terminal_id.clone());
     self.view = Some(view);
     self.overlay = Overlay::None;
-    self.prefix_pending = false;
+    self.keys = KeyState::Root;
     self.reconcile().await?;
     // The first attachment may have resized the shared canvas.
     self.refresh_view().await
@@ -354,9 +383,23 @@ impl App<'_> {
       .cloned()
       .collect();
     for id in removed {
+      self.copies.remove(&id);
       if let Some(mut pane) = self.panes.remove(&id) {
         pane.close().await;
       }
+    }
+    if let Some(
+      MouseCapture::Application {
+        terminal_id: id, ..
+      }
+      | MouseCapture::Selection {
+        target: CopyTarget::Pane(id),
+        ..
+      },
+    ) = &self.mouse_capture
+      && !ids.contains(id)
+    {
+      self.mouse_capture = None;
     }
     if !ids.contains(&self.focused) {
       self.focused = ids.first().cloned().unwrap_or_default();
@@ -516,82 +559,320 @@ impl App<'_> {
 
   async fn event(&mut self, event: Event) -> Result<bool> {
     match event {
-      Event::Mouse(mouse)
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-          && self.copy_mode.is_none()
-          && matches!(self.overlay, Overlay::None) =>
-      {
-        self.focus_at(mouse.column, mouse.row);
-      }
-      Event::Mouse(mouse)
+      Event::Mouse(mouse) => {
         if matches!(
           mouse.kind,
-          MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-        ) && !self.prefix_pending
-          && mouse.row < self.size.1.saturating_sub(1)
-          && mouse.column < self.size.0
-          && (self.copy_mode.is_some() || matches!(self.overlay, Overlay::None)) =>
-      {
-        let up = mouse.kind == MouseEventKind::ScrollUp;
-        if self.copy_mode.is_none()
-          && matches!(self.overlay, Overlay::None)
-          && !self.focus_at(mouse.column, mouse.row)
-        {
-          return Ok(false);
+          MouseEventKind::Down(_)
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+        ) {
+          self.keys.cancel_repeat();
         }
-        if self.copy_mode.is_none() && up {
-          self.command(KeyCode::Char('[')).await?;
-          if let Some(mode) = &mut self.copy_mode {
-            mode.bottom_behavior = BottomBehavior::ReturnToLive;
-          }
-        }
-        if let Some(mode) = &mut self.copy_mode {
-          let height = usize::from(self.size.1.saturating_sub(1));
-          mode.fit(usize::from(self.size.0), height);
-          if matches!(mode.scroll(up, 5, height), CopyAction::Close) {
-            self.copy_mode = None;
-          }
-        }
+        self.mouse(mouse).await?;
       }
-      Event::Key(key)
-        if key.kind != KeyEventKind::Release
-          && key.code == KeyCode::PageUp
-          && key.modifiers == KeyModifiers::SHIFT
-          && self.copy_mode.is_none()
-          && matches!(self.overlay, Overlay::None) =>
-      {
-        self.command(KeyCode::Char('[')).await?;
-        if let Some(mode) = &mut self.copy_mode {
-          let height = usize::from(self.size.1.saturating_sub(1));
-          mode.fit(usize::from(self.size.0), height);
-          mode.scroll(true, height, height);
-        }
-      }
-      Event::Key(key) if key.kind != KeyEventKind::Release => return self.key(key).await,
+      Event::Key(key) => return self.key(key).await,
       Event::Resize(columns, rows) => {
         self.size = (columns, rows);
         self.resize().await?;
       }
-      Event::Paste(text)
-        if self.copy_mode.is_none()
+      Event::Paste(text) => {
+        self.keys.cancel_repeat();
+        if self.active_copy().is_none()
           && matches!(self.overlay, Overlay::None)
-          && !self.prefix_pending =>
-      {
-        self.paste(text).await?;
+          && !self.keys.is_prefix()
+        {
+          self.paste(text).await?;
+        }
       }
       _ => {}
     }
     Ok(false)
   }
 
-  fn focus_at(&mut self, column: u16, row: u16) -> bool {
-    if let Some(view) = &self.view
-      && let Some(id) = pane_at(view, &self.panes, &self.focused, self.size, (column, row))
-    {
-      self.focused = id.to_owned();
-      return true;
+  fn active_copy(&self) -> Option<&CopyMode> {
+    self
+      .archive_copy
+      .as_ref()
+      .or_else(|| self.copies.get(&self.focused))
+  }
+
+  fn copy_mut(&mut self, target: &CopyTarget) -> Option<&mut CopyMode> {
+    match target {
+      CopyTarget::Pane(id) => self.copies.get_mut(id),
+      CopyTarget::Archive => self.archive_copy.as_mut(),
     }
-    false
+  }
+
+  fn copy_size(&self, target: &CopyTarget) -> (usize, usize) {
+    if let CopyTarget::Pane(id) = target
+      && let Some(rect) = self
+        .view
+        .as_ref()
+        .and_then(|view| view.panes.iter().find(|rect| &rect.terminal_id == id))
+    {
+      return (usize::from(rect.columns), usize::from(rect.rows));
+    }
+    (
+      usize::from(self.size.0),
+      usize::from(self.size.1.saturating_sub(1)),
+    )
+  }
+
+  fn new_copy(&self, id: &str) -> Option<CopyMode> {
+    let pane = self.panes.get(id)?;
+    let (width, height) = self.copy_size(&CopyTarget::Pane(id.into()));
+    let (prefix, rows) = pane.model.copy_snapshot();
+    let mut mode = CopyMode::from_rows(prefix, rows, width);
+    mode.history_gap = pane.history_gap();
+    mode.fit(width, height);
+    Some(mode)
+  }
+
+  fn copy_action(&mut self, target: &CopyTarget, action: CopyAction) -> Result<()> {
+    if matches!(action, CopyAction::Stay) {
+      return Ok(());
+    }
+    match target {
+      CopyTarget::Pane(id) => {
+        self.copies.remove(id);
+      }
+      CopyTarget::Archive => self.archive_copy = None,
+    }
+    self.mouse_capture = None;
+    if let CopyAction::Copy(text) = action {
+      self.copy_buffer = Some(text.clone());
+      let sent = crate::terminal::copy_to_clipboard(&text)?;
+      self.notice(if sent {
+        "Copied to ctmux buffer; clipboard requested (OSC 52)".into()
+      } else {
+        "Copied to ctmux buffer; selection exceeds clipboard limit".into()
+      });
+    }
+    Ok(())
+  }
+
+  fn mouse_position(&self, target: &CopyTarget, mouse: MouseEvent) -> Option<(usize, usize)> {
+    let position = match target {
+      CopyTarget::Pane(id) => pane_position(
+        self.view.as_ref()?,
+        &self.panes,
+        &self.copies,
+        &self.focused,
+        self.size,
+        id,
+        (mouse.column, mouse.row),
+      )?,
+      CopyTarget::Archive => (
+        mouse.column.min(self.size.0.saturating_sub(1)),
+        mouse.row.min(self.size.1.saturating_sub(2)),
+      ),
+    };
+    Some((usize::from(position.0), usize::from(position.1)))
+  }
+
+  async fn send_mouse(
+    &self,
+    id: &str,
+    mut mouse: MouseEvent,
+    position: (usize, usize),
+  ) -> Result<()> {
+    if let Some(pane) = self.panes.get(id)
+      && !self.read_only
+      && pane.connected
+      && pane.ended.is_none()
+      && pane.control.state().leases().input.owned_by_client
+    {
+      mouse.column = u16::try_from(position.0).expect("pane column");
+      mouse.row = u16::try_from(position.1).expect("pane row");
+      if let Some(data) = input::encode_mouse(mouse, pane.model.input_modes.mouse()) {
+        pane.control.input(data).await?;
+      }
+    }
+    Ok(())
+  }
+
+  async fn release_mouse(&mut self) -> Result<()> {
+    if let Some(MouseCapture::Application {
+      terminal_id,
+      button,
+      position,
+    }) = self.mouse_capture.take()
+    {
+      self
+        .send_mouse(
+          &terminal_id,
+          MouseEvent {
+            kind: MouseEventKind::Up(button),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+          },
+          position,
+        )
+        .await?;
+    }
+    Ok(())
+  }
+
+  // A drag belongs to the pane where it began, even across borders or the footer.
+  async fn captured_mouse(&mut self, mouse: MouseEvent, capture: MouseCapture) -> Result<()> {
+    match capture {
+      MouseCapture::Application {
+        terminal_id,
+        button,
+        position,
+      } => {
+        let position = self
+          .mouse_position(&CopyTarget::Pane(terminal_id.clone()), mouse)
+          .unwrap_or(position);
+        self.send_mouse(&terminal_id, mouse, position).await?;
+        if mouse.kind != MouseEventKind::Up(button) {
+          self.mouse_capture = Some(MouseCapture::Application {
+            terminal_id,
+            button,
+            position,
+          });
+        }
+      }
+      MouseCapture::Selection { target, pending } => {
+        if !matches!(
+          mouse.kind,
+          MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        ) {
+          self.mouse_capture = Some(MouseCapture::Selection { target, pending });
+          return Ok(());
+        }
+        let Some((x, y)) = self.mouse_position(&target, mouse) else {
+          return Ok(());
+        };
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+          // A click only focuses; its pending snapshot never replaces the live view.
+          if pending.is_none()
+            && let Some(mode) = self.copy_mut(&target)
+          {
+            mode.drag(x, y);
+            let action = mode.finish_drag();
+            self.copy_action(&target, action)?;
+          }
+        } else {
+          if let Some(mode) = pending
+            && let CopyTarget::Pane(id) = &target
+          {
+            self.copies.insert(id.clone(), mode);
+          }
+          if let Some(mode) = self.copy_mut(&target) {
+            mode.drag(x, y);
+          }
+          self.mouse_capture = Some(MouseCapture::Selection {
+            target,
+            pending: None,
+          });
+        }
+      }
+    }
+    Ok(())
+  }
+
+  async fn mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+    if matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+      && let Some(capture) = self.mouse_capture.take()
+    {
+      return self.captured_mouse(mouse, capture).await;
+    }
+    if self.keys.is_prefix() {
+      return Ok(());
+    }
+    if mouse.column >= self.size.0 || mouse.row >= self.size.1.saturating_sub(1) {
+      return Ok(());
+    }
+    let target = if self.archive_copy.is_some() {
+      CopyTarget::Archive
+    } else {
+      if !matches!(self.overlay, Overlay::None) {
+        return Ok(());
+      }
+      let Some(id) = self.view.as_ref().and_then(|view| {
+        pane_at(
+          view,
+          &self.panes,
+          &self.copies,
+          &self.focused,
+          self.size,
+          (mouse.column, mouse.row),
+        )
+      }) else {
+        return Ok(());
+      };
+      CopyTarget::Pane(id.to_owned())
+    };
+    // Capture coordinates before focus can shift a clipped shared viewport.
+    let Some(position) = self.mouse_position(&target, mouse) else {
+      return Ok(());
+    };
+    if let CopyTarget::Pane(id) = &target {
+      if matches!(
+        mouse.kind,
+        MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+      ) {
+        self.focused.clone_from(id);
+      }
+      let application = !self.copies.contains_key(id)
+        && !mouse.modifiers.contains(KeyModifiers::SHIFT)
+        && !self.read_only
+        && self.panes.get(id).is_some_and(|pane| {
+          pane.connected
+            && pane.ended.is_none()
+            && pane.control.state().leases().input.owned_by_client
+            && pane.model.input_modes.mouse().enabled()
+        });
+      if application {
+        if let MouseEventKind::Down(button) = mouse.kind {
+          self.mouse_capture = Some(MouseCapture::Application {
+            terminal_id: id.clone(),
+            button,
+            position,
+          });
+        }
+        return self.send_mouse(id, mouse, position).await;
+      }
+    }
+    match mouse.kind {
+      MouseEventKind::Down(MouseButton::Left) => {
+        let pending = if let Some(mode) = self.copy_mut(&target) {
+          mode.begin_drag(position.0, position.1);
+          None
+        } else if let CopyTarget::Pane(id) = &target {
+          self.new_copy(id).map(|mut mode| {
+            mode.begin_drag(position.0, position.1);
+            mode
+          })
+        } else {
+          None
+        };
+        self.mouse_capture = Some(MouseCapture::Selection { target, pending });
+      }
+      MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+        let up = mouse.kind == MouseEventKind::ScrollUp;
+        let (width, height) = self.copy_size(&target);
+        if let CopyTarget::Pane(id) = &target
+          && up
+          && !self.copies.contains_key(id)
+          && let Some(mut mode) = self.new_copy(id)
+        {
+          mode.bottom_behavior = BottomBehavior::ReturnToLive;
+          self.copies.insert(id.clone(), mode);
+        }
+        if let Some(mode) = self.copy_mut(&target) {
+          mode.fit(width, height);
+          let action = mode.scroll(up, 5, height);
+          self.copy_action(&target, action)?;
+        }
+      }
+      _ => {}
+    }
+    Ok(())
   }
 
   async fn paste(&self, text: String) -> Result<()> {
@@ -618,22 +899,50 @@ impl App<'_> {
   }
 
   async fn key(&mut self, key: KeyEvent) -> Result<bool> {
-    if let Some(mode) = &mut self.copy_mode {
-      match mode.key(key, usize::from(self.size.1.saturating_sub(1))) {
-        CopyAction::Stay => {}
-        CopyAction::Close => self.copy_mode = None,
-        CopyAction::Copy(text) => {
-          self.copy_mode = None;
-          self.copy_buffer = Some(text.clone());
-          let sent = crate::terminal::copy_to_clipboard(&text)?;
-          self.notice(if sent {
-            "Copied to ctmux buffer; clipboard requested (OSC 52)".into()
-          } else {
-            "Copied to ctmux buffer; selection exceeds clipboard limit".into()
-          });
-        }
-      }
+    if key.kind == KeyEventKind::Release {
       return Ok(false);
+    }
+    if self.archive_copy.is_some() {
+      self.keys.cancel_repeat();
+      let target = CopyTarget::Archive;
+      let (_, height) = self.copy_size(&target);
+      let action = self
+        .archive_copy
+        .as_mut()
+        .expect("archive copy")
+        .key(key, height);
+      self.copy_action(&target, action)?;
+      return Ok(false);
+    }
+    if matches!(self.overlay, Overlay::None) {
+      match self.keys.resolve(key, &self.prefix, Instant::now()) {
+        Dispatch::Ignore | Dispatch::Pending => return Ok(false),
+        Dispatch::Action(binding) => return self.execute(binding.action).await,
+        Dispatch::SendPrefix => {
+          self.send_key(key).await?;
+          return Ok(false);
+        }
+        Dispatch::Unknown => {
+          self.notice(format!("{} ? for commands", self.prefix.label));
+          return Ok(false);
+        }
+        Dispatch::Forward => {}
+      }
+      if key.code == KeyCode::PageUp
+        && key.modifiers == KeyModifiers::SHIFT
+        && self.active_copy().is_none()
+      {
+        return self.execute(Action::History { page_back: true }).await;
+      }
+      let target = CopyTarget::Pane(self.focused.clone());
+      let (_, height) = self.copy_size(&target);
+      if let Some(mode) = self.copies.get_mut(&self.focused) {
+        let action = mode.key(key, height);
+        self.copy_action(&target, action)?;
+        return Ok(false);
+      }
+    } else {
+      self.keys.cancel_repeat();
     }
     if self.ended.is_some() {
       for pane in self.panes.values_mut() {
@@ -673,19 +982,7 @@ impl App<'_> {
       self.overlay_key(key).await?;
       return Ok(false);
     }
-    if self.prefix_pending {
-      self.prefix_pending = false;
-      if input::matches_prefix(key, &self.prefix) {
-        self.send_key(key).await?;
-        return Ok(false);
-      }
-      return self.command(key.code).await;
-    }
-    if input::matches_prefix(key, &self.prefix) {
-      self.prefix_pending = true;
-    } else {
-      self.send_key(key).await?;
-    }
+    self.send_key(key).await?;
     Ok(false)
   }
 
@@ -699,30 +996,29 @@ impl App<'_> {
     Ok(())
   }
 
-  async fn command(&mut self, code: KeyCode) -> Result<bool> {
-    match code {
-      KeyCode::Char('A') => {
+  async fn execute(&mut self, action: Action) -> Result<bool> {
+    match action {
+      Action::Archives => {
         self.archives = self.local_archives()?;
         self.overlay = Overlay::Archives(0);
       }
-      KeyCode::Char('[') => {
-        if let Some(pane) = self.panes.get(&self.focused) {
-          let mut mode = CopyMode::new(pane.model.copy_lines());
-          mode.history_gap = pane.history_gap();
-          self.copy_mode = Some(mode);
+      Action::History { page_back } => {
+        self.release_mouse().await?;
+        let id = self.focused.clone();
+        if !self.copies.contains_key(&id)
+          && let Some(mode) = self.new_copy(&id)
+        {
+          self.copies.insert(id.clone(), mode);
+        }
+        if page_back {
+          let (width, height) = self.copy_size(&CopyTarget::Pane(id.clone()));
+          if let Some(mode) = self.copies.get_mut(&id) {
+            mode.fit(width, height);
+            mode.scroll(true, height, height);
+          }
         }
       }
-      KeyCode::PageUp => {
-        if let Some(pane) = self.panes.get(&self.focused) {
-          let mut mode = CopyMode::new(pane.model.copy_lines());
-          mode.history_gap = pane.history_gap();
-          let height = usize::from(self.size.1.saturating_sub(1));
-          mode.fit(usize::from(self.size.0), height);
-          mode.scroll(true, height, height);
-          self.copy_mode = Some(mode);
-        }
-      }
-      KeyCode::Char(']') if !self.read_only => {
+      Action::Paste if !self.read_only => {
         if let Some(text) = self.copy_buffer.clone() {
           // Reuse the same lease checks and bracketed-paste encoding as a host paste.
           self.paste(text).await?;
@@ -730,22 +1026,26 @@ impl App<'_> {
           self.notice("Copy buffer is empty".into());
         }
       }
-      KeyCode::Char('d') => return Ok(true),
-      KeyCode::Char('r') => self.renderer.invalidate(),
-      KeyCode::Char('o') => self.next_pane(),
-      KeyCode::Char('?') => self.overlay = Overlay::Help,
-      KeyCode::Char('s' | 'w') => self.overlay = Overlay::Sessions(self.session_index()),
-      KeyCode::Char('n') => self.next_session(1).await?,
-      KeyCode::Char('p') => self.next_session(-1).await?,
-      KeyCode::Char('c') if !self.read_only => self.create().await?,
-      KeyCode::Char('%') if !self.read_only => self.split(SplitAxis::Horizontal).await?,
-      KeyCode::Char('"') if !self.read_only => self.split(SplitAxis::Vertical).await?,
-      KeyCode::Char('x') if !self.read_only => self.overlay = Overlay::Kill(self.focused.clone()),
-      KeyCode::Char('I') if !self.read_only => self.toggle_lease(LeaseKind::Input).await?,
-      KeyCode::Char('R') if !self.read_only => self.toggle_lease(LeaseKind::Layout).await?,
-      KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => self.focus(code),
-      KeyCode::Esc => {}
-      _ => self.notice(format!("{} ? for commands", self.prefix.label)),
+      Action::Detach => return Ok(true),
+      Action::Refresh => self.renderer.invalidate(),
+      Action::NextPane => self.next_pane(),
+      Action::Help => self.overlay = Overlay::Help,
+      Action::Sessions => self.overlay = Overlay::Sessions(self.session_index()),
+      Action::NextSession => self.next_session(1).await?,
+      Action::PreviousSession => self.next_session(-1).await?,
+      Action::CreateSession if !self.read_only => self.create().await?,
+      Action::Split(axis) if !self.read_only => self.split(axis).await?,
+      Action::KillPane if !self.read_only => self.overlay = Overlay::Kill(self.focused.clone()),
+      Action::ToggleLease(lease) if !self.read_only => self.toggle_lease(lease).await?,
+      Action::Focus(direction) => self.focus(direction),
+      Action::Cancel => {}
+      Action::Paste
+      | Action::CreateSession
+      | Action::Split(_)
+      | Action::KillPane
+      | Action::ToggleLease(_) => {
+        self.notice("This attachment is read only".into());
+      }
     }
     Ok(false)
   }
@@ -854,7 +1154,7 @@ impl App<'_> {
       .clone_from(&view.panes[(index + 1) % view.panes.len()].terminal_id);
   }
 
-  fn focus(&mut self, direction: KeyCode) {
+  fn focus(&mut self, direction: Direction) {
     let Some(view) = &self.view else {
       return;
     };
@@ -909,7 +1209,7 @@ impl App<'_> {
           if let Some(terminal) = archive.terminals.get(*index) {
             let mut mode = CopyMode::new(terminal.lines.clone());
             mode.history_gap = terminal.history_gap;
-            self.copy_mode = Some(mode);
+            self.archive_copy = Some(mode);
           }
         }
         KeyCode::Esc => self.overlay = Overlay::Archives(0),
@@ -921,32 +1221,22 @@ impl App<'_> {
     Ok(())
   }
 
-  fn draw(&mut self) -> Result<()> {
+  fn frame(&mut self) -> Frame {
     let mut frame = Frame::new(self.size.0, self.size.1);
-    let copy_connection = if matches!(self.overlay, Overlay::ArchiveTerminals(..)) {
-      "archive".to_owned()
-    } else {
-      self.connection_history_status()
-    };
-    if let Some(mode) = &mut self.copy_mode {
+    if let Some(mode) = &mut self.archive_copy {
       mode.fit(
         usize::from(self.size.0),
         usize::from(self.size.1.saturating_sub(1)),
       );
       frame.copy_mode(mode);
-      if self.size.1 > 0 {
-        frame.text(
-          0,
-          self.size.1 - 1,
-          &format!(" {copy_connection} | {}", mode.status()),
-          true,
-        );
+    } else if let Some(view) = &self.view {
+      for rect in &view.panes {
+        if let Some(mode) = self.copies.get_mut(&rect.terminal_id) {
+          mode.fit(usize::from(rect.columns), usize::from(rect.rows));
+        }
       }
-      self.renderer.draw(frame)?;
-      return Ok(());
-    }
-    if let Some(view) = &self.view {
-      frame.canvas(view, &self.panes, &self.focused);
+      frame.canvas(view, &self.panes, &self.copies, &self.focused);
+      frame.overlay(&self.overlay_lines());
     } else {
       let instructions = if let Some(ended) = &self.ended {
         ended.clone()
@@ -959,16 +1249,31 @@ impl App<'_> {
         )
       };
       frame.text(0, 0, &instructions, false);
+      frame.overlay(&self.overlay_lines());
     }
-    frame.overlay(&self.overlay_lines());
     if self.size.1 > 0 {
       frame.text(0, self.size.1 - 1, &self.status(), true);
     }
+    frame
+  }
+
+  fn draw(&mut self) -> Result<()> {
+    let frame = self.frame();
     self.renderer.draw(frame)?;
     Ok(())
   }
 
   fn status(&self) -> String {
+    if let Some(mode) = &self.archive_copy {
+      return format!(" archive | {}", mode.status());
+    }
+    if let Some(mode) = self.copies.get(&self.focused)
+      && matches!(self.overlay, Overlay::None)
+      && !self.keys.is_prefix()
+    {
+      return format!(" {} | {}", self.connection_history_status(), mode.status());
+    }
+
     if matches!(
       self.overlay,
       Overlay::Archives(_) | Overlay::ArchiveTerminals(..)
@@ -985,7 +1290,7 @@ impl App<'_> {
     {
       return format!("{ended} — press any key to close pane");
     }
-    if self.prefix_pending {
+    if self.keys.is_prefix() {
       return format!(
         " {} | PREFIX  % split right  \" split below  arrows focus  c new  s sessions  d detach  ? help",
         self.connection_history_status()
@@ -1120,6 +1425,7 @@ impl App<'_> {
         format!("Commands after {} — any key closes help", self.prefix.label),
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    x: terminate (confirm)".into(),
+        "Focus arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),
@@ -1146,11 +1452,11 @@ fn session_not_found(error: &crate::Error) -> bool {
 fn adjacent(
   panes: &[ctmux_proto::PaneGeometry],
   focused: &str,
-  direction: KeyCode,
+  direction: Direction,
 ) -> Option<String> {
   let origin = panes.iter().find(|pane| pane.terminal_id == focused)?;
-  let horizontal = matches!(direction, KeyCode::Left | KeyCode::Right);
-  let sign = if matches!(direction, KeyCode::Right | KeyCode::Down) {
+  let horizontal = matches!(direction, Direction::Left | Direction::Right);
+  let sign = if matches!(direction, Direction::Right | Direction::Down) {
     1
   } else {
     -1

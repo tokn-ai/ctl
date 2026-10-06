@@ -162,6 +162,42 @@ fn saved_hint_lookup_keeps_missing_separate_from_unavailable_locked_or_busy() {
 }
 
 #[test]
+fn saved_hint_lookup_reports_changed_files_and_invalid_metadata_instead_of_missing_keys() {
+  let fixture = Fixture::new();
+  let original_public = public(9);
+  let original = fixture.openssh(&original_public);
+  let previously_saved = saved(&original, &original_public);
+  let replacement_public = public(10);
+  let snapshot = fixture.openssh(&replacement_public);
+  assert_eq!(original.path, snapshot.path);
+  assert_ne!(original.file_version, snapshot.file_version);
+  assert!(matches!(
+    checked_hint(&snapshot, Ok(Some(previously_saved))),
+    Err(IdentityError::FileChanged)
+  ));
+  let metadata = saved(&snapshot, &replacement_public);
+  for corrupt in [
+    SavedIdentity {
+      version: 2,
+      ..metadata.clone()
+    },
+    SavedIdentity {
+      path: "/fixture/different-key".into(),
+      ..metadata.clone()
+    },
+    SavedIdentity {
+      fingerprint: "SHA256:wrong".into(),
+      ..metadata
+    },
+  ] {
+    assert!(matches!(
+      checked_hint(&snapshot, Ok(Some(corrupt))),
+      Err(IdentityError::ListFailed)
+    ));
+  }
+}
+
+#[test]
 fn stale_public_sibling_does_not_override_verified_saved_hint() {
   let fixture = Fixture::new();
   let snapshot = fixture.opaque();

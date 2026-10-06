@@ -39,6 +39,20 @@ pub struct Frame {
 }
 
 impl Frame {
+  #[cfg(test)]
+  pub fn text_rows(&self) -> Vec<String> {
+    self
+      .cells
+      .chunks(usize::from(self.columns).max(1))
+      .map(|row| {
+        row
+          .iter()
+          .filter(|pixel| pixel.width != 0)
+          .map(|pixel| pixel.ch)
+          .collect()
+      })
+      .collect()
+  }
   pub fn new(columns: u16, rows: u16) -> Self {
     Self {
       columns,
@@ -83,17 +97,30 @@ impl Frame {
     }
   }
 
-  pub fn canvas(&mut self, view: &ViewInfo, panes: &BTreeMap<String, Pane>, focused: &str) {
+  pub fn canvas(
+    &mut self,
+    view: &ViewInfo,
+    panes: &BTreeMap<String, Pane>,
+    copies: &BTreeMap<String, CopyMode>,
+    focused: &str,
+  ) {
     let height = self.rows.saturating_sub(1);
     if height == 0 || self.columns == 0 {
       return;
     }
-    let (offset_x, offset_y) =
-      viewport_offset(view, panes.get(focused), focused, self.columns, height);
+    let (offset_x, offset_y) = viewport_offset(
+      view,
+      panes.get(focused),
+      copies.get(focused),
+      focused,
+      self.columns,
+      height,
+    );
     // Only cells not covered by a pane become dividers; no border reduces PTY space.
     let mut covered = vec![false; usize::from(self.columns) * usize::from(height)];
     for rect in &view.panes {
       let pane = panes.get(&rect.terminal_id);
+      let copy = copies.get(&rect.terminal_id);
       let lines: Vec<_> = pane.map_or_else(Vec::new, |pane| pane.model.vt.view().collect());
       for row in 0..rect.rows {
         let Some(y) = (rect.top + row)
@@ -111,7 +138,9 @@ impl Frame {
             continue;
           };
           covered[usize::from(y) * usize::from(self.columns) + usize::from(x)] = true;
-          if let Some(cell) = cells.and_then(|line| line.cells().get(usize::from(column))) {
+          if copy.is_none()
+            && let Some(cell) = cells.and_then(|line| line.cells().get(usize::from(column)))
+          {
             let pixel: Pixel = cell.into();
             // Do not emit half of a wide glyph at a viewport edge.
             if (pixel.width == 0 && x == 0)
@@ -123,7 +152,20 @@ impl Frame {
           }
         }
       }
-      if let Some(ended) = pane.and_then(|pane| pane.ended.as_deref())
+      if let Some(mode) = copy {
+        let cursor = self.cursor;
+        self.copy_region(
+          mode,
+          (rect.left, rect.top),
+          (rect.columns, rect.rows),
+          (offset_x, offset_y),
+        );
+        if rect.terminal_id != focused {
+          self.cursor = cursor;
+        }
+      }
+      if copy.is_none()
+        && let Some(ended) = pane.and_then(|pane| pane.ended.as_deref())
         && let Some(y) = rect.top.checked_sub(offset_y).filter(|y| *y < height)
       {
         let mut label = avt::Vt::new(usize::from(rect.columns.max(1)), 1);
@@ -139,30 +181,35 @@ impl Frame {
         }
       }
       if rect.terminal_id == focused
+        && copy.is_none()
         && let Some(pane) = pane
       {
-        let cursor = pane.model.vt.cursor();
-        if cursor.visible
-          && pane.connected
-          && cursor.col < usize::from(rect.columns)
-          && cursor.row < usize::from(rect.rows)
-        {
-          let x = usize::from(rect.left) + cursor.col;
-          let y = usize::from(rect.top) + cursor.row;
-          if x >= usize::from(offset_x) && y >= usize::from(offset_y) {
-            let x = x - usize::from(offset_x);
-            let y = y - usize::from(offset_y);
-            if x < usize::from(self.columns) && y < usize::from(height) {
-              self.cursor = Some((
-                u16::try_from(x).expect("bounded"),
-                u16::try_from(y).expect("bounded"),
-              ));
-            }
-          }
-        }
+        self.live_cursor(pane, rect, (offset_x, offset_y));
       }
     }
     self.dividers(view, &covered, (offset_x, offset_y), focused);
+  }
+
+  fn live_cursor(&mut self, pane: &Pane, rect: &ctmux_proto::PaneGeometry, offset: (u16, u16)) {
+    let cursor = pane.model.vt.cursor();
+    if !cursor.visible
+      || !pane.connected
+      || cursor.col >= usize::from(rect.columns)
+      || cursor.row >= usize::from(rect.rows)
+    {
+      return;
+    }
+    let x = (usize::from(rect.left) + cursor.col).checked_sub(usize::from(offset.0));
+    let y = (usize::from(rect.top) + cursor.row).checked_sub(usize::from(offset.1));
+    if let (Some(x), Some(y)) = (x, y)
+      && x < usize::from(self.columns)
+      && y < usize::from(self.rows.saturating_sub(1))
+    {
+      self.cursor = Some((
+        u16::try_from(x).expect("bounded"),
+        u16::try_from(y).expect("bounded"),
+      ));
+    }
   }
 
   fn dividers(&mut self, view: &ViewInfo, covered: &[bool], offset: (u16, u16), focused: &str) {
@@ -212,7 +259,22 @@ impl Frame {
   }
 
   pub fn copy_mode(&mut self, mode: &CopyMode) {
-    let height = usize::from(self.rows.saturating_sub(1));
+    self.copy_region(
+      mode,
+      (0, 0),
+      (self.columns, self.rows.saturating_sub(1)),
+      (0, 0),
+    );
+  }
+
+  fn copy_region(
+    &mut self,
+    mode: &CopyMode,
+    origin: (u16, u16),
+    size: (u16, u16),
+    offset: (u16, u16),
+  ) {
+    let height = usize::from(size.1);
     let mut palette = avt::Vt::new(2, 1);
     palette.feed_str("\x1b[7mX");
     let selected_pen = *palette.line(0).cells()[0].pen();
@@ -223,9 +285,25 @@ impl Frame {
         if width == 0 {
           continue;
         }
-        if column >= mode.left && column + width <= mode.left + usize::from(self.columns) {
-          let x = u16::try_from(column - mode.left).expect("bounded column");
-          let y = u16::try_from(row - mode.top).expect("bounded row");
+        if column >= mode.left && column + width <= mode.left + usize::from(size.0) {
+          let absolute_x = usize::from(origin.0) + column - mode.left;
+          let absolute_y = usize::from(origin.1) + row - mode.top;
+          let Some(x) = absolute_x
+            .checked_sub(usize::from(offset.0))
+            .filter(|x| x + width <= usize::from(self.columns))
+          else {
+            column += width;
+            continue;
+          };
+          let Some(y) = absolute_y
+            .checked_sub(usize::from(offset.1))
+            .filter(|y| *y < usize::from(self.rows.saturating_sub(1)))
+          else {
+            column += width;
+            continue;
+          };
+          let x = u16::try_from(x).expect("bounded column");
+          let y = u16::try_from(y).expect("bounded row");
           let pen = if mode.selected(Position { row, column: index }) {
             selected_pen
           } else {
@@ -253,14 +331,19 @@ impl Frame {
           }
         }
         column += width;
-        if column >= mode.left + usize::from(self.columns) {
+        if column >= mode.left + usize::from(size.0) {
           break;
         }
       }
     }
     let x = mode.cursor_column().saturating_sub(mode.left);
     let y = mode.cursor.row.saturating_sub(mode.top);
-    if x < usize::from(self.columns) && y < height {
+    let x = (usize::from(origin.0) + x).checked_sub(usize::from(offset.0));
+    let y = (usize::from(origin.1) + y).checked_sub(usize::from(offset.1));
+    if let (Some(x), Some(y)) = (x, y)
+      && x < usize::from(self.columns)
+      && y < usize::from(self.rows.saturating_sub(1))
+    {
       self.cursor = Some((
         u16::try_from(x).expect("bounded"),
         u16::try_from(y).expect("bounded"),
@@ -286,6 +369,7 @@ impl Frame {
 pub fn pane_at<'a>(
   view: &'a ViewInfo,
   panes: &BTreeMap<String, Pane>,
+  copies: &BTreeMap<String, CopyMode>,
   focused: &str,
   size: (u16, u16),
   position: (u16, u16),
@@ -294,7 +378,14 @@ pub fn pane_at<'a>(
   if position.0 >= size.0 || position.1 >= height {
     return None;
   }
-  let offset = viewport_offset(view, panes.get(focused), focused, size.0, height);
+  let offset = viewport_offset(
+    view,
+    panes.get(focused),
+    copies.get(focused),
+    focused,
+    size.0,
+    height,
+  );
   let x = position.0.checked_add(offset.0)?;
   let y = position.1.checked_add(offset.1)?;
   view
@@ -306,9 +397,43 @@ pub fn pane_at<'a>(
     .map(|pane| pane.terminal_id.as_str())
 }
 
+/// Map host coordinates into a pane, clamping a captured drag to its boundaries.
+pub fn pane_position(
+  view: &ViewInfo,
+  panes: &BTreeMap<String, Pane>,
+  copies: &BTreeMap<String, CopyMode>,
+  focused: &str,
+  size: (u16, u16),
+  target: &str,
+  position: (u16, u16),
+) -> Option<(u16, u16)> {
+  let rect = view.panes.iter().find(|rect| rect.terminal_id == target)?;
+  let offset = viewport_offset(
+    view,
+    panes.get(focused),
+    copies.get(focused),
+    focused,
+    size.0,
+    size.1.saturating_sub(1),
+  );
+  Some((
+    position
+      .0
+      .saturating_add(offset.0)
+      .saturating_sub(rect.left)
+      .min(rect.columns.saturating_sub(1)),
+    position
+      .1
+      .saturating_add(offset.1)
+      .saturating_sub(rect.top)
+      .min(rect.rows.saturating_sub(1)),
+  ))
+}
+
 fn viewport_offset(
   view: &ViewInfo,
   pane: Option<&Pane>,
+  copy: Option<&CopyMode>,
   focused: &str,
   width: u16,
   height: u16,
@@ -317,8 +442,16 @@ fn viewport_offset(
     return (0, 0);
   };
   let cursor = pane.map(|pane| pane.model.vt.cursor());
-  let x = usize::from(rect.left) + cursor.map_or(0, |cursor| cursor.col);
-  let y = usize::from(rect.top) + cursor.map_or(0, |cursor| cursor.row);
+  let x = usize::from(rect.left)
+    + copy.map_or_else(
+      || cursor.map_or(0, |cursor| cursor.col),
+      |copy| copy.cursor_column().saturating_sub(copy.left),
+    );
+  let y = usize::from(rect.top)
+    + copy.map_or_else(
+      || cursor.map_or(0, |cursor| cursor.row),
+      |copy| copy.cursor.row.saturating_sub(copy.top),
+    );
   let left = x
     .saturating_sub(usize::from(width.saturating_sub(1)))
     .min(usize::from(view.canvas_size.columns.saturating_sub(width)));
@@ -471,7 +604,7 @@ mod tests {
       terminals: Vec::new(),
     };
     let mut frame = Frame::new(100, 41);
-    frame.canvas(&view, &BTreeMap::new(), "a");
+    frame.canvas(&view, &BTreeMap::new(), &BTreeMap::new(), "a");
     assert_eq!(frame.cells[50].ch, '│');
     assert_eq!(
       frame.cells[50].pen.foreground(),
@@ -484,11 +617,26 @@ mod tests {
     frame.text(0, 40, "status", true);
     assert!(frame.cells[4099].pen.is_inverse());
     let panes = BTreeMap::new();
-    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (49, 0)), Some("a"));
-    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (50, 0)), None);
-    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (51, 0)), Some("b"));
-    assert_eq!(pane_at(&view, &panes, "a", (100, 41), (51, 40)), None);
-    assert_eq!(pane_at(&view, &panes, "b", (10, 5), (9, 0)), Some("b"));
+    assert_eq!(
+      pane_at(&view, &panes, &BTreeMap::new(), "a", (100, 41), (49, 0)),
+      Some("a")
+    );
+    assert_eq!(
+      pane_at(&view, &panes, &BTreeMap::new(), "a", (100, 41), (50, 0)),
+      None
+    );
+    assert_eq!(
+      pane_at(&view, &panes, &BTreeMap::new(), "a", (100, 41), (51, 0)),
+      Some("b")
+    );
+    assert_eq!(
+      pane_at(&view, &panes, &BTreeMap::new(), "a", (100, 41), (51, 40)),
+      None
+    );
+    assert_eq!(
+      pane_at(&view, &panes, &BTreeMap::new(), "b", (10, 5), (9, 0)),
+      Some("b")
+    );
   }
 
   #[test]
@@ -509,6 +657,64 @@ mod tests {
     clipped.copy_mode(&mode);
     assert_eq!(clipped.cells[0].ch, ' ');
     assert_eq!(clipped.cells[1].ch, 'b');
+  }
+
+  #[test]
+  fn pane_copies_keep_dividers_footer_and_focused_cursor_and_share_hit_test_geometry() {
+    use ctmux_proto::{SplitAxis, TerminalSize, ViewLayout};
+    let layout = ViewLayout::Split {
+      axis: SplitAxis::Horizontal,
+      children: vec![
+        ViewLayout::Terminal {
+          terminal_id: "a".into(),
+        },
+        ViewLayout::Terminal {
+          terminal_id: "b".into(),
+        },
+      ],
+    };
+    let canvas_size = TerminalSize {
+      columns: 20,
+      rows: 4,
+      ..TerminalSize::default()
+    };
+    let view = ViewInfo {
+      session_id: "s".into(),
+      session_name: "test".into(),
+      view_id: "v".into(),
+      revision: 0,
+      panes: layout.pane_geometry(&canvas_size).unwrap(),
+      layout,
+      canvas_size,
+      terminals: Vec::new(),
+    };
+    let mut mode = CopyMode::new_wrapped((0..30).map(|row| format!("row{row}")).collect(), 10);
+    mode.fit(10, 4);
+    let copies = BTreeMap::from([
+      ("a".into(), mode),
+      ("b".into(), CopyMode::new(vec!["OTHER".into()])),
+    ]);
+    let panes = BTreeMap::new();
+    let mut frame = Frame::new(20, 5);
+    frame.canvas(&view, &panes, &copies, "a");
+    assert_eq!(frame.cursor, Some((0, 3)));
+    let rows = frame.text_rows();
+    assert!(rows[0].starts_with("row26"));
+    assert!(rows[0].contains("│OTHER"));
+    assert_eq!(rows[4].trim(), "");
+    let mut clipped = Frame::new(5, 3);
+    clipped.canvas(&view, &panes, &copies, "a");
+    assert_eq!(clipped.cursor, Some((0, 1)));
+    assert!(clipped.text_rows()[0].starts_with("row28"));
+    assert_eq!(
+      pane_position(&view, &panes, &copies, "a", (5, 3), "a", (0, 0)),
+      Some((0, 2))
+    );
+    assert_eq!(pane_at(&view, &panes, &copies, "a", (5, 3), (0, 2)), None);
+    assert_eq!(
+      pane_position(&view, &panes, &copies, "a", (20, 5), "a", (19, 4)),
+      Some((9, 3))
+    );
   }
 
   #[test]

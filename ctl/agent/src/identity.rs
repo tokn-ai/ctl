@@ -75,16 +75,50 @@ fn discover_at(directory: &Path, executable: &Path) -> io::Result<RemoteIdentity
 fn installed_identity(remote_id: String, executable: &Path) -> io::Result<RemoteIdentity> {
   let component = crate::component_info();
   let manifest = executable.with_file_name("manifest.json");
-  let bundle = match fs::File::open(manifest) {
-    Ok(file) => {
-      let mut bytes = Vec::new();
-      file
-        .take(MAX_BUNDLE_MANIFEST_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-      Some(Box::new(parse_manifest(&bytes, &component)?))
+  #[cfg(unix)]
+  let managed_bundle =
+    match fs::symlink_metadata(executable.with_file_name(ctl_core::bundles::MANIFEST_FILE)) {
+      Ok(_) => {
+        let bundle =
+          ctl_core::bundles::Bundle::open(executable.parent().ok_or_else(invalid_manifest)?)?;
+        if !bundle.manifest.same_component("ctl-agent", &component)
+          || bundle.manifest.target_triple != ctl_core::paths::native_target()
+        {
+          return Err(invalid_manifest());
+        }
+        Some(Box::new(BundleVersion {
+          app_version: component.build.version.clone(),
+          bundle_id: bundle
+            .manifest
+            .distribution_id
+            .unwrap_or(bundle.manifest.bundle_id),
+          git_revision: component
+            .build
+            .source_revision
+            .clone()
+            .ok_or_else(invalid_manifest)?,
+          target_triple: bundle.manifest.target_triple,
+        }))
+      }
+      Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+      Err(error) => return Err(error),
+    };
+  #[cfg(not(unix))]
+  let managed_bundle = None;
+  let bundle = if managed_bundle.is_some() {
+    managed_bundle
+  } else {
+    match fs::File::open(manifest) {
+      Ok(file) => {
+        let mut bytes = Vec::new();
+        file
+          .take(MAX_BUNDLE_MANIFEST_BYTES as u64 + 1)
+          .read_to_end(&mut bytes)?;
+        Some(Box::new(parse_manifest(&bytes, &component)?))
+      }
+      Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+      Err(error) => return Err(error),
     }
-    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-    Err(error) => return Err(error),
   };
   let identity = RemoteIdentity {
     remote_id,
@@ -353,6 +387,39 @@ mod tests {
     assert!(parse_manifest(duplicate.as_bytes(), &component).is_err());
     manifest["schema_version"] = json!(1);
     assert!(parse_manifest(&serde_json::to_vec(&manifest).unwrap(), &component).is_err());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn complete_store_identity_is_pinned_to_verified_bytes_and_the_actual_agent() {
+    use ctl_core::bundles::{Manifest as CompleteManifest, Source, Store};
+    let home = std::env::temp_dir().join(format!("ctl-managed-identity-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&home).unwrap();
+    let component = crate::component_info();
+    let versioned = versioned_manifest(&component);
+    let components = serde_json::from_value(versioned["components"].clone()).unwrap();
+    let files = ctl_core::bundles::COMPONENTS
+      .into_iter()
+      .map(|name| (name.into(), name.as_bytes().to_vec()))
+      .collect();
+    let manifest = CompleteManifest::new(
+      ctl_core::paths::native_target(),
+      Source::Local,
+      components,
+      &files,
+    )
+    .unwrap()
+    .with_distribution_id("0.1.0-dev.published")
+    .unwrap();
+    let bundle = Store::new(&home).publish(&manifest, &files).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let executable = bundle.directory.join("ctl-agent");
+    let identity = installed_identity(id.clone(), &executable).unwrap();
+    assert_eq!(identity.remote_id, id);
+    assert_eq!(identity.bundle.unwrap().bundle_id, "0.1.0-dev.published");
+    fs::write(bundle.directory.join("ctl-taskd"), b"changed companion").unwrap();
+    assert!(installed_identity(id, &executable).is_err());
+    fs::remove_dir_all(home).unwrap();
   }
 
   #[test]

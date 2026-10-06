@@ -724,7 +724,9 @@ dependencies = [
  "ctl-proto",
  "ctl-task-cli",
  "ctl-task-client",
+ "ctl-task-proto",
  "ctmux-cli",
+ "ctmux-ipc",
  "ctmux-proto",
  "dirs",
  "flate2",
@@ -777,10 +779,12 @@ name = "ctl-core"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1058,6 +1062,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ctmux-client",
+ "ctmux-core",
  "ctmux-ipc",
  "ctmux-proto",
  "ctmuxd",

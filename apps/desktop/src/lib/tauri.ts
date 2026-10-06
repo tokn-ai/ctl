@@ -51,6 +51,10 @@ import type {
   VpnStatus,
   VpnSnapshot,
   ComponentVersionsSnapshot,
+  ComponentBundlesSnapshot,
+  ComponentBundleSelection,
+  ComponentBundleSelectionResult,
+  ComponentBundlePhase,
   ComponentActionPreflight,
   ComponentActionResult,
   ComponentReconnectResult,
@@ -70,8 +74,21 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
   return nativeInvoke<T>(command, args);
 }
 
-export async function getComponentVersions(): Promise<ComponentVersionsSnapshot> {
-  return invoke("get_component_versions");
+export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {
+  return invoke("get_component_versions", host_id ? { host_id } : undefined);
+}
+
+export async function getComponentBundles(): Promise<ComponentBundlesSnapshot> {
+  return invoke("get_component_bundles");
+}
+
+export async function selectComponentBundle(
+  request: ComponentBundleSelection,
+  on_progress: (phase: ComponentBundlePhase) => void,
+): Promise<ComponentBundleSelectionResult> {
+  const channel = new Channel<ComponentBundlePhase>();
+  channel.onmessage = on_progress;
+  return invoke("select_component_bundle", { request, on_progress: channel });
 }
 
 export async function listSavedCredentials(targets: CredentialTarget[]): Promise<CredentialsSnapshot> {
@@ -233,11 +250,12 @@ export async function probeSshHost(
   target: ConnectionTarget,
   attempt_id: string,
   onPrompt: (prompt: SshPrompt) => void,
+  components_only = false,
 ): Promise<RemoteIdentity> {
   const channel = new Channel<SshPrompt>();
   channel.onmessage = onPrompt;
   return invoke<RemoteIdentity>("probe_ssh_host", {
-    request: { target, attempt_id },
+    request: { target, attempt_id, ...(components_only ? { components_only: true } : {}) },
     on_prompt: channel,
   });
 }

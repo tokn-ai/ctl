@@ -1,5 +1,5 @@
 use ctl_ipc::SshTarget;
-use ctl_ipc::credentials::{Inventory, scope_id};
+use ctl_ipc::credentials::{Inventory, lookup_scope_ids, scope_id};
 use ctl_keychain_client::{Authentication, Query, Write};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -15,6 +15,9 @@ pub(crate) mod identity;
 mod index;
 mod operation;
 mod purpose;
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) use availability::availability;
 
@@ -67,14 +70,55 @@ pub fn load(target: &SshTarget, prompt: &str) -> Result<Option<Zeroizing<String>
     "Read {} to authenticate this SSH connection",
     credential_name(target, prompt)
   );
-  let records = ctl_keychain_client::search(&Query {
-    service: Some(&service(target)),
-    account: Some(&digest(prompt.as_bytes())),
-    limit: 1,
-    secret: true,
-    authentication: Authentication::Allow { reason: &reason },
-  })?;
-  records.into_iter().next().map(secret_string).transpose()
+  let account = digest(prompt.as_bytes());
+  lookup_scopes(target, |scope| {
+    let records = ctl_keychain_client::search(&Query {
+      service: Some(&format!("{KEYCHAIN_SERVICE_PREFIX}.{scope}")),
+      account: Some(&account),
+      limit: 1,
+      secret: true,
+      authentication: Authentication::Allow { reason: &reason },
+    })?;
+    records.into_iter().next().map(secret_string).transpose()
+  })
+}
+
+// Only an absent exact item permits trying its legacy scope. Denied or failed
+// authentication must never trigger a second lookup or authorization prompt.
+fn lookup_scopes<T, E>(
+  target: &SshTarget,
+  mut read: impl FnMut(&str) -> Result<Option<T>, E>,
+) -> Result<Option<T>, E> {
+  for scope in lookup_scope_ids(target) {
+    if let Some(value) = read(&scope)? {
+      return Ok(Some(value));
+    }
+  }
+  Ok(None)
+}
+
+fn replace_scopes<E>(
+  target: &SshTarget,
+  write: impl FnOnce(&str) -> Result<(), E>,
+  mut remove_legacy: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+  let scopes = lookup_scope_ids(target);
+  write(&scopes[0])?;
+  // Remove only after the replacement and its metadata have been saved.
+  for legacy in &scopes[1..] {
+    remove_legacy(legacy)?;
+  }
+  Ok(())
+}
+
+fn remove_scopes<E>(
+  target: &SshTarget,
+  mut remove: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+  for scope in lookup_scope_ids(target) {
+    remove(&scope)?;
+  }
+  Ok(())
 }
 
 fn secret_string(mut record: ctl_keychain_client::Record) -> Result<Zeroizing<String>, Error> {
@@ -93,37 +137,52 @@ pub fn save(target: &SshTarget, secrets: &HashMap<String, Zeroizing<String>>) ->
   for (prompt, secret) in secrets {
     let metadata = Metadata::from_prompt(target, prompt);
     let comment = serde_json::to_string(&metadata).map_err(|_| invalid_metadata())?;
-    let service = service(target);
     let account = digest(prompt.as_bytes());
     let reason = format!(
       "Save {} in Keychain for future SSH connections",
       credential_name(target, prompt)
     );
     let pending = index::begin_mutation()?;
-    ctl_keychain_client::upsert(&Write {
-      service: &service,
-      account: &account,
-      label: &metadata.name(),
-      comment: &comment,
-      data: secret.as_bytes(),
-      biometric: true,
-      authentication: Authentication::Allow { reason: &reason },
-    })?;
-    let now = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .ok()
-      .and_then(|value| i64::try_from(value.as_millis()).ok());
-    let mut inventory = credential_metadata::inventory_from_attributes([Some(Attributes {
-      values: HashMap::from([
-        ("svce".into(), service),
-        ("acct".into(), account),
-        ("icmt".into(), comment),
-      ]),
-      created_at_ms: now,
-      updated_at_ms: now,
-    })]);
-    let credential = inventory.credentials.pop().ok_or_else(invalid_metadata)?;
-    index::save_credential(credential)?;
+    replace_scopes(
+      target,
+      |scope| {
+        let service = format!("{KEYCHAIN_SERVICE_PREFIX}.{scope}");
+        ctl_keychain_client::upsert(&Write {
+          service: &service,
+          account: &account,
+          label: &metadata.name(),
+          comment: &comment,
+          data: secret.as_bytes(),
+          biometric: true,
+          authentication: Authentication::Allow { reason: &reason },
+        })?;
+        let now = SystemTime::now()
+          .duration_since(UNIX_EPOCH)
+          .ok()
+          .and_then(|value| i64::try_from(value.as_millis()).ok());
+        let mut inventory = credential_metadata::inventory_from_attributes([Some(Attributes {
+          values: HashMap::from([
+            ("svce".into(), service),
+            ("acct".into(), account.clone()),
+            ("icmt".into(), comment),
+          ]),
+          created_at_ms: now,
+          updated_at_ms: now,
+        })]);
+        let credential = inventory.credentials.pop().ok_or_else(invalid_metadata)?;
+        index::save_credential(credential)
+      },
+      |scope| {
+        // Replacing a credential must not leave an exact legacy copy that can
+        // reappear after the newly saved item is forgotten.
+        ctl_keychain_client::delete(
+          &format!("{KEYCHAIN_SERVICE_PREFIX}.{scope}"),
+          Some(&account),
+          Authentication::Allow { reason: &reason },
+        )?;
+        index::forget_credential(&format!("{scope}:{account}"))
+      },
+    )?;
     index::finish_mutation(&pending)?;
   }
   Ok(())
@@ -134,20 +193,23 @@ pub fn should_offer_save(target: &SshTarget) -> Result<bool, Error> {
 }
 
 fn read_save_policy(target: &SshTarget) -> Result<bool, Error> {
-  let records = ctl_keychain_client::search(&Query {
-    service: Some(&policy_service(target)),
-    account: Some(SAVE_POLICY_ACCOUNT),
-    limit: 1,
-    secret: true,
-    authentication: Authentication::Forbid,
+  let never = lookup_scopes(target, |scope| {
+    let records = ctl_keychain_client::search(&Query {
+      service: Some(&format!("{SAVE_POLICY_SERVICE_PREFIX}.{scope}")),
+      account: Some(SAVE_POLICY_ACCOUNT),
+      limit: 1,
+      secret: true,
+      authentication: Authentication::Forbid,
+    })?;
+    Ok::<_, Error>(
+      records
+        .into_iter()
+        .next()
+        .and_then(|record| record.secret)
+        .filter(|policy| policy.as_slice() == NEVER_SAVE),
+    )
   })?;
-  Ok(
-    records
-      .into_iter()
-      .next()
-      .and_then(|record| record.secret)
-      .is_none_or(|policy| policy.as_slice() != NEVER_SAVE),
-  )
+  Ok(never.is_none())
 }
 
 pub fn never_save(target: &SshTarget) -> Result<(), Error> {
@@ -177,23 +239,25 @@ fn delete_inner(target: &SshTarget) -> Result<(), Error> {
     "Remove saved SSH credentials for {} from Keychain",
     purpose::connection(target)
   );
-  ctl_keychain_client::delete(
-    &service(target),
-    None,
-    Authentication::Allow { reason: &reason },
-  )?;
-  let scope = scope_id(target);
-  for credential in credentials
-    .into_iter()
-    .filter(|credential| credential.scope_id == scope)
-  {
-    index::forget_credential(&credential.credential_id)?;
-  }
-  ctl_keychain_client::delete(
-    &policy_service(target),
-    Some(SAVE_POLICY_ACCOUNT),
-    Authentication::Forbid,
-  )?;
+  remove_scopes(target, |scope| {
+    ctl_keychain_client::delete(
+      &format!("{KEYCHAIN_SERVICE_PREFIX}.{scope}"),
+      None,
+      Authentication::Allow { reason: &reason },
+    )?;
+    ctl_keychain_client::delete(
+      &format!("{SAVE_POLICY_SERVICE_PREFIX}.{scope}"),
+      Some(SAVE_POLICY_ACCOUNT),
+      Authentication::Forbid,
+    )?;
+    for credential in credentials
+      .iter()
+      .filter(|credential| credential.scope_id == scope)
+    {
+      index::forget_credential(&credential.credential_id)?;
+    }
+    Ok::<_, Error>(())
+  })?;
   index::finish_mutation(&pending)
 }
 
@@ -251,10 +315,6 @@ pub fn forget(credential_id: &str) -> Result<(), Error> {
 
 fn invalid_metadata() -> Error {
   Error(security_framework::base::Error::from_code(-50))
-}
-
-fn service(target: &SshTarget) -> String {
-  format!("{KEYCHAIN_SERVICE_PREFIX}.{}", scope_id(target))
 }
 
 fn policy_service(target: &SshTarget) -> String {

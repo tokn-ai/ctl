@@ -87,7 +87,14 @@ pub async fn probe(
   target: ConnectionTargetDto,
   _channel: Channel<SshPromptDto>,
   _restart_check: bool,
+  components_only: bool,
 ) -> CommandResult<ctl_proto::RemoteIdentity> {
+  if components_only {
+    return Err(CommandErrorDto::new(
+      "remote_component_inspection_unsupported",
+      "Remote component inspection currently requires an existing SSH master on macOS or Linux.",
+    ));
+  }
   connection::remote_service(async {
     let (stream, identity) = connect_identified(&target).await?;
     verification::verify(stream, target.label()).await?;

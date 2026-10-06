@@ -22,7 +22,7 @@ const SUPPORTED_TARGETS: [&str; 4] = [
 ];
 
 mod cache;
-mod compatibility;
+pub(crate) mod compatibility;
 pub use cache::{BundleCacheEntry, read_compatible_cached_bundle};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,11 +93,11 @@ pub struct BundleSet {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BundleTarget {
+pub(crate) struct BundleTarget {
   archive: String,
   sha256: String,
   #[serde(default, deserialize_with = "compatibility::deserialize_components")]
-  components: Option<BTreeMap<String, ComponentInfo>>,
+  pub(crate) components: Option<BTreeMap<String, ComponentInfo>>,
 }
 
 impl BundleSet {
@@ -216,7 +216,7 @@ impl BundleSet {
     )
   }
 
-  fn target(&self, target: &str) -> Result<&BundleTarget, Error> {
+  pub(crate) fn target(&self, target: &str) -> Result<&BundleTarget, Error> {
     self
       .targets
       .get(target)
@@ -236,7 +236,7 @@ impl BundleSet {
     Ok(&self.target(target)?.archive)
   }
 
-  fn verify_archive_bytes(&self, target: &str, archive: &[u8]) -> Result<(), Error> {
+  pub(crate) fn verify_archive_bytes(&self, target: &str, archive: &[u8]) -> Result<(), Error> {
     let entry = self.target(target)?;
     if archive.len() > MAX_BUNDLE_BYTES {
       return Err(Error::Invalid(
@@ -398,11 +398,6 @@ pub async fn download_release_bundle(
       "invalid client version for remote bundle download".into(),
     ));
   }
-  if expected.dirty || expected.source_revision.is_none() || !expected.is_valid() {
-    return Err(Error::Stale(
-      "remote component recovery requires a clean client with a source revision".into(),
-    ));
-  }
   let client = reqwest::Client::builder()
     .https_only(true)
     .connect_timeout(Duration::from_secs(15))
@@ -425,7 +420,11 @@ pub async fn download_release_bundle(
   )
   .await?;
   let manifest = BundleSet::parse(&bytes, &expected.version)?;
-  manifest.verify_revision(expected)?;
+  if !manifest.is_compatible(target)? {
+    return Err(Error::NotAvailable(
+      "published bundle does not advertise the required compatible component contracts".into(),
+    ));
+  }
   // A version release must not silently supply a main-branch development build.
   if manifest.bundle_id != manifest.app_version {
     return Err(Error::Invalid(

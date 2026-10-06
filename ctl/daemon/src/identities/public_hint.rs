@@ -81,6 +81,11 @@ fn checked_hint(
   let Some(metadata) = metadata? else {
     return Ok(SavedPublicKeyHint::Missing);
   };
+  metadata.check_binding(
+    &snapshot.identity_id,
+    &snapshot.path,
+    &snapshot.file_version,
+  )?;
   Ok(saved_hint(snapshot, &metadata).map_or(
     SavedPublicKeyHint::Unavailable,
     SavedPublicKeyHint::Available,

@@ -237,7 +237,15 @@ async fn signing_before_enumeration_cannot_read_a_saved_passphrase() {
 async fn lazy_unlock_retains_the_fallback_cause_without_warning_for_unused_keys() {
   let fixture = Fixture::new();
   for (reason, message) in [
-    (Reason::NotSaved, "No usable saved passphrase"),
+    (Reason::NotSaved, "No saved passphrase"),
+    (
+      Reason::Identity(identities::IdentityError::FileChanged),
+      "The identity file changed",
+    ),
+    (
+      Reason::Identity(identities::IdentityError::ListFailed),
+      "Saved identity metadata could not be read",
+    ),
     (
       Reason::Identity(identities::IdentityError::KeychainMissingEntitlement),
       "not authorized for Keychain access",

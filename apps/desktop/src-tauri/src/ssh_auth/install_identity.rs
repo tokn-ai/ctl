@@ -8,6 +8,24 @@ use ctl_client::{CoreError, SshConnectionOptions};
 use crate::dto::ConnectionTargetDto;
 use crate::error::{CommandErrorDto, CommandResult};
 
+pub(super) fn verify_installed(
+  installed: &crate::dto::RemoteAgentInstallResultDto,
+  identity: &ctl_proto::RemoteIdentity,
+) -> CommandResult<()> {
+  if identity.bundle.as_ref().is_some_and(|bundle| {
+    bundle.bundle_id == installed.bundle_id
+      && bundle.git_revision == installed.git_revision
+      && bundle.target_triple == installed.target_triple
+      && bundle.app_version == installed.app_version
+  }) {
+    return Ok(());
+  }
+  Err(CommandErrorDto::new(
+    "remote_install_verification_failed",
+    "Components were installed, but the active installation differs from the verified bundle. Running sessions were preserved. Refresh Components before retrying.",
+  ))
+}
+
 pub(super) async fn upload<T, F, U>(
   target: &ConnectionTargetDto,
   destination: &str,
@@ -62,6 +80,27 @@ mod tests {
   use super::*;
   use std::cell::Cell;
   use std::future::ready;
+
+  #[test]
+  fn activation_requires_the_exact_selected_bundle_not_the_app_revision() {
+    let installed = crate::dto::RemoteAgentInstallResultDto {
+      app_version: "0.1.0".into(),
+      bundle_id: "0.1.0-dev.cached".into(),
+      git_revision: "a".repeat(40),
+      target_triple: "x86_64-unknown-linux-musl".into(),
+    };
+    let mut observed = identity("11111111-1111-4111-8111-111111111111");
+    assert!(verify_installed(&installed, &observed).is_err());
+    observed.bundle = Some(Box::new(ctl_proto::BundleVersion {
+      app_version: installed.app_version.clone(),
+      bundle_id: installed.bundle_id.clone(),
+      git_revision: installed.git_revision.clone(),
+      target_triple: installed.target_triple.clone(),
+    }));
+    assert!(verify_installed(&installed, &observed).is_ok());
+    observed.bundle.as_mut().unwrap().bundle_id = "a-different-installation".into();
+    assert!(verify_installed(&installed, &observed).is_err());
+  }
 
   fn identity(remote_id: &str) -> ctl_proto::RemoteIdentity {
     serde_json::from_value(serde_json::json!({

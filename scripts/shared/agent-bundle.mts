@@ -129,7 +129,8 @@ export function parseAgentBundleManifest(bytes: Buffer, identity: AgentBundleIde
   const root = record(JSON.parse(bytes.toString("utf8")), "archive manifest");
   exactKeys(root, ["schema_version", "app_version", "bundle_id", "git_revision", "target_triple", "files", "components"], "archive manifest");
   if (root.schema_version !== 2 || root.target_triple !== target ||
-    Object.entries(identity).some(([name, value]) => root[name] !== value)) throw new Error("archive manifest does not match the bundle identity and target");
+    root.app_version !== identity.app_version || root.bundle_id !== identity.bundle_id ||
+    root.git_revision !== identity.git_revision) throw new Error("archive manifest does not match the bundle identity and target");
   const files = record(root.files, "archive file hashes");
   exactKeys(files, agentComponents, "archive file hashes");
   if (Object.values(files).some((value) => typeof value !== "string" || !/^[a-fA-F0-9]{64}$/.test(value))) throw new Error("invalid archive file checksum");

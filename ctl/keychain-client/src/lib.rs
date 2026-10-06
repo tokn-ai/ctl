@@ -1,6 +1,7 @@
 //! A small owned interface to the macOS Data Protection Keychain.
 //!
-//! All Core Foundation ownership and Security FFI stays in one audited module.
+//! Core Foundation, Local Authentication, and Security ownership stays in
+//! audited native modules.
 //! Passive metadata callers explicitly forbid authentication. User-requested
 //! discovery may authorize attribute access without requesting secret data.
 
@@ -9,7 +10,16 @@
 mod native;
 
 #[cfg(target_os = "macos")]
-pub use native::{check_availability, delete, exists, scan_attributes, search, upsert};
+#[allow(unsafe_code)]
+mod session;
+
+#[cfg(target_os = "macos")]
+pub use native::{
+  AuthenticationContext, check_availability, delete, exists, scan_attributes, search, upsert,
+};
+
+#[cfg(target_os = "macos")]
+pub use session::{SessionState, SessionSubscription, with_session_monitor};
 
 /// Application-local error: the owned inventory exceeds the discovery budget.
 pub const ATTRIBUTE_SCAN_LIMIT: i32 = -1_000_002;
@@ -23,7 +33,16 @@ use zeroize::Zeroizing;
 #[derive(Clone, Copy)]
 pub enum Authentication<'a> {
   Forbid,
-  Allow { reason: &'a str },
+  Allow {
+    reason: &'a str,
+  },
+  /// Reuse OS authorization without retaining the credential in application memory.
+  #[cfg(target_os = "macos")]
+  Context {
+    reason: &'a str,
+    context: &'a AuthenticationContext,
+    allow_ui: bool,
+  },
 }
 
 pub struct Query<'a> {
@@ -48,7 +67,7 @@ pub struct Write<'a> {
   pub label: &'a str,
   pub comment: &'a str,
   pub data: &'a [u8],
-  pub biometric: bool,
+  pub user_presence: bool,
   pub authentication: Authentication<'a>,
 }
 

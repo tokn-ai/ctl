@@ -211,11 +211,13 @@ fn register_provider(provider: DaemonProvider) -> io::Result<()> {
 }
 
 /// Internal evolution counter; advancing it alone does not publish a contract.
-pub const PROTOCOL_BUILD: u16 = 13;
+pub const PROTOCOL_BUILD: u16 = 14;
 pub const CONTRACT_V1_0_12: ProtocolVersion = ProtocolVersion::new(1, 0, 12);
 pub const CONTRACT_V1_1_13: ProtocolVersion = ProtocolVersion::new(1, 1, 13);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_13;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[CONTRACT_V1_0_12, CONTRACT_V1_1_13];
+pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_14;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
+  &[CONTRACT_V1_0_12, CONTRACT_V1_1_13, CONTRACT_V1_1_14];
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -228,17 +230,19 @@ pub fn protocol_offer() -> ProtocolOffer {
 
 /// Internal build of the one-shot credential, identity, askpass, and proxy APIs.
 /// Published helper contracts are independent of the broker and lifecycle APIs.
-pub const HELPER_API_BUILD: u16 = 4;
+pub const HELPER_API_BUILD: u16 = 5;
 pub const HELPER_API_CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const HELPER_API_CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
 pub const HELPER_API_CONTRACT_V1_1_3: ProtocolVersion = ProtocolVersion::new(1, 1, 3);
 pub const HELPER_API_CONTRACT_V1_1_4: ProtocolVersion = ProtocolVersion::new(1, 1, 4);
-pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_1_4;
+pub const HELPER_API_CONTRACT_V1_1_5: ProtocolVersion = ProtocolVersion::new(1, 1, 5);
+pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_1_5;
 pub const SUPPORTED_HELPER_API_VERSIONS: &[ProtocolVersion] = &[
   HELPER_API_CONTRACT_V1_0_1,
   HELPER_API_CONTRACT_V1_1_2,
   HELPER_API_CONTRACT_V1_1_3,
   HELPER_API_CONTRACT_V1_1_4,
+  HELPER_API_CONTRACT_V1_1_5,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -380,6 +384,12 @@ pub fn has_remote_vpn(gateways: &[SshGateway]) -> bool {
 pub fn gateway_route_supported(gateways: &[SshGateway], protocol: ProtocolVersion) -> bool {
   SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol)
     && (!has_remote_vpn(gateways) || protocol >= CONTRACT_V1_1_13)
+}
+
+/// Quiet SSH establishment never opens authentication or credential-save UI.
+#[must_use]
+pub fn quiet_master_supported(protocol: ProtocolVersion) -> bool {
+  SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol) && protocol >= CONTRACT_V1_1_14
 }
 
 /// Resolve a remote VPN's SSH owner using the exact prefix that reaches it.
@@ -590,6 +600,11 @@ pub enum ClientMessage {
     protocol: ProtocolOffer,
   },
   EnsureMaster {
+    target: SshTarget,
+  },
+  /// Reuse an authenticated master or establish one without displaying UI.
+  /// Only a negotiated contract supporting quiet establishment may send this.
+  EnsureMasterQuiet {
     target: SshTarget,
   },
   PromptResponse {
@@ -1659,6 +1674,32 @@ mod tests {
     assert_eq!(
       protocol_offer().negotiate(&[CONTRACT_V1_0_12]),
       Some(CONTRACT_V1_0_12)
+    );
+  }
+
+  #[test]
+  fn quiet_master_contract_is_explicit_and_retains_historical_requests() {
+    assert!(!quiet_master_supported(CONTRACT_V1_0_12));
+    assert!(!quiet_master_supported(CONTRACT_V1_1_13));
+    assert!(quiet_master_supported(CONTRACT_V1_1_14));
+    assert!(!quiet_master_supported(ProtocolVersion::new(1, 2, 15)));
+    for contract in SUPPORTED_PROTOCOL_VERSIONS {
+      assert_eq!(protocol_offer().negotiate(&[*contract]), Some(*contract));
+    }
+    let historical = serde_json::json!({
+      "type": "ensure_master",
+      "target": { "destination": "fixture", "hostname": null, "user": null,
+        "port": null, "identity_file": null }
+    });
+    let request: ClientMessage = serde_json::from_value(historical.clone()).unwrap();
+    assert!(matches!(request, ClientMessage::EnsureMaster { .. }));
+    let mut quiet = historical;
+    quiet["type"] = serde_json::json!("ensure_master_quiet");
+    let request: ClientMessage = serde_json::from_value(quiet).unwrap();
+    assert!(matches!(request, ClientMessage::EnsureMasterQuiet { .. }));
+    assert_eq!(
+      serde_json::to_value(request).unwrap()["type"],
+      "ensure_master_quiet"
     );
   }
 

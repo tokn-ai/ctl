@@ -12,7 +12,9 @@ names. Remove opens a picker when its selector is omitted. Removal and clear
 require interactive confirmation. Clear removes all owned SSH passwords and
 identity passphrases, including unindexed older copies, while retaining key
 files, host definitions, VPN profiles, and never-save preferences. It requires
-helper contract `1.1.3`; older helpers reject it before performing any operation.
+helper contract `1.1.5`, as does individual removal, so every secret mutation
+revokes reconnect approval retained by an updated broker before changing Keychain.
+An older selected helper is rejected before receiving the request.
 
 Discovery requires helper contract `1.1.4`; older helpers reject its new request
 before starting any interactive inventory. A successful CLI list includes every
@@ -76,9 +78,14 @@ credential rows; they are not silently treated as verified identity entries.
 
 ## Storage and metadata
 
-- SSH passwords and SSH key passphrases are stored in the macOS protected
-  Keychain. Display metadata lives in separate, non-biometric Keychain records
-  in the same app access group. Passive desktop inventory queries explicitly
+- SSH passwords and SSH key passphrases are stored in the device-local macOS
+  Data Protection Keychain, accessible while unlocked. New saves use
+  `userPresence`: macOS can authorize access with Touch ID or the account
+  password. Explicitly saving a replacement also updates an existing item's
+  access control to this policy atomically; ordinary reads do not migrate it.
+  Older biometric-only items retain their original requirements until resaved.
+  Display metadata lives in separate Keychain records without interactive
+  authorization requirements, in the same app access group. Passive desktop inventory queries explicitly
   forbid authentication UI; user-requested CLI discovery may authorize attribute
   access. Neither requests password data. An inaccessible Keychain is reported as
   unavailable rather than empty.
@@ -92,7 +99,7 @@ credential rows; they are not silently treated as verified identity entries.
   app associates them with currently configured host routes when possible;
   otherwise they remain **Saved SSH credential** entries with a short identifier.
   Their password/passphrase subtype is not guessed. New saves include nonsecret
-  metadata while retaining the existing access policy. Non-VPN credential
+  metadata and use the current user-presence access policy. Non-VPN credential
   identifiers are unchanged. VPN lookups try the shared identifier first, then
   the exact old identifier for the current route. Saving a replacement removes
   that exact legacy copy, and host-wide cleanup and never-save preferences also
@@ -108,7 +115,7 @@ credential rows; they are not silently treated as verified identity entries.
   still exists; these rows explicitly leave that state unverified.
 
 In the desktop app, **Import saved credential metadata** is an explicit action for entries saved
-before this metadata index existed. It requests Touch ID to read their names and
+before this metadata index existed. It requests macOS authorization to read their names and
 attributes, then writes metadata records without changing the protected secrets.
 An interrupted or incomplete import remains available to retry. Until import
 completes, missing metadata means **Not checked**, not **Not saved**. Opening the
@@ -145,6 +152,57 @@ Creation and modification dates are Keychain metadata, not a record of the last
 login. Missing dates are shown as not recorded. Source errors do not hide rows
 successfully read from another source, and a failed refresh marks retained rows
 as the previous result.
+
+## Reconnect approval
+
+After a successful SSH connection, the signed broker can retain the macOS
+authorization contexts used to read its credentials for a fixed **24-hour**
+window. A new connection after network loss can reuse those contexts to read
+the necessary credential from Keychain. Repeated reads and successful reconnects
+do not extend the original deadline. macOS may reject authorization earlier;
+the window is a maximum, not a guarantee of prompt-free access.
+
+The cache contains authorization contexts, not password or passphrase values.
+Each credential value is retrieved only for authentication and its temporary
+owned credential buffers are zeroized afterward. Decrypted private keys remain in an
+isolated agent only for the connection attempt; they are not cached for the
+24-hour window. An existing authenticated SSH master continues to be reused
+without reading credentials again.
+
+Approval is scoped to the configured account, endpoint, gateway route, effective
+SSH configuration, and known-hosts trust snapshot. Each context is further bound
+to an exact Keychain selector; identity-passphrase approval includes the key's
+canonical path and file contents. Changed configuration, host trust, or key-file
+contents cannot reuse the previous approval. A failed or canceled connection
+does not grant approval for a later attempt.
+
+`StrictHostKeyChecking=accept-new` disables retained approval for new connections.
+Interactive connections can still authorize Keychain normally. This prevents an
+automatically accepted replacement server from inheriting earlier approval when
+known-hosts storage is disabled or nonpersistent. Use `ask` or `yes` for reusable
+approval with stable server trust.
+
+Lock, sleep, logout, console-session changes, broker restart, explicit host
+disconnect, and any owned-secret mutation end approval. The saved credential
+remains in Keychain. These revocations do not terminate other already established
+SSH connections; a later connection requiring the secret needs authorization.
+Background reconnects never open authentication or credential-save UI. When
+approval is unavailable, they report that authentication is required and wait
+for an explicit interactive connection.
+
+Desktop and CLI helpers share saved credentials, but approval contexts exist
+only in the broker process that authenticated them. Clients using the same
+broker can reuse its approval; separate development or desktop broker processes
+need their own authorization. Contexts are never persisted or sent over IPC.
+Updated one-shot helpers publish a nonsecret revocation revision before saving,
+replacing, forgetting, or clearing secrets. Credential removal and identity
+save/forget clients require helper `1.1.5` for that guarantee. An older running
+broker can still save credentials using its original implementation; update or
+restart old writers before relying on cross-process revocation. On brokers
+without ctld `1.1.14`, background clients use passive master status and require
+interactive connection if no reusable master remains.
+Metadata import, passive inventory, and discovery cache refresh do not revoke
+reconnect approval or change saved secret access controls.
 
 ## Forgetting credentials
 

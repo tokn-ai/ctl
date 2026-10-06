@@ -9,7 +9,7 @@ async fn an_old_helper_is_rejected_before_receiving_a_new_operation() {
     ),
     (
       credentials::Request::Clear {},
-      ctl_ipc::HELPER_API_CONTRACT_V1_1_3,
+      ctl_ipc::HELPER_API_CONTRACT_V1_1_5,
     ),
   ] {
     let requested = Fixture::new();
@@ -48,9 +48,6 @@ async fn newest_helpers_accept_the_explicitly_retained_initial_contract() {
     credentials::Request::List,
     credentials::Request::ListMetadata,
     credentials::Request::ImportMetadata,
-    credentials::Request::Forget {
-      credential_id: format!("{}:{}", "a".repeat(64), "b".repeat(64)),
-    },
   ] {
     assert_eq!(
       credential_contract(&request),
@@ -68,7 +65,6 @@ async fn newest_helpers_accept_the_explicitly_retained_initial_contract() {
         }
       }
       credentials::Request::ImportMetadata => credentials::Response::Imported,
-      credentials::Request::Forget { .. } => credentials::Response::Forgotten,
       _ => unreachable!(),
     };
     let mut fixture = command(
@@ -124,6 +120,125 @@ async fn newest_helpers_accept_the_explicitly_retained_initial_contract() {
 }
 
 #[tokio::test]
+async fn secret_mutations_reject_every_pre_revocation_helper_before_sending_input() {
+  let historical = &[
+    ctl_ipc::HELPER_API_CONTRACT_V1_0_1,
+    ctl_ipc::HELPER_API_CONTRACT_V1_1_2,
+    ctl_ipc::HELPER_API_CONTRACT_V1_1_3,
+    ctl_ipc::HELPER_API_CONTRACT_V1_1_4,
+  ];
+  for (index, old) in historical.iter().copied().enumerate() {
+    for request in [
+      credentials::Request::Clear {},
+      credentials::Request::Forget {
+        credential_id: format!("{}:{}", "a".repeat(64), "b".repeat(64)),
+      },
+    ] {
+      assert_eq!(
+        credential_contract(&request),
+        ctl_ipc::HELPER_API_CONTRACT_V1_1_5
+      );
+      let requested = Fixture::new();
+      let mut fixture = command_with_contract(
+        r#"printf received > "$CTL_HELPER_FIXTURE_REQUESTED"; cat >/dev/null; exit 99"#,
+        old,
+        &historical[..=index],
+      );
+      fixture.env("CTL_HELPER_FIXTURE_REQUESTED", &requested.path);
+      let error = exchange_credentials(fixture, request, Duration::from_secs(2))
+        .await
+        .unwrap_err();
+      assert_eq!(error.code, "credential_helper_unsupported");
+      assert!(error.message.contains("requires 1.1.5 (build 5)"));
+      assert!(!requested.path.exists());
+    }
+    for request in [
+      identities::Request::Save {
+        path: "/tmp/private-key".into(),
+        file_version: "a".repeat(64),
+        passphrase: Zeroizing::new("private-fixture-canary".into()),
+      },
+      identities::Request::Forget {
+        identity_id: "a".repeat(64),
+      },
+    ] {
+      assert_eq!(
+        identity_contract(&request),
+        ctl_ipc::HELPER_API_CONTRACT_V1_1_5
+      );
+      let requested = Fixture::new();
+      let mut fixture = command_with_contract(
+        r#"printf received > "$CTL_HELPER_FIXTURE_REQUESTED"; cat >/dev/null; exit 99"#,
+        old,
+        &historical[..=index],
+      );
+      fixture.env("CTL_HELPER_FIXTURE_REQUESTED", &requested.path);
+      let error = exchange_identity(fixture, request, Duration::from_secs(2))
+        .await
+        .unwrap_err();
+      assert_eq!(error.code, "credential_helper_unsupported");
+      assert!(error.message.contains("requires 1.1.5 (build 5)"));
+      assert!(!error.to_string().contains("canary"));
+      assert!(!requested.path.exists());
+    }
+  }
+}
+
+#[tokio::test]
+async fn revocation_aware_helpers_keep_the_existing_mutation_wire_shapes() {
+  let request = credentials::Request::Forget {
+    credential_id: format!("{}:{}", "a".repeat(64), "b".repeat(64)),
+  };
+  let mut fixture = command(
+    r#"request=$(cat); test "$request" = "$CTL_HELPER_FIXTURE_REQUEST" || exit 99; printf '%s' '{"type":"forgotten"}'"#,
+  );
+  fixture.env(
+    "CTL_HELPER_FIXTURE_REQUEST",
+    serde_json::to_string(&request).unwrap(),
+  );
+  assert_eq!(
+    exchange_credentials(fixture, request, Duration::from_secs(2))
+      .await
+      .unwrap(),
+    credentials::Response::Forgotten,
+  );
+  for (request, expected) in [
+    (
+      identities::Request::Save {
+        path: "/tmp/private-key".into(),
+        file_version: "a".repeat(64),
+        passphrase: Zeroizing::new("private-fixture-canary".into()),
+      },
+      identities::Response::Saved,
+    ),
+    (
+      identities::Request::Forget {
+        identity_id: "a".repeat(64),
+      },
+      identities::Response::Forgotten,
+    ),
+  ] {
+    let mut fixture = command(
+      r#"request=$(cat); test "$request" = "$CTL_HELPER_FIXTURE_REQUEST" || exit 99; printf '%s' "$CTL_HELPER_FIXTURE_REPLY""#,
+    );
+    fixture.env(
+      "CTL_HELPER_FIXTURE_REQUEST",
+      serde_json::to_string(&request).unwrap(),
+    );
+    fixture.env(
+      "CTL_HELPER_FIXTURE_REPLY",
+      serde_json::to_string(&expected).unwrap(),
+    );
+    assert_eq!(
+      exchange_identity(fixture, request, Duration::from_secs(2))
+        .await
+        .unwrap(),
+      expected
+    );
+  }
+}
+
+#[tokio::test]
 async fn a_newer_advertised_version_does_not_imply_unlisted_older_support() {
   let requested = Fixture::new();
   let latest = ctl_ipc::HELPER_API_VERSION;
@@ -175,7 +290,7 @@ async fn malformed_or_failed_metadata_does_not_send_identity_secret_input() {
         .message
         .contains("available ctld_helper contract is unknown")
     );
-    assert!(error.message.contains("requires 1.0.1 (build 1)"));
+    assert!(error.message.contains("requires 1.1.5 (build 5)"));
     assert!(!format!("{error:?}").contains("canary"));
     assert!(!requested.path.exists());
   }
@@ -213,7 +328,11 @@ async fn failed_operation_output_is_distinct_from_a_structured_rejection() {
           .as_ref()
       )
     );
-    assert!(error.message.contains("1.1.4 (build 4)"));
+    assert!(error.message.contains(&format!(
+      "{} (build {})",
+      ctl_ipc::HELPER_API_VERSION,
+      ctl_ipc::HELPER_API_BUILD
+    )));
     assert!(!error.to_string().contains("canary"));
   }
 }

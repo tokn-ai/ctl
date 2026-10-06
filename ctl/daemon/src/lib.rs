@@ -15,6 +15,8 @@ mod master_observation;
 mod openconnect;
 mod port_forwarding;
 pub mod proxy_route;
+#[cfg(any(target_os = "macos", test))]
+mod reconnect_approval;
 mod shared_forwarding;
 mod ssh_config_master;
 mod ssh_startup;
@@ -78,6 +80,8 @@ struct State {
   endpoint_registry: endpoint_registry::Registry,
   shared_forwards: AsyncMutex<SharedForwardRegistry>,
   vpn_service: Option<vpn_service::VpnService>,
+  #[cfg(target_os = "macos")]
+  approvals: Option<Arc<keychain::approval::Approvals>>,
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +242,10 @@ pub enum DaemonError {
 
 #[derive(Debug, thiserror::Error)]
 enum RequestError {
+  #[error(
+    "SSH authentication is required. Reconnect interactively to authorize credential access."
+  )]
+  AuthenticationRequired,
   #[error("VPN operation failed: {0}")]
   VpnFailed(String),
   #[error(transparent)]
@@ -287,6 +295,37 @@ enum RequestError {
 /// Returns an error when the owner-only endpoint cannot be prepared or served.
 #[cfg(unix)]
 pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
+  run_with_approvals(
+    socket_path,
+    #[cfg(target_os = "macos")]
+    None,
+  )
+  .await
+}
+
+/// Runs macOS monitoring on the main thread while the broker owns its runtime.
+///
+/// # Errors
+/// Returns broker startup or runtime errors. Unavailable session monitoring
+/// disables reuse, without weakening Keychain's user-presence protection.
+#[cfg(target_os = "macos")]
+pub fn run_monitored(
+  runtime: tokio::runtime::Runtime,
+  socket_path: PathBuf,
+) -> Result<(), DaemonError> {
+  ctl_keychain_client::with_session_monitor(move |session| {
+    runtime.block_on(run_with_approvals(
+      socket_path,
+      Some(keychain::approval::Approvals::new(session)),
+    ))
+  })
+}
+
+#[cfg(unix)]
+async fn run_with_approvals(
+  socket_path: PathBuf,
+  #[cfg(target_os = "macos")] approvals: Option<Arc<keychain::approval::Approvals>>,
+) -> Result<(), DaemonError> {
   use tokio::signal::unix::{SignalKind, signal};
 
   prepare_runtime_directory(&socket_path).map_err(DaemonError::RuntimeDirectory)?;
@@ -302,10 +341,26 @@ pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
     vpn_service: Some(vpn_service),
     lifecycle: Some(lifecycle),
     endpoint_registry: endpoint_registry::Registry::for_socket(&guard.0),
+    #[cfg(target_os = "macos")]
+    approvals,
     ..State::default()
   });
   let mut connections = tokio::task::JoinSet::new();
   let mut restarting = None;
+  #[cfg(target_os = "macos")]
+  let approval_cleanup = {
+    let approvals = state.approvals.clone();
+    tokio::spawn(async move {
+      let Some(approvals) = approvals else {
+        return;
+      };
+      let mut interval = tokio::time::interval(Duration::from_secs(1));
+      loop {
+        interval.tick().await;
+        approvals.maintain();
+      }
+    })
+  };
   let result = loop {
     tokio::select! {
       biased;
@@ -335,6 +390,8 @@ pub async fn run(socket_path: PathBuf) -> Result<(), DaemonError> {
   // created while their owners drain. Keep the endpoint occupied until the
   // entire old owner has released its resources.
   connections.shutdown().await;
+  #[cfg(target_os = "macos")]
+  approval_cleanup.abort();
   let forwards_released = state
     .forwards
     .lock()
@@ -434,6 +491,9 @@ async fn handle_connection(
     validate_request_contract(&request, protocol)?;
     match request {
       ClientMessage::EnsureMaster { target } => ensure_master(&mut stream, state, target).await,
+      ClientMessage::EnsureMasterQuiet { target } => {
+        ensure_master_with_interaction(&mut stream, state, target, false).await
+      }
       ClientMessage::MasterStatus { target } => master_status(&mut stream, &state, &target).await,
       ClientMessage::ConnectionStatus { target } => {
         connection_status(&mut stream, &state, &target).await
@@ -471,6 +531,10 @@ async fn handle_connection(
   }
   .await;
   if let Err(error) = &result {
+    if matches!(error, RequestError::AuthenticationRequired) {
+      let _ = ctl_ipc::write_frame(&mut stream, &ServerMessage::AuthenticationRequired).await;
+      return result;
+    }
     let _ = ctl_ipc::write_frame(
       &mut stream,
       &ServerMessage::Error {
@@ -487,7 +551,15 @@ fn validate_request_contract(
   request: &ClientMessage,
   protocol: ProtocolVersion,
 ) -> Result<(), RequestError> {
+  if matches!(request, ClientMessage::EnsureMasterQuiet { .. })
+    && !ctl_ipc::quiet_master_supported(protocol)
+  {
+    return Err(RequestError::InvalidRequest(
+      "quiet SSH connection requires ctld 1.1.14",
+    ));
+  }
   let (ClientMessage::EnsureMaster { target }
+  | ClientMessage::EnsureMasterQuiet { target }
   | ClientMessage::MasterStatus { target }
   | ClientMessage::ConnectionStatus { target }
   | ClientMessage::DisconnectMaster { target }
@@ -560,6 +632,7 @@ async fn handle_vpn_request(
 fn normalize_request_target(request: &mut ClientMessage) {
   match request {
     ClientMessage::EnsureMaster { target }
+    | ClientMessage::EnsureMasterQuiet { target }
     | ClientMessage::MasterStatus { target }
     | ClientMessage::ConnectionStatus { target }
     | ClientMessage::DisconnectMaster { target }
@@ -640,11 +713,24 @@ async fn ensure_master(
   state: Arc<State>,
   target: SshTarget,
 ) -> Result<(), RequestError> {
+  ensure_master_with_interaction(stream, state, target, true).await
+}
+
+async fn ensure_master_with_interaction(
+  stream: &mut ctl_ipc::Stream,
+  state: Arc<State>,
+  target: SshTarget,
+  interactive: bool,
+) -> Result<(), RequestError> {
   validate_target(&target)?;
   let lifecycle = state.target(&target);
   let mut attempt = lifecycle.attempt();
   let _target_guard = attempt.run(lifecycle.lock.lock()).await?;
-  lifecycle.resume(&attempt)?;
+  if interactive {
+    lifecycle.resume(&attempt)?;
+  } else {
+    lifecycle.require_connected()?;
+  }
   attempt
     .run(async { state.forwards.lock().await.resume(&target) })
     .await?;
@@ -692,10 +778,13 @@ async fn ensure_master(
     token: token.clone(),
     state: Arc::clone(&state),
   };
-  #[cfg(target_os = "macos")]
-  let mut identities = attempt
-    .run(identity_connection::PreparedIdentities::prepare(&target))
-    .await?;
+  let mut authentication = attempt
+    .run(ConnectionAuthentication::prepare(
+      &state,
+      &target,
+      interactive,
+    ))
+    .await??;
   let mut child = start_master(
     &target,
     &endpoint,
@@ -705,7 +794,7 @@ async fn ensure_master(
       .as_deref()
       .unwrap_or(&ctl_ipc::socket_path()),
     #[cfg(target_os = "macos")]
-    Some(&identities),
+    Some(&authentication.identities),
   )?;
   let result = attempt
     .run(wait_for_master(
@@ -715,10 +804,13 @@ async fn ensure_master(
       &endpoint,
       &mut child,
       &mut prompt_rx,
-      #[cfg(target_os = "macos")]
-      &mut identities,
+      &mut authentication,
     ))
     .await;
+  #[cfg(target_os = "macos")]
+  if matches!(result, Ok(Ok(()))) {
+    attempt.run(authentication.connected(&target)).await?;
+  }
   if endpoint.shared {
     if matches!(result, Ok(Ok(()))) {
       state.remember_endpoint(&target, &endpoint, child.stdin.take());
@@ -732,6 +824,116 @@ async fn ensure_master(
   result?
 }
 
+/// Per-connection authentication state. It owns temporary secrets and agents;
+/// only the native authorization context may outlive successful authentication.
+struct ConnectionAuthentication {
+  interactive: bool,
+  attempted_stored: HashSet<String>,
+  captured: HashMap<String, Zeroizing<String>>,
+  #[cfg(target_os = "macos")]
+  approval_scope: Option<String>,
+  #[cfg(target_os = "macos")]
+  authorization: keychain::approval::Attempt,
+  #[cfg(target_os = "macos")]
+  _guard: keychain::approval::CancelOnDrop,
+  #[cfg(target_os = "macos")]
+  identities: identity_connection::PreparedIdentities,
+}
+
+impl ConnectionAuthentication {
+  async fn prepare(
+    state: &State,
+    target: &SshTarget,
+    interactive: bool,
+  ) -> Result<Self, RequestError> {
+    #[cfg(target_os = "macos")]
+    let approval_scope = keychain::approval_scope::snapshot(target).await;
+    #[cfg(target_os = "macos")]
+    let authorization = {
+      let approvals = state.approvals.clone();
+      let prefix = format!("{}:", target_key(target));
+      let scope = approval_scope
+        .as_ref()
+        .map(|scope| format!("{prefix}{scope}"));
+      tokio::task::spawn_blocking(move || {
+        keychain::approval::Attempt::begin(approvals.as_ref(), &prefix, scope, interactive)
+      })
+      .await
+      .map_err(|_| RequestError::InvalidRequest("keychain worker stopped"))?
+    };
+    #[cfg(target_os = "macos")]
+    let guard = authorization.guard();
+    #[cfg(target_os = "macos")]
+    let identities =
+      identity_connection::PreparedIdentities::prepare(target, authorization.clone()).await;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (state, target);
+    Ok(Self {
+      interactive,
+      attempted_stored: HashSet::new(),
+      captured: HashMap::new(),
+      #[cfg(target_os = "macos")]
+      approval_scope,
+      #[cfg(target_os = "macos")]
+      authorization,
+      #[cfg(target_os = "macos")]
+      _guard: guard,
+      #[cfg(target_os = "macos")]
+      identities,
+    })
+  }
+
+  async fn finish(
+    &mut self,
+    stream: &mut ctl_ipc::Stream,
+    target: &SshTarget,
+  ) -> Result<(), RequestError> {
+    #[cfg(target_os = "macos")]
+    {
+      self.identities.authentication_finished();
+      if self.interactive {
+        handle_save_offer(stream, target, &mut self.captured, &mut self.identities).await?;
+      }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (stream, target);
+    self.captured.clear();
+    Ok(())
+  }
+
+  #[cfg(target_os = "macos")]
+  async fn connected(&self, target: &SshTarget) {
+    let Some(scope) = &self.approval_scope else {
+      return;
+    };
+    if keychain::approval_scope::snapshot(target).await.as_ref() != Some(scope) {
+      self.authorization.revoke();
+      return;
+    }
+    let approved = self.authorization.clone();
+    let _ = tokio::task::spawn_blocking(move || approved.connected()).await;
+  }
+
+  #[cfg(test)]
+  fn fresh(interactive: bool) -> Self {
+    #[cfg(target_os = "macos")]
+    let authorization = keychain::approval::Attempt::fresh(interactive);
+    Self {
+      interactive,
+      attempted_stored: HashSet::new(),
+      captured: HashMap::new(),
+      #[cfg(target_os = "macos")]
+      approval_scope: None,
+      #[cfg(target_os = "macos")]
+      _guard: authorization.guard(),
+      #[cfg(target_os = "macos")]
+      authorization,
+      #[cfg(target_os = "macos")]
+      identities: identity_connection::PreparedIdentities::default(),
+    }
+  }
+}
+
 async fn wait_for_master(
   stream: &mut ctl_ipc::Stream,
   state: &State,
@@ -739,34 +941,15 @@ async fn wait_for_master(
   endpoint: &MasterEndpoint,
   child: &mut Child,
   prompt_rx: &mut mpsc::Receiver<PromptRequest>,
-  #[cfg(target_os = "macos")] identities: &mut identity_connection::PreparedIdentities,
+  authentication: &mut ConnectionAuthentication,
 ) -> Result<(), RequestError> {
   let control_path = &endpoint.control_path;
   let mut authenticated = shared_session_ready(child, endpoint.shared);
-  let mut diagnostics = child.stderr.take().map(|mut stderr| {
-    tokio::spawn(async move {
-      use tokio::io::AsyncReadExt as _;
-      let mut retained = Vec::new();
-      let mut buffer = [0_u8; 1024];
-      while let Ok(count) = stderr.read(&mut buffer).await {
-        if count == 0 {
-          break;
-        }
-        let keep = count.min(MAX_DIAGNOSTICS.saturating_sub(retained.len()));
-        retained.extend_from_slice(&buffer[..keep]);
-      }
-      String::from_utf8_lossy(&retained).trim().to_owned()
-    })
-  });
+  let mut diagnostics = retain_diagnostics(child);
   let deadline = Instant::now() + MASTER_START_TIMEOUT;
-  let mut captured = HashMap::new();
-  let mut attempted_stored = HashSet::new();
   loop {
     if control_master_is_ready(target, control_path).await {
-      #[cfg(target_os = "macos")]
-      handle_save_offer(stream, target, &mut captured, identities).await?;
-      #[cfg(not(target_os = "macos"))]
-      captured.clear();
+      authentication.finish(stream, target).await?;
       state.adopt(target, endpoint, None)?;
       let mut forwards = state.forwards.lock().await;
       forwards
@@ -807,11 +990,14 @@ async fn wait_for_master(
       } else {
         String::new()
       };
-      return Err(ssh_startup::failure(if message.is_empty() {
-        status.to_string()
-      } else {
-        message
-      }));
+      return Err(ssh_startup::failure_with_interaction(
+        if message.is_empty() {
+          status.to_string()
+        } else {
+          message
+        },
+        authentication.interactive,
+      ));
     }
     if Instant::now() >= deadline {
       return Err(RequestError::MasterTimeout);
@@ -822,21 +1008,38 @@ async fn wait_for_master(
           return Err(RequestError::ClientClosed);
         };
         #[cfg(target_os = "macos")]
-        let warning = identities.fallback_warning(&prompt.message);
+        let warning = authentication.identities.fallback_warning(&prompt.message);
         #[cfg(not(target_os = "macos"))]
         let warning = None;
         answer_prompt(
           stream,
           target,
           prompt,
-          &mut attempted_stored,
-          &mut captured,
           warning,
+          authentication,
         ).await?;
       }
       () = sleep(MASTER_POLL_INTERVAL) => {}
     }
   }
+}
+
+fn retain_diagnostics(child: &mut Child) -> Option<tokio::task::JoinHandle<String>> {
+  child.stderr.take().map(|mut stderr| {
+    tokio::spawn(async move {
+      use tokio::io::AsyncReadExt as _;
+      let mut retained = Vec::new();
+      let mut buffer = [0_u8; 1024];
+      while let Ok(count) = stderr.read(&mut buffer).await {
+        if count == 0 {
+          break;
+        }
+        let keep = count.min(MAX_DIAGNOSTICS.saturating_sub(retained.len()));
+        retained.extend_from_slice(&buffer[..keep]);
+      }
+      String::from_utf8_lossy(&retained).trim().to_owned()
+    })
+  })
 }
 
 async fn reuse_master_or_prepare(
@@ -888,6 +1091,7 @@ async fn reuse_master_or_prepare(
 impl RequestError {
   fn code(&self) -> &'static str {
     match self {
+      Self::AuthenticationRequired => "ssh_authentication_required",
       Self::VpnFailed(_) => "vpn_failed",
       Self::Codec(_) | Self::ClientClosed => "ctld_connection_error",
       Self::InvalidRequest(_) => "ctld_protocol_error",
@@ -912,9 +1116,8 @@ async fn answer_prompt(
   stream: &mut ctl_ipc::Stream,
   target: &SshTarget,
   prompt: PromptRequest,
-  attempted_stored: &mut HashSet<String>,
-  captured: &mut HashMap<String, Zeroizing<String>>,
   warning: Option<String>,
+  authentication: &mut ConnectionAuthentication,
 ) -> Result<(), RequestError> {
   let cacheable = !prompt.confirm && cacheable_prompt(&prompt.message);
   #[cfg(target_os = "macos")]
@@ -922,13 +1125,16 @@ async fn answer_prompt(
   #[cfg(target_os = "macos")]
   if cacheable
     && !identity_connection::is_key_prompt(&prompt.message)
-    && attempted_stored.insert(prompt.message.clone())
+    && authentication
+      .attempted_stored
+      .insert(prompt.message.clone())
   {
     let target = target.clone();
     let message = prompt.message.clone();
+    let authorization = authentication.authorization.clone();
     match tokio::task::spawn_blocking(move || {
       keychain::availability()?;
-      keychain::load(&target, &message)
+      keychain::load_for_connection(&target, &message, &authorization)
     })
     .await
     {
@@ -947,7 +1153,16 @@ async fn answer_prompt(
     }
   }
   #[cfg(not(target_os = "macos"))]
-  let _ = (target, attempted_stored);
+  let _ = (target, &authentication.attempted_stored);
+
+  #[cfg(target_os = "macos")]
+  if prompt.confirm {
+    authentication.authorization.discard_cached();
+  }
+  if !authentication.interactive {
+    let _ = prompt.response.send(None);
+    return Err(RequestError::AuthenticationRequired);
+  }
 
   let prompt_id = uuid::Uuid::new_v4().to_string();
   ctl_ipc::write_frame(
@@ -972,7 +1187,9 @@ async fn answer_prompt(
     _ => return Err(RequestError::InvalidRequest("expected prompt response")),
   };
   if cacheable && let Some(secret) = &response {
-    captured.insert(prompt.message, secret.clone());
+    authentication
+      .captured
+      .insert(prompt.message, secret.clone());
   }
   let _ = prompt.response.send(response);
   Ok(())
@@ -1084,7 +1301,7 @@ async fn report_save_error(
   message: &str,
 ) -> Result<(), RequestError> {
   let message = if message.contains("-34018") {
-    "ctld must be signed with its application identifier entitlement before it can use the Touch ID-protected Keychain.".to_owned()
+    "ctld must be signed with its application identifier entitlement before it can use the protected Keychain.".to_owned()
   } else {
     format!("Could not update the SSH credential in Keychain: {message}")
   };
@@ -1188,6 +1405,10 @@ async fn disconnect_master(
   // Publish cancellation before waiting for the lock held by authentication,
   // including an unanswered password or credential-save prompt.
   lifecycle.pause();
+  #[cfg(target_os = "macos")]
+  if let Some(approvals) = &state.approvals {
+    approvals.revoke_target(&format!("{}:", target_key(target)));
+  }
   let _target_guard = lifecycle.lock.lock().await;
   let mut forwards = state.forwards.lock().await;
   forwards.pause(target);
@@ -2344,9 +2565,8 @@ mod tests {
             confirm: true,
             response,
           },
-          &mut HashSet::new(),
-          &mut HashMap::new(),
           None,
+          &mut ConnectionAuthentication::fresh(true),
         ))
         .await
     });
@@ -2366,6 +2586,115 @@ mod tests {
     ));
     assert!(response_rx.await.is_err());
     assert!(lifecycle.lock.try_lock().is_ok());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn quiet_connect_is_gated_by_the_negotiated_contract_before_dispatch() {
+    for protocol in [
+      ctl_ipc::CONTRACT_V1_0_12,
+      ctl_ipc::CONTRACT_V1_1_13,
+      ctl_ipc::CONTRACT_V1_1_14,
+    ] {
+      let state = Arc::new(State::default());
+      let target = target();
+      let supported = protocol == ctl_ipc::CONTRACT_V1_1_14;
+      if supported {
+        state.target(&target).pause();
+      }
+      let (mut client, server) = ctl_ipc::Stream::pair().unwrap();
+      let worker = tokio::spawn(handle_connection(server, Arc::clone(&state)));
+      ctl_ipc::write_frame(
+        &mut client,
+        &ClientMessage::Handshake {
+          protocol: ctl_core::protocol::ProtocolOffer::new(protocol.build, protocol, &[protocol]),
+        },
+      )
+      .await
+      .unwrap();
+      assert!(matches!(
+        ctl_ipc::read_frame::<_, ServerMessage>(&mut client).await.unwrap(),
+        Some(ServerMessage::HandshakeAccepted { protocol_version }) if protocol_version == protocol
+      ));
+      ctl_ipc::write_frame(&mut client, &ClientMessage::EnsureMasterQuiet { target })
+        .await
+        .unwrap();
+      let response = ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
+        .await
+        .unwrap();
+      if supported {
+        assert!(
+          matches!(response, Some(ServerMessage::Error { code, .. }) if code == "ssh_host_disconnected")
+        );
+        assert!(matches!(
+          worker.await.unwrap(),
+          Err(RequestError::HostDisconnected)
+        ));
+      } else {
+        assert!(
+          matches!(response, Some(ServerMessage::Error { code, .. }) if code == "ctld_protocol_error")
+        );
+        assert!(matches!(
+          worker.await.unwrap(),
+          Err(RequestError::InvalidRequest(_))
+        ));
+        assert_eq!(state.targets.lock().unwrap().len(), 0);
+      }
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn quiet_connect_never_resumes_an_explicitly_disconnected_host() {
+    let state = Arc::new(State::default());
+    let target = target();
+    let lifecycle = state.target(&target);
+    lifecycle.pause();
+    let (_client, mut server) = ctl_ipc::Stream::pair().unwrap();
+    assert!(matches!(
+      ensure_master_with_interaction(&mut server, state, target, false).await,
+      Err(RequestError::HostDisconnected)
+    ));
+    assert!(lifecycle.is_paused());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn quiet_authentication_requires_user_action_without_emitting_a_prompt() {
+    for (message, confirm) in [
+      ("Trust host?", true),
+      ("Verification code:", false),
+      ("Enter passphrase for key '/keys/synthetic':", false),
+    ] {
+      let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
+      let (response, answer) = oneshot::channel();
+      let mut authentication = ConnectionAuthentication::fresh(false);
+      assert!(matches!(
+        answer_prompt(
+          &mut server,
+          &target(),
+          PromptRequest {
+            message: message.into(),
+            confirm,
+            response
+          },
+          None,
+          &mut authentication,
+        )
+        .await,
+        Err(RequestError::AuthenticationRequired)
+      ));
+      assert!(answer.await.unwrap().is_none());
+      assert_eq!(authentication.captured.len(), 0);
+      assert!(
+        tokio::time::timeout(
+          Duration::from_millis(20),
+          ctl_ipc::read_frame::<_, ServerMessage>(&mut client)
+        )
+        .await
+        .is_err()
+      );
+    }
   }
 
   #[test]

@@ -120,9 +120,12 @@ fn main() {
       std::process::exit(1);
     }
   };
-  if let Err(error) = runtime.block_on(ctld::run(
-    arguments.socket.unwrap_or_else(ctl_ipc::socket_path),
-  )) {
+  let socket = arguments.socket.unwrap_or_else(ctl_ipc::socket_path);
+  #[cfg(target_os = "macos")]
+  let result = ctld::run_monitored(runtime, socket);
+  #[cfg(not(target_os = "macos"))]
+  let result = runtime.block_on(ctld::run(socket));
+  if let Err(error) = result {
     eprintln!("ctld: {error}");
     std::process::exit(1);
   }

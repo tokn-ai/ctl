@@ -8,7 +8,7 @@ pub(crate) fn save_offer_message(context: &str, names: impl IntoIterator<Item = 
   names.dedup();
   let names = names.join("\n");
   format!(
-    "Save these credentials in Keychain for {context}?\n\n{names}\n\nFuture access requires Touch ID."
+    "Save these credentials in Keychain for {context}?\n\n{names}\n\nAuthorize access with Touch ID or your macOS account password. Successful connections can reuse approval for up to 24 hours, ending when you lock or sleep your Mac."
   )
 }
 
@@ -100,7 +100,9 @@ mod tests {
       concat!(
         "Save these credentials in Keychain for alice@example.test?\n\n",
         "SSH identity passphrase: /keys/work\nSSH password: gateway\n\n",
-        "Future access requires Touch ID.",
+        "Authorize access with Touch ID or your macOS account password. ",
+        "Successful connections can reuse approval for up to 24 hours, ",
+        "ending when you lock or sleep your Mac.",
       )
     );
   }

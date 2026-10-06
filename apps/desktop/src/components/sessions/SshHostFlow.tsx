@@ -812,7 +812,7 @@ export function SshHostFlow({
     case "auth":
       title = selectedProviderTargetRef.current ? "Authentication · 5/5" : "Authentication · 4/4";
       description =
-        "OpenSSH authenticates this host. On macOS, you can choose whether to save a verified password or key passphrase in Keychain for Touch ID access.";
+        "OpenSSH authenticates this host. On macOS, you can save a verified password or key passphrase in Keychain, protected by Touch ID or your macOS account password.";
       mode = {
         kind: "pick",
         choices: [
@@ -1182,7 +1182,7 @@ function promptMode(prompt: SshPrompt): QuickInputMode {
           {
             id: "yes",
             label: "Yes",
-            detail: "Save in Keychain and require Touch ID for future access.",
+            detail: "Save in Keychain, protected by Touch ID or your macOS account password.",
           },
           {
             id: "no",

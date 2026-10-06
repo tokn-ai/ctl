@@ -159,8 +159,9 @@ and `ctld_helper` API versions. The helper's build identity must match its own
 manifest; it does not have to match the CLI's commit, fingerprint, or release
 version. Discovery verifies the selected app instead of choosing a cache entry
 by its directory name or modification time. Credential operations also require
-their explicit helper contract: initial operations use `1.0.1`, clearing uses
-`1.1.3`, and exhaustive discovery uses `1.1.4`. A valid shared helper lacking that
+their explicit helper contract: initial metadata operations use `1.0.1`,
+exhaustive discovery uses `1.1.4`, and secret removal, clearing, or identity
+save/forget require revocation-aware `1.1.5`. A valid shared helper lacking that
 contract can fall back to a verified embedded release helper. `CTLD_BIN` remains
 authoritative for every build; shared discovery also retains explicit
 complete component selections and reports missing capabilities. Unsafe or invalid selected
@@ -677,7 +678,8 @@ names are also accepted.
 `ctl passwords remove ID` confirms removal of one saved entry, or opens a picker
 when no ID is given. `ctl passwords clear` previews known entries and confirms
 clearing all owned SSH passwords and passphrases, including unindexed older
-copies. These commands require helper contract `1.1.4`. Removal requires an interactive
+copies. List/show require helper contract `1.1.4`; remove/clear require `1.1.5`
+to revoke reconnect approvals before changing saved secrets. Removal requires an interactive
 terminal and preserves key files, host/VPN settings, and never-save preferences.
 See [saved credentials](docs/credentials.md) for the shared store's behavior.
 

@@ -197,7 +197,7 @@ fn write(account: &str, comment: &str) -> Result<(), Error> {
     label: "ctmux credential metadata",
     comment,
     data: b"",
-    biometric: false,
+    user_presence: false,
     authentication: Authentication::Forbid,
   })
   .map_err(Into::into)
@@ -279,11 +279,21 @@ fn remove(account: &str) -> Result<(), Error> {
   ctl_keychain_client::delete(SERVICE, Some(account), Authentication::Forbid).map_err(Into::into)
 }
 
-/// Persist before changing a secret. Only successful index commit clears it.
+/// Persist an index mutation marker, without changing reconnect approval.
+/// Metadata import/reconciliation never changes a protected credential value.
 pub(super) fn begin_mutation() -> Result<String, Error> {
   let token = uuid::Uuid::new_v4().to_string();
   write(&format!("{PENDING_PREFIX}{token}"), "1")?;
   Ok(token)
+}
+
+/// Call under the operation lock before changing any protected credential.
+pub(super) fn begin_secret_mutation() -> Result<String, Error> {
+  // Credential management runs in separate one-shot helpers as well as the
+  // broker. A durable nonsecret revision revokes every process's cached approval
+  // before any protected value can be replaced or removed.
+  super::operation::advance_revision()?;
+  begin_mutation()
 }
 
 pub(super) fn finish_mutation(token: &str) -> Result<(), Error> {

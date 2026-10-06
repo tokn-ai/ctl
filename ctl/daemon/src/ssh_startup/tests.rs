@@ -70,3 +70,71 @@ fn authentication_security_configuration_and_unknown_errors_remain_fatal() {
     assert!(matches!(error, RequestError::MasterFailed(detail) if detail == message));
   }
 }
+
+#[test]
+fn quiet_authentication_failures_request_interactive_authorization() {
+  for message in [
+    "alice@work: Permission denied (publickey,password).",
+    "alice@2001:db8::1: Permission denied (publickey,keyboard-interactive).\r\n",
+    "Permission denied (publickey).",
+    "sign_and_send_pubkey: signing failed for ED25519 \"/fixture/id_ed25519\" from agent: agent refused operation\nalice@work: Permission denied (publickey).",
+    "debug1: Offering public key: /fixture/id_ed25519\nsign_and_send_pubkey: signing failed for RSA \"fixture key\" from agent: agent refused operation\ndebug2: we did not send a packet, disable method\nalice@work: Permission denied (publickey,gssapi-with-mic).\ndebug1: No more authentication methods to try.",
+  ] {
+    assert!(
+      matches!(
+        failure_with_interaction(message.into(), false),
+        RequestError::AuthenticationRequired
+      ),
+      "{message}"
+    );
+    assert!(
+      matches!(
+        failure_with_interaction(message.into(), true),
+        RequestError::MasterFailed(detail) if detail == message
+      ),
+      "{message}"
+    );
+  }
+}
+
+#[test]
+fn quiet_connections_preserve_transport_security_and_unknown_failures() {
+  for message in [
+    "ssh: connect to host work port 22: Connection refused",
+    "ctld: Remote VPN operation timed out\nConnection closed by UNKNOWN port 65535",
+  ] {
+    assert!(
+      matches!(
+        failure_with_interaction(message.into(), false),
+        RequestError::MasterConnectionFailed(detail) if detail == message
+      ),
+      "{message}"
+    );
+  }
+  for message in [
+    "",
+    "exit status: 255",
+    "sign_and_send_pubkey: signing failed for ED25519 \"fixture\" from agent: agent refused operation",
+    "alice@work: Permission denied ().",
+    "alice@work: Permission denied (publickey,).",
+    "alice@work: Permission denied (publickey password).",
+    "alice@work: Permission denied (publickey). extra text",
+    "arbitrary prefix: Permission denied (publickey).",
+    "Permission denied (publickey).\nunknown proxy failure",
+    "unknown proxy failure\nalice@work: Permission denied (publickey).",
+    "Host key verification failed.\nalice@work: Permission denied (publickey).",
+    "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nalice@work: Permission denied (publickey).",
+    "ssh: Could not resolve hostname work: Name or service not known\nalice@work: Permission denied (publickey).",
+    "alice@work: Permission denied (publickey).\nConnection reset by 192.0.2.1 port 22",
+    "sign_and_send_pubkey: signing failed for ED25519 \"fixture\" from agent: unknown failure\nalice@work: Permission denied (publickey).",
+    "alice@work: Permission denied (publickey).\nsign_and_send_pubkey: signing failed for ED25519 \"fixture\" from agent: agent refused operation",
+  ] {
+    assert!(
+      matches!(
+        failure_with_interaction(message.into(), false),
+        RequestError::MasterFailed(detail) if detail == message
+      ),
+      "{message}"
+    );
+  }
+}

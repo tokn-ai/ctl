@@ -187,8 +187,7 @@ async fn a_remote_key_prompt_always_requests_user_input_instead_of_keychain_auto
   let (mut client, mut server) = ctl_ipc::Stream::pair().unwrap();
   let (response, response_rx) = tokio::sync::oneshot::channel();
   let worker = tokio::spawn(async move {
-    let mut attempted = HashSet::new();
-    let mut captured = HashMap::new();
+    let mut authentication = crate::ConnectionAuthentication::fresh(true);
     crate::answer_prompt(
       &mut server,
       &target,
@@ -197,14 +196,13 @@ async fn a_remote_key_prompt_always_requests_user_input_instead_of_keychain_auto
         confirm: false,
         response,
       },
-      &mut attempted,
-      &mut captured,
       Some("Keychain access is unavailable.".into()),
+      &mut authentication,
     )
     .await
     .unwrap();
-    assert_eq!(attempted, HashSet::<String>::new());
-    assert_eq!(captured.len(), 1);
+    assert_eq!(authentication.attempted_stored, HashSet::<String>::new());
+    assert_eq!(authentication.captured.len(), 1);
   });
   let Some(ctl_ipc::ServerMessage::Prompt {
     prompt_id,

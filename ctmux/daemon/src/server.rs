@@ -1230,6 +1230,7 @@ struct PreparedAttachment {
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
   view_updates: watch::Receiver<Option<ctmux_proto::ViewInfo>>,
+  layout_lease_updates: watch::Receiver<()>,
 }
 
 impl PreparedAttachment {
@@ -1299,9 +1300,12 @@ fn prepared_attachment(
   shell_state_updates: watch::Receiver<ShellState>,
 ) -> PreparedAttachment {
   let mut view_updates = session.subscribe_view();
+  let mut layout_lease_updates = session.subscribe_layout_leases();
   // Deliver the current view even when this attachment does not resize it.
   // Subscription precedes initial PTY work, so later mutations cannot be lost.
   view_updates.mark_changed();
+  // Admission can race a lease change before the initial attached reply.
+  layout_lease_updates.mark_changed();
   PreparedAttachment {
     session,
     attachment_id: registration.attachment_id,
@@ -1313,6 +1317,7 @@ fn prepared_attachment(
     events,
     shell_state_updates,
     view_updates,
+    layout_lease_updates,
   }
 }
 
@@ -1322,24 +1327,13 @@ async fn handle_attach(
   request: AttachParameters,
 ) -> Result<(), ConnectionError> {
   let mut attachment_guard = attachment.guard(request.attachment_liveness_timeout);
-  let PreparedAttachment {
-    session,
-    attachment_id,
-    attachment_token,
-    attachment_leases,
-    superseded,
-    events,
-    shell_state_updates,
-    view_updates,
-    ..
-  } = attachment;
   let initial_delivery_deadline = initial_attachment_delivery_deadline();
 
-  if attachment_leases.layout.owned_by_client
+  if attachment.attachment_leases.layout.owned_by_client
     && !apply_initial_resize(
       &mut stream,
-      Arc::clone(&session),
-      attachment_id.clone(),
+      Arc::clone(&attachment.session),
+      attachment.attachment_id.clone(),
       request.client_terminal_size.clone(),
       initial_delivery_deadline,
     )
@@ -1350,7 +1344,7 @@ async fn handle_attach(
 
   let Some(mut snapshot) = take_initial_snapshot(
     &mut stream,
-    Arc::clone(&session),
+    Arc::clone(&attachment.session),
     request.resume_from,
     initial_delivery_deadline,
   )
@@ -1360,41 +1354,39 @@ async fn handle_attach(
   };
   let initial_shell_state = shell_state_for_attachment(
     snapshot.shell_state.clone(),
-    request.request_command_line && attachment_leases.input.owned_by_client,
-    request.request_running_command && attachment_leases.input.owned_by_client,
+    request.request_command_line && attachment.attachment_leases.input.owned_by_client,
+    request.request_running_command && attachment.attachment_leases.input.owned_by_client,
   );
   let checkpoint_geometry_revision = snapshot.checkpoint_geometry_revision;
   let sent_sequence = snapshot.journal.replay_from;
   let applied_sequence = snapshot.checkpoint.is_none().then_some(sent_sequence);
   let pinned_history = pin_snapshot_history(&mut snapshot, request.protocol_version)?;
   let (reader, mut writer) = tokio::io::split(stream);
-  match timeout_at(
+  if !send_initial_attachment(
+    &mut writer,
+    snapshot,
+    &request,
+    &attachment,
+    initial_shell_state.clone(),
+    pinned_history
+      .as_ref()
+      .map(|history| history.manifest.clone()),
     initial_delivery_deadline,
-    send_attached(
-      &mut writer,
-      snapshot,
-      request.client_terminal_size,
-      attachment_leases,
-      attachment_token,
-      initial_shell_state.clone(),
-      pinned_history
-        .as_ref()
-        .map(|history| history.manifest.clone()),
-    ),
   )
-  .await
+  .await?
   {
-    Ok(result) => result?,
-    Err(_) => return Ok(()),
+    return Ok(());
   }
   attachment_guard.preserve_on_drop = true;
 
-  let attachment = LiveAttachment {
+  let live_attachment = LiveAttachment {
     reader: FrameReader::new(reader),
     writer,
-    events,
-    shell_state_updates,
-    view_updates,
+    events: attachment.events,
+    shell_state_updates: attachment.shell_state_updates,
+    view_updates: attachment.view_updates,
+    layout_lease_updates: attachment.layout_lease_updates,
+    layout_lease_status: attachment.attachment_leases.layout,
     sent_sequence,
     checkpoint_geometry_revision,
     shell_state_revision: initial_shell_state.revision,
@@ -1404,16 +1396,16 @@ async fn handle_attach(
     in_flight_charge_bytes: 0,
     request_command_line: request.request_command_line,
     request_running_command: request.request_running_command,
-    superseded,
+    superseded: attachment.superseded,
     pinned_history,
     pending_history: None,
     pending_checkpoint: false,
     protocol_version: request.protocol_version,
   };
   let exit = drive_attachment(
-    attachment,
-    session,
-    attachment_id,
+    live_attachment,
+    attachment.session,
+    attachment.attachment_id,
     request.attachment_liveness_timeout,
     Instant::now() + request.attachment_liveness_timeout,
   )
@@ -1422,6 +1414,34 @@ async fn handle_attach(
     attachment_guard.close_now();
   }
   Ok(())
+}
+
+async fn send_initial_attachment(
+  writer: &mut OwnedWriteHalf,
+  snapshot: AttachSnapshot,
+  request: &AttachParameters,
+  attachment: &PreparedAttachment,
+  shell_state: ShellState,
+  history_manifest: Option<TerminalHistoryManifest>,
+  deadline: Instant,
+) -> Result<bool, ConnectionError> {
+  match timeout_at(
+    deadline,
+    send_attached(
+      writer,
+      snapshot,
+      request.client_terminal_size.clone(),
+      attachment.attachment_leases.clone(),
+      attachment.attachment_token.clone(),
+      shell_state,
+      history_manifest,
+    ),
+  )
+  .await
+  {
+    Ok(result) => result.map(|()| true),
+    Err(_) => Ok(false),
+  }
 }
 
 async fn apply_initial_resize(
@@ -1476,6 +1496,8 @@ struct LiveAttachment {
   events: broadcast::Receiver<SessionEvent>,
   shell_state_updates: watch::Receiver<ShellState>,
   view_updates: watch::Receiver<Option<ctmux_proto::ViewInfo>>,
+  layout_lease_updates: watch::Receiver<()>,
+  layout_lease_status: ctmux_proto::LeaseStatus,
   sent_sequence: u64,
   /// Internal ordering for geometry changes represented by the last checkpoint.
   checkpoint_geometry_revision: Option<u64>,
@@ -1676,15 +1698,7 @@ async fn drive_attachment(
     }
     // Like terminal events, shared view metadata gets one bounded turn even
     // while presentation acknowledgements or history requests stay ready.
-    if ctmux_proto::supports_view_zoom(driver.attachment.protocol_version)
-      && driver.pending_session_end.is_none()
-      && driver
-        .attachment
-        .view_updates
-        .has_changed()
-        .unwrap_or(false)
-      && !driver.send_view_update().await?
-    {
+    if !driver.send_pending_metadata().await? {
       return Ok(AttachmentExit::Disconnected);
     }
     if driver.send_session_end_if_drained().await? {
@@ -1743,6 +1757,11 @@ async fn drive_attachment(
           return Ok(AttachmentExit::Disconnected);
         }
       }
+      changed = driver.attachment.layout_lease_updates.changed(), if ctmux_proto::supports_layout_lease_notifications(driver.attachment.protocol_version) && driver.pending_session_end.is_none() => {
+        if changed.is_err() || !driver.send_layout_lease_update().await? {
+          return Ok(AttachmentExit::Disconnected);
+        }
+      }
     }
   }
 }
@@ -1763,6 +1782,88 @@ struct PendingSessionEnd {
 }
 
 impl AttachmentDriver {
+  async fn send_pending_metadata(&mut self) -> Result<bool, ConnectionError> {
+    if self.pending_session_end.is_some() {
+      return Ok(true);
+    }
+    if ctmux_proto::supports_view_zoom(self.attachment.protocol_version)
+      && self.attachment.view_updates.has_changed().unwrap_or(false)
+      && !self.send_view_update().await?
+    {
+      return Ok(false);
+    }
+    if ctmux_proto::supports_layout_lease_notifications(self.attachment.protocol_version)
+      && self
+        .attachment
+        .layout_lease_updates
+        .has_changed()
+        .unwrap_or(false)
+      && !self.send_layout_lease_update().await?
+    {
+      return Ok(false);
+    }
+    Ok(true)
+  }
+
+  async fn send_layout_lease_update(&mut self) -> Result<bool, ConnectionError> {
+    self.attachment.layout_lease_updates.borrow_and_update();
+    let status = self.session.layout_lease_status(&self.attachment_id);
+    if status == self.attachment.layout_lease_status {
+      return Ok(true);
+    }
+    let written = write_before_deadline(
+      &mut self.attachment.writer,
+      &ServerMessage::LeaseStatus {
+        lease: LeaseKind::Layout,
+        status: status.clone(),
+        notification: true,
+      },
+      self.deadline,
+    )
+    .await?;
+    if written.is_some() {
+      self.attachment.layout_lease_status = status;
+    }
+    Ok(written.is_some())
+  }
+
+  async fn process_lease_change(
+    &mut self,
+    lease: LeaseKind,
+    acquire: bool,
+  ) -> Result<bool, ConnectionError> {
+    let previously_owned_input =
+      lease == LeaseKind::Input && self.session.owns_input_lease(&self.attachment_id);
+    let status = if acquire {
+      self.session.acquire_lease(&self.attachment_id, lease)
+    } else {
+      self.session.release_lease(&self.attachment_id, lease)
+    };
+    let owns_input = status.owned_by_client;
+    if lease == LeaseKind::Layout {
+      // The requester receives this direct reply. Its watch notification must
+      // not look like a second acknowledgement to clients with queued intents.
+      self.attachment.layout_lease_status = status.clone();
+    }
+    let written = write_before_deadline(
+      &mut self.attachment.writer,
+      &ServerMessage::LeaseStatus {
+        lease,
+        status,
+        notification: false,
+      },
+      self.deadline,
+    )
+    .await?;
+    if lease == LeaseKind::Input
+      && (self.attachment.request_command_line || self.attachment.request_running_command)
+      && previously_owned_input != owns_input
+    {
+      self.session.refresh_shell_state_for_visibility();
+    }
+    Ok(written.is_some())
+  }
+
   async fn send_view_update(&mut self) -> Result<bool, ConnectionError> {
     let view = self.attachment.view_updates.borrow_and_update().clone();
     let Some(view) = view else {
@@ -1802,6 +1903,14 @@ impl AttachmentDriver {
       return self.send_available_output().await;
     }
     match message {
+      ClientMessage::AcquireLease { lease } => {
+        self.renew_liveness();
+        return self.process_lease_change(lease, true).await;
+      }
+      ClientMessage::ReleaseLease { lease } => {
+        self.renew_liveness();
+        return self.process_lease_change(lease, false).await;
+      }
       ClientMessage::RequestCheckpoint | ClientMessage::HistoryRequest { .. }
         if self.attachment.protocol_version == ctmux_proto::CONTRACT_V1_0_13 =>
       {
@@ -1857,8 +1966,6 @@ impl AttachmentDriver {
         &mut self.attachment.writer,
         Arc::clone(&self.session),
         &self.attachment_id,
-        self.attachment.request_command_line,
-        self.attachment.request_running_command,
         self.attachment.protocol_version,
         message,
       ),
@@ -2290,8 +2397,6 @@ async fn process_attach_input<W>(
   writer: &mut W,
   session: Arc<Terminal>,
   attachment_id: &str,
-  request_command_line: bool,
-  request_running_command: bool,
   protocol_version: ctl_core::protocol::ProtocolVersion,
   message: ClientMessage,
 ) -> Result<bool, ConnectionError>
@@ -2327,32 +2432,6 @@ where
     }
     request @ (ClientMessage::ResizePane { .. } | ClientMessage::ResizeDivider { .. }) => {
       process_pane_resize(writer, session, attachment_id, protocol_version, request).await?;
-    }
-    ClientMessage::AcquireLease { lease } => {
-      let already_owned_input =
-        lease == LeaseKind::Input && session.owns_input_lease(attachment_id);
-      let status = session.acquire_lease(attachment_id, lease);
-      let acquired_input = status.owned_by_client;
-      write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
-      if lease == LeaseKind::Input
-        && (request_command_line || request_running_command)
-        && !already_owned_input
-        && acquired_input
-      {
-        session.refresh_shell_state_for_visibility();
-      }
-    }
-    ClientMessage::ReleaseLease { lease } => {
-      let already_owned_input =
-        lease == LeaseKind::Input && session.owns_input_lease(attachment_id);
-      let status = session.release_lease(attachment_id, lease);
-      write_frame(writer, &ServerMessage::LeaseStatus { lease, status }).await?;
-      if lease == LeaseKind::Input
-        && (request_command_line || request_running_command)
-        && already_owned_input
-      {
-        session.refresh_shell_state_for_visibility();
-      }
     }
     ClientMessage::Heartbeat { nonce } => {
       write_frame(writer, &ServerMessage::HeartbeatAck { nonce }).await?;

@@ -922,6 +922,8 @@ export interface LeaseStatusEvent extends AttachmentEventBase {
   event_type: "lease_status";
   lease: LeaseKind;
   status: LeaseStatus;
+  /** An unsolicited observation, not a reply to a local lease request. */
+  notification?: boolean;
 }
 
 export type PaneResizeResultEvent = AttachmentEventBase & {
@@ -1015,6 +1017,8 @@ export interface AttachmentViewState {
   history_gap: boolean;
   terminal_size_mismatch: boolean;
   resize_with_window: boolean;
+  /** Manual layout-control preference, independent of automatic canvas sizing. */
+  resize_control_desired: boolean;
   message: string | null;
 }
 

@@ -20,6 +20,7 @@ export const COMMAND_IDS = {
   close: "session.close",
   toggleInput: "terminal.toggle_input",
   toggleResize: "terminal.toggle_resize_with_window",
+  toggleResizeControl: "terminal.toggle_resize_control",
   reconnect: "terminal.reconnect",
   focus: "terminal.focus",
   restartDaemon: "daemon.restart",

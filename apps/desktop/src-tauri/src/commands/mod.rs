@@ -363,6 +363,12 @@ async fn open_reserved_attachment(
     }
     ctl_client::Transport::Local(_) => None,
   };
+  // Transport verification has completed. Expose the actual environment to
+  // the GUI so separate saved SSH aliases can recognize their shared owner.
+  let target = verified_attachment_target(
+    target,
+    remote_observation.as_ref().map(|remote| &remote.identity),
+  );
   let (controller, control, events) =
     AttachmentController::new(stream, &attached, options).map_err(CommandErrorDto::client)?;
   let response = OpenAttachmentResponseDto::new(attachment_id.clone(), &attached, target.clone());
@@ -395,6 +401,16 @@ async fn open_reserved_attachment(
     controller.run(),
   ));
   Ok(response)
+}
+
+fn verified_attachment_target(
+  mut target: ConnectionTargetDto,
+  identity: Option<&ctl_proto::RemoteIdentity>,
+) -> ConnectionTargetDto {
+  if let (ConnectionTargetDto::Ssh { remote_info, .. }, Some(identity)) = (&mut target, identity) {
+    *remote_info = Some(Box::new(identity.clone()));
+  }
+  target
 }
 
 #[tauri::command]
@@ -574,6 +590,40 @@ fn unexpected_response(expected: &str, _actual: &ServerMessage) -> CommandErrorD
 mod tests {
   use super::*;
   use crate::dto::{ConnectionTargetDto, TerminalSizeDto};
+
+  #[test]
+  fn attachment_targets_preserve_the_route_and_publish_the_verified_environment() {
+    let identity = ctl_proto::RemoteIdentity {
+      protocols: ctl_proto::agent_protocols(),
+      remote_id: "verified-environment".into(),
+      agent_version: "0.1.0".into(),
+      build: None,
+      ctmux_restart_supported: false,
+      bundle: None,
+    };
+    let original = ConnectionTargetDto::ssh("saved-alias");
+    let enriched = verified_attachment_target(original.clone(), Some(&identity));
+    let ConnectionTargetDto::Ssh {
+      destination,
+      remote_info,
+      ..
+    } = &enriched
+    else {
+      panic!("SSH attachment must retain its route");
+    };
+    assert_eq!(destination, "saved-alias");
+    assert_eq!(remote_info.as_deref(), Some(&identity));
+    let mut route = enriched;
+    if let ConnectionTargetDto::Ssh { remote_info, .. } = &mut route {
+      *remote_info = None;
+    }
+    assert_eq!(route, original);
+    assert_eq!(verified_attachment_target(original.clone(), None), original);
+    assert_eq!(
+      verified_attachment_target(ConnectionTargetDto::Local, Some(&identity)),
+      ConnectionTargetDto::Local
+    );
+  }
 
   /// Exercises the public command functions invoked by Tauri without a
   /// `WebView`. The caller supplies an OpenSSH destination and may supply the

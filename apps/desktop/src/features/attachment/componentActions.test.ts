@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ComponentSessionsReset, DividerResize, SessionSummary, SessionView } from "../../lib/types";
-import { componentResetMatches, publishPaneResizeResult, publishSessionView, reconnectComponentAttachments, registerAttachmentControl, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, setSessionViewZoom } from "./componentActions";
+import type { ComponentSessionsReset, DividerResize, LeaseStatus, SessionSummary, SessionView, TerminalSize } from "../../lib/types";
+import { componentResetMatches, proposeSessionViewportSize, publishPaneResizeResult, publishSessionView, reconnectComponentAttachments, registerAttachmentControl, requestSessionResizeControl, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, resizeSessionViewport, sessionResizeControlStatus, sessionResizeWithWindow, setSessionViewZoom, toggleSessionResizeWithWindow } from "./componentActions";
 
 const stops: (() => void)[] = [];
 afterEach(() => { for (const stop of stops.splice(0)) stop(); });
@@ -9,13 +9,153 @@ const session = (host_id?: string, remote_id?: string): SessionSummary => ({
   session_id: "shared-session-id", name: "shell", status: "running", terminal_size: { rows: 24, columns: 80, pixel_width: null, pixel_height: null }, next_sequence: "0",
 });
 function register(id: string, current: SessionSummary) {
-  const control = { resizeDivider: vi.fn(async (_divider: DividerResize, _request_id: string) => {}), attachmentId: () => id, session: () => current, reconnect: vi.fn(async (): Promise<string | null> => `${id}-replacement`), reset: vi.fn(), layoutOwned: vi.fn(() => false), setViewZoom: vi.fn(async (_terminal_id: string | null) => {}), resizePane: vi.fn(async (_terminal_id: string, _direction: string, _amount: number, _request_id: string) => {}) };
+  const control = {
+    resizeDivider: vi.fn(async (_divider: DividerResize, _request_id: string) => {}),
+    attachmentId: () => id, session: () => current,
+    reconnect: vi.fn(async (): Promise<string | null> => `${id}-replacement`), reset: vi.fn(),
+    layoutOwned: vi.fn(() => false), layoutLease: vi.fn((): LeaseStatus | null => ({ held: false, owned_by_client: false })),
+    requestResizeControl: vi.fn(async (_acquire: boolean) => {}),
+    resizeWithWindow: vi.fn(() => false), toggleResizeWithWindow: vi.fn(async () => {}),
+    enqueueViewportResize: vi.fn(), proposeViewportSize: vi.fn((): TerminalSize | null => null),
+    setViewZoom: vi.fn(async (_terminal_id: string | null) => {}),
+    resizePane: vi.fn(async (_terminal_id: string, _direction: string, _amount: number, _request_id: string) => {}),
+  };
   stops.push(registerAttachmentControl(control));
   return control;
 }
 const baseline = { view_id: "view", revision: "1", zoomed_terminal_id: null };
 
 describe("component attachment actions", () => {
+  it("reports a sibling owner as owned here and routes release and auto resizing through it", async () => {
+    const root = register("root", session());
+    root.layoutLease.mockReturnValue({ held: true, owned_by_client: false });
+    const sibling = register("sibling", { ...session(), terminal_id: "secondary" });
+    sibling.layoutOwned.mockReturnValue(true);
+    sibling.layoutLease.mockReturnValue({ held: true, owned_by_client: true });
+    sibling.resizeWithWindow.mockReturnValue(true);
+    expect(sessionResizeControlStatus(session())).toBe("owned");
+    expect(sessionResizeWithWindow(session())).toBe(true);
+    await requestSessionResizeControl(session(), true, "root");
+    await requestSessionResizeControl(session(), false, "root");
+    await toggleSessionResizeWithWindow(session(), "root");
+    expect(sibling.requestResizeControl.mock.calls).toEqual([[true], [false]]);
+    expect(sibling.toggleResizeWithWindow).toHaveBeenCalledOnce();
+    expect(root.requestResizeControl).not.toHaveBeenCalled();
+    expect(root.toggleResizeWithWindow).not.toHaveBeenCalled();
+  });
+
+  it("takes available control through the selected root", async () => {
+    const sibling = register("sibling", { ...session(), terminal_id: "secondary" });
+    const root = register("root", { ...session(), terminal_id: "primary" });
+    expect(sessionResizeControlStatus(session())).toBe("available");
+    await requestSessionResizeControl(session(), true, "root");
+    expect(root.requestResizeControl).toHaveBeenCalledExactlyOnceWith(true);
+    expect(sibling.requestResizeControl).not.toHaveBeenCalled();
+  });
+
+  it("refreshes stale held state through an ordinary acquire on the preferred attachment", async () => {
+    const sibling = register("sibling", { ...session(), terminal_id: "secondary" });
+    const root = register("root", { ...session(), terminal_id: "primary" });
+    root.layoutLease.mockReturnValue({ held: true, owned_by_client: false });
+    sibling.layoutLease.mockReturnValue({ held: true, owned_by_client: false });
+    expect(sessionResizeControlStatus(session())).toBe("held_elsewhere");
+    root.requestResizeControl.mockImplementationOnce(async (_acquire: boolean) => {
+      root.layoutOwned.mockReturnValue(true);
+      root.layoutLease.mockReturnValue({ held: true, owned_by_client: true });
+    });
+    await requestSessionResizeControl(session(), true, "root");
+    expect(root.requestResizeControl).toHaveBeenCalledExactlyOnceWith(true);
+    expect(sibling.requestResizeControl).not.toHaveBeenCalled();
+    expect(sessionResizeControlStatus(session())).toBe("owned");
+  });
+
+  it("leaves ownership unchanged when an ordinary acquire is denied", async () => {
+    const root = register("root", session());
+    root.layoutLease.mockReturnValue({ held: true, owned_by_client: false });
+    root.requestResizeControl.mockRejectedValueOnce(new Error("The current owner must release resize control."));
+    await expect(requestSessionResizeControl(session(), true, "root")).rejects.toThrow("current owner must release");
+    expect(root.requestResizeControl).toHaveBeenCalledExactlyOnceWith(true);
+    expect(root.layoutOwned()).toBe(false);
+    expect(root.layoutLease()).toEqual({ held: true, owned_by_client: false });
+    expect(sessionResizeControlStatus(session())).toBe("held_elsewhere");
+  });
+
+  it("forwards the visible root canvas to a hidden alias owner without acquiring again", async () => {
+    const visible_session = session("visible", "one-daemon");
+    const visible = register("visible", visible_session);
+    const owner = register("hidden-owner", session("hidden", "one-daemon"));
+    owner.layoutOwned.mockReturnValue(true);
+    const size = { ...visible_session.terminal_size, columns: 120, rows: 40 };
+    visible.proposeViewportSize.mockReturnValue(size);
+    expect(proposeSessionViewportSize(visible_session, "visible")).toEqual(size);
+    await toggleSessionResizeWithWindow(visible_session, "visible");
+    expect(owner.toggleResizeWithWindow).toHaveBeenCalledExactlyOnceWith(size);
+    expect(visible.toggleResizeWithWindow).not.toHaveBeenCalled();
+    expect(resizeSessionViewport(visible_session, size)).toBe(false);
+    owner.resizeWithWindow.mockReturnValue(true);
+    expect(resizeSessionViewport(visible_session, size)).toBe(true);
+    expect(owner.enqueueViewportResize).toHaveBeenCalledExactlyOnceWith(size);
+    expect(visible.enqueueViewportResize).not.toHaveBeenCalled();
+    expect(owner.requestResizeControl).not.toHaveBeenCalled();
+    expect(visible.requestResizeControl).not.toHaveBeenCalled();
+  });
+
+  it("ignores disconnected lease snapshots and does not acquire through them", async () => {
+    const stale = register("stale", session());
+    stale.layoutLease.mockReturnValue(null);
+    stale.layoutOwned.mockReturnValue(true);
+    expect(sessionResizeControlStatus(session())).toBe("unavailable");
+    await expect(requestSessionResizeControl(session(), true, "stale")).rejects.toThrow("Attach to a running session");
+    expect(stale.requestResizeControl).not.toHaveBeenCalled();
+    const live = register("live", session());
+    await requestSessionResizeControl(session(), true, "stale");
+    expect(live.requestResizeControl).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("routes ownership, resize and zoom across verified remote aliases of the same view", async () => {
+    const primary_session = { ...session("primary", "shared-environment"), view_id: "view" };
+    const alias_session = { ...session("alias", "shared-environment"), view_id: "view", terminal_id: "secondary" };
+    const primary = register("primary", primary_session);
+    primary.layoutLease.mockReturnValue({ held: true, owned_by_client: false });
+    const alias = register("alias", alias_session);
+    alias.layoutOwned.mockReturnValue(true);
+    expect(sessionResizeControlStatus(primary_session)).toBe("owned");
+    await requestSessionResizeControl(primary_session, false, "primary");
+    expect(alias.requestResizeControl).toHaveBeenCalledExactlyOnceWith(false);
+    const view: SessionView = { ...baseline, revision: "2", zoomed_terminal_id: "secondary",
+      session_id: primary_session.session_id, session_name: "shell", canvas_size: primary_session.terminal_size,
+      layout: { kind: "terminal", terminal_id: "secondary" }, panes: [], terminals: [] };
+    const resizing = resizeSessionPane(primary_session, "secondary", "right", 1);
+    const request_id = alias.resizePane.mock.lastCall![3];
+    publishPaneResizeResult({ session: alias_session, attachment_id: "alias", request_id, view, error: null });
+    expect(await resizing).toEqual(view);
+    const zooming = setSessionViewZoom(primary_session, "secondary", baseline);
+    publishSessionView({ session: alias_session, attachment_id: "alias", view });
+    expect(await zooming).toEqual(view);
+    expect(primary.resizePane).not.toHaveBeenCalled();
+    expect(primary.setViewZoom).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [session("same-host", "environment-one"), session("same-host", "environment-two")],
+    [session("alias-one"), session("alias-two")],
+    [session(), session("remote")],
+    [{ ...session("alias-one", "same-environment"), view_id: "first" }, { ...session("alias-two", "same-environment"), view_id: "second" }],
+  ])("does not merge conflicting or unverified view identities", async (selected, other) => {
+    const owner = register("other", other);
+    owner.layoutOwned.mockReturnValue(true);
+    expect(sessionResizeControlStatus(selected)).toBe("unavailable");
+    await expect(resizeSessionPane(selected, "pane", "right", 1)).rejects.toThrow("Take resize control");
+    expect(owner.resizePane).not.toHaveBeenCalled();
+  });
+
+  it("matches unknown remote identity only through the same saved target", () => {
+    const owner = register("owner", session("saved-host"));
+    owner.layoutOwned.mockReturnValue(true);
+    expect(sessionResizeControlStatus(session("saved-host", "discovered-environment"))).toBe("owned");
+    expect(sessionResizeControlStatus(session("another-host", "discovered-environment"))).toBe("unavailable");
+  });
+
   it("routes an exact divider through a secondary layout owner and waits for the matching operation", async () => {
     const root = register("root", session());
     const secondary = register("secondary", { ...session(), terminal_id: "secondary" });

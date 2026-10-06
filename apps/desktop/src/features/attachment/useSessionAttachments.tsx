@@ -8,6 +8,7 @@ import { sameSshEndpoint } from "../workspace/remoteRecovery";
 import type { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment, type AttachmentActions, type ConnectOptions } from "./useAttachment";
 import { useAttachmentNotifications } from "../notifications/useAttachmentNotifications";
+import { requestSessionResizeControl, toggleSessionResizeWithWindow } from "./componentActions";
 
 interface Entry {
   session: SessionSummary;
@@ -163,7 +164,14 @@ export function useSessionAttachments(renderer: XtermRenderer | null): Attachmen
     },
     handleInput: (data) => active()?.handleInput(data),
     toggleInputLease: () => active()?.toggleInputLease() ?? Promise.resolve(),
-    toggleResizeWithWindow: () => active()?.toggleResizeWithWindow() ?? Promise.resolve(),
+    toggleResizeWithWindow: () => {
+      const current = active()?.state;
+      return current?.session ? toggleSessionResizeWithWindow(current.session, current.attachment_id ?? undefined) : Promise.resolve();
+    },
+    requestResizeControl: (acquire) => {
+      const current = active()?.state;
+      return current?.session ? requestSessionResizeControl(current.session, acquire, current.attachment_id ?? undefined) : Promise.resolve();
+    },
     closeSession,
     retainSessions,
     disconnectHost: async (host_id) => {

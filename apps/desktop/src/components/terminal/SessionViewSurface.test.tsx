@@ -55,6 +55,9 @@ beforeEach(() => {
   stop_control = registerAttachmentControl({
     attachmentId: () => "primary-owner", session: () => session,
     layoutOwned: () => true, setViewZoom: mocks.zoom, resizePane: mocks.resize, resizeDivider: mocks.divider,
+    layoutLease: () => ({ held: true, owned_by_client: true }), requestResizeControl: async () => {},
+    resizeWithWindow: () => false, toggleResizeWithWindow: async () => {},
+    enqueueViewportResize: () => {}, proposeViewportSize: () => null,
     reconnect: async () => null, reset: () => {},
   });
 });
@@ -227,6 +230,8 @@ describe("session compositor", () => {
     mocks.resize.mockImplementation(async () => {});
     const resize_other = vi.fn(async () => {});
     const stop_other = registerAttachmentControl({ attachmentId: () => "other-owner", session: () => other_session,
+      layoutLease: () => ({ held: true, owned_by_client: true }), requestResizeControl: async () => {},
+      resizeWithWindow: () => false, toggleResizeWithWindow: async () => {}, enqueueViewportResize: () => {}, proposeViewportSize: () => null,
       layoutOwned: () => true, setViewZoom: async () => {}, resizePane: resize_other, resizeDivider: vi.fn(async () => {}), reconnect: async () => null, reset: () => {} });
     try {
       const prefix_settings = { document: { schema_version: 1 as const, overrides: [] }, bindings: new Map(), platform: "other" as const };

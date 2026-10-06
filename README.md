@@ -489,11 +489,14 @@ watchdog, and Escape cancels the installation.
 Each row and tab carries its host; create, attach, reconnect, and kill
 operations use that host's selected connection method without changing session
 identity.
-It renders one terminal pane and exposes input and layout ownership separately.
-Selecting a session does not resize its PTY. **Resize with window** explicitly
-acquires layout ownership and continuously matches the PTY to the window;
-turning it off releases layout ownership. A session created in the GUI starts
-with this mode enabled because that window establishes its initial layout.
+It renders shared terminal panes and exposes input and resize ownership separately.
+**Take resize control** enables dragging pane dividers and zooming without changing
+the canvas size. **Auto resize** follows the visible window's canvas; **Fixed size**
+stops following it while retaining manual control. **Release resize control**
+releases ownership and stops auto resizing. Ownership status includes background
+attachments in the same GUI window, including verified SSH aliases of the same
+remote environment. A session created in the GUI starts with auto resizing enabled
+because that window establishes its initial layout.
 GUI-created shells receive a daemon-assigned name. **Disconnect** closes the
 active tab and detaches its view while leaving the daemon-owned shell running;
 **Terminate session** explicitly terminates the session for every attached client. Closing

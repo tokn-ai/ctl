@@ -304,6 +304,7 @@ pub enum AttachmentEvent {
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
+    notification: bool,
   },
   ShellStateChanged {
     state: ShellState,
@@ -1492,9 +1493,13 @@ impl<S> AttachmentController<S> {
           .process_resize_result(request_id, outcome, writer_statuses)
           .await
       }
-      ServerMessage::LeaseStatus { lease, status } => {
+      ServerMessage::LeaseStatus {
+        lease,
+        status,
+        notification,
+      } => {
         self
-          .process_lease_status(lease, status, writer_statuses)
+          .process_lease_status(lease, status, notification, writer_statuses)
           .await
       }
       ServerMessage::ShellStateChanged { state } => {
@@ -1663,12 +1668,17 @@ impl<S> AttachmentController<S> {
     &mut self,
     lease: LeaseKind,
     status: LeaseStatus,
+    notification: bool,
     writer_statuses: &mut mpsc::UnboundedReceiver<WriterStatus>,
   ) -> Result<ControllerAction, ClientError> {
     self.state.set_lease(lease, status.clone());
     self
       .emit_event(
-        AttachmentEvent::LeaseStatus { lease, status },
+        AttachmentEvent::LeaseStatus {
+          lease,
+          status,
+          notification,
+        },
         writer_statuses,
       )
       .await
@@ -2607,7 +2617,7 @@ async fn present_interactive_events(
           .acknowledge_geometry_incompatible(observed_sequence)
           .await;
       }
-      AttachmentEvent::LeaseStatus { lease, status } => {
+      AttachmentEvent::LeaseStatus { lease, status, .. } => {
         let owner = if status.owned_by_client {
           "owned by this attachment"
         } else if status.held {
@@ -3121,6 +3131,52 @@ mod tests {
       runner.await.unwrap().unwrap().reason,
       AttachExitReason::Detached
     );
+  }
+
+  #[tokio::test]
+  async fn layout_notifications_preserve_reply_identity_and_update_command_authority() {
+    let (stream, mut daemon) = tokio::io::duplex(4096);
+    let attached = attached_session(0, None, ShellState::default());
+    let (controller, control, mut events) =
+      AttachmentController::new(stream, &attached, controller_options()).unwrap();
+    let runner = tokio::spawn(controller.run());
+    for notification in [false, true] {
+      let status = LeaseStatus {
+        held: !notification,
+        owned_by_client: !notification,
+      };
+      write_frame(
+        &mut daemon,
+        &ServerMessage::LeaseStatus {
+          lease: LeaseKind::Layout,
+          status: status.clone(),
+          notification,
+        },
+      )
+      .await
+      .unwrap();
+      assert_eq!(
+        events.recv().await,
+        Some(AttachmentEvent::LeaseStatus {
+          lease: LeaseKind::Layout,
+          status,
+          notification,
+        })
+      );
+    }
+    assert_eq!(
+      control
+        .resize_pane(
+          "terminal-test".into(),
+          ctmux_proto::ResizeDirection::Right,
+          1,
+          "revoked".into()
+        )
+        .await,
+      Err(AttachmentCommandError::LayoutLeaseRequired)
+    );
+    drop(daemon);
+    runner.await.unwrap().unwrap();
   }
 
   #[tokio::test]

@@ -20,6 +20,16 @@ const request: OpenAttachmentRequest = {
 beforeEach(() => { vi.resetAllMocks(); });
 
 describe("attachment IPC cancellation", () => {
+  it("keeps the verified environment while retaining saved alias metadata", async () => {
+    const target = { kind: "ssh" as const, destination: "alias", host_id: "saved-host", host_name: "My host", method_id: "ssh-method" };
+    const remote_info = { remote_id: "verified-environment", agent_version: "0.1.0" };
+    ipc.invoke.mockResolvedValue({ attachment_id: "active", session: {
+      session_id: "shell", target: { kind: "ssh", destination: "alias", remote_info },
+    } } as OpenAttachmentResponse);
+    const result = await openAttachment({ ...request, target }, vi.fn());
+    expect(result.attached.session.target).toEqual({ ...target, remote_info });
+    expect(ipc.invoke.mock.calls[0][1].request.cache_host_key).toBe("host:saved-host");
+  });
   it("queues an exact divider target and lossless revision through the owning attachment", async () => {
     const request = { attachment_id: "owner", request_id: "operation", view_id: "view",
       expected_revision: "18446744073709551615", split_path: [0, 2], boundary: 1, position: 60 };

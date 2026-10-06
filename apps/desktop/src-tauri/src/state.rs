@@ -823,9 +823,11 @@ async fn forward_event(
       attachment_id: actor.attachment_id.clone(),
       view: view.into(),
     },
-    AttachmentEvent::LeaseStatus { lease, status } => {
-      AttachmentEventDto::lease_status(&actor.attachment_id, lease, status)
-    }
+    AttachmentEvent::LeaseStatus {
+      lease,
+      status,
+      notification,
+    } => AttachmentEventDto::lease_status(&actor.attachment_id, lease, status, notification),
     AttachmentEvent::ShellStateChanged { state } => {
       AttachmentEventDto::shell_state_changed(&actor.attachment_id, state)
     }

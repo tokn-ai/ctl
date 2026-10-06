@@ -35,6 +35,7 @@ import { COMPONENT_RESET_EVENT } from "../features/about/useComponentActionEvent
 import { useAttachmentNotifications } from "../features/notifications/useAttachmentNotifications";
 import { useManualReconnect } from "../features/attachment/ManualReconnect";
 import { sessionKey } from "../features/targets/targets";
+import { registerAttachmentControl, requestSessionResizeControl } from "../features/attachment/componentActions";
 
 const nativeEvents = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
@@ -132,6 +133,7 @@ const attachment = vi.hoisted(() => ({
     history_gap: false,
     terminal_size_mismatch: false,
     resize_with_window: false,
+    resize_control_desired: false,
     message: null,
   },
   connect: vi.fn(),
@@ -140,6 +142,7 @@ const attachment = vi.hoisted(() => ({
   handleInput: vi.fn(),
   toggleInputLease: vi.fn(),
   toggleResizeWithWindow: vi.fn(),
+  requestResizeControl: vi.fn(),
   cancelPendingConnection: vi.fn(),
   resetAfterDaemonRestart: vi.fn(),
   forgetRestartedSessions: vi.fn(),
@@ -219,6 +222,10 @@ beforeEach(() => {
   attachment.state.message = null;
   attachment.state.session = null;
   attachment.state.shell_state = null;
+  attachment.state.layout_lease = { held: false, owned_by_client: false };
+  attachment.state.resize_with_window = false;
+  attachment.state.resize_control_desired = false;
+  attachment.requestResizeControl.mockReset().mockResolvedValue(undefined);
   attachment.states = [];
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   nativeWindow.onCloseRequested.mockResolvedValue(() => {});
@@ -337,6 +344,32 @@ function nativeCommand(commandId: string, count = 1) {
 }
 
 describe("workspace-backed terminal page", () => {
+  it("shows and releases a verified alias owner in this window instead of reporting another client", async () => {
+    const selected: SessionSummary = { ...newSession({ kind: "ssh", host_id: "test-id", destination: "test", remote_info: remoteInfo }),
+      session_id: "known-id", terminal_id: "primary", view_id: "shared-view" };
+    const alias: SessionSummary = { ...selected, terminal_id: "secondary",
+      target: { kind: "ssh", host_id: "alias-id", destination: "same-server", remote_info: remoteInfo } };
+    Object.assign(attachment.state, { phase: "attached", attachment_id: "primary", session: selected,
+      layout_lease: { held: true, owned_by_client: false } });
+    const release = vi.fn(async () => {});
+    const stop = registerAttachmentControl({ attachmentId: () => "alias-owner", session: () => alias,
+      layoutOwned: () => true, layoutLease: () => ({ held: true, owned_by_client: true }), requestResizeControl: release,
+      resizeWithWindow: () => false, toggleResizeWithWindow: async () => {}, enqueueViewportResize: () => {}, proposeViewportSize: () => null,
+      reconnect: async () => null, reset: () => {}, setViewZoom: async () => {}, resizeDivider: async () => {}, resizePane: async () => {} });
+    attachment.requestResizeControl.mockImplementation((acquire: boolean) => requestSessionResizeControl(selected, acquire, "primary"));
+    try {
+      render(<TerminalPage />);
+      await screen.findByRole("button", { name: "Host settings for test" });
+      await screen.findByRole("button", { name: "Release resize control" });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Release resize control" }).hasAttribute("disabled")).toBe(false));
+      expect(screen.getByLabelText("Resize control status").textContent).toBe("Resize: Owned here");
+      expect(screen.queryByText("OTHER SIZE")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Release resize control" }));
+      await waitFor(() => expect(release).toHaveBeenCalledExactlyOnceWith(false));
+      expect(attachment.toggleResizeWithWindow).not.toHaveBeenCalled();
+    } finally { cleanup(); stop(); }
+  });
+
   it("remembers and opens a remote shell created while another window restarts local ctmuxd", async () => {
     let finish!: (session: SessionSummary) => void;
     api.createSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));

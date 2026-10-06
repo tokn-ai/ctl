@@ -648,6 +648,7 @@ pub enum AttachmentEventDto {
     attachment_id: String,
     lease: LeaseKindDto,
     status: LeaseStatusDto,
+    notification: bool,
   },
   ShellStateChanged {
     attachment_id: String,
@@ -746,11 +747,17 @@ impl AttachmentEventDto {
     }
   }
 
-  pub fn lease_status(attachment_id: &str, lease: LeaseKind, status: LeaseStatus) -> Self {
+  pub fn lease_status(
+    attachment_id: &str,
+    lease: LeaseKind,
+    status: LeaseStatus,
+    notification: bool,
+  ) -> Self {
     Self::LeaseStatus {
       attachment_id: attachment_id.into(),
       lease: lease.into(),
       status: status.into(),
+      notification,
     }
   }
 
@@ -1221,6 +1228,25 @@ mod tests {
 #[cfg(test)]
 mod pane_resize_tests {
   use super::*;
+
+  #[test]
+  fn lease_status_preserves_notification_origin_for_frontend_intent_matching() {
+    for notification in [true, false] {
+      let value = serde_json::to_value(AttachmentEventDto::lease_status(
+        "owner",
+        LeaseKind::Layout,
+        LeaseStatus {
+          held: true,
+          owned_by_client: false,
+        },
+        notification,
+      ))
+      .unwrap();
+      assert_eq!(value["event_type"], "lease_status");
+      assert_eq!(value["notification"], notification);
+      assert_eq!(value["status"]["owned_by_client"], false);
+    }
+  }
 
   fn divider_request() -> serde_json::Value {
     serde_json::json!({

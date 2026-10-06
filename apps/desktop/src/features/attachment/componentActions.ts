@@ -1,5 +1,5 @@
-import type { ComponentReconnectResult, ComponentSessionsReset, DividerResize, ResizeDirection, SessionSummary, SessionView } from "../../lib/types";
-import { sameSession } from "../targets/targets";
+import type { ComponentReconnectResult, ComponentSessionsReset, DividerResize, LeaseStatus, ResizeDirection, SessionSummary, SessionView, TerminalSize } from "../../lib/types";
+import { sameTarget } from "../targets/targets";
 
 interface AttachmentControl {
   attachmentId(): string | null;
@@ -7,6 +7,12 @@ interface AttachmentControl {
   reconnect(expected_id: string): Promise<string | null>;
   reset(): void;
   layoutOwned(): boolean;
+  layoutLease(): LeaseStatus | null;
+  requestResizeControl(acquire: boolean): Promise<void>;
+  resizeWithWindow(): boolean;
+  toggleResizeWithWindow(initial_size?: TerminalSize): Promise<void>;
+  enqueueViewportResize(size: TerminalSize): void;
+  proposeViewportSize(): TerminalSize | null;
   setViewZoom(terminal_id: string | null): Promise<void>;
   resizeDivider(divider: DividerResize, request_id: string): Promise<void>;
   resizePane(terminal_id: string, direction: ResizeDirection, amount: number, request_id: string): Promise<void>;
@@ -15,6 +21,24 @@ interface AttachmentControl {
 // Each webview has its own module registry. Every root, background tab, and
 // split pane registers here so a native window-scoped event reaches all owners.
 const controls = new Set<AttachmentControl>();
+
+export type ResizeControlStatus = "owned" | "available" | "held_elsewhere" | "unavailable";
+
+/** Saved aliases may lead to the same verified daemon and shared view. */
+function sameAttachedView(left: SessionSummary | null | undefined, right: SessionSummary): boolean {
+  if (!left || left.session_id !== right.session_id ||
+    left.view_id && right.view_id && left.view_id !== right.view_id) return false;
+  if (left.target.kind === "ssh" && right.target.kind === "ssh") {
+    const left_remote = left.target.remote_info?.remote_id;
+    const right_remote = right.target.remote_info?.remote_id;
+    if (left_remote && right_remote) return left_remote === right_remote;
+  }
+  return sameTarget(left.target, right.target);
+}
+
+function attachedControls(session: SessionSummary): AttachmentControl[] {
+  return [...controls].filter((control) => control.attachmentId() && control.layoutLease() && sameAttachedView(control.session(), session));
+}
 
 type SessionViewChange = {
   session: SessionSummary;
@@ -34,7 +58,67 @@ export function sessionLayoutOwned(session: SessionSummary | null): boolean {
   return Boolean(session && layoutOwner(session));
 }
 function layoutOwner(session: SessionSummary): AttachmentControl | undefined {
-  return [...controls].find((control) => control.attachmentId() && sameSession(control.session(), session) && control.layoutOwned());
+  return attachedControls(session).find((control) => control.layoutOwned());
+}
+
+export function sessionResizeControlStatus(session: SessionSummary | null): ResizeControlStatus {
+  if (!session) return "unavailable";
+  const attached = attachedControls(session);
+  if (attached.some((control) => control.layoutOwned())) return "owned";
+  if (attached.some((control) => control.layoutLease()?.held)) return "held_elsewhere";
+  return attached.length ? "available" : "unavailable";
+}
+
+export function sessionResizeWithWindow(session: SessionSummary | null): boolean | null {
+  if (!session) return null;
+  const owner = layoutOwner(session);
+  return owner ? owner.resizeWithWindow() : null;
+}
+
+function preferredControl(attached: AttachmentControl[], session: SessionSummary, preferred_attachment_id?: string | null): AttachmentControl | undefined {
+  return attached.find((control) => control.attachmentId() === preferred_attachment_id)
+    ?? attached.find((control) => control.session()?.terminal_id === session.terminal_id)
+    ?? attached[0];
+}
+
+export async function toggleSessionResizeWithWindow(session: SessionSummary, preferred_attachment_id?: string | null): Promise<void> {
+  const attached = attachedControls(session);
+  const control = attached.find((candidate) => candidate.layoutOwned()) ?? preferredControl(attached, session, preferred_attachment_id);
+  if (!control) throw new Error("Attach to a running session before resizing with the window.");
+  await control.toggleResizeWithWindow(proposeSessionViewportSize(session, preferred_attachment_id) ?? undefined);
+}
+
+/** Only full-canvas measurements from an active root may reach its owner. */
+export function resizeSessionViewport(session: SessionSummary, size: TerminalSize): boolean {
+  const owner = layoutOwner(session);
+  if (!owner?.resizeWithWindow()) return false;
+  owner.enqueueViewportResize(size);
+  return true;
+}
+
+export function proposeSessionViewportSize(session: SessionSummary, preferred_attachment_id?: string | null): TerminalSize | null {
+  const attached = attachedControls(session);
+  const preferred = preferredControl(attached, session, preferred_attachment_id);
+  for (const control of preferred ? [preferred, ...attached.filter((control) => control !== preferred)] : attached) {
+    const size = control.proposeViewportSize();
+    if (size) return size;
+  }
+  return null;
+}
+
+/** Release the existing local owner instead of asking a sibling to release it. */
+export async function requestSessionResizeControl(
+  session: SessionSummary,
+  acquire: boolean,
+  preferred_attachment_id?: string | null,
+): Promise<void> {
+  const attached = attachedControls(session);
+  const owner = attached.find((control) => control.layoutOwned());
+  if (owner) { await owner.requestResizeControl(acquire); return; }
+  if (!acquire) return;
+  const primary = preferredControl(attached, session, preferred_attachment_id);
+  if (!primary) throw new Error("Attach to a running session before taking resize control.");
+  await primary.requestResizeControl(true);
 }
 
 export function subscribeSessionViews(listener: (event: SessionViewChange) => void): () => void {
@@ -52,9 +136,7 @@ export async function setSessionViewZoom(
   terminal_id: string | null,
   baseline: Pick<SessionView, "view_id" | "revision" | "zoomed_terminal_id">,
 ): Promise<SessionView> {
-  const owner = [...controls].find((control) =>
-    control.attachmentId() && sameSession(control.session(), session) && control.layoutOwned(),
-  );
+  const owner = layoutOwner(session);
   if (!owner) throw new Error("Take resize control to zoom panes.");
   const attachment_id = owner.attachmentId()!;
   const baseline_revision = BigInt(baseline.revision);
@@ -70,7 +152,7 @@ export async function setSessionViewZoom(
       else reject(failure);
     };
     const stop = subscribeSessionViews((event) => {
-      if (event.attachment_id !== attachment_id || !sameSession(event.session, session)) return;
+      if (event.attachment_id !== attachment_id || !sameAttachedView(event.session, session)) return;
       if (event.error !== undefined) finish(null, new Error(event.error));
       else if (event.view.session_id === session.session_id &&
         event.view.view_id === baseline.view_id && event.view.zoomed_terminal_id === terminal_id &&
@@ -132,7 +214,7 @@ function confirmResize(
       else reject(failure);
     };
     const listener = (event: PaneResizeResult) => {
-      if (event.attachment_id !== attachment_id || event.request_id !== request_id || !sameSession(event.session, session)) return;
+      if (event.attachment_id !== attachment_id || event.request_id !== request_id || !sameAttachedView(event.session, session)) return;
       if (event.error) finish(null, new Error(event.error.message));
       else if (event.view.session_id === session.session_id) finish(event.view);
     };

@@ -463,7 +463,12 @@ export async function openAttachment(
     return {
       attached: {
         ...attached,
-        session: { ...attached.session, target: request.target },
+        session: {
+          ...attached.session,
+          target: request.target.kind === "ssh" && attached.session.target?.kind === "ssh"
+            ? { ...request.target, remote_info: attached.session.target.remote_info ?? request.target.remote_info }
+            : request.target,
+        },
       },
       channel,
     };

@@ -59,6 +59,7 @@ function setup(
     confirmCloseSession: vi.fn(),
     toggleInput: vi.fn(),
     toggleResizeWithWindow: vi.fn(),
+    requestResizeControl: vi.fn(),
     reconnect: vi.fn(),
     focusTerminal: vi.fn(),
     requestDaemonRestart: vi.fn(),
@@ -79,6 +80,7 @@ function setup(
     phase,
     inputOwned: true,
     resizeWithWindow: false,
+    resizeControlStatus: "available",
     listLoading: false,
     creating: false,
     newShellOpen: false,
@@ -108,6 +110,23 @@ function findCommand(
 }
 
 describe("terminal commands", () => {
+  it.each([
+    ["available", "Take Resize Control", true, true],
+    ["owned", "Release Resize Control", true, false],
+    ["held_elsewhere", "Take Resize Control", true, true],
+    ["unavailable", "Take Resize Control", false, true],
+  ] as const)("separates manual control from auto resize when control is %s", (status, title, enabled, acquire) => {
+    const { context, actions } = setup();
+    const commands = buildTerminalCommands({ ...context, resizeControlStatus: status }, actions);
+    const control = findCommand(commands, COMMAND_IDS.toggleResizeControl);
+    expect(control).toMatchObject({ title, enabled, focusTerminalAfterRun: false });
+    if (enabled) {
+      control.run();
+      expect(actions.requestResizeControl).toHaveBeenCalledExactlyOnceWith(acquire);
+      expect(actions.toggleResizeWithWindow).not.toHaveBeenCalled();
+    }
+    expect(findCommand(commands, COMMAND_IDS.toggleResize).enabled).toBe(true);
+  });
   it.each(["first", null])("offers the host picker when %s is active and an SSH target is available", (activeSessionId) => {
     const { actions, context } = setup(activeSessionId);
     const commands = buildTerminalCommands({ ...context, targets: [
@@ -458,6 +477,7 @@ describe("terminal commands", () => {
 
     expect(findCommand(commands, COMMAND_IDS.toggleInput).enabled).toBe(false);
     expect(findCommand(commands, COMMAND_IDS.toggleResize).enabled).toBe(false);
+    expect(findCommand(commands, COMMAND_IDS.toggleResizeControl).enabled).toBe(false);
     expect(findCommand(commands, COMMAND_IDS.reconnect).enabled).toBe(false);
   });
 

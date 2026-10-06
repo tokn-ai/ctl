@@ -232,6 +232,13 @@ separate attachment-bound leases:
 - `acquire_lease` and `release_lease` adjust one capability after attaching.
   The daemon replies with `lease_status`, whose `owned_by_client` field is
   relative to that attachment; other attachment identities are not exposed.
+- Contract `1.1.16` also sends changed layout ownership to affected attachments
+  after acquire/release, detach, reconnect-grace expiry, and topology changes.
+  These unsolicited `lease_status` frames contain `notification: true`.
+  Direct replies omit this field (default `false`), so an ownership notification
+  cannot acknowledge a pending lease request. Earlier contracts receive only
+  direct replies. Clients resolve the status against the terminal's current view;
+  notifications can coalesce intermediate changes.
 - `attached` contains the initial input and layout lease statuses.
 - `input` requires the input lease, and `resize` requires the layout lease.
   An unauthorized command receives a structured error but does not terminate

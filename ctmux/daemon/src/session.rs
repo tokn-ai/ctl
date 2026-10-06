@@ -80,6 +80,7 @@ pub struct Terminal {
   lifecycle: Mutex<SessionLifecycle>,
   shell_state_publisher: ShellStatePublisher,
   view_updates: watch::Sender<Option<ctmux_proto::ViewInfo>>,
+  layout_lease_updates: watch::Sender<()>,
   #[cfg(unix)]
   shell_reporter: Mutex<Option<ShellReporter>>,
   process_observation_enabled: AtomicBool,
@@ -335,7 +336,20 @@ impl ShellStatePublication<'_> {
 }
 
 impl Terminal {
-  fn with_view_leases<T: Default>(
+  fn with_view_leases<T: Default>(&self, action: impl FnOnce(&AttachmentLeaseRegistry) -> T) -> T {
+    let Some(manager) = self.manager.upgrade() else {
+      return T::default();
+    };
+    let registry = lock(&manager.registry);
+    let owner = lock(&self.owner).session_id.clone();
+    registry
+      .sessions
+      .get(&owner)
+      .map(|root| action(&root.view.leases))
+      .unwrap_or_default()
+  }
+
+  fn change_view_leases<T: Default>(
     &self,
     action: impl FnOnce(&mut AttachmentLeaseRegistry) -> T,
   ) -> T {
@@ -344,11 +358,13 @@ impl Terminal {
     };
     let mut registry = lock(&manager.registry);
     let owner = lock(&self.owner).session_id.clone();
-    registry
+    let result = registry
       .sessions
       .get_mut(&owner)
       .map(|root| action(&mut root.view.leases))
-      .unwrap_or_default()
+      .unwrap_or_default();
+    registry.publish_layout_leases(&owner);
+    result
   }
 
   pub fn info(&self) -> SessionInfo {
@@ -391,6 +407,14 @@ impl Terminal {
 
   pub fn subscribe_view(&self) -> watch::Receiver<Option<ctmux_proto::ViewInfo>> {
     self.view_updates.subscribe()
+  }
+
+  pub fn subscribe_layout_leases(&self) -> watch::Receiver<()> {
+    self.layout_lease_updates.subscribe()
+  }
+
+  pub fn layout_lease_status(&self, attachment_id: &str) -> LeaseStatus {
+    self.with_view_leases(|leases| leases.status(attachment_id, LeaseKind::Layout))
   }
 
   /// Returns the latest state without live command metadata.
@@ -458,7 +482,7 @@ impl Terminal {
     let leases = lock(&self.leases).request_initial(&attachment_id, request_input_lease, false);
     let leases = AttachmentLeases {
       input: leases.input,
-      layout: self.with_view_leases(|leases| {
+      layout: self.change_view_leases(|leases| {
         leases
           .request_initial(&attachment_id, false, request_layout_lease)
           .layout
@@ -531,7 +555,7 @@ impl Terminal {
     };
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
-      self.with_view_leases(|leases| leases.release_attachment(&attachment_id));
+      self.change_view_leases(|leases| leases.release_attachment(&attachment_id));
     }
   }
 
@@ -551,20 +575,20 @@ impl Terminal {
     };
     if let Some(attachment_id) = attachment_id {
       lock(&self.leases).release_attachment(&attachment_id);
-      self.with_view_leases(|leases| leases.release_attachment(&attachment_id));
+      self.change_view_leases(|leases| leases.release_attachment(&attachment_id));
     }
   }
 
   pub fn acquire_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     if lease == LeaseKind::Layout {
-      return self.with_view_leases(|leases| leases.acquire(attachment_id, lease));
+      return self.change_view_leases(|leases| leases.acquire(attachment_id, lease));
     }
     lock(&self.leases).acquire(attachment_id, lease)
   }
 
   pub fn release_lease(&self, attachment_id: &str, lease: LeaseKind) -> LeaseStatus {
     if lease == LeaseKind::Layout {
-      return self.with_view_leases(|leases| leases.release(attachment_id, lease));
+      return self.change_view_leases(|leases| leases.release(attachment_id, lease));
     }
     lock(&self.leases).release(attachment_id, lease)
   }
@@ -1426,6 +1450,7 @@ impl SessionManager {
       lifecycle: Mutex::new(SessionLifecycle::Running),
       shell_state_publisher: ShellStatePublisher::new(shell_state),
       view_updates: watch::channel(None).0,
+      layout_lease_updates: watch::channel(()).0,
       #[cfg(unix)]
       shell_reporter: Mutex::new(Some(shell_reporter)),
       process_observation_enabled: AtomicBool::new(process_inspector.is_some()),
@@ -2518,6 +2543,78 @@ mod tests {
     assert!(matches!(result, Err(SessionControlError::Pty(_))));
     assert_eq!(fixture.manager.view(&before.session_id).unwrap(), before);
     assert_eq!(secondary.info().terminal_size, secondary_size);
+  }
+
+  #[test]
+  fn failed_topology_reflow_notifies_current_layout_ownership() {
+    let fixture = PtyViewFixture::new();
+    let moved = &fixture.terminals[0];
+    let remaining = &fixture.terminals[1];
+    let failed = &fixture.terminals[2];
+    let original_session = moved.info().session_id;
+    let owner = moved.create_attachment(true, true);
+    let observer = remaining.create_attachment(false, false);
+    let mut old_view_updates = remaining.subscribe_view();
+    let mut old_lease_updates = remaining.subscribe_layout_leases();
+    old_view_updates.borrow_and_update();
+    old_lease_updates.borrow_and_update();
+
+    // Promotion changes ownership even when resizing the surviving view fails.
+    let master = lock(&failed.master).take();
+    let promoted = fixture
+      .manager
+      .promote_terminal(&moved.id, Some("moved".into()))
+      .unwrap();
+    *lock(&failed.master) = master;
+    assert!(!old_view_updates.has_changed().unwrap());
+    assert!(old_lease_updates.has_changed().unwrap());
+    assert_eq!(
+      remaining.layout_lease_status(&observer.attachment_id),
+      LeaseStatus::default()
+    );
+    assert_eq!(
+      moved.layout_lease_status(&owner.attachment_id),
+      LeaseStatus::default()
+    );
+
+    assert!(
+      moved
+        .acquire_lease(&owner.attachment_id, LeaseKind::Layout)
+        .owned_by_client
+    );
+    assert!(
+      remaining
+        .acquire_lease(&observer.attachment_id, LeaseKind::Layout)
+        .owned_by_client
+    );
+    let mut moved_view_updates = moved.subscribe_view();
+    let mut moved_lease_updates = moved.subscribe_layout_leases();
+    moved_view_updates.borrow_and_update();
+    moved_lease_updates.borrow_and_update();
+
+    // The source registry is discarded before destination PTY reflow. Its
+    // former owner must learn that the destination's owner now controls it.
+    let master = lock(&failed.master).take();
+    let merged = fixture
+      .manager
+      .merge_sessions(&promoted.session_id, &original_session);
+    *lock(&failed.master) = master;
+    assert!(matches!(merged, Err(SessionManagerError::Pty(_))));
+    assert_eq!(moved.info().session_id, original_session);
+    assert!(!moved_view_updates.has_changed().unwrap());
+    assert!(moved_lease_updates.has_changed().unwrap());
+    assert_eq!(
+      moved.layout_lease_status(&owner.attachment_id),
+      LeaseStatus {
+        held: true,
+        owned_by_client: false
+      }
+    );
+    assert!(
+      remaining
+        .layout_lease_status(&observer.attachment_id)
+        .owned_by_client
+    );
   }
 
   #[test]

@@ -78,6 +78,10 @@ and an absolute cell position for mouse dragging. Earlier clients receive
 the authoritative pane rectangles with weights omitted; compatible arrangement
 updates preserve existing proportions, and ambiguous weighted restructures are
 rejected. New clients disable divider resizing when an earlier contract is selected.
+The same `1.1.16` development cycle adds layout ownership notifications marked
+with `lease_status.notification: true`. Direct replies omit this field, which
+defaults to false. Notifications are gated to `1.1.16` so older peers keep their
+response-only lease behavior.
 
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.

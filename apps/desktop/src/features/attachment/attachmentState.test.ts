@@ -12,6 +12,17 @@ const opened = {
 };
 
 describe("attachment lifecycle", () => {
+  it.each([false, true])("reports unavailable resize control accurately (held=%s)", (held) => {
+    const connecting = transitionAttachment(initialAttachmentState(), { type: "begin", intent: "attach", session, resume_from: null,
+      resize_with_window: false, resize_control_desired: true });
+    const next = transitionAttachment(connecting, { type: "attached", resize_with_window: false, response: {
+      attachment_id: "actor", session, replay_from: "0", history_gap: false, terminal_size_mismatch: false,
+      input_lease: { held: false, owned_by_client: false }, layout_lease: { held, owned_by_client: false },
+      shell_state: { shell_type: "unknown", cwd: null, running_command: null, prompt_phase: "unknown", tui_hint: "unknown", revision: "0", observed_sequence: "0" },
+    } });
+    expect(next.message).toBe(held ? "Another attachment holds resize control." : "Resize control is available. Take resize control to resize panes.");
+    expect(next.resize_control_desired).toBe(true);
+  });
   it.each([null, "0", "123"])("derives connection intent independently of cursor %s", (resume_from) => {
     for (const intent of ["attach", "reconnect"] as const) {
       const next = transitionAttachment(initialAttachmentState(), { type: "begin", intent, session, resume_from, resize_with_window: false });

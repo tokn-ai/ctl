@@ -292,9 +292,17 @@ snaps to terminal cells, and the daemon clamps movement at subtree minimum sizes
 The existing line has a wider hit area without changing PTY dimensions. Resizing
 does not move focus or remount terminal renderers.
 
-Dragging requires the view's resize lease. The toolbar's **Resize with window**
-control (shown as **Fixed size** when inactive and **Auto resize** when active)
-requests that lease; it cannot displace another owner. A drag stops on Escape,
+Dragging requires the view's resize lease. **Take resize control** acquires it
+without resizing the canvas; it cannot displace another owner. **Auto resize**
+follows the visible full canvas viewport. **Fixed size** stops auto resizing while
+retaining control of pane sizing and zoom. **Release resize control** releases
+ownership and stops auto resizing. The toolbar and status row recognize the owner
+among all attachments in this GUI window, including saved SSH aliases verified
+against the same remote identity. Pane actions and viewport measurements route
+through that owner, so selecting another pane or alias does not require acquiring
+the lease again. Secondary pane measurements never resize the shared canvas.
+Ownership changes update observers as owners release control, detach, or expire,
+and when panes move between views. A drag stops on Escape,
 pointer cancellation, window blur, disconnection, lease loss, pane exit, zoom,
 or a changed layout/canvas. Mouse release keeps the final requested position;
 already confirmed movement remains applied. Each confirmed resize is visible

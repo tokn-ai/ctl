@@ -185,6 +185,22 @@ impl SessionRegistry {
         });
       }
     }
+    // A terminal can move between views without replacing its attachment.
+    // Refresh ownership against its current view after every topology update.
+    self.publish_layout_leases(id);
+  }
+
+  pub(super) fn publish_layout_leases(&self, id: &str) {
+    let Some(root) = self.sessions.get(id) else {
+      return;
+    };
+    for terminal_id in root.view.layout.terminal_ids() {
+      if let Some(terminal) = self.terminals.get(&terminal_id) {
+        // This watch is an invalidation signal, independent of canonical PTY
+        // events. Drivers query current ownership and suppress unchanged state.
+        terminal.layout_lease_updates.send_replace(());
+      }
+    }
   }
 
   pub(super) fn reflow_view(&mut self, id: &str) -> Result<(), super::SessionControlError> {
@@ -298,6 +314,8 @@ impl SessionRegistry {
         self.sessions.remove(&owner_id);
       }
     }
+    // Lease changes are committed independently of fallible PTY reflow.
+    self.publish_layout_leases(&owner_id);
     let _ = self.reflow_view(&owner_id);
   }
 
@@ -415,6 +433,7 @@ impl SessionManager {
     );
     registry.pending_names.remove(&reservation.name);
     reservation.active = false;
+    registry.publish_layout_leases(&owner.session_id);
     registry.publish_view(&owner.session_id);
     registry.view_info(&owner.session_id)
   }
@@ -487,6 +506,9 @@ impl SessionManager {
     for id in moved_ids {
       *lock(&registry.terminals[&id].owner) = owner.clone();
     }
+    // Source attachments now consult the destination registry even if its
+    // geometry update fails before a view snapshot can be published.
+    registry.publish_layout_leases(&destination_id);
     registry
       .reflow_view(&destination_id)
       .map_err(|error| SessionManagerError::Pty(error.to_string()))?;

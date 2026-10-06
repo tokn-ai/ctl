@@ -34,6 +34,11 @@ pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
 }
 
 #[must_use]
+pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_16)
+}
+
+#[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
   ProtocolOffer::new(
     PROTOCOL_BUILD,
@@ -871,6 +876,10 @@ pub enum ServerMessage {
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
+    /// Contract 16 unsolicited state refresh. Direct replies omit this field
+    /// to preserve the historical response-only wire shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    notification: bool,
   },
   /// Echoes an attached client's heartbeat nonce.
   HeartbeatAck {
@@ -1239,6 +1248,7 @@ mod tests {
         held: true,
         owned_by_client: false,
       },
+      notification: false,
     };
     let (mut server, mut client) = tokio::io::duplex(1024);
 
@@ -1254,7 +1264,39 @@ mod tests {
           held: true,
           owned_by_client: false,
         },
+        notification: false,
       }
+    );
+  }
+
+  #[test]
+  fn lease_notifications_are_distinct_from_historical_replies() {
+    let reply = serde_json::json!({
+      "type": "lease_status", "lease": "layout",
+      "status": { "held": false, "owned_by_client": false }
+    });
+    let status: ServerMessage = serde_json::from_value(reply.clone()).unwrap();
+    assert!(matches!(
+      status,
+      ServerMessage::LeaseStatus {
+        notification: false,
+        ..
+      }
+    ));
+    assert_eq!(serde_json::to_value(status).unwrap(), reply);
+    let notification = ServerMessage::LeaseStatus {
+      lease: LeaseKind::Layout,
+      status: LeaseStatus {
+        held: false,
+        owned_by_client: false,
+      },
+      notification: true,
+    };
+    let value = serde_json::to_value(&notification).unwrap();
+    assert_eq!(value["notification"], true);
+    assert_eq!(
+      serde_json::from_value::<ServerMessage>(value).unwrap(),
+      notification
     );
   }
 

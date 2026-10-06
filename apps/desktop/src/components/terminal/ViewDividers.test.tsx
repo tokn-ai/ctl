@@ -73,6 +73,9 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true, value(this: HTMLElement, pointer_id: number) { return captured.get(this) === pointer_id; } });
   Object.defineProperty(HTMLElement.prototype, "releasePointerCapture", { configurable: true, value(this: HTMLElement) { captured.delete(this); } });
   stops.push(registerAttachmentControl({ attachmentId: () => "owner", session: () => session, layoutOwned: () => owned,
+    layoutLease: () => ({ held: owned, owned_by_client: owned }), requestResizeControl: async () => {},
+    resizeWithWindow: () => false, toggleResizeWithWindow: async () => {},
+    enqueueViewportResize: () => {}, proposeViewportSize: () => null,
     resizeDivider: resize, resizePane: async () => {}, setViewZoom: async () => {}, reconnect: async () => null, reset: () => {} }));
 });
 afterEach(() => {

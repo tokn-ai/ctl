@@ -617,7 +617,11 @@ async fn read_history_bytes(
         ServerMessage::Output { sequence_end, .. } => {
           acknowledge_output(stream, sequence_end).await?;
         }
-        ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
+        ServerMessage::ViewSnapshot { .. }
+        | ServerMessage::ShellStateChanged { .. }
+        | ServerMessage::LeaseStatus {
+          notification: true, ..
+        } => {}
         other => {
           return Err(format!("history was interrupted before completion: {other:?}").into());
         }
@@ -641,7 +645,11 @@ async fn expect_history_expired(stream: &mut UnixStream, expected: &str) -> Test
         assert_eq!(snapshot_id, expected);
         return Ok(());
       }
-      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       other => {
         return Err(format!("expected scoped history expiration, received {other:?}").into());
       }
@@ -656,7 +664,11 @@ async fn raw_history_page(stream: &mut UnixStream) -> TestResult<ServerMessage> 
       ServerMessage::Output { sequence_end, .. } => {
         acknowledge_output(stream, sequence_end).await?;
       }
-      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       other => return Err(format!("expected history page, received {other:?}").into()),
     }
   }
@@ -678,7 +690,11 @@ async fn raw_checkpoint(
       ServerMessage::Output { sequence_end, .. } => {
         acknowledge_output(stream, sequence_end).await?;
       }
-      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       other => return Err(format!("expected replacing checkpoint, received {other:?}").into()),
     }
   }
@@ -750,7 +766,11 @@ async fn presentation_window_pauses_output_without_blocking_heartbeats() -> Test
       ServerMessage::Output { .. } => {
         return Err("daemon exceeded presentation credit before renderer progress".into());
       }
-      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       message => {
         return Err(format!("unexpected message before heartbeat ACK: {message:?}").into());
       }
@@ -2215,7 +2235,10 @@ async fn wait_for_tui_hint(stream: &mut UnixStream, expected: ctmux_proto::TuiHi
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       response => {
         return Err(format!("expected tui hint {expected:?}, received {response:?}").into());
       }
@@ -2240,7 +2263,10 @@ async fn wait_for_unredacted_command_line(
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       message => {
         return Err(format!("expected unredacted shell state, received {message:?}").into());
       }
@@ -2265,7 +2291,10 @@ async fn wait_for_visible_running_command(
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       message => {
         return Err(format!("expected visible running command, received {message:?}").into());
       }
@@ -2290,7 +2319,10 @@ async fn wait_for_redacted_running_command(
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       message => {
         return Err(format!("expected redacted running command, received {message:?}").into());
       }
@@ -2358,7 +2390,10 @@ async fn heartbeat(stream: &mut UnixStream, nonce: u64) -> TestResult {
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       response => {
         return Err(format!("expected heartbeat acknowledgement, received {response:?}").into());
       }
@@ -2372,18 +2407,347 @@ async fn lease_status_response(
 ) -> TestResult<LeaseStatus> {
   loop {
     match presented_message(stream).await? {
-      ServerMessage::LeaseStatus { lease, status } => {
-        assert_eq!(lease, expected_lease);
-        return Ok(status);
+      ServerMessage::LeaseStatus {
+        lease,
+        status,
+        notification: false,
+      } if lease == expected_lease => return Ok(status),
+      ServerMessage::LeaseStatus {
+        notification: false,
+        ..
+      }
+      | ServerMessage::Output { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
+      response => return Err(format!("expected lease status, received {response:?}").into()),
+    }
+  }
+}
+
+/// A heartbeat is a stream-order barrier: capture all ownership changes sent
+/// before it, including accidental duplicate replies to the requester.
+async fn layout_statuses_before_heartbeat(
+  stream: &mut UnixStream,
+  nonce: u64,
+) -> TestResult<Vec<LeaseStatus>> {
+  write_frame(stream, &ClientMessage::Heartbeat { nonce }).await?;
+  let mut statuses = Vec::new();
+  loop {
+    match presented_message(stream).await? {
+      ServerMessage::LeaseStatus {
+        lease: LeaseKind::Layout,
+        status,
+        ..
+      } => statuses.push(status),
+      ServerMessage::HeartbeatAck {
+        nonce: acknowledged,
+      } if acknowledged == nonce => {
+        return Ok(statuses);
       }
       ServerMessage::Output { .. }
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
-      response => return Err(format!("expected lease status, received {response:?}").into()),
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
+      message => {
+        return Err(format!("expected layout notification or barrier, got {message:?}").into());
+      }
     }
   }
+}
+
+async fn wait_for_layout_status(stream: &mut UnixStream, held: bool, owned: bool) -> TestResult {
+  loop {
+    if let ServerMessage::LeaseStatus {
+      lease: LeaseKind::Layout,
+      status,
+      notification,
+    } = presented_message(stream).await?
+    {
+      assert!(
+        notification,
+        "observer updates must be marked as notifications"
+      );
+      assert_lease_status(&status, held, owned);
+      return Ok(());
+    }
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn layout_lease_notifications_reach_observers_without_duplicate_replies() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(&socket, "lease-watch", "IFS= read -r line").await?;
+  let (mut observer, _) = attach_session(&socket, &session.session_id, None, false, false).await?;
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut observer, 1).await?,
+    Vec::<LeaseStatus>::new()
+  );
+  let (mut owner, _) = attach_session(&socket, &session.session_id, None, true, true).await?;
+  wait_for_layout_status(&mut observer, true, false).await?;
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut owner, 2).await?,
+    Vec::<LeaseStatus>::new()
+  );
+
+  write_frame(
+    &mut owner,
+    &ClientMessage::ReleaseLease {
+      lease: LeaseKind::Layout,
+    },
+  )
+  .await?;
+  let replies = layout_statuses_before_heartbeat(&mut owner, 3).await?;
+  assert_eq!(
+    replies.len(),
+    1,
+    "release must have exactly one requester reply"
+  );
+  assert_lease_status(&replies[0], false, false);
+  wait_for_layout_status(&mut observer, false, false).await?;
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut observer, 4).await?,
+    Vec::<LeaseStatus>::new()
+  );
+
+  write_frame(
+    &mut owner,
+    &ClientMessage::AcquireLease {
+      lease: LeaseKind::Layout,
+    },
+  )
+  .await?;
+  let replies = layout_statuses_before_heartbeat(&mut owner, 5).await?;
+  assert_eq!(
+    replies.len(),
+    1,
+    "acquisition must have exactly one requester reply"
+  );
+  assert_lease_status(&replies[0], true, true);
+  wait_for_layout_status(&mut observer, true, false).await?;
+  assert!(
+    acquire_lease(&mut owner, LeaseKind::Layout)
+      .await?
+      .owned_by_client
+  );
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut owner, 6).await?,
+    Vec::<LeaseStatus>::new()
+  );
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut observer, 7).await?,
+    Vec::<LeaseStatus>::new()
+  );
+
+  release_lease(&mut owner, LeaseKind::Layout).await?;
+  timeout(Duration::from_secs(3), observer.readable()).await??;
+  // A release notification is already buffered when this observer requests
+  // ownership. It must never be mistaken for the following acquisition reply.
+  write_frame(
+    &mut observer,
+    &ClientMessage::AcquireLease {
+      lease: LeaseKind::Layout,
+    },
+  )
+  .await?;
+  wait_for_layout_status(&mut observer, false, false).await?;
+  let acquired = lease_status_response(&mut observer, LeaseKind::Layout).await?;
+  assert_lease_status(&acquired, true, true);
+  wait_for_layout_status(&mut owner, true, false).await?;
+  write_frame(&mut owner, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut owner).await?;
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut observer, 8).await?,
+    Vec::<LeaseStatus>::new()
+  );
+  kill_shell_session(&socket, &session.session_id).await?;
+  drop(owner);
+  drop(observer);
+  wait_for_daemon_exit(daemon, "layout watch daemon did not exit").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_layout_lease_peers_keep_response_only_delivery() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let session = create_shell_session(&socket, "lease-compat", "IFS= read -r line").await?;
+  let (mut owner, _) = attach_session(&socket, &session.session_id, None, true, true).await?;
+  for contract in [
+    ctmux_proto::CONTRACT_V1_0_13,
+    ctmux_proto::CONTRACT_V1_1_14,
+    ctmux_proto::CONTRACT_V1_1_15,
+  ] {
+    let mut old = historical_connection(&socket, contract).await?;
+    write_frame(
+      &mut old,
+      &ClientMessage::AttachSession {
+        session: session.session_id.clone(),
+        resume_from: None,
+        terminal_size: TerminalSize::default(),
+        request_input_lease: false,
+        request_layout_lease: false,
+        request_command_line: false,
+        request_running_command: false,
+        presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+      },
+    )
+    .await?;
+    let ServerMessage::Attached { checkpoint, .. } = required_message(&mut old).await? else {
+      panic!("historical attachment expected");
+    };
+    if let Some(checkpoint) = checkpoint {
+      acknowledge_output(&mut old, checkpoint.sequence).await?;
+    }
+    release_lease(&mut owner, LeaseKind::Layout).await?;
+    assert_eq!(
+      layout_statuses_before_heartbeat(&mut old, 16).await?,
+      Vec::<LeaseStatus>::new()
+    );
+    acquire_lease(&mut owner, LeaseKind::Layout).await?;
+    assert_eq!(
+      layout_statuses_before_heartbeat(&mut old, 17).await?,
+      Vec::<LeaseStatus>::new()
+    );
+    let status = acquire_lease(&mut old, LeaseKind::Layout).await?;
+    assert_lease_status(&status, true, false);
+    write_frame(&mut old, &ClientMessage::Detach).await?;
+    wait_for_detached(&mut old).await?;
+  }
+  kill_shell_session(&socket, &session.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "historical lease daemon did not exit").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn layout_lease_notifications_refresh_transferred_attachments() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let source = create_shell_session(&socket, "lease-source", "IFS= read -r line").await?;
+  let split = split_topology_shell(&socket, &source).await?;
+  let (mut moved_owner, _) = attach_session(&socket, &source.terminal_id, None, true, true).await?;
+  let (mut source_observer, _) =
+    attach_session(&socket, &split.terminals[1].terminal_id, None, false, false).await?;
+  let ServerMessage::ViewSnapshot { view: promoted } = topology_request(
+    &socket,
+    ClientMessage::PromoteTerminal {
+      terminal_id: source.terminal_id.clone(),
+      name: Some("lease-promoted".into()),
+    },
+  )
+  .await?
+  else {
+    panic!("promoted view expected");
+  };
+  wait_for_layout_status(&mut moved_owner, false, false).await?;
+  wait_for_layout_status(&mut source_observer, false, false).await?;
+  assert!(
+    acquire_lease(&mut moved_owner, LeaseKind::Layout)
+      .await?
+      .owned_by_client
+  );
+
+  let destination = create_shell_session(&socket, "lease-destination", "IFS= read -r line").await?;
+  let (mut destination_owner, _) =
+    attach_session(&socket, &destination.session_id, None, true, true).await?;
+  topology_request(
+    &socket,
+    ClientMessage::MergeSessions {
+      source: promoted.session_id,
+      destination: destination.session_id.clone(),
+    },
+  )
+  .await?;
+  wait_for_layout_status(&mut moved_owner, true, false).await?;
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut destination_owner, 9).await?,
+    Vec::<LeaseStatus>::new()
+  );
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut source_observer, 10).await?,
+    Vec::<LeaseStatus>::new()
+  );
+  assert!(
+    !acquire_lease(&mut moved_owner, LeaseKind::Layout)
+      .await?
+      .owned_by_client
+  );
+  write_frame(&mut destination_owner, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut destination_owner).await?;
+  wait_for_layout_status(&mut moved_owner, false, false).await?;
+  assert!(
+    acquire_lease(&mut moved_owner, LeaseKind::Layout)
+      .await?
+      .owned_by_client
+  );
+  kill_shell_session(&socket, &source.session_id).await?;
+  kill_shell_session(&socket, &destination.session_id).await?;
+  drop(moved_owner);
+  drop(source_observer);
+  drop(destination_owner);
+  wait_for_daemon_exit(daemon, "transferred lease daemon did not exit").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn layout_lease_expiry_notifies_waiting_observer_without_polling() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon_with_liveness(&socket, 64 * 1024, 4 * 1024, Duration::from_millis(300));
+  let session = create_shell_session(&socket, "lease-expiry", "IFS= read -r line").await?;
+  let (owner, _) = attach_session(&socket, &session.session_id, None, true, true).await?;
+  let (mut observer, _) = attach_session(&socket, &session.session_id, None, false, false).await?;
+  drop(owner);
+  // Keep only the observer alive. It sends no lease query or acquisition.
+  heartbeat(&mut observer, 11).await?;
+  // The read and write halves keep the same transport while expiry publishes
+  // its unsolicited ownership update.
+  let (mut reader, mut writer) = observer.into_split();
+  let renewal = async {
+    for nonce in 12..=15 {
+      sleep(Duration::from_millis(100)).await;
+      write_frame(&mut writer, &ClientMessage::Heartbeat { nonce }).await?;
+    }
+    Ok::<_, Box<dyn Error + Send + Sync>>(())
+  };
+  let receive = async {
+    loop {
+      let Some(message) = read_frame(&mut reader).await? else {
+        return Err("observer disconnected before layout lease expired".into());
+      };
+      if let ServerMessage::LeaseStatus {
+        lease: LeaseKind::Layout,
+        status,
+        notification,
+      } = message
+      {
+        assert!(notification);
+        assert_lease_status(&status, false, false);
+        return Ok::<_, Box<dyn Error + Send + Sync>>(());
+      }
+    }
+  };
+  let (renewed, received) = tokio::join!(renewal, timeout(Duration::from_secs(2), receive));
+  renewed?;
+  received??;
+  kill_shell_session(&socket, &session.session_id).await?;
+  drop(reader);
+  drop(writer);
+  wait_for_daemon_exit(daemon, "lease expiry daemon did not exit").await
 }
 
 async fn acquire_lease_until_owned(
@@ -2414,7 +2778,10 @@ async fn expect_error(stream: &mut UnixStream, expected_code: ErrorCode) -> Test
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       response => return Err(format!("expected error response, received {response:?}").into()),
     }
   }
@@ -2431,7 +2798,10 @@ async fn wait_for_session_end(stream: &mut UnixStream) -> TestResult<Vec<u8>> {
       ServerMessage::Checkpoint { checkpoint, .. } => output = checkpoint.payload,
       ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       response => {
         return Err(format!("expected output or session end, received {response:?}").into());
       }
@@ -2453,7 +2823,10 @@ async fn wait_for_session_end_or_connection_close(stream: &mut UnixStream) -> Te
       | ServerMessage::Checkpoint { .. }
       | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       response => {
         return Err(
           format!("expected output, session end, or close, received {response:?}").into(),
@@ -2710,7 +3083,10 @@ async fn read_output_until_from(
       }
       ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
     }
   }
@@ -2741,7 +3117,10 @@ async fn read_output_until_with_first_sequence(
       ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
       | ServerMessage::Checkpoint { .. }
-      | ServerMessage::PtyGeometryChanged { .. } => {}
+      | ServerMessage::PtyGeometryChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       message => return Err(format!("expected output, received {message:?}").into()),
     }
   }
@@ -2768,7 +3147,10 @@ async fn wait_for_geometry_change(
       ServerMessage::Output { .. }
       | ServerMessage::ViewSnapshot { .. }
       | ServerMessage::ShellStateChanged { .. }
-      | ServerMessage::Checkpoint { .. } => {}
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       message => return Err(format!("expected geometry change, received {message:?}").into()),
     }
   }
@@ -4410,7 +4792,11 @@ async fn assert_view_precedes_control_barrier(
           return Err("view update waited until all ready control traffic drained".into());
         }
       }
-      ServerMessage::ViewSnapshot { .. } | ServerMessage::ShellStateChanged { .. } => {}
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::LeaseStatus {
+        notification: true, ..
+      } => {}
       other => return Err(format!("unexpected observer frame: {other:?}").into()),
     }
   }

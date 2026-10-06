@@ -77,6 +77,7 @@ pub struct App<'a> {
   layout_owner: Option<String>,
   maintenance: Maintenance<'a>,
   runtime: bool,
+  resize_sequence: u64,
 }
 
 impl App<'_> {
@@ -109,6 +110,7 @@ impl App<'_> {
       layout_owner: None,
       maintenance: Maintenance::default(),
       runtime: false,
+      resize_sequence: 0,
     }
   }
 
@@ -1235,6 +1237,21 @@ impl App<'_> {
         });
         self.set_zoom(target).await?;
       }
+      Action::ResizePane { direction, amount } if !self.read_only => {
+        self.release_mouse().await?;
+        self.resize_sequence = self.resize_sequence.wrapping_add(1);
+        let request_id = format!("tui-pane-resize-{}", self.resize_sequence);
+        let owner = self
+          .panes
+          .values_mut()
+          .find(|pane| pane.connected && pane.control.state().leases().layout.owned_by_client)
+          .ok_or("Resize lease required to resize panes")?;
+        // The daemon moves the divider and clears zoom in one mutation. The
+        // regular event drain adopts its view; input and rendering keep running.
+        owner
+          .resize_pane(self.focused.clone(), direction, amount, request_id)
+          .await?;
+      }
       Action::Help => self.overlay = Overlay::Help,
       Action::Sessions => self.overlay = Overlay::Sessions(self.session_index()),
       Action::NextSession => self.next_session(1).await?,
@@ -1251,6 +1268,7 @@ impl App<'_> {
       Action::Paste
       | Action::CreateSession
       | Action::Split(_)
+      | Action::ResizePane { .. }
       | Action::KillPane
       | Action::ToggleLease(_) => {
         self.notice("This attachment is read only".into());
@@ -1729,7 +1747,8 @@ impl App<'_> {
         format!("Commands after {} — any key closes help", self.prefix.label),
         "%: split right    \": split below".into(),
         "Arrows: focus pane    o: next pane    z: zoom    x: terminate (confirm)".into(),
-        "Focus arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
+        "Ctrl/Alt arrows resize panes by 1/5 cells after prefix.".into(),
+        "Focus/resize arrows repeat for 500 ms; other commands need a fresh prefix.".into(),
         "c: new session    n/p: next/previous session    s/w: session list".into(),
         "[: history/copy mode    ]: paste copied text    A: archives".into(),
         "r: redraw    I: take/release input    R: take/release resize".into(),

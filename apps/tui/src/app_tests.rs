@@ -1,12 +1,8 @@
 use super::*;
 use crate::actions::Action;
 use crate::keys::KeyState;
+use crate::test_daemon::TestDaemon as Daemon;
 use ctmux_proto::CommandSpec;
-#[path = "../tests/support/daemon.rs"]
-// Process tests also use this fixture's echo and explicit shutdown helpers.
-#[allow(dead_code)]
-mod daemon;
-use daemon::TestDaemon as Daemon;
 
 struct RelayTransport {
   socket: PathBuf,
@@ -875,8 +871,7 @@ async fn modified_prefix_bindings_do_not_detach_or_change_pane_focus() -> Result
 
   for (code, modifiers) in [
     (KeyCode::Char('d'), KeyModifiers::CONTROL),
-    (KeyCode::Right, KeyModifiers::CONTROL),
-    (KeyCode::Right, KeyModifiers::ALT),
+    (KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::ALT),
     (KeyCode::Right, KeyModifiers::SHIFT),
     (KeyCode::PageUp, KeyModifiers::SHIFT),
   ] {

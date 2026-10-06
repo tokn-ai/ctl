@@ -6,16 +6,32 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 15;
+pub const PROTOCOL_BUILD: u16 = 16;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
 pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
 /// Server-owned view zoom with attachment layout ownership.
 pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_15;
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] =
-  &[CONTRACT_V1_0_13, CONTRACT_V1_1_14, CONTRACT_V1_1_15];
+/// Proportional split geometry and leased pane resizing.
+pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_16;
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+  CONTRACT_V1_0_13,
+  CONTRACT_V1_1_14,
+  CONTRACT_V1_1_15,
+  CONTRACT_V1_1_16,
+];
+
+#[must_use]
+pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_15 | CONTRACT_V1_1_16)
+}
+
+#[must_use]
+pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_16)
+}
 
 #[must_use]
 pub fn protocol_offer() -> ProtocolOffer {
@@ -52,6 +68,7 @@ pub const MAX_NORMALIZED_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// This is intentionally much smaller than the editable command-line bound:
 /// it is presentation metadata for titles, not an alternate command buffer.
 pub const MAX_RUNNING_COMMAND_BYTES: usize = 256;
+pub const MAX_PANE_RESIZE_REQUEST_ID_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
@@ -557,6 +574,16 @@ pub enum SplitAxis {
   Vertical,
 }
 
+/// Direction in which to move the nearest matching split divider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeDirection {
+  Left,
+  Right,
+  Up,
+  Down,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", from = "LegacyViewLayout")]
 pub enum ViewLayout {
@@ -566,6 +593,9 @@ pub enum ViewLayout {
   Split {
     axis: SplitAxis,
     children: Vec<ViewLayout>,
+    /// Positive relative child extents; omitted weights retain equal splits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    weights: Vec<u32>,
   },
 }
 
@@ -579,6 +609,8 @@ enum LegacyViewLayout {
   Split {
     axis: SplitAxis,
     children: Vec<ViewLayout>,
+    #[serde(default)]
+    weights: Vec<u32>,
   },
   Tabs {
     children: Vec<ViewLayout>,
@@ -589,10 +621,19 @@ impl From<LegacyViewLayout> for ViewLayout {
   fn from(layout: LegacyViewLayout) -> Self {
     match layout {
       LegacyViewLayout::Terminal { terminal_id } => Self::Terminal { terminal_id },
-      LegacyViewLayout::Split { axis, children } => Self::Split { axis, children },
+      LegacyViewLayout::Split {
+        axis,
+        children,
+        weights,
+      } => Self::Split {
+        axis,
+        children,
+        weights,
+      },
       LegacyViewLayout::Tabs { children } => Self::Split {
         axis: SplitAxis::Horizontal,
         children,
+        weights: Vec::new(),
       },
     }
   }
@@ -634,6 +675,13 @@ pub enum ClientMessage {
   /// `None` restores the saved split geometry.
   SetViewZoom {
     terminal_id: Option<String>,
+  },
+  /// Attached-only shared divider movement requiring this view's layout lease.
+  ResizePane {
+    request_id: String,
+    terminal_id: String,
+    direction: ResizeDirection,
+    amount: u16,
   },
   PromoteTerminal {
     terminal_id: String,
@@ -743,9 +791,21 @@ pub enum ErrorCode {
   Internal,
 }
 
+/// Correlated pane resize acknowledgement, including unchanged boundary results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneResizeOutcome {
+  Applied { view: Box<ViewInfo> },
+  Rejected { code: ErrorCode, message: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+  PaneResizeResult {
+    request_id: String,
+    outcome: PaneResizeOutcome,
+  },
   HandshakeAccepted {
     protocol_version: ProtocolVersion,
     protocols: Vec<ctl_core::component::ProtocolInfo>,
@@ -1336,9 +1396,9 @@ mod tests {
   }
 
   #[test]
-  fn view_zoom_uses_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 15));
-    assert_eq!(PROTOCOL_BUILD, 15);
+  fn pane_resize_uses_current_protocol_version() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 16));
+    assert_eq!(PROTOCOL_BUILD, 16);
   }
 
   #[test]
@@ -1346,6 +1406,7 @@ mod tests {
     let canvas_size = TerminalSize::default();
     let layout = ViewLayout::Split {
       axis: SplitAxis::Horizontal,
+      weights: Vec::new(),
       children: vec![
         ViewLayout::Terminal {
           terminal_id: "first".into(),
@@ -1410,6 +1471,41 @@ mod tests {
     }))
     .unwrap();
     assert_eq!(clear, ClientMessage::SetViewZoom { terminal_id: None });
+  }
+
+  #[test]
+  fn pane_resize_request_and_correlated_rejection_use_snake_case_fields() {
+    let request = ClientMessage::ResizePane {
+      request_id: "resize-1".into(),
+      terminal_id: "pane".into(),
+      direction: ResizeDirection::Left,
+      amount: 5,
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "type": "resize_pane", "request_id": "resize-1", "terminal_id": "pane",
+        "direction": "left", "amount": 5,
+      })
+    );
+    assert_eq!(request, serde_json::from_value(value).unwrap());
+    let reply = ServerMessage::PaneResizeResult {
+      request_id: "resize-1".into(),
+      outcome: PaneResizeOutcome::Rejected {
+        code: ErrorCode::LayoutLeaseRequired,
+        message: "Resize lease required".into(),
+      },
+    };
+    let value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "type": "pane_resize_result", "request_id": "resize-1",
+        "outcome": { "kind": "rejected", "code": "layout_lease_required", "message": "Resize lease required" },
+      })
+    );
+    assert_eq!(reply, serde_json::from_value(value).unwrap());
   }
 
   #[test]

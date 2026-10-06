@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenAttachmentRequest, OpenAttachmentResponse } from "./types";
-import { openAttachment, requestAttachmentCheckpoint } from "./tauri";
+import { openAttachment, resizeAttachmentPane, requestAttachmentCheckpoint } from "./tauri";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -20,6 +20,11 @@ const request: OpenAttachmentRequest = {
 beforeEach(() => { vi.resetAllMocks(); });
 
 describe("attachment IPC cancellation", () => {
+  it("queues a correlated pane resize through only the owning attachment", async () => {
+    const request = { attachment_id: "owner", request_id: "operation", terminal_id: "secondary", direction: "left" as const, amount: 5 };
+    await resizeAttachmentPane(request);
+    expect(ipc.invoke).toHaveBeenCalledExactlyOnceWith("resize_attachment_pane", { request });
+  });
   it("requests a checkpoint for only the current attachment", async () => {
     ipc.invoke.mockResolvedValue(undefined);
     await requestAttachmentCheckpoint({ attachment_id: "current" });

@@ -433,6 +433,15 @@ pub struct ResizeAttachmentRequestDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ResizeAttachmentPaneRequestDto {
+  pub attachment_id: String,
+  pub request_id: String,
+  pub terminal_id: String,
+  pub direction: ctmux_proto::ResizeDirection,
+  pub amount: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SetAttachmentViewZoomRequestDto {
   pub attachment_id: String,
   pub terminal_id: Option<String>,
@@ -564,6 +573,12 @@ pub enum AttachmentExitReasonDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum AttachmentEventDto {
+  PaneResizeResult {
+    attachment_id: String,
+    request_id: String,
+    view: Option<crate::commands::views::ViewDto>,
+    error: Option<crate::error::CommandErrorDto>,
+  },
   ViewChanged {
     attachment_id: String,
     view: crate::commands::views::ViewDto,
@@ -637,6 +652,26 @@ pub enum AttachmentEventDto {
 }
 
 impl AttachmentEventDto {
+  pub fn pane_resize_result(
+    attachment_id: &str,
+    request_id: String,
+    outcome: ctmux_proto::PaneResizeOutcome,
+  ) -> Self {
+    let (view, error) = match outcome {
+      ctmux_proto::PaneResizeOutcome::Applied { view } => (Some((*view).into()), None),
+      ctmux_proto::PaneResizeOutcome::Rejected { code, message } => (
+        None,
+        Some(CommandErrorDto::new(protocol_error_code(&code), message)),
+      ),
+    };
+    Self::PaneResizeResult {
+      attachment_id: attachment_id.into(),
+      request_id,
+      view,
+      error,
+    }
+  }
+
   pub fn checkpoint(
     attachment_id: &str,
     event_id: String,
@@ -1154,5 +1189,29 @@ mod tests {
 
     assert_eq!(safe["next_sequence"], u64::MAX.to_string());
     assert!(pending["next_sequence"].is_null());
+  }
+}
+
+#[cfg(test)]
+mod pane_resize_tests {
+  use super::*;
+
+  #[test]
+  fn resize_request_uses_stable_snake_case_fields_and_bounded_amount() {
+    let request: ResizeAttachmentPaneRequestDto = serde_json::from_value(serde_json::json!({
+      "attachment_id": "owner", "request_id": "operation", "terminal_id": "secondary",
+      "direction": "left", "amount": 5,
+    }))
+    .unwrap();
+    assert_eq!(request.request_id, "operation");
+    assert_eq!(request.direction, ctmux_proto::ResizeDirection::Left);
+    assert_eq!(request.amount, 5);
+    assert!(
+      serde_json::from_value::<ResizeAttachmentPaneRequestDto>(serde_json::json!({
+        "attachment_id": "owner", "request_id": "operation", "terminal_id": "secondary",
+        "direction": "left", "amount": 65536,
+      }))
+      .is_err()
+    );
   }
 }

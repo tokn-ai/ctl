@@ -30,13 +30,13 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
   let directory = TestDirectory::new();
   let socket = directory.path.join("ctmux.sock");
   let daemon = spawn_daemon(&socket, 4096, 1024);
-  let future = ProtocolVersion::new(1, 1, 16);
+  let future = ProtocolVersion::new(1, 1, 17);
   let mut stream = connect_when_ready(&socket).await?;
   write_frame(
     &mut stream,
     &ClientMessage::Handshake {
       protocol: ProtocolOffer::new(
-        16,
+        17,
         future,
         &[ctmux_proto::CONTRACT_V1_0_13, PROTOCOL_VERSION, future],
       ),
@@ -68,7 +68,7 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
     &mut control,
     &LocalControlClientMessage::Handshake {
       protocol: ProtocolOffer::new(
-        16,
+        17,
         future,
         &[ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION, future],
       ),
@@ -2997,6 +2997,7 @@ async fn assert_view_layout_updates(
       expected_revision: view.revision,
       layout: ctmux_proto::ViewLayout::Split {
         axis: ctmux_proto::SplitAxis::Horizontal,
+        weights: Vec::new(),
         children: vec![
           ctmux_proto::ViewLayout::Terminal {
             terminal_id: child_id.to_owned(),
@@ -3023,6 +3024,7 @@ async fn assert_view_layout_updates(
       expected_revision: view.revision,
       layout: ctmux_proto::ViewLayout::Split {
         axis: ctmux_proto::SplitAxis::Vertical,
+        weights: Vec::new(),
         children: vec![
           ctmux_proto::ViewLayout::Terminal {
             terminal_id: child_id.to_owned(),
@@ -3233,6 +3235,533 @@ async fn assert_minimum_canvas(
     terminal_size(5, 1)
   );
   Ok(())
+}
+
+async fn resize_pane_result(
+  stream: &mut UnixStream,
+  terminal_id: &str,
+  direction: ctmux_proto::ResizeDirection,
+  amount: u16,
+) -> TestResult<ctmux_proto::PaneResizeOutcome> {
+  let request_id = Uuid::new_v4().to_string();
+  resize_pane_with_id(stream, terminal_id, direction, amount, request_id).await
+}
+
+async fn resize_pane_with_id(
+  stream: &mut UnixStream,
+  terminal_id: &str,
+  direction: ctmux_proto::ResizeDirection,
+  amount: u16,
+  request_id: String,
+) -> TestResult<ctmux_proto::PaneResizeOutcome> {
+  write_frame(
+    stream,
+    &ClientMessage::ResizePane {
+      request_id: request_id.clone(),
+      terminal_id: terminal_id.into(),
+      direction,
+      amount,
+    },
+  )
+  .await?;
+  loop {
+    match presented_message(stream).await? {
+      ServerMessage::PaneResizeResult {
+        request_id: received,
+        outcome,
+      } => {
+        assert_eq!(received, request_id);
+        return Ok(outcome);
+      }
+      ServerMessage::ViewSnapshot { .. }
+      | ServerMessage::Checkpoint { .. }
+      | ServerMessage::ShellStateChanged { .. }
+      | ServerMessage::Output { .. } => {}
+      other => return Err(format!("expected correlated pane resize result, got {other:?}").into()),
+    }
+  }
+}
+
+fn applied_resize(outcome: ctmux_proto::PaneResizeOutcome) -> ctmux_proto::ViewInfo {
+  let ctmux_proto::PaneResizeOutcome::Applied { view } = outcome else {
+    panic!("resize must succeed: {outcome:?}");
+  };
+  *view
+}
+
+fn assert_resize_rejected(outcome: ctmux_proto::PaneResizeOutcome, expected: &ErrorCode) {
+  assert!(
+    matches!(outcome, ctmux_proto::PaneResizeOutcome::Rejected { code, .. } if &code == expected)
+  );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pane_resize_is_shared_owned_and_persistent_across_resume() -> TestResult {
+  use ctmux_proto::ResizeDirection;
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "proportions",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  let initial = split_topology_shell(&socket, &root).await?;
+  let second_id = initial.terminals[1].terminal_id.clone();
+  let (mut first, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let (mut second, second_attachment) =
+    attach_session(&socket, &second_id, None, true, true).await?;
+  let before = topology_view(&socket, &root.session_id).await?;
+  assert_resize_rejected(
+    resize_pane_result(&mut second, &root.terminal_id, ResizeDirection::Right, 5).await?,
+    &ErrorCode::LayoutLeaseRequired,
+  );
+  assert_eq!(topology_view(&socket, &root.session_id).await?, before);
+  let resized = applied_resize(
+    resize_pane_result(&mut first, &root.terminal_id, ResizeDirection::Right, 5).await?,
+  );
+  assert_eq!(
+    (resized.panes[0].columns, resized.panes[1].columns),
+    (45, 34)
+  );
+  assert_eq!(resized.revision, before.revision + 1);
+  assert_unzoomed_geometry(&resized);
+  let observed = wait_for_view_zoom_at_revision(&mut second, None, resized.revision).await?;
+  assert_eq!(observed.layout, resized.layout);
+  release_lease(&mut first, LeaseKind::Layout).await?;
+  assert!(
+    acquire_lease(&mut second, LeaseKind::Layout)
+      .await?
+      .owned_by_client
+  );
+  let ServerMessage::Attached {
+    attachment_token, ..
+  } = second_attachment
+  else {
+    panic!("attachment expected");
+  };
+  drop(second);
+  let (mut second, _) = resume_attachment(&socket, &second_id, &attachment_token, None).await?;
+  for _ in 0..5 {
+    resize_pane_result(&mut second, &root.terminal_id, ResizeDirection::Right, 1).await?;
+  }
+  let repeated = topology_view(&socket, &root.session_id).await?;
+  assert_eq!(
+    (repeated.panes[0].columns, repeated.panes[1].columns),
+    (50, 29)
+  );
+  assert_eq!(repeated.revision, resized.revision + 5);
+  write_frame(
+    &mut second,
+    &ClientMessage::Resize {
+      terminal_size: terminal_size(160, 24),
+    },
+  )
+  .await?;
+  let expected = repeated
+    .layout
+    .pane_geometry(&terminal_size(160, 24))?
+    .remove(1);
+  wait_for_geometry_change(&mut second, &terminal_size(expected.columns, expected.rows)).await?;
+  let wider = topology_view(&socket, &root.session_id).await?;
+  assert_eq!(wider.layout, repeated.layout);
+  assert_unzoomed_geometry(&wider);
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(first);
+  drop(second);
+  wait_for_daemon_exit(daemon, "pane resize daemon did not exit").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pane_resize_validates_before_unzoom_and_acknowledges_unchanged_limits() -> TestResult {
+  use ctmux_proto::ResizeDirection;
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "resize-zoom",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let zoomed = set_view_zoom(
+    &socket,
+    &root.session_id,
+    &mut owner,
+    Some(&root.terminal_id),
+  )
+  .await?;
+  for request_id in [String::new(), "a".repeat(257)] {
+    assert_resize_rejected(
+      resize_pane_with_id(
+        &mut owner,
+        &root.terminal_id,
+        ResizeDirection::Right,
+        1,
+        request_id,
+      )
+      .await?,
+      &ErrorCode::InvalidRequest,
+    );
+  }
+  assert_resize_rejected(
+    resize_pane_result(&mut owner, "absent", ResizeDirection::Right, 5).await?,
+    &ErrorCode::InvalidRequest,
+  );
+  assert_resize_rejected(
+    resize_pane_result(&mut owner, &root.terminal_id, ResizeDirection::Right, 0).await?,
+    &ErrorCode::InvalidRequest,
+  );
+  assert_eq!(topology_view(&socket, &root.session_id).await?, zoomed);
+  let unchanged = applied_resize(
+    resize_pane_result(&mut owner, &root.terminal_id, ResizeDirection::Up, 1).await?,
+  );
+  assert_eq!(unchanged, zoomed);
+  let resized = applied_resize(
+    resize_pane_result(
+      &mut owner,
+      &root.terminal_id,
+      ResizeDirection::Left,
+      u16::MAX,
+    )
+    .await?,
+  );
+  assert_eq!(
+    (resized.panes[0].columns, resized.panes[1].columns),
+    (2, 77)
+  );
+  assert_eq!(resized.revision, zoomed.revision + 1);
+  assert_unzoomed_geometry(&resized);
+  let unchanged = applied_resize(
+    resize_pane_result(&mut owner, &root.terminal_id, ResizeDirection::Left, 1).await?,
+  );
+  assert_eq!(unchanged, resized);
+  write_frame(
+    &mut owner,
+    &ClientMessage::Input {
+      data: b"still-typing-after-resize-errors\n".to_vec(),
+    },
+  )
+  .await?;
+  read_output_until(&mut owner, b"still-typing-after-resize-errors").await?;
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "resize zoom daemon did not exit").await
+}
+
+async fn historical_connection(
+  socket: &Path,
+  contract: ctl_core::protocol::ProtocolVersion,
+) -> TestResult<UnixStream> {
+  let mut stream = connect_when_ready(socket).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::Handshake {
+      protocol: ctl_core::protocol::ProtocolOffer::new(contract.build, contract, &[contract]),
+      client_name: "historical-proportions".into(),
+      client_version: "test".into(),
+    },
+  )
+  .await?;
+  assert!(
+    matches!(required_message(&mut stream).await?, ServerMessage::HandshakeAccepted { protocol_version, .. } if protocol_version == contract)
+  );
+  Ok(stream)
+}
+
+async fn historical_view_request(
+  socket: &Path,
+  contract: ctl_core::protocol::ProtocolVersion,
+  request: ClientMessage,
+) -> TestResult<ServerMessage> {
+  let mut stream = historical_connection(socket, contract).await?;
+  write_frame(&mut stream, &request).await?;
+  required_message(&mut stream).await
+}
+
+async fn assert_legacy_layout_preserves_weights(
+  socket: &Path,
+  root: &SessionInfo,
+  contract: ctl_core::protocol::ProtocolVersion,
+) -> TestResult {
+  let authoritative = topology_view(socket, &root.session_id).await?;
+  let ServerMessage::ViewSnapshot { mut view } = historical_view_request(
+    socket,
+    contract,
+    ClientMessage::GetView {
+      session: root.session_id.clone(),
+    },
+  )
+  .await?
+  else {
+    panic!("view expected");
+  };
+  assert_eq!(view.panes, authoritative.panes);
+  assert!(!view.layout.has_weights());
+  let ctmux_proto::ViewLayout::Split { children, .. } = &mut view.layout else {
+    panic!("split expected");
+  };
+  children.swap(0, 1);
+  let ServerMessage::ViewSnapshot { view: swapped } = historical_view_request(
+    socket,
+    contract,
+    ClientMessage::UpdateView {
+      session: root.session_id.clone(),
+      expected_revision: view.revision,
+      layout: view.layout,
+    },
+  )
+  .await?
+  else {
+    panic!("swap expected");
+  };
+  assert!(!swapped.layout.has_weights());
+  let actual = topology_view(socket, &root.session_id).await?;
+  let ctmux_proto::ViewLayout::Split { weights, .. } = &authoritative.layout else {
+    panic!("weights expected");
+  };
+  assert!(
+    matches!(&actual.layout, ctmux_proto::ViewLayout::Split { weights: actual_weights, .. } if actual_weights == weights)
+  );
+  assert_eq!((actual.panes[0].columns, actual.panes[1].columns), (45, 34));
+  assert!(matches!(
+    historical_view_request(
+      socket,
+      contract,
+      ClientMessage::UpdateView {
+        session: root.session_id.clone(),
+        expected_revision: actual.revision,
+        layout: actual.layout.clone()
+      }
+    )
+    .await?,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+  let mut restructured = actual.layout;
+  restructured.clear_weights();
+  let ctmux_proto::ViewLayout::Split { axis, .. } = &mut restructured else {
+    panic!("split expected");
+  };
+  *axis = ctmux_proto::SplitAxis::Vertical;
+  assert!(matches!(
+    historical_view_request(
+      socket,
+      contract,
+      ClientMessage::UpdateView {
+        session: root.session_id.clone(),
+        expected_revision: actual.revision,
+        layout: restructured
+      }
+    )
+    .await?,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+  assert_legacy_pane_resize_unavailable(socket, root, contract).await
+}
+
+async fn assert_legacy_pane_resize_unavailable(
+  socket: &Path,
+  root: &SessionInfo,
+  contract: ctl_core::protocol::ProtocolVersion,
+) -> TestResult {
+  let mut stream = historical_connection(socket, contract).await?;
+  write_frame(
+    &mut stream,
+    &ClientMessage::AttachSession {
+      session: root.terminal_id.clone(),
+      resume_from: None,
+      terminal_size: TerminalSize::default(),
+      request_input_lease: false,
+      request_layout_lease: false,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+    },
+  )
+  .await?;
+  let ServerMessage::Attached { checkpoint, .. } = required_message(&mut stream).await? else {
+    panic!("attached expected");
+  };
+  if let Some(checkpoint) = checkpoint {
+    acknowledge_output(&mut stream, checkpoint.sequence).await?;
+  }
+  write_frame(
+    &mut stream,
+    &ClientMessage::ResizePane {
+      request_id: "old-mutation".into(),
+      terminal_id: root.terminal_id.clone(),
+      direction: ctmux_proto::ResizeDirection::Right,
+      amount: 5,
+    },
+  )
+  .await?;
+  expect_error(&mut stream, ErrorCode::InvalidRequest).await?;
+  write_frame(&mut stream, &ClientMessage::Detach).await?;
+  wait_for_detached(&mut stream).await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_contracts_preserve_new_proportions_and_cannot_resize_unleased() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(&socket, "proportion-compat", "IFS= read -r line").await?;
+  split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  resize_pane_result(
+    &mut owner,
+    &root.terminal_id,
+    ctmux_proto::ResizeDirection::Right,
+    5,
+  )
+  .await?;
+  for contract in [
+    ctmux_proto::CONTRACT_V1_0_13,
+    ctmux_proto::CONTRACT_V1_1_14,
+    ctmux_proto::CONTRACT_V1_1_15,
+  ] {
+    assert_legacy_layout_preserves_weights(&socket, &root, contract).await?;
+  }
+  let before = topology_view(&socket, &root.session_id).await?;
+  let mut forged = before.layout.clone();
+  let ctmux_proto::ViewLayout::Split { weights, .. } = &mut forged else {
+    panic!("split expected");
+  };
+  *weights = vec![1, 1];
+  assert!(matches!(
+    topology_request(
+      &socket,
+      ClientMessage::UpdateView {
+        session: root.session_id.clone(),
+        expected_revision: before.revision,
+        layout: forged
+      }
+    )
+    .await?,
+    ServerMessage::Error {
+      code: ErrorCode::InvalidRequest,
+      ..
+    }
+  ));
+  assert_eq!(topology_view(&socket, &root.session_id).await?, before);
+  for weights in [vec![0, 1], vec![1], vec![1, 2, 3]] {
+    let mut malformed = before.layout.clone();
+    let ctmux_proto::ViewLayout::Split {
+      weights: values, ..
+    } = &mut malformed
+    else {
+      panic!("split expected");
+    };
+    *values = weights;
+    assert!(matches!(
+      topology_request(
+        &socket,
+        ClientMessage::UpdateView {
+          session: root.session_id.clone(),
+          expected_revision: before.revision,
+          layout: malformed
+        }
+      )
+      .await?,
+      ServerMessage::Error {
+        code: ErrorCode::InvalidRequest,
+        ..
+      }
+    ));
+  }
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "proportion compatibility daemon did not exit").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn weighted_topology_keeps_ratios_through_split_removal_and_merge() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(&socket, "weighted-topology", "IFS= read -r line").await?;
+  split_topology_shell(&socket, &root).await?;
+  let (mut owner, _) = attach_session(&socket, &root.terminal_id, None, true, true).await?;
+  let resized = applied_resize(
+    resize_pane_result(
+      &mut owner,
+      &root.terminal_id,
+      ctmux_proto::ResizeDirection::Right,
+      5,
+    )
+    .await?,
+  );
+  let divided = split_topology_shell(&socket, &root).await?;
+  assert!(
+    matches!(&divided.layout, ctmux_proto::ViewLayout::Split { weights, .. } if weights == &[45, 34])
+  );
+  let added = divided
+    .terminals
+    .iter()
+    .find(|terminal| {
+      !resized
+        .terminals
+        .iter()
+        .any(|previous| previous.terminal_id == terminal.terminal_id)
+    })
+    .unwrap()
+    .terminal_id
+    .clone();
+  topology_request(&socket, ClientMessage::KillTerminal { terminal_id: added }).await?;
+  timeout(Duration::from_secs(3), async {
+    loop {
+      if topology_view(&socket, &root.session_id)
+        .await?
+        .terminals
+        .len()
+        == 2
+      {
+        return Ok::<_, Box<dyn Error + Send + Sync>>(());
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await??;
+  let restored = topology_view(&socket, &root.session_id).await?;
+  assert_eq!(restored.layout, resized.layout);
+  let source = create_shell_session(&socket, "weighted-source", "IFS= read -r line").await?;
+  let ServerMessage::ViewSnapshot { view: merged } = topology_request(
+    &socket,
+    ClientMessage::MergeSessions {
+      source: source.session_id,
+      destination: root.session_id.clone(),
+    },
+  )
+  .await?
+  else {
+    panic!("merged view expected");
+  };
+  let ctmux_proto::ViewLayout::Split {
+    children, weights, ..
+  } = &merged.layout
+  else {
+    panic!("split expected");
+  };
+  assert_eq!(weights.as_slice(), &[] as &[u32]);
+  assert_eq!(children[0], resized.layout);
+  assert_unzoomed_geometry(&merged);
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  wait_for_daemon_exit(daemon, "weighted topology daemon did not exit").await
 }
 
 async fn set_view_zoom(

@@ -177,6 +177,7 @@ mod tests {
       ],
       layout: ViewLayout::Split {
         axis: SplitAxis::Horizontal,
+        weights: vec![2, 1],
         children: vec![
           ViewLayout::Terminal {
             terminal_id: "primary".into(),
@@ -206,6 +207,10 @@ mod tests {
     assert_eq!(serialized["view"]["zoomed_terminal_id"], "secondary");
     assert_eq!(serialized["view"]["revision"], u64::MAX.to_string());
     assert_eq!(serialized["view"]["panes"][1]["columns"], 39);
+    assert_eq!(
+      serialized["view"]["layout"]["weights"],
+      serde_json::json!([2, 1])
+    );
     assert_eq!(serialized["view"]["terminals"].as_array().unwrap().len(), 2);
     let cleared = ViewDto::from(ViewInfo {
       zoomed_terminal_id: None,

@@ -6,8 +6,8 @@ const leaf = (terminal_id: string): ViewLayout => ({ kind: "terminal", terminal_
 
 describe("server view geometry", () => {
   const layout: ViewLayout = {
-    kind: "split", axis: "horizontal",
-    children: [leaf("a"), { kind: "split", axis: "vertical", children: [leaf("b"), leaf("c")] }],
+    kind: "split", axis: "horizontal", weights: [3, 2],
+    children: [leaf("a"), { kind: "split", axis: "vertical", weights: [2, 1], children: [leaf("b"), leaf("c")] }],
   };
   const panes = [
     { terminal_id: "a", left: 0, top: 0, width: 50, height: 40, visible: true },
@@ -26,8 +26,8 @@ describe("server view geometry", () => {
     expect(adjacentPane(panes, "b", "down")).toBe("c");
     expect(adjacentPane(panes, "c", "left")).toBe("a");
     expect(swapPanes(layout, "a", "c")).toEqual({
-      kind: "split", axis: "horizontal",
-      children: [leaf("c"), { kind: "split", axis: "vertical", children: [leaf("b"), leaf("a")] }],
+      kind: "split", axis: "horizontal", weights: [3, 2],
+      children: [leaf("c"), { kind: "split", axis: "vertical", weights: [2, 1], children: [leaf("b"), leaf("a")] }],
     });
   });
 });

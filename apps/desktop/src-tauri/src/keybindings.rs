@@ -70,10 +70,7 @@ impl TerminalPrefixSettings {
             !keys.insert((
               binding.command_id.starts_with("pane.move_"),
               normalized.clone(),
-            )) || !((normalized.len() == 1
-              && normalized.bytes().all(|byte| byte.is_ascii_alphanumeric()))
-              || ["left", "right", "up", "down", "!", ":", "%", "\""]
-                .contains(&normalized.as_str()))
+            )) || !valid_prefix_action_key(&normalized)
           })
       })
     {
@@ -81,6 +78,14 @@ impl TerminalPrefixSettings {
     }
     Ok(())
   }
+}
+
+fn valid_prefix_action_key(key: &str) -> bool {
+  if let Some((modifier, arrow)) = key.split_once('+') {
+    return ["ctrl", "alt"].contains(&modifier) && ["left", "right", "up", "down"].contains(&arrow);
+  }
+  (key.len() == 1 && key.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    || ["left", "right", "up", "down", "!", ":", "%", "\""].contains(&key)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +370,16 @@ mod tests {
         key: Some("q".into()),
       });
     assert!(document.validate().is_err());
+  }
+
+  #[test]
+  fn prefix_actions_accept_modified_arrows_without_modifier_aliases() {
+    for key in ["ctrl+left", "alt+right", "ctrl+up", "alt+down"] {
+      assert!(valid_prefix_action_key(key));
+    }
+    for key in ["ctrl+a", "shift+left", "ctrl+alt+left", "meta+right"] {
+      assert!(!valid_prefix_action_key(key));
+    }
   }
 
   #[test]

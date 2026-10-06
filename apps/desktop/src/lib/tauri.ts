@@ -6,6 +6,7 @@ import type {
   AttachmentIdRequest,
   AttachmentInputRequest,
   AttachmentLeaseRequest,
+  AttachmentPaneResizeRequest,
   AttachmentResizeRequest,
   AttachmentViewZoomRequest,
   CreateSessionRequest,
@@ -486,6 +487,12 @@ export async function acquireAttachmentLease(
   request: AttachmentLeaseRequest,
 ): Promise<void> {
   await invoke("acquire_attachment_lease", { request });
+}
+
+export async function resizeAttachmentPane(
+  request: AttachmentPaneResizeRequest,
+): Promise<void> {
+  await invoke("resize_attachment_pane", { request });
 }
 
 export async function setAttachmentViewZoom(

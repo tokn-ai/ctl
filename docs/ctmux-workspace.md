@@ -281,8 +281,12 @@ Pane controls sit above the canvas. Pane interiors contain only terminal cells,
 so side-by-side panes have equal height. An outline marks the active pane. Pane
 labels use live command/shell and directory metadata instead of generated session
 names. If the viewport is too small for the split tree, the daemon preserves the
-minimum valid grid and the client scrolls it. Equal split proportions remain the
-default; no divider dragging is introduced here.
+minimum valid grid and the client scrolls it. New splits use equal proportions.
+The daemon retains resized proportions in its shared layout, so the TUI and
+desktop render the same unequal rectangles. Resizing uses the actual layout-owner
+attachment, independently of which pane has focus or owns input. It requires
+ctmux contract `1.1.16`; earlier clients keep the authoritative rectangles.
+Divider dragging remains deferred.
 
  Local startup attachment is a
 one-shot intent and uses the normal connection/error handling once the renderer
@@ -344,6 +348,7 @@ With a terminal focused, press the prefix then:
 | --- | --- |
 | V / S | Split right / below |
 | Arrow | Focus the adjacent visible pane |
+| Ctrl + Arrow / Alt + Arrow | Move a shared divider by one / five cells; requires resize ownership |
 | Z | Zoom/unzoom the focused pane in the shared view; requires resize ownership |
 | M, then arrows | Swap the focused pane with neighbors in the shared layout |
 | ! | Move the pane to a new session |
@@ -357,9 +362,13 @@ move mode. Unknown keys cancel a pending sequence without sending partial input.
 A floating hint overlay shows bindings without changing the terminal dimensions.
 Dialogs, nonterminal inputs, composition, and window blur do not retain a pending
 prefix. Pane focus and shared zoom preserve existing renderers, while moves use the
-server view revision to reject concurrent layout conflicts. This pass controls
-existing panes and session tabs; split ratios and tmux-style windows within a
-session are not introduced here.
+server view revision to reject concurrent layout conflicts. Focus and resize
+arrows can repeat for 500 ms. Resizing a divider unzooms the shared view when it
+moves, clamps at subtree minimum sizes, and retains proportions through canvas
+resize and reconnect. Direction refers to divider movement, so right/down can
+shrink the focused pane when it is the last child of its split. Command-palette
+actions provide the same four resize directions. Tmux-style windows within a
+session remain deferred.
 
 
 ## Local terminal persistence

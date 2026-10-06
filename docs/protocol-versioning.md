@@ -70,6 +70,13 @@ zoom fields/events require the negotiated `1.1.15` contract. Older clients keep
 the ordinary split layout and new clients report zoom unavailable on older
 daemons.
 
+Shared pane sizing advances ctmux from `1.1.15` (build 15) to `1.1.16`
+(build 16), retaining `1.0.13`, `1.1.14`, and `1.1.15`. Weighted split layouts
+and attached divider resize requests require `1.1.16`. Earlier clients receive
+the authoritative pane rectangles with weights omitted; compatible arrangement
+updates preserve existing proportions, and ambiguous weighted restructures are
+rejected. New clients disable divider resizing when an earlier contract is selected.
+
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
 
@@ -80,9 +87,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 15,
-    "version": "1.1.15",
-    "supported_versions": ["1.0.13", "1.1.15"]
+    "build": 16,
+    "version": "1.1.16",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16"]
   }
 }
 ```
@@ -96,7 +103,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.1.15` while one connection
+from the selected contract. A server can advertise `1.1.16` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:

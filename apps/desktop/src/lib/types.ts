@@ -807,6 +807,15 @@ export interface AttachmentResizeRequest extends AttachmentIdRequest {
   terminal_size: TerminalSize;
 }
 
+export type ResizeDirection = "left" | "right" | "up" | "down";
+
+export interface AttachmentPaneResizeRequest extends AttachmentIdRequest {
+  request_id: string;
+  terminal_id: string;
+  direction: ResizeDirection;
+  amount: number;
+}
+
 export interface AttachmentViewZoomRequest extends AttachmentIdRequest {
   terminal_id: string | null;
 }
@@ -903,6 +912,11 @@ export interface LeaseStatusEvent extends AttachmentEventBase {
   status: LeaseStatus;
 }
 
+export type PaneResizeResultEvent = AttachmentEventBase & {
+  event_type: "pane_resize_result";
+  request_id: string;
+} & ({ view: SessionView; error: null } | { view: null; error: { code: string; message: string } });
+
 export interface ViewChangedEvent extends AttachmentEventBase {
   event_type: "view_changed";
   view: SessionView;
@@ -956,6 +970,7 @@ export type AttachmentEvent =
   | PtyGeometryChangedEvent
   | LeaseStatusEvent
   | ViewChangedEvent
+  | PaneResizeResultEvent
   | ShellStateChangedEvent
   | SessionObservedEvent
   | ServerErrorEvent
@@ -1065,7 +1080,7 @@ export type TaskLogEvent =
 
 export type ViewLayout =
   | { kind: "terminal"; terminal_id: string }
-  | { kind: "split"; axis: "horizontal" | "vertical"; children: ViewLayout[] };
+  | { kind: "split"; axis: "horizontal" | "vertical"; children: ViewLayout[]; weights?: number[] };
 
 export interface SessionView {
   session_name: string;

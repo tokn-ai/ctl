@@ -119,6 +119,7 @@ pub fn run() {
       commands::cancel_attachment_open,
       commands::send_input,
       commands::resize_attachment,
+      commands::resize_attachment_pane,
       commands::set_attachment_view_zoom,
       commands::acquire_attachment_lease,
       commands::release_attachment_lease,

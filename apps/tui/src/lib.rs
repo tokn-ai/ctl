@@ -11,6 +11,11 @@ mod render;
 mod terminal;
 mod transport;
 
+#[cfg(all(test, unix))]
+#[path = "../tests/support/daemon.rs"]
+#[allow(dead_code)]
+mod test_daemon;
+
 pub use transport::{ConnectFuture, Duplex, Stream, Transport};
 
 use std::io::{self, IsTerminal};

@@ -15,7 +15,7 @@ import { sessionKey } from "../targets/targets";
 import { XtermRenderer } from "../terminal/XtermRenderer";
 import { useAttachment } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
-import { reconnectComponentAttachments, resetComponentAttachments, setSessionViewZoom } from "./componentActions";
+import { reconnectComponentAttachments, resetComponentAttachments, resizeSessionPane, setSessionViewZoom } from "./componentActions";
 import { NotificationProvider } from "../notifications/NotificationContext";
 import { NotificationStore } from "../notifications/NotificationStore";
 import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
@@ -72,6 +72,7 @@ const api = vi.hoisted(() => ({
   acquireAttachmentLease: vi.fn(),
   releaseAttachmentLease: vi.fn(),
   resizeAttachment: vi.fn(),
+  resizeAttachmentPane: vi.fn(),
   setAttachmentViewZoom: vi.fn(),
   sendInput: vi.fn(),
   sessionCache: vi.fn(),
@@ -212,6 +213,56 @@ afterEach(async () => {
 });
 
 describe("background history presentation", () => {
+  it("keeps pane resize acknowledgements correlated and nonfatal through the live attachment", async () => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { resize_with_window: true }); });
+    const attachment_id = result.current.state.attachment_id!;
+    await expect(resizeSessionPane(first, "secondary", "right", 1)).rejects.toThrow("Take resize control");
+    expect(api.resizeAttachmentPane).not.toHaveBeenCalled();
+    await emit({ event_type: "lease_status", attachment_id, lease: "layout", status: { held: true, owned_by_client: true } });
+    api.resizeAttachmentPane.mockResolvedValue(undefined);
+    const view: SessionView = {
+      session_id: first.session_id, session_name: first.name, view_id: first.view_id!, revision: "2",
+      canvas_size: size, zoomed_terminal_id: null, panes: [],
+      layout: { kind: "split", axis: "horizontal", weights: [2, 1], children: [{ kind: "terminal", terminal_id: first.terminal_id! }, { kind: "terminal", terminal_id: "secondary" }] }, terminals: [],
+    };
+    let completed = false;
+    const resizing = resizeSessionPane(first, "secondary", "right", 5).then((view) => { completed = true; return view; });
+    const request = api.resizeAttachmentPane.mock.lastCall![0];
+    expect(request).toEqual({ attachment_id, terminal_id: "secondary", direction: "right", amount: 5, request_id: expect.any(String) });
+    await emit({ event_type: "view_changed", attachment_id, view });
+    expect(completed).toBe(false);
+    await emit({ event_type: "pane_resize_result", attachment_id, request_id: request.request_id, view, error: null });
+    expect(await resizing).toEqual(view);
+    const rejected = resizeSessionPane(first, "secondary", "left", 1);
+    const failure = expect(rejected).rejects.toThrow("Another client owns layout.");
+    await emit({ event_type: "pane_resize_result", attachment_id, request_id: api.resizeAttachmentPane.mock.lastCall![0].request_id, view: null, error: { code: "layout_lease_required", message: "Another client owns layout." } });
+    await failure;
+    expect(result.current.state.layout_lease.owned_by_client).toBe(false);
+    expect(result.current.state.resize_with_window).toBe(false);
+    await expect(resizeSessionPane(first, "secondary", "left", 1)).rejects.toThrow("Take resize control");
+    expect(api.resizeAttachmentPane).toHaveBeenCalledTimes(2);
+    expect(result.current.state.phase).toBe("attached");
+    expect(api.acknowledgeAttachmentEvent).not.toHaveBeenCalled();
+  });
+  it.each(["input", "layout"] as const)("reflects %s lease denial without ending the live attachment", async (lease) => {
+    const { result } = renderHook(() => useAttachment(renderer));
+    await act(async () => { await result.current.connect(first, { resize_with_window: true }); });
+    const attachment_id = result.current.state.attachment_id!;
+    await emit({ event_type: "lease_status", attachment_id, lease, status: { held: true, owned_by_client: true } });
+    await emit({ event_type: "server_error", attachment_id, code: `${lease}_lease_required`, message: "Ownership was released." });
+    expect(result.current.state[`${lease}_lease`].owned_by_client).toBe(false);
+    expect(result.current.state.phase).toBe("attached");
+    if (lease === "input") {
+      result.current.handleInput(new Uint8Array([97]));
+      expect(api.sendInput).not.toHaveBeenCalled();
+    } else {
+      expect(result.current.state.resize_with_window).toBe(false);
+      await expect(resizeSessionPane(first, "secondary", "left", 1)).rejects.toThrow("Take resize control");
+      expect(api.resizeAttachmentPane).not.toHaveBeenCalled();
+    }
+  });
+
   it("dispatches shared zoom over the owned attachment and resolves on its view event", async () => {
     const { result } = renderHook(() => useAttachment(renderer));
     await act(async () => { await result.current.connect(first, { resize_with_window: true }); });

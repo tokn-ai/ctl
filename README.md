@@ -204,8 +204,9 @@ cargo run -p ctmux-cli
 ```
 
 Use Ctrl+B then `?` for help, `%` to split right, `z` to zoom/unzoom the
-focused pane, and `d` to detach. Shared zoom requires the view resize lease
-and ctmux contract `1.1.15`.
+focused pane, and `d` to detach. Prefix + Ctrl arrows resizes by one cell;
+Alt arrows resizes by five. Shared zoom and resizing require the view resize
+lease. Zoom needs ctmux contract `1.1.15` or `1.1.16`; resizing needs `1.1.16`.
 See [apps/tui](apps/tui/README.md) for controls and shared-view behavior.
 
 For the Windows local CLI and daemon slice:

@@ -9,6 +9,7 @@ import {
   releaseAttachmentLease,
   requestAttachmentCheckpoint,
   resizeAttachment,
+  resizeAttachmentPane,
   sendInput,
   sessionCache,
   setAttachmentViewZoom,
@@ -35,7 +36,7 @@ import {
   interruptedAttachmentState,
   reconnectSequenceAfterError,
 } from "./attachmentRecovery";
-import { publishSessionView, registerAttachmentControl } from "./componentActions";
+import { publishPaneResizeResult, publishSessionView, registerAttachmentControl } from "./componentActions";
 import { initialAttachmentState, transitionAttachment, type ConnectionIntent } from "./attachmentState";
 import { ConnectionIntentQueue } from "./ConnectionIntentQueue";
 import { InputPump } from "./InputPump";
@@ -422,6 +423,20 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     });
   }, []);
 
+  const loseLease = useCallback((lease: LeaseKind) => {
+    if (lease === "input") {
+      inputLeaseOwnedRef.current = false;
+      inputPumpRef.current?.clear();
+      setState((current) => ({ ...current, input_lease: { ...current.input_lease, owned_by_client: false } }));
+    } else {
+      layoutLeaseOwnedRef.current = false;
+      resizeWithWindowRef.current = false;
+      layoutLeasePumpRef.current?.reset();
+      resizeCoordinatorRef.current?.stop();
+      setState((current) => ({ ...current, layout_lease: { ...current.layout_lease, owned_by_client: false }, resize_with_window: false }));
+    }
+  }, []);
+
   const processEvent = useCallback(
     async (event: AttachmentEvent, generation: number) => {
       const isCurrent = () =>
@@ -436,6 +451,14 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
       }
 
       switch (event.event_type) {
+        case "pane_resize_result": {
+          if (event.error?.code === "layout_lease_required") loseLease("layout");
+          const session = stateRef.current.session;
+          if (session) publishPaneResizeResult(event.error
+            ? { session, attachment_id: event.attachment_id, request_id: event.request_id, view: null, error: event.error }
+            : { session, attachment_id: event.attachment_id, request_id: event.request_id, view: event.view, error: null });
+          break;
+        }
         case "view_changed": {
           const session = stateRef.current.session;
           if (session) publishSessionView({ session, attachment_id: event.attachment_id, view: event.view });
@@ -616,6 +639,8 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
           publishShellState(event.shell_state);
           break;
         case "server_error":
+          if (event.code === "input_lease_required") loseLease("input");
+          else if (event.code === "layout_lease_required") loseLease("layout");
           if (stateRef.current.session) publishSessionView({ session: stateRef.current.session, attachment_id: event.attachment_id, error: event.message });
           setState((current) => ({ ...current, message: event.message }));
           break;
@@ -672,6 +697,7 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     },
     [
       acknowledge,
+      loseLease,
       publishAppliedSequence,
       publishShellState,
       queueResize,
@@ -1178,6 +1204,13 @@ export function useAttachment(renderer: AttachmentRenderer | null, view_resize =
     attachmentId: () => activeAttachmentRef.current,
     session: () => stateRef.current.session,
     layoutOwned: () => stateRef.current.phase === "attached" && layoutLeaseOwnedRef.current,
+    resizePane: async (terminal_id, direction, amount, request_id) => {
+      const attachment_id = activeAttachmentRef.current;
+      if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {
+        throw new Error("Take resize control to resize panes.");
+      }
+      await resizeAttachmentPane({ attachment_id, terminal_id, direction, amount, request_id });
+    },
     setViewZoom: async (terminal_id) => {
       const attachment_id = activeAttachmentRef.current;
       if (!attachment_id || stateRef.current.phase !== "attached" || !layoutLeaseOwnedRef.current) {

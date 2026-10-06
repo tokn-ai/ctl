@@ -1,4 +1,4 @@
-import type { ComponentReconnectResult, ComponentSessionsReset, SessionSummary, SessionView } from "../../lib/types";
+import type { ComponentReconnectResult, ComponentSessionsReset, ResizeDirection, SessionSummary, SessionView } from "../../lib/types";
 import { sameSession } from "../targets/targets";
 
 interface AttachmentControl {
@@ -8,6 +8,7 @@ interface AttachmentControl {
   reset(): void;
   layoutOwned(): boolean;
   setViewZoom(terminal_id: string | null): Promise<void>;
+  resizePane(terminal_id: string, direction: ResizeDirection, amount: number, request_id: string): Promise<void>;
 }
 
 // Each webview has its own module registry. Every root, background tab, and
@@ -67,6 +68,54 @@ export async function setSessionViewZoom(
     } catch (failure) {
       finish(null, failure);
     }
+  });
+}
+
+type PaneResizeResult = {
+  session: SessionSummary;
+  attachment_id: string;
+  request_id: string;
+} & ({ view: SessionView; error: null } | { view: null; error: { code: string; message: string } });
+const resize_listeners = new Set<(event: PaneResizeResult) => void>();
+
+export function publishPaneResizeResult(event: PaneResizeResult): void {
+  if (event.view) publishSessionView({ session: event.session, attachment_id: event.attachment_id, view: event.view });
+  for (const listener of resize_listeners) listener(event);
+}
+
+/** Wait for this exact operation, including a confirmed minimum-size no-op. */
+export async function resizeSessionPane(
+  session: SessionSummary,
+  terminal_id: string,
+  direction: ResizeDirection,
+  amount: number,
+): Promise<SessionView> {
+  const owner = [...controls].find((control) =>
+    control.attachmentId() && sameSession(control.session(), session) && control.layoutOwned(),
+  );
+  if (!owner) throw new Error("Take resize control to resize panes.");
+  const attachment_id = owner.attachmentId()!;
+  const request_id = crypto.randomUUID();
+  return new Promise<SessionView>((resolve, reject) => {
+    let settled = false;
+    const finish = (view: SessionView | null, failure?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resize_listeners.delete(listener);
+      if (view) resolve(view);
+      else reject(failure);
+    };
+    const listener = (event: PaneResizeResult) => {
+      if (event.attachment_id !== attachment_id || event.request_id !== request_id || !sameSession(event.session, session)) return;
+      if (event.error) finish(null, new Error(event.error.message));
+      else if (event.view.session_id === session.session_id) finish(event.view);
+    };
+    resize_listeners.add(listener);
+    const timer = setTimeout(() => finish(null, new Error("The server did not confirm the pane resize. Reconnect and try again.")), 5000);
+    try {
+      void owner.resizePane(terminal_id, direction, amount, request_id).catch((failure) => finish(null, failure));
+    } catch (failure) { finish(null, failure); }
   });
 }
 

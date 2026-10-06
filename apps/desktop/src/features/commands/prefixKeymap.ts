@@ -9,6 +9,14 @@ export const PREFIX_ACTIONS = [
   { id: "pane.focus_right", title: "Focus right", key: "Right" },
   { id: "pane.focus_up", title: "Focus above", key: "Up" },
   { id: "pane.focus_down", title: "Focus below", key: "Down" },
+  { id: "pane.resize_left", title: "Resize pane left", key: "Ctrl+Left" },
+  { id: "pane.resize_right", title: "Resize pane right", key: "Ctrl+Right" },
+  { id: "pane.resize_up", title: "Resize pane up", key: "Ctrl+Up" },
+  { id: "pane.resize_down", title: "Resize pane down", key: "Ctrl+Down" },
+  { id: "pane.resize_left_large", title: "Resize pane left by 5 cells", key: "Alt+Left" },
+  { id: "pane.resize_right_large", title: "Resize pane right by 5 cells", key: "Alt+Right" },
+  { id: "pane.resize_up_large", title: "Resize pane up by 5 cells", key: "Alt+Up" },
+  { id: "pane.resize_down_large", title: "Resize pane down by 5 cells", key: "Alt+Down" },
   { id: "pane.zoom", title: "Zoom pane", key: "Z" },
   { id: "pane.move", title: "Move pane mode", key: "M" },
   { id: "pane.move_left", title: "Move pane left", key: "Left" },
@@ -45,10 +53,22 @@ export function prefixStroke(text: string) {
 
 export function prefixActionKey(text: string): string {
   const value = text.trim();
+  const modified = /^(Ctrl|Alt)\+(Left|Right|Up|Down)$/i.exec(value);
+  if (modified) return `${modified[1].toLowerCase() === "ctrl" ? "Ctrl" : "Alt"}+${arrows[modified[2].toLowerCase()]}`;
   if (/^[a-z0-9]$/i.test(value)) return value.toLowerCase();
   if (["!", ":", "%", '"'].includes(value)) return value;
   if (Object.prototype.hasOwnProperty.call(arrows, value.toLowerCase())) return arrows[value.toLowerCase()];
-  throw new Error("Use a letter, digit, arrow name (Left, Right, Up, Down), !, :, %, or a double quote.");
+  throw new Error("Use a letter, digit, arrow name (optionally Ctrl+ or Alt+), !, :, %, or a double quote.");
+}
+
+export function prefixEventKey(event: { key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean; shiftKey: boolean }): string | null {
+  if (event.metaKey || event.ctrlKey && event.altKey) return null;
+  if (event.ctrlKey || event.altKey) {
+    if (event.shiftKey || !Object.values(arrows).includes(event.key)) return null;
+    return `${event.ctrlKey ? "Ctrl" : "Alt"}+${event.key}`;
+  }
+  if (event.shiftKey && event.key.length !== 1) return null;
+  return event.key.length === 1 ? event.key.toLowerCase() : event.key;
 }
 
 export function resolvePrefix(document: KeybindingsDocument, direct: ReadonlyMap<string, Keybinding>, platform: ShortcutPlatform) {

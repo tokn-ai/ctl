@@ -894,6 +894,15 @@ async fn handle_view_request(
       expected_revision,
       layout,
     } => {
+      if !ctmux_proto::supports_pane_resize(protocol_version) && layout.has_weights() {
+        send_error(
+          &mut stream,
+          ErrorCode::InvalidRequest,
+          "split weights require contract 1.1.16",
+        )
+        .await?;
+        return Ok(());
+      }
       let result = tokio::task::spawn_blocking(move || {
         sessions.update_view(&session, expected_revision, layout)
       })
@@ -974,14 +983,25 @@ async fn write_view_result(
   protocol_version: ctl_core::protocol::ProtocolVersion,
 ) -> Result<(), CodecError> {
   match result {
-    Ok(mut view) => {
-      if protocol_version != ctmux_proto::CONTRACT_V1_1_15 {
-        view.zoomed_terminal_id = None;
-      }
+    Ok(view) => {
+      let view = view_for_contract(view, protocol_version);
       write_frame(stream, &ServerMessage::ViewSnapshot { view }).await
     }
     Err(error) => send_session_manager_error(stream, &error).await,
   }
+}
+
+fn view_for_contract(
+  mut view: ctmux_proto::ViewInfo,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+) -> ctmux_proto::ViewInfo {
+  if !ctmux_proto::supports_view_zoom(protocol_version) {
+    view.zoomed_terminal_id = None;
+  }
+  if !ctmux_proto::supports_pane_resize(protocol_version) {
+    view.layout.clear_weights();
+  }
+  view
 }
 
 async fn handle_kill_session_request(
@@ -1656,7 +1676,7 @@ async fn drive_attachment(
     }
     // Like terminal events, shared view metadata gets one bounded turn even
     // while presentation acknowledgements or history requests stay ready.
-    if driver.attachment.protocol_version == ctmux_proto::CONTRACT_V1_1_15
+    if ctmux_proto::supports_view_zoom(driver.attachment.protocol_version)
       && driver.pending_session_end.is_none()
       && driver
         .attachment
@@ -1718,7 +1738,7 @@ async fn drive_attachment(
           return Ok(AttachmentExit::Disconnected);
         }
       }
-      changed = driver.attachment.view_updates.changed(), if driver.attachment.protocol_version == ctmux_proto::CONTRACT_V1_1_15 && driver.pending_session_end.is_none() => {
+      changed = driver.attachment.view_updates.changed(), if ctmux_proto::supports_view_zoom(driver.attachment.protocol_version) && driver.pending_session_end.is_none() => {
         if changed.is_err() || !driver.send_view_update().await? {
           return Ok(AttachmentExit::Disconnected);
         }
@@ -1748,6 +1768,7 @@ impl AttachmentDriver {
     let Some(view) = view else {
       return Ok(true);
     };
+    let view = view_for_contract(view, self.attachment.protocol_version);
     write_before_deadline(
       &mut self.attachment.writer,
       &ServerMessage::ViewSnapshot { view },
@@ -2295,23 +2316,34 @@ where
       }
     }
     ClientMessage::SetViewZoom { terminal_id } => {
-      if protocol_version == ctmux_proto::CONTRACT_V1_1_15 {
-        let attachment_id = attachment_id.to_owned();
-        let result =
-          tokio::task::spawn_blocking(move || session.set_view_zoom(&attachment_id, terminal_id))
-            .await?;
-        match result {
-          Ok(view) => write_frame(writer, &ServerMessage::ViewSnapshot { view }).await?,
-          Err(error) => send_control_error(writer, &error).await?,
-        }
-      } else {
-        send_error(
-          writer,
-          ErrorCode::InvalidRequest,
-          "view zoom requires contract 1.1.15",
-        )
-        .await?;
-      }
+      process_view_zoom(
+        writer,
+        session,
+        attachment_id,
+        protocol_version,
+        terminal_id,
+      )
+      .await?;
+    }
+    ClientMessage::ResizePane {
+      request_id,
+      terminal_id,
+      direction,
+      amount,
+    } => {
+      process_pane_resize(
+        writer,
+        session,
+        attachment_id,
+        protocol_version,
+        PaneResizeRequest {
+          request_id,
+          terminal_id,
+          direction,
+          amount,
+        },
+      )
+      .await?;
     }
     ClientMessage::AcquireLease { lease } => {
       let already_owned_input =
@@ -2355,12 +2387,115 @@ where
   Ok(true)
 }
 
+async fn process_view_zoom<W>(
+  writer: &mut W,
+  session: Arc<Terminal>,
+  attachment_id: &str,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+  terminal_id: Option<String>,
+) -> Result<(), ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  if !ctmux_proto::supports_view_zoom(protocol_version) {
+    send_error(
+      writer,
+      ErrorCode::InvalidRequest,
+      "view zoom requires contract 1.1.15",
+    )
+    .await?;
+    return Ok(());
+  }
+  let attachment_id = attachment_id.to_owned();
+  let result =
+    tokio::task::spawn_blocking(move || session.set_view_zoom(&attachment_id, terminal_id)).await?;
+  match result {
+    Ok(view) => {
+      write_frame(
+        writer,
+        &ServerMessage::ViewSnapshot {
+          view: view_for_contract(view, protocol_version),
+        },
+      )
+      .await?;
+    }
+    Err(error) => send_control_error(writer, &error).await?,
+  }
+  Ok(())
+}
+
+struct PaneResizeRequest {
+  request_id: String,
+  terminal_id: String,
+  direction: ctmux_proto::ResizeDirection,
+  amount: u16,
+}
+
+async fn process_pane_resize<W>(
+  writer: &mut W,
+  session: Arc<Terminal>,
+  attachment_id: &str,
+  protocol_version: ctl_core::protocol::ProtocolVersion,
+  request: PaneResizeRequest,
+) -> Result<(), ConnectionError>
+where
+  W: tokio::io::AsyncWrite + Unpin,
+{
+  if !ctmux_proto::supports_pane_resize(protocol_version) {
+    send_error(
+      writer,
+      ErrorCode::InvalidRequest,
+      "pane resize requires contract 1.1.16",
+    )
+    .await?;
+    return Ok(());
+  }
+  let outcome = if request.request_id.is_empty()
+    || request.request_id.len() > ctmux_proto::MAX_PANE_RESIZE_REQUEST_ID_BYTES
+  {
+    ctmux_proto::PaneResizeOutcome::Rejected {
+      code: ErrorCode::InvalidRequest,
+      message: "pane resize request_id must contain 1 to 256 bytes".into(),
+    }
+  } else {
+    let attachment_id = attachment_id.to_owned();
+    let result = tokio::task::spawn_blocking(move || {
+      session.resize_pane(
+        &attachment_id,
+        &request.terminal_id,
+        request.direction,
+        request.amount,
+      )
+    })
+    .await?;
+    match result {
+      Ok(view) => ctmux_proto::PaneResizeOutcome::Applied {
+        view: Box::new(view),
+      },
+      Err(error) => ctmux_proto::PaneResizeOutcome::Rejected {
+        code: control_error_code(&error),
+        message: error.to_string(),
+      },
+    }
+  };
+  write_frame(
+    writer,
+    &ServerMessage::PaneResizeResult {
+      request_id: request.request_id,
+      outcome,
+    },
+  )
+  .await?;
+  Ok(())
+}
+
 fn renews_attachment_liveness(message: &ClientMessage) -> bool {
   matches!(
     message,
     ClientMessage::Input { .. }
       | ClientMessage::Resize { .. }
       | ClientMessage::SetViewZoom { .. }
+      | ClientMessage::ResizePane { .. }
       | ClientMessage::AcquireLease { .. }
       | ClientMessage::ReleaseLease { .. }
       | ClientMessage::Heartbeat { .. }
@@ -2474,13 +2609,17 @@ async fn send_control_error<W>(
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
-  let code = match error {
+  let code = control_error_code(error);
+  send_error(writer, code, &error.to_string()).await
+}
+
+fn control_error_code(error: &SessionControlError) -> ErrorCode {
+  match error {
     SessionControlError::InvalidView(_) => ErrorCode::InvalidRequest,
     SessionControlError::InputLeaseRequired => ErrorCode::InputLeaseRequired,
     SessionControlError::LayoutLeaseRequired => ErrorCode::LayoutLeaseRequired,
     SessionControlError::Io(_) | SessionControlError::Pty(_) => ErrorCode::Internal,
-  };
-  send_error(writer, code, &error.to_string()).await
+  }
 }
 
 async fn send_error<W>(writer: &mut W, code: ErrorCode, message: &str) -> Result<(), CodecError>

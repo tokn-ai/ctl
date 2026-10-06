@@ -8,6 +8,8 @@ and an independent published `major.minor.build` version.
 - The patch/build increases when the protocol changes during development.
   Some builds never ship, so gaps are intentional. Implementation changes that
   leave the protocol unchanged do not require a new contract.
+  Running development daemons also keep their advertised contract: adding an
+  operation requires a new version even while the pull request remains open.
 - The minor identifies a release cycle. After the current contract is released
   or frozen, the first protocol revision for the next cycle advances the minor
   once and increments the build. Further revisions in that cycle increment only
@@ -72,16 +74,19 @@ daemons.
 
 Shared pane sizing advances ctmux from `1.1.15` (build 15) to `1.1.16`
 (build 16), retaining `1.0.13`, `1.1.14`, and `1.1.15`. Weighted split layouts
-and attached pane/divider resize requests require `1.1.16`. The explicit divider
-operation carries view identity, expected revision, split path, boundary index,
-and an absolute cell position for mouse dragging. Earlier clients receive
-the authoritative pane rectangles with weights omitted; compatible arrangement
+and attached keyboard `resize_pane` requests require `1.1.16`. Earlier clients
+receive the authoritative pane rectangles with weights omitted; compatible arrangement
 updates preserve existing proportions, and ambiguous weighted restructures are
-rejected. New clients disable divider resizing when an earlier contract is selected.
-The same `1.1.16` development cycle adds layout ownership notifications marked
-with `lease_status.notification: true`. Direct replies omit this field, which
-defaults to false. Notifications are gated to `1.1.16` so older peers keep their
-response-only lease behavior.
+rejected.
+
+Exact divider dragging advances that development cycle to `1.1.17` (build 17),
+retaining every earlier contract. Its `resize_divider` operation carries view
+identity, expected revision, split path, boundary index, and an absolute cell
+position. Layout ownership notifications also require `1.1.17` and contain
+`lease_status.notification: true`. Direct replies omit this field, which defaults
+to false. A connection selecting `1.1.16` retains weighted keyboard resizing and
+response-only leases; the client rejects divider dragging before sending a frame.
+This protects running build-16 daemons that cannot decode the new operation.
 
 Storage schema versions are separate. Changing a protocol contract does not
 rename or migrate an on-disk schema.
@@ -93,9 +98,9 @@ The first handshake or control request contains an offer:
 ```json
 {
   "protocol": {
-    "build": 16,
-    "version": "1.1.16",
-    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16"]
+    "build": 17,
+    "version": "1.1.17",
+    "supported_versions": ["1.0.13", "1.1.14", "1.1.15", "1.1.16", "1.1.17"]
   }
 }
 ```
@@ -109,7 +114,7 @@ older contract is selected; new servers preserve old-client messages and
 semantics. Optional features must be gated by that selected contract.
 
 Daemon status and session/task handshakes return actual advertisements, separately
-from the selected contract. A server can advertise `1.1.16` while one connection
+from the selected contract. A server can advertise `1.1.17` while one connection
 selects `1.0.13`; diagnostics must retain both facts.
 
 Every component's `--component-info` output declares the release mapping:

@@ -30,13 +30,13 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
   let directory = TestDirectory::new();
   let socket = directory.path.join("ctmux.sock");
   let daemon = spawn_daemon(&socket, 4096, 1024);
-  let future = ProtocolVersion::new(1, 1, 17);
+  let future = ProtocolVersion::new(1, 1, 18);
   let mut stream = connect_when_ready(&socket).await?;
   write_frame(
     &mut stream,
     &ClientMessage::Handshake {
       protocol: ProtocolOffer::new(
-        17,
+        future.build,
         future,
         &[ctmux_proto::CONTRACT_V1_0_13, PROTOCOL_VERSION, future],
       ),
@@ -68,7 +68,7 @@ async fn published_contract_handshakes_select_explicit_shared_versions() -> Test
     &mut control,
     &LocalControlClientMessage::Handshake {
       protocol: ProtocolOffer::new(
-        17,
+        future.build,
         future,
         &[ctmux_ipc::LOCAL_CONTROL_PROTOCOL_VERSION, future],
       ),
@@ -2589,6 +2589,7 @@ async fn historical_layout_lease_peers_keep_response_only_delivery() -> TestResu
     ctmux_proto::CONTRACT_V1_0_13,
     ctmux_proto::CONTRACT_V1_1_14,
     ctmux_proto::CONTRACT_V1_1_15,
+    ctmux_proto::CONTRACT_V1_1_16,
   ] {
     let mut old = historical_connection(&socket, contract).await?;
     write_frame(
@@ -3694,6 +3695,109 @@ async fn resize_divider_result(
   )
   .await?;
   wait_for_resize_result(stream, &request_id).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contract_16_rejects_divider_without_disconnect_or_lease_loss() -> TestResult {
+  let _guard = pty_test_lock().await;
+  let directory = TestDirectory::new();
+  let socket = directory.path.join("ctmux.sock");
+  let daemon = spawn_daemon(&socket, 64 * 1024, 4 * 1024);
+  let root = create_shell_session(
+    &socket,
+    "keyboard-only",
+    "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+  )
+  .await?;
+  split_topology_shell(&socket, &root).await?;
+  let mut owner = historical_connection(&socket, ctmux_proto::CONTRACT_V1_1_16).await?;
+  write_frame(
+    &mut owner,
+    &ClientMessage::AttachSession {
+      session: root.terminal_id.clone(),
+      resume_from: None,
+      terminal_size: TerminalSize::default(),
+      request_input_lease: true,
+      request_layout_lease: true,
+      request_command_line: false,
+      request_running_command: false,
+      presentation_window_bytes: DEFAULT_PRESENTATION_WINDOW_BYTES,
+    },
+  )
+  .await?;
+  let ServerMessage::Attached {
+    layout_lease,
+    checkpoint,
+    ..
+  } = required_message(&mut owner).await?
+  else {
+    panic!("historical owner attachment expected");
+  };
+  assert_lease_status(&layout_lease, true, true);
+  if let Some(checkpoint) = checkpoint {
+    acknowledge_output(&mut owner, checkpoint.sequence).await?;
+  }
+  let baseline = topology_view(&socket, &root.session_id).await?;
+  let rejected = resize_divider_result(&mut owner, &baseline, &[], 0, 60).await?;
+  assert!(
+    matches!(rejected, ctmux_proto::PaneResizeOutcome::Rejected { code: ErrorCode::InvalidRequest, message } if message.contains("1.1.17"))
+  );
+  assert_eq!(topology_view(&socket, &root.session_id).await?, baseline);
+  assert_eq!(
+    layout_statuses_before_heartbeat(&mut owner, 16).await?,
+    Vec::<LeaseStatus>::new()
+  );
+  assert_lease_status(
+    &acquire_lease(&mut owner, LeaseKind::Layout).await?,
+    true,
+    true,
+  );
+  let resized = applied_resize(
+    resize_pane_result(
+      &mut owner,
+      &root.terminal_id,
+      ctmux_proto::ResizeDirection::Right,
+      5,
+    )
+    .await?,
+  );
+  assert_eq!(resized.revision, baseline.revision + 1);
+  assert!(resized.layout.has_weights());
+  let historical_view = historical_view_request(
+    &socket,
+    ctmux_proto::CONTRACT_V1_1_16,
+    ClientMessage::GetView {
+      session: root.session_id.clone(),
+    },
+  )
+  .await?;
+  assert_eq!(
+    historical_view,
+    ServerMessage::ViewSnapshot { view: resized }
+  );
+  let (mut observer, attached) =
+    attach_session(&socket, &root.terminal_id, None, false, false).await?;
+  let ServerMessage::Attached { layout_lease, .. } = attached else {
+    panic!("observer attachment expected");
+  };
+  assert_lease_status(&layout_lease, true, false);
+  assert_lease_status(
+    &acquire_lease(&mut observer, LeaseKind::Layout).await?,
+    true,
+    false,
+  );
+  write_frame(
+    &mut owner,
+    &ClientMessage::Input {
+      data: b"typing-after-unsupported-divider\n".to_vec(),
+    },
+  )
+  .await?;
+  read_output_until(&mut owner, b"typing-after-unsupported-divider").await?;
+  kill_shell_session(&socket, &root.session_id).await?;
+  drop(owner);
+  drop(observer);
+  wait_for_daemon_exit(daemon, "contract 16 divider daemon did not exit").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

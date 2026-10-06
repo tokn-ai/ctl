@@ -450,10 +450,10 @@ pub async fn resize_attachment_divider(
   request: ResizeAttachmentDividerRequestDto,
 ) -> CommandResult<()> {
   let actor = state.actor(window.label(), &request.attachment_id).await?;
-  if !actor.control.supports_pane_resize() {
+  if !actor.control.supports_divider_resize() {
     return Err(CommandErrorDto::new(
-      "pane_resize_unsupported",
-      "This server does not support divider resizing. Upgrade ctmuxd to use it.",
+      "divider_resize_unsupported",
+      "Divider dragging requires ctmux contract 1.1.17. Update the running ctmuxd daemon and reconnect to use it.",
     ));
   }
   actor

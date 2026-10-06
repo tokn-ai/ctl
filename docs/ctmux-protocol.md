@@ -1,4 +1,4 @@
-# ctmux published protocol 1.1.16
+# ctmux published protocol 1.1.17
 
 The protocol is independent of local IPC and future remote transport. Internal build
 11 introduced length-prefixed JSON frames for debuggability. Each frame begins with a
@@ -232,7 +232,7 @@ separate attachment-bound leases:
 - `acquire_lease` and `release_lease` adjust one capability after attaching.
   The daemon replies with `lease_status`, whose `owned_by_client` field is
   relative to that attachment; other attachment identities are not exposed.
-- Contract `1.1.16` also sends changed layout ownership to affected attachments
+- Contract `1.1.17` also sends changed layout ownership to affected attachments
   after acquire/release, detach, reconnect-grace expiry, and topology changes.
   These unsolicited `lease_status` frames contain `notification: true`.
   Direct replies omit this field (default `false`), so an ownership notification
@@ -600,9 +600,9 @@ contract.
 
 ## Shared pane sizing (published contract 1.1.16)
 
-Internal build 16 adds split `weights` and the attached `resize_pane` and
-`resize_divider` requests. Keyboard resizing uses
-`resize_pane { request_id, terminal_id, direction, amount }`. Weights are relative
+Internal build 16 adds split `weights` and the attached `resize_pane` request.
+Keyboard resizing uses `resize_pane { request_id, terminal_id, direction, amount }`.
+Weights are relative
 positive integers; an omitted or empty list retains the historical equal split.
 A nonempty list must match the number of children. For example:
 
@@ -659,6 +659,14 @@ including updates from clients that cannot send them. Changing explicit weights 
 restructuring a weighted node ambiguously is rejected; clients must use the attached
 resize operations to change proportions. This prevents arrangement updates from
 bypassing resize ownership or silently restoring equal sizes.
+
+### Exact divider dragging (published contract 1.1.17)
+
+Internal build 17 adds `resize_divider` and unsolicited layout lease notifications.
+Clients require negotiated `1.1.17` before sending a divider request. Connections
+selecting `1.1.16` retain keyboard pane resizing and receive only direct lease
+replies; they never send the new operation to a build-16 daemon. Unsupported
+dragging is rejected locally without disconnecting or changing ownership.
 
 Mouse dragging uses `resize_divider { request_id, view_id, expected_revision,
 split_path, boundary, position }` on the layout-owner attachment. The same

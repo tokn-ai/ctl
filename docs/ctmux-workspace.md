@@ -284,8 +284,11 @@ names. If the viewport is too small for the split tree, the daemon preserves the
 minimum valid grid and the client scrolls it. New splits use equal proportions.
 The daemon retains resized proportions in its shared layout, so the TUI and
 desktop render the same unequal rectangles. Resizing uses the actual layout-owner
-attachment, independently of which pane has focus or owns input. It requires
-ctmux contract `1.1.16`; earlier clients keep the authoritative rectangles.
+attachment, independently of which pane has focus or owns input. Keyboard
+resizing supports contracts `1.1.16` and `1.1.17`; earlier clients keep the
+authoritative rectangles.
+Exact mouse dragging requires `1.1.17`. A connection selecting `1.1.16` keeps
+keyboard resizing but rejects dragging without disconnecting or changing leases.
 Drag a divider with the primary mouse button to resize adjacent panes. Vertical
 dividers move horizontally; horizontal dividers move vertically. The pointer
 snaps to terminal cells, and the daemon clamps movement at subtree minimum sizes.

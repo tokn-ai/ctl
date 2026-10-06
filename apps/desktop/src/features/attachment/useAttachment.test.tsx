@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import type { Terminal as HeadlessTerminal } from "@xterm/headless";
 import type {
   AttachmentEvent,
@@ -13,7 +13,7 @@ import type {
 } from "../../lib/types";
 import { sessionKey } from "../targets/targets";
 import { XtermRenderer } from "../terminal/XtermRenderer";
-import { useAttachment } from "./useAttachment";
+import { useAttachment, type AttachmentActions } from "./useAttachment";
 import { useSessionAttachments } from "./useSessionAttachments";
 import { reconnectComponentAttachments, resetComponentAttachments, resizeSessionDivider, resizeSessionPane, setSessionViewZoom, toggleSessionResizeWithWindow } from "./componentActions";
 import { NotificationProvider } from "../notifications/NotificationContext";
@@ -21,6 +21,7 @@ import { NotificationStore } from "../notifications/NotificationStore";
 import { useWorkbenchNotifications } from "../notifications/useWorkbenchNotifications";
 import { useAttachmentNotifications } from "../notifications/useAttachmentNotifications";
 import { ManualReconnectProvider, type ManualReconnectRequest } from "./ManualReconnect";
+import { ViewDividers } from "../../components/terminal/ViewDividers";
 
 const xterm = vi.hoisted(() => ({
   instances: [] as {
@@ -39,6 +40,7 @@ vi.mock("@xterm/xterm", async () => {
       constructor(options: ConstructorParameters<typeof Terminal>[0]) {
         const terminal = new Terminal({ ...options, allowProposedApi: true });
         const dispose = vi.fn(() => terminal.dispose());
+        let input: HTMLTextAreaElement | null = null;
         return {
           get buffer() { return terminal.buffer; },
           get cols() { return terminal.cols; },
@@ -47,13 +49,14 @@ vi.mock("@xterm/xterm", async () => {
           resize: (columns: number, rows: number) => terminal.resize(columns, rows),
           dispose,
           open: (container: HTMLElement) => {
-            container.append(document.createElement("div"));
+            input = document.createElement("textarea");
+            container.append(input);
             xterm.instances.push({ terminal, container, dispose });
           },
           loadAddon: () => undefined,
           onData: () => undefined,
           onBinary: () => undefined,
-          focus: () => undefined,
+          focus: () => input?.focus(),
         };
       }
     },
@@ -214,6 +217,175 @@ afterEach(async () => {
   renderer.dispose();
   container.remove();
   await Promise.resolve();
+});
+
+class TestPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly isPrimary: boolean;
+  constructor(type: string, options: PointerEventInit = {}) {
+    super(type, options);
+    this.pointerId = options.pointerId ?? 1;
+    this.isPrimary = options.isPrimary ?? true;
+  }
+}
+
+const sibling = { ...first, terminal_id: "sibling-terminal" };
+function dividerView(position = 40, revision = "1"): SessionView {
+  return {
+    session_id: first.session_id, session_name: first.name, view_id: first.view_id!, revision,
+    canvas_size: size, zoomed_terminal_id: null,
+    layout: { kind: "split", axis: "horizontal", weights: [position, 79 - position], children: [
+      { kind: "terminal", terminal_id: first.terminal_id! }, { kind: "terminal", terminal_id: sibling.terminal_id! },
+    ] },
+    panes: [{ terminal_id: first.terminal_id!, left: 0, top: 0, columns: position, rows: 24 },
+      { terminal_id: sibling.terminal_id!, left: position + 1, top: 0, columns: 79 - position, rows: 24 }],
+    terminals: [first, sibling].map((session) => ({ terminal_id: session.terminal_id!, name: session.name,
+      terminal_size: size, next_sequence: "0" })),
+  };
+}
+
+interface DividerAttachments {
+  owner?: AttachmentActions;
+  observer?: AttachmentActions;
+}
+
+function DividerAttachmentFixture({ actions, observer_renderer }: {
+  actions: DividerAttachments; observer_renderer: XtermRenderer;
+}) {
+  const owner = useAttachment(renderer, true);
+  const observer = useAttachment(observer_renderer);
+  actions.owner = owner;
+  actions.observer = observer;
+  useAttachmentNotifications(owner);
+  useAttachmentNotifications(observer);
+  const [view, setView] = useState(dividerView);
+  const [busy, setBusy] = useState(false);
+  const busy_ref = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  return <div>
+    <output data-testid="divider-busy">{String(busy)}</output>
+    <output data-testid="divider-geometry">{view.panes[0].columns}</output>
+    {error && <div role="alert">{error}</div>}
+    <ViewDividers session={owner.state.session} view={view} cell={{ width: 8, height: 16 }}
+      enabled={owner.state.phase === "attached"} can_begin={() => !busy_ref.current}
+      on_busy={(next) => { busy_ref.current = next; setBusy(next); }} on_error={setError} on_confirm={setView} />
+  </div>;
+}
+
+describe("divider ownership through live attachments", () => {
+  let captured: WeakMap<HTMLElement, number>;
+  let observer_container: HTMLElement;
+  beforeEach(() => {
+    captured = new WeakMap();
+    vi.stubGlobal("PointerEvent", TestPointerEvent);
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true,
+      value(this: HTMLElement, pointer_id: number) { captured.set(this, pointer_id); } });
+    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true,
+      value(this: HTMLElement, pointer_id: number) { return captured.get(this) === pointer_id; } });
+    Object.defineProperty(HTMLElement.prototype, "releasePointerCapture", { configurable: true,
+      value(this: HTMLElement) { captured.delete(this); } });
+    observer_container = document.createElement("div");
+    document.body.append(observer_container);
+  });
+  afterEach(() => {
+    observer_container.remove();
+    for (const method of ["setPointerCapture", "hasPointerCapture", "releasePointerCapture"]) {
+      Reflect.deleteProperty(HTMLElement.prototype, method);
+    }
+  });
+
+  async function connectFixture(owned: boolean, held = false) {
+    const open = api.openAttachment.getMockImplementation()!;
+    api.openAttachment.mockImplementation(async (...args) => {
+      const response = await open(...args);
+      const is_observer = args[0].session === sibling.terminal_id;
+      response.attached.session = is_observer ? sibling : first;
+      response.attached.layout_lease = { held: held || owned && is_observer, owned_by_client: false };
+      return response;
+    });
+    const observer_renderer = new XtermRenderer(observer_container, () => undefined, size);
+    pane_renderers.push(observer_renderer);
+    const actions: DividerAttachments = {};
+    const store = new NotificationStore();
+    render(<NotificationProvider store={store}>
+      <DividerAttachmentFixture actions={actions} observer_renderer={observer_renderer} />
+    </NotificationProvider>);
+    await act(async () => { await actions.owner!.connect(first, { resize_with_window: false, resize_control: owned }); });
+    if (owned) await emit({ event_type: "lease_status", attachment_id: actions.owner!.state.attachment_id!,
+      lease: "layout", status: { held: true, owned_by_client: true } });
+    await act(async () => { await actions.observer!.connect(sibling, { resize_with_window: false, terminal_id: sibling.terminal_id }); });
+    return { actions, store };
+  }
+
+  it("keeps the local owner and observer stable when pointer capture begins and the first move is confirmed", async () => {
+    const { actions, store } = await connectFixture(true);
+    const owner_id = actions.owner!.state.attachment_id!;
+    const observer_id = actions.observer!.state.attachment_id!;
+    const input = container.querySelector("textarea")!;
+    act(() => input.focus());
+    expect(document.activeElement).toBe(input);
+    const handle = screen.getByRole("separator");
+    expect(handle.getAttribute("aria-disabled")).toBe("false");
+    const expectStableAttachments = () => {
+      expect(actions.owner!.state).toMatchObject({ phase: "attached", attachment_id: owner_id,
+        layout_lease: { held: true, owned_by_client: true }, message: null });
+      expect(actions.observer!.state).toMatchObject({ phase: "attached", attachment_id: observer_id,
+        layout_lease: { held: true, owned_by_client: false }, message: null });
+      expect(api.openAttachment).toHaveBeenCalledTimes(2);
+      expect(api.acquireAttachmentLease).toHaveBeenCalledExactlyOnceWith({ attachment_id: owner_id, lease: "layout" });
+      expect(api.releaseAttachmentLease).not.toHaveBeenCalled();
+      expect(api.detachAttachment).not.toHaveBeenCalled();
+      expect(store.snapshot().entries).toEqual([]);
+      expect(document.activeElement).toBe(input);
+      expect(container.querySelector("textarea")).toBe(input);
+    };
+    expect(fireEvent.pointerDown(handle, { pointerId: 1, button: 0, clientX: 324, clientY: 100 })).toBe(false);
+    expect(captured.get(handle)).toBe(1);
+    expect(api.resizeAttachmentDivider).not.toHaveBeenCalled();
+    expectStableAttachments();
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 364, clientY: 100 });
+    expect(api.resizeAttachmentDivider).toHaveBeenCalledExactlyOnceWith({ attachment_id: owner_id,
+      request_id: expect.any(String), view_id: first.view_id, expected_revision: "1", split_path: [], boundary: 0, position: 45 });
+    expect(screen.getByTestId("divider-geometry").textContent).toBe("40");
+    expectStableAttachments();
+    const request_id = api.resizeAttachmentDivider.mock.lastCall![0].request_id;
+    const next = dividerView(45, "2");
+    await emit({ event_type: "pane_resize_result", attachment_id: owner_id, request_id, view: next, error: null });
+    await emit({ event_type: "view_changed", attachment_id: observer_id, view: next });
+    await emit({ event_type: "lease_status", attachment_id: owner_id, lease: "layout", notification: true,
+      status: { held: true, owned_by_client: true } });
+    await emit({ event_type: "lease_status", attachment_id: observer_id, lease: "layout", notification: true,
+      status: { held: true, owned_by_client: false } });
+    await waitFor(() => expect(screen.getByTestId("divider-geometry").textContent).toBe("45"));
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 364, clientY: 100 });
+    expect(captured.has(handle)).toBe(false);
+    expect(screen.getByTestId("divider-busy").textContent).toBe("false");
+    expectStableAttachments();
+  });
+
+  it.each([false, true])("never acquires or steals layout control by starting a drag without a local owner (held=%s)", async (held) => {
+    const { actions, store } = await connectFixture(false, held);
+    const owner_id = actions.owner!.state.attachment_id;
+    const observer_id = actions.observer!.state.attachment_id;
+    const handle = screen.getByRole("separator");
+    expect(handle.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.pointerDown(handle, { pointerId: 1, button: 0, clientX: 324, clientY: 100 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 364, clientY: 100 });
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 364, clientY: 100 });
+    expect(screen.getByRole("alert").textContent).toBe("Take resize control to resize panes.");
+    expect(captured.has(handle)).toBe(false);
+    expect(screen.getByTestId("divider-busy").textContent).toBe("false");
+    expect(actions.owner!.state).toMatchObject({ phase: "attached", attachment_id: owner_id,
+      layout_lease: { held, owned_by_client: false } });
+    expect(actions.observer!.state).toMatchObject({ phase: "attached", attachment_id: observer_id,
+      layout_lease: { held, owned_by_client: false } });
+    expect(api.openAttachment).toHaveBeenCalledTimes(2);
+    expect(api.acquireAttachmentLease).not.toHaveBeenCalled();
+    expect(api.releaseAttachmentLease).not.toHaveBeenCalled();
+    expect(api.resizeAttachmentDivider).not.toHaveBeenCalled();
+    expect(api.detachAttachment).not.toHaveBeenCalled();
+    expect(store.snapshot().entries).toEqual([]);
+  });
 });
 
 describe("background history presentation", () => {

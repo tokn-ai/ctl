@@ -171,8 +171,9 @@ the layout clears zoom, and exiting the zoomed pane clears zoom. Its final
 screen remains visible until dismissed, as with other ended panes.
 Zoom survives detach and reconnect, and the status row shows `ZOOM`.
 
-Zoom requires negotiated ctmux contract `1.1.15` or `1.1.16`. Older daemons remain usable
-with their existing split controls; attempting zoom reports that it is unavailable.
+Zoom supports negotiated ctmux contracts `1.1.15`, `1.1.16`, and `1.1.17`.
+Older daemons remain usable with their existing split controls; attempting zoom
+reports that it is unavailable.
 
 **Ctrl+B Ctrl+Arrow** moves a divider by one cell; **Ctrl+B Alt+Arrow** moves it
 by five. The daemon chooses the nearest split in that direction's axis, using
@@ -181,14 +182,15 @@ Left/up moves the divider left/up, and right/down moves it right/down. This can
 shrink the focused pane when it is the last child. Subtree minimum sizes limit
 movement; a divider at its limit stays put.
 
-Resizing requires the view resize lease and negotiated ctmux contract `1.1.16`.
+Resizing requires the view resize lease and negotiated ctmux contract `1.1.16`
+or `1.1.17`.
 A successful movement unzooms the view and saves its new proportions. The TUI
 and desktop see the same rectangles; canvas changes, detach, and reconnect
 retain the proportions. Daemon restart still ends these in-memory views.
 Clients selecting an earlier contract can view unequal panes and rearrange
 compatible layouts without resetting proportions, but cannot resize dividers.
-Desktop users can drag the shared dividers with the mouse; the TUI receives the
-same confirmed geometry. TUI resizing uses the keyboard bindings above. If this
+Desktop mouse dragging requires `1.1.17`; the TUI receives the same confirmed
+geometry. TUI resizing uses the keyboard bindings above. If this
 client does not own resize, **Ctrl+B R** requests the available view lease.
 
 Each pane has its own bounded VT emulator. The renderer uses authoritative pane

@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Internal protocol build; incrementing this does not publish a new contract.
-pub const PROTOCOL_BUILD: u16 = 16;
+pub const PROTOCOL_BUILD: u16 = 17;
 /// First published wire contract. Keep this identity immutable.
 pub const CONTRACT_V1_0_13: ProtocolVersion = ProtocolVersion::new(1, 0, 13);
 /// Published compatible addition: paged history and checkpoint recovery.
@@ -15,27 +15,38 @@ pub const CONTRACT_V1_1_14: ProtocolVersion = ProtocolVersion::new(1, 1, 14);
 pub const CONTRACT_V1_1_15: ProtocolVersion = ProtocolVersion::new(1, 1, 15);
 /// Proportional split geometry and leased pane resizing.
 pub const CONTRACT_V1_1_16: ProtocolVersion = ProtocolVersion::new(1, 1, 16);
-pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_16;
+/// Exact divider targeting and marked unsolicited layout ownership updates.
+pub const CONTRACT_V1_1_17: ProtocolVersion = ProtocolVersion::new(1, 1, 17);
+pub const PROTOCOL_VERSION: ProtocolVersion = CONTRACT_V1_1_17;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
   CONTRACT_V1_0_13,
   CONTRACT_V1_1_14,
   CONTRACT_V1_1_15,
   CONTRACT_V1_1_16,
+  CONTRACT_V1_1_17,
 ];
 
 #[must_use]
 pub const fn supports_view_zoom(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_15 | CONTRACT_V1_1_16)
+  matches!(
+    version,
+    CONTRACT_V1_1_15 | CONTRACT_V1_1_16 | CONTRACT_V1_1_17
+  )
 }
 
 #[must_use]
 pub const fn supports_pane_resize(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_16)
+  matches!(version, CONTRACT_V1_1_16 | CONTRACT_V1_1_17)
+}
+
+#[must_use]
+pub const fn supports_divider_resize(version: ProtocolVersion) -> bool {
+  matches!(version, CONTRACT_V1_1_17)
 }
 
 #[must_use]
 pub const fn supports_layout_lease_notifications(version: ProtocolVersion) -> bool {
-  matches!(version, CONTRACT_V1_1_16)
+  matches!(version, CONTRACT_V1_1_17)
 }
 
 #[must_use]
@@ -876,7 +887,7 @@ pub enum ServerMessage {
   LeaseStatus {
     lease: LeaseKind,
     status: LeaseStatus,
-    /// Contract 16 unsolicited state refresh. Direct replies omit this field
+    /// Contract 17 unsolicited state refresh. Direct replies omit this field
     /// to preserve the historical response-only wire shape.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     notification: bool,
@@ -1454,9 +1465,32 @@ mod tests {
   }
 
   #[test]
-  fn pane_resize_uses_current_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 16));
-    assert_eq!(PROTOCOL_BUILD, 16);
+  fn divider_contract_retains_historical_keyboard_resizing() {
+    assert_eq!(PROTOCOL_VERSION, ProtocolVersion::new(1, 1, 17));
+    assert_eq!(PROTOCOL_BUILD, 17);
+    assert_eq!(
+      SUPPORTED_PROTOCOL_VERSIONS,
+      &[
+        CONTRACT_V1_0_13,
+        CONTRACT_V1_1_14,
+        CONTRACT_V1_1_15,
+        CONTRACT_V1_1_16,
+        CONTRACT_V1_1_17,
+      ]
+    );
+    for (version, zoom, pane, divider) in [
+      (CONTRACT_V1_0_13, false, false, false),
+      (CONTRACT_V1_1_14, false, false, false),
+      (CONTRACT_V1_1_15, true, false, false),
+      (CONTRACT_V1_1_16, true, true, false),
+      (CONTRACT_V1_1_17, true, true, true),
+      (ProtocolVersion::new(1, 1, 18), false, false, false),
+    ] {
+      assert_eq!(supports_view_zoom(version), zoom);
+      assert_eq!(supports_pane_resize(version), pane);
+      assert_eq!(supports_divider_resize(version), divider);
+      assert_eq!(supports_layout_lease_notifications(version), divider);
+    }
   }
 
   #[test]

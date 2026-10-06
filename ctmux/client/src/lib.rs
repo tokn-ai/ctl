@@ -550,6 +550,8 @@ pub enum AttachmentCommandError {
   ViewZoomUnavailable,
   #[error("pane resizing requires ctmux contract 1.1.16")]
   PaneResizeUnavailable,
+  #[error("divider resizing requires ctmux contract 1.1.17")]
+  DividerResizeUnavailable,
   #[error("attachment controller is no longer running")]
   Closed,
 }
@@ -637,10 +639,16 @@ impl AttachmentControl {
       .await
   }
 
-  /// Whether the negotiated contract supports moving pane dividers.
+  /// Whether the negotiated contract supports keyboard pane resizing.
   #[must_use]
   pub fn supports_pane_resize(&self) -> bool {
     ctmux_proto::supports_pane_resize(self.protocol_version)
+  }
+
+  /// Whether the negotiated contract supports an exact mouse divider target.
+  #[must_use]
+  pub fn supports_divider_resize(&self) -> bool {
+    ctmux_proto::supports_divider_resize(self.protocol_version)
   }
 
   /// Queues movement of the focused pane's nearest divider in cell units.
@@ -688,8 +696,8 @@ impl AttachmentControl {
     divider: ctmux_proto::DividerResize,
     request_id: String,
   ) -> Result<(), AttachmentCommandError> {
-    if !self.supports_pane_resize() {
-      return Err(AttachmentCommandError::PaneResizeUnavailable);
+    if !self.supports_divider_resize() {
+      return Err(AttachmentCommandError::DividerResizeUnavailable);
     }
     if !self.state.lease_status(LeaseKind::Layout).owned_by_client {
       return Err(AttachmentCommandError::LayoutLeaseRequired);
@@ -3032,7 +3040,7 @@ mod tests {
         control
           .resize_divider(divider_request(), "old-divider".into())
           .await,
-        Err(AttachmentCommandError::PaneResizeUnavailable)
+        Err(AttachmentCommandError::DividerResizeUnavailable)
       );
     }
     let (client, _peer) = tokio::io::duplex(4096);
@@ -3068,6 +3076,117 @@ mod tests {
       boundary: 1,
       position: 32,
     }
+  }
+
+  async fn read_non_heartbeat_request(peer: &mut tokio::io::DuplexStream) -> ClientMessage {
+    loop {
+      match read_frame::<_, ClientMessage>(peer)
+        .await
+        .unwrap()
+        .expect("attachment must remain connected until the expected request")
+      {
+        ClientMessage::Heartbeat { .. } => {}
+        request => return request,
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn contract_16_blocks_divider_before_queue_and_preserves_keyboard_lease_and_heartbeat() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+      let (client, mut peer) = tokio::io::duplex(4096);
+      let mut attached = attached_session(0, None, ShellState::default());
+      attached.handshake_info.protocol_version = ctmux_proto::CONTRACT_V1_1_16;
+      attached.layout_lease = LeaseStatus {
+        held: true,
+        owned_by_client: true,
+      };
+      attached.liveness.heartbeat_interval = Duration::from_millis(10);
+      let (controller, control, mut events) =
+        AttachmentController::new(client, &attached, controller_options()).unwrap();
+      let runner = tokio::spawn(controller.run());
+      assert!(control.supports_pane_resize());
+      assert!(!control.supports_divider_resize());
+      assert_eq!(
+        control
+          .resize_divider(divider_request(), "unsupported".into())
+          .await,
+        Err(AttachmentCommandError::DividerResizeUnavailable)
+      );
+      assert_eq!(control.state().leases().layout, attached.layout_lease);
+      control
+        .resize_pane(
+          "terminal".into(),
+          ResizeDirection::Right,
+          1,
+          "keyboard".into(),
+        )
+        .await
+        .unwrap();
+      let mut keyboard_sent = false;
+      let mut heartbeat_seen = false;
+      while !keyboard_sent || !heartbeat_seen {
+        match read_frame::<_, ClientMessage>(&mut peer)
+          .await
+          .unwrap()
+          .unwrap()
+        {
+          ClientMessage::ResizePane { request_id, .. } => {
+            assert_eq!(request_id, "keyboard");
+            assert!(!keyboard_sent);
+            keyboard_sent = true;
+          }
+          ClientMessage::Heartbeat { nonce } => {
+            write_frame(&mut peer, &ServerMessage::HeartbeatAck { nonce })
+              .await
+              .unwrap();
+            assert_eq!(
+              events.recv().await,
+              Some(AttachmentEvent::HeartbeatAck { nonce })
+            );
+            heartbeat_seen = true;
+          }
+          unexpected => panic!("unsupported drag wrote an unexpected request: {unexpected:?}"),
+        }
+      }
+      control.acquire_lease(LeaseKind::Layout).await.unwrap();
+      assert_eq!(
+        read_non_heartbeat_request(&mut peer).await,
+        ClientMessage::AcquireLease {
+          lease: LeaseKind::Layout,
+        }
+      );
+      let status = attached.layout_lease;
+      write_frame(
+        &mut peer,
+        &ServerMessage::LeaseStatus {
+          lease: LeaseKind::Layout,
+          status: status.clone(),
+          notification: false,
+        },
+      )
+      .await
+      .unwrap();
+      assert_eq!(
+        events.recv().await,
+        Some(AttachmentEvent::LeaseStatus {
+          lease: LeaseKind::Layout,
+          status,
+          notification: false
+        })
+      );
+      control.detach().await.unwrap();
+      assert_eq!(read_non_heartbeat_request(&mut peer).await, ClientMessage::Detach);
+      write_frame(&mut peer, &ServerMessage::Detached)
+        .await
+        .unwrap();
+      assert_eq!(
+        runner.await.unwrap().unwrap().reason,
+        AttachExitReason::Detached
+      );
+    })
+    .await
+    .expect("contract 16 divider rejection must preserve keyboard, heartbeat, lease reply, and detach within three seconds");
   }
 
   #[tokio::test]

@@ -2550,7 +2550,14 @@ where
     .await?;
     return Ok(());
   }
-  let outcome = if request.request_id.is_empty()
+  let outcome = if matches!(&request.action, PaneResizeAction::Divider(_))
+    && !ctmux_proto::supports_divider_resize(protocol_version)
+  {
+    ctmux_proto::PaneResizeOutcome::Rejected {
+      code: ErrorCode::InvalidRequest,
+      message: "divider resize requires contract 1.1.17".into(),
+    }
+  } else if request.request_id.is_empty()
     || request.request_id.len() > ctmux_proto::MAX_PANE_RESIZE_REQUEST_ID_BYTES
   {
     ctmux_proto::PaneResizeOutcome::Rejected {

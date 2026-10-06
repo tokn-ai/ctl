@@ -140,8 +140,10 @@ rebuilds local daemons separately. Ordinary development does not replace an
 already running daemon; `ctld` uses protocol-specific sockets, and rejects an
 incompatible helper executable before starting it.
 
-All commands below run from the repository root. Use `pnpm --filter ctmux-app`
-for app-only package commands; shared tooling lives in the root package.
+All commands below run from the repository root. The desktop package retains
+only `pnpm dev` (`tauri dev`) for starting native development from `apps/desktop`.
+Frontend builds, checks, tests, and repository tooling are owned by the root;
+root `pnpm dev` starts the frontend that Tauri uses.
 
 Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are
@@ -376,13 +378,14 @@ so the local team selection does not modify tracked files. Free Personal Team
 profiles expire after seven days; after initial setup the signed-development
 launcher asks Xcode to refresh an expired profile automatically.
 
-The standalone CLI shares this provisioning project and profile discovery.
-From the repository root, `pnpm helper:signed` prepares
-a signed helper that ordinary unsigned Cargo debug CLI builds can reuse.
-`pnpm ctl:signed` builds a signed CLI with `ctld.app` embedded; see the
-[CLI development instructions](../../README.md#build).
+The CLI and GUI share this provisioning project and profile discovery.
+From the repository root, `pnpm ctld:signed` prepares one complete signed
+`ctld.app` that ordinary unsigned debug CLI and GUI builds both discover and
+verify. Start them with Cargo or `pnpm desktop:dev`; see the
+[development instructions](../../README.md#build).
 
-Then run `pnpm desktop:dev:signed`. The launcher searches Xcode's downloaded
+For a managed signed development daemon, run `pnpm desktop:dev:signed`.
+The launcher searches Xcode's downloaded
 profiles and `~/Library/Application Support/ctmux/signing/ctld.provisionprofile`,
 selects the newest unexpired profile for `dev.tokn-ai.ctl.ctld`, discovers its
 matching signing certificate in the login Keychain, and selects a private,
@@ -416,12 +419,14 @@ Tauri arguments, such as `--release`, can be passed through
 `pnpm desktop:dev:signed --release`.
 Explicit `--no-watch` or `--exit-on-panic` still opts out of waiting after a
 failed build, following Tauri's behavior.
-Ordinary `pnpm desktop:dev` keeps the desktop's bundled helper first, then discovers
-a compatible, verified `ctld.app` selected under `~/.tokn/ctl`, including signed
-development installations. Without one it falls back to a loose, unsigned daemon
-and cannot store Touch ID-protected credentials. Installing a signed helper does
-not change an already-running daemon: use **About → Restart** to replace that
-owner explicitly. The restart can interrupt its SSH forwards and VPN connections.
+Ordinary `pnpm desktop:dev` first verifies this checkout's selected signed ctld,
+then discovers a compatible, verified `ctld.app` selected under `~/.tokn/ctl`,
+including signed development installations. Packaged desktop releases prefer
+their own bundled helper. Without a signed app, development falls back to a
+loose, unsigned daemon and cannot store Touch ID-protected credentials. Preparing
+a signed helper preserves an already-running daemon: use **About → Restart**
+to replace that owner explicitly. The restart can interrupt its SSH forwards
+and VPN connections.
 Run the launcher regression tests with `pnpm test:dev`.
 
 The release workflow derives the Team ID and signing identity from the profile

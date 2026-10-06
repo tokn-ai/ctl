@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.tokn-ai.ctl.ctmux",
   "build": {
-    "beforeDevCommand": "pnpm --workspace-root daemons:build && pnpm dev",
+    "beforeDevCommand": "pnpm --workspace-root daemons:build && pnpm --workspace-root dev",
     "devUrl": "http://localhost:1430",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm --workspace-root build",
     "frontendDist": "../dist"
   },
   "app": {

@@ -2,7 +2,6 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 use ctl_client::{RemoteInstallPhase, RemoteInstallProgress, RemoteInstallWatchdog};
-use tauri::ipc::Channel;
 use tokio::sync::watch;
 
 use crate::dto::{RemoteAgentInstallPhase as Phase, RemoteAgentInstallProgressDto as Progress};
@@ -31,7 +30,7 @@ fn shared_progress(progress: Progress) -> RemoteInstallProgress {
   }
 }
 
-fn desktop_progress(progress: RemoteInstallProgress) -> Progress {
+pub(super) fn desktop_progress(progress: RemoteInstallProgress) -> Progress {
   Progress {
     phase: match progress.phase {
       RemoteInstallPhase::DetectingPlatform => Phase::DetectingPlatform,
@@ -53,7 +52,7 @@ fn desktop_progress(progress: RemoteInstallProgress) -> Progress {
 pub(super) async fn monitor<T>(
   install: impl Future<Output = CommandResult<T>>,
   mut updates: watch::Receiver<Progress>,
-  channel: &Channel<Progress>,
+  on_progress: impl Fn(Progress) -> CommandResult<()>,
   authenticating: impl Fn() -> bool,
 ) -> CommandResult<T> {
   tokio::pin!(install);
@@ -66,7 +65,7 @@ pub(super) async fn monitor<T>(
           let mut complete = updates.borrow().clone();
           complete.phase = Phase::Complete;
           complete.bytes_per_second = 0;
-          let _ = channel.send(complete);
+          on_progress(complete)?;
         }
         return result;
       }
@@ -82,9 +81,7 @@ pub(super) async fn monitor<T>(
         authenticating(),
       )
       .map_err(|error| CommandErrorDto::new("remote_agent_install_stalled", error.to_string()))?;
-    channel
-      .send(desktop_progress(progress))
-      .map_err(|error| CommandErrorDto::new("remote_agent_progress_closed", error.to_string()))?;
+    on_progress(desktop_progress(progress))?;
   }
 }
 

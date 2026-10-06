@@ -1,5 +1,39 @@
 export type Sequence = string;
 
+export type ComponentUpdatePackage = "ctl_agent" | "full_bundle";
+export type ComponentUpdateSource = { kind: "selected" } | {
+  kind: "provided";
+  path: string;
+  local_build: boolean;
+  ctld_package: string | null;
+};
+export interface ComponentUpdateOptions {
+  package: ComponentUpdatePackage;
+  source: ComponentUpdateSource;
+}
+export interface ComponentUpdateRequest {
+  targets: ConnectionTarget[];
+  attempt_id: string;
+  options: ComponentUpdateOptions;
+}
+export type ComponentUpdateState = "updating" | "complete" | "failed" | "cancelled";
+export interface ComponentUpdateProgress {
+  host_index: number;
+  state: ComponentUpdateState;
+  progress: RemoteAgentInstallProgress | null;
+}
+export interface ComponentUpdateHostResult {
+  host_index: number;
+  state: ComponentUpdateState;
+  result: { package: ComponentUpdatePackage; bundle_id: string; target_triple: string; services_preserved: boolean } | null;
+  error: string | null;
+}
+export interface ComponentUpdateContext {
+  targets?: readonly ConnectionTarget[];
+  package?: ComponentUpdatePackage;
+  source?: ComponentUpdateSource;
+}
+
 export interface CredentialTarget {
   name: string;
   target: SshConnectionTarget;

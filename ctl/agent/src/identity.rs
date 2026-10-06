@@ -105,7 +105,38 @@ fn installed_identity(remote_id: String, executable: &Path) -> io::Result<Remote
     };
   #[cfg(not(unix))]
   let managed_bundle = None;
-  let bundle = if managed_bundle.is_some() {
+  #[cfg(unix)]
+  let agent_source =
+    match fs::symlink_metadata(executable.with_file_name(ctl_core::bundles::agent::SOURCE_FILE)) {
+      Ok(_) => {
+        let source = ctl_core::bundles::agent::AgentSource::open(
+          executable.parent().ok_or_else(invalid_manifest)?,
+        )?
+        .source_bundle;
+        if !source.same_component("ctl-agent", &component)
+          || source.target_triple != ctl_core::paths::native_target()
+        {
+          return Err(invalid_manifest());
+        }
+        Some(Box::new(BundleVersion {
+          app_version: component.build.version.clone(),
+          bundle_id: source.distribution_id.unwrap_or(source.bundle_id),
+          git_revision: component
+            .build
+            .source_revision
+            .clone()
+            .ok_or_else(invalid_manifest)?,
+          target_triple: source.target_triple,
+        }))
+      }
+      Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+      Err(error) => return Err(error),
+    };
+  #[cfg(not(unix))]
+  let agent_source = None;
+  let bundle = if agent_source.is_some() {
+    agent_source
+  } else if managed_bundle.is_some() {
     managed_bundle
   } else {
     match fs::File::open(manifest) {
@@ -432,6 +463,26 @@ mod tests {
       io::ErrorKind::NotFound
     );
     assert!(!directory.exists());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_dangling_agent_source_is_rejected_instead_of_silently_ignored() {
+    let directory = std::env::temp_dir().join(format!("ctl-agent-source-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&directory).unwrap();
+    std::os::unix::fs::symlink(
+      "missing",
+      directory.join(ctl_core::bundles::agent::SOURCE_FILE),
+    )
+    .unwrap();
+    assert!(
+      installed_identity(
+        uuid::Uuid::new_v4().to_string(),
+        &directory.join("ctl-agent")
+      )
+      .is_err()
+    );
+    fs::remove_dir_all(directory).unwrap();
   }
 
   #[test]

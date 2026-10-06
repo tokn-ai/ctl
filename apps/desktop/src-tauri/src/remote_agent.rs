@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use ctl_client::{
-  RemoteInstallEvent, SshConnectionOptions, SshInteraction,
-  install_ssh_unix_agent_interactive_with_progress, probe_ssh_unix_platform_interactive,
-  remote_bundle::{self, Platform, VerifiedBundle},
+  SshConnectionOptions, SshInteraction, probe_ssh_unix_platform_interactive,
+  remote_bundle::{self, Platform},
 };
+#[cfg(test)]
 use ctl_core::component::ComponentBuildInfo;
-use tauri::{AppHandle, Manager as _, ipc::Channel, path::BaseDirectory};
+use tauri::{AppHandle, Manager as _, path::BaseDirectory};
 use tokio::sync::watch;
 
 use crate::dto::{
@@ -17,17 +17,24 @@ use crate::error::{CommandErrorDto, CommandResult};
 
 mod progress;
 
+pub(crate) struct Installation {
+  pub version: RemoteAgentInstallResultDto,
+  pub agent: ctl_core::component::ComponentInfo,
+  pub result: ctl_core::component_update::UpdateResult,
+}
+
 pub async fn install(
   app: &AppHandle,
   destination: &str,
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
-  on_progress: Channel<Progress>,
+  update: &ctl_client::component_update::UpdateOptions,
+  on_progress: impl Fn(Progress) -> CommandResult<()>,
   authenticating: impl Fn() -> bool,
-) -> CommandResult<RemoteAgentInstallResultDto> {
+) -> CommandResult<Installation> {
   let (updates, receiver) = watch::channel(progress::initial());
   progress::monitor(
-    install_bundle(app, destination, options, interaction, &updates),
+    install_bundle(app, destination, options, interaction, update, &updates),
     receiver,
     &on_progress,
     authenticating,
@@ -40,56 +47,66 @@ async fn install_bundle(
   destination: &str,
   options: &SshConnectionOptions,
   interaction: &SshInteraction,
+  update: &ctl_client::component_update::UpdateOptions,
   updates: &watch::Sender<Progress>,
-) -> CommandResult<RemoteAgentInstallResultDto> {
+) -> CommandResult<Installation> {
   let platform = probe_ssh_unix_platform_interactive(destination, options, interaction)
     .await
     .map_err(|error| CommandErrorDto::new("remote_platform_probe_failed", error.to_string()))?;
   let platform = parse_platform(&platform)?;
   let target_triple = platform.target_triple().map_err(bundle_error)?;
   updates.send_modify(|progress| progress.phase = Phase::VerifyingBundle);
-  let bundle = read_verified_bundle(bundle_directories(app)?, target_triple).await?;
+  let home = dirs::home_dir().ok_or_else(bundle_unavailable)?;
+  let bundle = ctl_client::component_update::prepare(
+    &home,
+    target_triple,
+    ctl_core::bundles::Purpose::Upload,
+    &update.source,
+    &bundle_directories(app)?,
+  )
+  .await
+  .map_err(CommandErrorDto::backend)?;
   updates.send_modify(|progress| {
     progress.phase = Phase::Connecting;
-    progress.file_name = Some(bundle.file_name.clone());
-    progress.total_bytes = bundle.archive.len() as u64;
+    progress.file_name = Some(match update.package {
+      ctl_client::component_update::Package::CtlAgent => "ctl-agent".into(),
+      ctl_client::component_update::Package::FullBundle => "Complete bundle".into(),
+    });
   });
 
-  install_ssh_unix_agent_interactive_with_progress(
+  ctl_client::component_update::install_remote(
     destination,
     options,
     interaction,
-    &bundle.bundle_id,
-    &bundle.archive,
-    |event| {
-      updates.send_modify(|progress| {
-        progress.phase = match event {
-          RemoteInstallEvent::Receiving { received_bytes } => {
-            progress.transferred_bytes = received_bytes;
-            Phase::Transferring
-          }
-          RemoteInstallEvent::Extracting => Phase::Extracting,
-          RemoteInstallEvent::Checking { file_name } => {
-            progress.file_name = Some(file_name.into());
-            Phase::Checking
-          }
-          RemoteInstallEvent::Activating => {
-            progress.file_name = None;
-            Phase::Activating
-          }
-          RemoteInstallEvent::Complete => Phase::Complete,
-        };
-      });
+    &bundle,
+    update.package,
+    |progress| {
+      updates.send_replace(progress::desktop_progress(progress));
     },
   )
   .await
   .map_err(|error| CommandErrorDto::new("remote_agent_install_failed", error.to_string()))?;
 
-  Ok(RemoteAgentInstallResultDto {
-    app_version: bundle.app_version,
-    bundle_id: bundle.bundle_id,
-    git_revision: bundle.git_revision,
-    target_triple: target_triple.into(),
+  Ok(Installation {
+    agent: bundle.manifest.components["ctl-agent"].clone(),
+    result: ctl_client::component_update::result(&bundle, update.package),
+    version: RemoteAgentInstallResultDto {
+      app_version: bundle.manifest.components["ctl-agent"]
+        .build
+        .version
+        .clone(),
+      bundle_id: bundle
+        .manifest
+        .distribution_id
+        .clone()
+        .unwrap_or(bundle.manifest.bundle_id),
+      git_revision: bundle.manifest.components["ctl-agent"]
+        .build
+        .source_revision
+        .clone()
+        .unwrap_or_default(),
+      target_triple: target_triple.into(),
+    },
   })
 }
 
@@ -131,70 +148,12 @@ fn development_bundle_directories(packaged: PathBuf, development: PathBuf) -> Ve
   }
 }
 
-fn expected_bundle_build() -> ComponentBuildInfo {
-  let mut expected = ctl_core::component::build_info();
-  expected.version = env!("CARGO_PKG_VERSION").into();
-  expected.source_revision =
-    (!env!("CTMUX_SOURCE_REVISION").is_empty()).then(|| env!("CTMUX_SOURCE_REVISION").into());
-  expected.dirty |= env!("CTMUX_COMPONENTS_DIRTY") == "true";
-  expected
-}
-
-async fn read_verified_bundle(
-  directories: Vec<PathBuf>,
-  target_triple: &str,
-) -> CommandResult<VerifiedBundle> {
-  let target_triple = target_triple.to_owned();
-  let expected = expected_bundle_build();
-  #[cfg(unix)]
-  {
-    let home = dirs::home_dir().ok_or_else(bundle_unavailable)?;
-    let selected = tokio::task::spawn_blocking(move || {
-      let store = ctl_core::bundles::Store::new(&home);
-      if let Some(bundle) = store
-        .selected(ctl_core::bundles::Purpose::Upload, &target_triple)
-        .map_err(CommandErrorDto::backend)?
-      {
-        return Ok((home, bundle, false));
-      }
-      let bundle = read_verified_bundle_sync(&directories, &target_triple, &expected)?;
-      let source = if bundle.bundle_id == bundle.app_version {
-        ctl_core::bundles::Source::Release
-      } else {
-        ctl_core::bundles::Source::Ci
-      };
-      let imported = ctl_client::components::import_remote(&home, &bundle, &target_triple, source)
-        .map_err(bundle_error)?;
-      Ok::<_, CommandErrorDto>((home, imported, true))
-    })
-    .await
-    .map_err(CommandErrorDto::backend)??;
-    let bundle = if selected.2 {
-      ctl_client::components::initialize_upload(&selected.0, &selected.1)
-        .await
-        .map_err(CommandErrorDto::backend)?
-    } else {
-      selected.1
-    };
-    tokio::task::spawn_blocking(move || {
-      ctl_client::components::upload_bundle(&bundle).map_err(CommandErrorDto::backend)
-    })
-    .await
-    .map_err(CommandErrorDto::backend)?
-  }
-  #[cfg(not(unix))]
-  tokio::task::spawn_blocking(move || {
-    read_verified_bundle_sync(&directories, &target_triple, &expected)
-  })
-  .await
-  .map_err(CommandErrorDto::backend)?
-}
-
+#[cfg(test)]
 fn read_verified_bundle_sync(
   directories: &[PathBuf],
   target_triple: &str,
   expected: &ComponentBuildInfo,
-) -> CommandResult<VerifiedBundle> {
+) -> CommandResult<remote_bundle::VerifiedBundle> {
   remote_bundle::read_reusable_bundle(directories, target_triple, expected)
     .map_err(bundle_error)?
     .ok_or_else(bundle_unavailable)

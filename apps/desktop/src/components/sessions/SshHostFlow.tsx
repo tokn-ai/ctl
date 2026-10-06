@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { UpdateComponentsDialog } from "../components/UpdateComponentsDialog";
 import { QuickInput, type QuickInputMode } from "../commands/QuickInput";
-import { remoteInstallProgressMode } from "./remoteInstallProgress";
+import { promptMode, promptTitle } from "./sshPrompt";
 import { GatewayRouteDialog } from "./GatewayRouteDialog";
 import { tailscaleDeviceDetail, VIRTUAL_SSH_GROUP, VIRTUAL_TAILSCALE_GROUP } from "./hostChoices";
 import { connectionMethodOptions, connectionSettings, resolveSshGateways, tailscaleTarget } from "../../features/workspace/workspaceModel";
@@ -18,7 +19,6 @@ import { errorCode, errorMessage } from "../../lib/errors";
 import {
   cancelSshProbe,
   forgetSshCredentials,
-  installRemoteAgent,
   openVpnSignIn,
   restartRemoteCtmux,
   checkRemoteCtmuxRestart,
@@ -32,7 +32,6 @@ import type {
   SshHostDefinition,
   SshHostStorage,
   SshPrompt,
-  RemoteAgentInstallProgress,
   SshConnectionTarget,
   SshGatewayRouteStep,
   WorkspaceSshGateway,
@@ -48,6 +47,7 @@ export interface SshHostFlowProps {
   component_mode?: "inspect" | "update";
   on_components_complete?(updated: boolean): void;
   suggestions: readonly string[];
+  update_targets?: readonly ConnectionTarget[];
   tailscaleDevices?: readonly TailscaleDevice[];
   discoveryLoading?: boolean;
   warning: string | null;
@@ -112,7 +112,6 @@ type Step =
   | "identity"
   | "restart_confirm"
   | "restarting"
-  | "installing"
   | "progress"
   | "storage"
   | "save_retry"
@@ -122,6 +121,7 @@ type Step =
 
 export function SshHostFlow({
   suggestions,
+  update_targets = [],
   component_mode,
   on_components_complete,
   tailscaleDevices = [],
@@ -190,7 +190,7 @@ export function SshHostFlow({
   const [prompt, setPrompt] = useState<SshPrompt | null>(null);
   const [saving, setSaving] = useState(false);
   const [canInstallAgent, setCanInstallAgent] = useState(updateRequired || component_mode === "update");
-  const [install_progress, setInstallProgress] = useState<RemoteAgentInstallProgress | null>(null);
+  const [pending_update, setPendingUpdate] = useState<{ target: ConnectionTarget; reconnect_candidate: ConnectionTarget } | null>(null);
   const attemptRef = useRef<string | null>(null);
   const identityRef = useRef<RemoteIdentity | null>(null);
   const [needsUpdate, setNeedsUpdate] = useState(updateRequired || component_mode === "update");
@@ -354,50 +354,10 @@ export function SshHostFlow({
     }
   }
 
-  async function installAgent(candidate: ConnectionTarget, reconnect_candidate = candidate) {
+  function installAgent(candidate: ConnectionTarget, reconnect_candidate = candidate) {
     cancelAttempt();
-    candidateRef.current = reconnect_candidate;
-    onConnectionChange?.(reconnect_candidate, "connecting");
-    const attempt = crypto.randomUUID();
-    attemptRef.current = attempt;
     setError(null);
-    setPrompt(null);
-    setInstallProgress(null);
-    setStep("installing");
-    try {
-      await installRemoteAgent(
-        candidate,
-        attempt,
-        (next) => {
-          if (attemptRef.current === attempt && !closedRef.current) setPrompt(next);
-        },
-        (next) => {
-          if (attemptRef.current === attempt && !closedRef.current) setInstallProgress(next);
-        },
-      );
-      if (attemptRef.current !== attempt || closedRef.current) return;
-      attemptRef.current = null;
-      componentsUpdatedRef.current = candidate;
-      if (component_mode && candidate === reconnect_candidate) {
-        on_components_complete?.(true);
-        onClose();
-        return;
-      }
-      if (component_mode === "update") await installAgent(reconnect_candidate);
-      else await connect(reconnect_candidate);
-    } catch (failure) {
-      if (attemptRef.current !== attempt || closedRef.current) return;
-      attemptRef.current = null;
-      setPrompt(null);
-      setError(errorMessage(failure));
-      setNeedsVpnSignIn(errorCode(failure) === "vpn_sign_in_required");
-      setNeedsRemoteVpnSignIn(errorCode(failure) === "remote_vpn_sign_in_required");
-      if (candidate === reconnect_candidate) {
-        setCanInstallAgent(errorCode(failure) !== "vpn_sign_in_required" && errorCode(failure) !== "remote_vpn_sign_in_required");
-      }
-      onConnectionChange?.(reconnect_candidate, "error", errorMessage(failure));
-      setStep("retry");
-    }
+    setPendingUpdate({ target: candidate, reconnect_candidate });
   }
 
   async function checkRestart(candidate: ConnectionTarget) {
@@ -943,10 +903,6 @@ export function SshHostFlow({
       description = "Ending terminal sessions and starting the updated daemon. Closing this dialog stops waiting; it cannot undo the restart.";
       mode = { kind: "progress" };
       break;
-    case "installing":
-      title = vpn_update_owner ? `Updating components on ${vpn_update_owner.name}` : "Installing remote components";
-      mode = remoteInstallProgressMode(install_progress);
-      break;
     case "progress":
       title = component_mode ? "Checking host components" : "Connecting to host";
       description = candidateRef.current?.kind === "ssh" && hasVpnRoute(candidateRef.current)
@@ -1135,6 +1091,22 @@ export function SshHostFlow({
     }
   }
 
+  if (pending_update) return <UpdateComponentsDialog targets={update_targets} context={{ targets: [pending_update.target] }} on_updated={(results, selected) => {
+    if (!results.some((result) => result.state === "complete" && sameSshEndpoint(selected[result.host_index], pending_update.target))) return;
+    componentsUpdatedRef.current = pending_update.target;
+    candidateRef.current = pending_update.reconnect_candidate;
+    setNeedsUpdate(false);
+    setCanInstallAgent(false);
+    setNeedsRemoteVpnSignIn(false);
+    setNeedsVpnSignIn(false);
+    setVpnUpdateOwner(null);
+    if (component_mode) on_components_complete?.(true);
+  }} on_close={() => {
+    setPendingUpdate(null);
+    if (component_mode && componentsUpdatedRef.current) onClose();
+    else setStep("reconnect");
+  }} />;
+
   return (
     <QuickInput
       key={`${step}:${saving}`}
@@ -1154,49 +1126,4 @@ function targetAddress(target: SshConnectionTarget): string {
   if (!target.hostname) return target.destination;
   const hostname = target.hostname.includes(":") ? `[${target.hostname}]` : target.hostname;
   return `${target.user ? `${target.user}@` : ""}${hostname}${target.port ? `:${target.port}` : ""}`;
-}
-
-function promptTitle(prompt: SshPrompt): string {
-  switch (prompt.kind) {
-    case "confirm":
-      return "SSH host verification";
-    case "secret":
-      return "SSH authentication";
-    case "credential_save":
-      return "Save SSH credential?";
-    case "credential_save_error":
-      return "Credential not saved";
-  }
-}
-
-function promptMode(prompt: SshPrompt): QuickInputMode {
-  switch (prompt.kind) {
-    case "confirm":
-      return { kind: "confirm", confirm_label: "Trust and connect" };
-    case "secret":
-      return { kind: "input", label: "SSH response", secret: true };
-    case "credential_save":
-      return {
-        kind: "pick",
-        choices: [
-          {
-            id: "yes",
-            label: "Yes",
-            detail: "Save in Keychain and require Touch ID for future access.",
-          },
-          {
-            id: "no",
-            label: "No",
-            detail: "Do not save this time; ask again after a future authentication.",
-          },
-          {
-            id: "never",
-            label: "Never",
-            detail: "Never offer to save credentials for this SSH host.",
-          },
-        ],
-      };
-    case "credential_save_error":
-      return { kind: "confirm", confirm_label: "Continue" };
-  }
 }

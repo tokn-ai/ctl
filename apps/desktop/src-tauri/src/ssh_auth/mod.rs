@@ -230,6 +230,28 @@ pub async fn install_agent(
   channel: Channel<SshPromptDto>,
   on_progress: Channel<crate::dto::RemoteAgentInstallProgressDto>,
 ) -> CommandResult<crate::dto::RemoteAgentInstallResultDto> {
+  install_components(
+    app,
+    window,
+    attempt_id,
+    target,
+    channel,
+    ctl_client::component_update::UpdateOptions::default(),
+    |progress| on_progress.send(progress).map_err(CommandErrorDto::backend),
+  )
+  .await
+  .map(|installed| installed.version)
+}
+
+pub(crate) async fn install_components(
+  app: tauri::AppHandle,
+  window: String,
+  attempt_id: String,
+  target: ConnectionTargetDto,
+  channel: Channel<SshPromptDto>,
+  update: ctl_client::component_update::UpdateOptions,
+  on_progress: impl Fn(crate::dto::RemoteAgentInstallProgressDto) -> CommandResult<()> + Send + Sync,
+) -> CommandResult<crate::remote_agent::Installation> {
   let key = (window, attempt_id);
   let (cancel, mut cancelled) = watch::channel(false);
   let attempt = Arc::new(Attempt {
@@ -275,6 +297,7 @@ pub async fn install_agent(
           &destination,
           &options,
           &interaction,
+          &update,
           on_progress,
           || !attempt.responses.lock().unwrap().is_empty(),
         )
@@ -292,7 +315,12 @@ pub async fn install_agent(
       let identity = ctl_client::maintenance::inspect_agent(&destination, &options, &control_path)
         .await.map_err(|error| CommandErrorDto::new("remote_install_verification_failed", format!("Components were installed, but their active installation could not be verified. Running sessions were preserved. Check Components before retrying: {error}")))?;
       target.verify_remote_identity(&identity)?;
-      install_identity::verify_installed(&installed, &identity)?;
+      install_identity::verify_installed(
+        &installed.version,
+        &identity,
+        (installed.result.package == ctl_core::component_update::Package::CtlAgent)
+          .then_some(&installed.agent),
+      )?;
     }
     Ok(installed)
   };

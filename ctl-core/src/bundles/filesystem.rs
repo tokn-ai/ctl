@@ -406,7 +406,7 @@ fn options() -> OpenOptions {
   ));
   options
 }
-fn read(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+pub(super) fn read(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
   require_file(&fs::symlink_metadata(path)?)?;
   let file = options().read(true).open(path)?;
   require_file(&file.metadata()?)?;

@@ -1,6 +1,6 @@
 //! Noninteractive metadata sidecars. Source secrets remain in their namespaces.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use ctl_ipc::credentials::StoredCredential;
 use ctl_keychain_client::{Authentication, Presence, Query, Record, Write};
@@ -293,20 +293,25 @@ pub(super) fn finish_mutation(token: &str) -> Result<(), Error> {
   remove(&format!("{PENDING_PREFIX}{token}"))
 }
 
+/// Called only after a complete clear plan has removed every owned secret.
+/// A failed reset leaves import required rather than reporting an empty index.
+pub(super) fn reset_empty() -> Result<(), Error> {
+  ctl_keychain_client::delete(SERVICE, None, Authentication::Forbid)?;
+  write(MARKER, "1")
+}
+
 pub(super) fn import() -> Result<(), Error> {
   // The caller holds the cross-process operation lock throughout import.
   // A failed/cancelled scan leaves the old index and its pending marker intact.
   let _pending = begin_mutation()?;
-  let records = ctl_keychain_client::search(&Query {
-    service: None,
-    account: None,
-    limit: MAX_ITEMS + 1,
-    secret: false,
-    authentication: Authentication::Allow {
+  let records = ctl_keychain_client::scan_attributes(
+    Authentication::Allow {
       reason: "Import names and metadata for saved ctmux SSH passwords and identity passphrases, and reconcile interrupted credential updates without returning password or passphrase values.",
     },
-  })?;
-  let imported = imported_records(records);
+    |service| service.starts_with(SERVICE_PREFIX) || service == super::identity::SERVICE,
+  )?;
+  let mut imported = imported_records(records);
+  preserve_cached_hints(&mut imported);
   if !imported.complete {
     // Useful rows remain recoverable when an unrelated owned item is malformed
     // or the bounded scan is truncated. Retain the old index and pending marker:
@@ -321,6 +326,30 @@ pub(super) fn import() -> Result<(), Error> {
   }
   // Rebuild only the metadata service, so malformed and stale sidecars can be
   // recovered too. Before the final marker, a crash always requires import.
+  replace(imported)
+}
+
+/// Refresh only readable metadata after a successful authoritative source scan.
+/// Unknown source entries leave the cache incomplete without hiding them from
+/// discovery, whose coverage is independent of whether metadata can be decoded.
+pub(super) fn reconcile(records: &[Record]) -> Result<(), Error> {
+  let mut imported = imported_sources(records);
+  preserve_cached_hints(&mut imported);
+  replace(imported)
+}
+
+fn preserve_cached_hints(imported: &mut Imported) {
+  if let Ok(previous) = read() {
+    preserve_public_hints(&mut imported.identities, &previous.identities);
+  }
+}
+
+fn replace(imported: Imported) -> Result<(), Error> {
+  // Reserve one cache row for its completion or pending marker. A source scan
+  // can still be complete when this optional cache exceeds its own budget.
+  if imported.credentials.len() + imported.identities.len() >= MAX_ITEMS {
+    return Err(invalid());
+  }
   ctl_keychain_client::delete(SERVICE, None, Authentication::Forbid)?;
   let token = begin_mutation()?;
   for credential in imported.credentials {
@@ -329,8 +358,11 @@ pub(super) fn import() -> Result<(), Error> {
   for (identity_id, metadata) in imported.identities {
     save_identity(&identity_id, &metadata)?;
   }
-  write(MARKER, "1")?;
-  finish_mutation(&token)
+  if imported.complete {
+    write(MARKER, "1")?;
+    finish_mutation(&token)?;
+  }
+  Ok(())
 }
 
 fn preserve_public_hints(imported: &mut SavedIdentities, previous: &SavedIdentities) {
@@ -349,42 +381,70 @@ fn preserve_public_hints(imported: &mut SavedIdentities, previous: &SavedIdentit
 }
 
 fn imported_records(records: Vec<Record>) -> Imported {
+  let mut imported = imported_sources(&records);
+  let sidecars = records
+    .into_iter()
+    .filter(|record| record.attributes.get("svce").map(String::as_str) == Some(SERVICE))
+    .collect();
+  preserve_public_hints(&mut imported.identities, &project(sidecars).identities);
+  imported
+}
+
+fn imported_sources(records: &[Record]) -> Imported {
   let mut credentials = Vec::new();
   let mut identities = HashMap::new();
-  let mut sidecars = Vec::new();
-  let mut complete = records.len() <= MAX_ITEMS;
-  for record in records.into_iter().take(MAX_ITEMS) {
+  let mut seen = BTreeSet::new();
+  let mut complete = true;
+  let mut owned_count = 0;
+  for record in records {
+    if record.attributes.get("svce").is_some_and(|service| {
+      service.starts_with(SERVICE_PREFIX) || service == super::identity::SERVICE
+    }) {
+      owned_count += 1;
+      complete &= owned_count <= MAX_ITEMS;
+    }
     match record.attributes.get("svce").map(String::as_str) {
-      Some(service) if service.starts_with(SERVICE_PREFIX) => credentials.push(Some(Attributes {
-        values: record.attributes,
-        created_at_ms: record.created_at_ms,
-        updated_at_ms: record.updated_at_ms,
-      })),
+      Some(service) if service.starts_with(SERVICE_PREFIX) => {
+        let inventory = credential_metadata::inventory_from_attributes([Some(Attributes {
+          values: record.attributes.clone(),
+          created_at_ms: record.created_at_ms,
+          updated_at_ms: record.updated_at_ms,
+        })]);
+        complete &= inventory.complete;
+        for credential in inventory.credentials {
+          // A generic fallback fully represents an old hashed-only source
+          // item, even though its descriptive metadata remains unknown.
+          if seen.insert(credential.credential_id.clone()) {
+            credentials.push(credential);
+          } else {
+            complete = false;
+          }
+        }
+      }
       Some(super::identity::SERVICE) => {
-        if let Some((account, metadata)) = imported_identity(&record) {
-          identities.insert(account, metadata);
+        if let Some((account, metadata)) = imported_identity(record) {
+          if identities.insert(account, metadata).is_some() {
+            complete = false;
+          }
         } else {
           complete = false;
         }
       }
-      Some(SERVICE) => sidecars.push(record),
       None => complete = false,
       _ => {}
     }
+    if record.secret.is_some() {
+      complete = false;
+    }
   }
-  // The successful source scan includes our metadata service. Preserve only
-  // hints whose old binding still matches, without a second index read that
-  // could prevent repairing an unreadable or malformed metadata index.
-  preserve_public_hints(&mut identities, &project(sidecars).identities);
-  let inventory = credential_metadata::inventory_from_attributes(credentials);
   Imported {
-    credentials: inventory.credentials,
+    credentials,
     identities,
-    complete: complete && inventory.complete,
+    complete,
   }
 }
 
-fn imported_identity(record: &Record) -> Option<(String, SavedIdentity)> {
+pub(super) fn imported_identity(record: &Record) -> Option<(String, SavedIdentity)> {
   let account = record.attributes.get("acct")?;
   let comment = record
     .attributes

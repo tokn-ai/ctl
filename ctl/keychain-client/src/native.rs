@@ -12,9 +12,9 @@ use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::passwords::AccessControlOptions;
 use security_framework_sys::item::{
   kSecAttrAccessControl, kSecAttrAccount, kSecAttrComment, kSecAttrLabel, kSecAttrService,
-  kSecClass, kSecClassGenericPassword, kSecMatchLimit, kSecReturnAttributes, kSecReturnData,
-  kSecReturnPersistentRef, kSecReturnRef, kSecUseAuthenticationUI, kSecUseDataProtectionKeychain,
-  kSecValueData,
+  kSecClass, kSecClassGenericPassword, kSecMatchLimit, kSecMatchLimitAll, kSecReturnAttributes,
+  kSecReturnData, kSecReturnPersistentRef, kSecReturnRef, kSecUseAuthenticationUI,
+  kSecUseDataProtectionKeychain, kSecValueData,
 };
 use security_framework_sys::keychain_item::{
   SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate,
@@ -194,6 +194,87 @@ pub fn search(query: &Query<'_>) -> Result<Vec<Record>, Error> {
   } else {
     Ok(vec![record(&value, query.secret)?])
   }
+}
+
+fn scan_parameters(authentication: Authentication<'_>) -> Result<Parameters, Error> {
+  let mut parameters = selector(None, None, authentication)?;
+  parameters.extend(unsafe {
+    [
+      (
+        constant(kSecMatchLimit),
+        constant(kSecMatchLimitAll).into_CFType(),
+      ),
+      (
+        constant(kSecReturnAttributes),
+        CFBoolean::true_value().into_CFType(),
+      ),
+      (
+        constant(kSecReturnData),
+        CFBoolean::false_value().into_CFType(),
+      ),
+      (
+        constant(kSecReturnRef),
+        CFBoolean::false_value().into_CFType(),
+      ),
+      (
+        constant(kSecReturnPersistentRef),
+        CFBoolean::false_value().into_CFType(),
+      ),
+    ]
+  });
+  Ok(parameters)
+}
+
+/// Discover owned item attributes without retrieving password data or references.
+///
+/// Ownership filtering precedes the retained-item limit, so metadata sidecars
+/// and unrelated items cannot truncate the source inventory. Any limit or access
+/// failure rejects the scan rather than returning an apparently complete subset.
+///
+/// # Errors
+/// Returns an `OSStatus` for access failures, or `ATTRIBUTE_SCAN_LIMIT` for too many
+/// owned entries. Authentication UI is controlled explicitly by the caller.
+pub fn scan_attributes(
+  authentication: Authentication<'_>,
+  include: impl Fn(&str) -> bool,
+) -> Result<Vec<Record>, Error> {
+  let Some(value) = copy(&scan_parameters(authentication)?)? else {
+    return Ok(Vec::new());
+  };
+  let mut records = Vec::new();
+  if let Some(array) = value.downcast::<CFArray>() {
+    for value in array.iter() {
+      // SAFETY: the live result array owns each borrowed Core Foundation value.
+      append_owned(
+        &unsafe { CFType::wrap_under_get_rule(*value) },
+        &include,
+        &mut records,
+      )?;
+    }
+  } else {
+    append_owned(&value, &include, &mut records)?;
+  }
+  Ok(records)
+}
+
+fn append_owned(
+  value: &CFType,
+  include: &impl Fn(&str) -> bool,
+  records: &mut Vec<Record>,
+) -> Result<(), Error> {
+  let dictionary = value.downcast::<CFDictionary>().ok_or(Error(PARAM))?;
+  let Some(service) =
+    dictionary_value(&dictionary, "svce").and_then(|value| value.downcast::<CFString>())
+  else {
+    return Ok(());
+  };
+  if include(&service.to_string()) {
+    if records.len() == super::MAX_ATTRIBUTE_SCAN_ITEMS {
+      return Err(Error(super::ATTRIBUTE_SCAN_LIMIT));
+    }
+    records.push(record(value, false)?);
+  }
+  Ok(())
 }
 
 fn record(value: &CFType, secret: bool) -> Result<Record, Error> {
@@ -594,6 +675,81 @@ mod tests {
         .unwrap()
         .as_slice(),
       b"synthetic secret"
+    );
+  }
+
+  #[test]
+  fn discovery_requests_all_attributes_with_explicit_authentication_and_no_secrets() {
+    let parameters = CFDictionary::from_CFType_pairs(
+      &scan_parameters(Authentication::Allow {
+        reason: "List synthetic saved credentials",
+      })
+      .unwrap(),
+    )
+    .into_untyped();
+    assert_eq!(
+      dictionary_value(&parameters, "m_Limit")
+        .unwrap()
+        .downcast::<CFString>()
+        .unwrap()
+        .to_string(),
+      "m_LimitAll",
+    );
+    assert_eq!(
+      dictionary_value(&parameters, "u_AuthUI")
+        .unwrap()
+        .downcast::<CFString>()
+        .unwrap()
+        .to_string(),
+      "u_AuthUIA",
+    );
+    assert!(bool::from(
+      dictionary_value(&parameters, "r_Attributes")
+        .unwrap()
+        .downcast::<CFBoolean>()
+        .unwrap()
+    ));
+    for key in ["r_Data", "r_Ref", "r_PersistentRef"] {
+      assert!(!bool::from(
+        dictionary_value(&parameters, key)
+          .unwrap()
+          .downcast::<CFBoolean>()
+          .unwrap()
+      ));
+    }
+  }
+
+  #[test]
+  fn discovery_filters_unrelated_items_before_its_limit_and_never_copies_data() {
+    fn item(service: &str) -> CFType {
+      CFDictionary::from_CFType_pairs(&[
+        (CFString::new("svce"), CFString::new(service).into_CFType()),
+        (
+          CFString::new("acct"),
+          CFString::new("synthetic").into_CFType(),
+        ),
+        (
+          CFString::new("v_Data"),
+          CFData::from_buffer(b"fixture secret").into_CFType(),
+        ),
+      ])
+      .into_CFType()
+    }
+    let unrelated = item("unrelated");
+    let owned = item("owned");
+    let include = |service: &str| service == "owned";
+    let mut records = Vec::new();
+    for _ in 0..=super::super::MAX_ATTRIBUTE_SCAN_ITEMS {
+      append_owned(&unrelated, &include, &mut records).unwrap();
+    }
+    assert!(records.is_empty());
+    for _ in 0..super::super::MAX_ATTRIBUTE_SCAN_ITEMS {
+      append_owned(&owned, &include, &mut records).unwrap();
+    }
+    assert!(records.iter().all(|record| record.secret.is_none()));
+    assert_eq!(
+      append_owned(&owned, &include, &mut records),
+      Err(Error(super::super::ATTRIBUTE_SCAN_LIMIT))
     );
   }
 }

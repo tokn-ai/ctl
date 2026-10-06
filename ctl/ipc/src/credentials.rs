@@ -44,6 +44,59 @@ fn metadata_import_needed() -> bool {
   true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasswordSource {
+  Credential,
+  Identity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasswordState {
+  Saved,
+  FileChanged,
+  Unknown,
+}
+
+/// One discovered Keychain item, containing attributes and file metadata only.
+///
+/// The stored ID and source identify valid items even when descriptive metadata
+/// cannot be decoded. Malformed selectors have stable opaque IDs that cannot be
+/// used for deletion. No password or passphrase value is returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPassword {
+  pub id: String,
+  pub source: PasswordSource,
+  pub name: String,
+  pub kind: CredentialKind,
+  pub state: PasswordState,
+  pub target: Option<String>,
+  pub account: Option<String>,
+  pub key_name: Option<String>,
+  pub path: Option<String>,
+  pub display_path: Option<String>,
+  pub file_version: Option<String>,
+  pub key_type: Option<String>,
+  pub fingerprint: Option<String>,
+  pub encrypted: Option<bool>,
+  pub file_state: Option<crate::identities::FileState>,
+  pub detail: Option<String>,
+  pub created_at_ms: Option<i64>,
+  pub updated_at_ms: Option<i64>,
+}
+
+/// Attribute-only inventory from the authoritative credential store.
+///
+/// Unknown item metadata remains visible in `entries`; `complete` describes
+/// whether discovery finished, independently of metadata decoding success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Discovery {
+  pub entries: Vec<SavedPassword>,
+  pub complete: bool,
+  pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -51,6 +104,10 @@ pub enum Request {
   /// Rejectable by older helpers before their interactive inventory can run.
   ListMetadata,
   ImportMetadata,
+  /// Discover all owned saved items without reading their secret values.
+  Discover {},
+  /// Explicitly remove all owned SSH secrets; never returns their values.
+  Clear {},
   Forget {
     credential_id: String,
   },
@@ -66,12 +123,16 @@ impl<'de> Deserialize<'de> for Request {
       List {},
       ListMetadata {},
       ImportMetadata {},
+      Discover {},
+      Clear {},
       Forget { credential_id: String },
     }
     Ok(match Wire::deserialize(deserializer)? {
       Wire::List {} => Self::List,
       Wire::ListMetadata {} => Self::ListMetadata,
       Wire::ImportMetadata {} => Self::ImportMetadata,
+      Wire::Discover {} => Self::Discover {},
+      Wire::Clear {} => Self::Clear {},
       Wire::Forget { credential_id } => Self::Forget { credential_id },
     })
   }
@@ -80,10 +141,29 @@ impl<'de> Deserialize<'de> for Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-  Inventory { inventory: Inventory },
+  Inventory {
+    inventory: Inventory,
+  },
+  Discovered {
+    inventory: Discovery,
+  },
   Imported,
   Forgotten,
-  Error { code: String, message: String },
+  Cleared {
+    credential_count: usize,
+    identity_count: usize,
+  },
+  Error {
+    code: String,
+    message: String,
+  },
+}
+
+/// Counts returned only after every planned secret and its index were cleared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearCounts {
+  pub credential_count: usize,
+  pub identity_count: usize,
 }
 
 /// Credential scope for the destination and its authentication route.
@@ -370,6 +450,182 @@ mod tests {
       serde_json::from_str::<Request>(r#"{"type":"import_metadata","password":"fixture"}"#)
         .is_err()
     );
+  }
+
+  #[test]
+  fn clear_is_explicit_metadata_only_and_rejected_by_older_helpers() {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+    enum PreviousRequest {
+      List {},
+      ListMetadata {},
+      ImportMetadata {},
+      Forget { credential_id: String },
+    }
+    let encoded = serde_json::to_string(&Request::Clear {}).unwrap();
+    assert!(matches!(
+      serde_json::from_str::<PreviousRequest>(
+        r#"{"type":"forget","credential_id":"fixture"}"#
+      )
+      .unwrap(),
+      PreviousRequest::Forget { credential_id } if credential_id == "fixture"
+    ));
+    assert_eq!(encoded, r#"{"type":"clear"}"#);
+    assert_eq!(
+      serde_json::from_str::<Request>(&encoded).unwrap(),
+      Request::Clear {},
+    );
+    assert!(serde_json::from_str::<PreviousRequest>(&encoded).is_err());
+    for extra in ["password", "identity_id", "credential_id", "include_vpn"] {
+      let value = serde_json::json!({"type": "clear", extra: "fixture"});
+      assert!(serde_json::from_value::<Request>(value).is_err());
+    }
+    assert_eq!(
+      serde_json::to_value(Response::Cleared {
+        credential_count: 2,
+        identity_count: 3,
+      })
+      .unwrap(),
+      serde_json::json!({"type":"cleared", "credential_count":2, "identity_count":3}),
+    );
+    assert_eq!(crate::HELPER_API_BUILD, 4);
+    assert_eq!(crate::HELPER_API_VERSION, crate::HELPER_API_CONTRACT_V1_1_4,);
+    for supported in [
+      crate::HELPER_API_CONTRACT_V1_0_1,
+      crate::HELPER_API_CONTRACT_V1_1_2,
+      crate::HELPER_API_CONTRACT_V1_1_3,
+      crate::HELPER_API_CONTRACT_V1_1_4,
+    ] {
+      assert!(crate::SUPPORTED_HELPER_API_VERSIONS.contains(&supported));
+    }
+  }
+
+  #[test]
+  fn discovery_is_strict_and_preserves_historical_requests() {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+    enum PreviousRequest {
+      List {},
+      ListMetadata {},
+      ImportMetadata {},
+      Clear {},
+      Forget { credential_id: String },
+    }
+    let encoded = serde_json::to_string(&Request::Discover {}).unwrap();
+    assert_eq!(encoded, r#"{"type":"discover"}"#);
+    assert_eq!(
+      serde_json::from_str::<Request>(&encoded).unwrap(),
+      Request::Discover {},
+    );
+    assert!(serde_json::from_str::<PreviousRequest>(&encoded).is_err());
+    for extra in ["password", "identity_id", "credential_id", "include_vpn"] {
+      let value = serde_json::json!({"type": "discover", extra: "fixture"});
+      assert!(serde_json::from_value::<Request>(value).is_err());
+    }
+    for historical in [
+      r#"{"type":"list"}"#,
+      r#"{"type":"list_metadata"}"#,
+      r#"{"type":"import_metadata"}"#,
+      r#"{"type":"clear"}"#,
+      r#"{"type":"forget","credential_id":"fixture"}"#,
+    ] {
+      assert!(serde_json::from_str::<PreviousRequest>(historical).is_ok());
+      let current: Request = serde_json::from_str(historical).unwrap();
+      assert_eq!(serde_json::to_string(&current).unwrap(), historical);
+    }
+    assert!(matches!(
+      serde_json::from_str::<PreviousRequest>(
+        r#"{"type":"forget","credential_id":"fixture"}"#
+      )
+      .unwrap(),
+      PreviousRequest::Forget { credential_id } if credential_id == "fixture"
+    ));
+  }
+
+  #[test]
+  fn discovery_retains_unknown_items_without_secret_values() {
+    let response: Response = serde_json::from_value(serde_json::json!({
+      "type": "discovered",
+      "inventory": {
+        "entries": [
+          {
+            "id": "stored-credential",
+            "source": "credential",
+            "name": "Unknown SSH credential",
+            "kind": "ssh_credential",
+            "state": "unknown",
+            "detail": "Saved metadata could not be decoded."
+          },
+          {
+            "id": "stored-identity",
+            "source": "identity",
+            "name": "work key",
+            "kind": "ssh_key_passphrase",
+            "state": "file_changed",
+            "path": "/keys/work",
+            "display_path": "/keys/work",
+            "encrypted": true,
+            "file_state": "ready"
+          }
+        ],
+        "complete": true,
+        "warnings": []
+      }
+    }))
+    .unwrap();
+    let Response::Discovered { inventory } = &response else {
+      panic!("discovery response expected");
+    };
+    assert!(inventory.complete);
+    assert_eq!(inventory.entries[0].id, "stored-credential");
+    assert_eq!(inventory.entries[0].source, PasswordSource::Credential);
+    assert_eq!(inventory.entries[0].state, PasswordState::Unknown);
+    assert_eq!(inventory.entries[1].source, PasswordSource::Identity);
+    assert_eq!(inventory.entries[1].state, PasswordState::FileChanged);
+    assert_eq!(
+      inventory.entries[1].file_state,
+      Some(crate::identities::FileState::Ready),
+    );
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(value["inventory"].as_object().unwrap().len(), 3);
+    for entry in value["inventory"]["entries"].as_array().unwrap() {
+      let fields = entry.as_object().unwrap();
+      assert_eq!(fields.len(), 18);
+      for secret_field in ["password", "passphrase", "secret", "value", "data"] {
+        assert!(!fields.contains_key(secret_field));
+      }
+    }
+    assert_eq!(serde_json::from_value::<Response>(value).unwrap(), response);
+  }
+
+  #[test]
+  fn discovery_reports_incomplete_scan_independently_of_legacy_import() {
+    let response = Response::Discovered {
+      inventory: Discovery {
+        entries: Vec::new(),
+        complete: false,
+        warnings: vec!["Keychain access was denied.".into()],
+      },
+    };
+    assert_eq!(
+      serde_json::to_value(&response).unwrap(),
+      serde_json::json!({
+        "type": "discovered",
+        "inventory": {
+          "entries": [],
+          "complete": false,
+          "warnings": ["Keychain access was denied."]
+        }
+      }),
+    );
+    for historical in [
+      r#"{"type":"imported"}"#,
+      r#"{"type":"forgotten"}"#,
+      r#"{"type":"cleared","credential_count":1,"identity_count":2}"#,
+      r#"{"type":"inventory","inventory":{"credentials":[],"complete":true,"warning":null}}"#,
+    ] {
+      assert!(serde_json::from_str::<Response>(historical).is_ok());
+    }
   }
 
   #[test]

@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 use crate::credential_metadata::{self, Attributes, Metadata, SERVICE_PREFIX};
 
 mod availability;
+mod clear;
+mod discovery;
 pub(crate) mod identity;
 mod index;
 mod operation;
@@ -56,6 +58,14 @@ impl Error {
 
   pub fn is_busy(self) -> bool {
     self.0.code() == operation::BUSY
+  }
+
+  pub fn is_scan_limit(self) -> bool {
+    self.0.code() == ctl_keychain_client::ATTRIBUTE_SCAN_LIMIT
+  }
+
+  pub fn is_scan_conflict(self) -> bool {
+    self.0.code() == ctl_keychain_client::ATTRIBUTE_SCAN_CONFLICT
   }
 }
 
@@ -284,22 +294,45 @@ pub fn import_metadata() -> Result<(), Error> {
   index::import()
 }
 
+/// Explicitly remove owned SSH secrets, leaving files and save preferences intact.
+pub fn clear() -> Result<ctl_ipc::credentials::ClearCounts, Error> {
+  clear::run()
+}
+
+/// Authoritative attribute-only discovery and best-effort metadata repair.
+pub fn discover() -> Result<ctl_ipc::credentials::Discovery, Error> {
+  discovery::run()
+}
+
 pub fn forget(credential_id: &str) -> Result<(), Error> {
   let _operation = operation::acquire()?;
   let (scope_id, account_id) =
     credential_metadata::item_identity(credential_id).ok_or_else(invalid_metadata)?;
-  let (credentials, _, _) = index::list()?;
-  let credential = credentials
-    .iter()
-    .find(|credential| credential.credential_id == credential_id)
-    .ok_or_else(invalid_metadata)?;
-  let reason = format!(
-    "Remove {} from Keychain",
-    purpose::stored_credential(credential)
+  availability()?;
+  let service = format!("{SERVICE_PREFIX}{scope_id}");
+  if ctl_keychain_client::exists(&service, account_id)? == ctl_keychain_client::Presence::Missing {
+    return Err(invalid_metadata());
+  }
+  // A discovered source can exist without readable cache metadata. Its validated
+  // namespace and exact ID suffice for explicit removal, never for secret reuse.
+  let cached = index::list().ok().and_then(|(credentials, _, _)| {
+    credentials
+      .into_iter()
+      .find(|credential| credential.credential_id == credential_id)
+  });
+  let name = cached.as_ref().map_or_else(
+    || {
+      format!(
+        "saved SSH credential {}",
+        &digest(credential_id.as_bytes())[..12]
+      )
+    },
+    purpose::stored_credential,
   );
+  let reason = format!("Remove {name} from Keychain");
   let pending = index::begin_mutation()?;
   ctl_keychain_client::delete(
-    &format!("{SERVICE_PREFIX}{scope_id}"),
+    &service,
     Some(account_id),
     Authentication::Allow { reason: &reason },
   )?;

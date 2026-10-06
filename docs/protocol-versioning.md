@@ -45,6 +45,17 @@ unpublished wire formats.
 
 The remote VPN addition starts the next development cycle with ctld `1.1.13`
 (build 13) and helper `1.1.2` (build 2), retaining their frozen initial contracts.
+During that same development cycle, helper `1.1.3` (build 3) adds explicit
+clearing of saved SSH credentials and identity passphrases. It retains support
+for both `1.0.1` and `1.1.2`; clients using the new clear operation require the
+updated helper.
+Helper `1.1.4` (build 4) adds the `discover` credential request and `discovered`
+response for authoritative, attribute-only saved-password discovery. Its entries
+include saved SSH credentials and identity passphrases, retain identifiable
+items with unknown metadata, and report scan completeness and specific warnings
+separately. No secret values are returned. Discovery requires `1.1.4`; helpers
+implementing earlier contracts reject the new request. Existing requests and
+responses are unchanged, and `1.0.1`, `1.1.2`, and `1.1.3` remain supported.
 Further protocol changes before release increment only their patch/build.
 A broker channel selecting ctld `1.0.12` supports the original SSH and local VPN
 routes; remote VPN route steps
@@ -149,6 +160,13 @@ must exercise old-client/new-server and new-client/old-server behavior using
 historical messages, alongside unsupported selections and malformed offers.
 Do not advertise a contract until its implementation and compatibility tests
 exist.
+
+Every PR description must include a protocol statement. For each affected named
+contract, record the previous and new contract versions and internal builds,
+describe changes to operations, fields, or negotiation behavior, and state which
+earlier contracts remain supported. Identify an announced breaking change
+explicitly, and keep product release versions separate from protocol versions.
+If the protocol is unchanged, write `Protocol changes: none.`
 
 At release, freeze the final development contract and record the exact protocol
 map in the release metadata. Do not increment the minor again at this point.

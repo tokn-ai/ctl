@@ -212,7 +212,7 @@ legacy owners. ctl-taskd accepts a passive control metadata query. Standalone
 `--component-info` prints JSON for helper executables without starting services.
 
 ctld metadata reports data contract `1.1.13` (and retained `1.0.12`), lifecycle
-contract `1.0.1`, and helper contract `1.1.2` (and retained `1.0.1`). Remote VPN
+contract `1.0.1`, and helper contract `1.1.3` (and retained `1.0.1` and `1.1.2`). Remote VPN
 routes are gated by the selected broker contract and the helper advertisement.
 The helper API covers credential, identity, askpass, and proxy helper modes.
 Standalone macOS CLI discovery first honors `CTLD_BIN`, then verifies a shared

@@ -16,6 +16,7 @@ fn validate_local_command_target(arguments: &Arguments) -> Result<(), CliError> 
     Command::Components { .. } => CliError::ComponentsTarget,
     Command::Setup(_) => CliError::SetupTarget,
     Command::Skill(_) => CliError::SkillTarget,
+    Command::Passwords { .. } => CliError::PasswordsTarget,
     _ => return Ok(()),
   };
   if arguments.host.is_some() || arguments.method.is_some() || arguments.remote_platform.is_some() {
@@ -70,6 +71,10 @@ pub async fn run(arguments: Arguments) -> Result<i32, CliError> {
         return Err(CliError::HostManagementTarget);
       }
       crate::host::run(command, arguments.method.as_deref()).await?;
+      return Ok(0);
+    }
+    Command::Passwords { command, json } => {
+      crate::passwords::run(command, json).await?;
       return Ok(0);
     }
     Command::Ssh {
@@ -129,6 +134,7 @@ async fn run_selected(
     Command::Setup(_)
     | Command::Skill(_)
     | Command::Host { .. }
+    | Command::Passwords { .. }
     | Command::Ssh { .. }
     | Command::Scp { .. } => {
       unreachable!("commands dispatched before target resolution")
@@ -384,6 +390,12 @@ pub enum CliError {
   Skill(#[from] crate::skill::Error),
   #[error("Skill documentation is bundled locally; omit --host, --method, and --remote-platform.")]
   SkillTarget,
+  #[error(
+    "Passwords manage the local credential store; omit --host, --method, and --remote-platform."
+  )]
+  PasswordsTarget,
+  #[error(transparent)]
+  Passwords(#[from] crate::passwords::Error),
   #[error(transparent)]
   HostCommand(#[from] crate::host::Error),
   #[error(
@@ -462,6 +474,27 @@ mod tests {
       ])
       .is_err()
     );
+  }
+
+  #[tokio::test]
+  async fn passwords_reject_remote_flags_before_preparing_helpers_or_connecting() {
+    use clap::Parser;
+    for flags in [
+      vec!["--host", "work"],
+      vec!["--method", "ssh"],
+      vec!["--host", "work", "--remote-platform", "windows"],
+    ] {
+      for action in ["list", "remove", "clear"] {
+        let arguments = Arguments::try_parse_from(
+          [vec!["ctl"], flags.clone(), vec!["passwords", action]].concat(),
+        )
+        .unwrap();
+        assert!(matches!(
+          run(arguments).await,
+          Err(CliError::PasswordsTarget)
+        ));
+      }
+    }
   }
 
   #[tokio::test]

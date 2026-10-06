@@ -1,19 +1,23 @@
 set -eu
 umask 077
+fail() {
+  printf 'ctl install: %s\n' "$1" >&2
+  exit 1
+}
 base="$HOME/.tokn/ctl"
 versions="$base/components/agents/__BUNDLE_TARGET__"
 for directory in "$HOME" "$HOME/.tokn" "$base" "$base/components" "$base/components/agents" "$versions"; do
-  test ! -L "$directory"
+  test ! -L "$directory" || fail "storage path is a symbolic link: $directory"
   mkdir -p "$directory"
-  test -d "$directory"
+  test -d "$directory" || fail "storage path is not a directory: $directory"
   case "$(uname -s)" in
     Linux) metadata=$(stat -c '%u %a' "$directory") ;;
     Darwin) metadata=$(stat -f '%u %Lp' "$directory") ;;
-    *) exit 1 ;;
+    *) fail 'unsupported installation platform' ;;
   esac
-  test "${metadata%% *}" -eq "$(id -u)"
+  test "${metadata%% *}" -eq "$(id -u)" || fail "storage directory is not owned by this account: $directory"
   mode=$((0${metadata#* }))
-  test "$((mode & 022))" -eq 0
+  test "$((mode & 022))" -eq 0 || fail "storage directory is writable by group or others: $directory"
 done
 base=$(cd "$base" && pwd -P)
 versions="$base/components/agents/__BUNDLE_TARGET__"
@@ -42,9 +46,9 @@ done
 wait "$receiver"
 receiver=""
 received=$(wc -c < "$archive" | tr -d '[:space:]')
-test "$received" -eq __ARCHIVE_BYTES__
+test "$received" -eq __ARCHIVE_BYTES__ || fail 'incomplete agent upload; previous installation was kept'
 if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$archive"); else actual=$(shasum -a 256 "$archive"); fi
-test "${actual%% *}" = '__ARCHIVE_SHA256__'
+test "${actual%% *}" = '__ARCHIVE_SHA256__' || fail 'archive checksum mismatch; previous installation was kept'
 printf 'ctl-install-progress-v1 receiving %s\n' "$received"
 printf 'ctl-install-progress-v1 extracting\n'
 tar -xzf "$archive" -C "$payload"

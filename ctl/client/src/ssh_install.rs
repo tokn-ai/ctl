@@ -54,7 +54,7 @@ pub async fn install_ssh_agent_only_with_progress(
   command
     .args(extra)
     .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
-    .arg(script);
+    .arg(posix_install_command(&script));
   run_package_install(command, archive, true, on_progress).await
 }
 
@@ -161,8 +161,15 @@ pub async fn install_ssh_unix_agent_interactive_with_progress(
   command
     .args(extra)
     .args(prepare_ssh_base_arguments(destination, options, interaction).await?)
-    .arg(script);
+    .arg(posix_install_command(&script));
   run_install_command(command, archive, on_progress).await
+}
+
+fn posix_install_command(script: &str) -> String {
+  // OpenSSH passes its command to the account's login shell. Only let that
+  // shell parse this launcher: the installers rely on POSIX octal arithmetic,
+  // traps and redirections, which differ in shells such as zsh and fish.
+  format!("exec sh -c '{}'", script.replace('\'', "'\\''"))
 }
 
 fn install_script(bundle_id: &str, archive_bytes: usize) -> Result<String, CoreError> {
@@ -255,12 +262,15 @@ async fn run_package_install(
   let status = status.map_err(CoreError::WaitSshCommand)?;
   // Prefer remote diagnostics to a broken stdin pipe after an early SSH exit.
   if !status.success() {
-    let diagnostic = String::from_utf8_lossy(&stderr)
+    let mut diagnostic = String::from_utf8_lossy(&stderr)
       .chars()
       .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
       .collect::<String>()
       .trim()
       .to_owned();
+    if diagnostic.is_empty() {
+      diagnostic = "remote component installer exited without reporting a reason".into();
+    }
     return Err(CoreError::SshCommandFailed {
       status: status.to_string(),
       diagnostic,

@@ -505,6 +505,126 @@ async fn early_remote_failure_preserves_diagnostics_instead_of_broken_pipe() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn silent_installer_failure_has_a_nonempty_diagnostic() {
+  let mut command = Command::new("sh");
+  command.args(["-c", "exit 1"]);
+  let result = run_install_command(command, &vec![0; 1024 * 1024], |_| {}).await;
+  assert!(matches!(result,
+    Err(CoreError::SshCommandFailed { diagnostic, .. })
+      if diagnostic == "remote component installer exited without reporting a reason"
+  ));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn both_installers_use_posix_permissions_from_a_zsh_login_shell() {
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::Source;
+  use std::os::unix::fs::PermissionsExt as _;
+  let fixture = BundleFixture::new();
+  let import_home = fixture.directory.join("import-home");
+  let bundle = crate::components::import_remote(
+    &import_home,
+    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
+    "aarch64-apple-darwin",
+    Source::Ci,
+  )
+  .unwrap();
+  // Both the outer launcher and the agent's nested companion argument must
+  // preserve quotes and spaces. No fixture binary is executed during install.
+  let home = fixture.directory.join("home with 'quotes'");
+  std::fs::create_dir(&home).unwrap();
+  std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+  let command = |script: &str| {
+    let mut command = Command::new("/bin/zsh");
+    command
+      .args(["-f", "-c", &posix_install_command(script)])
+      .env("HOME", &home);
+    command
+  };
+  let upload = crate::components::upload_bundle(&bundle).unwrap();
+  let script = installation_script(&upload.bundle_id, &upload.archive).unwrap();
+  tokio::time::timeout(
+    std::time::Duration::from_secs(10),
+    run_install_command(command(&script), &upload.archive, |_| {}),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  let current = home.join(".tokn/ctl/current");
+  let original = std::fs::canonicalize(&current).unwrap();
+  assert_eq!(
+    ctl_core::bundles::Bundle::open(&original).unwrap().manifest,
+    bundle.manifest
+  );
+  let archive = crate::component_update::agent_archive(&bundle).unwrap();
+  let script = agent_script(&archive, Some(&original)).unwrap();
+  tokio::time::timeout(
+    std::time::Duration::from_secs(10),
+    run_package_install(command(&script), &archive, true, |_| {}),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert!(current.join("agent-source.json").is_file());
+  for name in ["ctmuxd", "ctl-taskd", "ctld"] {
+    assert_eq!(
+      std::fs::canonicalize(current.join(name)).unwrap(),
+      original.join(name)
+    );
+  }
+  assert!(!home.join(".tokn/ctl/components/.sync-lock").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn both_installers_explain_writable_storage_without_activating() {
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::Source;
+  use std::os::unix::fs::PermissionsExt as _;
+  let fixture = BundleFixture::new();
+  let import_home = fixture.directory.join("import-home");
+  let bundle = crate::components::import_remote(
+    &import_home,
+    &Fixture::new("0.0.9", &"b".repeat(40)).bundle(),
+    "aarch64-apple-darwin",
+    Source::Ci,
+  )
+  .unwrap();
+  let home = fixture.directory.join("home");
+  let tokn = home.join(".tokn");
+  std::fs::create_dir_all(&tokn).unwrap();
+  std::fs::set_permissions(&tokn, std::fs::Permissions::from_mode(0o770)).unwrap();
+  let upload = crate::components::upload_bundle(&bundle).unwrap();
+  let agent_archive = crate::component_update::agent_archive(&bundle).unwrap();
+  for (script, archive, agent_only) in [
+    (
+      installation_script(&upload.bundle_id, &upload.archive).unwrap(),
+      upload.archive,
+      false,
+    ),
+    (
+      agent_script(&agent_archive, None).unwrap(),
+      agent_archive,
+      true,
+    ),
+  ] {
+    let mut command = Command::new("sh");
+    command
+      .args(["-c", &posix_install_command(&script)])
+      .env("HOME", &home);
+    let result = run_package_install(command, &archive, agent_only, |_| {}).await;
+    assert!(matches!(result,
+      Err(CoreError::SshCommandFailed { diagnostic, .. })
+        if diagnostic.contains("storage directory is writable by group or others") && diagnostic.contains(tokn.to_str().unwrap())
+    ));
+    assert!(!home.join(".tokn/ctl/current").exists());
+    assert!(!home.join(".tokn/ctl/components/.sync-lock").exists());
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn managed_installer_uses_the_shared_store_and_preserves_selection_on_damage() {
   use crate::components;
   use crate::remote_bundle::compatibility::tests::Fixture;

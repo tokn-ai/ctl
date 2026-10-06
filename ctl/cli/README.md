@@ -94,6 +94,30 @@ cache under `~/.tokn/ctl/components/ctld/development/`. Explicit
 `target/ctl-dev/ctl setup` selects it for other standalone builds while leaving
 release `current` unchanged. Existing daemons require an explicit restart.
 
+Use `ctl components update` for an explicit update. It defaults to this computer;
+`--hosts work,jump-a` updates several saved hosts through their preferred routes,
+and `--local` includes this computer in that batch. `--package ctl-agent` retains
+the installed daemons; the default `--package full-bundle` installs all four
+components from one compatible complete build. Updates preserve running services
+and sessions; restart or reconnect separately.
+
+```sh
+ctl components update --hosts work,jump-a --package ctl-agent
+ctl --host work --method vpn components update
+ctl components update --hosts work --from /path/to/bundle-set --json
+```
+
+`--from` supplies a complete build directory or archive. Use `--local-build` for
+four native binaries; local macOS full updates also require `--ctld-package`.
+Otherwise updates use the pinned selection for each target. `components list`
+shows included and stored complete builds across all targets, with availability
+and local/upload selections. Use `--target <triple>` to filter or `--json` for
+manifests, availability, selections, and inspection errors. Listing never imports
+or selects a build. `components sync` imports a build; `components select` can
+choose a listed stored or included build. See the
+[component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md)
+for source formats, cancellation, and per-host results.
+
 VPN profiles remain in the local catalog. Use `ctl --host GATEWAY vpn start NAME_OR_ID`,
 `vpn list`, and `vpn stop NAME_OR_ID` to run and manage a profile on an SSH host.
 The gateway needs updated ctl-agent/ctld components and Docker or Podman. Its

@@ -5,6 +5,8 @@
 //! belong to the user's OpenSSH installation and configuration.
 
 #[cfg(unix)]
+pub mod component_update;
+#[cfg(unix)]
 pub mod components;
 
 use std::ffi::OsString;
@@ -29,6 +31,8 @@ pub mod ssh_reachability;
 mod ssh_startup;
 pub mod tailscale;
 
+#[cfg(unix)]
+pub use ssh_install::install_ssh_agent_only_with_progress;
 pub use ssh_install::{
   RemoteInstallEvent, RemoteInstallPhase, RemoteInstallProgress, RemoteInstallStalled,
   RemoteInstallWatchdog, install_ssh_unix_agent_interactive,

@@ -173,7 +173,7 @@ async fn local_bundle(
   Ok(bundle)
 }
 
-fn bundle_directories() -> io::Result<Vec<PathBuf>> {
+pub(super) fn bundle_directories() -> io::Result<Vec<PathBuf>> {
   if let Some(directory) = std::env::var_os("CTL_REMOTE_BUNDLES_DIR") {
     return Ok(vec![PathBuf::from(directory)]);
   }

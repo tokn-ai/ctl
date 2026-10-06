@@ -11,10 +11,11 @@ interface Props {
   onAddMethod(): void;
   onEditMethod(method: WorkspaceConnectionMethod): void;
   onConnect(method: WorkspaceConnectionMethod): void;
+  on_update_components?(): void;
   onClose(): void;
 }
 
-export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMethod, onEditMethod, onConnect, onClose }: Props) {
+export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMethod, onEditMethod, onConnect, on_update_components, onClose }: Props) {
   const [draft, setDraft] = useState<WorkspaceHost>(() => ({
     ...host,
     connection_methods: host.connection_methods.map((method) => ({ ...method })),
@@ -142,6 +143,7 @@ export function HostSettingsDialog({ host, vpn_connections = [], onSave, onAddMe
         {error ? <p className="quick-input-error" role="alert">{error}</p> : null}
       </div>
       <footer className="host-settings-actions">
+        {on_update_components ? <button type="button" onClick={on_update_components} disabled={saving || dirty}>Update components…</button> : null}
         <button type="button" onClick={close} disabled={saving}>Cancel</button>
         <button type="button" className="button-primary" onClick={() => void save()} disabled={saving || !dirty || !valid}>
           {saving ? "Saving…" : "Save changes"}

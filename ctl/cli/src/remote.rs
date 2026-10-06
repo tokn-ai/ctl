@@ -15,6 +15,17 @@ use tokio::sync::watch;
 
 mod bundle;
 
+pub(crate) async fn ensure_update_source(target: &str) -> io::Result<()> {
+  bundle::matching_bundle(target)
+    .await
+    .map(|_| ())
+    .map_err(io::Error::other)
+}
+
+pub(crate) fn update_bundle_directories() -> io::Result<Vec<std::path::PathBuf>> {
+  bundle::bundle_directories()
+}
+
 #[derive(Default)]
 pub(super) struct Recovery {
   started: AtomicBool,
@@ -225,14 +236,14 @@ async fn install(
 }
 
 #[derive(Default)]
-struct ProgressDisplay {
+pub(crate) struct ProgressDisplay {
   active: bool,
   phase: Option<ctl_client::RemoteInstallPhase>,
   file_name: Option<String>,
 }
 
 impl ProgressDisplay {
-  fn show(&mut self, progress: &ctl_client::RemoteInstallProgress) {
+  pub(crate) fn show(&mut self, progress: &ctl_client::RemoteInstallProgress) {
     use ctl_client::RemoteInstallPhase as Phase;
     let file = crate::table::text(progress.file_name.as_deref().unwrap_or("remote components"));
     let changed = self.phase != Some(progress.phase) || self.file_name != progress.file_name;
@@ -280,7 +291,7 @@ impl ProgressDisplay {
     self.active = true;
   }
 
-  fn finish(&mut self) {
+  pub(crate) fn finish(&mut self) {
     if self.active {
       eprintln!();
       self.active = false;

@@ -497,8 +497,8 @@ pub async fn wait_for_daemon_shutdown(
 ) -> Result<(), EndpointDrainError> {
   let deadline = Instant::now() + wait_timeout;
   loop {
-    let data_is_gone = endpoint_is_unavailable(data_socket_path).await?;
-    let control_is_gone = endpoint_is_unavailable(control_socket_path).await?;
+    let data_is_gone = endpoint_is_unavailable(connect(data_socket_path).await)?;
+    let control_is_gone = endpoint_is_unavailable(connect(control_socket_path).await)?;
     if data_is_gone && control_is_gone {
       return Ok(());
     }
@@ -553,10 +553,8 @@ where
 {
   let deadline = Instant::now() + wait_timeout;
   loop {
-    match connect().await {
-      Ok(connection) => drop(connection),
-      Err(error) if retryable_connect_error(&error) => return Ok(()),
-      Err(error) => return Err(EndpointDrainError::Connect(error)),
+    if endpoint_is_unavailable(connect().await)? {
+      return Ok(());
     }
 
     if Instant::now() >= deadline {
@@ -568,13 +566,16 @@ where
   }
 }
 
-async fn endpoint_is_unavailable(socket_path: &Path) -> Result<bool, EndpointDrainError> {
-  match connect(socket_path).await {
+fn endpoint_is_unavailable<T>(connection: io::Result<T>) -> Result<bool, EndpointDrainError> {
+  match connection {
     Ok(connection) => {
       drop(connection);
       Ok(false)
     }
     Err(error) if retryable_connect_error(&error) => Ok(true),
+    // A listener closing during a queued connection can reset it. Recheck;
+    // this alone does not prove the endpoint is safe for a replacement.
+    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => Ok(false),
     Err(error) => Err(EndpointDrainError::Connect(error)),
   }
 }
@@ -966,6 +967,54 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
+  async fn endpoint_drain_rechecks_a_reset_before_confirming_shutdown() {
+    let connect_count = Arc::new(AtomicUsize::new(0));
+    wait_for_endpoint_drain_with(
+      {
+        let connect_count = Arc::clone(&connect_count);
+        move || {
+          let attempt = connect_count.fetch_add(1, Ordering::Relaxed);
+          std::future::ready(match attempt {
+            0 => Err(io::Error::from(io::ErrorKind::ConnectionReset)),
+            1 => Ok(()),
+            _ => Err(io::Error::from(io::ErrorKind::NotFound)),
+          })
+        }
+      },
+      Duration::from_secs(1),
+      Duration::ZERO,
+    )
+    .await
+    .expect("a reset is inconclusive until the endpoint is absent");
+
+    assert_eq!(connect_count.load(Ordering::Relaxed), 3);
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn endpoint_drain_times_out_when_resets_never_confirm_absence() {
+    let error = wait_for_endpoint_drain_with(
+      || {
+        std::future::ready(Err::<(), _>(io::Error::from(
+          io::ErrorKind::ConnectionReset,
+        )))
+      },
+      Duration::ZERO,
+      Duration::ZERO,
+    )
+    .await
+    .expect_err("a reset must not allow a replacement to start");
+
+    assert!(matches!(
+      error,
+      EndpointDrainError::TimedOut {
+        timeout: Duration::ZERO
+      }
+    ));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
   async fn endpoint_drain_times_out_without_forcing_a_live_endpoint() {
     let error = wait_for_endpoint_drain_with(
       || std::future::ready(Ok::<_, io::Error>(())),
@@ -1012,6 +1061,10 @@ mod tests {
     );
     assert!(
       ConnectError::Connect(io::Error::from(io::ErrorKind::ConnectionRefused))
+        .is_endpoint_unavailable()
+    );
+    assert!(
+      !ConnectError::Connect(io::Error::from(io::ErrorKind::ConnectionReset))
         .is_endpoint_unavailable()
     );
     assert!(

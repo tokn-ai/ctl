@@ -2140,7 +2140,8 @@ async fn stop_picker_excludes_shared_only_connections_and_targets_the_owned_sele
     reply(&listener, response(VpnStatus::default())).await
   });
   let mut terminal = Terminal::new(&fixture, &["vpn", "stop"]);
-  terminal.wait_for("Choose a VPN to stop");
+  // The heading and option can arrive in separate PTY reads.
+  terminal.wait_for("Work VPN");
   let menu = String::from_utf8_lossy(&terminal.transcript);
   assert!(menu.contains("Work VPN"));
   assert!(!menu.contains("Team VPN"));

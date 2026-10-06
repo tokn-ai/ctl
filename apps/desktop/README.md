@@ -375,8 +375,10 @@ profiles expire after seven days; after initial setup the signed-development
 launcher asks Xcode to refresh an expired profile automatically.
 
 The standalone CLI shares this provisioning project and profile discovery.
-From the repository root, `node scripts/dev/ctl-signed.mts` builds a signed CLI
-with `ctld.app` embedded; see the [CLI development instructions](../../README.md#build).
+From the repository root, `node scripts/dev/ctl-signed.mts --helper-only` prepares
+a signed helper that ordinary unsigned Cargo debug CLI builds can reuse.
+Without that flag, it also builds a signed CLI with `ctld.app` embedded; see the
+[CLI development instructions](../../README.md#build).
 
 Then run `pnpm tauri:dev:signed`. The launcher searches Xcode's downloaded
 profiles and `~/Library/Application Support/ctmux/signing/ctld.provisionprofile`,

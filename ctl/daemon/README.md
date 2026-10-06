@@ -15,18 +15,24 @@ is not required. Setup preserves the complete bundle, updates the release
 `current` symlink, and selects it for its architecture and APIs without
 restarting the daemon.
 
-Standalone macOS CLI builds prefer a verified compatible shared `ctld.app` after
-an explicit `CTLD_BIN` override, before their own bundled or loose helper.
+`CTLD_BIN` explicitly overrides helper discovery. Ordinary macOS debug CLI
+builds then prefer the checkout's provisioned signed helper; signed development
+CLIs prefer their matching embedded helper. Shared discovery prefers a verified
+compatible shared `ctld.app` before bundled release or loose helpers.
 Compatibility requires the native target and explicitly shared ctld, lifecycle,
 and helper contracts. Remote VPN routes require ctld `1.1.13` and helper `1.1.2`.
 The installed helper's version and source
 fingerprint need not match the CLI's. Its signature, provisioning, and build
 metadata are still checked against its own installation manifest.
 
-Signed development builds use the immutable
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache and update
-`selected/<target>-ctld1-lifecycle1-helper1` while leaving release `current`
-unchanged. Ordinary Cargo CLI builds can reuse that selection. The desktop
+Prepare a checkout helper with `node scripts/dev/ctl-signed.mts --helper-only`.
+It publishes under `<target-dir>/ctl-dev/helpers/<checkout-id>/` for reuse by an
+unsigned Cargo debug CLI, without changing shared selections. Embedded signed
+development builds use the immutable
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` cache. Explicit
+development `ctl setup` updates `selected/<target>-ctld1-lifecycle1-helper1`
+while leaving release `current` unchanged. Other standalone CLI builds can reuse
+that selection. The desktop
 continues to prefer its own bundled helper. Source builds remain available for
 development and other Unix platforms.
 

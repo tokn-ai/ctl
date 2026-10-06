@@ -99,20 +99,29 @@ For local macOS development, use the shared Tauri provisioning flow:
 ```sh
 node scripts/dev/ctl-signed.mts --provision
 # In Xcode, choose your team in Signing & Capabilities and build once.
-node scripts/dev/ctl-signed.mts
-target/ctl-dev/ctl setup
+node scripts/dev/ctl-signed.mts --helper-only
+cargo run -p ctl-cli -- passwords
 ```
 
 The build detects the native Rust target and workspace version, finds or
 refreshes the provisioning profile, and chooses its matching Keychain
-certificate. It compiles `ctld`, signs the complete app, embeds it in `ctl`, then
-signs the CLI and atomically replaces the development output. It allows local
-source changes and needs no notarization credentials. Its manifest binds the
-helper's revision, source fingerprint, and dirty flag. Development bundles use
-`~/.tokn/ctl/components/ctld/development/<archive-sha256>/`. They update the shared
-architecture/API selection while leaving the release `current` symlink intact.
-All standalone CLI builds, including ordinary Cargo builds, can reuse that
-selected app. The runtime still checks signature, provisioning expiry,
+certificate. The helper-only command compiles `ctld`, signs the complete app,
+and atomically publishes its checkout selection under
+`<target-dir>/ctl-dev/helpers/<checkout-id>/`. Ordinary macOS debug CLI builds
+reuse it before shared discovery; the CLI itself can remain unsigned. Cargo's
+configured target directory and canonical checkout identity determine discovery,
+independently of the current directory. Worktrees sharing a target directory have
+separate selections. Repeat this preparation after helper changes; ordinary CLI
+edits need only a Cargo rebuild.
+
+Without `--helper-only`, the command also embeds the helper in `ctl`, signs the
+CLI, and atomically replaces `target/ctl-dev/ctl`. It allows local source changes
+and needs no notarization credentials. Its manifest binds the helper's revision,
+source fingerprint, and dirty flag. Embedded development preparation uses
+`~/.tokn/ctl/components/ctld/development/<archive-sha256>/` without changing shared
+selections. Explicit `target/ctl-dev/ctl setup` updates the shared architecture/API
+selection while leaving the release `current` symlink intact.
+The runtime still checks signature, provisioning expiry,
 certificate identity, source metadata against the app's own manifest, and API
 compatibility. Rebuild after a profile expires. An existing compatible daemon is
 never restarted automatically.
@@ -215,7 +224,11 @@ or restarts a daemon. Existing compatible connections continue using their
 running daemon until it is stopped explicitly.
 
 An explicit `CTLD_BIN` executable override has highest priority. Otherwise the
-standalone macOS CLI prefers a verified compatible selected managed app, then its
+signed development CLI prepares its own matching embedded helper and leaves
+global selections unchanged. Ordinary macOS debug Cargo builds first verify this
+checkout's provisioned helper under its target directory. With no compatible
+local helper, a standalone macOS CLI prefers a
+verified compatible selected managed app supporting the requested operation, then its
 own bundled helper, then a nearby desktop bundle, sibling executable, or `PATH`.
 The desktop continues to prefer its own bundled helper. Unsafe or invalid selected
 installations produce a verification error. `ctl setup --json` prints the result with

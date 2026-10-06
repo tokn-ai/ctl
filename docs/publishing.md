@@ -123,7 +123,13 @@ verification. Remote agent
 the daemon or existing connections. Repeating setup checks and reuses the same
 immutable version when its release metadata matches.
 
-`CTLD_BIN` continues to override discovery. Otherwise, the standalone macOS CLI
+`CTLD_BIN` continues to override discovery. Signed development CLI builds always
+prepare their matching embedded helper without changing shared selections;
+explicit `ctl setup` still selects it for reuse. Ordinary debug Cargo builds
+first check this checkout's provisioned signed helper under the configured
+target directory. Prepare it with `node scripts/dev/ctl-signed.mts --helper-only`;
+the CLI itself does not need signing. Checkout selections are isolated from
+shared defaults. Without a compatible local helper, the standalone macOS CLI
 prefers a verified compatible managed app, then its own bundled helper, then a
 nearby desktop bundle, sibling, or `PATH` executable. The desktop continues to
 prefer its own bundled helper. Ordinary Cargo CLI builds also discover selected
@@ -132,7 +138,12 @@ signed development apps.
 Selections use
 `~/.tokn/ctl/components/ctld/selected/<target>-ctld1-lifecycle1-helper1`.
 Discovery requires the native target and compatible `ctld`, `ctld_lifecycle`, and
-`ctld_helper` APIs. It checks the helper against its own installation manifest,
+`ctld_helper` APIs. Credential operations additionally require an explicitly
+advertised operation contract (`1.0.1` for initial operations, `1.1.3` for clear,
+and `1.1.4` for discovery). A valid managed helper lacking that contract permits
+bundled release preparation. `CTLD_BIN` remains authoritative for every build;
+shared discovery also retains explicit complete selections.
+It checks the helper against its own installation manifest,
 without requiring its version or build fingerprint to equal the CLI's. Cached
 directories are immutable; discovery follows the selection rather than picking
 the newest directory.

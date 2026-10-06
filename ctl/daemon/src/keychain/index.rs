@@ -293,6 +293,13 @@ pub(super) fn finish_mutation(token: &str) -> Result<(), Error> {
   remove(&format!("{PENDING_PREFIX}{token}"))
 }
 
+/// Called only after a complete clear plan has removed every owned secret.
+/// A failed reset leaves import required rather than reporting an empty index.
+pub(super) fn reset_empty() -> Result<(), Error> {
+  ctl_keychain_client::delete(SERVICE, None, Authentication::Forbid)?;
+  write(MARKER, "1")
+}
+
 pub(super) fn import() -> Result<(), Error> {
   // The caller holds the cross-process operation lock throughout import.
   // A failed/cancelled scan leaves the old index and its pending marker intact.

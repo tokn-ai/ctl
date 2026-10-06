@@ -12,6 +12,7 @@ fn invalid_and_oversized_requests_never_reach_keychain() {
   for input in [
     b"not json".to_vec(),
     br#"{"type":"list","password":"fixture-secret"}"#.to_vec(),
+    br#"{"type":"clear","password":"fixture-secret"}"#.to_vec(),
     vec![b'x'; MAX_REQUEST_BYTES + 1],
   ] {
     let response = run_fixture(&input, |_| panic!("invalid request reached storage"));
@@ -19,6 +20,24 @@ fn invalid_and_oversized_requests_never_reach_keychain() {
       matches!(response, Response::Error { code, .. } if code == "credential_request_invalid")
     );
   }
+}
+
+#[test]
+fn clear_is_dispatched_once_and_returns_counts_without_credentials() {
+  let response = run_fixture(br#"{"type":"clear"}"#, |request| {
+    assert_eq!(request, &Request::Clear {});
+    Response::Cleared {
+      credential_count: 4,
+      identity_count: 2,
+    }
+  });
+  assert_eq!(
+    response,
+    Response::Cleared {
+      credential_count: 4,
+      identity_count: 2,
+    }
+  );
 }
 
 #[test]
@@ -123,5 +142,8 @@ fn service_unavailable_does_not_tell_users_to_sign_the_daemon() {
 fn unsupported_platform_does_not_claim_to_have_an_empty_keychain() {
   assert!(
     matches!(handle(&Request::List), Response::Error { code, .. } if code == "credential_store_unsupported")
+  );
+  assert!(
+    matches!(handle(&Request::Clear {}), Response::Error { code, .. } if code == "credential_store_unsupported")
   );
 }

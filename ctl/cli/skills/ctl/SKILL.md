@@ -25,6 +25,7 @@ or authentication. `-H`, `--method`, and `--remote-platform` are rejected for
 | Run once, stream output, preserve exit status | `ctl exec -- PROGRAM ARGS...`; guidance below |
 | Ordinary SSH login or file copy | `ctl ssh` / `ctl scp`; guidance below |
 | Inspect or edit saved hosts and connection methods | [ctl-host](../ctl-host/SKILL.md), `ctl skill ctl-host` |
+| Inspect or remove locally saved SSH passwords and key passphrases | `ctl passwords`; guidance below |
 | Create, attach, inspect, split, or terminate persistent terminals | [ctl-session](../ctl-session/SKILL.md), `ctl skill ctl-session` |
 | Manage named background/interactive processes or save reusable recipes | [ctl-task](../ctl-task/SKILL.md), `ctl skill ctl-task` |
 | Expose a remote TCP service on local loopback | [ctl-port](../ctl-port/SKILL.md), `ctl skill ctl-port` |
@@ -40,7 +41,7 @@ back to an OpenSSH alias or destination. Ambiguous saved names fail; use the ID.
 preferred method is used. A failed selected route does not choose another route.
 
 Host catalog commands take a positional host and reject `-H`. SSH/SCP also take
-their destination positionally. `ctl setup` and `ctl taskd restart` are local.
+their destination positionally. `ctl setup`, `ctl passwords`, and `ctl taskd restart` are local.
 VPN list/start/stop also accept `-H`; VPN profile create/remove remain local.
 
 Check `ctl --version`, `ctl --help`, and the relevant native subcommand's
@@ -49,6 +50,25 @@ Read [setup and troubleshooting](references/setup.md) with
 `ctl skill --file references/setup.md` when ctl, a helper, authentication, or a
 service protocol is unavailable. If ctl is unavailable, use the linked file.
 Do not invent commands for features described only in proposals.
+
+## Saved SSH passwords
+
+On macOS, `ctl passwords` or `ctl passwords list` lists saved SSH credentials and
+identity-file passphrases. `ctl passwords show ID` shows metadata only; neither
+command unlocks secrets. Human-readable tables use compact `p-` and `k-` IDs
+with names, accounts, targets or key paths, and state. Use the printed ID with
+`show` or `remove`; `--json` retains full IDs for machine-readable metadata. An
+incomplete list is reported explicitly because older unindexed credentials may
+be absent.
+
+`ctl passwords remove ID` removes one saved entry after terminal confirmation;
+omit the ID to choose an entry interactively. A full ID from JSON, a unique
+full-ID prefix, or an exact unique name also works. `ctl passwords clear` previews
+known entries and clears all owned SSH credentials and passphrases after confirmation,
+including unindexed older copies. Clear requires helper contract `1.1.3`. Both
+actions preserve key files, host/VPN settings, and never-save preferences, and
+require an interactive terminal. These commands have no create, update, import,
+reveal, or copy action; omit `-H`, `--method`, and `--remote-platform`.
 
 ## One-off execution
 

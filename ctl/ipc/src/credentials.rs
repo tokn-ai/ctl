@@ -51,6 +51,8 @@ pub enum Request {
   /// Rejectable by older helpers before their interactive inventory can run.
   ListMetadata,
   ImportMetadata,
+  /// Explicitly remove all owned SSH secrets; never returns their values.
+  Clear {},
   Forget {
     credential_id: String,
   },
@@ -66,12 +68,14 @@ impl<'de> Deserialize<'de> for Request {
       List {},
       ListMetadata {},
       ImportMetadata {},
+      Clear {},
       Forget { credential_id: String },
     }
     Ok(match Wire::deserialize(deserializer)? {
       Wire::List {} => Self::List,
       Wire::ListMetadata {} => Self::ListMetadata,
       Wire::ImportMetadata {} => Self::ImportMetadata,
+      Wire::Clear {} => Self::Clear {},
       Wire::Forget { credential_id } => Self::Forget { credential_id },
     })
   }
@@ -80,10 +84,26 @@ impl<'de> Deserialize<'de> for Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-  Inventory { inventory: Inventory },
+  Inventory {
+    inventory: Inventory,
+  },
   Imported,
   Forgotten,
-  Error { code: String, message: String },
+  Cleared {
+    credential_count: usize,
+    identity_count: usize,
+  },
+  Error {
+    code: String,
+    message: String,
+  },
+}
+
+/// Counts returned only after every planned secret and its index were cleared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearCounts {
+  pub credential_count: usize,
+  pub identity_count: usize,
 }
 
 /// Stable credential scope, preserving existing saved SSH credentials.
@@ -125,6 +145,53 @@ mod tests {
       serde_json::from_str::<Request>(r#"{"type":"import_metadata","password":"fixture"}"#)
         .is_err()
     );
+  }
+
+  #[test]
+  fn clear_is_explicit_metadata_only_and_rejected_by_older_helpers() {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+    enum PreviousRequest {
+      List {},
+      ListMetadata {},
+      ImportMetadata {},
+      Forget { credential_id: String },
+    }
+    let encoded = serde_json::to_string(&Request::Clear {}).unwrap();
+    assert!(matches!(
+      serde_json::from_str::<PreviousRequest>(
+        r#"{"type":"forget","credential_id":"fixture"}"#
+      )
+      .unwrap(),
+      PreviousRequest::Forget { credential_id } if credential_id == "fixture"
+    ));
+    assert_eq!(encoded, r#"{"type":"clear"}"#);
+    assert_eq!(
+      serde_json::from_str::<Request>(&encoded).unwrap(),
+      Request::Clear {},
+    );
+    assert!(serde_json::from_str::<PreviousRequest>(&encoded).is_err());
+    for extra in ["password", "identity_id", "credential_id", "include_vpn"] {
+      let value = serde_json::json!({"type": "clear", extra: "fixture"});
+      assert!(serde_json::from_value::<Request>(value).is_err());
+    }
+    assert_eq!(
+      serde_json::to_value(Response::Cleared {
+        credential_count: 2,
+        identity_count: 3,
+      })
+      .unwrap(),
+      serde_json::json!({"type":"cleared", "credential_count":2, "identity_count":3}),
+    );
+    assert_eq!(crate::HELPER_API_BUILD, 3);
+    assert_eq!(crate::HELPER_API_VERSION, crate::HELPER_API_CONTRACT_V1_1_3,);
+    for supported in [
+      crate::HELPER_API_CONTRACT_V1_0_1,
+      crate::HELPER_API_CONTRACT_V1_1_2,
+      crate::HELPER_API_CONTRACT_V1_1_3,
+    ] {
+      assert!(crate::SUPPORTED_HELPER_API_VERSIONS.contains(&supported));
+    }
   }
 
   #[test]

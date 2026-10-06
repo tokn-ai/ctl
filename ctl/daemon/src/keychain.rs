@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 use crate::credential_metadata::{self, Attributes, Metadata, SERVICE_PREFIX};
 
 mod availability;
+mod clear;
 pub(crate) mod identity;
 mod index;
 mod operation;
@@ -218,6 +219,11 @@ pub fn metadata_import_required() -> Result<bool, Error> {
 pub fn import_metadata() -> Result<(), Error> {
   let _operation = operation::acquire()?;
   index::import()
+}
+
+/// Explicitly remove owned SSH secrets, leaving files and save preferences intact.
+pub fn clear() -> Result<ctl_ipc::credentials::ClearCounts, Error> {
+  clear::run()
 }
 
 pub fn forget(credential_id: &str) -> Result<(), Error> {

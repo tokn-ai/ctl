@@ -1,5 +1,16 @@
 # Saved credentials
 
+The CLI exposes the local SSH store with `ctl passwords` (or `list`), `show`,
+`remove`, and `clear`. All support `--json`; list/show display metadata without
+unlocking stored secrets. Human-readable tables show compact `p-` and `k-` IDs
+with names, accounts, targets or key paths, and state. Show and remove accept
+these printed IDs, full IDs from JSON, unique full-ID prefixes, or exact unique
+names. Remove opens a picker when its selector is omitted. Removal and clear
+require interactive confirmation. Clear removes all owned SSH passwords and
+identity passphrases, including unindexed older copies, while retaining key
+files, host definitions, VPN profiles, and never-save preferences. It requires
+helper contract `1.1.3`; older helpers reject it before performing any operation.
+
 Open **Credentials** from the sidebar or command palette to inspect credentials
 managed by ctmux and local SSH identity files. The page displays names, credential
 types, accounts or targets, storage locations, and recorded dates. It has no reveal or copy-secret action.

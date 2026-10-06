@@ -96,6 +96,13 @@ fn handle(request: &Request) -> Response {
         Ok(()) => Response::Forgotten,
         Err(failure) => keychain_error(failure, "credential_forget_failed"),
       },
+      Request::Clear {} => match crate::keychain::clear() {
+        Ok(counts) => Response::Cleared {
+          credential_count: counts.credential_count,
+          identity_count: counts.identity_count,
+        },
+        Err(failure) => keychain_error(failure, "credential_clear_failed"),
+      },
     }
   }
   #[cfg(not(target_os = "macos"))]
@@ -132,7 +139,11 @@ fn keychain_error(failure: crate::keychain::Error, fallback: &str) -> Response {
   } else {
     error(
       fallback,
-      "Keychain could not complete the credential operation.",
+      if fallback == "credential_clear_failed" {
+        "Could not clear every saved SSH credential. Some entries may already have been removed. Refresh and try again."
+      } else {
+        "Keychain could not complete the credential operation."
+      },
     )
   }
 }

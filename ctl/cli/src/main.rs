@@ -3,6 +3,7 @@ mod commands;
 mod connection;
 mod host;
 mod openssh;
+mod passwords;
 #[cfg(unix)]
 mod port;
 mod remote;
@@ -57,6 +58,14 @@ enum Command {
   Host {
     #[command(subcommand)]
     command: host::Command,
+  },
+  /// Inspect and remove locally saved SSH passwords and key passphrases.
+  Passwords {
+    /// Print metadata or action results as JSON.
+    #[arg(long, global = true)]
+    json: bool,
+    #[command(subcommand)]
+    command: Option<passwords::Command>,
   },
   /// Open a persistent ctmux shell (or an ordinary shell with --plain).
   Shell {
@@ -149,6 +158,40 @@ async fn main() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn passwords_exposes_only_inspection_and_removal_with_global_json_output() {
+    let arguments = Arguments::try_parse_from(["ctl", "passwords"]).unwrap();
+    assert!(matches!(
+      arguments.command,
+      Command::Passwords {
+        command: None,
+        json: false
+      }
+    ));
+    for action in ["list", "show", "remove", "clear"] {
+      let mut command = vec!["ctl", "passwords", action];
+      if action == "show" {
+        command.push("saved-id");
+      }
+      command.push("--json");
+      let arguments = Arguments::try_parse_from(command).unwrap();
+      assert!(matches!(
+        arguments.command,
+        Command::Passwords { json: true, .. }
+      ));
+    }
+    for action in ["create", "update", "import", "reveal", "copy"] {
+      assert!(Arguments::try_parse_from(["ctl", "passwords", action]).is_err());
+    }
+    for action in ["remove", "clear"] {
+      assert!(Arguments::try_parse_from(["ctl", "passwords", action, "--yes"]).is_err());
+      assert!(
+        Arguments::try_parse_from(["ctl", "passwords", action, "--password", "secret"]).is_err()
+      );
+    }
+    assert!(Arguments::try_parse_from(["ctl", "passwords", "show"]).is_err());
+  }
 
   #[test]
   fn setup_accepts_json_and_never_accepts_unsigned_source_overrides() {

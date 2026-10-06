@@ -17,6 +17,7 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 
 pub mod hosts;
+pub mod local_credentials;
 pub mod maintenance;
 pub mod remote_bundle;
 pub mod setup;

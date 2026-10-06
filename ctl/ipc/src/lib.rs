@@ -153,12 +153,16 @@ pub fn protocol_offer() -> ProtocolOffer {
 
 /// Internal build of the one-shot credential, identity, askpass, and proxy APIs.
 /// Published helper contracts are independent of the broker and lifecycle APIs.
-pub const HELPER_API_BUILD: u16 = 2;
+pub const HELPER_API_BUILD: u16 = 3;
 pub const HELPER_API_CONTRACT_V1_0_1: ProtocolVersion = ProtocolVersion::new(1, 0, 1);
 pub const HELPER_API_CONTRACT_V1_1_2: ProtocolVersion = ProtocolVersion::new(1, 1, 2);
-pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_1_2;
-pub const SUPPORTED_HELPER_API_VERSIONS: &[ProtocolVersion] =
-  &[HELPER_API_CONTRACT_V1_0_1, HELPER_API_CONTRACT_V1_1_2];
+pub const HELPER_API_CONTRACT_V1_1_3: ProtocolVersion = ProtocolVersion::new(1, 1, 3);
+pub const HELPER_API_VERSION: ProtocolVersion = HELPER_API_CONTRACT_V1_1_3;
+pub const SUPPORTED_HELPER_API_VERSIONS: &[ProtocolVersion] = &[
+  HELPER_API_CONTRACT_V1_0_1,
+  HELPER_API_CONTRACT_V1_1_2,
+  HELPER_API_CONTRACT_V1_1_3,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1530,6 +1534,11 @@ mod tests {
         HELPER_API_CONTRACT_V1_0_1,
         &[HELPER_API_CONTRACT_V1_0_1][..],
         false,
+      ),
+      (
+        HELPER_API_CONTRACT_V1_1_2,
+        &[HELPER_API_CONTRACT_V1_0_1, HELPER_API_CONTRACT_V1_1_2][..],
+        true,
       ),
       (HELPER_API_VERSION, SUPPORTED_HELPER_API_VERSIONS, true),
     ] {

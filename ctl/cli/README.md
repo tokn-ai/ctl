@@ -104,6 +104,10 @@ the existing `--vpn PROFILE_ID` option still selects a local VPN before the rout
 ctl --help
 ctl host create
 ctl host list
+ctl passwords
+ctl passwords show ID
+ctl passwords remove ID
+ctl passwords clear
 ctl vpn create
 ctl vpn list
 ctl vpn start NAME_OR_ID
@@ -117,6 +121,26 @@ connecting or saving credentials. For scripts, use
 `ctl host create NAME DESTINATION` with connection flags. With `--json`, prompts
 use stderr and the saved host JSON is written to stdout. `host method add` adds an alternate
 connection method to an existing host.
+
+`passwords` (or `passwords list`) lists locally saved SSH passwords, legacy SSH
+credentials, and identity-file passphrases through the selected signed helper.
+`show` displays metadata only. Human-readable tables use compact `p-` and `k-`
+IDs alongside names, accounts, targets or key paths, and state. Use the printed
+ID, a full ID from JSON, a unique full-ID prefix, or an exact unique name with
+`show` and `remove`. `--json` is available for all four actions and retains full
+IDs; listing and showing do not unlock secrets or start a daemon. Incomplete
+metadata is reported explicitly, so an empty partial list does not claim no
+credentials are saved.
+
+`passwords remove` opens a picker when its selector is omitted and removes one
+saved secret after interactive confirmation. `passwords clear` previews known
+entries and, after confirmation, clears all owned SSH credentials and identity
+passphrases, including legacy copies absent from the metadata list. Clear
+requires ctld helper contract `1.1.3`; update the selected signed helper if an
+older helper rejects it. Both actions require an interactive terminal and have
+no `--yes` bypass. They retain private key files, hosts, VPN profiles, running
+connections, and never-save preferences. These commands manage the local macOS
+Keychain, so omit `--host`, `--method`, and `--remote-platform`.
 
 `vpn create` opens a questionnaire and saves an OpenConnect or Tailscale profile
 without starting a daemon or container. Password input is masked. `vpn list`

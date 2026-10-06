@@ -2,7 +2,11 @@ use super::*;
 use crate::actions::Action;
 use crate::keys::KeyState;
 use ctmux_proto::CommandSpec;
-use std::os::unix::fs::PermissionsExt;
+#[path = "../tests/support/daemon.rs"]
+// Process tests also use this fixture's echo and explicit shutdown helpers.
+#[allow(dead_code)]
+mod daemon;
+use daemon::TestDaemon as Daemon;
 
 struct RelayTransport {
   socket: PathBuf,
@@ -118,36 +122,7 @@ async fn transported_shell_scrolls_frozen_history_and_reconnects() -> Result<()>
   Ok(())
 }
 
-struct Daemon {
-  directory: PathBuf,
-  task: tokio::task::JoinHandle<std::result::Result<(), ctmuxd::DaemonError>>,
-}
-
 impl Daemon {
-  async fn start() -> Result<Self> {
-    let directory =
-      std::env::temp_dir().join(format!("rtui-{}", &uuid::Uuid::new_v4().to_string()[..8]));
-    std::fs::create_dir(&directory)?;
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
-    let socket = directory.join("ctmux.sock");
-    let task = tokio::spawn(ctmuxd::run(ctmuxd::DaemonConfig {
-      socket_path: socket.clone(),
-      ..ctmuxd::DaemonConfig::default()
-    }));
-    let daemon = Self { directory, task };
-    timeout(Duration::from_secs(5), async {
-      while !socket.exists() {
-        if daemon.task.is_finished() {
-          return Err("test daemon failed to start");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-      }
-      Ok(())
-    })
-    .await??;
-    Ok(daemon)
-  }
-
   fn app(&self, read_only: bool) -> App<'_> {
     let mut app = App::new(
       self.directory.join("ctmux.sock"),
@@ -156,13 +131,6 @@ impl Daemon {
     );
     app.size = (80, 25);
     app
-  }
-}
-
-impl Drop for Daemon {
-  fn drop(&mut self) {
-    self.task.abort();
-    let _ = std::fs::remove_dir_all(&self.directory);
   }
 }
 

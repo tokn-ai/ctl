@@ -33,5 +33,9 @@ portable-pty.workspace = true
 ctmuxd.workspace = true
 uuid.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+filedescriptor = "0.8.3"
+nix = { workspace = true, features = ["signal"] }
+
 [lints]
 workspace = true

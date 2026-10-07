@@ -70,8 +70,7 @@ impl Fixture {
       .len(),
       frame(request).len(),
     );
-    fs::write(self.0.join("ssh"), script).unwrap();
-    fs::set_permissions(self.0.join("ssh"), fs::Permissions::from_mode(0o700)).unwrap();
+    ctl_core::test_fixtures::shell_command(self.0.join("ssh"), script).unwrap();
   }
 
   fn broker(&self, count: usize) -> tokio::task::JoinHandle<Vec<ctl_ipc::SshTarget>> {

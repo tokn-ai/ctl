@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::{Mutex, MutexGuard};
 
 const MALFORMED_CATALOG: &[u8] = b"this is not a host catalog; must not be read";
 
@@ -50,18 +49,14 @@ const DOCUMENTS: &[(&str, &str, &[u8])] = &[
   ),
 ];
 
-// Keep executable copies and child lifetimes serialized. A parallel fork can
-// inherit a copy's writable descriptor before exec and cause ETXTBSY on Linux.
-static SUBPROCESS_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
-
 struct Fixture {
   directory: PathBuf,
-  _execution_guard: MutexGuard<'static, ()>,
+  execution_guard: ctl_core::test_fixtures::ProcessGuard,
 }
 
 impl Fixture {
   fn new() -> Self {
-    let execution_guard = SUBPROCESS_FIXTURE_LOCK.lock().unwrap();
+    let execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
     let path = std::env::temp_dir().join(format!("ctl-skill-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&path).unwrap();
     fs::create_dir(path.join("bin")).unwrap();
@@ -69,9 +64,12 @@ impl Fixture {
     fs::write(path.join("hosts.json"), MALFORMED_CATALOG).unwrap();
     let fixture = Self {
       directory: path,
-      _execution_guard: execution_guard,
+      execution_guard,
     };
-    fs::copy(env!("CARGO_BIN_EXE_ctl"), fixture.binary()).unwrap();
+    fixture
+      .execution_guard
+      .copy(env!("CARGO_BIN_EXE_ctl"), fixture.binary())
+      .unwrap();
     fixture
   }
 

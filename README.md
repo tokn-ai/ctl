@@ -1006,3 +1006,8 @@ sidebar, use **Ctrl+B A** in the TUI, or run `ctmux archives` followed by
 Paged history uses published contract `1.1.14`; peers selecting `1.0.13`
 continue to receive complete inline history.
 Reading existing local archives does not require a connection or upgrade.
+
+### Tests and CI
+
+See [the testing guide](docs/testing.md) for the shared local/CI check command,
+pinned toolchains, platform coverage, and integration-test synchronization rules.

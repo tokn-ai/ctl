@@ -15,10 +15,12 @@ struct Fixture {
   agent: PathBuf,
   arguments: PathBuf,
   script: String,
+  _guard: ctl_core::test_fixtures::ProcessGuard,
 }
 
 impl Fixture {
   fn new() -> Self {
+    let guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
     let directory =
       std::env::temp_dir().join(format!("ctl-forced-command-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&directory).unwrap();
@@ -53,6 +55,7 @@ impl Fixture {
       agent,
       arguments,
       script,
+      _guard: guard,
     }
   }
 

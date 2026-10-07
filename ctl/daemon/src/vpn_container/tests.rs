@@ -1,6 +1,5 @@
 use std::fmt::Write as _;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Child, Command};
 use std::time::Instant;
 
@@ -19,7 +18,7 @@ impl Fixture {
     let root = std::env::temp_dir().join(format!("ctld-shared-vpn-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     let engine = root.join("engine");
-    fs::write(
+    ctl_core::test_fixtures::shell_command(
       &engine,
       r#"#!/bin/sh
 set -eu
@@ -60,7 +59,6 @@ esac
 "#,
     )
     .unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(root.join("inventory"), "").unwrap();
     Self { root, engine }
   }
@@ -444,7 +442,11 @@ async fn dropping_one_interest_does_not_stop_or_remove_the_shared_container() {
   // Both clients address the same fixture and immutable container. Separate
   // logs identify which interest actually renews after the other is dropped.
   let second_engine = fixture.root.join("second-engine");
-  fs::copy(&fixture.engine, &second_engine).unwrap();
+  ctl_core::test_fixtures::shell_command(
+    &second_engine,
+    fs::read(fixture.engine.with_extension("script")).unwrap(),
+  )
+  .unwrap();
   let first = heartbeat(&fixture.engine, ID).await.unwrap();
   let second = heartbeat(&second_engine, ID).await.unwrap();
   drop(first);

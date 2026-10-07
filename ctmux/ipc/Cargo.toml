@@ -30,3 +30,6 @@ interprocess = { version = "2.4.4", features = ["tokio"] }
 widestring = "1.2.1"
 dirs.workspace = true
 uuid = { workspace = true, features = ["v5"] }
+
+[dev-dependencies]
+ctl-core = { workspace = true, features = ["test-fixtures"] }

@@ -3,7 +3,6 @@
 use ctl_ipc::{ClientMessage, ServerMessage};
 use serde_json::json;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt as _;
@@ -24,8 +23,7 @@ impl Fixture {
   }
   fn script(&self, name: &str, body: &str) {
     let path = self.0.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    ctl_core::test_fixtures::shell_command(path, format!("{body}\n")).unwrap();
   }
   fn command(&self) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctl"));

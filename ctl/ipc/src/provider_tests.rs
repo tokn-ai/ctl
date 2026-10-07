@@ -467,7 +467,7 @@ fn test_provider() -> DaemonExecutableFuture {
 
 #[tokio::test]
 async fn lazy_provider_covers_startup_availability_overrides_and_passive_queries() {
-  let _execution_guard = tests::SUBPROCESS_FIXTURE_LOCK.lock().await;
+  let _execution_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let executable = fixture.0.join("ctld");
   let metadata = serde_json::to_string(&ctl_core::component::ComponentInfo {

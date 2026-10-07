@@ -37,6 +37,7 @@ flate2 = "1.1.9"
 tar = { version = "0.4.46", default-features = false }
 
 [dev-dependencies]
+ctl-core = { workspace = true, features = ["test-fixtures"] }
 serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

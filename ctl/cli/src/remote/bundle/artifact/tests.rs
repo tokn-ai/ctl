@@ -165,30 +165,23 @@ impl StreamGh {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn byte_progress_permits_a_healthy_download_beyond_five_minutes() {
-  use std::sync::atomic::{AtomicU64, Ordering};
-  let fake = StreamGh::new("for n in 1 2 3 4 5 6 7 8; do printf x; sleep 0.02; done");
+async fn healthy_streams_write_the_complete_payload() {
+  // Long-duration policy belongs to RemoteInstallWatchdog's pure-clock tests.
+  // Advancing a fake clock while a real process exits can invent a checking
+  // stall, depending on whether its last byte or EOF is observed first.
+  let fake = StreamGh::new("printf xxxxxxxx");
   let destination = fake.directory.0.join("payload");
-  let base = Instant::now();
-  let seconds = AtomicU64::new(0);
-  let mut received = 0;
   stream_command(
     fake.program.as_os_str(),
     "fixed-endpoint",
     &destination,
     8,
-    || base + Duration::from_secs(seconds.load(Ordering::SeqCst)),
+    Instant::now,
     Duration::from_millis(1),
-    |progress| {
-      if progress.transferred_bytes > received {
-        received = progress.transferred_bytes;
-        seconds.fetch_add(120, Ordering::SeqCst);
-      }
-    },
+    |_| {},
   )
   .await
   .unwrap();
-  assert!(seconds.load(Ordering::SeqCst) > 300);
   assert_eq!(std::fs::read(destination).unwrap(), b"xxxxxxxx");
 }
 

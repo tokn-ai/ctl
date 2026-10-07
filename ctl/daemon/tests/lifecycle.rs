@@ -73,6 +73,7 @@ async fn stop_owner(socket: &Path) {
 
 #[tokio::test]
 async fn restart_replaces_only_an_isolated_owner_and_verifies_the_new_build() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory =
     std::env::temp_dir().join(format!("cl-{}", &uuid::Uuid::new_v4().to_string()[..8]));
   std::fs::create_dir(&directory).unwrap();
@@ -129,6 +130,7 @@ async fn restart_replaces_only_an_isolated_owner_and_verifies_the_new_build() {
 
 #[tokio::test]
 async fn vpn_status_observes_shared_inventory_once_per_request() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let directory =
     PathBuf::from("/tmp").join(format!("cl-vpn-{}", &uuid::Uuid::new_v4().to_string()[..8]));
   std::fs::create_dir(&directory).unwrap();

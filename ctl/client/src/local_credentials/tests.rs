@@ -39,6 +39,7 @@ mod preflight;
 
 #[tokio::test]
 async fn helper_receives_fixed_argument_and_eof_without_askpass_context() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let mut command = command(
     r#"
     test "$1" = --credential-request || exit 1
@@ -72,6 +73,7 @@ async fn helper_receives_fixed_argument_and_eof_without_askpass_context() {
 
 #[tokio::test]
 async fn clear_reports_confirmed_counts_and_categorizes_old_or_failed_helpers() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = command(
     r#"request=$(cat); test "$request" = '{"type":"clear"}' || exit 1; printf '%s' '{"type":"cleared","credential_count":2,"identity_count":3}'"#,
   );
@@ -115,6 +117,7 @@ async fn clear_reports_confirmed_counts_and_categorizes_old_or_failed_helpers() 
 
 #[tokio::test]
 async fn old_helpers_never_receive_interactive_inventory_fallback() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = command(
     r#"request=$(cat); test "$request" = '{"type":"list_metadata"}' || exit 1; printf '%s' '{"type":"error","code":"credential_request_invalid","message":"private-fixture-canary"}'"#,
   );
@@ -143,6 +146,7 @@ async fn old_helpers_never_receive_interactive_inventory_fallback() {
 
 #[tokio::test]
 async fn discovery_uses_its_authoritative_operation_and_reports_access_failures() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = command(
     r#"request=$(cat); test "$request" = '{"type":"discover"}' || exit 1; printf '%s' '{"type":"discovered","inventory":{"entries":[],"complete":true,"warnings":[]}}'"#,
   );
@@ -192,6 +196,7 @@ async fn discovery_uses_its_authoritative_operation_and_reports_access_failures(
 
 #[tokio::test]
 async fn helper_errors_and_stderr_are_sanitized() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = command(
     r#"cat >/dev/null; printf '%s' 'stderr-private-fixture-canary' >&2; printf '%s' '{"type":"error","code":"credential_store_locked","message":"helper-private-fixture-canary"}'; exit 2"#,
   );
@@ -233,6 +238,7 @@ fn a_broken_input_pipe_does_not_confirm_success() {
 
 #[tokio::test]
 async fn input_and_output_progress_concurrently() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let output = exchange(
     command("dd if=/dev/zero bs=1024 count=128 2>/dev/null; cat >/dev/null"),
     "--credential-request",
@@ -249,6 +255,7 @@ async fn input_and_output_progress_concurrently() {
 
 #[tokio::test]
 async fn output_limits_terminate_the_helper() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let error = exchange(
     command("cat >/dev/null; printf '%s' 'too-long'; exec sleep 30"),
     "--credential-request",
@@ -320,6 +327,7 @@ async fn assert_reaped(pid: rustix::process::Pid) {
 
 #[tokio::test]
 async fn timed_out_helper_is_terminated_and_reaped() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let command = fixture.command();
   let operation = tokio::spawn(exchange(
@@ -337,6 +345,7 @@ async fn timed_out_helper_is_terminated_and_reaped() {
 
 #[tokio::test]
 async fn canceled_caller_terminates_and_reaps_helper() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let operation = tokio::spawn(exchange(
     fixture.command(),
@@ -353,6 +362,7 @@ async fn canceled_caller_terminates_and_reaps_helper() {
 
 #[tokio::test]
 async fn draining_after_dropped_exchange_waits_for_child_reaping() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let pid = {
     let operation = exchange(

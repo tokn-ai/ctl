@@ -448,6 +448,7 @@ mod tests {
 
   #[tokio::test]
   async fn expired_or_rejected_channels_are_known_non_destructive() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     for mut bytes in [&[][..], &[0_u8][..]] {
       let error = require_waiting_for_confirmation(&mut bytes)
         .await
@@ -532,6 +533,7 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn preparation_preserves_buffered_frames_after_shell_startup_output() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut prepared = tokio::time::timeout(
       Duration::from_secs(5),
       prepare(
@@ -552,6 +554,7 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn preparation_rejects_noise_after_readiness_before_confirmation() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let error = tokio::time::timeout(
       Duration::from_secs(5),
       prepare(
@@ -569,6 +572,7 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn unsupported_maintenance_markers_fail_before_confirmation() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let mut command = Command::new("sh");
     command.args(["-c", "printf 'ctl-maintenance-v2\\n'; cat >/dev/null"]);
     let error = tokio::time::timeout(

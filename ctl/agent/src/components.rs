@@ -158,6 +158,7 @@ mod tests {
   #[tokio::test]
   async fn inspection_reports_installed_companions_without_starting_absent_services() {
     use std::os::unix::fs::PermissionsExt as _;
+    let _guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
     let root =
       std::path::PathBuf::from("/tmp").join(format!("ctl-inspection-{}", uuid::Uuid::new_v4()));
     let directory = root.join("bundle");

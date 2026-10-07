@@ -343,6 +343,7 @@ fn discovery_and_replacement_reject_corrupt_or_escaping_index_links() {
 
 #[test]
 fn selections_reject_unsafe_permissions_foreign_links_and_special_files() {
+  let _guard = ctl_core::test_fixtures::ProcessGuard::acquire_blocking();
   let fixture = Fixture::new();
   let executable = fixture.install("release");
   let root = component_directory(&fixture.home);

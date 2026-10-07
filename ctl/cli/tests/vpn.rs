@@ -142,9 +142,14 @@ impl Terminal {
   }
 
   fn wait_for(&mut self, prompt: &str) {
+    self.wait_for_all(&[prompt]);
+  }
+
+  fn wait_for_all(&mut self, prompts: &[&str]) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-      if String::from_utf8_lossy(&self.transcript[self.next_prompt..]).contains(prompt) {
+      let output = String::from_utf8_lossy(&self.transcript[self.next_prompt..]);
+      if prompts.iter().all(|prompt| output.contains(prompt)) {
         self.next_prompt = self.transcript.len();
         return;
       }
@@ -152,7 +157,7 @@ impl Terminal {
       match self.output.recv_timeout(remaining) {
         Ok(bytes) => self.transcript.extend(bytes),
         Err(error) => panic!(
-          "did not receive prompt {prompt:?}: {error}\n{}",
+          "did not receive prompts {prompts:?}: {error}\n{}",
           String::from_utf8_lossy(&self.transcript)
         ),
       }
@@ -320,6 +325,7 @@ fn connected() -> VpnStatus {
 
 #[tokio::test]
 async fn start_list_and_stop_use_daemon_ipc_and_print_json() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let mut profile = saved_openconnect();
@@ -371,6 +377,7 @@ async fn start_list_and_stop_use_daemon_ipc_and_print_json() {
 
 #[tokio::test]
 async fn start_list_and_stop_print_a_human_readable_table_by_default() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let mut profile = saved_openconnect();
@@ -419,6 +426,7 @@ async fn start_list_and_stop_print_a_human_readable_table_by_default() {
 
 #[tokio::test]
 async fn tailscale_start_reports_pending_login_and_sends_provider_settings() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let profile = saved_tailscale();
@@ -458,6 +466,7 @@ async fn tailscale_start_reports_pending_login_and_sends_provider_settings() {
 
 #[tokio::test]
 async fn start_only_reports_sign_in_for_valid_tailscale_authentication_urls() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for (provider, auth_url) in [
     (
       ctl_ipc::VpnProvider::Openconnect,
@@ -516,6 +525,7 @@ async fn start_only_reports_sign_in_for_valid_tailscale_authentication_urls() {
 
 #[tokio::test]
 async fn tailscale_list_explains_required_device_approval() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let pending = VpnStatus {
@@ -533,6 +543,7 @@ async fn tailscale_list_explains_required_device_approval() {
 
 #[tokio::test]
 async fn human_list_shows_lifecycle_and_unavailable_connection_details() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   for (state, expected) in [
@@ -563,6 +574,7 @@ async fn human_list_shows_lifecycle_and_unavailable_connection_details() {
 
 #[tokio::test]
 async fn human_list_escapes_terminal_controls_and_preserves_readable_unicode() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let (output, _) = exchange(
@@ -601,6 +613,7 @@ async fn human_list_escapes_terminal_controls_and_preserves_readable_unicode() {
 
 #[tokio::test]
 async fn list_shows_multiple_connections_and_aligns_every_column() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let first = connected();
@@ -662,6 +675,7 @@ async fn list_shows_multiple_connections_and_aligns_every_column() {
 
 #[tokio::test]
 async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let legacy = VpnStatus {
@@ -695,6 +709,7 @@ async fn legacy_status_is_exposed_as_a_single_connection_snapshot() {
 
 #[tokio::test]
 async fn targeted_stop_selects_one_vpn_and_rejects_unsafe_legacy_fallback() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for supports_multiple in [true, false] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -765,6 +780,7 @@ async fn targeted_stop_selects_one_vpn_and_rejects_unsafe_legacy_fallback() {
 
 #[tokio::test]
 async fn targeted_stop_does_not_stop_a_different_legacy_connection() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let (output, request) = exchange(
@@ -792,6 +808,7 @@ async fn targeted_stop_does_not_stop_a_different_legacy_connection() {
 
 #[tokio::test]
 async fn stop_accepts_saved_names_ids_and_runtime_ids_despite_an_unreadable_catalog() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for (selector, runtime_id, valid_catalog) in [
     ("Work VPN", "work-id", true),
     ("work-id", "work-id", true),
@@ -832,6 +849,7 @@ async fn stop_accepts_saved_names_ids_and_runtime_ids_despite_an_unreadable_cata
 
 #[tokio::test]
 async fn stop_without_an_id_reports_ambiguity_and_never_stops_all_connections() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let (output, request) = exchange(
@@ -903,6 +921,7 @@ async fn missing_daemon_reports_unavailable_inventory_without_starting_and_remot
 
 #[tokio::test]
 async fn saved_start_launches_ctld_when_absent() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let profile = saved_openconnect();
   let expected: ctl_ipc::VpnConnection = serde_json::from_value(profile.clone()).unwrap();
@@ -949,6 +968,7 @@ async fn saved_start_launches_ctld_when_absent() {
 
 #[tokio::test]
 async fn daemon_errors_are_reported_without_success_output() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   fixture.write_profiles(2, &[saved_openconnect()]);
@@ -977,6 +997,7 @@ async fn daemon_errors_are_reported_without_success_output() {
 
 #[tokio::test]
 async fn shared_container_list_distinguishes_local_interest_and_keeps_endpoint() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let snapshot = VpnSnapshot {
@@ -1021,6 +1042,7 @@ async fn shared_container_list_distinguishes_local_interest_and_keeps_endpoint()
 
 #[tokio::test]
 async fn vpn_tables_only_show_use_when_a_connection_is_displayed_as_shared() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for locally_connected in [Some(true), None, Some(false)] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -1057,6 +1079,7 @@ async fn vpn_tables_only_show_use_when_a_connection_is_displayed_as_shared() {
 
 #[tokio::test]
 async fn default_vpn_client_honors_the_vpn_socket_override() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let selected = fixture.directory.join("vpn-override.sock");
   let listener = UnixListener::bind(&selected).unwrap();
@@ -1083,6 +1106,7 @@ async fn default_vpn_client_honors_the_vpn_socket_override() {
 #[tokio::test]
 async fn saved_host_reuses_connected_vpn_without_resolving_a_helper() {
   use std::os::unix::fs::PermissionsExt as _;
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
 
   let fixture = Fixture::new();
   let hosts = fixture.directory.join("hosts.json");
@@ -1266,6 +1290,7 @@ async fn assert_no_daemon_contact(listener: &UnixListener) {
 
 #[tokio::test]
 async fn list_reads_saved_profiles_and_passively_checks_runtime_without_exposing_secrets() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for schema_version in [1, 2] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -1344,6 +1369,7 @@ async fn list_reads_saved_profiles_and_passively_checks_runtime_without_exposing
 
 #[tokio::test]
 async fn list_without_a_saved_catalog_is_empty_and_does_not_start_ctld() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let output = fixture.output(&["vpn", "list", "--json"]).await;
   assert!(output.status.success(), "{output:?}");
@@ -1367,6 +1393,7 @@ async fn list_without_a_saved_catalog_is_empty_and_does_not_start_ctld() {
 
 #[tokio::test]
 async fn list_uses_the_desktop_catalog_path_by_default() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let bytes = fixture.write_profiles(2, &[saved_openconnect()]);
   let directory = fixture.directory.join(".tokn/ctl");
@@ -1401,6 +1428,7 @@ async fn list_uses_the_desktop_catalog_path_by_default() {
 
 #[tokio::test]
 async fn list_merges_saved_connected_disconnected_and_runtime_only_connections() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
@@ -1473,6 +1501,7 @@ async fn list_merges_saved_connected_disconnected_and_runtime_only_connections()
 
 #[tokio::test]
 async fn list_marks_unmatched_saved_profiles_unavailable_when_runtime_inventory_is_missing() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for daemon_running in [false, true] {
     let fixture = Fixture::new();
     fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
@@ -1608,6 +1637,7 @@ async fn legacy_local_inventory_keeps_matched_connections_and_marks_unmatched_pr
 
 #[tokio::test]
 async fn status_is_rejected_and_list_is_the_only_inventory_command() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   for args in [vec!["vpn", "status"], vec!["vpn", "status", "--json"]] {
@@ -1634,6 +1664,7 @@ async fn status_is_rejected_and_list_is_the_only_inventory_command() {
 
 #[tokio::test]
 async fn removed_vpn_commands_and_flags_are_rejected_without_mutation_or_ipc() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let original = fixture.write_profiles(2, &[saved_openconnect()]);
@@ -1657,6 +1688,7 @@ async fn removed_vpn_commands_and_flags_are_rejected_without_mutation_or_ipc() {
 
 #[tokio::test]
 async fn create_and_start_without_selector_require_a_terminal_without_mutation_or_ipc() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for existing_catalog in [false, true] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -1679,6 +1711,7 @@ async fn create_and_start_without_selector_require_a_terminal_without_mutation_o
 
 #[tokio::test]
 async fn remove_requires_a_terminal_and_has_no_confirmation_bypass_flag() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let original = fixture.write_profiles(2, &[saved_openconnect()]);
@@ -1700,6 +1733,7 @@ async fn remove_requires_a_terminal_and_has_no_confirmation_bypass_flag() {
 
 #[tokio::test]
 async fn remove_rejects_unknown_and_ambiguous_saved_selectors_without_prompting_or_ipc() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let mut second = saved_openconnect();
@@ -1740,6 +1774,7 @@ async fn remove_confirmation_defaults_to_no_and_cancellation_leaves_profiles_unc
 
 #[tokio::test]
 async fn cancelling_remove_picker_keeps_saved_profiles_without_contacting_ctld() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let original = fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
@@ -1754,6 +1789,7 @@ async fn cancelling_remove_picker_keeps_saved_profiles_without_contacting_ctld()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confirmed_remove_selects_saved_names_ids_or_picker_and_returns_only_removed_metadata() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for selector in [Some("work-id"), Some("Work VPN"), None] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -1819,6 +1855,7 @@ async fn confirmed_remove_selects_saved_names_ids_or_picker_and_returns_only_rem
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confirmed_remove_refuses_active_shared_or_unverifiable_inventory_without_stopping_a_vpn() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for scenario in [
     "owned",
     "shared",
@@ -1900,6 +1937,7 @@ async fn confirmed_remove_refuses_active_shared_or_unverifiable_inventory_withou
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confirmed_remove_preserves_catalog_changes_made_while_the_confirmation_was_open() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for deleted in [false, true] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -1934,6 +1972,7 @@ async fn confirmed_remove_preserves_catalog_changes_made_while_the_confirmation_
 
 #[tokio::test]
 async fn create_openconnect_in_a_terminal_masks_password_reprompts_and_only_saves_a_profile() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let mut terminal = Terminal::new(&fixture, &["vpn", "create"]);
@@ -1983,6 +2022,7 @@ async fn create_openconnect_in_a_terminal_masks_password_reprompts_and_only_save
 
 #[tokio::test]
 async fn create_tailscale_in_a_terminal_saves_provider_settings_without_contacting_ctld() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let original = fixture.write_profiles(2, &[saved_openconnect()]);
@@ -2014,6 +2054,7 @@ async fn create_tailscale_in_a_terminal_saves_provider_settings_without_contacti
 
 #[tokio::test]
 async fn cancelling_create_during_password_input_keeps_saved_profiles_and_never_contacts_ctld() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let original = fixture.write_profiles(2, &[saved_openconnect()]);
@@ -2037,6 +2078,7 @@ async fn cancelling_create_during_password_input_keeps_saved_profiles_and_never_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_picker_reloads_current_settings_for_the_selected_stable_id() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let mut selected = saved_openconnect();
@@ -2067,6 +2109,7 @@ async fn start_picker_reloads_current_settings_for_the_selected_stable_id() {
 
 #[tokio::test]
 async fn start_picker_rejects_a_deleted_selection_even_when_its_id_matches_another_saved_name() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let mut selected = saved_openconnect();
@@ -2086,6 +2129,7 @@ async fn start_picker_rejects_a_deleted_selection_even_when_its_id_matches_anoth
 
 #[tokio::test]
 async fn cancelling_start_picker_does_not_start_a_highlighted_profile_or_change_saved_settings() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let original = fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
@@ -2100,6 +2144,7 @@ async fn cancelling_start_picker_does_not_start_a_highlighted_profile_or_change_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_picker_excludes_shared_only_connections_and_targets_the_owned_selection() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   fixture.write_profiles(2, &[saved_openconnect(), saved_tailscale()]);
@@ -2140,7 +2185,8 @@ async fn stop_picker_excludes_shared_only_connections_and_targets_the_owned_sele
     reply(&listener, response(VpnStatus::default())).await
   });
   let mut terminal = Terminal::new(&fixture, &["vpn", "stop"]);
-  terminal.wait_for("Choose a VPN to stop");
+  // The heading and options can arrive in the same or separate PTY reads.
+  terminal.wait_for_all(&["Choose a VPN to stop", "Work VPN", "└"]);
   let menu = String::from_utf8_lossy(&terminal.transcript);
   assert!(menu.contains("Work VPN"));
   assert!(!menu.contains("Team VPN"));
@@ -2156,6 +2202,7 @@ async fn stop_picker_excludes_shared_only_connections_and_targets_the_owned_sele
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_stop_uses_untargeted_stop_for_a_legacy_local_daemon() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let server = tokio::spawn(async move {
@@ -2197,6 +2244,7 @@ async fn interactive_stop_uses_untargeted_stop_for_a_legacy_local_daemon() {
 
 #[tokio::test]
 async fn start_selects_saved_name_or_id_and_sends_the_full_unchanged_profile() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for (schema_version, selector) in [(1, "Work VPN"), (2, "work-id")] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -2229,6 +2277,7 @@ async fn start_selects_saved_name_or_id_and_sends_the_full_unchanged_profile() {
 
 #[tokio::test]
 async fn start_prefers_an_exact_id_over_another_profiles_matching_name() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let selected = saved_openconnect();
@@ -2254,6 +2303,7 @@ async fn start_prefers_an_exact_id_over_another_profiles_matching_name() {
 
 #[tokio::test]
 async fn start_rejects_unknown_and_ambiguous_names_before_contacting_ctld() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   let first = saved_openconnect();
@@ -2291,6 +2341,7 @@ async fn start_rejects_unknown_and_ambiguous_names_before_contacting_ctld() {
 
 #[tokio::test]
 async fn saved_tailscale_start_checks_capabilities_and_preserves_provider_settings() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   for supported in [true, false] {
     let fixture = Fixture::new();
     let listener = UnixListener::bind(fixture.socket()).unwrap();
@@ -2358,6 +2409,7 @@ async fn saved_tailscale_start_checks_capabilities_and_preserves_provider_settin
 
 #[tokio::test]
 async fn list_preserves_runtime_when_saved_files_are_unsafe_and_start_rejects_them_before_ipc() {
+  let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
   let fixture = Fixture::new();
   let listener = UnixListener::bind(fixture.socket()).unwrap();
   for invalid_file in ["permissions", "symlink", "malformed"] {

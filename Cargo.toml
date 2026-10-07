@@ -12,6 +12,7 @@ members = [
   "ctmux/client",
   "ctmux/cli",
   "ctmux/core",
+  "ctmux/avt",
   "ctmux/daemon",
   "apps/desktop/src-tauri",
   "apps/tui",
@@ -38,7 +39,7 @@ ctl-core = { path = "ctl-core", version = "=0.1.0" }
 clap = { version = "4.6.6", features = ["derive"] }
 comfy-table = "8.0.1"
 crossterm = "0.29.0"
-avt = "0.18.0"
+avt = { package = "ctmux-avt", path = "ctmux/avt", version = "=0.1.0" }
 base64 = "0.22.1"
 ctl-client = { path = "ctl/client", version = "=0.1.0" }
 ctl-proto = { path = "ctl/proto", version = "=0.1.0" }

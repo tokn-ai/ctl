@@ -47,16 +47,23 @@ const metadata = JSON.parse(result.stdout) as CargoMetadata;
 const packages = metadata.packages.filter((pkg) => pkg.publish?.length !== 0);
 const excluded = metadata.packages.filter((pkg) => pkg.publish?.length === 0);
 const license = readFileSync(join(root, "LICENSE"), "utf8");
+const package_licenses = new Map<string, string>();
 for (const pkg of packages) {
-  if (pkg.license !== "MIT" || !pkg.description || !pkg.readme || !pkg.repository || !pkg.rust_version) {
+  // The AVT fork retains its upstream Apache license; other family members
+  // must continue to carry the workspace MIT license.
+  const is_avt = pkg.name === "ctmux-avt";
+  const expected_license = is_avt ? "Apache-2.0" : "MIT";
+  if (pkg.license !== expected_license || !pkg.description || !pkg.readme || !pkg.repository || !pkg.rust_version) {
     throw new Error(`${pkg.name}: missing publishing metadata`);
   }
   if (pkg.publish?.join() !== "crates-io") {
     throw new Error(`${pkg.name}: expected explicit crates.io publishing policy`);
   }
-  if (readFileSync(join(dirname(pkg.manifest_path), "LICENSE"), "utf8") !== license) {
+  const source_license = readFileSync(join(dirname(pkg.manifest_path), "LICENSE"), "utf8");
+  if (!is_avt && source_license !== license) {
     throw new Error(`${pkg.name}: LICENSE must match the workspace MIT license`);
   }
+  package_licenses.set(pkg.name, source_license);
   for (const dependency of pkg.dependencies.filter((dep) => dep.path)) {
     const member = packages.find((candidate) => candidate.name === dependency.name);
     if (!member || dependency.req !== `=${member.version}`) {
@@ -75,10 +82,10 @@ run("cargo", [
 const directory = mkdtempSync(join(tmpdir(), "ctl-cargo-packages-"));
 try {
   const members = packages.map((pkg) => `${pkg.name}-${pkg.version}`);
-  for (const member of members) {
+  for (const [index, member] of members.entries()) {
     run("tar", ["-xzf", join(metadata.target_directory, "package", `${member}.crate`), "-C", directory]);
-    if (readFileSync(join(directory, member, "LICENSE"), "utf8") !== license) {
-      throw new Error(`${member}: archive is missing the MIT license`);
+    if (readFileSync(join(directory, member, "LICENSE"), "utf8") !== package_licenses.get(packages[index].name)) {
+      throw new Error(`${member}: archive license differs from its source package`);
     }
   }
   const patches = packages.map((pkg, index) => `${pkg.name} = { path = ${JSON.stringify(members[index])} }`);

@@ -1,7 +1,8 @@
 # Cargo publishing
 
-The Rust package family starts at `0.1.0`, uses MIT, and supports Rust 1.97 or
-newer. Public packages explicitly target crates.io. `ctmux-app` is a desktop
+The Rust package family starts at `0.1.0` and supports Rust 1.97 or newer.
+Packages use MIT except `ctmux-avt`, which retains the upstream AVT Apache-2.0
+license. Public packages explicitly target crates.io. `ctmux-app` is a desktop
 bundle and stays unpublished; its release workflow is separate.
 
 Internal dependencies specify both a checkout path and an exact registry version.
@@ -19,7 +20,8 @@ node --experimental-strip-types scripts/ci/verify-cargo-packages.mts
 ```
 
 The verifier checks package metadata, exact internal dependency versions, and
-per-package copies of the root MIT license. It packages every public member,
+per-package licenses (the root MIT license, or AVT's retained Apache license).
+It packages every public member,
 unpacks the generated `.crate` archives outside the checkout, and runs their
 tests with all features. Only archived sources are used; the unpublished family
 is linked through temporary crates.io patches. The original external dependency
@@ -47,6 +49,7 @@ ctmux-process-info
 ctl-proto
 ctl-task-proto
 ctmux-proto
+ctmux-avt
 ctl-ipc
 ctl-task-ipc
 ctl-task-store

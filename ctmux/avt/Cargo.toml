@@ -1,0 +1,26 @@
+[package]
+name = "ctmux-avt"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+authors = ["Marcin Kulik <m@ku1ik.com>"]
+description = "Terminal emulator for ctmux, derived from asciinema avt"
+readme = "README.md"
+categories = ["command-line-interface"]
+keywords = ["ctmux", "terminal", "emulator"]
+publish = ["crates-io"]
+
+[lib]
+name = "avt"
+
+[dependencies]
+rgb = "0.8.33"
+unicode-width.workspace = true
+
+[dev-dependencies]
+rand = "0.7"
+proptest = "=1.9.0"
+tempfile = "3.24.0"
+pretty_assertions = "1.0"

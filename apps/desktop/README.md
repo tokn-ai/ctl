@@ -140,10 +140,11 @@ rebuilds local daemons separately. Ordinary development does not replace an
 already running daemon; `ctld` uses protocol-specific sockets, and rejects an
 incompatible helper executable before starting it.
 
-All commands below run from the repository root. The desktop package retains
-only `pnpm dev` (`tauri dev`) for starting native development from `apps/desktop`.
-Frontend builds, checks, tests, and repository tooling are owned by the root;
-root `pnpm dev` starts the frontend that Tauri uses.
+All commands below run from the repository root. The desktop package keeps
+the standard Tauri/Vite scripts: `dev` starts Vite, `build` builds the frontend,
+`preview` previews that build, and `tauri` invokes the Tauri CLI. Provisioning,
+signing, daemon and bundle commands, checks, and tests live at the root.
+Root `pnpm desktop:dev` delegates to `pnpm tauri dev` in `apps/desktop`.
 
 Development startup also performs a local-only bundle preflight. It warns but does
 not block local or already-provisioned SSH work when remote install bundles are

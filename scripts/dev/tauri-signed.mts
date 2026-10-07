@@ -81,7 +81,7 @@ async function main(): Promise<void> {
       CTLD_SOCKET_PATH: daemon.socket_path,
       CTMUX_DEV_APP_SUPERVISOR: supervisorSocket,
     };
-    tauri = spawn("pnpm", ["dev", ...process.argv.slice(2)], {
+    tauri = spawn("pnpm", ["tauri", "dev", ...process.argv.slice(2)], {
       cwd: appDirectory,
       env: environment,
       stdio: "inherit",

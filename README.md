@@ -108,8 +108,8 @@ Remote identity and component bundles already use this root as `remote-id`,
 Use Node 24 or newer and the pinned pnpm version from `package.json`.
 Run `pnpm install` at the repository root. The pnpm workspace includes
 `apps/desktop` and uses one root lockfile; repository scripts are checked and
-run from the root. The desktop package retains only `dev` (`tauri dev`);
-its frontend build, check, and test commands live at the root.
+run from the root. The desktop package keeps the standard Tauri/Vite scripts
+(`dev`, `build`, `preview`, and `tauri`); project-specific commands live at the root.
 
 | Command | Purpose |
 | --- | --- |

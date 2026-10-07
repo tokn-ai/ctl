@@ -55,6 +55,25 @@ pub(crate) fn load(
   context: Option<&str>,
   canceled: Option<&AtomicBool>,
 ) -> Result<Option<Zeroizing<String>>, IdentityError> {
+  load_inner(snapshot, context, canceled, None)
+}
+
+pub(crate) fn load_for_connection(
+  snapshot: &IdentitySnapshot,
+  context: &str,
+  canceled: &AtomicBool,
+  authorization: &super::approval::Attempt,
+) -> Result<Option<Zeroizing<String>>, IdentityError> {
+  crate::identities::ensure_current(snapshot)?;
+  load_inner(snapshot, Some(context), Some(canceled), Some(authorization))
+}
+
+fn load_inner(
+  snapshot: &IdentitySnapshot,
+  context: Option<&str>,
+  canceled: Option<&AtomicBool>,
+  authorization: Option<&super::approval::Attempt>,
+) -> Result<Option<Zeroizing<String>>, IdentityError> {
   let reason = purpose::identity("Read", &snapshot.path, context);
   let records = with_authentication(
     canceled,
@@ -62,17 +81,35 @@ pub(crate) fn load(
       super::operation::acquire()
         .map_err(|error| map_error(error, IdentityError::KeychainUnavailable))
     },
-    || {
-      ctl_keychain_client::search(&Query {
-        service: Some(SERVICE),
-        account: Some(&snapshot.identity_id),
-        limit: 1,
-        secret: true,
-        authentication: Authentication::Allow { reason: &reason },
-      })
-      .map_err(|error| map_error(error.into(), IdentityError::KeychainUnavailable))
+    |guard| {
+      let read = |authentication: Authentication<'_>| {
+        ctl_keychain_client::search(&Query {
+          service: Some(SERVICE),
+          account: Some(&snapshot.identity_id),
+          limit: 1,
+          secret: true,
+          authentication,
+        })
+        .map_err(super::Error::from)
+        .map(|records| (!records.is_empty()).then_some(records))
+      };
+      let records = if let Some(authorization) = authorization {
+        authorization.read(
+          guard,
+          &format!(
+            "{SERVICE}:{}:{}",
+            snapshot.identity_id, snapshot.file_version
+          ),
+          &reason,
+          read,
+        )
+      } else {
+        read(Authentication::Allow { reason: &reason })
+      };
+      records.map_err(|error| map_error(error, IdentityError::KeychainUnavailable))
     },
-  )?;
+  )?
+  .unwrap_or_default();
   let Some(record) = records.into_iter().next() else {
     return Ok(None);
   };
@@ -87,7 +124,7 @@ pub(crate) fn load(
 fn with_authentication<T, Guard>(
   canceled: Option<&AtomicBool>,
   acquire: impl FnOnce() -> Result<Guard, IdentityError>,
-  query: impl FnOnce() -> Result<T, IdentityError>,
+  query: impl FnOnce(&Guard) -> Result<T, IdentityError>,
 ) -> Result<T, IdentityError> {
   let check = || {
     if canceled.is_some_and(|canceled| canceled.load(Ordering::Acquire)) {
@@ -97,9 +134,9 @@ fn with_authentication<T, Guard>(
     }
   };
   check()?;
-  let _operation = acquire()?;
+  let operation = acquire()?;
   check()?;
-  query()
+  query(&operation)
 }
 
 fn check_binding(
@@ -159,14 +196,14 @@ pub(crate) fn save(
   );
   let reason = purpose::identity("Save", &snapshot.path, None);
   let pending =
-    index::begin_mutation().map_err(|error| map_error(error, IdentityError::SaveFailed))?;
+    index::begin_secret_mutation().map_err(|error| map_error(error, IdentityError::SaveFailed))?;
   ctl_keychain_client::upsert(&Write {
     service: SERVICE,
     account: &snapshot.identity_id,
     label: &label,
     comment: &comment,
     data: passphrase.as_bytes(),
-    biometric: true,
+    user_presence: true,
     authentication: Authentication::Allow { reason: &reason },
   })
   .map_err(|error| map_error(error.into(), IdentityError::SaveFailed))?;
@@ -226,8 +263,8 @@ pub(crate) fn forget(identity_id: &str) -> Result<(), IdentityError> {
     },
     |metadata| purpose::identity("Remove the saved", &metadata.path, None),
   );
-  let pending =
-    index::begin_mutation().map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
+  let pending = index::begin_secret_mutation()
+    .map_err(|error| map_error(error, IdentityError::ForgetFailed))?;
   ctl_keychain_client::delete(
     SERVICE,
     Some(identity_id),
@@ -310,7 +347,7 @@ mod tests {
     let result: Result<(), _> = with_authentication(
       Some(&canceled),
       || -> Result<(), IdentityError> { panic!("canceled attempt acquired operation lock") },
-      || panic!("canceled attempt authenticated"),
+      |()| panic!("canceled attempt authenticated"),
     );
     assert!(matches!(result, Err(IdentityError::UnlockFailed)));
 
@@ -324,11 +361,11 @@ mod tests {
         canceled.store(true, Ordering::Release);
         Ok(Guard(&released))
       },
-      || panic!("queued cancellation opened an authentication prompt"),
+      |_| panic!("queued cancellation opened an authentication prompt"),
     );
     assert!(matches!(result, Err(IdentityError::UnlockFailed)));
     assert!(released.load(Ordering::Acquire));
-    assert_eq!(with_authentication(None, || Ok(()), || Ok(7)).unwrap(), 7);
+    assert_eq!(with_authentication(None, || Ok(()), |()| Ok(7)).unwrap(), 7);
   }
 
   fn attributes() -> (String, SavedIdentity, HashMap<String, String>) {

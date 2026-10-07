@@ -64,6 +64,31 @@ remote VPN routes are passed to them. Other helper operations retain `1.0.1`
 behavior. The independent remote VPN channel negotiates `1.0.1` before identity
 and credentials, using a stable marker rather than changing the marker per build.
 
+Quiet SSH establishment advances ctld from `1.1.13` (build 13) to `1.1.14`
+(build 14), retaining `1.0.12` and `1.1.13`. The additive `ensure_master_quiet`
+request may reuse a master or create one without Keychain authentication UI,
+OpenSSH confirmation, password entry, or credential-save UI. If user approval is
+required, it returns the existing `authentication_required` response. Ordinary
+`ensure_master` retains its interactive behavior. Clients require negotiated
+`1.1.14` before sending the quiet request; with earlier brokers, background
+reconnects send only passive `master_status` and require explicit interaction
+when a fresh SSH connection is needed. This broker addition does not change the
+independent helper or lifecycle contracts, or the product release version.
+
+Reconnect authorization revocation advances `ctld_helper` from `1.1.4` (build 4)
+to `1.1.5` (build 5). Credential `forget`/`clear` and identity `save`/`forget`
+retain their existing request and response shapes, but every owned-secret
+mutation publishes a shared nonsecret revision before modifying Keychain. This
+also revokes approvals retained by a separately running updated broker. New
+clients require explicit helper `1.1.5` support before sending a mutating
+request, including any supplied passphrase; passive metadata and discovery
+operations retain their earlier contract requirements. Updated helpers retain
+`1.0.1`, `1.1.2`, `1.1.3`, and `1.1.4`, and provide revocation for old clients'
+mutating requests too. Legacy helper binaries and brokers cannot implement this
+cross-process policy; replace them before relying on reconnect approval reuse.
+The independent `ctld_lifecycle` contract remains `1.0.1` (build 1), and the
+product release version remains separate.
+
 Shared ctmux pane zoom advances its open development cycle from `1.1.14` to
 `1.1.15` (build 15), retaining `1.0.13` and `1.1.14`. Zoom commands and shared
 zoom fields/events require the negotiated `1.1.15` contract. Older clients keep

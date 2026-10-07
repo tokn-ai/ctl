@@ -27,7 +27,7 @@ export function promptMode(prompt: SshPrompt): QuickInputMode {
           {
             id: "yes",
             label: "Yes",
-            detail: "Save in Keychain and require Touch ID for future access.",
+            detail: "Save in Keychain, protected by Touch ID or your macOS account password.",
           },
           {
             id: "no",

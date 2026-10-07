@@ -10,6 +10,78 @@ pub(super) fn failure(message: String) -> RequestError {
   }
 }
 
+pub(super) fn failure_with_interaction(message: String, interactive: bool) -> RequestError {
+  if !interactive && is_authentication_required(&message) {
+    RequestError::AuthenticationRequired
+  } else {
+    failure(message)
+  }
+}
+
+fn is_authentication_required(message: &str) -> bool {
+  let mut denied = false;
+  for line in message
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+  {
+    if authentication_denied(line) {
+      denied = true;
+    } else if !debug_diagnostic(line) && (denied || !agent_refused_signature(line)) {
+      // Require a complete authentication failure. An agent refusal alone, or
+      // mixed transport/security/configuration diagnostics, remains fatal.
+      return false;
+    }
+  }
+  denied
+}
+
+fn authentication_denied(line: &str) -> bool {
+  let detail = if let Some((endpoint, detail)) = line.rsplit_once(": ") {
+    if endpoint.chars().any(char::is_whitespace)
+      || !endpoint
+        .split_once('@')
+        .is_some_and(|(user, host)| !user.is_empty() && !host.is_empty())
+    {
+      return false;
+    }
+    detail
+  } else {
+    line
+  };
+  let Some(methods) = detail
+    .strip_prefix("Permission denied (")
+    .and_then(|detail| detail.strip_suffix(")."))
+  else {
+    return false;
+  };
+  methods.split(',').all(|method| {
+    !method.is_empty()
+      && method.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'@' | b'.' | b'+')
+      })
+  })
+}
+
+fn agent_refused_signature(line: &str) -> bool {
+  let Some(detail) = line
+    .strip_prefix("sign_and_send_pubkey: signing failed for ")
+    .and_then(|detail| detail.strip_suffix(" from agent: agent refused operation"))
+  else {
+    return false;
+  };
+  let Some((algorithm, key)) = detail.split_once(' ') else {
+    return false;
+  };
+  !algorithm.is_empty()
+    && algorithm
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    && key.starts_with('"')
+    && key.ends_with('"')
+    && key.len() >= 2
+}
+
 fn is_transport_failure(message: &str) -> bool {
   let mut transport_failure = false;
   for line in message

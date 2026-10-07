@@ -223,6 +223,59 @@ impl BundleFixture {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn receiver_progress_is_valid_before_the_background_writer_starts() {
+  for script in [
+    install_script("0.1.0-test", 5).unwrap(),
+    AGENT_INSTALL_COMMAND.replace("__BUNDLE_TARGET__", ctl_core::paths::native_target()),
+  ] {
+    for create_first in [true, false] {
+      let fixture = BundleFixture::new();
+      // Hold the receiver until the first count has been read. This deliberately
+      // exercises the parent running before the child opens its output file.
+      let transfer = script
+      .split("test \"$received\" -eq")
+      .next()
+      .unwrap()
+      .replace(
+        "cat <&3 > \"$archive\" &",
+        "(while [ ! -f \"$temporary/counted\" ]; do sleep 0.01; done; cat <&3 > \"$archive\") &",
+      )
+      .replace(
+        "  printf 'ctl-install-progress-v1 receiving %s\\n' \"$received\"",
+        "  : > \"$temporary/counted\"\n  printf 'ctl-install-progress-v1 receiving %s\\n' \"$received\"",
+      );
+      let script = format!(
+        "{transfer}\nprintf 'ctl-install-progress-v1 receiving %s\\n' \"$received\"\nprintf 'ctl-install-progress-v1 extracting\\nctl-install-progress-v1 checking ctl-agent\\nctl-install-progress-v1 activating\\nctl-install-v1\\n'"
+      );
+      let script = if create_first {
+        script
+      } else {
+        // Negative control: the original race must fail, not pass accidentally.
+        script.replace(": > \"$archive\"", ":")
+      };
+      let mut command = Command::new("sh");
+      command
+        .args(["-c", &script])
+        .env("HOME", fixture.directory.join("home"));
+      let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_package_install(command, b"hello", true, |_| {}),
+      )
+      .await
+      .unwrap();
+      if create_first {
+        result.unwrap();
+      } else {
+        assert!(
+          matches!(result, Err(CoreError::ReadSshCommand(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+      }
+    }
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn installer_activates_components_despite_shell_startup_output() {
   let fixture = BundleFixture::new();
   tokio::time::timeout(

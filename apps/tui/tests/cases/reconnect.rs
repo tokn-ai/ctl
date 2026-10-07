@@ -93,10 +93,13 @@ async fn repeated_transport_reconnects_preserve_panes_controls_and_actual_input(
       (b"\x02\x1b[C".as_slice(), "second", 2),
     ] {
       tui.send(navigation)?;
-      let status = format!("pane {pane}");
       tui
         .wait_screen("prefix navigation selects the pane", |screen| {
-          footer(screen).contains(&status)
+          // A six-second disconnect notice can hide the pane number. The
+          // live cursor proves focus without waiting for that notice to expire.
+          screen.cursor_visible
+            && screen.cursor.1 < usize::from(ROWS - 1)
+            && (screen.cursor.0 < usize::from(COLUMNS / 2)) == (pane == 1)
         })
         .await?;
       let marker = format!("cycle-{cycle}-{tag}");

@@ -142,9 +142,14 @@ impl Terminal {
   }
 
   fn wait_for(&mut self, prompt: &str) {
+    self.wait_for_all(&[prompt]);
+  }
+
+  fn wait_for_all(&mut self, prompts: &[&str]) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-      if String::from_utf8_lossy(&self.transcript[self.next_prompt..]).contains(prompt) {
+      let output = String::from_utf8_lossy(&self.transcript[self.next_prompt..]);
+      if prompts.iter().all(|prompt| output.contains(prompt)) {
         self.next_prompt = self.transcript.len();
         return;
       }
@@ -152,7 +157,7 @@ impl Terminal {
       match self.output.recv_timeout(remaining) {
         Ok(bytes) => self.transcript.extend(bytes),
         Err(error) => panic!(
-          "did not receive prompt {prompt:?}: {error}\n{}",
+          "did not receive prompts {prompts:?}: {error}\n{}",
           String::from_utf8_lossy(&self.transcript)
         ),
       }
@@ -2140,7 +2145,8 @@ async fn stop_picker_excludes_shared_only_connections_and_targets_the_owned_sele
     reply(&listener, response(VpnStatus::default())).await
   });
   let mut terminal = Terminal::new(&fixture, &["vpn", "stop"]);
-  terminal.wait_for("Choose a VPN to stop");
+  // The heading and options can arrive in the same or separate PTY reads.
+  terminal.wait_for_all(&["Choose a VPN to stop", "Work VPN", "└"]);
   let menu = String::from_utf8_lossy(&terminal.transcript);
   assert!(menu.contains("Work VPN"));
   assert!(!menu.contains("Team VPN"));
